@@ -158,7 +158,6 @@ class ExchangeBinanceSpot(Exchange):
             return klines
         except Exception as e:
             print(f"{code} - {frequency} Error : {e}")
-            # exit()
 
         return None
 

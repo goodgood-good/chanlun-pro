@@ -76,7 +76,7 @@ from chanlun.decision_support.trading_system.forward_paper import (  # noqa: E40
     audit_forward_implementation_continuity,
     audit_forward_paper_session_delivery,
     load_forward_paper_ledger,
-    load_frozen_forward_contract,
+    load_forward_contract,
     sha256_file,
 )
 from chanlun.decision_support.trading_system.trading_session import (  # noqa: E402
@@ -180,8 +180,7 @@ CN = ZoneInfo("Asia/Shanghai")
 DAILY_SECTOR_CAPTURE_DUE = time(9, 10)
 DEFAULT_ROOT = Path(".cache/chanlun_human_review_forward")
 DEFAULT_PARAMETERS = Path(
-    "audit/chanlun_trading_system_backtest/"
-    "recent_year_current_sector_no3p/parameter_snapshot_human_review.json"
+    "config/decision_support/human_review_parameters.json"
 )
 DEFAULT_SECTOR_LEDGER = Path(
     ".cache/chanlun_qmt_sector_ledger/qmt_gics3_catalog_ledger.json"
@@ -995,11 +994,8 @@ def _archive_live_screening_snapshot(
         and market_data_as_of.tzinfo is not None
         and as_of.astimezone(CN).date() == session
         and market_data_as_of.astimezone(CN).date() == session
-        # The 15:20 daily evaluation is an end-of-session sample.  Merely
-        # sharing the calendar date is insufficient: a long coverage cycle
-        # that began at 14:35 must not be promoted after it happens to finish
-        # later in the evening.  Both the review cutoff and its underlying
-        # market-data cutoff must include the 15:00 close.
+        # 15:20 日级评估是收盘样本，仅日期相同并不足够：14:35 开始的长覆盖周期即使晚间
+        # 才完成也不能晋级。复核截止点及其底层行情截止点都必须包含 15:00 收盘。
         and as_of.astimezone(CN) >= expected_market_close
         and market_data_as_of.astimezone(CN) >= expected_market_close
         and market_data_as_of <= as_of
@@ -1045,19 +1041,16 @@ def _archive_live_screening_snapshot(
                 "live screening sector-triggered signal is not a member of "
                 "the same-session QMT sector"
             )
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     source_payload_sha256 = sha256_json(payload)
-    # Candidate identity must match the page for the exact same decision
-    # facts.  generated_at, scan pacing and other operational fields remain
-    # bound by ``source_payload_sha256`` and by the immutable wrapper object,
-    # but they must not create a second human-review candidate.
+    # 完全相同的决策事实必须与页面候选身份一致。生成时间、扫描节奏等运行字段仍由
+    # ``source_payload_sha256`` 和不可变包装对象绑定，但不得创建第二个人工复核候选。
     source_sha256 = str(payload["snapshot_content_sha256"])
     stable: dict[str, object] = {
         "schema": "chanlun-forward-live-screening-snapshot",
         "session": session.isoformat(),
-        # Use the immutable market cutoff as the archive identity time.  A
-        # wall-clock write time would make an otherwise identical daily
-        # evaluation produce a new file hash and append a duplicate event.
+        # 归档身份时间使用不可变行情截止点；若使用墙钟写入时间，相同日级评估会产生
+        # 新文件哈希并追加重复事件。
         "captured_at": as_of.isoformat(),
         "market_data_as_of": market_data_as_of.isoformat(),
         "source_path": str(source),
@@ -1094,8 +1087,7 @@ def _archive_live_screening_snapshot(
         result_label="FORWARD_STAGED_LIVE_HUMAN_REVIEW_QUEUE",
         decision_source_snapshot=current_decision_source_snapshot(PROJECT_ROOT),
     )
-    # Event evidence points only at content-addressed objects. The named files
-    # are current-view aliases for the page and public interface.
+    # 事件证据只指向内容寻址对象；具名文件只是页面和公开接口的当前视图别名。
     output, output_sha256 = _immutable_json_object(
         session_root,
         kind="forward_live_screening_snapshot",
@@ -1344,11 +1336,9 @@ def _qmt_human_paper_execution_fact(
             expired = expiry_date < session
         except ValueError as exc:
             raise RuntimeError("QMT instrument expiry date is invalid") from exc
-    # ``IsTrading`` is a wall-clock flag and is normally false after the 15:00
-    # close, exactly when this daily evaluator runs.  It therefore cannot mean
-    # "suspended for this session".  QMT documents ``InstrumentStatus`` as the
-    # suspension state; absence of a same-session 1m bar remains the second,
-    # independent fail-closed check in the settlement loop.
+    # ``IsTrading`` 是墙钟标志，15:00 收盘后通常为假，恰好也是日级评估器运行时段，
+    # 因此不能表示“本交易日停牌”。QMT 用 ``InstrumentStatus`` 表示停牌状态；同交易日
+    # 1m K 线缺失仍是结算循环中第二项独立关闭失败检查。
     suspended = status >= 1
     return {
         "symbol": symbol,
@@ -1762,10 +1752,8 @@ def _human_paper_entry_selection_settlement_gate(
         "attestation_audit": attestation_audit,
         "source_binding_audit": source_audit,
         "source_report_archive": source_report_archive,
-        # `_settle_human_paper` replaces this placeholder with the exact
-        # post-settlement ledger prefix before any result can leave the
-        # function.  Direct status views do not mutate or fabricate a ledger
-        # archive and therefore retain `None` here.
+        # 在任何结果离开函数前，``_settle_human_paper`` 会用精确结算后账本前缀替换该占位；
+        # 直接状态视图不修改或伪造账本归档，因此此处保留 ``None``。
         "paper_ledger_prefix_archive": None,
         "immutable_source_ranking_required_before_virtual_buy_fill": True,
         "exact_qmt_sector_admission_required_before_virtual_buy_fill": True,
@@ -1804,8 +1792,7 @@ def _archive_human_paper_ledger_prefix(
         kind="human_paper_ledger_prefix",
         payload=ledger,
     )
-    # Re-open through the authoritative ledger validator before publishing a
-    # receipt.  This verifies every event identity, chain link and payload.
+    # 发布回执前通过权威账本校验器重新打开，以验证每个事件身份、链路和载荷。
     archived = load_human_paper_ledger(object_path)
     if archived.get("content_sha256") != content_sha256:
         raise RuntimeError("archived human paper ledger prefix changed")
@@ -2872,9 +2859,8 @@ def _capture_human_paper_valuation(
     session_root = root / "sessions" / session.isoformat()
     alias_path = session_root / "paper_valuation.json"
 
-    # A promoted close point is immutable for its exact ledger/accounting
-    # identity.  Same-session retries reuse it byte-for-byte.  If the virtual
-    # book changed after promotion, fail closed instead of rewriting history.
+    # 已晋级收盘点对其精确账本/核算身份不可变；同交易日重试逐字节复用。若虚拟账本在
+    # 晋级后变化，应关闭失败而不是改写历史。
     if alias_path.is_file():
         try:
             raw = json.loads(alias_path.read_text(encoding="utf-8"))
@@ -3108,7 +3094,7 @@ def _promoted_forward_review_reports(
     """Load the first promoted immutable screen for each eligible session."""
 
     root, _ledger = _paths(args)
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     output: list[tuple[date, str, Mapping[str, object]]] = []
     sessions_root = root / "sessions"
     if not sessions_root.is_dir():
@@ -3164,7 +3150,7 @@ def _promoted_forward_warmup_lineage_sources(
     """Load the validated live object behind each promoted daily sample."""
 
     root, _ledger = _paths(args)
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     output: list[ForwardWarmupLineageSessionSnapshot] = []
     sessions_root = root / "sessions"
     if not sessions_root.is_dir():
@@ -3256,7 +3242,7 @@ def _forward_review_session_qualification(
                 manifest_sessions.append(source_session)
 
     events: tuple[Mapping[str, object], ...] = ()
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     ledger_error: str | None = None
     ledger_content_sha256: str | None = None
     if ledger_path.is_file():
@@ -3503,8 +3489,7 @@ def _forward_review_price_bars(
                 "adjusted_bar_revision": adjusted_bar_revision,
             }
         except Exception as exc:
-            # One unavailable symbol must remain explicit, but must not erase
-            # causal observations for every other candidate.
+            # 单个不可用标的必须明确记录，但不能抹除其他全部候选的因果观测。
             bars_by_symbol[symbol] = ()
             audits[symbol] = {
                 "status": "UNAVAILABLE",
@@ -3744,8 +3729,8 @@ def _candidate_warmup_diagnostic(
             alias_path.with_suffix(".log"),
             (result.stdout or "").encode("utf-8"),
         )
-        # Exit code 3 is the tool's valid PARTIAL report.  The file contract,
-        # not process success alone, decides whether evidence is reusable.
+        # 退出码 3 表示工具的有效 PARTIAL 报告；证据是否可复用由文件契约决定，
+        # 不能只看进程是否成功。
         if result.returncode not in {0, 3} or not alias_path.is_file():
             raise RuntimeError(
                 "candidate warmup diagnostic process failed with "
@@ -3790,13 +3775,11 @@ def _append(
     evidence: Mapping[str, object],
 ) -> tuple[dict[str, object], dict[str, object], bool]:
     _root, ledger_path = _paths(args)
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     frozen_implementation = _implementation_provenance()
     if _current_implementation_provenance() != frozen_implementation:
-        # Child tools are loaded from disk during Evaluate.  A start-only hash
-        # would let a mid-run edit execute under a provenance identity that the
-        # process did not actually use.  Leave the ledger untouched and retry
-        # under one stable implementation instead.
+        # 子工具在评估期间从磁盘加载；若只在启动时哈希，运行中修改会在进程未实际使用的
+        # 来源身份下执行。此时保持账本不变，并在一个稳定实现下重试。
         raise RuntimeError(
             "forward implementation changed while the command was running"
         )
@@ -3825,7 +3808,7 @@ def _forward_implementation_continuity(
 
     if events is None:
         _root, ledger_path = _paths(args)
-        contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+        contract = load_forward_contract(args.parameter_snapshot.resolve())
         events = (
             tuple(load_forward_paper_ledger(ledger_path, contract=contract)["events"])
             if ledger_path.is_file()
@@ -3843,7 +3826,7 @@ def _forward_implementation_continuity(
 
 
 def _start(args: argparse.Namespace) -> int:
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     _document, event, reused = _append(
         args=args,
         phase="CONTROL",
@@ -3865,7 +3848,7 @@ def _start(args: argparse.Namespace) -> int:
 
 
 def _capture(args: argparse.Namespace) -> int:
-    load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    load_forward_contract(args.parameter_snapshot.resolve())
     sector_path = args.sector_ledger.resolve()
     capture_args = capture_parser().parse_args(
         [
@@ -3969,9 +3952,8 @@ def _qmt_rpc_market_frame(
         code,
         frequency,
         start_date=start_at.strftime("%Y%m%d%H%M%S"),
-        # QMT's native end boundary is right-open.  Ask through the next bar
-        # boundary, then the data gate causally truncates observations at
-        # ``end_at``.  Otherwise the 15:00 closing bar is silently omitted.
+        # QMT 原生结束边界右开，因此请求到下一根 K 线边界，再由数据闸门按因果性截断到
+        # ``end_at``；否则会静默遗漏 15:00 收盘 K 线。
         end_date=query_end.strftime("%Y%m%d%H%M%S"),
         args={
             "req_counts": minimum_rows,
@@ -4064,9 +4046,8 @@ def _market_data_gate(
     reasons: list[str] = []
 
     def expected_last_at(frequency: str) -> datetime:
-        # QMT labels continuous 1m/5m bars at the interval close.  The 09:30
-        # row is the opening auction and is not one of the 240 continuous
-        # one-minute bars; a complete continuous session ends at 15:00.
+        # QMT 在区间结束时标记连续 1m/5m K 线；09:30 记录属于开盘集合竞价，不在 240 根
+        # 连续一分钟 K 线中，完整连续交易时段结束于 15:00。
         return end_at
 
     def complete(
@@ -4321,7 +4302,7 @@ def _session_pit_snapshot(
 
 def _evaluate(args: argparse.Namespace) -> int:
     session = _session(args)
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     implementation_continuity = _forward_implementation_continuity(args=args)
     if implementation_continuity["ready"] is not True:
         _document, blocked, blocked_reused = _append(
@@ -4467,11 +4448,9 @@ def _evaluate(args: argparse.Namespace) -> int:
                 )
             )
         except Exception as exc:
-            # This new evidence is collected for later sessions only.  Failure
-            # cannot weaken today's existing fail-closed data gates, and must
-            # not turn a previously valid human-review screen into a different
-            # trading decision.  Keep the coverage gap explicit and retry on
-            # the next idempotent evaluation.
+            # 新证据只为后续交易日收集；失败不能削弱今日已有关闭失败数据闸门，也不能把
+            # 先前有效人工复核屏幕变成不同交易决策。应明确保留覆盖缺口，并在下一次幂等
+            # 评估时重试。
             archive_evidence["qmt_instrument_status_snapshot"] = {
                 "status": "CAPTURE_INCOMPLETE",
                 "session": session.isoformat(),
@@ -4498,13 +4477,9 @@ def _evaluate(args: argparse.Namespace) -> int:
                 "broker_transport_available": False,
                 "live_status": "LIVE_DISABLED",
             }
-            # The screen object is already an immutable, useful review fact,
-            # but the daily forward decision is not complete if confirmed
-            # human intents could not be settled.  Returning success here used
-            # to suppress Task Scheduler's bounded retry and could strand a
-            # pending virtual intent indefinitely.  Preserve the screen, fail
-            # the decision closed, and let the idempotent retry re-run
-            # settlement without ever exposing an order transport.
+            # 屏幕对象已经是不可变且有用的复核事实，但已确认人工意图若无法结算，日级前向
+            # 决策就未完成。此处返回成功会抑制任务计划程序的有界重试，可能让待处理虚拟
+            # 意图永久悬空。应保留屏幕、关闭决策，并让幂等重试重新结算，始终不暴露下单传输。
             _document, blocked, blocked_reused = _append(
                 args=args,
                 phase="DECISION",
@@ -4588,9 +4563,8 @@ def _evaluate(args: argparse.Namespace) -> int:
                 )
             )
         except Exception as exc:
-            # Mark-outs are a diagnostic read model.  They must never turn a
-            # valid immutable daily screen into a trade, but a failure must be
-            # visible instead of being mistaken for a zero-return sample.
+            # 后验收益是诊断只读模型，绝不能把有效不可变日级屏幕变成交易；但失败必须可见，
+            # 不能误作零收益样本。
             archive_evidence["forward_review_markout"] = {
                 "status": "MARKOUT_EVALUATION_FAILED",
                 "error": f"{type(exc).__name__}: {str(exc)[:240]}",
@@ -4611,10 +4585,8 @@ def _evaluate(args: argparse.Namespace) -> int:
                 )
             )
         except Exception as exc:
-            # Deep warmup evidence is a bounded presentation sidecar.  Its
-            # absence must be explicit, but it cannot alter the archived
-            # screen, active gates, ranking, paper eligibility, or the daily
-            # EVALUATED result.
+            # 深层预热证据是有界展示旁车；缺失必须明确，但不能改变归档屏幕、活动闸门、
+            # 排序、虚拟资格或日级 EVALUATED 结果。
             archive_evidence["candidate_warmup_diagnostic"] = {
                 "status": "DIAGNOSTIC_UNAVAILABLE",
                 "reason_code": "CANDIDATE_WARMUP_DIAGNOSTIC_UNAVAILABLE",
@@ -4633,10 +4605,8 @@ def _evaluate(args: argparse.Namespace) -> int:
         _document, evaluated, evaluated_reused = _append(
             args=args,
             phase="DECISION",
-            # Keep the append-only ledger on its frozen status vocabulary.
-            # The evidence schema/result path below identifies this as the
-            # staged live-screen archive; inventing a second success status
-            # would make otherwise valid ledgers unreadable by the strict loader.
+            # 追加式账本保持冻结状态词表；下方证据模式和结果路径已把它标识为分阶段实时屏幕
+            # 归档，若发明第二种成功状态，会让原本有效的账本无法被严格加载器读取。
             status="EVALUATED",
             evidence=archive_evidence,
         )
@@ -4661,7 +4631,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         return 0
 def _status(args: argparse.Namespace) -> int:
     root, ledger_path = _paths(args)
-    contract = load_frozen_forward_contract(args.parameter_snapshot.resolve())
+    contract = load_forward_contract(args.parameter_snapshot.resolve())
     if not ledger_path.is_file():
         _print(
             {
@@ -4805,10 +4775,9 @@ def _status(args: argparse.Namespace) -> int:
         }
     valuation_source: dict[str, object] = {
         "forward_root": root,
-        # ``events`` came from the frozen forward-ledger validator above.
-        # Successful EVALUATED sessions are the authoritative operational
-        # calendar for daily valuation continuity; never guess weekdays or
-        # exchange holidays here.
+    # ``events`` 来自上方已经冻结的前向账本校验器。
+        # 成功 EVALUATED 的交易日构成日级估值连续性的权威运行日历；此处绝不猜测工作日
+        # 或交易所假日。
         "forward_events": events,
     }
     if status_accounting_parameters is not None:
@@ -5053,11 +5022,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "status": _status,
     }
     if args.command != "status":
-        # Freeze the executable/source identity before Capture or Evaluate
-        # reads any market fact.  An operator editing files while a long
-        # command is running must not make the terminal event claim code that
-        # the process never executed.  Each CLI invocation is a fresh process;
-        # status remains a read-only path and needs no provenance preflight.
+        # 采集或评估读取任何市场事实前先冻结可执行程序/来源身份。长命令运行期间修改文件时，
+        # 终态事件不能声称进程从未执行的代码。每次命令行调用都是新进程；状态命令保持只读，
+        # 无需来源预检。
         _implementation_provenance()
     return handlers[args.command](args)
 

@@ -1,10 +1,8 @@
-"""Human-in-the-loop Chanlun screening without order authority.
+"""无下单权限的人工复核缠论筛选。
 
-The program may narrow a large QMT universe and point a reviewer at plausible
-30m/5m/1m locations.  It may not decide whether the center, trend type,
-recursive level or buy/sell point is correct, and it may never create an
-order.  Historical evaluation is therefore an event study of screening
-quality, not a portfolio backtest.
+程序可以缩小 QMT 全市场范围，并把严格递归引擎已经确认的 30m/5m/1m 结构位置
+交给人工复核。它不得重新判断中枢、走势类型、递归级别或买卖点，也不得创建订单。
+历史评估因此只衡量筛选质量，不把人工复核队列冒充组合回测。
 """
 
 from __future__ import annotations
@@ -39,9 +37,6 @@ from chanlun.decision_support.trading_system.models import (
     EntryExecutionBoundary,
     parse_entry_execution_boundary_document,
 )
-from chanlun.decision_support.trading_system.technical_approximation import (
-    technical_approximation_parameters,
-)
 from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_EVIDENCE_CONTRACT_ID,
     QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID,
@@ -75,6 +70,9 @@ from chanlun.decision_support.trading_system.selection import (
     HIGHER_TIMEFRAME_RISK_STATES,
     higher_timeframe_risk_gate,
 )
+from chanlun.decision_support.trading_system.signal_alignment import (
+    unified_signal_alignment_contract,
+)
 
 
 AlertType = Literal[
@@ -97,8 +95,7 @@ _RISK_GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
 _FEEDBACK_LEDGER_SCHEMA = "chanlun-human-review-feedback-ledger"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 HUMAN_REVIEW_SCREEN_SCHEMA = "chanlun-human-review-screen"
-MONITOR_ONLY_WARNING_CODE = "MONITOR_ONLY_NOT_CURRENT_SECTOR_TRIGGER"
-MONITOR_ONLY_BUY_REASON_CODE = "current_qmt_sector_trigger_required"
+MONITOR_ONLY_WARNING_CODE = "MONITOR_ONLY_FORMAL_SELECTION_NOT_PASSED"
 SECTOR_HIGHER_TIMEFRAME_REVIEW_EVIDENCE_SCHEMA = (
     "chanlun-human-review-sector-higher-timeframe-evidence"
 )
@@ -140,7 +137,7 @@ REVIEW_CHECKLIST = (
 
 @dataclass(frozen=True, slots=True)
 class HumanReviewScreeningParameters:
-    technical_approximation_parameter_set_id: str
+    signal_alignment_parameter_set_id: str
     schema: str = "chanlun-human-review-screening-parameters"
     event_study_horizons: tuple[int, ...] = (5, 10, 20)
     confidence_scores: tuple[tuple[str, int], ...] = (
@@ -159,10 +156,10 @@ class HumanReviewScreeningParameters:
 
     def __post_init__(self) -> None:
         if (
-            self.technical_approximation_parameter_set_id
-            != technical_approximation_parameters().parameter_set_id
+            self.signal_alignment_parameter_set_id
+            != unified_signal_alignment_contract().parameter_set_id
         ):
-            raise ValueError("human review technical parameter identity changed")
+            raise ValueError("人工复核统一信号对齐身份发生变化")
         if self.event_study_horizons != (5, 10, 20):
             raise ValueError("human review event-study horizons changed")
         if (
@@ -183,8 +180,8 @@ class HumanReviewScreeningParameters:
 
 def human_review_screening_parameters() -> HumanReviewScreeningParameters:
     return HumanReviewScreeningParameters(
-        technical_approximation_parameter_set_id=(
-            technical_approximation_parameters().parameter_set_id
+        signal_alignment_parameter_set_id=(
+            unified_signal_alignment_contract().parameter_set_id
         )
     )
 
@@ -480,10 +477,8 @@ class SectorHigherTimeframeReviewEvidence:
         if unresolved:
             if self.gate != "UNRESOLVED" or not self.reason_codes:
                 raise ValueError("unresolved sector review lacks a cause")
-            # As with market/symbol evidence, a fail-closed safety overlay
-            # removes the effective sector states but must retain the raw
-            # replayable M/W/D diagnostics.  A genuinely unavailable sector
-            # source remains represented by an empty diagnostic tuple.
+            # 与市场/标的证据相同，关闭失败的安全覆盖会移除有效板块状态，但必须保留
+            # 可重放的原始月/周/日诊断；真正不可用的板块来源仍以空诊断元组表示。
         else:
             if (
                 len(diagnostics) != 3
@@ -1382,14 +1377,10 @@ class HigherTimeframeReviewSideEvidence:
         if unresolved:
             if self.gate != "UNRESOLVED" or not self.reason_codes:
                 raise ValueError("unresolved higher-timeframe gate lacks a cause")
-            # The effective M/W/D states are deliberately flattened to
-            # UNRESOLVED when a safety overlay (for example warmup
-            # divergence) removes an otherwise replayable decision snapshot.
-            # Keep the raw period diagnostics: they explain what the
-            # structure engine saw before the fail-closed overlay and are
-            # explicitly required by the higher-timeframe audit contract.
-            # An unavailable source uses an empty diagnostic tuple, so both
-            # cases remain distinguishable by evidence rather than inference.
+            # 当安全覆盖（例如预热分歧）移除原本可重放的决策快照时，有效月/周/日状态
+            # 会统一压平为 UNRESOLVED。必须保留原始周期诊断，用于解释结构引擎在关闭
+            # 失败前看到的事实，也是高周期审计契约的明确要求。不可用来源使用空诊断
+            # 元组，因此两种情况可凭证据区分，而非依靠推断。
         else:
             if (
                 len(diagnostics) != 3
@@ -1650,11 +1641,8 @@ def _review_source_supports_from_risk(
             HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID
         ):
             raise ValueError("higher-timeframe session support is incomplete")
-        # The portable market/symbol evidence does not duplicate the sector
-        # side, but it still consumes one atomic upstream contract.  Validate
-        # the ignored member as well so a partially rewritten four-field
-        # extension cannot be accepted merely because the selected two sides
-        # remain well formed.
+        # 可移植市场/标的证据不重复板块侧，但仍消费同一个原子上游契约。被忽略成员
+        # 也必须校验，避免四字段扩展被部分改写后仅因选中两侧形式正确而获准。
         _parse_review_session_evidence(
             risk["sector_session_evidence"],
             evidence_cutoff=evidence_cutoff,
@@ -1731,10 +1719,8 @@ def _review_source_supports_from_risk(
             raise ValueError("higher-timeframe convergence support is incomplete")
         sector_convergence = risk["sector_warmup_convergence_evidence"]
         if sector_convergence is None:
-            # The portable market/symbol converter historically accepts a
-            # risk fragment with no sector decision fields.  In that shape
-            # the atomic extension's ignored sector member may be ``None``;
-            # an explicitly resolved sector still may not drop its evidence.
+            # 可移植市场/标的转换器允许不含板块决策字段的风险片段；此形态下原子扩展
+            # 中被忽略的板块成员可为 ``None``，但显式已解析板块仍不能丢失证据。
             if risk.get("sector_gate") not in {None, "UNRESOLVED"}:
                 raise ValueError("resolved sector lost convergence evidence")
         else:
@@ -2523,10 +2509,8 @@ def sector_ranking_review_evidence_from_live_sector(
                 if raw.get("horizontal_rank") is None
                 else int(raw["horizontal_rank"])
             ),
-            # The authoritative batch has one decision time for every member
-            # category, mean and cross-sector rank.  The compact sector row
-            # does not duplicate that clock, so bind it explicitly here
-            # instead of silently substituting the signal's structure time.
+            # 权威批次对每个成员分类、均值和跨板块排序共用一个决策时间；紧凑板块记录
+            # 不重复该时钟，因此在此显式绑定，不能静默替换为信号结构时间。
             strength_observed_at=observed_at,
             strength_anchor_session=(
                 None
@@ -2681,7 +2665,7 @@ class HumanReviewAlert:
     warning_codes: tuple[str, ...]
     source_fact_ids: tuple[str, ...]
     screening_parameter_set_id: str
-    technical_approximation_parameter_set_id: str
+    signal_alignment_parameter_set_id: str
     sector_higher_timeframe_evidence: SectorHigherTimeframeReviewEvidence | None = None
     market_symbol_higher_timeframe_evidence: (
         MarketSymbolHigherTimeframeReviewEvidence | None
@@ -2837,10 +2821,10 @@ class HumanReviewAlert:
         if (
             self.screening_parameter_set_id
             != human_review_screening_parameters().parameter_set_id
-            or self.technical_approximation_parameter_set_id
-            != technical_approximation_parameters().parameter_set_id
+            or self.signal_alignment_parameter_set_id
+            != unified_signal_alignment_contract().parameter_set_id
         ):
-            raise ValueError("human review alert parameter binding changed")
+            raise ValueError("人工复核提醒的严格参数绑定发生变化")
         if (
             self.review_checklist != REVIEW_CHECKLIST
             or self.status != "REVIEW_REQUIRED"
@@ -2855,7 +2839,7 @@ class HumanReviewAlert:
 
     @property
     def signal_lifecycle_id(self) -> str:
-        """Stable setup identity across immutable daily screen snapshots."""
+        """返回跨不可变每日筛选快照保持稳定的 setup 身份。"""
 
         return sha256_json(
             {
@@ -2864,9 +2848,7 @@ class HumanReviewAlert:
                 "alert_type": self.alert_type,
                 "source_point_id": self.source_point_id,
                 "screening_parameter_set_id": self.screening_parameter_set_id,
-                "technical_approximation_parameter_set_id": (
-                    self.technical_approximation_parameter_set_id
-                ),
+                "signal_alignment_parameter_set_id": self.signal_alignment_parameter_set_id,
             }
         )
 
@@ -2874,13 +2856,11 @@ class HumanReviewAlert:
 def _human_review_candidate_id(
     alert: HumanReviewAlert,
 ) -> str:
-    """Recompute the current candidate identity."""
+    """重新计算当前候选身份。"""
 
-    # ``dataclasses.asdict(alert)`` recursively copies every nested M/W/D
-    # evidence tree before the code below immediately replaces those copies
-    # with each evidence object's canonical document.  On a full-market queue
-    # that duplicated tens of millions of values for no semantic benefit.
-    # Keep a shallow field map and normalize only nested evidence objects.
+    # ``dataclasses.asdict(alert)`` 会递归复制每棵 M/W/D 证据树，而下方随后又会用
+    # 各证据对象的规范文档替换副本。全市场队列会因此无意义地复制数千万个值；
+    # 这里保留浅层字段映射，只规范化嵌套证据对象。
     stable = {
         field: getattr(alert, field) for field in HumanReviewAlert.__dataclass_fields__
     }
@@ -2889,18 +2869,14 @@ def _human_review_candidate_id(
             alert.sector_higher_timeframe_evidence.document()
         )
     if alert.market_symbol_higher_timeframe_evidence is not None:
-        # Source-support evidence contains point-in-time calendar sessions as
-        # pure ``date`` values.  Bind the evidence's already normalized
-        # portable document instead of feeding ``asdict`` dates to the generic
-        # canonical fingerprint helper.
+        # 来源支持证据以纯 ``date`` 保存时点化交易日；应绑定其已规范化的可移植文档，
+        # 而不是把 ``asdict`` 日期交给通用规范指纹助手。
         stable["market_symbol_higher_timeframe_evidence"] = (
             alert.market_symbol_higher_timeframe_evidence.document()
         )
     if alert.sector_ranking_evidence is not None:
-        # The canonical fingerprint helper deliberately has no generic
-        # date-only representation.  Use the evidence's own normalized
-        # document so its anchor session is hashed as an ISO date and the
-        # nested evidence identity is bound as well.
+        # 规范指纹助手有意不提供通用纯日期表示；使用证据自身的规范文档，使锚定交易日
+        # 按 ISO 日期哈希，并同时绑定嵌套证据身份。
         stable["sector_ranking_evidence"] = alert.sector_ranking_evidence.document()
     if alert.entry_execution_boundary is not None:
         stable["entry_execution_boundary"] = alert.entry_execution_boundary.document()
@@ -3119,10 +3095,8 @@ def validate_human_review_screen_document(
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("human_review_candidate_malformed") from exc
-    # ``parse_human_review_alert`` has already recomputed and matched every
-    # candidate identity.  Reading the authenticated raw identities here
-    # avoids hashing the same large evidence tree a second time merely to find
-    # duplicates.
+    # ``parse_human_review_alert`` 已经重算并匹配了每一项。
+    # 候选身份已完成认证；此处读取已认证原始身份，可避免仅为查重再次哈希同一大型证据树。
     identities = tuple(str(value["candidate_id"]) for value in queue)
     if len(identities) != len(set(identities)):
         raise ValueError("human_review_candidate_duplicate")
@@ -3196,9 +3170,8 @@ def evaluate_review_alert(
     known = tuple(
         bar for bar in completed if bar.observed_at <= alert.review_available_at
     )
-    # Intraday remnants of the signal session are not a complete forward
-    # session.  Excluding them makes “5 sessions” mean five complete trading
-    # dates after the reviewer first had the alert.
+    # 信号当日剩余盘中区间不是完整前向交易日；排除后，“5 个交易日”才表示复核者首次
+    # 收到提醒之后的五个完整交易日。
     future = tuple(
         bar
         for bar in completed
@@ -3228,11 +3201,10 @@ def evaluate_review_alert(
             )
     else:
         reference = None if not known else known[-1]
-    # ``alert.reference_price`` is the finest causal structure anchor copied
-    # from the 1m locator (or 5m setup), not a market quote.  A mark-out return
-    # must start from the last completed 1m close actually knowable at review
-    # time.  Requiring the two values to be equal incorrectly rejects normal
-    # candidates whose structure anchor is below/above the latest close.
+    # ``alert.reference_price`` 是复制得到的最细粒度因果结构锚点。
+    # ``alert.reference_price`` 来自 1m 定位点（或 5m 设置）的最细因果结构锚点，
+    # 不是市场报价。后验收益必须从复核时实际可知的最后一根已完成 1m 收盘价开始；
+    # 强制二者相等会错误拒绝结构锚点低于或高于最新收盘价的正常候选。
     observed_future_sessions = {bar.observed_at.date() for bar in future}
     if calendar is None:
         sessions = tuple(sorted(observed_future_sessions))
@@ -3310,9 +3282,8 @@ def evaluate_review_alert(
                 bar.observed_at
                 for bar in window
                 if alert.structural_invalidation_price is not None
-                # strict strategy §5.6: a third-buy return remains valid at equality
-                # (low >= ZG); only a completed bar whose low is strictly
-                # below ZG proves re-entry into the center.
+                # 严格策略第 5.6 节：三买回试在相等时仍有效（low >= ZG）；只有已完成
+                # 已完成 K 线最低价严格低于 ZG，才能证明重新进入中枢。
                 and bar.low < alert.structural_invalidation_price
             ),
             None,
@@ -3534,9 +3505,8 @@ class HumanReviewFeedback:
     def feedback_id(self) -> str:
         values = asdict(self)
         if self.request_id is not None:
-            # A network retry receives a new server wall-clock time.  Bind its
-            # identity to the explicit request key while still preserving the
-            # timestamp of the first accepted write in the ledger payload.
+            # 网络重试会获得新的服务器墙钟时间；身份绑定显式请求键，同时在账本载荷中
+            # 保留首次获准写入的时间戳。
             values["reviewed_at"] = "IDEMPOTENT_REQUEST_TIMESTAMP"
         return sha256_json(values)
 
@@ -3738,7 +3708,6 @@ __all__ = (
     "HIGHER_TIMEFRAME_REVIEW_SOURCE_SUPPORT_SCHEMA",
     "MARKET_SYMBOL_HIGHER_TIMEFRAME_REVIEW_EVIDENCE_SCHEMA",
     "MarketSymbolHigherTimeframeReviewEvidence",
-    "MONITOR_ONLY_BUY_REASON_CODE",
     "MONITOR_ONLY_WARNING_CODE",
     "REVIEW_CHECKLIST",
     "ReviewEventStudyObservation",

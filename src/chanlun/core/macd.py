@@ -157,7 +157,7 @@ class MACD:
         base_slow = self._ema_slow_val_prev
         base_dea = self._dea_val_prev
 
-        # EMA_today = alpha * Price + (1 - alpha) * EMA_prev
+        # 计算式：今日指数均线 = 平滑系数 × 当前价格 + (1 - 平滑系数) × 前值。
         new_ema_fast = (close * self.fast_alpha) + (base_fast * (1 - self.fast_alpha))
         new_ema_slow = (close * self.slow_alpha) + (base_slow * (1 - self.slow_alpha))
         new_dif = new_ema_fast - new_ema_slow

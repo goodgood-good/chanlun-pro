@@ -1,4 +1,4 @@
-"""Native market-data adapters for the sole active trading-screening engine."""
+"""唯一生产选股引擎使用的原生行情适配器。"""
 
 from __future__ import annotations
 
@@ -16,12 +16,16 @@ from typing import Protocol, cast
 import pandas as pd
 
 from chanlun.core.strict_structure.errors import StrictStructureContractError
+from chanlun.core.strict_structure.formal_state import current_formal_direction
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.a_share_minute_grid import (
     a_share_optional_entry_valid_until,
 )
-from chanlun.decision_support.trading_system.context import classify_context
+from chanlun.decision_support.trading_system.context import (
+    classify_context,
+    context_point_max_age,
+)
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeDataUnavailable,
@@ -57,8 +61,6 @@ from chanlun.decision_support.trading_system.screening_runtime import (
 )
 from chanlun.decision_support.trading_system.screening_structure import (
     SCREENING_STRUCTURE_FREQUENCIES,
-    merge_provisional_candidates,
-    unfinished_segment_candidates,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_QMT_30M_FALLBACK_REASON_CODE,
@@ -165,7 +167,7 @@ class SectorAnalysisUnavailable(RuntimeError):
 
 
 class StrictStructureAnalysisError(RuntimeError):
-    """Marks a validated frame whose strict structure contract is invalid."""
+    """表示已校验行情帧不满足严格结构契约。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +197,7 @@ class SectorAnalysisFailure:
 
 @dataclass(frozen=True, slots=True)
 class SectorAnalysisExclusion:
-    """A deterministic catalog-eligibility outcome, not an analysis failure."""
+    """表示确定性的目录资格结论，而不是分析失败。"""
 
     sector_id: str
     code: str
@@ -242,12 +244,10 @@ class SectorAssessmentBatch:
     errors: tuple[SectorAnalysisFailure, ...]
     exclusion_counts: tuple[tuple[str, int], ...] = ()
     exclusions: tuple[SectorAnalysisExclusion, ...] = ()
-    # Exact QMT catalog identity.  A missing value keeps the batch fail-closed
-    # and ineligible for forward publication.
+    # 精确的 QMT 目录身份。缺失时批次保持关闭失败，不能进入前向发布。
     catalog_revision: str | None = None
-    # Compact member-category evidence used to recompute every horizontal
-    # strength, cross-sector rank and per-sector source identity.  A missing
-    # value remains display-only and cannot enter a forward publication.
+    # 紧凑的成员分类证据，用于重算全部横向强度、跨板块排序和各板块来源身份。
+    # 缺失时只能展示，不能进入前向发布。
     strength_evidence: SectorStrengthBatch | None = None
 
     def __post_init__(self) -> None:
@@ -410,13 +410,10 @@ class StructureAnalyzer(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class NativeTradingGatewayConfig:
-    # Cold starts consume the complete QMT lookback made available for each
-    # physical frequency.  The former 3,200/4,800-bar tails were long enough
-    # to manufacture segments but not to stabilize first/second points: the
-    # exact same symbol could expose only a third point until its older centers
-    # were restored.  Symbols are deterministically sharded, unchanged frames
-    # are cached, and the live scheduler analyzes only its bounded changed-code
-    # batch; the longer cost is paid on a cold contract rebuild.
+    # 冷启动使用各物理周期可获得的完整 QMT 回看区间。旧的 3200/4800 根尾部数据
+    # 足以形成线段，却不足以稳定一、二类点：同一标的在旧中枢恢复前可能只显示三类点。
+    # 标的采用确定性分片，未变化数据帧会缓存，实时调度只分析有界变更代码批次；
+    # 较长耗时仅发生在冷态契约重建。
     request_bars_by_frequency: tuple[tuple[str, int], ...] = (
         CANONICAL_REQUEST_BARS_BY_FREQUENCY
     )
@@ -530,13 +527,11 @@ def _closed_frame(
 
 
 def _frame_content_revision(frame: pd.DataFrame) -> str:
-    """Bind an analysis-cache hit to the exact closed input prefix.
+    """把分析缓存命中绑定到精确的已收盘输入前缀。
 
-    The price-basis identity is intentionally stable across ordinary QMT data
-    refreshes.  It therefore cannot by itself authenticate a cached structure:
-    QMT may fill a missing component or revise OHLC at the same last bar close.
-    Include every consumed OHLCV row and, for sector composites, the exact
-    contributor bitmask path so such repairs force a deterministic recompute.
+    价格基准身份会有意跨普通 QMT 刷新保持稳定，不能单独证明缓存结构有效：QMT 可能
+    补齐缺失成分，或在末根收盘时间不变时修订开高低收。哈希需覆盖全部已使用行情行，
+    板块合成还需覆盖精确贡献者位图路径，使这类修订必然触发确定性重算。
     """
 
     identity_attrs = {
@@ -589,7 +584,7 @@ def _frame_content_revision(frame: pd.DataFrame) -> str:
 
 
 def _entry_valid_until(confirmation_closed_at: datetime) -> datetime:
-    """Return the frozen optional-entry TTL for an end-labelled A-share 1m bar."""
+    """返回按结束时间标记的 A 股 1m 行情对应的冻结可选入场有效期。"""
 
     return a_share_optional_entry_valid_until(confirmation_closed_at)
 
@@ -600,7 +595,7 @@ def _entry_execution_boundaries(
     points: tuple[StructuralPoint, ...],
     raw_frame: pd.DataFrame,
 ) -> tuple[EntryExecutionBoundary, ...]:
-    """Bind confirmed 1m buy points to exact unadjusted QMT bars."""
+    """把已确认 1m 买点绑定到精确的 QMT 不复权行情。"""
 
     metadata = strict_snapshot_price_metadata(raw_frame)
     if (
@@ -653,8 +648,7 @@ def analyze_native_frame(
     if frequency not in _FREQUENCIES:
         raise ValueError("unsupported trading frequency")
     closed_at = normalize_datetime(as_of, "as_of")
-    # Metadata failures describe the input snapshot, not a structure-engine
-    # contract violation, and retain their public ValueError classification.
+    # 元数据失败描述输入快照，而非结构引擎契约违规，因此保留公开的 ValueError 分类。
     strict_snapshot_price_metadata(frame)
     try:
         evidence = screening_evidence_from_frame(
@@ -671,14 +665,6 @@ def analyze_native_frame(
         code=code,
         source_frequency=frequency,
         as_of=closed_at,
-    )
-    provisional = merge_provisional_candidates(
-        provisional,
-        unfinished_segment_candidates(
-            evidence,
-            code=code,
-            source_frequency=frequency,
-        ),
     )
     return FrameStructureAnalysis(
         closed_at=closed_at,
@@ -699,49 +685,34 @@ def _warmup_tail_signature(
     not_before: datetime,
 ) -> tuple[object, ...]:
     latest: dict[tuple[str, str, int], tuple[datetime, tuple[object, ...]]] = {}
-    for point in (*analysis.confirmed_points, *analysis.provisional_points):
-        observed_at = (
-            point.available_at
-            if isinstance(point, StructuralPoint)
-            else point.observed_at
-        )
-        if observed_at < not_before:
+    # 预热门禁只比较已经确认、能够进入正式决策链的证据。未确认候选的形态会
+    # 随最后一根行情变化，它们仍展示在观察列表中，但不能让正式历史收敛失效。
+    for point in analysis.confirmed_points:
+        observed_at = point.available_at
+        # 锚点过旧而最近才完成递归确认的点，不是当前尾部信号。锚点时间与
+        # 可用时间必须同时位于活动窗口内，避免旧结构重新进入实时决策。
+        if observed_at < not_before or point.anchor_at < not_before:
             continue
         lane = (point.point_type, point.tower, point.recursive_level)
-        # Object ids include the complete upstream structure ancestry.  The
-        # same tail point therefore receives a different id when the warmup
-        # prefix starts later, even when every decision-relevant fact agrees.
-        # Convergence must compare that stable semantic payload, not a prefix-
-        # scoped hash; provenance ids remain untouched in the actual signal.
-        if isinstance(point, StructuralPoint):
-            semantic = (
-                point.side,
-                point.status,
-                point.source_frequency,
-                point.anchor_at.isoformat(),
-                None if point.confirmed_at is None else point.confirmed_at.isoformat(),
-                point.available_at.isoformat(),
-                point.price_basis_revision,
-                point.structure_anchor_price,
-                point.structure_invalidation_price,
-                point.center_zd,
-                point.center_zg,
-                point.center_ordinal,
-                point.variant,
-                point.divergence_kind,
-                point.evidence_codes,
-            )
-        else:
-            semantic = (
-                point.side,
-                point.status,
-                point.source_frequency,
-                point.observed_at.isoformat(),
-                point.anchor_price,
-                point.missing_conditions,
-                point.evidence_codes,
-                point.actionable,
-            )
+        # 对象编号包含完整上游结构血缘。同一个尾部点在截短左侧历史后可能
+        # 得到不同编号，因此收敛比较使用稳定语义，正式信号仍保留原始血缘编号。
+        semantic = (
+            point.side,
+            point.status,
+            point.source_frequency,
+            point.anchor_at.isoformat(),
+            None if point.confirmed_at is None else point.confirmed_at.isoformat(),
+            point.available_at.isoformat(),
+            point.price_basis_revision,
+            point.structure_anchor_price,
+            point.structure_invalidation_price,
+            point.center_zd,
+            point.center_zg,
+            point.center_ordinal,
+            point.variant,
+            point.divergence_kind,
+            point.evidence_codes,
+        )
         previous = latest.get(lane)
         if previous is None or observed_at > previous[0]:
             latest[lane] = (observed_at, semantic)
@@ -758,17 +729,13 @@ def _warmup_latest_points(
     analysis: FrameStructureAnalysis,
     *,
     not_before: datetime,
-) -> dict[tuple[str, str, int], tuple[datetime, object]]:
-    """Return the same latest semantic lanes used by the active signature."""
+) -> dict[tuple[str, str, int], tuple[datetime, StructuralPoint]]:
+    """返回活动签名使用的各条正式语义通道中的最新点。"""
 
-    latest: dict[tuple[str, str, int], tuple[datetime, object]] = {}
-    for point in (*analysis.confirmed_points, *analysis.provisional_points):
-        observed_at = (
-            point.available_at
-            if isinstance(point, StructuralPoint)
-            else point.observed_at
-        )
-        if observed_at < not_before:
+    latest: dict[tuple[str, str, int], tuple[datetime, StructuralPoint]] = {}
+    for point in analysis.confirmed_points:
+        observed_at = point.available_at
+        if observed_at < not_before or point.anchor_at < not_before:
             continue
         lane = (point.point_type, point.tower, point.recursive_level)
         previous = latest.get(lane)
@@ -783,7 +750,7 @@ def _warmup_tail_difference_codes(
     *,
     not_before: datetime,
 ) -> tuple[str, ...]:
-    """Explain pairwise divergence without weakening the active gate."""
+    """解释两段历史的正式证据差异，不放宽活动门禁。"""
 
     codes: list[str] = []
     if full.direction != short.direction:
@@ -873,7 +840,7 @@ def analyze_native_frame_with_warmup(
     frame: pd.DataFrame,
     as_of: datetime,
 ) -> FrameStructureAnalysis:
-    """Require the active tail to agree under two left-history lengths."""
+    """要求活动尾部的正式证据在两种左侧历史长度下保持一致。"""
 
     full = analyze_native_frame(
         code=code,
@@ -894,6 +861,10 @@ def analyze_native_frame_with_warmup(
     suffix = frame.iloc[trim:].copy().reset_index(drop=True)
     suffix.attrs = dict(frame.attrs)
     suffix_start = _market_datetime(suffix["date"].iloc[0], "warmup suffix start")
+    active_tail_start = max(
+        suffix_start,
+        normalize_datetime(as_of, "as_of") - context_point_max_age(frequency),
+    )
     short = analyze_native_frame(
         code=code,
         frequency=frequency,
@@ -902,15 +873,15 @@ def analyze_native_frame_with_warmup(
     )
     converged = _warmup_tail_signature(
         full,
-        not_before=suffix_start,
-    ) == _warmup_tail_signature(short, not_before=suffix_start)
+        not_before=active_tail_start,
+    ) == _warmup_tail_signature(short, not_before=active_tail_start)
     difference_codes = (
         ()
         if converged
         else _warmup_tail_difference_codes(
             full,
             short,
-            not_before=suffix_start,
+            not_before=active_tail_start,
         )
     )
     return replace(
@@ -935,12 +906,11 @@ def audit_native_frame_warmup_envelope(
         _WARMUP_ENVELOPE_PREFIX_RATIOS
     ),
 ) -> WarmupConvergenceEnvelope:
-    """Audit one common active tail under four left-history lengths.
+    """在四种左侧历史长度下审计同一活动尾部。
 
-    This deliberately calls :func:`analyze_native_frame`, not the active
-    pairwise warmup wrapper.  Its output is diagnostic-only and carries an
-    immutable ``active_gate_unchanged`` marker; callers must not feed the
-    result back into ranking, candidate selection, or order eligibility.
+    此处特意调用 :func:`analyze_native_frame`，而不是生效中的成对预热包装器。结果只
+    用于诊断，并携带不可变的 ``active_gate_unchanged`` 标记；调用方不得把结果反馈到
+    排名、候选选择或订单资格判断。
     """
 
     if frequency not in SCREENING_WARMUP_REQUIRED_BARS:
@@ -996,7 +966,10 @@ def audit_native_frame_warmup_envelope(
                 ),
             )
         )
-    common_tail_start = None if not prepared else max(row[1] for row in prepared)
+    common_tail_start = None if not prepared else max(
+        max(row[1] for row in prepared),
+        normalize_datetime(as_of, "as_of") - context_point_max_age(frequency),
+    )
     observations = tuple(
         WarmupPrefixObservation(
             bar_count=bar_count,
@@ -1019,14 +992,7 @@ def audit_native_frame_warmup_envelope(
 
 
 def _strict_direction(evidence: StrictEvidenceResult) -> ContextDirection:
-    structure = evidence.structure
-    if not structure.levels:
-        return "neutral"
-    level = structure.levels[-1]
-    if level.trend_types:
-        return cast(ContextDirection, level.trend_types[-1].direction)
-    locked = tuple(unit for unit in level.units if unit.locked)
-    return "neutral" if not locked else cast(ContextDirection, locked[-1].direction)
+    return cast(ContextDirection, current_formal_direction(evidence))
 
 
 def _stock_codes(raw: object) -> tuple[str, ...]:
@@ -1043,11 +1009,10 @@ def _stock_codes(raw: object) -> tuple[str, ...]:
 def _qmt_catalog_universe(
     rows: Sequence[object],
 ) -> dict[str, str]:
-    """Use captured QMT GICS3 members as the sector-first universe.
+    """使用已捕获的 QMT GICS3 成员作为板块优先选股范围。
 
-    The catalog builder has already normalized and filtered the native response
-    to A-share identities.  Intersecting it with ``ExchangeQMT.all_stocks`` was
-    redundant and also allowed ``get_full_tick`` to influence the scan scope.
+    目录构建器已经把原生响应规范化并筛成 A 股身份；再与
+    ``ExchangeQMT.all_stocks`` 求交既重复，也会让 ``get_full_tick`` 意外影响扫描范围。
     """
 
     result: dict[str, str] = {}
@@ -1066,7 +1031,7 @@ def _qmt_catalog_universe(
 
 
 def _catalog_member_count(raw: Sequence[object]) -> int:
-    """Count unique canonical A-share identities in the QMT catalog."""
+    """统计 QMT 目录中唯一且规范的 A 股身份。"""
 
     identities: set[str] = set()
     for value in raw:
@@ -1076,7 +1041,7 @@ def _catalog_member_count(raw: Sequence[object]) -> int:
 
 
 class NativeTradingDataGateway:
-    """Read sector facts, then build stock d/30m/5m/1m physical structures."""
+    """先读取板块事实，再构建个股日线、30m、5m、1m 物理结构。"""
 
     def __init__(
         self,
@@ -1141,20 +1106,17 @@ class NativeTradingDataGateway:
         self._analysis_cache: dict[
             tuple[str, str], tuple[str, FrameStructureAnalysis]
         ] = {}
-        # M/W/D facts are immutable at the explicit causal cutoff used by the
-        # intraday monitor.  Cache only fully resolved bundles so repeated 1m
-        # and 5m observations do not resample hundreds of daily sessions, while
-        # transient UNRESOLVED evidence remains retryable.
+        # 月/周/日事实冻结在盘中监听所用的显式因果截止点。只缓存完全解析的证据包，
+        # 避免重复 1m/5m 观测反复采样数百个日级交易日；瞬时 UNRESOLVED 仍可重试。
         self._higher_timeframe_cache: dict[
             tuple[str, str, str, str, str], HigherTimeframeGateBundle
         ] = {}
 
     def _report_progress(self) -> None:
-        """Attest progress immediately around native/CPU-heavy boundaries.
+        """在原生调用或高计算量边界前后立即证明进度。
 
-        The callback intentionally propagates failures.  In the isolated
-        worker a broken parent connection must stop further QMT work instead
-        of leaving an orphan process consuming native resources.
+        回调会有意传播失败。隔离工作进程与父进程断连后必须停止后续 QMT 工作，不能
+        留下继续消耗原生资源的孤儿进程。
         """
 
         self._progress_callback()
@@ -1376,10 +1338,8 @@ class NativeTradingDataGateway:
                 for point in analysis.confirmed_points
             )
         ):
-            # Structure is calculated on the frozen adjusted basis, while the
-            # optional entry cap is an execution fact and must come from the
-            # exact unadjusted confirmation bar.  Read the latter separately;
-            # never infer it from the structural anchor or adjustment factor.
+            # 结构在冻结复权基准上计算；可选入场上限属于执行事实，必须取自准确的
+            # 未复权确认 K 线。后者单独读取，绝不能由结构锚点或复权因子推断。
             try:
                 self._report_progress()
                 raw_confirmation_frame = loader(
@@ -1413,9 +1373,8 @@ class NativeTradingDataGateway:
                     ),
                 )
             except Exception as exc:
-                # Screening remains useful for human chart review.  The
-                # downstream paper-intent gate treats a missing boundary as
-                # observation-only, so this cannot silently become a fill.
+                # 筛选结果仍可供人工看图复核；下游虚拟意图闸门会把缺失边界视为仅观测，
+                # 因此不会静默变成成交。
                 LogUtil.warning(
                     "[trading_screening.entry_execution_boundary] "
                     f"code={code} reason={type(exc).__name__}: {str(exc)[:160]}"
@@ -1443,12 +1402,11 @@ class NativeTradingDataGateway:
         code: str,
         as_of: datetime,
     ) -> pd.DataFrame:
-        """Rebuild one invalid native 30m stream from completed QMT 5m bars.
+        """用已完成的 QMT 5m 行情重建一条无效的原生 30m 数据流。
 
-        This is not a price repair: the invalid native bar is discarded in full.
-        Every replacement OHLCV value is deterministically aggregated from six
-        already-completed, same-source 5m bars, then validated by the normal
-        causal frame gate.  Missing or invalid lower bars remain a hard failure.
+        这不是价格修补：无效原生行情会被完整丢弃。替代开高低收量全部由同源的六根
+        已完成 5m 行情确定性聚合，再通过常规因果行情门槛校验；底层行情缺失或无效
+        仍属于硬失败。
         """
 
         loader = getattr(exchange, "klines", None)
@@ -1528,7 +1486,7 @@ class NativeTradingDataGateway:
             raise ValueError(
                 "QMT sector catalog revision does not match its members"
             )
-        # Current QMT components are the point-in-time selection universe.
+        # 当前 QMT 成分构成时点化选股标的池。
         digits = _qmt_catalog_universe(rows)
         symbol_names: dict[str, str] = {}
         universe_codes = set(digits.values())
@@ -1632,8 +1590,7 @@ class NativeTradingDataGateway:
                     provider_frequency = frequency
                     provider_request_bars = self._config.request_bars(frequency)
                     if frequency == "30m":
-                        # A median of native 30m member returns is not the same
-                        # object as six chained medians of 5m member returns.
+                        # 原生 30m 成员收益中位数不等同于六段 5m 成员收益中位数的连乘结果。
                         provider_frequency = "5m"
                         provider_request_bars = (
                             self._config.request_bars("30m") * 6 + 47
@@ -1757,15 +1714,11 @@ class NativeTradingDataGateway:
         if self._sector_strength_provider is not None:
             try:
                 self._report_progress()
-                # ``observed_at`` is the worker wall clock.  A post-midnight
-                # replay can observe the catalog on Tuesday while every
-                # completed 30m/5m bar still belongs to Monday's close.  Sector
-                # strength consumes those same completed-price facts, so its
-                # decision time must be their verified cutoff rather than the
-                # process clock.  Otherwise an otherwise causal Monday snapshot
-                # is mislabeled Tuesday and the immutable review boundary must
-                # reject it.  ``latest_bars`` contains only analyses already
-                # checked as no later than ``observed_at``.
+                # ``observed_at`` 是工作进程墙钟。午夜后回放可能在周二观察目录，但全部
+                # 已完成 30m/5m K 线仍属于周一收盘。板块强度使用同一已完成价格事实，
+                # 决策时间必须取其已验证截止点而非进程时钟；否则因果有效的周一快照会
+                # 被误标为周二并被不可变复核边界拒绝。``latest_bars`` 只包含已确认不晚于
+                # ``observed_at`` 的分析。
                 strength_decision_time = max(
                     latest_bars.values(),
                     default=observed_at,
@@ -1913,7 +1866,7 @@ class NativeTradingDataGateway:
         self,
         codes: tuple[str, ...],
     ) -> tuple[str, ...]:
-        """Keep only QMT-native A-share stocks and exchange-traded ETFs."""
+        """只保留 QMT 原生 A 股股票和交易所交易基金。"""
 
         dispositions = self.screening_instrument_types(codes)
         return tuple(
@@ -1926,7 +1879,7 @@ class NativeTradingDataGateway:
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """Return exact native type dispositions for monitor diagnostics."""
+        """为监听诊断返回精确的原生类型处置结果。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
@@ -1956,9 +1909,8 @@ class NativeTradingDataGateway:
             cached = self._symbol_names.get(code)
         if cached is not None:
             return cached
-        # GICS3 membership carries no display name.  Read static instrument
-        # metadata only for codes that actually emitted a review row; never use
-        # full-tick data for naming or universe membership.
+        # 三级行业成员关系不含展示名称；仅为实际产生复核记录的代码读取静态标的信息，
+        # 绝不使用全量逐笔数据决定名称或标的池成员。
         try:
             provider = getattr(self._exchange_provider(), "stock_info", None)
             if not callable(provider):
@@ -1986,7 +1938,7 @@ class NativeTradingDataGateway:
         session: date,
         observed_at: datetime,
     ) -> Mapping[str, object]:
-        """Return calendar evidence through the same read-only QMT boundary."""
+        """通过同一个只读 QMT 边界返回交易日历证据。"""
 
         provider = self._trading_session_provider
         if provider is None:
@@ -2017,14 +1969,10 @@ class NativeTradingDataGateway:
         if not requested or not requested.issubset(_FREQUENCIES):
             raise ValueError("frequencies must contain only d, 30m, 5m and 1m")
         analyses: dict[str, FrameStructureAnalysis] = {}
-        # The shared decision core starts from a *current* 5m setup.  Evaluate
-        # that necessary condition first.  When it is absent, 30m/d context,
-        # 1m precision and M/W/D risk facts cannot create a decision row and
-        # therefore do not need to be read or calculated.  This is execution
-        # pruning only: the same `_has_current_five_minute_setup` age contract
-        # is mirrored by TradingEngine._current_five_minute_points, and the
-        # returned bundle still carries the exact 5m evidence so the shared
-        # core independently proves the empty result.
+        # 共享决策核心从“当前 5m 设置”开始，必须先检查这一必要条件。缺失时，30m/日级
+        # 背景、1m 精细触发和月/周/日风险事实都无法生成决策记录，无需读取或计算。
+        # 这只是执行剪枝：``_has_current_five_minute_setup`` 与统一决策核心内部的
+        # 5m 时效契约一致；返回证据包仍携带精确 5m 证据，由共享核心独立证明结果为空。
         cached_five = self._cached_analysis(code, "5m")
         analyses["5m"] = (
             self._load_analysis(
@@ -2063,14 +2011,10 @@ class NativeTradingDataGateway:
                     as_of=observed_at,
                 )
         bundle_as_of = max(item.closed_at for item in analyses.values())
-        # The low-level 1m precision lane may legitimately be newer than the
-        # latest completed sector 5m bar (for example 09:47 versus 09:45).
-        # Keep the signal on that completed 1m prefix, while freezing every
-        # M/W/D risk fact to the page-wide market-data cutoff.  Reusing the
-        # signal wall clock here made convergence, reconciliation and source
-        # coverage evidence describe 09:47 even though the atomic sector
-        # snapshot was frozen at 09:45; the resulting document failed its own
-        # causal validator immediately after it was written.
+        # 低级别 1m 精细通道可合理晚于最新已完成板块 5m K 线（如 09:47 对 09:45）。
+        # 信号保留在该已完成 1m 前缀上，而全部月/周/日风险事实冻结到页面统一行情截止点。
+        # 若复用信号墙钟，会让收敛、对账和来源覆盖证据描述 09:47，尽管原子板块快照
+        # 冻结于 09:45，导致文档写入后立即无法通过自身因果校验。
         risk_as_of = bundle_as_of
         if higher_timeframe_as_of is not None:
             requested_risk_as_of = normalize_datetime(
@@ -2084,13 +2028,10 @@ class NativeTradingDataGateway:
                 )
             risk_as_of = min(bundle_as_of, requested_risk_as_of)
         higher_timeframe_gates = None
-        # The decision core emits one result per current 5m setup.  When the
-        # completed 5m prefix has no current setup, its output is provably the
-        # empty tuple regardless of the M/W/D gate.  Avoid reading and
-        # resampling roughly 300 sessions of QMT 1m history for that empty
-        # branch.  This is execution pruning only: every symbol that can emit
-        # a candidate still receives the exact same higher-timeframe provider
-        # and the entry gate remains fail-closed below.
+        # 决策核心为每个当前 5m 设置输出一个结果。已完成 5m 前缀没有当前设置时，
+        # 无论月/周/日闸门如何，输出都可证明为空元组，因此避免为该空分支读取并重采样
+        # 约 300 个交易日的 QMT 1m 历史。这仅是执行剪枝；所有可能产生候选的标的仍使用
+        # 完全相同的高周期提供器，且下方入场闸门继续关闭失败。
         if (
             self._higher_timeframe_provider is not None
             and has_current_five_minute_setup

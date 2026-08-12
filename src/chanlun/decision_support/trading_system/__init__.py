@@ -1,6 +1,5 @@
-"""Single active trading-system implementation.
+"""唯一生效的交易系统实现。
 
-Import concrete APIs from their defining modules.  Keeping this package
-initializer side-effect free prevents one service import from loading every
-research, replay, and execution module.
+具体接口从各自定义模块导入。包初始化保持无副作用，避免一个服务导入动作连带加载
+全部研究、回放和执行模块。
 """

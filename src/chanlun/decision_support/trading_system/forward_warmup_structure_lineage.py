@@ -178,8 +178,8 @@ def build_forward_warmup_structure_lineage_rollup(
     signals_with_lineage_extension = 0
     unavailable_subject_evidence_count = 0
     session_rows: list[dict[str, object]] = []
-    # A market diagnostic can be repeated on many symbol rows in one screen.
-    # Count it once per qualified session and semantic content identity.
+        # 同一个市场诊断可能在一屏的多个标的行中重复；每个合格交易日与语义内容标识
+        # 只统计一次。
     diagnostics: dict[
         tuple[date, str, str], WarmupStructureLineageDiagnosticEnvelope
     ] = {}

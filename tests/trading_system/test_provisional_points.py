@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -14,9 +15,14 @@ from tests.trading_system.strict_helpers import (
 
 
 def test_provisional_adapter_reads_only_strict_approaching_points() -> None:
+    parent = strict_point("1buy")
     raw = strict_point("2buy", status=StrictPointStatus.APPROACHING)
+    raw = replace(raw, parent_point_id=parent.point_id)
     candidates = extract_provisional_candidates(
-        strict_evidence_result(approaching_points=(raw,)),
+        strict_evidence_result(
+            confirmed_points=(parent,),
+            approaching_points=(raw,),
+        ),
         code="SZ.000001",
         source_frequency="5m",
         as_of=DEFAULT_CLOSED_AT,
@@ -28,6 +34,10 @@ def test_provisional_adapter_reads_only_strict_approaching_points() -> None:
     assert candidates[0].observed_at == raw.available_at
     assert candidates[0].missing_conditions == raw.missing_conditions
     assert candidates[0].evidence_codes == raw.evidence_codes
+    assert candidates[0].parent_point_id is not None
+    assert candidates[0].parent_point_id != parent.point_id
+    assert candidates[0].related_point_ids == ()
+    assert candidates[0].small_to_large_carrier_unit_ids == ()
     assert candidates[0].actionable is False
 
 
@@ -50,7 +60,7 @@ def test_provisional_adapter_rejects_future_visibility() -> None:
 
 
 def test_candidate_has_no_probability_score() -> None:
-    raw = strict_point("3sell", status=StrictPointStatus.APPROACHING)
+    raw = strict_point("1sell", status=StrictPointStatus.APPROACHING)
     candidate = extract_provisional_candidates(
         strict_evidence_result(approaching_points=(raw,)),
         code="SZ.000001",
@@ -64,8 +74,13 @@ def test_candidate_has_no_probability_score() -> None:
 
 
 def test_provisional_adapter_rejects_non_approaching_endpoint() -> None:
+    parent = strict_point("1buy")
     raw = strict_point("2buy", status=StrictPointStatus.APPROACHING)
-    evidence = strict_evidence_result(approaching_points=(raw,))
+    raw = replace(raw, parent_point_id=parent.point_id)
+    evidence = strict_evidence_result(
+        confirmed_points=(parent,),
+        approaching_points=(raw,),
+    )
     object.__setattr__(raw, "status", StrictPointStatus.CONFIRMED)
 
     with pytest.raises(ValueError, match="non-approaching point"):

@@ -189,6 +189,13 @@ function snapshot(overrides = {}) {
     structure_revision: 'sha256:structure-1',
     snapshot_revision: 'sha256:snapshot-1',
     render_revision: 'sha256:render-1',
+    formal_direction: {
+      direction: 'neutral',
+      structural_level: null,
+      trend_id: null,
+      support_point_id: null,
+      reason_codes: ['current_suffix_has_no_formal_trend'],
+    },
     stroke_center_observations: [],
     levels: [{
       structural_level: 0,

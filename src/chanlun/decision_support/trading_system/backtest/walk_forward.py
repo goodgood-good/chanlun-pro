@@ -146,7 +146,6 @@ def build_walk_forward_windows(
 @dataclass(frozen=True, slots=True)
 class FrozenParameters:
     base_trade_risk: Decimal
-    first_center_three_buy_only: bool
     max_portfolio_heat: Decimal
     first_buy_risk_multiplier: Decimal
 
@@ -160,18 +159,15 @@ class FrozenParameters:
 PRE_REGISTERED_PARAMETER_GRID = tuple(
     FrozenParameters(
         base_trade_risk=base_trade_risk,
-        first_center_three_buy_only=first_center_three_buy_only,
         max_portfolio_heat=max_portfolio_heat,
         first_buy_risk_multiplier=first_buy_risk_multiplier,
     )
     for (
         base_trade_risk,
-        first_center_three_buy_only,
         max_portfolio_heat,
         first_buy_risk_multiplier,
     ) in product(
         (Decimal("0.0035"), Decimal("0.005")),
-        (True, False),
         (Decimal("0.015"), Decimal("0.02")),
         (Decimal("0.25"), Decimal("0.50")),
     )
@@ -208,10 +204,9 @@ class SelectedParameters:
 
 def _parameter_key(
     parameters: FrozenParameters,
-) -> tuple[Decimal, bool, Decimal, Decimal]:
+) -> tuple[Decimal, Decimal, Decimal]:
     return (
         parameters.base_trade_risk,
-        parameters.first_center_three_buy_only,
         parameters.max_portfolio_heat,
         parameters.first_buy_risk_multiplier,
     )
@@ -219,7 +214,7 @@ def _parameter_key(
 
 def _selection_key(
     result: ValidationResult,
-) -> tuple[int, Decimal, Decimal, Decimal, tuple[Decimal, bool, Decimal, Decimal]]:
+) -> tuple[int, Decimal, Decimal, Decimal, tuple[Decimal, Decimal, Decimal]]:
     calmar_rank = (
         Decimal("Infinity") if result.calmar is None else -result.calmar
     )

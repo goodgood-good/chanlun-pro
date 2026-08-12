@@ -68,7 +68,7 @@ def test_replay_snapshot_is_dependency_scoped_not_forward_adapter_scoped() -> No
     paths = {row["path"] for row in replay["files"]}
 
     assert replay["schema"] == REPLAY_DECISION_SOURCE_SNAPSHOT_SCHEMA
-    assert "tools/backtest_sector_first_full_market.py" in paths
+    assert "tools/backtest_qmt_fixed_year.py" in paths
     assert "src/chanlun/core/cl.py" in paths
     assert (
         "src/chanlun/decision_support/trading_system/human_review_screening.py"

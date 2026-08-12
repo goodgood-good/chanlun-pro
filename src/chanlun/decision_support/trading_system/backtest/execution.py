@@ -160,9 +160,8 @@ class FillDecision:
             order_id=order.order_id,
             filled=True,
             reason="filled",
-            # ``try_fill`` uses this minute's complete OHLCV for tradability,
-            # capacity and slippage.  That information is first available at
-            # the close, so the fill must never be timestamped at the open.
+        # ``try_fill`` 使用本分钟完整的开高低收量判断可交易性、容量与滑点。
+        # 这些信息到收盘才完整，因此成交时间绝不能记在开盘时刻。
             filled_at=bar.closed_at,
             execution_price=price,
             shares=order.shares,
@@ -250,13 +249,12 @@ def try_fill(
         return FillDecision.rejected(order, "status_session_mismatch")
     if not status.listed:
         return FillDecision.rejected(order, "not_listed")
-    # A-share buys use board lots.  An existing odd-lot remainder may be sold
-    # in one order after a corporate action, so the buy constraint must not be
-    # copied to exits.
+        # A 股买入按整手执行；公司行为后遗留的零股可以一次卖出，
+        # 因此不能把买入手数约束照搬到退出订单。
     if order.side == "buy" and order.shares % status.lot_size != 0:
         return FillDecision.rejected(order, "lot_size_mismatch")
-    # Signals are created at the source bar's close.  This execution model
-    # waits for a later bar to close before using that bar's OHLCV.
+        # 信号在来源 K 线收盘时生成；本执行模型会等待后续 K 线收盘，
+        # 再使用该根 K 线的开高低收量。
     if bar.closed_at <= order.created_at:
         return FillDecision.rejected(order, "bar_not_after_trigger")
     if status.suspended or bar.volume <= 0:
@@ -267,9 +265,8 @@ def try_fill(
         return FillDecision.rejected(order, "limit_up_locked")
     if order.side == "sell" and bar.raw_high <= limit_down:
         return FillDecision.rejected(order, "limit_down_locked")
-    # The certified replay does not invent historical ST limit percentages.
-    # If the complete next minute only traded at one price, queue priority is
-    # unknowable and a fill is therefore forbidden regardless of the label.
+        # 认证回放不会臆造历史 ST 涨跌停比例。若下一完整分钟只有一个成交价，
+        # 排队优先级便不可知，因此无论标签为何都禁止模拟成交。
     if policy.require_observed_price_range and bar.raw_high == bar.raw_low:
         return FillDecision.rejected(order, "one_price_bar_unfillable")
     if Decimal(order.shares) > bar.volume * policy.max_volume_participation:

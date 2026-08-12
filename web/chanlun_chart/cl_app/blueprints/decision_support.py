@@ -1,4 +1,4 @@
-"""Read-only routes for the sole active TradingEngine screening strategy."""
+"""当前唯一人工辅助选股策略的只读路由。"""
 
 from __future__ import annotations
 
@@ -532,8 +532,7 @@ def early_screening():
 @decision_support_bp.get("/decision-support/early-signals")
 @login_required
 def early_signals():
-    # No-query callers keep the historical complete presentation contract.
-    # The product page explicitly requests the bounded sector-trigger scope.
+    # 无查询参数的调用方继续保持原有完整展示约定；产品页面会明确请求有界行业触发范围。
     scope = str(request.args.get("scope") or "all-qualified").strip().lower()
     if scope not in {"sector-trigger", "all-qualified"}:
         scope = "all-qualified"
@@ -618,25 +617,15 @@ def research_audit():
         audit = build_research_audit_snapshot(_research_audit_root())
     except ResearchAuditUnavailable as exc:
         current_app.logger.warning("research audit unavailable: %s", exc.code)
-        template_name = (
-            "research_audit_current.html"
-            if exc.code.startswith("current_research_")
-            else "research_audit.html"
-        )
         return _no_store_html(
-            template_name,
+            "research_audit.html",
             status=503,
             audit=None,
             audit_error_code=exc.code,
             audit_error_details=exc.details,
         )
-    template_name = (
-        "research_audit_current.html"
-        if audit.get("source_kind") == "current_research_variant"
-        else "research_audit.html"
-    )
     return _no_store_html(
-        template_name,
+        "research_audit.html",
         audit=audit,
         audit_error_code=None,
         audit_error_details=None,

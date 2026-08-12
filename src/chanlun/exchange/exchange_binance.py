@@ -162,7 +162,6 @@ class ExchangeBinance(Exchange):
             return klines
         except Exception as e:
             print(f"{code} - {frequency} Error : {e}")
-            # exit()
 
         return None
 
@@ -415,7 +414,7 @@ class ExchangeBinance(Exchange):
             else:
                 raise e
         # 持仓字段：symbol/entryPrice/contracts/side(long|short)/leverage/
-        #           unrealizedPnl/initialMargin/percentage
+        # 收益率字段依次为未实现盈亏、初始保证金和百分比。
         # symbol 含 ":USDT" 后缀，统一去掉以对齐项目内部 code 格式
         res_poss = []
         for p in position:

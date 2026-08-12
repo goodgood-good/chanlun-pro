@@ -34,7 +34,7 @@ REQUIRED_ABLATION_IDS = (
     "plus_sector_ranking",
     "plus_30m_context",
     "plus_1m_trigger",
-    "plus_first_center_three_buy",
+    "plus_unified_buy_point_execution",
     "plus_portfolio_risk",
 )
 REQUIRED_BENCHMARK_IDS = (
@@ -349,19 +349,6 @@ def build_report(
     benchmark_evidence_available = all(
         row.data_grade != "invalid" for row in ordered_benchmarks
     )
-    selected_first_center_values: list[bool] = []
-    selected_parameter_contract_complete = True
-    for window in result.walk_forward_windows:
-        selected = dict(window.selected_parameters).get("first_center_three_buy_only")
-        if not isinstance(selected, bool):
-            selected_parameter_contract_complete = False
-            continue
-        if selected not in selected_first_center_values:
-            selected_first_center_values.append(selected)
-    selected_first_center_values.sort()
-    first_center_three_buy_only = (
-        all(selected_first_center_values) if selected_first_center_values else True
-    )
     blocking_limitations = tuple(
         limitation
         for limitation in limitations
@@ -393,8 +380,6 @@ def build_report(
         failed_conditions.append("walk_forward_evidence")
     if blocking_limitations:
         failed_conditions.append("execution_continuity")
-    if not selected_parameter_contract_complete:
-        failed_conditions.append("parameter_contract")
     if evidence.grade == "invalid":
         status = "data_invalid"
     elif "data_evidence" in failed_conditions:
@@ -415,7 +400,6 @@ def build_report(
         for condition in (
             "walk_forward_evidence",
             "execution_continuity",
-            "parameter_contract",
         )
     ):
         status = "methodology_incomplete"
@@ -477,14 +461,8 @@ def build_report(
             "setup_frequency": "5m",
             "trigger_frequency": "1m",
             "point_classes_analyzed_independently": True,
+            "buy_point_classes_share_execution_logic": True,
             "max_five_minute_setup_age_seconds": (MAX_FIVE_MINUTE_SETUP_AGE_SECONDS),
-            "first_center_three_buy_only": first_center_three_buy_only,
-            "first_center_three_buy_mode": (
-                "walk_forward_selected"
-                if result.walk_forward_windows
-                else "policy_default"
-            ),
-            "first_center_three_buy_selected_values": selected_first_center_values,
             "sector_price_source": sector_price_source,
             "sector_price_change_gate": False,
             "next_tradable_minute_fill": True,

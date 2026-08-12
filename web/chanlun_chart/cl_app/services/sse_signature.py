@@ -24,9 +24,9 @@ def compute_signature(chart_data: dict) -> str:
     t = chart_data.get("t") or []
     parts = [f"t:{len(t)}:{t[-1] if t else ''}"]
     # 末根 K 线 OHLC 纳入指纹:使"末根价格在不改变形态计数时变动"(盘中绝大多数 tick)也被检测到,
-    # 与 prepend 的"末根 OHLC 全等才跳过"判据对齐,消除"算了不推"导致的盘中实时停滞(审查 M2)。
+    # 与 prepend 的“末根 OHLC 全等才跳过”判据对齐，消除“算了不推”导致的盘中实时停滞。
     # 末根一动即推,但被 SSE_REFRESH_MS(8s)周期天然限流,不会每 tick 刷屏。
-    # R5-#3: volume 'v' 一并纳入——一字涨停/跌停时 OHLC 恒定但成交量逐 tick 累积(prepend
+    # 成交量 v 一并纳入——一字涨停或跌停时 OHLC 恒定，但成交量会逐笔累积（prepend
     # web-B1 只更 _data['v'][-1]), 不入指纹则该量柱更新恒被 dedup 吞→SSE 客户端量柱冻结。
     for _k in ("o", "h", "l", "c", "v"):
         _a = chart_data.get(_k) or []

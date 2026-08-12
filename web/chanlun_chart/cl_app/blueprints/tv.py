@@ -9,7 +9,6 @@ import json
 import math
 import datetime
 import time
-from pathlib import Path
 from flask import Blueprint, current_app, request
 from flask_login import login_required
 
@@ -115,7 +114,7 @@ def _normalize_resolution(resolution: str):
 
 
 def _validated_review_chart_lock():
-    """Return a server-verified human-review or risk-point causal lock."""
+    """返回服务端校验通过的人工复核因果图表锁。"""
 
     values = {
         "candidate_id": str(request.args.get("review_candidate_id") or ""),
@@ -128,59 +127,13 @@ def _validated_review_chart_lock():
         raise ValueError("partial human-review chart lock")
     service = current_app.extensions.get("decision_support_human_review")
     validator = getattr(service, "validate_chart_lock", None)
-    if callable(validator):
-        try:
-            return validator(
-                candidate_id=values["candidate_id"],
-                source_sha256=values["source_sha256"],
-                review_as_of=int(values["review_as_of"]),
-            )
-        except (TypeError, ValueError, RuntimeError):
-            pass
-    try:
-        from ..services.research_audit import validate_risk_point_chart_lock
-
-        return validate_risk_point_chart_lock(
-            current_app.config.get(
-                "RESEARCH_AUDIT_ROOT", Path(__file__).resolve().parents[4]
-            ),
-            point_id=values["candidate_id"],
-            source_sha256=values["source_sha256"],
-            review_as_of=int(values["review_as_of"]),
-        )
-    except (TypeError, ValueError, RuntimeError) as risk_error:
-        raise ValueError(
-            "chart lock was rejected by both human-review and risk-point audits"
-        ) from risk_error
-
-
-def _sector_chart_archive_for_lock(lock):
-    """Resolve an already server-validated synthetic-sector chart lock."""
-
-    if (
-        not isinstance(lock, dict)
-        or lock.get("chart_source_kind") != "VERIFIED_QMT_SECTOR_ARCHIVE"
-    ):
-        return None
-    from ..services.sector_chart_archive import load_sector_chart_archive
-
-    archive = load_sector_chart_archive(
-        current_app.config.get(
-            "RESEARCH_AUDIT_ROOT", Path(__file__).resolve().parents[4]
-        ),
-        expected_manifest_content_sha256=str(
-            lock.get("sector_chart_archive_manifest_content_sha256") or ""
-        ),
+    if not callable(validator):
+        raise ValueError("人工复核图表锁服务不可用")
+    return validator(
+        candidate_id=values["candidate_id"],
+        source_sha256=values["source_sha256"],
+        review_as_of=int(values["review_as_of"]),
     )
-    entry_id = str(lock.get("sector_chart_archive_entry_id") or "")
-    entry = archive.entries_by_id.get(entry_id)
-    if (
-        entry is None
-        or entry.get("sector_id") != lock.get("symbol")
-        or entry.get("review_as_of_unix") != lock.get("review_as_of")
-    ):
-        raise ValueError("sector chart archive lock changed")
-    return archive, entry_id
 
 
 def _parse_tv_symbol(symbol: str):
@@ -239,7 +192,7 @@ def _normalize_user_drawing_state(value):
             for source_id, source_state in sources.items()
             if isinstance(source_state, dict)
         },
-        # Automatic entities never belong to persisted TradingView groups.
+    # 自动生成的实体绝不写入持久化 TradingView 分组。
         "groups": {},
     }
 
@@ -282,23 +235,10 @@ def tv_symbols():
         return {"s": "error", "errmsg": f"invalid symbol: {raw_symbol}"}
 
     try:
-        review_lock = _validated_review_chart_lock()
-        sector_archive = _sector_chart_archive_for_lock(review_lock)
+        _validated_review_chart_lock()
     except (TypeError, ValueError, RuntimeError) as exc:
         LogUtil.warning(f"[tv_symbols] rejected review lock: {exc}")
         return {"s": "error", "errmsg": "invalid causal chart lock"}
-    if sector_archive is not None:
-        if market != "a" or code != review_lock.get("symbol"):
-            return {"s": "error", "errmsg": "causal chart symbol mismatch"}
-        from ..services.sector_chart_archive import sector_chart_symbol_info
-
-        archive, entry_id = sector_archive
-        return sector_chart_symbol_info(
-            archive,
-            entry_id=entry_id,
-            interval=str(review_lock["chart_interval"]),
-        )
-
     # 先读已恢复的 last-known-good symbol 缓存。冷启动时 QMT 的全市场刷新会长时间
     # 持有 xtdata native lock；若这里先调 stock_info，前端 Requester 会在 15 秒后超时并把
     # 一次临时阻塞永久记成 unknown_symbol，直到用户手动“重新加载数据”。缓存命中时不再
@@ -644,38 +584,6 @@ def tv_history():
         ):
             LogUtil.warning("[tv_history] review lock symbol mismatch")
             return {"s": "no_data"}
-        if (
-            _review_lock is not None
-            and _review_lock.get("lock_kind") == "RISK_POINT_AUDIT"
-            and resolution != _review_lock.get("chart_interval")
-        ):
-            LogUtil.warning("[tv_history] risk-point review lock interval mismatch")
-            return {"s": "no_data"}
-
-        try:
-            sector_archive = _sector_chart_archive_for_lock(_review_lock)
-        except (TypeError, ValueError, RuntimeError) as exc:
-            LogUtil.warning(f"[tv_history] sector archive lock rejected: {exc}")
-            return {"s": "no_data"}
-        if sector_archive is not None:
-            from ..services.sector_chart_archive import (
-                SectorChartArchiveUnavailable,
-                sector_chart_history_payload,
-            )
-
-            archive, entry_id = sector_archive
-            try:
-                return sector_chart_history_payload(
-                    archive,
-                    entry_id=entry_id,
-                    interval=resolution,
-                    from_ts=_from,
-                    to_ts=_to,
-                )
-            except SectorChartArchiveUnavailable as exc:
-                LogUtil.warning(f"[tv_history] sector archive unavailable: {exc}")
-                return {"s": "no_data"}
-
         frequency = resolution_maps.get(resolution)
         if frequency is None:
             LogUtil.warning(f"[tv_history] Unsupported resolution: {resolution}")
@@ -757,8 +665,8 @@ def tv_history():
         _needs_refresh = False
         _calc_lock = chart_calc_locks.get(cache_key)
         with _calc_lock:
-            # RAM miss may synchronously read a pickle. Keep that I/O outside the
-            # process-wide cache lock; the per-key calc lock still serializes writes.
+        # 内存未命中时可能同步读取 pickle；将该输入输出放在进程级缓存锁之外，
+        # 每个键的计算锁仍会串行化写入。
             cache_entry = _get_chart_cache_entry(cache_key)
             if _review_lock is not None and cache_entry is not None:
                 # 历史复核输入不可变，禁止 live stale-revalidate 用当前行情覆盖它。

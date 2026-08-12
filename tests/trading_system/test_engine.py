@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
-    TradingEngine,
+    _TechnicalSignalEvaluator,
 )
 from tests.trading_system.helpers import (
     AS_OF,
@@ -45,7 +45,7 @@ def test_engine_keeps_three_buy_lanes_and_triggers_independent() -> None:
         one_points=(confirmed_point("1buy", frequency="1m", minutes_after=1),),
     )
 
-    evaluated = TradingEngine().evaluate_symbol(bundle)
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(bundle)
 
     assert {item.setup.point.point_type for item in evaluated} == {
         "1buy",
@@ -56,7 +56,7 @@ def test_engine_keeps_three_buy_lanes_and_triggers_independent() -> None:
 
 
 def test_neutral_sector_is_retained() -> None:
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(
             five_points=(confirmed_point("2buy"),),
             one_points=(
@@ -70,7 +70,7 @@ def test_neutral_sector_is_retained() -> None:
 
 
 def test_hostile_sector_blocks_new_entry() -> None:
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(
             sector=hostile_sector(),
             five_points=(confirmed_point("2buy"),),
@@ -86,7 +86,7 @@ def test_hostile_sector_blocks_new_entry() -> None:
 
 
 def test_lower_level_sell_is_risk_not_global_veto() -> None:
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(
             five_points=(confirmed_point("2buy", tower="formal", level=1),),
             one_points=(
@@ -102,7 +102,7 @@ def test_lower_level_sell_is_risk_not_global_veto() -> None:
 
 
 def test_confirmed_one_minute_trigger_is_required() -> None:
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(five_points=(confirmed_point("2buy"),))
     )
 
@@ -112,7 +112,7 @@ def test_confirmed_one_minute_trigger_is_required() -> None:
 
 
 def test_engine_keeps_provisional_five_minute_points_as_approaching() -> None:
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(five_points=(provisional_point("2buy"),))
     )
 
@@ -133,7 +133,7 @@ def test_engine_exposes_completed_preview_as_formed_not_approaching() -> None:
         ),
     )
 
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(five_points=(point,))
     )
 
@@ -147,7 +147,7 @@ def test_repeated_evaluation_is_deterministic() -> None:
         five_points=(confirmed_point("2buy"),),
         one_points=(confirmed_point("1buy", frequency="1m", minutes_after=1),),
     )
-    engine = TradingEngine()
+    engine = _TechnicalSignalEvaluator()
 
     first = engine.evaluate_symbol(bundle)
     second = engine.evaluate_symbol(replace(bundle))
@@ -167,7 +167,7 @@ def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
     latest_one_buy = confirmed_point("1buy", minutes_after=5)
     independent_two_sell = confirmed_point("2sell", minutes_after=3)
 
-    evaluated = TradingEngine().evaluate_symbol(
+    evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(
             five_points=(
                 stale,

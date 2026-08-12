@@ -16,6 +16,11 @@ from chanlun.decision_support.trading_system.backtest.report import (
     AblationResult,
     BenchmarkResult,
 )
+from chanlun.decision_support.trading_system.selection import (
+    SelectionResearchSnapshot,
+    selection_research_by_symbol,
+    selection_research_ledger_from_document,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +49,6 @@ def algorithm_hashes() -> tuple[tuple[str, str], ...]:
             "tools/finalize_qmt_fixed_year.py",
             "tools/finalize_qmt_pit_fixed_year.py",
             "tools/snapshot_qmt_pit_metadata.py",
-            "tools/build_sector_first_trigger_ledger.py",
         }
     )
     return tuple(
@@ -121,8 +125,33 @@ def write_report_atomic(path: Path, report: object) -> None:
     os.replace(temporary, target)
 
 
+def load_selection_research_ledger(
+    path: Path,
+    *,
+    replay_symbols: set[str],
+) -> tuple[
+    tuple[SelectionResearchSnapshot, ...],
+    dict[str, tuple[SelectionResearchSnapshot, ...]],
+]:
+    """读取正式研究账本，并验证其标的范围属于本次回放。"""
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("正式研究账本缺失或不可读") from exc
+    snapshots = selection_research_ledger_from_document(raw)
+    if not snapshots:
+        raise ValueError("正式研究账本不能为空")
+    by_symbol = selection_research_by_symbol(snapshots)
+    unknown = set(by_symbol).difference(replay_symbols)
+    if unknown:
+        raise ValueError("正式研究账本包含回放范围外标的")
+    return snapshots, by_symbol
+
+
 __all__ = (
     "algorithm_hashes",
+    "load_selection_research_ledger",
     "unavailable_ablations",
     "unavailable_benchmarks",
     "write_report_atomic",

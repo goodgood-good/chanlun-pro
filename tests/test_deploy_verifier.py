@@ -207,7 +207,7 @@ def test_deploy_verifier_rejects_health_from_an_unrelated_pid():
 
 def test_web_restart_completes_preflight_before_stopping_web():
     source = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
-    stop_at = source.index("# --- 1. Stop the web project FIRST")
+    stop_at = source.index("# --- 1. 先停止网页项目")
     required_preflight = {
         "project directories": "foreach ($requiredDir in @($ProjectRoot, $AppDir, $SrcPath))",
         "application files": "foreach ($requiredFile in @($AppScript, $verifyScript))",

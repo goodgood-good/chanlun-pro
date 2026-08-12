@@ -3052,6 +3052,22 @@ class ChartManager {
         ) {
             throw new Error('strict structure collections are invalid');
         }
+        const formalDirection = snapshot.formal_direction;
+        if (
+            !formalDirection
+            || !['up', 'down', 'neutral'].includes(formalDirection.direction)
+            || !Array.isArray(formalDirection.reason_codes)
+            || formalDirection.reason_codes.length === 0
+            || formalDirection.reason_codes.some(
+                (value) => typeof value !== 'string' || !value,
+            )
+            || (
+                formalDirection.structural_level !== null
+                && !Number.isInteger(formalDirection.structural_level)
+            )
+        ) {
+            throw new Error('strict structure formal direction is invalid');
+        }
 
         const displayFrequency = this._strictFrequencyFromResolution(currentInterval);
         const chartSymbol = this._strictNormalizeSymbol(

@@ -29,7 +29,7 @@ def xuangu_task_list(market):
     _xuangu_tasks = current_app.extensions.get("xuangu_tasks")
     xuangu_task_list = _xuangu_tasks.xuangu_task_config_list()
 
-    # task_memo
+# 任务备忘录。
     task_infos = {
         _k: {
             "task_memo": _v["task_memo"],

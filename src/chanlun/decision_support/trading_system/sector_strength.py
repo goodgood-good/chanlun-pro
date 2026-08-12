@@ -306,12 +306,10 @@ def _build_horizontal_sector_strength(
             sector_id=sector_id,
             anchor_session=anchor.anchor_session,
             decision_time=observed,
-            # §6.3: all point-in-time members stay in the denominator.  The
-            # snapshot therefore fails closed when even one member has an
-            # unexplained history gap instead of ranking a selected subset.
+            # 规则 6.3：所有时点成员都保留在分母中。只要一个成员存在无法解释的
+            # 历史缺口，快照就安全关闭，而不是对经过筛选的子集排名。
             members=members,
-            # A temporary positive value satisfies the immutable snapshot;
-            # the cross-sector rank is assigned below from all resolved values.
+            # 临时正值用于满足不可变快照；跨行业排名会在下方根据所有已解析值统一分配。
             rank=1,
         )
     ordered = sorted(

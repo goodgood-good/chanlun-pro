@@ -27,16 +27,16 @@ import hashlib
 import json
 import math
 import time as wall_time
-from typing import Iterable, Literal, Mapping, Sequence, cast
+from typing import Iterable, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from chanlun.core.cl import CL
+from chanlun.core.strict_structure.formal_state import current_formal_direction
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.divergence import (
-    collect_strict_divergences,
-    merge_formal_divergence_ledger,
+    collect_formal_divergence_ledger,
 )
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
@@ -81,12 +81,10 @@ from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
     structural_point_id_map,
 )
-from chanlun.decision_support.trading_system.direct_recursive_structure import (
-    DirectRecursiveEntryChain,
-)
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
 from chanlun.decision_support.trading_system.selection import (
-    TechnicalEntrySnapshot,
+    SelectionResearchSnapshot,
+    visible_selection_research,
 )
 from chanlun.exchange.kline_precision import (
     normalize_kline_precision,
@@ -333,7 +331,7 @@ def load_qmt_frame(
                         dividend_type="none",
                         fill_data=False,
                     )
-                except Exception as exc:  # provider can disappear mid-universe
+                except Exception as exc:  # 数据提供方可能在遍历标的范围期间中断
                     provider_error = exc
                     raw = {}
                 columns: dict[str, pd.Series] = {}
@@ -381,9 +379,8 @@ def load_qmt_frame(
         frame.pop("time"), unit="ms", utc=True
     ).dt.tz_convert(CN)
     if frequency == "1d":
-        # QMT fixed daily records are midnight-labelled.  A daily fact is not
-        # knowable until the A-share close, so historical replay must expose it
-        # at 15:00 rather than at the start of its own session.
+        # 行情终端 QMT 的固定日线记录标记在午夜；日级事实直到 A 股收盘才可知，
+        # 在 15:00 暴露，而不是在该交易日开始时暴露。
         frame["date"] = frame["date"].dt.normalize() + pd.Timedelta(hours=15)
     frame.insert(0, "code", code)
     frame = frame.loc[:, list(BASE_FRAME_COLUMNS)]
@@ -456,9 +453,8 @@ def strict_state(code: str, frequency: str, frame: pd.DataFrame) -> CL:
         structure_price_quantum=quantum,
         price_basis_revision=revision,
     )
-    # Strict divergence uses causal-partial HTF MACD.  Each source-bar sample
-    # is frozen at that bar's close, so certified replay and live calculation
-    # share the same prefix-stable strength evidence.
+    # 严格背驰使用因果局部高周期 MACD；每个源 K 线样本冻结于自身收盘，使认证回放与
+    # 实时计算共享同一前缀稳定力度证据。
     return CL(code, frequency, config, market="a")
 
 
@@ -582,16 +578,13 @@ class CausalCenterCompletionFact:
             raise ValueError("causal center identity is required")
         if self.structural_level < 0 or self.body_revision < 0:
             raise ValueError("causal center revisions and levels cannot be negative")
-        # The unique strategy contract defines a center on the closed
-        # intersection ``ZD <= ZG``.  A one-tick/equality center is therefore
-        # valid causal evidence and must not disappear only in the historical
-        # ledger while remaining visible on the page and live path.
+        # 唯一策略契约用闭区间交集 ``ZD <= ZG`` 定义中枢，因此一跳或相等中枢属于有效
+        # 因果证据，不能只在历史账本消失而仍出现在页面和实时链路。
         if self.zd_tick > self.zg_tick:
             raise ValueError("causal center core must be a non-empty interval")
         if self.leave_direction != "up" or self.return_direction != "down":
-            # strict strategy consumes only upward third-buy completion geometry.  Keeping
-            # the generic ledger fail-closed prevents a sell-side center from
-            # being mistaken for entry evidence.
+            # 严格策略只消费向上三买完成几何；通用账本保持关闭失败，可防止卖侧中枢
+            # 被误认成入场证据。
             raise ValueError("causal entry center requires up-leave/down-return")
         if not (
             self.leave_market_start
@@ -610,56 +603,6 @@ class CausalCenterCompletionFact:
 
 
 @dataclass(frozen=True, slots=True)
-class CausalDirectRecursiveDecisionFact:
-    """First causal observation of one direct 30m/5m/1m alignment decision."""
-
-    l0_point_id: str
-    first_seen_at: datetime
-    status: Literal["PASS", "REJECT"]
-    reason_codes: tuple[str, ...]
-    structure_snapshot_id: str
-    technical_entry: TechnicalEntrySnapshot | None
-    aligned_entry_chain: DirectRecursiveEntryChain | None = None
-    relevant_expansion_ids: tuple[str, ...] = ()
-    unresolved_nine_segment_ids: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "first_seen_at",
-            normalize_datetime(self.first_seen_at, "first_seen_at"),
-        )
-        for field in (
-            "reason_codes",
-            "relevant_expansion_ids",
-            "unresolved_nine_segment_ids",
-        ):
-            values = tuple(getattr(self, field))
-            object.__setattr__(self, field, values)
-            if len(values) != len(set(values)):
-                raise ValueError(f"{field} must be unique")
-        if not self.l0_point_id or not self.structure_snapshot_id:
-            raise ValueError("causal direct-recursive decision identity is required")
-        if self.status == "PASS":
-            if (
-                self.technical_entry is None
-                or self.aligned_entry_chain is None
-                or self.reason_codes
-            ):
-                raise ValueError("passing causal alignment requires one clean entry")
-            if self.technical_entry.observed_at != self.first_seen_at:
-                raise ValueError("causal entry must be stamped at first observation")
-            if self.aligned_entry_chain.l0_point_id != self.l0_point_id:
-                raise ValueError("causal aligned chain identity changed")
-        elif (
-            self.technical_entry is not None
-            or self.aligned_entry_chain is not None
-            or not self.reason_codes
-        ):
-            raise ValueError("rejected causal alignment requires explicit reasons")
-
-
-@dataclass(frozen=True, slots=True)
 class CausalStructureEventLedger:
     """Append-only facts first observed from frozen segment prefixes."""
 
@@ -667,7 +610,6 @@ class CausalStructureEventLedger:
     completed_trends: tuple[TrendType, ...]
     completed_units: tuple[ConstituentUnit, ...] = ()
     center_completions: tuple[CausalCenterCompletionFact, ...] = ()
-    direct_recursive_decisions: tuple[CausalDirectRecursiveDecisionFact, ...] = ()
     point_anchor_unit_ids: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -675,11 +617,6 @@ class CausalStructureEventLedger:
         object.__setattr__(self, "completed_trends", tuple(self.completed_trends))
         object.__setattr__(self, "completed_units", tuple(self.completed_units))
         object.__setattr__(self, "center_completions", tuple(self.center_completions))
-        object.__setattr__(
-            self,
-            "direct_recursive_decisions",
-            tuple(self.direct_recursive_decisions),
-        )
         object.__setattr__(
             self,
             "point_anchor_unit_ids",
@@ -734,19 +671,6 @@ class CausalStructureEventLedger:
         )
         if len(center_keys) != len(set(center_keys)):
             raise ValueError("causal center completions must be unique")
-        if (
-            tuple(
-                sorted(
-                    self.direct_recursive_decisions,
-                    key=lambda item: (item.first_seen_at, item.l0_point_id),
-                )
-            )
-            != self.direct_recursive_decisions
-        ):
-            raise ValueError("causal direct decisions must be chronological")
-        direct_ids = tuple(item.l0_point_id for item in self.direct_recursive_decisions)
-        if len(direct_ids) != len(set(direct_ids)):
-            raise ValueError("causal direct decisions must be unique")
         anchors = tuple(self.point_anchor_unit_ids)
         if anchors != tuple(sorted(anchors)):
             raise ValueError("causal point anchors must be sorted")
@@ -856,7 +780,6 @@ def _causal_confirmed_structure_events(
     trend_ledger: dict[str, TrendType] = {}
     unit_ledger: dict[tuple[str, int], ConstituentUnit] = {}
     center_ledger: dict[tuple[str, int], CausalCenterCompletionFact] = {}
-    direct_decision_ledger: dict[str, CausalDirectRecursiveDecisionFact] = {}
     next_segment_start: int | None = None
     prefix_size = 3
 
@@ -866,9 +789,8 @@ def _causal_confirmed_structure_events(
         if next_segment_start is None:
             calculator.calculate(prefix)
         else:
-            # A frozen segment is an irreversible causal boundary.  Rebuild
-            # only its still-live suffix; future strokes are not permitted to
-            # merge back through a point that was already observable.
+            # 冻结线段是不可逆因果边界，只重建仍活动的后缀；未来笔不允许穿过已可观测点
+            # 向前合并。
             calculator._build_segments(prefix, next_segment_start)
         completed = tuple(item for item in calculator.xds if item.is_done())
         if not completed:
@@ -879,9 +801,8 @@ def _causal_confirmed_structure_events(
         checkpoint = locked_bis[prefix_size - 1].locked_at
         if checkpoint is None:
             raise ValueError("causal segment checkpoint must be locked")
-        # The first prefix that emitted the segment is the strongest possible
-        # visibility bound.  Never trust a helper's older internal timestamp
-        # over the complete input prefix actually consumed here.
+        # 首次产生线段的前缀是最强可见性边界；辅助对象更早的内部时间戳绝不能优先于
+        # 此处实际消费的完整输入前缀。
         segment.locked_at = checkpoint
         segment.done = True
         frozen_segments.append(segment)
@@ -984,10 +905,9 @@ def _causal_confirmed_structure_events(
             str,
             state.get_config()["strict_config_revision"],
         )
-        divergences = merge_formal_divergence_ledger(
+        divergences = collect_formal_divergence_ledger(
             structure,
             raw_points,
-            collect_strict_divergences(structure, strength),
         )
         structure_revision = build_strict_evidence_revision(
             symbol=code,
@@ -1037,9 +957,7 @@ def _causal_confirmed_structure_events(
             if windows is not None and not any(
                 start <= point.available_at <= end for start, end in windows
             ):
-                # A point that was already available before an active setup
-                # window is historical context, not a newly confirmed trigger
-                # at the first checkpoint inside that window.
+                # 在活动设置窗口之前已可用的点属于历史背景，不是窗口内首个检查点新确认的触发。
                 continue
             first_seen = replace(
                 point,
@@ -1053,51 +971,6 @@ def _causal_confirmed_structure_events(
             )
             if previous_anchor != anchor_unit_id:
                 raise ValueError("causal point anchor unit changed across prefixes")
-
-        # Record the direct 30m/5m/1m decision at the first locked-stroke
-        # prefix that can actually produce it.  A terminal structure snapshot
-        # is not admissible here: its live tail may contain evidence that was
-        # unavailable at the historical decision time.
-        if frequency == "1m" and len(structure.levels) >= 3:
-            from chanlun.decision_support.trading_system.direct_recursive_structure import (
-                build_direct_recursive_structure_path,
-            )
-
-            direct = build_direct_recursive_structure_path(
-                evidence=snapshot,
-                code=code,
-            )
-            entries = {entry.l0_point_id: entry for entry in direct.technical_entries}
-            strategic_available = {
-                point.point_id: point.available_at for point in direct.strategic_points
-            }
-            for decision in direct.decisions:
-                strategic_at = strategic_available[decision.l0_point_id]
-                if windows is not None and not any(
-                    start <= strategic_at <= end for start, end in windows
-                ):
-                    continue
-                if decision.l0_point_id in direct_decision_ledger:
-                    continue
-                entry = entries.get(decision.l0_point_id)
-                causal_entry = (
-                    None if entry is None else replace(entry, observed_at=checkpoint)
-                )
-                direct_decision_ledger[decision.l0_point_id] = (
-                    CausalDirectRecursiveDecisionFact(
-                        l0_point_id=decision.l0_point_id,
-                        first_seen_at=checkpoint,
-                        status=decision.status,
-                        reason_codes=decision.reason_codes,
-                        structure_snapshot_id=direct.structure_snapshot_id,
-                        technical_entry=causal_entry,
-                        aligned_entry_chain=decision.chain,
-                        relevant_expansion_ids=decision.relevant_expansion_ids,
-                        unresolved_nine_segment_ids=(
-                            decision.unresolved_nine_segment_ids
-                        ),
-                    )
-                )
 
     return CausalStructureEventLedger(
         points=tuple(
@@ -1122,12 +995,6 @@ def _causal_confirmed_structure_events(
             sorted(
                 center_ledger.values(),
                 key=lambda item: (item.available_at, item.center_id),
-            )
-        ),
-        direct_recursive_decisions=tuple(
-            sorted(
-                direct_decision_ledger.values(),
-                key=lambda item: (item.first_seen_at, item.l0_point_id),
             )
         ),
         point_anchor_unit_ids=tuple(sorted(point_anchor_ledger.items())),
@@ -1286,20 +1153,7 @@ def causal_directions(
             continue
         try:
             evidence = state.get_strict_evidence()
-            structure = evidence.structure
-            if not structure.levels:
-                direction: ContextDirection = "neutral"
-            else:
-                level = structure.levels[-1]
-                if level.trend_types:
-                    direction = cast(ContextDirection, level.trend_types[-1].direction)
-                else:
-                    locked = tuple(unit for unit in level.units if unit.locked)
-                    direction = (
-                        "neutral"
-                        if not locked
-                        else cast(ContextDirection, locked[-1].direction)
-                    )
+            direction = cast(ContextDirection, current_formal_direction(evidence))
             output.append((observed_at, direction))
         except (StrictStructureContractError, TypeError, ValueError):
             output.append((observed_at, "neutral"))
@@ -1463,6 +1317,7 @@ def build_symbol_bundle(
     held_tower: StructureTower | None = None,
     held_level: int | None = None,
     selection_sources: tuple[str, ...] = (),
+    selection_research: SelectionResearchSnapshot | None = None,
 ) -> SymbolStructureBundle:
     observed_at = evaluation.observed_at
 
@@ -1474,9 +1329,8 @@ def build_symbol_bundle(
             and point.source_frequency == frequency
         )
 
-    # Replay and live screening consume the same complete recursive graph for
-    # each physical frequency.  In particular, small-to-large first/second
-    # points must remain tradable instead of being discarded at this boundary.
+    # 回放与实时筛选在每个物理周期消费同一完整递归图；尤其小转大的一、二类点必须保持
+    # 可交易，不能在该边界被丢弃。
     thirty = tradable(facts.thirty_points, "30m")
     five = tradable(facts.five_points, "5m")
     one = tradable(facts.one_points, "1m")
@@ -1488,13 +1342,14 @@ def build_symbol_bundle(
         thirty_points=thirty,
         five_points=five,
         one_points=one,
-        # Match the live gateway: conflict evidence spans every analyzed stock
-        # frequency and is filtered by side/level inside ``resolve_conflict``.
+        # 与实时网关一致：冲突证据覆盖全部已分析个股周期，并在 ``resolve_conflict``
+        # 内按方向和级别过滤。
         opposite_points=(*thirty, *five, *one),
         held_tower=held_tower,
         held_level=held_level,
         physical_timeframe_recursive=True,
         selection_sources=selection_sources,
+        selection_research=selection_research,
     )
 
 
@@ -1583,9 +1438,8 @@ def _status_for_bar(
         listed=True if master is None else master.listed_on(session),
         st=False,
         suspended=bar.volume <= 0,
-        # Certified execution observes the completed next-minute price range
-        # directly.  A deliberately broad bound avoids inventing historical
-        # ST percentages while raw OHLC still caps every possible fill.
+        # 认证执行直接观察下一根已完成分钟 K 线价格区间；有意使用宽限制可避免虚构历史
+        # 特别处理股票涨跌幅，同时原始 OHLC 仍约束所有可能成交价。
         limit_pct=(_board_limit(bar.code, session) if master is None else Decimal("1")),
         lot_size=100,
         t_plus_days=1,
@@ -1756,13 +1610,17 @@ def run_sparse_portfolio(
     *,
     initial_cash: Decimal,
     minute_timeline: Sequence[datetime] | None = None,
-    selection_sources_by_code: Mapping[str, tuple[str, ...]] | None = None,
+    selection_research_by_code: Mapping[
+        str,
+        tuple[SelectionResearchSnapshot, ...],
+    ]
+    | None = None,
 ):
-    """Execute sparse decisions while replaying every held/pending minute.
+    """执行稀疏决策，并逐分钟回放所有持仓与待处理订单。
 
-    New buys fail closed unless the caller supplies the point-in-time
-    ``QMT_SECTOR_TRIGGER`` source for that symbol.  Sector eligibility alone is
-    monitoring scope and must not be upgraded into a historical trigger.
+    新买入要求当时的板块评估确属支持状态，并且存在当时可见的正式个股研究快照。
+    板块来源由同一次因果回放中的 ``SectorResearchFacts`` 唯一推导，调用方不能再
+    用静态标的映射把未来触发回填到整段历史。
     """
 
     from chanlun.decision_support.trading_system.backtest.execution import (
@@ -1785,10 +1643,33 @@ def run_sparse_portfolio(
         raise ValueError("initial_cash must be positive")
     if not symbol_facts:
         raise ValueError("symbol facts are required")
-    selection_sources = dict(selection_sources_by_code or {})
+    selection_research = {
+        code: tuple(snapshots)
+        for code, snapshots in (selection_research_by_code or {}).items()
+    }
     facts_by_code = {row.code: row for row in symbol_facts}
     if len(facts_by_code) != len(symbol_facts):
         raise ValueError("symbol facts contain duplicate codes")
+    unknown_research_symbols = set(selection_research).difference(facts_by_code)
+    if unknown_research_symbols:
+        raise ValueError("selection research contains symbols outside replay facts")
+    for code, snapshots in selection_research.items():
+        if any(snapshot.symbol != code for snapshot in snapshots):
+            raise ValueError("selection research symbol does not match mapping key")
+        identities = tuple(snapshot.snapshot_id for snapshot in snapshots)
+        if len(identities) != len(set(identities)):
+            raise ValueError("selection research snapshots must be unique")
+        if snapshots != tuple(
+            sorted(
+                snapshots,
+                key=lambda snapshot: (
+                    snapshot.effective_at,
+                    snapshot.known_at,
+                    snapshot.snapshot_id,
+                ),
+            )
+        ):
+            raise ValueError("selection research snapshots must be chronological")
     requested_starts = {row.requested_start for row in symbol_facts}
     requested_ends = {row.requested_end for row in symbol_facts}
     effective_starts = {row.effective_start for row in symbol_facts}
@@ -1909,13 +1790,26 @@ def run_sparse_portfolio(
                     reason_codes=("sector_data_incomplete",),
                 )
             held = state.held_structures().get(facts.code)
+            current_research = visible_selection_research(
+                selection_research.get(facts.code, ()),
+                symbol=facts.code,
+                selection_path="INDIVIDUAL_THREE_PROGRAM",
+                decision_time=observed_at,
+            )
             bundle = build_symbol_bundle(
                 facts,
                 evaluation,
                 sector,
                 held_tower=None if held is None else held[0],
                 held_level=None if held is None else held[1],
-                selection_sources=selection_sources.get(facts.code, ()),
+                selection_sources=(
+                    ("QMT_SECTOR_TRIGGER",)
+                    if sector.regime == "supportive"
+                    else ("QMT_SECTOR_ELIGIBLE_SCOPE",)
+                    if sector.eligible
+                    else ("INCREMENTAL_SCAN_SCOPE",)
+                ),
+                selection_research=current_research,
             )
             status = _status_for_bar(bar, facts.security_master)
             for evaluated in engine.evaluate_symbol(bundle):
@@ -1977,11 +1871,9 @@ def run_sparse_portfolio(
                     closed_at=terminal_at,
                     reason="expired_security_zero_recovery",
                 )
-        # A position still open at the sample boundary remains open.  Selling
-        # it with the already-completed terminal minute's OHLC would create a
-        # same-bar fill that the normal execution path explicitly forbids.
-        # Mark it at the last causally observed raw close instead; the report
-        # exposes open positions separately from realised trades.
+        # 样本边界仍开放的持仓继续保持开放；若用已完成末分钟 OHLC 卖出，会制造常规执行链
+        # 明确禁止的同 K 线成交。改用最后一个因果可见的原始收盘价盯市，报告将开放持仓
+        # 与已实现交易分开展示。
         state.record_equity(terminal_at)
     run = state.finish()
     timeline = (
@@ -2026,10 +1918,8 @@ def build_symbol_facts(
     factors = qmt_factor_frame(factor_rows)
     end_at = datetime.combine(requested_end, time(15, 0), tzinfo=CN)
     context_start = datetime.combine(warmup_start, time(9, 30), tzinfo=CN)
-    # QMT's rolling one-year 1m boundary cuts the first requested session at
-    # the current wall-clock minute.  Read the preceding calendar day when it
-    # is locally available, then enforce one uniform effective start after the
-    # 1m warm-up in the orchestrator.
+    # 行情终端 QMT 的滚动一年 1m 边界会在当前墙钟分钟截断首个请求交易日。
+    # 日历日，再由编排器在 1m 预热后统一强制有效起点。
     minute_start = datetime.combine(
         requested_start - timedelta(days=1),
         time(9, 30),

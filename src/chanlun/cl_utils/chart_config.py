@@ -24,7 +24,7 @@ CL_CHART_CONFIG_PERSIST_KEYS = (
     "chart_show_xd",
 )
 
-# The structure algorithm has no user-configurable cache axis.
+# 结构算法没有用户可配置的缓存维度。
 CL_COMPUTE_CACHE_CONFIG_KEYS: tuple[str, ...] = ()
 
 _DEFAULT_CONFIG: Dict[str, object] = {

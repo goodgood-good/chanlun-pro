@@ -63,6 +63,8 @@ def test_qmt_frame_reaches_the_single_strict_chart_pipeline() -> None:
     assert strict["price_basis_revision"] == metadata.price_basis_revision
     assert strict["structure_price_quantum"] == "0.01"
     assert strict["source_closed_at"] == int(frame.iloc[-1]["date"].timestamp())
+    assert strict["formal_direction"]["direction"] in {"up", "down", "neutral"}
+    assert strict["formal_direction"]["reason_codes"]
     assert payload["c"][-1] == float(frame.iloc[-1]["close"])
     assert all(
         center["source_kind"] == "stroke_observation"

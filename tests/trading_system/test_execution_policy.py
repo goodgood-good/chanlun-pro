@@ -69,7 +69,7 @@ def test_each_buy_class_has_an_independent_risk_lane(
     assert decision.risk_multiplier == expected_multiplier
 
 
-def test_three_buy_requires_first_center_and_one_tick_clearance() -> None:
+def test_three_buy_requires_one_tick_clearance_but_not_first_center() -> None:
     touching = valid_entry_inputs(
         "3buy",
         variant="boundary_touch",
@@ -78,7 +78,7 @@ def test_three_buy_requires_first_center_and_one_tick_clearance() -> None:
     later = valid_entry_inputs("3buy", center_ordinal=2)
 
     assert evaluate_entry_policy(*touching, policy=TradingPolicy()).allowed is False
-    assert evaluate_entry_policy(*later, policy=TradingPolicy()).allowed is False
+    assert evaluate_entry_policy(*later, policy=TradingPolicy()).allowed is True
 
 
 def test_forming_five_minute_is_never_executable() -> None:
@@ -165,7 +165,6 @@ def test_ablation_policy_can_disable_entry_layers_without_changing_defaults() ->
             require_confirmed_one_minute=False,
             require_sector_eligibility=False,
             require_thirty_minute_context=False,
-            first_center_three_buy_only=False,
         ),
     )
 

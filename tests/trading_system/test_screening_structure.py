@@ -18,10 +18,13 @@ from chanlun.core.strict_structure.models import (
     StrictLevelResult,
     StrictStructureResult,
 )
+from chanlun.core.strict_structure.signals import StrictSignalEngine
+from chanlun.decision_support.trading_system.provisional import (
+    extract_provisional_candidates,
+)
 from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
 from chanlun.decision_support.trading_system.screening_structure import (
     build_screening_evidence,
-    unfinished_segment_candidates,
 )
 
 
@@ -80,6 +83,8 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         available_at=NOW,
         completion_leave_unit_id=units[4].unit_id,
         completion_return_unit_id=units[5].unit_id,
+        establishment_unit_id=units[4].unit_id,
+        establishment_leave_unit_id=units[4].unit_id,
     )
     center_result = CenterLevelResult(
         structural_level=0,
@@ -111,6 +116,10 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         structure=structure,
         confirmed_points=(),
     )
+    approaching = StrictSignalEngine(
+        structure=structure,
+        price_quantum=QUANTUM,
+    ).approaching_points(NOW)
     evidence = StrictEvidenceResult(
         symbol="SZ.000001",
         source_frequency="5m",
@@ -130,13 +139,14 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
             replay_from=0,
         ),
         confirmed_points=(),
-        approaching_points=(),
+        approaching_points=approaching,
     )
 
-    [candidate] = unfinished_segment_candidates(
+    [candidate] = extract_provisional_candidates(
         evidence,
         code="SZ.000001",
         source_frequency="5m",
+        as_of=NOW,
     )
 
     assert candidate.point_type == "3buy"
@@ -183,10 +193,11 @@ def test_empty_canonical_structure_has_no_unfinished_candidate() -> None:
         approaching_points=(),
     )
 
-    assert unfinished_segment_candidates(
+    assert extract_provisional_candidates(
         evidence,
         code="qmt-gics3:test",
         source_frequency="30m",
+        as_of=NOW,
     ) == ()
 
 

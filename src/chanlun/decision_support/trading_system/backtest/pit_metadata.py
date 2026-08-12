@@ -179,9 +179,8 @@ class QmtFactorAt:
         return CorporateActionAt(
             code=self.code,
             effective_at=self.effective_at,
-            # Ex-date economics are public before the opening auction.  Using
-            # the auction boundary is conservative and never changes a prior
-            # session's state.
+    # 除权日经济信息会在开盘集合竞价前公开；使用集合竞价边界是保守做法，
+    # 且绝不会改变前一交易日状态。
             known_at=self.effective_at,
             action_type=action_type,
             cash_per_share=self.interest,

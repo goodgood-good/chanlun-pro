@@ -30,10 +30,9 @@ from chanlun.decision_support.trading_system.human_paper_valuation import (
 TZ = ZoneInfo("Asia/Shanghai")
 SESSION = date(2026, 7, 28)
 PARAMETER_SNAPSHOT = (
-    Path(__file__).resolve().parents[2]
-    / "audit"
-    / "chanlun_trading_system_backtest"
-    / "recent_year_current_sector_no3p"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "forward_paper"
     / "parameter_snapshot_human_review.json"
 )
 

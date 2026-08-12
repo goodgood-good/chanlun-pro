@@ -138,8 +138,8 @@ def _matching_receipt(
         ):
             raise RuntimeError("existing daily QMT receipt is invalid")
         if value.get("entry_sha256") != entry_sha256:
-            # A different intraday revision is valid evidence in its own right;
-            # it must remain byte-for-byte immutable and cannot be reused here.
+            # 同一日内的不同修订本身也是有效证据；它必须逐字节保持不可变，
+            # 不能在此处复用。
             continue
         if value.get("ledger_file_sha256") != ledger_file_sha256:
             raise RuntimeError("existing daily QMT receipt is not bound to the ledger")
@@ -202,8 +202,7 @@ def capture_daily(args: argparse.Namespace) -> dict[str, object]:
             ledger_file_sha256=ledger_file_sha256,
         )
         if prior_receipt is not None:
-            # A retry must not mutate a receipt already referenced by a paper
-            # event, including a later same-session revision.
+        # 重试不得改变已经被模拟事件引用的回执，包括同一交易日内更晚的修订。
             return prior_receipt
         evidence = dict(catalog.get("capture_evidence") or {})
         source_date = (

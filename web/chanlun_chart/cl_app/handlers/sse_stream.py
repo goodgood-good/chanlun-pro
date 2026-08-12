@@ -121,9 +121,8 @@ def sse_runtime_status():
 def start_sse_runtime():
     global _runtime_closed, _recompute_slots
     with _runtime_lock:
-        # The HTTP server can accept an SSE connection just before the explicit
-        # runtime bootstrap reaches this function.  In that case recomputes are
-        # valid work on an already-open runtime, not evidence of a restart.
+                # HTTP 服务器可能在显式运行时引导到达本函数前刚好接受 SSE 连接。
+                # 此时重算是在已打开运行时上的有效工作，并不代表发生了重启。
         if not _runtime_closed:
             return
         if _runtime_inflight:
@@ -282,7 +281,7 @@ class SseStreamHandler(tornado.web.RequestHandler):
                 if not _hub.clients_of(cache_key):
                     return
                 # running 门:启动"立即首帧"(add_callback)与首次周期回调是两条独立调度链,
-                # 可同时进入 _tick → 同 key 双重重算 + last_sig check-then-act 竞态(审查 M1)。
+                # 可同时进入 _tick，造成同一键双重重算，以及 last_sig 先检查后执行竞态。
                 # 本拍未结束则跳过(下个周期再来);try/finally 确保异常也复位,不会永久卡住。
                 if ctx.get("running"):
                     return

@@ -17,9 +17,8 @@ import time
 
 from chanlun.tools.log_util import LogUtil
 
-# A blocking compute cannot be safely killed in CPython. Run each attempt in a
-# daemon thread, cap the number of underlying attempts, and quarantine timed-out
-# keys until their original call really returns.
+# CPython 无法安全终止阻塞计算。每次尝试放入守护线程，限制底层尝试数量，
+# 并隔离超时键，直到其原始调用真正返回。
 _MAX_ACTIVE_REVALIDATIONS = 4
 _REVALIDATION_TIMEOUT_SECONDS = 30.0
 _inflight: set = set()

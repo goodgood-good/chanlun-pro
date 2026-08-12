@@ -56,7 +56,7 @@ class CL_Kline_Process:
             h, l = max(k1.h, k2.h), max(k1.l, k2.l)
             o, c = l, h  # 缠论合并K线不强调OC，仅示意性赋值
             date, k_index = (k1.date, k1.k_index) if k1.h > k2.h else (k2.date, k2.k_index)
-        else:  # 'down'
+        else:  # 向下
             # 向下合并：高取低、低取低
             h, l = min(k1.h, k2.h), min(k1.l, k2.l)
             o, c = h, l

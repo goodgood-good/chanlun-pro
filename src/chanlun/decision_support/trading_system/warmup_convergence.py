@@ -1129,9 +1129,8 @@ class WarmupConvergenceEnvelope:
     diagnostic_only: bool = True
     active_gate_unchanged: bool = True
     live_status: str = "LIVE_DISABLED"
-    # The convergence envelope remains byte-for-byte stable.  Human-readable semantic
-    # facts live in a separately hashed, envelope-bound diagnostic and are
-    # deliberately excluded from equality and the convergence content identity.
+        # 收敛信封逐字节保持稳定。便于阅读的语义事实位于单独计算哈希、并绑定信封的
+        # 诊断文件中，特意不参与相等性与收敛内容标识计算。
     diagnostic: WarmupConvergenceDiagnosticEnvelope | None = field(
         default=None,
         compare=False,
@@ -1142,9 +1141,8 @@ class WarmupConvergenceEnvelope:
         compare=False,
         repr=False,
     )
-    # A third, independently hashed sibling records strict-stroke/center/trigger-line
-    # lineage.  It is deliberately absent from the convergence document and
-    # equality so adding human-review evidence cannot mutate the active gate.
+        # 第三个独立哈希的同级文件记录严格笔、中枢和触发线血缘。它特意不进入
+        # 收敛文档与相等性计算，避免新增人工复核证据改变正在使用的门控。
     structure_lineage_diagnostic: (
         WarmupStructureLineageDiagnosticEnvelope | None
     ) = field(

@@ -19,7 +19,9 @@ from chanlun.decision_support.trading_system.backtest.portfolio import (
 )
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
-    TradingEngine,
+)
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    HumanAssistedDecisionCore,
 )
 from chanlun.decision_support.trading_system.models import (
     EntryDecision,
@@ -34,6 +36,7 @@ from chanlun.decision_support.trading_system.portfolio_risk import (
     size_entry,
 )
 from tests.trading_system.backtest.helpers import CN
+from tests.trading_system.helpers import valid_selection_research
 from tests.trading_system.helpers import confirmed_point, eligible_sector
 
 
@@ -683,6 +686,8 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
                 five_points=(buy,),
                 one_points=(buy_trigger,),
                 opposite_points=(),
+                selection_sources=("QMT_SECTOR_TRIGGER",),
+                selection_research=valid_selection_research(),
             ),
             sell_signal_bar.closed_at: SymbolStructureBundle(
                 code=sell_signal_bar.code,
@@ -712,7 +717,7 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
             (signal_bar, sell_signal_bar, exit_fill_bar),
             t_plus_days=0,
         ),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         structure_replay=replay,
         risk_limits=RiskLimits(),
         execution_policy=ExecutionPolicy(),

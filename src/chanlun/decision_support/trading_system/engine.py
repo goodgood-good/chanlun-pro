@@ -1,3 +1,9 @@
+"""统一决策核心内部使用的技术信号评估阶段。
+
+本模块只保存结构包、评估结果和私有技术评估器；生产调用方必须通过
+``HumanAssistedDecisionCore``，从而保证正式研究、板块触发与技术结构使用同一入口。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -34,9 +40,14 @@ from chanlun.decision_support.trading_system.models import (
     TradingPolicy,
 )
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
+from chanlun.decision_support.trading_system.parameters import SelectionPath
 from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_WARMUP_DIFFERENCE_CODES,
     SCREENING_WARMUP_FREQUENCIES,
+)
+from chanlun.decision_support.trading_system.selection import (
+    FormalSelectionGate,
+    SelectionResearchSnapshot,
 )
 
 
@@ -66,6 +77,8 @@ class SymbolStructureBundle:
     physical_timeframe_recursive: bool = False
     entry_execution_boundaries: tuple[EntryExecutionBoundary, ...] = ()
     selection_sources: tuple[str, ...] = ()
+    selection_path: SelectionPath = "INDIVIDUAL_THREE_PROGRAM"
+    selection_research: SelectionResearchSnapshot | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of", normalize_datetime(self.as_of, "as_of"))
@@ -103,6 +116,11 @@ class SymbolStructureBundle:
             or any(not isinstance(value, str) or not value for value in self.selection_sources)
         ):
             raise ValueError("selection sources must be unique non-empty strings")
+        if self.selection_research is not None and (
+            self.selection_research.symbol != self.code
+            or self.selection_research.path != self.selection_path
+        ):
+            raise ValueError("正式研究快照与结构包不一致")
         if any(
             value.symbol != self.code
             for value in self.entry_execution_boundaries
@@ -162,6 +180,8 @@ class EvaluatedSignal:
     daily_context: TimeframeContext | None = None
     physical_timeframe_recursive: bool = False
     entry_execution_boundary: EntryExecutionBoundary | None = None
+    formal_selection: FormalSelectionGate | None = None
+    selection_research: SelectionResearchSnapshot | None = None
 
 
 def _point_time(point: StructuralPoint | ProvisionalCandidate) -> datetime:
@@ -206,7 +226,7 @@ def _current_five_minute_points(
     )
 
 
-class TradingEngine:
+class _TechnicalSignalEvaluator:
     def __init__(
         self,
         trading_policy: TradingPolicy = TradingPolicy(),
@@ -504,18 +524,7 @@ class TradingEngine:
                 )
             )
         return tuple(output)
-
-
-def evaluate_symbol(
-    bundle: SymbolStructureBundle,
-    policy: TradingPolicy = TradingPolicy(),
-) -> tuple[EvaluatedSignal, ...]:
-    return TradingEngine(policy).evaluate_symbol(bundle)
-
-
 __all__ = [
     "EvaluatedSignal",
     "SymbolStructureBundle",
-    "TradingEngine",
-    "evaluate_symbol",
 ]

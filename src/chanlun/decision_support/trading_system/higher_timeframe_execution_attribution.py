@@ -226,12 +226,10 @@ def higher_timeframe_execution_attribution(
     replay: Mapping[str, object],
     terminal_accounting: Mapping[str, object],
 ) -> dict[str, object]:
-    """Build an exact candidate -> order -> fill -> cycle attribution.
+    """构建候选、订单、成交与持仓周期之间的精确归因链。
 
-    Only rows that carry the boolean ``accepted`` field have reached the M/W/D
-    risk adjudication.  Approximation rejects that occur before that stage are
-    outside this audit and remain represented in the existing candidate
-    funnel.
+    只有包含布尔字段 ``accepted`` 的记录才已进入月、周、日风险裁决。
+    在此之前被拒绝的候选不属于本审计范围，仍由既有候选漏斗记录。
     """
 
     risk_rows: list[Mapping[str, object]] = []

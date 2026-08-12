@@ -184,11 +184,9 @@ def normalize_completed_minute_sessions(
     missing = required.difference(raw.columns)
     if missing:
         raise ValueError(f"raw minute frame is missing columns: {sorted(missing)!r}")
-    # Keep the session-level validation explicit, but assemble each accepted
-    # session as one vectorized frame.  The previous implementation called
-    # ``iterrows`` and built 240 dictionaries per session; on a multi-year
-    # minute cache that made this read-only adapter dominate the entire causal
-    # replay without changing a single market-data decision.
+    # 保持逐交易日校验明确可见，但把每个获准交易日组装成一个向量化数据帧。
+    # 旧实现调用 ``iterrows``，每个交易日构建 240 个字典；在多年分钟缓存上，
+    # 这个只读适配器会占据整个因果回放的大部分耗时，却不改变任何行情决策。
     output: list[pd.DataFrame] = []
     complete_sessions: list[date] = []
     rejected: list[dict[str, object]] = []

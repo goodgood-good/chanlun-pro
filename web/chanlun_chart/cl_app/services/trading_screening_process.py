@@ -1,13 +1,10 @@
-"""Crash-isolated process boundary for native QMT screening reads.
+"""原生 QMT 选股读取的崩溃隔离进程边界。
 
-The xtquant client contains native code which can terminate the interpreter
-without raising a Python exception.  The live screening worker therefore runs
-all of its QMT/structure reads in a persistent child process.  This module owns
-the authenticated loopback IPC transport and exposes the same read-only gateway
-protocol used by :mod:`trading_screening`.
+xtquant 客户端含有可能直接终止解释器、且不抛出 Python 异常的原生代码。因此实时
+选股工作器把全部 QMT 和结构读取放进持久子进程。本模块管理带认证的本机回环 IPC
+传输，并公开与 :mod:`trading_screening` 相同的只读网关协议。
 
-No account object, trader session or order transport is accepted by this
-boundary.
+此边界不接受账户对象、交易会话或订单传输。
 """
 
 from __future__ import annotations
@@ -74,15 +71,12 @@ _SECTOR_SNAPSHOT_WEB_PRODUCERS = (
 
 
 def _sector_cache_decision_epoch(value: datetime) -> tuple[date, str, int]:
-    """Map a wall-clock request to its causal A-share 5m data epoch.
+    """把墙上时钟请求映射到因果 A 股 5m 数据周期。
 
-    A sector snapshot is expensive but its completed market-data prefix does
-    not change every wall-clock minute.  Exact timestamp matching made a cache
-    written at 20:58 immediately unusable at 20:59 and trapped the background
-    scanner in a permanent sector-rebuild loop.  Reuse is safe only inside a
-    window in which no new completed 5m bar can appear.  Weekday holidays are
-    intentionally treated like trading days: this may recompute unnecessarily
-    but can never carry a snapshot across a possible new bar.
+    板块快照计算昂贵，但已完成行情前缀不会每个自然分钟都变化。若要求精确时间戳
+    匹配，20:58 写入的缓存到 20:59 就失效，会使后台选股陷入永久板块重建循环。只有
+    在不可能出现新已完成 5m 行情的窗口内才能安全复用。工作日假期会有意按交易日
+    处理；这可能多算，但不会让快照跨越一根可能新增的行情。
     """
 
     local = normalize_datetime(value, "sector cache decision time").astimezone(_CN)
@@ -104,19 +98,15 @@ def native_sector_snapshot_producer_revision(
     *,
     project_root: Path | str | None = None,
 ) -> str:
-    """Return the complete, UI-independent native-sector producer identity.
+    """返回完整且独立于界面的原生板块生产者身份。
 
-    The persisted native snapshot contains QMT catalog, composite structure,
-    constituent-strength and cache-codec output.  Its identity therefore
-    covers every runtime file under ``src`` plus the three Web service modules
-    that assemble, transport and authenticate that output.  Templates,
-    JavaScript, CSS, unrelated Web routes and deployment scripts cannot change
-    those facts and deliberately do not invalidate an expensive sector replay.
+    持久原生快照包含 QMT 目录、合成结构、成分强度和缓存编解码输出，因此其身份覆盖
+    ``src`` 下全部运行文件，以及负责组装、传输和认证输出的三个 Web 服务模块。模板、
+    JavaScript、CSS、无关 Web 路由和部署脚本无法改变这些事实，因而不会让高成本板块
+    回放失效。
 
-    This is intentionally broader than a hand-maintained Python import list:
-    bundled QMT binaries/configuration and newly introduced decision helpers
-    are picked up automatically.  Runtime bytecode/cache directories are not
-    source and are excluded.
+    覆盖范围有意大于人工维护的 Python 导入列表：捆绑的 QMT 二进制和配置、新增决策
+    助手都会自动纳入；运行字节码和缓存目录不属于源码，予以排除。
     """
 
     root = _PROJECT_ROOT if project_root is None else Path(project_root).resolve()
@@ -159,7 +149,7 @@ def native_sector_snapshot_cache_revision(
     *,
     project_root: Path | str | None = None,
 ) -> str | None:
-    """Enable cache only for an exact content-addressed source tree."""
+    """只有精确内容寻址的源码树才能启用缓存。"""
 
     if not isinstance(build_revision, str):
         raise TypeError("build_revision must be a string")
@@ -170,23 +160,23 @@ def native_sector_snapshot_cache_revision(
 
 
 class NativeScreeningWorkerError(RuntimeError):
-    """Base class for the isolated native screening boundary."""
+    """隔离原生选股边界的异常基类。"""
 
 
 class NativeScreeningWorkerUnavailable(NativeScreeningWorkerError):
-    """The child process is dead or still inside its restart backoff."""
+    """子进程已退出，或仍处于重启退避期。"""
 
 
 class NativeScreeningWorkerTimeout(NativeScreeningWorkerError):
-    """No progress arrived before the native-call idle deadline."""
+    """原生调用空闲期限前没有收到进度。"""
 
 
 class NativeScreeningWorkerProtocolError(NativeScreeningWorkerError):
-    """The authenticated child returned an invalid protocol message."""
+    """已认证子进程返回无效协议消息。"""
 
 
 class NativeScreeningWorkerRemoteError(NativeScreeningWorkerError):
-    """A normal Python exception was raised inside the healthy child."""
+    """健康子进程内部抛出普通 Python 异常。"""
 
     def __init__(
         self,
@@ -549,10 +539,9 @@ def _batch_cache_document(value: SectorAssessmentBatch) -> dict[str, object]:
         "errors": [_failure_cache_document(item) for item in value.errors],
         "exclusion_counts": [list(item) for item in value.exclusion_counts],
         "exclusions": [_exclusion_cache_document(item) for item in value.exclusions],
-        # This is the independently recomputed QMT catalog identity carried by
-        # the native gateway.  Dropping it on cache round-trip makes an ordinary
-        # same-build Web restart silently replace it with the service's weaker
-        # fallback membership hash and therefore changes the coverage epoch.
+        # 这是原生网关携带、独立重算的 QMT 标的目录标识。若缓存往返时丢弃它，
+        # 同一构建版本的普通 Web 重启便会悄然用服务端较弱的成员回退哈希替换它，
+        # 从而改变覆盖周期。
         "catalog_revision": value.catalog_revision,
         "strength_evidence": (
             None
@@ -669,7 +658,7 @@ def _bar_from_cache(value: object, field_name: str) -> BarKey:
 
 
 class NativeWorkerProcessTransport:
-    """Persistent authenticated IPC client with idle timeout and crash recovery."""
+    """带空闲超时和崩溃恢复的持久认证 IPC 客户端。"""
 
     def __init__(
         self,
@@ -812,7 +801,7 @@ class NativeWorkerProcessTransport:
             log_handle.close()
             raise
         finally:
-            # Popen duplicates the handle for the child on Windows.
+            # Windows 下由 Popen 为子进程复制句柄。
             log_handle.close()
 
         deadline = time.monotonic() + self._config.startup_timeout_seconds
@@ -937,7 +926,7 @@ class NativeWorkerProcessTransport:
         try:
             callback()
         except Exception:
-            # Operational telemetry must not corrupt a valid market-data reply.
+        # 运行遥测失败不得破坏有效的行情响应。
             pass
 
     def request(self, method: str, **kwargs: object) -> object:
@@ -1036,13 +1025,11 @@ class NativeWorkerProcessTransport:
                         self._request_started_at = None
 
     def startup(self) -> None:
-        """Establish the authenticated worker without issuing a data request.
+        """建立已认证工作进程，但不发出数据请求。
 
-        Requests remain lazy and crash-recovering, but an application runtime
-        needs to prove that its isolated native dependency can actually start
-        before ``/readyz`` may report success.  Keeping the handshake separate
-        from a market-data method avoids advancing cursors or rebuilding the
-        sector snapshot merely to attest process readiness.
+        请求仍保持惰性和崩溃可恢复；不过应用运行时必须先证明隔离原生依赖确实能启动，
+        ``/readyz`` 才能报告成功。把握手与行情方法分离，可避免仅为证明进程就绪就推进
+        游标或重建板块快照。
         """
 
         with self._request_lock:
@@ -1145,7 +1132,7 @@ class NativeWorkerProcessTransport:
 
 
 class NativeTradingDataGatewayProcessProxy:
-    """Typed read-only gateway backed by :class:`NativeWorkerProcessTransport`."""
+    """由 :class:`NativeWorkerProcessTransport` 支撑的类型化只读网关。"""
 
     def __init__(
         self,
@@ -1234,18 +1221,16 @@ class NativeTradingDataGatewayProcessProxy:
             transport.set_progress_callback(callback)
 
     def startup(self) -> None:
-        """Prime the primary read-only worker; structure shards stay lazy.
+        """预启动主只读工作进程，结构分片保持惰性。
 
-        The primary transport owns gateway health and lightweight catalog/
-        calendar calls.  Starting all structure shards here would consume the
-        memory of a full coverage run even when the market is closed.  They are
-        still deterministically fanned out and started on first symbol use.
+        主传输负责网关健康及轻量目录和日历调用。若在这里启动全部结构分片，即使闭市
+        也会消耗全量覆盖级别的内存。分片仍按确定性方式分配，并在首次使用标的时启动。
         """
 
         self._transport.startup()
 
     def _structure_transport(self, code: str) -> NativeWorkerProcessTransport:
-        """Keep one symbol on one worker so its in-memory analysis cache survives."""
+        """让同一标的固定到同一工作进程，以保留内存分析缓存。"""
 
         digest = hashlib.sha256(code.encode("ascii", errors="strict")).digest()
         index = int.from_bytes(digest[:8], "big") % len(self._structure_transports)
@@ -1636,12 +1621,10 @@ class NativeTradingDataGatewayProcessProxy:
         as_of: datetime,
         catalog_revision: str,
     ) -> None:
-        """Prime process-local routing from an authenticated app snapshot.
+        """根据已认证应用快照预置进程本地路由。
 
-        The complete typed sector batch remains owned and validated by the
-        screening service.  Only the member routing required by
-        ``structure_bundle`` is restored here; no market fact is recomputed,
-        no changed-bar cursor is advanced, and no disk cache is overwritten.
+        完整类型化板块批次仍由选股服务持有并校验；这里只恢复 ``structure_bundle``
+        所需成员路由，不重算市场事实、不推进变化行情游标，也不覆盖磁盘缓存。
         """
 
         observed_at = normalize_datetime(as_of, "restored sector members as_of")
@@ -1718,7 +1701,7 @@ class NativeTradingDataGatewayProcessProxy:
         self,
         codes: tuple[str, ...],
     ) -> tuple[str, ...]:
-        """Classify monitor supplements inside the isolated QMT worker."""
+        """在隔离 QMT 工作进程内分类监听补充标的。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
@@ -1743,7 +1726,7 @@ class NativeTradingDataGatewayProcessProxy:
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """Return exact native types without collapsing unresolved results."""
+        """返回精确原生类型，不折叠尚未解析的结果。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
@@ -1783,7 +1766,7 @@ class NativeTradingDataGatewayProcessProxy:
         session: date,
         observed_at: datetime,
     ) -> Mapping[str, object]:
-        """Read and validate QMT calendar evidence in the native worker."""
+        """在原生工作进程内读取并校验 QMT 日历证据。"""
 
         if isinstance(session, datetime) or not isinstance(session, date):
             raise TypeError("session must be a date")
@@ -1796,12 +1779,10 @@ class NativeTradingDataGatewayProcessProxy:
                 session=session,
                 observed_at=observed,
             )
-        # Screening structure reads are intentionally serialized through one
-        # isolated native worker.  A readiness probe must not queue behind a
-        # potentially long ``structure_bundle`` call: doing so can make the
-        # Web deployment health gate time out even though both processes are
-        # healthy.  Busy means calendar provenance is temporarily unavailable,
-        # never that the target is a weekday/trading session.
+            # 选股结构读取会有意串行经过一个隔离的原生工作进程。就绪探针不能排在
+            # 可能耗时很长的 ``structure_bundle`` 调用之后，否则两个进程都健康时，
+            # Web 部署健康门仍可能超时。“繁忙”只表示交易日历来源暂时不可用，
+            # 绝不表示目标日期一定是工作日或交易日。
         worker_health = self._transport.health_snapshot()
         if worker_health.get("in_flight") is True:
             return build_trading_session_evidence(
@@ -1857,7 +1838,7 @@ class NativeTradingDataGatewayProcessProxy:
         frequencies: tuple[str, ...],
         risk_evidence_cutoff: datetime,
     ) -> SymbolStructureBundle:
-        """Keep current 1m precision while freezing M/W/D evidence earlier."""
+        """保留当前 1m 精度，同时把月周日证据冻结在更早时点。"""
 
         return self._structure_bundle(
             code,

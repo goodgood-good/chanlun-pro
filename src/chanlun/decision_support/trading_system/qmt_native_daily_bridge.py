@@ -393,8 +393,8 @@ def _normalized_native_daily(
     if result["date"].dt.tz is None:
         _fail("QMT_NATIVE_DAILY_TIMEZONE_UNRESOLVED", "timezone-naive date")
     local = result["date"].dt.tz_convert("Asia/Shanghai")
-    # QMT local fixed records label daily bars at midnight while ExchangeQMT
-    # normalises them to 15:00.  The bar is knowable only at the latter time.
+    # QMT 本地定长记录把日线标在零点，而 ExchangeQMT 会规范为 15:00；
+    # 该根 K 线只能在后一个时刻确定。
     result["date"] = pd.DatetimeIndex(
         [
             timestamp.normalize() + pd.Timedelta(hours=15)
@@ -514,9 +514,8 @@ def build_qmt_native_daily_bridge(
             "QMT_NATIVE_DAILY_TRADING_CALENDAR_INVALID",
             "calendar must be a non-empty, unique, chronological date sequence",
         )
-    # A caller may own a longer immutable exchange calendar, but a decision
-    # identity must never change merely because later sessions were appended.
-    # Bind and validate only the prefix visible no later than this decision day.
+        # 调用方可能持有更长的不可变交易所日历，但决策标识不能仅因追加后续交易日而变化。
+        # 只绑定并校验不晚于本决策日可见的日历前缀。
     calendar = tuple(
         value for value in supplied_calendar if value <= observed.date()
     )

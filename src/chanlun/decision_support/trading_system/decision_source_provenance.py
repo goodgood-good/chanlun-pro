@@ -56,11 +56,9 @@ FORWARD_PIPELINE_TOOL_PATHS = (
     "tools/snapshot_qmt_pit_metadata.py",
 )
 FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA = "chanlun-forward-implementation-provenance"
-# A historical replay must be invalidated by every implementation file that
-# can alter its structures, selection, orders, fills or accounting.  It must
-# not, however, be invalidated by downstream forward-review persistence and
-# UI adapters that the replay process never imports.  Those remain covered by
-# the complete integration snapshot above.
+# 所有可能改变结构、选股、订单、成交或记账的实现文件，都必须能使历史回放失效。
+# 但回放进程从未导入的下游前向复核持久化与界面适配器，不应导致回放失效；
+# 它们仍由上方完整集成快照覆盖。
 _REPLAY_SOURCE_DIRECTORIES = (
     "src/chanlun/core",
     "src/chanlun/decision_support/trading_system/backtest",
@@ -93,10 +91,12 @@ _REPLAY_SOURCE_FILES = (
     "src/chanlun/market.py",
     "src/chanlun/tools/__init__.py",
     "src/chanlun/tools/log_util.py",
-    "tools/backtest_sector_first_full_market.py",
-    "tools/build_recent_year_current_sector_triggers.py",
-    "tools/extract_sector_first_direct_facts.py",
-    "tools/prescreen_sector_first_research_candidates.py",
+    "tools/qmt_research_contract.py",
+    "tools/backtest_qmt_fixed_year.py",
+    "tools/audit_qmt_prefix_invariance.py",
+    "tools/finalize_qmt_fixed_year.py",
+    "tools/finalize_qmt_pit_fixed_year.py",
+    "tools/snapshot_qmt_pit_metadata.py",
     "tools/snapshot_qmt_gics3_sector_ledger.py",
 )
 
@@ -415,9 +415,8 @@ def decision_source_snapshot_matches_current(
         current = current_decision_source_snapshot(project_root)
     except (OSError, TypeError, ValueError):
         return False
-    # JSON round-tripping changes tuples into lists.  The aggregate is over the
-    # canonical JSON representation, so equality of the independently
-    # validated identities is both stricter and representation-independent.
+    # JSON 往返会把元组变成列表。聚合基于规范 JSON 表示，因此独立校验后的
+    # 标识相等既更严格，也不受内存表示形式影响。
     return archived == current["aggregate_sha256"]
 
 

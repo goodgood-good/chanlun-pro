@@ -24,8 +24,8 @@ from chanlun.decision_support.trading_system.execution import (
     FeeRateAt,
 )
 from chanlun.decision_support.trading_system.forward_paper import (
-    FROZEN_RESEARCH_PARAMETER_SET_ID,
-    load_frozen_forward_contract,
+    CURRENT_STRATEGY_PARAMETER_SET_ID,
+    load_forward_contract,
 )
 
 
@@ -62,7 +62,7 @@ class HumanPaperAccountingParameters:
     live_status: str = "LIVE_DISABLED"
 
     def __post_init__(self) -> None:
-        if self.strategy_parameter_set_id != FROZEN_RESEARCH_PARAMETER_SET_ID:
+        if self.strategy_parameter_set_id != CURRENT_STRATEGY_PARAMETER_SET_ID:
             raise ValueError("human paper accounting parameter identity changed")
         if (
             self.initial_cash != Decimal("1000000")
@@ -105,7 +105,7 @@ def load_human_paper_accounting_parameters(
 ) -> HumanPaperAccountingParameters:
     """Load and independently freeze the fee/capital subset of the snapshot."""
 
-    contract = load_frozen_forward_contract(parameter_snapshot_path)
+    contract = load_forward_contract(parameter_snapshot_path)
     try:
         payload = json.loads(parameter_snapshot_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -143,8 +143,8 @@ def load_human_paper_accounting_parameters(
         slot_count=contract.slot_count,
         slot_fraction=Decimal(contract.slot_fraction),
         account_exposure_cap=Decimal(contract.account_exposure_cap),
-        # The frozen selection path is QMT current-sector stocks.  ETF proxy is
-        # a separate parameter snapshot and must never be mixed into this book.
+        # 当前合同只接受经过三程序研究的个股；ETF 代理属于另一条正式选股路径，
+        # 不能混入本账本。
         instrument_kind="A_SHARE_STOCK",
         fee_model=fee_model,
     )
@@ -170,7 +170,7 @@ def rebuild_human_paper_accounting(
     fill_count = 0
     closed_cycle_count = 0
     violations: list[str] = []
-    # Each FIFO lot stores [quantity, total remaining acquisition cost, session].
+    # 每个先进先出批次保存[数量、剩余总取得成本、交易日]。
     lots: dict[str, list[list[object]]] = {}
 
     for event in events:

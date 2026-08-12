@@ -94,11 +94,11 @@ def _alert() -> HumanReviewAlert:
         market_risk_gate="AMBER",
         sector_risk_gate="UNRESOLVED",
         symbol_risk_gate="GREEN",
-        warning_codes=("APPROXIMATE_STRUCTURE",),
+        warning_codes=("STRICT_STRUCTURE_REVIEW",),
         source_fact_ids=("sha256:point", "sha256:snapshot"),
         screening_parameter_set_id=parameters.parameter_set_id,
-        technical_approximation_parameter_set_id=(
-            parameters.technical_approximation_parameter_set_id
+        signal_alignment_parameter_set_id=(
+            parameters.signal_alignment_parameter_set_id
         ),
     )
 

@@ -31,9 +31,9 @@ from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 
 # 基础数据缓存（市场 → processed symbols list）
-# Last-known-good values must survive refresh failures; refresh cadence tracks freshness.
+# 刷新失败后仍须保留最后一次已知有效值；刷新节奏用于跟踪新鲜度。
 stock_cache: LRUCache = LRUCache(maxsize=100)
-# stock_cache 专用锁（M3）。曾与 chart_cache.cache_lock 共用一把锁，导致一次
+# stock_cache 使用专用锁；过去与 chart_cache.cache_lock 共用锁时会导致一次
 # chart 缓存的磁盘读会阻塞 symbol 列表读写；此处独立成锁，两个无关缓存互不干扰。
 _stock_cache_lock = threading.Lock()
 
@@ -87,8 +87,7 @@ PRELOAD_ATTEMPT_TIMEOUT_SECONDS = max(
 # 正在异步刷新的市场集合，防止同一市场被并发触发多次刷新而堆积慢请求。
 _async_refresh_in_flight: set = set()
 _async_refresh_lock = threading.Lock()
-# Per-market refresh state. It shares the cache lock so cache contents and the
-# readiness snapshot are observed atomically.
+# 各市场独立保存刷新状态，并共用缓存锁，使缓存内容与就绪快照能够被原子观测。
 _symbol_states = {}
 _preload_attempts = {}
 _preload_attempts_lock = threading.Lock()

@@ -2,6 +2,7 @@ import atexit
 import datetime
 import hashlib
 import hmac
+import json
 import os
 import threading
 import pathlib
@@ -57,6 +58,9 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
     calculate_forward_application_source_revision,
     content_addressed_source_revision_from_build,
 )
+from chanlun.decision_support.trading_system.selection import (
+    selection_research_ledger_from_document,
+)
 from .services.job_names import job_display_name
 
 __all__ = ["create_app"]
@@ -69,13 +73,12 @@ _SHARED_RUNTIME_OWNER: object | None = None
 
 
 def _human_review_historical_report() -> pathlib.Path:
-    """Return the sole current-release historical review sidecar."""
+    """返回当前系统唯一的历史人工复核快照路径。"""
     repository_root = pathlib.Path(__file__).resolve().parents[3]
     return (
         repository_root
-        / "audit"
-        / "chanlun_trading_system_backtest"
-        / "recent_year_current_sector_no3p_mwd_strength"
+        / ".cache"
+        / "chanlun_human_review"
         / "human_review_screen.json"
     )
 
@@ -109,8 +112,7 @@ def _scheduler_task_snapshot(scheduler):
 
 
 def create_app(test_config=None, start_scheduler=False):
-    # App factories must be side-effect free by default. The single-process
-    # desktop entrypoint opts in explicitly; tests and generic WSGI imports do not.
+    # 应用工厂默认不得产生副作用；单进程桌面入口会显式启用，测试和通用 WSGI 导入不会启用。
     app = Flask(__name__, instance_relative_config=True)
     https_enabled = is_https_enabled()
     secure_cookie_setting = (
@@ -133,9 +135,8 @@ def create_app(test_config=None, start_scheduler=False):
         REMEMBER_COOKIE_SAMESITE="Lax",
         REMEMBER_COOKIE_SECURE=secure_cookie_enabled,
         PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
-        # Keep a trusted browser signed in across app/browser restarts.  The
-        # expiry slides while the app is used, but password rotation and an
-        # explicit logout still revoke the existing login identity.
+        # 可信浏览器在应用或浏览器重启后保持登录；使用期间有效期滚动延长，但修改密码
+        # 或显式退出仍会撤销现有登录身份。
         REMEMBER_COOKIE_DURATION=datetime.timedelta(days=30),
         REMEMBER_COOKIE_REFRESH_EACH_REQUEST=True,
         MAX_CONTENT_LENGTH=8 * 1024 * 1024,
@@ -145,9 +146,8 @@ def create_app(test_config=None, start_scheduler=False):
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
-        # Full-market coverage is intentionally opt-in.  The always-on
-        # priority/holding monitors must never turn a web restart into an
-        # implicit multi-hour rebuild.
+        # 全市场覆盖有意设为显式启用；常驻优先级/持仓监听绝不能把网页重启变成隐式的
+        # 数小时重建。
         TRADING_SCREENING_FULL_COVERAGE_ENABLED=(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
@@ -172,9 +172,8 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
         TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS=1800,
         TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
-        # A system-local, market-independent watchlist group declares manual
-        # holdings.  It is only a monitoring fact: no broker/account access or
-        # order capability is inferred from membership.
+        # 系统本地且独立于市场的自选组用于声明手工持仓；它只是一项监听事实，不能由成员
+        # 关系推断券商/账户访问权或下单能力。
         TRADING_SCREENING_MANUAL_HOLDING_GROUP=os.environ.get(
             "CHANLUN_TRADING_SCREENING_MANUAL_HOLDING_GROUP",
             "我的持仓",
@@ -217,11 +216,9 @@ def create_app(test_config=None, start_scheduler=False):
                 "64",
             )
         ),
-        # Post-close full-universe coverage is start-to-start throttled to one
-        # batch per minute.  Keep the ordinary discovery lane aligned with the
-        # total 64-symbol budget; leaving its dataclass default at 32 idles the
-        # ten structure workers for most of every interval and roughly doubles
-        # the time needed to publish the next-session preselection.
+        # 收盘后全市场覆盖按启动间隔限流为每分钟一批。常规发现通道应匹配 64 标的总预算；
+        # 若沿用数据类默认 32，会让十个结构进程在大部分间隔内空闲，并使下一交易日预选
+        # 发布时间大致翻倍。
         TRADING_SCREENING_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
@@ -232,16 +229,14 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS=45.0,
         TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS=210.0,
         TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
-        # One authenticated worker process can saturate only one CPU core.
-        # Use half the logical CPUs (capped at eight) for stock structure work,
-        # leaving capacity for QMT, Flask, charts and the operating system.
+        # 一个已认证工作进程只能占满一个 CPU 核；个股结构任务使用约一半逻辑 CPU，
+        # 最多八个，为 QMT、Flask、图表和操作系统留出容量。
         TRADING_SCREENING_STOCK_WORKERS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
-                # Use roughly five eighths of logical CPUs, capped at ten.
-                # On the current 10-core/16-thread host this assigns one
-                # worker per physical core while retaining six logical CPUs
-                # for QMT, Flask, chart rendering and notification delivery.
+                # 使用约八分之五的逻辑 CPU，最多十个。当前 10 核 16 线程主机上相当于
+                # 每个物理核心一个工作进程，并保留六个逻辑 CPU 给 QMT、Flask、图表
+                # 渲染和通知投递。
                 str(
                     min(
                         10,
@@ -252,14 +247,14 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         FORWARD_SCHEDULER_MONITOR_ENABLED=True,
         FORWARD_SCHEDULER_MONITOR_TTL_SECONDS=30.0,
-        # app.py is the sole owner of forward business scheduling.
+        # app.py 是前向业务调度的唯一所有者。
         FORWARD_SCHEDULER_MODE=os.environ.get("CHANLUN_FORWARD_SCHEDULER_MODE", "APP")
         .strip()
         .upper(),
         FORWARD_QMT_LOCAL_DATA_DIR=os.environ.get(
             "CHANLUN_QMT_LOCAL_DATA_DIR", ""
         ).strip(),
-        # app.py is also the sole owner of the interactive QMT runtime.
+        # app.py 也是交互式 QMT 运行时的唯一所有者。
         QMT_RUNTIME_MODE=os.environ.get("CHANLUN_QMT_RUNTIME_MODE", "APP")
         .strip()
         .upper(),
@@ -289,10 +284,9 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         HUMAN_REVIEW_PARAMETER_SNAPSHOT=(
             pathlib.Path(__file__).resolve().parents[3]
-            / "audit"
-            / "chanlun_trading_system_backtest"
-            / "recent_year_current_sector_no3p"
-            / "parameter_snapshot_human_review.json"
+            / "config"
+            / "decision_support"
+            / "human_review_parameters.json"
         ),
         HUMAN_REVIEW_LIVE_ARCHIVE_ROOT=(
             pathlib.Path(__file__).resolve().parents[3]
@@ -324,8 +318,7 @@ def create_app(test_config=None, start_scheduler=False):
     if app.testing and (
         not test_config or "TRADING_SCREENING_BACKGROUND_ENABLED" not in test_config
     ):
-        # Runtime tests opt in explicitly. This keeps the default app factory
-        # side-effect free and prevents real market scans in unrelated tests.
+        # 运行时测试必须显式启用，以保持默认应用工厂无副作用，并防止无关测试扫描真实市场。
         app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = False
     if app.testing and (
         not test_config
@@ -335,21 +328,20 @@ def create_app(test_config=None, start_scheduler=False):
     if app.testing and (
         not test_config or "FORWARD_SCHEDULER_MONITOR_ENABLED" not in test_config
     ):
-        # Reading Windows Task Scheduler is an explicit integration-test opt-in.
-        # Generic app-factory tests remain host-independent and side-effect free.
+        # 读取 Windows 任务计划程序必须由集成测试显式启用；通用应用工厂测试保持
+        # 与主机无关且无副作用。
         app.config["FORWARD_SCHEDULER_MONITOR_ENABLED"] = False
     if app.testing and (not test_config or "FORWARD_SCHEDULER_MODE" not in test_config):
-        # Unit tests must opt into the process-owning scheduler explicitly.
+        # 单元测试必须显式启用拥有进程的调度器。
         app.config["FORWARD_SCHEDULER_MODE"] = "DISABLED"
     if app.testing and (not test_config or "QMT_RUNTIME_MODE" not in test_config):
-        # Host-process control is always an explicit integration-test opt-in.
+        # 主机进程控制始终由集成测试显式启用。
         app.config["QMT_RUNTIME_MODE"] = "DISABLED"
     if app.testing and (
         not test_config or "TRADING_SESSION_OFFICIAL_CALENDAR_PATH" not in test_config
     ):
-        # Unit tests opt into the immutable annual artifact explicitly.  This
-        # preserves injected calendar-provider tests and prevents a real
-        # filesystem artifact from silently replacing their fixture evidence.
+        # 单元测试须显式启用不可变年度工件，以保留注入日历提供器的测试，并防止真实磁盘
+        # 工件静默替换夹具证据。
         app.config["TRADING_SESSION_OFFICIAL_CALENDAR_PATH"] = None
     if https_enabled:
         app.config["SESSION_COOKIE_SECURE"] = True
@@ -469,10 +461,10 @@ def create_app(test_config=None, start_scheduler=False):
     app.jinja_env.auto_reload = True
 
     # 添加登录验证
-    # secret_key 解析顺序：环境变量 CHANLUN_FLASK_SECRET_KEY > config.FLASK_SECRET_KEY > 数据目录持久化文件。
+    # 密钥解析顺序：环境变量 CHANLUN_FLASK_SECRET_KEY > config.FLASK_SECRET_KEY > 数据目录持久化文件。
     app.secret_key = get_flask_secret_key()
 
-    # CSRF token 与当前浏览器会话使用同一 12 小时边界；记住登录 Cookie 独立续期。
+    # 跨站请求伪造令牌与当前浏览器会话使用同一 12 小时边界；记住登录 Cookie 独立续期。
     from .csrf import csrf
 
     csrf.init_app(app)
@@ -481,7 +473,7 @@ def create_app(test_config=None, start_scheduler=False):
     # ``Cache-Control: max-age=31536000, immutable``,导致 charts.js / bundle.js
     # 等核心前端文件被浏览器**永久缓存**——后端修了字段但前端永远拉不到新版本。
     # 修法:在 Jinja2 模板里给 ``<script src>`` 加 ``?asset={{ static_asset_token }}``,
-    # static_asset_token = 关键文件 mtime 的 short hash,文件变即 bust。
+    # 静态资源令牌取关键文件修改时间的短哈希，文件变化即刷新缓存。
     @app.before_request
     def _set_csp_nonce():
         g.csp_nonce = secrets.token_urlsafe(24)
@@ -690,10 +682,9 @@ def create_app(test_config=None, start_scheduler=False):
             return configured
         project_root = pathlib.Path(__file__).resolve().parents[3]
         try:
-            # Direct ``app.py`` / PyCharm launches are the normal production
-            # owner in this project.  Bind readiness and persistent native fact
-            # caches to the exact dirty working tree instead of reporting only
-            # HEAD and disabling caches merely because no wrapper set an env var.
+            # 直接通过 ``app.py`` 或 PyCharm 启动是本项目正常生产所有者。就绪状态和持久化
+            # 原生事实缓存应绑定精确工作树，而非只报告 HEAD；不能仅因包装器未设置环境变量
+            # 就禁用缓存。
             return calculate_forward_application_source_revision(project_root)
         except (OSError, RuntimeError):
             pass
@@ -1145,7 +1136,7 @@ def create_app(test_config=None, start_scheduler=False):
             reasons.append("trading_screening_not_ready")
         # 持仓预警属于只读研究观察面。其失败必须在独立组件中完整暴露，
         # 但不能让图表 Web/QMT 本身被宣告不可用；这与 forward research
-        # evidence 的 readiness 口径一致。
+        # 证据的就绪口径一致。
 
         ready = not reasons
         payload = {
@@ -1239,7 +1230,6 @@ def create_app(test_config=None, start_scheduler=False):
                 abort(404)
             service = app.extensions.get("decision_support_human_review")
             validator = getattr(service, "validate_chart_lock", None)
-            human_error = None
             try:
                 if not callable(validator):
                     raise ValueError("human review service unavailable")
@@ -1249,43 +1239,13 @@ def create_app(test_config=None, start_scheduler=False):
                     review_as_of=int(review_values["review_as_of"]),
                 )
             except (TypeError, ValueError, RuntimeError) as exc:
-                human_error = exc
-            if review_chart_lock is None:
-                try:
-                    from .services.research_audit import (
-                        validate_risk_point_chart_lock,
-                    )
-
-                    review_chart_lock = validate_risk_point_chart_lock(
-                        app.config.get(
-                            "RESEARCH_AUDIT_ROOT",
-                            pathlib.Path(__file__).resolve().parents[3],
-                        ),
-                        point_id=review_values["candidate_id"],
-                        source_sha256=review_values["source_sha256"],
-                        review_as_of=int(review_values["review_as_of"]),
-                    )
-                except (TypeError, ValueError, RuntimeError):
-                    app.logger.debug(
-                        "causal chart lock rejected by human and risk validators: %r",
-                        human_error,
-                    )
-                    abort(404)
+                app.logger.debug("人工复核图表锁校验失败：%r", exc)
+                abort(404)
             requested_code = str(request.args.get("code") or "")
             if initial_market != "a" or requested_code != review_chart_lock.get(
                 "symbol"
             ):
                 abort(404)
-            if review_chart_lock.get("lock_kind") == "RISK_POINT_AUDIT":
-                requested_intervals = tuple(
-                    value.strip()
-                    for value in str(request.args.get("intervals") or "").split(",")
-                    if value.strip()
-                )
-                if requested_intervals != (
-                    str(review_chart_lock.get("chart_interval")),
-                ):
-                    abort(404)
 
         selected_default_codes = market_default_codes.cached_snapshot()
         selected_frequencies = market_frequencys.cached_snapshot()
@@ -1353,9 +1313,8 @@ def create_app(test_config=None, start_scheduler=False):
         "ticks": None,
         "symbols": None,
     }
-    # Constructed after the QMT/official trading-session provider exists.  The
-    # lifecycle closures deliberately reference this late-bound controller so
-    # app factories remain side-effect free until start_runtime_services().
+    # 在 QMT 与正式交易日提供器创建后再构造。生命周期闭包有意引用这个后绑定控制器，
+    # 使应用工厂在 ``start_runtime_services()`` 前保持无副作用。
     app_forward_scheduler = None
     app_qmt_runtime = None
 
@@ -1431,17 +1390,14 @@ def create_app(test_config=None, start_scheduler=False):
 
         try:
             if app_qmt_runtime is not None:
-                # QMT must be established before any metadata/tick/native
-                # screening worker can consume its local runtime.
+                # 必须先建立 QMT，再允许元数据、逐笔或原生筛选进程消费其本地运行时。
                 app_qmt_runtime.startup()
                 _ensure_start_is_current()
             native_gateway_startup = getattr(trading_gateway, "startup", None)
             if callable(native_gateway_startup):
-                # A restored coverage snapshot may make every scan currently
-                # not due.  Without an explicit, request-free handshake the
-                # lazy native process then remains stopped forever and
-                # /readyz incorrectly reports the otherwise healthy app as
-                # unavailable until the next market event happens to wake it.
+                # 恢复的覆盖快照可能让所有扫描当前都未到期。若没有显式且不依赖请求的握手，
+                # 惰性原生进程会一直停止，/readyz 会把本来健康的应用误报为不可用，直到下个
+                # 市场事件碰巧唤醒它。
                 native_gateway_startup()
                 _ensure_start_is_current()
             constants_service.start_market_metadata_loaders()
@@ -1525,9 +1481,8 @@ def create_app(test_config=None, start_scheduler=False):
                 ):
                     return
                 if not runtime_state["owns_shared_runtime"]:
-                    # App factories are side-effect free by default. An app that
-                    # never claimed the process-wide services must not stop the
-                    # owner app's SSE, cache, metadata, or revalidation workers.
+                    # 应用工厂默认无副作用；未取得进程级服务所有权的应用不得停止所有者应用的
+                    # 服务器推送、缓存、元数据或重校验工作线程。
                     runtime_state["shutdown_complete"] = True
                     return
                 runtime_state["stop_event"].set()
@@ -1748,7 +1703,7 @@ def create_app(test_config=None, start_scheduler=False):
                 "decision_mode": (
                     "UNIFIED_HUMAN_ASSISTED_DECISION_CORE"
                     if row.get("market") == "a"
-                    else "APPROXIMATE_STRUCTURE_OBSERVATION"
+                    else "STRICT_STRUCTURE_OBSERVATION_ONLY"
                 ),
             }
             for row in rows
@@ -1930,9 +1885,8 @@ def create_app(test_config=None, start_scheduler=False):
             webhook=trading_screening_dingtalk_webhook,
             keyword=trading_screening_dingtalk_keyword,
             dry_run=trading_screening_dry_run,
-            # One final app-wide transport gate covers strict A-share signals
-            # and the auxiliary cross-market monitor.  It persists only
-            # message hashes, never webhook credentials or message bodies.
+            # 最终应用级传输闸门同时覆盖严格 A 股信号和辅助跨市场监听；只持久化消息哈希，
+            # 绝不保存机器人凭据或消息正文。
             dedupe_state_path=(
                 config.get_data_path() / "monitor" / "dingtalk_outbound_dedupe.json"
             ),
@@ -1943,9 +1897,8 @@ def create_app(test_config=None, start_scheduler=False):
     )
     if app.config.get("HOLDING_GROUP_MONITOR_ENABLED", True):
         holding_group_monitor = HoldingGroupMonitorService(
-            # The provider queries global groups every run. US watchlist edits
-            # therefore take effect within one monitor interval without an app
-            # restart. A shares remain exclusively in the strict decision core.
+            # 提供器每次运行都查询全局分组，因此美股自选修改会在一个监听间隔内生效，
+            # 无需重启应用；A 股仍完全由严格决策核心处理。
             positions_provider=_non_a_monitor_universe,
             notifier=raw_trading_notifier,
             state_root=(config.get_data_path() / "monitor"),
@@ -1977,11 +1930,9 @@ def create_app(test_config=None, start_scheduler=False):
     trading_gateway = app.config.get("TRADING_SCREENING_GATEWAY")
     if trading_gateway is None:
         if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True):
-            # Manual or unofficial launches stay cache-disabled. Official
-            # launches bind the persistent sector snapshot to its complete but
-            # UI-independent native producer: trading/structure/QMT changes
-            # invalidate it, while a template or JavaScript-only deploy does
-            # not force a 10-15 minute sector replay.
+            # 手工或非正式启动保持禁用缓存。正式启动把持久化板块快照绑定到完整且独立于界面的
+            # 原生生产器：交易、结构或 QMT 变化会使其失效，仅模板或 JavaScript 部署不会
+            # 强制执行 10–15 分钟板块重放。
             sector_cache_revision = native_sector_snapshot_cache_revision(
                 build_revision
             )
@@ -2071,10 +2022,8 @@ def create_app(test_config=None, start_scheduler=False):
         and not app.config.get("TESTING", False)
         and content_addressed_source_revision_from_build(build_revision) is not None
     ):
-        # Prime recent immutable official/QMT calendar verdicts before the background
-        # universe scan can occupy the serialized native worker.  This keeps
-        # readiness non-blocking without masking a missed prior-session
-        # Capture/Evaluate delivery as merely "calendar unavailable".
+        # 在后台标的池扫描占用串行原生进程前，预热近期不可变正式/QMT 日历判定。这样既让
+        # 就绪检查不阻塞，也不会把上个交易日漏掉的采集/评估投递掩盖成“日历不可用”。
         calendar_provider = trading_session_provider
         if callable(calendar_provider):
             calendar_observed_at = _trading_screening_clock()
@@ -2125,6 +2074,24 @@ def create_app(test_config=None, start_scheduler=False):
             "status": "evidence_unavailable",
             "evidence_grade": "invalid",
         }
+    selection_research_path = config.get_data_path() / "decision_support" / (
+        "selection_research.json"
+    )
+    try:
+        selection_research = (
+            selection_research_ledger_from_document(
+                json.loads(selection_research_path.read_text(encoding="utf-8"))
+            )
+            if selection_research_path.is_file()
+            else ()
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        app.logger.error(
+            "正式研究账本无效，新买入将保持仅观察：%s: %s",
+            type(exc).__name__,
+            str(exc)[:160],
+        )
+        selection_research = ()
     decision_support_trading_screening = TradingScreeningService(
         market_data=trading_gateway,
         sector_catalog=trading_gateway,
@@ -2137,6 +2104,7 @@ def create_app(test_config=None, start_scheduler=False):
         human_review_archive_root=pathlib.Path(
             app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
         ),
+        selection_research=selection_research,
         clock=_trading_screening_clock,
         notifier=trading_notification_dispatcher,
         config=TradingScreeningConfig(
@@ -2283,8 +2251,7 @@ def create_app(test_config=None, start_scheduler=False):
             )
             delivery = payload.get("components", {}).get("forward_delivery", {})
             return {
-                # A sector receipt is merely an input.  Adoption/success must
-                # prove that the forward ledger itself contains CAPTURE.
+                # 板块回执只是输入；采纳或成功必须证明前向账本自身包含 CAPTURE 事件。
                 "ready": bool(delivery.get("capture_ready")),
                 "reason_code": str(
                     delivery.get("reason_code")
@@ -2312,9 +2279,8 @@ def create_app(test_config=None, start_scheduler=False):
                 app.config.get("FORWARD_QMT_LOCAL_DATA_DIR") or None
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            # Keep the web page available but fail the paper-admission gate
-            # closed.  The controller snapshot carries the exact missing-QMT
-            # reason until configuration is repaired.
+            # 保持网页可用，但虚拟入场闸门关闭失败；控制器快照在配置修复前持续携带精确的
+            # QMT 缺失原因。
             app.logger.error(
                 "app-owned forward QMT data directory unresolved: %s",
                 str(exc)[:200],
@@ -2351,11 +2317,8 @@ def create_app(test_config=None, start_scheduler=False):
             forward_scheduler_probe.snapshot
             if app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
             and forward_scheduler_probe is not None
-            # Disabling the readiness/UI observation must never turn into a
-            # semantic bypass for new virtual intents.  Generic tests keep the
-            # host-independent monitor disabled, so inject a deterministic
-            # invalid observation instead of starting PowerShell; the shared
-            # validator then fails the paper path closed.
+            # 禁用就绪或界面观测绝不能变成新虚拟意图的语义绕过。通用测试禁用依赖主机的
+            # 监听，因此注入确定性无效观测而不启动 PowerShell，再由共享校验器关闭虚拟链。
             else lambda **_kwargs: {}
         ),
     )

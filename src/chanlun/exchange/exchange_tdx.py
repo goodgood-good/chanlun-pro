@@ -364,15 +364,6 @@ class ExchangeTDX(Exchange):
                     print(f"获取数据失败: {e}")
                     continue
                 quotes += batch_quotes
-            # ('market', 0), ('code', '000001'), ('active1', 4390), ('price', 14.29), ('last_close', 14.24), ('open', 14.35),
-            # ('high', 14.37), ('low', 14.14), ('servertime', '14:59:55.939'), ('reversed_bytes0', 14998872),
-            # ('reversed_bytes1', -1429), ('vol', 690954), ('cur_vol', 11982), ('amount', 985552128.0), ('s_vol', 339925),
-            # ('b_vol', 351029), ('reversed_bytes2', -1), ('reversed_bytes3', 45188), ('bid1', 14.28), ('ask1', 14.29),
-            # ('bid_vol1', 2617), ('ask_vol1', 2391), ('bid2', 14.27), ('ask2', 14.3), ('bid_vol2', 1853),
-            # ('ask_vol2', 4075), ('bid3', 14.26), ('ask3', 14.31), ('bid_vol3', 2164), ('ask_vol3', 3421), ('bid4', 14.25),
-            # ('ask4', 14.32), ('bid_vol4', 2512), ('ask_vol4', 8679), ('bid5', 14.24), ('ask5', 14.33), ('bid_vol5', 889),
-            # ('ask_vol5', 5191), ('reversed_bytes4', (2518,)), ('reversed_bytes5', 0), ('reversed_bytes6', 0),
-            # ('reversed_bytes7', 0), ('reversed_bytes8', 0), ('reversed_bytes9', 0.0), ('active2', 4390)])
             for _q in quotes:
                 if _q["code"] == "999999":
                     _code = "SH.000001"
@@ -412,7 +403,7 @@ class ExchangeTDX(Exchange):
                         round(
                             (_q["price"] - _q["last_close"]) / _q["last_close"] * 100, 2
                         )
-                        # R18: 护卫真正的除数 last_close(非 price), 否则新股首日/停牌复牌
+                        # 保护真正的除数 last_close（而非 price），否则新股首日或停牌复牌时，
                         # last_close=0 而 price!=0 时上一行除零崩溃吞掉 A股实盘信号通知。
                         if _q["last_close"] != 0
                         else 0

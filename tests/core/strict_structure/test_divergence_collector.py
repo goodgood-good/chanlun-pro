@@ -1,10 +1,8 @@
-from dataclasses import replace
-
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     establish_center,
 )
-from chanlun.core.strict_structure.divergence import collect_strict_divergences
+from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     CenterEventKind,
@@ -137,34 +135,16 @@ class FixedStrength:
         )
 
 
-def strength_pair(earlier, later, *, decayed):
-    return FixedStrength(
-        {
-            earlier.unit_id: (10.0, 5.0, 4.0),
-            later.unit_id: ((5.0, 2.0, 2.0) if decayed else (12.0, 6.0, 5.0)),
-        }
-    )
-
-
 def only(values):
     result = tuple(values)
     assert len(result) == 1
     return result[0]
 
 
-def test_completed_consolidation_emits_level_scoped_divergence_without_point_dependency():
-    structure, earlier, later = completed_consolidation_fixture(level=0)
-    values = collect_strict_divergences(
-        structure,
-        strength_pair(earlier, later, decayed=True),
-    )
-    item = only(values)
-    assert item.kind == "consolidation"
-    assert item.structural_level == 0
-    assert item.compare_unit_id == earlier.unit_id
-    assert item.signal_unit_id == later.unit_id
-    assert item.confirmed_at == later.confirmed_at
-    assert item.divergence_id
+def test_completed_center_without_formal_boundary_does_not_enter_ledger():
+    structure, _earlier, _later = completed_consolidation_fixture(level=0)
+
+    assert collect_formal_divergence_ledger(structure) == ()
 
 
 def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
@@ -179,21 +159,6 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
     center, _event = advance_center(center, return_unit)
     terminal = unit(8, "up", 120, 140)
     values = (*prefix, *seed, return_unit, terminal)
-    structure = structure_for(center)
-    level = structure.levels[0]
-    structure = replace(
-        structure,
-        levels=(
-            replace(
-                level,
-                units=values,
-                center_result=replace(
-                    level.center_result,
-                    locked_unit_count=len(values),
-                ),
-            ),
-        ),
-    )
     provider = FixedStrength(
         {
             ("u-0", "u-1", "u-2"): (10.0, 5.0, 4.0),
@@ -201,7 +166,28 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
         }
     )
 
-    item = only(collect_strict_divergences(structure, provider))
+    center_result, assembly = calculate_level_with_divergence_boundaries(
+        values,
+        0,
+        SourceKind.SEGMENT,
+        strength=provider,
+    )
+    structure = StrictStructureResult(
+        schema="chanlun-structure",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=(
+            StrictLevelResult(
+                structural_level=0,
+                units=values,
+                center_result=center_result,
+                trend_types=assembly.current_trends,
+                completed_trends=assembly.completed_trends,
+                decomposition_boundaries=assembly.decomposition_boundaries,
+            ),
+        ),
+    )
+
+    item = only(collect_formal_divergence_ledger(structure))
 
     assert item.kind == "consolidation"
     assert item.comparison_width == 3
@@ -210,23 +196,12 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
 
 
 def test_completed_trend_emits_trend_divergence_at_recursive_level():
-    structure, earlier, later = completed_trend_fixture(level=2)
-    item = only(
-        collect_strict_divergences(
-            structure,
-            strength_pair(earlier, later, decayed=True),
-        )
-    )
+    structure, _earlier, _later = completed_trend_fixture(level=2)
+    item = only(collect_formal_divergence_ledger(structure))
     assert item.kind == "trend"
     assert item.structural_level == 2
 
 
 def test_non_divergent_comparison_is_not_formal_evidence():
-    structure, earlier, later = completed_trend_fixture(level=1, decayed=False)
-    assert (
-        collect_strict_divergences(
-            structure,
-            strength_pair(earlier, later, decayed=False),
-        )
-        == ()
-    )
+    structure, _earlier, _later = completed_trend_fixture(level=1, decayed=False)
+    assert collect_formal_divergence_ledger(structure) == ()

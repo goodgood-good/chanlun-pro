@@ -1,5 +1,4 @@
-# App-owned QMT runtime helper.  It manages only the explicitly configured QMT
-# installation and never starts/stops the chanlun web process.
+﻿# 应用拥有的 QMT 运行时助手。只管理明确配置的 QMT 安装，不启动或停止缠论网页进程。
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -39,8 +38,7 @@ function Invoke-QmtLogRetention(
     [int]$RetentionDays,
     [long]$MaxTotalBytes
 ) {
-    # Delete only this helper's dated logs.  The current log is immutable for
-    # the duration of the invocation even when it alone exceeds the cap.
+    # 仅清理本助手带日期的日志。当前调用期间日志不可变，即使单个文件超过上限也保留。
     $currentFullPath = [IO.Path]::GetFullPath($CurrentLog)
     $cutoff = (Get-Date).Date.AddDays(-($RetentionDays - 1))
     $removedCount = 0
@@ -266,7 +264,7 @@ try {
             )
         }
     } catch {
-        # Diagnostic cleanup must never make QMT unavailable.
+        # 诊断清理不能导致 QMT 不可用。
         Write-QmtLog (
             'log retention warning: {0}: {1}' -f `
                 $_.Exception.GetType().Name,
@@ -307,8 +305,7 @@ try {
         )
         if ($launcher.Count -eq 0) {
             Write-QmtLog "starting QMT launcher: $resolvedExe"
-            # QMT is an interactive terminal; leave its window available to
-            # the signed-in user.  No credentials or account API are touched.
+            # QMT 是交互式终端，窗口需要留给已登录用户；这里不接触凭据或账户接口。
             Start-Process -FilePath $resolvedExe -WorkingDirectory $qmtDir -ErrorAction Stop | Out-Null
             $started = $true
         } else {

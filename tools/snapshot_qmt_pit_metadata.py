@@ -106,8 +106,8 @@ def _tree_hash(paths: Sequence[Path], *, root: Path) -> str:
 
 
 def _cninfo_headers() -> dict[str, str]:
-    # AkShare ships the official CNInfo request-code algorithm.  Evaluate it
-    # once in the main thread; py_mini_racer is not thread-safe on Windows.
+    # AkShare 自带巨潮资讯官方请求码算法。只在主线程计算一次，因为
+    # py_mini_racer 在 Windows 下不是线程安全的。
     from akshare.stock.stock_industry_cninfo import _get_file_content_ths
     import py_mini_racer
 
@@ -293,14 +293,11 @@ def _security_master(
             visibly_expired = status == 3 or "\u9000\u5e02" in name or name.endswith("\u9000")
             if visibly_expired:
                 if not sessions:
-                    # It cannot contribute a bar or be filled in this source
-                    # range.  Keep no guessed expiry in the certified scope.
+                # 它无法在本数据范围贡献 K 线或成交；认证范围内不保留猜测的到期日。
                     continue
                 last_observed = sessions[-1]
-                # The last available bar is not itself an effective-dated
-                # delisting notice.  Keep the member in subsequent coverage
-                # denominators and use the end-of-test known status only for
-                # terminal zero recovery.
+                # 最后一根可用 K 线本身不是带生效日期的退市公告。后续覆盖率分母中
+                # 仍保留该成员，仅在期末零值回收时使用测试结束时已知的状态。
                 listed_through = None
                 inferred_expired.append(
                     {"code": native, "last_observed_session": str(last_observed)}

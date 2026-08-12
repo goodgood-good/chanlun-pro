@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
-from chanlun.core.strict_structure.divergence import merge_formal_divergence_ledger
+from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     SourceKind,
@@ -98,7 +98,7 @@ def aware_confirmed_point(point_type="3buy"):
 
 
 def approaching_point(sequence=1):
-    point = aware_confirmed_point()
+    point = aware_confirmed_point("1buy")
     return replace(
         point,
         point_id=f"approaching-{sequence}",
@@ -114,15 +114,13 @@ def evidence_bundle(
     stroke_observations=None,
     confirmed_points=(),
     approaching_points=(),
-    divergences=(),
 ):
     formal = structure or empty_structure(
         with_level=bool(confirmed_points or approaching_points)
     )
-    divergences = merge_formal_divergence_ledger(
+    divergences = collect_formal_divergence_ledger(
         formal,
         confirmed_points,
-        divergences,
     )
     revision = build_strict_evidence_revision(
         symbol="SZ.000001",
@@ -165,18 +163,26 @@ def test_evidence_revision_excludes_approaching_only_changes():
     )
 
 
-def test_evidence_revision_and_atomic_bundle_include_independent_divergences():
+def test_atomic_bundle_rejects_independent_divergence():
     divergence = aware_confirmed_point("1buy").divergence
     assert divergence is not None
     base = evidence_bundle(structure=empty_structure(with_level=True))
-    changed = evidence_bundle(
-        structure=empty_structure(with_level=True),
+    revision = build_strict_evidence_revision(
+        symbol=base.symbol,
+        source_frequency=base.source_frequency,
+        price_basis_revision=base.price_basis_revision,
+        strict_config_revision=base.strict_config_revision,
+        structure=base.structure,
+        confirmed_points=base.confirmed_points,
         divergences=(divergence,),
     )
-    assert changed.divergences == (divergence,)
-    assert build_strict_evidence_revision(**base.formal_inputs) != (
-        build_strict_evidence_revision(**changed.formal_inputs)
-    )
+
+    with pytest.raises(ValueError, match="formal divergence ledger must exactly"):
+        replace(
+            base,
+            divergences=(divergence,),
+            structure_revision=revision,
+        )
 
 
 def test_evidence_revision_changes_for_formal_point_or_structure_change():
@@ -219,7 +225,7 @@ def test_atomic_bundle_requires_embedded_divergence_in_top_level_ledger():
         divergences=(),
     )
 
-    with pytest.raises(ValueError, match="embedded divergence is missing"):
+    with pytest.raises(ValueError, match="formal divergence ledger must exactly"):
         replace(
             base,
             divergences=(),

@@ -173,7 +173,7 @@ def _download_batch(
                 start_text=start_text,
                 end_text=end_text,
             )
-        except Exception as exc:  # QMT raises native client exceptions.
+        except Exception as exc:  # QMT 会抛出原生客户端异常。
             last_error = exc
             if attempt < retries:
                 time.sleep(min(2**attempt, 5))
@@ -234,8 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     records: dict[str, dict[str, object]] = (
         dict(raw_records) if isinstance(raw_records, dict) else {}
     )
-    # A failed batch stays resumable.  A legitimate zero-row result (for
-    # example, a newly listed code outside the requested range) is complete.
+    # 失败批次保持可续跑；合法的零行结果（例如新上市代码不在请求区间内）视为完成。
     completed = {code for code, row in records.items() if not row.get("error")}
     pending = tuple(code for code in codes if code not in completed)
     started = time.perf_counter()

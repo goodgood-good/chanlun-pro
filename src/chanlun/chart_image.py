@@ -53,9 +53,8 @@ def _epoch(value: datetime) -> int:
     if not isinstance(value, datetime):
         raise TypeError("chart timestamp must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
-        # Source adapters historically allowed naive Asia/Shanghai values.
-        # Matching them by wall-clock order is sufficient for this renderer;
-        # strict evidence itself remains timezone-aware and causally checked.
+    # 历史数据源适配器曾允许不带时区的上海时间值。该渲染器按墙上时钟顺序匹配即可；
+    # 严格证据本身仍带时区并经过因果校验。
         return int(value.replace(tzinfo=_CN).timestamp())
     return int(value.timestamp())
 

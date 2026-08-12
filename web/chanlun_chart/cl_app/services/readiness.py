@@ -237,8 +237,7 @@ class ReadinessRegistry:
                 and error is not None
                 and self._clock() - state["recorded_at"] >= self._tick_error_ttl
             ):
-                # Error details may age out, but a failed dependency remains
-                # not-ready until a real tick request succeeds.
+        # 错误详情可以随时间淘汰，但失败依赖在真实行情请求成功前始终保持未就绪。
                 state["error"] = None
                 error = None
 

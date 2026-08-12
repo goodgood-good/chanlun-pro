@@ -17,6 +17,7 @@ import pandas as pd
 
 from chanlun import fun
 from chanlun.core.cl import CL
+from chanlun.core.strict_structure.formal_state import current_formal_direction
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.trading_system.models import StructuralPoint
 from chanlun.decision_support.trading_system.runtime_config import (
@@ -65,13 +66,7 @@ def _aware_datetime(value: object) -> datetime:
 
 
 def _strict_direction(evidence: StrictEvidenceResult | None) -> str:
-    if evidence is None or not evidence.structure.levels:
-        return "neutral"
-    level = evidence.structure.levels[-1]
-    if level.trend_types:
-        return str(level.trend_types[-1].direction)
-    locked = tuple(unit for unit in level.units if unit.locked)
-    return "neutral" if not locked else str(locked[-1].direction)
+    return "neutral" if evidence is None else current_formal_direction(evidence)
 
 
 @dataclass

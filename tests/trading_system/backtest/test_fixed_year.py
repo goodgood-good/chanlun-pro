@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -23,7 +24,12 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
     load_qmt_frame,
 )
 from tests.trading_system.backtest.helpers import minute_bar
-from tests.trading_system.helpers import CN, confirmed_point, eligible_sector
+from tests.trading_system.helpers import (
+    CN,
+    confirmed_point,
+    eligible_sector,
+    valid_selection_research,
+)
 
 
 def test_symbol_bundle_keeps_recursive_small_to_large_points_tradable() -> None:
@@ -229,7 +235,7 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         volume="1000000",
     )
     evaluation = SparseEvaluationFact(observed_at, "neutral", event_bar)
-    sector = eligible_sector()
+    sector = replace(eligible_sector(), regime="supportive")
     facts = SymbolResearchFacts(
         schema=FACT_SCHEMA,
         algorithm_revision="sha256:" + "a" * 64,
@@ -294,13 +300,23 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         lambda *_args, **_kwargs: next(sources),
     )
 
+    blocked = run_sparse_portfolio(
+        (facts,),
+        {sector.sector_id: sector_facts},
+        initial_cash=Decimal("1000000"),
+        minute_timeline=(observed_at, *dates),
+    )
+
+    assert blocked.open_positions == ()
+    assert blocked.fills == ()
+
     run = run_sparse_portfolio(
         (facts,),
         {sector.sector_id: sector_facts},
         initial_cash=Decimal("1000000"),
         minute_timeline=(observed_at, *dates),
-        selection_sources_by_code={
-            facts.code: ("QMT_SECTOR_TRIGGER",),
+        selection_research_by_code={
+            facts.code: (valid_selection_research(),),
         },
     )
 
@@ -318,6 +334,90 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         time(15, 0),
         tzinfo=CN,
     )
+
+
+def test_sparse_portfolio_neutral_sector_cannot_be_promoted_by_research(
+    monkeypatch,
+) -> None:
+    """正式研究不能把中性板块静态回填成历史触发。"""
+
+    from chanlun.decision_support.trading_system.backtest import fixed_year
+
+    setup = confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9)
+    trigger = confirmed_point(
+        "1buy",
+        frequency="1m",
+        anchor=9.9,
+        minutes_after=5,
+    )
+    observed_at = trigger.available_at
+    evaluation = SparseEvaluationFact(
+        observed_at,
+        "neutral",
+        minute_bar(
+            opened_at=observed_at - timedelta(minutes=1),
+            raw_open="10.00",
+            raw_high="10.05",
+            raw_low="9.95",
+            raw_close="10.00",
+            analysis_open="10.00",
+            analysis_high="10.05",
+            analysis_low="9.95",
+            analysis_close="10.00",
+            previous_raw_close="10.00",
+            volume="1000000",
+        ),
+    )
+    sector = eligible_sector()
+    facts = SymbolResearchFacts(
+        schema=FACT_SCHEMA,
+        algorithm_revision="sha256:" + "a" * 64,
+        source_revision="sha256:" + "b" * 64,
+        code="SZ.000001",
+        sector_id=sector.sector_id,
+        requested_start=observed_at.date(),
+        requested_end=observed_at.date(),
+        effective_start=observed_at.date(),
+        row_counts=(("30m", 1), ("5m", 1), ("1m", 1)),
+        thirty_points=(),
+        five_points=(setup,),
+        one_points=(trigger,),
+        evaluations=(evaluation,),
+    )
+    sector_facts = SectorResearchFacts(
+        schema=SECTOR_FACT_SCHEMA,
+        algorithm_revision="sha256:" + "a" * 64,
+        source_revision="sha256:" + "c" * 64,
+        sector_id=sector.sector_id,
+        sector_name=sector.sector_name,
+        member_count=8,
+        row_count=1,
+        thirty_points=(),
+        assessments=((observed_at, sector),),
+    )
+    monkeypatch.setattr(
+        fixed_year,
+        "_active_minute_source",
+        lambda *_args, **_kwargs: fixed_year._ActiveMinuteSource(
+            frame=pd.DataFrame(),
+            dates=(),
+            previous_by_session={},
+            index=0,
+        ),
+    )
+
+    run = run_sparse_portfolio(
+        (facts,),
+        {sector.sector_id: sector_facts},
+        initial_cash=Decimal("1000000"),
+        minute_timeline=(observed_at,),
+        selection_research_by_code={
+            facts.code: (valid_selection_research(),),
+        },
+    )
+
+    assert run.fills == ()
+    assert run.open_positions == ()
 
 
 def test_relevant_setup_cannot_silently_accept_missing_qmt_one_minute_data(

@@ -569,9 +569,8 @@ def _delete_chart_cache_entry(cache_key: str) -> None:
     with cache_lock:
         chart_data_cache.pop(cache_key, None)
 
-    # A previous _set may still be writing this key asynchronously. Wait only
-    # for those rare same-key writes before deleting, otherwise a late writer
-    # could resurrect the unsafe snapshot after the unlink.
+    # 先前的设置操作可能仍在异步写入同一键；删除前只等待这种少见的同键写入，
+    # 否则延迟写入者会在删除后复活不安全快照。
     with _chart_cache_disk_lock:
         pending = [
             future
@@ -620,7 +619,7 @@ def _mark_chart_cache_validated(cache_key: str):
 _NEGATIVE_CACHE_TTL_SECONDS = 300.0
 # 异常空(数据源暂时不可用,如 cq 分段拉取失败返回 attrs['fetch_incomplete'])用短退避,与
 # "真空(新股/退市,真没数据)"的 300s 区分:真空 5min 抑制防无限重拉;异常空 30s 快速自愈,不被
-# 5min 抑制卡住恢复(C1+M3 协同,审查 M3)。
+# 避免五分钟抑制阻碍恢复。
 _TRANSIENT_NEGATIVE_TTL_SECONDS = 30.0
 # value = (mark_ts, ttl)：每项按各自 ttl 独立失效,支持真空/异常空并存于同一表。
 _NEGATIVE_CACHE_MAX_SIZE = 500
@@ -646,7 +645,7 @@ def _mark_negative_cache(cache_key: str, ttl: float = _NEGATIVE_CACHE_TTL_SECOND
     """Record a negative result while enforcing a strict oldest-first capacity."""
     now = time.time()
     with _negative_cache_lock:
-        # Reinsert existing keys so dict insertion order reflects the latest mark.
+        # 重新插入已有键，使字典插入顺序反映最新标记。
         _negative_cache.pop(cache_key, None)
         _negative_cache[cache_key] = (now, ttl)
         stale = [
@@ -665,7 +664,7 @@ def _klines_fetch_incomplete(klines) -> bool:
     """cq 源级完整性闸门信号：拉取带洞时返回空 DataFrame 且 attrs['fetch_incomplete']=True(C1)。
 
     web 层据此走短退避(_TRANSIENT_NEGATIVE_TTL_SECONDS)而非真空 5min 负缓存,避免数据源暂时失败
-    被当真空抑制 5min 不自愈(M3)。回测/monitor 不查此标记,klines 契约不变。
+    被当作真实空数据抑制五分钟而无法自愈。回测与监控不读取此标记，K 线契约不变。
     """
     attrs = getattr(klines, "attrs", None)
     return bool(attrs) and attrs.get("fetch_incomplete") is True

@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
-    TradingEngine,
+    _TechnicalSignalEvaluator,
 )
 from chanlun.decision_support.trading_system.models import TradingPolicy
 from chanlun.decision_support.trading_system.structure_adapter import (
@@ -60,7 +60,7 @@ def test_empty_strict_snapshot_stays_empty_on_every_frequency() -> None:
     assert _mapped("1m", ()) == ()
 
 
-def test_first_center_policy_filters_entry_without_mutating_signal_ledger() -> None:
+def test_later_center_three_buy_uses_the_same_execution_logic() -> None:
     later_three_buy = replace(
         strict_point("3buy"),
         center_ordinal=2,
@@ -85,14 +85,9 @@ def test_first_center_policy_filters_entry_without_mutating_signal_ledger() -> N
         opposite_points=(),
     )
 
-    [strict_decision] = TradingEngine().evaluate_symbol(bundle)
-    [relaxed_decision] = TradingEngine(
-        TradingPolicy(first_center_three_buy_only=False)
-    ).evaluate_symbol(bundle)
+    [decision] = _TechnicalSignalEvaluator(TradingPolicy()).evaluate_symbol(bundle)
 
     assert five[0].center_ordinal == 2
-    assert strict_decision.entry is not None
-    assert strict_decision.entry.allowed is False
-    assert "three_buy_not_first_center" in strict_decision.entry.reason_codes
-    assert relaxed_decision.entry is not None
-    assert relaxed_decision.entry.allowed is True
+    assert decision.entry is not None
+    assert decision.entry.allowed is True
+    assert "three_buy_not_first_center" not in decision.entry.reason_codes

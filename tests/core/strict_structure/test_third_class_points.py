@@ -4,7 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 from chanlun.core.strict_structure.identity import build_center_id
+from chanlun.core.strict_structure.center_machine import close_center_at_divergence
+from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
+    DivergenceEvidence,
     SourceKind,
     StrictPointStatus,
     StrictPointVariant,
@@ -16,6 +19,7 @@ from tests.core.strict_structure.helpers import (
     engine_for,
     only_point,
     ongoing_center,
+    unit,
 )
 
 
@@ -47,6 +51,54 @@ def test_completed_down_center_emits_symmetric_three_sell():
     assert point.variant is StrictPointVariant.BOUNDARY_TOUCH
     assert point.anchor_unit_id == completed.completion_return_unit.unit_id
     assert point.confirmed_at == completed.completed_at
+
+
+def test_later_divergence_boundary_cannot_rewrite_confirmed_third_point():
+    completed = completed_up_center(return_low_tick=120, zg_tick=115)
+    engine = engine_for(completed)
+    before = only_point(engine.third_class_points())
+    leave = completed.completion_leave_unit
+    ret = completed.completion_return_unit
+    assert leave is not None and ret is not None
+    terminal = unit(6, "up", ret.end_tick, ret.end_tick + 30)
+    compare_ids = tuple(item.unit_id for item in completed.body_units[:3])
+    signal_ids = (leave.unit_id, ret.unit_id, terminal.unit_id)
+    divergence = DivergenceEvidence(
+        divergence_id=stable_structure_id(
+            "chanlun-strict-divergence",
+            completed.price_basis_revision,
+            completed.structural_level,
+            completed.source_kind.value,
+            "consolidation",
+            "up",
+            compare_ids,
+            signal_ids,
+        ),
+        structural_level=completed.structural_level,
+        source_kind=completed.source_kind,
+        price_basis_revision=completed.price_basis_revision,
+        kind="consolidation",
+        direction="up",
+        compare_unit_id=compare_ids[-1],
+        signal_unit_id=terminal.unit_id,
+        anchor_at=terminal.market_end,
+        anchor_tick=terminal.high_tick,
+        confirmed_at=terminal.confirmed_at,
+        available_at=terminal.available_at,
+        price_extreme_confirmed=True,
+        histogram_area_decayed=True,
+        histogram_peak_decayed=False,
+        dif_extreme_decayed=False,
+        strength_source="macd",
+        compare_leg_unit_ids=compare_ids,
+        signal_leg_unit_ids=signal_ids,
+    )
+    closed = close_center_at_divergence(completed, divergence)
+    after = engine._third_class_point(closed, direction="up", ordinal=1)
+
+    assert closed.available_at > completed.available_at
+    assert after is not None
+    assert after == before
 
 
 def test_ongoing_center_never_emits_formal_third_class_point():

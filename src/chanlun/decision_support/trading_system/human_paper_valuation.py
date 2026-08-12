@@ -954,9 +954,8 @@ def audit_human_paper_valuation_evidence(
         "equity_curve_available": curve_available,
         "performance_evaluable": False,
         "source_provenance_available": source_provenance_available,
-        # Point provenance and curve continuity are separate verdicts.  A
-        # missing/mismatched forward anchor closes the curve, but it does not
-        # retroactively make an otherwise source-verified close mark untrue.
+        # 点位来源与曲线连续性是两个独立结论。前向锚点缺失或不匹配会关闭整条曲线，
+        # 但不会追溯性地否定其他已经通过来源校验的收盘标记。
         "source_provenance_verified": source_provenance_verified,
         "curve_continuity_status": continuity["status"],
         "forward_anchor_available": continuity["forward_anchor_available"],
@@ -973,9 +972,8 @@ def audit_human_paper_valuation_evidence(
             "verified_forward_anchor_count"
         ],
         "points": points,
-        # Individually verified points remain available for diagnostics, but a
-        # broken later alias invalidates the curve as a whole.  Never expose an
-        # older point through the convenient ``latest`` field in that state.
+        # 单独验证过的点仍可用于诊断，但后续别名断裂会使整条曲线失效；
+        # 此时绝不能通过便捷的 ``latest`` 字段暴露旧点。
         "latest": points[-1] if curve_available else None,
         "invalid_evidence": invalid,
         "source_unverified_evidence": source_unverified,

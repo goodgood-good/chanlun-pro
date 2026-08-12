@@ -137,8 +137,7 @@ def dispatch_gateway_request(
             "assessments": assessments,
             "members": members,
             "changed_bars": changed_bars,
-            # Names do not participate in ranking or decisions.  Load them
-            # lazily only for emitted review rows.
+    # 名称不参与排名或决策，仅在输出复核记录时延迟加载。
             "symbol_names": {},
             "minimum_market_data_frequency": "1m",
             "tick_data_used": False,
@@ -224,10 +223,9 @@ def _build_gateway(connection: Connection, request_id: list[str | None]) -> _Gat
         identity = request_id[0]
         if identity is None:
             return
-        # The gateway deliberately catches ordinary ``Exception`` values as
-        # per-sector data failures.  ``_ParentDisconnected`` derives directly
-        # from BaseException so a dead parent cannot be mistaken for 66
-        # independent sector errors while the orphan keeps reading QMT.
+            # 网关有意把普通 ``Exception`` 当作单个行业的数据失败处理。
+            # ``_ParentDisconnected`` 直接继承 BaseException，避免父进程死亡被误判为
+            # 66 个相互独立的行业错误，而孤儿进程仍继续读取 QMT。
         _send_to_parent(
             connection,
             {

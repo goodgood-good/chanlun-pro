@@ -368,7 +368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dividend_type="none",
                 fill_data=False,
             )
-        except Exception as exc:  # QMT raises native client exceptions.
+        except Exception as exc:  # QMT 会抛出原生客户端异常。
             failure = {
                 "first_code": str(chunk[0]["code"]),
                 "batch_size": len(chunk),

@@ -2309,11 +2309,9 @@ def _buy_ohlcv_terminal_execution_action(
         raw_high=raw_high,
         raw_low=raw_low,
     )
-    # No-chase is a price-path verdict, not a liquidity inference.  Once a
-    # completed eligible bar is wholly above the attested cap, even zero
-    # reported volume proves that this optional order must not remain alive
-    # waiting for a later cheaper bar.  Capacity is required only to infer a
-    # fill from OHLCV.
+    # 不追价是价格路径判定，不是流动性推断。一旦合格已完成 K 线整体高于认证上限，
+    # 即使报告成交量为零，也能证明该可选订单不得继续等待更便宜的后续 K 线；
+    # 只有从 OHLCV 推断成交时才需要容量。
     if raw_low > limit_price:
         return "PRICE_CAP_REJECT"
     if (
@@ -2381,9 +2379,8 @@ def build_human_paper_intent(
         and ranking is not None
     )
     if exact_sector_selection_required:
-        # Keep this check in the shared decision/ledger core as well as the
-        # page service.  A direct caller may not bypass the exact QMT catalog
-        # gate merely by avoiding the web endpoint.
+        # 该检查必须同时存在于共享决策/账本核心和页面服务中；直接调用者不能仅通过
+        # 绕开网页端点规避精确 QMT 目录闸门。
         if entry_selection_evidence is None:
             return None
         if (
@@ -2438,10 +2435,8 @@ def build_human_paper_intent(
         role_unclassified_sell and feedback.level_judgement == "5M"
     )
     if side != program_side:
-        # Reviewers may disagree with a coarse program clue and that judgement
-        # remains valuable feedback.  It must not, however, turn a sell-source
-        # candidate into a virtual buy (or vice versa) without a matching
-        # source structure and causal execution boundary.
+        # 复核者可以不同意粗粒度程序线索，这仍是有价值的反馈；但没有匹配的源结构和
+        # 因果执行边界时，不能把卖出来源候选变成虚拟买入，反之亦然。
         status = "OBSERVATION_ONLY"
         reasons = (
             "HUMAN_POINT_SIDE_CONTRADICTS_PROGRAM_CLUE",
@@ -2454,42 +2449,35 @@ def build_human_paper_intent(
             expected_level_reason,
         )
     elif feedback.trend_judgement == "UNCERTAIN":
-        # The human-assisted contract delegates trend-type recognition to the
-        # reviewer.  Center and level alone therefore cannot authorize even a
-        # virtual observation fill while the trend type remains unresolved.
+        # 人工辅助契约把走势类型识别交给复核者；走势类型未解析时，仅凭中枢和级别
+        # 甚至不能授权虚拟观测成交。
         status = "OBSERVATION_ONLY"
         reasons = (
             "HUMAN_TREND_TYPE_CONFIRMATION_INCOMPLETE",
             "HUMAN_CONFIRM_TREND_TYPE_BEFORE_VIRTUAL_INTENT",
         )
     elif signal_lifecycle_terminal:
-        # One immutable buy/sell point may have only one terminal paper
-        # outcome.  Reusing it after a completed strategic cycle would turn
-        # an old structure into a new entry without a new source point.
+        # 一个不可变买卖点只能对应一个终态虚拟结果；策略周期完成后复用它，会在没有
+        # 新源点的情况下把旧结构变成新入场。
         status = "OBSERVATION_ONLY"
         reasons = (
             "SIGNAL_LIFECYCLE_ALREADY_CONSUMED",
             "NEW_STRUCTURE_REQUIRED_FOR_NEW_VIRTUAL_CYCLE",
         )
     elif tactical_review:
-        # This diagnostic book always trades one A-share lot.  The frozen
-        # tactical target is floor_to_lot(Q_CYCLE * 0.25), which is zero for
-        # a 100-share cycle.  Letting a 5m signal trade 100 shares would sell
-        # the 30m core or increase Q_CYCLE, both explicitly forbidden by the
-        # strategy contract.  Keep the human judgement, but do not create an
-        # executable paper intent until a real batch ledger exists.
+        # 诊断账本始终交易一手 A 股。冻结战术目标为向下取整到整手的
+        # ``Q_CYCLE * 0.25``，对 100 股周期结果为零。若允许 5m 信号交易 100 股，
+        # 会卖掉 30m 核心仓位或扩大 Q_CYCLE，二者均被策略契约明确禁止。在真实批次
+        # 账本存在前保留人工判断，但不创建可执行虚拟意图。
         status = "OBSERVATION_ONLY"
         reasons = (
             "FIXED_ONE_LOT_TACTICAL_TARGET_BELOW_TRADING_UNIT",
             "TACTICAL_REVIEW_OBSERVATION_ONLY",
         )
     elif is_buy and MONITOR_ONLY_WARNING_CODE in alert.warning_codes:
-        # Watchlists, previous signals and virtual holdings remain in the same
-        # human-review queue so an operator can inspect them and preserve exit
-        # continuity. They are not a current QMT sector trigger, however, and
-        # human feedback must not turn that monitoring supplement into a new
-        # strategic entry. The warning is part of the alert candidate hash and
-        # is derived from the validated live selection scope.
+        # 自选、历史信号和虚拟持仓保留在同一人工复核队列，便于检查并维持退出连续性；
+        # 但它们不是当前 QMT 板块触发，人工反馈不得把监听补充转成新策略入场。该警告
+        # 属于提醒候选哈希的一部分，来源于已校验实时选股范围。
         status = "OBSERVATION_ONLY"
         reasons = (
             "BUY_NOT_TRIGGERED_BY_CURRENT_QMT_SECTOR",
@@ -2520,10 +2508,8 @@ def build_human_paper_intent(
             "WARMUP_CONVERGENCE_GATE_FAILED",
         )
     ):
-        # Warmup is a data-sufficiency boundary rather than an interpretive
-        # Chanlun judgement.  A reviewer may classify the clue, but cannot
-        # make an unstable prefix causally suitable for a new virtual entry.
-        # Existing-position exits deliberately bypass this branch.
+        # 预热是数据充分性边界，不是解释性的缠论判断。复核者可分类线索，但不能让
+        # 不稳定前缀在因果上适合新虚拟入场；已有持仓退出有意绕过此分支。
         status = "OBSERVATION_ONLY"
         reasons = (
             "WARMUP_CONVERGENCE_REQUIRED_FOR_VIRTUAL_ENTRY",
@@ -2559,10 +2545,9 @@ def build_human_paper_intent(
         and _earliest_causal_one_minute_bar_close(feedback.reviewed_at)
         > alert.entry_valid_until
     ):
-        # A review made after the current minute opened cannot causally claim
-        # that bar's open.  If the next whole 1m bar would close after the
-        # frozen locator TTL, the optional entry is impossible at creation
-        # time and must not linger as a misleading PENDING intent.
+        # 当前分钟开盘后完成的复核不能在因果上使用该 K 线开盘价。若下一根完整 1m K 线
+        # 收盘会超过冻结定位点有效期，可选入场在创建时即不可能，不得以误导性的
+        # PENDING 意图继续存在。
         status = "OBSERVATION_ONLY"
         reasons = (
             "NO_CAUSAL_1M_EXECUTION_BAR_REMAINS_BEFORE_TTL",
@@ -3522,10 +3507,8 @@ def _settle_human_paper_intents_unlocked(
             lots_by_symbol.setdefault(str(intent["symbol"]), []).append(
                 [bar.closed_at.date(), quantity]
             )
-    # The operations decision is recorded only after every independently
-    # provable historical fill/rejection.  The same ledger lock covers both
-    # phases, so a concurrent reviewer cannot re-open or replace the failed
-    # optional BUY between settlement and cancellation.
+    # 只有所有可独立证明的历史成交或拒绝处理完后才记录运行决策。同一账本锁覆盖两个
+    # 阶段，因此并发复核者不能在结算与取消之间重新打开或替换失败的可选买入。
     for cancellation in sorted(
         operations_cancellations,
         key=lambda value: (value.cancelled_at, value.intent_id),
@@ -5364,8 +5347,7 @@ def audit_human_paper_portfolio_rejection_evidence(
             "live_status": "LIVE_DISABLED",
         }
 
-    # Reuse the exact-fill verifier for the shared immutable market/fact
-    # contract.  These rows exist only in memory and never enter the ledger.
+    # 复用精确成交校验器验证共享不可变行情/事实契约；这些记录只存在于内存，不写入账本。
     synthetic_fills = tuple(
         {
             "kind": "FILL",
@@ -5385,10 +5367,8 @@ def audit_human_paper_portfolio_rejection_evidence(
         }
         for value in rejections
     )
-    # The shared verifier also proves the BUY boundary against the originating
-    # intent.  Keep those immutable intent rows in the synthetic audit stream;
-    # passing only the fabricated fill rows would make every legitimate
-    # capital rejection fail with ``fill intent is unavailable``.
+    # 共享校验器还会依据原始意图证明买入边界，因此合成审计流必须保留不可变意图记录；
+    # 若只传入构造的成交记录，所有合法资金拒绝都会因“成交意图不可用”而失败。
     intent_events = tuple(
         event
         for event in events
@@ -5422,10 +5402,8 @@ def audit_human_paper_portfolio_rejection_evidence(
         and isinstance(event.get("payload"), Mapping)
     }
 
-    # The shared verifier proves the selected bar.  This pass proves it was
-    # not selected after an earlier eligible 1m bar in that same snapshot and
-    # that every open-position mark came from the exact same completed 1m
-    # interval and immutable instrument-fact snapshot.
+    # 共享校验器证明选中 K 线；本轮还证明同一快照中不存在更早合格 1m K 线，并确认
+    # 每个开放持仓盯市都来自完全相同的已完成 1m 区间和不可变标的事实快照。
     for rejection in rejections:
         rejection_id = str(rejection.get("rejection_id") or "")
         if rejection_id in invalid_ids | missing_ids:
@@ -5739,8 +5717,7 @@ def _continuity_evidence_for_intent(
                 is not True
                 or audit.get("status") != "COMPLETE"
             ):
-                # Optional BUY data/security failures are terminal operations
-                # cancellations.  Remaining pending is therefore a gap.
+                # 可选买入的数据或安全失败属于终态运行取消；仍为待处理即表示存在缺口。
                 terminal_outcome_proven = True
                 continue
             earliest = normalize_datetime(

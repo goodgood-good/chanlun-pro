@@ -1,10 +1,8 @@
-"""Point-in-time, sector-first A-share scope for the strict strategy individual path.
+"""严格策略个股路径使用的时点板块优先 A 股范围。
 
-The live QMT GICS catalog is useful for a prospective screen, but it has no
-effective-dated history.  Historical strict strategy evaluation therefore uses the QMT
-security master together with CNInfo SW1 membership changes captured in
-``PITMetadataSnapshot``.  This module is deliberately selection-only: it does
-not create a technical signal, a research adjudication, or an order.
+QMT 实时 GICS 目录只适合前瞻筛选，没有带生效日期的历史。历史评估因此使用
+``PITMetadataSnapshot`` 中的 QMT 证券主数据和巨潮 SW1 成分变更。本模块只负责
+选股范围，不生成技术信号、研究结论或订单。
 """
 
 from __future__ import annotations
@@ -128,7 +126,7 @@ class SectorFirstScope:
                 "POINT_IN_TIME_SECTOR_MEMBERS",
                 "INDIVIDUAL_THREE_PROGRAM",
                 "MARKET_SECTOR_SYMBOL_HIGHER_TIMEFRAME_RISK",
-                "DIRECT_RECURSIVE_30M_5M_1M_TECHNICAL_ENTRY",
+                "PHYSICAL_5M_SETUP_1M_TRIGGER_UNIFIED_POINT_CLASSES",
                 "SHARED_PORTFOLIO_AND_EXECUTION_CORE",
             ),
         }

@@ -108,7 +108,7 @@ class TradingViewClientScreenshotRenderer:
         code: str,
         name: str,
     ) -> Sequence[Mapping[str, object]]:
-        del name  # The authenticated page resolves the canonical display name.
+        del name  # 已认证页面用于解析规范展示名称。
         cookie = str(self._session_cookie_provider() or "")
         if not cookie:
             raise RuntimeError("TradingView capture session is unavailable")

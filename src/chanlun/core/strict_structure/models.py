@@ -581,7 +581,7 @@ class TrendCenter:
 
         if self.source_kind is SourceKind.TREND_TYPE:
             return self.initial_units[-1]
-        if self.establishment_unit is None:  # guarded by ``__post_init__``
+        if self.establishment_unit is None:  # 由 ``__post_init__`` 保护
             raise ValueError("physical center maturity evidence is missing")
         return self.establishment_unit
 
@@ -592,7 +592,7 @@ class TrendCenter:
         if self.source_kind is SourceKind.TREND_TYPE:
             return self.initial_units
         maturity = self.establishment_unit
-        if maturity is None:  # guarded by ``__post_init__``; keeps typing exact
+        if maturity is None:  # 由 ``__post_init__`` 保护，同时保持精确类型
             return ()
         return (self.entry_unit, *self.initial_units, maturity)
 
@@ -643,6 +643,28 @@ class TrendCenter:
             and self.completion_return_unit is not None
             and self.completed_at is not None
         )
+
+    @property
+    def completion_available_at(self) -> datetime | None:
+        """返回三类点首次完成时的不可变可见时间。
+
+        中枢随后可能因一类点背驰边界改为 ``DIVERGENCE_CLOSED``，此时中枢自身
+        的 ``available_at`` 会覆盖新的边界证据，但不能反向改写此前三类点的
+        首次可见时间。
+        """
+
+        leave = self.completion_leave_unit
+        ret = self.completion_return_unit
+        if leave is None or ret is None or self.completed_at is None:
+            return None
+        evidence = (
+            self.entry_unit,
+            *self.establishment_units,
+            *self.body_units,
+            leave,
+            ret,
+        )
+        return max(self.completed_at, *(item.available_at for item in evidence))
 
     @property
     def tradable(self) -> bool:
@@ -752,6 +774,28 @@ class CenterPreview:
             raise ValueError(
                 "trend-type preview has no physical fifth establishment unit"
             )
+
+    @property
+    def formal_center_id(self) -> str | None:
+        """返回该预览锁定后将采用的正式中枢身份。
+
+        触碰型预览没有有效价格区间，永远不能提升为正式中枢。其余预览与
+        正式中枢共用完全相同的种子身份，盘中候选因此可以保留到确认阶段的
+        精确中枢血缘，而不需要由选股层重新拼装另一套身份。
+        """
+
+        if self.zd_tick is None or self.zg_tick is None:
+            return None
+        return build_center_id(
+            price_basis_revision=self.price_basis_revision,
+            structural_level=self.structural_level,
+            source_kind=self.source_kind.value,
+            entry_unit_id=self.entry_unit_id,
+            initial_unit_ids=self.unit_ids[: center_seed_size(self.source_kind)],
+            establishment_unit_id=self.establishment_unit_id,
+            zd_tick=self.zd_tick,
+            zg_tick=self.zg_tick,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1458,6 +1502,35 @@ class StrictLevelResult:
             )
             if any(unit_id not in units_by_id for unit_id in referenced):
                 raise ValueError("center preview references a missing level unit")
+            if preview.state is CenterPreviewState.COMPLETED:
+                seed_width = center_seed_size(preview.source_kind)
+                if (
+                    preview.formal_center_id is None
+                    or len(preview.unit_ids) < seed_width
+                    or (
+                        preview.source_kind is SourceKind.SEGMENT
+                        and preview.establishment_unit_id is None
+                    )
+                ):
+                    raise ValueError("已完成中枢预览缺少正式成立种子")
+                lifecycle_ids = (
+                    preview.entry_unit_id,
+                    *preview.unit_ids,
+                    *(
+                        ()
+                        if preview.establishment_unit_id is None
+                        else (preview.establishment_unit_id,)
+                    ),
+                    preview.completion_leave_unit_id,
+                    preview.completion_return_unit_id,
+                )
+                lifecycle_units = tuple(
+                    units_by_id[unit_id]
+                    for unit_id in lifecycle_ids
+                    if unit_id is not None
+                )
+                if all(unit.locked for unit in lifecycle_units):
+                    raise ValueError("全锁定中枢必须提升为正式证据而非保留预览")
         for event in self.center_result.events:
             if event.center_id not in centers_by_id or any(
                 unit_id is not None and unit_id not in units_by_id
@@ -1732,6 +1805,63 @@ class StrictEvidenceResult:
         if len({point.point_id for point in all_points}) != len(all_points):
             raise ValueError("confirmed and approaching point ids must be disjoint")
         confirmed_by_id = {point.point_id: point for point in self.confirmed_points}
+        # 延迟导入避免模型定义与纯规则模块形成加载环。盘中三类点必须能够从
+        # 当前严格中枢/预览账本完整重放，调用方不能自行拼装第二套三类点逻辑。
+        from chanlun.core.strict_structure.point_rules import (
+            approaching_third_class_points,
+        )
+
+        expected_approaching_thirds = {
+            point.point_id: point
+            for level in self.structure.levels
+            for point in approaching_third_class_points(
+                level,
+                price_quantum=self.structure_price_quantum,
+            )
+        }
+        actual_approaching_thirds = {
+            point.point_id: point
+            for point in self.approaching_points
+            if point.point_type in {"3buy", "3sell"}
+        }
+        if actual_approaching_thirds != expected_approaching_thirds:
+            raise ValueError("盘中三类点必须精确重放严格中枢账本")
+        for point in self.approaching_points:
+            if point.point_type not in {"2buy", "2sell"}:
+                if point.parent_point_id is not None:
+                    raise ValueError("only second-class points may reference a parent")
+                continue
+            parent = confirmed_by_id.get(point.parent_point_id)
+            expected_parent_type = "1buy" if point.side == "buy" else "1sell"
+            if (
+                parent is None
+                or parent.point_type != expected_parent_type
+                or parent.side != point.side
+                or parent.available_at > point.available_at
+            ):
+                raise ValueError("approaching second-class parent is unresolved")
+            is_small_to_large = "small_to_large_reversal" in point.evidence_codes
+            if is_small_to_large:
+                if (
+                    parent.structural_level >= point.structural_level
+                    or tuple(point.related_point_ids) != (parent.point_id,)
+                ):
+                    raise ValueError(
+                        "approaching small-to-large evidence graph is incomplete"
+                    )
+                self._validate_small_to_large_second(
+                    point,
+                    parent,
+                    levels_by_number,
+                    approaching=True,
+                )
+            elif (
+                parent.structural_level != point.structural_level
+                or point.related_point_ids
+            ):
+                raise ValueError(
+                    "approaching ordinary second-class parent must be same-level"
+                )
         for point in self.confirmed_points:
             related = []
             for related_id in point.related_point_ids:
@@ -1817,11 +1947,54 @@ class StrictEvidenceResult:
             )
             if item is not None
         )
-        if any(
-            divergence_by_id.get(item.divergence_id) != item
-            for item in embedded_divergences
-        ):
-            raise ValueError("embedded divergence is missing from the formal ledger")
+        embedded_by_id: dict[str, DivergenceEvidence] = {}
+        for item in embedded_divergences:
+            previous = embedded_by_id.setdefault(item.divergence_id, item)
+            if previous != item:
+                raise ValueError("embedded divergence id maps to conflicting evidence")
+        if divergence_by_id != embedded_by_id:
+            raise ValueError(
+                "formal divergence ledger must exactly match embedded evidence"
+            )
+        boundaries = tuple(
+            boundary
+            for level in self.structure.levels
+            for boundary in level.decomposition_boundaries
+        )
+        first_points_by_divergence: dict[str, list[StrictPointEvidence]] = {}
+        for point in self.confirmed_points:
+            if point.point_type not in {"1buy", "1sell"}:
+                continue
+            if point.divergence is None:
+                raise ValueError("一类点缺少正式背驰证据")
+            first_points_by_divergence.setdefault(
+                point.divergence.divergence_id,
+                [],
+            ).append(point)
+        boundary_divergence_ids = {
+            boundary.divergence.divergence_id for boundary in boundaries
+        }
+        if not boundary_divergence_ids.issubset(first_points_by_divergence):
+            raise ValueError("每个同级背驰边界必须唯一对应一个一类点")
+        for boundary in boundaries:
+            matches = first_points_by_divergence[boundary.divergence.divergence_id]
+            expected_type = (
+                "1buy" if boundary.divergence.direction == "down" else "1sell"
+            )
+            if len(matches) != 1:
+                raise ValueError("每个同级背驰边界必须唯一对应一个一类点")
+            point = matches[0]
+            if (
+                point.point_type != expected_type
+                or point.structural_level != boundary.structural_level
+                or point.source_kind is not boundary.source_kind
+                or point.center_id != boundary.terminal_center_id
+                or point.anchor_unit_id != boundary.anchor_unit_id
+                or point.anchor_at != boundary.anchor_at
+                or point.anchor_tick != boundary.anchor_tick
+                or point.divergence != boundary.divergence
+            ):
+                raise ValueError("一类点必须保留其同级背驰边界的精确血缘")
         expected_revision = build_strict_evidence_revision(
             symbol=self.symbol,
             source_frequency=self.source_frequency,
@@ -1876,6 +2049,8 @@ class StrictEvidenceResult:
         point,
         parent,
         levels_by_number,
+        *,
+        approaching: bool = False,
     ) -> None:
         """从冻结的递归图中重建小转大二类点的同一套三段证明。"""
 
@@ -1894,10 +2069,30 @@ class StrictEvidenceResult:
             if point.side == "buy"
             else signal.high_tick == parent.anchor_tick
         )
+        if approaching:
+            source_level = levels_by_number.get(point.structural_level - 1)
+
+            def ready(unit) -> bool:
+                if unit.locked:
+                    return True
+                if source_level is None:
+                    return False
+                matches = tuple(
+                    trend
+                    for trend in source_level.trend_types
+                    if trend.trend_id == unit.unit_id
+                )
+                return len(matches) == 1 and matches[0].complete
+
+            carrier_locks_valid = (
+                ready(signal) and ready(rebound) and not pullback.locked
+            )
+        else:
+            carrier_locks_valid = (
+                signal.locked and rebound.locked and pullback.locked
+            )
         if (
-            not signal.locked
-            or not rebound.locked
-            or not pullback.locked
+            not carrier_locks_valid
             or signal.direction != expected_signal
             or signal.market_end != parent.anchor_at
             or signal.end_tick != parent.anchor_tick
@@ -1948,33 +2143,20 @@ class StrictEvidenceResult:
         """重放相邻级别之间的精确生产递归关系。"""
 
         # 延迟导入用于避免 models -> adapter/decomposition -> models 循环依赖。
-        from chanlun.core.strict_structure.same_level_decomposition import (
-            combine_same_level_trends,
+        from chanlun.core.strict_structure.unit_adapter import (
+            build_recursive_unit_stream,
         )
-        from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
 
         for level_number in range(1, len(self.structure.levels)):
             previous = self.structure.levels[level_number - 1]
             current = self.structure.levels[level_number]
-            locked_trends = tuple(
-                trend
-                for trend in previous.trend_types
-                if trend.state is TrendState.LOCKED
-            )
-            source_units = tuple(trend_type_to_unit(trend) for trend in locked_trends)
-            oscillatory_ids = frozenset(
-                trend.trend_id
-                for trend in locked_trends
-                if trend.kind is TrendKind.CONSOLIDATION
-            )
             protected_ids = frozenset(
                 boundary.left_trend_id for boundary in previous.decomposition_boundaries
             )
-            expected = combine_same_level_trends(
-                source_units,
-                oscillatory_ids,
+            expected, _oscillatory_ids = build_recursive_unit_stream(
+                previous.trend_types,
                 protected_ids,
-            ).units
+            )
             if current.units != expected:
                 raise ValueError(
                     "recursive level units must exactly replay prior locked trends"

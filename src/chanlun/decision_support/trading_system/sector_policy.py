@@ -19,13 +19,8 @@ def assess_sector(
 ) -> SectorAssessment:
     if market_data_source not in {
         "qmt_gics3_component_composite",
-        # Canonical QMT median-return composite used by the page, forward
-        # paper path and the current-membership research replay.
+        # 页面、前向模拟和当前成分研究回放共用的规范 QMT 收益率中位数组合。
         "qmt-gics3-composite",
-        # User-authorized recent-year research variant.  The distinct source
-        # identity keeps current-constituent backfill visible in every hash
-        # and report; it remains RESEARCH_ONLY / LIVE_DISABLED.
-        "qmt-gics3-current-backfill-composite",
         "qmt-sw1-pit-composite",
     }:
         return SectorAssessment(

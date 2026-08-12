@@ -136,9 +136,8 @@ class QMTLocalKlineAudit:
     selected_record_count: int
     first_at: datetime | None
     last_at: datetime | None
-    # Physical file boundaries are separate from ``first_at`` / ``last_at``.
-    # The latter describe only the caller-selected window, while these fields
-    # bind the complete QMT file coverage into the audit identity.
+        # 物理文件边界与 ``first_at`` / ``last_at`` 相互独立；后两者只描述调用方
+        # 选取的窗口，而这里的字段会把完整 QMT 文件覆盖范围绑定到审计标识中。
     source_first_at: datetime | None = None
     source_last_at: datetime | None = None
     schema: str = QMT_LOCAL_CACHE_SCHEMA
@@ -204,10 +203,9 @@ def read_qmt_local_kline(
             source_last_at=None,
         )
 
-    # QMT may append to or replace a cache file while the terminal is alive.
-    # Parsing through a memmap and hashing the path afterwards can therefore
-    # bind the returned bars to a different file generation.  Read once and
-    # derive geometry, physical boundaries and SHA256 from those exact bytes.
+    # QMT 终端运行期间可能追加或替换缓存文件。因此，先用内存映射解析、再按路径
+    # 计算哈希，可能会把返回的 K 线绑定到另一代文件。这里一次性读取字节，并从
+    # 同一份字节推导结构、物理边界和 SHA256。
     payload = path.read_bytes()
     size = len(payload)
     if (
@@ -274,8 +272,8 @@ def read_qmt_local_kline(
             raise QMTLocalCacheFormatError(
                 f"QMT kline contains invalid OHLCV records in requested range: {path}"
             )
-        # QMT stores A-share volume in lots in the local fixed record while
-        # xtdata exposes shares.  Preserve the public API's raw-volume unit.
+    # QMT 本地定长记录以“手”保存 A 股成交量，而 xtdata 对外暴露“股”；
+    # 这里保持公共接口原始成交量的单位。
         frame = pd.DataFrame(
             {
                 "time": timestamps * 1000,
@@ -315,13 +313,11 @@ def read_qmt_local_kline(
 
 
 def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate only six-bar, same-session QMT 5m buckets.
+    """仅聚合同一交易时段内连续、完整的六根 QMT 五分钟线。
 
-    This adapter exists for the sector research path because the installed QMT
-    cache has 1m and 5m directories but no independent 30m directory.  It does
-    not bridge the lunch recess, does not fill a missing 5m bar, and labels the
-    derivation as a research approximation.  Individual-stock signal authority
-    continues to use the direct recursive one-minute graph.
+    本适配器只为板块研究数据补齐三十分钟行情；本地 QMT 缓存包含一分钟和
+    五分钟目录，但没有独立的三十分钟目录。聚合不会跨越午休，也不会填补
+    缺失的五分钟线。个股信号仍只由一分钟原始数据构建的直接递归结构决定。
     """
 
     required = {"time", "open", "high", "low", "close", "volume"}
@@ -334,7 +330,7 @@ def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
         result.attrs.update(
             qmt_transport="LOCAL_5M_DERIVED_30M_READ_ONLY",
             qmt_derived_grid_revision=_DERIVED_30M_GRID_REVISION,
-            data_grade="RESEARCH_APPROXIMATION",
+            data_grade="RESEARCH_ONLY",
             live_status="LIVE_DISABLED",
         )
         return result
@@ -351,7 +347,7 @@ def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
             ("morning", 9, 35),
             ("afternoon", 13, 5),
         ):
-            del side  # documents the two exchange sessions; not an output field
+            del side  # 仅用于说明两个交易时段，不写入结果字段
             anchor = ordered["_date"].iloc[0].replace(
                 hour=opening_hour,
                 minute=opening_minute,
@@ -389,7 +385,7 @@ def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
         qmt_transport="LOCAL_5M_DERIVED_30M_READ_ONLY",
         qmt_derived_grid_revision=_DERIVED_30M_GRID_REVISION,
         qmt_derived_from_frequency="5m",
-        data_grade="RESEARCH_APPROXIMATION",
+        data_grade="RESEARCH_ONLY",
         live_status="LIVE_DISABLED",
     )
     return result
@@ -402,7 +398,7 @@ def read_qmt_local_derived_30m(
     start_at: datetime,
     end_at: datetime,
 ) -> tuple[pd.DataFrame, QMTLocalKlineAudit]:
-    """Read local 5m records and causally derive completed 30m bars."""
+    """读取本地五分钟记录，并按因果时序生成已完成的三十分钟线。"""
 
     five, source_audit = read_qmt_local_kline(
         data_dir=data_dir,
@@ -471,7 +467,7 @@ class QMTPershareAudit:
     first_report_period: date | None
     last_report_period: date | None
     schema: str = "chanlun-qmt-local-pershare-index"
-    data_grade: str = "RESEARCH_APPROXIMATION"
+    data_grade: str = "RESEARCH_ONLY"
     live_status: str = "LIVE_DISABLED"
 
 
@@ -528,9 +524,8 @@ def read_qmt_local_pershare(
                 _PERSHARE_FIELDS, row["metrics"][: len(_PERSHARE_FIELDS)]
             )
         )
-        # The cache contains a disclosure date but no intraday publication
-        # timestamp.  Making it visible at midnight on the following calendar
-        # day is conservative for every A-share trading decision.
+    # 缓存只有披露日期，没有日内发布时间。统一在下一自然日零点后可见，
+    # 对所有 A 股交易决策都是保守处理。
         known_at = datetime.combine(
             announced + timedelta(days=1),
             datetime.min.time(),

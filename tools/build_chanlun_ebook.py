@@ -654,7 +654,7 @@ def effective_image_dpi(width: int, height: int, placement: ImagePlacement | Non
 def image_width_pct(placement: ImagePlacement | None) -> float | None:
     if not placement or not placement.width_pt or not placement.page_width_pt:
         return None
-    # Body width is 88% because the generated CSS keeps 6% side margins.
+    # 正文宽度为 88%，因为生成的样式表在两侧各保留 6% 边距。
     pct = placement.width_pt / (placement.page_width_pt * 0.88) * 100.0
     return max(18.0, min(100.0, pct))
 

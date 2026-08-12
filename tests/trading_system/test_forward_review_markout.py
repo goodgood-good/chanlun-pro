@@ -269,8 +269,8 @@ def _alert(*, session: date, snapshot: str) -> HumanReviewAlert:
         warning_codes=("HIGHER_TIMEFRAME_GATE_NOT_GREEN",),
         source_fact_ids=(snapshot,),
         screening_parameter_set_id=parameters.parameter_set_id,
-        technical_approximation_parameter_set_id=(
-            parameters.technical_approximation_parameter_set_id
+        signal_alignment_parameter_set_id=(
+            parameters.signal_alignment_parameter_set_id
         ),
     )
 

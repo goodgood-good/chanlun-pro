@@ -1,8 +1,7 @@
-"""Financial-data service evidence for the strict strategy three-program stock path.
+"""严格策略个股三程序路径使用的金融数据服务证据。
 
-The original lessons do not define numerical leader, growth or undervaluation
-formulae.  This module therefore validates evidence and a signed adjudication;
-it never turns a vendor metric into an automatic investment conclusion.
+原始课程没有给出龙头、成长或低估的数值公式，因此本模块只校验证据与签名裁决，
+绝不会把供应商指标自动转换成投资结论。
 """
 
 from __future__ import annotations
@@ -29,9 +28,8 @@ ResearchProgram = Literal[
 EvidenceSubjectKind = Literal["STOCK", "SECTOR", "INDUSTRY_CHAIN", "PUBLICATION"]
 ResearchGrade = Literal["FULL_SYSTEM_ELIGIBLE", "RESEARCH_ONLY", "UNRESOLVED"]
 
-# Every path below was returned by the financial-data-query skill's tool
-# recall on 2026-07-27.  Runtime acquisition must reject any URL not in this
-# immutable allow-list instead of guessing a similarly named service.
+# 以下路径均来自 2026-07-27 金融数据查询工具的实际返回记录。运行时采集必须拒绝
+# 不在该不可变白名单中的网址，不能猜测名称相近的服务地址。
 INDUSTRY_CLASSIFICATION_URL = "/api/stock_fnd/industry-classification"
 DAILY_VALUATION_URL = "/api/stock/daily-valuation-indicators"
 SECTOR_VALUATION_URL = "/api/sector/sector-valuation"
@@ -159,9 +157,8 @@ class FinancialDataEvidence:
 
     def visible_at(self, decision_time: datetime) -> bool:
         decision = normalize_datetime(decision_time, "decision_time")
-        # A later capture can support a historical decision only when the
-        # service returned an as-published/effective-dated vintage rather than
-        # a present-day restatement.
+        # 较晚采集的数据只有在服务返回“按当时发布/带生效日期”的历史版本，而非
+        # 当前重述值时，才能支持历史决策。
         capture_is_causal = self.captured_at <= decision or self.point_in_time_attested
         return self.published_at <= decision and capture_is_causal and not self.issues
 
@@ -343,7 +340,7 @@ def build_individual_selection_facts(
     *,
     decision_time: datetime,
 ) -> IndividualSelectionFacts:
-    """Validate independent evidence lanes and emit the existing strict strategy snapshot."""
+    """校验彼此独立的证据通道，并生成正式严格策略研究快照。"""
 
     decision = normalize_datetime(decision_time, "decision_time")
     blockers: list[ResearchEvidenceBlocker] = []

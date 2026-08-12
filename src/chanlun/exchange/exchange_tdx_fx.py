@@ -194,7 +194,7 @@ class ExchangeTDXFX(Exchange):
                 klines: pd.DataFrame = self.fdb.get_tdx_klines(
                     Market.FX.value, code, frequency
                 )
-                if klines is None or len(klines) == 0:  # R4-C:空df(1根缓存丢末根)也走全拉
+                if klines is None or len(klines) == 0:  # 空数据帧也走全量拉取
                     # 无缓存：按页拉取（每页 700 条），pages 决定总量
                     klines = pd.concat(
                         [
@@ -275,7 +275,7 @@ class ExchangeTDXFX(Exchange):
             # 通达信扩展行情无原生 10 分钟周期(frequency_map['10m']=category 0=5分钟),拿到的是
             # 5 分钟 K 线,需 resample 合成真 10 分钟(与 exchange_tdx_us.py 共用 convert_us_tdx_
             # kline_frequency)。共用前提是"date 列已带 tz":本函数上方已 localize 到 +8;us 经
-            # _convert_dt 已转美东 tz(非 UTC+8——原注释"同为 UTC+8 存储"对 us 不准,审查 M4)。
+            # _convert_dt 已转为美东时区（并非 UTC+8，因此不能声称美股也按 UTC+8 存储）。
             # convert 内部统一 tz_convert(UTC) 后按 UTC 整 10 分切 bin,故两源通用。
             if frequency == "10m":
                 result = convert_us_tdx_kline_frequency(result, "10m")

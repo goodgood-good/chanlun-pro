@@ -30,9 +30,10 @@
     }
     const kind = requireString(item.render_kind, "render_kind");
     let identifier;
-    if (
+    if (kind === "center_preview") {
+      identifier = item.preview_id;
+    } else if (
       kind === "formal_center" ||
-      kind === "center_preview" ||
       kind === "center_projection" ||
       kind === "center_observation"
     ) {

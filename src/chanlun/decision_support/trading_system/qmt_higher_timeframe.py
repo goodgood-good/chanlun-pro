@@ -524,8 +524,8 @@ def _mwd_warmup_semantic_snapshot(
                 evidence_bar_end=value.fact.evidence_bar_end,
                 active_top_interval=value.active_top_interval,
                 mapping_unique=value.fact.mapping_unique,
-                # Center IDs bind geometry and event identity.  A mismatch
-                # remains divergent even if the coarse colour is unchanged.
+            # 中枢标识同时绑定几何与事件身份；即使粗粒度颜色不变，标识不匹配
+            # 仍然属于结构分歧。
                 mapped_center_id=value.mapped_center_id,
                 mapping_candidate_ids=value.mapping_candidate_ids,
                 blocker_codes=tuple(
@@ -790,9 +790,8 @@ def build_qmt_higher_timeframe_risk(
                 ),
             )
     if warmup_blocker is not None:
-        # A truncated prefix must never be rendered as a favourable GREEN
-        # snapshot.  Keep the full diagnostic states/MA5, but remove only the
-        # decision-grade snapshot so every consumer fails new entries closed.
+    # 截断的历史前缀绝不能显示为有利的绿色快照。保留完整诊断状态与五日均线，
+    # 只移除决策级快照，使所有消费者都对新开仓安全关闭。
         risk = replace(
             risk,
             snapshot=None,

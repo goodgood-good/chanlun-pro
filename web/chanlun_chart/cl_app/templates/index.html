@@ -827,7 +827,7 @@
     var market_frequencys = JSON.parse(market_frequencys);
 
     // 支持通过 URL 参数 ?market=&code= 直接定位到指定标的（来自 /symbols 列表页跳转）。
-    // 除兼容写入 localStorage 外，还保留当前页面自己的启动配置；同源多 iframe
+    // 同步写入 localStorage，并保留当前页面自己的启动配置；同源多 iframe
     // 并行加载时必须优先用内存值，不能让共享 localStorage 把 30m/5m/1m 互相覆盖。
     window.__chanlunUrlBootstrap = null;
     (function applyUrlSymbolParams() {

@@ -136,11 +136,7 @@ def result(count: int, *, concentrated: bool = False) -> BacktestEvaluationResul
     )
 
 
-def result_with_window(
-    count: int,
-    *,
-    first_center_selection: bool = True,
-) -> BacktestEvaluationResult:
+def result_with_window(count: int) -> BacktestEvaluationResult:
     base = result(count)
     window = WalkForwardWindowResult(
         window_id="wf-001",
@@ -152,7 +148,6 @@ def result_with_window(
         test_end=date(2024, 1, 10),
         selected_parameters=(
             ("base_trade_risk", "0.0035"),
-            ("first_center_three_buy_only", first_center_selection),
             ("max_portfolio_heat", "0.015"),
             ("first_buy_risk_multiplier", "0.25"),
         ),
@@ -401,17 +396,16 @@ def test_independent_walk_forward_window_liquidation_blocks_live_ready() -> None
     assert "execution_continuity" in report["verdict"]["failed_conditions"]
 
 
-def test_execution_contract_discloses_locked_first_center_selection() -> None:
+def test_execution_contract_discloses_unified_buy_point_execution() -> None:
     report = build_report(
         evidence=evidence(),
-        result=result_with_window(200, first_center_selection=False),
+        result=result_with_window(200),
         ablations=ablations(),
         benchmarks=benchmarks(),
         generated_at=GENERATED_AT,
     )
 
     contract = report["execution_contract"]
-    assert contract["first_center_three_buy_only"] is False
-    assert contract["first_center_three_buy_mode"] == "walk_forward_selected"
-    assert contract["first_center_three_buy_selected_values"] == [False]
+    assert contract["point_classes_analyzed_independently"] is True
+    assert contract["buy_point_classes_share_execution_logic"] is True
     assert contract["max_five_minute_setup_age_seconds"] == 345600

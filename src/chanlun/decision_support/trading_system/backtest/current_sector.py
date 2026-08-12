@@ -44,12 +44,9 @@ from chanlun.exchange.price_basis import (
 )
 
 
-# The historical current-membership proxy deliberately keeps its biased
-# membership mode below, but its *bar construction* must be the same canonical
-# contract consumed by the page/forward higher-timeframe gate.  Keeping a
-# second provider/adjustment/method identity here previously made two
-# numerically identical 5m median-return chains look like different decision
-# facts and prevented the replay from using the live sector M/W/D core.
+# 历史当前成员代理有意保留下方带偏差的成员模式，但其 K 线构造必须与页面/前向高周期
+# 闸门消费的规范契约一致。此前保留第二套提供器、复权和方法身份，会让数值相同的两条
+# 5m 中位收益链看似不同决策事实，并阻止回放使用实时板块月/周/日核心。
 CURRENT_GICS3_COMPOSITE_PROVIDER = "qmt-gics3-composite"
 CURRENT_GICS3_COMPOSITE_ADJUSTMENT = (
     "causal-factor-stable-24-member-median"
@@ -130,9 +127,7 @@ def _attach_current_composite_provenance(
     frame.attrs.update(
         sector_id=sector_id,
         sector_membership_revision=membership_revision,
-        # Scope describes who supplied the immutable member tuple.  The
-        # separate membership mode below continues to disclose that this
-        # tuple is backfilled over the research year.
+        # 范围说明不可变成员元组的提供方；下方独立成员模式继续披露该元组在研究年度内回填。
         sector_membership_scope="CALLER_SUPPLIED",
         sector_members=sector_members,
         sector_composite_members=composite_members,
@@ -522,8 +517,7 @@ class CurrentQmtGics3CompositeReplaySource:
             sector_id,
             members,
         )
-        # Populate both the immutable raw-frame and audit caches.  A repeated
-        # prefix request performs no second QMT read.
+        # 同时填充不可变原始数据帧和审计缓存；重复前缀请求不会再次读取 QMT。
         self._available_member_frames(
             representatives=representatives,
             frequency="5m",
@@ -615,10 +609,8 @@ class CurrentQmtGics3CompositeReplaySource:
         stable: dict[str, object] = {
             "schema": CURRENT_GICS3_PHYSICAL_5M_COVERAGE_SCHEMA,
             "sector_id": sector_id,
-            # This mapping is attached to ``DataFrame.attrs`` and may cross a
-            # parquet boundary in the chart-evidence archive. Keep it a real
-            # JSON document rather than leaking Python datetime objects into
-            # pandas metadata.
+            # 该映射附着于 ``DataFrame.attrs``，可能跨越图表证据归档的 parquet 边界；
+            # 应保持真实 JSON 文档，不能把 Python datetime 对象泄漏进 pandas 元数据。
             "observed_at": observed.isoformat(),
             "requested_start_at": self._start_at.isoformat(),
             "representative_member_count": len(representatives),
@@ -737,9 +729,8 @@ class CurrentQmtGics3CompositeReplaySource:
             },
             eligible_member_count=len(representatives),
             start_at=self._start_at,
-            # Keep the decision date here so its ex-date factor identity is
-            # the same as the 5m side.  The incomplete current daily row is
-            # removed only after its 15:00 publication timestamp is assigned.
+            # 此处保留决策日期，使除权日因子身份与 5m 侧一致；当前未完成日线记录只在赋予
+            # 15:00 发布时间戳后才移除。
             end_at=observed,
             sector_members=members,
             composite_members=representatives,

@@ -1,10 +1,8 @@
-"""Append-only control ledger for the frozen strict strategy forward paper observation.
+"""严格策略前向纸面观察使用的只追加控制账本。
 
-This module is deliberately operational rather than strategic.  It binds the
-already-frozen recent-year parameter snapshot, records each daily gate, and
-can never turn on a broker/account transport.  The decision pipeline remains
-the same shared strict strategy decision/replay core; this ledger only proves what was (or
-was not) available before that pipeline ran.
+本模块只负责运行控制，不重新定义策略。它绑定冻结参数快照、记录每日门控，
+且绝不能开启券商账户或订单通道。决策仍由统一的严格策略核心负责；本账本只
+证明核心运行前哪些证据已经可用。
 """
 
 from __future__ import annotations
@@ -24,6 +22,16 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
     FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA,
 )
 from chanlun.decision_support.trading_system.file_lock import interprocess_file_lock
+from chanlun.decision_support.trading_system.human_review_screening import (
+    human_review_screening_parameters,
+)
+from chanlun.decision_support.trading_system.parameters import (
+    individual_parameter_snapshot,
+)
+from chanlun.decision_support.trading_system.signal_alignment import (
+    UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
+    unified_signal_alignment_contract,
+)
 from chanlun.decision_support.trading_system.trading_session import (
     resolve_trading_session_requirement,
 )
@@ -37,17 +45,12 @@ FORWARD_PAPER_LEDGER_SCHEMA = "chanlun-forward-paper-ledger"
 FORWARD_PAPER_EVENT_SCHEMA = "chanlun-forward-paper-event"
 FORWARD_PAPER_SESSION_DELIVERY_SCHEMA = "chanlun-forward-paper-session-delivery"
 FORWARD_IMPLEMENTATION_CONTINUITY_SCHEMA = "chanlun-forward-implementation-continuity"
-FROZEN_RESEARCH_PARAMETER_SET_ID = (
-    "sha256:7c7f7f0fe638110ad891b5f98f87f6f4b784bfd15980239261c964f80d06cf0b"
+CURRENT_STRATEGY_PARAMETER_SET_ID = individual_parameter_snapshot().parameter_set_id
+CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID = (
+    unified_signal_alignment_contract().parameter_set_id
 )
-FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID = (
-    "sha256:84f3e7f2146d4aefbd26f33028cb16b0c0eb86e10d523c55d7d1a83a743f81e0"
-)
-FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID = (
-    "sha256:303673b8517de296ec57b7c98691c80f866bc45932b0dbcc1bf25607ec12e7df"
-)
-FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID = (
-    "sha256:00f1c5b19ce6cc71893e41be0fc83661f4fb8faaa02c86bbdcb24821efbc2e86"
+CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID = (
+    human_review_screening_parameters().parameter_set_id
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PHASES = {"CAPTURE", "DATA_GATE", "DECISION", "CONTROL"}
@@ -1132,9 +1135,8 @@ def _evaluation_artifacts_proof(
     session: date,
     forward_root: Path,
 ) -> tuple[bool, str]:
-    # Lazy imports keep the forward contract module below accounting and
-    # valuation in the dependency graph; both of those modules bind the frozen
-    # forward parameter identity and therefore import this module themselves.
+    # 延迟导入使前向合约模块在依赖图中位于记账与估值模块之下；后两者都会绑定
+    # 已冻结的前向参数标识，因此自身也需要导入本模块。
     from chanlun.decision_support.trading_system.human_paper_valuation import (
         validate_human_paper_valuation_document,
     )
@@ -1454,7 +1456,7 @@ def audit_forward_paper_session_delivery(
     post-close preselection window.  Whether the date is required is resolved
     only from validated trading-session evidence.  Missing or unpublished QMT
     calendar facts stay tri-state ``UNRESOLVED`` and can never fall back to a
-    Monday-Friday approximation.
+    weekday-only calendar assumption.
     """
 
     if isinstance(session, datetime) or not isinstance(session, date):
@@ -1761,24 +1763,20 @@ class ForwardPaperContract:
     strategic_frequency: str
     tactical_frequency: str
     locator_frequency: str
-    recursive_levels: tuple[int, int, int]
     initial_cash: str
     slot_count: int
     slot_fraction: str
     account_exposure_cap: str
     tactical_ratio: str
     technical_mode: str = "HUMAN_REVIEW_SCREENING"
-    technical_approximation_parameter_set_id: str = (
-        FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID
-    )
-    technical_alignment_parameter_set_id: str = (
-        FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID
+    signal_alignment_parameter_set_id: str = (
+        CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID
     )
     human_review_screening_parameter_set_id: str = (
-        FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
+        CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
     )
     tick_data_used: bool = False
-    three_program_enabled: bool = False
+    three_program_required: bool = True
     completed_one_minute_execution_only: bool = True
     signal_bar_fill_allowed: bool = False
     real_account_access: bool = False
@@ -1788,7 +1786,7 @@ class ForwardPaperContract:
     schema: str = FORWARD_PAPER_CONTRACT_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.strategy_parameter_set_id != FROZEN_RESEARCH_PARAMETER_SET_ID:
+        if self.strategy_parameter_set_id != CURRENT_STRATEGY_PARAMETER_SET_ID:
             raise ValueError("forward paper strategy parameter identity changed")
         if _SHA256.fullmatch(self.strategy_parameter_snapshot_sha256) is None:
             raise ValueError("forward paper parameter snapshot hash is invalid")
@@ -1797,13 +1795,11 @@ class ForwardPaperContract:
             self.strategic_frequency,
             self.tactical_frequency,
             self.locator_frequency,
-            self.recursive_levels,
         ) != (
-            "QMT_CURRENT_SECTOR_TECHNICAL_ONLY",
+            "INDIVIDUAL_THREE_PROGRAM",
             "30m",
             "5m",
             "1m",
-            (2, 1, 0),
         ):
             raise ValueError("forward paper timeframe/selection mapping changed")
         if (
@@ -1816,7 +1812,7 @@ class ForwardPaperContract:
             raise ValueError("forward paper capital parameters changed")
         if (
             self.tick_data_used
-            or self.three_program_enabled
+            or not self.three_program_required
             or not self.completed_one_minute_execution_only
             or self.signal_bar_fill_allowed
             or self.real_account_access
@@ -1827,12 +1823,10 @@ class ForwardPaperContract:
             raise ValueError("forward paper safety contract changed")
         if (
             self.technical_mode != "HUMAN_REVIEW_SCREENING"
-            or self.technical_approximation_parameter_set_id
-            != FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID
-            or self.technical_alignment_parameter_set_id
-            != FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID
+            or self.signal_alignment_parameter_set_id
+            != CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID
             or self.human_review_screening_parameter_set_id
-            != FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
+            != CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
             or self.schema != FORWARD_PAPER_CONTRACT_SCHEMA
         ):
             raise ValueError("human review forward paper contract changed")
@@ -1842,11 +1836,7 @@ class ForwardPaperContract:
         return sha256_json(self._stable_document())
 
     def _stable_document(self) -> dict[str, object]:
-        values: dict[str, object] = asdict(self)
-        # JSON has no tuple type.  Store the canonical wire representation so
-        # a write/read round trip cannot look like a contract mutation.
-        values["recursive_levels"] = list(self.recursive_levels)
-        return values
+        return asdict(self)
 
     def document(self) -> dict[str, object]:
         return {**self._stable_document(), "contract_id": self.contract_id}
@@ -1856,43 +1846,38 @@ class ForwardPaperContract:
         return "REVIEW_REQUIRED"
 
 
-def load_frozen_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperContract:
+def load_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperContract:
     try:
         payload = json.loads(parameter_snapshot_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(
-            "frozen recent-year parameter snapshot cannot be read"
+            "当前前向观察参数快照无法读取"
         ) from exc
     if not isinstance(payload, Mapping):
-        raise ValueError("frozen recent-year parameter snapshot is invalid")
+        raise ValueError("当前前向观察参数快照无效")
     required = {
-        "parameter_set_id": FROZEN_RESEARCH_PARAMETER_SET_ID,
-        "selection_path": "QMT_CURRENT_SECTOR_TECHNICAL_ONLY",
+        "parameter_set_id": CURRENT_STRATEGY_PARAMETER_SET_ID,
+        "selection_path": "INDIVIDUAL_THREE_PROGRAM",
         "strategic_frequency": "30m",
         "tactical_frequency": "5m",
         "locator_frequency": "1m",
-        "strategic_recursive_level": 2,
-        "tactical_recursive_level": 1,
-        "locator_recursive_level": 0,
         "initial_cash": "1000000",
         "slot_count": 5,
         "slot_fraction": "0.18",
         "account_exposure_cap": "0.90",
         "tactical_ratio": "0.25",
         "tick_data_used": False,
-        "three_program_mode": "DISABLED_USER_AUTHORIZED",
+        "three_program_mode": "REQUIRED_SIGNED_POINT_IN_TIME",
         "execution_observation": "COMPLETED_1M_BAR",
         "signal_bar_fill_allowed": False,
         "live_status": "LIVE_DISABLED",
         "technical_mode": "HUMAN_REVIEW_SCREENING",
-        "technical_approximation_parameter_set_id": (
-            FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID
-        ),
-        "technical_alignment_parameter_set_id": (
-            FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID
+        "signal_alignment_contract_id": UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
+        "signal_alignment_parameter_set_id": (
+            CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID
         ),
         "human_review_screening_parameter_set_id": (
-            FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
+            CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
         ),
         "highest_status": "REVIEW_REQUIRED",
         "automated_order_authorized": False,
@@ -1904,7 +1889,7 @@ def load_frozen_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperC
     )
     if changed:
         raise ValueError(
-            "frozen recent-year parameter snapshot changed: " + ", ".join(changed)
+            "当前前向观察参数快照发生变化：" + ", ".join(changed)
         )
     return ForwardPaperContract(
         strategy_parameter_set_id=str(payload["parameter_set_id"]),
@@ -1913,22 +1898,14 @@ def load_frozen_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperC
         strategic_frequency=str(payload["strategic_frequency"]),
         tactical_frequency=str(payload["tactical_frequency"]),
         locator_frequency=str(payload["locator_frequency"]),
-        recursive_levels=(
-            int(payload["strategic_recursive_level"]),
-            int(payload["tactical_recursive_level"]),
-            int(payload["locator_recursive_level"]),
-        ),
         initial_cash=str(payload["initial_cash"]),
         slot_count=int(payload["slot_count"]),
         slot_fraction=str(payload["slot_fraction"]),
         account_exposure_cap=str(payload["account_exposure_cap"]),
         tactical_ratio=str(payload["tactical_ratio"]),
         technical_mode=str(payload["technical_mode"]),
-        technical_approximation_parameter_set_id=str(
-            payload["technical_approximation_parameter_set_id"]
-        ),
-        technical_alignment_parameter_set_id=str(
-            payload["technical_alignment_parameter_set_id"]
+        signal_alignment_parameter_set_id=str(
+            payload["signal_alignment_parameter_set_id"]
         ),
         human_review_screening_parameter_set_id=str(
             payload["human_review_screening_parameter_set_id"]
@@ -2155,16 +2132,15 @@ __all__ = (
     "FORWARD_PAPER_EVENT_SCHEMA",
     "FORWARD_PAPER_LEDGER_SCHEMA",
     "FORWARD_PAPER_SESSION_DELIVERY_SCHEMA",
-    "FROZEN_RESEARCH_PARAMETER_SET_ID",
-    "FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID",
-    "FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID",
-    "FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID",
+    "CURRENT_STRATEGY_PARAMETER_SET_ID",
+    "CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID",
+    "CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID",
     "ForwardPaperContract",
     "append_forward_paper_event",
     "audit_forward_implementation_continuity",
     "audit_forward_paper_session_delivery",
     "load_forward_paper_ledger",
-    "load_frozen_forward_contract",
+    "load_forward_contract",
     "sha256_file",
     "validate_forward_implementation_provenance",
     "validate_forward_paper_ledger",

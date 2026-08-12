@@ -145,7 +145,7 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
         return copy_price_basis_metadata(cached, target)
 
     # 两边 tz 状态对齐(各自 naive 则补 UTC 标签),否则 sort_values 会抛
-    # "Cannot compare tz-naive and tz-aware timestamps"。
+    # 即“无法比较无时区与带时区的时间戳”。
     cached = _ensure_tz_aware(cached)
     new = _ensure_tz_aware(new)
 
@@ -416,7 +416,7 @@ def prepend_klines_and_replace_cache(
                 and _co["high"] == _mo["high"]
                 and _co["low"] == _mo["low"]
                 and _co["close"] == _mo["close"]
-                # 末根相同还不够:中间根可能被回填/订正(审计 M1,同 H1 根因)。比对不可变前缀
+                # 末根相同仍不够：中间 K 线可能被回填或订正，因此还需比对不可变前缀。
                 # 指纹,前缀也一致才是真"数据没变"可跳过;否则继续重算以纳入中间根变更。
                 and _klines_prefix_fp(cached_df, len(merged) - 1)
                 == _klines_prefix_fp(merged, len(merged) - 1)

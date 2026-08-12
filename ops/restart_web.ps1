@@ -1,8 +1,8 @@
-# ============================================================================
+﻿# ============================================================================
 # restart_web.ps1
 #
-# Restart the chanlun-pro web application. The application process owns the
-# QMT lifecycle through app_qmt_runtime.py; deployments never mutate QMT.
+# 重启 chanlun-pro 网页应用。应用进程通过 app_qmt_runtime.py 管理 QMT 生命周期；
+# 部署脚本本身不修改 QMT。
 # ============================================================================
 
 [CmdletBinding()]
@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy_common.ps1')
 
-# ------------------------------- CONFIG -------------------------------------
+# -------------------------------- 配置 ---------------------------------------
 $ProjectRoot  = Split-Path -Parent $PSScriptRoot
 $AppDir       = Join-Path $ProjectRoot 'web\chanlun_chart'
 $SrcPath      = Join-Path $ProjectRoot 'src'
@@ -42,9 +42,8 @@ function Get-DeploymentMutexName {
         [Parameter(Mandatory = $true)][int]$Port
     )
 
-    # Scope the lock to the exact checkout and configured listener.  Another
-    # checkout or a deliberately separate port may deploy independently, while
-    # two invocations that could stop/start the same service are serialized.
+    # 互斥量只绑定当前检出目录与配置端口。其他检出目录或明确分离的端口可以独立部署；
+    # 可能停止或启动同一服务的两个调用必须串行执行。
     $normalizedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\').ToUpperInvariant()
     $identity = '{0}|{1}' -f $normalizedRoot, $Port
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -63,13 +62,11 @@ function Enter-DeploymentMutex {
     $mutex = New-Object Threading.Mutex($false, $Name)
     try {
         try {
-            # Fail fast.  A second deploy must never wait invisibly and then
-            # mutate a service whose ownership facts were measured earlier.
+            # 立即失败：第二个部署进程不能静默等待后，再修改先前已完成归属校验的服务。
             $acquired = $mutex.WaitOne(0)
         } catch [Threading.AbandonedMutexException] {
-            # Windows transfers ownership to this thread when the previous
-            # process died without releasing the mutex.  The abandoned state
-            # is therefore recoverable and still provides exclusive ownership.
+            # 前一个进程未释放互斥量便退出时，Windows 会把所有权转交当前线程；
+            # 因此该状态可以恢复，且仍能保证独占。
             $acquired = $true
         }
         if (-not $acquired) {
@@ -96,21 +93,16 @@ function Exit-DeploymentMutex {
 function Import-ProjectDotEnv {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    $script:ProjectDotEnvReplacedLegacyLogin = $false
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
     try {
         $bytes = [IO.File]::ReadAllBytes($Path)
-        try {
-            $strictUtf8 = New-Object Text.UTF8Encoding($true, $true)
-            $content = $strictUtf8.GetString($bytes)
-            if ($content.Length -gt 0 -and $content[0] -eq [char]0xfeff) {
-                $content = $content.Substring(1)
-            }
-        } catch [Text.DecoderFallbackException] {
-            $content = [Text.Encoding]::GetEncoding(936).GetString($bytes)
+        $strictUtf8 = New-Object Text.UTF8Encoding($true, $true)
+        $content = $strictUtf8.GetString($bytes)
+        if ($content.Length -gt 0 -and $content[0] -eq [char]0xfeff) {
+            $content = $content.Substring(1)
         }
     } catch {
-        throw "unable to read .env: $($_.Exception.Message)"
+        throw ".env 必须是有效的 UTF-8 文件：$($_.Exception.Message)"
     }
     foreach ($line in ($content -split "`r?`n")) {
         $trimmed = $line.Trim()
@@ -122,12 +114,7 @@ function Import-ProjectDotEnv {
         $key = $parts[0].Trim()
         if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
         $currentValue = [Environment]::GetEnvironmentVariable($key, 'Process')
-        $replaceLegacyLogin = (
-            $key -eq 'CHANLUN_LOGIN_PWD' -and
-            $null -ne $currentValue -and
-            $currentValue.Trim() -notmatch '^(?:pbkdf2:|scrypt:)'
-        )
-        if ($null -ne $currentValue -and -not $replaceLegacyLogin) { continue }
+        if ($null -ne $currentValue) { continue }
         $value = $parts[1].Trim()
         if (
             $value.Length -ge 2 -and
@@ -136,20 +123,7 @@ function Import-ProjectDotEnv {
         ) {
             $value = $value.Substring(1, $value.Length - 2)
         }
-        # A legacy user/machine environment variable can otherwise shadow the
-        # repository's migrated Werkzeug hash forever.  Only repair that one
-        # invalid override, and only when .env supplies a valid replacement;
-        # valid explicit process overrides retain normal environment priority.
-        if (
-            $replaceLegacyLogin -and
-            $value.Trim() -notmatch '^(?:pbkdf2:|scrypt:)'
-        ) {
-            continue
-        }
         [Environment]::SetEnvironmentVariable($key, $value, 'Process')
-        if ($replaceLegacyLogin) {
-            $script:ProjectDotEnvReplacedLegacyLogin = $true
-        }
     }
 }
 
@@ -172,14 +146,10 @@ function Resolve-ProjectPython {
         throw 'no project Python found; set CHANLUN_PYTHON or install the Poetry environment'
     }
     Push-Location $ProjectRoot
-    # Poetry may emit an informational message such as
-    # "Skipping virtualenv creation, as specified in config file." on stderr
-    # while still returning exit code 0 and printing a perfectly usable Python
-    # path on stdout.  With the script-wide ErrorActionPreference=Stop,
-    # Windows PowerShell promotes that harmless native stderr record to a
-    # terminating error before we can inspect LASTEXITCODE.  Limit the relaxed
-    # preference to this read-only resolver call; the exit code and returned
-    # executable remain the authoritative checks below.
+    # Poetry 可能把跳过虚拟环境等提示写入标准错误，但仍以退出码 0 在标准输出返回
+    # 可用的 Python 路径。全局 ErrorActionPreference=Stop 会让 Windows PowerShell
+    # 在检查 LASTEXITCODE 前把这类提示提升为终止错误，所以只在这个只读解析调用中
+    # 临时放宽错误偏好；下方仍以退出码与实际可执行文件为最终依据。
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -193,8 +163,8 @@ function Resolve-ProjectPython {
         throw ('Poetry could not resolve project Python: {0}' -f ($output -join ' '))
     }
     foreach ($line in $output) {
-        # Native stderr records remain ErrorRecord objects after 2>&1.  Do not
-        # pass their ANSI-decorated display text to Test-Path.
+        # 原生标准错误在 2>&1 后仍可能是 ErrorRecord，不能把含 ANSI 装饰的显示文本
+        # 交给 Test-Path。
         if ($line -isnot [string]) { continue }
         $candidate = ([string]$line).Trim()
         if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
@@ -206,17 +176,9 @@ function Resolve-ProjectPython {
 
 function Get-WebProcs {
     $appPattern = '(?i)(?:^|[\s"])' + [regex]::Escape($AppScript) + '(?:[\s"]|$)'
-    # Older/manual launchers may preserve the repository-relative script path
-    # in Win32_Process.CommandLine.  Recognize only this exact project-relative
-    # path; the caller still requires the PID to own the configured port before
-    # it is eligible for shutdown.
-    $relativeAppPattern = '(?i)(?:^|[\s"])web[\\/]+chanlun_chart[\\/]+app\.py(?:[\s"]|$)'
     @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -and (
-                $_.CommandLine -match $appPattern -or
-                $_.CommandLine -match $relativeAppPattern
-            )
+            $_.CommandLine -and $_.CommandLine -match $appPattern
         })
 }
 
@@ -268,7 +230,7 @@ function Test-WebLiveness {
                 return $true
             }
         } catch {
-            # Startup may still be in progress.
+            # 启动可能仍在进行。
         }
     } while ((Get-Date) -lt $deadline)
     return $false
@@ -321,7 +283,7 @@ function Abort-AfterWebStop {
 
 Log '===== web restart START ====='
 
-# Validate all web prerequisites before stopping anything.
+# 在停止任何进程前校验全部网页服务前置条件。
 foreach ($requiredDir in @($ProjectRoot, $AppDir, $SrcPath)) {
     if (-not (Test-Path -LiteralPath $requiredDir -PathType Container)) {
         Log ('ERROR: required directory not found: {0}' -f $requiredDir)
@@ -349,9 +311,6 @@ if ($null -eq (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) 
 
 try {
     Import-ProjectDotEnv -Path (Join-Path $ProjectRoot '.env')
-    if ($script:ProjectDotEnvReplacedLegacyLogin) {
-        Log 'replaced an invalid inherited CHANLUN_LOGIN_PWD with the hashed project .env value'
-    }
     $PythonExe = Resolve-ProjectPython
 } catch {
     Log ('ERROR: Python/environment preflight failed: {0}' -f $_.Exception.Message)
@@ -395,7 +354,7 @@ if ($env:PYTHONPATH) { $pyPathParts += $env:PYTHONPATH }
 $env:PYTHONPATH = ($pyPathParts -join ';')
 Log ('web bind host = {0}:{1}; source revision = {2}' -f $env:CHANLUN_WEB_HOST, $webPort, $sourceRevision)
 
-# Side-effect-free preflight: compile sources in memory and check module specs.
+# 无副作用预检：在内存中编译源码并检查运行模块。
 $preflightCode = @"
 import importlib.util
 import os
@@ -466,7 +425,7 @@ if ($null -eq $deploymentMutex) {
 Log ('deployment single-flight lock acquired: {0}; owner PID={1}' -f $deploymentMutexName, $PID)
 
 try {
-# --- 1. Stop the web project FIRST ------------------------------------------
+# --- 1. 先停止网页项目 -------------------------------------------------------
 $webProcs = @(Get-WebProcs)
 $webProcIds = @($webProcs | ForEach-Object { [int]$_.ProcessId })
 $portOwners = @(Get-ListeningProcessIds -Port $webPort)
@@ -495,14 +454,13 @@ foreach ($process in $targetWebProcs) {
     try {
         Wait-Process -Id $process.ProcessId -Timeout 15 -ErrorAction Stop
     } catch {
-        # Confirm independently below; Wait-Process also throws if already gone.
+        # 下方会独立确认；进程已退出时 Wait-Process 也可能抛错。
     }
 }
 $remainingWebIds = @($targetWebProcs | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | ForEach-Object { [int]$_.ProcessId })
 $remainingPortOwners = @(Get-ListeningProcessIds -Port $webPort)
-# Windows can release the listening socket before the terminated process
-# disappears from the process table.  Give that already-stopped process a
-# bounded grace period instead of aborting on a transient stale PID.
+# Windows 可能先释放监听套接字，终止进程稍后才从进程表消失。为已停止进程保留有界
+# 宽限期，避免因短暂残留 PID 错误中止。
 for ($i = 0; $i -lt 15 -and ($remainingWebIds.Count -gt 0 -or $remainingPortOwners.Count -gt 0); $i++) {
     Start-Sleep -Seconds 1
     $remainingWebIds = @(
@@ -519,19 +477,16 @@ if ($remainingWebIds.Count -gt 0 -or $remainingPortOwners.Count -gt 0) {
 }
 if (-not $script:PreviousWebWasRunning) { Log 'web project not running on configured port, skip stop' }
 
-# --- 2. Start web ------------------------------------------------------------
+# --- 2. 启动网页服务 ---------------------------------------------------------
 try {
     $startedProcess = Start-WebProcess -PythonPath $PythonExe -Purpose 'restart'
 } catch {
     Abort-AfterWebStop -Reason ('failed to start web project: {0}' -f $_.Exception.Message)
 }
 
-# --- 3. Verify readiness, exact PID, port owner, and source -----------------
-# A clean screening epoch must publish one causal structure batch before the
-# strict readiness endpoint may become ready.  That cold path is intentionally
-# slower than the historical 120-second process-start timeout, so keep the
-# deployment gate bounded but configurable without weakening any readiness
-# predicate below.
+# --- 3. 校验就绪状态、精确 PID、端口所有者和源码 ----------------------------
+# 全新选股周期必须先发布一批因果结构，严格就绪接口才可进入就绪状态。冷启动路径可能
+# 超过 120 秒，因此部署门槛保持有界且可配置，但不放宽下方任何就绪判据。
 $deadline = (Get-Date).AddSeconds($WebReadinessTimeoutSeconds)
 $healthy = $false
 $lastReadinessDetail = 'not checked'

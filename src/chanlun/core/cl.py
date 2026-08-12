@@ -410,16 +410,17 @@ class CL(ICL):
 
     @_strict_runtime_locked
     def get_strict_divergences(self):
-        from chanlun.core.strict_structure.divergence import collect_strict_divergences
-        from chanlun.core.strict_structure.strength import MacdStrengthProvider
+        from chanlun.core.strict_structure.divergence import (
+            collect_formal_divergence_ledger,
+        )
 
         self._validate_strict_structure_metadata()
         cached = self._strict_structure_memo.get("divergences")
         if cached is not None:
             return cached
-        result = collect_strict_divergences(
+        result = collect_formal_divergence_ledger(
             self.get_strict_structure_levels(),
-            MacdStrengthProvider(self),
+            self.get_strict_points(),
         )
         self._strict_structure_memo["divergences"] = result
         return result
@@ -427,9 +428,6 @@ class CL(ICL):
     @_strict_runtime_locked
     @_strict_contract_boundary
     def get_strict_evidence(self):
-        from chanlun.core.strict_structure.divergence import (
-            merge_formal_divergence_ledger,
-        )
         from chanlun.core.strict_structure.identity import (
             build_strict_evidence_revision,
         )
@@ -444,11 +442,7 @@ class CL(ICL):
             return cached
         structure = self.get_strict_structure_levels()
         confirmed_points = self.get_strict_points()
-        divergences = merge_formal_divergence_ledger(
-            structure,
-            confirmed_points,
-            self.get_strict_divergences(),
-        )
+        divergences = self.get_strict_divergences()
         price_basis_revision = self._strict_price_basis_revision()
         structure_revision = build_strict_evidence_revision(
             symbol=self.get_code(),

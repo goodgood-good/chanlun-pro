@@ -50,9 +50,6 @@ from chanlun.decision_support.trading_system.human_review_screening import (
 from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
-from chanlun.decision_support.trading_system.technical_approximation import (
-    technical_approximation_parameters,
-)
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -63,10 +60,9 @@ PAPER_SECTOR_NAME = "测试板块"
 PAPER_SECTOR_SOURCE_KEY = "GICS3测试板块"
 PAPER_SECTOR_MEMBERS = ("SH.600000", "SH.600001")
 PARAMETER_SNAPSHOT = (
-    Path(__file__).resolve().parents[2]
-    / "audit"
-    / "chanlun_trading_system_backtest"
-    / "recent_year_current_sector_no3p"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "forward_paper"
     / "parameter_snapshot_human_review.json"
 )
 
@@ -218,8 +214,8 @@ def _paper_review_source(
         screening_parameter_set_id=(
             human_review_screening_parameters().parameter_set_id
         ),
-        technical_approximation_parameter_set_id=(
-            technical_approximation_parameters().parameter_set_id
+        signal_alignment_parameter_set_id=(
+            human_review_screening_parameters().signal_alignment_parameter_set_id
         ),
         sector_ranking_evidence=ranking,
         entry_confirmation_bar_closed_at=entry_confirmation_bar_closed_at,
@@ -2931,7 +2927,7 @@ def test_evaluate_blocks_before_market_reads_when_implementation_changed(
     )
     monkeypatch.setattr(
         subject,
-        "load_frozen_forward_contract",
+        "load_forward_contract",
         lambda _path: SimpleNamespace(technical_mode="HUMAN_REVIEW_SCREENING"),
     )
     continuity = {
@@ -3001,7 +2997,7 @@ def test_human_review_evaluate_uses_frozen_evaluated_status(
     )
     monkeypatch.setattr(
         subject,
-        "load_frozen_forward_contract",
+        "load_forward_contract",
         lambda _path: SimpleNamespace(technical_mode="HUMAN_REVIEW_SCREENING"),
     )
     accounting_parameters = subject.load_human_paper_accounting_parameters(
@@ -3180,7 +3176,7 @@ def test_human_review_evaluate_rejects_capture_without_immutable_receipt(
     )
     monkeypatch.setattr(
         subject,
-        "load_frozen_forward_contract",
+        "load_forward_contract",
         lambda _path: SimpleNamespace(technical_mode="HUMAN_REVIEW_SCREENING"),
     )
     monkeypatch.setattr(
@@ -3249,7 +3245,7 @@ def test_human_review_evaluate_blocks_and_retries_virtual_settlement_failure(
     )
     monkeypatch.setattr(
         subject,
-        "load_frozen_forward_contract",
+        "load_forward_contract",
         lambda _path: SimpleNamespace(technical_mode="HUMAN_REVIEW_SCREENING"),
     )
     monkeypatch.setattr(
@@ -3334,7 +3330,7 @@ def test_human_review_evaluate_blocks_and_retries_daily_valuation_failure(
     )
     monkeypatch.setattr(
         subject,
-        "load_frozen_forward_contract",
+        "load_forward_contract",
         lambda _path: SimpleNamespace(technical_mode="HUMAN_REVIEW_SCREENING"),
     )
     monkeypatch.setattr(
@@ -3548,7 +3544,7 @@ def test_status_exposes_sector_capture_receipt_audit(
     captured: list[dict[str, object]] = []
     audit_calls: list[tuple[Path, date | None]] = []
     monkeypatch.setattr(subject, "_paths", lambda _args: (tmp_path, forward_ledger))
-    monkeypatch.setattr(subject, "load_frozen_forward_contract", lambda _path: contract)
+    monkeypatch.setattr(subject, "load_forward_contract", lambda _path: contract)
     monkeypatch.setattr(
         subject,
         "load_forward_paper_ledger",
@@ -3730,7 +3726,7 @@ def test_application_source_revision_tracks_only_forward_runtime_sources(
     source = repo / "src" / "application.py"
     source.write_text("VALUE = 1\n", encoding="utf-8")
     (repo / "tools").mkdir()
-    historical_tool = repo / "tools" / "backtest_sector_first_full_market.py"
+    historical_tool = repo / "tools" / "backtest_qmt_fixed_year.py"
     historical_tool.write_text("PIPELINE_ID = 'first'\n", encoding="utf-8")
     forward_tool = repo / "tools" / "run_forward_paper.py"
     forward_tool.write_text("FORWARD_ID = 'first'\n", encoding="utf-8")
@@ -3751,7 +3747,7 @@ def test_application_source_revision_tracks_only_forward_runtime_sources(
     git(
         "add",
         "src/application.py",
-        "tools/backtest_sector_first_full_market.py",
+        "tools/backtest_qmt_fixed_year.py",
         "tools/run_forward_paper.py",
     )
     git("commit", "--quiet", "-m", "fixture")

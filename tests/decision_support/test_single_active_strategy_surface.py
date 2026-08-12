@@ -3,7 +3,10 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from chanlun.decision_support.trading_system.engine import TradingEngine
+from chanlun.decision_support.trading_system import engine as technical_engine
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    HumanAssistedDecisionCore,
+)
 from chanlun.decision_support.trading_system.backtest.report import (
     STRATEGY_ID as BACKTEST_STRATEGY_ID,
 )
@@ -23,7 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_only_new_trading_system_is_importable() -> None:
     assert STRICT_STRATEGY_ID == "chanlun_source_faithful"
-    assert TradingEngine is not None
+    assert HumanAssistedDecisionCore is not None
+    assert not hasattr(technical_engine, "TradingEngine")
+    assert not hasattr(technical_engine, "evaluate_symbol")
     assert not (ROOT / "src/chanlun/decision_support/scanner.py").exists()
 
 

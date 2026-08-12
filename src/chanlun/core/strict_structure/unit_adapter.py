@@ -4,7 +4,13 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from chanlun.core.strict_structure.identity import stable_structure_id
-from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind, TrendType
+from chanlun.core.strict_structure.models import (
+    ConstituentUnit,
+    SourceKind,
+    TrendKind,
+    TrendState,
+    TrendType,
+)
 
 
 class UnitLockRegistry:
@@ -163,3 +169,96 @@ def trend_type_to_unit(trend: TrendType) -> ConstituentUnit:
             item.unit_id for item in trend.constituent_units
         ),
     )
+
+
+def trend_type_to_observation_unit(trend: TrendType) -> ConstituentUnit:
+    """把尚未锁定的当前走势转换为高级别只读观察单元。"""
+
+    if trend.state is TrendState.LOCKED:
+        raise ValueError("locked trend type must use the formal unit adapter")
+    return ConstituentUnit(
+        unit_id=trend.trend_id,
+        structural_level=trend.structural_level + 1,
+        source_kind=SourceKind.TREND_TYPE,
+        price_basis_revision=trend.price_basis_revision,
+        direction=trend.direction,
+        start_tick=trend.start_tick,
+        end_tick=trend.end_tick,
+        low_tick=trend.low_tick,
+        high_tick=trend.high_tick,
+        market_start=trend.market_start,
+        market_end=trend.market_end,
+        confirmed_at=None,
+        available_at=trend.available_at,
+        locked=False,
+        child_ids=tuple(item.unit_id for item in trend.constituent_units),
+    )
+
+
+def build_recursive_unit_stream(
+    current_trends: tuple[TrendType, ...],
+    protected_after_ids: frozenset[str] = frozenset(),
+) -> tuple[tuple[ConstituentUnit, ...], frozenset[str]]:
+    """构造高级别正式前缀及其连续的未锁定观察尾部。"""
+
+    # 延迟导入，避免单元适配器与同级别结合模块在加载阶段形成循环依赖。
+    from chanlun.core.strict_structure.center_machine import validate_unit_sequence
+    from chanlun.core.strict_structure.same_level_decomposition import (
+        combine_same_level_trends,
+    )
+
+    trends = tuple(current_trends)
+    unlocked_seen = False
+    for trend in trends:
+        if trend.state is not TrendState.LOCKED:
+            unlocked_seen = True
+        elif unlocked_seen:
+            raise ValueError("locked recursive trends must form a prefix")
+
+    locked = tuple(trend for trend in trends if trend.state is TrendState.LOCKED)
+    observations = tuple(
+        trend for trend in trends if trend.state is not TrendState.LOCKED
+    )
+    locked_units = tuple(trend_type_to_unit(trend) for trend in locked)
+    locked_oscillatory = frozenset(
+        trend.trend_id for trend in locked if trend.kind is TrendKind.CONSOLIDATION
+    )
+    decomposition = combine_same_level_trends(
+        locked_units,
+        locked_oscillatory,
+        protected_after_ids,
+    )
+    output = list(decomposition.units)
+    oscillatory = set(decomposition.oscillatory_ids)
+
+    for trend in observations:
+        candidate = trend_type_to_observation_unit(trend)
+        candidate_oscillatory = set(oscillatory)
+        if trend.kind is TrendKind.CONSOLIDATION:
+            candidate_oscillatory.add(candidate.unit_id)
+        try:
+            validate_unit_sequence(
+                tuple((*output, candidate)),
+                candidate.structural_level,
+                SourceKind.TREND_TYPE,
+                frozenset(candidate_oscillatory),
+            )
+        except ValueError as exc:
+            if str(exc) == "unit directions must alternate":
+                # 同向的未锁定走势将来可能按结合律并入前一单元。在身份冻结之前
+                # 不制造高级别观察单元，避免临时合并改写正式递归前缀。
+                break
+            raise
+        output.append(candidate)
+        oscillatory = candidate_oscillatory
+    return tuple(output), frozenset(oscillatory)
+
+
+__all__ = (
+    "UnitLockRegistry",
+    "adapt_lines",
+    "build_recursive_unit_stream",
+    "line_to_unit",
+    "trend_type_to_observation_unit",
+    "trend_type_to_unit",
+)

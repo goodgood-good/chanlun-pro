@@ -205,7 +205,7 @@ class ExchangeBaostock(Exchange):
         kline["volume"] = pd.to_numeric(kline["volume"])
         kline.fillna(0, inplace=True)
 
-        # R17: 空结果集(无效/退市/该周期无覆盖代码)时 kline 为列齐全的空 df,
+        # 结果集为空（无效、退市或该周期无覆盖代码）时，kline 是列齐全的空数据帧；
         # 若进入分钟重建则 new_kline=pd.DataFrame() 零列 → :后 sort_values("date") KeyError。
         # 前置 len>0 使空结果落到下方 :tz_localize 既有空返回路径(与日线空结果同路径)。
         if len(kline) > 0 and frequency in ["60m", "30m", "15m", "5m", "1m"]:

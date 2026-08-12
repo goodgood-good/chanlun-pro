@@ -21,6 +21,7 @@ def resolve_conflict(
         for candidate in opposite_points
         if candidate.confirmed
         and candidate.side != point.side
+        and candidate.available_at >= point.available_at
         and candidate.available_at <= setup.context.observed_at
     )
     timeframe_rank = {"1m": 0, "5m": 1, "30m": 2, "d": 3}

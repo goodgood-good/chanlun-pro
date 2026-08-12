@@ -23,7 +23,6 @@ from chanlun.decision_support.trading_system.etf_proxy_facts import (
     aggregate_completed_period_bars,
     apply_qmt_causal_adjustments,
     build_benchmark_structure_risk_facts,
-    build_etf_proxy_candidate_decision,
     build_higher_timeframe_risk_facts,
     build_risk_structure_state_fact,
     latest_completed_bottom_fractal_anchor,
@@ -33,12 +32,9 @@ from chanlun.decision_support.trading_system.etf_proxy_facts import (
 )
 from chanlun.decision_support.trading_system import etf_proxy_facts as etf_facts
 from chanlun.decision_support.trading_system.selection import (
-    AccountEntryGate,
     CompletedDailyClose,
     HigherTimeframeRiskSnapshot,
     SectorMemberHistory,
-    TechnicalEntrySnapshot,
-    TradeabilitySnapshot,
     member_ma_strength_category,
 )
 
@@ -1044,152 +1040,3 @@ def test_missing_benchmark_30m_is_explicit_and_cannot_be_green() -> None:
         mapping_unique=False,
     )
     assert snapshot.gate == "AMBER"
-
-
-def test_candidate_interface_uses_exact_pit_session_and_same_decision_core(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "pit.sqlite3"
-    create_pit_database(database, membership_count=300)
-    repository = EtfProxyPitRepository(database)
-    session = repository.available_membership_sessions()[0]
-    decision = close_time(session)
-    mapping = EtfTrackingMapping(
-        symbol="SH.510300",
-        tracked_index="CSI.000300",
-        known_at=close_time(date(2019, 1, 1)),
-        effective_from=close_time(date(2019, 1, 1)),
-        valid_until=close_time(date(2030, 1, 1)),
-        evidence_ids=("RESEARCH_SOURCE:ETF_TRACKING_DECLARATION",),
-        authoritative=False,
-    )
-    benchmark_start = session - timedelta(days=1099)
-    benchmark = tuple(
-        market_bar(
-            benchmark_start + timedelta(days=index),
-            100 + (index % 11),
-        )
-        for index in range(1100)
-    )
-    calendar = tuple(row.session for row in benchmark)
-    tradeability = TradeabilitySnapshot(
-        symbol="SH.510300",
-        observed_at=decision,
-        listed=True,
-        st=False,
-        suspended=False,
-        reliable_continuous_market_data=True,
-        continuity_status="ACTIVE",
-        structure_history_sufficient=True,
-        price_tick=Decimal("0.001"),
-        buy_quantity_increment=100,
-        sell_quantity_increment=100,
-        fee_schedule_id="fees:research",
-        price_limits_known=True,
-        trading_calendar_known=True,
-        completed_daily_volume_sessions=20,
-        completed_same_clock_l2_sessions=20,
-        median_daily_raw_volume=Decimal("10000000"),
-        median_same_clock_l2_volume=Decimal("100000"),
-        quote_coverage=Decimal("0.99"),
-        median_spread_ticks=Decimal("2"),
-        current_quote_valid_and_fresh=True,
-        q_liquidity_cap=5000,
-    )
-    technical = TechnicalEntrySnapshot(
-        structure_snapshot_id="technical:510300:test",
-        observed_at=decision,
-        price_basis_revision="pit:test",
-        stroke_mode="strict-cl-k-distance",
-        l0_source_frequency="30m",
-        l1_source_frequency="5m",
-        l2_source_frequency="1m",
-        direct_recursive_levels_unique=True,
-        all_components_completed=True,
-        l0_center_id="center:l0:first",
-        l0_center_ordinal=1,
-        l0_center_completed=True,
-        l0_point_type="3buy",
-        l0_point_id="point:l0:3buy",
-        l0_point_confirmation_time=decision - timedelta(minutes=1),
-        l1_departure_completed=True,
-        l1_first_return_completed=True,
-        first_return_low=Decimal("4"),
-        l0_zg=Decimal("4"),
-        l2_locator="L2_FIRST_BUY",
-        l2_point_id="point:l2:1buy",
-        l2_confirmation_bar_high=Decimal("4.1"),
-    )
-    account = AccountEntryGate(
-        observed_at=decision,
-        operations_normal=True,
-        reconciliation_passed=True,
-        free_strategic_slot=True,
-        drawdown=Decimal("0"),
-        no_active_symbol_order=True,
-    )
-
-    def green_risk(snapshot_id: str) -> HigherTimeframeRiskSnapshot:
-        return HigherTimeframeRiskSnapshot(
-            snapshot_id=snapshot_id,
-            observed_at=decision,
-            monthly="NONE",
-            weekly="RESOLVED_CONTINUATION",
-            daily="INTERMEDIATE",
-            monthly_ma5=Decimal("10"),
-            weekly_ma5=Decimal("10"),
-            daily_ma5=Decimal("10"),
-            mapping_unique=True,
-        )
-
-    result = build_etf_proxy_candidate_decision(
-        repository,
-        mapping,
-        decision_time=decision,
-        benchmark_daily_bars=benchmark,
-        benchmark_completed_30m_bars=(),
-        trading_sessions=calendar,
-        calendar_coverage_end=calendar[-1],
-        tradeability=tradeability,
-        sector_risk=green_risk("sector"),
-        symbol_risk=green_risk("symbol"),
-        technical=technical,
-        account=account,
-        reviewer="research-adapter",
-        signature="RESEARCH_ONLY/LIVE_DISABLED",
-    )
-    assert result.selection.basket is not None
-    assert result.selection.basket.candidate_session == session
-    assert result.candidate_snapshot is not None
-    assert result.decision is not None
-    assert result.decision.accepted is False
-    assert any(
-        code in {"REJECT_MARKET_RISK_AMBER", "REJECT_MARKET_RISK_UNRESOLVED"}
-        for code in result.decision.rejected_reason_codes
-    )
-    assert result.grade == "RESEARCH_ONLY"
-    assert "CSI300_COMPLETED_30M_BARS_MISSING" in {
-        blocker.code for blocker in result.blockers
-    }
-
-    previous = build_etf_proxy_candidate_decision(
-        repository,
-        mapping,
-        decision_time=decision - timedelta(days=1),
-        benchmark_daily_bars=benchmark,
-        benchmark_completed_30m_bars=(),
-        trading_sessions=calendar,
-        calendar_coverage_end=calendar[-1],
-        tradeability=tradeability,
-        sector_risk=green_risk("sector"),
-        symbol_risk=green_risk("symbol"),
-        technical=technical,
-        account=account,
-        reviewer="research-adapter",
-        signature="RESEARCH_ONLY/LIVE_DISABLED",
-    )
-    assert previous.selection.snapshot is None
-    assert previous.decision is None
-    assert "EXACT_DECISION_SESSION_BASKET_MISSING" in {
-        blocker.code for blocker in previous.blockers
-    }

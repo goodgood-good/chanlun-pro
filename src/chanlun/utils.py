@@ -99,7 +99,7 @@ def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
     """
     发送飞书消息（富文本 post）。
     """
-    import lark_oapi as lark  # lazy import: optional extra
+    import lark_oapi as lark  # 延迟导入可选依赖
     from lark_oapi.api.im.v1 import (
         CreateMessageRequest,
         CreateMessageRequestBody,
@@ -112,7 +112,7 @@ def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
         or fs_key["app_secret"] == ""
         or fs_key["user_id"] == ""
     ):
-        return True  # no-op when not configured
+        return True  # 未配置时不执行操作
     # 创建client
     client = (
         lark.Client.builder()
@@ -121,7 +121,7 @@ def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
         .log_level(lark.LogLevel.WARNING)
         .build()
     )
-    # https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json
+    # 飞书消息格式参考：https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json
     if isinstance(contents, str):
         msg_content = {
             "zh_cn": {

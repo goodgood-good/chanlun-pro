@@ -433,10 +433,8 @@ def _build_official_trading_session_evidence(
         coverage_end,
         trading_days,
     ) = _validated_official_documents(calendar_document, source_document)
-    # The annual announcement may classify future sessions once published, but
-    # the artifact proves only a publication *date*, not an intraday timestamp.
-    # Treat it as causally available from the following day so an observation
-    # at 00:01 on the publication date can never borrow a later announcement.
+    # 年度公告发布后可以界定未来交易日，但证据只能证明发布日期，不能证明日内时刻。
+    # 因此从次日才视为因果可用，确保发布日期 00:01 的观测绝不会借用稍后发布的公告。
     if observed.date() <= published_on or not (
         coverage_start <= session <= coverage_end
     ):

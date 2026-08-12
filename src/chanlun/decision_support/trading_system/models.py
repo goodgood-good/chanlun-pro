@@ -476,7 +476,6 @@ class TradingPolicy:
     require_confirmed_one_minute: bool = True
     require_sector_eligibility: bool = True
     require_thirty_minute_context: bool = True
-    first_center_three_buy_only: bool = True
     minimum_tick: Decimal = Decimal("0.01")
     first_buy_risk_multiplier: Decimal = Decimal("0.50")
     second_buy_risk_multiplier: Decimal = Decimal("1.00")

@@ -43,8 +43,9 @@ from chanlun.core.strict_structure.models import (
     TrendKind,
     TrendState,
     TrendType,
-    build_strict_point_id,
 )
+from chanlun.core.strict_structure.point_rules import build_approaching_point_id
+from chanlun.core.strict_structure.signals import StrictSignalEngine
 from tests.core.strict_structure.helpers import (
     completed_up_center,
     engine_for,
@@ -163,7 +164,7 @@ def _evidence(
     observation: TrendCenter | None = None,
     formal_centers: tuple[TrendCenter, ...] | None = None,
     confirmed_points=(),
-    approaching_points=(),
+    approaching_points=None,
     divergences=(),
     previews=(),
     level_units=None,
@@ -251,6 +252,11 @@ def _evidence(
         price_basis_revision=PRICE_BASIS,
         levels=tuple(levels),
     )
+    if approaching_points is None:
+        approaching_points = StrictSignalEngine(
+            structure=structure,
+            price_quantum=QUANTUM,
+        ).approaching_points(BASE + timedelta(hours=6))
     observation_result = CenterLevelResult(
         structural_level=0,
         price_basis_revision=PRICE_BASIS,
@@ -520,6 +526,13 @@ def test_snapshot_serializes_unlocked_tail_as_non_tradable_center_preview() -> N
     assert snapshot["levels"][0]["confirmed_points"] == []
     assert snapshot["levels"][0]["divergences"] == []
     assert snapshot["schema"] == "chanlun-chart-structure"
+    assert snapshot["formal_direction"] == {
+        "direction": "neutral",
+        "structural_level": None,
+        "trend_id": None,
+        "support_point_id": None,
+        "reason_codes": ["current_suffix_has_no_formal_trend"],
+    }
     assert payload["schema"] == "chanlun-chart-center"
     assert payload["render_kind"] == "center_preview"
     assert payload["state"] == "forming"
@@ -665,6 +678,8 @@ def test_snapshot_serializes_provisional_third_sell_completion() -> None:
     )
 
     payload = snapshot["levels"][0]["center_previews"][0]
+    assert payload["center_id"] == preview.formal_center_id
+    assert payload["preview_id"] != payload["center_id"]
     assert payload["state"] == "completed"
     assert payload["tradable"] is False
     assert payload["completion_phase"] == "GEOMETRIC_THIRD_CLASS_POINT"
@@ -760,7 +775,7 @@ def test_snapshot_revision_is_deterministic_and_window_independent() -> None:
     assert first["schema"] == "chanlun-chart-structure"
 
 
-def test_snapshot_groups_independent_divergences_by_level() -> None:
+def test_atomic_evidence_rejects_an_unreferenced_recursive_divergence() -> None:
     item = DivergenceEvidence(
         divergence_id=stable_structure_id(
             "chanlun-strict-divergence",
@@ -789,27 +804,15 @@ def test_snapshot_groups_independent_divergences_by_level() -> None:
         dif_extreme_decayed=True,
         strength_source="macd",
     )
-    snapshot = build_strict_structure_snapshot(
+    with pytest.raises(
+        ValueError,
+        match="recursive level units must exactly replay prior locked trends",
+    ):
         _evidence(
             divergences=(item,),
             level_count=2,
             source_frequency="1m",
-        ),
-        interval="1m",
-    )
-
-    assert snapshot["schema"] == "chanlun-chart-structure"
-    assert [level["label"] for level in snapshot["levels"]] == ["1m", "5m"]
-    assert {level["origin"] for level in snapshot["levels"]} == {
-        "current_chart_recursive"
-    }
-    payload = snapshot["levels"][1]["divergences"][0]
-    assert payload["kind"] == "trend"
-    assert payload["schema"] == "chanlun-chart-divergence"
-    assert payload["comparison_width"] == 1
-    assert payload["compare_leg_unit_ids"] == ["L1-earlier"]
-    assert payload["signal_leg_unit_ids"] == ["L1-later"]
-    assert payload["metrics"]["strength_decay_count"] == 3
+        )
 
 
 def test_observation_or_approaching_change_updates_render_not_decision_revision() -> (
@@ -819,27 +822,48 @@ def test_observation_or_approaching_change_updates_render_not_decision_revision(
     formal_center = _center(extension=True)
     anchor = formal_center.body_units[-1]
     approaching = strict_point(
-        "3buy",
+        "1buy",
         status=StrictPointStatus.APPROACHING,
         available_at=BASE + timedelta(hours=5),
     )
+    divergence = replace(
+        approaching.divergence,
+        divergence_id=stable_structure_id(
+            "chanlun-strict-divergence",
+            PRICE_BASIS,
+            0,
+            SourceKind.SEGMENT.value,
+            "trend",
+            "down",
+            approaching.divergence.compare_leg_unit_ids,
+            (anchor.unit_id,),
+        ),
+        signal_unit_id=anchor.unit_id,
+        signal_leg_unit_ids=(anchor.unit_id,),
+        anchor_at=anchor.market_end,
+        anchor_tick=anchor.low_tick,
+        confirmed_at=anchor.confirmed_at,
+        available_at=approaching.available_at,
+    )
     approaching = replace(
         approaching,
-        point_id="approaching:"
-        + build_strict_point_id(
+        point_id=build_approaching_point_id(
             price_basis_revision=PRICE_BASIS,
             point_type=approaching.point_type,
             structural_level=0,
             anchor_unit_id=anchor.unit_id,
-            center_id=formal_center.center_id,
+            center_id=None,
             parent_point_id=None,
         ),
         anchor_unit_id=anchor.unit_id,
         anchor_at=anchor.market_end,
         anchor_tick=anchor.low_tick,
-        center_id=formal_center.center_id,
-        center_zd_tick=formal_center.zd_tick,
-        center_zg_tick=formal_center.zg_tick,
+        invalidation_tick=anchor.low_tick,
+        center_id=None,
+        center_zd_tick=None,
+        center_zg_tick=None,
+        center_ordinal=None,
+        divergence=divergence,
     )
     before = build_strict_structure_snapshot(_evidence(), interval="5m")
     observation_after = build_strict_structure_snapshot(

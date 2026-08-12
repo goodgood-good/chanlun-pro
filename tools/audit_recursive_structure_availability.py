@@ -151,7 +151,7 @@ def audit(
         },
         "required_entry_point_counts": required_entry_points,
         "point_parent_edge_count": len(parent_edges),
-        "direct_recursive_l0_l1_l2_point_levels_available": every_level_observed,
+        "all_required_structure_levels_available": every_level_observed,
         "strict_entry_fact_types_available": entry_types_observed,
         "decision": decision,
         "reason": reason,

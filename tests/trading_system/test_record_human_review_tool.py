@@ -14,9 +14,6 @@ from chanlun.decision_support.trading_system.human_review_screening import (
     human_review_screening_parameters,
     load_human_review_feedback_ledger,
 )
-from chanlun.decision_support.trading_system.technical_approximation import (
-    technical_approximation_parameters,
-)
 from tools.record_human_review import main
 
 
@@ -45,8 +42,8 @@ def _alert() -> HumanReviewAlert:
         screening_parameter_set_id=(
             human_review_screening_parameters().parameter_set_id
         ),
-        technical_approximation_parameter_set_id=(
-            technical_approximation_parameters().parameter_set_id
+        signal_alignment_parameter_set_id=(
+            human_review_screening_parameters().signal_alignment_parameter_set_id
         ),
     )
 

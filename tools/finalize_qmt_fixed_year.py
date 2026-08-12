@@ -80,6 +80,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--allow-partial", action="store_true")
     result.add_argument("--force-sectors", action="store_true")
     result.add_argument(
+        "--selection-research",
+        type=Path,
+        default=None,
+        help="正式研究账本；默认读取输入目录下的 selection_research.json",
+    )
+    result.add_argument(
         "--allow-research-only",
         action="store_true",
         help=(
@@ -152,6 +158,7 @@ def _write_causality_gate(
     algorithm_revision: str,
     symbol_count: int,
     published_path: Path | None = None,
+    extra_failures: Sequence[Mapping[str, str]] = (),
 ) -> Path:
     path = directory / "causality_gate.json"
     payload = {
@@ -167,7 +174,7 @@ def _write_causality_gate(
             "close_timestamped_full_ohlcv_execution",
             "algorithm_and_source_fingerprinted_checkpoints",
         ),
-        "failures": _CERTIFICATION_FAILURES,
+        "failures": (*_CERTIFICATION_FAILURES, *extra_failures),
     }
     _atomic_json(path, payload)
     if published_path is not None and published_path.resolve() != path.resolve():
@@ -472,6 +479,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             flush=True,
         )
         return 3
+    research_path = (
+        args.selection_research.resolve()
+        if args.selection_research is not None
+        else directory / "selection_research.json"
+    )
+    try:
+        research_snapshots, selection_research_by_code = (
+            qmt_research_contract.load_selection_research_ledger(
+                research_path,
+                replay_symbols={row.code for row in symbols},
+            )
+        )
+    except ValueError as exc:
+        failure = {
+            "code": "formal_selection_research_ledger_missing_or_invalid",
+            "evidence": str(exc),
+            "required": "按决策时点有序且字段完整的正式研究账本",
+        }
+        gate_path = _write_causality_gate(
+            directory=directory,
+            algorithm_revision=algorithm_revision,
+            symbol_count=len(symbols),
+            published_path=args.report.resolve().parent / "causality_gate.json",
+            extra_failures=(failure,),
+        )
+        print(
+            json.dumps(
+                {
+                    "complete": False,
+                    "status": "blocked_by_formal_selection_research_gate",
+                    "pnl_generated": False,
+                    "failures": [failure["code"]],
+                    "gate": str(gate_path.resolve()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return 3
     request = manifest.get("request")
     if not isinstance(request, Mapping):
         raise ValueError("extract request is unavailable")
@@ -503,6 +550,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         symbols,
         sectors,
         initial_cash=args.initial_cash,
+        selection_research_by_code=selection_research_by_code,
     )
     run_path = directory / "portfolio_run.pkl"
     _atomic_bytes(run_path, pickle.dumps(run, protocol=pickle.HIGHEST_PROTOCOL))
@@ -548,6 +596,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("historical_membership", Decimal("0")),
             ("point_in_time_adjustment", Decimal("1")),
             ("historical_security_status", Decimal("0")),
+            (
+                "formal_selection_research_symbols",
+                Decimal(len(selection_research_by_code)) / Decimal(selected),
+            ),
         ),
     )
     result = BacktestEvaluationResult(
@@ -596,10 +648,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest["summary"]["symbols_with_evaluations"]
             ),
             "causal_evaluation_count": int(manifest["summary"]["evaluation_count"]),
+            "formal_selection_research_snapshot_count": len(research_snapshots),
+            "formal_selection_research_symbol_count": len(
+                selection_research_by_code
+            ),
         },
         data_source_hashes=(
             ("qmt_extract_manifest", _sha256(manifest_path)),
             ("qmt_catalog_snapshot", _sha256(snapshot_path)),
+            ("formal_selection_research_ledger", _sha256(research_path)),
             (
                 "symbol_fact_checkpoint_tree",
                 _checkpoint_tree(

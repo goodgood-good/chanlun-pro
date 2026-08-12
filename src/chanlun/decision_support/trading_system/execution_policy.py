@@ -58,8 +58,6 @@ def evaluate_entry_policy(
     if conflict.hard_block:
         reasons.append("structure_conflict")
     if isinstance(point, StructuralPoint) and point.point_type == "3buy":
-        if policy.first_center_three_buy_only and point.center_ordinal != 1:
-            reasons.append("three_buy_not_first_center")
         clearance = (
             None
             if point.center_zg is None

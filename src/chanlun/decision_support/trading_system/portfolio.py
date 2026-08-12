@@ -268,10 +268,8 @@ def size_strategic_entry(
         sizing.q_liquidity_cap,
         sizing.buy_quantity_increment,
     )
-    # Compute cash capacity independently.  Capping this search by the
-    # smallest of the other capacities leaves Q_PLAN unchanged, but falsely
-    # reports cash as a co-binding constraint whenever (for example) U_SLOT is
-    # the real limit.
+    # 独立计算现金容量。若用其他容量中的最小值限制搜索，计划数量虽然不变，
+    # 但当实际限制例如来自单标的仓位时，会错误地把现金也报告为共同约束。
     cash_upper = floor_to_increment(
         entry_cash_available / sizing.buy_price_cap,
         sizing.buy_quantity_increment,

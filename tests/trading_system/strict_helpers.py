@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from chanlun.core.strict_structure.divergence import merge_formal_divergence_ledger
+from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.identity import (
     build_strict_evidence_revision,
     stable_structure_id,
@@ -260,7 +260,7 @@ def strict_evidence_result(
         locked_unit_count=0,
         replay_from=0,
     )
-    divergences = merge_formal_divergence_ledger(
+    divergences = collect_formal_divergence_ledger(
         structure,
         confirmed_points,
     )

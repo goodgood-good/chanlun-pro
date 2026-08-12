@@ -24,22 +24,12 @@ from zoneinfo import ZoneInfo
 
 from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
 from chanlun.decision_support.fingerprints import normalize_datetime
-from chanlun.decision_support.trading_system.parameters import (
-    StrategyParameters,
-    etf_parameter_snapshot,
-)
 from chanlun.decision_support.trading_system.selection import (
-    AccountEntryGate,
-    CandidateDecision,
-    CandidateSnapshot,
     CompletedDailyClose,
     HigherTimeframeRiskSnapshot,
     RiskState,
     SectorStrengthSnapshot,
     SelectionResearchSnapshot,
-    TechnicalEntrySnapshot,
-    TradeabilitySnapshot,
-    evaluate_candidate,
 )
 
 
@@ -268,25 +258,6 @@ class BenchmarkStructureRiskFacts:
             raise ValueError("benchmark risk states must be ordered M/W/D")
         if self.completed_30m_prefix_count < 0:
             raise ValueError("completed 30m prefix count cannot be negative")
-
-
-@dataclass(frozen=True, slots=True)
-class EtfProxyCandidateDecisionFacts:
-    """Auditable envelope around the unchanged strict strategy candidate decision core."""
-
-    selection: EtfProxySelectionFacts
-    anchor: BottomFractalAnchorFacts
-    basket_strength: BasketStrengthFacts
-    benchmark_structure: BenchmarkStructureRiskFacts
-    market_risk: HigherTimeframeRiskFacts
-    candidate_snapshot: CandidateSnapshot | None
-    decision: CandidateDecision | None
-    grade: FactGrade
-    blockers: tuple[FactBlocker, ...]
-
-    @property
-    def full_system_eligible(self) -> bool:
-        return self.grade == "FULL_SYSTEM_ELIGIBLE" and self.decision is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -681,9 +652,8 @@ class RiskMappingSupplyFacts:
     outside_top_interval_sell12_count: int
     highest_candidate_center_count: int
     point_evidence: tuple[RiskMappingPointEvidenceFacts, ...]
-    # Buy-side first/second points are diagnostic only.  They explain a
-    # directional supply imbalance but never enter the frozen top-fractal
-    # first/second-sell selector or the stable mapping-point identity table.
+    # 买侧一、二类点只用于诊断，可解释方向性供给失衡，但绝不进入冻结顶分型一/二卖
+    # 选择器或稳定映射点身份表。
     diagnostic_buy_point_type_counts: tuple[tuple[str, int], ...]
     diagnostic_buy_point_evidence: tuple[RiskDiagnosticBuyPointEvidenceFacts, ...]
 
@@ -1753,7 +1723,7 @@ def build_risk_structure_state_fact(
         return RiskStructureStateFacts(fact, None, None, (), ())
 
     top_confirmation, top, interval = max(completed_tops, key=lambda row: row[0])
-    # A later, completed opposite high-timeframe pen closes this top event.
+    # 后续已完成的反向高周期笔会关闭该顶部事件。
     down_pen_end: datetime | None = None
     for line in high_state.get_bis():
         if (
@@ -1798,9 +1768,8 @@ def build_risk_structure_state_fact(
             decision_time=decision,
         )
     )
-    # First/second buys are retained only as read-only directional supply
-    # diagnostics.  They cannot enter the frozen top-fractal mapping, stable
-    # mapping-point identities, later third-point lifecycle, or gate state.
+    # 一、二买只保留为只读方向供给诊断，不能进入冻结顶分型映射、稳定映射点身份、
+    # 后续三类点生命周期或闸门状态。
     evidence = tuple(
         row
         for row in all_evidence
@@ -1973,8 +1942,7 @@ def aggregate_completed_period_bars(
             continue
         if period == "W":
             period_calendar_end = max(expected) if expected else group[-1].session
-            # Calendar coverage through Sunday proves no later trading day was
-            # silently omitted from the supplied calendar.
+            # 日历覆盖到周日可证明所提供日历未静默遗漏更晚交易日。
             calendar_period_end = date.fromisocalendar(
                 group[-1].session.isocalendar().year,
                 group[-1].session.isocalendar().week,
@@ -2089,8 +2057,7 @@ def latest_completed_bottom_fractal_anchor(
             (),
         )
 
-    # Import lazily so data-only consumers do not initialize the structure
-    # engine.  These are read-only calls into the frozen implementation.
+    # 延迟导入，避免仅数据消费者初始化结构引擎；这些只是对冻结实现的只读调用。
     import pandas as pd
 
     from chanlun.core.cl import CL
@@ -2578,9 +2545,8 @@ class EtfProxyPitRepository:
                     f"members={len(basket.members)}",
                 )
             )
-        # The cache has a source update date but no intraday publication
-        # timestamp.  Use the source day's close as a conservative visibility
-        # boundary and keep the certification downgrade explicit.
+        # 缓存有来源更新日期却没有盘中发布时间戳，因此以来源日收盘作为保守可见性边界，
+        # 并明确保留认证降级。
         basket_known_at = datetime.combine(
             basket.source_update_date, time(15, 0), tzinfo=CN
         )
@@ -2870,9 +2836,8 @@ class EtfProxyPitRepository:
                     )
                 )
         categories.sort(key=lambda value: value[0])
-        # The table has dated factors but no publication timestamp.  The
-        # backward factors are safe for causal calculation after filtering by
-        # effective date, yet this missing field prevents full certification.
+        # 表中因子带日期却无发布时间戳；按生效日过滤后后复权因子可安全用于因果计算，
+        # 但缺失该字段仍阻止完整认证。
         blockers.append(
             FactBlocker(
                 "adjustment_factor_known_at",
@@ -2931,185 +2896,6 @@ class EtfProxyPitRepository:
         return BasketStrengthFacts(snapshot, basket, grade, tuple(blockers))
 
 
-def build_etf_proxy_candidate_decision(
-    repository: EtfProxyPitRepository,
-    mapping: EtfTrackingMapping,
-    *,
-    decision_time: datetime,
-    benchmark_daily_bars: Sequence[DailyMarketBar],
-    benchmark_completed_30m_bars: Sequence[FrozenStructureBar],
-    trading_sessions: Sequence[date],
-    calendar_coverage_end: date,
-    tradeability: TradeabilitySnapshot,
-    sector_risk: HigherTimeframeRiskSnapshot | None,
-    symbol_risk: HigherTimeframeRiskSnapshot | None,
-    technical: TechnicalEntrySnapshot,
-    account: AccountEntryGate,
-    reviewer: str,
-    signature: str,
-    parameters: StrategyParameters | None = None,
-    market: str = "A",
-) -> EtfProxyCandidateDecisionFacts:
-    """Build one strict ETF_PROXY candidate at an arbitrary decision time.
-
-    Selection, membership and basket strength are regenerated for the exact
-    decision session.  The unchanged :func:`evaluate_candidate` core performs
-    the final rule checks.  Sector and symbol risk remain separate caller
-    facts as required by strict strategy; this adapter never aliases the broad-market risk
-    into those labels.
-    """
-
-    decision_time = normalize_datetime(decision_time, "decision_time")
-    actual_parameters = parameters or etf_parameter_snapshot()
-    blockers: list[FactBlocker] = []
-    if actual_parameters.selection_path != "ETF_PROXY":
-        blockers.append(
-            FactBlocker(
-                "parameter_selection_path",
-                "ETF_PROXY_PARAMETER_SNAPSHOT_REQUIRED",
-                actual_parameters.selection_path,
-            )
-        )
-    selection = repository.build_selection_facts(
-        mapping,
-        decision_time=decision_time,
-        reviewer=reviewer,
-        signature=signature,
-    )
-    anchor = latest_completed_bottom_fractal_anchor(
-        benchmark_daily_bars,
-        decision_time=decision_time,
-        symbol=repository.tracked_index,
-    )
-    basket_strength = repository.build_basket_strength_facts(
-        decision_time=decision_time,
-        anchor_session=anchor.anchor_session,
-    )
-    benchmark_structure = build_benchmark_structure_risk_facts(
-        benchmark_daily_bars,
-        trading_sessions=trading_sessions,
-        calendar_coverage_end=calendar_coverage_end,
-        decision_time=decision_time,
-        completed_30m_bars=benchmark_completed_30m_bars,
-        symbol=repository.tracked_index,
-    )
-    market_risk = build_higher_timeframe_risk_facts(
-        benchmark_daily_bars,
-        trading_sessions=trading_sessions,
-        calendar_coverage_end=calendar_coverage_end,
-        decision_time=decision_time,
-        structure_states=tuple(
-            value.fact for value in benchmark_structure.states
-        ),
-        snapshot_id=_fingerprint(
-            {
-                "kind": "ETF_PROXY_MARKET_RISK",
-                "tracked_index": repository.tracked_index,
-                "decision_time": decision_time,
-                "structure_revisions": tuple(
-                    value.fact.source_revision
-                    for value in benchmark_structure.states
-                ),
-            }
-        ),
-    )
-    blockers.extend(selection.blockers)
-    blockers.extend(anchor.blockers)
-    blockers.extend(anchor.warnings)
-    blockers.extend(basket_strength.blockers)
-    blockers.extend(benchmark_structure.blockers)
-    blockers.extend(market_risk.blockers)
-    if tradeability.symbol != mapping.symbol:
-        blockers.append(
-            FactBlocker(
-                "tradeability_symbol",
-                "ETF_PROXY_TRADEABILITY_SYMBOL_MISMATCH",
-                f"mapping={mapping.symbol}; tradeability={tradeability.symbol}",
-            )
-        )
-    if sector_risk is None:
-        blockers.append(
-            FactBlocker(
-                "sector_risk",
-                "ETF_PROXY_SECTOR_RISK_FACT_MISSING",
-                "strict strategy forbids aliasing broad-market risk into sector risk",
-            )
-        )
-    if symbol_risk is None:
-        blockers.append(
-            FactBlocker(
-                "symbol_risk",
-                "ETF_PROXY_SYMBOL_RISK_FACT_MISSING",
-                "the ETF's own M/W/D risk snapshot was not supplied",
-            )
-        )
-    if selection.snapshot is None:
-        blockers.append(
-            FactBlocker(
-                "selection_snapshot",
-                "ETF_PROXY_SELECTION_SNAPSHOT_UNAVAILABLE",
-                decision_time.date().isoformat(),
-            )
-        )
-    if market_risk.snapshot is None:
-        blockers.append(
-            FactBlocker(
-                "market_risk",
-                "ETF_PROXY_MARKET_RISK_SNAPSHOT_UNAVAILABLE",
-                decision_time.isoformat(),
-            )
-        )
-
-    candidate: CandidateSnapshot | None = None
-    evaluated: CandidateDecision | None = None
-    can_evaluate = (
-        actual_parameters.selection_path == "ETF_PROXY"
-        and selection.snapshot is not None
-        and market_risk.snapshot is not None
-        and sector_risk is not None
-        and symbol_risk is not None
-        and tradeability.symbol == mapping.symbol
-    )
-    if can_evaluate:
-        candidate = CandidateSnapshot(
-            symbol=mapping.symbol,
-            market=market,
-            sector_id=basket_strength.snapshot.sector_id,
-            decision_time=decision_time,
-            research=selection.snapshot,
-            tradeability=tradeability,
-            market_risk=market_risk.snapshot,
-            sector_risk=sector_risk,
-            symbol_risk=symbol_risk,
-            sector_strength=basket_strength.snapshot,
-            technical=technical,
-            account=account,
-        )
-        evaluated = evaluate_candidate(candidate, actual_parameters)
-
-    if evaluated is None:
-        grade: FactGrade = "UNRESOLVED"
-    elif (
-        selection.grade == "FULL_SYSTEM_ELIGIBLE"
-        and basket_strength.grade == "FULL_SYSTEM_ELIGIBLE"
-        and not blockers
-    ):
-        grade = "FULL_SYSTEM_ELIGIBLE"
-    else:
-        grade = "RESEARCH_ONLY"
-    return EtfProxyCandidateDecisionFacts(
-        selection=selection,
-        anchor=anchor,
-        basket_strength=basket_strength,
-        benchmark_structure=benchmark_structure,
-        market_risk=market_risk,
-        candidate_snapshot=candidate,
-        decision=evaluated,
-        grade=grade,
-        blockers=tuple(blockers),
-    )
-
-
 __all__ = (
     "BasketStrengthFacts",
     "BenchmarkStructureRiskFacts",
@@ -3118,7 +2904,6 @@ __all__ = (
     "CausalAdjustedStructureBars",
     "DailyMarketBar",
     "EtfProxyPitRepository",
-    "EtfProxyCandidateDecisionFacts",
     "EtfProxySelectionFacts",
     "EtfTrackingMapping",
     "FactBlocker",
@@ -3138,7 +2923,6 @@ __all__ = (
     "apply_qmt_causal_adjustments",
     "build_higher_timeframe_risk_facts",
     "build_benchmark_structure_risk_facts",
-    "build_etf_proxy_candidate_decision",
     "build_risk_structure_state_fact",
     "completed_period_ma5",
     "latest_completed_bottom_fractal_anchor",

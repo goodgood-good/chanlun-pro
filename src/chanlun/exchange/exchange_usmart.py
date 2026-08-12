@@ -441,9 +441,8 @@ def _float_value(value: Any) -> float:
 class ExchangeUSmart(Exchange):
     """uSMART A/HK/US 三市场基础行情适配器。"""
 
-    # ``latestTime`` is the completed interval endpoint.  The regular US
-    # minute series ends at 16:00 (rather than a start-labelled 15:59), and
-    # calendar bars are normalized to the local market close below.
+        # ``latestTime`` 是已完成区间终点。美股常规分钟序列结束于 16:00，
+        # 而不是按起点标记的 15:59；日历周期 K 线会在下方规范为当地市场收盘时刻。
     kline_time_label = "end"
 
     def __init__(
@@ -471,8 +470,7 @@ class ExchangeUSmart(Exchange):
                 f"{sorted(_US_HISTORY_SOURCES)}, got "
                 f"{self._us_history_source!r}"
             )
-        # Lazily created so uSMART can still provide symbols/ticks without
-        # opening a second quote connection during application startup.
+            # 延迟创建，确保应用启动时无需打开第二条行情连接，uSMART 仍可提供标的和报价。
         self._us_history_exchange = history_exchange
         self._longbridge_fallback_reported = False
         self._all_stocks: List[Dict[str, Any]] | None = None
@@ -521,11 +519,9 @@ class ExchangeUSmart(Exchange):
                     )
                 )
                 if not all(credentials):
-                    # A console access token is not sufficient for the API-key
-                    # SDK flow.  Keep the market-data service available by
-                    # taking the already configured uSMART path for this whole
-                    # request; its price-basis metadata lets callers detect a
-                    # later provider change and rebuild atomically.
+        # 控制台访问令牌不足以完成 API 密钥形式的软件开发工具包流程。本次请求全程使用
+        # 已配置的 uSMART 路径以保持行情服务可用；其价格基准元数据可让调用方识别
+        # 后续数据提供方变化并进行原子重建。
                     if not self._longbridge_fallback_reported:
                         LogUtil.warning(
                             "Longbridge history credentials are incomplete; "

@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
-from chanlun.core.strict_structure.divergence import merge_formal_divergence_ledger
+from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     ConstituentUnit,
@@ -22,8 +22,8 @@ from chanlun.core.strict_structure.strength import StrengthSnapshot
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
 )
-from chanlun.decision_support.trading_system.structure_signal_adapter import (
-    _point_proof,
+from chanlun.decision_support.trading_system.provisional import (
+    extract_provisional_candidates,
 )
 from tests.core.strict_structure.signal_helpers import confirmed_point
 from tests.core.strict_structure.helpers import (
@@ -191,16 +191,17 @@ def _with_point_anchors(structure, points) -> StrictStructureResult:
             if point.structural_level != level_number:
                 continue
             by_id.setdefault(point.anchor_unit_id, _anchor_unit(point))
+        level_units = tuple(
+            sorted(
+                by_id.values(), key=lambda unit: (unit.market_start, unit.unit_id)
+            )
+        )
         levels[level_number] = replace(
             level,
-            units=tuple(
-                sorted(
-                    by_id.values(), key=lambda unit: (unit.market_start, unit.unit_id)
-                )
-            ),
+            units=level_units,
             center_result=replace(
                 level.center_result,
-                locked_unit_count=len(by_id),
+                locked_unit_count=sum(unit.locked for unit in level_units),
             ),
         )
     return replace(structure, levels=tuple(levels))
@@ -242,6 +243,7 @@ def _aware_point(point_type: str, *, parent=None):
 def _evidence(
     points=(),
     *,
+    approaching_points=(),
     symbol: str = "SZ.000001",
     source_frequency: str = "1m",
     structure=None,
@@ -253,7 +255,7 @@ def _evidence(
             price_basis_revision="test-raw",
             levels=(),
         ),
-        points,
+        (*points, *approaching_points),
     )
     observations = CenterLevelResult(
         structural_level=0,
@@ -264,7 +266,7 @@ def _evidence(
         locked_unit_count=0,
         replay_from=0,
     )
-    divergences = merge_formal_divergence_ledger(structure, points)
+    divergences = collect_formal_divergence_ledger(structure, points)
     revision = build_strict_evidence_revision(
         symbol=symbol,
         source_frequency=source_frequency,
@@ -285,7 +287,7 @@ def _evidence(
         structure=structure,
         stroke_center_observations=observations,
         confirmed_points=points,
-        approaching_points=(),
+        approaching_points=approaching_points,
         divergences=divergences,
     )
 
@@ -428,10 +430,120 @@ def test_small_to_large_parent_link_survives_id_conversion() -> None:
     )
     assert converted_second.parent_point_id == converted_parent.point_id
     assert converted_second.related_point_ids == (converted_parent.point_id,)
-    proof_ids, reasons = _point_proof(
-        converted_second,
-        points_by_id={point.point_id: point for point in converted},
-        trends=(),
+
+
+def test_small_to_large_second_is_visible_before_lock_and_then_confirms() -> None:
+    strength = SmallToLargeFixtureStrength()
+    all_units = tuple(
+        unit(index, direction, start_tick + 1_000, end_tick + 1_000)
+        for index, (direction, start_tick, end_tick) in enumerate(
+            SMALL_TO_LARGE_SPECS
+        )
     )
-    assert proof_ids == (converted_parent.point_id,)
-    assert reasons == ()
+
+    live_units = list(all_units[:54])
+    live_units[-1] = replace(
+        live_units[-1],
+        locked=False,
+        confirmed_at=None,
+    )
+    live_structure = StrictRecursiveEngine(max_levels=3).calculate(
+        tuple(live_units),
+        strength=strength,
+    )
+    live_engine = StrictSignalEngine(
+        structure=live_structure,
+        strength=strength,
+        price_quantum=Decimal("0.01"),
+    )
+    live = next(
+        point
+        for point in live_engine.approaching_points(live_units[-1].available_at)
+        if point.point_type == "2buy"
+        and point.structural_level == 1
+        and "small_to_large_reversal" in point.evidence_codes
+    )
+
+    extended_live_units = list(all_units[:57])
+    extended_live_units[-1] = replace(
+        extended_live_units[-1],
+        locked=False,
+        confirmed_at=None,
+    )
+    extended_structure = StrictRecursiveEngine(max_levels=3).calculate(
+        tuple(extended_live_units),
+        strength=strength,
+    )
+    extended_engine = StrictSignalEngine(
+        structure=extended_structure,
+        strength=strength,
+        price_quantum=Decimal("0.01"),
+    )
+    extended_live = next(
+        point
+        for point in extended_engine.approaching_points(
+            extended_live_units[-1].available_at
+        )
+        if point.point_type == "2buy"
+        and point.structural_level == 1
+        and "small_to_large_reversal" in point.evidence_codes
+    )
+
+    locked_units = list(all_units[:58])
+    locked_units[-1] = replace(
+        locked_units[-1],
+        locked=False,
+        confirmed_at=None,
+    )
+    locked_structure = StrictRecursiveEngine(max_levels=3).calculate(
+        tuple(locked_units),
+        strength=strength,
+    )
+    locked_engine = StrictSignalEngine(
+        structure=locked_structure,
+        strength=strength,
+        price_quantum=Decimal("0.01"),
+    )
+    confirmed = next(
+        point
+        for point in locked_engine.confirmed_points()
+        if point.point_type == "2buy"
+        and point.structural_level == 1
+        and "small_to_large_reversal" in point.evidence_codes
+    )
+
+    assert live.anchor_unit_id == confirmed.anchor_unit_id
+    assert extended_live.anchor_unit_id == confirmed.anchor_unit_id
+    assert live.parent_point_id == confirmed.parent_point_id
+    assert live.small_to_large_carrier_unit_ids == (
+        confirmed.small_to_large_carrier_unit_ids
+    )
+    assert live.confirmed_at is None
+    assert live.missing_conditions == ("terminal_unit_locked",)
+
+    live_confirmed = live_engine.confirmed_points()
+    candidate = extract_provisional_candidates(
+        _evidence(
+            live_confirmed,
+            approaching_points=(live,),
+            structure=live_structure,
+        ),
+        code="SZ.000001",
+        source_frequency="1m",
+        as_of=AS_OF,
+    )[0]
+    converted_parent = next(
+        point
+        for point in extract_confirmed_points(
+            _evidence(live_confirmed, structure=live_structure),
+            code="SZ.000001",
+            source_frequency="1m",
+            as_of=AS_OF,
+        )
+        if point.parent_point_id is None
+        and point.point_id == candidate.parent_point_id
+    )
+    assert candidate.related_point_ids == (converted_parent.point_id,)
+    assert candidate.small_to_large_carrier_unit_ids == (
+        live.small_to_large_carrier_unit_ids
+    )

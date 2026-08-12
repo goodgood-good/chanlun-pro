@@ -17,8 +17,7 @@ class LINE:
         self._end: FX = end  # 线的结束位置，以分型来记录
         self._type: str = _type  # 线的方向类型 （up 上涨  down 下跌）
         self.index: int = index  # 线的索引，后续查找方便
-        # Causal structure lock time.  A locked line may only use evidence
-        # already present at this timestamp; unfinished lines keep None.
+    # 因果结构锁定时刻。锁定线只能使用该时刻已经存在的证据；未完成线保持 None。
         self.locked_at = None
 
         # 根据缠论配置（笔/段区间），得来的高低点

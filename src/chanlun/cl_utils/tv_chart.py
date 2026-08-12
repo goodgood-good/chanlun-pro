@@ -136,8 +136,7 @@ def cl_data_to_tv_chart(
                 "strict chart higher-timeframe MACD is not aligned with displayed bars"
             )
     else:
-        # A structure failure never resurrects another recognition engine.
-        # Bars remain visible with the fixed production MACD parameters only.
+        # 结构计算失败时绝不启用其他识别引擎；只按固定生产 MACD 参数保留 K 线显示。
         macd = MACD()
         macd.process_macd(
             [

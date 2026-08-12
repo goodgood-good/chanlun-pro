@@ -1,4 +1,4 @@
-"""QMT GICS3 catalog and component-derived sector bars for live screening."""
+"""为实时选股提供 QMT GICS3 目录及由成分股合成的行业 K 线。"""
 
 from __future__ import annotations
 
@@ -83,12 +83,10 @@ _FIELDS = ("time", "open", "high", "low", "close", "volume")
 _PRICE_FIELDS = ("open", "high", "low", "close")
 _COMPOSITE_QUANTUM = Decimal("0.000001")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
-# The M/W/D convergence gate requires 480 completed daily observations.  At
-# two natural years, 550 calendar days can expose only about 390 A-share
-# sessions, making a valid sector gate mechanically impossible regardless of
-# how much 5m history QMT has.  This is evidence lookback, not a signal
-# parameter; retain ample holiday/suspension margin around the 480-session
-# requirement and validate the exact returned exchange calendar below.
+# 月、周、日收敛门需要 480 个已完成日线观测。两个自然年中的 550 个日历日通常只能
+# 提供约 390 个 A 股交易日，无论 QMT 有多少五分钟历史都无法形成有效行业门。
+# 这里是证据回看范围，不是信号参数；围绕 480 个交易日要求保留充足的节假日和停牌
+# 余量，并在下方精确校验返回的交易所日历。
 _QMT_TRADING_CALENDAR_LOOKBACK_DAYS = 1100
 _DAILY_FIELDS = ("time", "open", "high", "low", "close", "volume")
 _FACT_CACHE_ENVELOPE_SCHEMA = "chanlun-qmt-sector-fact-cache-envelope"
@@ -327,8 +325,8 @@ def qmt_trading_session_evidence(
         )
 
     try:
-        # The CLI status command is a machine-readable JSON surface.  QMT's
-        # optional connection greeting is operational noise, not evidence.
+        # 命令行状态命令输出机器可读 JSON；QMT 可选的连接问候属于运行噪声，
+        # 不能作为证据。
         if hasattr(xtdata, "enable_hello"):
             xtdata.enable_hello = False
         with _XTDATA_NATIVE_LOCK:
@@ -935,10 +933,8 @@ def _member_ratios(
         frame["time"], unit="ms", utc=True
     ).dt.tz_convert("Asia/Shanghai")
     if frequency == "1d":
-        # QMT labels native daily rows at the session boundary.  A daily fact
-        # becomes decision-visible only at the completed A-share close.  Use
-        # that publication time both for the causal cutoff and for exact
-        # exchange-calendar suffix validation below.
+        # QMT 把原生日线标在交易日边界，但日线事实只有在 A 股收盘完成后才对决策可见。
+        # 因果截点和下方交易所日历后缀校验都使用这一发布时间。
         frame["date"] = frame["date"].dt.normalize() + pd.Timedelta(hours=15)
     cutoff = pd.Timestamp(normalize_datetime(not_after, "not_after"))
     prices = frame.loc[:, list(_PRICE_FIELDS)]
@@ -1033,9 +1029,8 @@ class QmtSectorCompositeSource:
     def _bucket(as_of: datetime, frequency: str) -> int:
         observed = normalize_datetime(as_of, "as_of")
         if frequency == "1d":
-            # A pre-close and post-close request on the same session must not
-            # share a cache bucket: the 15:00 daily bar is invisible to the
-            # former and visible to the latter.
+            # 同一交易日收盘前后的请求不能共用缓存分桶：15:00 日线对前者不可见，
+            # 对后者可见。
             return observed.date().toordinal() * 2 + int(
                 observed.timetz().replace(tzinfo=None) >= time(15)
             )
@@ -1185,9 +1180,8 @@ class QmtSectorCompositeSource:
         ):
             return None
         result = pd.DataFrame(rows)
-        # Match the provider-normalization dtype exactly.  Constructing a
-        # DataFrame directly from ``zoneinfo`` datetimes produces an equivalent
-        # looking but pandas-distinct timezone dtype on older pandas releases.
+        # 精确匹配数据提供方规范化后的数据类型。旧版 pandas 直接用 ``zoneinfo``
+        # 时间构建数据帧时，会产生外观等价但内部不同的时区类型。
         result["date"] = pd.to_datetime(result["date"], utc=True).dt.tz_convert(
             "Asia/Shanghai"
         )
@@ -1279,8 +1273,7 @@ class QmtSectorCompositeSource:
         try:
             _write_fact_payload(path, {**identity, "rows": rows})
         except OSError:
-            # Persistence is an optimization.  The already validated live QMT
-            # frame remains usable when the cache volume is temporarily read-only.
+            # 持久化只是优化；缓存卷暂时只读时，已经校验的实时 QMT 数据帧仍可使用。
             pass
         finally:
             self._report_progress()
@@ -2620,8 +2613,7 @@ class QmtSectorStrengthSource:
                 "trading_day": trading_day.isoformat(),
                 "instrument_name": name,
                 "instrument_status": int(status),
-                # Wall-clock IsTrading is retained as raw evidence but does
-                # not participate in the suspension interpretation.
+                # 按当前时钟观测的 IsTrading 只保留为原始证据，不参与停牌解释。
                 "is_trading": bool(is_trading),
                 "suspended": True,
             }
@@ -2630,9 +2622,8 @@ class QmtSectorStrengthSource:
             captured_at=captured_at,
             facts=result,
         )
-        # A native fact read after the decision timestamp is valid forward
-        # evidence but cannot be injected into that earlier decision.  The
-        # unresolved batch remains retryable; a later request can load it.
+        # 决策时刻之后读取的原生事实是有效前向证据，但不能注入更早决策。
+        # 未解析批次保持可重试，后续请求可以重新加载。
         return result if captured_at <= observed else {}
 
     def _fact_identity(
@@ -2804,9 +2795,8 @@ class QmtSectorStrengthSource:
         if self._fact_cache_path is None or identity is None:
             return
         symbols = tuple(identity["symbols"])
-        # Do not make a transient missing QMT response durable.  A complete
-        # symbol bundle may still contain a legitimately short newly listed
-        # history, but every requested symbol must have at least one fact.
+        # 不要把 QMT 瞬时缺失响应持久化。完整标的数据包可以包含新上市标的合法的短历史，
+        # 但每个请求标的至少必须有一条事实。
         if set(bars) != set(symbols) or any(not bars[symbol] for symbol in symbols):
             return
         document = {
@@ -2858,10 +2848,9 @@ class QmtSectorStrengthSource:
         for start in range(0, len(symbols), self._request_chunk_size):
             chunk = symbols[start : start + self._request_chunk_size]
             native = tuple(_qmt_code(value) for value in chunk)
-            # QMT's local 1d tables can be stale by different amounts for whole
-            # exchange partitions.  Refresh each bounded chunk in one native
-            # call rather than issuing thousands of per-symbol downloads.  A
-            # failed chunk is still read and will fail the cutoff gate below.
+            # QMT 本地日线表可能按整个交易所分区存在不同程度的滞后。每个有界分块只用
+            # 一次原生调用刷新，避免发起数千次单标的下载；失败分块仍会读取，并在下方
+            # 截点门中失败关闭。
             try:
                 self._progress_callback()
                 with _XTDATA_NATIVE_LOCK:
@@ -2947,8 +2936,7 @@ class QmtSectorStrengthSource:
             session=required_session,
             observed=observed,
         )
-        # A status capture is reusable only for a member in the current PIT
-        # basket.  It can never excuse a stale broad-market benchmark.
+            # 状态采集只可复用于当前时点篮子中的成员，绝不能用来豁免过期的宽基基准。
         status_facts = {
             symbol: fact
             for symbol, fact in status_facts.items()
@@ -2970,10 +2958,8 @@ class QmtSectorStrengthSource:
                 symbol: refreshed.get(symbol, current_bars.get(symbol, ()))
                 for symbol in symbols
             }
-            # Incomplete raw facts are safe to retain because their exact
-            # missing set is hash-authenticated and recomputed on every load.
-            # They never enter a resolved rank, and the next refresh retries
-            # only those symbols instead of redownloading the entire universe.
+            # 不完整原始事实可以安全保留，因为其精确缺失集合经过哈希认证，并在每次加载时
+            # 重算。它们绝不会进入已解析排名；下次刷新只重试缺失标的，不重新下载全市场。
             self._persist_daily_facts(
                 identity=fact_identity,
                 bars=current_bars,
@@ -3137,9 +3123,8 @@ class QmtSectorStrengthSource:
             members_by_sector=histories,
             membership_revision=membership_revision,
         )
-        # A publication lag or unresolved calendar is transient.  Keeping that
-        # unresolved batch in the day-long memory cache would prevent the
-        # singleton production source from ever recovering without a restart.
+            # 发布滞后或未解析日历属于瞬时状态。若把该未解析批次留在全天内存缓存中，
+            # 单例生产数据源不重启便永远无法恢复。
         member_history_complete = all(
             member.history_status != "UNEXPLAINED_GAP"
             for members in histories.values()

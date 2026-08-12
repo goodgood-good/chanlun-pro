@@ -75,6 +75,12 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--bootstrap-repetitions", type=int, default=2000)
     result.add_argument("--force-sectors", action="store_true")
+    result.add_argument(
+        "--selection-research",
+        type=Path,
+        default=None,
+        help="正式研究账本；默认读取输入目录下的 selection_research.json",
+    )
     return result
 
 
@@ -536,6 +542,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             flush=True,
         )
         return 3
+    research_path = (
+        args.selection_research.resolve()
+        if args.selection_research is not None
+        else directory / "selection_research.json"
+    )
+    try:
+        research_snapshots, selection_research_by_code = (
+            qmt_research_contract.load_selection_research_ledger(
+                research_path,
+                replay_symbols={row.code for row in symbols},
+            )
+        )
+    except ValueError:
+        failure = "formal_selection_research_ledger_missing_or_invalid"
+        _write_gate(
+            path=gate_path,
+            status="blocked",
+            pnl_generated=False,
+            algorithm_revision=algorithm_revision,
+            snapshot_hash=snapshot_hash,
+            symbols=len(symbols),
+            evaluations=evaluations,
+            failures=(failure,),
+        )
+        print(
+            json.dumps(
+                {
+                    "complete": False,
+                    "status": "blocked_by_formal_selection_research_gate",
+                    "failures": (failure,),
+                    "gate": str(gate_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return 3
     sectors = _build_sector_facts(
         directory=directory,
         symbols=symbols,
@@ -580,6 +624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         symbols,
         sectors,
         initial_cash=args.initial_cash,
+        selection_research_by_code=selection_research_by_code,
     )
     terminal_same_bar = tuple(
         trade.code
@@ -641,6 +686,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("historical_security_status", Decimal("1")),
             ("corporate_action_accounting", Decimal("1")),
             ("sector_event_coverage", sector_event_coverage),
+            (
+                "formal_selection_research_symbols",
+                Decimal(len(selection_research_by_code)) / Decimal(len(symbols)),
+            ),
         ),
     )
     result = BacktestEvaluationResult(
@@ -683,11 +732,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sector_composite_member_limit": None,
             "corporate_action_count": len(snapshot.factors),
             "causal_evaluation_count": evaluations,
+            "formal_selection_research_snapshot_count": len(research_snapshots),
+            "formal_selection_research_symbol_count": len(
+                selection_research_by_code
+            ),
         },
         data_source_hashes=(
             ("pit_metadata_snapshot", snapshot_hash),
             ("qmt_extract_manifest", _sha256(manifest_path)),
             ("prefix_invariance_audit", _sha256(prefix_path)),
+            ("formal_selection_research_ledger", _sha256(research_path)),
             (
                 "symbol_fact_checkpoint_tree",
                 _checkpoint_tree(symbol_paths, root=directory),

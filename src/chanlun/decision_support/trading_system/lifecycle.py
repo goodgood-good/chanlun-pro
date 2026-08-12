@@ -88,7 +88,10 @@ def build_setup(
         point_identity = point.point_id
     else:
         started_at = point.observed_at
-        prices = [point.anchor_price]
+        prices = [point.invalidation_price, point.anchor_price]
+        boundary = point.center_zg if point.side == "buy" else point.center_zd
+        if boundary is not None:
+            prices.append(boundary)
         point_identity = point.candidate_id
     setup_id = sha256_json(
         {
@@ -142,11 +145,9 @@ def match_one_minute_trigger(
 
 def _base_stage(setup: TradeSetup) -> LifecycleStage:
     if isinstance(setup.point, ProvisionalCandidate):
-        # A completed center preview already has a same-level external leave
-        # and first return that holds outside the frozen core.  That is a
-        # geometrically formed third-class point, even though the deferred XD
-        # lock still keeps it non-actionable.  Do not collapse this factual
-        # state back into the earlier "approaching" bucket.
+    # 已完成的中枢预览已经具备同级别外部离开段，以及保持在冻结核心之外的首次回抽。
+    # 从几何上看三类点已经形成，即使延迟锁定的线段仍使它不可执行；
+    # 不要把这一事实状态退回更早的“接近中”分类。
         if has_formed_provisional_geometry(
             setup.point.point_type,
             setup.point.evidence_codes,

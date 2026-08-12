@@ -12,15 +12,15 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingSupplyFacts,
 )
-from chanlun.decision_support.trading_system.direct_recursive_structure import (
-    direct_recursive_alignment_contract,
-)
 from chanlun.decision_support.trading_system.human_assisted_decision import (
+    FORMAL_SELECTION_REQUIRED_REASON_CODE,
     HumanAssistedDecisionCore,
-    MONITOR_ONLY_BUY_REASON_CODE,
     replay_human_assisted_bundles,
     validate_human_assisted_contract_document,
     validate_signal_decision_document,
+)
+from chanlun.decision_support.trading_system.signal_alignment import (
+    unified_signal_alignment_contract,
 )
 from tests.trading_system.helpers import confirmed_point, deterministic_bundle
 
@@ -135,13 +135,30 @@ def test_sector_selection_scope_is_shared_and_hash_bound() -> None:
     assert monitor_evaluated.entry is not None
     assert monitor_evaluated.entry.allowed is False
     assert monitor_evaluated.entry.risk_multiplier == 0
-    assert MONITOR_ONLY_BUY_REASON_CODE in monitor_evaluated.entry.reason_codes
+    assert "QMT_SECTOR_TRIGGER_REQUIRED" in monitor_evaluated.entry.reason_codes
     assert monitor["entry_allowed"] is False
     assert monitor["risk_multiplier"] == "0"
-    assert MONITOR_ONLY_BUY_REASON_CODE in monitor["decision_reasons"]
+    assert "QMT_SECTOR_TRIGGER_REQUIRED" in monitor["decision_reasons"]
     assert triggered["sector_triggered"] is True
     assert triggered["monitor_only"] is False
+    assert triggered["formal_selection"]["status"] == "PASS"
     assert triggered["decision_document_id"] != monitor["decision_document_id"]
+
+
+def test_sector_trigger_cannot_replace_signed_three_program_research() -> None:
+    core = HumanAssistedDecisionCore()
+    bundle = replace(deterministic_bundle(), selection_research=None)
+
+    [decision] = core.evaluate_symbol(bundle)
+    [document] = core.decision_documents(bundle)
+
+    assert decision.technical_entry_allowed is True
+    assert decision.entry is not None and decision.entry.allowed is False
+    assert FORMAL_SELECTION_REQUIRED_REASON_CODE in decision.entry.reason_codes
+    assert document["sector_triggered"] is True
+    assert document["monitor_only"] is True
+    assert document["formal_selection"]["research_status"] == "UNRESOLVED"
+    assert FORMAL_SELECTION_REQUIRED_REASON_CODE in document["decision_reasons"]
 
 
 def test_page_explanation_fields_do_not_change_shared_decision_identity() -> None:
@@ -175,8 +192,8 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     assert first.contract.stroke_mode == "strict-cl-k-distance"
     assert first.contract.strict_base_profile_id == ("chanlun-source-faithful-base")
     assert first.contract.strict_base_profile_revision.startswith("sha256:")
-    assert first.contract.direct_recursive_alignment_parameter_set_id == (
-        direct_recursive_alignment_contract().parameter_set_id
+    assert first.contract.signal_alignment_parameter_set_id == (
+        unified_signal_alignment_contract().parameter_set_id
     )
     assert first.contract.structure_scope == "physical-timeframe-recursive"
     assert first.contract.recursive_structure_allowed is True
@@ -190,7 +207,7 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     assert document["policy"]["minimum_tick"] == "0.01"
     assert validate_human_assisted_contract_document(document) == (first.contract_id)
 
-    document["direct_recursive_alignment_parameter_set_id"] = "sha256:" + "0" * 64
+    document["signal_alignment_parameter_set_id"] = "sha256:" + "0" * 64
     with pytest.raises(ValueError, match="physical structure contract changed"):
         validate_human_assisted_contract_document(document)
 

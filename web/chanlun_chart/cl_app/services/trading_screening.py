@@ -1,4 +1,4 @@
-"""Incremental, read-only screening service driven only by ``TradingEngine``."""
+"""只由统一人工辅助决策核心驱动的只读增量选股服务。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ from chanlun.core.strict_structure.base_profile import (
 from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
-    TradingEngine,
 )
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     current_decision_source_snapshot,
@@ -38,7 +37,7 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
 )
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     HumanAssistedDecisionCore,
-    apply_sector_selection_scope as _apply_selection_scope,
+    apply_formal_selection_scope as _apply_selection_scope,
     sector_decision_document,
     serialize_evaluated_signal,
 )
@@ -46,6 +45,11 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID,
     HigherTimeframeGateBundle,
     HigherTimeframeSessionEvidence,
+)
+from chanlun.decision_support.trading_system.selection import (
+    SelectionResearchSnapshot,
+    selection_research_ledger_document,
+    visible_selection_research,
 )
 from chanlun.decision_support.trading_system.file_lock import (
     interprocess_file_lock,
@@ -194,7 +198,7 @@ _CACHE_GENERATION_FILE = re.compile(r"^[0-9a-f]{64}\.json$")
 
 @lru_cache(maxsize=4)
 def _current_review_decision_source_id(project_root: str) -> str:
-    """Freeze the app process implementation identity once per repository."""
+    """为当前仓库冻结一次应用进程实现身份。"""
 
     snapshot = current_decision_source_snapshot(Path(project_root))
     return decision_source_snapshot_id(snapshot)
@@ -204,14 +208,11 @@ def _current_review_decision_source_id(project_root: str) -> str:
 def _official_calendar_for_observed_day(
     observed_day: date,
 ) -> tuple[date, date, frozenset[date], str] | None:
-    """Load the pinned SSE annual calendar once per observed day.
+    """每个观察日只加载一次已固定的上交所年度日历。
 
-    Scheduling must never turn a weekday holiday into a trading session.  The
-    existing forward pipeline already pins and validates the SSE annual
-    announcement, so screening consumes the same evidence instead of inventing
-    a second calendar.  Returning ``None`` keeps a conservative weekday
-    fallback outside the artifact's coverage; it can cause extra work, but can
-    never skip a possible market session.
+    调度不能把工作日假期误当成交易日。前向链路已固定并校验上交所年度公告，因此
+    选股直接复用同一证据，不再创造第二套日历。日期超出证据覆盖时返回 ``None``，
+    继续采用保守的工作日兜底；这可能增加计算，但不会漏过可能的交易日。
     """
 
     observed_at = datetime.combine(
@@ -283,7 +284,7 @@ def _preselection_target_session(
     snapshot: Mapping[str, object],
     observed_at: datetime,
 ) -> dict[str, object]:
-    """Bind a close snapshot to the session for which it is actionable."""
+    """把收盘快照绑定到其可操作的交易日。"""
 
     observed = normalize_datetime(observed_at, "observed_at").astimezone(CN)
     raw_cutoff = snapshot.get("market_data_as_of")
@@ -348,14 +349,11 @@ def _complete_close_snapshot_can_idle(
     review_boundary_ready: bool | None = None,
     phase_refresh_at: datetime | None = None,
 ) -> bool:
-    """Return whether a proven close-complete snapshot may remain read-only.
+    """判断已证明完整的收盘快照能否继续只读静置。
 
-    This is an operational pacing gate, not a cache relaxation.  It never reuses
-    one sector snapshot for a different decision time: after one successful
-    refresh in the current Web process, a fully drained close snapshot may idle
-    until one of two boundaries: 15:05 builds the next-session candidate pool
-    from the completed close, while 08:45 performs a bounded pre-open
-    reconciliation before the 09:10 point-in-time capture.
+    这是运行节奏门槛，不是放宽缓存。它不会把一个板块快照用于不同决策时点：当前
+    Web 进程成功刷新一次后，已全部处理的收盘快照可静置到两个边界之一；15:05 用
+    完整收盘数据构建下一交易日候选池，08:45 则在 09:10 时点捕获前做有界盘前核对。
     """
 
     if (
@@ -416,10 +414,9 @@ def _complete_close_snapshot_can_idle(
             tzinfo=CN,
         )
     elif POST_CLOSE_PRESELECTION_START <= current < POST_CLOSE_PRESELECTION_END:
-        # Do not accept yesterday's 15:00 cutoff merely because a diagnostic
-        # refresh ran after today's close.  QMT can need a short period to
-        # expose the final minute; keep retrying until today's completed close
-        # is the actual decision cutoff.
+        # 不能因诊断刷新发生在今日收盘后，就接受昨日 15:00 的截止点。
+        # 行情终端 QMT 可能需要短暂时间才暴露最后一分钟，因此必须重试到今日完整收盘
+        # 真正成为决策截止点。
         if cutoff.date() != local_now.date():
             return False
         phase_start = datetime.combine(
@@ -430,10 +427,8 @@ def _complete_close_snapshot_can_idle(
     else:
         return True
 
-    # One complete refresh inside the current phase is enough.  If it opens a
-    # new full-market epoch, the pending queue bypasses this idle gate and keeps
-    # draining until complete; if QMT has not exposed the close yet, the
-    # pre-close cutoff check above keeps the service retrying.
+    # 当前阶段完成一次刷新即可。若它开启新的全市场周期，待处理队列会绕过
+    # 空闲闸门并持续排空；若 QMT 尚未暴露收盘数据，上面的截止点检查会继续重试。
     if phase_refresh_at is not None:
         refreshed_at = normalize_datetime(
             phase_refresh_at,
@@ -457,14 +452,11 @@ def _coverage_sector_probe_required(
     snapshot: Mapping[str, object],
     observed_at: datetime,
 ) -> bool:
-    """Return whether a complete frozen epoch must query QMT sector state again.
+    """判断完整冻结周期是否必须再次查询 QMT 板块状态。
 
-    Outside the two deliberate daily boundaries, a restart is not a new
-    decision time.  Recomputing the same sector structures merely because the
-    Python process changed can alter structural point identities and mix two
-    evidence identities in one coverage epoch. The post-close and pre-open
-    windows remain the only places where a complete epoch is probed for a new
-    market/catalog revision.
+    除两个明确的每日边界外，进程重启不代表新决策时点。仅因 Python 进程变化就重算
+    同一板块结构，可能改变结构点身份，并在一个覆盖周期中混入两种证据身份。只有
+    盘后和盘前窗口会为完整周期探测新的市场或目录修订。
     """
 
     local_now = normalize_datetime(observed_at, "observed_at").astimezone(CN)
@@ -535,7 +527,7 @@ def _next_background_active_start(observed_at: datetime) -> datetime:
 
 
 def _next_full_coverage_active_start(observed_at: datetime) -> datetime:
-    """Resolve the next archival window, including overnight continuation."""
+    """解析下一个归档窗口，包括跨夜续算。"""
 
     local_now = normalize_datetime(observed_at, "observed_at").astimezone(CN)
     for day_offset in range(32):
@@ -557,13 +549,11 @@ def _next_full_coverage_active_start(observed_at: datetime) -> datetime:
 
 
 def _full_coverage_refresh_window_open(observed_at: datetime) -> bool:
-    """Limit expensive full-universe work to deliberate daily windows.
+    """把高成本全市场任务限制在明确的每日窗口内。
 
-    The close-to-next-session selection is built after 15:05.  An unfinished
-    authenticated epoch may resume from midnight through the short pre-open
-    reconciliation window.  During continuous trading the independent priority
-    lane owns the minute-by-minute budget; draining thousands of archival
-    symbols there can otherwise block a current alert for minutes.
+    收盘到下一交易日的选股在 15:05 后构建；未完成且已认证的周期可从午夜续算到短暂
+    盘前核对窗口。连续交易期间，每分钟预算归独立优先通道所有；若此时继续处理数千
+    个归档标的，可能让当前告警阻塞数分钟。
     """
 
     local_now = normalize_datetime(observed_at, "observed_at").astimezone(CN)
@@ -584,7 +574,7 @@ def _full_coverage_refresh_window_open(observed_at: datetime) -> bool:
 
 
 def _priority_monitor_session_open(observed_at: datetime) -> bool:
-    """Use only completed A-share minute bars, never an in-progress bar."""
+    """只使用已完成的 A 股分钟行情，绝不使用进行中的行情。"""
 
     local_now = normalize_datetime(observed_at, "observed_at").astimezone(CN)
     local_is_trading, _calendar_source = _scheduled_trading_day(
@@ -606,7 +596,7 @@ def _priority_monitor_delay_seconds(
     *,
     interval_seconds: int,
 ) -> float:
-    """Return the remaining start-to-start monitor interval."""
+    """返回两次监听启动时刻之间的剩余间隔。"""
 
     if last_at is None:
         return 0.0
@@ -635,14 +625,11 @@ def _priority_buy_candidate_codes(
     excluded_codes: frozenset[str] = frozenset(),
     allowed_stages: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
-    """Return non-owned buy candidates in operational urgency order.
+    """按运行紧迫度返回非持仓买入候选。
 
-    A sell point is actionable only for a held or explicitly watched symbol;
-    those names live in the mandatory lane assembled by the caller.  Letting
-    hundreds of unowned sell-only documents consume the bounded current-minute
-    lane can otherwise make every explicit watchlist name wait many rotations.
-    This helper changes observation order only: it neither creates nor removes
-    any archived signal or trading decision.
+    卖点只有在标的已持仓或被明确关注时才可操作，这些标的由调用方放入强制通道。
+    若让数百个非持仓纯卖出文档占用有界的当前分钟通道，明确自选标的可能等待多个
+    轮次。此函数只改变观察顺序，既不创建也不删除任何归档信号或交易决策。
     """
 
     best_rank: dict[str, tuple[int, str]] = {}
@@ -681,15 +668,12 @@ def _take_due_candidate_batch(
     excluded_codes: frozenset[str] = frozenset(),
     previous_monitor_at: datetime | None = None,
 ) -> tuple[str, ...]:
-    """Take the oldest due bar-cadence candidates within honest capacity.
+    """在真实容量内选取最早到期的行情节奏候选。
 
-    The target is a maximum observation age, not a promise that every symbol
-    is recomputed on every one-minute scheduler tick.  A 5m setup cannot
-    change between completed 5m bars, so the scheduler spreads that universe
-    across the five minute ticks.  If a slow prior pass consumed multiple
-    ticks, the requested share grows proportionally and the hard cap makes any
-    capacity shortfall visible through health instead of blocking the 1m lane
-    indefinitely.
+    目标是限制最大观察年龄，并不承诺每个标的在调度器每次一分钟触发时都重算。两根
+    已完成 5m 行情之间形态不会变化，因此调度器把该范围分摊到五个分钟触发点。若
+    上一轮较慢并跨过多个触发点，本轮份额会按比例增大；硬上限会通过健康状态暴露
+    容量缺口，而不是无限阻塞 1m 通道。
     """
 
     if target_seconds <= 0 or monitor_interval_seconds <= 0 or max_symbols <= 0:
@@ -737,7 +721,7 @@ def _candidate_lane_coverage(
     observed_at: datetime,
     target_seconds: int,
 ) -> dict[str, object]:
-    """Describe actual cadence coverage without treating unseen as current."""
+    """描述真实节奏覆盖，不把未观察状态冒充当前状态。"""
 
     observed = normalize_datetime(observed_at, "observed_at")
     unique = tuple(dict.fromkeys(universe))
@@ -777,15 +761,12 @@ def _main_notification_context(
     monitoring_only_refresh: bool,
     max_age_seconds: int,
 ) -> dict[str, object]:
-    """Describe whether the archival scan may emit a real-time alert.
+    """描述归档扫描是否可以发出实时告警。
 
-    Full-universe coverage is deliberately resumable and can take much longer
-    than one minute.  A symbol discovered near the end of that queue still
-    belongs to the frozen coverage cutoff; treating it as a live transition
-    would make an overnight/backfill result look like an intraday warning.
-    The independent priority monitor is the normal live lane while coverage is
-    draining.  The archival lane may notify only when its complete publication
-    is itself current and the A-share minute session is open.
+    全市场覆盖允许断点续算，耗时可能远超一分钟。队尾才发现的标的仍属于冻结覆盖
+    截止点；若当作实时转换，会把隔夜或补算结果伪装成盘中告警。覆盖处理期间，独立
+    优先监听器才是正常实时通道。只有完整发布本身仍属当前状态且 A 股分钟交易时段
+    已开启，归档通道才可通知。
     """
 
     observed = normalize_datetime(observed_at, "observed_at")
@@ -872,7 +853,7 @@ def _screening_policy_document() -> dict[str, object]:
         "stock_structure_request_bars": dict(
             CANONICAL_REQUEST_BARS_BY_FREQUENCY
         ),
-        "unfinished_segment_candidates": True,
+        "provisional_point_source": "strict_approaching_ledger",
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",
         "qmt_one_minute_grid_revision": (QMT_COMPLETED_ONE_MINUTE_GRID_REVISION),
@@ -905,7 +886,7 @@ def _screening_policy_document() -> dict[str, object]:
 
 
 def _screening_policy_id() -> str:
-    """Identity for selection rules and decision-input adapter semantics."""
+    """返回选股规则与决策输入适配语义的身份。"""
 
     return sha256_json(_screening_policy_document())
 
@@ -1085,12 +1066,17 @@ class TradingScreeningConfig:
             raise ValueError("algorithm_id cannot be empty")
 
 
-def _initial_snapshot(config: TradingScreeningConfig) -> dict[str, object]:
+def _initial_snapshot(
+    config: TradingScreeningConfig,
+    *,
+    selection_research_revision: str,
+) -> dict[str, object]:
     return {
         "schema": SCHEMA,
         "algorithm_id": config.algorithm_id,
         "structure_contract_id": config.structure_contract_id,
         "parameter_set_id": config.parameter_set_id,
+        "selection_research_revision": selection_research_revision,
         "available": False,
         "scan_state": "not_started",
         "last_batch_state": "not_started",
@@ -1463,13 +1449,11 @@ def _sector_exclusion_from_document(
 def _coverage_sector_state_from_snapshot(
     snapshot: Mapping[str, object],
 ) -> tuple[SectorAssessmentBatch, dict[str, tuple[str, ...]] | None]:
-    """Restore the exact sector evidence frozen for one resumable coverage epoch.
+    """恢复为可续算覆盖周期冻结的精确板块证据。
 
-    A stock signal embeds the sector assessment that affected its decision.  A
-    multi-batch scan must therefore reuse the same assessment documents after a
-    process restart; re-running the sector analyzer at the same bar cutoff can
-    produce a different structural point identity and silently mix two evidence
-    identities in one otherwise unchanged epoch.
+    个股信号内嵌实际影响决策的板块评估。因此多批次扫描在进程重启后必须复用同一批
+    评估文档；在相同行情截止点重新运行板块分析器也可能产生不同结构点身份，进而在
+    其他内容未变的周期中悄然混入两种证据身份。
     """
 
     raw_sectors = snapshot.get("sectors")
@@ -1633,10 +1617,8 @@ def _signal_document(
         sector_evidence = (
             higher_timeframe_gates.sector.session_evidence
         ) or HigherTimeframeSessionEvidence.unavailable()
-        # Presentation-only extension: these facts explain an already
-        # fail-closed M/W/D result and never participate in decision identity.
-        # The extension carries its own contract so coverage can continue
-        # without replaying already-completed symbols merely to add prose.
+        # 这些事实只用于展示和解释已关闭失败的月/周/日结果，不参与决策身份。
+        # 扩展拥有独立契约，因此无需为了补充说明而重放已完成标的。
         risk["session_evidence_contract_id"] = (
             HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID
         )
@@ -1787,9 +1769,8 @@ def _signal_document(
             is None
             else higher_timeframe_gates.market.native_daily_reconciliation_evidence.document()
         )
-        # The optional sector native-daily path is intentionally unreconciled,
-        # capped at AMBER and therefore is not a *reconciliation* evidence.
-        # Never mislabel it as the symbol/benchmark overlap-certified bridge.
+        # 可选的板块原生日线链有意保持未对账，最高只允许 AMBER，不能作为
+        # 对账证据，也不能误标为已通过标的/基准重叠认证的桥接结果。
         risk["sector_native_daily_reconciliation_evidence"] = None
         risk["symbol_native_daily_reconciliation_evidence"] = (
             None
@@ -1815,8 +1796,7 @@ def _signal_document(
             is None
             else higher_timeframe_gates.market.native_daily_calendar_coverage_evidence.document()
         )
-        # Sector M/W/D is derived from its component 5m composite and has a
-        # separate strict same-base coverage contract.
+        # 板块月/周/日由成分 5m 合成序列派生，并使用独立的严格同源覆盖契约。
         risk["sector_native_daily_calendar_coverage_evidence"] = None
         risk["symbol_native_daily_calendar_coverage_evidence"] = (
             None
@@ -2076,15 +2056,12 @@ def _presentation_rows(
 def _presentation_signal_document(
     signal: Mapping[str, object],
 ) -> dict[str, object]:
-    """Build the bounded live-page projection of one audit signal.
+    """构建单个审计信号的有界实时页面投影。
 
-    The immutable screening publication and the human-review detail endpoint
-    retain the complete evidence tree.  The live list only needs identity,
-    filtering, the four-period summary and decision-relevant reason codes.
-    Copying every audit field made a 1,664-row response roughly 27 MiB and
-    caused browsers/extensions to abandon the request before rendering any
-    result.  Keep this projection as an explicit allow-list so new audit fields
-    cannot silently inflate the minute-polled page again.
+    不可变选股发布物和人工复核详情接口保留完整证据树。实时列表只需身份、筛选字段、
+    四周期摘要及决策相关原因码。复制全部审计字段会让 1664 行响应达到约 27 MiB，
+    浏览器或扩展可能在渲染前放弃请求。这里采用显式允许列表，防止新增审计字段再次
+    悄然膨胀每分钟轮询页面。
     """
 
     document = _presentation_fields(signal, _PRESENTATION_SIGNAL_FIELDS) or {}
@@ -2152,13 +2129,11 @@ def _stock_analysis_error_document(
     code: str,
     error: Exception,
 ) -> dict[str, object]:
-    """Normalize stock failures without relying on UI parsing exception text.
+    """规范化个股失败，不依赖界面解析异常文本。
 
-    The isolated worker exposes its remote exception type and original message
-    as attributes.  Direct/in-memory gateways used by tests and research tools
-    still work through the ordinary exception name and message.  Known market
-    data failures are deterministic for the frozen coverage cutoff; runtime
-    transport failures remain explicitly retryable after worker backoff.
+    隔离工作进程通过属性公开远端异常类型与原始消息；测试和研究工具使用的直接内存
+    网关仍通过普通异常名与消息工作。已知行情失败在冻结覆盖截止点下是确定性的；运行
+    传输失败则在工作进程退避后明确允许重试。
     """
 
     remote_error_type = getattr(error, "remote_error_type", type(error).__name__)
@@ -2216,7 +2191,7 @@ def _stock_analysis_error_document(
 
 
 def _is_coverage_exclusion(error: Mapping[str, object]) -> bool:
-    """Return whether a rejection is an audited epoch-local eligibility fact."""
+    """判断拒绝是否属于已审计的本周期资格事实。"""
 
     return bool(
         error.get("reason_code") in COVERAGE_EXCLUSION_REASON_CODES
@@ -2228,11 +2203,10 @@ def _is_coverage_exclusion(error: Mapping[str, object]) -> bool:
 def _stock_analysis_exclusion_document(
     error: Mapping[str, object],
 ) -> dict[str, object]:
-    """Convert minimum-history rejection into a non-success exclusion.
+    """把最短历史拒绝转换为非成功排除。
 
-    This deliberately does not lower the history threshold and does not mark
-    the symbol completed.  It only distinguishes an expected, deterministic
-    universe eligibility outcome from a transport or market-data failure.
+    这里不会降低历史阈值，也不会把标记记为已完成；它只负责区分预期且确定性的范围
+    资格结论与传输或行情失败。
     """
 
     if not _is_coverage_exclusion(error):
@@ -2252,7 +2226,7 @@ def _stock_analysis_exclusion_document(
 def _sector_coverage_contract_is_valid(
     snapshot: Mapping[str, object],
 ) -> bool:
-    """Recompute current sector dispositions from their exact documents."""
+    """根据精确文档重新计算当前板块处置状态。"""
 
     if snapshot.get("sector_coverage_contract_id") != SECTOR_COVERAGE_CONTRACT_ID:
         return False
@@ -2421,11 +2395,10 @@ def _sector_coverage_contract_is_valid(
 
 
 def _sector_source_evidence_complete(snapshot: Mapping[str, object]) -> bool:
-    """Return whether every cached sector document has explicit source evidence.
+    """判断每个缓存板块文档是否都带有明确来源证据。
 
-    The current contract always includes ``strength_source_revision``.  A
-    ``None`` value explicitly records that no independently attested
-    horizontal-strength source was available.
+    当前契约始终包含 ``strength_source_revision``；值为 ``None`` 会明确记录当时没有
+    可独立证明的横向强度来源。
     """
 
     sectors = snapshot.get("sectors")
@@ -2472,6 +2445,7 @@ def _cache_is_valid(
     value: object,
     config: TradingScreeningConfig,
     decision_core_id: str,
+    selection_research_revision: str,
 ) -> bool:
     return bool(
         isinstance(value, Mapping)
@@ -2482,6 +2456,8 @@ def _cache_is_valid(
         and value.get("read_only") is True
         and value.get("no_order_execution") is True
         and value.get("decision_core_id") == decision_core_id
+        and value.get("selection_research_revision")
+        == selection_research_revision
         and value.get("screening_policy") == _screening_policy_document()
         and value.get("screening_policy_id") == _screening_policy_id()
         and value.get("signal_document_contract_id") == SIGNAL_DOCUMENT_CONTRACT_ID
@@ -2507,15 +2483,11 @@ def _screening_review_readiness(
     *,
     identity_valid: bool,
 ) -> tuple[bool, str]:
-    """Attest whether the immutable screening page can enter human review.
+    """证明不可变选股页面能否进入人工复核。
 
-    Operational readiness and research-sample readiness are deliberately
-    separate.  An incomplete coverage epoch is still a usable screening page,
-    but it must not release the daily forward evaluator.  Once the mechanical
-    prerequisites are complete, the exact review-boundary validator is the
-    sole final decision core.  This verdict intentionally says nothing about
-    the separate same-session QMT Capture required by the daily forward
-    archive.
+    运行就绪与研究样本就绪有意分离。覆盖周期未完成时页面仍可用于查看，但不能放行
+    每日前向评估器。机械前置条件齐全后，精确的复核边界校验器是唯一最终决策核心。
+    此结论不评价每日前向归档另行要求的同交易日 QMT 捕获。
     """
 
     if snapshot.get("available") is not True:
@@ -2554,16 +2526,19 @@ class TradingScreeningService:
         *,
         market_data: MarketDataGateway,
         sector_catalog: SectorCatalogGateway,
-        engine: TradingEngine | HumanAssistedDecisionCore,
+        engine: HumanAssistedDecisionCore,
         scan_planner: Callable[..., ScanPlan] = build_scan_plan,
         cache_path: Path,
         human_review_archive_root: Path | None = None,
+        selection_research: tuple[SelectionResearchSnapshot, ...] = (),
         clock: Callable[[], datetime],
         notifier: NotificationDispatcher | None,
         config: TradingScreeningConfig = TradingScreeningConfig(),
         risk_limits: RiskLimits = RiskLimits(),
         backtest_verdict: Mapping[str, object] | None = None,
     ) -> None:
+        if not isinstance(engine, HumanAssistedDecisionCore):
+            raise TypeError("实时选股服务必须使用唯一人工辅助决策核心")
         self._market_data = market_data
         self._sector_catalog = sector_catalog
         self._engine = engine
@@ -2596,6 +2571,10 @@ class TradingScreeningService:
             if human_review_archive_root is None
             else Path(human_review_archive_root)
         )
+        self._selection_research = tuple(selection_research)
+        self._selection_research_revision = sha256_json(
+            selection_research_ledger_document(self._selection_research)
+        )
         self._human_review_decision_source_snapshot_id: str | None = None
         if self._human_review_archive_root is not None:
             try:
@@ -2604,9 +2583,8 @@ class TradingScreeningService:
                     _current_review_decision_source_id(str(project_root))
                 )
             except (OSError, RuntimeError, TypeError, ValueError):
-                # A missing implementation identity may never make an old
-                # receipt look current.  The isolated validator remains able
-                # to produce the in-memory verdict and an actionable reason.
+                # 缺失实现身份时绝不能把旧回执视为当前回执；隔离校验器仍应
+                # 给出内存判定和可执行的原因。
                 self._human_review_decision_source_snapshot_id = None
         self._clock = clock
         self._notifier = notifier
@@ -2630,23 +2608,18 @@ class TradingScreeningService:
         self._background_last_result_at: datetime | None = None
         self._background_last_error: str | None = None
         self._background_iteration_count = 0
-        # Monitor-only observations run after a full coverage epoch has already
-        # been attested.  Their transient failures are operational diagnostics,
-        # not coverage failures; keeping them separate prevents one failed
-        # re-observation from poisoning the immutable epoch forever.
+        # 仅监听观测发生在完整覆盖周期已认证之后；其瞬时失败属于运行诊断，
+        # 不是覆盖失败。二者分离可避免一次复查失败永久污染不可变周期。
         self._last_monitoring_at: datetime | None = None
         self._last_monitoring_errors: tuple[dict[str, object], ...] = ()
         self._pending_frequencies: dict[str, set[str]] = {}
-        # Transient worker/transport failures retry after one paced refresh in
-        # the same frozen market-data epoch. Deterministic data rejections stay
-        # in ``_deferred_frequencies`` until a genuinely new market-data epoch.
+        # 工作进程或传输的瞬时失败在同一冻结行情周期内按节奏重试；确定性数据
+        # 拒绝保留在 ``_deferred_frequencies``，直到出现真正的新行情周期。
         self._backoff_frequencies: dict[str, set[str]] = {}
         self._deferred_frequencies: dict[str, set[str]] = {}
         self._monitor_offset = 0
-        # The full-universe coverage epoch is deliberately frozen while its
-        # resumable queue drains.  A separate compact state tracks current-bar
-        # priority observations so holdings/watchlists/active signals do not
-        # wait hours behind that historical coverage work.
+        # 可恢复队列排空期间，全市场覆盖周期有意保持冻结。另用紧凑状态追踪
+        # 当前 K 线的优先观测，避免持仓、自选和活跃信号在历史覆盖任务后等待数小时。
         self._priority_monitor_state_path = self._cache_path.with_name(
             "trading_priority_monitor_state.json"
         )
@@ -2669,8 +2642,7 @@ class TradingScreeningService:
         self._priority_monitor_sector_source_mode: str | None = None
         self._priority_monitor_sector_as_of: datetime | None = None
         self._priority_monitor_sector_coverage_epoch_id: str | None = None
-        # Persisted documents survive restart for lifecycle/idempotence, but
-        # the new process must still prove its own QMT routing immediately.
+        # 持久化文档跨重启保留生命周期和幂等性，但新进程仍须立即证明自身 QMT 路由。
         self._priority_monitor_runtime_verified = False
         self._load_priority_monitor_state()
         self._coverage_cycle_started_at: datetime | None = None
@@ -2701,10 +2673,12 @@ class TradingScreeningService:
         self._quarantined_cache_decision_core_id: str | None = None
         self._quarantined_cache_reason: str | None = None
         loaded_snapshot = self._load_valid_cache()
-        self._snapshot = loaded_snapshot or _initial_snapshot(config)
-        # Loaded snapshots have already passed the full semantic/content hash
-        # gate.  Health reads can attest this immutable publication by identity
-        # instead of re-hashing a 100+ MiB signal tree on every HTTP request.
+        self._snapshot = loaded_snapshot or _initial_snapshot(
+            config,
+            selection_research_revision=self._selection_research_revision,
+        )
+        # 已加载快照已通过完整语义与内容哈希闸门；健康检查可按身份认证这份
+        # 不可变发布，无需每个 HTTP 请求都重新哈希超过 100 MiB 的信号树。
         self._validated_snapshot_sha256: str | None = (
             str(self._snapshot.get("snapshot_content_sha256"))
             if loaded_snapshot is not None
@@ -2715,10 +2689,9 @@ class TradingScreeningService:
         self._presentation_cache: dict[str, object] | None = None
         self._review_readiness_cache_sha256: str | None = None
         self._review_readiness_cache: tuple[bool, str] | None = None
-        # Large full-market publications can take minutes to pass the deepest
-        # human-review boundary validator.  Health requests must never each
-        # repeat that CPU work.  One daemon validates a given immutable hash;
-        # /readyz remains responsive and reports PENDING until it is cached.
+        # 大型全市场发布通过最深层人工复核边界可能耗时数分钟。健康请求不能
+        # 重复这项 CPU 工作；单个守护线程校验指定不可变哈希，在结果缓存前
+        # /readyz 保持响应并报告 PENDING。
         self._review_readiness_validation_lock = Lock()
         self._review_readiness_validation_sha256: str | None = None
         self._review_readiness_validation_thread: Thread | None = None
@@ -2737,6 +2710,9 @@ class TradingScreeningService:
         )
         self._snapshot["decision_core_id"] = self._decision_core_id
         self._snapshot["decision_core"] = copy.deepcopy(self._decision_core_document)
+        self._snapshot["selection_research_revision"] = (
+            self._selection_research_revision
+        )
         coverage_state_restored = (
             False
             if self._snapshot_rebuild_required
@@ -2748,8 +2724,7 @@ class TradingScreeningService:
                     _coverage_sector_state_from_snapshot(self._snapshot)
                 )
             except (TypeError, ValueError) as exc:
-                # Never mix a partially restorable sector state with the
-                # authenticated current coverage epoch.
+                # 绝不能把只能部分恢复的板块状态混入已认证的当前覆盖周期。
                 self._coverage_sector_restore_error = (
                     f"{type(exc).__name__}: {str(exc)[:160]}"
                 )
@@ -2834,6 +2809,8 @@ class TradingScreeningService:
             or payload.get("candidate_monitor_contract_id")
             != CANDIDATE_MONITOR_CONTRACT_ID
             or payload.get("decision_core_id") != self._decision_core_id
+            or payload.get("selection_research_revision")
+            != self._selection_research_revision
             or payload.get("signal_document_contract_id") != SIGNAL_DOCUMENT_CONTRACT_ID
             or payload.get("live_status") != "LIVE_DISABLED"
             or payload.get("content_sha256")
@@ -3069,6 +3046,7 @@ class TradingScreeningService:
             "schema": PRIORITY_MONITOR_SCHEMA,
             "candidate_monitor_contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
             "decision_core_id": self._decision_core_id,
+            "selection_research_revision": self._selection_research_revision,
             "signal_document_contract_id": SIGNAL_DOCUMENT_CONTRACT_ID,
             "last_at": (None if last_at is None else last_at.isoformat()),
             "signal_stages": dict(sorted(signal_stages.items())),
@@ -3163,7 +3141,7 @@ class TradingScreeningService:
         successful_five_codes: tuple[str, ...] = (),
         successful_thirty_codes: tuple[str, ...] = (),
     ) -> None:
-        """Publish compact monitor state without touching coverage state."""
+        """发布精简监听状态，不修改覆盖状态。"""
 
         lane_map = dict(lanes_by_code or {})
         if any(value not in _CANDIDATE_MONITOR_LANES for value in lane_map.values()):
@@ -3277,12 +3255,10 @@ class TradingScreeningService:
         *,
         mandatory_codes: frozenset[str],
     ) -> None:
-        """Drop stale live-overlay sells outside holdings/watchlist scope.
+        """清理持仓和自选范围外过期的实时叠加卖点。
 
-        The authenticated archival snapshot remains untouched.  Only compact
-        current-minute overlay state is removed, because a sell point for a
-        symbol that is neither held nor explicitly watched has no live action
-        owner and will no longer be sampled by the priority lane.
+        已认证归档快照保持不变，只删除精简的当前分钟叠加状态。既未持仓也未明确关注的
+        标的卖点没有实时操作归属，优先通道也不会再对其采样。
         """
 
         with self._background_lock:
@@ -3320,15 +3296,12 @@ class TradingScreeningService:
         frozen_sector_as_of: datetime | None = None,
         frozen_coverage_epoch_id: str | None = None,
     ) -> None:
-        """Observe current completed bars without changing the frozen coverage.
+        """观察当前已完成行情，但不改变冻结覆盖。
 
-        This lane is intentionally *not* a full-universe snapshot and never
-        contributes to coverage ratios.  It advances human-review lifecycle
-        notifications for owned/selected risk and a rotating sample of
-        currently supportive QMT sectors.  It remains active both while the
-        slower authenticated coverage epoch drains and after that epoch becomes
-        complete: the ordinary complete-epoch cursor can span thousands of
-        symbols and must not make a holding wait one full rotation.
+        此通道有意不构成全市场快照，也不计入覆盖率。它推进持仓、自选风险及当前有利
+        QMT 板块轮换样本的人工复核生命周期通知。无论较慢的认证覆盖周期仍在处理，
+        还是已经完成，该通道都保持运行；普通完整周期游标可能跨越数千标的，不能让
+        持仓标的等待整轮扫描。
         """
 
         if not self._priority_monitor_due(observed_at):
@@ -3351,11 +3324,9 @@ class TradingScreeningService:
         else:
             if frozen_sector_as_of is None or not frozen_coverage_epoch_id:
                 raise ValueError("frozen priority sector provenance is required")
-            # Daily preselection freezes sector ranking and membership.  The
-            # intraday lane must monitor newer completed stock bars without
-            # silently reselecting sectors every minute; doing so both changes
-            # the decision scope mid-session and serially rebuilds every QMT
-            # sector before one priority symbol can be observed.
+            # 日级预选会冻结板块排序和成员。盘中通道只监听更新后的已完成个股 K 线，
+            # 不得每分钟暗中重选板块；否则既会在盘中改变决策范围，也会在观测一个
+            # 优先标的前串行重建全部 QMT 板块。
             sector_batch = frozen_sector_batch
             all_members = dict(frozen_sector_members or {})
             sector_source_mode = "FROZEN_COVERAGE_EPOCH"
@@ -3438,10 +3409,8 @@ class TradingScreeningService:
             for row in monitor_signal_documents
             if row.get("code") in fresh_monitor_codes
         )
-        # A successful current observation is authoritative even when it emits
-        # no row.  Without this code-level tombstone, an armed row in the daily
-        # archive would re-enter the 1m lane forever after its setup vanished;
-        # a newer formed row could likewise lose to the archive's older rank.
+        # 当前观测成功但未产生记录时同样具有权威性。代码级墓碑可防止日级归档中的
+        # 旧待触发记录在设置消失后永久重返 1m 通道，也避免新形成记录输给旧归档排序。
         current_signal_documents = (
             tuple(
                 row
@@ -3461,12 +3430,9 @@ class TradingScreeningService:
             allowed_stages=_CURRENT_MINUTE_BUY_STAGES,
         )
         minute_codes = tuple(dict.fromkeys((*mandatory_codes, *urgent_buy_codes)))
-        # Existing buy candidates are observed on the cadence of the 5m setup
-        # that can change their decision.  The much broader frozen supportive
-        # sector scope is a discovery lane: it receives a current 5m+30m
-        # evaluation over each 30-minute window.  Treating all sector members
-        # as five-minute candidates would overclaim capacity and delay the
-        # genuinely armed 1m lane on the measured production host.
+        # 已有买入候选按可能改变决策的 5m 设置节奏观测。更宽的冻结支持板块范围
+        # 属于发现通道，每个 30 分钟窗口接受一次当前 5m+30m 评估。若把全部板块
+        # 成员都当作五分钟候选，会虚报容量并拖延真正待触发的 1m 通道。
         five_universe = tuple(dict.fromkeys((*mandatory_scope, *buy_candidate_codes)))
         thirty_universe = tuple(dict.fromkeys((*five_universe, *supportive_codes)))
         with self._background_lock:
@@ -3497,9 +3463,8 @@ class TradingScreeningService:
         )
         frequencies_by_code: dict[str, set[str]] = {}
         for code in minute_codes:
-            # A current 1m trigger is only meaningful against the latest
-            # completed 5m setup; refreshing both prevents a stale cached 5m
-            # structure from surviving a five-minute boundary.
+            # 当前 1m 触发只有绑定最新已完成 5m 设置才有意义；二者同时刷新可防止
+            # 过期的 5m 缓存结构跨越五分钟边界继续生效。
             frequencies_by_code.setdefault(code, set()).update(("5m", "1m"))
         for code in five_codes:
             frequencies_by_code.setdefault(code, set()).add("5m")
@@ -3602,6 +3567,12 @@ class TradingScreeningService:
                 bundle = replace(
                     bundle,
                     selection_sources=selection_sources_for(code),
+                    selection_research=visible_selection_research(
+                        self._selection_research,
+                        symbol=code,
+                        selection_path=bundle.selection_path,
+                        decision_time=bundle.as_of,
+                    ),
                 )
                 if code in holding_codes and bundle.physical_timeframe_recursive:
                     bundle = replace(bundle, held_tower="formal", held_level=0)
@@ -3685,9 +3656,8 @@ class TradingScreeningService:
                 for document in documents
                 if document.get("code") in notification_authoritative_code_set
             ],
-            # A missing signal is meaningful only for symbols successfully
-            # recomputed in this partial lane.  The dispatcher uses this scope
-            # to emit a retraction without invalidating rotated-out symbols.
+            # 信号缺失只对本次局部通道中成功重算的标的有意义；分发器据此撤回信号，
+            # 而不会使轮换出本批次的标的失效。
             "notification_authoritative_codes": list(notification_authoritative_codes),
         }
         successful_five_codes = tuple(
@@ -3747,7 +3717,7 @@ class TradingScreeningService:
         frozen_sector_as_of: datetime | None = None,
         frozen_coverage_epoch_id: str | None = None,
     ) -> None:
-        """Keep live observations from poisoning a frozen coverage epoch."""
+        """防止实时观察污染冻结覆盖周期。"""
 
         try:
             self._record_background_heartbeat()
@@ -3783,8 +3753,7 @@ class TradingScreeningService:
             try:
                 self._persist_priority_monitor_state()
             except Exception:
-                # The in-memory health result remains observable.  A state-file
-                # failure must never abort the authenticated coverage batch.
+                # 内存健康结果仍可观测；状态文件失败绝不能中止已认证覆盖批次。
                 pass
         finally:
             self._record_background_heartbeat()
@@ -3808,7 +3777,7 @@ class TradingScreeningService:
         self,
         snapshot: Mapping[str, object],
     ) -> bool:
-        """Independently recompute the shared strict strategy coverage-epoch identity."""
+        """独立重算共享严格策略的覆盖周期身份。"""
 
         manifest = snapshot.get("coverage_manifest")
         if not isinstance(manifest, Mapping):
@@ -4078,13 +4047,17 @@ class TradingScreeningService:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
-        # ``json.loads`` already owns a fresh tree.  Deep-copying a 100+ MiB
-        # validated snapshot here doubled startup memory and added no isolation:
-        # the returned tree becomes the service's private immutable publication.
+        # ``json.loads`` 已生成全新对象树；此处深拷贝超过 100 MiB 的已校验快照只会
+        # 让启动内存翻倍，不会增加隔离性，因为返回树本身即服务私有的不可变发布。
         return (
             value
             if isinstance(value, dict)
-            and _cache_is_valid(value, self._config, self._decision_core_id)
+            and _cache_is_valid(
+                value,
+                self._config,
+                self._decision_core_id,
+                self._selection_research_revision,
+            )
             else None
         )
 
@@ -4114,17 +4087,22 @@ class TradingScreeningService:
         try:
             current_value = json.loads(self._cache_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            # A missing, truncated or otherwise unreadable primary snapshot can
-            # be the residue of an interrupted replacement.  Only that physical
-            # failure class may roll back to an immutable generation.
+            # 主快照缺失、截断或不可读可能源于原子替换中断；只有这类物理失败
+            # 才允许回退到不可变历史代。
             pass
         else:
             if isinstance(current_value, dict) and _cache_is_valid(
-                current_value, self._config, self._decision_core_id
+                current_value,
+                self._config,
+                self._decision_core_id,
+                self._selection_research_revision,
             ):
                 return current_value
             if isinstance(current_value, Mapping):
                 cached_core_id = current_value.get("decision_core_id")
+                cached_research_revision = current_value.get(
+                    "selection_research_revision"
+                )
                 if (
                     isinstance(cached_core_id, str)
                     and cached_core_id
@@ -4132,14 +4110,20 @@ class TradingScreeningService:
                 ):
                     self._quarantined_cache_decision_core_id = cached_core_id
                     self._quarantined_cache_reason = "DECISION_CORE_IDENTITY_MISMATCH"
+                elif cached_research_revision != self._selection_research_revision:
+                    self._quarantined_cache_decision_core_id = (
+                        cached_core_id if isinstance(cached_core_id, str) else None
+                    )
+                    self._quarantined_cache_reason = (
+                        "SELECTION_RESEARCH_REVISION_MISMATCH"
+                    )
                 else:
                     self._quarantined_cache_decision_core_id = (
                         cached_core_id if isinstance(cached_core_id, str) else None
                     )
                     self._quarantined_cache_reason = "CURRENT_CACHE_CONTRACT_INVALID"
-            # A parseable primary that fails semantic, policy or content-hash
-            # validation is evidence of tampering/staleness, not an interrupted
-            # write.  Fail closed instead of hiding it behind an older backup.
+            # 可解析主快照若未通过语义、策略或内容哈希校验，说明被篡改或已过期，
+            # 而非写入中断；必须关闭失败，不能用旧备份掩盖。
             return None
         for path in generations:
             recovered = self._valid_cache_from_path(path)
@@ -4154,13 +4138,11 @@ class TradingScreeningService:
             return copy.deepcopy(self._snapshot)
 
     def presentation_snapshot(self) -> dict[str, object]:
-        """Return a compact live-page view of the full audit publication.
+        """返回完整审计发布物的精简实时页面视图。
 
-        The immutable archive retains every warmup/mapping diagnostic.  The
-        browser needs their decision-relevant summary, not repeated raw point
-        evidence for every row.  Keeping this projection separate preserves
-        the auditable contract used by replay/forward capture while preventing
-        minute polling from copying and transferring a 100+ MiB JSON tree.
+        不可变归档保留全部预热和映射诊断；浏览器只需与决策相关的摘要，而不必为每行
+        重复原始点证据。单独维护该投影既保留回放和前向捕获使用的可审计契约，也避免
+        分钟轮询复制并传输超过 100 MiB 的 JSON 树。
         """
 
         observed_at = normalize_datetime(self._clock(), "clock")
@@ -4323,13 +4305,11 @@ class TradingScreeningService:
         return copy.deepcopy(document)
 
     def _snapshot_reference(self) -> Mapping[str, object]:
-        """Return the current immutable publication without copying its tree.
+        """返回当前不可变发布物，而不复制整棵数据树。
 
-        Refresh builds a separate payload and atomically replaces
-        ``self._snapshot`` under ``_state_lock``; it never mutates a published
-        snapshot in place.  A health request may therefore retain the old
-        mapping safely while a newer publication is installed.  Public page
-        callers still use :meth:`snapshot` and receive an isolated deep copy.
+        刷新会构建独立载荷，并在 ``_state_lock`` 下原子替换 ``self._snapshot``，从不
+        原地修改已发布快照。因此安装新发布物期间，健康请求可以安全持有旧映射；公开
+        页面调用方仍使用 :meth:`snapshot` 并获得隔离的深拷贝。
         """
 
         with self._state_lock:
@@ -4337,10 +4317,8 @@ class TradingScreeningService:
 
     def _record_background_heartbeat(self) -> None:
         with self._background_lock:
-            # Native process progress is delivered by the request thread.  In
-            # the parallel stock scanner that is intentionally not the owner
-            # background thread, but it still proves the owned refresh is
-            # alive.  Ignore callbacks only when no background owner exists.
+            # 原生进程进度由请求线程回报；并行个股扫描中它虽不是后台所有者线程，
+            # 仍能证明所属刷新存活。仅在没有后台所有者时忽略回调。
             if self._background_thread is None:
                 return
             self._background_heartbeat_at = normalize_datetime(self._clock(), "clock")
@@ -4452,7 +4430,7 @@ class TradingScreeningService:
         self,
         snapshot_sha256: str,
     ) -> bool:
-        """Reuse an exact child verdict after app restart, never a stale one."""
+        """应用重启后只复用精确匹配的子进程结论，绝不复用过期结论。"""
 
         archive_root = getattr(self, "_human_review_archive_root", None)
         decision_source_id = getattr(
@@ -4475,7 +4453,7 @@ class TradingScreeningService:
         snapshot: Mapping[str, object],
         snapshot_sha256: str,
     ) -> None:
-        """Compute one large immutable review verdict without blocking HTTP."""
+        """在不阻塞 HTTP 的情况下计算大型不可变复核结论。"""
 
         try:
             result = _screening_review_readiness(snapshot, identity_valid=True)
@@ -4495,14 +4473,12 @@ class TradingScreeningService:
         snapshot: Mapping[str, object],
         snapshot_sha256: str,
     ) -> None:
-        """Validate a large persisted snapshot outside the Web interpreter.
+        """在 Web 解释器之外校验大型持久快照。
 
-        ``validate_live_review_snapshot`` walks the complete 100+ MiB evidence
-        tree.  A Python daemon thread keeps HTTP logically asynchronous but its
-        CPU work still owns the GIL and can stall every page for minutes.  The
-        publication has already been atomically persisted before installation,
-        so a short-lived read-only child can validate that exact file/hash and
-        return only the compact verdict.
+        ``validate_live_review_snapshot`` 会遍历超过 100 MiB 的完整证据树。Python
+        守护线程虽然让 HTTP 逻辑异步，但其计算仍占用全局解释器锁，可能使所有页面
+        停顿数分钟。发布物在安装前已原子持久化，因此短生命周期只读子进程可以校验
+        精确文件与哈希，并只返回精简结论。
         """
 
         project_root = Path(__file__).resolve().parents[4]
@@ -4570,13 +4546,11 @@ class TradingScreeningService:
                 self._review_readiness_validation_thread = None
 
     def health_snapshot(self) -> dict[str, object]:
-        """Return a side-effect-free operational attestation for screening.
+        """返回无副作用的选股运行证明。
 
-        A live Flask process is not sufficient evidence that the QMT-backed
-        scanner is usable: the scanner runs in a daemon thread and native
-        ``xtquant`` failures cannot be caught by Python.  This document lets
-        readiness verify the worker, its heartbeat, and the last publishable
-        immutable snapshot without making any QMT call itself.
+        Flask 进程存活不足以证明 QMT 选股器可用：选股器运行在守护线程中，原生
+        ``xtquant`` 崩溃也无法由 Python 捕获。此文档让就绪检查在不调用 QMT 的情况
+        下校验工作进程、心跳和最后一个可发布的不可变快照。
         """
 
         observed_at = normalize_datetime(self._clock(), "clock")
@@ -4630,10 +4604,8 @@ class TradingScreeningService:
                 self._candidate_monitor_last_thirty_codes
             )
 
-        # Do not deep-copy the full-universe signal/evidence tree merely to
-        # read health counters.  Identity is still recomputed against the
-        # entire immutable publication below, so tamper detection is not
-        # weakened.
+        # 读取健康计数时不深拷贝全市场信号/证据树；下方仍针对完整不可变发布
+        # 重算身份，因此不会削弱篡改检测。
         with self._state_lock:
             snapshot = self._snapshot
             validated_snapshot_sha256 = self._validated_snapshot_sha256
@@ -4642,12 +4614,9 @@ class TradingScreeningService:
         snapshot_available = snapshot.get("available") is True
         snapshot_sha256 = snapshot.get("snapshot_content_sha256")
         try:
-            # Publication is validated once before atomic installation.  The
-            # installed tree is private and never mutated in place, so matching
-            # its declared content identity avoids hashing a 100+ MiB snapshot
-            # on every /readyz poll.  A cache loaded at startup is likewise
-            # validated before installation; unknown publications still take
-            # the full gate once and then become identity-cached.
+            # 发布在原子安装前校验一次；安装后的对象树私有且不原地修改，因此匹配
+            # 声明身份即可避免每次 /readyz 轮询都哈希超过 100 MiB 的快照。启动缓存
+            # 同样先校验再安装；未知发布首次通过完整闸门后再按身份缓存。
             identity_valid = bool(
                 isinstance(snapshot_sha256, str)
                 and snapshot_sha256 == validated_snapshot_sha256
@@ -4657,6 +4626,7 @@ class TradingScreeningService:
                     snapshot,
                     self._config,
                     self._decision_core_id,
+                    self._selection_research_revision,
                 )
                 if identity_valid:
                     with self._state_lock:
@@ -5373,10 +5343,8 @@ class TradingScreeningService:
                 identity_valid=identity_valid,
             )
             if _reason == "REVIEW_BOUNDARY_VALIDATION_PENDING":
-                # The already hash-validated complete publication remains the
-                # page source while its deeper review contract is checked.
-                # Starting another full scan here would compete with the one
-                # bounded validator and cannot improve the current verdict.
+                # 深层复核契约校验期间，已通过哈希校验的完整发布仍作为页面来源。
+                # 此时另启全量扫描只会与有界校验器争用资源，无法改善当前判定。
                 return False
             if _complete_close_snapshot_can_idle(
                 snapshot,
@@ -5430,8 +5398,7 @@ class TradingScreeningService:
         try:
             while not stop.is_set():
                 self._record_background_heartbeat()
-                # Clear the event before inspecting state so a concurrent wake-up
-                # between this point and ``wait`` cannot be lost.
+                # 检查状态前先清除事件，避免此处至 ``wait`` 之间的并发唤醒丢失。
                 wake.clear()
                 if stop.is_set():
                     break
@@ -5460,9 +5427,8 @@ class TradingScreeningService:
                             priority_only=not coverage_window_open,
                         )
                     except Exception as exc:
-                        # Persistence and notification failures live outside the
-                        # refresh error snapshot. Keep the worker alive, but avoid
-                        # a tight retry loop.
+                        # 持久化与通知失败不属于刷新错误快照；保留工作线程存活，
+                        # 同时避免无间隔重试。
                         self._record_background_exception(exc)
                         wake.wait(timeout=float(self._config.refresh_interval_seconds))
                         continue
@@ -5472,8 +5438,7 @@ class TradingScreeningService:
                         and refreshed.get("scan_state") == "complete"
                         and self._immediate_pending_symbol_count(refreshed) > 0
                     ):
-                        # Drain the discovery queue batch by batch. This is what
-                        # makes progress independent of page polling.
+                        # 按批次排空发现队列，使任务进度不依赖页面轮询。
                         continue
                     if stop.is_set():
                         break
@@ -5504,9 +5469,8 @@ class TradingScreeningService:
                         )
                         continue
 
-                # Once a coverage cycle is complete (or a batch failed), pace the
-                # next attempt from completion time instead of immediately looping
-                # when a slow batch took longer than the nominal refresh interval.
+                # 覆盖周期完成或批次失败后，从完成时刻开始安排下次尝试；慢批次超过
+                # 名义刷新间隔时不得立即循环。
                 wake.wait(timeout=float(self._config.refresh_interval_seconds))
         finally:
             with self._background_lock:
@@ -5514,7 +5478,7 @@ class TradingScreeningService:
                     self._background_thread = None
 
     def start_background(self) -> Thread:
-        """Start the page-independent incremental scanner, idempotently."""
+        """幂等启动独立于页面的增量选股器。"""
 
         with self._background_lock:
             existing = self._background_thread
@@ -5545,7 +5509,7 @@ class TradingScreeningService:
         wait: bool = True,
         timeout: float | None = 1.0,
     ) -> bool:
-        """Signal the background scanner and report whether it has stopped."""
+        """通知后台选股器退出，并报告是否已停止。"""
 
         with self._background_lock:
             worker = self._background_thread
@@ -5587,12 +5551,10 @@ class TradingScreeningService:
         return True
 
     def notify_instrument_scope_changed(self) -> bool:
-        """Wake the priority lane after a watchlist/holding membership edit.
+        """自选或持仓成员变化后唤醒优先通道。
 
-        Providers are evaluated inside every priority scan, so there is no
-        membership cache to invalidate. Marking the runtime observation
-        unverified makes the next background-loop iteration due immediately;
-        the wake event removes the otherwise possible one-minute delay.
+        每轮优先扫描都会重新读取提供者，因此没有成员缓存需要失效。把运行观察标记为
+        未校验，会让下一轮后台循环立即到期；唤醒事件则消除原本可能出现的一分钟延迟。
         """
 
         with self._background_lock:
@@ -5609,7 +5571,7 @@ class TradingScreeningService:
         *,
         cache_valid: bool | None = None,
     ) -> None:
-        """Reject any loss of completed symbols in one coverage epoch."""
+        """拒绝同一覆盖周期中任何已完成标的回退。"""
 
         previous = self._snapshot_reference()
         if cache_valid is None:
@@ -5617,6 +5579,7 @@ class TradingScreeningService:
                 payload,
                 self._config,
                 self._decision_core_id,
+                self._selection_research_revision,
             )
         if not cache_valid:
             return
@@ -5680,6 +5643,7 @@ class TradingScreeningService:
                     payload,
                     self._config,
                     self._decision_core_id,
+                    self._selection_research_revision,
                 )
             self._assert_coverage_progress_non_regression(
                 payload,
@@ -5696,9 +5660,8 @@ class TradingScreeningService:
             )
             try:
                 with temporary.open("x", encoding="utf-8", newline="\n") as handle:
-                    # Stream directly into the atomic replacement.  Building a
-                    # second 100+ MiB ``json.dumps`` string on every coverage
-                    # batch caused avoidable memory spikes and GC pauses.
+                    # 直接流式写入原子替换文件，避免每个覆盖批次再构造一份超过
+                    # 100 MiB 的 ``json.dumps`` 字符串，引发内存峰值和 GC 停顿。
                     json.dump(
                         payload,
                         handle,
@@ -5743,8 +5706,7 @@ class TradingScreeningService:
                         )
                         self._cache_generation_error = None
                     except OSError as exc:
-                        # A backup failure must remain visible but must not
-                        # prevent the atomic primary snapshot from progressing.
+                        # 备份失败必须可见，但不能阻止主快照的原子更新继续进行。
                         self._cache_generation_error = (
                             f"{type(exc).__name__}: {str(exc)[:160]}"
                         )
@@ -5849,13 +5811,12 @@ class TradingScreeningService:
         frequencies: tuple[str, ...],
         risk_evidence_cutoff: datetime,
     ) -> SymbolStructureBundle:
-        """Load a current low-level bundle with causally frozen M/W/D facts.
+        """加载带有因果冻结月周日事实的当前低级别结构包。
 
-        ``market_data_as_of`` is the atomic sector/coverage cutoff.  A current
-        1m bar may close after that cutoff but before the scan wall clock; the
-        low-level signal keeps that precision while M/W/D evidence must equal
-        ``min(bundle.as_of, market_data_as_of)``.  Every provider must expose
-        the explicit cutoff-aware method.
+        ``market_data_as_of`` 是原子板块和覆盖截止点。当前 1m 行情可能在该截止点之后、
+        扫描时钟之前收盘；低级别信号保留该精度，而月周日证据时点必须等于
+        ``min(bundle.as_of, market_data_as_of)``。每个提供者都必须公开明确感知截止点的
+        方法。
         """
 
         observed = normalize_datetime(as_of, "as_of")
@@ -5919,9 +5880,8 @@ class TradingScreeningService:
         priority_set = set(priority)
         ordered_remaining: list[str] = []
         seen = set(priority_set)
-        # ``scan_order_codes`` is an operational priority only.  It is derived
-        # from the already frozen sector ranking and never removes a symbol from
-        # the complete eligible-sector coverage scope.
+        # ``scan_order_codes`` 只表示运行优先级，来源于已冻结的板块排序，绝不会
+        # 从完整合格板块覆盖范围中删除标的。
         for code in scan_order_codes:
             if code in self._pending_frequencies and code not in seen:
                 ordered_remaining.append(code)
@@ -5959,14 +5919,11 @@ class TradingScreeningService:
         *,
         priority_codes: tuple[str, ...],
     ) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
-        """Take a bounded same-epoch monitor batch without reopening coverage.
+        """在不重开覆盖的情况下提取有界同周期监听批次。
 
-        Once a market cutoff/universe epoch is complete, repeated observations
-        of active signals may still advance their review lifecycle.  They are
-        not missing universe coverage, however, and must never be put back into
-        ``_pending_frequencies``.  Otherwise the persisted manifest oscillates
-        from complete to incomplete every few minutes and an unchanged close is
-        rescanned forever.
+        市场截止点和范围周期完成后，重复观察活动信号仍可推进复核生命周期，但这不
+        表示范围覆盖缺失，绝不能把它们放回 ``_pending_frequencies``。否则持久清单会
+        每隔几分钟在完成与未完成之间震荡，并永久重复扫描未变化的收盘数据。
         """
 
         candidates = tuple(sorted(set(plan.symbols)))
@@ -6087,19 +6044,22 @@ class TradingScreeningService:
         self,
         payload: Mapping[str, object],
     ) -> bool:
-        """Return whether ``payload`` is an independently valid last-good page.
+        """判断 ``payload`` 是否为独立有效的最后正常页面。
 
-        Refresh diagnostics are operational facts, not a replacement decision
-        snapshot.  Once a complete epoch has been atomically published, a
-        gateway-wide outage must leave that page and its cache intact while the
-        background health path reports the failure and retries.
+        刷新诊断是运行事实，不是替代决策快照。完整周期原子发布后，网关整体故障必须
+        保留该页面及其缓存，由后台健康路径报告失败并重试。
         """
 
         manifest = payload.get("coverage_manifest")
         audit = payload.get("scan_audit")
         quality = payload.get("data_quality")
         return bool(
-            _cache_is_valid(payload, self._config, self._decision_core_id)
+            _cache_is_valid(
+                payload,
+                self._config,
+                self._decision_core_id,
+                self._selection_research_revision,
+            )
             and payload.get("available") is True
             and isinstance(manifest, Mapping)
             and manifest.get("complete") is True
@@ -6153,14 +6113,14 @@ class TradingScreeningService:
                 ]
                 self._finalize_snapshot_identity(payload)
                 if self._can_retain_complete_snapshot(previous):
-                    # Return the diagnostic to the background loop so
-                    # readiness records the outage, but do not replace the
-                    # independently valid page or its atomic on-disk cache.
+                    # 将诊断返回后台循环以记录故障，但不替换独立有效的页面数据
+                    # 及其磁盘原子缓存。
                     return result(payload)
                 payload_valid = _cache_is_valid(
                     payload,
                     self._config,
                     self._decision_core_id,
+                    self._selection_research_revision,
                 )
                 try:
                     self._persist_atomic(
@@ -6186,6 +6146,7 @@ class TradingScreeningService:
                 payload,
                 self._config,
                 self._decision_core_id,
+                self._selection_research_revision,
             )
             self._persist_atomic(
                 payload,
@@ -6242,10 +6203,8 @@ class TradingScreeningService:
                             ),
                         )
                     except Exception:
-                        # The safe monitor below publishes the exact per-symbol
-                        # native failures without replacing the authenticated
-                        # archival snapshot.  Leave this flag false so the next
-                        # minute retries process-local routing restoration.
+                        # 下方安全监听会发布精确到标的的原生失败，不替换已认证归档快照；
+                        # 保持此标志为假，使下一分钟重试进程内路由恢复。
                         pass
                     else:
                         self._coverage_cycle_sector_runtime_hydrated = True
@@ -6265,9 +6224,8 @@ class TradingScreeningService:
                     self._coverage_epoch_id if frozen_sector_ready else None
                 ),
             )
-            # The live lane persists its own compact, authenticated state.
-            # Returning the exact archival snapshot guarantees that a minute
-            # observation cannot consume, reorder, or republish coverage work.
+            # 实时通道持久化自身紧凑且已认证的状态；返回原样归档快照可保证分钟观测
+            # 不会消费、重排或重新发布覆盖任务。
             return dict(previous)
         cycle_started = not self._pending_frequencies
         superseded_epoch_id: str | None = None
@@ -6281,11 +6239,9 @@ class TradingScreeningService:
                 datetime_time(15),
                 tzinfo=CN,
             )
-            # A multi-batch intraday cycle can still be draining after the
-            # market has closed.  Finishing it later does not turn its 14:35
-            # facts into a 15:00 end-of-session snapshot.  Supersede that
-            # pending epoch before the next batch so the daily forward sample
-            # can only come from a fresh close-complete coverage plan.
+            # 多批次盘中周期可能在收盘后仍未排空；稍后完成也不能把 14:35 的事实
+            # 变成 15:00 收盘快照。下一批次前替换该待处理周期，确保日级前向样本
+            # 只能来自新的完整收盘覆盖计划。
             if cutoff_local < market_close <= observed_at.astimezone(CN):
                 superseded_epoch_id = self._coverage_epoch_id
                 superseded_market_data_as_of = current_cutoff
@@ -6316,24 +6272,16 @@ class TradingScreeningService:
             and cached_sector_members is not None
         )
         if reuse_cycle_sectors:
-            # A coverage cycle is one market-data snapshot. Re-reading all sector
-            # composites for every stock batch both wasted tens of seconds and
-            # allowed later batches to use a different sector state/as-of time.
+            # 一个覆盖周期对应一个行情快照。每个个股批次都重读全部板块合成数据
+            # 不仅浪费数十秒，还会让后续批次使用不同板块状态和截止时刻。
             #
-            # A completed epoch is frozen both in the process that produced it
-            # and after an app restart. Requiring the cache to have come from
-            # restart restoration made the live process recompute sectors on
-            # every idle refresh after coverage completed. That could change
-            # structural point identities while retaining the already-built
-            # symbol documents, mixing two evidence states in one snapshot.
-            # The deliberate pre-open/post-close probes above are the only
-            # times a complete epoch may query a new sector catalog revision.
+            # 完成周期在原进程和应用重启后都保持冻结。若只允许使用“重启恢复”的缓存，
+            # 实时进程会在覆盖完成后的每次空闲刷新都重算板块，可能在保留旧个股文档时
+            # 改变结构点身份，把两套证据混进同一快照。只有上方明确的盘前/盘后探测
+            # 才允许完整周期查询新版板块目录。
             #
-            # The native process proxy keeps member routing in memory. After
-            # an app restart the authenticated screening snapshot can prime
-            # that routing directly; generic gateways fall back to their own
-            # frozen-time cache or assessment call. The frozen assessment
-            # remains authoritative when membership is exact.
+            # 原生进程代理在内存中保存成员路由。应用重启后可由已认证筛选快照直接预热；
+            # 通用网关则回退到自身冻结时刻缓存或评估调用。成员精确一致时，以冻结评估为准。
             sector_started_perf = time.perf_counter()
             hydrated_batch: SectorAssessmentBatch | None = None
             if self._coverage_cycle_sector_runtime_hydrated:
@@ -6355,11 +6303,8 @@ class TradingScreeningService:
                     try:
                         runtime_sector_members = dict(self._sector_catalog.members())
                     except RuntimeError:
-                        # Hydrate a generic transport at the frozen coverage
-                        # time, not at the restart wall clock.  Its sector
-                        # cache is keyed by causal 5m epoch; using
-                        # ``observed_at`` would reject the exact cache that
-                        # produced this coverage epoch.
+                        # 通用传输必须按冻结覆盖时刻恢复，而非重启墙钟时刻。板块缓存
+                        # 以因果 5m 周期为键；使用 ``observed_at`` 会错误拒绝生成本周期的缓存。
                         hydrated_batch = self._sector_catalog.native_sector_assessments(
                             as_of=self._coverage_cycle_started_at
                         )
@@ -6369,10 +6314,8 @@ class TradingScreeningService:
                 as_of = self._coverage_cycle_started_at
                 sector_batch = cached_sector_batch
             else:
-                # A real membership change is a new universe, not a restorable
-                # same-epoch transport detail.  Continue with the freshly
-                # authenticated batch so the ordinary epoch-replacement gate
-                # replays the complete current scope.
+                # 真实成员变化代表新标的池，不是可恢复的同周期传输细节；继续使用新认证
+                # 批次，让常规周期替换闸门重放完整当前范围。
                 reuse_cycle_sectors = False
                 as_of = observed_at
                 sector_batch = (
@@ -6396,9 +6339,8 @@ class TradingScreeningService:
                 (time.perf_counter() - sector_started_perf) * 1000,
                 2,
             )
-        # One complete coverage batch can legitimately span many minutes.
-        # Record progress between native QMT calls so the heartbeat detects a
-        # single stuck call instead of timing the whole healthy batch.
+        # 一个完整覆盖批次可能正常跨越数分钟；在原生 QMT 调用之间记录进度，使心跳
+        # 检测单次卡住的调用，而不是给整个健康批次计时。
         self._record_background_heartbeat()
         sector_ratio = sector_batch.completion_ratio
         sector_resolution_ratio = sector_batch.resolution_ratio
@@ -6460,8 +6402,7 @@ class TradingScreeningService:
             if assessment.sector_id not in failed_sector_ids
         )
         ranked = rank_sectors(assessments)
-        # Every structurally eligible QMT sector contributes its members. Ranking
-        # remains an explanation/order field; it is not a top-N cutoff.
+        # 每个结构合格的 QMT 板块都贡献其成员；排序只用于解释和执行顺序，不是 Top-N 截断。
         selected = ranked
         selected_by_id = {row.assessment.sector_id: row.assessment for row in selected}
         if reuse_cycle_sectors and cached_sector_members is not None:
@@ -6474,10 +6415,8 @@ class TradingScreeningService:
             sector_id: tuple(all_members.get(sector_id, ()))
             for sector_id in selected_by_id
         }
-        # A symbol's primary sector is the first (best-ranked) eligible sector
-        # containing it.  GICS3 membership should normally be unique, while
-        # this deterministic fallback also prevents a lower-ranked supportive
-        # duplicate from contradicting the sector document shown on the page.
+        # 标的主板块取包含它的首个（排名最高）合格板块。GICS3 成员通常唯一；确定性
+        # 回退还能避免低排名的重复支持板块与页面展示的板块文档矛盾。
         selected_sector_by_code: dict[str, SectorAssessment] = {}
         for ranked_sector in selected:
             for member in sorted(
@@ -6623,10 +6562,8 @@ class TradingScreeningService:
                 ]
                 return blocked
 
-            # Only now is it safe to replace the old pending plan.  The fresh
-            # sector snapshot proves that its own market-data cutoff includes
-            # the close; clearing before this proof would lose resumable work
-            # whenever QMT had not finished updating its local history.
+            # 只有此时才能安全替换旧待处理计划：新板块快照已证明自身行情截止点包含收盘；
+            # 若在证明前清理，QMT 尚未更新完本地历史时会丢失可恢复任务。
             self._pending_frequencies.clear()
             self._backoff_frequencies.clear()
             self._deferred_frequencies.clear()
@@ -6673,6 +6610,7 @@ class TradingScreeningService:
                 "watchlist": watchlist,
                 "holdings": holdings,
                 "decision_core_id": self._decision_core_id,
+                "selection_research_revision": self._selection_research_revision,
             }
         )
         sector_catalog_revision = sector_batch.catalog_revision or sha256_json(
@@ -6800,13 +6738,10 @@ class TradingScreeningService:
                 parameter_set_id=self._config.parameter_set_id,
             )
             if replacing_coverage_epoch:
-                # A coverage identity change clears the completed ledger.  An
-                # incremental planner may legitimately return only changed bars
-                # and monitored symbols, but that subset cannot authenticate a
-                # brand-new full-sector coverage manifest.  Re-enter every
-                # member of every currently eligible QMT sector, plus explicit
-                # monitors, with the same frozen d/30m/5m/1m structure inputs.
-                # This is coverage repair, not a parameter or signal change.
+                # 覆盖身份变化会清空完成账本。增量计划可只返回变化 K 线和监听标的，
+                # 但该子集无法认证全新的完整板块清单；必须以同一冻结 d/30m/5m/1m
+                # 结构输入重新纳入所有当前合格板块成员及显式监听标的。这是覆盖修复，
+                # 不是参数或信号变化。
                 full_scope = set(priority_codes).union(plan.symbols)
                 full_scope.update(
                     member for members in sector_members.values() for member in members
@@ -6821,22 +6756,17 @@ class TradingScreeningService:
                     full_market_history_scan=plan.full_market_history_scan,
                     background_full_refresh_required=True,
                 )
-            # A planner may surface a genuinely new code even when the sector
-            # composite cutoff and catalog revision are unchanged.  Such a code
-            # is discovery work, not same-epoch monitoring, and must enter the
-            # ordinary resumable coverage queue.
+            # 即使板块合成截止点和目录版本未变，计划器仍可能发现真正的新代码；它属于
+            # 发现任务而非同周期监听，必须进入常规可恢复覆盖队列。
             if monitoring_only_refresh and any(
                 code not in self._coverage_cycle_discovered_codes
                 for code in plan.symbols
             ):
                 monitoring_only_refresh = False
             if not monitoring_only_refresh:
-                # Retry queues belong to the universe that produced them.  A
-                # new market-data epoch may retry a still-current member, but
-                # a catalog/watchlist change must never resurrect a removed or
-                # delisted symbol.  ``plan.symbols`` is included for custom
-                # incremental discoveries that are valid even when they are
-                # not sector members or explicit monitors.
+                # 重试队列属于生成它的标的池。新行情周期可重试仍有效成员，但目录或
+                # 自选变化绝不能复活已移除/退市标的。``plan.symbols`` 还包含虽非板块
+                # 成员或显式监听、但仍有效的自定义增量发现。
                 retry_scope = selected_member_codes.union(
                     priority_codes,
                     plan.symbols,
@@ -6880,9 +6810,8 @@ class TradingScreeningService:
                     plan.background_full_refresh_required
                 )
         else:
-            # A coverage plan is immutable while its pending queue drains. Replanning
-            # every batch re-added the active watchlist and made a cycle impossible
-            # to finish whenever monitored symbols existed.
+            # 待处理队列排空期间覆盖计划不可变；每批次重新规划会反复加入活跃自选，
+            # 导致存在监听标的时周期永远无法完成。
             plan = ScanPlan(
                 sectors=(),
                 symbols=(),
@@ -6908,14 +6837,10 @@ class TradingScreeningService:
                 scan_order_codes=ranked_scan_codes,
             )
         if self._priority_monitor_due(observed_at):
-            # The coverage epoch stays frozen for causal completeness, while
-            # this independent lane re-observes owned/watchlisted/active names
-            # and a rotating supportive-sector sample on current completed
-            # minute bars.  It also stays active after coverage completes,
-            # because the ordinary multi-thousand-symbol monitor cursor cannot
-            # provide a one-minute SLA for owned risk.  Excluding this batch
-            # prevents duplicate native QMT work without changing either
-            # lane's decision semantics.
+            # 覆盖周期为保证因果完整而保持冻结；独立通道则用当前已完成分钟 K 线复查
+            # 持仓、自选、活跃标的及轮换的支持板块样本。覆盖完成后它仍持续运行，
+            # 因为常规数千标的游标无法为持仓风险提供一分钟时效。排除此批可避免重复
+            # 原生 QMT 工作，且不改变两条通道的决策语义。
             self._run_priority_monitor_safely(
                 previous=previous,
                 observed_at=observed_at,
@@ -6990,12 +6915,16 @@ class TradingScreeningService:
                 bundle = replace(
                     bundle,
                     selection_sources=selection_sources,
+                    selection_research=visible_selection_research(
+                        self._selection_research,
+                        symbol=code,
+                        selection_path=bundle.selection_path,
+                        decision_time=bundle.as_of,
+                    ),
                 )
                 if code in holding_codes and bundle.physical_timeframe_recursive:
-                    # External holdings do not carry the originating strict
-                    # point lineage.  Attach the most conservative base-level
-                    # position identity so any same-frequency recursive sell
-                    # remains visible for full-exit review.
+                    # 外部持仓没有原始严格点位谱系；附加最保守的基础级别持仓身份，
+                    # 使任一同频递归卖点都能进入完整退出复核。
                     bundle = replace(
                         bundle,
                         held_tower="formal",
@@ -7055,12 +6984,9 @@ class TradingScreeningService:
                 self._record_background_heartbeat()
                 consume_stock_result(evaluate_stock(code))
         else:
-            # Market-data proxies assign each symbol deterministically to one
-            # isolated QMT worker.  Threads here only coordinate authenticated
-            # IPC; the CPU-heavy structure calculations run in separate Python
-            # processes and therefore use physical cores rather than contending
-            # on the GIL. `executor.map` preserves symbol order so signal and
-            # rejection documents remain byte-for-byte deterministic.
+            # 行情代理将每个标的确定性分配给一个隔离 QMT 工作进程。此处线程只协调
+            # 已认证 IPC；CPU 密集结构计算在独立 Python 进程中使用物理核心，不争用
+            # 全局解释器锁。``executor.map`` 保持标的顺序，使信号与拒绝文档逐字节确定。
             with ThreadPoolExecutor(
                 max_workers=worker_count,
                 thread_name_prefix="TradingScreeningStock",
@@ -7098,22 +7024,16 @@ class TradingScreeningService:
             self._record_cycle_exclusions(exclusions)
         stock_batch_errors = errors[len(sector_errors) :]
         if monitoring_only_refresh:
-            # The full-universe coverage ledger is already complete.  A failed
-            # same-cutoff re-observation must retain the last-good signal and be
-            # visible only as operational health; adding it to ``errors`` would
-            # make stock error codes disagree with manifest.failed_codes and no
-            # later successful monitor could recover the epoch.
+            # 全市场覆盖账本已经完成。同截止点复查失败时必须保留最近有效信号，仅作为
+            # 运行健康问题展示；若加入 ``errors``，标的错误码会与清单失败码不一致，
+            # 后续成功监听也无法恢复该周期。
             with self._background_lock:
                 self._last_monitoring_at = as_of
                 self._last_monitoring_errors = tuple(copy.deepcopy(errors))
-            # A completed coverage publication is immutable.  The sector probe
-            # above may legitimately produce a different structural point
-            # identity for the same frozen market cutoff, while this bounded
-            # monitor only re-evaluates a subset of symbols.  Rebuilding the
-            # page here would therefore combine retained old signals with new
-            # sector documents.  The priority monitor already persists and
-            # notifies its current results through its independent state lane;
-            # keep the daily preselection snapshot byte-for-byte unchanged.
+            # 已完成覆盖发布不可变。上方板块探测可能在相同冻结截止点生成不同结构点身份，
+            # 而有界监听只重评部分标的；此处重建页面会把保留的旧信号与新版块文档混合。
+            # 优先监听已通过独立状态通道持久化并通知当前结果，因此日级预选快照必须
+            # 保持逐字节不变。
             return dict(previous)
         else:
             self._record_cycle_errors(stock_batch_errors)
@@ -7132,13 +7052,10 @@ class TradingScreeningService:
             stock_exclusion_counts[reason_code] = (
                 stock_exclusion_counts.get(reason_code, 0) + 1
             )
-        # Classify failures before the batch completion gate.  Requeueing an
-        # entire low-completion batch made a sorted cluster of deterministic
-        # market-data rejections monopolize every refresh, so untouched valid
-        # symbols later in the frozen coverage plan were never visited.
-        # Deterministic failures are terminal for this market-data epoch;
-        # transport failures use the paced backoff queue.  Both remain fully
-        # represented in the immutable manifest and error ledger.
+        # 在批次完成闸门前先分类失败。若把低完成率批次整体重新入队，排序靠前的一簇
+        # 确定性行情拒绝会垄断每次刷新，使冻结计划中后续有效标的永远无法访问。
+        # 确定性失败在本行情周期内终止，传输失败进入按节奏退避队列；二者都完整记录
+        # 在不可变清单和错误账本中。
         if not monitoring_only_refresh:
             stock_errors_by_code = {
                 str(error["code"]): error
@@ -7434,6 +7351,7 @@ class TradingScreeningService:
             "parameter_set_id": self._config.parameter_set_id,
             "decision_core_id": self._decision_core_id,
             "decision_core": copy.deepcopy(self._decision_core_document),
+            "selection_research_revision": self._selection_research_revision,
             "signal_document_contract_id": SIGNAL_DOCUMENT_CONTRACT_ID,
             "sector_coverage_contract_id": SECTOR_COVERAGE_CONTRACT_ID,
             "available": True,

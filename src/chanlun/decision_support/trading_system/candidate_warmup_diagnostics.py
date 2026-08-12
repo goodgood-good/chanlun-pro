@@ -297,10 +297,9 @@ def candidate_warmup_diagnostic_path(
         parameter_set_id or candidate_warmup_parameter_set_id(),
         "diagnostic_parameter_set_id",
     )
-    # One content-addressed binding filename keeps the Windows path comfortably
-    # below MAX_PATH even when a test/runtime root is already long.  The full
-    # source and parameter identities remain inside the independently hashed
-    # document and are revalidated on every read.
+    # 使用一个内容寻址的绑定文件名，即使测试或运行根目录很长，也能让 Windows 路径
+    # 安全低于 MAX_PATH。完整来源与参数标识仍保存在独立哈希文档内，并在每次读取时
+    # 重新校验。
     binding = sha256_json(
         {
             "source_content_sha256": source,

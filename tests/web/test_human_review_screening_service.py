@@ -54,7 +54,7 @@ from chanlun.decision_support.trading_system.human_review_screening import (
 )
 from chanlun.decision_support.trading_system.forward_paper import (
     append_forward_paper_event,
-    load_frozen_forward_contract,
+    load_forward_contract,
 )
 from chanlun.decision_support.trading_system.forward_review_markout import (
     FORWARD_REVIEW_SAMPLE_COHORT_CONTRACT_ID,
@@ -76,9 +76,6 @@ from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
 from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
-from chanlun.decision_support.trading_system.technical_approximation import (
-    technical_approximation_parameters,
-)
 from chanlun.decision_support.trading_system.warmup_convergence import (
     WarmupPrefixObservation,
     classify_warmup_convergence_envelope,
@@ -96,10 +93,9 @@ TZ = ZoneInfo("Asia/Shanghai")
 SECTOR_ID = "qmt-gics3:" + "a" * 64
 SYMBOL = "SZ.000001"
 PARAMETER_SNAPSHOT = (
-    Path(__file__).resolve().parents[2]
-    / "audit"
-    / "chanlun_trading_system_backtest"
-    / "recent_year_current_sector_no3p"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "forward_paper"
     / "parameter_snapshot_human_review.json"
 )
 
@@ -166,8 +162,8 @@ def _alert() -> HumanReviewAlert:
         warning_codes=("UNRESOLVED_CENTER_DECOMPOSITION",),
         source_fact_ids=("sha256:" + "3" * 64,),
         screening_parameter_set_id=human_review_screening_parameters().parameter_set_id,
-        technical_approximation_parameter_set_id=(
-            technical_approximation_parameters().parameter_set_id
+        signal_alignment_parameter_set_id=(
+            human_review_screening_parameters().signal_alignment_parameter_set_id
         ),
         entry_confirmation_bar_closed_at=signal_at,
         entry_price_cap=Decimal("1000"),
@@ -1913,7 +1909,7 @@ def test_snapshot_attaches_only_valid_immutable_daily_valuation(
     (session_root / "paper_valuation.json").write_text(encoded, encoding="utf-8")
     append_forward_paper_event(
         service.forward_root / "forward_paper_ledger.json",
-        contract=load_frozen_forward_contract(PARAMETER_SNAPSHOT),
+        contract=load_forward_contract(PARAMETER_SNAPSHOT),
         session=datetime(2026, 7, 28, tzinfo=TZ).date(),
         phase="DECISION",
         status="EVALUATED",
@@ -2003,7 +1999,7 @@ def test_forward_delivery_readiness_rejects_self_reported_evaluated_event(
     assert missing["ready"] is False
     assert missing["reason_code"] == "CAPTURE_MISSING_AFTER_DUE"
 
-    contract = load_frozen_forward_contract(service.parameter_snapshot)
+    contract = load_forward_contract(service.parameter_snapshot)
     ledger_path = service.forward_root / "forward_paper_ledger.json"
     append_forward_paper_event(
         ledger_path,
@@ -2094,7 +2090,7 @@ def test_forward_delivery_preflight_blocks_changed_source_and_recovers(
 ) -> None:
     session = date(2026, 7, 30)
     observed_at = datetime(2026, 7, 30, 23, 1, tzinfo=TZ)
-    contract = load_frozen_forward_contract(service.parameter_snapshot)
+    contract = load_forward_contract(service.parameter_snapshot)
     ledger_path = service.forward_root / "forward_paper_ledger.json"
     captured_implementation = _implementation_provenance("a")
     append_forward_paper_event(

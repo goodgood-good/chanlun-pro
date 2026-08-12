@@ -143,9 +143,8 @@ class DingTalkWebhookNotifier:
             parsed = urlsplit(url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 continue
-            # DingTalk markdown uses square brackets for alt text.  Keep stock
-            # names readable while preventing them from terminating the image
-            # expression supplied by this trusted notification renderer.
+    # 钉钉 Markdown 使用方括号表示替代文字。保持股票名称可读，同时避免名称提前结束
+    # 由本可信通知渲染器生成的图片表达式。
             alt = alt.replace("[", "（").replace("]", "）")
             images.append((url, alt))
         return tuple(images)
@@ -238,16 +237,13 @@ class DingTalkWebhookNotifier:
                     try:
                         self._persist_dedupe_records(records)
                     except OSError as exc:
-                        # The transport has already succeeded.  Keep the
-                        # in-process barrier and avoid a false retry that would
-                        # immediately duplicate the same DingTalk message.
+                # 传输已经成功；保留进程内屏障，避免错误重试立即重复发送同一条钉钉消息。
                         fun.get_logger().warning(
                             f"[notify] outbound dedupe persist failed: {type(exc).__name__}"
                         )
                     return True
             except InterprocessLockTimeout as exc:
-                # Fail closed: sending without the shared gate can create the
-                # exact duplicate this barrier exists to prevent.
+            # 安全关闭：绕过共享门发送，恰好会制造本屏障需要防止的重复消息。
                 fun.get_logger().warning(
                     f"[notify] outbound dedupe lock failed: {type(exc).__name__}"
                 )

@@ -177,10 +177,8 @@ def _etf_data_inventory() -> dict[str, object]:
 
 
 def _mapping(symbol: str, first_session: date, last_session: date) -> EtfTrackingMapping:
-    # The user supplied the tracking relationship for this research task, but
-    # no authoritative historical methodology/publication record is cached.
-    # Keep it explicitly non-authoritative so evaluate/report layers cannot
-    # promote these rows to FULL_SYSTEM_ELIGIBLE.
+        # 用户为本研究任务提供了跟踪关系，但缓存中没有权威的历史方法或发布记录。
+        # 因此明确保持非权威状态，防止评估或报告层把这些记录提升为全系统可用。
     first = datetime.combine(first_session, time(0, 0), tzinfo=CN)
     last = datetime.combine(last_session, time(23, 59, 59), tzinfo=CN)
     return EtfTrackingMapping(

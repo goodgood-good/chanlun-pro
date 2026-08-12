@@ -143,7 +143,7 @@ def _shutdown_pickle_write_executor() -> None:
 atexit.register(_shutdown_pickle_write_executor)
 
 
-# Persistence responsibilities are composed from focused mixins.
+# 持久化职责由各个专用混入类组合完成。
 from chanlun.file_db_mixins import (  # noqa: E402
     _ChartDataCacheMixin,
     _KlineCacheMixin,
@@ -423,7 +423,7 @@ class FileCacheDB(_ChartDataCacheMixin, _KlineCacheMixin):
         finally:
             self._cleanup_lock.release()
 
-    # Kline, generic-pickle and chart-data methods are supplied by mixins.
+# K 线、通用 pickle 和图表数据方法由混入类提供。
 
 
 fdb = FileCacheDB()

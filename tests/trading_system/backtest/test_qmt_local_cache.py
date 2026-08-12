@@ -189,7 +189,7 @@ def test_local_pershare_is_visible_only_after_announcement_day(tmp_path: Path) -
     assert record.get("book_value_per_share") == 5.0
     assert record.get("diluted_eps") is None
     assert audit.record_count == 1
-    assert audit.data_grade == "RESEARCH_APPROXIMATION"
+    assert audit.data_grade == "RESEARCH_ONLY"
 
 
 def test_local_pershare_hash_binds_the_exact_parsed_byte_snapshot(
@@ -289,4 +289,4 @@ def test_local_30m_is_derived_only_from_complete_same_session_5m_buckets(
     assert audit.frequency == "30m_from_5m"
     assert audit.selected_record_count == 7
     assert frame.attrs["qmt_transport"] == "LOCAL_5M_DERIVED_30M_READ_ONLY"
-    assert frame.attrs["data_grade"] == "RESEARCH_APPROXIMATION"
+    assert frame.attrs["data_grade"] == "RESEARCH_ONLY"

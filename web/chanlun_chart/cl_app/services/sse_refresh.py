@@ -36,7 +36,8 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
         ex = get_exchange(Market(market))
         klines = ex.klines(code, frequency)
         if _klines_fetch_incomplete(klines):
-            # 拉取带洞:短退避保留旧缓存,≤30s 自愈,不被真空 5min 负缓存抑制(C1+M3)。
+            # 拉取存在缺口时短暂退避并保留旧缓存，三十秒内自愈，不受真实空数据的
+            # 五分钟负缓存抑制。
             _mark_negative_cache(cache_key, ttl=_TRANSIENT_NEGATIVE_TTL_SECONDS)
             return None
         if klines is None or len(klines) == 0:

@@ -57,3 +57,46 @@ def test_physical_frequency_lower_recursive_sell_is_risk_only() -> None:
 
     assert decision.hard_block is False
     assert decision.risk_only_point_ids == (sell.point_id,)
+
+
+def test_older_opposite_point_cannot_veto_later_setup() -> None:
+    sell = confirmed_point(
+        "1sell",
+        tower="formal",
+        level=1,
+        center_id="same",
+        minutes_after=-5,
+    )
+    buy = confirmed_point(
+        "2buy",
+        tower="formal",
+        level=1,
+        center_id="same",
+    )
+
+    decision = resolve_conflict(setup_for(buy), (sell,))
+
+    assert decision.hard_block is False
+    assert decision.blocking_point_ids == ()
+    assert decision.risk_only_point_ids == ()
+
+
+def test_later_opposite_point_can_veto_earlier_setup() -> None:
+    buy = confirmed_point(
+        "2buy",
+        tower="formal",
+        level=1,
+        center_id="same",
+    )
+    sell = confirmed_point(
+        "1sell",
+        tower="formal",
+        level=1,
+        center_id="same",
+        minutes_after=5,
+    )
+
+    decision = resolve_conflict(setup_for(buy), (sell,))
+
+    assert decision.hard_block is True
+    assert decision.blocking_point_ids == (sell.point_id,)

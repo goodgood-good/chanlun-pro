@@ -11,8 +11,8 @@ def pid_alive(pid: object) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
     if os.name == "nt":
-        # ``os.kill(pid, 0)`` may use a console-control path on Windows and
-        # report WinError 87/SystemError for a detached or GUI process.
+# Windows 下 ``os.kill(pid, 0)`` 可能走控制台控制路径，并对已分离进程或图形界面
+# 进程报告 WinError 87/SystemError。
         import ctypes
         from ctypes import wintypes
 
@@ -39,13 +39,13 @@ def pid_alive(pid: object) -> bool:
 
         handle = open_process(process_query_limited_information, False, pid)
         if not handle:
-            # Access denied still proves that a protected process exists.
+        # 即使访问被拒绝，也足以证明受保护进程仍然存在。
             return ctypes.get_last_error() == access_denied
         try:
             exit_code = wintypes.DWORD()
             if not get_exit_code(handle, ctypes.byref(exit_code)):
-                # A live handle with an unreadable exit code is ambiguous;
-                # fail closed so two app processes cannot share one owner.
+        # 活跃句柄却无法读取退出码时状态不明确；此时安全关闭，避免两个应用进程
+        # 共用同一个所有者身份。
                 return True
             return exit_code.value == still_active
         finally:

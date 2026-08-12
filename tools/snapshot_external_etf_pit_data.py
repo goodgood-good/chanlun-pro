@@ -262,9 +262,8 @@ def _symbol_complete(
         end,
         date.fromisoformat(master[1]) if master[1] else end,
     )
-    # The first/last calendar date can be a non-session.  A seven-day bound is
-    # enough to prove the requested range was queried without requiring a
-    # future-filled exchange calendar.
+        # 起止自然日可能不是交易日；七天边界足以证明已经查询请求范围，
+        # 无需使用填充未来日期的交易所日历。
     return (
         date.fromisoformat(bar_range[0]).toordinal()
         <= expected_start.toordinal() + 7
@@ -539,10 +538,8 @@ def capture(
                     )
                 )
             for index, code in enumerate(sorted(members), start=1):
-                # BaoStock sessions can expire during a long all-member
-                # snapshot.  Refresh at deterministic boundaries; completed
-                # symbols are already committed and remain immutable cache
-                # inputs on a resumed run.
+            # BaoStock 会话可能在长时间的全成员快照期间过期。按确定性边界刷新；
+            # 已完成标的已经提交，续跑时继续作为不可变缓存输入。
                 if index > 1 and (index - 1) % 100 == 0:
                     bs.logout()
                     refreshed = bs.login()

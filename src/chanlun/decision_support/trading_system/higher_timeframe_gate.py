@@ -1659,12 +1659,9 @@ def higher_timeframe_effectiveness_audit(
                                         )
                                         is not None
                                     )
-                                    # Reuse the mapping-supply audit identity so
-                                    # the lineage row opens the exact same causal
-                                    # chart lock.  ``role.point_id`` is the
-                                    # structural point identity, not the chart-row
-                                    # identity accepted by
-                                    # ``validate_risk_point_chart_lock``.
+                                    # 复用映射供给审计身份，使谱系记录打开完全相同的因果图表锁。
+                                    # ``role.point_id`` 是结构点身份，并非人工复核正式图表锁
+                                    # 接受的图表记录身份。
                                     chart_lock_point_id = sha256_json(
                                         {
                                             "schema": (
@@ -3539,10 +3536,9 @@ def build_qmt_sector_same_base_coverage_evidence(
         )
         if actual == _sector_five_minute_closes(session):
             completed_sessions.append(session)
-    # ``warmup_evidence`` may intentionally evaluate only the configured tail
-    # (for example 120 of 130 physically visible sessions in a small adapter
-    # test).  Coverage describes the actual causal source boundary, so it may
-    # be larger than that evaluated tail but can never be smaller.
+    # ``warmup_evidence`` 可能有意只评估配置的尾部区间。
+    # 小型适配器测试可能只评估物理可见交易日的尾部（例如 130 个中的 120 个）。覆盖范围
+    # 描述真实因果来源边界，因此可大于被评估尾部，但绝不能更小。
     if len(completed_sessions) < warmup_evidence.full_daily_bar_count:
         raise ValueError("sector 5m coverage diverges from strict warmup evidence")
 
@@ -3907,8 +3903,8 @@ def _sector_same_base_frames(
         if session == decision.date() and actual == expected[: len(actual)]:
             accepted.append(ordered)
             continue
-        # A count-bounded QMT read may cut only the oldest session.  Interior
-        # partial sessions are data gaps and must never be silently discarded.
+        # 按数量限制的 QMT 读取只能截断最老交易日；内部残缺交易日属于数据缺口，
+        # 绝不能静默丢弃。
         if index == 0 and actual == expected[-len(actual) :]:
             continue
         raise HigherTimeframeDataUnavailable(
@@ -4507,19 +4503,16 @@ def resolve_sector_higher_timeframe_gate(
             observed_at=observed_at,
             trading_sessions=trading_sessions,
             calendar_coverage_end=calendar_coverage_end,
-            # The 480-bar value is a minimum, not a tail cap.  Retaining every
-            # causally returned row gives the pairwise convergence check its
-            # older comparison margin without changing a strategy threshold.
+            # 480 根是最低值而非尾部上限；保留所有因果返回记录可为成对收敛检查提供
+            # 更早的比较余量，同时不改变策略阈值。
             daily_bars=max(daily_bars, len(native_daily)),
             thirty_minute_bars=thirty_minute_bars,
         )
     except HigherTimeframeDataUnavailable as exc:
         unavailable_reasons = exc.reason_codes
     except RuntimeError:
-        # QMT transport/history/factor failures are expected data-source
-        # failures for this optional advisory.  They must not crash the page or
-        # make replay choose a different decision path; preserve the strict
-        # fail-closed result and expose a stable machine-readable cause.
+        # 行情终端的传输、历史或因子失败是可选建议链预期的数据源失败；不能让页面崩溃或使回放
+        # 选择不同决策路径。应保留严格关闭失败结果，并暴露稳定的机器可读原因。
         unavailable_reasons = (
             "QMT_SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_UNAVAILABLE",
         )
@@ -4616,10 +4609,8 @@ class QmtHigherTimeframeGateSource:
         self._trading_calendar_provider = trading_calendar_provider
         self._sector_daily_bars = sector_daily_bars
         self._sector_thirty_minute_bars = sector_thirty_minute_bars
-        # 480 is the frozen minimum, while convergence compares the full
-        # prefix with its oldest-third-trimmed suffix.  Request a mechanical
-        # 50% evidence margin on the on-demand native-daily advisory without
-        # changing any trading threshold.
+        # 480 是冻结最低值，收敛检查会比较完整前缀与去掉最老三分之一后的后缀；按需
+        # 原生日线建议额外请求 50% 的机械证据余量，但不改变任何交易阈值。
         sector_native_daily_minimum = max(
             sector_daily_bars,
             QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
@@ -4638,9 +4629,8 @@ class QmtHigherTimeframeGateSource:
             daily_bars,
             ceil(thirty_minute_bars / 8),
         )
-        # QMT can include a 09:30 opening event in addition to 240 completed
-        # minutes.  One extra session lets us discard a leading fragment caused
-        # solely by the requested row-count boundary.
+        # 行情终端除 240 个已完成分钟外还可能包含 09:30 开盘事件；多请求一个交易日可丢弃
+        # 仅由请求行数边界造成的开头残片。
         self._one_minute_bars = (required_sessions + 1) * 241
         self._lookback_days = max(120, required_sessions * 2)
         self._native_daily_bars = self._daily_bars + 10
@@ -4651,10 +4641,8 @@ class QmtHigherTimeframeGateSource:
         self._sector_cache: dict[
             tuple[str, str], HigherTimeframeGateEvidence
         ] = {}
-        # A symbol can have an incomplete same-base 1m history while the broad
-        # market stream remains fully valid.  Cache the resulting fail-closed
-        # pair for this exact decision minute so monitoring refreshes neither
-        # recompute the same invalid stream nor erase the valid market gate.
+        # 标的同源 1m 历史可能不完整，而大盘流仍完全有效。对精确决策分钟缓存所得关闭失败
+        # 组合，使监听刷新既不重算同一无效流，也不抹除有效市场闸门。
         self._bundle_cache: dict[
             tuple[str, str, str | None, str | None],
             HigherTimeframeGateBundle,
@@ -4662,11 +4650,8 @@ class QmtHigherTimeframeGateSource:
         self._calendar_cache: dict[str, tuple] = {}
         self._minute_cache: dict[tuple[str, str], pd.DataFrame] = {}
         self._native_daily_cache: dict[tuple[str, str], pd.DataFrame] = {}
-        # A native daily row can become visible a few seconds before the local
-        # 1m store has downloaded the same completed session.  One explicit
-        # post-close refresh per symbol/session repairs that transport lag; the
-        # reconciliation contract remains fail-closed if the refreshed prefix
-        # is still incomplete.
+        # 原生日线记录可能比本地 1m 库下载同一已完成交易日早几秒可见。每个标的/交易日
+        # 明确执行一次盘后刷新以修复传输延迟；刷新后前缀仍不完整时，对账契约继续关闭失败。
         self._native_daily_ahead_refresh_attempts: set[tuple[str, date]] = set()
         self._native_daily_calendar_coverage_cache: dict[
             tuple[str, str], QmtNativeDailyCalendarCoverageEvidence
@@ -4736,8 +4721,8 @@ class QmtHigherTimeframeGateSource:
         frame = loader(
             symbol,
             "1m",
-            # ExchangeQMT accepts a local QMT timestamp, not an ISO-8601
-            # offset suffix (``+08:00`` is rejected by xtdata).
+            # 交易接口接受本地 QMT 时间戳，不接受 ISO-8601 时区偏移后缀；
+            # 底层 xtdata 会拒绝 ``+08:00``。
             start_date=start.strftime("%Y-%m-%d %H:%M:%S"),
             end_date=observed.strftime("%Y-%m-%d %H:%M:%S"),
             args={
@@ -4879,15 +4864,10 @@ class QmtHigherTimeframeGateSource:
                 observed,
                 expected_sessions,
             )
-            # Bind the one-shot refresh to the latest expected trading
-            # session, not to the wall-clock date.  On weekends and exchange
-            # holidays the native daily bar can legitimately contain Friday
-            # (or the prior trading day) while the cached 1m base is still one
-            # session behind.  Requiring ``session == observed.date()`` made
-            # that mismatch permanently fail closed until the next trading
-            # day.  Comparing with the completed session close keeps the
-            # refresh causal and still forbids an intraday current-session
-            # download.
+            # 一次性刷新绑定最新预期交易日，而不是墙钟日期。周末或交易所假日时，原生日线
+            # 可合理包含周五（或上一交易日），本地 1m 基础仍可能落后一个交易日。若要求
+            # ``session == observed.date()``，该差异会一直关闭失败到下一交易日。改与已完成
+            # 交易日收盘比较，既保持刷新因果性，也继续禁止盘中下载当前交易日。
             refresh_key = (
                 None
                 if latest_expected_session is None
@@ -4937,9 +4917,8 @@ class QmtHigherTimeframeGateSource:
     def _benchmark_prefix_is_current(self, as_of: datetime) -> bool:
         observed = normalize_datetime(as_of, "as_of")
         local = observed.astimezone(ZoneInfo("Asia/Shanghai"))
-        # The forward process does not evaluate weekends.  A weekday holiday
-        # remains conservatively unresolved because this adapter has no
-        # independently certified future trading calendar.
+        # 前向进程不评估周末；工作日假期保守保持未解析，因为该适配器没有独立认证的
+        # 未来交易日历。
         if local.weekday() >= 5 or local.time() < time(9, 30):
             return True
         frame = self._one_minute_frame(self._benchmark_symbol, observed)
@@ -5187,9 +5166,8 @@ class QmtHigherTimeframeGateSource:
                 calendar_coverage_end=sessions[-1],
             )
         except HigherTimeframeDataUnavailable as exc:
-            # The market and symbol evidence are independent.  Losing the
-            # symbol's session grid must keep new entry fail-closed, but it
-            # must not rewrite a valid market risk assessment to UNRESOLVED.
+            # 市场与标的证据相互独立；丢失标的交易日网格时，新入场必须关闭失败，但不能
+            # 把有效市场风险评估改写为 UNRESOLVED。
             symbol_gate = unresolved_higher_timeframe_gates(
                 symbol=symbol,
                 observed_at=observed,

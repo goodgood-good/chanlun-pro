@@ -81,7 +81,8 @@ class ExchangeQMT(Exchange):
             "15m": "5m",
             "30m": "5m",
             "60m": "5m",
-            # D3-M1: 2m/10m/120m 读 1m + convert 合成, 下载基础须 1m(原 fallback 误落 1d 致冷标的返空)
+            # 二、十、一百二十分钟周期由一分钟线转换合成，因此下载基础必须是一分钟线；
+            # 若错误回退到日线，冷标的会返回空数据。
             "2m": "1m",
             "10m": "1m",
             "120m": "1m",
@@ -359,7 +360,8 @@ class ExchangeQMT(Exchange):
 
         # QMT 可服务周期 = 原生(frequency_map) + convert 合成(2m/10m resample, 120m 分段)。
         # 其余(q/y/3m/6m 等)convert 不支持:历史会 fallback 读 1m 再 convert 抛异常,被外层
-        # @retry 吞 3 次 → RetryError(审查 M5)。与 cq 一致在入口如实拒绝,不降级、不进 retry。
+        # 若进入重试装饰器会连续吞掉三次异常后转成 RetryError；这里与 cq 一致，
+        # 在入口如实拒绝，不降级也不重试。
         QMT_SUPPORTED_FREQS = frozenset(self.download_frequency_map)
         if frequency not in QMT_SUPPORTED_FREQS:
             LogUtil.warning(f"[ExchangeQMT.klines] 不支持的周期 {frequency} code={code}, 返回空(不降级)")
@@ -396,18 +398,14 @@ class ExchangeQMT(Exchange):
             if research_exact_end
             else ""
         )
-        # ``xtdata.download_history_data`` treats ``end_time`` as an exclusive
-        # transport boundary, while ``get_market_data`` reads the same boundary
-        # inclusively.  Passing the frozen decision time to both calls therefore
-        # leaves the bar whose completion timestamp is exactly ``end_date`` out
-        # of the local store.  The mismatch is observable after the close: QMT's
-        # native daily row is present, but the 1m-derived daily prefix stops one
-        # session earlier and the higher-timeframe gate correctly fails closed.
+            # ``xtdata.download_history_data`` 把 ``end_time`` 当作不包含端点的传输边界，
+            # 而 ``get_market_data`` 会包含同一边界。若两者都传入冻结决策时刻，完成时间
+            # 恰等于 ``end_date`` 的 K 线不会进入本地存储。收盘后可观察到该差异：QMT
+            # 原生日线存在，但由一分钟线生成的日线前缀少一个交易日，高级别门会正确关闭。
         #
-        # Move *only the download boundary* one second forward.  The read stays
-        # pinned to ``query_end`` and the explicit dataframe filter below still
-        # enforces ``date <= end_date``.  Thus the transport can fetch the bar at
-        # the decision timestamp without making any later bar visible.
+            # 仅把下载边界向后移动一秒；读取仍固定在 ``query_end``，下方显式数据帧过滤
+            # 继续强制 ``date <= end_date``。这样传输层可获取决策时刻的 K 线，
+            # 又不会暴露任何后续 K 线。
         download_query_end = query_end
         if research_exact_end:
             exact_end = pd.Timestamp(end_date)
@@ -504,7 +502,7 @@ class ExchangeQMT(Exchange):
             klines_df["date"] = klines_df["date"].dt.tz_convert(self.tz)
 
             if frequency in ["d", "w", "m"]:
-                # "y" 已删:frequency_map 无 y(年线触发 BSON 崩溃已移除)、M5 白名单入口亦拒 y,
+                # 年线已经删除：frequency_map 不含 y，入口白名单也拒绝 y，
                 # 原 ["d","w","m","y"] 的 y 分支是到不了的死代码(审查 L1)。
                 klines_df["date"] = klines_df["date"].dt.normalize() + pd.Timedelta(hours=15)
         except Exception as e:
@@ -524,7 +522,7 @@ class ExchangeQMT(Exchange):
             klines_df = convert_stock_kline_frequency(klines_df, frequency)
 
         # end_date 历史区间裁剪:本函数原忽略 end_date(只用 start 算 query_start、拉到最新),
-        # 历史回放/区间查询会返回超出 end_date 的未来数据(审查 M2)。仅对"过去日历日"的历史查询
+        # 历史回放或区间查询可能返回超出 end_date 的未来数据。仅对过去自然日的历史查询
         # 裁剪;实时(end_date 为今日/未来)跳过——否则 d/w/m 规整到当日 15:00 的在制 bar(date 晚于
         # intraday 的 now)会被裸 `date<=now` 误删。
         if end_date:

@@ -71,8 +71,8 @@ class _KlineCacheMixin:
         if _klines is None:
             return None
 
-        # Parquet preserves the source dtype, which can still be string for
-        # some vendors. Normalize it before downstream datetime arithmetic.
+        # Parquet 会保留来源数据类型，部分供应商仍可能给出字符串；
+        # 在下游日期时间运算前先规范化。
         if _klines is not None and len(_klines) > 0 and "date" in _klines.columns:
             if not pd.api.types.is_datetime64_any_dtype(_klines["date"]):
                 _klines["date"] = pd.to_datetime(_klines["date"], errors="coerce")

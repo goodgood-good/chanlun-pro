@@ -112,7 +112,7 @@ def derive_qmt_sector_thirty_minute_frame(
             accepted.append(ordered)
             continue
         if index == 0 and actual == expected[-len(actual) :]:
-            # Oldest count-boundary suffix: it has no session-open anchor.
+            # 最早的计数边界后缀没有交易日开盘锚点。
             continue
         if index == len(grouped) - 1 and actual == expected[: len(actual)]:
             accepted.append(ordered)
@@ -175,8 +175,7 @@ def derive_qmt_sector_thirty_minute_frame(
                 high=("high", "max"),
                 low=("low", "min"),
                 close=("close", "last"),
-                # This is the conservative minimum 5m coverage within the
-                # bucket, not a fabricated 30m all-member trade volume.
+        # 这是分桶内保守的五分钟最小覆盖量，不是虚构的三十分钟全成员成交量。
                 volume=("volume", "min"),
             )
             .reset_index(drop=True)

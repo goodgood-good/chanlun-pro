@@ -111,7 +111,7 @@ def create_clean_cover(
     image = Image.new("RGB", (COVER_WIDTH, COVER_HEIGHT), (247, 244, 238))
     draw = ImageDraw.Draw(image)
 
-    # Subtle paper texture and a quiet technical grid.
+    # 使用细微的纸张纹理和低调的技术网格。
     for y in range(0, COVER_HEIGHT, 24):
         shade = 235 if y % 48 == 0 else 240
         draw.line((120, y, COVER_WIDTH - 120, y), fill=(shade, shade, shade), width=1)

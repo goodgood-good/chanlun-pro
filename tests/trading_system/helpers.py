@@ -7,6 +7,7 @@ adapt removed core buy/sell-point, center, or recursive-branch objects.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -24,6 +25,9 @@ from chanlun.decision_support.trading_system.models import (
 )
 from chanlun.decision_support.trading_system.provisional import (
     ProvisionalCandidate,
+)
+from chanlun.decision_support.trading_system.selection import (
+    SelectionResearchSnapshot,
 )
 
 
@@ -172,6 +176,11 @@ def provisional_point(
     anchor: float = 10.0,
 ) -> ProvisionalCandidate:
     side = "buy" if point_type.endswith("buy") else "sell"
+    parent_point_id = (
+        f"parent:{side}:{tower}:{level}"
+        if point_type in {"2buy", "2sell"}
+        else None
+    )
     return ProvisionalCandidate(
         candidate_id=f"candidate:{point_type}:{tower}:{level}",
         code="SZ.000001",
@@ -183,13 +192,43 @@ def provisional_point(
         recursive_level=level,
         observed_at=POINT_AT,
         anchor_price=anchor,
+        invalidation_price=(anchor - 0.1 if side == "buy" else anchor + 0.1),
+        price_basis_revision="test-raw",
+        variant=cast(PointVariant, "standard"),
+        center_id=(f"center:{tower}:{level}" if point_type in {"3buy", "3sell"} else None),
+        center_zd=(anchor - 0.1 if point_type in {"3buy", "3sell"} else None),
+        center_zg=(anchor + 0.1 if point_type in {"3buy", "3sell"} else None),
+        center_ordinal=(1 if point_type in {"3buy", "3sell"} else None),
+        divergence_kind=None,
         missing_conditions=("terminal_unit_locked",),
         evidence_codes=("test_fixture",),
+        parent_point_id=parent_point_id,
     )
 
 
 def setup_for(point: StructuralPoint | ProvisionalCandidate):
     return build_setup(point, neutral_context("30m"), eligible_sector())
+
+
+def valid_selection_research() -> SelectionResearchSnapshot:
+    """构造一份在测试决策时刻可见的正式个股三程序快照。"""
+
+    return SelectionResearchSnapshot(
+        snapshot_id="research:SZ.000001:formal",
+        symbol="SZ.000001",
+        path="INDIVIDUAL_THREE_PROGRAM",
+        effective_at=AS_OF - timedelta(days=1),
+        known_at=AS_OF - timedelta(days=2),
+        valid_until=AS_OF + timedelta(days=30),
+        reviewer="test-reviewer",
+        signature="signed:test-selection-research",
+        official_evidence_ids=("evidence:test-three-program",),
+        industry_opportunity_status="PASS",
+        fundamental_role="LEADER",
+        relative_value_status="FAIR",
+        point_in_time_total_market_cap=Decimal("1000000000"),
+        peer_set_id="peer-set:test-sector",
+    )
 
 
 def deterministic_bundle() -> SymbolStructureBundle:
@@ -208,6 +247,7 @@ def deterministic_bundle() -> SymbolStructureBundle:
         opposite_points=(),
         physical_timeframe_recursive=True,
         selection_sources=("QMT_SECTOR_TRIGGER",),
+        selection_research=valid_selection_research(),
     )
 
 
@@ -224,4 +264,5 @@ __all__ = (
     "provisional_point",
     "setup_for",
     "supportive_context",
+    "valid_selection_research",
 )

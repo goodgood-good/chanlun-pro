@@ -285,7 +285,7 @@ def test_early_signals_exposes_cross_market_manual_holdings_without_account_acce
                 "code": "HK.00700",
                 "name": "腾讯控股",
                 "monitoring_scope": "NON_A_AUXILIARY_STRUCTURE_RADAR",
-                "decision_mode": "APPROXIMATE_STRUCTURE_OBSERVATION",
+                "decision_mode": "STRICT_STRUCTURE_OBSERVATION_ONLY",
             },
         ],
         "declared_count": 2,

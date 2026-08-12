@@ -10,6 +10,7 @@ import pytest
 
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.human_assisted_decision import (
+    apply_formal_selection_scope,
     signal_decision_document_id,
 )
 from chanlun.decision_support.trading_system.decision_source_provenance import (
@@ -2001,10 +2002,19 @@ def test_live_alert_explains_watchlist_monitor_origin() -> None:
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
     )
-    with pytest.raises(ValueError, match="decision evidence is invalid"):
+    with pytest.raises(ValueError, match="entry gate is invalid"):
         validate_live_review_snapshot(snapshot)
 
-    signal["decision_reasons"].append("current_qmt_sector_trigger_required")
+    signal["decision_reasons"] = [
+        reason
+        for reason in signal["decision_reasons"]
+        if reason
+        not in {
+            "SIGNED_SELECTION_RESEARCH_REQUIRED",
+            "QMT_SECTOR_TRIGGER_REQUIRED",
+        }
+    ]
+    apply_formal_selection_scope(signal, ("ACTIVE_WATCHLIST_MONITOR",))
     signal["decision_document_id"] = signal_decision_document_id(signal)
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
@@ -2018,7 +2028,7 @@ def test_live_alert_explains_watchlist_monitor_origin() -> None:
     )
 
     assert "SELECTION_SOURCE_ACTIVE_WATCHLIST_MONITOR" in alert.warning_codes
-    assert "MONITOR_ONLY_NOT_CURRENT_SECTOR_TRIGGER" in alert.warning_codes
+    assert "MONITOR_ONLY_FORMAL_SELECTION_NOT_PASSED" in alert.warning_codes
 
 
 def test_live_alert_falls_back_to_five_minute_anchor_without_locator() -> None:

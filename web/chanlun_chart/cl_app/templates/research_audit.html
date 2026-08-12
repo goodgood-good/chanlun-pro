@@ -212,7 +212,7 @@
             <div class="ra-fact"><span>5m 可操作级别</span><strong>确认候选结构，不替代精细触发</strong></div>
             <div class="ra-fact"><span>1m 精细触发</span><strong>同向确认后，最早下一根可交易 1m 成交</strong></div>
             <div class="ra-fact"><span>买卖点通道</span><strong>一、二、三类买卖点独立，不折叠为三买</strong></div>
-            <div class="ra-fact"><span>第一中枢三买</span><strong>{{ "强制" if audit.execution_contract.first_center_three_buy_only else "当前滚动窗口未强制" }}</strong><small>{{ audit.execution_contract.first_center_three_buy_mode }}</small></div>
+            <div class="ra-fact"><span>买点执行逻辑</span><strong>一、二、三类统一</strong><small>三买仅保留自身中枢外回抽条件</small></div>
             <div class="ra-fact"><span>板块行情</span><strong>历史时点申万一级有效成分合成板块结构</strong></div>
             <div class="ra-fact"><span>板块涨跌幅</span><strong>{{ "不参与筛选" if not audit.execution_contract.sector_price_change_gate else "参与" }}</strong></div>
             <div class="ra-fact"><span>T+1</span><strong>{{ "严格执行" if audit.execution_contract.t_plus_one else "未启用" }}</strong></div>

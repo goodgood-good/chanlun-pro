@@ -134,6 +134,52 @@ def _point_message(evidence: StrictEvidenceResult, points) -> str:
     return f"{evidence.source_frequency} 严格递归结构确认买卖点【{labels}】"
 
 
+def _latest_partition_boundary_before(evidence, point):
+    """返回该点所在同级分区之前最近的已确认背驰边界。"""
+
+    level = next(
+        (
+            item
+            for item in evidence.structure.levels
+            if item.structural_level == point.structural_level
+        ),
+        None,
+    )
+    if level is None:
+        return None
+    return max(
+        (
+            boundary
+            for boundary in level.decomposition_boundaries
+            if boundary.anchor_at < point.anchor_at
+            and boundary.available_at <= point.available_at
+        ),
+        key=lambda boundary: (boundary.anchor_at, boundary.boundary_id),
+        default=None,
+    )
+
+
+def _causal_first_parent(evidence, third, *, trend_only: bool):
+    """只接受当前三类点所在分区的直接一类点血缘。"""
+
+    boundary = _latest_partition_boundary_before(evidence, third)
+    if boundary is None or (trend_only and boundary.divergence.kind != "trend"):
+        return None
+    expected = "1buy" if third.side == "buy" else "1sell"
+    matches = tuple(
+        point
+        for point in evidence.confirmed_points
+        if point.point_type == expected
+        and point.structural_level == third.structural_level
+        and point.anchor_unit_id == boundary.anchor_unit_id
+        and point.divergence == boundary.divergence
+        and point.available_at <= third.available_at
+    )
+    if len(matches) > 1:
+        raise ValueError("current partition boundary maps to multiple first points")
+    return None if not matches else matches[0]
+
+
 def _single_class_point(code, mk_datas, opt_types, point_class: str):
     sides = _allowed_sides(opt_types)
     evidence = _evidence(code, mk_datas, mk_datas.frequencys[0])
@@ -177,17 +223,11 @@ def select_strict_class3_after_class1(
         sides=sides,
         classes=frozenset({"3"}),
     )
-    matches = []
-    for third in thirds:
-        expected = "1buy" if third.side == "buy" else "1sell"
-        if any(
-            point.point_type == expected
-            and point.structural_level == third.structural_level
-            and point.available_at <= third.available_at
-            and point.anchor_at < third.anchor_at
-            for point in evidence.confirmed_points
-        ):
-            matches.append(third)
+    matches = [
+        third
+        for third in thirds
+        if _causal_first_parent(evidence, third, trend_only=False) is not None
+    ]
     if not matches:
         return None
     return {
@@ -208,19 +248,11 @@ def select_strict_class3_after_trend_divergence(
         sides=sides,
         classes=frozenset({"3"}),
     )
-    matches = []
-    for third in thirds:
-        expected = "1buy" if third.side == "buy" else "1sell"
-        if any(
-            point.point_type == expected
-            and point.structural_level == third.structural_level
-            and point.divergence is not None
-            and point.divergence.kind == "trend"
-            and point.available_at <= third.available_at
-            and point.anchor_at < third.anchor_at
-            for point in evidence.confirmed_points
-        ):
-            matches.append(third)
+    matches = [
+        third
+        for third in thirds
+        if _causal_first_parent(evidence, third, trend_only=True) is not None
+    ]
     if not matches:
         return None
     return {

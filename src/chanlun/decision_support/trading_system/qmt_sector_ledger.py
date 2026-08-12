@@ -80,8 +80,8 @@ def _canonical_sectors(catalog: Mapping[str, object]) -> tuple[dict[str, object]
                 "member_codes": canonical_members,
             }
         )
-    # The provider adapter freezes catalog order by canonical QMT source key;
-    # preserve that same order so its catalog revision remains authoritative.
+    # 数据提供适配器按规范 QMT 来源键冻结目录顺序；这里保持相同顺序，
+    # 使其目录修订标识继续具有权威性。
     sectors.sort(key=lambda value: str(value["source_key"]))
     return tuple(sectors)
 
@@ -183,7 +183,7 @@ def validate_sector_ledger(payload: Mapping[str, object]) -> dict[str, object]:
             raise ValueError("QMT sector entry capture time is invalid") from exc
         if previous_time is not None and captured <= previous_time:
             raise ValueError("QMT sector captures must be strictly chronological")
-        # Reuse the catalog validator so a valid hash cannot hide malformed rows.
+    # 复用目录校验器，防止合法哈希掩盖格式错误的记录。
         canonical_entry = catalog_capture_entry(
             {
                 "source": _CATALOG_SCHEMA_SOURCE,
@@ -324,10 +324,8 @@ def audit_sector_capture_receipts(
                     bound_document = load_sector_ledger(bound_ledger)
                     binding_source = "ARCHIVED_PREFIX"
                 else:
-                    # The current ledger has already validated the complete
-                    # entry chain.  Rebuild the exact historical prefix named
-                    # by the immutable receipt and prove its original file
-                    # identity before accepting it as evidence.
+                # 当前账本已经校验完整记录链。必须按不可变回执指定的范围精确重建
+                # 历史前缀，并证明其原始文件标识，之后才能把它接纳为证据。
                     bound_document = _ledger_document(entries[:capture_count])
                     reconstructed_sha256 = _sha256_bytes(
                         _ledger_file_bytes(bound_document)

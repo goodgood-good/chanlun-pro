@@ -1,10 +1,8 @@
-"""Causal adapter from the shared live decision document to human review.
+"""把共享实时决策文档因果转换为人工复核提醒。
 
-The staged scanner and historical replay already share the same
-``HumanAssistedDecisionCore``.  This module is the only place allowed to turn
-one of those canonical decision documents into a review alert.  It preserves
-the 30m strategic context, 5m setup and 1m locator distinction and never
-creates an order-capable object.
+分阶段扫描器和历史回放共同使用 ``HumanAssistedDecisionCore``。本模块是唯一可以
+把规范决策文档转换为复核提醒的位置；它保留 30m 战略环境、5m setup 与 1m 定位
+的区别，且永远不会创建具有下单能力的对象。
 """
 
 from __future__ import annotations
@@ -51,7 +49,6 @@ from chanlun.decision_support.trading_system.sector_strength import (
 )
 from chanlun.decision_support.trading_system.human_review_screening import (
     HUMAN_REVIEW_SCREEN_SCHEMA,
-    MONITOR_ONLY_BUY_REASON_CODE,
     MONITOR_ONLY_WARNING_CODE,
     HumanReviewAlert,
     HUMAN_REVIEW_ALERT_TYPES,
@@ -64,7 +61,9 @@ from chanlun.decision_support.trading_system.human_review_screening import (
 )
 from chanlun.decision_support.trading_system.selection import (
     HIGHER_TIMEFRAME_RISK_STATES,
+    evaluate_formal_selection_gate,
     higher_timeframe_risk_gate,
+    selection_research_snapshot_from_document,
 )
 from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingSupplyFacts,
@@ -475,18 +474,15 @@ def live_screening_semantic_snapshot_document(
     a weaker, second hash interpretation in the forward tool.
     """
 
-    # Hashing only reads the document.  A deep copy of a full-universe live
-    # snapshot can exceed 40 MiB and used to be performed on every readiness
-    # probe.  Copy only the two mapping levels that are actually normalized;
-    # all other nested values remain read-only inputs to ``sha256_json``.
+    # 哈希只读取文档。全市场实时快照深拷贝可能超过 40 MiB，过去每次就绪探测都会执行；
+    # 现在只复制实际需要规范化的两层映射，其余嵌套值作为 ``sha256_json`` 只读输入。
     stable = dict(payload)
     for field in (
         "generated_at",
         "scanned_at",
         "snapshot_content_sha256",
-        # Delivery eligibility is an operational wall-clock gate.  It decides
-        # whether an already authenticated market transition may be announced;
-        # it does not create a different market decision or coverage epoch.
+        # 通知资格属于运行墙钟闸门，只决定已认证市场转变能否发布，不会创建不同的
+        # 市场决策或覆盖周期。
         "notification_context",
     ):
         stable.pop(field, None)
@@ -999,10 +995,9 @@ def _sector_context_is_consistent(
         observed_at = datetime.fromisoformat(str(raw["observed_at"]))
     except (KeyError, TypeError, ValueError):
         return False
-    # QMT sector composites deliberately stop at 5m.  Their serialized 1m
-    # row is a neutral sentinel because 1m remains a stock-only locator.  It
-    # is not the result of ``classify_context`` and therefore has its own
-    # exact contract; 30m/5m sector rows use the ordinary context semantics.
+    # 行情终端 QMT 的板块合成数据有意止于 5m；序列化 1m 记录是中性哨兵，
+    # 定位。它并非 ``classify_context`` 的结果，故使用独立精确契约；30m/5m 板块记录
+    # 使用常规背景语义。
     context_consistent = _decision_context_is_consistent(raw)
     if frequency == "1m":
         context_consistent = bool(
@@ -1668,8 +1663,7 @@ def _sector_source_extension_is_consistent(
     ):
         return False
     if mode == QMT_SECTOR_SAME_BASE_SOURCE_MODE:
-        # On the strict path the selected evidence is the strict evidence; a
-        # second divergent copy would make page and replay provenance ambiguous.
+        # 严格链路中选中证据就是严格证据；第二份有分歧副本会让页面与回放来源含糊。
         return strict_warmup == selected_warmup
     if mode != QMT_SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_MODE:
         return False
@@ -2078,18 +2072,57 @@ def _risk_evidence_is_consistent(
     ) and calendar_side_is_consistent("symbol", expected_symbol, symbol_reasons)
 
 
+def _formal_selection_gate_is_consistent(
+    signal: Mapping[str, object],
+) -> tuple[bool, tuple[str, ...], bool]:
+    """从签名研究快照重新计算正式候选资格，拒绝自报布尔值。"""
+
+    selection_path = signal.get("selection_path")
+    raw_sources = signal.get("selection_sources")
+    raw_gate = signal.get("formal_selection")
+    raw_research = signal.get("selection_research")
+    if (
+        selection_path not in {"INDIVIDUAL_THREE_PROGRAM", "ETF_PROXY"}
+        or not isinstance(raw_sources, list)
+        or any(not isinstance(value, str) for value in raw_sources)
+        or not isinstance(raw_gate, Mapping)
+    ):
+        return False, (), False
+    try:
+        observed_at = datetime.fromisoformat(str(signal["observed_at"]))
+        research = (
+            None
+            if raw_research is None
+            else selection_research_snapshot_from_document(dict(raw_research))
+        )
+        expected = evaluate_formal_selection_gate(
+            research,
+            symbol=str(signal.get("code") or ""),
+            decision_time=observed_at,
+            selection_path=selection_path,
+            sector_triggered="QMT_SECTOR_TRIGGER" in raw_sources,
+        )
+    except (KeyError, TypeError, ValueError):
+        return False, (), False
+    consistent = bool(
+        dict(raw_gate) == expected.document()
+        and signal.get("sector_triggered") is expected.sector_triggered
+        and signal.get("monitor_only") is (not expected.accepted)
+    )
+    return consistent, expected.reason_codes, expected.accepted
+
+
 def _entry_gate_is_consistent(
     signal: Mapping[str, object],
     *,
     risk: Mapping[str, object],
     warmup: Mapping[str, object],
 ) -> bool:
-    """Bind the serialized final decision to its three entry gates.
+    """校验序列化最终决策是否严格绑定全部入场门槛。
 
-    ``technical_entry_allowed`` is captured immediately before the M/W/D and
-    pairwise-warmup gates in :class:`TradingEngine`.  Consequently the final
-    buy permission is exactly their conjunction.  Sell observations use the
-    separate exit policy and must never acquire an entry permission here.
+    ``technical_entry_allowed`` 记录正式研究、月周日风险以及成对预热门槛生效前的
+    纯技术结论。因此最终买入许可必须是全部门槛的合取；卖出信号使用独立离场策略，
+    不能在这里获得入场许可。
     """
 
     side = signal.get("side")
@@ -2105,15 +2138,22 @@ def _entry_gate_is_consistent(
         return False
     if side == "sell":
         return technical is False and entry_allowed is False
+    formal_consistent, _formal_reasons, formal_accepted = (
+        _formal_selection_gate_is_consistent(signal)
+    )
     expected_entry = bool(
         technical
         and warmup.get("converged") is True
         and risk.get("market_gate") == "GREEN"
         and risk.get("sector_gate") == "GREEN"
         and risk.get("symbol_gate") == "GREEN"
-        and signal.get("monitor_only") is not True
+        and formal_accepted
     )
-    return entry_allowed is expected_entry and exit_allowed is False
+    return bool(
+        formal_consistent
+        and entry_allowed is expected_entry
+        and exit_allowed is False
+    )
 
 
 def _conflict_reason_codes(raw: object) -> tuple[str, ...] | None:
@@ -2173,18 +2213,20 @@ def _buy_decision_evidence_is_consistent(
         or multiplier is None
     ):
         return False
-    structural_point = bool(
+    has_structural_lineage = bool(
         isinstance(setup.get("price_basis_revision"), str)
         and str(setup.get("price_basis_revision"))
     )
+    confirmed_structural_point = bool(
+        has_structural_lineage and setup.get("status") == "confirmed"
+    )
     confirmed_buy = bool(
-        structural_point
-        and setup.get("status") == "confirmed"
+        confirmed_structural_point
         and setup.get("side") == "buy"
         and setup.get("source_frequency") == "5m"
     )
     trigger_confirmed = bool(
-        structural_point
+        confirmed_structural_point
         and isinstance(trigger, Mapping)
         and trigger.get("status") == "confirmed"
         and trigger.get("side") == setup.get("side")
@@ -2209,12 +2251,7 @@ def _buy_decision_evidence_is_consistent(
     conflict = signal.get("conflict")
     if isinstance(conflict, Mapping) and conflict.get("hard_block") is True:
         entry_reasons.append("structure_conflict")
-    if structural_point and setup.get("point_type") == "3buy":
-        if (
-            policy.get("first_center_three_buy_only") is True
-            and setup.get("center_ordinal") != 1
-        ):
-            entry_reasons.append("three_buy_not_first_center")
+    if confirmed_structural_point and setup.get("point_type") == "3buy":
         try:
             clearance = Decimal(str(setup["anchor_price"])) - Decimal(
                 str(setup["center_zg"])
@@ -2238,11 +2275,13 @@ def _buy_decision_evidence_is_consistent(
     try:
         expected_multiplier = (
             Decimal(str(policy[multiplier_field]))
-            if structural_point and multiplier_field is not None
+            if confirmed_structural_point and multiplier_field is not None
             else Decimal("0")
         )
         expected_stop = (
-            Decimal(str(setup["invalidation_price"])) if structural_point else None
+            Decimal(str(setup["invalidation_price"]))
+            if confirmed_structural_point
+            else None
         )
         actual_stop = (
             None
@@ -2289,22 +2328,21 @@ def _buy_decision_evidence_is_consistent(
                 )
             )
         expected_multiplier *= 0
-    # ``resolve_conflict`` emits one explicit provenance reason when the setup
-    # is still a ProvisionalCandidate.  It has no point IDs to serialize, so
-    # the reason must be reconstructed from the setup status rather than from
-    # the otherwise empty conflict lists.
+    # 当 setup 仍是 ProvisionalCandidate 时，``resolve_conflict`` 会给出一条明确的
+    # 来源原因。候选点尚无可进入冲突账本的正式点身份，因此这里必须依据 setup
+    # 状态重建该原因，不能从空的冲突点列表反推。
     setup_conflict_reasons = (
         ("setup_not_confirmed",) if setup.get("status") == "provisional" else ()
     )
-    selection_reasons = (
-        (MONITOR_ONLY_BUY_REASON_CODE,) if signal.get("monitor_only") is True else ()
+    formal_consistent, formal_reasons, formal_accepted = (
+        _formal_selection_gate_is_consistent(signal)
     )
+    if not formal_consistent:
+        return False
+    selection_reasons = () if formal_accepted else formal_reasons
     if selection_reasons:
-        # HumanAssistedDecisionCore applies the sector-first scope to the
-        # entry decision before ``serialize_evaluated_signal`` appends setup
-        # conflict reasons.  Reconstruct the same order here; putting the
-        # monitor-only reason after ``setup_not_confirmed`` rejects otherwise
-        # canonical provisional watchlist rows.
+        # 决策核心先应用正式选股门，再由序列化过程追加 setup 冲突原因；这里必须
+        # 保持相同顺序，才能从归档文档独立重建规范原因序列。
         entry_reasons.extend(selection_reasons)
         expected_multiplier *= 0
     expected_entry_reasons = tuple(dict.fromkeys(entry_reasons))
@@ -2930,12 +2968,9 @@ def validate_live_review_snapshot(
         or decision_core.get("human_confirmation_required") is not True
         or decision_core.get("automated_order_authorized") is not False
         or decision_core.get("live_status") != "LIVE_DISABLED"
-        # The coverage epoch authenticates the declared market cutoff, but it
-        # cannot by itself prove that the cutoff is causal for this decision
-        # page.  A future cutoff can be re-identified with a fresh valid epoch
-        # and semantic hash.  Bind both clocks here so /readyz and the archive
-        # use one temporal boundary instead of relying on a later duplicate
-        # check in the daily tool.
+        # 覆盖周期认证声明的行情截止点，但不能独立证明该截止点对当前决策页面具有因果性。
+        # 未来截止点也能以新有效周期和语义哈希重新标识；因此在此绑定两个时钟，使
+        # /readyz 与归档共用一个时间边界，而非依赖日级工具稍后的重复校验。
         or market_data_as_of.tzinfo is None
         or market_data_as_of > review_at
         or market_data_as_of.astimezone(ZoneInfo("Asia/Shanghai")).date()
@@ -2966,7 +3001,7 @@ def validate_live_review_snapshot(
         strength_evidence=strength_evidence,
     )
     discovered_codes = manifest.get("discovered_codes")
-    if not isinstance(discovered_codes, list):  # coverage parser guards this
+    if not isinstance(discovered_codes, list):  # 由覆盖范围解析器保护
         raise ValueError("live screening eligible sector member coverage is invalid")
     required_sector_members = {
         symbol
@@ -2976,13 +3011,11 @@ def validate_live_review_snapshot(
     }
     missing_sector_members = required_sector_members.difference(discovered_codes)
     if missing_sector_members:
-        # ``universe_revision`` authenticates the service's declared universe,
-        # but an opaque hash cannot independently prove that the declaration
-        # contains every current member.  The already-validated horizontal
-        # strength batch carries the canonical QMT member lists, so bind the
-        # completed stock ledger to that evidence before any signal is admitted.
-        # Explicit watchlist/holding monitors may add codes; they may never make
-        # an eligible sector member optional.
+        # ``universe_revision`` 用于认证服务声明的标的范围。
+        # ``universe_revision`` 可认证服务声明的标的池，但不透明哈希无法独立证明声明
+        # 包含每个当前成员。已校验横向强度批次携带规范 QMT 成员列表，因此任何信号获准前
+        # 都要把已完成个股账本绑定到该证据。显式自选/持仓监听可增加代码，但绝不能让
+        # 合格板块成员变成可选项。
         raise ValueError("live screening eligible sector member coverage is incomplete")
 
     signals: list[Mapping[str, object]] = []
@@ -2994,10 +3027,8 @@ def validate_live_review_snapshot(
             observed_at = datetime.fromisoformat(str(raw["observed_at"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("live screening signal time is invalid") from exc
-        # A page-wide market cutoff is only an outer ceiling.  Every nested
-        # decision fact must also have existed by this signal's own lifecycle
-        # observation, otherwise an older signal could silently consume a
-        # later setup, locator, daily context, or M/W/D diagnostic.
+        # 页面统一行情截止点只是外层上限；每个嵌套决策事实还必须在该信号自身生命周期
+        # 观测时已经存在，否则旧信号可能静默使用更晚的设置、定位点、日级背景或月/周/日诊断。
         signal_evidence_cutoff = (
             observed_at
             if observed_at.tzinfo is not None and observed_at <= market_data_as_of
@@ -3207,20 +3238,15 @@ def validate_live_review_snapshot(
                 for value in selection_sources
             )
             or len(selection_sources) != len(set(selection_sources))
-            or raw.get("sector_triggered")
-            != ("QMT_SECTOR_TRIGGER" in selection_sources)
-            or raw.get("monitor_only") == ("QMT_SECTOR_TRIGGER" in selection_sources)
+            or not _formal_selection_gate_is_consistent(raw)[0]
             or not sector_document_consistent
         ):
             raise ValueError("live screening signal timeframe provenance is invalid")
         signals.append(raw)
     try:
-        # Archive readiness must cover the complete read-only conversion, not
-        # merely its outer snapshot checks.  Otherwise an illegal lifecycle,
-        # risk gate, warmup document or structure price can make /readyz say
-        # ready and fail only when the daily pipeline constructs its alerts.
-        # The constructor has no I/O or order authority; invoking it here keeps
-        # every consumer of this validator on the same semantic boundary.
+        # 归档就绪必须覆盖完整只读转换，而不只是外层快照检查；否则非法生命周期、风险闸门、
+        # 预热文档或结构价格会让 /readyz 报告就绪，却在日级链构造提醒时才失败。构造器没有
+        # 输入输出或下单权限，在此调用可让该校验器的所有消费者共用同一语义边界。
         for signal in signals:
             signal_sector = signal.get("sector")
             sector_id = (
@@ -3248,11 +3274,8 @@ def validate_live_review_snapshot(
             )
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("live screening signal review conversion is invalid") from exc
-    # Recompute prominent human-review fields only after the lower-level
-    # provenance and alert-conversion contracts have been checked.  Besides
-    # retaining their more precise diagnostics, this prevents an invalid
-    # lifecycle or frequency label from merely surfacing as a derived-policy
-    # mismatch.
+    # 只有低层来源与提醒转换契约通过后，才重算主要人工复核字段。这样既保留更精确诊断，
+    # 也避免非法生命周期或周期标签仅表现为派生策略不匹配。
     for signal in signals:
         risk = signal.get("higher_timeframe_risk")
         warmup = signal.get("warmup")
@@ -3267,9 +3290,8 @@ def validate_live_review_snapshot(
             )
         ):
             raise ValueError("live screening signal decision evidence is invalid")
-    # The portable decision identity is the final per-signal tamper-evidence
-    # gate.  It deliberately follows every more specific, independently
-    # recomputable domain check so callers keep actionable diagnostics.
+    # 可移植决策身份是逐信号最终防篡改闸门；它有意放在所有更具体、可独立重算的领域
+    # 检查之后，使调用方保留可执行诊断。
     for signal in signals:
         try:
             validate_signal_decision_document(signal)
@@ -3323,9 +3345,8 @@ def validate_live_review_snapshot(
 
 def _alert_type(signal: Mapping[str, object]) -> str:
     side = signal.get("side")
-    # The live path consumes the canonical recursive graph independently at
-    # d/30m/5m/1m.  Preserve the physical 5m side clue and let the review
-    # contract decide how it affects the held strategic cycle.
+    # 实时链在日/30m/5m/1m 各物理周期独立消费规范递归图；保留物理 5m 方向线索，
+    # 由复核契约决定其如何影响已持有的策略周期。
     if side == "sell" and signal.get("physical_timeframe_recursive") is True:
         return "POSSIBLE_SELL_REVIEW"
     if side == "sell" and signal.get("exit_action") == "reduce_tactical":
@@ -3552,9 +3573,8 @@ def live_signal_human_review_alert(
             warning_count=len(warnings),
             parameters=parameters,
         ),
-        # This is the finest available causal structure anchor, never a quote
-        # or an execution promise: prefer the 1m locator and fall back to the
-        # 5m setup while the locator is still forming.
+        # 这是当前最细的因果结构锚点，不是行情报价或成交承诺：优先使用 1m 定位点；
+        # 定位点仍在形成时退回 5m setup。
         reference_price=reference_price,
         structural_invalidation_price=(
             None if invalidation is None else Decimal(str(invalidation))
@@ -3565,9 +3585,7 @@ def live_signal_human_review_alert(
         warning_codes=warnings,
         source_fact_ids=facts,
         screening_parameter_set_id=parameters.parameter_set_id,
-        technical_approximation_parameter_set_id=(
-            parameters.technical_approximation_parameter_set_id
-        ),
+        signal_alignment_parameter_set_id=parameters.signal_alignment_parameter_set_id,
         sector_higher_timeframe_evidence=sector_source_evidence,
         market_symbol_higher_timeframe_evidence=(market_symbol_source_evidence),
         sector_ranking_evidence=sector_ranking_evidence,

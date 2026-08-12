@@ -46,9 +46,8 @@ def _notify_instrument_scope_changed(market: str) -> None:
         if callable(refresh):
             refresh()
     except Exception:
-        # Persistence already succeeded. Polling remains the correctness
-        # fallback, so a transient scheduler failure must not turn the user's
-        # successful edit into an HTTP 500 response.
+        # 持久化已经成功；轮询仍是保证正确性的回退机制，因此调度器瞬时失败
+        # 不能把用户已成功的编辑变成 HTTP 500 响应。
         current_app.logger.warning(
             "live monitor wake-up failed after watchlist edit",
             exc_info=True,

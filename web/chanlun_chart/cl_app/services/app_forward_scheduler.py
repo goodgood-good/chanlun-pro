@@ -393,10 +393,9 @@ class AppForwardSchedulerController:
         """Release only this process's execution-owner receipt."""
 
         with self._state_lock:
-            # ``scheduler.shutdown(wait=False)`` deliberately keeps web
-            # shutdown bounded.  If a child phase is still running, retain the
-            # Keep the owner marker until process exit so no second scheduler
-            # can overlap the active child.
+        # ``scheduler.shutdown(wait=False)`` 用于限制 Web 停机等待时间。
+        # 若子阶段仍在运行，则保留所有者标记直到进程退出，避免第二个调度器
+        # 与仍活跃的子任务重叠执行。
             if self._attempt_lock.locked():
                 self._registered = False
                 return
@@ -565,8 +564,8 @@ class AppForwardSchedulerController:
             else self._evaluation_readiness
         )
         if provider is None:
-            # Host-independent unit tests and explicitly disabled monitors do
-            # not have a shared readiness provider.  Production always does.
+            # 与主机无关的单元测试以及明确禁用的监控没有共享就绪状态提供方；
+            # 生产环境始终具备该提供方。
             return True, None
         try:
             readiness = dict(
@@ -700,9 +699,8 @@ class AppForwardSchedulerController:
                 with self._state_lock:
                     state = self._load_state()
                     existing = self._phase_record(state, phase, session)
-                    # The cross-process lock already excludes a live attempt.
-                    # A persisted RUNNING record can only be a crash remnant
-                    # and must be retried rather than wedging the day forever.
+            # 跨进程锁已经排除了仍存活的执行。持久化的 RUNNING 记录只能是
+            # 崩溃残留，必须重试，不能让当天任务永久卡死。
                     if existing is not None and existing.get("status") in (
                         _TERMINAL_PHASE_STATES
                     ):

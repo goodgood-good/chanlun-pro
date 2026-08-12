@@ -31,7 +31,7 @@ from chanlun.tools.log_util import LogUtil
 
 warnings.filterwarnings("ignore")
 
-# https://docs.sqlalchemy.org/en/20/core/types.html
+# SQLAlchemy 类型参考：https://docs.sqlalchemy.org/en/20/core/types.html
 
 from chanlun.db_models.base import Base
 from chanlun.db_models.cache import TableByCache
@@ -162,7 +162,7 @@ class DB(object):
         self._last_dt_cache: dict = {}
         self._last_dt_cache_generation: dict = {}
         self._last_dt_cache_lock = threading.Lock()
-        # R6-#2: 保护 __cache_tables 的 check-then-act + 动态建 ORM 表类(同 get_exchange 审查 B-1)
+        # 保护 __cache_tables 的先检查后执行流程以及动态创建 ORM 表类。
         self._cache_tables_lock = threading.Lock()
 
     def _get_last_dt_cache_snapshot(self, market: str, code: str, frequency: str):
@@ -248,7 +248,7 @@ class DB(object):
         if table_name in self.__cache_tables:
             return self.__cache_tables[table_name]
 
-        # R6-#2: 无锁 check-then-act 下多线程首访同一冷表会各自执行下方 class TableByKlines
+        # 无锁的先检查后执行会让多个线程首次访问同一冷表时各自创建下方 TableByKlines 类，
         # (向共享 Base.metadata 注册同名 Table), 第2+个线程撞 InvalidRequestError。进程锁
         # + double-check 串行化建表(镜像 exchange.get_exchange 审查 B-1)。
         with self._cache_tables_lock:
@@ -710,7 +710,7 @@ class DB(object):
                 ).filter(TableByZixuan.zx_group == zx_group).filter(
                     TableByZixuan.stock_code == stock_code
                 ).update(
-                    {"position": (max_position or 0) + 1},  # R15-C3: 空组 MAX=None 守零
+                    {"position": (max_position or 0) + 1},  # 空组最大值为 None 时按零处理
                     synchronize_session=False,
                 )
                 session.commit()
@@ -957,8 +957,7 @@ class DB(object):
         if not values:
             return True
 
-        # Serialize every value before opening the transaction. A malformed value
-        # must not leave an earlier key committed while a later key fails.
+        # 开启事务前先序列化所有值；畸形值不能造成前面的键已提交、后面的键却失败。
         payloads = [
             {"k": key, "v": json.dumps(val), "expire": expire}
             for key, val in values.items()
@@ -987,8 +986,8 @@ class DB(object):
         return True
 
     def cache_set(self, key: str, val: dict, expire: int = 0):
-        # Keep single-key writes on the same dialect-specific upsert path as
-        # multi-key settings writes so their transaction behavior cannot drift.
+        # 单键写入与多键设置写入共用同一数据库方言专用的插入或更新路径，
+        # 防止两者事务行为漂移。
         return self.cache_set_many({key: val}, expire=expire)
 
     def cache_del(self, key: str):

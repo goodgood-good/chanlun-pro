@@ -10,15 +10,10 @@ from chanlun.core.strict_structure.models import (
     StrictLevelResult,
     StrictStructureResult,
     TrendAssemblyResult,
-    TrendKind,
-    TrendState,
     center_seed_size,
 )
-from chanlun.core.strict_structure.same_level_decomposition import (
-    combine_same_level_trends,
-)
 from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
-from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
+from chanlun.core.strict_structure.unit_adapter import build_recursive_unit_stream
 
 
 def calculate_level_with_divergence_boundaries(
@@ -296,32 +291,16 @@ class StrictRecursiveEngine:
                     decomposition_boundaries=assembly.decomposition_boundaries,
                 )
             )
-            locked_trends = tuple(
-                trend
-                for trend in assembly.current_trends
-                if trend.state is TrendState.LOCKED
-            )
-            next_units = tuple(trend_type_to_unit(trend) for trend in locked_trends)
-            # 盘整走势类型没有方向。上一层把它按净位移记成 up/down，只是为了让
-            # 单元有一个可比较的端点方向，不代表它在交替判定中算一条有向腿。
-            next_oscillatory_ids = frozenset(
-                unit.unit_id
-                for unit, trend in zip(next_units, locked_trends)
-                if trend.kind is TrendKind.CONSOLIDATION
-            )
-            # 同级别结合律先于高一级中枢计算：直接相邻的同向趋势
-            # 合成一个可追溯复合单元，盘整则作为无方向连接件保留。这样
-            # 「有了结合律，方向不是最重要的」不会被误读为取消方向约束。
-            decomposition = combine_same_level_trends(
-                next_units,
-                next_oscillatory_ids,
+            # 正式递归仍只消费锁定走势；唯一当前的完成/形成中走势作为未锁定
+            # 观察尾部随账本上递归，使高级别小转大二类点能在回抽锁定前进入
+            # 观察列表。该尾部不会进入正式中枢、背驰或已确认点。
+            next_units, next_oscillatory_ids = build_recursive_unit_stream(
+                assembly.current_trends,
                 frozenset(
                     boundary.left_trend_id
                     for boundary in assembly.decomposition_boundaries
                 ),
             )
-            next_units = decomposition.units
-            next_oscillatory_ids = decomposition.oscillatory_ids
             if len(next_units) < 3:
                 break
             try:

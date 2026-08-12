@@ -33,23 +33,23 @@ from chanlun.cl_utils.strict_chart import (
 
 
 __all__ = [
-    # chart_config
+# 图表配置。
     "query_cl_chart_config",
     "set_cl_chart_config",
     "del_cl_chart_config",
-    # tv_chart
+# TradingView 图表。
     "cl_data_to_tv_chart",
-    # strict chart runtime
+# 严格图表运行时。
     "StrictChartRuntimeResult",
     "build_strict_chart_cd",
-    # indicators
+# 指标。
     "bi_td",
     "up_cross",
     "down_cross",
     "last_done_bi",
     "bi_qk_num",
     "klines_to_heikin_ashi_klines",
-    # strict chart evidence
+# 严格图表证据。
     "active_center_projection_to_chart_dict",
     "aware_datetime_to_epoch_seconds",
     "build_strict_structure_snapshot",

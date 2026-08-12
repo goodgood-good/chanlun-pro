@@ -201,7 +201,7 @@ class ExchangeDB(Exchange):
             self.tz, ambiguous=True, nonexistent="shift_forward"
         )  # nonexistent: 货币7x24在DST服务器上春令时不存在墙钟(如US/Eastern 02:00-03:00)前移防崩
         if frequency in {"y", "q", "m", "w", "d"}:
-            # R1-F3-1: 仅日级及以上做 00:00→收盘时刻规整(镜像 exchange_tdx_futures.py:282 成例)。
+            # 仅日级及以上做 00:00 到收盘时刻的规整，沿用期货适配器的相同处理。
             # 分钟级放行:期货夜盘跨零点品种(AU/AG/SC 至 02:30 等)的 00:00 bar 是真实数据,
             # 无差别改写会与 09:00 日盘 bar 重复时间戳/夜盘 OHLC 错插早盘时间轴。
             kline_pd["date"] = kline_pd["date"].apply(self.__convert_date)

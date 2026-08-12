@@ -189,7 +189,7 @@ class ExchangeTDXHK(Exchange):
                 klines_df: pd.DataFrame = self.fdb.get_tdx_klines(
                     Market.HK.value, code, frequency
                 )
-                # R1-F3-2(R4-C 六兄弟补齐): 恰1根缓存被 get_tdx_klines 丢末根→空df(非None),
+                # 恰有一根缓存被 get_tdx_klines 丢弃末根时会得到非 None 的空数据帧，
                 # 只判 is None 会进增量分支 iloc[-1] IndexError→RetryError 最长15天不自愈。
                 if klines_df is None or len(klines_df) == 0:
                     klines_df = pd.concat(
@@ -209,7 +209,7 @@ class ExchangeTDXHK(Exchange):
                         sort=False,
                     )
                     if len(klines_df) == 0:
-                        # R4-C: 全拉为空(无效/退市代码)→干净返回空 df,而非 KeyError 'datetime'
+                        # 全量拉取仍为空时干净返回空数据帧，而不是触发 datetime 的 KeyError。
                         return pd.DataFrame([])
                     klines_df.loc[:, "date"] = pd.to_datetime(klines_df["datetime"])
                     klines_df.sort_values("date", inplace=True)

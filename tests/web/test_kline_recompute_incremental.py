@@ -33,9 +33,12 @@ class _FakeCL:
 
 @pytest.fixture
 def mock_cl(monkeypatch):
+    created = []
+
     def build(**kwargs):
         cd = _FakeCL()
         cd.process_klines(kwargs["frame"])
+        created.append(cd)
         return StrictChartRuntimeResult.success(cd)
 
     monkeypatch.setattr(chart_compute, "build_strict_chart_cd", build)
@@ -48,7 +51,7 @@ def mock_cl(monkeypatch):
         },
     )
     kline_recompute.reset_cl_pool()
-    yield
+    yield created
     kline_recompute.reset_cl_pool()
 
 
@@ -96,6 +99,8 @@ def test_no_reuse_without_cache_key(mock_cl):
     first = recompute_chart_data_from_klines("a", "SYN", "1m", {}, frame)
     second = recompute_chart_data_from_klines("a", "SYN", "1m", {}, frame)
 
+    assert len(mock_cl) == 2
+    assert mock_cl[0] is not mock_cl[1]
     assert first["id"] != second["id"]
 
 

@@ -27,7 +27,7 @@
 import hashlib
 import json
 import os
-import pathlib
+from pathlib import Path
 import re
 import threading
 import time
@@ -327,7 +327,7 @@ def symbols_list():
 # ---------------------------------------------------------------------------
 
 # 预热使用的常用周期（TV interval 表示法），通过 resolution_maps 转成项目内部 freq：
-# "1D" -> d, "30" -> 30m, "5" -> 5m, "1" -> 1m
+# 映射为："1D" -> d，"30" -> 30m，"5" -> 5m，"1" -> 1m。
 # 默认只预热 30m/5m/1m(去掉日线): 减少每只标的的取数+计算量,加速全量预热;日线首次看时
 # 按需算(~1.3s,之后缓存秒开)。env PREWARM_INTERVALS 逗号分隔可调,例如:
 #   "5,1"      仅 1m+5m(更快,~再减一档)
@@ -379,7 +379,7 @@ PREWARM_CODE_PARALLELISM_BY_MARKET = {
     "a": 1,            # xtquant native，绝对串行
     "futures": 1,      # tdx native，保险串行
     "ny_futures": 1,   # 同上
-    "us": 3,           # 长桥 HTTP，可并行 3 个标的（M2 后允许更激进）
+    "us": 3,           # 长桥 HTTP，可并行处理 3 个标的
     "hk": 2,           # futu HTTP，可并行 2 个标的
     "fx": 1,
     "currency": 1,
@@ -462,7 +462,7 @@ class PrewarmTask:
         # (current_code, current_name) 一对原子写：避免多 worker 并发裸写两个独立属性
         # 时被读端观察到 (新 code, 旧 name) 撕裂组合。
         self.current: tuple = ("", "")
-        self.status: str = "running"  # running | finished | cancelled | error
+        self.status: str = "running"  # 状态取值：running、finished、cancelled、error。
         self.started_at: float = time.time()
         self.finished_at: Optional[float] = None
         self.cancel_event: threading.Event = threading.Event()
@@ -624,7 +624,7 @@ class PrewarmManager:
                 f"{task.done}/{task.total}"
             )
 
-    def _persist_dir(self) -> "pathlib.Path":
+    def _persist_dir(self) -> Path:
         """惰性获取持久化目录；首次调用时创建。失败返回 None 由调用方降级。"""
         from chanlun.config import get_data_path
         try:
@@ -637,7 +637,7 @@ class PrewarmManager:
 
     # ---------------- 已完成 code 列表（续跑支持） ----------------
 
-    def _done_file_path(self, market: str) -> Optional["pathlib.Path"]:
+    def _done_file_path(self, market: str) -> Optional[Path]:
         d = self._persist_dir()
         if d is None:
             return None
@@ -1192,10 +1192,10 @@ class PrewarmManager:
         - 4 个周期之间没有数据依赖（higher_macd 是从当前周期 closes 算的，不依赖其他周期）；
         - cache_lock 是写缓存的细粒度锁，多个 cache_key 同时写不会冲突。
 
-        注意（M5 → R8-C2 修正）：compute_and_cache_chart_data 现以非阻塞方式获取
+        注意：compute_and_cache_chart_data 现以非阻塞方式获取
         chart_calc_locks（与 tv_history/_do_revalidate 同锁域）。用户正持锁计算同一
         cache_key 时预热让位跳过（返回 True，用户结果会入缓存），既去重复计算、又消除
-        预热读共享 CL 与用户 path-2 增量改写的并发撕裂（原 M5 "cache_lock 保正确性" 仅护
+        预热读取共享 CL 与用户增量路径改写的并发撕裂（原 cache_lock 仅保护
         dict 写入，漏了共享 CL 的并发读/改）。
         单标的内的周期并行度由 _resolve_freq_parallelism(market) 决定：native
         市场（a/futures/ny_futures）强制串行 1。
@@ -1333,7 +1333,7 @@ def symbols_prewarm():
     if result["ok"]:
         status_code = 200
     elif result.get("code") == "rate_limited":
-        status_code = 429  # Too Many Requests
+        status_code = 429  # 请求过多。
     else:
         status_code = 409
     return jsonify(result), status_code

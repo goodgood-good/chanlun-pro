@@ -12,16 +12,15 @@ from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.forward_paper import (
     FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA,
     FORWARD_PAPER_CONTRACT_SCHEMA,
-    FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID,
-    FROZEN_RESEARCH_PARAMETER_SET_ID,
-    FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID,
-    FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID,
+    CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID,
+    CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID,
+    CURRENT_STRATEGY_PARAMETER_SET_ID,
     _human_paper_entry_selection_gate_proven,
     append_forward_paper_event,
     audit_forward_implementation_continuity,
     audit_forward_paper_session_delivery as _audit_forward_paper_session_delivery,
     load_forward_paper_ledger,
-    load_frozen_forward_contract,
+    load_forward_contract,
 )
 from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
@@ -260,24 +259,20 @@ def audit_forward_paper_session_delivery(*args, **kwargs):
 
 
 def test_current_forward_contract_has_no_order_authority() -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
 
-    assert contract.strategy_parameter_set_id == FROZEN_RESEARCH_PARAMETER_SET_ID
+    assert contract.strategy_parameter_set_id == CURRENT_STRATEGY_PARAMETER_SET_ID
     assert contract.strategic_frequency == "30m"
     assert contract.tactical_frequency == "5m"
     assert contract.locator_frequency == "1m"
     assert contract.technical_mode == "HUMAN_REVIEW_SCREENING"
     assert (
-        contract.technical_approximation_parameter_set_id
-        == FROZEN_TECHNICAL_APPROXIMATION_PARAMETER_SET_ID
-    )
-    assert (
-        contract.technical_alignment_parameter_set_id
-        == FROZEN_TECHNICAL_ALIGNMENT_PARAMETER_SET_ID
+        contract.signal_alignment_parameter_set_id
+        == CURRENT_SIGNAL_ALIGNMENT_PARAMETER_SET_ID
     )
     assert (
         contract.human_review_screening_parameter_set_id
-        == FROZEN_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
+        == CURRENT_HUMAN_REVIEW_SCREENING_PARAMETER_SET_ID
     )
     assert contract.operational_status == "REVIEW_REQUIRED"
     assert contract.highest_status == "REVIEW_REQUIRED"
@@ -290,7 +285,7 @@ def test_current_forward_contract_has_no_order_authority() -> None:
 def test_human_review_forward_ledger_preserves_review_required_status(
     tmp_path: Path,
 ) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "human-review.json"
 
     ledger, event, reused = append_forward_paper_event(
@@ -310,7 +305,7 @@ def test_human_review_forward_ledger_preserves_review_required_status(
 
 
 def test_forward_ledger_is_hash_chained_and_duplicate_safe(tmp_path: Path) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     ledger_path = tmp_path / "paper.json"
     recorded = datetime(2026, 7, 28, 9, 15, tzinfo=CN)
 
@@ -354,7 +349,7 @@ def test_forward_ledger_is_hash_chained_and_duplicate_safe(tmp_path: Path) -> No
 def test_forward_ledger_appends_recovery_after_a_later_phase_block(
     tmp_path: Path,
 ) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "recovery.json"
     recorded = datetime(2026, 7, 28, 15, 20, tzinfo=CN)
     ready_evidence = {"gate": "READY"}
@@ -397,7 +392,7 @@ def test_forward_ledger_appends_recovery_after_a_later_phase_block(
 def test_forward_append_rejects_invalid_session_and_time_without_corruption(
     tmp_path: Path,
 ) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "chronology.json"
     session = date(2026, 7, 28)
     recorded = datetime(2026, 7, 28, 10, 0, tzinfo=CN)
@@ -446,7 +441,7 @@ def test_forward_append_rejects_invalid_session_and_time_without_corruption(
 
 
 def test_forward_ledger_tampering_is_rejected(tmp_path: Path) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "paper.json"
     append_forward_paper_event(
         path,
@@ -483,7 +478,7 @@ def _rehash_forward_ledger(payload: dict[str, object]) -> None:
 def test_rehashed_ledger_still_rejects_evidence_and_safety_drift(
     tmp_path: Path,
 ) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     original = tmp_path / "original.json"
     append_forward_paper_event(
         original,
@@ -516,7 +511,7 @@ def test_rehashed_ledger_still_rejects_evidence_and_safety_drift(
 def test_forward_ledger_rejects_malformed_implementation_provenance(
     tmp_path: Path,
 ) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "malformed-provenance.json"
     with pytest.raises(
         ValueError,
@@ -535,7 +530,7 @@ def test_forward_ledger_rejects_malformed_implementation_provenance(
 
 
 def test_forward_ledger_serializes_concurrent_writers(tmp_path: Path) -> None:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "paper.json"
     recorded = datetime(2026, 7, 28, 9, 15, tzinfo=CN)
 
@@ -563,7 +558,7 @@ def _forward_session_events(
     *statuses: tuple,
     implementation_provenance: bool = True,
 ) -> tuple[dict[str, object], ...]:
-    contract = load_frozen_forward_contract(PARAMETER_SOURCE)
+    contract = load_forward_contract(PARAMETER_SOURCE)
     path = tmp_path / "delivery.json"
     ledger: dict[str, object] | None = None
     for item in statuses:

@@ -48,3 +48,59 @@ def test_point_is_hidden_until_its_available_at() -> None:
 
     assert context.dominant_point_id is None
     assert context.reason_codes == ("no_active_directional_point",)
+
+
+def test_expired_point_cannot_control_current_context() -> None:
+    expired = confirmed_point("1buy", frequency="30m", minutes_after=-(31 * 24 * 60))
+
+    context = classify_context(
+        frequency="30m",
+        current_direction="neutral",
+        points=(expired,),
+        as_of=AS_OF,
+    )
+
+    assert context.disposition == "neutral"
+    assert context.dominant_point_id is None
+    assert context.reason_codes == ("directional_points_expired",)
+
+
+def test_old_anchor_recently_confirmed_cannot_reenter_current_context() -> None:
+    delayed = confirmed_point(
+        "1buy",
+        frequency="30m",
+        minutes_after=-(31 * 24 * 60),
+        available_minutes_after=31 * 24 * 60,
+    )
+
+    context = classify_context(
+        frequency="30m",
+        current_direction="up",
+        points=(delayed,),
+        as_of=AS_OF,
+    )
+
+    assert delayed.available_at <= AS_OF
+    assert context.disposition == "neutral"
+    assert context.dominant_point_id is None
+    assert context.reason_codes == ("directional_points_expired",)
+
+
+def test_latest_causal_point_wins_before_recursive_level() -> None:
+    old_higher_sell = confirmed_point(
+        "1sell",
+        frequency="30m",
+        level=2,
+        minutes_after=-60,
+    )
+    latest_buy = confirmed_point("1buy", frequency="30m", level=0)
+
+    context = classify_context(
+        frequency="30m",
+        current_direction="neutral",
+        points=(old_higher_sell, latest_buy),
+        as_of=AS_OF,
+    )
+
+    assert context.disposition == "supportive"
+    assert context.dominant_point_id == latest_buy.point_id

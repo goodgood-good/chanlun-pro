@@ -40,24 +40,21 @@ from chanlun.decision_support.trading_system.models import EntryExecutionBoundar
 from chanlun.decision_support.trading_system.human_review_screening import (
     HumanReviewAlert,
     HumanReviewFeedback,
+    MONITOR_ONLY_WARNING_CODE,
     SectorRankingReviewEvidence,
     human_review_screening_parameters,
 )
 from chanlun.decision_support.trading_system.qmt_sector_ledger import (
     catalog_capture_entry,
 )
-from chanlun.decision_support.trading_system.technical_approximation import (
-    technical_approximation_parameters,
-)
 
 
 TZ = ZoneInfo("Asia/Shanghai")
 REVIEWED_AT = datetime(2026, 7, 28, 10, 0, tzinfo=TZ)
 PARAMETER_SNAPSHOT = (
-    Path(__file__).resolve().parents[2]
-    / "audit"
-    / "chanlun_trading_system_backtest"
-    / "recent_year_current_sector_no3p"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "forward_paper"
     / "parameter_snapshot_human_review.json"
 )
 ACCOUNTING_PARAMETERS = load_human_paper_accounting_parameters(PARAMETER_SNAPSHOT)
@@ -91,8 +88,8 @@ def _alert(
         screening_parameter_set_id=(
             human_review_screening_parameters().parameter_set_id
         ),
-        technical_approximation_parameter_set_id=(
-            technical_approximation_parameters().parameter_set_id
+        signal_alignment_parameter_set_id=(
+            human_review_screening_parameters().signal_alignment_parameter_set_id
         ),
         # Ledger-focused fixtures use a deliberately wide attested boundary so
         # cash, slot, T+1 and restart tests remain independent of the live
@@ -418,7 +415,7 @@ def test_monitor_only_buy_cannot_create_a_pending_virtual_entry() -> None:
 
     alert = replace(
         _alert(),
-        warning_codes=("MONITOR_ONLY_NOT_CURRENT_SECTOR_TRIGGER",),
+        warning_codes=(MONITOR_ONLY_WARNING_CODE,),
     )
 
     intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
@@ -436,7 +433,7 @@ def test_monitor_only_sell_keeps_virtual_position_exit_available() -> None:
 
     alert = replace(
         _alert(alert_type="POSSIBLE_30M_EXIT"),
-        warning_codes=("MONITOR_ONLY_NOT_CURRENT_SECTOR_TRIGGER",),
+        warning_codes=(MONITOR_ONLY_WARNING_CODE,),
         entry_confirmation_bar_closed_at=None,
         entry_price_cap=None,
         entry_valid_until=None,

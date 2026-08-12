@@ -78,9 +78,8 @@ def build_strict_chart_cd(
             exc=exc,
         )
     try:
-        # The production chart is part of the strict strategy decision surface,
-        # so it consumes the same canonical profile as screening, replay and
-        # notifications. A visible center and point therefore share one chain.
+# 生产图表属于严格策略决策界面，因此与选股、回放和通知使用同一规范配置。
+# 可见中枢和买卖点由此共用同一条结构链。
         config = strict_cl_config(
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,

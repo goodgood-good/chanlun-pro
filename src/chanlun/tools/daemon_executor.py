@@ -1,4 +1,4 @@
-"""A small fixed-size executor whose workers do not block interpreter exit."""
+"""工作线程不阻止解释器退出的小型定长执行器。"""
 
 import queue
 import threading
@@ -6,7 +6,7 @@ from concurrent.futures import Executor, Future
 
 
 class DaemonExecutor(Executor):
-    """Executor-compatible daemon worker pool with explicit shutdown."""
+    """支持显式关闭的守护工作线程池。"""
 
     def __init__(self, max_workers: int, thread_name_prefix: str, max_pending=None):
         workers = max(1, int(max_workers))

@@ -752,8 +752,7 @@ class _PortfolioState:
         position = self.positions_by_code.get(bar.code)
         if (
             position is None
-            # A close-timestamped entry cannot be stopped by a low that may
-            # have occurred earlier in that same minute.
+        # 以收盘时间记入的开仓，不能被同一分钟内可能更早出现的最低价触发止损。
             or position.opened_at >= bar.closed_at
             or bar.raw_low > position.structural_stop
             or self._has_pending(bar.code, "sell")

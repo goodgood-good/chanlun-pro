@@ -172,9 +172,8 @@ class ZiXuan(object):
         for stock in stocks:
             stock_market = stock.get("market")
             if stock_market is not None and stock_market != self.market_type:
-                # ``replace_zx_stocks`` remains a scoped write used by the
-                # market-specific selector/import jobs.  Other-market members
-                # of the same global group are preserved by the DB operation.
+        # ``replace_zx_stocks`` 仍是供特定市场选股或导入任务使用的有范围写入；
+        # 数据库操作会保留同一全局分组中其他市场的成员。
                 continue
             code = stock["code"]
             name = stock.get("name")

@@ -184,7 +184,7 @@ class ExchangeAlpaca(Exchange):
                 start_date = _to_datetime(start_date)
 
             # 免费 / paper 账户必须指定 feed=IEX，否则 alpaca 默认走 SIP 报：
-            # "subscription does not permit querying recent SIP data"。
+            # 即“当前订阅不允许查询近期 SIP 数据”。
             # 不传 limit：StockBarsRequest.limit 是整个调用总条数上限而非每页大小，
             # 传入后会截断分页，导致长区间 bar 不完整。省略则自动分页拉全区间。
             req_kwargs = dict(

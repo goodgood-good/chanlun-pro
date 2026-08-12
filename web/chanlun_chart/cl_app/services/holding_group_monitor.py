@@ -858,11 +858,9 @@ def _default_market_open(exchange: object, market: str, _now: datetime) -> bool:
     if value is False:
         return False
 
-    # uSMART reports several US pre/post-market states as open, while its K-line
-    # endpoint currently supplies the regular-session series used by this
-    # Chanlun monitor.  Scanning at 06:00 New York with yesterday's 16:00 bar
-    # would falsely look live.  Bind the auxiliary structure lane to RTH; the
-    # adapter state still closes holidays and exceptional sessions when known.
+    # 盈立会把若干美股盘前盘后状态报告为开市，但其 K 线接口当前提供本监听使用的常规
+    # 交易时段序列。若纽约 06:00 用昨日 16:00 K 线扫描，会被误认为实时。辅助结构通道
+    # 因此绑定常规交易时段；已知假日和特殊交易日仍由适配器状态关闭。
     if market == "us":
         local = _now.astimezone(ZoneInfo("America/New_York"))
         minute = local.hour * 60 + local.minute
@@ -910,9 +908,8 @@ class HoldingGroupMonitorService:
         self._states: dict[tuple[str, str], object] = {}
         self._exchanges: dict[str, object] = {}
         self._dedupers: dict[str, object] = {}
-        # Scanning can spend seconds warming multiple markets.  Keep it apart
-        # from the short metadata lock so page/readiness requests never wait
-        # for market I/O to finish.
+        # 多市场预热扫描可能耗时数秒，应与短时元数据锁分离，使页面和就绪请求无需等待
+        # 市场输入输出完成。
         self._run_lock = threading.Lock()
         self._lock = threading.RLock()
         self._job_registered = False
@@ -1336,10 +1333,8 @@ class HoldingGroupMonitorService:
             if warmup_incomplete.get(code, 0) >= 3
         }
         failed_codes = refresh_failed_codes | stalled_warmup_codes
-        # Never publish a clue computed from stale state or an incomplete
-        # multi-timeframe warmup.  The collector may still return the last
-        # cached event after a refresh failure, so this must be an explicit
-        # fail-closed gate rather than an assumption about collector behavior.
+        # 绝不发布由过期状态或不完整多周期预热计算的线索。刷新失败后收集器仍可能返回
+        # 最近缓存事件，因此这里必须有显式关闭失败闸门，不能假设收集器行为。
         events = [
             event
             for event in events
@@ -1348,9 +1343,8 @@ class HoldingGroupMonitorService:
         ]
         current_directions: dict[str, str] = {}
         for code, state in states.items():
-            # A partial warmup is not authoritative.  Persisting its high-level
-            # direction would make the first fully valid down-transition look
-            # old and suppress the corresponding holding exit notification.
+            # 部分预热不具权威性；若持久化其高级别方向，会让首个完全有效的向下转变看似旧状态，
+            # 从而抑制对应持仓退出通知。
             if code in failed_codes or code in warming_codes:
                 continue
             try:
@@ -1359,11 +1353,9 @@ class HoldingGroupMonitorService:
                 direction = "neutral"
             current_directions[code] = direction
 
-        # The strict collector emits a big-down exit on every completed
-        # 30m bar while the direction remains down.  A holding alert must model
-        # the state transition, not repeatedly announce the same state.  The
-        # previous direction is durable, so an app restart does not re-alert an
-        # unchanged down leg.
+        # 严格收集器在方向持续向下时会对每根已完成 30m K 线产生大级别向下退出。持仓提醒
+        # 必须表达状态转变，而非重复播报同一状态；上一方向会持久化，应用重启不会重复提醒
+        # 未变化的下行段。
         events = [
             event
             for event in events
@@ -1381,15 +1373,12 @@ class HoldingGroupMonitorService:
         failed_delivery_codes: set[str] = set()
         failed_transition_codes: set[str] = set()
 
-        # Retry the durable outbox before considering newly observed events.
-        # ``StrictPhysicalMonitorState`` emits a structure point only once, so an
-        # HTTP failure cannot be recovered by hoping the collector repeats it.
+        # 处理新观测事件前先重试持久化发件箱。``StrictPhysicalMonitorState`` 对结构点只发出
+        # 一次，HTTP 失败不能寄希望于收集器重复发出。
         pending = self._runtime_ledger.pending_notification(market)
         if pending is not None and self._pending_notification_expired(pending):
-            # A trading clue that could not be delivered promptly is no longer
-            # actionable.  Mark its occurrence consumed so a repeating state
-            # event (for example a still-down 30m direction) cannot resurrect
-            # the same stale alert later in this cycle.
+            # 未能及时投递的交易线索已不可操作，应把该次出现标为已消费，避免重复状态事件
+            # （如仍向下的 30m 方向）在本周期稍后复活同一过期提醒。
             deduper.mark_identities(pending["identities"])
             self._runtime_ledger.record_expired(int(pending["event_count"]))
             self._runtime_ledger.clear_pending_notification(market)
@@ -1444,8 +1433,7 @@ class HoldingGroupMonitorService:
                 failed_transition_codes.update(payload["transition_codes"])
                 self._runtime_ledger.set_pending_notification(market, payload)
 
-        # Health remains visible in readiness/page state, but the user-facing
-        # DingTalk channel is reserved exclusively for actual structure events.
+        # 健康状态仍在就绪和页面状态中可见，但面向用户的钉钉通道只用于真实结构事件。
         health_alert_count = 0
         issue_counts = {
             code: (
@@ -1621,9 +1609,8 @@ class HoldingGroupMonitorService:
                 "status": overall_status,
                 "reason_code": overall_reason,
                 "declared_count": len(positions),
-                # ``monitored_count`` now means actively scanning, not merely
-                # declared-and-not-failed.  Closed markets remain covered and
-                # are reported separately.
+                # ``monitored_count`` 现在表示正在主动扫描，而非仅已声明且未失败；闭市市场
+                # 仍纳入覆盖并单独报告。
                 "monitored_count": active_count,
                 "covered_count": covered_count,
                 "active_count": active_count,

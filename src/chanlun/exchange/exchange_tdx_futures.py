@@ -253,7 +253,7 @@ class ExchangeTDXFutures(Exchange):
                         )
                         if len(_ks) == 0:
                             break
-                        # R1-F3-3: 守卫必须先于取列(空页 0 列 df 取 "datetime" 即 KeyError)
+                        # 守卫必须先于取列（对零列空页读取 datetime 会触发 KeyError）。
                         _ks["fix_datetime"] = _ks["datetime"].apply(
                             lambda _dt: self.fix_yp_date(code, _dt)
                         )
@@ -351,13 +351,6 @@ class ExchangeTDXFutures(Exchange):
                 if _market is None:
                     continue
                 _quote = client.get_instrument_quote(_market, _tdx_code)
-                # [OrderedDict([('market', 1), ('code', 'FG2305'), ('pre_close', 1546.0), ('open', 1548.0),
-                # ('high', 1558.0), ('low', 1536.0), ('price', 1543.0), ('kaicang', 341886), ('zongliang', 367292),
-                # ('xianliang', 1), ('neipan', 192905), ('waipan', 174387), ('chicang', 993096), ('bid1', 1543.0),
-                # ('bid2', 0.0), ('bid3', 0.0), ('bid4', 0.0), ('bid5', 0.0), ('bid_vol1', 903), ('bid_vol2', 0),
-                # ('bid_vol3', 0), ('bid_vol4', 0), ('bid_vol5', 0), ('ask1', 1544.0), ('ask2', 0.0), ('ask3', 0.0),
-                # ('ask4', 0.0), ('ask5', 0.0), ('ask_vol1', 512), ('ask_vol2', 0), ('ask_vol3', 0), ('ask_vol4', 0),
-                # ('ask_vol5', 0)])]
                 if len(_quote) > 0:
                     _quote = _quote[0]
                     ticks[_code] = Tick(
@@ -403,10 +396,6 @@ class ExchangeTDXFutures(Exchange):
                     if len(_qs) < 80:
                         break
                 for _quote in _quotes:
-                    # OrderedDict([('market', 28), ('code', 'MA2509'),
-                    # ('BiShu', 10569), ('ZuoJie', 2262.0), ('JinKai', 2260.0), ('ZuiGao', 2266.0), ('ZuiDi', 2242.0), ('MaiChu', 2258.0), ('KaiCang', 262905),
-                    # ('ZongLiang', 254179), ('XianLiang', 2), ('ZongJinE', 5730089472.0), ('NeiPan', 128701), ('WaiPan', 125478),
-                    # ('ChiCangLiang', 674677), ('MaiRuJia', 2257.0), ('MaiRuLiang', 72), ('MaiChuJia', 2258.0), ('MaiChuLiang', 25)])
 
                     if _quote["MaiChu"] == 0.0:
                         continue

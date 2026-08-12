@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
 
@@ -20,10 +21,7 @@ from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
-    TradingEngine,
-)
-from chanlun.decision_support.trading_system.direct_recursive_structure import (
-    direct_recursive_alignment_contract,
+    _TechnicalSignalEvaluator,
 )
 from chanlun.decision_support.trading_system.models import (
     SectorAssessment,
@@ -35,11 +33,18 @@ from chanlun.decision_support.trading_system.provisional import ProvisionalCandi
 from chanlun.decision_support.trading_system.screening_structure import (
     SCREENING_STRUCTURE_SCOPE,
 )
+from chanlun.decision_support.trading_system.signal_alignment import (
+    unified_signal_alignment_contract,
+)
+from chanlun.decision_support.trading_system.selection import (
+    evaluate_formal_selection_gate,
+    selection_research_snapshot_from_document,
+)
 
 
 DECISION_CORE_SCHEMA = "chanlun-human-assisted-decision-core"
 SIGNAL_DECISION_DOCUMENT_SCHEMA = "chanlun-human-assisted-signal-decision"
-MONITOR_ONLY_BUY_REASON_CODE = "current_qmt_sector_trigger_required"
+FORMAL_SELECTION_REQUIRED_REASON_CODE = "SIGNED_SELECTION_RESEARCH_REQUIRED"
 
 _SIGNAL_DECISION_FIELDS = (
     "decision_core_id",
@@ -73,6 +78,9 @@ _SIGNAL_DECISION_FIELDS = (
     "decision_reasons",
     "conflict",
     "warmup",
+    "selection_path",
+    "selection_research",
+    "formal_selection",
     "selection_sources",
     "sector_triggered",
     "monitor_only",
@@ -106,7 +114,6 @@ def _trading_policy_document(policy: TradingPolicy) -> dict[str, object]:
         "require_confirmed_one_minute": policy.require_confirmed_one_minute,
         "require_sector_eligibility": policy.require_sector_eligibility,
         "require_thirty_minute_context": policy.require_thirty_minute_context,
-        "first_center_three_buy_only": policy.first_center_three_buy_only,
         "minimum_tick": format(policy.minimum_tick, "f"),
         "first_buy_risk_multiplier": format(
             policy.first_buy_risk_multiplier, "f"
@@ -137,12 +144,11 @@ class HumanAssistedDecisionContract:
     stroke_mode: str = STRICT_STROKE_MODE
     strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
     strict_base_profile_revision: str = strict_base_config_revision()
-    direct_recursive_alignment_parameter_set_id: str = (
-        direct_recursive_alignment_contract().parameter_set_id
+    signal_alignment_parameter_set_id: str = (
+        unified_signal_alignment_contract().parameter_set_id
     )
     structure_scope: str = SCREENING_STRUCTURE_SCOPE
     recursive_structure_allowed: bool = True
-    unfinished_segment_candidates: bool = True
     human_confirmation_required: bool = True
     automated_order_authorized: bool = False
     live_status: str = "LIVE_DISABLED"
@@ -162,11 +168,10 @@ class HumanAssistedDecisionContract:
             or self.stroke_mode != STRICT_STROKE_MODE
             or self.strict_base_profile_id != STRICT_BASE_PROFILE_ID
             or self.strict_base_profile_revision != strict_base_config_revision()
-            or self.direct_recursive_alignment_parameter_set_id
-            != direct_recursive_alignment_contract().parameter_set_id
+            or self.signal_alignment_parameter_set_id
+            != unified_signal_alignment_contract().parameter_set_id
             or self.structure_scope != SCREENING_STRUCTURE_SCOPE
             or not self.recursive_structure_allowed
-            or not self.unfinished_segment_candidates
         ):
             raise ValueError("human-assisted physical structure contract changed")
         if (
@@ -197,12 +202,11 @@ class HumanAssistedDecisionContract:
             "stroke_mode": self.stroke_mode,
             "strict_base_profile_id": self.strict_base_profile_id,
             "strict_base_profile_revision": self.strict_base_profile_revision,
-            "direct_recursive_alignment_parameter_set_id": (
-                self.direct_recursive_alignment_parameter_set_id
+            "signal_alignment_parameter_set_id": (
+                self.signal_alignment_parameter_set_id
             ),
             "structure_scope": self.structure_scope,
             "recursive_structure_allowed": self.recursive_structure_allowed,
-            "unfinished_segment_candidates": self.unfinished_segment_candidates,
             "human_confirmation_required": self.human_confirmation_required,
             "automated_order_authorized": self.automated_order_authorized,
             "live_status": self.live_status,
@@ -235,7 +239,6 @@ def validate_human_assisted_contract_document(
         "require_confirmed_one_minute",
         "require_sector_eligibility",
         "require_thirty_minute_context",
-        "first_center_three_buy_only",
     )
     if any(type(policy_document.get(name)) is not bool for name in bool_fields):
         raise ValueError("human-assisted decision policy booleans are invalid")
@@ -275,7 +278,7 @@ def validate_human_assisted_contract_document(
         "stroke_mode",
         "strict_base_profile_id",
         "strict_base_profile_revision",
-        "direct_recursive_alignment_parameter_set_id",
+        "signal_alignment_parameter_set_id",
         "structure_scope",
         "live_status",
     )
@@ -283,7 +286,6 @@ def validate_human_assisted_contract_document(
         raise ValueError("human-assisted decision contract strings are invalid")
     contract_bool_fields = (
         "recursive_structure_allowed",
-        "unfinished_segment_candidates",
         "human_confirmation_required",
         "automated_order_authorized",
     )
@@ -306,12 +308,11 @@ def validate_human_assisted_contract_document(
         stroke_mode=str(document["stroke_mode"]),
         strict_base_profile_id=str(document["strict_base_profile_id"]),
         strict_base_profile_revision=str(document["strict_base_profile_revision"]),
-        direct_recursive_alignment_parameter_set_id=str(
-            document["direct_recursive_alignment_parameter_set_id"]
+        signal_alignment_parameter_set_id=str(
+            document["signal_alignment_parameter_set_id"]
         ),
         structure_scope=str(document["structure_scope"]),
         recursive_structure_allowed=bool(document["recursive_structure_allowed"]),
-        unfinished_segment_candidates=bool(document["unfinished_segment_candidates"]),
         human_confirmation_required=bool(document["human_confirmation_required"]),
         automated_order_authorized=bool(document["automated_order_authorized"]),
         live_status=str(document["live_status"]),
@@ -394,15 +395,20 @@ def point_decision_document(
             "anchor_at": point.observed_at.isoformat(),
             "confirmed_at": None,
             "available_at": point.observed_at.isoformat(),
-            "price_basis_revision": None,
+            "price_basis_revision": point.price_basis_revision,
             "anchor_price": point.anchor_price,
-            "invalidation_price": None,
-            "center_id": None,
-            "center_zd": None,
-            "center_zg": None,
-            "center_ordinal": None,
-            "variant": None,
-            "divergence_kind": None,
+            "invalidation_price": point.invalidation_price,
+            "center_id": point.center_id,
+            "center_zd": point.center_zd,
+            "center_zg": point.center_zg,
+            "center_ordinal": point.center_ordinal,
+            "variant": point.variant,
+            "divergence_kind": point.divergence_kind,
+            "parent_point_id": point.parent_point_id,
+            "related_point_ids": list(point.related_point_ids),
+            "small_to_large_carrier_unit_ids": list(
+                point.small_to_large_carrier_unit_ids
+            ),
             "missing_conditions": list(point.missing_conditions),
             "evidence_codes": list(point.evidence_codes),
             "contains_unfinished_segment": unfinished_segment,
@@ -430,6 +436,11 @@ def point_decision_document(
         "center_ordinal": point.center_ordinal,
         "variant": point.variant,
         "divergence_kind": point.divergence_kind,
+        "parent_point_id": point.parent_point_id,
+        "related_point_ids": list(point.related_point_ids),
+        "small_to_large_carrier_unit_ids": list(
+            point.small_to_large_carrier_unit_ids
+        ),
         "missing_conditions": [],
         "evidence_codes": list(point.evidence_codes),
         "contains_unfinished_segment": False,
@@ -437,16 +448,11 @@ def point_decision_document(
     }
 
 
-def apply_sector_selection_scope(
+def apply_formal_selection_scope(
     document: dict[str, object],
     selection_sources: Sequence[str],
 ) -> None:
-    """在共享决策合同内应用板块优先入场规则。
-
-    过去网页选股会在公共评估器返回后再修改结果，导致历史回放可能允许入场，
-    而页面却正确地把同一买点保留为仅监控。将规则放在这里，使选股来源成为
-    可移植决策身份的一部分。
-    """
+    """把板块扫描来源和正式研究证据共同绑定到决策身份。"""
 
     sources = tuple(dict.fromkeys(selection_sources))
     if not sources:
@@ -454,8 +460,26 @@ def apply_sector_selection_scope(
     sector_triggered = "QMT_SECTOR_TRIGGER" in sources
     document["selection_sources"] = list(sources)
     document["sector_triggered"] = sector_triggered
-    document["monitor_only"] = not sector_triggered
-    if document.get("side") == "buy" and not sector_triggered:
+    raw_research = document.get("selection_research")
+    research = (
+        None
+        if raw_research is None
+        else selection_research_snapshot_from_document(raw_research)
+    )
+    try:
+        decision_time = datetime.fromisoformat(str(document["observed_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("决策时间无效") from exc
+    gate = evaluate_formal_selection_gate(
+        research,
+        symbol=str(document.get("code") or ""),
+        decision_time=decision_time,
+        selection_path=document.get("selection_path"),  # type: ignore[arg-type]
+        sector_triggered=sector_triggered,
+    )
+    document["formal_selection"] = gate.document()
+    document["monitor_only"] = not gate.accepted
+    if document.get("side") == "buy" and not gate.accepted:
         raw_reasons = document.get("decision_reasons")
         if not isinstance(raw_reasons, list) or any(
             not isinstance(value, str) for value in raw_reasons
@@ -464,7 +488,7 @@ def apply_sector_selection_scope(
         document["entry_allowed"] = False
         document["risk_multiplier"] = "0"
         document["decision_reasons"] = list(
-            dict.fromkeys((*raw_reasons, MONITOR_ONLY_BUY_REASON_CODE))
+            dict.fromkeys((*raw_reasons, *gate.reason_codes))
         )
     if document.get("decision_document_schema") is not None:
         document["decision_document_id"] = signal_decision_document_id(document)
@@ -657,11 +681,26 @@ def serialize_evaluated_signal(
             ],
             "required_for_new_entry": True,
         },
+        "selection_path": (
+            item.formal_selection.selection_path
+            if item.formal_selection is not None
+            else "INDIVIDUAL_THREE_PROGRAM"
+        ),
+        "selection_research": (
+            None
+            if item.selection_research is None
+            else item.selection_research.document()
+        ),
+        "formal_selection": (
+            None
+            if item.formal_selection is None
+            else item.formal_selection.document()
+        ),
         "human_confirmation_required": True,
         "automated_order_authorized": False,
         "live_status": "LIVE_DISABLED",
     }
-    apply_sector_selection_scope(document, selection_sources)
+    apply_formal_selection_scope(document, selection_sources)
     document["decision_document_id"] = signal_decision_document_id(document)
     return document
 
@@ -671,7 +710,7 @@ class HumanAssistedDecisionCore:
 
     def __init__(self, policy: TradingPolicy = TradingPolicy()) -> None:
         self.contract = HumanAssistedDecisionContract(policy=policy)
-        self._engine = TradingEngine(policy)
+        self._technical_evaluator = _TechnicalSignalEvaluator(policy)
 
     @property
     def contract_id(self) -> str:
@@ -681,15 +720,26 @@ class HumanAssistedDecisionCore:
         self,
         bundle: SymbolStructureBundle,
     ) -> tuple[EvaluatedSignal, ...]:
-        evaluated = self._engine.evaluate_symbol(bundle)
-        if "QMT_SECTOR_TRIGGER" in bundle.selection_sources:
-            return evaluated
+        evaluated = self._technical_evaluator.evaluate_symbol(bundle)
+        gate = evaluate_formal_selection_gate(
+            bundle.selection_research,
+            symbol=bundle.code,
+            decision_time=bundle.as_of,
+            selection_path=bundle.selection_path,
+            sector_triggered="QMT_SECTOR_TRIGGER" in bundle.selection_sources,
+        )
         return tuple(
             replace(
                 item,
+                formal_selection=gate,
+                selection_research=bundle.selection_research,
                 entry=(
                     item.entry
-                    if item.entry is None or item.setup.point.side != "buy"
+                    if (
+                        item.entry is None
+                        or item.setup.point.side != "buy"
+                        or gate.accepted
+                    )
                     else replace(
                         item.entry,
                         allowed=False,
@@ -698,7 +748,7 @@ class HumanAssistedDecisionCore:
                             dict.fromkeys(
                                 (
                                     *item.entry.reason_codes,
-                                    MONITOR_ONLY_BUY_REASON_CODE,
+                                    *gate.reason_codes,
                                 )
                             )
                         ),
@@ -760,11 +810,11 @@ def replay_human_assisted_bundles(
 
 __all__ = (
     "DECISION_CORE_SCHEMA",
-    "MONITOR_ONLY_BUY_REASON_CODE",
+    "FORMAL_SELECTION_REQUIRED_REASON_CODE",
     "SIGNAL_DECISION_DOCUMENT_SCHEMA",
     "HumanAssistedDecisionContract",
     "HumanAssistedDecisionCore",
-    "apply_sector_selection_scope",
+    "apply_formal_selection_scope",
     "point_decision_document",
     "replay_human_assisted_bundles",
     "sector_decision_document",

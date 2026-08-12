@@ -103,9 +103,8 @@ class QmtInstrumentStatusFact:
             "trading_day": self.trading_day.isoformat(),
             "instrument_name": self.instrument_name,
             "instrument_status": self.instrument_status,
-            # ``IsTrading`` is a wall-clock observation and is retained only
-            # as raw evidence.  Suspension classification uses the SDK's
-            # InstrumentStatus field exclusively.
+    # ``IsTrading`` 是按当前时钟得到的观测，只保留为原始证据；停牌分类仅使用
+    # 软件开发工具包的 InstrumentStatus 字段。
             "is_trading": self.is_trading,
             "suspended": self.suspended,
             "classification": self.classification,

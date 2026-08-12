@@ -20,7 +20,7 @@ from chanlun.tools.log_util import LogUtil
 
 _SCHEMA = "current"
 _LOCK = threading.Lock()
-_last_record = None  # ((market, code, frequency), wall_time)
+_last_record = None  # 格式：((市场、代码、周期), 墙上时钟时间)。
 _DEBOUNCE_SECONDS = 5.0
 
 

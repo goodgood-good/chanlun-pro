@@ -1,4 +1,4 @@
-"""Strict, atomic chart serialization for source-faithful Chanlun evidence."""
+"""把唯一严格结构证据原子化序列化为图表快照。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Iterable
 
 from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.formal_state import resolve_formal_direction
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
     CenterPreview,
@@ -571,9 +572,8 @@ def strict_center_preview_to_chart_dict(
     expected_zg = min(item.high_tick for item in core_units)
     if (preview.zd_tick, preview.zg_tick) != (expected_zd, expected_zg):
         raise ValueError("chart center preview core does not match its seed")
-    # Every line component must positively overlap the frozen core. Recursive
-    # trend types retain the original closed-interval equality rule. The
-    # completion return is deliberately not part of ``body``.
+            # 每个线段成分都必须与冻结核心形成正宽度重叠。递归走势类型继续沿用原有
+            # 闭区间相等规则；完成回抽有意不计入 ``body``。
     if any(
         (
             max(item.low_tick, preview.zd_tick)
@@ -664,6 +664,12 @@ def strict_center_preview_to_chart_dict(
         preview.zd_tick,
         preview.zg_tick,
     )
+    formal_center_id = (
+        preview.formal_center_id
+        if preview.source_kind is SourceKind.TREND_TYPE
+        or preview.establishment_unit_id is not None
+        else None
+    )
     closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
     completed = preview.state is CenterPreviewState.COMPLETED
     end_epoch = (
@@ -674,7 +680,9 @@ def strict_center_preview_to_chart_dict(
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": "center_preview",
-        "center_id": preview_id,
+        # ``center_id`` 始终表示可提升的正式中枢身份。物理预览在第五段成立
+        # 证据出现之前只能拥有渲染身份，不能提前承诺一个正式中枢。
+        "center_id": formal_center_id,
         "preview_id": preview_id,
         "render_id": (
             f"{preview_id}@{preview.state.value}@{len(body) - seed_width}"
@@ -796,9 +804,8 @@ def strict_center_preview_to_chart_dict(
                 else establishment_unit
             ).confirmed_at
         ),
-        # Geometry is complete, but an unlocked return has no formal
-        # confirmation timestamp.  Keep this null so consumers cannot mistake
-        # a provisional third-class shape for a confirmed trading signal.
+        # 几何完成但回返单元未锁定时没有正式确认时间。这里必须保持空值，
+        # 防止消费者把盘中三类形态误当成已确认交易信号。
         "completed_at": None,
         "available_at": aware_datetime_to_epoch_seconds(preview.available_at),
     }
@@ -923,6 +930,7 @@ def strict_point_to_chart_dict(
         point.evidence_codes,
         point.missing_conditions,
         point.related_point_ids,
+        point.small_to_large_carrier_unit_ids,
     )
     render_kind = (
         "point_confirmed"
@@ -961,6 +969,9 @@ def strict_point_to_chart_dict(
         "evidence_codes": list(point.evidence_codes),
         "missing_conditions": list(point.missing_conditions),
         "related_point_ids": list(point.related_point_ids),
+        "small_to_large_carrier_unit_ids": list(
+            point.small_to_large_carrier_unit_ids
+        ),
         "evidence_revision": evidence_revision,
         "tradable": point.status is StrictPointStatus.CONFIRMED,
         "points": [
@@ -1059,6 +1070,14 @@ def build_strict_structure_snapshot(
         evidence.source_closed_at
     )
     labels = recursive_level_labels(interval)
+    formal_direction = resolve_formal_direction(evidence)
+    formal_direction_payload = {
+        "direction": formal_direction.direction,
+        "structural_level": formal_direction.structural_level,
+        "trend_id": formal_direction.trend_id,
+        "support_point_id": formal_direction.support_point_id,
+        "reason_codes": list(formal_direction.reason_codes),
+    }
 
     confirmed_by_level: dict[int, list[StrictPointEvidence]] = {}
     approaching_by_level: dict[int, list[StrictPointEvidence]] = {}
@@ -1122,7 +1141,7 @@ def build_strict_structure_snapshot(
                 )
                 for preview in center_previews
             ),
-            "center_id",
+            "preview_id",
         )
         active_center = (
             centers[-1]
@@ -1207,6 +1226,7 @@ def build_strict_structure_snapshot(
         source_closed_epoch,
     )
     render_extras = {
+        "formal_direction": formal_direction_payload,
         "stroke_center_observations": observations,
         "level_extras": [
             {
@@ -1235,6 +1255,7 @@ def build_strict_structure_snapshot(
         "structure_revision": evidence.structure_revision,
         "snapshot_revision": snapshot_revision,
         "render_revision": render_revision,
+        "formal_direction": formal_direction_payload,
         "stroke_center_observations": observations,
         "levels": levels,
     }

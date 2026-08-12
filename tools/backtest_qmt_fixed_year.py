@@ -155,9 +155,8 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    # The completed-symbol manifest grows to several thousand entries.  Do
-    # not materialise both one giant Unicode string and its encoded bytes
-    # while the worker pool is holding structure states in memory.
+    # 已完成标的清单会增长到数千条；工作进程池在内存中持有结构状态时，
+    # 不要同时物化一份巨大的 Unicode 字符串及其编码字节。
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(
             payload,
@@ -254,9 +253,8 @@ def _catalog_scope(
     requested_start: date,
     requested_end: date,
 ) -> tuple[tuple[tuple[str, str], ...], dict[str, object]]:
-    # The backtest universe is owned by the same sector-first contract used by
-    # the live candidate path.  Do not reconstruct a second, subtly different
-    # stock-first universe in this CLI.
+    # 回测与实时选股共用同一个板块优先范围合同，不能在命令行中再构造另一套
+    # 细节不同的个股优先股票池。
     sector_first = build_sector_first_scope(
         snapshot,
         requested_start=requested_start,
@@ -294,7 +292,7 @@ def _catalog_scope(
             "POINT_IN_TIME_SECTOR_TRIGGER",
             "POINT_IN_TIME_SECTOR_MEMBERS",
             "INDIVIDUAL_THREE_PROGRAM",
-            "DIRECT_RECURSIVE_30M_5M_1M_TECHNICAL_ENTRY",
+            "PHYSICAL_5M_SETUP_1M_TRIGGER_UNIFIED_POINT_CLASSES",
         ),
         "sector_first_scope_sha256": sector_first.content_sha256,
         "etf_proxy_role": sector_first.etf_proxy_role,
@@ -458,10 +456,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     failures.pop(request.code, None)
                 except Exception as exc:
                     failures[request.code] = f"{type(exc).__name__}:{exc}"
-                # Each symbol already has its own fsync'd fact checkpoint.  A
-                # complete manifest rewrite after every result grows O(N^2)
-                # and eventually dominates the actual structure calculation.
-                # A restart discovers any newer per-symbol files directly.
+            # 每个标的已有各自完成落盘同步的事实检查点。每得到一个结果就完整重写清单，
+            # 复杂度会增长到 O(N²)，最终压过实际结构计算；重启时可直接发现更新的
+            # 单标的文件。
                 publish = (
                     ordinal % 25 == 0
                     or ordinal == len(pending)

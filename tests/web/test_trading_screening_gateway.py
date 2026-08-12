@@ -137,6 +137,10 @@ def test_analyzer_uses_canonical_recursive_screening_builder(monkeypatch) -> Non
         status=StrictPointStatus.APPROACHING,
         available_at=closed_at,
     )
+    approaching = replace(
+        approaching,
+        parent_point_id=confirmed.point_id,
+    )
     evidence = strict_evidence_result(
         code="SZ.000001",
         source_frequency="5m",
@@ -151,11 +155,6 @@ def test_analyzer_uses_canonical_recursive_screening_builder(monkeypatch) -> Non
         return evidence
 
     monkeypatch.setattr(gateway_module, "screening_evidence_from_frame", build)
-    monkeypatch.setattr(
-        gateway_module,
-        "unfinished_segment_candidates",
-        lambda *_args, **_kwargs: (),
-    )
 
     analysis = analyze_native_frame(
         code="SZ.000001",
@@ -168,7 +167,7 @@ def test_analyzer_uses_canonical_recursive_screening_builder(monkeypatch) -> Non
     assert builder_calls[0]["code"] == "SZ.000001"
     assert builder_calls[0]["frequency"] == "5m"
     assert builder_calls[0]["as_of"] == closed_at
-    assert analysis.direction == "up"
+    assert analysis.direction == "neutral"
     assert tuple(point.point_type for point in analysis.confirmed_points) == ("1buy",)
     assert tuple(point.point_type for point in analysis.provisional_points) == ("2buy",)
 
@@ -199,12 +198,6 @@ def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
         "build_screening_evidence",
         lambda *_args, **_kwargs: state.evidence,
     )
-    monkeypatch.setattr(
-        gateway_module,
-        "unfinished_segment_candidates",
-        lambda *_args, **_kwargs: (),
-    )
-
     analyze_native_frame(
         code="SZ.000001",
         frequency="5m",
@@ -352,6 +345,33 @@ def test_warmup_requires_same_active_tail_under_shorter_left_history(
         as_of=NOW,
     )
     assert result.warmup_converged is True
+
+    def provisional_preview_differs(**kwargs):
+        approaching = (
+            (provisional_point("3buy", frequency="30m"),)
+            if len(kwargs["frame"]) == 600
+            else ()
+        )
+        return FrameStructureAnalysis(
+            closed_at=kwargs["as_of"],
+            direction="up",
+            confirmed_points=(),
+            provisional_points=approaching,
+        )
+
+    monkeypatch.setattr(
+        gateway_module,
+        "analyze_native_frame",
+        provisional_preview_differs,
+    )
+    result = analyze_native_frame_with_warmup(
+        code="SZ.000001",
+        frequency="30m",
+        frame=frame,
+        as_of=NOW,
+    )
+    assert result.warmup_converged is True
+    assert result.warmup_difference_codes == ()
 
     def divergent(**kwargs):
         return FrameStructureAnalysis(

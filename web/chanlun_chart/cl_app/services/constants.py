@@ -54,12 +54,9 @@ _ALL_MARKETS = [
     ("currency_spot", Market.CURRENCY_SPOT),
 ]
 
-# Capability metadata must remain usable when a configured quote adapter is
-# temporarily offline.  These are deliberately the smallest cross-provider
-# contracts used by the chart router, not synthetic market data.  Readiness
-# still reports the failed metadata load; the fallback merely prevents a
-# transient connection failure from misclassifying ordinary 1m/5m requests as
-# unsupported.  Quarterly bars are an explicit FX-only contract.
+# 已配置行情适配器暂时离线时，能力元数据仍须可用。这里有意采用图表路由使用的最小
+# 跨提供器契约，而非合成市场数据。就绪状态仍报告元数据加载失败；回退只防止瞬时连接
+# 失败把普通 1m/5m 请求误判为不支持。季度 K 线明确只属于外汇契约。
 _STOCK_FUTURES_FREQUENCY_FALLBACK = (
     "1m",
     "5m",
@@ -113,7 +110,7 @@ class _LazyMarketDict(dict):
         self._attempts = {}
         self._closed = False
 
-        # Templates address every supported market directly, so initialize all keys.
+        # 模板会直接访问每个支持市场，因此初始化全部键。
         for key in self._markets:
             dict.__setitem__(self, key, self._fallback_value(key))
 
@@ -242,10 +239,8 @@ class _LazyMarketDict(dict):
         """Allow loads again after a prior lifecycle shutdown."""
         with self._state_lock:
             self._closed = False
-            # A shutdown followed by a new app lifecycle is an explicit retry
-            # boundary.  Do not retain a pre-shutdown failure for another
-            # retry_seconds window: that leaves supported resolutions and
-            # default symbols stuck at their empty fallbacks in the new app.
+            # 关闭后启动新应用生命周期属于显式重试边界。不能在新的重试窗口继续保留关闭前
+            # 失败，否则新应用的支持周期和默认标的会卡在空回退状态。
             for key, state in self._states.items():
                 if state == "failed" or (
                     state == "loading" and key not in self._attempts
@@ -323,11 +318,9 @@ class _LazyMarketDict(dict):
 
 def _build_market_frequencys(key, market):
     frequencies = list(get_exchange(market).support_frequencys().keys())
-    # ``q`` was added to the shared TradingView map solely for the TDX FX
-    # adapter.  Some configurable providers advertise a synthetic quarterly
-    # frequency even though the corresponding routed market cannot honour the
-    # same contract.  Keep the web/API capability boundary deterministic and
-    # fail closed for a hand-crafted 3M request outside FX.
+    # ``q`` 加入共享 TradingView 映射只为通达信外汇适配器。部分可配置提供器会声明合成
+    # 季度周期，但相应路由市场无法履行同一契约。网页/接口能力边界必须确定，在外汇以外
+    # 对手工构造的 3M 请求关闭失败。
     if key != "fx":
         frequencies = [value for value in frequencies if value != "q"]
     return frequencies

@@ -238,7 +238,7 @@ class XdCalculator:
                     and bi_i.end.val < bi_i2.end.val
                     and bi_i.end.val < bi_i4.end.val
                 )
-            else:  # down
+            else:  # 向下
                 is_extreme = (
                     bi_i.start.val > bi_i2.start.val
                     and bi_i.start.val > bi_i4.start.val
@@ -261,8 +261,8 @@ class XdCalculator:
         """
         # 候选段携带本分支真正使用到的因果见证时间；只有后续确认级联跨过
         # deferred 边界后，才会把该见证写成 XD.locked_at。
-        segs: List[tuple] = []      # (seg_start, real_end, seg_type, formed_at)
-        locked_candidates = {}      # (start, end, type) -> first causal lock time
+        segs: List[tuple] = []      # 元组格式：（线段起点、实际终点、线段类型、形成时刻）
+        locked_candidates = {}      # （起点、终点、类型）映射到首次因果锁定时刻
         pos = start
         reverse_end_hint = None
         pending_tail = None         # 内层自然结束的末段未完成线段 (start, type)
@@ -298,10 +298,8 @@ class XdCalculator:
             seg_type = all_bis[pos].type
             seg_start = pos
             check = seg_end + 1
-            # Every BI read while choosing between extension, absorption and
-            # termination is part of the causal witness.  Keep the latest
-            # such lock time so a later branch resolution can never be
-            # back-dated to an earlier geometric witness.
+            # 在延伸、吸收和终止之间做选择时读取的每一笔都属于因果见证。
+            # 保留其中最晚锁定时刻，确保后续分支解析绝不会倒填到更早几何见证时刻。
             decision_floor = None
             decision_is_formal = True
 
@@ -661,11 +659,8 @@ class XdCalculator:
             )
         if pending_tail is not None:
             if segs:
-                # Provisional units still participate in strict structure
-                # previews, so they must preserve the same continuity and
-                # alternating-direction contract as locked units.  Keep this
-                # normalization as a defensive boundary for every producer of
-                # ``pending_tail``.
+                # 临时单元仍参与严格结构预览，因此必须与锁定单元保持相同的连续性和
+                # 方向交替约定。对每个 ``pending_tail`` 生产者都保留这一规范化防御边界。
                 expected_start = segs[-1][1] + 1
                 expected_type = "down" if segs[-1][2] == "up" else "up"
                 pending_tail = (expected_start, expected_type)
@@ -682,7 +677,7 @@ class XdCalculator:
             self._emit_pending(all_bis, start, all_bis[start].type)
 
     # ----------------------------------------------------------
-    # _try_end
+    # 尝试结束线段。
     # ----------------------------------------------------------
     def _try_end(self, all_bis, seg_start, seg_end, seg_type,
                  seg_high, seg_low, check_pos,
@@ -909,7 +904,7 @@ class XdCalculator:
         return end_bi_idx, next_start, next_end, formed_at
 
     # ----------------------------------------------------------
-    # _check_type2
+    # 检查第二种情况。
     # ----------------------------------------------------------
     def _check_type2(self, all_bis, mid_elem, seg_type) -> tuple[str, Optional[int]]:
         """Return type-2 status and the farthest causal witness BI index."""

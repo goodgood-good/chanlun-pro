@@ -174,6 +174,13 @@ function snapshot(overrides = {}) {
     structure_revision: 'sha256:structure-revision-1234567890',
     snapshot_revision: 'sha256:snapshot-revision-1234567890',
     render_revision: 'sha256:render-revision-1234567890',
+    formal_direction: {
+      direction: 'up',
+      structural_level: 0,
+      trend_id: 'trend-l0-current',
+      support_point_id: null,
+      reason_codes: ['current_directional_trend'],
+    },
     stroke_center_observations: [center({
       render_kind: 'center_observation',
       center_id: 'stroke-observation-1',
@@ -259,7 +266,8 @@ const context = {
 test('strict snapshot supplies centers and signals through one contract', () => {
   const strictOnly = Analysis.summarizeChartData(barsResult(), context);
   assert.equal(strictOnly.state, 'ready');
-  assert.equal(strictOnly.trends[0].directionLabel, '向上');
+  assert.equal(strictOnly.trends[0].directionLabel, '几何向上');
+  assert.equal(strictOnly.formalDirectionLabel, '正式上涨');
   assert.equal(strictOnly.formalCenters[0].tradable, false);
   assert.equal(strictOnly.formalCenters[0].enteringSegment.direction, 'up');
   assert.equal(strictOnly.formalCenters[0].leavingSegment.direction, 'up');
@@ -337,7 +345,7 @@ test('current stroke and segment status use base geometry from the same response
 
   assert.equal(summary.bi.text, '向上 · 形成中');
   assert.equal(summary.xd.text, '向下 · 已完成');
-  assert.equal(summary.trends[0].directionLabel, '向上');
+  assert.equal(summary.trends[0].directionLabel, '几何向上');
 });
 
 test('all six buy and sell point classes stay independent across confirmed and approaching evidence', () => {

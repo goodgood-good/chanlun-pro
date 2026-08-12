@@ -31,8 +31,8 @@ def _fractal_lock_witness(fx: FX):
             right_high = min(source.h for source in prefix)
             right_low = min(source.l for source in prefix)
         else:
-            # A non-merged shoulder has one source K.  Missing direction is a
-            # malformed intermediate state; replay its latest source snapshot.
+        # 未合并的肩部只有一根来源 K 线。方向缺失属于畸形中间状态，
+        # 此时重放其最新来源快照。
             right_high = prefix[-1].h
             right_low = prefix[-1].l
 

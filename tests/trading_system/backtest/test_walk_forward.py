@@ -60,15 +60,11 @@ def test_short_dataset_returns_explicit_empty_reason() -> None:
 
 
 def test_parameter_grid_is_frozen_and_contains_only_registered_axes() -> None:
-    assert len(PRE_REGISTERED_PARAMETER_GRID) == 16
+    assert len(PRE_REGISTERED_PARAMETER_GRID) == 8
     assert {row.base_trade_risk for row in PRE_REGISTERED_PARAMETER_GRID} == {
         Decimal("0.0035"),
         Decimal("0.005"),
     }
-    assert {
-        row.first_center_three_buy_only
-        for row in PRE_REGISTERED_PARAMETER_GRID
-    } == {True, False}
     assert {row.max_portfolio_heat for row in PRE_REGISTERED_PARAMETER_GRID} == {
         Decimal("0.015"),
         Decimal("0.02"),

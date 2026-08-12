@@ -1,9 +1,7 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    # Windows PowerShell 5.1 does not reliably populate $PSScriptRoot while a
-    # parameter default expression is being bound for ``powershell -File``.
-    # Resolve the implicit root after binding, when the automatic variable is
-    # authoritative.
+    # Windows PowerShell 5.1 在 ``powershell -File`` 绑定参数默认表达式时不一定可靠
+    # 填充 $PSScriptRoot；应在绑定完成、自动变量可信后解析隐式根目录。
     [string]$ProjectRoot = '',
     [string]$HealthUri = 'http://127.0.0.1:9900/readyz?market=a',
     [string]$ExpectedRevision = '',

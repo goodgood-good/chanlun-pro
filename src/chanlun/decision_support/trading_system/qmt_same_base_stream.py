@@ -37,10 +37,8 @@ QmtSameBaseGrade = Literal[
 _REQUIRED = ("date", "open", "high", "low", "close", "volume")
 _CN = "Asia/Shanghai"
 QMT_COMPLETED_ONE_MINUTE_GRID_REVISION = (
-    # The complete 241-row -> 240-row mapping is unchanged.  Sparse live
-    # sessions are current causal prefixes and deliberately do not masquerade
-    # as a newly completed grid or invalidate the last causally complete daily
-    # screening publication.
+    # 完整的 241 行到 240 行映射保持不变。稀疏实时交易日属于当前因果前缀，有意不伪装成
+    # 新完成网格，也不使最近一份因果完整日级筛选发布失效。
     "QMT_A_SHARE_END_LABELLED_241_TO_COMPLETED_240_TRADE_AWARE"
 )
 _MISSING_SESSION_DETAIL = (
@@ -252,8 +250,7 @@ def normalize_qmt_opening_event_for_completed_minutes(
         result.attrs = snapshot_attrs
         return result
     if len(rows) == 1:
-        # The 09:30 boundary is known, but no standard one-minute bar has
-        # completed yet.  It must not become a standalone locator bar.
+        # 09:30 边界已知，但尚无标准一分钟 K 线完成，不能把它变成独立定位 K 线。
         result = rows.iloc[0:0].copy()
         result.attrs = snapshot_attrs
         return result
@@ -270,10 +267,8 @@ def normalize_qmt_opening_event_for_completed_minutes(
         )
     opening = rows.iloc[0]
     opening_volume = float(opening["volume"])
-    # Some instruments expose a 09:30 placeholder with zero volume and a
-    # carried/stale price.  It is not a traded auction fact and must not
-    # override the actual first continuous-auction bar.  A positive-volume
-    # opening event is real price/volume evidence and remains merged.
+    # 部分标的会暴露成交量为零且价格沿用或过期的 09:30 占位；它不是已成交集合竞价事实，
+    # 不得覆盖首根真实连续竞价 K 线。正成交量开盘事件是真实价量证据，继续合并。
     if next_at.time() == time(9, 31):
         first_bar = rows.iloc[1].copy()
         if opening_volume > 0:
@@ -290,11 +285,8 @@ def normalize_qmt_opening_event_for_completed_minutes(
             ignore_index=True,
         )
     elif opening_volume > 0:
-        # No trade occurred in QMT's 09:31 continuous-auction slice.  The
-        # positive-volume opening auction is still an observed market fact and
-        # belongs to the first completed interval.  Re-end-label that fact at
-        # 09:31 instead of attaching it to a later trade or fabricating the
-        # missing intervening bars.
+        # QMT 的 09:31 连续竞价切片没有成交，但正成交量开盘集合竞价仍是已观测市场事实，
+        # 属于首个已完成区间。将其结束标签改到 09:31，而不是附着到更晚成交或伪造中间 K 线。
         first_bar = opening.copy()
         first_bar["date"] = opening_at + pd.Timedelta(minutes=1)
         merged = pd.concat(
@@ -302,8 +294,7 @@ def normalize_qmt_opening_event_for_completed_minutes(
             ignore_index=True,
         )
     else:
-        # A zero-volume 09:30 placeholder contains no trade evidence.  Keeping
-        # the later observed bars unchanged is both causal and lossless.
+        # 零成交量 09:30 占位不含成交证据；保持后续已观测 K 线不变既因果又无损。
         merged = rows.iloc[1:].copy().reset_index(drop=True)
     result = merged.loc[:, list(_REQUIRED)]
     result.attrs = snapshot_attrs
@@ -389,11 +380,9 @@ def _aggregate_intraday(one_minute: pd.DataFrame, minutes: int) -> pd.DataFrame:
                 volume=("volume", "sum"),
             )
         )
-        # QMT can carry the previous price through a one-minute row with no
-        # transaction.  Such a placeholder contributes no OHLC fact to a
-        # larger bar.  Use the first/last and extremes of price-bearing rows;
-        # if an entire bucket has zero volume, retain the deterministic carried
-        # fallback so the completed exchange grid itself stays intact.
+        # QMT 可能在无成交的一分钟记录中沿用前价，此类占位不会为更大周期贡献 OHLC 事实。
+        # 应使用有价格证据记录的首尾和极值；若整个桶成交量为零，则保留确定性沿用回退，
+        # 使已完成交易所网格本身保持完整。
         traded = complete[complete["volume"] > 0]
         if not traded.empty:
             traded_prices = traded.groupby("bucket", sort=True).agg(

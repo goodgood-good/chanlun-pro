@@ -16,7 +16,7 @@ from chanlun.decision_support.trading_system.forward_paper import (
     FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA,
     append_forward_paper_event,
     audit_forward_paper_session_delivery as _audit_forward_paper_session_delivery,
-    load_frozen_forward_contract,
+    load_forward_contract,
 )
 from chanlun.decision_support.trading_system.human_paper_ledger import (
     LEDGER_SCHEMA,
@@ -30,10 +30,9 @@ from chanlun.decision_support.trading_system.trading_session import (
 CN = ZoneInfo("Asia/Shanghai")
 SESSION = date(2026, 7, 30)
 PARAMETERS = (
-    Path(__file__).resolve().parents[2]
-    / "audit"
-    / "chanlun_trading_system_backtest"
-    / "recent_year_current_sector_no3p"
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "forward_paper"
     / "parameter_snapshot_human_review.json"
 )
 
@@ -183,7 +182,7 @@ def _events(
     *,
     evaluation_evidence: dict[str, object],
 ) -> tuple[dict[str, object], ...]:
-    contract = load_frozen_forward_contract(PARAMETERS)
+    contract = load_forward_contract(PARAMETERS)
     capture, _readiness = _capture_evidence()
     ledger = None
     for phase, status, recorded_at, evidence in (
@@ -222,7 +221,7 @@ def _events(
 
 
 def _artifact_evidence(forward_root: Path) -> dict[str, object]:
-    contract = load_frozen_forward_contract(PARAMETERS)
+    contract = load_forward_contract(PARAMETERS)
     session_root = forward_root / "sessions" / SESSION.isoformat()
     source_content_sha256 = "sha256:" + "1" * 64
     screening_policy_id = "sha256:" + "2" * 64

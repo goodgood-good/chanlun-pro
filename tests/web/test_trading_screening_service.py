@@ -15,17 +15,19 @@ import cl_app.services.trading_screening as trading_screening_subject
 
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.live_human_review import (
-    MONITOR_ONLY_BUY_REASON_CODE,
     SECTOR_COVERAGE_CONTRACT_ID,
     live_screening_snapshot_content_sha256,
     screening_coverage_epoch_id,
+)
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    FORMAL_SELECTION_REQUIRED_REASON_CODE,
+    HumanAssistedDecisionCore,
 )
 from chanlun.decision_support.trading_system.human_review_screening import (
     market_symbol_higher_timeframe_review_evidence_from_risk,
 )
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
-    TradingEngine,
 )
 from chanlun.decision_support.trading_system.a_share_minute_grid import (
     a_share_optional_entry_valid_until,
@@ -51,6 +53,7 @@ from chanlun.decision_support.trading_system.sector_strength import (
     build_horizontal_sector_strength_batch,
 )
 from chanlun.decision_support.trading_system.selection import (
+    SelectionResearchSnapshot,
     SectorMemberHistory,
 )
 from chanlun.decision_support.trading_system.qmt_same_base_stream import (
@@ -79,6 +82,7 @@ from tests.trading_system.helpers import (
     neutral_context,
     provisional_point,
     supportive_context,
+    valid_selection_research,
 )
 from cl_app.services.trading_screening import (
     SIGNAL_DOCUMENT_CONTRACT_ID,
@@ -375,7 +379,7 @@ class ConcurrentRecordingMarketData(RecordingMarketData):
                 self._active -= 1
 
 
-class RecordingEngine:
+class RecordingEngine(HumanAssistedDecisionCore):
     def __init__(self) -> None:
         self.codes: list[str] = []
         self.bundles: list[SymbolStructureBundle] = []
@@ -428,7 +432,7 @@ def test_stock_structure_requests_use_configured_parallel_workers(
     service = TradingScreeningService(
         market_data=market,
         sector_catalog=MultiMemberSectorCatalog(symbols),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -561,6 +565,69 @@ def test_service_recovers_corrupt_primary_from_content_addressed_generation(
     assert health["cache_generation_error"] is None
 
 
+def test_research_revision_change_invalidates_snapshot_and_priority_state(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    priority_path = tmp_path / "trading_priority_monitor_state.json"
+    first = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    published = first.refresh_now()
+    first._priority_monitor_last_at = AS_OF
+    first._persist_priority_monitor_state()
+    persisted_priority = json.loads(priority_path.read_text(encoding="utf-8"))
+
+    research = SelectionResearchSnapshot(
+        snapshot_id="research:SZ.000001:20260720",
+        symbol="SZ.000001",
+        path="INDIVIDUAL_THREE_PROGRAM",
+        effective_at=AS_OF,
+        known_at=AS_OF,
+        valid_until=AS_OF + timedelta(days=30),
+        reviewer="研究员",
+        signature="signed:research:SZ.000001:20260720",
+        official_evidence_ids=("official:SZ.000001:20260720",),
+        industry_opportunity_status="PASS",
+        fundamental_role="LEADER",
+        relative_value_status="UNDERVALUED",
+        point_in_time_total_market_cap=Decimal("100000000000"),
+        peer_set_id="peer:bank:20260720",
+    )
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        selection_research=(research,),
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+
+    snapshot = restarted.snapshot()
+    assert snapshot["scan_state"] == "not_started"
+    assert snapshot["snapshot_content_sha256"] is None
+    assert snapshot["selection_research_revision"] != published[
+        "selection_research_revision"
+    ]
+    assert restarted._priority_monitor_last_at is None
+    assert persisted_priority["selection_research_revision"] != (
+        restarted._selection_research_revision
+    )
+    assert restarted.health_snapshot()["quarantined_cache_reason"] == (
+        "SELECTION_RESEARCH_REVISION_MISMATCH"
+    )
+
+
 def test_same_epoch_completed_progress_cannot_silently_reset(tmp_path: Path) -> None:
     cache_path = tmp_path / "snapshot.json"
     service = TradingScreeningService(
@@ -652,7 +719,7 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
             "5m": 12000,
             "1m": 12000,
         },
-        "unfinished_segment_candidates": True,
+        "provisional_point_source": "strict_approaching_ledger",
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",
         "qmt_one_minute_grid_revision": (
@@ -1572,7 +1639,7 @@ def test_old_signal_contract_is_rebuilt_without_reusing_signal_rows(
     first = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=full_plan,
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -1601,7 +1668,7 @@ def test_old_signal_contract_is_rebuilt_without_reusing_signal_rows(
     restarted = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=MultiMemberSectorCatalog(symbols),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=full_plan,
         cache_path=cache_path,
         clock=lambda: AS_OF + timedelta(minutes=10),
@@ -1680,7 +1747,7 @@ def test_incomplete_warmup_signal_contract_is_rejected_without_conversion(
     first = TradingScreeningService(
         market_data=ApproachingMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -1696,7 +1763,7 @@ def test_incomplete_warmup_signal_contract_is_rejected_without_conversion(
     signal["decision_reasons"] = [
         reason
         for reason in signal["decision_reasons"]
-        if reason != MONITOR_ONLY_BUY_REASON_CODE
+        if reason != FORMAL_SELECTION_REQUIRED_REASON_CODE
     ]
     signal["warmup"].pop("difference_codes_by_frequency", None)
     noncurrent_contract = "chanlun-human-assisted-signal-document"
@@ -1723,7 +1790,7 @@ def test_incomplete_warmup_signal_contract_is_rejected_without_conversion(
     restarted = TradingScreeningService(
         market_data=restarted_market,
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=cache_path,
         clock=lambda: AS_OF + timedelta(minutes=1),
@@ -1748,7 +1815,7 @@ def test_missing_decision_identity_contract_is_rejected_without_conversion(
     first = TradingScreeningService(
         market_data=ApproachingMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -1784,7 +1851,7 @@ def test_missing_decision_identity_contract_is_rejected_without_conversion(
     restarted = TradingScreeningService(
         market_data=restarted_market,
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=cache_path,
         clock=lambda: AS_OF + timedelta(minutes=1),
@@ -1811,7 +1878,7 @@ def test_incomplete_noncurrent_queue_is_not_resumed_by_current_runtime(
     first = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=MultiMemberSectorCatalog(symbols),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -1850,7 +1917,7 @@ def test_incomplete_noncurrent_queue_is_not_resumed_by_current_runtime(
     restarted = TradingScreeningService(
         market_data=restarted_market,
         sector_catalog=MultiMemberSectorCatalog(symbols),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=cache_path,
         clock=lambda: AS_OF + timedelta(minutes=1),
@@ -3084,7 +3151,7 @@ def test_snapshot_serializes_approaching_point_without_inventing_confirmation(
     service = TradingScreeningService(
         market_data=ApproachingMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3127,7 +3194,7 @@ def test_supportive_sector_is_the_only_native_sector_trigger(
     payload = TradingScreeningService(
         market_data=ApproachingMarketData(),
         sector_catalog=catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3137,7 +3204,49 @@ def test_supportive_sector_is_the_only_native_sector_trigger(
     [signal] = payload["signals"]
     assert signal["selection_sources"] == ["QMT_SECTOR_TRIGGER"]
     assert signal["sector_triggered"] is True
+    assert signal["monitor_only"] is True
+    assert signal["formal_selection"]["status"] == "UNRESOLVED"
+    assert FORMAL_SELECTION_REQUIRED_REASON_CODE in signal["decision_reasons"]
+
+
+def test_live_service_applies_visible_research_to_formal_buy_entry(
+    tmp_path: Path,
+) -> None:
+    supportive = replace(
+        eligible_sector(),
+        regime="supportive",
+        rank_components=(("thirty_support", 40),),
+        reason_codes=("test_supportive",),
+    )
+    catalog = RecordingSectorCatalog(
+        SectorAssessmentBatch(
+            assessments=(supportive,),
+            discovered_count=1,
+            completed_count=1,
+            failure_counts=(),
+            errors=(),
+        )
+    )
+
+    payload = TradingScreeningService(
+        market_data=ApproachingMarketData(),
+        sector_catalog=catalog,
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        selection_research=(valid_selection_research(),),
+        clock=lambda: AS_OF,
+        notifier=None,
+    ).refresh_now()
+
+    [signal] = payload["signals"]
+    assert signal["selection_research"]["snapshot_id"] == (
+        valid_selection_research().snapshot_id
+    )
+    assert signal["formal_selection"]["status"] == "PASS"
+    assert signal["sector_triggered"] is True
     assert signal["monitor_only"] is False
+    assert FORMAL_SELECTION_REQUIRED_REASON_CODE not in signal["decision_reasons"]
 
 
 def test_snapshot_exposes_exact_session_gap_without_claiming_suspension(
@@ -3146,7 +3255,7 @@ def test_snapshot_exposes_exact_session_gap_without_claiming_suspension(
     service = TradingScreeningService(
         market_data=SessionIssueMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3187,7 +3296,7 @@ def test_snapshot_binds_mwd_warmup_evidence(
     service = TradingScreeningService(
         market_data=WarmupIssueMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3256,7 +3365,7 @@ def test_newer_one_minute_signal_uses_frozen_mwd_cutoff_and_is_self_consistent(
     service = TradingScreeningService(
         market_data=market_data,
         sector_catalog=catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3281,7 +3390,7 @@ def test_presentation_snapshot_compacts_audit_only_evidence(
     service = TradingScreeningService(
         market_data=WarmupIssueMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3338,7 +3447,7 @@ def test_snapshot_binds_native_daily_reconciliation(
     service = TradingScreeningService(
         market_data=NativeDailyEvidenceMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3378,7 +3487,7 @@ def test_native_daily_ahead_snapshot_fails_closed(
     service = TradingScreeningService(
         market_data=NativeDailyAheadMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3400,7 +3509,7 @@ def test_snapshot_binds_unexplained_native_daily_gap_without_claiming_suspension
     service = TradingScreeningService(
         market_data=NativeDailyCalendarGapMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3439,7 +3548,7 @@ def test_snapshot_authenticates_sector_native_daily_research_cap(
     service = TradingScreeningService(
         market_data=SectorNativeDailyResearchMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -3472,7 +3581,7 @@ def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     first_service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -3482,7 +3591,7 @@ def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     second_service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=cache_path,
         clock=lambda: AS_OF + timedelta(minutes=1),
@@ -3511,7 +3620,7 @@ def test_confirmed_signal_serializes_causal_and_price_basis_evidence(
     service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -4351,9 +4460,10 @@ def test_priority_monitor_notification_is_early_and_idempotent(
     service = TradingScreeningService(
         market_data=WatchlistMarket(),
         sector_catalog=sector_catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=tmp_path / "snapshot.json",
+        selection_research=(valid_selection_research(),),
         clock=lambda: observed_at[0],
         notifier=dispatcher,
         config=TradingScreeningConfig(
@@ -4421,7 +4531,7 @@ def test_candidate_cadence_lane_cannot_emit_realtime_notification(
     service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -4510,7 +4620,7 @@ def test_partial_epoch_restores_exact_sector_batch_across_restart(
     first_service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=EvidenceSectorCatalog(first_batch, symbols),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -4529,7 +4639,7 @@ def test_partial_epoch_restores_exact_sector_batch_across_restart(
     restarted = TradingScreeningService(
         market_data=restarted_market,
         sector_catalog=changed_catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(("SHOULD.NOT.REPLAN",)),
         cache_path=cache_path,
         clock=lambda: AS_OF + timedelta(minutes=10),
@@ -4650,7 +4760,7 @@ def test_same_epoch_monitoring_with_changed_sector_identity_keeps_publication_im
     first_service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=EvidenceSectorCatalog(first_batch, symbols),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(symbols),
         cache_path=cache_path,
         clock=lambda: AS_OF,
@@ -4671,7 +4781,7 @@ def test_same_epoch_monitoring_with_changed_sector_identity_keeps_publication_im
     monitor_service = TradingScreeningService(
         market_data=monitor_market,
         sector_catalog=changed_catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(symbols),
         cache_path=cache_path,
         clock=lambda: preopen,
@@ -4717,7 +4827,7 @@ def test_same_epoch_monitoring_failure_keeps_valid_last_good_snapshot(
     service = TradingScreeningService(
         market_data=market,
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -5921,7 +6031,7 @@ def test_incremental_refresh_preserves_current_signals_for_unscanned_symbols(
     service = TradingScreeningService(
         market_data=ActionableMarketData(),
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((("SZ.000001",), ())),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -5942,7 +6052,7 @@ def test_active_monitoring_does_not_starve_new_sector_discovery(
     service = TradingScreeningService(
         market_data=market,
         sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner(
             (
                 ("SZ.000001",),
@@ -5999,7 +6109,7 @@ def test_watchlist_signal_keeps_its_native_unselected_sector_context(
     service = TradingScreeningService(
         market_data=market_data,
         sector_catalog=catalog,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((("SZ.000001",),)),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -6076,7 +6186,7 @@ def test_removed_nontradable_monitor_cannot_reenter_through_previous_signal(
     service = TradingScreeningService(
         market_data=market,
         sector_catalog=MixedSectorCatalog(),
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         scan_planner=PreviousScopePlanner(),
         cache_path=tmp_path / "snapshot.json",
         clock=lambda: AS_OF,
@@ -6218,6 +6328,7 @@ def test_cache_gate_rejects_rehashed_monitor_diagnostic_forgery(
         valid,
         service._config,
         service._decision_core_id,
+        service._selection_research_revision,
     )
 
     forged = json.loads(json.dumps(valid))
@@ -6228,11 +6339,16 @@ def test_cache_gate_rejects_rehashed_monitor_diagnostic_forgery(
         forged,
         service._config,
         service._decision_core_id,
+        service._selection_research_revision,
     )
 
 
 def test_monitor_only_scope_blocks_new_buy_but_preserves_sell_exit() -> None:
     buy = {
+        "code": "SZ.000001",
+        "observed_at": AS_OF.isoformat(),
+        "selection_path": "INDIVIDUAL_THREE_PROGRAM",
+        "selection_research": None,
         "side": "buy",
         "entry_allowed": True,
         "exit_allowed": False,
@@ -6245,9 +6361,16 @@ def test_monitor_only_scope_blocks_new_buy_but_preserves_sell_exit() -> None:
     assert buy["monitor_only"] is True
     assert buy["entry_allowed"] is False
     assert buy["risk_multiplier"] == "0"
-    assert buy["decision_reasons"] == ["current_qmt_sector_trigger_required"]
+    assert buy["decision_reasons"] == [
+        "SIGNED_SELECTION_RESEARCH_REQUIRED",
+        "QMT_SECTOR_TRIGGER_REQUIRED",
+    ]
 
     sell = {
+        "code": "SZ.000001",
+        "observed_at": AS_OF.isoformat(),
+        "selection_path": "INDIVIDUAL_THREE_PROGRAM",
+        "selection_research": None,
         "side": "sell",
         "entry_allowed": False,
         "exit_allowed": True,

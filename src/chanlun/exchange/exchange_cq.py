@@ -15,7 +15,7 @@ from tenacity import Retrying, stop_after_attempt, wait_exponential, retry_if_ex
 from longbridge.openapi import Config, QuoteContext, TradeContext, Market, Period, \
     AdjustType, OrderSide, OrderType, TimeInForceType, SecurityListCategory, TradeSessions, OpenApiException
 
-# Chanlun SDK imports
+# 缠论软件开发工具包导入。
 from chanlun import fun
 from chanlun import config
 from chanlun.exchange import Exchange
@@ -1019,7 +1019,7 @@ class ExchangeChangQiao(Exchange):
         try:
             # 同 timestamp 去重:实时进行中 bar 可能被多个分段各拉到一次(OHLC/volume 不同),
             # as_completed 完成顺序不确定 → 原 {ts:c} 字典推导保留"最后 extend 进来"的那个 = 末根
-            # bar 非确定(审查 M3)。改为同 ts 取 volume 最大者:进行中 bar volume 单调增,最大 = 最新
+            # K 线不确定时，同一时间戳取成交量最大者；进行中 K 线的成交量单调增加，最大值即最新值。
             # 快照,结果确定。历史 bar 各 ts 唯一,行为不变。
             _by_ts = {}
             for c in all_candles:

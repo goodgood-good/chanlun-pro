@@ -336,9 +336,8 @@ class AlertChartImageService:
                                 )
                             )
                     except Exception as exc:
-                        # The deterministic strict renderer below remains a
-                        # complete fallback.  Never turn one browser failure
-                        # into a second notification or a missed alert.
+        # 下方确定性的严格渲染器仍是完整回退方案；绝不能让一次浏览器失败
+        # 导致重复通知或漏报提醒。
                         fun.get_logger().warning(
                             "[notify] TradingView chart capture failed: %s",
                             type(exc).__name__,

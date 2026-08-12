@@ -181,10 +181,10 @@ def compute_and_cache_chart_data(
     market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
 ) -> bool:
     """全量计算前先取 per-key chart_calc_locks(与 tv_history/_do_revalidate 同锁域), 消除
-    prewarm 的 cl_data_to_tv_chart 读共享 CL 与用户 path-2 process_klines 改写的并发撕裂几何
-    (R8-C2: M5 "cache_lock 保证正确性" 只护 dict 写入, 漏了共享 CL 的并发读/改)。RLock 可重入:
+    预热的 cl_data_to_tv_chart 读取共享 CL 时，可能与用户增量路径的 process_klines 改写
+    产生并发撕裂；原缓存锁只保护字典写入，遗漏了共享 CL 的并发读写。RLock 可重入：
     _do_revalidate 已持锁的嵌套调用即成功、行为不变; 裸 prewarm(symbols.py)取新锁→与用户互斥。
-    非阻塞: 他方正持锁算同 key 时让位(其结果会入缓存, 保 M5 "prewarm 让位用户" 语义、不加用户
+    非阻塞：他方正持锁计算同一键时让位（其结果会入缓存，保持“预热让位用户”语义、不增加用户
     延迟), 跳过视为已覆盖返回 True。"""
     cache_key = _build_cache_key(market, code, frequency, cl_config)
     _calc_lock = chart_calc_locks.get(cache_key)
@@ -204,7 +204,7 @@ def _compute_and_cache_chart_data_impl(
     """完整复刻 ``tv_history`` 中 cache miss 后的计算路径，把结果写入 ``chart_data_cache``。
 
     返回 True 表示成功写入缓存（数据非空），False 表示中途无数据
-    （空拉取只写负缓存、不再标 validated：R5-#4，避免重置陈旧快照 validated_at）。
+    （空拉取只写负缓存、不再标记已验证，避免重置陈旧快照的 validated_at）。
 
     设计目的：让 ``symbols.py`` 的批量预热与用户实际打开图表时走完全相同的计算逻辑，
     避免预热结果"少算"了 higher_macd 等指标，导致用户切换时仍然 cache miss。
@@ -408,7 +408,8 @@ def _miss_source_is_full(is_range_request, cache_miss_reason, cd_is_none) -> boo
 
     与 tv.py 对 entry 写入 is_full_snapshot 的口径一致: 非 range 请求 / cache_empty(均按全量
     回看拉取)/ prepend(cd is None: head/tail gap 整体重算全量)→ 全量; range-miss(窄 kline_args
-    独立计算)→ 窄。F2-R1: 漏 cd_is_none 会使 tail_gap 轮询误判为窄 → 纯轮询下幽灵不清。
+    独立计算）为窄范围。遗漏 cd_is_none 会使 tail_gap 轮询误判为窄范围，
+    导致纯轮询下残留数据无法清除。
     """
     return (not is_range_request) or (cache_miss_reason == "cache_empty") or bool(cd_is_none)
 

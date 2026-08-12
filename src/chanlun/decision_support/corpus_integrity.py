@@ -13,7 +13,7 @@ from .corpus_types import CorpusFile, IntegrityIssue, IntegrityReport
 
 try:
     from PIL import Image
-except ImportError:  # Structural validation remains available without Pillow.
+except ImportError:  # 未安装 Pillow 时仍保留结构校验能力。
     Image = None
 
 

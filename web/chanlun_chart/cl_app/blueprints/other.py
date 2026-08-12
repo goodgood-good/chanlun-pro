@@ -150,13 +150,13 @@ def ticks():
         try:
             now_trading = market_now_trading(ex, market)
         except Exception as exc:
-            # Market-hours metadata is advisory. Preserve successfully fetched
-            # prices and expose an unknown state instead of discarding the batch.
+        # 市场时段元数据仅供参考。保留成功获取的价格并暴露未知状态，
+        # 不要丢弃整批结果。
             LogUtil.warning(
                 f"/ticks market state unavailable market={market} err={exc}"
             )
             now_trading = None
-        # R4-C6: rate 可为 None(ib 透传 redis / binance ccxt percentage 缺省), 原列表推导内
+        # rate 可为 None（盈透经 Redis 透传或币安 ccxt 缺少 percentage），原列表推导中
         # float(None) 抛 TypeError 被外层 except 吞→整批(含健康标的)清空且 now_trading=False
         # 停掉前端轮询。改逐标的隔离 + `or 0` 守零, 镜像 /tv/quotes(tv.py:637)。
         res_ticks = []
@@ -166,7 +166,7 @@ def ticks():
             try:
                 _price = float(_t.last)
                 _rate = round(float(_t.rate or 0), 2)
-                # R14-C1: NaN/Inf 不是合法 JSON(Flask allow_nan=True 输出裸 NaN token
+                # NaN/Inf 不是合法 JSON（Flask 的 allow_nan=True 会输出裸 NaN 标记，
                 # 打断前端严格 JSON.parse → 整批含健康标的全失败), 镜像 /tv/quotes(tv.py:654)降级跳过。
                 if not math.isfinite(_price) or not math.isfinite(_rate):
                     continue

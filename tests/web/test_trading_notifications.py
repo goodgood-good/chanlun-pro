@@ -270,19 +270,7 @@ def test_newly_discovered_triggered_signal_only_seeds_the_baseline(
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     (
-        ({"entry_allowed": False}, "ENTRY_NOT_ALLOWED"),
         ({"warmup": {"converged": False}}, "WARMUP_NOT_CONVERGED"),
-        (
-            {
-                "higher_timeframe_risk": {
-                    "market_gate": "GREEN",
-                    "sector_gate": "AMBER",
-                    "symbol_gate": "GREEN",
-                }
-            },
-            "HIGHER_TIMEFRAME_GATE_NOT_GREEN",
-        ),
-        ({"sector_triggered": False}, "CURRENT_SECTOR_TRIGGER_REQUIRED"),
         (
             {"physical_timeframe_recursive": False},
             "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING",
@@ -310,6 +298,40 @@ def test_buy_transition_fails_closed_when_decision_gate_is_not_proven(
     assert health["last_suppressed_reason"] == reason
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"entry_allowed": False},
+        {
+            "entry_allowed": False,
+            "higher_timeframe_risk": {
+                "market_gate": "GREEN",
+                "sector_gate": "AMBER",
+                "symbol_gate": "GREEN",
+            },
+        },
+        {"entry_allowed": False, "sector_triggered": False},
+    ),
+)
+def test_confirmed_buy_point_notifies_even_when_formal_entry_is_blocked(
+    tmp_path: Path,
+    mutation: dict[str, object],
+) -> None:
+    sender = RecordingNotifier()
+    current = signal_document("triggered")
+    current.update(mutation)
+
+    SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "structural-buy.json",
+    ).dispatch_changes(snapshot("armed"), {"signals": [current]})
+
+    assert len(sender.messages) == 1
+    rendered = "\n".join(sender.messages[0][1])
+    assert "仅结构确认" in rendered
+    assert "正式准入未完成" in rendered
+
+
 def test_stale_or_expired_one_minute_trigger_never_notifies(tmp_path: Path) -> None:
     sender = RecordingNotifier()
     dispatcher = SignalNotificationDispatcher(
@@ -325,7 +347,7 @@ def test_stale_or_expired_one_minute_trigger_never_notifies(tmp_path: Path) -> N
     assert dispatcher.health_snapshot()["last_suppressed_reason"] == "TRIGGER_STALE"
 
 
-def test_expired_entry_boundary_never_notifies_even_while_trigger_is_fresh(
+def test_expired_entry_boundary_still_notifies_the_structural_point(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -342,13 +364,11 @@ def test_expired_entry_boundary_never_notifies_even_while_trigger_is_fresh(
 
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [expired]})
 
-    assert sender.messages == []
-    assert (
-        dispatcher.health_snapshot()["last_suppressed_reason"] == "ENTRY_WINDOW_EXPIRED"
-    )
+    assert len(sender.messages) == 1
+    assert "仅结构确认" not in "\n".join(sender.messages[0][1])
 
 
-def test_sell_transition_requires_an_actual_holding_exit_decision(
+def test_sell_transition_notifies_without_an_actual_holding_exit_decision(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -374,8 +394,10 @@ def test_sell_transition_requires_an_actual_holding_exit_decision(
         {"signals": [sell]},
     )
 
-    assert sender.messages == []
-    assert dispatcher.health_snapshot()["last_suppressed_reason"] == "EXIT_NOT_ALLOWED"
+    assert len(sender.messages) == 1
+    rendered = "\n".join(sender.messages[0][1])
+    assert "仅结构确认" in rendered
+    assert "持仓者优先复核" in rendered
 
 
 def test_same_trigger_stage_upgrade_does_not_send_twice(tmp_path: Path) -> None:
@@ -461,7 +483,7 @@ def test_event_audit_persists_delivery_and_suppression_facts(tmp_path: Path) -> 
     sender = RecordingNotifier()
     dispatcher = SignalNotificationDispatcher(sender, state_path=state_path)
     blocked = signal_document("triggered")
-    blocked["entry_allowed"] = False
+    blocked["physical_timeframe_recursive"] = False
 
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [blocked]})
     dispatcher.dispatch_changes(snapshot("armed"), snapshot("triggered"))
@@ -471,7 +493,7 @@ def test_event_audit_persists_delivery_and_suppression_facts(tmp_path: Path) -> 
         "suppressed",
         "delivered",
     ]
-    assert persisted["event_audit"][0]["reason"] == "ENTRY_NOT_ALLOWED"
+    assert persisted["event_audit"][0]["reason"] == "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING"
     assert persisted["event_audit"][1]["trigger_available_at"] == (
         "2026-07-20T10:01:00+08:00"
     )
@@ -553,7 +575,9 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
     )
     assert title.endswith("5分钟三类卖点")
     assert "防守价：10.80（突破卖出结构失效）" in "\n".join(lines)
-    assert lines[-1] == "建议：优先检查退出条件"
+    assert lines[-1] == (
+        "建议：结构卖点已确认；持仓者优先复核减仓或退出，非持仓仅作走势观察"
+    )
 
     _title, invalidated_lines = format_notification(
         sell,

@@ -5,10 +5,8 @@ from dataclasses import replace
 from chanlun.core.strict_structure.models import (
     CenterState,
     StrictStructureResult,
-    TrendKind,
 )
 from chanlun.core.strict_structure.strength import (
-    MacdStrengthUnavailable,
     center_departure_comparison_leg,
     center_entry_comparison_leg,
     compare_comparison_legs,
@@ -127,68 +125,19 @@ def compare_center_consolidation_divergence(
     )
 
 
-def collect_strict_divergences(structure, strength):
+def collect_formal_divergence_ledger(
+    structure,
+    confirmed_points=(),
+):
+    """从正式结构和买卖点中汇总唯一的背驰证据账本。
+
+    背驰只能由走势装配阶段确认，并由走势边界、正式走势或买卖点引用。这里不再
+    针对所有历史中枢重新计算另一套背驰，避免不同分段起点产生没有对应一类点的
+    孤立证据。
+    """
+
     if not isinstance(structure, StrictStructureResult):
         raise TypeError("structure must be a StrictStructureResult")
-    by_id = {}
-    for level in structure.levels:
-        trend_center_ids = {
-            center.center_id
-            for trend in (*level.trend_types, *level.completed_trends)
-            if trend.kind is TrendKind.TREND
-            for center in trend.centers
-        }
-        for boundary in level.decomposition_boundaries:
-            evidence = boundary.divergence
-            previous = by_id.setdefault(evidence.divergence_id, evidence)
-            if previous != evidence:
-                raise ValueError("divergence id maps to conflicting evidence")
-
-        for center in level.center_result.centers:
-            # 两个分离中枢已经组成趋势时，只保留趋势末端的 A/C 比较；不能再给
-            # 其中的单个中枢重复标注盘整背驰，否则同一段走势会有两种分类。
-            if center.center_id in trend_center_ids:
-                continue
-            try:
-                evidence = compare_center_consolidation_divergence(
-                    center,
-                    level.units,
-                    strength,
-                )
-            except MacdStrengthUnavailable:
-                continue
-            if evidence is not None and evidence.is_divergent:
-                previous = by_id.setdefault(evidence.divergence_id, evidence)
-                if previous != evidence:
-                    raise ValueError("divergence id maps to conflicting evidence")
-
-        for trend in level.completed_trends:
-            evidence = trend.terminal_divergence
-            if evidence is None or not evidence.is_divergent:
-                continue
-            previous = by_id.setdefault(evidence.divergence_id, evidence)
-            if previous != evidence:
-                raise ValueError("divergence id maps to conflicting evidence")
-
-    return tuple(
-        sorted(
-            by_id.values(),
-            key=lambda item: (
-                item.available_at,
-                item.structural_level,
-                item.kind,
-                item.divergence_id,
-            ),
-        )
-    )
-
-
-def merge_formal_divergence_ledger(
-    structure,
-    confirmed_points,
-    divergences=(),
-):
-    """汇总结构与买卖点中嵌入的全部正式背驰证据。"""
 
     by_id = {}
 
@@ -199,8 +148,6 @@ def merge_formal_divergence_ledger(
         if previous != evidence:
             raise ValueError("divergence id maps to conflicting evidence")
 
-    for evidence in divergences:
-        record(evidence)
     for point in confirmed_points:
         record(point.divergence)
     for level in structure.levels:

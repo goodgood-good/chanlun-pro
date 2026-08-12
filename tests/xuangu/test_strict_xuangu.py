@@ -54,7 +54,14 @@ def _divergence(
     )
 
 
-def _evidence(frequency: str, *, points=(), divergences=(), levels=1):
+def _evidence(
+    frequency: str,
+    *,
+    points=(),
+    divergences=(),
+    boundaries=(),
+    levels=1,
+):
     structure_levels = tuple(
         SimpleNamespace(
             structural_level=level,
@@ -64,6 +71,9 @@ def _evidence(frequency: str, *, points=(), divergences=(), levels=1):
                     unit_id="terminal" if level == 0 else f"terminal-l{level}",
                     locked=True,
                 ),
+            ),
+            decomposition_boundaries=(
+                tuple(boundaries) if level == 0 else ()
             ),
         )
         for level in range(levels)
@@ -116,9 +126,30 @@ def test_single_class_selection_requires_current_terminal_point(monkeypatch) -> 
 
 
 def test_third_after_first_uses_same_strict_point_ledger(monkeypatch) -> None:
-    first = _point("1buy", anchor="old", at=NOW - timedelta(hours=1))
+    divergence = _divergence(
+        "down",
+        signal="old",
+        at=NOW - timedelta(hours=1),
+    )
+    first = _point(
+        "1buy",
+        anchor="old",
+        at=NOW - timedelta(hours=1),
+        divergence=divergence,
+    )
     third = _point("3buy")
-    evidence = _evidence("5m", points=(first, third))
+    boundary = SimpleNamespace(
+        anchor_unit_id="old",
+        anchor_at=first.anchor_at,
+        available_at=first.available_at,
+        boundary_id="boundary-current-partition",
+        divergence=divergence,
+    )
+    evidence = _evidence(
+        "5m",
+        points=(first, third),
+        boundaries=(boundary,),
+    )
     monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
 
     result = strict_xuangu.select_strict_class3_after_class1(
@@ -129,6 +160,19 @@ def test_third_after_first_uses_same_strict_point_ledger(monkeypatch) -> None:
 
     assert result is not None
     assert "严格一类点" in result["msg"]
+
+
+def test_third_after_first_rejects_unrelated_historical_first(monkeypatch) -> None:
+    stale = _point("1buy", anchor="old", at=NOW - timedelta(days=20))
+    third = _point("3buy")
+    evidence = _evidence("5m", points=(stale, third))
+    monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
+
+    assert strict_xuangu.select_strict_class3_after_class1(
+        "SH.600000",
+        _market_datas("5m"),
+        ["long"],
+    ) is None
 
 
 def test_multi_frequency_selection_matches_point_or_divergence_side(monkeypatch) -> None:

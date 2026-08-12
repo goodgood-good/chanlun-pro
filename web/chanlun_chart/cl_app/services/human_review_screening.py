@@ -90,7 +90,7 @@ from chanlun.decision_support.trading_system.forward_paper import (
     audit_forward_implementation_continuity,
     audit_forward_paper_session_delivery,
     load_forward_paper_ledger,
-    load_frozen_forward_contract,
+    load_forward_contract,
 )
 from chanlun.decision_support.trading_system.live_human_review import (
     live_human_review_document,
@@ -469,9 +469,8 @@ _SECTOR_RANKING_CATALOG_ENTRY_REASONS = {
     ),
 }
 
-# A long-running web process may continue executing already imported code after
-# files on disk change.  Capture the manifest once at process import instead of
-# falsely attributing an old in-memory implementation to the newer disk state.
+# 长期运行的网页进程在磁盘文件变化后仍可能执行已导入代码，因此在进程导入时固定一次
+# 实现清单，避免把旧内存实现错误归因到较新的磁盘状态。
 _WEB_PROCESS_DECISION_SOURCE_SNAPSHOT = current_decision_source_snapshot()
 _WEB_PROCESS_DECISION_SOURCE_SNAPSHOT_ID = decision_source_snapshot_id(
     _WEB_PROCESS_DECISION_SOURCE_SNAPSHOT
@@ -812,10 +811,9 @@ class HumanReviewScreeningService:
             parameter_snapshot
             if parameter_snapshot is not None
             else repository_root
-            / "audit"
-            / "chanlun_trading_system_backtest"
-            / "recent_year_current_sector_no3p"
-            / "parameter_snapshot_human_review.json"
+            / "config"
+            / "decision_support"
+            / "human_review_parameters.json"
         ).resolve()
         self.live_screening_snapshot = (
             None
@@ -834,31 +832,24 @@ class HumanReviewScreeningService:
             else forward_warmup_lineage_report
         ).resolve()
         self._write_lock = threading.RLock()
-        # Immutable reports are content addressed.  Parsing and semantically
-        # validating a full-market report can be CPU-heavy, so retain a small
-        # exact-stat cache for repeated page/detail/feedback reads.  Ledger and
-        # scheduler overlays remain recomputed on every request; only the
-        # immutable source report and alert objects are reused.
+        # 不可变报告按内容寻址。解析并语义校验全市场报告可能消耗大量 CPU，因此保留
+        # 小型精确文件状态缓存，供页面、详情和反馈重复读取。账本与调度覆盖仍在每次
+        # 请求时重算，只复用不可变源报告和提醒对象。
         self._report_cache_lock = threading.RLock()
         self._report_cache: dict[
             tuple[str, int, int],
             tuple[dict[str, object], tuple[HumanReviewAlert, ...]],
         ] = {}
-        # The child process also publishes a compact, hash-bound Web index.
-        # It avoids parsing/validating the 80+ MiB evidence archive in Flask;
-        # one full candidate is read from the JSONL detail store only after a
-        # reviewer selects it or submits feedback.
+        # 子进程还会发布紧凑且绑定哈希的网页索引，避免 Flask 解析和校验超过 80 MiB
+        # 的证据归档；只有复核者选中候选或提交反馈时，才从 JSONL 详情库读取完整候选。
         self._web_bundle_cache_lock = threading.RLock()
         self._web_bundle_cache: dict[
             tuple[str, int, int, str, int, int],
             _LoadedWebBundle,
         ] = {}
-        # ``forward_delivery_readiness`` authenticates the complete forward
-        # ledger, its immutable artifacts and the current implementation
-        # provenance.  That strict audit intentionally remains synchronous for
-        # direct callers, but it must never turn ``/readyz`` into a multi-minute
-        # request.  The app-facing method below owns one background validation
-        # and caches only the verdict for the exact input identity.
+        # ``forward_delivery_readiness`` 认证完整前向账本、不可变工件和当前实现来源。
+        # 直接调用者仍执行同步严格审计，但不能让 ``/readyz`` 变成数分钟请求；下方应用
+        # 方法只运行一个后台校验，并仅按精确输入身份缓存判定。
         self._forward_delivery_readiness_lock = threading.Lock()
         self._forward_delivery_readiness_cache_key: tuple[object, ...] | None = None
         self._forward_delivery_readiness_cache: dict[str, object] | None = None
@@ -1053,12 +1044,9 @@ class HumanReviewScreeningService:
         )
         if materialized is not None:
             return materialized
-        # Small fixtures and compact deployments keep the original immediate
-        # behavior.  A full-market snapshot is 100+ MiB; parsing and validating
-        # it here would monopolize the Web interpreter.  The screening service
-        # validates that exact file in a child process and atomically publishes
-        # the receipt consumed above.  Until then the previous immutable report
-        # remains available and is explicitly shown as stale/review-only.
+        # 小型夹具和紧凑部署保留即时行为。全市场快照超过 100 MiB，在此解析校验会独占
+        # 网页解释器；筛选服务改由子进程校验该精确文件并原子发布上方消费的回执。在此
+        # 之前，上一份不可变报告仍可用，但会明确标为过期且仅供复核。
         try:
             if source.stat().st_size > _MAX_SYNCHRONOUS_LIVE_SNAPSHOT_BYTES:
                 return None
@@ -1068,10 +1056,8 @@ class HumanReviewScreeningService:
         try:
             review_at, _signals = validate_live_review_snapshot(payload)
             session = review_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-            # Validation above independently recomputes this semantic identity.
-            # Re-hashing the full mutable JSON would let generated_at, pacing
-            # timings and coverage batch counters create a new candidate/report
-            # even though every market and decision fact is unchanged.
+            # 上方校验会独立重算该语义身份；若重新哈希完整可变 JSON，生成时间、节奏计时
+            # 和覆盖批次计数会在市场与决策事实完全不变时制造新候选或新报告。
             source_sha256 = str(payload["snapshot_content_sha256"])
             report = live_human_review_document(
                 live_snapshot=payload,
@@ -1305,12 +1291,9 @@ class HumanReviewScreeningService:
                 if _IMMUTABLE_REPORT_NAME.fullmatch(value.name) is not None
             )
         )
-        # A coverage epoch is legitimately incomplete while the background
-        # scanner is still working.  Such a snapshot must never be promoted,
-        # but it must not make the last immutable live report (or the forward
-        # and historical sources) unreadable.  Treat only the current mutable
-        # candidate as unavailable; archived reports remain independently
-        # verifiable below.
+        # 后台扫描仍在运行时，覆盖周期可以合理地尚未完成。该快照绝不能晋级，但也不能
+        # 使最后一份不可变实时报告或前向/历史来源无法读取；只把当前可变候选视为不可用，
+        # 归档报告仍可在下方独立验证。
         try:
             current = self._materialize_live_report()
         except HumanReviewScreenUnavailable:
@@ -1371,7 +1354,7 @@ class HumanReviewScreeningService:
     def _load_path(
         self, kind: str, path: Path
     ) -> tuple[dict[str, object], tuple[HumanReviewAlert, ...]]:
-        del kind  # The immutable file identity, not its presentation lane, keys it.
+        del kind  # 以不可变文件标识为键，而不是展示通道。
         try:
             resolved = path.resolve()
             stat = resolved.stat()
@@ -1504,8 +1487,7 @@ class HumanReviewScreeningService:
     def _current_market_session(self) -> date | None:
         path = self.live_screening_snapshot
         if path is None:
-            # Forward-only/test deployments retain their existing behaviour;
-            # production always configures this independently verified source.
+            # 仅前向或测试部署保留原行为；生产环境始终配置这一独立验证来源。
             return None
         bundle = self._current_web_bundle()
         if bundle is not None:
@@ -1667,8 +1649,7 @@ class HumanReviewScreeningService:
 
         provider = self._forward_scheduler_provider
         if provider is None:
-            # Direct research/test services may deliberately omit the forward
-            # operations adapter. Production injects the strict shared probe.
+            # 直接研究或测试服务可有意省略前向运行适配器；生产环境会注入严格共享探针。
             return True, None
         try:
             scheduler = validate_forward_scheduler_snapshot(
@@ -1694,15 +1675,10 @@ class HumanReviewScreeningService:
         due = self._sector_capture_due
         if due is None:
             return True, None
-        # ``due`` configures the operational Capture schedule; it is not a
-        # license to fabricate point-in-time evidence before that schedule has
-        # run.  A pre-deadline virtual intent could otherwise be stranded when
-        # Capture later fails: the post-close evaluator correctly refuses to
-        # backfill the missing receipt, leaving the intent to poison the next
-        # session's causal-continuity audit.  Require the immutable receipt at
-        # every time of day.  The same idempotent human feedback may be retried
-        # after Capture and reconciled into an intent without losing review
-        # work.
+        # ``due`` 只配置采集运行计划，不能授权在计划执行前伪造时点证据。否则截止前创建的
+        # 虚拟意图可能在后续采集失败时悬空：收盘后评估器会正确拒绝补填缺失回执，悬空
+        # 意图则污染下一交易日的因果连续性审计。因此全天都必须要求不可变回执；同一条
+        # 幂等人工反馈可在采集后重试并对账成意图，不会丢失复核工作。
         try:
             capture = self.forward_archive_capture_readiness(session=source_session)
         except (OSError, RuntimeError, TypeError, ValueError):
@@ -2069,9 +2045,7 @@ class HumanReviewScreeningService:
                 "real_order_transport_enabled": False,
                 "live_status": "LIVE_DISABLED",
             }
-        # The complete catalog and receipt documents can be large and are
-        # already available from their dedicated audited surfaces.  Readiness
-        # exposes only their immutable identities and verdict.
+        # 完整目录与回执文档可能很大，且已有专门审计界面；就绪接口只暴露其不可变身份和判定。
         return (
             {
                 key: value
@@ -2131,11 +2105,10 @@ class HumanReviewScreeningService:
         if not path.is_file():
             return None
         try:
-            contract = load_frozen_forward_contract(self.parameter_snapshot)
+            contract = load_forward_contract(self.parameter_snapshot)
             ledger = load_forward_paper_ledger(path, contract=contract)
         except (OSError, TypeError, ValueError):
-            # Keep the review page available, but do not turn a missing or
-            # invalid anchor ledger into a falsely verified empty history.
+            # 保持复核页面可用，但不能把缺失或无效的锚定账本伪装成已验证的空历史。
             return None
         return tuple(dict(value) for value in ledger.get("events") or ())
 
@@ -2313,9 +2286,8 @@ class HumanReviewScreeningService:
             }
         valuation_source: dict[str, object] = {
             "forward_root": self.forward_root,
-            # Loaded through the frozen forward contract/hash-chain verifier.
-            # These successful execution sessions prove valuation continuity
-            # without inferring weekends or exchange holidays.
+            # 这些事件通过冻结前向契约和哈希链校验器加载；成功执行的交易日可直接证明
+            # 估值连续性，无需推断周末或交易所假日。
             "forward_events": forward_event_source,
         }
         if accounting_parameters is not None:
@@ -2418,10 +2390,8 @@ class HumanReviewScreeningService:
                 and isinstance(event.get("payload"), Mapping)
                 and isinstance(event["payload"].get("feedback_id"), str)
             }
-            # An operational gate may accept/hash the review before it is safe
-            # to create a virtual intent. Expose that exact, idempotently
-            # retryable gap instead of requiring a second human judgement
-            # after the scheduler or same-session Capture recovers.
+            # 运行闸门可能在安全创建虚拟意图前就接受并哈希复核。应暴露这一精确且可幂等
+            # 重试的缺口，而不是在调度器或同交易日采集恢复后要求再次人工判断。
             paper_reconciliation_pending = bool(
                 isinstance(latest_feedback, Mapping)
                 and candidate_paper_reconcilable
@@ -2464,8 +2434,7 @@ class HumanReviewScreeningService:
                     "paper_observation_reason": (candidate_paper_observation_reason),
                     "confidence": alert.confidence,
                     "review_priority": alert.review_priority,
-                    # Presentation-only fields.  They neither modify the
-                    # source alert nor authorize a trade.
+                    # 仅展示字段，既不修改源提醒，也不授权交易。
                     "review_lane": review_lane,
                     "sector_horizontal_rank": sector_horizontal_rank,
                     "sector_horizontal_strength": (sector_horizontal_strength),
@@ -2572,9 +2541,8 @@ class HumanReviewScreeningService:
                     "warning_codes": list(alert.warning_codes),
                     "source_fact_ids": list(alert.source_fact_ids),
                     "review_checklist": list(alert.review_checklist),
-                    # Bounded multi-prefix evidence is presentation-only and
-                    # bound to this exact screen hash.  It is intentionally
-                    # absent from alert/candidate identities and queue sorting.
+                    # 有界多前缀证据只用于展示并绑定到当前屏幕哈希；它有意不进入提醒/候选
+                    # 身份和队列排序。
                     "deep_warmup_diagnostic": candidate_warmup_views.get(alert.symbol),
                     "status": "REVIEW_REQUIRED",
                     "live_status": "LIVE_DISABLED",
@@ -3077,7 +3045,7 @@ class HumanReviewScreeningService:
         trading_session_evidence = requirement["trading_session_evidence"]
         ledger_path = self.forward_root / "forward_paper_ledger.json"
         try:
-            contract = load_frozen_forward_contract(self.parameter_snapshot)
+            contract = load_forward_contract(self.parameter_snapshot)
             ledger = (
                 load_forward_paper_ledger(ledger_path, contract=contract)
                 if ledger_path.is_file()
@@ -3184,8 +3152,7 @@ class HumanReviewScreeningService:
         except FileNotFoundError:
             return str(path), False, 0, 0
         except OSError:
-            # A transiently unreadable path must not reuse a previously ready
-            # result.  The changed sentinel forces a fail-closed revalidation.
+            # 路径暂时不可读时不能复用先前就绪结果；变化哨兵会强制重新执行关闭失败校验。
             return str(path), False, -1, -1
         return str(path), True, int(stat.st_size), int(stat.st_mtime_ns)
 
@@ -3266,7 +3233,7 @@ class HumanReviewScreeningService:
     ) -> None:
         try:
             result = self.forward_delivery_readiness(session=session)
-        except Exception as exc:  # readiness must remain observable, never hang
+        except Exception as exc:  # 就绪状态必须始终可观测，绝不能挂起。
             observed_at = self._clock()
             if observed_at.tzinfo is None:
                 observed_at = observed_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))

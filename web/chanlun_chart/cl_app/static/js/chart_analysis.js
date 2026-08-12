@@ -665,6 +665,12 @@
       renderRevision: null,
       priceBasisRevision: null,
       structurePriceQuantum: null,
+      formalDirection: 'neutral',
+      formalDirectionLabel: '正式方向待确认',
+      formalDirectionLevel: null,
+      formalDirectionTrendId: null,
+      formalDirectionSupportPointId: null,
+      formalDirectionReasonCodes: [],
       trends: [],
       completedTrends: [],
       formalCenters: [],
@@ -728,6 +734,15 @@
     ) {
       throw new Error('严格结构集合无效');
     }
+    const formalDirection = snapshot.formal_direction;
+    if (!formalDirection || !['up', 'down', 'neutral'].includes(formalDirection.direction)
+      || !Array.isArray(formalDirection.reason_codes)
+      || formalDirection.reason_codes.length === 0
+      || formalDirection.reason_codes.some((value) => typeof value !== 'string' || !value)
+      || (formalDirection.structural_level !== null
+        && !Number.isInteger(formalDirection.structural_level))) {
+      throw new Error('严格结构正式方向证据无效');
+    }
 
     const expectedFrequency = strictFrequencyFromResolution(options.resolution);
     if (snapshot.display_frequency !== expectedFrequency
@@ -769,7 +784,8 @@
   function summarizeStrictCenter(item, qualification) {
     const core = item && item.core && typeof item.core === 'object' ? item.core : {};
     return {
-      centerId: item.center_id,
+      centerId: item.center_id || null,
+      previewId: item.preview_id || null,
       renderId: item.render_id,
       bodyRevision: item.body_revision,
       structuralLevel: item.structural_level,
@@ -810,7 +826,8 @@
       state: item.state,
       kind: item.kind,
       direction,
-      directionLabel: DIRECTION_LABELS[direction] || '方向待定',
+      directionLabel: DIRECTION_LABELS[direction]
+        ? `几何${DIRECTION_LABELS[direction]}` : '几何方向待定',
       tradable: item.tradable === true,
       centerIds: Array.isArray(item.center_ids) ? item.center_ids.slice() : [],
       confirmedAt: toSeconds(item.confirmed_at),
@@ -855,6 +872,8 @@
       centerOrdinal: numeric(item.center_ordinal),
       parentPointId: item.parent_point_id || null,
       relatedPointIds: Array.isArray(item.related_point_ids) ? item.related_point_ids.slice() : [],
+      smallToLargeCarrierUnitIds: Array.isArray(item.small_to_large_carrier_unit_ids)
+        ? item.small_to_large_carrier_unit_ids.slice() : [],
       missingConditions: Array.isArray(item.missing_conditions) ? item.missing_conditions.slice() : [],
       evidenceCodes: Array.isArray(item.evidence_codes) ? item.evidence_codes.slice() : [],
       evidenceText: strictEvidenceText(item),
@@ -1004,6 +1023,12 @@
     );
     const narrative = structureNarrative(bi, xd, biZone, xdZone);
     const plan = buildPlan(bi, xd, biZone, xdZone);
+    const formalDirection = snapshot.formal_direction;
+    const formalDirectionLabel = formalDirection.direction === 'up'
+      ? '正式上涨'
+      : formalDirection.direction === 'down'
+        ? '正式下跌'
+        : '正式方向待确认';
 
     return {
       ...base,
@@ -1015,6 +1040,12 @@
       renderRevision: snapshot.render_revision,
       priceBasisRevision: snapshot.price_basis_revision,
       structurePriceQuantum: snapshot.structure_price_quantum,
+      formalDirection: formalDirection.direction,
+      formalDirectionLabel,
+      formalDirectionLevel: formalDirection.structural_level,
+      formalDirectionTrendId: formalDirection.trend_id,
+      formalDirectionSupportPointId: formalDirection.support_point_id,
+      formalDirectionReasonCodes: formalDirection.reason_codes.slice(),
       trends,
       completedTrends,
       formalCenters,

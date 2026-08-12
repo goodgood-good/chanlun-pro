@@ -1,4 +1,9 @@
-"""Idempotent lifecycle notifications for read-only trading signals."""
+"""只读买卖点生命周期通知。
+
+通知负责报告已经确认的结构事实，不把“买卖点已出现”偷换成“已经具备下单
+资格”。三程序、月周日风险门、板块门和执行边界仍决定正式准入状态，并在
+通知正文中明确披露。
+"""
 
 from __future__ import annotations
 
@@ -97,7 +102,7 @@ def _stage(signal: Mapping[str, object] | None) -> str | None:
 
 
 def _stage_label(stage: str | None) -> str:
-    """Translate a stable lifecycle enum only at the presentation boundary."""
+    """只在展示边界翻译稳定的生命周期枚举。"""
 
     if stage is None or stage == "None":
         return "首次发现"
@@ -129,7 +134,7 @@ def _trigger_occurrence_key(
     signal: Mapping[str, object],
     new_stage: str,
 ) -> tuple[str, ...] | None:
-    """Identify one visible trigger even when several 5m setups consume it."""
+    """即使多个 5m 形态共用触发点，也只识别一个可见触发。"""
 
     if new_stage not in {"triggered", "executable"}:
         return None
@@ -204,11 +209,11 @@ def _notification_eligibility_reason(
     *,
     new_stage: str,
 ) -> str | None:
-    """Fail closed unless a transition is a current, executable decision.
+    """只允许当前、可验证的一分钟结构触发进入通知通道。
 
-    A lifecycle ``triggered`` value is only a structural fact.  It is not an
-    instruction to notify: the serialized decision, warmup convergence and the
-    one-minute execution window remain authoritative.
+    ``entry_allowed`` 和 ``exit_allowed`` 是正式操作资格，不是买卖点是否
+    存在的判据。风险门、三程序或持仓身份未通过时，结构点仍需通知，但正文
+    必须标明仅供观察；结构权威、预热收敛、触发确认和时效性仍然失败关闭。
     """
 
     if new_stage in {"invalidated", "closed"}:
@@ -217,13 +222,7 @@ def _notification_eligibility_reason(
         return "UNSUPPORTED_NOTIFICATION_STAGE"
 
     side = str(signal.get("side") or "")
-    if side == "buy":
-        if signal.get("entry_allowed") is not True:
-            return "ENTRY_NOT_ALLOWED"
-    elif side == "sell":
-        if signal.get("exit_allowed") is not True:
-            return "EXIT_NOT_ALLOWED"
-    else:
+    if side not in {"buy", "sell"}:
         return "SIGNAL_SIDE_INVALID"
 
     if signal.get("physical_timeframe_recursive") is not True:
@@ -231,10 +230,6 @@ def _notification_eligibility_reason(
     warmup = _mapping(signal.get("warmup"))
     if warmup.get("converged") is not True:
         return "WARMUP_NOT_CONVERGED"
-    conflict = _mapping(signal.get("conflict"))
-    if conflict.get("hard_block") is True:
-        return "STRUCTURE_CONFLICT"
-
     trigger = _mapping(signal.get("trigger_1m"))
     if (
         trigger.get("status") != "confirmed"
@@ -252,22 +247,6 @@ def _notification_eligibility_reason(
     if age > _TRIGGER_MAX_AGE:
         return "TRIGGER_STALE"
 
-    if side == "buy":
-        if signal.get("sector_triggered") is not True:
-            return "CURRENT_SECTOR_TRIGGER_REQUIRED"
-        risk = _mapping(signal.get("higher_timeframe_risk"))
-        if any(
-            risk.get(key) != "GREEN"
-            for key in ("market_gate", "sector_gate", "symbol_gate")
-        ):
-            return "HIGHER_TIMEFRAME_GATE_NOT_GREEN"
-        boundary = _mapping(signal.get("entry_execution_boundary"))
-        valid_until = _parse_time(boundary.get("entry_valid_until"))
-        confirmation = _parse_time(boundary.get("confirmation_bar_closed_at"))
-        if valid_until is None or confirmation != trigger_at:
-            return "ENTRY_EXECUTION_BOUNDARY_INVALID"
-        if observed_at > valid_until:
-            return "ENTRY_WINDOW_EXPIRED"
     return None
 
 
@@ -326,12 +305,10 @@ def _defense_price_text(
     signal: Mapping[str, object],
     setup: Mapping[str, object],
 ) -> str:
-    """Render the operation-level structural defense without inventing a price.
+    """展示操作级结构防守位，不臆造价格。
 
-    The 5-minute setup owns the structure that generated the alert, so its
-    invalidation price is authoritative for both buy and sell signals.  A sell
-    defense is an *upper* invalidation boundary, not a downside stop, hence the
-    direction is stated explicitly in the notification.
+    五分钟 setup 是通知结构的直接来源，因此其失效价同时约束买点与卖点。
+    卖点防守位是向上的失效边界而非止损价，通知中必须明确方向。
     """
 
     raw_values = signal.get("notification_defense_prices")
@@ -378,6 +355,8 @@ def _action_advice(
     if not side:
         side = "buy" if "buy" in point else "sell" if "sell" in point else ""
     if side == "buy":
+        if signal.get("entry_allowed") is not True:
+            return "建议：结构买点已确认；正式准入未完成，复核三程序、风险门和执行边界后再决定"
         action = "增持" if scope == "持仓股" else "买入"
         if point.startswith("1buy"):
             condition = "确认反转后"
@@ -389,6 +368,8 @@ def _action_advice(
             condition = "人工确认后"
         return f"建议：{condition}考虑分批{action}"
     if side == "sell":
+        if signal.get("exit_allowed") is not True:
+            return "建议：结构卖点已确认；持仓者优先复核减仓或退出，非持仓仅作走势观察"
         if point.startswith("3sell"):
             return "建议：优先检查退出条件"
         if point.startswith("2sell"):
@@ -464,6 +445,11 @@ def format_notification(
         f"{name}｜{old_stage_label}→{new_stage_label}｜{confirmed_at}",
         f"结构：{context_text}｜5分钟{setup_point}｜1分钟{trigger_point}",
         (f"板块：{_text(sector.get('sector_name'))}｜防守价：{defense_price}"),
+        (
+            "资格：正式准入已通过"
+            if signal.get("entry_allowed") is True or signal.get("exit_allowed") is True
+            else "资格：仅结构确认，尚未取得正式操作资格"
+        ),
         _action_advice(
             signal,
             point_type=effective_point_type,
@@ -662,7 +648,7 @@ class SignalNotificationDispatcher:
         temporary.replace(self._state_path)
 
     def health_snapshot(self) -> dict[str, object]:
-        """Expose durable delivery evidence without revealing credentials."""
+        """公开持久投递证据，但不泄露任何凭据。"""
 
         with self._lock:
             degraded = bool(
