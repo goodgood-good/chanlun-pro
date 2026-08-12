@@ -145,12 +145,10 @@ class FrameStructureAnalysis:
             raise ValueError("warmup bar counts cannot be negative")
         if len(self.warmup_reason_codes) != len(set(self.warmup_reason_codes)):
             raise ValueError("warmup reason codes must be unique")
-        if (
-            len(self.warmup_difference_codes)
-            != len(set(self.warmup_difference_codes))
-            or not set(self.warmup_difference_codes).issubset(
-                SCREENING_WARMUP_DIFFERENCE_CODES
-            )
+        if len(self.warmup_difference_codes) != len(
+            set(self.warmup_difference_codes)
+        ) or not set(self.warmup_difference_codes).issubset(
+            SCREENING_WARMUP_DIFFERENCE_CODES
         ):
             raise ValueError("warmup difference codes are invalid")
         if len({value.point_id for value in self.entry_execution_boundaries}) != len(
@@ -264,16 +262,10 @@ class SectorAssessmentBatch:
             raise ValueError("sector catalog revision must be a sha256 identity")
         if self.strength_evidence is not None:
             evidence_ids = tuple(self.strength_evidence)
-            assessment_ids = tuple(
-                sorted(item.sector_id for item in self.assessments)
-            )
+            assessment_ids = tuple(sorted(item.sector_id for item in self.assessments))
             if evidence_ids != assessment_ids:
-                raise ValueError(
-                    "sector strength evidence must cover every assessment"
-                )
-            assessment_by_id = {
-                item.sector_id: item for item in self.assessments
-            }
+                raise ValueError("sector strength evidence must cover every assessment")
+            assessment_by_id = {item.sector_id: item for item in self.assessments}
             if any(
                 assessment_by_id[sector_id].horizontal_strength
                 != self.strength_evidence[sector_id].strength
@@ -289,9 +281,7 @@ class SectorAssessmentBatch:
                 != self.strength_evidence[sector_id].reason_codes
                 for sector_id in evidence_ids
             ):
-                raise ValueError(
-                    "sector strength evidence does not match assessments"
-                )
+                raise ValueError("sector strength evidence does not match assessments")
             evidence_document = self.strength_evidence.evidence_document()
             if (
                 self.catalog_revision is not None
@@ -338,9 +328,7 @@ class SectorAssessmentBatch:
             for code, count in self.exclusion_counts
         ):
             raise ValueError("sector exclusion counts are invalid")
-        if sum(count for _code, count in self.exclusion_counts) != len(
-            self.exclusions
-        ):
+        if sum(count for _code, count in self.exclusion_counts) != len(self.exclusions):
             raise ValueError("sector exclusion counts do not match exclusions")
         actual_exclusion_counts = tuple(
             sorted(Counter(item.reason_code for item in self.exclusions).items())
@@ -434,16 +422,17 @@ class NativeTradingGatewayConfig:
         ):
             values = dict(getattr(self, field_name))
             if set(values) != set(_FREQUENCIES):
-                raise ValueError(
-                    f"{field_name} must define d, 30m, 5m and 1m"
-                )
+                raise ValueError(f"{field_name} must define d, 30m, 5m and 1m")
             if any(type(value) is not int or value <= 0 for value in values.values()):
                 raise ValueError(f"{field_name} values must be positive integers")
         requests = dict(self.request_bars_by_frequency)
         minimums = dict(self.minimum_bars_by_frequency)
         if any(minimums[key] > requests[key] for key in _FREQUENCIES):
             raise ValueError("minimum bars cannot exceed requested bars")
-        if type(self.minimum_sector_members) is not int or self.minimum_sector_members <= 0:
+        if (
+            type(self.minimum_sector_members) is not int
+            or self.minimum_sector_members <= 0
+        ):
             raise ValueError("minimum_sector_members must be a positive integer")
         if (
             type(self.current_setup_age_seconds) is not int
@@ -484,9 +473,7 @@ def _closed_frame(
     if any(column not in value.columns for column in required):
         raise ValueError("kline frame is missing required columns")
     snapshot_attrs = dict(value.attrs)
-    optional = tuple(
-        column for column in ("member_mask",) if column in value.columns
-    )
+    optional = tuple(column for column in ("member_mask",) if column in value.columns)
     result = value.loc[:, [*required, *optional]].copy()
     dates = tuple(_market_datetime(item, "kline.date") for item in result["date"])
     if any(right <= left for left, right in zip(dates, dates[1:])):
@@ -515,8 +502,7 @@ def _closed_frame(
     if "member_mask" in result:
         masks = tuple(result["member_mask"])
         if any(
-            isinstance(mask, bool) or not isinstance(mask, Integral)
-            for mask in masks
+            isinstance(mask, bool) or not isinstance(mask, Integral) for mask in masks
         ):
             raise ValueError("kline member masks must be exact integers")
         result.loc[:, "member_mask"] = tuple(int(mask) for mask in masks)
@@ -573,9 +559,7 @@ def _frame_content_revision(frame: pd.DataFrame) -> str:
                     "close": float(row.close),
                     "volume": float(row.volume),
                     **(
-                        {"member_mask": int(row.member_mask)}
-                        if has_member_mask
-                        else {}
+                        {"member_mask": int(row.member_mask)} if has_member_mask else {}
                     ),
                 }
                 for row in frame.itertuples(index=False)
@@ -612,11 +596,7 @@ def _entry_execution_boundaries(
         rows_by_time[closed_at] = row
     output: list[EntryExecutionBoundary] = []
     for point in points:
-        if (
-            point.source_frequency != "1m"
-            or not point.confirmed
-            or point.side != "buy"
-        ):
+        if point.source_frequency != "1m" or not point.confirmed or point.side != "buy":
             continue
         row = rows_by_time.get(point.available_at)
         if row is None:
@@ -903,9 +883,7 @@ def audit_native_frame_warmup_envelope(
     frequency: str,
     frame: pd.DataFrame,
     as_of: datetime,
-    prefix_ratios: tuple[tuple[int, int], ...] = (
-        _WARMUP_ENVELOPE_PREFIX_RATIOS
-    ),
+    prefix_ratios: tuple[tuple[int, int], ...] = (_WARMUP_ENVELOPE_PREFIX_RATIOS),
 ) -> WarmupConvergenceEnvelope:
     """在四种左侧历史长度下审计同一活动尾部。
 
@@ -967,9 +945,13 @@ def audit_native_frame_warmup_envelope(
                 ),
             )
         )
-    common_tail_start = None if not prepared else max(
-        max(row[1] for row in prepared),
-        normalize_datetime(as_of, "as_of") - context_point_max_age(frequency),
+    common_tail_start = (
+        None
+        if not prepared
+        else max(
+            max(row[1] for row in prepared),
+            normalize_datetime(as_of, "as_of") - context_point_max_age(frequency),
+        )
     )
     observations = tuple(
         WarmupPrefixObservation(
@@ -1054,8 +1036,7 @@ class NativeTradingDataGateway:
         | None = None,
         higher_timeframe_provider: Callable[..., HigherTimeframeGateBundle]
         | None = None,
-        trading_session_provider: Callable[..., Mapping[str, object]]
-        | None = None,
+        trading_session_provider: Callable[..., Mapping[str, object]] | None = None,
         watchlist_provider: Callable[[], object] = lambda: (),
         holdings_provider: Callable[[], object] = lambda: (),
         analyzer: StructureAnalyzer = analyze_native_frame_with_warmup,
@@ -1072,9 +1053,7 @@ class NativeTradingDataGateway:
         )
         if any(not callable(provider) for provider in providers):
             raise TypeError("trading gateway providers must be callable")
-        if sector_frame_provider is not None and not callable(
-            sector_frame_provider
-        ):
+        if sector_frame_provider is not None and not callable(sector_frame_provider):
             raise TypeError("sector_frame_provider must be callable")
         if sector_strength_provider is not None and not callable(
             sector_strength_provider
@@ -1187,17 +1166,12 @@ class NativeTradingDataGateway:
                         QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
                     ),
                 }
-                factor_revision = raw_frame.attrs.get(
-                    "sector_factor_revision"
-                )
+                factor_revision = raw_frame.attrs.get("sector_factor_revision")
                 if (
                     not isinstance(factor_revision, str)
-                    or re.fullmatch(r"sha256:[0-9a-f]{64}", factor_revision)
-                    is None
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", factor_revision) is None
                 ):
-                    raise ValueError(
-                        "sector causal factor revision is unavailable"
-                    )
+                    raise ValueError("sector causal factor revision is unavailable")
                 if frequency == "30m":
                     expected_attrs.update(
                         {
@@ -1253,9 +1227,7 @@ class NativeTradingDataGateway:
                         "validated completed-5m fallback unavailable: "
                         f"{type(fallback_exc).__name__}: {fallback_exc}"
                     ) from fallback_exc
-                fallback_reason_codes = (
-                    SCREENING_QMT_30M_FALLBACK_REASON_CODE,
-                )
+                fallback_reason_codes = (SCREENING_QMT_30M_FALLBACK_REASON_CODE,)
                 LogUtil.warning(
                     "[trading_screening.market_data_fallback] "
                     "code="
@@ -1273,14 +1245,11 @@ class NativeTradingDataGateway:
                 expected_provider = expected_adjustment = None
             if is_sector and (
                 frame.attrs.get("price_basis_provider") != expected_provider
-                or frame.attrs.get("price_basis_adjustment")
-                != expected_adjustment
+                or frame.attrs.get("price_basis_adjustment") != expected_adjustment
                 or (
                     sector_source == QMT_GICS3_CATALOG_SOURCE
                     and (
-                        frame.attrs.get(
-                            "sector_factor_adjustment_contract_id"
-                        )
+                        frame.attrs.get("sector_factor_adjustment_contract_id")
                         != QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
                         or re.fullmatch(
                             r"sha256:[0-9a-f]{64}",
@@ -1488,9 +1457,7 @@ class NativeTradingDataGateway:
         catalog_revision = qmt_sector_catalog_revision(raw)
         provided_revision = raw.get("catalog_revision")
         if provided_revision is not None and provided_revision != catalog_revision:
-            raise ValueError(
-                "QMT sector catalog revision does not match its members"
-            )
+            raise ValueError("QMT sector catalog revision does not match its members")
         # 当前 QMT 成分构成时点化选股标的池。
         digits = _qmt_catalog_universe(rows)
         symbol_names: dict[str, str] = {}
@@ -1528,11 +1495,7 @@ class NativeTradingDataGateway:
             members = tuple(
                 sorted(
                     {
-                        (
-                            value
-                            if value in universe_codes
-                            else digits[value]
-                        )
+                        (value if value in universe_codes else digits[value])
                         for value in raw_members
                         if isinstance(value, str)
                         and (value in universe_codes or value in digits)
@@ -1638,9 +1601,7 @@ class NativeTradingDataGateway:
                     )
                     for frequency in _SECTOR_FREQUENCIES
                 }
-                context_time = max(
-                    analysis.closed_at for analysis in analyses.values()
-                )
+                context_time = max(analysis.closed_at for analysis in analyses.values())
                 one = TimeframeContext(
                     frequency="1m",
                     direction="neutral",
@@ -1782,9 +1743,7 @@ class NativeTradingDataGateway:
                 assessments = [
                     replace(
                         assessment,
-                        strength_reason_codes=(
-                            "SECTOR_STRENGTH_PROVIDER_UNAVAILABLE",
-                        ),
+                        strength_reason_codes=("SECTOR_STRENGTH_PROVIDER_UNAVAILABLE",),
                     )
                     for assessment in assessments
                 ]
@@ -1793,23 +1752,15 @@ class NativeTradingDataGateway:
             self._symbol_names = symbol_names
             self._latest_sector_bars = latest_bars
         ordered_errors = tuple(sorted(errors, key=lambda item: item.sector_id))
-        ordered_exclusions = tuple(
-            sorted(exclusions, key=lambda item: item.sector_id)
-        )
+        ordered_exclusions = tuple(sorted(exclusions, key=lambda item: item.sector_id))
         failure_counts = tuple(
             sorted(Counter(item.error_type for item in ordered_errors).items())
         )
         exclusion_counts = tuple(
-            sorted(
-                Counter(
-                    item.reason_code for item in ordered_exclusions
-                ).items()
-            )
+            sorted(Counter(item.reason_code for item in ordered_exclusions).items())
         )
         return SectorAssessmentBatch(
-            assessments=tuple(
-                sorted(assessments, key=lambda item: item.sector_id)
-            ),
+            assessments=tuple(sorted(assessments, key=lambda item: item.sector_id)),
             discovered_count=discovered_count,
             completed_count=completed_count,
             failure_counts=failure_counts,
@@ -1826,9 +1777,7 @@ class NativeTradingDataGateway:
 
     def changed_bars(self, since: datetime | None) -> tuple[BarKey, ...]:
         cutoff = (
-            None
-            if since is None
-            else normalize_datetime(since, "changed bars cutoff")
+            None if since is None else normalize_datetime(since, "changed bars cutoff")
         )
         with self._lock:
             changed = tuple(
@@ -1840,7 +1789,9 @@ class NativeTradingDataGateway:
             for item in changed:
                 self._emitted_sector_bars[(item.code, item.frequency)] = item.closed_at
         return tuple(
-            sorted(changed, key=lambda item: (item.closed_at, item.code, item.frequency))
+            sorted(
+                changed, key=lambda item: (item.closed_at, item.code, item.frequency)
+            )
         )
 
     def active_watchlist(self) -> tuple[str, ...]:
@@ -1851,9 +1802,7 @@ class NativeTradingDataGateway:
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         requested = _stock_codes(self._watchlist_provider())
         eligible = self.tradable_instrument_codes(requested)
-        return eligible, tuple(
-            code for code in requested if code not in eligible
-        )
+        return eligible, tuple(code for code in requested if code not in eligible)
 
     def holdings(self) -> tuple[str, ...]:
         return self.holdings_scope()[0]
@@ -1863,9 +1812,7 @@ class NativeTradingDataGateway:
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         requested = _stock_codes(self._holdings_provider())
         eligible = self.tradable_instrument_codes(requested)
-        return eligible, tuple(
-            code for code in requested if code not in eligible
-        )
+        return eligible, tuple(code for code in requested if code not in eligible)
 
     def tradable_instrument_codes(
         self,
@@ -1892,22 +1839,62 @@ class NativeTradingDataGateway:
         exchange = self._exchange_provider()
         provider = getattr(exchange, "screening_instrument_types", None)
         if not callable(provider):
-            raise RuntimeError(
-                "QMT native instrument type provider is unavailable"
-            )
+            raise RuntimeError("QMT native instrument type provider is unavailable")
         self._report_progress()
         raw = provider(normalized)
         self._report_progress()
         if not isinstance(raw, Mapping) or set(raw) != set(normalized):
-            raise RuntimeError(
-                "QMT native instrument type result is incomplete"
-            )
+            raise RuntimeError("QMT native instrument type result is incomplete")
         for code, kind in raw.items():
             if code not in normalized or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES:
-                raise RuntimeError(
-                    "QMT native instrument type result is invalid"
-                )
+                raise RuntimeError("QMT native instrument type result is invalid")
         return {code: str(raw[code]) for code in normalized}
+
+    def tick_probe(self, code: str) -> Mapping[str, object]:
+        """在原生进程内探测一个 A 股实时报价，不泄露原生行情对象。"""
+
+        if not isinstance(code, str) or _A_STOCK_CODE.fullmatch(code) is None:
+            raise ValueError("tick probe requires an exact normalized A-share code")
+        exchange = self._exchange_provider()
+        market_open_probe = getattr(exchange, "now_trading", None)
+        if not callable(market_open_probe):
+            raise TypeError("exchange must expose now_trading")
+        market_open = bool(market_open_probe("a"))
+        if not market_open:
+            return {
+                "schema": "chanlun-native-tick-probe",
+                "code": code,
+                "status": "market_closed",
+                "market_open": False,
+                "usable": False,
+                "tick_data_used": False,
+                "real_account_access": False,
+                "real_order_transport": False,
+            }
+        loader = getattr(exchange, "ticks", None)
+        if not callable(loader):
+            raise TypeError("exchange must expose ticks")
+        self._report_progress()
+        values = loader([code]) or {}
+        self._report_progress()
+        tick = values.get(code) if isinstance(values, Mapping) else None
+        last = None if tick is None else getattr(tick, "last", None)
+        usable = bool(
+            isinstance(last, (Integral, float))
+            and not isinstance(last, bool)
+            and math.isfinite(float(last))
+            and float(last) > 0
+        )
+        return {
+            "schema": "chanlun-native-tick-probe",
+            "code": code,
+            "status": "ready" if usable else "empty",
+            "market_open": True,
+            "usable": usable,
+            "tick_data_used": True,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
 
     def symbol_name(self, code: str) -> str | None:
         with self._lock:
@@ -2092,9 +2079,9 @@ class NativeTradingDataGateway:
                             self._higher_timeframe_cache.pop(
                                 next(iter(self._higher_timeframe_cache))
                             )
-                        self._higher_timeframe_cache[
-                            higher_timeframe_cache_key
-                        ] = higher_timeframe_gates
+                        self._higher_timeframe_cache[higher_timeframe_cache_key] = (
+                            higher_timeframe_gates
+                        )
             except HigherTimeframeDataUnavailable as exc:
                 LogUtil.error(
                     "[trading_screening.higher_timeframe.data] "
@@ -2162,23 +2149,17 @@ class NativeTradingDataGateway:
                 () if "d" not in analyses else analyses["d"].confirmed_points
             ),
             thirty_direction=(
-                "neutral"
-                if "30m" not in analyses
-                else analyses["30m"].direction
+                "neutral" if "30m" not in analyses else analyses["30m"].direction
             ),
             thirty_points=(
-                ()
-                if "30m" not in analyses
-                else analyses["30m"].confirmed_points
+                () if "30m" not in analyses else analyses["30m"].confirmed_points
             ),
             five_points=(
                 *analyses["5m"].confirmed_points,
                 *analyses["5m"].provisional_points,
             ),
             one_points=(
-                ()
-                if "1m" not in analyses
-                else analyses["1m"].confirmed_points
+                () if "1m" not in analyses else analyses["1m"].confirmed_points
             ),
             opposite_points=confirmed,
             higher_timeframe_gates=higher_timeframe_gates,
@@ -2190,9 +2171,7 @@ class NativeTradingDataGateway:
             ),
             warmup_reason_codes=warmup_reasons,
             warmup_by_frequency=warmup_by_frequency,
-            warmup_difference_codes_by_frequency=(
-                warmup_difference_codes_by_frequency
-            ),
+            warmup_difference_codes_by_frequency=(warmup_difference_codes_by_frequency),
             enforce_warmup_entry_gate=True,
             physical_timeframe_recursive=True,
             entry_execution_boundaries=(

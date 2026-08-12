@@ -356,6 +356,9 @@ class _FakeGateway:
             code: "index_cn" if code == "SH.000001" else "stock_cn" for code in codes
         }
 
+    def tick_probe(self, code):
+        return {"code": code, "usable": True}
+
 
 def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
     gateway = _FakeGateway()
@@ -372,6 +375,11 @@ def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
         method="screening_instrument_types",
         kwargs={"codes": ("SH.000001", "SH.600000")},
     ) == {"SH.000001": "index_cn", "SH.600000": "stock_cn"}
+    assert dispatch_gateway_request(
+        gateway,
+        method="tick_probe",
+        kwargs={"code": "SH.600000"},
+    ) == {"code": "SH.600000", "usable": True}
     for forbidden in ("order", "cancel_order", "account", "trader"):
         with pytest.raises(ValueError, match="not allowed"):
             dispatch_gateway_request(gateway, method=forbidden, kwargs={})
@@ -401,6 +409,47 @@ class _InstrumentScopeTransport:
 
     def shutdown(self) -> None:
         return None
+
+
+class _TickProbeTransport:
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def set_progress_callback(self, callback) -> None:
+        self.progress_callback = callback
+
+    def request(self, method: str, **kwargs: object) -> object:
+        self.calls.append((method, kwargs))
+        return self.result
+
+    def health_snapshot(self):
+        return {"ready": True}
+
+    def shutdown(self) -> None:
+        return None
+
+
+def test_process_proxy_validates_isolated_tick_probe() -> None:
+    result = {
+        "schema": "chanlun-native-tick-probe",
+        "code": "SH.000001",
+        "status": "market_closed",
+        "market_open": False,
+        "usable": False,
+        "tick_data_used": False,
+        "real_account_access": False,
+        "real_order_transport": False,
+    }
+    transport = _TickProbeTransport(result)
+    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+
+    assert proxy.tick_probe("SH.000001") == result
+    assert transport.calls == [("tick_probe", {"code": "SH.000001"})]
+
+    transport.result = {**result, "usable": True}
+    with pytest.raises(NativeScreeningWorkerProtocolError):
+        proxy.tick_probe("SH.000001")
 
 
 class _BundleTransport:
@@ -1350,7 +1399,7 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         },
     )
 
-    expected_workers = min(4, max(1, (os.cpu_count() or 4) // 4))
+    expected_workers = min(3, max(1, (os.cpu_count() or 4) // 4))
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == 3
     assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 256
@@ -1358,6 +1407,7 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64
     gateway = app.extensions["decision_support_trading_screening_gateway"]
     assert len(gateway._structure_transports) == expected_workers  # noqa: SLF001
+    assert gateway._transport not in gateway._structure_transports  # noqa: SLF001
 
 
 def test_direct_app_launch_uses_content_addressed_revision_for_worker_caches(

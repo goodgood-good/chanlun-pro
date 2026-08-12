@@ -20,6 +20,8 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
     tmp_path,
 ):
     calls = []
+    tick_probes = {}
+
     class _Handle:
         def __init__(self, name):
             self.name = name
@@ -72,11 +74,13 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         "shutdown_pickle_writes",
         lambda **_kwargs: calls.append(("stop-pickle-writes", None)),
     )
-    monkeypatch.setattr(
-        readiness,
-        "start_ticks_warmup",
-        lambda _registry, _probe, market: calls.append(("ticks", market)) or ticks_thread,
-    )
+
+    def capture_tick_probe(_registry, probe, market):
+        tick_probes[market] = probe
+        calls.append(("ticks", market))
+        return ticks_thread
+
+    monkeypatch.setattr(readiness, "start_ticks_warmup", capture_tick_probe)
     monkeypatch.setattr(
         stock_list,
         "start_symbol_preload_thread",
@@ -159,17 +163,27 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         assert app.extensions["metadata_warmup_thread"] is warmup_thread
         screening = app.extensions["decision_support_trading_screening"]
         assert screening._config.priority_monitoring_enabled is True
-        assert (
-            screening._config.max_five_minute_candidate_symbols_per_refresh
-            == 256
-        )
-        assert (
-            screening._config.max_thirty_minute_candidate_symbols_per_refresh
-            == 96
-        )
+        assert screening._config.max_five_minute_candidate_symbols_per_refresh == 256
+        assert screening._config.max_thirty_minute_candidate_symbols_per_refresh == 96
         assert screening._config.max_symbols_per_refresh == 64
         assert screening._config.max_total_symbols_per_refresh == 64
         assert screening._config.priority_monitor_interval_seconds == 60
+        gateway = app.extensions["decision_support_trading_screening_gateway"]
+        monkeypatch.setattr(
+            constants.market_default_codes,
+            "cached_snapshot",
+            lambda _keys: {"a": "SH.000001"},
+        )
+        monkeypatch.setattr(
+            gateway,
+            "tick_probe",
+            lambda code: {
+                "code": code,
+                "status": "market_closed",
+                "usable": False,
+            },
+        )
+        assert tick_probes["a"]("a") == {"__market_closed__": True}
         assert calls == [
             ("app-qmt-startup", None),
             ("metadata-loaders", None),
@@ -331,8 +345,12 @@ def test_shutdown_cancels_an_inflight_runtime_start(monkeypatch):
         entered.set()
         release.wait(timeout=2)
 
-    monkeypatch.setattr(constants, "start_market_metadata_loaders", blocking_metadata_start)
-    monkeypatch.setattr(constants, "shutdown_market_metadata_loaders", lambda **_k: None)
+    monkeypatch.setattr(
+        constants, "start_market_metadata_loaders", blocking_metadata_start
+    )
+    monkeypatch.setattr(
+        constants, "shutdown_market_metadata_loaders", lambda **_k: None
+    )
     monkeypatch.setattr(chart_cache, "shutdown_chart_cache_runtime", lambda **_k: None)
     monkeypatch.setattr(file_db, "shutdown_pickle_writes", lambda **_k: None)
     monkeypatch.setattr(stock_list, "shutdown_symbol_preload", lambda **_k: None)

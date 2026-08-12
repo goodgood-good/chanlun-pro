@@ -235,18 +235,17 @@ def create_app(test_config=None, start_scheduler=False):
             )
         ),
         TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
-        # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多四个隔离结构
-        # 进程，盘中完整覆盖暂停后，这四路全部可供分钟监听使用；盘后仍为图表、
-        # QMT 维护与通知保留容量。
+        # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多三个结构进程，
+        # 另有一个独立控制进程专供逐笔、日历与轻量分类，总原生子进程上限仍为四。
         TRADING_SCREENING_STOCK_WORKERS=int(
             min(
-                4,
+                3,
                 max(
                     1,
                     int(
                         os.environ.get(
                             "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
-                            str(min(4, max(1, (os.cpu_count() or 4) // 4))),
+                            str(min(3, max(1, (os.cpu_count() or 4) // 4))),
                         )
                     ),
                 ),
@@ -1360,6 +1359,18 @@ def create_app(test_config=None, start_scheduler=False):
         )
         if not default_code:
             raise RuntimeError("default market code is not ready")
+        isolated_probe = getattr(trading_gateway, "tick_probe", None)
+        if market == "a" and callable(isolated_probe):
+            result = isolated_probe(default_code)
+            if result.get("status") == "market_closed":
+                return {"__market_closed__": True}
+            if result.get("usable") is True:
+                return {default_code: result}
+            return {}
+        if market == "a" and app.config.get(
+            "TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True
+        ):
+            raise RuntimeError("isolated A-share tick probe is unavailable")
         from chanlun.exchange import get_exchange, market_now_trading
         from chanlun.market import Market
 

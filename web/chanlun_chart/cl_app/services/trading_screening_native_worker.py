@@ -37,6 +37,8 @@ class _Gateway(Protocol):
 
     def screening_instrument_types(self, codes: tuple[str, ...]) -> object: ...
 
+    def tick_probe(self, code: str) -> object: ...
+
     def structure_bundle(self, code: str, **kwargs: object) -> object: ...
 
     def trading_session_evidence(self, **kwargs: object) -> object: ...
@@ -137,7 +139,7 @@ def dispatch_gateway_request(
             "assessments": assessments,
             "members": members,
             "changed_bars": changed_bars,
-    # 名称不参与排名或决策，仅在输出复核记录时延迟加载。
+            # 名称不参与排名或决策，仅在输出复核记录时延迟加载。
             "symbol_names": {},
             "minimum_market_data_frequency": "1m",
             "tick_data_used": False,
@@ -173,6 +175,13 @@ def dispatch_gateway_request(
                 "screening_instrument_types requires an exact string tuple"
             )
         return gateway.screening_instrument_types(codes)
+    if method == "tick_probe":
+        if set(kwargs) != {"code"}:
+            raise ValueError("tick_probe requires exactly code")
+        code = kwargs.get("code")
+        if not isinstance(code, str):
+            raise ValueError("tick_probe requires code")
+        return gateway.tick_probe(code)
     if method == "structure_bundle":
         code = kwargs.get("code")
         if not isinstance(code, str):

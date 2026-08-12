@@ -926,7 +926,7 @@ class NativeWorkerProcessTransport:
         try:
             callback()
         except Exception:
-        # 运行遥测失败不得破坏有效的行情响应。
+            # 运行遥测失败不得破坏有效的行情响应。
             pass
 
     def request(self, method: str, **kwargs: object) -> object:
@@ -1184,11 +1184,12 @@ class NativeTradingDataGatewayProcessProxy:
             expected_application_source_revision=(expected_application_source_revision),
         )
         structure_transports: list[NativeWorkerProcessTransport] = [self._transport]
-        if transport is None and structure_worker_count > 1:
+        if transport is None:
             assert log_path is not None
-            for index in range(1, structure_worker_count):
+            structure_transports = []
+            for index in range(structure_worker_count):
                 worker_log = log_path.with_name(
-                    f"{log_path.stem}.worker-{index + 1}{log_path.suffix}"
+                    f"{log_path.stem}.structure-{index + 1}{log_path.suffix}"
                 )
                 structure_transports.append(
                     NativeWorkerProcessTransport(
@@ -1217,7 +1218,7 @@ class NativeTradingDataGatewayProcessProxy:
         self._trading_session_cache: dict[date, dict[str, object]] = {}
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
-        for transport in self._structure_transports:
+        for transport in (self._transport, *self._structure_transports):
             transport.set_progress_callback(callback)
 
     def startup(self) -> None:
@@ -1243,7 +1244,9 @@ class NativeTradingDataGatewayProcessProxy:
             self._install_sector_snapshot(cached)
             return cached.batch
 
-        value = self._transport.request("sector_snapshot", as_of=as_of)
+        # 行业快照可能持续数分钟，必须进入结构进程，不能占用为逐笔、日历和轻量
+        # 分类保留的控制进程。
+        value = self._structure_transports[0].request("sector_snapshot", as_of=as_of)
         components = self._validated_atomic_snapshot(value, observed_at)
         self._install_sector_snapshot(components)
         self._persist_sector_snapshot_cache(components, observed_at)
@@ -1750,6 +1753,38 @@ class NativeTradingDataGatewayProcessProxy:
             )
         return {code: str(value[code]) for code in normalized}
 
+    def tick_probe(self, code: str) -> Mapping[str, object]:
+        """通过认证子进程探测实时行情，避免 ``xtdata`` 阻塞 Web 主进程。"""
+
+        normalized = _stock_codes((code,))
+        if len(normalized) != 1 or normalized[0] != code:
+            raise ValueError("tick probe requires an exact normalized A-share code")
+        value = self._transport.request("tick_probe", code=code)
+        if (
+            not isinstance(value, Mapping)
+            or value.get("schema") != "chanlun-native-tick-probe"
+            or value.get("code") != code
+            or value.get("status") not in {"ready", "empty", "market_closed"}
+            or type(value.get("market_open")) is not bool
+            or type(value.get("usable")) is not bool
+            or type(value.get("tick_data_used")) is not bool
+            or value.get("real_account_access") is not False
+            or value.get("real_order_transport") is not False
+            or (value.get("status") == "ready") != (value.get("usable") is True)
+            or (value.get("status") == "market_closed")
+            != (value.get("market_open") is False)
+            or (
+                value.get("market_open") is False
+                and value.get("tick_data_used") is not False
+            )
+            or (
+                value.get("market_open") is True
+                and value.get("tick_data_used") is not True
+            )
+        ):
+            raise NativeScreeningWorkerProtocolError("invalid native tick probe")
+        return dict(value)
+
     def symbol_name(self, code: str) -> str | None:
         with self._cache_lock:
             cached = self._symbol_names.get(code)
@@ -1779,10 +1814,9 @@ class NativeTradingDataGatewayProcessProxy:
                 session=session,
                 observed_at=observed,
             )
-            # 选股结构读取会有意串行经过一个隔离的原生工作进程。就绪探针不能排在
-            # 可能耗时很长的 ``structure_bundle`` 调用之后，否则两个进程都健康时，
-            # Web 部署健康门仍可能超时。“繁忙”只表示交易日历来源暂时不可用，
-            # 绝不表示目标日期一定是工作日或交易日。
+        # 控制进程可能正在执行逐笔或轻量目录调用。就绪探针不能继续排队，否则 Web
+        # 部署健康门可能超时。“繁忙”只表示交易日历来源暂时不可用，绝不表示目标
+        # 日期一定是工作日或交易日。
         worker_health = self._transport.health_snapshot()
         if worker_health.get("in_flight") is True:
             return build_trading_session_evidence(
@@ -1933,7 +1967,11 @@ class NativeTradingDataGatewayProcessProxy:
         return result
 
     def close(self) -> None:
-        for transport in self._structure_transports:
+        seen: set[int] = set()
+        for transport in (self._transport, *self._structure_transports):
+            if id(transport) in seen:
+                continue
+            seen.add(id(transport))
             transport.shutdown()
 
 

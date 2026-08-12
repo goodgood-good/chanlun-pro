@@ -585,6 +585,10 @@ class RecordingExchange:
             for code in codes
         }
 
+    def now_trading(self, market: str) -> bool:
+        assert market == "a"
+        return False
+
 
 class RecordingAnalyzer:
     def __init__(self) -> None:
@@ -646,9 +650,7 @@ class OpeningAuctionExchange:
     def klines(self, _code: str, frequency: str, *, args: dict[str, object]):
         assert frequency == "1m"
         self.calls.append(dict(args))
-        adjustment = (
-            "none" if args.get("dividend_type") == "none" else "front_ratio"
-        )
+        adjustment = "none" if args.get("dividend_type") == "none" else "front_ratio"
         return _qmt_native_one_minute_session(adjustment=adjustment)
 
 
@@ -1615,6 +1617,23 @@ def test_native_gateway_monitor_scope_keeps_only_qmt_stock_and_etf() -> None:
         ("SH.000001",),
     )
     assert gateway.active_watchlist() == ("SH.510300", "SH.600000")
+
+
+def test_native_gateway_tick_probe_skips_qmt_when_market_is_closed() -> None:
+    gateway, _analyzer, _sector_exchange = _gateway()
+
+    result = gateway.tick_probe("SH.000001")
+
+    assert result == {
+        "schema": "chanlun-native-tick-probe",
+        "code": "SH.000001",
+        "status": "market_closed",
+        "market_open": False,
+        "usable": False,
+        "tick_data_used": False,
+        "real_account_access": False,
+        "real_order_transport": False,
+    }
 
 
 def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None:
