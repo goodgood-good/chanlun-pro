@@ -5287,7 +5287,7 @@ def test_background_idles_after_one_process_refresh_of_complete_close_snapshot(
             "timezone": "Asia/Shanghai",
             "weekdays": [0, 1, 2, 3, 4],
             "start": "15:05:00",
-            "end": "23:00:00",
+            "end": "23:59:59.999999",
         },
         {
             "phase": "OVERNIGHT_COVERAGE_CONTINUATION",
@@ -5454,7 +5454,8 @@ def test_official_calendar_skips_weekday_holiday_for_selection_and_alerts() -> N
         (15, 4, False),
         (15, 5, True),
         (22, 59, True),
-        (23, 0, False),
+        (23, 0, True),
+        (23, 59, True),
     ),
 )
 def test_full_coverage_refresh_uses_overnight_preopen_and_postclose_windows(
@@ -5473,12 +5474,12 @@ def test_full_coverage_refresh_uses_overnight_preopen_and_postclose_windows(
     assert _full_coverage_refresh_window_open(observed_at) is expected
 
 
-def test_full_coverage_resumes_at_midnight_of_next_trading_session() -> None:
+def test_full_coverage_next_active_boundary_skips_official_holiday() -> None:
     assert _next_full_coverage_active_start(
-        datetime(2026, 7, 20, 23, 0, tzinfo=AS_OF.tzinfo)
-    ) == datetime(2026, 7, 21, 0, 0, tzinfo=AS_OF.tzinfo)
+        datetime(2026, 7, 20, 12, 0, tzinfo=AS_OF.tzinfo)
+    ) == datetime(2026, 7, 20, 15, 5, tzinfo=AS_OF.tzinfo)
     assert _next_full_coverage_active_start(
-        datetime(2026, 9, 30, 23, 30, tzinfo=AS_OF.tzinfo)
+        datetime(2026, 10, 1, 10, 0, tzinfo=AS_OF.tzinfo)
     ) == datetime(2026, 10, 8, 0, 0, tzinfo=AS_OF.tzinfo)
 
 
@@ -5634,6 +5635,37 @@ def test_background_loop_runs_due_priority_lane_when_coverage_is_idle(
     service._background_loop(stop, threading.Event())
 
     assert calls == [(False, True)]
+
+
+def test_background_loop_keeps_full_lane_open_after_2300(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = AS_OF.replace(hour=23, minute=30)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(refresh_interval_seconds=60),
+    )
+    calls: list[tuple[bool, bool]] = []
+    stop = threading.Event()
+
+    monkeypatch.setattr(service, "_needs_refresh", lambda: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        stop.set()
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+    service._background_loop(stop, threading.Event())
+
+    assert calls == [(False, False)]
 
 
 def test_disabled_full_coverage_never_runs_full_lane_inside_active_window(

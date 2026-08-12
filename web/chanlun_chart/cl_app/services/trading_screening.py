@@ -165,11 +165,11 @@ SCHEMA = "chanlun-trading-screening"
 POINT_TYPES = ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
 CN = ZoneInfo("Asia/Shanghai")
 # 次日候选池的重计算属于收盘后任务。15:05 为 QMT 写入 15:00 已完成分钟线
-# 预留一个很小的落盘缓冲；全市场覆盖一旦开始，即使超过窗口也会由 pending
-# 队列继续排空。盘前窗口只重新读取板块目录/成分与最新缓存，完成轻量复核，
-# 不再把几千只股票的主扫描压到开盘前。
+# 预留一个很小的落盘缓冲；全市场覆盖一旦开始，收盘后必须连续运行到次日盘前，
+# 不能在 23:00 人为停顿一小时。盘中窗口仍只运行有界实时监听，不让几千只股票
+# 的主扫描挤占每分钟候选判断。
 POST_CLOSE_PRESELECTION_START = datetime_time(15, 5)
-POST_CLOSE_PRESELECTION_END = datetime_time(23, 0)
+POST_CLOSE_PRESELECTION_END = datetime_time.max
 PREOPEN_RECONCILIATION_START = datetime_time(8, 45)
 PREOPEN_RECONCILIATION_END = datetime_time(9, 10)
 OVERNIGHT_COVERAGE_CONTINUATION_START = datetime_time(0, 0)
@@ -552,9 +552,9 @@ def _next_full_coverage_active_start(observed_at: datetime) -> datetime:
 def _full_coverage_refresh_window_open(observed_at: datetime) -> bool:
     """把高成本全市场任务限制在明确的每日窗口内。
 
-    收盘到下一交易日的选股在 15:05 后构建；未完成且已认证的周期可从午夜续算到短暂
-    盘前核对窗口。连续交易期间，每分钟预算归独立优先通道所有；若此时继续处理数千
-    个归档标的，可能让当前告警阻塞数分钟。
+    收盘到下一交易日的选股在 15:05 后构建，并连续运行到次日盘前核对结束。连续
+    交易期间，每分钟预算归独立优先通道所有；若此时继续处理数千个归档标的，可能
+    让当前告警阻塞数分钟。
     """
 
     local_now = normalize_datetime(observed_at, "observed_at").astimezone(CN)
