@@ -6,9 +6,11 @@ from typing import Literal
 from chanlun.core.strict_structure.models import (
     CenterRelation,
     StrictEvidenceResult,
+    StrictLevelResult,
     StrictPointStatus,
     TrendKind,
     TrendState,
+    TrendType,
 )
 from chanlun.core.strict_structure.center_relation import classify_center_relation
 
@@ -28,15 +30,15 @@ class FormalDirectionState:
 
     def __post_init__(self) -> None:
         if self.direction not in {"up", "down", "neutral"}:
-            raise ValueError("formal direction is unsupported")
+            raise ValueError("正式方向取值不受支持")
         if (self.structural_level is None) != (self.trend_id is None):
-            raise ValueError("formal direction trend provenance is incomplete")
+            raise ValueError("正式方向的走势来源不完整")
         if self.structural_level is not None and self.structural_level < 0:
-            raise ValueError("formal direction level must be non-negative")
+            raise ValueError("正式方向级别不能为负数")
         if not self.reason_codes or len(self.reason_codes) != len(
             set(self.reason_codes)
         ):
-            raise ValueError("formal direction reasons must be non-empty and unique")
+            raise ValueError("正式方向原因不能为空且不能重复")
 
 
 def _neutral(
@@ -55,14 +57,10 @@ def _neutral(
 
 
 def _reversal_support(evidence, *, level, previous, current):
-    current_direction = _semantic_trend_direction(current)
+    current_direction = semantic_trend_direction(current)
     if current_direction is None:
         return None
-    expected = (
-        {"1buy", "2buy"}
-        if current_direction == "up"
-        else {"1sell", "2sell"}
-    )
+    expected = {"1buy", "2buy"} if current_direction == "up" else {"1sell", "2sell"}
     candidates = tuple(
         point
         for point in evidence.confirmed_points
@@ -89,9 +87,11 @@ def _trend_reaches_tail(trend, units) -> bool:
     return len(units) - 1 - terminal_index <= 2
 
 
-def _semantic_trend_direction(trend) -> FormalDirection | None:
+def semantic_trend_direction(trend: TrendType) -> FormalDirection | None:
     """返回走势定义上的方向，不使用整段首尾净位移代替中枢关系。"""
 
+    if not isinstance(trend, TrendType):
+        raise TypeError("走势定义方向只能由 TrendType 计算")
     if trend.kind is TrendKind.CONSOLIDATION:
         return None
     relations = tuple(
@@ -105,6 +105,96 @@ def _semantic_trend_direction(trend) -> FormalDirection | None:
     if all(relation is CenterRelation.DOWN_TREND for relation in relations):
         return "down"
     raise ValueError("正式趋势的中枢关系方向不一致")
+
+
+def _resolve_level_formal_direction(
+    evidence: StrictEvidenceResult,
+    level: StrictLevelResult,
+) -> FormalDirectionState:
+    """解析一个递归级别尾部的正式方向。"""
+
+    if not level.units:
+        return _neutral("formal_units_unavailable")
+    if not level.trend_types:
+        return _neutral("current_suffix_has_no_formal_trend")
+
+    current = level.trend_types[-1]
+    provenance = {
+        "structural_level": level.structural_level,
+        "trend_id": current.trend_id,
+    }
+    if not _trend_reaches_tail(current, level.units):
+        return _neutral("current_suffix_is_outside_formal_trend", **provenance)
+    if current.kind is TrendKind.CONSOLIDATION:
+        return _neutral("current_formal_movement_is_consolidation", **provenance)
+    if current.state is TrendState.LOCKED or current.terminal_divergence is not None:
+        return _neutral("current_formal_trend_has_ended", **provenance)
+
+    current_direction = semantic_trend_direction(current)
+    if current_direction is None:
+        raise ValueError("非盘整走势缺少正式方向")
+    previous = next(
+        (
+            trend
+            for trend in reversed(level.trend_types[:-1])
+            if trend.kind is TrendKind.TREND
+        ),
+        None,
+    )
+    support = None
+    previous_direction = (
+        None if previous is None else semantic_trend_direction(previous)
+    )
+    if previous_direction is not None and previous_direction != current_direction:
+        support = _reversal_support(
+            evidence,
+            level=level,
+            previous=previous,
+            current=current,
+        )
+        if support is None:
+            return _neutral(
+                "direction_change_lacks_first_or_second_point",
+                **provenance,
+            )
+
+    return FormalDirectionState(
+        direction=current_direction,
+        structural_level=level.structural_level,
+        trend_id=current.trend_id,
+        support_point_id=None if support is None else support.point_id,
+        reason_codes=(
+            "current_directional_trend",
+            *(
+                ()
+                if support is None
+                else ("direction_change_supported_by_first_or_second_point",)
+            ),
+        ),
+    )
+
+
+def resolve_level_formal_direction(
+    evidence: StrictEvidenceResult,
+    structural_level: int,
+) -> FormalDirectionState:
+    """返回指定递归级别的正式方向，供图表与决策审计共同使用。"""
+
+    if not isinstance(evidence, StrictEvidenceResult):
+        raise TypeError("正式方向必须基于 StrictEvidenceResult 解析")
+    if type(structural_level) is not int or structural_level < 0:
+        raise ValueError("正式方向级别必须是非负整数")
+    level = next(
+        (
+            item
+            for item in evidence.structure.levels
+            if item.structural_level == structural_level
+        ),
+        None,
+    )
+    if level is None:
+        raise ValueError("正式方向级别不存在于严格结构中")
+    return _resolve_level_formal_direction(evidence, level)
 
 
 def resolve_formal_direction(
@@ -127,66 +217,7 @@ def resolve_formal_direction(
     for level in reversed(levels):
         if not level.units or level.units[-1].market_end != current_market_end:
             continue
-        if not level.trend_types:
-            return _neutral("current_suffix_has_no_formal_trend")
-
-        current = level.trend_types[-1]
-        provenance = {
-            "structural_level": level.structural_level,
-            "trend_id": current.trend_id,
-        }
-        if (
-            not _trend_reaches_tail(current, level.units)
-            or level.units[-1].market_end != current_market_end
-        ):
-            return _neutral("current_suffix_is_outside_formal_trend", **provenance)
-        if current.kind is TrendKind.CONSOLIDATION:
-            return _neutral("current_formal_movement_is_consolidation", **provenance)
-        if current.state is TrendState.LOCKED or current.terminal_divergence is not None:
-            return _neutral("current_formal_trend_has_ended", **provenance)
-
-        current_direction = _semantic_trend_direction(current)
-        if current_direction is None:
-            raise ValueError("非盘整走势缺少正式方向")
-        previous = next(
-            (
-                trend
-                for trend in reversed(level.trend_types[:-1])
-                if trend.kind is TrendKind.TREND
-            ),
-            None,
-        )
-        support = None
-        previous_direction = (
-            None if previous is None else _semantic_trend_direction(previous)
-        )
-        if previous_direction is not None and previous_direction != current_direction:
-            support = _reversal_support(
-                evidence,
-                level=level,
-                previous=previous,
-                current=current,
-            )
-            if support is None:
-                return _neutral(
-                    "direction_change_lacks_first_or_second_point",
-                    **provenance,
-                )
-
-        return FormalDirectionState(
-            direction=current_direction,
-            structural_level=level.structural_level,
-            trend_id=current.trend_id,
-            support_point_id=None if support is None else support.point_id,
-            reason_codes=(
-                "current_directional_trend",
-                *(
-                    ()
-                    if support is None
-                    else ("direction_change_supported_by_first_or_second_point",)
-                ),
-            ),
-        )
+        return _resolve_level_formal_direction(evidence, level)
 
     return _neutral("no_formal_level_reaches_current_suffix")
 

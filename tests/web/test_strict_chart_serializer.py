@@ -757,6 +757,11 @@ def test_trend_and_point_serializers_preserve_strict_identity() -> None:
 
     assert trend["trend_id"] == source_trend.trend_id
     assert trend["render_id"].startswith(f"{source_trend.trend_id}@forming@")
+    assert trend["geometric_direction"] == source_trend.direction
+    assert trend["semantic_direction"] is None
+    assert trend["direction_status"] == "consolidation"
+    assert trend["formal_direction_confirmed"] is False
+    assert trend["direction_reason_codes"] == []
     assert point["point_id"] == source_point.point_id
     assert point["point_type"] == "3buy"
     assert point["status"] == "confirmed"

@@ -65,6 +65,22 @@ def test_qmt_frame_reaches_the_single_strict_chart_pipeline() -> None:
     assert strict["source_closed_at"] == int(frame.iloc[-1]["date"].timestamp())
     assert strict["formal_direction"]["direction"] in {"up", "down", "neutral"}
     assert strict["formal_direction"]["reason_codes"]
+    for level in strict["levels"]:
+        assert level["formal_direction"]["direction"] in {"up", "down", "neutral"}
+        assert level["formal_direction"]["reason_codes"]
+        for trend in level["current_trends"] + level["completed_trend_snapshots"]:
+            assert trend["geometric_direction"] == trend["direction"]
+            assert trend["semantic_direction"] in {"up", "down", None}
+            assert trend["direction_status"] in {
+                "formal",
+                "awaiting_reversal_support",
+                "consolidation",
+                "ended",
+                "geometric_candidate",
+            }
+            assert trend["formal_direction_confirmed"] is (
+                trend["direction_status"] == "formal"
+            )
     assert payload["c"][-1] == float(frame.iloc[-1]["close"])
     assert all(
         center["source_kind"] == "stroke_observation"

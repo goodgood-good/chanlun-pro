@@ -53,6 +53,18 @@
     zd: '震荡',
   });
 
+  const FORMAL_DIRECTION_REASON_LABELS = Object.freeze({
+    formal_units_unavailable: '当前级别没有可用结构单元',
+    current_suffix_has_no_formal_trend: '当前尾部尚未形成同级走势类型',
+    current_suffix_is_outside_formal_trend: '当前尾部已经超出上一条正式走势',
+    current_formal_movement_is_consolidation: '当前同级走势为盘整',
+    current_formal_trend_has_ended: '上一条正式走势已经结束',
+    direction_change_lacks_first_or_second_point: '几何方向虽已反转，但尚无同级一类或小转大二类点支撑',
+    no_formal_level_reaches_current_suffix: '尚无递归级别覆盖当前结构尾部',
+    current_directional_trend: '当前尾部由同级双中枢趋势覆盖',
+    direction_change_supported_by_first_or_second_point: '本次反转已由同级一类或小转大二类点确认',
+  });
+
   const LAYER_CONFIG_KEYS = Object.freeze({
     bi: { key: 'bi' },
     xd: { key: 'xd' },
@@ -343,8 +355,8 @@
     const low = explicitZd === null ? (prices.length ? Math.min.apply(null, prices) : null) : explicitZd;
     const high = explicitZg === null ? (prices.length ? Math.max.apply(null, prices) : null) : explicitZg;
     const renderKind = String(latest.render_kind || '');
-    // Lifecycle metadata binds the same-level return to this exact center and
-    // preserves the live state where third-class geometry awaits line locking.
+    // 生命周期元数据把同级回抽绑定到这个确切中枢，并保留三类点几何成立后
+    // 等待线段锁定的盘中状态。
     const tower = String(settings.tower || latest.tower || '').toLowerCase();
     const towerLabel = tower === 'bi' ? '笔' : '线段';
     const lifecycle = centerLifecycleText(latest, towerLabel);
@@ -353,7 +365,7 @@
       ? '线段中枢预览'
       : levelLabel;
     const qualification = lifecycle.qualification;
-    // Collection ownership is authoritative for the center tower.
+    // 集合归属是中枢层级的唯一权威来源。
     const recursiveLevel = numeric(latest.recursive_level);
     let position = '位置待定';
     if (latestClose !== null && low !== null && high !== null) {
@@ -492,7 +504,48 @@
     return line.status === '形成中' ? '未完成' : '已完成';
   }
 
-  function structureNarrative(bi, xd, biZone, xdZone) {
+  function summarizeFormalDirection(formalDirection) {
+    const value = formalDirection && typeof formalDirection === 'object'
+      ? formalDirection
+      : { direction: 'neutral', reason_codes: [] };
+    const reasons = Array.isArray(value.reason_codes) ? value.reason_codes : [];
+    const reasonText = reasons
+      .map((reason) => FORMAL_DIRECTION_REASON_LABELS[reason] || reason)
+      .join('；');
+    const lacksSupport = reasons.includes('direction_change_lacks_first_or_second_point');
+    const isConsolidation = reasons.includes('current_formal_movement_is_consolidation');
+    const hasEnded = reasons.includes('current_formal_trend_has_ended');
+    const levelText = Number.isInteger(value.structural_level)
+      ? `L${value.structural_level}`
+      : '当前级别';
+    let label = '正式方向待确认';
+    let tone = lacksSupport ? 'pending' : 'neutral';
+    if (value.direction === 'up') {
+      label = '正式上涨';
+      tone = 'buy';
+    } else if (value.direction === 'down') {
+      label = '正式下跌';
+      tone = 'sell';
+    } else if (lacksSupport) {
+      label = '反转待一/二类点确认';
+    } else if (isConsolidation) {
+      label = '盘整，方向待确认';
+    } else if (hasEnded) {
+      label = '原正式走势已结束';
+    }
+    const provenance = Number.isInteger(value.structural_level)
+      ? `${levelText} · `
+      : '';
+    return {
+      direction: value.direction,
+      label,
+      tone,
+      lacksSupport,
+      detail: `${provenance}${reasonText || '等待严格结构形成正式方向'}`,
+    };
+  }
+
+  function structureNarrative(bi, xd, biZone, xdZone, formalDirection) {
     if (!bi.exists && !xd.exists) {
       return {
         headline: '等待形成可解释的笔或线段',
@@ -517,9 +570,17 @@
     const mutableFact = [bi, xd].some((line) => line.exists && line.status === '形成中')
       ? '形成中的笔或线段边界仍可能变化。'
       : '当前笔与线段均已闭合，仍需等待后续结构更新。';
+    const formal = formalDirection ? summarizeFormalDirection(formalDirection) : null;
+    if (!formal) return { headline, detail: `${positionFact}；${mutableFact}` };
+    if (formal.lacksSupport) {
+      return {
+        headline: '几何反转待同级一/二类点确认',
+        detail: `${formal.detail}；当前笔、线段只表示几何运行。${positionFact}；${mutableFact}`,
+      };
+    }
     return {
-      headline,
-      detail: `${positionFact}；${mutableFact}`,
+      headline: `${formal.label}；${headline}`,
+      detail: `${formal.detail}；${positionFact}；${mutableFact}`,
     };
   }
 
@@ -534,8 +595,10 @@
     return `等待${zone.levelLabel}与现价位置完成计算`;
   }
 
-  function buildPlan(bi, xd, biZone, xdZone) {
+  function buildPlan(bi, xd, biZone, xdZone, formalDirection) {
     const now = [];
+    const formal = formalDirection ? summarizeFormalDirection(formalDirection) : null;
+    if (formal) now.push(formal.label);
     if (xd.exists) now.push(`线段${xd.direction}（${xd.status === '形成中' ? '未闭合' : '已闭合'}）`);
     if (bi.exists) now.push(`当前笔${bi.direction}（${bi.status === '形成中' ? '未闭合' : '已闭合'}）`);
     const zonePositions = [biZone, xdZone]
@@ -557,6 +620,11 @@
       const zoneCondition = zoneConfirmation(primaryZone);
       if (zoneCondition) conditions.push(zoneCondition);
       wait = `${conditions.join('；')}。条件未出现前，不升级结构判断。`;
+    }
+    if (formal && formal.lacksSupport) {
+      wait = `等待同级一类或小转大二类点确认反转；${wait}`;
+    } else if (formal && formal.direction === 'neutral') {
+      wait = `等待当前级别建立可发布的正式方向；${wait}`;
     }
 
     const boundaryFacts = [];
@@ -667,6 +735,8 @@
       structurePriceQuantum: null,
       formalDirection: 'neutral',
       formalDirectionLabel: '正式方向待确认',
+      formalDirectionDetail: '等待同一上下文的严格结构证据',
+      formalDirectionTone: 'neutral',
       formalDirectionLevel: null,
       formalDirectionTrendId: null,
       formalDirectionSupportPointId: null,
@@ -771,11 +841,33 @@
         || level.origin !== 'current_chart_recursive') {
         throw new Error('严格结构级别无效');
       }
+      const levelDirection = level.formal_direction;
+      if (!levelDirection
+        || !['up', 'down', 'neutral'].includes(levelDirection.direction)
+        || !Array.isArray(levelDirection.reason_codes)
+        || levelDirection.reason_codes.length === 0
+        || (levelDirection.structural_level !== null
+          && levelDirection.structural_level !== level.structural_level)) {
+        throw new Error('严格结构级别正式方向证据无效');
+      }
       [
         'centers', 'center_previews', 'center_projections', 'current_trends',
         'completed_trend_snapshots', 'confirmed_points', 'approaching_points', 'divergences',
       ].forEach((field) => {
         if (!Array.isArray(level[field])) throw new Error(`严格结构级别集合无效：${field}`);
+      });
+      level.current_trends.concat(level.completed_trend_snapshots).forEach((trend) => {
+        if (!trend || trend.render_kind !== 'strict_trend'
+          || trend.geometric_direction !== trend.direction
+          || !['up', 'down', null].includes(trend.semantic_direction)
+          || ![
+            'formal', 'awaiting_reversal_support', 'consolidation',
+            'ended', 'geometric_candidate',
+          ].includes(trend.direction_status)
+          || trend.formal_direction_confirmed !== (trend.direction_status === 'formal')
+          || !Array.isArray(trend.direction_reason_codes)) {
+          throw new Error('严格走势方向资格字段无效');
+        }
       });
     });
     return snapshot;
@@ -818,6 +910,26 @@
 
   function summarizeStrictTrend(item) {
     const direction = String(item.direction || '').toLowerCase();
+    const semanticDirection = item.semantic_direction === null
+      ? null
+      : String(item.semantic_direction || '').toLowerCase();
+    const directionStatus = String(item.direction_status || '').toLowerCase();
+    const geometricLabel = DIRECTION_LABELS[direction]
+      ? `几何${DIRECTION_LABELS[direction]}`
+      : '几何方向待定';
+    const semanticLabel = semanticDirection && DIRECTION_LABELS[semanticDirection]
+      ? DIRECTION_LABELS[semanticDirection]
+      : null;
+    let directionLabel = `${geometricLabel}（候选）`;
+    if (directionStatus === 'formal') {
+      directionLabel = `正式${semanticLabel || DIRECTION_LABELS[direction] || '方向待定'}`;
+    } else if (directionStatus === 'awaiting_reversal_support') {
+      directionLabel = `${semanticLabel ? `走势定义${semanticLabel}` : geometricLabel} · 待同级一/二类点`;
+    } else if (directionStatus === 'consolidation') {
+      directionLabel = `盘整 · ${geometricLabel}`;
+    } else if (directionStatus === 'ended') {
+      directionLabel = `${semanticLabel ? `走势定义${semanticLabel}` : geometricLabel} · 已结束`;
+    }
     return {
       trendId: item.trend_id,
       renderId: item.render_id,
@@ -826,8 +938,15 @@
       state: item.state,
       kind: item.kind,
       direction,
-      directionLabel: DIRECTION_LABELS[direction]
-        ? `几何${DIRECTION_LABELS[direction]}` : '几何方向待定',
+      geometricDirection: direction,
+      semanticDirection,
+      directionStatus,
+      directionLabel,
+      formalDirectionConfirmed: item.formal_direction_confirmed === true,
+      formalSupportPointId: item.formal_support_point_id || null,
+      directionReasonCodes: Array.isArray(item.direction_reason_codes)
+        ? item.direction_reason_codes.slice()
+        : [],
       tradable: item.tradable === true,
       centerIds: Array.isArray(item.center_ids) ? item.center_ids.slice() : [],
       confirmedAt: toSeconds(item.confirmed_at),
@@ -1021,14 +1140,16 @@
       latestClose,
       'bc',
     );
-    const narrative = structureNarrative(bi, xd, biZone, xdZone);
-    const plan = buildPlan(bi, xd, biZone, xdZone);
     const formalDirection = snapshot.formal_direction;
-    const formalDirectionLabel = formalDirection.direction === 'up'
-      ? '正式上涨'
-      : formalDirection.direction === 'down'
-        ? '正式下跌'
-        : '正式方向待确认';
+    const formalDirectionSummary = summarizeFormalDirection(formalDirection);
+    const narrative = structureNarrative(
+      bi,
+      xd,
+      biZone,
+      xdZone,
+      formalDirection,
+    );
+    const plan = buildPlan(bi, xd, biZone, xdZone, formalDirection);
 
     return {
       ...base,
@@ -1041,7 +1162,9 @@
       priceBasisRevision: snapshot.price_basis_revision,
       structurePriceQuantum: snapshot.structure_price_quantum,
       formalDirection: formalDirection.direction,
-      formalDirectionLabel,
+      formalDirectionLabel: formalDirectionSummary.label,
+      formalDirectionDetail: formalDirectionSummary.detail,
+      formalDirectionTone: formalDirectionSummary.tone,
       formalDirectionLevel: formalDirection.structural_level,
       formalDirectionTrendId: formalDirection.trend_id,
       formalDirectionSupportPointId: formalDirection.support_point_id,
@@ -1181,7 +1304,7 @@
       if (manager && manager.widget && typeof manager.widget.symbolInterval === 'function') {
         return manager.widget.symbolInterval();
       }
-    } catch (_) { /* chart is still initializing */ }
+    } catch (_) { /* 图表仍在初始化 */ }
     return null;
   }
 
@@ -1239,6 +1362,9 @@
     setText('ca-bi-meta', summary.bi.meta);
     setText('ca-xd-state', summary.xd.text);
     setText('ca-xd-meta', summary.xd.meta);
+    setText('ca-formal-direction-state', summary.formalDirectionLabel);
+    setText('ca-formal-direction-meta', summary.formalDirectionDetail);
+    setTone('ca-formal-direction-row', summary.formalDirectionTone);
     setText('ca-bi-zone-state', summary.biZone.text);
     setText('ca-bi-zone-meta', summary.biZone.meta);
     setTone('ca-bi-zone-row', summary.biZone.tone);
@@ -1376,7 +1502,7 @@
     if (persist) {
       try {
         root.localStorage.setItem(OVERVIEW_COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
-      } catch (_) { /* storage may be unavailable */ }
+      } catch (_) { /* 本地存储可能不可用 */ }
     }
   }
   function init() {

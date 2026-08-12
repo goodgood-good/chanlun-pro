@@ -6,7 +6,11 @@ from decimal import Decimal
 from chanlun.core.strict_structure.divergence import (
     collect_formal_divergence_ledger,
 )
-from chanlun.core.strict_structure.formal_state import resolve_formal_direction
+from chanlun.core.strict_structure.formal_state import (
+    resolve_formal_direction,
+    resolve_level_formal_direction,
+    semantic_trend_direction,
+)
 from chanlun.core.strict_structure.identity import (
     build_strict_evidence_revision,
     stable_structure_id,
@@ -246,9 +250,7 @@ def test_direction_change_without_first_or_second_point_stays_neutral():
     state = resolve_formal_direction(_bundle(structure))
 
     assert state.direction == "neutral"
-    assert state.reason_codes == (
-        "direction_change_lacks_first_or_second_point",
-    )
+    assert state.reason_codes == ("direction_change_lacks_first_or_second_point",)
 
 
 def test_direction_change_with_first_point_is_published_and_auditable():
@@ -273,3 +275,19 @@ def test_formal_direction_uses_center_relation_not_net_displacement():
 
     assert state.direction == "down"
     assert state.reason_codes == ("current_directional_trend",)
+
+
+def test_level_direction_and_global_direction_share_one_resolver():
+    evidence = _bundle(_structure(38))
+
+    assert resolve_level_formal_direction(evidence, 0) == resolve_formal_direction(
+        evidence
+    )
+
+
+def test_semantic_direction_is_independent_from_endpoint_displacement():
+    structure = _net_displacement_mismatch_structure()
+    current = structure.levels[0].trend_types[-1]
+
+    assert current.direction == "up"
+    assert semantic_trend_direction(current) == "down"

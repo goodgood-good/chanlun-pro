@@ -91,13 +91,22 @@ test('中枢用线宽表达权重并用线型和透明度表达完成状态', ()
 
 test('走势类型保持同级颜色但弱于基础结构线', () => {
   const api = loadStyleApi();
-  const completed = api.getTrendVisualStyle({ state: 'completed' });
-  const forming = api.getTrendVisualStyle({ state: 'forming' });
+  const completed = api.getTrendVisualStyle({ state: 'completed', direction_status: 'ended' });
+  const forming = api.getTrendVisualStyle({ state: 'forming', direction_status: 'formal' });
+  const candidate = api.getTrendVisualStyle({ state: 'completed', direction_status: 'geometric_candidate' });
+  const reversal = api.getTrendVisualStyle({ state: 'forming', direction_status: 'awaiting_reversal_support' });
+  const consolidation = api.getTrendVisualStyle({ state: 'forming', direction_status: 'consolidation' });
   assert.equal(completed.linewidth, 1);
   assert.equal(completed.linestyle, 0);
   assert.equal(completed.transparency, 12);
   assert.equal(forming.linestyle, 2);
   assert.equal(forming.transparency, 30);
+  assert.equal(candidate.linestyle, 2);
+  assert.equal(candidate.transparency, 50);
+  assert.equal(reversal.linestyle, 1);
+  assert.equal(reversal.transparency, 62);
+  assert.equal(consolidation.linestyle, 1);
+  assert.equal(consolidation.transparency, 70);
 });
 
 test('买卖点使用中文短标签、方向箭头和级别字号', () => {

@@ -134,6 +134,30 @@ test('body revision replaces exactly one prior entity', () => {
   assert.equal(plan.desiredItems.length, 1);
 });
 
+test('走势方向资格变化会触发图形替换', () => {
+  const candidate = {
+    render_kind: 'strict_trend',
+    trend_id: 'trend-1',
+    render_id: 'trend-1@forming@u9@geometric_candidate',
+    structural_level: 0,
+    state: 'forming',
+    direction: 'down',
+    semantic_direction: 'down',
+    direction_status: 'geometric_candidate',
+    points: [{ time: 100, price: 11 }, { time: 500, price: 9 }],
+  };
+  const formal = {
+    ...candidate,
+    render_id: 'trend-1@forming@u9@formal',
+    direction_status: 'formal',
+  };
+
+  assert.notEqual(
+    Reconcile.geometryFingerprint(candidate),
+    Reconcile.geometryFingerprint(formal),
+  );
+});
+
 test('duplicate retained entities are removed and rebuilt as one logical shape', () => {
   const item = strictCenter();
   const plan = Reconcile.planReconcile(

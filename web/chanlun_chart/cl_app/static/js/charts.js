@@ -690,6 +690,28 @@ function getCenterVisualStyle(role, item = {}) {
 
 function getTrendVisualStyle(item = {}) {
     const forming = String(item.state || "").toLowerCase() === "forming";
+    const directionStatus = String(item.direction_status || "").toLowerCase();
+    if (directionStatus === "awaiting_reversal_support") {
+        return {
+            linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
+            transparency: 62,
+            linestyle: CHART_CONFIG.LINE_STYLES.DOTTED,
+        };
+    }
+    if (directionStatus === "consolidation") {
+        return {
+            linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
+            transparency: 70,
+            linestyle: CHART_CONFIG.LINE_STYLES.DOTTED,
+        };
+    }
+    if (directionStatus === "geometric_candidate") {
+        return {
+            linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
+            transparency: 50,
+            linestyle: CHART_CONFIG.LINE_STYLES.DASHED,
+        };
+    }
     return {
         linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
         transparency: forming
@@ -3158,9 +3180,8 @@ class ChartManager {
                 if (!labeledItem || !Number.isInteger(labeledItem.structural_level) || !Array.isArray(labeledItem.points)) {
                     throw new Error('strict render item is invalid');
                 }
-                // Strict evidence keeps exact market-close instants for audit
-                // identity.  Rendering uses the same UTC period anchors as the
-                // calendar Bars handed to TradingView.
+                // 严格证据保留精确市场收盘时刻作为审计身份；绘图时使用与
+                // TradingView 日历 K 线一致的 UTC 周期锚点。
                 const item = api.itemToChartCoordinates(labeledItem, context.interval);
                 if (!this._strictItemEnabled(item)) continue;
                 const scope = api.scopeKey(context, item);
@@ -3175,6 +3196,17 @@ class ChartManager {
                 || typeof level.label !== 'string' || !level.label
                 || level.origin !== 'current_chart_recursive'
             ) throw new Error('strict level is invalid');
+            const levelDirection = level.formal_direction;
+            if (
+                !levelDirection
+                || !['up', 'down', 'neutral'].includes(levelDirection.direction)
+                || !Array.isArray(levelDirection.reason_codes)
+                || levelDirection.reason_codes.length === 0
+                || (
+                    levelDirection.structural_level !== null
+                    && levelDirection.structural_level !== level.structural_level
+                )
+            ) throw new Error('strict level formal direction is invalid');
             const requiredCollections = [
                 'centers', 'center_previews', 'center_projections',
                 'current_trends', 'completed_trend_snapshots',
@@ -3183,11 +3215,22 @@ class ChartManager {
             if (requiredCollections.some((field) => !Array.isArray(level[field]))) {
                 throw new Error('strict level collections are invalid');
             }
-            // Backend CenterLevelResult guarantees one unresolved owner.  Keep
-            // the same rule here as an independent stale-cache/race guard:
-            // a boundary-sharing or disjoint *forming* preview cannot coexist
-            // with an unresolved formal center unless a completed preview has
-            // already supplied that center's causal third-class boundary.
+            for (const trend of level.current_trends.concat(level.completed_trend_snapshots)) {
+                if (
+                    !trend || trend.render_kind !== 'strict_trend'
+                    || trend.geometric_direction !== trend.direction
+                    || !['up', 'down', null].includes(trend.semantic_direction)
+                    || ![
+                        'formal', 'awaiting_reversal_support', 'consolidation',
+                        'ended', 'geometric_candidate',
+                    ].includes(trend.direction_status)
+                    || trend.formal_direction_confirmed !== (trend.direction_status === 'formal')
+                    || !Array.isArray(trend.direction_reason_codes)
+                ) throw new Error('strict trend direction qualification is invalid');
+            }
+            // 后端 CenterLevelResult 保证只有一个未决归属。前端以同一规则独立
+            // 防御陈旧缓存和竞态：共享边界或相互分离的形成中预览，不能与未决
+            // 正式中枢共存，除非已完成预览提供了该中枢的因果三类点边界。
             const ongoingCenters = level.centers.filter((item) => item?.state === 'ongoing');
             const terminalOngoing = ongoingCenters.length
                 ? ongoingCenters[ongoingCenters.length - 1]

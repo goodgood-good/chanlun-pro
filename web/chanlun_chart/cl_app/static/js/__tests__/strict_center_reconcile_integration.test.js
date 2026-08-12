@@ -177,7 +177,7 @@ function divergence(kind = 'trend', overrides = {}) {
 }
 
 function snapshot(overrides = {}) {
-  return {
+  const value = {
     schema: 'chanlun-chart-structure',
     symbol: 'SH.600519',
     source_frequency: '5m',
@@ -212,6 +212,17 @@ function snapshot(overrides = {}) {
     }],
     ...overrides,
   };
+  value.levels = value.levels.map((level) => ({
+    formal_direction: {
+      direction: 'neutral',
+      structural_level: null,
+      trend_id: null,
+      support_point_id: null,
+      reason_codes: ['current_suffix_has_no_formal_trend'],
+    },
+    ...level,
+  }));
+  return value;
 }
 
 function chartData(mode = 'replace', strict = snapshot(), bars = null) {

@@ -186,9 +186,8 @@
     const right = Math.min(loaded.to, visible.to);
     if (left > right) return null;
 
-    // Visible-range edges may lie in a market break or weekend.  Anchoring a
-    // line tool at that arbitrary timestamp makes TradingView silently snap it
-    // to another candle, so use actual loaded bar coordinates when available.
+    // 可视区边界可能落在休市时段或周末。若把线段锚定在这种任意时间，
+    // TradingView 会静默吸附到其他 K 线，所以优先使用已经加载的真实 K 线坐标。
     const barTimes = Array.isArray(loaded.barTimes)
       ? loaded.barTimes
       : null;
@@ -228,6 +227,8 @@
         points: item.points,
         state: item.state,
         direction: item.direction,
+        semantic_direction: item.semantic_direction,
+        direction_status: item.direction_status,
         point_type: item.point_type,
         kind: item.kind,
         variant: item.variant,
@@ -260,9 +261,8 @@
       if (planned.has(key)) throw new Error(`duplicate incoming key: ${key}`);
       if (!intersects(sourceItem, visible)) continue;
       if (drawable === null) continue;
-      // Keep immutable strict evidence untouched, but clip the TradingView
-      // render copy to real bars currently on screen.  Off-screen anchors are
-      // otherwise snapped after creation and can never pass exact verification.
+      // 不修改不可变的严格证据，只把 TradingView 绘图副本裁剪到当前画面的
+      // 真实 K 线；否则画面外锚点会在创建后被吸附，无法通过精确校验。
       const renderItem = clipToLoadedRange(sourceItem, drawable);
       if (renderItem === null) continue;
       planned.set(key, {
@@ -279,10 +279,8 @@
       const next = planned.get(key);
       const duplicates = duplicatePrevious.get(key);
       if (duplicates) {
-        // A late asynchronous callback must never be able to make two live
-        // entities own one logical structure.  Rebuild the key from scratch;
-        // this also heals corrupted containers instead of rejecting the whole
-        // strict snapshot and leaving overlapping boxes on screen.
+        // 延迟异步回调不能让两个实体共同占有一个逻辑结构。这里从头重建该键，
+        // 同时修复已损坏的容器，避免因拒绝整份快照而在画面留下重叠图形。
         for (const duplicate of duplicates) {
           if (duplicate.id != null && !removeIds.includes(duplicate.id)) {
             removeIds.push(duplicate.id);
@@ -309,11 +307,9 @@
         createItems.push(next);
       }
     }
-    // Expose the complete desired render set as well as the delta.  TradingView
-    // can move an already-created line tool later while loading history or
-    // changing the visible range.  The caller therefore has to compare
-    // retained entities with their current desired geometry, not only compare
-    // the immutable bookkeeping fingerprints stored at creation time.
+    // 除增量外还返回完整目标集合。TradingView 在加载历史或改变可视区时可能
+    // 移动已创建的线工具，因此调用方必须把保留实体与当前目标几何重新比较，
+    // 不能只依赖创建时保存的不可变指纹。
     return {
       removeIds,
       createItems,

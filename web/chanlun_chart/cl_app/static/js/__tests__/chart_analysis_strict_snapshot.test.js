@@ -197,6 +197,13 @@ function snapshot(overrides = {}) {
       structural_level: 0,
       label: '5m',
       origin: 'current_chart_recursive',
+      formal_direction: {
+        direction: 'up',
+        structural_level: 0,
+        trend_id: 'trend-l0-current',
+        support_point_id: null,
+        reason_codes: ['current_directional_trend'],
+      },
       centers: [center()],
       center_previews: [centerPreview({
         points: [
@@ -217,6 +224,12 @@ function snapshot(overrides = {}) {
         state: 'forming',
         kind: 'trend',
         direction: 'up',
+        geometric_direction: 'up',
+        semantic_direction: 'up',
+        direction_status: 'formal',
+        formal_direction_confirmed: true,
+        formal_support_point_id: null,
+        direction_reason_codes: ['current_directional_trend'],
         tradable: true,
         points: [
           { time: 1699996000, price_tick: 980, price: 9.8 },
@@ -266,7 +279,7 @@ const context = {
 test('strict snapshot supplies centers and signals through one contract', () => {
   const strictOnly = Analysis.summarizeChartData(barsResult(), context);
   assert.equal(strictOnly.state, 'ready');
-  assert.equal(strictOnly.trends[0].directionLabel, '几何向上');
+  assert.equal(strictOnly.trends[0].directionLabel, '正式向上');
   assert.equal(strictOnly.formalDirectionLabel, '正式上涨');
   assert.equal(strictOnly.formalCenters[0].tradable, false);
   assert.equal(strictOnly.formalCenters[0].enteringSegment.direction, 'up');
@@ -345,7 +358,52 @@ test('current stroke and segment status use base geometry from the same response
 
   assert.equal(summary.bi.text, '向上 · 形成中');
   assert.equal(summary.xd.text, '向下 · 已完成');
-  assert.equal(summary.trends[0].directionLabel, '几何向上');
+  assert.equal(summary.trends[0].directionLabel, '正式向上');
+});
+
+test('几何反转缺少同级一二类点时不得显示为正式方向', () => {
+  const base = snapshot();
+  const waitingDirection = {
+    direction: 'neutral',
+    structural_level: 0,
+    trend_id: 'trend-l0-current',
+    support_point_id: null,
+    reason_codes: ['direction_change_lacks_first_or_second_point'],
+  };
+  const waitingTrend = {
+    ...base.levels[0].current_trends[0],
+    direction: 'down',
+    geometric_direction: 'down',
+    semantic_direction: 'down',
+    direction_status: 'awaiting_reversal_support',
+    formal_direction_confirmed: false,
+    direction_reason_codes: ['direction_change_lacks_first_or_second_point'],
+  };
+  const strict = snapshot({
+    formal_direction: waitingDirection,
+    levels: [{
+      ...base.levels[0],
+      formal_direction: waitingDirection,
+      current_trends: [waitingTrend],
+    }],
+  });
+
+  const summary = Analysis.summarizeChartData(barsResult(strict, {
+    xds: [{
+      linestyle: '0',
+      points: [
+        { time: CLOSED_AT - 300, price: 11.4 },
+        { time: CLOSED_AT, price: 10.1 },
+      ],
+    }],
+  }), context);
+
+  assert.equal(summary.formalDirection, 'neutral');
+  assert.equal(summary.formalDirectionLabel, '反转待一/二类点确认');
+  assert.equal(summary.trends[0].directionLabel, '走势定义向下 · 待同级一/二类点');
+  assert.equal(summary.verdict, '几何反转待同级一/二类点确认');
+  assert.match(summary.verdictDetail, /当前笔、线段只表示几何运行/);
+  assert.match(summary.plan.wait, /等待同级一类或小转大二类点确认反转/);
 });
 
 test('all six buy and sell point classes stay independent across confirmed and approaching evidence', () => {

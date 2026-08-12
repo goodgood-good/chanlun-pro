@@ -524,6 +524,24 @@
   background: var(--ca-bg);
 }
 
+.ca-structure-card--formal {
+  grid-column: 1 / -1;
+  border-color: rgba(22, 119, 255, 0.24);
+  background: var(--ca-blue-soft);
+}
+
+.ca-structure-card--formal[data-tone='buy'] strong {
+  color: var(--ca-buy);
+}
+
+.ca-structure-card--formal[data-tone='sell'] strong {
+  color: var(--ca-sell);
+}
+
+.ca-structure-card--formal[data-tone='pending'] strong {
+  color: var(--ca-live);
+}
+
 .ca-zone-card {
   min-width: 0;
   padding: 9px;

@@ -30,6 +30,8 @@ from chanlun.core.strict_structure.formal_state import (
     FormalDirectionState,
     current_formal_direction,
     resolve_formal_direction,
+    resolve_level_formal_direction,
+    semantic_trend_direction,
 )
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
@@ -79,4 +81,6 @@ __all__ = [
     "MacdStrengthProvider",
     "recursive_level_labels",
     "resolve_formal_direction",
+    "resolve_level_formal_direction",
+    "semantic_trend_direction",
 ]
