@@ -236,6 +236,23 @@ def test_restart_loads_dotenv_and_resolves_the_project_python_before_preflight()
     assert "poetry" in source
 
 
+def test_restart_rejects_invalid_login_environment_before_stopping_service():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    ).read_text(encoding="utf-8")
+
+    validation = source.index(
+        "if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD))"
+    )
+    stop_phase = source.index("# --- 1. 先停止网页项目")
+
+    assert validation < stop_phase
+    assert "function Test-LoginPasswordHash" in source
+    assert ".StartsWith('pbkdf2:')" in source
+    assert ".StartsWith('scrypt:')" in source
+    assert "现有服务未停止" in source
+
+
 def test_poetry_python_resolution_tolerates_informational_stderr_only():
     source = (
         Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"

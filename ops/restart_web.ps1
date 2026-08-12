@@ -174,6 +174,13 @@ function Resolve-ProjectPython {
     throw 'Poetry returned no usable Python executable'
 }
 
+function Test-LoginPasswordHash {
+    param([AllowEmptyString()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    return $Value.StartsWith('pbkdf2:') -or $Value.StartsWith('scrypt:')
+}
+
 function Get-WebProcs {
     $appPattern = '(?i)(?:^|[\s"])' + [regex]::Escape($AppScript) + '(?:[\s"]|$)'
     @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
@@ -314,6 +321,11 @@ try {
     $PythonExe = Resolve-ProjectPython
 } catch {
     Log ('ERROR: Python/environment preflight failed: {0}' -f $_.Exception.Message)
+    Log '===== web restart ABORTED ====='
+    exit 1
+}
+if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD)) {
+    Log 'ERROR: CHANLUN_LOGIN_PWD 必须是项目当前的 pbkdf2:/scrypt: 哈希；现有服务未停止'
     Log '===== web restart ABORTED ====='
     exit 1
 }
