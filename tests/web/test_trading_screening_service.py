@@ -719,6 +719,7 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
             "5m": 12000,
             "1m": 12000,
         },
+        "stock_structure_qmt_dividend_type": "front_ratio",
         "provisional_point_source": "strict_approaching_ledger",
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",

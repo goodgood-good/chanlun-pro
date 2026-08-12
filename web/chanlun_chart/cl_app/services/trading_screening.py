@@ -137,6 +137,7 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT,
     QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE,
 )
+from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 from cl_app.services.trading_screening_gateway import (
     CANONICAL_REQUEST_BARS_BY_FREQUENCY,
     SectorAnalysisExclusion,
@@ -853,6 +854,7 @@ def _screening_policy_document() -> dict[str, object]:
         "stock_structure_request_bars": dict(
             CANONICAL_REQUEST_BARS_BY_FREQUENCY
         ),
+        "stock_structure_qmt_dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
         "provisional_point_source": "strict_approaching_ledger",
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",
