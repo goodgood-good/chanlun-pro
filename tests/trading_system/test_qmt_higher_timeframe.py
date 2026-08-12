@@ -340,7 +340,7 @@ def frame(times: tuple[datetime, ...]) -> pd.DataFrame:
     value.attrs.update(
         {
             "price_basis_provider": "qmt",
-            "price_basis_adjustment": "front",
+            "price_basis_adjustment": "front_ratio",
             "price_basis_revision": REVISION,
             "source_base_stream_revision": BASE,
             "source_base_frequency": "1m",
@@ -566,7 +566,7 @@ def test_live_gate_derives_daily_and_30m_from_one_completed_1m_prefix() -> None:
     assert reconciliation.overlap_session_count == 2
     assert exchange.calls[0][1] == "1m"
     assert exchange.calls[1][1] == "d"
-    assert exchange.calls[0][2]["dividend_type"] == "front"
+    assert exchange.calls[0][2]["dividend_type"] == "front_ratio"
     assert exchange.calls[0][2]["research_exact_end"] is True
 
 

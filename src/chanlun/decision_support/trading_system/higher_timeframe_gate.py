@@ -61,6 +61,7 @@ from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QmtMinuteSessionIssue,
     build_qmt_same_base_stream_frames,
 )
+from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 RiskGate = Literal["GREEN", "AMBER", "RED", "UNRESOLVED"]
 RiskPeriod = Literal["M", "W", "D"]
 QMT_SECTOR_SAME_BASE_SOURCE_MODE = "PAGE_PARITY_SAME_5M_BASE"
@@ -4564,7 +4565,7 @@ def resolve_sector_higher_timeframe_gate(
 
 
 class QmtHigherTimeframeGateSource:
-    """Use reconciled native D + 1m-derived 30m; sector stays on one 5m base."""
+    """个股使用对账日线和 1m 派生 30m，行业保持唯一 5m 基础流。"""
 
     def __init__(
         self,
@@ -4726,7 +4727,7 @@ class QmtHigherTimeframeGateSource:
             start_date=start.strftime("%Y-%m-%d %H:%M:%S"),
             end_date=observed.strftime("%Y-%m-%d %H:%M:%S"),
             args={
-                "dividend_type": "front",
+                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
                 "skip_download": not allow_download,
                 "research_exact_end": True,
                 "req_counts": self._one_minute_bars,
@@ -4764,7 +4765,7 @@ class QmtHigherTimeframeGateSource:
             start_date=start.strftime("%Y-%m-%d %H:%M:%S"),
             end_date=observed.strftime("%Y-%m-%d %H:%M:%S"),
             args={
-                "dividend_type": "front",
+                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
                 "skip_download": True,
                 "research_exact_end": True,
                 "req_counts": self._native_daily_bars,

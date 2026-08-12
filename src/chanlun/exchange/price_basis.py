@@ -1,4 +1,4 @@
-"""Canonical price-basis metadata shared by market-data consumers."""
+"""行情消费者共享的规范价格基准元数据。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,10 @@ _DIAGNOSTIC_ATTRS = (
 _QMT_ADJUSTMENTS = frozenset(
     {"none", "front", "back", "front_ratio", "back_ratio"}
 )
+# 缠论结构只使用等比前复权。QMT 的普通前复权会按现金分红做减法，长回看区间内
+# 可能产生零价或负价，继而破坏振幅、比例和结构止损语义；等比前复权既消除除权跳空，
+# 又始终保留正价格。真实成交边界仍须由调用方显式请求 ``none``。
+QMT_STRUCTURE_DIVIDEND_TYPE = "front_ratio"
 _QMT_FACTOR_FIELDS = (
     "time",
     "interest",
@@ -34,7 +38,7 @@ _QMT_FACTOR_FIELDS = (
 
 
 class PriceBasisMismatchError(ValueError):
-    """Raised before frames from different or unknown price epochs are mixed."""
+    """在不同或未知价格纪元的数据帧混合前抛出。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +184,7 @@ def build_provider_price_basis_metadata(
     adjustment: str,
     structure_price_quantum: Decimal,
 ) -> PriceBasisMetadata:
-    """Build stable metadata for a provider with a declared price method."""
+    """为已声明价格方法的行情提供器构建稳定元数据。"""
 
     values = {
         "provider": provider,
@@ -258,6 +262,7 @@ def merge_price_basis_metadata(
 
 
 __all__ = (
+    "QMT_STRUCTURE_DIVIDEND_TYPE",
     "PriceBasisMetadata",
     "PriceBasisMismatchError",
     "attach_price_basis_metadata",

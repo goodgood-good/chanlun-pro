@@ -14,6 +14,7 @@ from chanlun.exchange.kline_precision import (
     resolve_structure_price_quantum,
 )
 from chanlun.exchange.price_basis import (
+    QMT_STRUCTURE_DIVIDEND_TYPE,
     attach_price_basis_metadata,
     build_qmt_price_basis_metadata,
 )
@@ -405,7 +406,11 @@ class ExchangeQMT(Exchange):
         if research_exact_end:
             download_query_end = qmt_exclusive_download_end(end_date)
 
-        dividend_type = args.get("dividend_type", "front") if args else "front"
+        dividend_type = (
+            args.get("dividend_type", QMT_STRUCTURE_DIVIDEND_TYPE)
+            if args
+            else QMT_STRUCTURE_DIVIDEND_TYPE
+        )
         if dividend_type not in {
             "none",
             "front",

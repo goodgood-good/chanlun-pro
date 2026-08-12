@@ -44,6 +44,7 @@ from chanlun.decision_support.trading_system.trading_session import (
 )
 from chanlun.exchange.exchange_qmt import _XTDATA_NATIVE_LOCK
 from chanlun.exchange.price_basis import (
+    QMT_STRUCTURE_DIVIDEND_TYPE,
     attach_price_basis_metadata,
     build_provider_price_basis_metadata,
 )
@@ -71,7 +72,7 @@ QMT_CURRENT_A_SHARE_SECTOR = "沪深京A股"
 QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT = (
     "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION"
 )
-QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE = "front_ratio"
+QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE = QMT_STRUCTURE_DIVIDEND_TYPE
 QMT_SECTOR_STRENGTH_ADJUSTMENT = (
     "front-ratio-terminal-close-normalized"
 )

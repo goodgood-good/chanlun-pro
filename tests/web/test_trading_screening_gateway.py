@@ -646,7 +646,9 @@ class OpeningAuctionExchange:
     def klines(self, _code: str, frequency: str, *, args: dict[str, object]):
         assert frequency == "1m"
         self.calls.append(dict(args))
-        adjustment = "none" if args.get("dividend_type") == "none" else "front"
+        adjustment = (
+            "none" if args.get("dividend_type") == "none" else "front_ratio"
+        )
         return _qmt_native_one_minute_session(adjustment=adjustment)
 
 
@@ -713,7 +715,7 @@ def test_native_gateway_merges_opening_event_for_structure_and_entry_boundary() 
     assert first["low"] == 9.8
     assert first["close"] == 10.2
     assert first["volume"] == 300.0
-    assert structure_frame.attrs["price_basis_adjustment"] == "front"
+    assert structure_frame.attrs["price_basis_adjustment"] == "front_ratio"
 
     [boundary] = analysis.entry_execution_boundaries
     assert boundary.confirmation_bar_closed_at == datetime.fromisoformat(
@@ -811,7 +813,7 @@ class InvalidNativeThirtyExchange:
             raise AssertionError(f"unexpected frequency: {frequency}")
         frame.attrs.update(
             structure_price_quantum="0.01",
-            price_basis_revision="qmt-front-test",
+            price_basis_revision="qmt-front-ratio-test",
         )
         return frame
 
@@ -1529,8 +1531,16 @@ def test_invalid_native_thirty_is_rebuilt_from_completed_same_source_five() -> N
     )
 
     assert exchange.calls == [
-        ("SH.603869", "30m", {"req_counts": 4}),
-        ("SH.603869", "5m", {"req_counts": 24}),
+        (
+            "SH.603869",
+            "30m",
+            {"req_counts": 4, "dividend_type": "front_ratio"},
+        ),
+        (
+            "SH.603869",
+            "5m",
+            {"req_counts": 24, "dividend_type": "front_ratio"},
+        ),
     ]
     assert analysis.warmup_reason_codes == (
         "QMT_NATIVE_30M_INVALID_RESAMPLED_FROM_COMPLETED_5M",
@@ -1540,7 +1550,7 @@ def test_invalid_native_thirty_is_rebuilt_from_completed_same_source_five() -> N
     assert len(rebuilt) == 2
     assert bool((rebuilt["high"] >= rebuilt[["open", "close"]].max(axis=1)).all())
     assert bool((rebuilt["low"] <= rebuilt[["open", "close"]].min(axis=1)).all())
-    assert rebuilt.attrs["price_basis_revision"] == "qmt-front-test"
+    assert rebuilt.attrs["price_basis_revision"] == "qmt-front-ratio-test"
 
 
 def test_invalid_native_thirty_fails_closed_when_five_minute_evidence_is_invalid() -> (
@@ -1621,7 +1631,13 @@ def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None
         frequencies=("1m",),
     )
 
-    assert stock_exchange.calls == [("SZ.000001", "1m", {"req_counts": 4})]
+    assert stock_exchange.calls == [
+        (
+            "SZ.000001",
+            "1m",
+            {"req_counts": 4, "dividend_type": "front_ratio"},
+        )
+    ]
 
 
 def test_native_gateway_does_not_leak_cached_one_minute_points_into_5m_lane() -> None:

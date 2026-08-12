@@ -2392,7 +2392,7 @@ def test_qmt_rpc_market_frame_forbids_download_and_uses_exact_close(
                 "req_counts": 240,
                 "skip_download": True,
                 "research_exact_end": True,
-                "dividend_type": "front",
+                "dividend_type": "front_ratio",
             },
         },
     )

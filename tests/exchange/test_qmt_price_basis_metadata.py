@@ -59,7 +59,7 @@ class _FakeXt:
         return _factor_frame()
 
 
-def test_qmt_front_adjusted_frame_has_formal_price_metadata(monkeypatch) -> None:
+def test_qmt_front_ratio_adjusted_frame_has_formal_price_metadata(monkeypatch) -> None:
     _FakeXt.factor_calls = 0
     _FakeXt.factor_error = None
     monkeypatch.setattr(exchange_qmt, "xtdata", _FakeXt)
@@ -70,7 +70,7 @@ def test_qmt_front_adjusted_frame_has_formal_price_metadata(monkeypatch) -> None
     assert frame.attrs["structure_price_quantum"] == "0.01"
     assert frame.attrs["price_basis_revision"].startswith("sha256:")
     assert frame.attrs["price_basis_provider"] == "qmt"
-    assert frame.attrs["price_basis_adjustment"] == "front"
+    assert frame.attrs["price_basis_adjustment"] == "front_ratio"
     assert _FakeXt.factor_calls == 1
 
 

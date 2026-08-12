@@ -3931,15 +3931,15 @@ def _qmt_rpc_market_frame(
     minimum_rows: int,
     skip_download: bool = True,
 ) -> pd.DataFrame:
-    """Read completed same-session bars from QMT without downloading data.
+    """从 QMT 读取同一交易日已完成的 K 线，默认不下载数据。
 
-    It never imports or invokes account, position, order, or trade APIs.  The
-    default is read-only.  A caller may explicitly set ``skip_download=False``
-    for one bounded official K-line refresh after both read-only sources have
-    proved incomplete; that still does not synthesize or infer market facts.
+    本函数不导入或调用账户、持仓、订单和成交接口。默认只读；只有两个只读来源均证明
+    数据不完整后，调用方才可显式传入 ``skip_download=False`` 执行一次有界官方 K 线
+    刷新，且仍不得合成或推测市场事实。
     """
 
     from chanlun.exchange import Market, get_exchange
+    from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 
     exchange = get_exchange(Market.A)
     loader = getattr(exchange, "klines", None)
@@ -3959,7 +3959,7 @@ def _qmt_rpc_market_frame(
             "req_counts": minimum_rows,
             "skip_download": skip_download,
             "research_exact_end": True,
-            "dividend_type": "front",
+            "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
         },
     )
 

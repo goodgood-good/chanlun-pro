@@ -87,6 +87,7 @@ from chanlun.decision_support.trading_system.warmup_convergence import (
     classify_warmup_convergence_envelope,
 )
 from chanlun.exchange.exchange import convert_stock_kline_frequency
+from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_CATALOG_SOURCE,
     QMT_GICS3_COMPOSITE_ADJUSTMENT,
@@ -1153,7 +1154,8 @@ class NativeTradingDataGateway:
                 )
             raise TypeError("exchange must expose klines")
         args: dict[str, object] = {
-            "req_counts": self._config.request_bars(frequency)
+            "req_counts": self._config.request_bars(frequency),
+            "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
         }
         if frame_override is _FRAME_UNSET:
             try:
@@ -1418,7 +1420,10 @@ class NativeTradingDataGateway:
         raw_five = loader(
             code,
             "5m",
-            args={"req_counts": requested_thirty * 6},
+            args={
+                "req_counts": requested_thirty * 6,
+                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
+            },
         )
         self._report_progress()
         five = _closed_frame(

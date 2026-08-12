@@ -131,7 +131,7 @@ def test_qmt_local_frame_provider_sets_skip_download() -> None:
             {
                 "req_counts": 1600,
                 "skip_download": True,
-                "dividend_type": "front",
+                "dividend_type": "front_ratio",
             },
         )
     ]

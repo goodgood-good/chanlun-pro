@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Audit multi-prefix warmup convergence from already-local QMT K-lines.
+"""审计本地 QMT K 线的多前缀预热收敛性。
 
-The command is deliberately diagnostic-only.  It reads market bars with
-``skip_download=True``, never reads an account, never routes an order, and
-does not feed its classifications back into the active screening gate.
+该命令仅用于诊断，以 ``skip_download=True`` 读取行情，不读取账户、不发送订单，
+也不会把分类结果写回在线选股闸门。
 """
 
 from __future__ import annotations
@@ -41,6 +40,9 @@ from chanlun.decision_support.trading_system.warmup_convergence import (  # noqa
     WarmupConvergenceEnvelope,
 )
 from chanlun.exchange.exchange import convert_stock_kline_frequency  # noqa: E402
+from chanlun.exchange.price_basis import (  # noqa: E402
+    QMT_STRUCTURE_DIVIDEND_TYPE,
+)
 from cl_app.services.trading_screening_gateway import (  # noqa: E402
     _closed_frame,
     _market_datetime,
@@ -118,7 +120,7 @@ def qmt_local_frame_provider(exchange: object) -> FrameProvider:
             args={
                 "req_counts": requested,
                 "skip_download": True,
-                "dividend_type": "front",
+                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
             },
         )
         source_minimum = (

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QMT K-line adjustment accepts only the current ``dividend_type`` contract."""
+"""QMT K 线只接受当前 ``dividend_type`` 契约。"""
 import pytest
 from tenacity import RetryError
 
@@ -30,12 +30,12 @@ def test_klines_forwards_dividend_type_back(monkeypatch):
     assert captured["dividend_type"] == "back"
 
 
-def test_klines_default_is_front(monkeypatch):
+def test_klines_default_is_front_ratio(monkeypatch):
     ex = ExchangeQMT()
     captured = {}
     _mock_xt(monkeypatch, captured)
     ex.klines("SH.600519", "d", start_date="2020-01-01")
-    assert captured["dividend_type"] == "front"
+    assert captured["dividend_type"] == "front_ratio"
 
 
 def test_unsupported_fq_key_is_rejected(monkeypatch):
