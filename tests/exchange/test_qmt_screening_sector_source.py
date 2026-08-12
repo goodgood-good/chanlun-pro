@@ -72,6 +72,28 @@ def test_qmt_fact_families_have_distinct_authenticated_revisions() -> None:
     assert composite != daily
 
 
+def test_qmt_fact_dependencies_do_not_cross_intraday_and_daily_families(
+    monkeypatch,
+) -> None:
+    original_read_bytes = Path.read_bytes
+    touched: list[str] = []
+
+    def recording_read_bytes(path: Path) -> bytes:
+        touched.append(path.name)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", recording_read_bytes)
+
+    subject.qmt_sector_composite_fact_producer_revision()
+    assert "qmt_time_contract.py" in touched
+    assert "etf_proxy_facts.py" not in touched
+
+    touched.clear()
+    subject.qmt_sector_daily_fact_producer_revision()
+    assert "etf_proxy_facts.py" in touched
+    assert "qmt_time_contract.py" not in touched
+
+
 class FakeXtdata:
     def __init__(
         self,
@@ -303,6 +325,7 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     assert len(fake.factor_calls) == len(members)
     assert fake.download_calls[0]["period"] == "5m"
     assert fake.download_calls[0]["incrementally"] is True
+    assert fake.download_calls[0]["end_time"] == "20260723103001"
     assert len(first) == 4
     assert first.equals(second)
     assert smaller.equals(first.tail(2).reset_index(drop=True))
@@ -629,8 +652,46 @@ def test_qmt_component_source_repairs_fresh_but_shallow_history_once_per_bucket(
     } == {
         (
             expected[0].strftime("%Y%m%d%H%M%S"),
-            expected[-1].strftime("%Y%m%d%H%M%S"),
+            (expected[-1] + timedelta(seconds=1)).strftime("%Y%m%d%H%M%S"),
         )
+    }
+
+
+def test_qmt_component_source_downloads_the_inclusive_final_close(
+    monkeypatch,
+) -> None:
+    """盘后增量下载必须补齐 QMT 不包含结束端点所遗漏的收盘柱。"""
+
+    class ExclusiveDownloadXtdata(FakeXtdata):
+        def download_history_data(self, stock_code, period, **kwargs):
+            super().download_history_data(stock_code, period, **kwargs)
+            downloaded_through = datetime.strptime(
+                kwargs["end_time"], "%Y%m%d%H%M%S"
+            ).replace(tzinfo=SHANGHAI)
+            if downloaded_through > AS_OF:
+                self.market_end = AS_OF
+            return None
+
+    fake = ExclusiveDownloadXtdata(
+        market_end=AS_OF - timedelta(minutes=5),
+        latest_probe_end=AS_OF - timedelta(minutes=5),
+    )
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+
+    frame = QmtSectorCompositeSource(minimum_member_count=8).frame(
+        sector_id="qmt-gics3:exclusive-download-end",
+        sector_name="下载端点测试",
+        members=tuple(f"SH.6000{index:02d}" for index in range(8)),
+        frequency="5m",
+        as_of=AS_OF,
+        request_bars=4,
+    )
+
+    assert not frame.empty
+    assert frame["date"].iloc[-1].to_pydatetime() == AS_OF
+    assert {value["end_time"] for value in fake.download_calls} == {
+        "20260723103001"
     }
 
 

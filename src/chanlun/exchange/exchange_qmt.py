@@ -17,6 +17,7 @@ from chanlun.exchange.price_basis import (
     attach_price_basis_metadata,
     build_qmt_price_basis_metadata,
 )
+from chanlun.exchange.qmt_time_contract import qmt_exclusive_download_end
 from chanlun.tools.log_util import LogUtil
 from xtquant import xtdata
 
@@ -398,22 +399,11 @@ class ExchangeQMT(Exchange):
             if research_exact_end
             else ""
         )
-            # ``xtdata.download_history_data`` 把 ``end_time`` 当作不包含端点的传输边界，
-            # 而 ``get_market_data`` 会包含同一边界。若两者都传入冻结决策时刻，完成时间
-            # 恰等于 ``end_date`` 的 K 线不会进入本地存储。收盘后可观察到该差异：QMT
-            # 原生日线存在，但由一分钟线生成的日线前缀少一个交易日，高级别门会正确关闭。
-        #
-            # 仅把下载边界向后移动一秒；读取仍固定在 ``query_end``，下方显式数据帧过滤
-            # 继续强制 ``date <= end_date``。这样传输层可获取决策时刻的 K 线，
-            # 又不会暴露任何后续 K 线。
+        # QMT 下载接口不包含 ``end_time``，读取接口却包含同一边界。下载边界统一后移
+        # 一秒，读取和下方裁剪仍固定在业务时刻，既补齐端点 K 线，也不会暴露未来数据。
         download_query_end = query_end
         if research_exact_end:
-            exact_end = pd.Timestamp(end_date)
-            if exact_end.tzinfo is not None:
-                exact_end = exact_end.tz_convert(self.tz).tz_localize(None)
-            download_query_end = (exact_end + pd.Timedelta(seconds=1)).strftime(
-                "%Y%m%d%H%M%S"
-            )
+            download_query_end = qmt_exclusive_download_end(end_date)
 
         dividend_type = args.get("dividend_type", "front") if args else "front"
         if dividend_type not in {

@@ -47,6 +47,7 @@ from chanlun.exchange.price_basis import (
     attach_price_basis_metadata,
     build_provider_price_basis_metadata,
 )
+from chanlun.exchange.qmt_time_contract import qmt_exclusive_download_end
 
 
 QMT_GICS3_CATALOG_SOURCE = "qmt_gics3_components"
@@ -161,18 +162,27 @@ def _qmt_fact_family_revision(*, family: str, roots: tuple[str, ...]) -> str:
         provider.read_text(encoding="utf-8"),
         roots=roots,
     )
-    shared_paths = (
+    shared_paths = [
         package_root / "exchange" / "price_basis.py",
         package_root / "decision_support" / "fingerprints.py",
+    ]
+    if family == "DAILY_MEMBER_STRENGTH_AND_STATUS":
+        # 日线强弱事实仍依赖 ``DailyMarketBar``。保持既有依赖身份，避免分钟下载契约
+        # 的修复无故淘汰已经验证并持久化的全市场日线事实。
+        shared_paths.append(
+            package_root
+            / "decision_support"
+            / "trading_system"
+            / "etf_proxy_facts.py"
+        )
+    shared_paths.append(
         package_root
         / "decision_support"
         / "trading_system"
-        / "etf_proxy_facts.py",
-        package_root
-        / "decision_support"
-        / "trading_system"
-        / "qmt_causal_factor_adjustment.py",
+        / "qmt_causal_factor_adjustment.py"
     )
+    if family == "INTRADAY_SECTOR_COMPOSITE":
+        shared_paths.append(package_root / "exchange" / "qmt_time_contract.py")
     shared = tuple(
         {
             "path": path.relative_to(package_root).as_posix(),
@@ -1404,6 +1414,9 @@ class QmtSectorCompositeSource:
             for code in members
             if native_by_member[code] not in ready and code not in attempted
         )
+        # QMT 下载的 ``end_time`` 是不包含端点；必须显式越过最后一根已完成 K 线，
+        # 否则盘后增量下载会稳定缺少 15:00 收盘柱，而读取接口仍把 15:00 视为可见。
+        download_end = qmt_exclusive_download_end(required[-1])
         completed_attempts: set[str] = set()
         for code in pending:
             try:
@@ -1420,9 +1433,7 @@ class QmtSectorCompositeSource:
                             else ""
                         ),
                         end_time=(
-                            required[-1].strftime("%Y%m%d%H%M%S")
-                            if repair_left_history
-                            else ""
+                            download_end
                         ),
                         incrementally=not repair_left_history,
                     )
