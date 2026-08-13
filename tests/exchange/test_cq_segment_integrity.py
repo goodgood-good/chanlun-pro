@@ -19,6 +19,7 @@ _root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_root / "src"))
 
 import pytz  # noqa: E402
+import pytest  # noqa: E402
 from longbridge.openapi import OpenApiException, Period, AdjustType  # noqa: E402
 
 from chanlun.exchange.exchange_cq import ExchangeChangQiao  # noqa: E402
@@ -39,6 +40,17 @@ def _mk_ex():
 def _candle(ts_unix):
     return types.SimpleNamespace(
         timestamp=ts_unix, open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0
+    )
+
+
+def _invalid_envelope_candle(ts_unix):
+    return types.SimpleNamespace(
+        timestamp=ts_unix,
+        open=308.053,
+        high=312.059,
+        low=308.102,
+        close=311.628,
+        volume=3_349_143.0,
     )
 
 
@@ -198,3 +210,29 @@ def test_us_klines_attach_strict_price_basis_metadata(monkeypatch):
     )
     assert runtime.error_code is None
     assert runtime.cd is not None
+
+
+def test_longbridge_repairs_only_invalid_ohlc_envelope_and_records_audit(
+    monkeypatch,
+):
+    def _seg(code, period, adjust, end, start, priority="interactive"):
+        return ([_invalid_envelope_candle(int(end.timestamp()))], "complete")
+
+    ex = _klines_ex(monkeypatch, _seg)
+    monkeypatch.setattr(ex, "_market_of_code", lambda code: "us")
+
+    frame = ex.klines(
+        "AAPL.US",
+        "30m",
+        start_date="2026-05-27 00:00:00",
+        end_date="2026-05-27 23:59:59",
+    )
+
+    assert len(frame) == 1
+    assert frame.iloc[0]["open"] == 308.053
+    assert frame.iloc[0]["close"] == 311.628
+    assert frame.iloc[0]["high"] == 312.059
+    assert frame.iloc[0]["low"] == 308.053
+    assert frame.attrs["ohlc_geometry_normalization"] == "ohlc-envelope-v1"
+    assert frame.attrs["ohlc_geometry_repair_count"] == 1
+    assert frame.attrs["ohlc_geometry_max_adjustment"] == pytest.approx(0.049)

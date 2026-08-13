@@ -7,6 +7,7 @@ import functools
 from datetime import timedelta, datetime, time as datetime_time
 from typing import Dict, List, Union
 import pandas as pd
+import numpy as np
 import pytz
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
@@ -34,6 +35,7 @@ from chanlun.exchange.price_basis import (
 
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
+_LONGBRIDGE_OHLC_NORMALIZATION_REVISION = "ohlc-envelope-v1"
 
 
 def _get_env(key: str):
@@ -87,6 +89,46 @@ def _parse_kline_boundary(
     if parsed.tzinfo is None:
         return tz.localize(parsed)
     return parsed.astimezone(tz)
+
+
+def _normalize_longbridge_ohlc_geometry(
+    frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, int, float]:
+    """让区间高低价包含开盘价和收盘价，并返回可审计的修正摘要。
+
+    长桥极少数复权分钟 K 线会出现 ``low > open`` 或 ``high < open``。开盘价与
+    收盘价本身是区间内成交事实，因此只扩展 high/low 包络，不猜测或改写 open/close。
+    非有限值不在这里修补，继续交由下游严格校验拒绝。
+    """
+
+    required = ("open", "high", "low", "close")
+    if frame.empty or any(column not in frame.columns for column in required):
+        return frame, 0, 0.0
+
+    numeric = frame.loc[:, list(required)].apply(pd.to_numeric, errors="coerce")
+    finite = pd.Series(
+        np.isfinite(numeric.to_numpy(dtype=float)).all(axis=1),
+        index=frame.index,
+    )
+    envelope_high = numeric.max(axis=1)
+    envelope_low = numeric.min(axis=1)
+    repair_high = finite & (numeric["high"] < envelope_high)
+    repair_low = finite & (numeric["low"] > envelope_low)
+    repair_rows = repair_high | repair_low
+    if not repair_rows.any():
+        return frame, 0, 0.0
+
+    normalized = frame.copy()
+    normalized.loc[repair_high, "high"] = envelope_high.loc[repair_high]
+    normalized.loc[repair_low, "low"] = envelope_low.loc[repair_low]
+    adjustments = pd.concat(
+        (
+            (envelope_high.loc[repair_high] - numeric.loc[repair_high, "high"]),
+            (numeric.loc[repair_low, "low"] - envelope_low.loc[repair_low]),
+        ),
+        ignore_index=True,
+    )
+    return normalized, int(repair_rows.sum()), float(adjustments.max())
 
 
 def _build_longbridge_config() -> Config:
@@ -1080,6 +1122,7 @@ class ExchangeChangQiao(Exchange):
             df = df[["date", "frequency", "code", "open", "high", "low", "close", "volume"]]
             market = self._market_of_code(code)
             df = normalize_kline_precision(df, market, code)
+            df, repair_count, max_adjustment = _normalize_longbridge_ohlc_geometry(df)
             quantum = resolve_structure_price_quantum(market, code)
             if quantum is not None:
                 metadata = build_provider_price_basis_metadata(
@@ -1088,8 +1131,18 @@ class ExchangeChangQiao(Exchange):
                     code=code,
                     adjustment="forward",
                     structure_price_quantum=quantum,
+                    normalization_revision=(
+                        _LONGBRIDGE_OHLC_NORMALIZATION_REVISION
+                    ),
                 )
                 df = attach_price_basis_metadata(df, metadata)
+                df.attrs.update(
+                    ohlc_geometry_normalization=(
+                        _LONGBRIDGE_OHLC_NORMALIZATION_REVISION
+                    ),
+                    ohlc_geometry_repair_count=repair_count,
+                    ohlc_geometry_max_adjustment=max_adjustment,
+                )
             return df
 
         except Exception as e:

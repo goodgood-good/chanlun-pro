@@ -124,9 +124,18 @@ def test_provider_basis_revision_is_stable_and_method_specific() -> None:
         adjustment="none",
         structure_price_quantum=Decimal("0.001"),
     )
+    normalized = build_provider_price_basis_metadata(
+        provider="longbridge",
+        market="us",
+        code="TSLA.US",
+        adjustment="forward",
+        structure_price_quantum=Decimal("0.001"),
+        normalization_revision="ohlc-envelope-v1",
+    )
 
     assert first == same
     assert first.price_basis_revision != raw.price_basis_revision
+    assert first.price_basis_revision != normalized.price_basis_revision
     assert first.provider == "longbridge"
     assert first.adjustment == "forward"
 
@@ -212,3 +221,30 @@ def test_missing_new_metadata_clears_old_formal_identity() -> None:
     assert "price_basis_revision" not in target.attrs
     assert "structure_price_quantum" not in target.attrs
     assert target.attrs["price_basis_error_code"] == "qmt_factor_read_failed"
+
+
+def test_merge_preserves_provider_ohlc_normalization_audit() -> None:
+    cached = pd.DataFrame({"close": [10.0]})
+    new = pd.DataFrame({"close": [11.0]})
+    target = pd.DataFrame({"close": [10.0, 11.0]})
+    metadata = build_provider_price_basis_metadata(
+        provider="longbridge",
+        market="us",
+        code="AAPL.US",
+        adjustment="forward",
+        structure_price_quantum=Decimal("0.001"),
+        normalization_revision="ohlc-envelope-v1",
+    )
+    attach_price_basis_metadata(cached, metadata)
+    attach_price_basis_metadata(new, metadata)
+    new.attrs.update(
+        ohlc_geometry_normalization="ohlc-envelope-v1",
+        ohlc_geometry_repair_count=1,
+        ohlc_geometry_max_adjustment=0.049,
+    )
+
+    merge_price_basis_metadata(cached, new, target)
+
+    assert target.attrs["ohlc_geometry_normalization"] == "ohlc-envelope-v1"
+    assert target.attrs["ohlc_geometry_repair_count"] == 1
+    assert target.attrs["ohlc_geometry_max_adjustment"] == pytest.approx(0.049)

@@ -17,6 +17,9 @@ _DIAGNOSTIC_ATTRS = (
     "price_basis_provider",
     "price_basis_adjustment",
     "price_basis_error_code",
+    "ohlc_geometry_normalization",
+    "ohlc_geometry_repair_count",
+    "ohlc_geometry_max_adjustment",
 )
 _QMT_ADJUSTMENTS = frozenset(
     {"none", "front", "back", "front_ratio", "back_ratio"}
@@ -183,6 +186,7 @@ def build_provider_price_basis_metadata(
     code: str,
     adjustment: str,
     structure_price_quantum: Decimal,
+    normalization_revision: str | None = None,
 ) -> PriceBasisMetadata:
     """为已声明价格方法的行情提供器构建稳定元数据。"""
 
@@ -194,6 +198,17 @@ def build_provider_price_basis_metadata(
     }
     if any(not isinstance(value, str) or not value.strip() for value in values.values()):
         raise ValueError("provider price basis fields must be non-empty strings")
+    if normalization_revision is not None and (
+        not isinstance(normalization_revision, str)
+        or not normalization_revision.strip()
+        or normalization_revision != normalization_revision.strip()
+    ):
+        raise ValueError("行情规范版本必须是非空且无首尾空白的字符串")
+    normalization_ledger = (
+        ()
+        if normalization_revision is None
+        else ({"normalization_revision": normalization_revision},)
+    )
     revision = _build_price_basis_revision(
         schema="chanlun-price-basis/provider",
         provider=provider,
@@ -201,7 +216,7 @@ def build_provider_price_basis_metadata(
         code=code,
         adjustment=adjustment,
         structure_price_quantum=structure_price_quantum,
-        adjustment_ledger=(),
+        adjustment_ledger=normalization_ledger,
     )
     return PriceBasisMetadata(
         structure_price_quantum=structure_price_quantum,
