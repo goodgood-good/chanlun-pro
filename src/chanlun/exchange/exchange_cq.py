@@ -20,7 +20,6 @@ from chanlun import fun
 from chanlun import config
 from chanlun.exchange import Exchange
 from chanlun.exchange.exchange import Tick
-from chanlun.fun import str_to_datetime
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
 from chanlun.exchange.lb_priority import lb_low_priority, _lb_call_priority  # noqa: F401  (lb_low_priority 供 web 层 prewarm 标记)
@@ -57,6 +56,37 @@ def _env_int(key: str, default: int) -> int:
         return v if v >= 1 else default
     except (TypeError, ValueError):
         return default
+
+
+def _parse_kline_boundary(
+    value: str | datetime,
+    *,
+    tz,
+    end_of_day: bool = False,
+) -> datetime:
+    """按统一行情契约解析日期或完整时间，并转换到行情时区。"""
+
+    date_only = False
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        date_only = len(text) == 10
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"长桥行情时间格式无效：{value!r}") from exc
+
+    if date_only and end_of_day:
+        parsed = parsed.replace(
+            hour=23,
+            minute=59,
+            second=59,
+            microsecond=999999,
+        )
+    if parsed.tzinfo is None:
+        return tz.localize(parsed)
+    return parsed.astimezone(tz)
 
 
 def _build_longbridge_config() -> Config:
@@ -857,11 +887,11 @@ class ExchangeChangQiao(Exchange):
 
         if is_history_query:
             # 用户指定了结束时间，严格按照用户时间查询
-            end_dt = str_to_datetime(end_date)
-            if end_dt.tzinfo is None:
-                end_dt = tz.localize(end_dt)
-            else:
-                end_dt = end_dt.astimezone(tz)
+            end_dt = _parse_kline_boundary(
+                end_date,
+                tz=tz,
+                end_of_day=True,
+            )
             # API 请求游标
             api_cursor_dt = end_dt
         else:
@@ -872,11 +902,7 @@ class ExchangeChangQiao(Exchange):
             api_cursor_dt = now_dt + timedelta(minutes=5)
 
         if start_date:
-            start_dt = str_to_datetime(start_date)
-            if start_dt.tzinfo is None:
-                start_dt = tz.localize(start_dt)
-            else:
-                start_dt = start_dt.astimezone(tz)
+            start_dt = _parse_kline_boundary(start_date, tz=tz)
         else:
             lookback = get_lookback_timedelta(frequency)
             start_dt = end_dt - lookback

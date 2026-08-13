@@ -140,6 +140,27 @@ def test_klines_all_complete_has_no_incomplete_attr(monkeypatch):
     assert not df.attrs.get("fetch_incomplete")
 
 
+def test_klines_accepts_date_only_boundaries_and_includes_the_end_day(monkeypatch):
+    windows = []
+
+    def _seg(code, period, adjust, end, start, priority="interactive"):
+        windows.append((start, end))
+        return ([_candle(int(end.timestamp()))], "complete")
+
+    ex = _klines_ex(monkeypatch, _seg)
+
+    df = ex.klines(
+        "SH.600519",
+        "d",
+        start_date="2023-11-01",
+        end_date="2023-11-15",
+    )
+
+    assert not df.empty
+    assert windows[0][0].isoformat() == "2023-11-01T00:00:00+08:00"
+    assert windows[0][1].isoformat() == "2023-11-15T23:59:59.999999+08:00"
+
+
 def test_klines_reached_origin_not_treated_as_hole(monkeypatch):
     # 301600 到历史原点是正常数据耗尽,不得判为缺段(否则历史短的新股/美股 1m 频繁误拒)。
     def _seg(code, period, adjust, e, s, priority="interactive"):

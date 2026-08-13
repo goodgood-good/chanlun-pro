@@ -245,7 +245,7 @@ def test_restart_builds_complete_longbridge_environment_before_preflight():
         Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
-    dotenv_call = source.index("Import-ProjectDotEnv `")
+    dotenv_call = source.index("Import-ProjectDotEnv -Path")
     user_fallback_call = source.index("Import-UserEnvironmentFallback -Names")
     preflight = source.index("$preflightCode =")
 
@@ -267,7 +267,7 @@ def test_project_login_hash_overrides_stale_parent_process_value():
     ).read_text(encoding="utf-8")
 
     managed_names = source.index("$deploymentManagedNames = @(")
-    dotenv_call = source.index("Import-ProjectDotEnv `")
+    dotenv_call = source.index("Import-ProjectDotEnv -Path")
     validation = source.index(
         "if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD))"
     )

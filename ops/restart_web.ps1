@@ -343,8 +343,7 @@ try {
         'LONGBRIDGE_APP_SECRET',
         'LONGBRIDGE_ACCESS_TOKEN'
     )
-    Import-ProjectDotEnv `
-        -Path (Join-Path $ProjectRoot '.env') `
+    Import-ProjectDotEnv -Path (Join-Path $ProjectRoot '.env') `
         -OverrideNames $deploymentManagedNames
     Import-UserEnvironmentFallback -Names @(
         'LONGBRIDGE_APP_KEY',
