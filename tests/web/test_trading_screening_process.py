@@ -1480,6 +1480,7 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 256
     assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
     assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64
+    assert app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"] == 210.0
     gateway = app.extensions["decision_support_trading_screening_gateway"]
     assert len(gateway._structure_transports) == expected_workers  # noqa: SLF001
     assert gateway._transport not in gateway._structure_transports  # noqa: SLF001

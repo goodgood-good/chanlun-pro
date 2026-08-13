@@ -226,12 +226,13 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
         TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS=45.0,
-        # 单次原生 QMT 调用超过一分钟没有任何进度时终止并重建隔离进程，避免一个
-        # 150 秒级 RPC 卡住整个扫描批次。该上限必须大于客户端自身 45 秒超时。
+        # QMT 的历史补数 RPC 在正常情况下也可能接近 150 秒才返回，结构进程必须给它
+        # 留出完整窗口；过早终止会触发 30 秒退避，并让同批后续标的被连带记为不可用。
+        # Web 与实时 Tick 已隔离且实时请求繁忙时不排队，因此这里延长等待不会拖死网页。
         TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS=float(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS",
-                "60",
+                "210",
             )
         ),
         TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
