@@ -53,6 +53,7 @@ def test_active_runtime_has_no_removed_package_imports() -> None:
                 offenders.append(f"{path.relative_to(ROOT)}:{forbidden}")
     assert offenders == []
 
+
 def test_removed_signal_authorities_are_physically_absent() -> None:
     remaining = []
     for relative in REMOVED_SIGNAL_PATHS:
@@ -157,9 +158,7 @@ def test_production_cl_calls_bind_market_explicitly() -> None:
             )
             if name != "CL":
                 continue
-            market_keyword = any(
-                keyword.arg == "market" for keyword in node.keywords
-            )
+            market_keyword = any(keyword.arg == "market" for keyword in node.keywords)
             if len(node.args) < 5 and not market_keyword:
                 offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert offenders == []
@@ -189,12 +188,27 @@ def test_strict_signal_and_divergence_assembly_has_one_production_authority() ->
             continue
         source = path.read_text(encoding="utf-8")
         for token in forbidden_calls:
-            if token in source and not (
-                relative == "src/chanlun/core/strict_structure/identity.py"
-                and token == "build_strict_evidence_revision("
-            ) and not (
-                relative == "src/chanlun/core/strict_structure/divergence.py"
-                and token == "collect_formal_divergence_ledger("
+            if (
+                token in source
+                and not (
+                    relative == "src/chanlun/core/strict_structure/identity.py"
+                    and token == "build_strict_evidence_revision("
+                )
+                and not (
+                    relative == "src/chanlun/core/strict_structure/divergence.py"
+                    and token == "collect_formal_divergence_ledger("
+                )
             ):
                 offenders.append(f"{relative}:{token}")
     assert offenders == []
+
+
+def test_stock_selection_uses_shared_current_strict_event_protocol() -> None:
+    """选股不能再用“点锚定末段”另造当前事件口径。"""
+
+    path = ROOT / "src/chanlun/xuangu/strict_xuangu.py"
+    source = path.read_text(encoding="utf-8")
+
+    assert "current_strict_events(" in source
+    assert "_terminal_locked_unit" not in source
+    assert "== point.anchor_unit_id" not in source

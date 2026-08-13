@@ -62,19 +62,23 @@ def _evidence(
     boundaries=(),
     levels=1,
 ):
+    terminal_at = NOW
     structure_levels = tuple(
         SimpleNamespace(
             structural_level=level,
             units=(
-                SimpleNamespace(unit_id=f"old-l{level}", locked=True),
+                SimpleNamespace(
+                    unit_id=f"old-l{level}",
+                    locked=True,
+                    available_at=NOW - timedelta(days=1),
+                ),
                 SimpleNamespace(
                     unit_id="terminal" if level == 0 else f"terminal-l{level}",
                     locked=True,
+                    available_at=terminal_at,
                 ),
             ),
-            decomposition_boundaries=(
-                tuple(boundaries) if level == 0 else ()
-            ),
+            decomposition_boundaries=(tuple(boundaries) if level == 0 else ()),
         )
         for level in range(levels)
     )
@@ -101,26 +105,57 @@ def test_registered_structure_tasks_use_only_strict_implementation() -> None:
     )
 
 
-def test_single_class_selection_requires_current_terminal_point(monkeypatch) -> None:
+def test_single_class_selection_uses_latest_confirmation_batch(monkeypatch) -> None:
     evidence = _evidence(
         "5m",
         points=(
-            _point("1buy", anchor="old", at=NOW - timedelta(days=1)),
+            _point("1buy", anchor="old-l0", at=NOW - timedelta(days=1)),
             _point("1sell"),
         ),
     )
     monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
     data = _market_datas("5m")
 
-    assert (
-        strict_xuangu.select_strict_class1_point(
-            "SH.600000", data, ["long"]
-        )
-        is None
+    assert strict_xuangu.select_strict_class1_point("SH.600000", data, ["long"]) is None
+    result = strict_xuangu.select_strict_class1_point("SH.600000", data, ["short"])
+    assert result is not None
+    assert "1sell" in result["msg"]
+
+
+def test_delayed_first_point_is_current_even_when_confirmation_locks_next_unit(
+    monkeypatch,
+) -> None:
+    evidence = _evidence(
+        "5m",
+        points=(_point("1buy", anchor="old-l0", at=NOW),),
     )
+    monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
+
     result = strict_xuangu.select_strict_class1_point(
-        "SH.600000", data, ["short"]
+        "SH.600000",
+        _market_datas("5m"),
+        ["long"],
     )
+
+    assert result is not None
+    assert "1buy" in result["msg"]
+
+
+def test_delayed_first_sell_uses_the_same_current_confirmation_rule(
+    monkeypatch,
+) -> None:
+    evidence = _evidence(
+        "5m",
+        points=(_point("1sell", anchor="old-l0", at=NOW),),
+    )
+    monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
+
+    result = strict_xuangu.select_strict_class1_point(
+        "SH.600000",
+        _market_datas("5m"),
+        ["short"],
+    )
+
     assert result is not None
     assert "1sell" in result["msg"]
 
@@ -168,14 +203,19 @@ def test_third_after_first_rejects_unrelated_historical_first(monkeypatch) -> No
     evidence = _evidence("5m", points=(stale, third))
     monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
 
-    assert strict_xuangu.select_strict_class3_after_class1(
-        "SH.600000",
-        _market_datas("5m"),
-        ["long"],
-    ) is None
+    assert (
+        strict_xuangu.select_strict_class3_after_class1(
+            "SH.600000",
+            _market_datas("5m"),
+            ["long"],
+        )
+        is None
+    )
 
 
-def test_multi_frequency_selection_matches_point_or_divergence_side(monkeypatch) -> None:
+def test_multi_frequency_selection_matches_point_or_divergence_side(
+    monkeypatch,
+) -> None:
     evidence_by_frequency = {
         "30m": _evidence("30m", divergences=(_divergence("down"),)),
         "5m": _evidence("5m", points=(_point("2buy"),)),
@@ -217,9 +257,13 @@ def test_recursive_small_to_large_second_point_is_current_and_selectable(
 
 
 def test_stock_selection_uses_the_same_real_frame_evidence_runtime() -> None:
-    frame = pd.read_parquet(FIXTURES / "SZ.002299_1m.parquet")[
-        ["date", "open", "high", "low", "close", "volume"]
-    ].head(900).copy()
+    frame = (
+        pd.read_parquet(FIXTURES / "SZ.002299_1m.parquet")[
+            ["date", "open", "high", "low", "close", "volume"]
+        ]
+        .head(900)
+        .copy()
+    )
     frame.attrs.update(
         structure_price_quantum="0.01",
         price_basis_revision="test-raw",

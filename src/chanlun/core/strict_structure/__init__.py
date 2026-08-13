@@ -30,6 +30,10 @@ from chanlun.core.strict_structure.evidence_assembler import (
     StrictEvidenceAssembler,
     empty_stroke_center_observations,
 )
+from chanlun.core.strict_structure.current_events import (
+    CurrentStrictEvents,
+    current_strict_events,
+)
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from chanlun.core.strict_structure.formal_state import (
     FormalDirectionState,
@@ -57,6 +61,7 @@ __all__ = [
     "CenterRelation",
     "CenterState",
     "ConstituentUnit",
+    "CurrentStrictEvents",
     "DivergenceEvidence",
     "FormalDirectionState",
     "SourceKind",
@@ -81,6 +86,7 @@ __all__ = [
     "empty_stroke_center_observations",
     "center_ordinals",
     "current_formal_direction",
+    "current_strict_events",
     "compare_divergence",
     "MacdStrengthUnavailable",
     "MacdStrengthProvider",

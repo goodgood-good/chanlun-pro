@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import pandas as pd
 
+from chanlun.core.strict_structure.current_events import current_strict_events
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.trading_system.screening_runtime import (
     screening_evidence_from_frame,
@@ -16,7 +17,7 @@ def _allowed_sides(opt_types: Iterable[str] | None) -> frozenset[str]:
     values = tuple(opt_types or ("long",))
     unknown = set(values) - {"long", "short"}
     if unknown:
-        raise ValueError(f"unsupported stock-selection direction: {sorted(unknown)}")
+        raise ValueError(f"选股方向不受支持：{sorted(unknown)}")
     sides = set()
     if "long" in values:
         sides.add("buy")
@@ -28,10 +29,10 @@ def _allowed_sides(opt_types: Iterable[str] | None) -> frozenset[str]:
 def _closed_frame(code: str, mk_datas, frequency: str) -> pd.DataFrame:
     getter = getattr(mk_datas, "closed_klines", None)
     if not callable(getter):
-        raise TypeError("strict stock selection requires closed_klines")
+        raise TypeError("严格选股必须提供 closed_klines 收盘行情入口")
     frame = getter(code, frequency)
     if not isinstance(frame, pd.DataFrame) or frame.empty:
-        raise ValueError("strict stock selection requires closed market bars")
+        raise ValueError("严格选股必须使用非空的已收盘行情")
     return frame
 
 
@@ -40,7 +41,7 @@ def _evidence(code: str, mk_datas, frequency: str) -> StrictEvidenceResult:
     market = getattr(mk_datas.market, "value", mk_datas.market)
     close_time = getattr(mk_datas, "closed_bar_as_of", None)
     if not callable(close_time):
-        raise TypeError("strict stock selection requires closed_bar_as_of")
+        raise TypeError("严格选股必须提供 closed_bar_as_of 收盘边界入口")
     return screening_evidence_from_frame(
         code=code,
         frequency=frequency,
@@ -50,37 +51,19 @@ def _evidence(code: str, mk_datas, frequency: str) -> StrictEvidenceResult:
     )
 
 
-def _terminal_locked_unit_ids(
-    evidence: StrictEvidenceResult,
-) -> dict[int, str]:
-    """分别返回每个递归级别当前最后一个已锁定单元。"""
-
-    terminal_by_level: dict[int, str] = {}
-    for level in evidence.structure.levels:
-        locked = tuple(unit for unit in level.units if unit.locked)
-        if locked:
-            terminal_by_level[level.structural_level] = locked[-1].unit_id
-    return terminal_by_level
-
-
 def _current_points(
     evidence: StrictEvidenceResult,
     *,
     sides: frozenset[str],
     classes: frozenset[str] = frozenset({"1", "2", "3"}),
 ):
-    terminal_by_level = _terminal_locked_unit_ids(evidence)
-    if not terminal_by_level:
-        return ()
+    current = current_strict_events(evidence)
     return tuple(
         sorted(
             (
                 point
-                for point in evidence.confirmed_points
-                if terminal_by_level.get(point.structural_level)
-                == point.anchor_unit_id
-                and point.side in sides
-                and point.point_type[0] in classes
+                for point in current.points
+                if point.side in sides and point.point_type[0] in classes
             ),
             key=lambda point: (
                 point.available_at,
@@ -96,17 +79,13 @@ def _current_divergences(
     *,
     sides: frozenset[str],
 ):
-    terminal_by_level = _terminal_locked_unit_ids(evidence)
-    if not terminal_by_level:
-        return ()
+    current = current_strict_events(evidence)
     return tuple(
         sorted(
             (
                 divergence
-                for divergence in evidence.divergences
-                if terminal_by_level.get(divergence.structural_level)
-                == divergence.signal_unit_id
-                and ("buy" if divergence.direction == "down" else "sell") in sides
+                for divergence in current.divergences
+                if ("buy" if divergence.direction == "down" else "sell") in sides
             ),
             key=lambda item: (item.available_at, item.kind, item.divergence_id),
         )
@@ -176,7 +155,7 @@ def _causal_first_parent(evidence, third, *, trend_only: bool):
         and point.available_at <= third.available_at
     )
     if len(matches) > 1:
-        raise ValueError("current partition boundary maps to multiple first points")
+        raise ValueError("当前分区边界不能对应多个一类点")
     return None if not matches else matches[0]
 
 
@@ -193,21 +172,15 @@ def _single_class_point(code, mk_datas, opt_types, point_class: str):
     return {"code": code, "msg": _point_message(evidence, points)}
 
 
-def select_strict_class1_point(
-    code: str, mk_datas, opt_type: list | None = None
-):
+def select_strict_class1_point(code: str, mk_datas, opt_type: list | None = None):
     return _single_class_point(code, mk_datas, opt_type, "1")
 
 
-def select_strict_class2_point(
-    code: str, mk_datas, opt_type: list | None = None
-):
+def select_strict_class2_point(code: str, mk_datas, opt_type: list | None = None):
     return _single_class_point(code, mk_datas, opt_type, "2")
 
 
-def select_strict_class3_point(
-    code: str, mk_datas, opt_type: list | None = None
-):
+def select_strict_class3_point(code: str, mk_datas, opt_type: list | None = None):
     return _single_class_point(code, mk_datas, opt_type, "3")
 
 

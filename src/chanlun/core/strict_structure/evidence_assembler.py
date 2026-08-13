@@ -54,12 +54,8 @@ class StrictEvidenceAssembler:
             raise ValueError("严格证据标的不能为空")
         if not isinstance(source_frequency, str) or not source_frequency.strip():
             raise ValueError("严格证据源周期不能为空")
-        if (
-            not isinstance(source_closed_at, datetime)
-            or source_closed_at.tzinfo is None
-            or source_closed_at.utcoffset() is None
-        ):
-            raise ValueError("严格证据收盘时点必须带时区")
+        if not isinstance(source_closed_at, datetime):
+            raise TypeError("严格证据收盘时点必须是 datetime")
         if not isinstance(structure, StrictStructureResult):
             raise TypeError("严格证据结构类型无效")
         if (
