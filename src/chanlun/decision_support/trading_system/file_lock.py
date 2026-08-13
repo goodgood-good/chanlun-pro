@@ -1,9 +1,8 @@
-"""Small cross-process lock used by append-only research ledgers.
+"""供只追加研究账本使用的轻量跨进程锁。
 
-The web process, scheduled forward runner and manual diagnostics can all touch
-the same evidence files.  ``threading.RLock`` only serializes threads inside
-one interpreter, so it cannot protect a read-modify-write cycle across those
-processes.  This module intentionally has no trading or strategy semantics.
+Web 进程、定时前向任务和人工诊断都可能访问同一证据文件。
+``threading.RLock`` 只能串行化单个解释器内的线程，无法保护跨进程的
+读取—修改—写入周期。本模块刻意不包含任何交易或策略语义。
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from typing import Iterator
 
 
 class InterprocessLockTimeout(TimeoutError):
-    """Raised when another process keeps an evidence lock past the deadline."""
+    """其他进程持有证据锁超过期限时抛出。"""
 
 
 def _try_lock(handle) -> bool:
@@ -59,7 +58,7 @@ def interprocess_file_lock(
     timeout_seconds: float = 15.0,
     poll_seconds: float = 0.05,
 ) -> Iterator[None]:
-    """Hold one advisory lock for a complete file read-modify-write cycle."""
+    """在完整的文件读取—修改—写入周期内持有建议锁。"""
 
     if timeout_seconds <= 0 or poll_seconds <= 0:
         raise ValueError("file lock timeouts must be positive")

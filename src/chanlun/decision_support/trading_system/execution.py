@@ -92,7 +92,7 @@ class FeeModel:
         fills: tuple[tuple[int, Decimal], ...],
         session: date,
     ) -> Decimal:
-        """Charge one terminal order fee over its actual fill notionals."""
+        """根据一个终态委托的实际成交金额统一计算费用。"""
 
         if not fills or any(quantity <= 0 or price <= 0 for quantity, price in fills):
             raise ValueError("fee fills must contain positive quantities and prices")

@@ -1,4 +1,4 @@
-"""Pure same-base derivation for QMT GICS3 sector composite bars."""
+"""QMT GICS3 板块合成柱的纯同源推导。"""
 
 from __future__ import annotations
 
@@ -80,12 +80,11 @@ def derive_qmt_sector_thirty_minute_frame(
     *,
     request_bars: int | None = None,
 ) -> pd.DataFrame:
-    """Aggregate only six clock-aligned, completed 5m composite bars.
+    """只聚合六根时钟对齐且已经完成的五分钟合成柱。
 
-    A count-bounded provider may return a suffix of the oldest session.  That
-    session is discarded in full; it is never re-anchored into counterfeit
-    30-minute buckets.  The newest session may be a prefix, in which case only
-    complete six-bar buckets are emitted.
+    按数量截断的数据源可能只返回最早交易日的后半段；该交易日必须整体
+    丢弃，绝不能重新锚定成伪造的三十分钟桶。最新交易日可以是不完整前缀，
+    此时只输出包含完整六根柱的桶。
     """
 
     if request_bars is not None and (

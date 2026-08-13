@@ -156,12 +156,11 @@ def audit_data_contract(evidence: DataContractEvidence) -> DataGateResult:
 def audit_bar_proxy_data_contract(
     evidence: DataContractEvidence,
 ) -> BarProxyDataGateResult:
-    """Audit the explicit research-only completed-bar execution variant.
+    """审计明确限定为研究用途的已完成柱成交变体。
 
-    Historical trade prints are waived only for this separately fingerprinted
-    proxy.  Historical best quotes needed by selection, frozen confirmation
-    timing and every other point-in-time, accounting, fee, quantity and
-    universe requirement remain unchanged.
+    只有这个单独留有指纹的代理可以免除历史逐笔成交要求。选股所需的
+    历史最优报价、冻结确认时点，以及其他时点、记账、费率、数量和标的池
+    要求均保持不变。
     """
 
     component_failures = tuple(

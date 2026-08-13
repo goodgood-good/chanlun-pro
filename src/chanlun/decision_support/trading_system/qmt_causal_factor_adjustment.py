@@ -1,10 +1,8 @@
-"""Causal QMT corporate-action adjustment shared by live and replay sectors.
+"""实时与回放板块共用的 QMT 因果公司行动复权。
 
-QMT's ``front`` series is convenient for charts, but its historical values can
-change after a later corporate action.  Sector screening therefore keeps the
-downloaded member bars on ``dividend_type='none'`` and applies only factor
-events whose ex-date is no later than the decision date.  The resulting ledger
-revision is part of every composite fact identity.
+QMT 的 ``front`` 序列便于绘图，但其历史值可能因后续公司行动而变化。
+因此板块筛选下载成分股柱时保留 ``dividend_type='none'``，并且只应用
+除权日在决策日期及以前的因子事件。最终账本修订号会进入每个合成事实标识。
 """
 
 from __future__ import annotations
@@ -127,7 +125,7 @@ def qmt_causal_factor_events_from_frame(
     not_before: date,
     not_after: date,
 ) -> tuple[QmtCausalFactorEvent, ...]:
-    """Normalize a native ``get_divid_factors`` result without future rows."""
+    """规范化原生 ``get_divid_factors`` 结果，并剔除未来行。"""
 
     if _NORMALIZED_A_SHARE_CODE.fullmatch(code) is None:
         raise ValueError("QMT factor code must be normalized")
@@ -177,7 +175,7 @@ def qmt_causal_factor_events_from_objects(
     values: Sequence[object],
     not_after: date,
 ) -> tuple[QmtCausalFactorEvent, ...]:
-    """Adapt immutable replay factor objects to the shared causal contract."""
+    """将不可变回放因子对象适配到统一因果契约。"""
 
     output: list[QmtCausalFactorEvent] = []
     for value in values:
@@ -248,7 +246,7 @@ def apply_qmt_causal_factor_adjustment(
     events: Sequence[QmtCausalFactorEvent],
     date_column: str = "date",
 ) -> pd.DataFrame:
-    """Return a copy whose OHLC prices are continuous across known ex-dates."""
+    """返回副本，使 OHLC 价格在已知除权日之间保持连续。"""
 
     result = frame.copy()
     if date_column not in result.columns:

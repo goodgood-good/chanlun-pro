@@ -33,12 +33,11 @@ STRICT_BAR_VOLUME_PARTICIPATION = Decimal("0.05")
 
 @dataclass(frozen=True, slots=True)
 class StrictLimitBarAssessment:
-    """One shared conservative OHLC verdict for a limit order.
+    """对限价单给出唯一且保守的 OHLC 判定。
 
-    A mixed bar proves only that prices existed on both sides of the limit;
-    without prints it cannot prove how much volume traded after the cross.
-    Consequently only a bar whose *entire* range is strictly through the
-    limit contributes executable capacity.
+    混合区间柱只能证明限价两侧都出现过价格；没有逐笔成交时，无法证明
+    穿越限价后实际成交了多少。因此，只有整根柱的价格区间都严格穿过
+    限价时，才计入可成交容量。
     """
 
     whole_bar_crossed: bool
@@ -53,7 +52,7 @@ def adverse_observed_bar_price(
     raw_high: Decimal,
     raw_low: Decimal,
 ) -> Decimal:
-    """Return the conservative whole-bar price shared by every bar proxy."""
+    """返回所有柱代理共用的保守整柱价格。"""
 
     if side not in {"buy", "sell"}:
         raise ValueError("strict bar side is invalid")
@@ -74,7 +73,7 @@ def assess_strict_limit_bar(
     raw_high: Decimal,
     raw_low: Decimal,
 ) -> StrictLimitBarAssessment:
-    """Classify one completed OHLC bar without inferring intrabar volume."""
+    """在不推测柱内成交量的前提下，对一根已完成 OHLC 柱分类。"""
 
     adverse_observed = adverse_observed_bar_price(
         side=side,
@@ -110,7 +109,7 @@ def strict_bar_volume_capacity(
     *,
     quantity_increment: int,
 ) -> int:
-    """Return the frozen five-percent whole-bar capacity in legal units."""
+    """按合法数量单位返回固定为整柱成交量百分之五的容量。"""
 
     if (
         not isinstance(raw_volume, Decimal)
@@ -127,13 +126,11 @@ def strict_bar_volume_capacity(
 
 @dataclass(frozen=True, slots=True)
 class BarProxyParameters:
-    """Frozen research-only substitute for unavailable historical prints.
+    """历史逐笔不可用时，供研究使用的冻结替代参数。
 
-    This snapshot does not alter the strict strategy snapshot.  It only records
-    the user's explicit decision to validate historical execution with later,
-    completed one-minute bars.  It is deliberately stricter than a common
-    OHLC touch model: a bar contributes capacity only when its *entire* price
-    range is strictly through the order limit.
+    此快照不会改变严格策略快照，只记录使用随后完成的一分钟柱验证历史
+    成交的明确选择。它刻意严于常见的 OHLC 触价模型：仅当整根柱的价格
+    区间都严格穿过委托限价时，该柱才贡献成交容量。
     """
 
     selection_path: SelectionPath
@@ -381,13 +378,12 @@ def match_historical_minute_bars(
     strategy_parameters: StrategyParameters,
     proxy_parameters: BarProxyParameters,
 ) -> BarProxyMatchResult:
-    """Causally match a strict strategy order using completed one-minute bars.
+    """使用已完成的一分钟柱，对严格策略委托进行因果撮合。
 
-    A mixed bar (for example ``low < buy_limit <= high``) proves that a cross
-    occurred but not how much volume crossed.  It therefore contributes zero
-    capacity.  A buy only uses a bar with ``high < limit``; a sell only uses a
-    bar with ``low > limit``.  The result is a lower-bound execution proxy,
-    never a claim of tick-equivalent replay.
+    混合区间柱（例如 ``low < buy_limit <= high``）只能证明发生过穿越，
+    无法证明穿越的成交量，因此容量计为零。买单仅使用 ``high < limit``
+    的柱，卖单仅使用 ``low > limit`` 的柱。结果只是成交下界代理，绝不
+    等同于逐笔回放。
     """
 
     if order.parameter_set_id != strategy_parameters.parameter_set_id:

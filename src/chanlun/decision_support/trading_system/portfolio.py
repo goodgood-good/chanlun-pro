@@ -190,7 +190,7 @@ def check_every_partial_buyback_prefix(
     available_net_sell_cash: Callable[[int], Decimal],
     bound_terminal_buy_cost: Callable[[int, Decimal], Decimal],
 ) -> PartialPrefixEdgeDecision:
-    """Require every possible terminal partial fill to retain one tick net cash."""
+    """要求每种可能的终态部分成交都至少保留一个最小价位的净现金。"""
 
     if (
         quantity <= 0
@@ -730,11 +730,10 @@ class CycleLedger:
         share_multiplier: Decimal,
         broker_position_qty: int,
     ) -> CycleLedger:
-        """Apply a broker-confirmed non-trade quantity transformation.
+        """应用券商确认的非交易数量变换。
 
-        The broker position is authoritative.  Any restore remainder that the
-        post-action buy increment cannot reproduce is removed from Q_CYCLE and
-        retained in the dedicated audit quantity; the method never rounds up.
+        券商持仓具有最终权威。公司行动后的买入步长无法还原的余数会从
+        Q_CYCLE 中移除，并保留在专用审计数量中；本方法绝不向上取整。
         """
 
         if share_multiplier <= 0 or broker_position_qty < 0:

@@ -1,9 +1,8 @@
-"""Frozen pairwise warmup policy shared by screening and archive validation.
+"""筛选与归档校验共用的冻结成对预热策略。
 
-The live scanner compares the semantic active tail produced from the complete
-available prefix with the tail produced after dropping the oldest third.  The
-same constants and count relation must be used by the producer and by every
-consumer that decides whether a snapshot is fit for forward-paper archiving.
+实时扫描器会比较完整可用前缀产生的语义活动尾部，与去掉最早三分之一后
+产生的尾部。生产者以及所有判断快照是否适合前向模拟归档的消费者，都必须
+使用相同常量和数量关系。
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ SCREENING_WARMUP_REQUIRED_BARS: Mapping[str, int] = MappingProxyType(
 
 
 def expected_screening_warmup_suffix_bar_count(full_bar_count: int) -> int:
-    """Return the exact suffix size produced by ``frame.iloc[len//3:]``."""
+    """返回 ``frame.iloc[len//3:]`` 产生的精确后缀长度。"""
 
     if type(full_bar_count) is not int or full_bar_count <= 0:
         raise ValueError("warmup full bar count must be a positive integer")
@@ -48,7 +47,7 @@ def screening_warmup_reason_code(
     full_bar_count: int,
     suffix_bar_count: int,
 ) -> str:
-    """Validate one active-gate measurement and return its canonical reason."""
+    """校验一次活动门控测量并返回规范原因码。"""
 
     if frequency not in SCREENING_WARMUP_REQUIRED_BARS:
         raise ValueError("unsupported screening warmup frequency")
