@@ -27,7 +27,8 @@ def test_restart_dotenv_loader_preserves_equals_and_quotes(tmp_path):
     env_file.write_text(
         'CHANLUN_WEB_HOST="127.0.0.1"\n'
         'CHANLUN_WEB_PORT=19999\n'
-        'CHANLUN_TEST_VALUE="左=右"\n',
+        'CHANLUN_TEST_VALUE="左=右"\n'
+        'CHANLUN_TEST_OVERRIDE=from-project\n',
         encoding="utf-8",
     )
     script_arg = str(script).replace("'", "''")
@@ -43,10 +44,13 @@ def test_restart_dotenv_loader_preserves_equals_and_quotes(tmp_path):
         "$expected=([string][char]0x5de6) + '=' + ([string][char]0x53f3); "
         "Remove-Item Env:CHANLUN_WEB_HOST,Env:CHANLUN_WEB_PORT,"
         "Env:CHANLUN_TEST_VALUE -ErrorAction SilentlyContinue; "
-        f"Import-ProjectDotEnv -Path '{env_arg}'; "
+        "$env:CHANLUN_TEST_OVERRIDE='stale-parent-value'; "
+        f"Import-ProjectDotEnv -Path '{env_arg}' "
+        "-OverrideNames @('CHANLUN_TEST_OVERRIDE'); "
         "if ($env:CHANLUN_WEB_HOST -ne '127.0.0.1' -or "
         "$env:CHANLUN_WEB_PORT -ne '19999' -or "
-        "$env:CHANLUN_TEST_VALUE -ne $expected) { exit 1 }"
+        "$env:CHANLUN_TEST_VALUE -ne $expected -or "
+        "$env:CHANLUN_TEST_OVERRIDE -ne 'from-project') { exit 1 }"
     )
 
     result = subprocess.run(
@@ -234,6 +238,42 @@ def test_restart_loads_dotenv_and_resolves_the_project_python_before_preflight()
     assert "CHANLUN_PYTHON" in source
     assert ".venv\\Scripts\\python.exe" in source
     assert "poetry" in source
+
+
+def test_restart_builds_complete_longbridge_environment_before_preflight():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    ).read_text(encoding="utf-8")
+
+    dotenv_call = source.index("Import-ProjectDotEnv `")
+    user_fallback_call = source.index("Import-UserEnvironmentFallback -Names")
+    preflight = source.index("$preflightCode =")
+
+    assert dotenv_call < user_fallback_call < preflight
+    assert "[string[]]$OverrideNames" in source
+    assert "$OverrideNames -notcontains $key" in source
+    assert "[Environment]::GetEnvironmentVariable($name, 'User')" in source
+    for name in (
+        "LONGBRIDGE_APP_KEY",
+        "LONGBRIDGE_APP_SECRET",
+        "LONGBRIDGE_ACCESS_TOKEN",
+    ):
+        assert source.count(f"'{name}'") >= 2
+
+
+def test_project_login_hash_overrides_stale_parent_process_value():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    ).read_text(encoding="utf-8")
+
+    managed_names = source.index("$deploymentManagedNames = @(")
+    dotenv_call = source.index("Import-ProjectDotEnv `")
+    validation = source.index(
+        "if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD))"
+    )
+
+    assert managed_names < dotenv_call < validation
+    assert "'CHANLUN_LOGIN_PWD'" in source[managed_names:dotenv_call]
 
 
 def test_restart_rejects_invalid_login_environment_before_stopping_service():

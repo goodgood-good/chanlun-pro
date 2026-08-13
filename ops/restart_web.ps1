@@ -91,7 +91,10 @@ function Exit-DeploymentMutex {
 }
 
 function Import-ProjectDotEnv {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$OverrideNames = @()
+    )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
     try {
@@ -114,7 +117,9 @@ function Import-ProjectDotEnv {
         $key = $parts[0].Trim()
         if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
         $currentValue = [Environment]::GetEnvironmentVariable($key, 'Process')
-        if ($null -ne $currentValue) { continue }
+        if ($null -ne $currentValue -and $OverrideNames -notcontains $key) {
+            continue
+        }
         $value = $parts[1].Trim()
         if (
             $value.Length -ge 2 -and
@@ -124,6 +129,21 @@ function Import-ProjectDotEnv {
             $value = $value.Substring(1, $value.Length - 2)
         }
         [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+    }
+}
+
+function Import-UserEnvironmentFallback {
+    param([Parameter(Mandatory = $true)][string[]]$Names)
+
+    foreach ($name in $Names) {
+        $processValue = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if (-not [string]::IsNullOrWhiteSpace($processValue)) { continue }
+
+        # 已运行的终端不会自动看到后来写入 Windows 用户环境的变量。项目文件未配置
+        # 该项时，从用户环境补齐到本次部署进程，子进程便能继承完整的提供方凭据。
+        $userValue = [Environment]::GetEnvironmentVariable($name, 'User')
+        if ([string]::IsNullOrWhiteSpace($userValue)) { continue }
+        [Environment]::SetEnvironmentVariable($name, $userValue, 'Process')
     }
 }
 
@@ -317,7 +337,20 @@ if ($null -eq (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) 
 }
 
 try {
-    Import-ProjectDotEnv -Path (Join-Path $ProjectRoot '.env')
+    $deploymentManagedNames = @(
+        'CHANLUN_LOGIN_PWD',
+        'LONGBRIDGE_APP_KEY',
+        'LONGBRIDGE_APP_SECRET',
+        'LONGBRIDGE_ACCESS_TOKEN'
+    )
+    Import-ProjectDotEnv `
+        -Path (Join-Path $ProjectRoot '.env') `
+        -OverrideNames $deploymentManagedNames
+    Import-UserEnvironmentFallback -Names @(
+        'LONGBRIDGE_APP_KEY',
+        'LONGBRIDGE_APP_SECRET',
+        'LONGBRIDGE_ACCESS_TOKEN'
+    )
     $PythonExe = Resolve-ProjectPython
 } catch {
     Log ('ERROR: Python/environment preflight failed: {0}' -f $_.Exception.Message)

@@ -521,8 +521,7 @@ class ExchangeUSmart(Exchange):
             if not all(credentials):
                 if not self._longbridge_fallback_reported:
                     LogUtil.warning(
-                        "Longbridge history credentials are incomplete; "
-                        "using uSMART history for this US adapter"
+                        "长桥历史行情凭据不完整；当前美股适配器改用盈立历史行情"
                     )
                     self._longbridge_fallback_reported = True
                 return None
