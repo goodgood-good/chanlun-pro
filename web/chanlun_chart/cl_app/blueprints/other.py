@@ -6,7 +6,6 @@
 
 import json
 import math
-from dataclasses import replace
 
 from flask import Blueprint, current_app, request
 from flask_login import login_required
@@ -24,77 +23,6 @@ other_bp = Blueprint("other", __name__)
 _MAX_TICK_CODES = 500
 
 _VALID_MARKETS = {m.value for m in Market}
-
-
-def _us_tdx_fallback_ticks(codes):
-    """Fetch US watchlist quotes from the existing TDX adapter.
-
-    uSMART remains the configured US source.  This fallback is deliberately
-    scoped to the lightweight ``/ticks`` watchlist endpoint so a transient
-    uSMART TLS/read timeout cannot leave every US row blank.  Chart history,
-    structure calculation and any decision evidence keep their configured
-    source unchanged.
-    """
-
-    from chanlun.exchange.exchange_tdx_us import ExchangeTDXUS
-
-    provider_to_project = {}
-    for project_code in codes:
-        value = str(project_code).strip()
-        provider_code = value[:-3] if value.upper().endswith(".US") else value
-        if provider_code:
-            provider_to_project[provider_code.upper()] = value
-    if not provider_to_project:
-        return {}
-
-    provider_ticks = ExchangeTDXUS().ticks(list(provider_to_project))
-    ticks = {}
-    for provider_code, tick in provider_ticks.items():
-        project_code = provider_to_project.get(str(provider_code).upper())
-        if project_code is not None and tick is not None:
-            ticks[project_code] = replace(tick, code=project_code)
-    return ticks
-
-
-def _fetch_ticks_with_us_fallback(ex, market: str, codes):
-    """Preserve primary quotes and fill missing US rows from TDX."""
-
-    primary_error = None
-    try:
-        primary_ticks = ex.ticks(codes)
-    except Exception as exc:
-        primary_error = exc
-        primary_ticks = {}
-
-    if market != Market.US.value:
-        if primary_error is not None:
-            raise primary_error
-        return primary_ticks
-
-    missing = [code for code in codes if code not in primary_ticks]
-    if not missing:
-        return primary_ticks
-    try:
-        fallback_ticks = _us_tdx_fallback_ticks(missing)
-    except Exception as fallback_error:
-        LogUtil.warning(
-            "/ticks US fallback failed "
-            f"missing={len(missing)} error={type(fallback_error).__name__}"
-        )
-        if primary_error is not None:
-            raise primary_error from fallback_error
-        return primary_ticks
-
-    if fallback_ticks:
-        primary_ticks.update(fallback_ticks)
-        LogUtil.warning(
-            "/ticks US quotes used TDX fallback "
-            f"coverage={len(fallback_ticks)}/{len(missing)} "
-            f"primary_error={type(primary_error).__name__ if primary_error else 'none'}"
-        )
-    if not primary_ticks and primary_error is not None:
-        raise primary_error
-    return primary_ticks
 
 
 def _error_response(code: str, message: str, status_code: int):
@@ -156,7 +84,9 @@ def ticks():
             now_trading = isolated_batch.market_open
         else:
             ex = get_exchange(Market(market))
-            stock_ticks = _fetch_ticks_with_us_fallback(ex, market, codes)
+            # 每个市场只读取配置好的唯一适配器。美股由盈立提供报价、长桥提供所配置的
+            # 历史数据，不再在接口内部混入通达信价格。
+            stock_ticks = ex.ticks(codes)
             try:
                 now_trading = market_now_trading(ex, market)
             except Exception as exc:

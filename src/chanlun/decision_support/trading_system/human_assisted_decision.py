@@ -24,6 +24,7 @@ from chanlun.decision_support.trading_system.engine import (
     _TechnicalSignalEvaluator,
 )
 from chanlun.decision_support.trading_system.models import (
+    REVERSAL_SUPPORT_POINT_TYPES,
     SectorAssessment,
     StructuralPoint,
     TimeframeContext,
@@ -140,6 +141,9 @@ class HumanAssistedDecisionContract:
     strategic_frequency: str = "30m"
     tactical_frequency: str = "5m"
     locator_frequency: str = "1m"
+    locator_trigger_point_types: tuple[str, ...] = tuple(
+        sorted(REVERSAL_SUPPORT_POINT_TYPES)
+    )
     physical_structure_frequencies: tuple[str, ...] = ("d", "30m", "5m", "1m")
     stroke_mode: str = STRICT_STROKE_MODE
     strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
@@ -163,6 +167,10 @@ class HumanAssistedDecisionContract:
             self.locator_frequency,
         ) != ("d", "30m", "5m", "1m"):
             raise ValueError("human-assisted timeframe contract changed")
+        if self.locator_trigger_point_types != tuple(
+            sorted(REVERSAL_SUPPORT_POINT_TYPES)
+        ):
+            raise ValueError("human-assisted one-minute trigger contract changed")
         if (
             self.physical_structure_frequencies != ("d", "30m", "5m", "1m")
             or self.stroke_mode != STRICT_STROKE_MODE
@@ -196,6 +204,7 @@ class HumanAssistedDecisionContract:
             "strategic_frequency": self.strategic_frequency,
             "tactical_frequency": self.tactical_frequency,
             "locator_frequency": self.locator_frequency,
+            "locator_trigger_point_types": list(self.locator_trigger_point_types),
             "physical_structure_frequencies": list(
                 self.physical_structure_frequencies
             ),
@@ -269,6 +278,11 @@ def validate_human_assisted_contract_document(
         not isinstance(value, str) for value in physical_frequencies
     ):
         raise ValueError("human-assisted physical frequencies are invalid")
+    locator_trigger_point_types = document.get("locator_trigger_point_types")
+    if not isinstance(locator_trigger_point_types, list) or any(
+        not isinstance(value, str) for value in locator_trigger_point_types
+    ):
+        raise ValueError("human-assisted one-minute trigger types are invalid")
     string_fields = (
         "schema",
         "higher_context_frequency",
@@ -304,6 +318,7 @@ def validate_human_assisted_contract_document(
         strategic_frequency=str(document["strategic_frequency"]),
         tactical_frequency=str(document["tactical_frequency"]),
         locator_frequency=str(document["locator_frequency"]),
+        locator_trigger_point_types=tuple(locator_trigger_point_types),
         physical_structure_frequencies=tuple(physical_frequencies),
         stroke_mode=str(document["stroke_mode"]),
         strict_base_profile_id=str(document["strict_base_profile_id"]),

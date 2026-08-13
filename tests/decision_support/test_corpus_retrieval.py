@@ -5,7 +5,6 @@ import pytest
 from chanlun.decision_support.corpus_retrieval import (
     CorpusIndex,
     EvidenceQuery,
-    concepts_for_event,
 )
 from chanlun.decision_support.corpus_types import (
     EvidenceUnit,
@@ -278,14 +277,3 @@ def test_search_rejects_non_integer_limit() -> None:
     for invalid_limit in (1.5, True, "1"):
         with pytest.raises(ValueError, match="limit must be positive"):
             index.search(EvidenceQuery(text="区间套"), limit=invalid_limit)
-
-def test_concepts_for_3buy_nest_are_exact_and_stable() -> None:
-    assert concepts_for_event("3buy_nest") == ("三类买点", "区间套", "中枢回试")
-
-
-def test_concepts_for_1buy_nest_include_required_concepts() -> None:
-    assert concepts_for_event("1buy_nest") == ("一类买点", "趋势背驰", "区间套")
-
-
-def test_concepts_for_unknown_event_is_empty() -> None:
-    assert concepts_for_event("not-a-chanlun-event") == ()

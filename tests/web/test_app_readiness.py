@@ -152,6 +152,10 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["status"] == "ready"
+    assert payload["runtime_ready"] is True
+    assert payload["selection_ready"] is None
+    assert payload["selection_status"] == "disabled"
+    assert payload["selection_reason_code"] == "SCREENING_DISABLED"
     assert payload["revision"] == "test-revision"
     assert payload["pid"] == os.getpid()
     assert payload["market"] == "a"
@@ -504,6 +508,9 @@ def test_readyz_requires_screening_attestation_when_runtime_is_running(app):
                 "ready": True,
                 "status": "ready",
                 "worker_alive": True,
+                "selection_ready": False,
+                "selection_status": "coverage_in_progress",
+                "selection_reason_code": "PRESELECTION_COVERAGE_INCOMPLETE",
                 "reasons": [],
             }
         )
@@ -525,7 +532,14 @@ def test_readyz_requires_screening_attestation_when_runtime_is_running(app):
         )
         recovered = app.test_client().get("/readyz?market=a")
         assert recovered.status_code == 200
-        assert recovered.get_json()["reasons"] == []
+        recovered_payload = recovered.get_json()
+        assert recovered_payload["reasons"] == []
+        assert recovered_payload["runtime_ready"] is True
+        assert recovered_payload["selection_ready"] is False
+        assert recovered_payload["selection_status"] == "coverage_in_progress"
+        assert recovered_payload["selection_reason_code"] == (
+            "PRESELECTION_COVERAGE_INCOMPLETE"
+        )
     finally:
         scheduler.shutdown(wait=False)
 

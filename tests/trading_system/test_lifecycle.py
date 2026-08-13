@@ -50,6 +50,81 @@ def test_five_minute_three_buy_can_use_one_minute_first_buy_trigger() -> None:
     assert trigger.point_type != setup.point.point_type
 
 
+@pytest.mark.parametrize("point_type", ("1buy", "2buy"))
+def test_buy_setup_accepts_only_one_or_two_buy_as_reversal_trigger(
+    point_type: str,
+) -> None:
+    setup = build_setup(
+        confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9),
+        supportive_context("30m"),
+        eligible_sector(),
+    )
+    trigger = confirmed_point(
+        point_type,
+        frequency="1m",
+        anchor=9.9,
+        minutes_after=1,
+    )
+
+    assert match_one_minute_trigger(setup, (trigger,), as_of=AS_OF) == trigger
+
+
+@pytest.mark.parametrize("point_type", ("1sell", "2sell"))
+def test_sell_setup_accepts_only_one_or_two_sell_as_reversal_trigger(
+    point_type: str,
+) -> None:
+    setup = build_setup(
+        confirmed_point(
+            "3sell",
+            anchor=10.0,
+            stop=10.2,
+            center_zd=10.1,
+            center_zg=10.3,
+        ),
+        neutral_context("30m"),
+        eligible_sector(),
+    )
+    trigger = confirmed_point(
+        point_type,
+        frequency="1m",
+        anchor=10.1,
+        stop=10.2,
+        minutes_after=1,
+    )
+
+    assert match_one_minute_trigger(setup, (trigger,), as_of=AS_OF) == trigger
+
+
+@pytest.mark.parametrize("point_type", ("3buy", "3sell"))
+def test_third_class_point_cannot_replace_one_minute_reversal_trigger(
+    point_type: str,
+) -> None:
+    side = "buy" if point_type == "3buy" else "sell"
+    setup = build_setup(
+        confirmed_point(
+            f"2{side}",
+            anchor=10.0,
+            stop=9.8 if side == "buy" else 10.2,
+            center_zg=10.1,
+            center_zd=9.9,
+        ),
+        neutral_context("30m"),
+        eligible_sector(),
+    )
+    third_class = confirmed_point(
+        point_type,
+        frequency="1m",
+        anchor=10.0,
+        stop=9.8 if side == "buy" else 10.2,
+        center_zd=9.8 if side == "buy" else 10.0,
+        center_zg=10.0 if side == "buy" else 10.2,
+        variant="boundary_touch",
+        minutes_after=1,
+    )
+
+    assert match_one_minute_trigger(setup, (third_class,), as_of=AS_OF) is None
+
+
 def test_provisional_five_minute_candidate_cannot_reach_triggered() -> None:
     setup = build_setup(
         provisional_point("2buy"),

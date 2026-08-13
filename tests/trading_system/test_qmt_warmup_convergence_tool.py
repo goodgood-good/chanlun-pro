@@ -181,13 +181,14 @@ def test_current_snapshot_selection_uses_review_facts_and_deduplicates() -> None
     selected = select_candidate_warmup_rows(snapshot, limit=3)
 
     assert [row["code"] for row in selected] == [
+        "SH.600001",
         "SH.600002",
         "SH.600004",
-        "SH.600003",
     ]
     assert [row["rank"] for row in selected] == [1, 2, 3]
     assert all(
-        row["selection_profile"] == "CURRENT_BUY_REVIEW_ORDER" for row in selected
+        row["selection_profile"] == "CURRENT_POINT_REVIEW_ORDER"
+        for row in selected
     )
 
 

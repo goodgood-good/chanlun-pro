@@ -14,6 +14,7 @@ from chanlun.decision_support.trading_system.models import (
 )
 from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     StrictPhysicalMonitorState,
+    StrictRealtimeMonitorEvent,
     collect_strict_monitor_events,
 )
 import chanlun.decision_support.trading_system.strict_realtime_monitor as monitor_module
@@ -66,11 +67,34 @@ def _point(
         center_id=center_id,
         center_zd=98.0 if side == "buy" else 101.0,
         center_zg=99.0 if side == "buy" else 102.0,
-        center_ordinal=1,
-        divergence_kind=None,
+        center_ordinal=1 if point_type.startswith("3") else None,
+        divergence_kind="trend" if point_type.startswith("1") else None,
         parent_point_id=None,
         evidence_codes=("strict",),
     )
+
+
+def test_monitor_event_rejects_old_point_aliases_and_side_mismatches() -> None:
+    common = {
+        "code": "TSLA.US",
+        "name": "特斯拉",
+        "kind": "strict_buy_point",
+        "signal_time": AT.isoformat(),
+        "price": 100.0,
+        "big_dir": "up",
+        "reason": "strict_confirmed_1buy",
+    }
+
+    with pytest.raises(ValueError, match="统一六类买卖点"):
+        StrictRealtimeMonitorEvent(side="buy", bs_type="1b", **common)
+    with pytest.raises(ValueError, match="类型与方向不一致"):
+        StrictRealtimeMonitorEvent(side="sell", bs_type="1buy", **common)
+    with pytest.raises(ValueError, match="统一严格通道"):
+        StrictRealtimeMonitorEvent(
+            side="buy",
+            bs_type="1buy",
+            **{**common, "kind": "small_buy"},
+        )
 
 
 class _StrictState:
@@ -114,7 +138,7 @@ def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
     assert event.signal_time == AT.isoformat(timespec="seconds")
 
 
-def test_strict_collector_applies_high_level_gate_but_keeps_sell_points() -> None:
+def test_strict_collector_keeps_buy_and_sell_facts_under_high_level_downtrend() -> None:
     buy = _point("3buy")
     sell = _point("3sell")
 
@@ -125,8 +149,23 @@ def test_strict_collector_applies_high_level_gate_but_keeps_sell_points() -> Non
     )
 
     assert [(event.side, event.evidence_id) for event in events] == [
-        ("sell", sell.point_id)
+        ("buy", buy.point_id),
+        ("sell", sell.point_id),
     ]
+    assert {event.big_dir for event in events} == {"down"}
+
+
+def test_strict_collector_reviews_first_sell_before_third_buy() -> None:
+    third_buy = _point("3buy")
+    first_sell = _point("1sell", center_id="sell-center")
+
+    events = collect_strict_monitor_events(
+        {"TSLA.US": _StrictState((third_buy, first_sell))},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert [event.bs_type for event in events] == ["1sell", "3buy"]
 
 
 def test_strict_collector_fails_closed_without_reusing_cached_points() -> None:

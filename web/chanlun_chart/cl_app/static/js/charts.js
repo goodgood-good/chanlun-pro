@@ -50,9 +50,8 @@ const MARKET_TIMEZONE = {
     futures: "Asia/Shanghai",
     ny_futures: "Asia/Shanghai",
 };
-// Blob documents inherit the parent CSP, which blocks Charting Library's
-// bootstrap inline scripts. The bundled sameorigin.html is served without
-// that page CSP and is explicitly enabled in the widget options below.
+// Blob 文档会继承父页面的内容安全策略，导致图表库的启动内联脚本被拦截。
+// 随包提供的 sameorigin.html 不使用该页面策略，并在下方组件选项中显式启用。
 const CHART_DISABLED_FEATURES = Object.freeze([
     "go_to_date",
     "use_blob_for_iframe_loading",
@@ -518,7 +517,7 @@ function strictItemEnabled(cfg, item) {
     if (item.render_kind === 'strict_trend') {
         return config.trend_all !== false && config[`trend_L${level}`] !== false;
     }
-    if (item.render_kind === 'point_confirmed') {
+    if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
         return config.point_all !== false && config[`point_${item.point_type}`] !== false;
     }
     if (item.render_kind === 'strict_divergence') {
@@ -725,6 +724,7 @@ const POINT_TYPE_LABELS = Object.freeze({
     "1buy": "一买", "2buy": "二买", "3buy": "三买",
     "1sell": "一卖", "2sell": "二卖", "3sell": "三卖",
 });
+const STRICT_POINT_TYPES = new Set(Object.keys(POINT_TYPE_LABELS));
 
 function pointTypeLabel(pointType) {
     const value = String(pointType || "");
@@ -1034,10 +1034,9 @@ class ChartManager {
         // 孤儿 shape 残留为长斜线；sweep 强制 removeEntity 清除。
         // 用户手画的 shape 从未进入此 set，不会被误删。
         this._reconcileOwnedIds = new Set();
-        // Only ids observed from unsuppressed user drawing events may enter
-        // persistent storage. TradingView can include disableSave automatic
-        // shapes in getLineToolsState(), so an inverse "not auto" test is not
-        // safe while asynchronous creates are settling.
+        // 只有从未被抑制的用户绘图事件中观察到的标识才能进入持久化存储。
+        // TradingView 的 getLineToolsState() 可能包含 disableSave 自动图形，因此异步
+        // 创建尚未稳定时，不能用“不是自动图形”的反向判断来认定用户绘图。
         this._userDrawingIds = new Set();
         this._automaticShapeCreateCount = 0;
         // removeEntity 可能不抛错却没有真正删除。删除确认前继续保留自动图形
@@ -1075,7 +1074,7 @@ class ChartManager {
             if (!this._drawingSavePending) {
                 this._drawingSavePending = { taskFactory, waiters: [] };
             } else {
-                // Requests waiting behind the active write all observe the latest state.
+                // 当前写入之后排队的请求统一观察最新状态。
                 this._drawingSavePending.taskFactory = taskFactory;
             }
             this._drawingSavePending.waiters.push({ resolve, reject });
@@ -1291,12 +1290,9 @@ class ChartManager {
         this.isApplyingDrawingState = true;
         this.markDrawingMutationStart('apply-user-drawings');
         try {
-            // A saved drawing state is applied asynchronously by TradingView.
-            // Invalidate every tracked automatic entity on both sides of that
-            // await: bars-ready can redraw Chanlun entities while the DTO is
-            // still being applied, and the late DTO commit may otherwise leave
-            // the ownership containers referring to entities whose geometry
-            // was replaced underneath them.
+            // TradingView 会异步应用保存的绘图状态，因此等待前后都要使已追踪的自动实体
+            // 失效。状态对象仍在应用时，K 线就绪事件可能重画缠论实体；若不这样处理，
+            // 延迟提交的状态会让所有权容器继续引用几何已被替换的实体。
             this._clearAllStrictScopes('apply-user-drawings-start');
             this.chart.removeAllShapes();
             // removeAllShapes 清空画面后 obj_charts 仍保留旧 entity 记录，
@@ -1381,19 +1377,17 @@ class ChartManager {
         const task = (async () => {
             if (!this.widget || !this.chart || this._disposed) return false;
 
-            // Flush the current explicit user drawings before clearing the
-            // canvas.  serializeUserDrawingsState excludes all automatic
-            // Chanlun entities, so a stale overlay cannot hitch a ride here.
+            // 清空画布前先保存当前明确的用户绘图。serializeUserDrawingsState 会排除
+            // 全部自动缠论实体，因此陈旧覆盖层不会随用户绘图一起保存。
             await this.scheduleDrawingsSave('manual-data-reload');
 
             this._resetDataReadyContext();
             this._drawRetryCount = 0;
             this._latestAppliedBarTime = null;
 
-            // Always read through the server strict gate.  The local cache may
-            // have been populated before an app upgrade or by a previous
-            // symbol/resolution context.  applyUserDrawingsState first removes
-            // every line tool, then restores only explicit manual drawings.
+            // 始终通过服务端严格闸门读取。本地缓存可能来自应用升级前，或来自先前的
+            // 标的/周期上下文。applyUserDrawingsState 会先删除全部线条工具，再只恢复
+            // 明确的手工绘图。
             await this.reloadDrawingsForCurrentContext('manual-data-reload', {
                 bypassCache: true,
                 redrawAutomatic: false,
@@ -1403,13 +1397,12 @@ class ChartManager {
             try {
                 const historyProvider = this.udf_datafeed?._historyProvider;
                 if (historyProvider) historyProvider._forceRefreshOnce = true;
-            } catch (e) { /* optional datafeed optimization */ }
+            } catch (e) { /* 可选的数据源优化 */ }
             this.widget.resetCache();
 
             this.chart.resetData();
-            // K lines and automatic structures have different lifecycles.
-            // Rebuild Chanlun entities only after the refreshed main series is
-            // installed, preventing floating shapes on an empty canvas.
+            // K 线与自动结构的生命周期不同。主序列刷新完成后才重建缠论实体，
+            // 防止空画布上残留悬浮图形。
             this._requestChanlunDrawWhenReady();
             return true;
         })();
@@ -1518,9 +1511,8 @@ class ChartManager {
             this._tvDataReadyIdentity !== this._currentDataIdentityKey()
         );
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
-        // A fresh transport response is a new opportunity to place shapes.
-        // Do not let failures from the previous canvas state consume its retry
-        // budget before TradingView has installed the new history.
+        // 新传输响应提供了重新放置图形的机会。在 TradingView 装入新历史数据前，
+        // 不能让上一画布状态的失败消耗本轮重试预算。
         if ((this._reconcileRetry?.count || 0) > 0) {
             this._clearReconcileRetryBudget();
         }
@@ -2123,11 +2115,9 @@ class ChartManager {
                 $('body').append(html);
                 const menuElement = document.getElementById(menuId);
                 let menuPlacement = null;
-                // The toolbar button lives inside TradingView's same-origin
-                // iframe, while the menu is mounted in this ChartManager
-                // document.  On embedded pages (for example early screening)
-                // ``window.top`` is a *different* coordinate space.  Always
-                // position and drag against the menu's actual owner window.
+                // 工具栏按钮位于 TradingView 同源内嵌框架中，菜单则挂载在当前
+                // ChartManager 文档内。页面被嵌入时（例如预选股页），window.top 属于
+                // 另一套坐标空间；菜单定位和拖动必须以其实际所属窗口为准。
                 const menuWindow = menuElement?.ownerDocument?.defaultView || window;
                 if (menuElement) {
                     menuPlacement = positionClDisplayMenuNearPointer(
@@ -2659,9 +2649,8 @@ class ChartManager {
             },
         };
         try {
-            // Only a time coordinate is supplied.  RiskMappingPointEvidence
-            // deliberately records no price; inventing one from the currently
-            // rendered bar would turn a time audit marker into false evidence.
+            // 此处只提供时间坐标。RiskMappingPointEvidence 有意不记录价格；若从当前
+            // 渲染 K 线虚构价格，会把时间审计标记错误地变成价格证据。
             this._causalAuditMarkerSetFor = key;
             const marker = this.chart.createMultipointShape([point], options);
             if (marker && typeof marker.then === 'function') {
@@ -2820,8 +2809,7 @@ class ChartManager {
     }
     handleVisibleRangeChange() {
         if (this._initialLoadDone) {
-            // Loading an earlier/later visible range can make previously
-            // rejected anchors available on the TradingView canvas.
+            // 加载更早或更晚的可视区间后，先前被拒绝的锚点可能已能落在画布上。
             if ((this._reconcileRetry?.count || 0) > 0) {
                 this._clearReconcileRetryBudget();
             }
@@ -2848,9 +2836,8 @@ class ChartManager {
         if (entityId == null) return entityId;
         if (!(this._reconcileOwnedIds instanceof Set)) this._reconcileOwnedIds = new Set();
         this._reconcileOwnedIds.add(entityId);
-        // An asynchronous create event can arrive before its promise resolves
-        // and briefly look like a user drawing. Ownership settlement must
-        // revoke that provisional user classification before persistence.
+        // 异步创建事件可能先于其承诺完成，并短暂表现为用户绘图。所有权确定后必须在
+        // 持久化前撤销这一临时用户分类。
         this._userDrawingIds?.delete(String(entityId));
         this._coloredDrawings?.delete(entityId);
         return entityId;
@@ -3228,6 +3215,25 @@ class ChartManager {
                     || !Array.isArray(trend.direction_reason_codes)
                 ) throw new Error('strict trend direction qualification is invalid');
             }
+            for (const [field, renderKind, status] of [
+                ['confirmed_points', 'point_confirmed', 'confirmed'],
+                ['approaching_points', 'point_approaching', 'approaching'],
+            ]) {
+                for (const point of level[field]) {
+                    const pointType = String(point?.point_type || '').toLowerCase();
+                    const expectedSide = pointType.endsWith('buy') ? 'buy' : 'sell';
+                    if (
+                        !point
+                        || point.render_kind !== renderKind
+                        || point.status !== status
+                        || point.structural_level !== level.structural_level
+                        || !STRICT_POINT_TYPES.has(pointType)
+                        || point.side !== expectedSide
+                        || !Array.isArray(point.points)
+                        || point.points.length !== 1
+                    ) throw new Error('strict point contract is invalid');
+                }
+            }
             // 后端 CenterLevelResult 保证只有一个未决归属。前端以同一规则独立
             // 防御陈旧缓存和竞态：共享边界或相互分离的形成中预览，不能与未决
             // 正式中枢共存，除非已完成预览提供了该中枢的因果三类点边界。
@@ -3288,6 +3294,7 @@ class ChartManager {
             add(level.current_trends);
             // completed_trend_snapshots 是只读审计证据，不创建默认图形。
             add(level.confirmed_points, level.label);
+            add(level.approaching_points, level.label);
             add(level.divergences, level.label);
         }
         return groups;
@@ -3408,9 +3415,8 @@ class ChartManager {
                 return Math.abs(actualPrice - expectedPrice) <= tolerance;
             });
         } catch (error) {
-            // A shape can be unreadable during the same tick in which it was
-            // created.  Treat that as not-yet-verified and retry; accepting it
-            // here would make a silently snapped rectangle permanent.
+            // 图形在创建的同一事件循环内可能暂时不可读；应视为尚未验证并重试。
+            // 若此处直接接受，静默吸附到错误坐标的矩形会被永久保留。
             return false;
         }
     }
@@ -3451,10 +3457,8 @@ class ChartManager {
         });
         this._markAutomaticShapeId(realId);
         this._pendingRemovalIds?.delete(realId);
-        // Creation can initially report the requested points and then be
-        // re-anchored by TradingView when its time scale finishes loading.
-        // Verify once more on the stable canvas.  _isVerifyingNow prevents a
-        // repair performed by the verification pass from scheduling a loop.
+        // 创建时可能先返回请求坐标，待时间轴加载完成后又被 TradingView 重新锚定。
+        // 因此要在稳定画布上再次验证；_isVerifyingNow 用于防止验证修复再次安排循环。
         if (!this._isVerifyingNow()) this._scheduleVerifyRebuild();
         return true;
     }
@@ -3475,12 +3479,9 @@ class ChartManager {
             plan.createItems.map((item) => [item.logicalKey, item]),
         );
 
-        // Fingerprints only describe what was requested when the entity was
-        // created.  They do not prove that the live TradingView line tool still
-        // has those points: history pagination and time-scale relayout can
-        // silently snap an existing rectangle to another candle afterwards.
-        // Revalidate every retained entity and turn drift/missing entities into
-        // an ordinary remove+create delta.
+        // 指纹只描述创建实体时请求的坐标，不能证明当前 TradingView 线条工具仍保有
+        // 这些坐标：历史分页和时间轴重新布局都可能把既有矩形静默吸附到其他 K 线。
+        // 所以要重新验证全部保留实体，并把漂移或缺失实体转成普通的删除后重建差量。
         for (const entry of container) {
             const desiredItem = desiredItems.get(entry.logicalKey);
             if (

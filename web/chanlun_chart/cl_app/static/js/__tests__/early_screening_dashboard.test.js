@@ -693,6 +693,10 @@ test("candidate origin distinguishes sector triggers from monitor supplements", 
     sector_triggered: false,
     selection_sources: ["HOLDING_MONITOR"],
   }), "持仓监控");
+  assert.equal(ui.selectionLabelForSignal({
+    sector_triggered: false,
+    selection_sources: ["DECISION_RULE_RECHECK"],
+  }), "规则变更重检");
   assert.deepEqual(
     ui.evidenceGroupsForSignal({
       selection_sources: ["ACTIVE_WATCHLIST_MONITOR"],
@@ -763,11 +767,16 @@ test("dashboard has six independent point filters", () => {
   }
 });
 
-test("stock selection and human review open on focused workloads without hiding channels", () => {
-  assert.match(template, /data-point-type="buy"[^>]*aria-pressed="true"/);
+test("stock selection opens with all six point channels visible", () => {
+  assert.match(template, /data-selection-scope="sector-trigger"[^>]*aria-pressed="false"/);
+  assert.match(template, /data-selection-scope="all-qualified"[^>]*aria-pressed="true"/);
+  assert.match(template, /data-point-type="buy"[^>]*aria-pressed="false"/);
   assert.match(template, /data-point-type="sell"[^>]*aria-pressed="false"/);
-  assert.match(template, /data-point-type="all"[^>]*aria-pressed="false"/);
-  assert.match(controllerSource, /pointType:\s*saved\.pointType\s*\|\|\s*"buy"/);
+  assert.match(template, /data-point-type="all"[^>]*aria-pressed="true"/);
+  assert.match(controllerSource, /pointType:\s*saved\.pointType\s*\|\|\s*"all"/);
+  assert.match(controllerSource, /CANONICAL_SIX_POINT_CHANNELS/);
+  assert.match(controllerSource, /value\.contract\s*===\s*VIEW_CONTRACT/);
+  assert.match(controllerSource, /saved\.selectionScope\s*===\s*"sector-trigger"[\s\S]*?"all-qualified"/);
   assert.match(humanReviewSource, /alertType:\s*"all"/);
   assert.match(humanReviewSource, /reviewLane:\s*"focus"/);
   assert.match(
@@ -955,6 +964,13 @@ test("review display sorting uses lifecycle then sector rank without mutating fa
       lifecycle_stage: "armed",
       sector: { sector_id: "sector-1" },
     },
+    {
+      signal_id: "armed-ranked-first-sell",
+      code: "SZ.000005",
+      point_type: "1sell",
+      lifecycle_stage: "armed",
+      sector: { sector_id: "sector-1" },
+    },
   ];
   const originalIds = rows.map((row) => row.signal_id);
   const sorted = Ui.sortSignalsForReview(rows, [
@@ -964,6 +980,7 @@ test("review display sorting uses lifecycle then sector rank without mutating fa
 
   assert.deepEqual(sorted.map((row) => row.signal_id), [
     "triggered-unranked",
+    "armed-ranked-first-sell",
     "armed-ranked",
     "armed-unranked",
     "approaching-ranked",
@@ -1534,6 +1551,7 @@ test("operator status copy explains degraded state without exposing internal cod
     daily_preselection_reason_code: "HUMAN_REVIEW_MATERIALIZATION_FAILED",
     daily_preselection_candidate_count: 1664,
     daily_preselection_buy_candidate_count: 612,
+    daily_preselection_sell_candidate_count: 1052,
     daily_preselection_target_session: "2026-08-04",
     daily_preselection_market_data_as_of: "2026-08-04T09:07:23+08:00",
     full_coverage_next_active_at: "NEXT_SCAN",
@@ -1548,7 +1566,7 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.doesNotMatch(summary, /review_blocked|HUMAN_REVIEW_MATERIALIZATION_FAILED/);
   assert.match(diagnostic, /内部状态 review_blocked/);
   assert.match(diagnostic, /原因 HUMAN_REVIEW_MATERIALIZATION_FAILED/);
-  assert.match(diagnostic, /结构线索 1664（买入 612）/);
+  assert.match(diagnostic, /结构线索 1664（买点 612 \/ 卖点 1052）/);
   assert.doesNotMatch(diagnostic, /重放板块证据/);
 
   assert.equal(
@@ -1558,8 +1576,9 @@ test("operator status copy explains degraded state without exposing internal cod
       daily_preselection_target_session: "2026-08-05",
       daily_preselection_candidate_count: 28,
       daily_preselection_buy_candidate_count: 17,
+      daily_preselection_sell_candidate_count: 11,
     }),
-    "已就绪 · 适用 2026-08-05 · 买入线索 17 / 全部 28",
+    "已就绪 · 适用 2026-08-05 · 买点 17 / 卖点 11 / 全部 28",
   );
 
   const monitorHealth = {

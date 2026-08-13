@@ -58,12 +58,12 @@ class _State:
         return self.direction
 
 
-def _small_sell(code: str, name: str, signal_time: str) -> MonitorEvent:
+def _strict_sell(code: str, name: str, signal_time: str) -> MonitorEvent:
     return MonitorEvent(
         code=code,
         name=name,
         side="sell",
-        kind="small_sell",
+        kind="strict_sell_point",
         bs_type="1sell",
         signal_time=signal_time,
         price=10.0,
@@ -77,7 +77,7 @@ def _small_sell(code: str, name: str, signal_time: str) -> MonitorEvent:
 
 def _event_collector(states, *, names, holdings, **_kwargs):
     assert holdings == set(states)
-    return [_small_sell(code, names[code], states[code].signal_time) for code in states]
+    return [_strict_sell(code, names[code], states[code].signal_time) for code in states]
 
 
 def _big_down_collector(states, *, names, holdings, **_kwargs):
@@ -207,7 +207,7 @@ def test_cross_market_alert_passes_symbol_aligned_chart_context(tmp_path):
     assert chart["market"] == "us"
     assert chart["code"] == "TSLA.US"
     assert chart["name"] == "特斯拉"
-    assert "small_sell|TSLA.US" in chart["artifact_key"]
+    assert "strict_sell_point|TSLA.US" in chart["artifact_key"]
     assert chart["point_type"] == "1sell"
     assert chart["signal_time"] == "2026-08-04 10:00:00"
     assert chart["evidence_required"] is True
@@ -241,7 +241,7 @@ def test_failed_delivery_is_not_deduplicated_and_retries(tmp_path):
             if code in emitted:
                 continue
             emitted.add(code)
-            events.append(_small_sell(code, names[code], state.signal_time))
+            events.append(_strict_sell(code, names[code], state.signal_time))
         return events
 
     service, notifier, _exchange_calls = _service(
@@ -600,7 +600,7 @@ def test_watched_us_signal_is_not_worded_as_a_holding(tmp_path):
                 code="AAPL.US",
                 name=names["AAPL.US"],
                 side="buy",
-                kind="small_buy",
+                kind="strict_buy_point",
                 bs_type="3buy",
                 signal_time=states["AAPL.US"].signal_time,
                 price=200.0,

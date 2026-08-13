@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from chanlun.decision_support.fingerprints import sha256_json
+from chanlun.decision_support.trading_system.models import (
+    CANONICAL_POINT_TYPES,
+    REVERSAL_SUPPORT_POINT_TYPES,
+)
 
 
 UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID = (
@@ -21,17 +25,16 @@ class UnifiedSignalAlignmentContract:
     context_frequencies: tuple[str, ...] = ("d", "30m")
     setup_frequency: str = "5m"
     trigger_frequency: str = "1m"
-    point_types: tuple[str, ...] = (
-        "1buy",
-        "2buy",
-        "3buy",
-        "1sell",
-        "2sell",
-        "3sell",
+    point_types: tuple[str, ...] = CANONICAL_POINT_TYPES
+    reversal_support_point_types: tuple[str, ...] = tuple(
+        point_type
+        for point_type in CANONICAL_POINT_TYPES
+        if point_type in REVERSAL_SUPPORT_POINT_TYPES
     )
     setup_classes_share_logic: bool = True
-    trigger_classes_share_logic: bool = True
+    point_classes_share_structure_authority: bool = True
     trigger_must_match_side: bool = True
+    third_class_can_confirm_reversal: bool = False
     third_class_keeps_center_geometry: bool = True
     small_to_large_second_class_allowed: bool = True
     provisional_points_actionable: bool = False
@@ -43,11 +46,17 @@ class UnifiedSignalAlignmentContract:
             self.structure_authority != "STRICT_PHYSICAL_TIMEFRAME_ENGINE"
             or self.context_frequencies != ("d", "30m")
             or (self.setup_frequency, self.trigger_frequency) != ("5m", "1m")
-            or self.point_types
-            != ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
+            or self.point_types != CANONICAL_POINT_TYPES
+            or self.reversal_support_point_types
+            != tuple(
+                point_type
+                for point_type in CANONICAL_POINT_TYPES
+                if point_type in REVERSAL_SUPPORT_POINT_TYPES
+            )
             or not self.setup_classes_share_logic
-            or not self.trigger_classes_share_logic
+            or not self.point_classes_share_structure_authority
             or not self.trigger_must_match_side
+            or self.third_class_can_confirm_reversal
             or not self.third_class_keeps_center_geometry
             or not self.small_to_large_second_class_allowed
             or self.provisional_points_actionable

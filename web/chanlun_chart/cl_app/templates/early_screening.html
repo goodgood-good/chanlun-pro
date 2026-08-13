@@ -340,13 +340,13 @@
           <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
 
           <details class="es-global-filter-drawer">
-            <summary>高级筛选 <span id="es-filter-summary">板块已触发 · 全部 · 选股买点</span></summary>
+            <summary>高级筛选 <span id="es-filter-summary">全部资格观察 · 全部 · 全部</span></summary>
             <div class="es-global-filters" aria-label="标的列表筛选条件">
               <fieldset class="es-filter-group">
                 <legend>候选范围</legend>
                 <div class="es-filter-buttons">
-                  <button class="is-active" type="button" data-selection-scope="sector-trigger" aria-pressed="true">板块已触发</button>
-                  <button type="button" data-selection-scope="all-qualified" aria-pressed="false">全部资格观察</button>
+                  <button type="button" data-selection-scope="sector-trigger" aria-pressed="false">板块已触发</button>
+                  <button class="is-active" type="button" data-selection-scope="all-qualified" aria-pressed="true">全部资格观察</button>
                 </div>
               </fieldset>
 
@@ -369,9 +369,9 @@
               <fieldset class="es-filter-group">
                 <legend>选股用途与一二三类买卖点独立通道</legend>
                 <div id="es-point-filters" class="es-filter-buttons es-point-filters">
-                  <button class="is-active" type="button" data-point-type="buy" aria-pressed="true">选股买点</button>
+                  <button type="button" data-point-type="buy" aria-pressed="false">买点</button>
                   <button type="button" data-point-type="sell" aria-pressed="false">卖点观察</button>
-                  <button type="button" data-point-type="all" aria-pressed="false">全部</button>
+                  <button class="is-active" type="button" data-point-type="all" aria-pressed="true">全部</button>
                   <button type="button" data-point-type="1buy" aria-pressed="false">一买</button>
                   <button type="button" data-point-type="2buy" aria-pressed="false">二买</button>
                   <button type="button" data-point-type="3buy" aria-pressed="false">三买</button>

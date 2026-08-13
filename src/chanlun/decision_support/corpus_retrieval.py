@@ -37,22 +37,6 @@ _CONCEPT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-_EVENT_CONCEPTS: dict[str, tuple[str, ...]] = {
-    "1buy": ("一类买点",),
-    "2buy": ("二类买点", "中枢回试"),
-    "3buy": ("三类买点", "中枢回试"),
-    "1sell": ("一类卖点",),
-    "2sell": ("二类卖点", "中枢回试"),
-    "3sell": ("三类卖点", "中枢回试"),
-    "1buy_nest": ("一类买点", "趋势背驰", "区间套"),
-    "2buy_nest": ("二类买点", "区间套", "中枢回试"),
-    "3buy_nest": ("三类买点", "区间套", "中枢回试"),
-    "1sell_nest": ("一类卖点", "趋势背驰", "区间套"),
-    "2sell_nest": ("二类卖点", "区间套", "中枢回试"),
-    "3sell_nest": ("三类卖点", "区间套", "中枢回试"),
-}
-
-
 def _normalize(text: str) -> str:
     folded = unicodedata.normalize("NFKC", text).casefold()
     return "".join(character for character in folded if character.isalnum())
@@ -291,7 +275,3 @@ class CorpusIndex:
 
         hits.sort(key=lambda hit: (-hit.score, hit.unit.evidence_id))
         return tuple(hits[:limit])
-
-
-def concepts_for_event(event_type: str) -> tuple[str, ...]:
-    return _EVENT_CONCEPTS.get(event_type.strip().casefold(), ())

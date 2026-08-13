@@ -171,6 +171,13 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
         TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS=1800,
         TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
+        # 低频候选必须在下一次 1m 监听到期前停止接纳新任务；剩余标的下一轮继续。
+        TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS=float(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS",
+                "40",
+            )
+        ),
         # 系统本地且独立于市场的自选组用于声明手工持仓；它只是一项监听事实，不能由成员
         # 关系推断券商/账户访问权或下单能力。
         TRADING_SCREENING_MANUAL_HOLDING_GROUP=os.environ.get(
@@ -1172,8 +1179,26 @@ def create_app(test_config=None, start_scheduler=False):
         # 证据的就绪口径一致。
 
         ready = not reasons
+        selection_ready = (
+            bool(screening_component.get("selection_ready"))
+            if screening_required
+            else None
+        )
         payload = {
             "status": "ready" if ready else "not_ready",
+            "runtime_ready": ready,
+            # 选股完整性不改变 Web/QMT 进程的 HTTP 就绪码，但必须在顶层明确暴露。
+            "selection_ready": selection_ready,
+            "selection_status": (
+                screening_component.get("selection_status")
+                if screening_required
+                else "disabled"
+            ),
+            "selection_reason_code": (
+                screening_component.get("selection_reason_code")
+                if screening_required
+                else "SCREENING_DISABLED"
+            ),
             "revision": build_revision,
             "pid": os.getpid(),
             "market": market,
@@ -1813,11 +1838,10 @@ def create_app(test_config=None, start_scheduler=False):
         return tuple(dict.fromkeys((*manually_declared, *virtual)))
 
     def _non_a_monitor_universe():
-        """Read global groups on every scan so UI edits need no app restart.
+        """每轮扫描都读取全局分组，使页面修改无需重启应用即可生效。
 
-        US symbols from every group are monitored. Other non-A markets retain
-        the previous holding-only behavior until their broader selection
-        contracts are explicitly enabled.
+        所有分组中的美股都会被监听；其他非 A 股市场在明确启用更广泛的选股契约前，
+        仍只监听持仓标的。
         """
 
         from chanlun.persistence.db import db
@@ -2229,6 +2253,12 @@ def create_app(test_config=None, start_scheduler=False):
                     60,
                 )
             ),
+            candidate_monitor_time_budget_seconds=float(
+                app.config.get(
+                    "TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS",
+                    40.0,
+                )
+            ),
             five_minute_candidate_target_seconds=int(
                 app.config.get(
                     "TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS",
@@ -2339,7 +2369,7 @@ def create_app(test_config=None, start_scheduler=False):
             }
 
         def _app_forward_evaluation_readiness(*, session, observed_at):
-            """Reuse the exact readiness facts formerly polled by PowerShell."""
+            """复用此前由 PowerShell 轮询的完全相同就绪事实。"""
 
             payload, _status = health_snapshot(
                 "readyz",

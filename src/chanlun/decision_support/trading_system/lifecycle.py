@@ -6,6 +6,7 @@ from datetime import datetime
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.models import (
     LifecycleStage,
+    REVERSAL_SUPPORT_POINT_TYPES,
     SectorAssessment,
     SignalLifecycle,
     StructuralPoint,
@@ -22,16 +23,14 @@ FORMED_GEOMETRY_EVIDENCE_CODES = frozenset(
     }
 )
 
-
 def has_formed_provisional_geometry(
     point_type: object,
     evidence_codes: object,
 ) -> bool:
-    """Return whether a provisional third-class point is geometrically complete.
+    """判断临时三类点的几何结构是否已经完成。
 
-    Segment locking is a later causal fact.  A same-level external leave plus
-    first return that holds outside the frozen center core already forms the
-    third-class point geometry and must not be folded back into ``approaching``.
+    线段锁定是稍后才可获得的因果事实。同级别外部离开与首次回抽保持在冻结中枢核心
+    之外时，三类点的几何形态已经形成，不能再归回 ``approaching`` 状态。
     """
 
     if point_type not in {"3buy", "3sell"} or isinstance(
@@ -47,12 +46,26 @@ def has_formed_provisional_geometry(
 
 
 def lifecycle_stage_from_signal(signal: Mapping[str, object]) -> str | None:
-    """Return the lifecycle stage declared by a current serialized signal."""
+    """返回当前序列化信号声明的生命周期阶段。"""
 
     stage = signal.get("lifecycle_stage")
     if stage not in _TRANSITIONS:
         return None
     return stage
+
+
+def is_one_minute_reversal_trigger(point: StructuralPoint) -> bool:
+    """判断正式点能否作为 1 分钟反转触发证据。
+
+    一、二类点分别证明趋势背驰反转和回试确认；三类点只证明离开中枢后的延续，
+    不能替代反转证据。实时决策与历史回放必须共同使用这一唯一判定入口。
+    """
+
+    return bool(
+        point.confirmed
+        and point.source_frequency == "1m"
+        and point.point_type in REVERSAL_SUPPORT_POINT_TYPES
+    )
 
 
 _TRANSITIONS: dict[LifecycleStage | None, set[LifecycleStage]] = {
@@ -123,8 +136,7 @@ def match_one_minute_trigger(
     matches = tuple(
         point
         for point in points
-        if point.confirmed
-        and point.source_frequency == "1m"
+        if is_one_minute_reversal_trigger(point)
         and point.side == setup.point.side
         and point.point_id != setup.point.point_id
         and point.confirmed_at is not None
@@ -145,9 +157,9 @@ def match_one_minute_trigger(
 
 def _base_stage(setup: TradeSetup) -> LifecycleStage:
     if isinstance(setup.point, ProvisionalCandidate):
-    # 已完成的中枢预览已经具备同级别外部离开段，以及保持在冻结核心之外的首次回抽。
-    # 从几何上看三类点已经形成，即使延迟锁定的线段仍使它不可执行；
-    # 不要把这一事实状态退回更早的“接近中”分类。
+        # 已完成的中枢预览已经具备同级别外部离开段，以及保持在冻结核心之外的首次回抽。
+        # 从几何上看三类点已经形成，即使延迟锁定的线段仍使它不可执行；
+        # 不要把这一事实状态退回更早的“接近中”分类。
         if has_formed_provisional_geometry(
             setup.point.point_type,
             setup.point.evidence_codes,

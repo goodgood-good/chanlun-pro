@@ -5,8 +5,10 @@ import pytest
 
 from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.provisional import (
+    ProvisionalCandidate,
     extract_provisional_candidates,
 )
+from tests.trading_system.helpers import provisional_point
 from tests.trading_system.strict_helpers import (
     DEFAULT_CLOSED_AT,
     strict_evidence_result,
@@ -71,6 +73,21 @@ def test_candidate_has_no_probability_score() -> None:
     assert not hasattr(candidate, "progress")
     assert not hasattr(candidate, "probability")
     assert not hasattr(candidate, "score")
+
+
+def test_provisional_candidate_rejects_noncanonical_point_type() -> None:
+    valid = provisional_point("1buy")
+    values = {
+        field: getattr(valid, field)
+        for field in valid.__dataclass_fields__
+    }
+    values.update(
+        candidate_id="candidate:old-l2buy",
+        point_type="l2buy",
+    )
+
+    with pytest.raises(ValueError, match="买卖点类型无效"):
+        ProvisionalCandidate(**values)
 
 
 def test_provisional_adapter_rejects_non_approaching_endpoint() -> None:

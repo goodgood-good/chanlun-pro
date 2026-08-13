@@ -207,7 +207,19 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
         "5m",
         "1m",
     )
+    assert first.contract.locator_trigger_point_types == (
+        "1buy",
+        "1sell",
+        "2buy",
+        "2sell",
+    )
     document = first.contract.document()
+    assert document["locator_trigger_point_types"] == [
+        "1buy",
+        "1sell",
+        "2buy",
+        "2sell",
+    ]
     assert document["policy"]["minimum_tick"] == "0.01"
     assert validate_human_assisted_contract_document(document) == (first.contract_id)
 

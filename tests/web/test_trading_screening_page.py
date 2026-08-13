@@ -399,7 +399,7 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "未来除权改写既有排序" not in html
     assert 'data-selection-scope="sector-trigger"' in html
     assert 'data-selection-scope="all-qualified"' in html
-    assert "板块已触发 · 全部 · 选股买点" in html
+    assert "全部资格观察 · 全部 · 全部" in html
     assert html.count("data-workspace=") == 3
     assert 'data-workspace="sector"' in html
     assert 'data-workspace="signals"' in html

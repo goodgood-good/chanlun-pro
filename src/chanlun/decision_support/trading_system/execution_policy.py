@@ -12,6 +12,9 @@ from chanlun.decision_support.trading_system.models import (
     TradeSetup,
     TradingPolicy,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    is_one_minute_reversal_trigger,
+)
 
 
 def _valid_one_minute_trigger(
@@ -22,9 +25,8 @@ def _valid_one_minute_trigger(
     return bool(
         lifecycle.stage == "triggered"
         and trigger is not None
-        and trigger.confirmed
+        and is_one_minute_reversal_trigger(trigger)
         and trigger.side == point.side
-        and trigger.source_frequency == "1m"
         and lifecycle.trigger_point_id == trigger.point_id
     )
 

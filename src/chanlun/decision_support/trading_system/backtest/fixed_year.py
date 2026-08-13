@@ -1,20 +1,15 @@
-"""Sparse causal facts for a fixed-policy, one-year QMT replay.
+"""固定策略年度 QMT 回放使用的稀疏因果事实。
 
-The replay evaluates the fixed production policy only at times when an entry
-or exit can actually change:
+回放只在进出场结论实际可能改变的时刻评估固定生产策略：
 
-* a confirmed five-minute setup becomes available;
-* its first matching confirmed one-minute trigger becomes available; or
-* a subsequent thirty-minute close changes a context gate while that setup is
-  still current.
+* 已确认的五分钟设置开始可见；
+* 首个匹配且已确认的一分钟触发点开始可见；
+* 设置仍有效时，后续三十分钟收盘改变了环境闸门。
 
-Confirmed points are recorded in an append-only event ledger.  A full-history
-strict snapshot is not such a ledger: later segment recursion can legitimately
-replace the live tail and thereby remove a point that was visible in an earlier
-prefix.  The replay below therefore freezes segments when they first become
-observable from locked strokes and records the first visibility of every point.
-The non-immutable thirty-minute direction is still replayed prefix-by-prefix at
-the sparse evaluation times.
+已确认点写入只追加事件账本。全历史严格快照并不等同于该账本：后续线段递归可以合法
+替换实时尾部，并移除早期前缀曾经可见的点。因此，下方回放在线段首次可由锁定笔观察
+时将其冻结，并记录每个点首次可见的时刻。非永久冻结的三十分钟方向仍在各稀疏评估
+时点按前缀重新回放。
 """
 
 from __future__ import annotations
@@ -66,6 +61,9 @@ from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
 )
 from chanlun.decision_support.trading_system.context import classify_context
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
+from chanlun.decision_support.trading_system.lifecycle import (
+    is_one_minute_reversal_trigger,
+)
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
     MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
@@ -278,7 +276,7 @@ def load_qmt_frame(
     factors: pd.DataFrame | None = None,
     _allow_native_daily: bool = False,
 ) -> pd.DataFrame:
-    """Read raw QMT rows and build an ex-date-only causal analysis basis."""
+    """读取原始 QMT 行，并只用除权日当时已知信息构建因果分析价格基准。"""
 
     if frequency not in FREQUENCIES and not (_allow_native_daily and frequency == "1d"):
         raise ValueError("frequency must be 30m, 5m or 1m")
@@ -432,7 +430,7 @@ def load_qmt_daily_frame(
     end_at: datetime,
     factors: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Read native QMT daily bars on the same causal price basis as 1m."""
+    """读取 QMT 原生日线，并保持与 1 分钟线相同的因果价格基准。"""
 
     return load_qmt_frame(
         code,
@@ -465,11 +463,10 @@ def _symbol_source_revision(
     security_master: SecurityMasterRecord | None = None,
     memberships: Sequence[SectorMembershipChange] = (),
 ) -> str:
-    """Fingerprint exactly the QMT rows and factor ledger used by a fact.
+    """为事实实际使用的 QMT 行和复权因子账本生成精确指纹。
 
-    Checkpoints are derived products.  Recording only row counts cannot prove
-    which historical values produced them, so include content hashes for all
-    three frequencies, their price-basis metadata, and the factor ledger.
+    检查点属于派生结果，只记录行数无法证明由哪些历史值生成。因此需要纳入三个周期
+    的内容哈希、各自价格基准元数据以及复权因子账本。
     """
 
     digest = hashlib.sha256()
@@ -524,12 +521,10 @@ def final_confirmed_points(
 
 @dataclass(frozen=True, slots=True)
 class CausalCenterCompletionFact:
-    """Read-only completion geometry first visible at a causal checkpoint.
+    """在因果检查点首次可见的只读完成几何事实。
 
-    The strict center implementation remains authoritative.  This fact only
-    copies the immutable completion leave/return units so downstream strategy
-    adapters do not have to infer their historical windows from a point's
-    anchor timestamp.
+    严格中枢实现仍是唯一权威。本事实只复制不可变的完成离开段和返回段，避免下游策略
+    适配器再从买卖点锚定时间推断历史窗口。
     """
 
     center_id: str
@@ -604,7 +599,7 @@ class CausalCenterCompletionFact:
 
 @dataclass(frozen=True, slots=True)
 class CausalStructureEventLedger:
-    """Append-only facts first observed from frozen segment prefixes."""
+    """只追加记录从冻结线段前缀中首次观察到的事实。"""
 
     points: tuple[StructuralPoint, ...]
     completed_trends: tuple[TrendType, ...]
@@ -691,7 +686,7 @@ def final_confirmed_structure_events(
     *,
     visibility_windows: Sequence[tuple[datetime, datetime]] | None = None,
 ) -> CausalStructureEventLedger:
-    """Return the shared causal point/trend ledger used by live and replay paths."""
+    """返回实时与回放路径共同使用的因果买卖点/趋势账本。"""
 
     return _causal_confirmed_structure_events(
         code,
@@ -723,20 +718,16 @@ def _causal_confirmed_structure_events(
     *,
     visibility_windows: Sequence[tuple[datetime, datetime]] | None = None,
 ) -> CausalStructureEventLedger:
-    """Return append-only facts built only from locked-stroke prefixes.
+    """只从已锁定笔前缀构建并返回只追加事实。
 
-    The ordinary terminal strict snapshot is intentionally insufficient here.
-    Segment and recursive-tail calculation is a current-state projection: a
-    later prefix may replace its tail and make a formerly confirmed fact
-    disappear.  Reading that terminal projection and filtering by the point's
-    historical ``available_at`` is survivor-biased.
+    普通的最终严格快照在这里有意不作为充分证据。线段和递归尾部计算只是当前状态投影：
+    后续前缀可能替换尾部，让此前确认的事实消失。读取最终投影再按买卖点历史
+    ``available_at`` 过滤，会产生幸存者偏差。
 
-    Locked strokes are prefix-stable inputs.  This routine advances through
-    those causal checkpoints, freezes the first segment that becomes complete,
-    and never reopens that boundary.  Point and completed-trend evidence is
-    recorded the first time it is observable.  The checkpoint itself floors
-    ``available_at`` so even an internal geometric helper that reports an older
-    witness cannot back-date a tradeable event.
+    已锁定笔是前缀稳定输入。本过程依次推进因果检查点，冻结首个完成的线段且不再重开
+    其边界，并在买卖点及完成趋势证据首次可观察时记录。检查点本身限定
+    ``available_at`` 的最早值，因此即使内部几何辅助函数返回更早见证时间，也不能把
+    可交易事件倒填到过去。
     """
 
     if frame.empty or visibility_windows == ():
@@ -1008,7 +999,7 @@ def _point_lane(point: StructuralPoint) -> tuple[str, str, int]:
 def setup_active_ends(
     points: Sequence[StructuralPoint],
 ) -> dict[str, tuple[datetime, bool]]:
-    """Return each setup's inclusive end and whether a newer lane supersedes it."""
+    """返回每个形态的包含式结束时间，以及它是否已被更新通道取代。"""
 
     ordered = tuple(
         sorted(points, key=lambda point: (point.available_at, point.point_id))
@@ -1049,8 +1040,7 @@ def first_matching_trigger(
     matches = (
         point
         for point in one_points
-        if point.confirmed
-        and point.source_frequency == "1m"
+        if is_one_minute_reversal_trigger(point)
         and point.side == setup.side
         and point.point_id != setup.point_id
         and setup.available_at <= point.available_at
@@ -1082,7 +1072,7 @@ def sparse_evaluation_times(
     effective_start: datetime,
     requested_end: datetime,
 ) -> tuple[datetime, ...]:
-    """Build the only timestamps at which a triggered current setup can change."""
+    """构建已触发当前形态可能发生变化的唯一时间点集合。"""
 
     start = normalize_datetime(effective_start, "effective_start")
     end = normalize_datetime(requested_end, "requested_end")
@@ -1186,7 +1176,7 @@ def sector_facts_from_frame(
     market_data_source: str = "qmt_gics3_component_composite",
     expected_closes: Sequence[datetime] = (),
 ) -> SectorResearchFacts:
-    """Replay the production sector hard gate at symbol evaluation times."""
+    """在标的评估时点回放生产环境的板块硬闸门。"""
 
     times = tuple(sorted(set(observed_times)))
     if not times:

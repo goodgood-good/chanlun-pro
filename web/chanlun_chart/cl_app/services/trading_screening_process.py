@@ -42,6 +42,7 @@ from chanlun.decision_support.trading_system.sector_strength import (
     sector_strength_batch_from_evidence_document,
 )
 from chanlun.decision_support.trading_system.models import (
+    CANONICAL_POINT_TYPE_SET,
     SectorAssessment,
     TimeframeContext,
 )
@@ -50,6 +51,7 @@ from chanlun.decision_support.trading_system.trading_session import (
     validate_trading_session_evidence,
 )
 from cl_app.services.trading_screening_gateway import (
+    CachedSectorSnapshot,
     SectorAnalysisExclusion,
     SectorAnalysisFailure,
     SectorAssessmentBatch,
@@ -176,6 +178,12 @@ class NativeScreeningWorkerUnavailable(NativeScreeningWorkerError):
 
 class NativeScreeningWorkerTimeout(NativeScreeningWorkerError):
     """原生调用空闲期限前没有收到进度。"""
+
+
+class NativeScreeningWorkerDeadlineExceeded(NativeScreeningWorkerTimeout):
+    """低优先级请求超过本轮绝对预算，工作分片已被回收。"""
+
+    reason_code = "CANDIDATE_MONITOR_TIME_BUDGET_EXHAUSTED"
 
 
 class NativeScreeningWorkerProtocolError(NativeScreeningWorkerError):
@@ -329,7 +337,7 @@ def _context_from_cache(value: object, field_name: str) -> TimeframeContext | No
         raise ValueError(f"{field_name}.direction is unsupported")
     if disposition not in {"supportive", "neutral", "hostile"}:
         raise ValueError(f"{field_name}.disposition is unsupported")
-    if point_type not in {None, "1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}:
+    if point_type is not None and point_type not in CANONICAL_POINT_TYPE_SET:
         raise ValueError(f"{field_name}.dominant_point_type is unsupported")
     return TimeframeContext(
         frequency=_cache_string(row.get("frequency"), f"{field_name}.frequency"),
@@ -748,7 +756,7 @@ class NativeWorkerProcessTransport:
         except BaseException as exc:  # pragma: no cover - platform shutdown race
             output.put((None, exc))
 
-    def _spawn(self) -> None:
+    def _spawn(self, *, deadline_monotonic: float | None = None) -> None:
         with self._state_lock:
             process = self._process
             connection = self._connection
@@ -813,6 +821,8 @@ class NativeWorkerProcessTransport:
             log_handle.close()
 
         deadline = time.monotonic() + self._config.startup_timeout_seconds
+        if deadline_monotonic is not None:
+            deadline = min(deadline, deadline_monotonic)
         connection: Connection | None = None
         failure: BaseException | None = None
         try:
@@ -827,6 +837,13 @@ class NativeWorkerProcessTransport:
                         )
                         break
             if connection is None:
+                if (
+                    deadline_monotonic is not None
+                    and time.monotonic() >= deadline_monotonic
+                ):
+                    raise NativeScreeningWorkerDeadlineExceeded(
+                        "native worker startup exceeded request deadline"
+                    )
                 raise NativeScreeningWorkerUnavailable(
                     f"native worker failed to connect: {failure or 'startup timeout'}"
                 )
@@ -882,7 +899,8 @@ class NativeWorkerProcessTransport:
                     connection.close()
             finally:
                 self._stop_process(process)
-                self._record_failure(f"{type(exc).__name__}: {exc}")
+                if not isinstance(exc, NativeScreeningWorkerDeadlineExceeded):
+                    self._record_failure(f"{type(exc).__name__}: {exc}")
             raise
         finally:
             listener.close()
@@ -957,6 +975,36 @@ class NativeWorkerProcessTransport:
         with self._request_lock:
             return self._request_locked(method, kwargs)
 
+    def request_until(
+        self,
+        method: str,
+        *,
+        deadline_monotonic: float,
+        **kwargs: object,
+    ) -> object:
+        """在绝对单调时钟截止点前完成请求，超时即回收对应隔离进程。"""
+
+        if not isinstance(method, str) or not method:
+            raise ValueError("native worker method is required")
+        if (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+        ):
+            raise TypeError("native worker deadline must be numeric")
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if remaining <= 0 or not self._request_lock.acquire(timeout=remaining):
+            raise NativeScreeningWorkerDeadlineExceeded(
+                f"native worker request lock exceeded deadline in {method}"
+            )
+        try:
+            return self._request_locked(
+                method,
+                kwargs,
+                deadline_monotonic=float(deadline_monotonic),
+            )
+        finally:
+            self._request_lock.release()
+
     def request_nowait(self, method: str, **kwargs: object) -> object:
         """仅在当前没有请求时发送；繁忙时立即失败，不进入等待队列。"""
 
@@ -976,10 +1024,16 @@ class NativeWorkerProcessTransport:
         self,
         method: str,
         kwargs: Mapping[str, object],
+        *,
+        deadline_monotonic: float | None = None,
     ) -> object:
         """在调用方已经取得单飞锁后执行一次认证请求。"""
 
-        self._spawn()
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise NativeScreeningWorkerDeadlineExceeded(
+                f"native worker request deadline already elapsed in {method}"
+            )
+        self._spawn(deadline_monotonic=deadline_monotonic)
         request_id = "sha256:" + uuid4().hex + uuid4().hex
         started = _now()
         with self._state_lock:
@@ -1009,7 +1063,19 @@ class NativeWorkerProcessTransport:
                         f"{method} with code {process.returncode}"
                     )
                 remaining = idle_deadline - time.monotonic()
+                if deadline_monotonic is not None:
+                    remaining = min(
+                        remaining,
+                        deadline_monotonic - time.monotonic(),
+                    )
                 if remaining <= 0:
+                    if (
+                        deadline_monotonic is not None
+                        and time.monotonic() >= deadline_monotonic
+                    ):
+                        raise NativeScreeningWorkerDeadlineExceeded(
+                            f"native worker exceeded request deadline in {method}"
+                        )
                     raise NativeScreeningWorkerTimeout(
                         f"native worker made no progress for "
                         f"{self._config.native_idle_timeout_seconds:g}s in {method}"
@@ -1054,6 +1120,14 @@ class NativeWorkerProcessTransport:
                     self._last_remote_error = None
                 return response["value"]
         except NativeScreeningWorkerRemoteError:
+            raise
+        except NativeScreeningWorkerDeadlineExceeded as exc:
+            # 这是调度器主动执行的低频预算边界，不应触发重启退避；下一分钟的 1m
+            # 标的必须能够立即拉起一个干净分片。
+            self._discard_worker(
+                f"{type(exc).__name__}: {exc}",
+                record_failure=False,
+            )
             raise
         except (EOFError, BrokenPipeError, OSError) as exc:
             message = f"native worker transport failed in {method}: {exc}"
@@ -1470,7 +1544,9 @@ class NativeTradingDataGatewayProcessProxy:
         self,
         document: object,
         as_of: datetime,
-    ) -> tuple[_SectorSnapshotComponents, str]:
+        *,
+        require_current_epoch: bool = True,
+    ) -> tuple[_SectorSnapshotComponents, str, datetime]:
         outer = _cache_mapping(document, "sector cache document")
         if outer.get("schema") != _SECTOR_CACHE_SCHEMA:
             raise _SectorSnapshotCacheError(
@@ -1498,7 +1574,12 @@ class NativeTradingDataGatewayProcessProxy:
         cached_as_of = _cache_datetime(
             payload.get("requested_as_of"), "sector cache requested_as_of"
         )
-        if _sector_cache_decision_epoch(cached_as_of) != (
+        if cached_as_of > as_of:
+            raise _SectorSnapshotCacheError(
+                "CACHE_DECISION_TIME_IN_FUTURE",
+                "sector cache was captured for a later decision time",
+            )
+        if require_current_epoch and _sector_cache_decision_epoch(cached_as_of) != (
             _sector_cache_decision_epoch(as_of)
         ):
             raise _SectorSnapshotCacheError(
@@ -1548,12 +1629,14 @@ class NativeTradingDataGatewayProcessProxy:
                 ),
                 symbol_names=names,
             )
-            self._validate_sector_snapshot_causality(components, as_of)
+            # 快照内的每项事实都必须在它自己声明的请求时刻已经可见。使用当前较晚
+            # 的墙上时钟校验会让被重写为未来行情的旧缓存蒙混过关。
+            self._validate_sector_snapshot_causality(components, cached_as_of)
         except _SectorSnapshotCacheError:
             raise
         except (NativeScreeningWorkerProtocolError, TypeError, ValueError) as exc:
             raise _SectorSnapshotCacheError("CACHE_DOCUMENT_INVALID", str(exc)) from exc
-        return components, expected_hash
+        return components, expected_hash, cached_as_of
 
     def _set_sector_cache_status(
         self,
@@ -1578,7 +1661,7 @@ class NativeTradingDataGatewayProcessProxy:
             return None
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
-            components, content_sha256 = self._components_from_cache_document(
+            components, content_sha256, _cached_as_of = self._components_from_cache_document(
                 document, as_of
             )
         except FileNotFoundError:
@@ -1612,6 +1695,74 @@ class NativeTradingDataGatewayProcessProxy:
             content_sha256=content_sha256,
         )
         return components
+
+    def cached_sector_snapshot_for_priority(
+        self,
+        *,
+        as_of: datetime,
+    ) -> CachedSectorSnapshot | None:
+        """只读取最近一次已完成板块快照，绝不调用原生板块计算。
+
+        盘中优先通道需要先服务 1m 买卖点。即便磁盘快照属于较早行情周期，也可用来
+        恢复个股到板块的路由；调用方会把这种上下文强制改为买入关闭失败。内容身份、
+        来源身份、安全边界和因果时点仍执行与正式缓存完全相同的校验。
+        """
+
+        observed_at = normalize_datetime(as_of, "as_of")
+        path = self._sector_cache_path
+        if path is None:
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            components, content_sha256, cached_as_of = (
+                self._components_from_cache_document(
+                    document,
+                    observed_at,
+                    require_current_epoch=False,
+                )
+            )
+        except FileNotFoundError:
+            self._set_sector_cache_status(
+                state="priority_miss",
+                reason="CACHE_FILE_MISSING",
+                as_of=observed_at,
+                content_sha256=None,
+            )
+            return None
+        except _SectorSnapshotCacheError as exc:
+            self._set_sector_cache_status(
+                state="priority_rejected",
+                reason=exc.reason_code,
+                as_of=observed_at,
+                content_sha256=None,
+            )
+            return None
+        except (OSError, TypeError, ValueError) as exc:
+            self._set_sector_cache_status(
+                state="priority_rejected",
+                reason=f"CACHE_READ_INVALID:{type(exc).__name__}",
+                as_of=observed_at,
+                content_sha256=None,
+            )
+            return None
+
+        current_epoch = _sector_cache_decision_epoch(cached_as_of) == (
+            _sector_cache_decision_epoch(observed_at)
+        )
+        self._install_sector_snapshot(components)
+        self._set_sector_cache_status(
+            state="priority_hit" if current_epoch else "priority_stale_hit",
+            reason=None if current_epoch else "CACHE_DECISION_TIME_STALE",
+            as_of=cached_as_of,
+            content_sha256=content_sha256,
+        )
+        return CachedSectorSnapshot(
+            batch=components.batch,
+            members=components.members,
+            requested_as_of=cached_as_of,
+            current_decision_epoch=current_epoch,
+            content_sha256=content_sha256,
+        )
 
     def _persist_sector_snapshot_cache(
         self,
@@ -1866,6 +2017,7 @@ class NativeTradingDataGatewayProcessProxy:
         *,
         frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
         as_of: datetime,
+        deadline_monotonic: float | None = None,
     ) -> Mapping[str, object]:
         """在一次分钟轮次前合并 QMT 补数，并认证可供各结构分片本地读取的范围。"""
 
@@ -1907,11 +2059,15 @@ class NativeTradingDataGatewayProcessProxy:
             }
         # 只让一个结构工作进程执行批量补数；QMT 本地库由全部分片共享，控制进程
         # 不参与，实时逐笔仍可服务。
-        value = self._structure_transports[0].request(
-            "prepare_local_history",
-            frequency_requests=canonical,
-            as_of=observed_at,
-        )
+        request = self._structure_transports[0].request
+        request_kwargs: dict[str, object] = {
+            "frequency_requests": canonical,
+            "as_of": observed_at,
+        }
+        if deadline_monotonic is not None:
+            request = self._structure_transports[0].request_until
+            request_kwargs["deadline_monotonic"] = deadline_monotonic
+        value = request("prepare_local_history", **request_kwargs)
         if not isinstance(value, Mapping) or (
             value.get("schema") != "chanlun-screening-local-history-preparation"
             or value.get("as_of") != observed_at.isoformat()
@@ -1946,6 +2102,21 @@ class NativeTradingDataGatewayProcessProxy:
             "prepared_frequencies_by_code": dict(prepared),
             "batch_download_available": value.get("batch_download_available"),
         }
+
+    def prepare_local_history_until(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+        deadline_monotonic: float,
+    ) -> Mapping[str, object]:
+        """按盘中低频预算准备历史；正式方法仍保持同一事实语义。"""
+
+        return self.prepare_local_history(
+            frequency_requests=frequency_requests,
+            as_of=as_of,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def symbol_name(self, code: str) -> str | None:
         with self._cache_lock:
@@ -2033,6 +2204,7 @@ class NativeTradingDataGatewayProcessProxy:
         sector: SectorAssessment,
         frequencies: tuple[str, ...],
         risk_evidence_cutoff: datetime,
+        deadline_monotonic: float | None = None,
     ) -> SymbolStructureBundle:
         """保留当前 1m 精度，同时把月周日证据冻结在更早时点。"""
 
@@ -2045,6 +2217,28 @@ class NativeTradingDataGatewayProcessProxy:
                 risk_evidence_cutoff,
                 "risk_evidence_cutoff",
             ),
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def structure_bundle_with_risk_cutoff_until(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+        deadline_monotonic: float,
+    ) -> SymbolStructureBundle:
+        """在绝对预算内读取带冻结高周期风险的结构包。"""
+
+        return self.structure_bundle_with_risk_cutoff(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+            risk_evidence_cutoff=risk_evidence_cutoff,
+            deadline_monotonic=deadline_monotonic,
         )
 
     def _structure_bundle(
@@ -2055,6 +2249,7 @@ class NativeTradingDataGatewayProcessProxy:
         sector: SectorAssessment,
         frequencies: tuple[str, ...],
         higher_timeframe_as_of: datetime | None,
+        deadline_monotonic: float | None = None,
     ) -> SymbolStructureBundle:
         with self._cache_lock:
             members = self._sector_members
@@ -2062,21 +2257,33 @@ class NativeTradingDataGatewayProcessProxy:
                 None if members is None else tuple(members.get(sector.sector_id, ()))
             )
         if sector_members is None:
-            raise NativeScreeningWorkerUnavailable(
-                "atomic sector snapshot has not been captured"
-            )
-        value = self._structure_transport(code).request(
-            "structure_bundle",
-            code=code,
-            as_of=as_of,
-            sector=sector,
-            sector_members=sector_members,
-            frequencies=frequencies,
-            higher_timeframe_as_of=higher_timeframe_as_of,
-            local_history_frequencies=self._prepared_local_frequencies(
+            if sector.sector_id == "unclassified" and sector.hard_block:
+                # 暂无可信板块快照时仍须识别持仓、自选和规则复查标的的结构与卖点。
+                # 空成员会让高周期板块证据保持关闭失败，不能放行任何新买入。
+                sector_members = ()
+            else:
+                raise NativeScreeningWorkerUnavailable(
+                    "atomic sector snapshot has not been captured"
+                )
+        transport = self._structure_transport(code)
+        request = transport.request if deadline_monotonic is None else transport.request_until
+        request_kwargs: dict[str, object] = {
+            "code": code,
+            "as_of": as_of,
+            "sector": sector,
+            "sector_members": sector_members,
+            "frequencies": frequencies,
+            "higher_timeframe_as_of": higher_timeframe_as_of,
+            "local_history_frequencies": self._prepared_local_frequencies(
                 code,
                 as_of,
             ),
+        }
+        if deadline_monotonic is not None:
+            request_kwargs["deadline_monotonic"] = deadline_monotonic
+        value = request(
+            "structure_bundle",
+            **request_kwargs,
         )
         if not isinstance(value, SymbolStructureBundle):
             raise NativeScreeningWorkerProtocolError("invalid structure bundle result")
@@ -2156,6 +2363,7 @@ __all__ = (
     "IPC_SCHEMA",
     "IPC_AUTHKEY_ENV",
     "NativeScreeningWorkerError",
+    "NativeScreeningWorkerDeadlineExceeded",
     "NativeScreeningWorkerProtocolError",
     "NativeScreeningWorkerRemoteError",
     "NativeScreeningWorkerTimeout",

@@ -10,6 +10,7 @@ from chanlun.core.strict_structure.models import (
 )
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.models import (
+    CANONICAL_POINT_TYPE_SET,
     PointSide,
     PointType,
     PointVariant,
@@ -52,6 +53,8 @@ class ProvisionalCandidate:
             raise ValueError("candidate_id is required")
         if self.status != "provisional" or self.actionable is not False:
             raise ValueError("provisional candidates must remain non-actionable")
+        if self.point_type not in CANONICAL_POINT_TYPE_SET:
+            raise ValueError("盘中候选买卖点类型无效")
         expected_side = "buy" if self.point_type.endswith("buy") else "sell"
         if self.side != expected_side:
             raise ValueError("point_type and side disagree")

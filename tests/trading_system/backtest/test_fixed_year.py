@@ -134,6 +134,31 @@ def test_trigger_must_match_side_time_and_setup_price_band() -> None:
     assert trigger == match
 
 
+def test_historical_replay_rejects_third_class_one_minute_trigger() -> None:
+    setup = confirmed_point(
+        "3buy",
+        anchor=10.0,
+        stop=9.8,
+        center_zg=9.9,
+    )
+    continuation = confirmed_point(
+        "3buy",
+        frequency="1m",
+        anchor=9.9,
+        minutes_after=1,
+    )
+
+    assert (
+        first_matching_trigger(
+            setup,
+            (continuation,),
+            active_end=setup.available_at + timedelta(days=4),
+            end_exclusive=False,
+        )
+        is None
+    )
+
+
 def test_sparse_times_start_at_trigger_then_use_thirty_minute_closes() -> None:
     setup = confirmed_point(
         "3buy",

@@ -93,14 +93,16 @@ from cl_app.services.trading_screening import (
     _full_coverage_refresh_window_open,
     _next_background_active_start,
     _next_full_coverage_active_start,
-    _priority_buy_candidate_codes,
+    _priority_signal_candidate_codes,
     _priority_monitor_delay_seconds,
     _priority_monitor_session_open,
+    _take_rule_recheck_batch,
     _take_due_candidate_batch,
     _sector_source_evidence_complete,
 )
 from cl_app.services.trading_notifications import SignalNotificationDispatcher
 from cl_app.services.trading_screening_gateway import (
+    CachedSectorSnapshot,
     SectorAnalysisExclusion,
     SectorAnalysisFailure,
     SectorAssessmentBatch,
@@ -1446,6 +1448,259 @@ def test_cache_from_previous_decision_core_is_quarantined(
     )
     assert health["quarantined_cache_reason"] == ("DECISION_CORE_IDENTITY_MISMATCH")
     assert "screening_snapshot_unavailable" not in health["reasons"]
+
+
+def test_previous_core_snapshot_seeds_bounded_rule_recheck_without_reusing_results(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    old = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    published = old.refresh_now()
+    signal = {
+        "code": "SZ.000001",
+        "decision_core_id": published["decision_core_id"],
+        "sector": {"strength_source_revision": None},
+    }
+    published["signals"] = [signal]
+    published["counts_by_stage"] = {}
+    published["counts_by_point_type"] = {
+        point_type: 0
+        for point_type in trading_screening_subject.CANONICAL_POINT_TYPES
+    }
+    old._finalize_snapshot_identity(published)
+    cache_path.write_text(json.dumps(published), encoding="utf-8")
+
+    class ReplacementEngine(RecordingEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self._delegate = HumanAssistedDecisionCore()
+
+        def evaluate_symbol(self, bundle: SymbolStructureBundle):
+            self.codes.append(bundle.code)
+            self.bundles.append(bundle)
+            return self._delegate.evaluate_symbol(bundle)
+
+    restarted = TradingScreeningService(
+        market_data=ActionableMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=ReplacementEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF.replace(hour=14, minute=58),
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+
+    assert restarted.snapshot()["signals"] == []
+    assert restarted._decision_rule_recheck_pending_codes == {"SZ.000001"}
+    health = restarted.health_snapshot()
+    assert health["decision_rule_recheck_pending_count"] == 1
+    assert health["decision_rule_recheck_status"] == "pending"
+
+    restarted._run_priority_monitor(previous=restarted.snapshot(), observed_at=AS_OF.replace(hour=14, minute=58))
+
+    assert restarted._decision_rule_recheck_pending_codes == set()
+    assert restarted.snapshot()["signals"] == []
+    presentation = restarted.presentation_snapshot()
+    assert presentation["candidate_live_overlay"]["live"] is True
+    assert presentation["candidate_live_overlay"]["signal_count"] >= 1
+    assert any(
+        row.get("code") == "SZ.000001"
+        and "DECISION_RULE_RECHECK" in row.get("selection_sources", ())
+        and row.get("observation_lane") == "CANDIDATE_CURRENT_5M"
+        for row in presentation["signals"]
+    )
+    persisted = json.loads(
+        (tmp_path / "trading_priority_monitor_state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted["decision_rule_recheck_pending_codes"] == []
+    assert persisted["decision_rule_recheck_source_snapshot_sha256"] == (
+        published["snapshot_content_sha256"]
+    )
+
+
+def test_disabled_full_coverage_priority_monitor_never_builds_sector_snapshot(
+    tmp_path: Path,
+) -> None:
+    """暂停全量覆盖后，优先通道没有缓存也必须继续个股复查。"""
+
+    class WatchlistMarket(RecordingMarketData):
+        def active_watchlist(self) -> tuple[str, ...]:
+            return ("SZ.000001",)
+
+    class NoRebuildCatalog(RecordingSectorCatalog):
+        def native_sector_assessments(self, *, as_of: datetime):
+            raise AssertionError(f"盘中不得重建板块快照：{as_of.isoformat()}")
+
+    market = WatchlistMarket()
+    engine = RecordingEngine()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=NoRebuildCatalog(),
+        engine=engine,
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF.replace(hour=14, minute=58),
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+
+    service._run_priority_monitor(
+        previous=service.snapshot(),
+        observed_at=AS_OF.replace(hour=14, minute=58),
+    )
+
+    assert market.bundle_codes == ["SZ.000001"]
+    assert engine.bundles[0].sector.sector_id == "unclassified"
+    assert engine.bundles[0].sector.hard_block is True
+    health = service.health_snapshot()
+    assert health["priority_monitor_sector_source_mode"] == (
+        "UNCLASSIFIED_SECTOR_FAIL_CLOSED"
+    )
+    assert health["priority_monitor_last_error_count"] == 0
+
+
+def test_stale_priority_sector_cache_preserves_members_but_blocks_buy_scope(
+    tmp_path: Path,
+) -> None:
+    """旧板块事实可用于定位标的，但不能扩大支持板块的买入发现范围。"""
+
+    code = "SZ.000001"
+    cached_at = AS_OF.replace(hour=14, minute=50)
+    observed_at = cached_at + timedelta(minutes=8)
+    supportive = replace(eligible_sector(), regime="supportive")
+    batch = SectorAssessmentBatch(
+        assessments=(supportive,),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
+
+    class CachedCatalog(RecordingSectorCatalog):
+        def cached_sector_snapshot_for_priority(self, *, as_of: datetime):
+            assert as_of == observed_at
+            return CachedSectorSnapshot(
+                batch=batch,
+                members={supportive.sector_id: (code,)},
+                requested_as_of=cached_at,
+                current_decision_epoch=False,
+                content_sha256="sha256:" + "7" * 64,
+            )
+
+        def native_sector_assessments(self, *, as_of: datetime):
+            raise AssertionError(f"盘中不得重建板块快照：{as_of.isoformat()}")
+
+    market = RecordingMarketData()
+    engine = RecordingEngine()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=CachedCatalog(),
+        engine=engine,
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+    service._decision_rule_recheck_pending_codes.add(code)
+
+    service._run_priority_monitor(
+        previous=service.snapshot(),
+        observed_at=observed_at,
+    )
+
+    assert market.bundle_codes == [code]
+    sector = engine.bundles[0].sector
+    assert sector.sector_id == supportive.sector_id
+    assert sector.hard_block is True
+    assert "priority_sector_snapshot_stale" in sector.reason_codes
+    assert "QMT_SECTOR_TRIGGER" not in engine.bundles[0].selection_sources
+    assert "DECISION_RULE_RECHECK" in engine.bundles[0].selection_sources
+    health = service.health_snapshot()
+    assert health["priority_monitor_sector_source_mode"] == (
+        "STALE_CACHED_SECTOR_SNAPSHOT_FAIL_CLOSED"
+    )
+
+
+def test_rule_recheck_progress_is_restored_without_reseeding_completed_codes(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    old = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    published = old.refresh_now()
+    published["signals"] = [
+        {
+            "code": "SZ.000001",
+            "decision_core_id": published["decision_core_id"],
+            "sector": {"strength_source_revision": None},
+        }
+    ]
+    old._finalize_snapshot_identity(published)
+    cache_path.write_text(json.dumps(published), encoding="utf-8")
+
+    class ReplacementEngine(RecordingEngine):
+        pass
+
+    first = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=ReplacementEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+    first._decision_rule_recheck_pending_codes.clear()
+    first._persist_priority_monitor_state()
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=ReplacementEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+
+    assert restarted._decision_rule_recheck_pending_codes == set()
+    assert restarted.health_snapshot()["decision_rule_recheck_status"] == "complete"
 
 
 def test_cache_from_previous_coverage_state_contract_is_rejected(
@@ -4124,6 +4379,152 @@ def test_restarted_priority_monitor_restores_compact_signal_documents(
     assert restarted._priority_monitor_runtime_verified is False
 
 
+def test_previous_core_priority_state_seeds_codes_without_restoring_conclusions(
+    tmp_path: Path,
+) -> None:
+    """规则升级时只迁移旧实时命中代码，旧结论必须全部隔离。"""
+
+    cache_path = tmp_path / "snapshot.json"
+    observed_at = AS_OF.replace(hour=14, minute=58)
+    old = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    old._record_priority_monitor_result(
+        observed_at=observed_at,
+        codes=("SZ.000001", "US.AAPL"),
+        errors=(),
+        documents=(
+            {
+                "signal_id": "old:SZ.000001",
+                "code": "SZ.000001",
+                "point_type": "3buy",
+                "lifecycle_stage": "confirmed",
+                "observed_at": observed_at.isoformat(),
+            },
+            {
+                "signal_id": "old:US.AAPL",
+                "code": "US.AAPL",
+                "point_type": "3buy",
+                "lifecycle_stage": "confirmed",
+                "observed_at": observed_at.isoformat(),
+            },
+        ),
+        successful_codes=("SZ.000001", "US.AAPL"),
+        lanes_by_code={
+            "SZ.000001": trading_screening_subject.CANDIDATE_MONITOR_LANE_1M,
+            "US.AAPL": trading_screening_subject.CANDIDATE_MONITOR_LANE_1M,
+        },
+    )
+    old._persist_priority_monitor_state()
+    state_path = tmp_path / "trading_priority_monitor_state.json"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+    class ReplacementEngine(RecordingEngine):
+        pass
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=ReplacementEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: observed_at + timedelta(minutes=1),
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+
+    assert restarted._decision_rule_recheck_pending_codes == {"SZ.000001"}
+    assert restarted._decision_rule_recheck_source_snapshot_sha256 == (
+        persisted["content_sha256"]
+    )
+    assert restarted._decision_rule_recheck_source_core_id == old._decision_core_id
+    assert restarted._priority_monitor_latest_documents == {}
+    assert restarted._priority_monitor_signal_stages == {}
+    assert restarted._priority_monitor_last_at is None
+    assert restarted._candidate_monitor_five_universe == ()
+    health = restarted.health_snapshot()
+    assert health["quarantined_priority_monitor_decision_core_id"] == (
+        old._decision_core_id
+    )
+    assert health["quarantined_priority_monitor_reason"] == (
+        "DECISION_CORE_IDENTITY_MISMATCH"
+    )
+    assert health["quarantined_priority_monitor_recheck_code_count"] == 1
+    assert health["decision_rule_recheck_status"] == "pending"
+
+
+def test_tampered_previous_core_priority_state_cannot_seed_recheck(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    observed_at = AS_OF.replace(hour=14, minute=58)
+    old = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    old._record_priority_monitor_result(
+        observed_at=observed_at,
+        codes=("SZ.000001",),
+        errors=(),
+        documents=(
+            {
+                "signal_id": "old:SZ.000001",
+                "code": "SZ.000001",
+                "point_type": "3buy",
+                "lifecycle_stage": "confirmed",
+                "observed_at": observed_at.isoformat(),
+            },
+        ),
+        successful_codes=("SZ.000001",),
+        lanes_by_code={
+            "SZ.000001": trading_screening_subject.CANDIDATE_MONITOR_LANE_1M,
+        },
+    )
+    old._persist_priority_monitor_state()
+    state_path = tmp_path / "trading_priority_monitor_state.json"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    persisted["latest_documents"][0]["code"] = "SH.600000"
+    state_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    class ReplacementEngine(RecordingEngine):
+        pass
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=ReplacementEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: observed_at + timedelta(minutes=1),
+        notifier=None,
+        config=TradingScreeningConfig(
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+
+    assert restarted._decision_rule_recheck_pending_codes == set()
+    assert restarted.health_snapshot()[
+        "quarantined_priority_monitor_decision_core_id"
+    ] is None
+
+
 def test_candidate_scheduler_covers_a_five_minute_universe_once_per_cadence() -> None:
     universe = tuple(f"SZ.{value:06d}" for value in range(10))
     observed_at = AS_OF.replace(hour=10, minute=0)
@@ -4171,6 +4572,54 @@ def test_candidate_scheduler_exposes_hard_capacity_instead_of_overclaiming() -> 
     # Four symbols per minute would be required for a five-minute SLA.  The
     # scheduler honors its hard cap; health reports the insufficiency.
     assert batch == universe[:3]
+
+
+def test_rule_recheck_scheduler_drains_with_fixed_remaining_capacity() -> None:
+    pending = tuple(f"SZ.{value:06d}" for value in range(10))
+    completed: set[str] = set()
+    batches: list[tuple[str, ...]] = []
+
+    while len(completed) < len(pending):
+        current_pending = tuple(code for code in pending if code not in completed)
+        batch = _take_rule_recheck_batch(
+            current_pending,
+            scheduled_codes=(),
+            max_symbols=3,
+        )
+        batches.append(batch)
+        completed.update(batch)
+
+    assert tuple(len(batch) for batch in batches) == (3, 3, 3, 1)
+    assert completed == set(pending)
+
+
+def test_rule_recheck_scheduler_reserves_capacity_for_regular_candidates() -> None:
+    batch = _take_rule_recheck_batch(
+        ("SZ.000003", "SZ.000002", "SZ.000001"),
+        scheduled_codes=("SZ.000001", "SZ.000009"),
+        max_symbols=3,
+    )
+
+    assert batch == ("SZ.000002",)
+
+
+def test_rule_recheck_scheduler_rotates_past_persistent_failures() -> None:
+    pending = tuple(f"SZ.{value:06d}" for value in range(6))
+
+    first = _take_rule_recheck_batch(
+        pending,
+        scheduled_codes=(),
+        max_symbols=3,
+    )
+    second = _take_rule_recheck_batch(
+        pending,
+        scheduled_codes=(),
+        previous_codes=first,
+        max_symbols=3,
+    )
+
+    assert first == pending[:3]
+    assert second == pending[3:]
 
 
 def test_candidate_health_reports_insufficient_configured_cadence_capacity(
@@ -4393,7 +4842,78 @@ def test_priority_monitor_completes_minute_phase_before_candidate_phase(
     ]
 
 
-def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
+def test_candidate_time_budget_defers_unstarted_codes_without_marking_success(
+    tmp_path: Path,
+) -> None:
+    """低频预算只能延后工作，不能把未完成标的伪装成已观察。"""
+
+    codes = ("SZ.000001", "SZ.000002", "SZ.000003")
+
+    class BudgetMarket(RecordingMarketData):
+        def prepare_local_history(self, **_kwargs) -> dict[str, object]:
+            return {}
+
+        def prepare_local_history_until(self, **_kwargs) -> dict[str, object]:
+            return {}
+
+        def structure_bundle_with_risk_cutoff_until(
+            self,
+            code: str,
+            *,
+            deadline_monotonic: float,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            del deadline_monotonic
+            time.sleep(0.07)
+            return super().structure_bundle_with_risk_cutoff(code, **kwargs)
+
+    market = BudgetMarket()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(codes),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            candidate_monitor_time_budget_seconds=0.05,
+            max_five_minute_candidate_symbols_per_refresh=3,
+        ),
+    )
+    service._decision_rule_recheck_source_snapshot_sha256 = "sha256:" + "6" * 64
+    service._decision_rule_recheck_source_core_id = "sha256:" + "5" * 64
+    service._decision_rule_recheck_pending_codes.update(codes)
+
+    service._run_priority_monitor(previous=service.snapshot(), observed_at=AS_OF)
+
+    assert market.bundle_codes == [codes[0]]
+    assert service._decision_rule_recheck_pending_codes == set(codes[1:])
+    # 规则迁移复查使用 5m 数据，但不冒充常规候选池的五分钟 SLA 覆盖。
+    assert service._candidate_monitor_five_last_success_at == {}
+    health = service.health_snapshot()
+    assert health["candidate_monitor_last_deferred_count"] == 2
+    assert health["candidate_monitor_last_deferred_codes"] == list(codes[1:])
+    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [
+        codes[0]
+    ]
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=MultiMemberSectorCatalog(codes),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=service._config,
+    )
+    assert restarted._candidate_monitor_last_deferred_codes == codes[1:]
+
+
+def test_priority_signal_candidates_treat_buy_and_sell_symmetrically() -> None:
     rows = (
         {
             "code": "SELL_ONLY",
@@ -4426,75 +4946,24 @@ def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
             "lifecycle_stage": "triggered",
         },
     )
-    candidates = _priority_buy_candidate_codes(
+    candidates = _priority_signal_candidate_codes(
         rows,
         excluded_codes=frozenset({"WATCHED_BUY"}),
     )
 
     assert candidates == (
         "BUY_EXECUTABLE",
+        "SELL_ONLY",
         "BUY_ARMED",
         "BUY_APPROACHING",
         "BUY_APPROACHING_B",
     )
-    urgent = _priority_buy_candidate_codes(
+    urgent = _priority_signal_candidate_codes(
         rows,
         excluded_codes=frozenset({"WATCHED_BUY"}),
         allowed_stages=frozenset({"armed", "triggered", "executable", "active"}),
     )
-    assert urgent == ("BUY_EXECUTABLE", "BUY_ARMED")
-
-
-def test_priority_state_prunes_only_unowned_sell_overlay_documents(
-    tmp_path: Path,
-) -> None:
-    service = TradingScreeningService(
-        market_data=RecordingMarketData(),
-        sector_catalog=RecordingSectorCatalog(),
-        engine=RecordingEngine(),
-        scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-        config=TradingScreeningConfig(priority_monitoring_enabled=True),
-    )
-    documents = {
-        "unowned-sell": {
-            "signal_id": "unowned-sell",
-            "code": "SELL_ONLY",
-            "point_type": "3sell",
-            "lifecycle_stage": "armed",
-        },
-        "watched-sell": {
-            "signal_id": "watched-sell",
-            "code": "WATCHED",
-            "point_type": "3sell",
-            "lifecycle_stage": "armed",
-        },
-        "buy": {
-            "signal_id": "buy",
-            "code": "BUY",
-            "point_type": "3buy",
-            "lifecycle_stage": "approaching",
-        },
-    }
-    service._priority_monitor_latest_documents = {
-        key: dict(value) for key, value in documents.items()
-    }
-    service._priority_monitor_signal_stages = {
-        key: str(value["lifecycle_stage"]) for key, value in documents.items()
-    }
-    service._priority_monitor_signal_codes = {
-        key: str(value["code"]) for key, value in documents.items()
-    }
-
-    service._prune_unowned_sell_priority_state(
-        mandatory_codes=frozenset({"WATCHED"}),
-    )
-
-    assert set(service._priority_monitor_latest_documents) == {"watched-sell", "buy"}
-    assert set(service._priority_monitor_signal_stages) == {"watched-sell", "buy"}
-    assert set(service._priority_monitor_signal_codes) == {"watched-sell", "buy"}
+    assert urgent == ("BUY_EXECUTABLE", "SELL_ONLY", "BUY_ARMED")
 
 
 def test_priority_monitor_failure_does_not_fail_frozen_coverage_batch(
@@ -6293,6 +6762,9 @@ def test_background_health_uses_the_shared_forward_review_validator(
     rejected = service.health_snapshot()
 
     assert rejected["ready"] is True
+    assert rejected["runtime_ready"] is True
+    assert rejected["selection_ready"] is False
+    assert rejected["selection_status"] == "review_blocked"
     assert rejected["daily_preselection_ready"] is False
     assert rejected["daily_preselection_status"] == "review_blocked"
     assert len(calls) == 1
@@ -6313,12 +6785,17 @@ def test_background_health_uses_the_shared_forward_review_validator(
     accepted = service.health_snapshot()
 
     assert accepted["ready"] is True
+    assert accepted["runtime_ready"] is True
+    assert accepted["selection_ready"] is True
+    assert accepted["selection_status"] == "ready"
+    assert accepted["selection_reason_code"] == "READY"
     assert accepted["screening_review_ready"] is True
     assert accepted["screening_review_reason_code"] == "READY"
     assert accepted["daily_preselection_ready"] is True
     assert accepted["daily_preselection_status"] == "ready"
     assert accepted["daily_preselection_candidate_count"] == 0
     assert accepted["daily_preselection_buy_candidate_count"] == 0
+    assert accepted["daily_preselection_sell_candidate_count"] == 0
     assert accepted["daily_preselection_refresh_schedule"] == (
         "MON-FRI 15:05 Asia/Shanghai FOR_NEXT_SESSION"
     )

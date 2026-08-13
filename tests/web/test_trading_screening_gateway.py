@@ -78,6 +78,31 @@ def test_entry_boundary_uses_unadjusted_confirmation_high_not_anchor() -> None:
     assert boundary.tick_data_used is False
 
 
+def test_entry_boundary_rejects_third_class_continuation_point() -> None:
+    point = confirmed_point(
+        "3buy",
+        frequency="1m",
+        anchor=9.8,
+        center_zd=9.0,
+        center_zg=9.8,
+        variant="boundary_touch",
+    )
+    raw = _frame()
+    raw.attrs.update(
+        price_basis_provider="qmt",
+        price_basis_adjustment="none",
+    )
+
+    assert (
+        gateway_module._entry_execution_boundaries(
+            code="SZ.000001",
+            points=(point,),
+            raw_frame=raw,
+        )
+        == ()
+    )
+
+
 @pytest.mark.parametrize(
     ("confirmed", "expected"),
     (

@@ -82,8 +82,8 @@ def shared_trigger_signal(signal_id: str, setup_point_type: str) -> dict[str, ob
     }
     signal["trigger_1m"] = {
         **signal["trigger_1m"],
-        "point_id": "trigger:shared-1m-3buy",
-        "point_type": "3buy",
+        "point_id": "trigger:shared-1m-1buy",
+        "point_type": "1buy",
         "confirmed_at": "2026-07-20T10:01:00+08:00",
     }
     return signal
@@ -229,7 +229,7 @@ def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
     second = shared_trigger_signal("signal:second-trigger", "2buy")
     second["trigger_1m"] = {
         **second["trigger_1m"],
-        "point_id": "trigger:distinct-1m-3buy",
+            "point_id": "trigger:distinct-1m-1buy",
         "available_at": "2026-07-20T10:02:00+08:00",
         "confirmed_at": "2026-07-20T10:02:00+08:00",
     }
@@ -345,6 +345,39 @@ def test_stale_or_expired_one_minute_trigger_never_notifies(tmp_path: Path) -> N
 
     assert sender.messages == []
     assert dispatcher.health_snapshot()["last_suppressed_reason"] == "TRIGGER_STALE"
+
+
+@pytest.mark.parametrize("point_type", ("3buy", "3sell"))
+def test_third_class_one_minute_point_never_notifies_as_reversal_trigger(
+    tmp_path: Path,
+    point_type: str,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / f"{point_type}.json",
+    )
+    signal = signal_document("triggered")
+    side = "buy" if point_type == "3buy" else "sell"
+    signal.update({"side": side, "point_type": point_type})
+    signal["setup_5m"] = {
+        **signal["setup_5m"],
+        "point_type": point_type,
+    }
+    signal["trigger_1m"] = {
+        **signal["trigger_1m"],
+        "point_type": point_type,
+    }
+
+    dispatcher.dispatch_changes(
+        {"signals": [{**signal, "lifecycle_stage": "armed"}]},
+        {"signals": [signal]},
+    )
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
+        "ONE_MINUTE_TRIGGER_NOT_CONFIRMED"
+    )
 
 
 def test_expired_entry_boundary_still_notifies_the_structural_point(

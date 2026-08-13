@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
 import os
@@ -42,6 +42,7 @@ from cl_app.services.realtime_quotes import (
     AShareRealtimeQuoteBatch,
 )
 from cl_app.services.trading_screening_process import (
+    NativeScreeningWorkerDeadlineExceeded,
     NativeScreeningWorkerProtocolError,
     NativeScreeningWorkerRemoteError,
     NativeScreeningWorkerTimeout,
@@ -365,6 +366,36 @@ def test_native_idle_timeout_kills_a_stuck_child(tmp_path: Path) -> None:
         transport.shutdown()
 
 
+def test_native_absolute_deadline_kills_worker_without_restart_backoff(
+    tmp_path: Path,
+) -> None:
+    """低频预算到期应回收分片，但不能阻止下一分钟立即恢复。"""
+
+    transport = _transport(tmp_path, idle=2.0, backoff=5.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            NativeScreeningWorkerDeadlineExceeded,
+            match="request deadline",
+        ):
+            transport.request_until(
+                "hang",
+                deadline_monotonic=time.monotonic() + 0.15,
+            )
+        assert time.monotonic() - started < 1.0
+        health = transport.health_snapshot()
+        assert health["worker_alive"] is False
+        assert health["failure_count"] == 0
+        assert health["restart_backoff_remaining_seconds"] == 0.0
+
+        assert transport.request("echo", value="next-minute") == {
+            "value": "next-minute"
+        }
+        assert transport.health_snapshot()["ready"] is True
+    finally:
+        transport.shutdown()
+
+
 def test_native_nowait_request_never_queues_behind_busy_worker(tmp_path: Path) -> None:
     transport = _transport(tmp_path)
     transport._request_lock.acquire()
@@ -674,6 +705,44 @@ def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
             },
         )
     ]
+
+
+def test_process_proxy_allows_fail_closed_unclassified_structure_without_sector_cache() -> None:
+    """没有板块快照时仍可识别个股结构，但只能传递空的板块成员证据。"""
+
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    sector = SectorAssessment(
+        sector_id="unclassified",
+        sector_name="未匹配 QMT GICS3 行业",
+        eligible=False,
+        hard_block=True,
+        regime="hostile",
+        rank_components=(),
+        reason_codes=("sector_membership_missing",),
+    )
+    bundle = SymbolStructureBundle(
+        code="SH.600000",
+        as_of=as_of,
+        sector=sector,
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+    )
+    transport = _BundleTransport(bundle)
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport
+    )
+
+    assert proxy.structure_bundle_with_risk_cutoff(
+        "SH.600000",
+        as_of=as_of,
+        sector=sector,
+        frequencies=("1m", "5m"),
+        risk_evidence_cutoff=as_of,
+    ) is bundle
+    assert transport.calls[0][1]["sector_members"] == ()
 
 
 def test_process_proxy_filters_watchlist_and_holdings_through_shared_catalog() -> None:
@@ -1262,6 +1331,42 @@ def test_proxy_reuses_snapshot_inside_same_causal_market_data_epoch(
     assert second.native_sector_assessments(as_of=requested_as_of) == expected
     assert transport.calls == []
     assert second.health_snapshot()["sector_snapshot_cache"]["state"] == "hit"
+
+
+def test_priority_cache_reader_reuses_stale_snapshot_without_worker_call(
+    tmp_path: Path,
+) -> None:
+    """盘中读取旧快照只恢复事实和路由，不得因周期变化启动原生重建。"""
+
+    cached_as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    requested_as_of = cached_as_of + timedelta(minutes=10)
+    cache_path = tmp_path / "sector-snapshot.json"
+    revision = "head.tree.priority-cache"
+    first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_atomic_snapshot(cached_as_of)),
+        sector_cache_path=cache_path,
+        sector_cache_revision=revision,
+    )
+    expected = first.native_sector_assessments(as_of=cached_as_of)
+    transport = _AtomicTransport(_atomic_snapshot(requested_as_of))
+    transport.available = False
+    second = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        sector_cache_path=cache_path,
+        sector_cache_revision=revision,
+    )
+
+    restored = second.cached_sector_snapshot_for_priority(as_of=requested_as_of)
+
+    assert restored is not None
+    assert restored.batch == expected
+    assert restored.requested_as_of == cached_as_of
+    assert restored.current_decision_epoch is False
+    assert restored.members == {"TDX.880301": ("SH.600000",)}
+    assert transport.calls == []
+    cache_health = second.health_snapshot()["sector_snapshot_cache"]
+    assert cache_health["state"] == "priority_stale_hit"
+    assert cache_health["reason"] == "CACHE_DECISION_TIME_STALE"
 
 
 def test_proxy_cache_roundtrips_recomputable_sector_strength_evidence(

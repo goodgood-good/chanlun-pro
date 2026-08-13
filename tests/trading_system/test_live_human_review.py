@@ -1550,6 +1550,23 @@ def test_live_snapshot_rejects_hostile_sector_in_ranked_subset(
         validate_live_review_snapshot(snapshot)
 
 
+def test_live_snapshot_rejects_third_class_one_minute_reversal_trigger() -> None:
+    snapshot = live_snapshot()
+    signal = next(
+        value for value in snapshot["signals"] if value["trigger_1m"] is not None
+    )
+    signal["trigger_1m"]["point_type"] = (
+        "3buy" if signal["side"] == "buy" else "3sell"
+    )
+    signal["decision_document_id"] = signal_decision_document_id(signal)
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    with pytest.raises(ValueError, match="timeframe provenance"):
+        validate_live_review_snapshot(snapshot)
+
+
 def test_live_snapshot_recomputes_sector_failure_coverage() -> None:
     """Failed assessments stay visible and are excluded from ranking by evidence."""
 

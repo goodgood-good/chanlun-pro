@@ -233,7 +233,7 @@ def test_ticks_returns_503_when_exchange_fails(client, monkeypatch):
     _assert_ticks_error(resp, 503, "service_unavailable")
 
 
-def test_us_ticks_fall_back_to_tdx_when_primary_times_out(client, monkeypatch):
+def test_us_ticks_fail_closed_when_primary_times_out(client, monkeypatch):
     class _UnavailableUS:
         def ticks(self, _codes):
             raise TimeoutError("primary timeout")
@@ -241,34 +241,18 @@ def test_us_ticks_fall_back_to_tdx_when_primary_times_out(client, monkeypatch):
         def now_trading(self):
             return False
 
-    fallback = {"AAPL.US": _tick("AAPL.US", 201.25, 1.75)}
     monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _UnavailableUS())
-    monkeypatch.setattr(
-        other_mod,
-        "_us_tdx_fallback_ticks",
-        lambda codes: {code: fallback[code] for code in codes if code in fallback},
-    )
 
     resp = client.post(
         "/ticks", data={"market": "us", "codes": json.dumps(["AAPL.US"])}
     )
 
-    assert resp.status_code == 200
-    assert resp.get_json()["ticks"] == [
-        {"code": "AAPL.US", "price": 201.25, "rate": 1.75}
-    ]
+    _assert_ticks_error(resp, 503, "service_unavailable")
 
 
-def test_us_ticks_keep_primary_rows_and_fill_only_missing_codes(client, monkeypatch):
+def test_us_ticks_do_not_fill_missing_primary_rows_from_another_source(client, monkeypatch):
     primary = {"AAPL.US": _tick("AAPL.US", 201.25, 1.75)}
-    fallback_calls = []
-
-    def _fallback(codes):
-        fallback_calls.append(tuple(codes))
-        return {"TSLA.US": _tick("TSLA.US", 320.5, -0.5)}
-
     monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _FakeEx(primary))
-    monkeypatch.setattr(other_mod, "_us_tdx_fallback_ticks", _fallback)
 
     resp = client.post(
         "/ticks",
@@ -276,11 +260,9 @@ def test_us_ticks_keep_primary_rows_and_fill_only_missing_codes(client, monkeypa
     )
 
     assert resp.status_code == 200
-    assert fallback_calls == [("TSLA.US",)]
-    assert {item["code"] for item in resp.get_json()["ticks"]} == {
-        "AAPL.US",
-        "TSLA.US",
-    }
+    assert resp.get_json()["ticks"] == [
+        {"code": "AAPL.US", "price": 201.25, "rate": 1.75}
+    ]
 
 
 def test_ticks_keeps_prices_when_market_state_probe_fails(client, monkeypatch):

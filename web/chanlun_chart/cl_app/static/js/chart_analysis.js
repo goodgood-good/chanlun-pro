@@ -14,19 +14,10 @@
   const MMD_LABELS = Object.freeze({
     '1buy': '一类买点',
     '2buy': '二类买点',
-    'l2buy': '类二类买点',
     '3buy': '三类买点',
-    'l3buy': '类三类买点',
     '1sell': '一类卖点',
     '2sell': '二类卖点',
-    'l2sell': '类二类卖点',
     '3sell': '三类卖点',
-    'l3sell': '类三类卖点',
-  });
-
-  const MMD_ALIASES = Object.freeze({
-    '1b': '1buy', '2b': '2buy', 'l2b': 'l2buy', '3b': '3buy', 'l3b': 'l3buy',
-    '1s': '1sell', '2s': '2sell', 'l2s': 'l2sell', '3s': '3sell', 'l3s': 'l3sell',
   });
 
   const BC_LABELS = Object.freeze({
@@ -216,9 +207,8 @@
   }
 
   function centerPointLabel(pointType) {
-    const canonical = MMD_ALIASES[String(pointType || '').toLowerCase()]
-      || String(pointType || '').toLowerCase();
-    return MMD_LABELS[canonical] || String(pointType || '三类点');
+    const value = String(pointType || '').toLowerCase();
+    return MMD_LABELS[value] || String(pointType || '三类点');
   }
 
   function centerLifecycleText(item, towerLabel) {
@@ -471,10 +461,9 @@
     let isBuy = false;
     let isSell = false;
     if (kind === 'mmd') {
-      const canonical = MMD_ALIASES[normalizedText] || normalizedText;
-      label = MMD_LABELS[canonical] || label;
-      isBuy = canonical.endsWith('buy');
-      isSell = canonical.endsWith('sell');
+      label = MMD_LABELS[normalizedText] || label;
+      isBuy = normalizedText.endsWith('buy');
+      isSell = normalizedText.endsWith('sell');
     } else {
       label = BC_LABELS[normalizedText] || label;
     }
@@ -692,6 +681,7 @@
   const STRICT_POINT_TYPES = Object.freeze([
     '1buy', '2buy', '3buy', '1sell', '2sell', '3sell',
   ]);
+  const STRICT_POINT_TYPE_SET = new Set(STRICT_POINT_TYPES);
 
   function strictFrequencyFromResolution(value) {
     const resolution = String(value == null ? '' : value).trim().toUpperCase();
@@ -869,6 +859,25 @@
           throw new Error('严格走势方向资格字段无效');
         }
       });
+      [
+        ['confirmed_points', 'point_confirmed', 'confirmed'],
+        ['approaching_points', 'point_approaching', 'approaching'],
+      ].forEach(([field, renderKind, status]) => {
+        level[field].forEach((point) => {
+          const pointType = String(point && point.point_type || '').toLowerCase();
+          const expectedSide = pointType.endsWith('buy') ? 'buy' : 'sell';
+          if (!point
+            || point.render_kind !== renderKind
+            || point.status !== status
+            || point.structural_level !== level.structural_level
+            || !STRICT_POINT_TYPE_SET.has(pointType)
+            || point.side !== expectedSide
+            || !Array.isArray(point.points)
+            || point.points.length !== 1) {
+            throw new Error('严格买卖点契约无效');
+          }
+        });
+      });
     });
     return snapshot;
   }
@@ -970,12 +979,11 @@
 
   function summarizeStrictPoint(item) {
     const rawType = String(item.point_type || '').toLowerCase();
-    const pointType = MMD_ALIASES[rawType] || rawType;
     return {
       pointId: item.point_id,
       renderId: item.render_id,
-      pointType,
-      pointLabel: MMD_LABELS[pointType] || pointType,
+      pointType: rawType,
+      pointLabel: MMD_LABELS[rawType],
       side: item.side,
       status: item.status,
       variant: item.variant,
@@ -1078,14 +1086,12 @@
       level.completed_trend_snapshots.forEach((item) => completedTrends.push(summarizeStrictTrend(item)));
       level.confirmed_points.forEach((item) => {
         rawConfirmedPoints.push(item);
-        const pointType = MMD_ALIASES[String(item.point_type || '').toLowerCase()]
-          || String(item.point_type || '').toLowerCase();
+        const pointType = String(item.point_type || '').toLowerCase();
         if (pointCounts[pointType]) pointCounts[pointType].confirmed += 1;
       });
       level.approaching_points.forEach((item) => {
         rawApproachingPoints.push(item);
-        const pointType = MMD_ALIASES[String(item.point_type || '').toLowerCase()]
-          || String(item.point_type || '').toLowerCase();
+        const pointType = String(item.point_type || '').toLowerCase();
         if (pointCounts[pointType]) pointCounts[pointType].approaching += 1;
       });
       level.divergences.forEach((item) => {

@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 import hashlib
-import math
 from numbers import Integral
 import re
 from threading import RLock
@@ -36,6 +35,9 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     unresolved_higher_timeframe_gates,
 )
 from chanlun.decision_support.trading_system.incremental_scan import BarKey
+from chanlun.decision_support.trading_system.lifecycle import (
+    is_one_minute_reversal_trigger,
+)
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
     EntryExecutionBoundary,
@@ -375,6 +377,50 @@ class SectorAssessmentBatch:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CachedSectorSnapshot:
+    """供盘中监听只读复用的已校验板块快照。
+
+    该对象只表达磁盘中已经完成的事实，读取它不得触发板块计算。是否仍属于当前
+    行情周期由提供器明确给出；过期快照只能帮助恢复成员路由和展示上下文，不能放行
+    新买入。
+    """
+
+    batch: SectorAssessmentBatch
+    members: Mapping[str, tuple[str, ...]]
+    requested_as_of: datetime
+    current_decision_epoch: bool
+    content_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.batch, SectorAssessmentBatch):
+            raise TypeError("cached sector batch is invalid")
+        normalized_members: dict[str, tuple[str, ...]] = {}
+        for sector_id, values in self.members.items():
+            if (
+                not isinstance(sector_id, str)
+                or not sector_id
+                or isinstance(values, (str, bytes))
+                or not isinstance(values, Sequence)
+                or any(not isinstance(value, str) or not value for value in values)
+            ):
+                raise ValueError("cached sector members are invalid")
+            normalized_members[sector_id] = tuple(values)
+        object.__setattr__(self, "members", normalized_members)
+        object.__setattr__(
+            self,
+            "requested_as_of",
+            normalize_datetime(self.requested_as_of, "cached sector requested_as_of"),
+        )
+        if type(self.current_decision_epoch) is not bool:
+            raise TypeError("cached sector current_decision_epoch must be a boolean")
+        if (
+            not isinstance(self.content_sha256, str)
+            or not self.content_sha256.startswith("sha256:")
+        ):
+            raise ValueError("cached sector content_sha256 is invalid")
+
+
 def _sector_failure_document(item: SectorAnalysisFailure) -> dict[str, object]:
     result: dict[str, object] = {
         "sector_id": item.sector_id,
@@ -607,11 +653,11 @@ def _frame_content_revision(frame: pd.DataFrame) -> str:
             dtype="<f8",
         )
         digest = hashlib.sha256()
-        digest.update(b"chanlun-screening-closed-stock-frame-v1\0")
+        digest.update(b"chanlun-screening-closed-stock-frame\0")
         digest.update(
             sha256_json(
                 {
-                    "schema": "chanlun-screening-closed-stock-frame-v1",
+                    "schema": "chanlun-screening-closed-stock-frame",
                     "attrs": identity_attrs,
                     "row_count": len(frame),
                 }
@@ -670,7 +716,7 @@ def _entry_execution_boundaries(
         rows_by_time[closed_at] = row
     output: list[EntryExecutionBoundary] = []
     for point in points:
-        if point.source_frequency != "1m" or not point.confirmed or point.side != "buy":
+        if not is_one_minute_reversal_trigger(point) or point.side != "buy":
             continue
         row = rows_by_time.get(point.available_at)
         if row is None:
@@ -2545,6 +2591,7 @@ class NativeTradingDataGateway:
 
 __all__ = (
     "CANONICAL_REQUEST_BARS_BY_FREQUENCY",
+    "CachedSectorSnapshot",
     "FrameStructureAnalysis",
     "NativeTradingDataGateway",
     "NativeTradingGatewayConfig",

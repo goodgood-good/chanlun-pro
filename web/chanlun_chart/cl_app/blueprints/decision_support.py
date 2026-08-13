@@ -75,7 +75,7 @@ def _presentation_scope(
     output: dict[str, object],
     scope: str,
 ) -> dict[str, object]:
-    """Bound the minute-polled response without changing the audit snapshot."""
+    """限制每分钟轮询响应的展示范围，但不改变审计快照。"""
 
     signals = []
     for value in output.get("signals", []):
@@ -197,7 +197,7 @@ def _trading_screening_snapshot(
 
 
 def _manual_holdings_snapshot() -> dict[str, object]:
-    """Return local user-declared holdings without touching a broker account."""
+    """返回用户在本地声明的持仓，不访问券商账户。"""
 
     unavailable = {
         "schema": "chanlun-local-manual-holdings",
@@ -409,7 +409,7 @@ def _human_review_snapshot(source: str) -> dict[str, object]:
 
 
 def _human_review_forward_operations() -> dict[str, object]:
-    """Expose the same forward verdicts as ``/readyz`` on the review page."""
+    """在复核页面展示与 ``/readyz`` 完全相同的前向结论。"""
 
     health_provider = current_app.extensions.get("health_snapshot")
     unavailable = {
@@ -532,7 +532,7 @@ def early_screening():
 @decision_support_bp.get("/decision-support/early-signals")
 @login_required
 def early_signals():
-    # 无查询参数的调用方继续保持原有完整展示约定；产品页面会明确请求有界行业触发范围。
+    # 默认展示全部合格候选；板块触发子集只能由调用方显式选择。
     scope = str(request.args.get("scope") or "all-qualified").strip().lower()
     if scope not in {"sector-trigger", "all-qualified"}:
         scope = "all-qualified"

@@ -556,8 +556,8 @@ var ZiXuan = (function () {
           url: "/ticks",
           data: { market: batch.market, codes: JSON.stringify(batch.codes) },
           dataType: "json",
-          // uSMART 自身的读取上限为 8 秒；美股需给后端备用行情切换留出余量。
-          timeout: batch.market === "us" ? 12000 : 8000,
+          // 各市场都只等待其配置行情源；超时后按市场独立退避重试。
+          timeout: 8000,
           success: function (response) {
             if (request_generation !== update_poll_generation) return;
             if (

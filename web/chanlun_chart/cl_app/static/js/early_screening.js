@@ -3,6 +3,7 @@
 (function startTradingScreeningController() {
   const POLL_INTERVAL_MS = 60_000;
   const STORAGE_KEY = "chanlun:trading-screening:view";
+  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS";
 
   function boot() {
     const Ui = globalThis.TradingScreeningUi;
@@ -17,16 +18,14 @@
     const signalList = byId("es-signal-list");
     const chartWorkspace = byId("es-chart-workspace");
     const saved = readView();
-    const savedSelectionScope = saved.selectionScope === "all-qualified"
-      ? "all-qualified"
-      : "sector-trigger";
+    const savedSelectionScope = saved.selectionScope === "sector-trigger"
+      ? "sector-trigger"
+      : "all-qualified";
     const state = {
       snapshot: null,
       selectedSignalId: null,
-      // The page is primarily an early stock-selection workspace.  Preserve
-      // an explicit prior choice, but do not let hundreds of no-position sell
-      // observations bury the buy shortlist on a first visit.
-      pointType: saved.pointType || "buy",
+      // 首次打开必须同时展示六类买卖点；用户主动选择的筛选条件仍会持久化。
+      pointType: saved.pointType || "all",
       lifecycle: saved.lifecycle || "all",
       selectionScope: savedSelectionScope,
       sectorId: "all",
@@ -56,7 +55,9 @@
     function readView() {
       try {
         const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-        return value && typeof value === "object" ? value : {};
+        return value && typeof value === "object" && value.contract === VIEW_CONTRACT
+          ? value
+          : {};
       } catch (_error) {
         return {};
       }
@@ -65,6 +66,7 @@
     function saveView() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          contract: VIEW_CONTRACT,
           pointType: state.pointType,
           lifecycle: state.lifecycle,
           selectionScope: state.selectionScope,
@@ -72,7 +74,7 @@
           chartSizing: state.chartSizing,
         }));
       } catch (_error) {
-        // Storage is optional; the live snapshot remains the source of truth.
+        // 本地存储不可用时仍以实时快照为唯一事实来源。
       }
     }
 

@@ -18,6 +18,27 @@ if TYPE_CHECKING:
 
 
 PointType = Literal["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]
+CANONICAL_POINT_TYPES: tuple[PointType, ...] = (
+    "1buy",
+    "2buy",
+    "3buy",
+    "1sell",
+    "2sell",
+    "3sell",
+)
+CANONICAL_POINT_TYPE_SET: frozenset[PointType] = frozenset(CANONICAL_POINT_TYPES)
+# 人工复核时按类别成对展示，避免三类买点把一、二类卖点挤到队列末端。
+POINT_REVIEW_ORDER: tuple[PointType, ...] = (
+    "1buy",
+    "1sell",
+    "2buy",
+    "2sell",
+    "3buy",
+    "3sell",
+)
+REVERSAL_SUPPORT_POINT_TYPES: frozenset[PointType] = frozenset(
+    {"1buy", "2buy", "1sell", "2sell"}
+)
 PointSide = Literal["buy", "sell"]
 PointStatus = Literal["confirmed"]
 PointVariant = Literal["standard", "strict", "weak_divergence", "boundary_touch"]
@@ -116,14 +137,7 @@ class StructuralPoint:
     def __post_init__(self) -> None:
         if not isinstance(self.code, str) or not self.code.strip():
             raise ValueError("买卖点标的不能为空")
-        if self.point_type not in {
-            "1buy",
-            "2buy",
-            "3buy",
-            "1sell",
-            "2sell",
-            "3sell",
-        }:
+        if self.point_type not in CANONICAL_POINT_TYPE_SET:
             raise ValueError("买卖点类型无效")
         expected_side = "buy" if self.point_type.endswith("buy") else "sell"
         if self.side != expected_side:

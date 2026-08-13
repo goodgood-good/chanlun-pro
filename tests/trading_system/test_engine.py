@@ -1,6 +1,4 @@
 from dataclasses import replace
-from datetime import timedelta
-
 import pytest
 
 from chanlun.decision_support.trading_system.engine import (
@@ -158,7 +156,6 @@ def test_repeated_evaluation_is_deterministic() -> None:
 
 
 def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
-    stale_at = AS_OF - timedelta(days=8)
     stale = confirmed_point(
         "3buy",
         center_ordinal=1,

@@ -15,8 +15,10 @@ from pathlib import Path
 import threading
 from zoneinfo import ZoneInfo
 
-from chanlun.decision_support.trading_system.lifecycle import (
-    lifecycle_stage_from_signal,
+from chanlun.decision_support.trading_system.lifecycle import lifecycle_stage_from_signal
+from chanlun.decision_support.trading_system.models import (
+    POINT_REVIEW_ORDER,
+    REVERSAL_SUPPORT_POINT_TYPES,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
     STRICT_STRATEGY_ID,
@@ -55,10 +57,6 @@ _POINT_LABELS = {
     "1sell": "一类卖点",
     "2sell": "二类卖点",
     "3sell": "三类卖点",
-    "1buy_nest": "一类买点（区间套）",
-    "3buy_nest": "三类买点（区间套）",
-    "类1buy": "类一买",
-    "类1sell": "类一卖",
 }
 _DIRECTION_LABELS = {
     "up": "向上",
@@ -72,12 +70,7 @@ _DISPOSITION_LABELS = {
 }
 _HOLDING_SOURCES = frozenset({"HOLDING_MONITOR", "VIRTUAL_HOLDING_MONITOR"})
 _SETUP_POINT_ORDER = {
-    "1buy": 0,
-    "2buy": 1,
-    "3buy": 2,
-    "1sell": 3,
-    "2sell": 4,
-    "3sell": 5,
+    point_type: index for index, point_type in enumerate(POINT_REVIEW_ORDER)
 }
 
 
@@ -234,6 +227,7 @@ def _notification_eligibility_reason(
     if (
         trigger.get("status") != "confirmed"
         or trigger.get("source_frequency") != "1m"
+        or trigger.get("point_type") not in REVERSAL_SUPPORT_POINT_TYPES
         or trigger.get("actionable") is not True
     ):
         return "ONE_MINUTE_TRIGGER_NOT_CONFIRMED"

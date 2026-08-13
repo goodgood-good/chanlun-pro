@@ -19,7 +19,11 @@ from chanlun import fun
 from chanlun.core.cl import CL
 from chanlun.core.strict_structure.formal_state import current_formal_direction
 from chanlun.core.strict_structure.models import StrictEvidenceResult
-from chanlun.decision_support.trading_system.models import StructuralPoint
+from chanlun.decision_support.trading_system.models import (
+    CANONICAL_POINT_TYPE_SET,
+    POINT_REVIEW_ORDER,
+    StructuralPoint,
+)
 from chanlun.decision_support.trading_system.runtime_config import (
     StrictSnapshotPriceMetadata,
     strict_cl_config,
@@ -87,6 +91,20 @@ class StrictRealtimeMonitorEvent:
     mid_level: str = "5m"
     mid_dir: str = ""
     evidence_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.side in {"buy", "sell"}:
+            if self.bs_type not in CANONICAL_POINT_TYPE_SET:
+                raise ValueError("实时监听事件只能使用统一六类买卖点")
+            expected_side = "buy" if self.bs_type.endswith("buy") else "sell"
+            if self.side != expected_side:
+                raise ValueError("实时监听事件的买卖点类型与方向不一致")
+            if self.kind != f"strict_{self.side}_point":
+                raise ValueError("实时监听买卖点事件必须来自统一严格通道")
+            return
+        if self.side == "exit" and not self.bs_type and self.kind == "big_down_exit":
+            return
+        raise ValueError("实时监听事件方向无效")
 
     @property
     def identity(self) -> str:
@@ -491,8 +509,8 @@ def collect_strict_monitor_events(
                 exc,
             )
 
-    buys: list[StrictRealtimeMonitorEvent] = []
-    others: list[StrictRealtimeMonitorEvent] = []
+    point_events: list[StrictRealtimeMonitorEvent] = []
+    exit_events: list[StrictRealtimeMonitorEvent] = []
     for code, points in signals.items():
         state = states[code]
         big_dir = str(state.big_dir() or "neutral")
@@ -504,8 +522,6 @@ def collect_strict_monitor_events(
             side = str(point.side)
             point_type = str(point.point_type)
             if side not in {"buy", "sell"}:
-                continue
-            if side == "buy" and big_dir == "down":
                 continue
             event = StrictRealtimeMonitorEvent(
                 code=code,
@@ -523,7 +539,12 @@ def collect_strict_monitor_events(
                 mid_dir=mid_dir,
                 evidence_id=point.point_id,
             )
-            (buys if side == "buy" else others).append(event)
+            point_events.append(event)
+
+    point_order = {
+        point_type: index for index, point_type in enumerate(POINT_REVIEW_ORDER)
+    }
+    point_events.sort(key=lambda event: point_order[event.bs_type])
 
     for code in sorted(holdings):
         state = states.get(code)
@@ -531,7 +552,7 @@ def collect_strict_monitor_events(
             continue
         last_big = getattr(state, "last_big", None)
         signal_time = "" if last_big is None else _aware_datetime(last_big).isoformat()
-        others.append(
+        exit_events.append(
             StrictRealtimeMonitorEvent(
                 code=code,
                 name=str(names.get(code, code)),
@@ -549,7 +570,7 @@ def collect_strict_monitor_events(
                 evidence_id=f"big-down:{signal_time}",
             )
         )
-    return buys + others
+    return point_events + exit_events
 
 
 __all__ = (

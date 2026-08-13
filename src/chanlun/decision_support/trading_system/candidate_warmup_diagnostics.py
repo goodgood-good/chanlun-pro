@@ -1,11 +1,8 @@
-"""Presentation-only deep warmup diagnostics for human-review candidates.
+"""供人工复核候选使用的只读深度预热诊断。
 
-The active screen remains the sole source of ranking and trading decisions.
-This module only selects a bounded, deterministic subset of already-ranked buy
-candidates and binds multi-prefix QMT diagnostics to that exact immutable
-screen.  A missing or invalid diagnostic must therefore degrade to
-``NOT_AVAILABLE`` in the page; it may never change a gate, candidate identity,
-paper eligibility, or an order.
+活动选股快照仍是排名与交易判断的唯一来源。本模块只从已经排序的六类买卖点候选中
+选取有界且确定的子集，并把多前缀 QMT 诊断绑定到该不可变快照。诊断缺失或无效时，
+页面只能降级为 ``NOT_AVAILABLE``；它不能改变闸门、候选身份、模拟观察资格或订单。
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ from chanlun.decision_support.trading_system.lifecycle import (
 from chanlun.decision_support.trading_system.live_human_review import (
     live_screening_snapshot_content_sha256,
 )
+from chanlun.decision_support.trading_system.models import POINT_REVIEW_ORDER
 from chanlun.decision_support.trading_system.warmup_convergence import (
     WarmupConvergenceDiagnosticEnvelope,
     WarmupConvergenceEnvelope,
@@ -58,7 +56,7 @@ _STAGE_ORDER = {
     "observed": 5,
     "active": 6,
 }
-_POINT_ORDER = {"1buy": 0, "2buy": 1, "3buy": 2}
+_POINT_ORDER = {point_type: index for index, point_type in enumerate(POINT_REVIEW_ORDER)}
 _CLOSED_STAGES = frozenset({"closed", "invalidated"})
 
 
@@ -80,10 +78,10 @@ def candidate_warmup_parameter_document(
     frequencies: Sequence[str] = DEFAULT_FREQUENCIES,
     bar_budgets: Mapping[str, int] = DEFAULT_BAR_BUDGETS,
 ) -> dict[str, object]:
-    """Return the frozen, hashable diagnostic parameters.
+    """返回冻结且可哈希的诊断参数。
 
-    The order is part of the identity.  In particular, daily/30m context is
-    audited before 5m/1m precision evidence, matching the human workflow.
+    顺序属于参数身份的一部分。日线和 30 分钟上下文先于 5 分钟和 1 分钟精确证据
+    接受审计，与人工复核顺序一致。
     """
 
     values = tuple(str(value) for value in frequencies)
@@ -104,7 +102,7 @@ def candidate_warmup_parameter_document(
     return {
         "schema": CANDIDATE_WARMUP_PARAMETER_SCHEMA,
         "candidate_limit": candidate_limit,
-        "selection_scope": "BOUNDED_BUY_CANDIDATES_FROM_EXISTING_SCREEN",
+        "selection_scope": "BOUNDED_POINT_CANDIDATES_FROM_EXISTING_SCREEN",
         "selection_order": [
             "lifecycle_stage",
             "sector_horizontal_rank",
@@ -121,7 +119,7 @@ def candidate_warmup_parameter_document(
             "observed",
             "active",
         ],
-        "point_type_order": ["1buy", "2buy", "3buy"],
+        "point_type_order": list(_POINT_ORDER),
         "frequencies": list(values),
         "bar_budgets": budgets,
         "minimum_prefix_bars": minimums,
@@ -153,7 +151,7 @@ def candidate_warmup_parameter_set_id(
 def unwrap_live_screening_snapshot(
     document: Mapping[str, object],
 ) -> tuple[dict[str, object], str, str | None]:
-    """Validate a current raw screen or immutable forward wrapper."""
+    """验证当前原始选股快照或不可变前向包装。"""
 
     if document.get("schema") != IMMUTABLE_LIVE_SCREENING_SCHEMA:
         snapshot = dict(document)
@@ -196,7 +194,7 @@ def select_candidate_warmup_rows(
     limit: int = DEFAULT_CANDIDATE_LIMIT,
     explicit_codes: Sequence[str] | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Select a bounded candidate subset without changing source ranking."""
+    """在不改变来源排名的前提下选取有界的买卖点候选子集。"""
 
     if limit <= 0:
         raise ValueError("candidate diagnostic limit must be positive")
@@ -237,11 +235,13 @@ def select_candidate_warmup_rows(
             continue
         side = str(value.get("side", "")).lower()
         stage = str(lifecycle_stage_from_signal(value) or "").lower()
-        if not side or not stage:
+        if side not in {"buy", "sell"} or not stage:
             raise ValueError("screening signal lacks current side or lifecycle")
-        if side != "buy" or stage in _CLOSED_STAGES:
+        if stage in _CLOSED_STAGES:
             continue
         point_type = str(value.get("point_type", "")).lower()
+        if point_type not in _POINT_ORDER or not point_type.endswith(side):
+            raise ValueError("screening signal point type and side disagree")
         sector = value.get("sector")
         raw_horizontal_rank = (
             sector.get("horizontal_rank")
@@ -259,7 +259,7 @@ def select_candidate_warmup_rows(
             "lifecycle_stage": stage or None,
             "sector_horizontal_rank": horizontal_rank,
             "point_type": point_type or None,
-            "selection_profile": "CURRENT_BUY_REVIEW_ORDER",
+            "selection_profile": "CURRENT_POINT_REVIEW_ORDER",
         }
         sort_key: tuple[object, ...] = (
             _STAGE_ORDER.get(stage, 10**6),
@@ -282,7 +282,7 @@ def select_candidate_warmup_rows(
         if len(selected) == limit:
             break
     if not selected:
-        raise ValueError("screening snapshot has no auditable buy candidates")
+        raise ValueError("screening snapshot has no auditable point candidates")
     return tuple(selected)
 
 
@@ -332,7 +332,7 @@ def build_candidate_warmup_diagnostic_document(
     errors: Sequence[Mapping[str, object]],
     parameter_document: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build a deterministic, content-addressed diagnostic report."""
+    """构建确定且按内容寻址的诊断报告。"""
 
     source_identity = _require_sha256(
         source_content_sha256, "source_content_sha256"
@@ -432,7 +432,7 @@ def validate_candidate_warmup_diagnostic_document(
     expected_source_content_sha256: str | None = None,
     expected_parameter_set_id: str | None = None,
 ) -> dict[str, object]:
-    """Validate report identity, complete pair coverage and safety contract."""
+    """验证报告身份、完整标的周期覆盖和安全契约。"""
 
     value = dict(raw)
     content_identity = _require_sha256(
@@ -551,7 +551,7 @@ def validate_candidate_warmup_diagnostic_document(
 def candidate_warmup_presentation(
     raw: Mapping[str, object],
 ) -> dict[str, object]:
-    """Return a compact page model while keeping bulky evidence on disk."""
+    """返回精简页面模型，并把大体积证据保留在磁盘。"""
 
     document = validate_candidate_warmup_diagnostic_document(raw)
     by_code: dict[str, list[dict[str, object]]] = {

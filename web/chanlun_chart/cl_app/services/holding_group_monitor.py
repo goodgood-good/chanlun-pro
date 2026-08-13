@@ -52,20 +52,16 @@ _POINT_LABELS = {
     "1buy": "一类买点",
     "2buy": "二类买点",
     "3buy": "三类买点",
-    "1buy_nest": "一类买点（区间套）",
-    "3buy_nest": "三类买点（区间套）",
     "1sell": "一类卖点",
     "2sell": "二类卖点",
     "3sell": "三类卖点",
-    "类1buy": "类一买",
-    "类1sell": "类一卖",
 }
 
 
 def fresh_monitor_events(events: Iterable[object], deduper: object) -> list[object]:
-    """Return unseen events after stable in-batch identity de-duplication.
+    """按稳定事件身份完成批内去重，再返回尚未发布的事件。
 
-    The durable deduper remains the sole persistence gate.
+    持久化去重器仍是唯一的跨批次发布闸门。
     """
 
     unique: list[object] = []
@@ -92,21 +88,16 @@ _POINT_ADVICE = {
     "1buy": "建议：确认反转后考虑分批增持",
     "2buy": "建议：回踩不破后考虑分批增持",
     "3buy": "建议：回抽确认后考虑分批增持",
-    "1buy_nest": "建议：区间套确认后考虑分批增持",
-    "3buy_nest": "建议：区间套确认后考虑分批增持",
     "1sell": "建议：优先考虑减仓",
     "2sell": "建议：反弹未转强时考虑继续减仓",
     "3sell": "建议：优先检查退出条件",
-    "类1buy": "建议：确认结构后再考虑增持",
-    "类1sell": "建议：确认结构后考虑减仓",
 }
 
 
 class BoundedEventDeduper:
-    """Durable event de-duplication with bounded retention.
+    """具有有界保留范围的持久化事件去重器。
 
-    A long-running app-owned holding monitor remains bounded while surviving
-    app restarts and retrying a notification that was not delivered.
+    长期运行的应用内持仓监听器既不会无限增长，也能跨应用重启恢复，并重试尚未送达的通知。
     """
 
     def __init__(
@@ -210,7 +201,7 @@ class BoundedEventDeduper:
 
 
 class HoldingMonitorRuntimeLedger:
-    """Small durable ledger for delivery evidence and transition state."""
+    """保存通知送达证据和方向转变状态的小型持久化账本。"""
 
     def __init__(
         self,
@@ -552,7 +543,7 @@ class HoldingMonitorRuntimeLedger:
         self,
         desired: set[tuple[str, str]],
     ) -> None:
-        """Discard outbox rows for symbols removed from the manual group."""
+        """丢弃已从手工分组移除标的对应的待发通知记录。"""
 
         with self._lock:
             pending_notifications = self._state["pending_notifications"]
@@ -640,12 +631,11 @@ def build_non_a_monitor_universe(
     holding_group: str = "我的持仓",
     expanded_watchlist_markets: frozenset[str] = frozenset({"us"}),
 ) -> list[dict[str, object]]:
-    """Merge global groups into one deterministic monitoring universe.
+    """把全局分组合并为一个确定性的监听标的池。
 
-    All non-A-share members of the holding group remain covered. Markets in
-    ``expanded_watchlist_markets`` additionally consume every user group. A
-    symbol occurring in several groups is scanned once while retaining its
-    holding identity and group provenance for notification wording.
+    持仓组中的所有非 A 股成员都会保留；``expanded_watchlist_markets`` 中的市场还会
+    纳入全部用户分组。同一标的即使出现在多个分组也只扫描一次，同时保留持仓身份和
+    分组来源，供通知文案使用。
     """
 
     merged: dict[tuple[str, str], dict[str, object]] = {}
@@ -699,7 +689,7 @@ def build_non_a_monitor_universe(
 
 
 def _notification_line(event: object) -> str:
-    """Render one holding alert as one dense, unambiguous line."""
+    """把一条持仓提醒渲染为紧凑且无歧义的一行。"""
 
     side = str(getattr(event, "side", "") or "")
     is_holding = getattr(event, "is_holding", True) is True
@@ -768,7 +758,7 @@ def _notification_line(event: object) -> str:
 
 
 def _notification_title(market: str, events: Sequence[object]) -> str:
-    """Put the exact point in the push preview whenever there is one event."""
+    """单条事件时把准确买卖点直接放进通知预览。"""
 
     scopes = {
         "持仓股" if getattr(event, "is_holding", True) is True else "关注股"
@@ -823,11 +813,10 @@ class HoldingGroupMonitorConfig:
 
 
 def _default_market_open(exchange: object, market: str, _now: datetime) -> bool:
-    """Use the adapter's own calendar/session; unknown means attempt a scan.
+    """使用适配器自己的日历/交易时段；状态未知时仍尝试扫描。
 
-    Several database-backed adapters intentionally return ``None`` when they
-    cannot prove the session state.  Treating that as closed would silently
-    suppress a holding, so the data request remains the final, observable gate.
+    若无法证明交易时段状态，部分数据库适配器会有意返回 ``None``。若把它视为休市，
+    会静默抑制持仓监听，因此实际数据请求仍作为最终且可观察的闸门。
     """
 
     value = market_now_trading(exchange, market)
@@ -845,7 +834,7 @@ def _default_market_open(exchange: object, market: str, _now: datetime) -> bool:
 
 
 class HoldingGroupMonitorService:
-    """Incrementally observe every declared holding and deliver new events."""
+    """增量观察全部已声明持仓，并发送新事件。"""
 
     def __init__(
         self,

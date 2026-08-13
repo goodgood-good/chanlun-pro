@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -143,6 +144,37 @@ def test_sell_exit_requires_confirmed_one_minute_trigger() -> None:
 
     assert rejected.allowed is False
     assert accepted.action == "exit_full"
+
+
+def test_execution_policy_rejects_third_class_point_as_reversal_trigger() -> None:
+    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=1)
+    setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
+    third_sell = confirmed_point(
+        "3sell",
+        frequency="1m",
+        anchor=10.0,
+        stop=10.2,
+        center_zd=10.0,
+        center_zg=10.2,
+        variant="boundary_touch",
+        minutes_after=1,
+    )
+    # 构造一条遭篡改的触发生命周期，证明执行层自身也会关闭失败，不能只依赖
+    # 上游生命周期匹配器。
+    valid_first_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
+    lifecycle = advance_lifecycle(None, setup, valid_first_sell, as_of=AS_OF)
+    lifecycle = replace(lifecycle, trigger_point_id=third_sell.point_id)
+
+    decision = evaluate_exit_policy(
+        lifecycle,
+        setup,
+        third_sell,
+        held_tower="formal",
+        held_level=1,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_codes == ("one_minute_sell_not_confirmed",)
 
 
 def test_ablation_policy_can_disable_entry_layers_without_changing_defaults() -> None:

@@ -274,7 +274,7 @@ test('one global group batches quotes by each member market', () => {
   assert.deepEqual(h.timers.map((timer) => timer.delay), [3000]);
 });
 
-test('US quote batches allow the backend fallback window without slowing other markets', () => {
+test('US quote batches use the same bounded primary-provider timeout', () => {
   const h = loadZiXuan([
     { market: 'a', code: 'SH.600000' },
     { market: 'us', code: 'AAPL.US' },
@@ -288,7 +288,7 @@ test('US quote batches allow the backend fallback window without slowing other m
   );
   assert.equal(
     h.ajaxCalls.find((call) => call.data.market === 'us').timeout,
-    12000,
+    8000,
   );
 });
 

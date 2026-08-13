@@ -12,6 +12,7 @@
   const SECTOR_SAME_BASE_COVERAGE_CONTRACT_ID =
     "chanlun-qmt-sector-same-5m-source-coverage";
   const POINT_TYPES = ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"];
+  const POINT_REVIEW_ORDER = ["1buy", "1sell", "2buy", "2sell", "3buy", "3sell"];
   const REVIEW_STAGE_ORDER = {
     executable: 0,
     triggered: 1,
@@ -471,8 +472,12 @@
       0,
       Number(health.daily_preselection_buy_candidate_count) || 0,
     );
+    const sells = Math.max(
+      0,
+      Number(health.daily_preselection_sell_candidate_count) || 0,
+    );
     if (health.daily_preselection_ready === true) {
-      return `已就绪 · 适用 ${target} · 买入线索 ${buys} / 全部 ${candidates}`;
+      return `已就绪 · 适用 ${target} · 买点 ${buys} / 卖点 ${sells} / 全部 ${candidates}`;
     }
     if (status === "target_session_stale") {
       return `待更新 · 当前名单适用 ${target}，正在准备 ${expected}`;
@@ -513,10 +518,14 @@
       0,
       Number(health.daily_preselection_buy_candidate_count) || 0,
     );
+    const sells = Math.max(
+      0,
+      Number(health.daily_preselection_sell_candidate_count) || 0,
+    );
     const parts = [
       `内部状态 ${status}`,
       `原因 ${reason}`,
-      `结构线索 ${candidates}（买入 ${buys}）`,
+      `结构线索 ${candidates}（买点 ${buys} / 卖点 ${sells}）`,
     ];
     if (health.daily_preselection_target_session) {
       parts.push(`适用 ${text(health.daily_preselection_target_session)}`);
@@ -676,6 +685,7 @@
     ) labels.push("持仓监控");
     if (sources.includes("PREVIOUS_SIGNAL_MONITOR")) labels.push("持续信号监控");
     if (sources.includes("INCREMENTAL_SCAN_SCOPE")) labels.push("增量监控");
+    if (sources.includes("DECISION_RULE_RECHECK")) labels.push("规则变更重检");
     return labels.length ? labels.join(" + ") : "来源待确认";
   }
 
@@ -1359,7 +1369,9 @@
           sectorRank(sector.rank) ?? Number.MAX_SAFE_INTEGER,
         ]),
     );
-    const pointOrder = new Map(POINT_TYPES.map((value, index) => [value, index]));
+    const pointOrder = new Map(
+      POINT_REVIEW_ORDER.map((value, index) => [value, index]),
+    );
     return (Array.isArray(signals) ? signals : []).slice().sort((left, right) => {
       const leftStage = REVIEW_STAGE_ORDER[lifecycleStageForSignal(left)]
         ?? Number.MAX_SAFE_INTEGER;
@@ -1395,10 +1407,9 @@
       .filter(Boolean);
     if (selectedId && filteredIds.includes(selectedId)) return selectedId;
     if (filteredIds.length) return filteredIds[0];
-    // The chart is a projection of the visible queue, not an independent
-    // watchlist.  Keeping an all-signal fallback here made an empty sector or
-    // point filter show a stale symbol that no longer existed on the left.
-    // Clear the chart instead so the list and every chart frame stay aligned.
+    // 图表是当前可见队列的投影，并非独立自选列表。若在此回退到全部信号，板块或
+    // 买卖点筛选结果为空时会展示左侧已不存在的陈旧标的。因此直接清空图表，保证
+    // 列表与所有图表窗口始终一致。
     return null;
   }
 
@@ -1845,6 +1856,7 @@
   return {
     LIFECYCLE_LABELS,
     POINT_LABELS,
+    POINT_REVIEW_ORDER,
     POINT_TYPES,
     SCHEMA,
     chartUrlsForSignal,

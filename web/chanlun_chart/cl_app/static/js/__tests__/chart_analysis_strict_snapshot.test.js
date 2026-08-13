@@ -424,6 +424,22 @@ test('all six buy and sell point classes stay independent across confirmed and a
   assert.equal(summary.bc.levelLabel, '5m');
 });
 
+test('strict analysis rejects old point aliases instead of relabeling them', () => {
+  const strict = snapshot();
+  strict.levels[0].confirmed_points = [point('1buy', 'confirmed', {
+    point_id: 'old-l2buy',
+    render_id: 'old-l2buy',
+    point_type: 'l2buy',
+    side: 'buy',
+  })];
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+
+  assert.equal(summary.state, 'syncing');
+  assert.equal(summary.confirmedPoints.length, 0);
+  assert.match(summary.statusDetail, /买卖点契约无效/);
+});
+
 test('unavailable or context-mismatched strict data reports synchronization failure', () => {
   const unavailable = Analysis.summarizeChartData({
     bars: [{ time: CLOSED_AT * 1000, close: 11 }],

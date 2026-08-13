@@ -32,7 +32,9 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     sector_native_daily_research_bridge_contract,
 )
 from chanlun.decision_support.trading_system.models import (
+    CANONICAL_POINT_TYPE_SET,
     EntryExecutionBoundary,
+    REVERSAL_SUPPORT_POINT_TYPES,
     parse_entry_execution_boundary_document,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
@@ -177,7 +179,6 @@ _QMT_MWD_WARMUP_BLOCKING_CODES = frozenset(
         "QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_DIVERGED",
     }
 )
-_POINT_TYPES = frozenset({"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"})
 _LIFECYCLE_STAGES = frozenset(
     {"approaching", "formed", "armed", "observed", "triggered", "executable"}
 )
@@ -189,6 +190,7 @@ _SELECTION_SOURCES = frozenset(
         "HOLDING_MONITOR",
         "VIRTUAL_HOLDING_MONITOR",
         "PREVIOUS_SIGNAL_MONITOR",
+        "DECISION_RULE_RECHECK",
         "INCREMENTAL_SCAN_SCOPE",
     }
 )
@@ -231,6 +233,7 @@ _MONITOR_SELECTION_SOURCES = frozenset(
         "HOLDING_MONITOR",
         "VIRTUAL_HOLDING_MONITOR",
         "PREVIOUS_SIGNAL_MONITOR",
+        "DECISION_RULE_RECHECK",
     }
 )
 
@@ -255,7 +258,7 @@ def _native_daily_reconciliation_evidence_is_consistent(
     expected_symbol: str | None,
     evidence_cutoff: datetime,
 ) -> bool:
-    """Validate the presentation copy of the certified native-D bridge."""
+    """验证已认证原生日线桥接证据的展示副本。"""
 
     if not isinstance(raw, Mapping):
         return False
@@ -381,7 +384,7 @@ def _native_daily_calendar_coverage_evidence_is_consistent(
     side_reasons: tuple[str, ...],
     side_gate: object,
 ) -> bool:
-    """Validate a gap proof without treating a missing bar as suspension."""
+    """验证缺口证据，但不把缺失 K 线直接认定为停牌。"""
 
     if not isinstance(raw, Mapping):
         return False
@@ -413,17 +416,13 @@ def screening_coverage_epoch_id(
     parameter_set_id: str,
     signal_document_contract_id: str = SIGNAL_DOCUMENT_CONTRACT_ID,
 ) -> str:
-    """Return the one canonical identity for a screening coverage epoch.
+    """返回选股覆盖批次的唯一规范身份。
 
-    Web production and the immutable forward validator must use the same
-    derivation.  In particular, a newly recomputed horizontal-strength batch
-    cannot reuse stock results collected under a different strength/ranking
-    input merely because both batches share the same market close and QMT
-    membership catalog.
+    Web 生产路径与不可变前向验证器必须使用相同推导。尤其是，新计算的横向强度批次
+    不能仅因收盘时间和 QMT 成员目录相同，就复用由另一组强度/排名输入采集的个股结果。
 
-    ``None`` is retained only for deliberately unaudited test/display
-    adapters.  A forward-eligible snapshot separately requires a real
-    strength evidence revision.
+    ``None`` 仅保留给明确不做审计的测试或展示适配器；可进入前向流程的快照仍必须
+    单独具备真实的强度证据修订号。
     """
 
     observed = normalize_datetime(market_data_as_of, "market_data_as_of")
@@ -466,12 +465,10 @@ def screening_coverage_epoch_id(
 def live_screening_semantic_snapshot_document(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Canonical market-semantic document shared by Web and daily archive.
+    """Web 与每日归档共同使用的规范市场语义文档。
 
-    Wall-clock timings and pacing counters do not create a new market
-    decision. Every field capable of changing candidates, coverage or
-    provenance remains covered. Keeping this implementation in ``src`` avoids
-    a weaker, second hash interpretation in the forward tool.
+    墙钟耗时和节奏计数器不会形成新的市场决策；所有能改变候选、覆盖或来源谱系的字段
+    都必须纳入。把实现保留在 ``src`` 中，可避免前向工具出现第二套较弱的哈希解释。
     """
 
     # 哈希只读取文档。全市场实时快照深拷贝可能超过 40 MiB，过去每次就绪探测都会执行；
@@ -553,7 +550,7 @@ def _entry_boundary_from_document(raw: object) -> EntryExecutionBoundary | None:
 
 
 def _source_screening_policy_id(payload: Mapping[str, object]) -> str:
-    """Return the mandatory attested screening-policy identity."""
+    """返回强制认证的选股策略身份。"""
 
     policy = payload.get("screening_policy")
     declared = payload.get("screening_policy_id")
@@ -596,14 +593,12 @@ def _frequency_code_set(raw: object, field: str) -> set[str]:
 
 
 def _coverage_exclusion_documents(raw: object) -> dict[str, str]:
-    """Validate current-epoch eligibility exclusions as signed facts.
+    """把当前批次的资格排除项验证为带身份的事实。
 
-    A symbol that cannot meet the frozen minimum-history requirement is not a
-    successful analysis and is not an operational failure.  It is an explicit
-    universe disposition for this market-data epoch and must be retried when a
-    new epoch can supply more completed bars.  Keeping the full normalized
-    document in the manifest prevents a bare ``excluded_codes`` list from
-    becoming an unaudited way to hide arbitrary scan failures.
+    无法满足冻结最小历史要求的标的既不算分析成功，也不属于运行故障；它是当前行情
+    批次对标的池的明确处置，待新批次能提供更多已完成 K 线时必须重试。清单保存完整
+    规范化文档，可防止单纯的 ``excluded_codes`` 列表成为未经审计、任意隐藏扫描失败的
+    通道。
     """
 
     if not isinstance(raw, list):
@@ -653,14 +648,11 @@ def _monitor_instrument_exclusions_are_consistent(
     audit: Mapping[str, object],
     manifest: Mapping[str, object],
 ) -> bool:
-    """Authenticate read-only QMT instrument-type exclusions.
+    """认证只读的 QMT 标的类型排除项。
 
-    These rows do not participate in signal generation, but they explain why
-    an explicit watchlist, virtual holding or previous signal is absent from
-    the screening universe.  The outer snapshot hash alone cannot distinguish
-    a genuine document from a forged document followed by re-hashing, so both
-    the live watermark and immutable review boundary enforce this exact
-    semantic contract.
+    这些记录不参与信号生成，但用于解释明确自选股、虚拟持仓或历史信号为何未进入选股
+    标的池。只有外层快照哈希无法区分真实文档与伪造后重新哈希的文档，因此实时水位线
+    和不可变复核边界都会强制执行这份精确语义契约。
     """
 
     raw = payload.get("monitor_instrument_exclusions")
@@ -746,7 +738,7 @@ def _monitor_instrument_exclusions_are_consistent(
 def monitor_instrument_exclusions_are_consistent(
     payload: Mapping[str, object],
 ) -> bool:
-    """Return whether the page/archive monitor diagnostic contract is exact."""
+    """返回页面与归档的监听诊断契约是否完全一致。"""
 
     audit = payload.get("scan_audit")
     manifest = payload.get("coverage_manifest")
@@ -892,7 +884,7 @@ def _coverage_manifest_is_consistent(
     manifest: Mapping[str, object],
     errors: list[object],
 ) -> bool:
-    """Recompute coverage claims instead of trusting self-described totals."""
+    """重新计算覆盖声明，不信任文档自行报告的汇总数。"""
 
     try:
         discovered = set(
@@ -1038,14 +1030,11 @@ def _coverage_manifest_is_consistent(
 def validate_live_screening_market_watermark(
     payload: Mapping[str, object],
 ) -> datetime:
-    """Validate the current scan's market cutoff without promoting its signals.
+    """验证当前扫描的市场截止点，但不提升其中任何信号。
 
-    An in-progress coverage epoch is not eligible for human-review promotion,
-    but its authenticated market cutoff is still the authoritative watermark
-    for deciding whether an older immutable review report may create *new*
-    paper intents.  This validator therefore proves only the read-only envelope,
-    semantic identity and coverage-manifest identity.  It deliberately does not
-    require ``coverage_cycle_complete`` and never returns any candidate signal.
+    进行中的覆盖批次不能提升到人工复核，但其已认证市场截止点仍是判断旧不可变复核
+    报告能否创建新模拟意图的权威水位线。因此本验证器只证明只读信封、语义身份和覆盖
+    清单身份；它有意不要求 ``coverage_cycle_complete``，也绝不返回候选信号。
     """
 
     try:
@@ -1130,7 +1119,7 @@ def _sector_context_is_consistent(
 
 
 def _decision_context_is_consistent(raw: object) -> bool:
-    """Recompute one serialized context from its dominant point summary."""
+    """根据主导买卖点摘要重新计算一个序列化上下文。"""
 
     if not isinstance(raw, Mapping):
         return False
@@ -1145,7 +1134,7 @@ def _decision_context_is_consistent(raw: object) -> bool:
         disposition = "neutral"
         reason = "no_active_directional_point"
     else:
-        if dominant_type not in _POINT_TYPES or not _is_sha256_identity(dominant_id):
+        if dominant_type not in CANONICAL_POINT_TYPE_SET or not _is_sha256_identity(dominant_id):
             return False
         if str(dominant_type).endswith("buy"):
             disposition = "supportive"
@@ -1205,7 +1194,7 @@ def _point_document_is_causal(
 
 
 def _warmup_evidence_is_consistent(raw: object) -> bool:
-    """Recompute the active pairwise warmup verdict from its frozen rows."""
+    """根据冻结记录重新计算当前成对预热结论。"""
 
     if not isinstance(raw, Mapping):
         return False
@@ -1303,7 +1292,7 @@ def _risk_period_diagnostics(
     *,
     evidence_cutoff: datetime,
 ) -> tuple[HigherTimeframePeriodDiagnostic, ...] | None:
-    """Parse and causally validate the portable M/W/D diagnostic documents."""
+    """解析并因果验证可移植的月/周/日诊断文档。"""
 
     if not isinstance(raw, list) or len(raw) not in {0, 3}:
         return None
@@ -1433,13 +1422,11 @@ def _session_evidence_is_consistent(
     side_gate: object,
     evidence_cutoff: datetime,
 ) -> bool:
-    """Validate the optional, presentation-only QMT session explanation.
+    """验证可选且只用于展示的 QMT 交易日说明。
 
-    A missing session remains unclassified unless a separate point-in-time
-    trade-status source proves suspension.  The current contract therefore
-    requires the exact source issue, ``historical_trade_status_proven=false``
-    and a fail-closed disposition; a re-hashed story cannot turn absence into
-    a suspension or erase the date.
+    除非独立的时点交易状态来源证明停牌，否则缺失交易日仍保持未分类。因此当前契约要求
+    精确记录来源问题、``historical_trade_status_proven=false`` 和关闭失败处置；重新哈希
+    的叙述不能把缺失偷换成停牌，也不能抹去日期。
     """
 
     if not isinstance(raw, Mapping) or set(raw) != {
@@ -1529,7 +1516,7 @@ def _mwd_warmup_evidence_is_consistent(
     side_reasons: tuple[str, ...],
     side_gate: object,
 ) -> bool:
-    """Recompute the frozen count/verdict relations in one M/W/D warmup row."""
+    """重新计算一条月/周/日预热记录中冻结的数量与结论关系。"""
 
     blocking_reasons = _QMT_MWD_WARMUP_BLOCKING_CODES.intersection(side_reasons)
     if raw is None:
@@ -1629,16 +1616,12 @@ def _mwd_warmup_diagnostic_chain_is_consistent(
     evidence_cutoff: datetime,
     memo: dict[tuple[str, str], bool] | None = None,
 ) -> bool:
-    """Validate the complete diagnostic lineage once per distinct document.
+    """每份不同文档只验证一次完整诊断谱系。
 
-    The former caller invoked the semantic, mapping-supply and lineage
-    validators independently.  Each deeper validator reconstructed and
-    revalidated every earlier sibling, so one signal parsed the same envelope
-    three times.  Market and sector documents are also shared by hundreds of
-    signals.  A validation-run-local cache keyed by the *recomputed canonical
-    content hash* preserves the exact tamper checks while avoiding that
-    quadratic work.  Declared document hashes are deliberately not trusted as
-    cache keys.
+    旧调用方分别执行语义、映射供给和谱系验证；每个更深层验证器都会重建并再次验证此前
+    各层，导致同一信号重复解析同一信封三次，且市场和板块文档还会被数百个信号共享。
+    本次验证范围内使用以重新计算的规范内容哈希为键的缓存，既保留完整防篡改检查，又
+    避免二次方工作量；文档自报哈希有意不作为缓存键。
     """
 
     cache_key: tuple[str, str] | None = None
@@ -1703,12 +1686,10 @@ def _sector_source_extension_mode(
     *,
     sector_reasons: tuple[str, ...],
 ) -> tuple[bool, str | None]:
-    """Authenticate the conditional page/replay sector-source provenance.
+    """认证页面与回放条件板块来源的谱系。
 
-    A row claiming the native-daily research blocker must carry the complete
-    provenance. The precheck is deliberately
-    independent of the risk-state recomputation so only a fully identified
-    research bridge may activate the GREEN-to-AMBER safety cap below.
+    声明原生日线研究阻断的记录必须携带完整谱系。预检查有意独立于风险状态重算，只有
+    身份完整的研究桥接才能触发下方由绿色限制为黄色的安全上限。
     """
 
     fields = (
@@ -1748,7 +1729,7 @@ def _sector_source_extension_is_consistent(
     mode: str | None,
     evidence_cutoff: datetime,
 ) -> bool:
-    """Bind source mode to both the strict and selected warmup evidence."""
+    """把来源模式同时绑定到严格预热证据和最终选用的预热证据。"""
 
     if mode is None:
         return True
@@ -2343,6 +2324,7 @@ def _buy_decision_evidence_is_consistent(
         and trigger.get("status") == "confirmed"
         and trigger.get("side") == setup.get("side")
         and trigger.get("source_frequency") == "1m"
+        and trigger.get("point_type") in REVERSAL_SUPPORT_POINT_TYPES
         and signal.get("lifecycle_stage") in {"triggered", "executable"}
     )
     entry_reasons: list[str] = []
@@ -2521,6 +2503,7 @@ def _displayed_decision_evidence_is_consistent(
         and trigger.get("status") == "confirmed"
         and trigger.get("side") == "sell"
         and trigger.get("source_frequency") == "1m"
+        and trigger.get("point_type") in REVERSAL_SUPPORT_POINT_TYPES
         and signal.get("lifecycle_stage") in {"triggered", "executable"}
     )
     exit_action = signal.get("exit_action")
@@ -2586,14 +2569,11 @@ def _validated_sector_strength_evidence(
 def _authenticated_sector_members(
     strength_evidence: SectorStrengthBatch,
 ) -> dict[str, frozenset[str]]:
-    """Recover current QMT membership from the already-validated batch.
+    """从已验证批次中恢复当前 QMT 板块成员关系。
 
-    The compact strength objects intentionally omit their full member lists,
-    but the canonical batch evidence retains them.  A sector trigger is not
-    proven merely because its claimed sector is eligible and ranked: the
-    signal symbol must also occur in that sector's authenticated current-QMT
-    basket.  The parser has already checked unique/sorted symbols, counts and
-    the batch evidence identity before this helper is called.
+    精简强度对象有意省略完整成员列表，但规范批次证据会保留。仅凭声明板块具备资格且有
+    排名，不能证明板块触发；信号标的还必须出现在该板块已认证的当前 QMT 成分篮子中。
+    调用本函数前，解析器已检查标的唯一性、排序、数量和批次证据身份。
     """
 
     document = strength_evidence.evidence_document()
@@ -2698,13 +2678,11 @@ def _validated_sector_documents(
     market_data_as_of: datetime,
     strength_evidence: SectorStrengthBatch,
 ) -> dict[str, Mapping[str, object]]:
-    """Recompute the full assessment set and its eligible ranked subset.
+    """重新计算完整板块评估集合及其中具备资格的排名子集。
 
-    The page deliberately publishes every completed/failed sector assessment:
-    eligible sectors receive a rank, while structurally hostile or explicitly
-    failed sectors remain unranked so monitor-only symbols retain their actual
-    sector context.  Treating the list as an eligible-only table would reject
-    every production snapshot containing a higher-timeframe sector block.
+    页面有意发布每个完成或失败的板块评估：合格板块获得排名，结构不利或明确失败的板块
+    保持无排名，使仅监听标的仍保留真实板块上下文。若把列表误当成仅含合格板块的表，
+    所有包含高级别板块阻断的生产快照都会被错误拒绝。
     """
 
     raw_sectors = payload.get("sectors")
@@ -2997,7 +2975,7 @@ def validate_live_review_snapshot(
     *,
     session: date | None = None,
 ) -> tuple[datetime, tuple[Mapping[str, object], ...]]:
-    """Validate the safety, coverage and 30m/5m/1m provenance boundary."""
+    """验证安全性、覆盖范围以及 30 分钟/5 分钟/1 分钟来源谱系边界。"""
 
     try:
         review_at = datetime.fromisoformat(str(payload["as_of"]))
@@ -3219,6 +3197,11 @@ def validate_live_review_snapshot(
             frequency="1m",
             evidence_cutoff=signal_evidence_cutoff,
         )
+        trigger_is_reversal_point = bool(
+            trigger is None
+            or isinstance(trigger, Mapping)
+            and trigger.get("point_type") in REVERSAL_SUPPORT_POINT_TYPES
+        )
         trigger_available_at = None
         if isinstance(trigger, Mapping):
             try:
@@ -3325,6 +3308,7 @@ def validate_live_review_snapshot(
             or not setup_is_causal
             or (trigger is not None and not isinstance(trigger, Mapping))
             or not trigger_is_causal
+            or not trigger_is_reversal_point
             or isinstance(trigger, Mapping)
             and (
                 trigger.get("side") != raw.get("side")
@@ -3447,7 +3431,7 @@ def validate_live_review_snapshot(
         != expected_stage_counts
         or normalized_declared_counts(
             payload.get("counts_by_point_type"),
-            allowed=frozenset({"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}),
+            allowed=CANONICAL_POINT_TYPE_SET,
         )
         != expected_point_counts
     ):
@@ -3482,7 +3466,7 @@ def live_signal_human_review_alert(
     sector_strength_evidence_revision: str | None = None,
     sector_catalog_revision: str | None = None,
 ) -> HumanReviewAlert:
-    """Translate one canonical 30m-context/5m-setup/1m-locator decision."""
+    """转换一个规范的 30 分钟上下文/5 分钟形态/1 分钟定位决策。"""
 
     symbol = signal.get("code")
     signal_id = signal.get("signal_id")
@@ -3725,7 +3709,7 @@ def live_human_review_document(
     result_label: str = "LIVE_INTRADAY_HUMAN_REVIEW_QUEUE",
     decision_source_snapshot: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build a review-only report suitable for immutable live archiving."""
+    """构建适合不可变实时归档、仅供复核的报告。"""
 
     source_implementation_id = (
         None
