@@ -101,7 +101,6 @@ function divergence(kind, structuralLevel = 0, overrides = {}) {
       strength_source: 'macd',
       is_divergent: true,
       strength_decay_count: 2,
-      is_strong_divergent: true,
     },
     tradable: true,
     points: [{ time: 1700000300, price: kind === 'trend' ? 10.2 : 10.8 }],
@@ -301,7 +300,7 @@ test('strict snapshot supplies centers and signals through one contract', () => 
   assert.equal(strictOnly.divergences.every((item) => item.comparisonWidth === 3), true);
   assert.equal(strictOnly.divergences.every((item) => item.compareLegUnitIds.length === 3), true);
   assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
-  assert.equal(strictOnly.divergences.every((item) => item.isStrongDivergent === true), true);
+  assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
 });
 
 test('provisional third-class completion is reported as complete but non-tradable', () => {

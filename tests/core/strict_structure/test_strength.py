@@ -387,7 +387,6 @@ def test_area_decay_alone_is_sufficient_macd_decay_for_formal_divergence():
     assert evidence.histogram_area_decayed is True
     assert evidence.histogram_peak_decayed is False
     assert evidence.dif_extreme_decayed is False
-    assert evidence.is_strong_divergent is False
     assert evidence.strength_source == "macd"
     assert evidence.structural_level == 0
     assert evidence.divergence_id
@@ -409,7 +408,6 @@ def test_peak_or_dif_decay_can_confirm_divergence_without_area_decay():
     assert evidence.dif_extreme_decayed is True
     assert evidence.is_divergent is True
     assert evidence.strength_decay_count == 2
-    assert evidence.is_strong_divergent is True
 
 
 @pytest.mark.parametrize(
@@ -440,7 +438,6 @@ def test_each_macd_indicator_can_independently_confirm_divergence(
     assert evidence.is_divergent is True
     assert evidence.strength_decay_count == 1
     assert getattr(evidence, expected_flag) is True
-    assert evidence.is_strong_divergent is False
 
 
 def test_strength_rejects_non_finite_macd_bars():

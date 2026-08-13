@@ -887,7 +887,7 @@ def strict_trend_to_chart_dict(
 def strict_divergence_to_chart_dict(
     divergence: DivergenceEvidence,
 ) -> dict[str, object]:
-    """Serialize one independent, level-scoped formal divergence."""
+    """序列化一条级别明确、彼此独立的正式背驰证据。"""
 
     if not isinstance(divergence, DivergenceEvidence):
         raise TypeError("divergence must be a DivergenceEvidence")
@@ -901,7 +901,6 @@ def strict_divergence_to_chart_dict(
         "strength_source": divergence.strength_source,
         "is_divergent": divergence.is_divergent,
         "strength_decay_count": divergence.strength_decay_count,
-        "is_strong_divergent": divergence.is_strong_divergent,
     }
     return {
         "schema": "chanlun-chart-divergence",

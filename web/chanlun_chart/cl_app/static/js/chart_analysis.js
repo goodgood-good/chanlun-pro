@@ -1036,7 +1036,6 @@
       availableAt: toSeconds(item.available_at),
       strengthSource: metrics.strength_source || null,
       strengthDecayCount: numeric(metrics.strength_decay_count),
-      isStrongDivergent: metrics.is_strong_divergent === true,
       tradable: item.tradable === true,
     };
   }

@@ -2314,11 +2314,6 @@ class DivergenceEvidence:
             )
         )
 
-    @property
-    def is_strong_divergent(self) -> bool:
-        return self.is_divergent and self.strength_decay_count >= 2
-
-
 @dataclass(frozen=True, slots=True)
 class DecompositionBoundaryEvidence:
     """固定同级别划分所使用的因果已确认边界。"""

@@ -168,7 +168,6 @@ function divergence(kind = 'trend', overrides = {}) {
       is_divergent: true,
       strength_source: 'macd',
       strength_decay_count: 1,
-      is_strong_divergent: false,
     },
     tradable: true,
     points: [{ time: BASE + 500, price: 10 }],
