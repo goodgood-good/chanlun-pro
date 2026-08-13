@@ -5579,8 +5579,18 @@ class TradingScreeningService:
             if background_running:
                 self._background_wake.set()
                 return True
+        observed_at = normalize_datetime(self._clock(), "clock")
+        coverage_window_open = bool(
+            self._config.full_coverage_refresh_enabled
+            and _full_coverage_refresh_window_open(observed_at)
+        )
         Thread(
-            target=lambda: self.refresh_now(copy_result=False),
+            # QMT 启动回调可能早于正式后台线程执行。该临时唤醒路径必须与后台循环
+            # 使用完全相同的时段闸门，否则盘中会绕过优先通道并串行重建全部板块。
+            target=lambda: self.refresh_now(
+                copy_result=False,
+                priority_only=not coverage_window_open,
+            ),
             daemon=True,
             name="trading-screening",
         ).start()

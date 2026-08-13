@@ -5637,6 +5637,48 @@ def test_background_loop_runs_due_priority_lane_when_coverage_is_idle(
     assert calls == [(False, True)]
 
 
+@pytest.mark.parametrize(
+    ("observed_at", "expected_priority_only"),
+    (
+        (AS_OF.replace(hour=10, minute=0), True),
+        (AS_OF.replace(hour=15, minute=5), False),
+    ),
+)
+def test_ensure_refresh_without_background_obeys_full_coverage_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observed_at: datetime,
+    expected_priority_only: bool,
+) -> None:
+    """QMT 启动回调不得绕过后台循环采用的盘中资源闸门。"""
+
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(refresh_interval_seconds=60),
+    )
+    calls: list[tuple[bool, bool]] = []
+    completed = threading.Event()
+
+    monkeypatch.setattr(service, "_needs_refresh", lambda: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        completed.set()
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+
+    assert service.ensure_refresh() is True
+    assert completed.wait(timeout=1.0)
+    assert calls == [(False, expected_priority_only)]
+
+
 def test_background_loop_keeps_full_lane_open_after_2300(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
