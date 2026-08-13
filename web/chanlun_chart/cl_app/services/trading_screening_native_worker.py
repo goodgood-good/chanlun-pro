@@ -35,13 +35,39 @@ class _Gateway(Protocol):
 
     def realtime_ticks(self, codes: tuple[str, ...]) -> object: ...
 
+    def prepare_local_history(self, **kwargs: object) -> object: ...
+
     def structure_bundle(self, code: str, **kwargs: object) -> object: ...
 
     def trading_session_evidence(self, **kwargs: object) -> object: ...
 
 
+def _probe_a_share_market_data() -> dict[str, object]:
+    """在工作进程宣布就绪前验证 A 股行情适配器的真实只读 RPC。"""
+
+    from chanlun.exchange import Market, get_exchange
+
+    exchange = get_exchange(Market.A)
+    probe = getattr(exchange, "market_data_readiness_probe", None)
+    if not callable(probe):
+        raise RuntimeError("A 股行情适配器未实现统一就绪探针")
+    raw = probe()
+    if not isinstance(raw, Mapping):
+        raise RuntimeError("A 股行情就绪探针返回类型无效")
+    result = {str(key): value for key, value in raw.items()}
+    if (
+        result.get("schema") != "chanlun-qmt-market-data-readiness"
+        or result.get("ready") is not True
+        or result.get("provider") != "QMT_XTDATA"
+        or result.get("real_account_access") is not False
+        or result.get("real_order_transport") is not False
+    ):
+        raise RuntimeError("A 股行情就绪探针证据无效")
+    return result
+
+
 class _ParentDisconnected(BaseException):
-    """Stop native work immediately when the authenticated parent is gone."""
+    """认证父进程消失时立即终止原生工作。"""
 
 
 def _qmt_fact_cache_settings(
@@ -55,12 +81,10 @@ def _qmt_fact_cache_settings(
     str | None,
     str | None,
 ]:
-    """Enable normalized QMT fact persistence only for official launches.
+    """只为正式启动启用规范化 QMT 事实持久化。
 
-    Manual or unofficial workers stay cache-disabled. An official ``app.py``
-    launch supplies an exact content-addressed working-tree revision.  The fact
-    identity remains independently derived from the narrow QMT producer
-    implementation.
+    手工或非正式工作进程保持缓存关闭。正式 ``app.py`` 启动会提供精确的内容寻址
+    工作树版本；事实身份仍由范围收敛的 QMT 生产实现独立派生。
     """
 
     runtime_revision = (
@@ -94,13 +118,11 @@ def _qmt_fact_cache_settings(
 
 
 def _send_to_parent(connection: Connection, payload: Mapping[str, object]) -> None:
-    """Send one IPC frame or terminate cleanly when the parent disappeared.
+    """发送一帧进程通信消息；父进程消失时干净终止。
 
-    A Web-only restart can close the authenticated socket while a native call is
-    finishing.  Treating that reset as an ordinary remote exception caused the
-    worker to send a second error frame over the same dead socket and emit a
-    misleading traceback.  Parent loss is process-lifecycle control flow, not a
-    screening-data failure.
+    仅重启网页时，原生调用可能尚在结束阶段，而认证套接字已经关闭。若把该重置当成
+    普通远程异常，工作进程会继续向同一失效套接字发送第二帧错误并产生误导堆栈。
+    父进程丢失属于进程生命周期控制，不是选股数据失败。
     """
 
     try:
@@ -122,7 +144,7 @@ def dispatch_gateway_request(
     method: str,
     kwargs: Mapping[str, object],
 ) -> object:
-    """Dispatch exactly the read-only screening allowlist."""
+    """严格按只读选股白名单分派请求。"""
 
     if method == "sector_snapshot":
         if set(kwargs) != {"as_of"}:
@@ -162,6 +184,18 @@ def dispatch_gateway_request(
         if type(codes) is not tuple or any(type(code) is not str for code in codes):
             raise ValueError("realtime_ticks requires an exact string tuple")
         return gateway.realtime_ticks(codes)
+    if method == "prepare_local_history":
+        if set(kwargs) != {"frequency_requests", "as_of"}:
+            raise ValueError(
+                "prepare_local_history requires frequency_requests and as_of"
+            )
+        requests = kwargs.get("frequency_requests")
+        if type(requests) is not tuple:
+            raise ValueError("prepare_local_history requires an exact tuple")
+        return gateway.prepare_local_history(
+            frequency_requests=requests,
+            as_of=kwargs.get("as_of"),
+        )
     if method == "structure_bundle":
         code = kwargs.get("code")
         if not isinstance(code, str):
@@ -171,6 +205,13 @@ def dispatch_gateway_request(
             type(value) is not str for value in sector_members
         ):
             raise ValueError("structure_bundle requires exact sector_members")
+        local_history_frequencies = kwargs.get("local_history_frequencies")
+        if type(local_history_frequencies) is not tuple or any(
+            type(value) is not str for value in local_history_frequencies
+        ):
+            raise ValueError(
+                "structure_bundle requires exact local_history_frequencies"
+            )
         return gateway.structure_bundle(
             code,
             as_of=kwargs.get("as_of"),
@@ -178,6 +219,7 @@ def dispatch_gateway_request(
             sector_members=sector_members,
             frequencies=kwargs.get("frequencies"),
             higher_timeframe_as_of=kwargs.get("higher_timeframe_as_of"),
+            local_history_frequencies=local_history_frequencies,
         )
     if method == "trading_session_evidence":
         if set(kwargs) != {"session", "observed_at"}:
@@ -266,6 +308,7 @@ def run_worker(connection: Connection) -> int:
         _PROJECT_ROOT
     )
     gateway = _build_gateway(connection, request_id)
+    market_data_probe = _probe_a_share_market_data()
     _send_to_parent(
         connection,
         {
@@ -273,6 +316,7 @@ def run_worker(connection: Connection) -> int:
             "type": "ready",
             "pid": os.getpid(),
             "application_source_revision": application_source_revision,
+            "market_data_probe": market_data_probe,
             "real_account_access": False,
             "real_order_transport": False,
         },

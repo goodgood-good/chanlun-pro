@@ -57,6 +57,10 @@ def _observation(
         "changed": changed,
         "qmt_executable": "D:/qmt/bin.x64/XtItClient.exe",
         "qmt_directory": "D:/qmt/bin.x64",
+        "market_data_port": 58610,
+        "market_data_rpc_ready": ready,
+        "automatic_control_ready": True,
+        "uncontrollable_process_ids": [],
         "log_retention_days": 30,
         "log_max_total_bytes": 104857600,
         "main_process_count": 1 if ready else 0,
@@ -254,6 +258,78 @@ def test_startup_cleans_an_orphaned_qmt_installation(tmp_path: Path) -> None:
     controller.startup()
 
     assert runner.actions == ["Status", "Restart"]
+
+
+def test_startup_adopts_healthy_rpc_even_when_process_is_elevated(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 2, 18, 0, tzinfo=CN))
+    healthy = _observation(
+        action="Status",
+        ready=True,
+        started_at="2026-08-02T08:30:00+08:00",
+        process_count=2,
+    )
+    healthy["automatic_control_ready"] = False
+    healthy["uncontrollable_process_ids"] = [1234, 1235]
+    runner = FakeRunner([healthy])
+    controller, _scheduler = _controller(tmp_path, clock=clock, runner=runner)
+
+    controller.startup()
+    controller.register_jobs()
+
+    assert runner.actions == ["Status"]
+    snapshot = controller.snapshot()
+    assert snapshot["ready"] is True
+    assert snapshot["market_data_rpc_ready"] is True
+    assert snapshot["automatic_control_ready"] is False
+
+
+def test_catchup_adopts_old_healthy_elevated_qmt_without_restart(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 3, 9, 0, tzinfo=CN))
+    healthy = _observation(
+        action="Status",
+        ready=True,
+        started_at="2026-08-02T08:30:00+08:00",
+        process_count=2,
+    )
+    healthy["automatic_control_ready"] = False
+    healthy["uncontrollable_process_ids"] = [1234, 1235]
+    runner = FakeRunner([healthy])
+    controller, _scheduler = _controller(tmp_path, clock=clock, runner=runner)
+
+    controller.startup()
+    controller.register_jobs()
+
+    assert runner.actions == ["Status"]
+    snapshot = controller.snapshot()
+    assert snapshot["ready"] is True
+    assert snapshot["daily_status"] == "ADOPTED"
+    assert snapshot["daily_reason_code"] == (
+        "QMT_HEALTHY_UNCONTROLLABLE_ADOPTED"
+    )
+
+
+def test_startup_requires_manual_restart_for_uncontrollable_broken_rpc(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 2, 18, 0, tzinfo=CN))
+    broken = _observation(action="Status", ready=False, process_count=2)
+    broken.update(
+        reason_code="QMT_MANUAL_RESTART_REQUIRED",
+        main_process_count=1,
+        automatic_control_ready=False,
+        uncontrollable_process_ids=[1234, 1235],
+    )
+    runner = FakeRunner([broken])
+    controller, _scheduler = _controller(tmp_path, clock=clock, runner=runner)
+
+    with pytest.raises(RuntimeError, match="QMT_MANUAL_RESTART_REQUIRED"):
+        controller.startup()
+
+    assert runner.actions == ["Status"]
 
 
 def test_monitor_repairs_qmt_and_reconnects_native_screening(

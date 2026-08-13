@@ -28,13 +28,13 @@ CAUSAL_PARTIAL_HTF_ALGORITHM = "causal-partial-htf"
 
 
 def level_plus_one(frequency: str) -> Optional[str]:
-    """Return the next frequency used by the HTF MACD chain."""
+    """返回高周期 MACD 链使用的下一个周期。"""
 
     return HIGHER_FREQ_MAP.get(frequency)
 
 
 def level_plus_one_chain(frequency: str) -> tuple[str, ...]:
-    """Return all higher frequencies reachable from ``frequency``."""
+    """返回从 ``frequency`` 可到达的全部更高周期。"""
 
     out: list[str] = []
     current = frequency
@@ -57,7 +57,7 @@ MARKET_DAY_OFFSET_H = {
 def _bucket_keys(
     t: np.ndarray, higher: str, market: Optional[str]
 ) -> Optional[np.ndarray]:
-    """Map source-bar close timestamps to higher-timeframe buckets."""
+    """把来源 K 线收盘时间映射到高周期桶。"""
 
     if higher == "5m":
         return t // 300
@@ -82,7 +82,7 @@ def _causal_bucket_keys(
     higher: str,
     market: Optional[str],
 ) -> Optional[np.ndarray]:
-    """Bucket close-time source bars for formal causal HTF evidence."""
+    """为正式因果高周期证据划分来源收盘 K 线桶。"""
 
     if higher == "5m":
         return (t - 1) // 300
@@ -92,12 +92,10 @@ def _causal_bucket_keys(
 
 
 class CausalPartialHigherMACDCalculator:
-    """Incremental causal partial-bucket HTF MACD calculator.
+    """因果高周期未完成桶的增量 MACD 计算器。
 
-    The state before the current bucket contains closed HTF bars only. Each
-    lower-timeframe close is applied once to that frozen state as the current
-    bucket's provisional close. When a new bucket starts, the preceding
-    bucket's last provisional state is promoted to the closed baseline.
+    当前桶之前的状态只包含已收盘高周期 K 线。每根低周期收盘只在该冻结状态上应用
+    一次，作为当前桶的临时收盘；新桶开始时，前一桶最后的临时状态晋升为收盘基线。
     """
 
     algorithm = CAUSAL_PARTIAL_HTF_ALGORITHM
@@ -137,13 +135,20 @@ class CausalPartialHigherMACDCalculator:
         self._bucket_base: Optional[tuple[float, float, float]] = None
         self._last_partial: Optional[tuple[float, float, float]] = None
 
-    def update(self, klines: List[Kline]) -> Optional[dict]:
+    def update(
+        self,
+        klines: List[Kline],
+        *,
+        validated_incremental_prefix: bool = False,
+    ) -> Optional[dict]:
         if self.higher is None:
             return None
         if not klines:
             self.reset()
             return None
 
+        if validated_incremental_prefix and self.keys:
+            return self._update_validated_increment(klines)
         if not self._can_extend(klines):
             return self._rebuild(klines)
 
@@ -155,6 +160,24 @@ class CausalPartialHigherMACDCalculator:
             for kline in klines[old_n:]:
                 if not self._append(kline):
                     return self._rebuild(klines)
+        return self._result()
+
+    def _update_validated_increment(self, klines: List[Kline]) -> Optional[dict]:
+        """消费调用方已经逐行认证过的“旧末根修订 + 追加”尾段。
+
+        生产选股状态在进入这里前已经比较完整 OHLCV 前缀，并在滑窗、历史修订或
+        价格基准变化时新建整个 ``CL``。因此无需让每一级高周期 MACD 再各自扫描一遍
+        上万根历史；这里仍校验长度、旧末根时间和桶身份，任何不一致立即全量重建。
+        """
+
+        old_n = len(self.keys)
+        if old_n <= 0 or len(klines) < old_n:
+            return self._rebuild(klines)
+        if not self._replace_last(klines[old_n - 1]):
+            return self._rebuild(klines)
+        for kline in klines[old_n:]:
+            if not self._append(kline):
+                return self._rebuild(klines)
         return self._result()
 
     def _can_extend(self, klines: List[Kline]) -> bool:

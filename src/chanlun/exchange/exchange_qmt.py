@@ -304,9 +304,27 @@ class ExchangeQMT(Exchange):
             if base not in base_starts or start < base_starts[base]:
                 base_starts[base] = start
         if not base_starts:
-            return
-        qmt_codes = [self.code_to_qmt(c) for c in codes if c]
-        total = len(qmt_codes)
+            return {
+                "schema": "chanlun-qmt-batch-download-result",
+                "cancelled": False,
+                "successful_by_base": {},
+                "failed_by_base": {},
+            }
+        if type(chunk_size) is not int or chunk_size <= 0:
+            raise ValueError("QMT batch download chunk_size must be a positive int")
+        raw_codes = tuple(codes)
+        if any(type(code) is not str or not code for code in raw_codes):
+            raise ValueError("QMT batch download codes must be non-empty strings")
+        code_pairs = [(code, self.code_to_qmt(code)) for code in raw_codes]
+        if len({code for code, _qmt_code in code_pairs}) != len(code_pairs):
+            raise ValueError("QMT batch download codes must be unique")
+        total = len(code_pairs)
+        successful_by_base: dict[str, set[str]] = {
+            base: set() for base in base_starts
+        }
+        failed_by_base: dict[str, set[str]] = {
+            base: set() for base in base_starts
+        }
         for base, start in base_starts.items():
             done = 0
             for i in range(0, total, chunk_size):
@@ -314,8 +332,20 @@ class ExchangeQMT(Exchange):
                     LogUtil.info(
                         f"[ExchangeQMT.batch_download] 取消 base={base} {done}/{total}"
                     )
-                    return
-                chunk = qmt_codes[i : i + chunk_size]
+                    return {
+                        "schema": "chanlun-qmt-batch-download-result",
+                        "cancelled": True,
+                        "successful_by_base": {
+                            key: tuple(sorted(values))
+                            for key, values in sorted(successful_by_base.items())
+                        },
+                        "failed_by_base": {
+                            key: tuple(sorted(values))
+                            for key, values in sorted(failed_by_base.items())
+                        },
+                    }
+                chunk_pairs = code_pairs[i : i + chunk_size]
+                chunk = [qmt_code for _code, qmt_code in chunk_pairs]
                 with _XTDATA_NATIVE_LOCK:
                     try:
                         xtdata.download_history_data2(
@@ -325,7 +355,13 @@ class ExchangeQMT(Exchange):
                             end_time="",
                             incrementally=True,
                         )
+                        successful_by_base[base].update(
+                            code for code, _qmt_code in chunk_pairs
+                        )
                     except Exception as e:
+                        failed_by_base[base].update(
+                            code for code, _qmt_code in chunk_pairs
+                        )
                         LogUtil.warning(
                             f"[ExchangeQMT.batch_download] chunk 失败 base={base} i={i}: {e}"
                         )
@@ -338,6 +374,18 @@ class ExchangeQMT(Exchange):
             LogUtil.info(
                 f"[ExchangeQMT.batch_download] base={base} 完成 {done}/{total} start={start}"
             )
+        return {
+            "schema": "chanlun-qmt-batch-download-result",
+            "cancelled": False,
+            "successful_by_base": {
+                key: tuple(sorted(values))
+                for key, values in sorted(successful_by_base.items())
+            },
+            "failed_by_base": {
+                key: tuple(sorted(values))
+                for key, values in sorted(failed_by_base.items())
+            },
+        }
 
     @retry(stop=stop_after_attempt(3), wait=wait_random(min=0.1, max=1))
     def klines(
@@ -580,6 +628,26 @@ class ExchangeQMT(Exchange):
             "code": code,
             "name": stock_detail["InstrumentName"],
             "precision": fun.reverse_decimal_to_power_of_ten(stock_detail["PriceTick"]),
+        }
+
+    def market_data_readiness_probe(self) -> Dict[str, object]:
+        """通过一次最小只读 RPC 调用验证 QMT 行情服务真正可用。
+
+        进程存在或端口监听都不能证明 xtdata 协议可用。固定查询浦发银行的合约信息，
+        不下载历史行情、不访问账户，也不受盘中或盘后状态影响。
+        """
+
+        probe_code = "SH.600000"
+        detail = self.stock_info(probe_code)
+        if not isinstance(detail, Mapping) or not str(detail.get("name") or "").strip():
+            raise RuntimeError("QMT 行情 RPC 未返回有效的探针标的信息")
+        return {
+            "schema": "chanlun-qmt-market-data-readiness",
+            "ready": True,
+            "probe_code": probe_code,
+            "provider": "QMT_XTDATA",
+            "real_account_access": False,
+            "real_order_transport": False,
         }
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:

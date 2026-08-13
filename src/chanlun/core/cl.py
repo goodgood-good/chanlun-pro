@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Single-authority Chanlun runtime.
+"""单一权威的缠论运行时。
 
-``CL`` builds only the production base structure (included K-lines, fractals,
-strokes, segments and MACD) and the strict recursive evidence derived from it.
-Centers, divergences and the three classes of buy/sell points have no mutable
-side channel on ``BI``/``XD`` objects and no alternate calculator in this
-runtime.
+``CL`` 只构建生产基础结构（包含处理后的 K 线、分型、笔、线段与 MACD），并由此
+生成严格递归证据。中枢、背驰和三类买卖点不在 ``BI``/``XD`` 对象上保留可变旁路，
+本运行时也不存在第二套计算器。
 """
 
 from __future__ import annotations
@@ -44,7 +42,7 @@ def _strict_runtime_locked(method):
 
 
 def _strict_contract_boundary(method):
-    """Translate generic invariants only inside strict evidence construction."""
+    """只在严格证据构建边界内转换通用不变量异常。"""
 
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -69,7 +67,7 @@ _RUNTIME_METADATA_KEYS = frozenset(
 
 
 def _production_config(config: dict | None) -> dict[str, object]:
-    """Bind one fixed base algorithm and accept metadata/scope fields only."""
+    """绑定唯一固定基础算法，只接受元数据和作用域字段。"""
 
     requested = {} if config is None else dict(config)
     base = strict_base_config()
@@ -100,7 +98,7 @@ def _production_config(config: dict | None) -> dict[str, object]:
 
 
 class CL(ICL):
-    """Production Chanlun state with a single strict evidence authority."""
+    """以唯一严格证据为权威的生产缠论状态。"""
 
     _PICKLE_SCHEMA = "chanlun-strict-cl"
     _PICKLE_STATE_FIELDS = frozenset(
@@ -183,25 +181,51 @@ class CL(ICL):
         return self._process_src_klines(src_klines)
 
     @_strict_runtime_locked
+    def process_validated_incremental_klines(self, klines: pd.DataFrame):
+        """处理已由唯一选股运行时认证过历史前缀的完整行情帧。
+
+        该入口只省略各级高周期 MACD 对同一旧前缀的重复逐行比较；K 线、包含、笔、
+        线段和严格结构仍走与 ``process_klines`` 完全相同的生产计算。调用方若发现
+        滑窗或任意旧事实变化，必须丢弃本实例而不能使用此入口。
+        """
+
+        src_klines = self.kline_processor.process_kline(klines)
+        return self._process_src_klines(
+            src_klines,
+            validated_incremental_prefix=True,
+        )
+
+    @_strict_runtime_locked
     def process_kline_values(self, date, open_, high, low, close, volume=0.0):
         src_klines = self.kline_processor.process_kline_values(
             date, open_, high, low, close, volume
         )
         return self._process_src_klines(src_klines)
 
-    def _process_src_klines(self, src_klines: List[Kline]):
+    def _process_src_klines(
+        self,
+        src_klines: List[Kline],
+        *,
+        validated_incremental_prefix: bool = False,
+    ):
         if not src_klines:
             return self
         self.macd_calculator.process_macd(self.kline_processor.klines)
-        self._compute_strict_htf_macd()
+        self._compute_strict_htf_macd(
+            validated_incremental_prefix=validated_incremental_prefix,
+        )
         self.cl_kline_processor.process_cl_klines(self.kline_processor.klines)
         self.bi_calculator.calculate(self.cl_kline_processor.cl_klines)
         self.xd_calculator.calculate(self.bi_calculator.bis)
         self._strict_structure_memo.clear()
         return self
 
-    def _compute_strict_htf_macd(self) -> None:
-        """Update prefix-stable level-plus-one MACD evidence."""
+    def _compute_strict_htf_macd(
+        self,
+        *,
+        validated_incremental_prefix: bool = False,
+    ) -> None:
+        """更新前缀稳定的上一级 MACD 证据。"""
 
         from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 
@@ -231,7 +255,10 @@ class CL(ICL):
                     target_frequency=target,
                 )
                 self._strict_htf_macd_calculators[level] = calc
-            value = calc.update(self.kline_processor.klines)
+            value = calc.update(
+                self.kline_processor.klines,
+                validated_incremental_prefix=validated_incremental_prefix,
+            )
             if value is not None:
                 results[level] = {**value}
         self._strict_htf_macd_by_level = results
@@ -309,7 +336,7 @@ class CL(ICL):
         return self._strict_unit_registry
 
     def _validate_strict_structure_metadata(self) -> None:
-        """Revalidate immutable runtime metadata before serving memoized facts."""
+        """返回缓存事实前重新校验不可变运行时元数据。"""
 
         self._strict_registry()
         self._strict_price_quantum()
@@ -469,6 +496,12 @@ class CL(ICL):
         )
         self._strict_structure_memo["evidence"] = result
         return result
+
+    @_strict_runtime_locked
+    def release_strict_evidence_cache(self) -> None:
+        """释放可由当前笔、线段和 MACD 状态确定性重建的严格证据备忘录。"""
+
+        self._strict_structure_memo.clear()
 
 
 __all__ = ("CL",)

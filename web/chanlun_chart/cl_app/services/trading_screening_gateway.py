@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+import hashlib
 import math
 from numbers import Integral
 import re
@@ -14,6 +15,7 @@ from threading import RLock
 from typing import Protocol, cast
 
 import pandas as pd
+import numpy as np
 
 from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.core.strict_structure.formal_state import current_formal_direction
@@ -57,6 +59,7 @@ from chanlun.decision_support.trading_system.runtime_config import (
     strict_snapshot_price_metadata,
 )
 from chanlun.decision_support.trading_system.screening_runtime import (
+    ScreeningRuntimeState,
     screening_evidence_from_frame,
 )
 from chanlun.decision_support.trading_system.screening_structure import (
@@ -113,6 +116,16 @@ _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 _FRAME_UNSET = object()
 _WARMUP_ENVELOPE_PREFIX_RATIOS = ((1, 2), (2, 3), (5, 6), (1, 1))
 _TRADABLE_SCREENING_INSTRUMENT_TYPES = frozenset({"stock_cn", "etf_cn"})
+_QMT_DOWNLOAD_BASE_BY_FREQUENCY = {
+    "d": "1d",
+    "30m": "5m",
+    "5m": "5m",
+    "1m": "1m",
+}
+_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY = {
+    "1m": 128,
+    "5m": 160,
+}
 _KNOWN_SCREENING_INSTRUMENT_TYPES = frozenset(
     {
         "stock_cn",
@@ -160,6 +173,12 @@ class FrameStructureAnalysis:
             self.entry_execution_boundaries
         ):
             raise ValueError("entry execution boundary point ids must be unique")
+
+
+@dataclass(slots=True)
+class _WarmupRuntimeStates:
+    full: ScreeningRuntimeState
+    suffix: ScreeningRuntimeState
 
 
 class SectorAnalysisUnavailable(RuntimeError):
@@ -480,29 +499,47 @@ def _closed_frame(
     snapshot_attrs = dict(value.attrs)
     optional = tuple(column for column in ("member_mask",) if column in value.columns)
     result = value.loc[:, [*required, *optional]].copy()
-    dates = tuple(_market_datetime(item, "kline.date") for item in result["date"])
-    if any(right <= left for left, right in zip(dates, dates[1:])):
+    raw_dates = result["date"]
+    try:
+        parsed_dates = pd.to_datetime(raw_dates, errors="raise")
+        if bool(parsed_dates.isna().any()):
+            raise ValueError("kline.date must be a datetime")
+        if isinstance(parsed_dates.dtype, pd.DatetimeTZDtype):
+            dates = parsed_dates.dt.tz_convert("Asia/Shanghai")
+        elif pd.api.types.is_datetime64_any_dtype(parsed_dates.dtype):
+            dates = parsed_dates.dt.tz_localize("Asia/Shanghai")
+        else:
+            raise TypeError("mixed datetime representation")
+    except (TypeError, ValueError, OverflowError):
+        # 混合时区或少见对象类型退回逐值规范化；正常 QMT DatetimeIndex 走上面的
+        # 向量路径，避免每只股票对上万根 K 线创建 Python datetime 对象。
+        dates = pd.Series(
+            tuple(pd.Timestamp(_market_datetime(item, "kline.date")) for item in raw_dates),
+            index=result.index,
+            dtype="datetime64[ns, Asia/Shanghai]",
+        )
+    if not bool(dates.is_monotonic_increasing) or bool(dates.duplicated().any()):
         raise ValueError("kline dates must be strictly chronological")
-    cutoff = normalize_datetime(not_after, "not_after")
-    positions = tuple(index for index, item in enumerate(dates) if item <= cutoff)
-    if not positions:
+    cutoff = pd.Timestamp(normalize_datetime(not_after, "not_after"))
+    closed_mask = dates <= cutoff
+    if not bool(closed_mask.any()):
         raise ValueError("kline frame has no closed bars")
-    result = result.iloc[list(positions)].copy().reset_index(drop=True)
-    result.loc[:, "date"] = [pd.Timestamp(dates[index]) for index in positions]
+    result = result.loc[closed_mask].copy().reset_index(drop=True)
+    result["date"] = dates.loc[closed_mask].reset_index(drop=True).array
     numeric_columns = ("open", "high", "low", "close", "volume")
     for column in numeric_columns:
         result.loc[:, column] = pd.to_numeric(result[column], errors="coerce")
     numeric = result.loc[:, list(numeric_columns)].astype(float)
-    prices = numeric.loc[:, ["open", "high", "low", "close"]]
+    numeric_values = numeric.to_numpy(dtype=np.float64, copy=False)
+    prices = numeric_values[:, :4]
     invalid = (
-        numeric.isna().any(axis=1)
-        | ~numeric.map(math.isfinite).all(axis=1)
+        ~np.isfinite(numeric_values).all(axis=1)
         | (prices <= 0).any(axis=1)
-        | (numeric["volume"] < 0)
-        | (numeric["high"] < prices.max(axis=1))
-        | (numeric["low"] > prices.min(axis=1))
+        | (numeric_values[:, 4] < 0)
+        | (numeric_values[:, 1] < prices.max(axis=1))
+        | (numeric_values[:, 2] > prices.min(axis=1))
     )
-    if bool(invalid.any()):
+    if bool(np.any(invalid)):
         raise ValueError("kline frame contains invalid market facts")
     if "member_mask" in result:
         masks = tuple(result["member_mask"])
@@ -551,6 +588,38 @@ def _frame_content_revision(frame: pd.DataFrame) -> str:
         if name in frame.attrs
     }
     has_member_mask = "member_mask" in frame.columns
+    if not has_member_mask:
+        # 股票帧已经过 ``_closed_frame`` 的时区、有限数值和列顺序校验。直接对规范的
+        # UTC 纳秒与 little-endian float64 字节做 SHA-256，保留逐位内容敏感性，同时
+        # 避免每分钟为每根 K 线创建字典、datetime 和 JSON 对象。该身份只用于进程内
+        # 分析缓存，不是跨版本的持久协议。
+        dates = pd.DatetimeIndex(frame["date"])
+        if dates.tz is None:
+            dates = dates.tz_localize("Asia/Shanghai")
+        else:
+            dates = dates.tz_convert("Asia/Shanghai")
+        date_values = np.asarray(dates.asi8, dtype="<i8")
+        numeric_values = np.ascontiguousarray(
+            frame.loc[:, ["open", "high", "low", "close", "volume"]].to_numpy(
+                dtype=np.float64,
+                copy=True,
+            ),
+            dtype="<f8",
+        )
+        digest = hashlib.sha256()
+        digest.update(b"chanlun-screening-closed-stock-frame-v1\0")
+        digest.update(
+            sha256_json(
+                {
+                    "schema": "chanlun-screening-closed-stock-frame-v1",
+                    "attrs": identity_attrs,
+                    "row_count": len(frame),
+                }
+            ).encode("ascii")
+        )
+        digest.update(date_values.tobytes(order="C"))
+        digest.update(numeric_values.tobytes(order="C"))
+        return "sha256:" + digest.hexdigest()
     return sha256_json(
         {
             "schema": "chanlun-screening-closed-frame",
@@ -630,6 +699,7 @@ def analyze_native_frame(
     frequency: str,
     frame: pd.DataFrame,
     as_of: datetime,
+    runtime_state: ScreeningRuntimeState | None = None,
 ) -> FrameStructureAnalysis:
     if frequency not in _FREQUENCIES:
         raise ValueError("unsupported trading frequency")
@@ -637,32 +707,44 @@ def analyze_native_frame(
     # 元数据失败描述输入快照，而非结构引擎契约违规，因此保留公开的 ValueError 分类。
     strict_snapshot_price_metadata(frame)
     try:
-        evidence = screening_evidence_from_frame(
-            code=code,
-            frequency=frequency,
-            frame=frame,
-            as_of=closed_at,
-            market="a",
-        )
+        if runtime_state is None:
+            evidence = screening_evidence_from_frame(
+                code=code,
+                frequency=frequency,
+                frame=frame,
+                as_of=closed_at,
+                market="a",
+            )
+        else:
+            update = runtime_state.update_from_frame(
+                frame=frame,
+                as_of=closed_at,
+            )
+            evidence = update.evidence()
     except (StrictStructureContractError, ValueError) as exc:
         raise StrictStructureAnalysisError(str(exc)) from exc
-    provisional = extract_provisional_candidates(
-        evidence,
-        code=code,
-        source_frequency=frequency,
-        as_of=closed_at,
-    )
-    return FrameStructureAnalysis(
-        closed_at=closed_at,
-        direction=_strict_direction(evidence),
-        confirmed_points=extract_confirmed_points(
+    try:
+        provisional = extract_provisional_candidates(
             evidence,
             code=code,
             source_frequency=frequency,
             as_of=closed_at,
-        ),
-        provisional_points=provisional,
-    )
+        )
+        analysis = FrameStructureAnalysis(
+            closed_at=closed_at,
+            direction=_strict_direction(evidence),
+            confirmed_points=extract_confirmed_points(
+                evidence,
+                code=code,
+                source_frequency=frequency,
+                as_of=closed_at,
+            ),
+            provisional_points=provisional,
+        )
+        return analysis
+    finally:
+        if runtime_state is not None:
+            runtime_state.release_evidence_cache()
 
 
 def _warmup_tail_signature(
@@ -825,6 +907,7 @@ def analyze_native_frame_with_warmup(
     frequency: str,
     frame: pd.DataFrame,
     as_of: datetime,
+    runtime_states: _WarmupRuntimeStates | None = None,
 ) -> FrameStructureAnalysis:
     """要求活动尾部的正式证据在两种左侧历史长度下保持一致。"""
 
@@ -833,6 +916,7 @@ def analyze_native_frame_with_warmup(
         frequency=frequency,
         frame=frame,
         as_of=as_of,
+        runtime_state=(None if runtime_states is None else runtime_states.full),
     )
     required = SCREENING_WARMUP_REQUIRED_BARS[frequency]
     if len(frame) < required:
@@ -856,6 +940,7 @@ def analyze_native_frame_with_warmup(
         frequency=frequency,
         frame=suffix,
         as_of=as_of,
+        runtime_state=(None if runtime_states is None else runtime_states.suffix),
     )
     converged = _warmup_tail_signature(
         full,
@@ -1101,6 +1186,18 @@ class NativeTradingDataGateway:
         self._analysis_cache: dict[
             tuple[str, str], tuple[str, FrameStructureAnalysis]
         ] = {}
+        self._runtime_states_by_frequency: dict[
+            str, OrderedDict[str, _WarmupRuntimeStates]
+        ] = {
+            frequency: OrderedDict()
+            for frequency in _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+        }
+        # 批量补数只证明某个精确观察时刻的本地 QMT 基础流可读；结构判断仍走
+        # ``_load_analysis`` 的唯一严格入口。本表仅用于跳过重复下载，读取或校验
+        # 失败时会立即退回逐只下载，不能把补数成功误当成结构成功。
+        self._prepared_local_frequencies: dict[
+            tuple[str, str], tuple[str, ...]
+        ] = {}
         # 月/周/日事实冻结在盘中监听所用的显式因果截止点。只缓存完全解析的证据包，
         # 避免重复 1m/5m 观测反复采样数百个日级交易日；瞬时 UNRESOLVED 仍可重试。
         self._higher_timeframe_cache: dict[
@@ -1115,6 +1212,45 @@ class NativeTradingDataGateway:
         """
 
         self._progress_callback()
+
+    def _analyze_frame(
+        self,
+        *,
+        code: str,
+        frequency: str,
+        frame: pd.DataFrame,
+        as_of: datetime,
+    ) -> FrameStructureAnalysis:
+        """调用唯一分析器，并为生产 1m/5m 通道分别保留有界严格状态。"""
+
+        if (
+            self._analyzer is not analyze_native_frame_with_warmup
+            or frequency not in _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+        ):
+            return self._analyzer(
+                code=code,
+                frequency=frequency,
+                frame=frame,
+                as_of=as_of,
+        )
+        with self._lock:
+            cache = self._runtime_states_by_frequency[frequency]
+            states = cache.pop(code, None)
+            if states is None:
+                states = _WarmupRuntimeStates(
+                    full=ScreeningRuntimeState(code, frequency, market="a"),
+                    suffix=ScreeningRuntimeState(code, frequency, market="a"),
+                )
+            cache[code] = states
+            while len(cache) > _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY[frequency]:
+                cache.popitem(last=False)
+        return analyze_native_frame_with_warmup(
+            code=code,
+            frequency=frequency,
+            frame=frame,
+            as_of=as_of,
+            runtime_states=states,
+        )
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         if not callable(callback):
@@ -1132,6 +1268,7 @@ class NativeTradingDataGateway:
         as_of: datetime,
         sector_source: str | None = None,
         frame_override: object = _FRAME_UNSET,
+        skip_download: bool = False,
     ) -> FrameStructureAnalysis:
         if sector_source not in {
             None,
@@ -1147,10 +1284,17 @@ class NativeTradingDataGateway:
                     "sector frame source is unavailable",
                 )
             raise TypeError("exchange must expose klines")
+        if type(skip_download) is not bool:
+            raise TypeError("skip_download must be an exact bool")
+        local_only = bool(
+            skip_download and frame_override is _FRAME_UNSET and not is_sector
+        )
         args: dict[str, object] = {
             "req_counts": self._config.request_bars(frequency),
             "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
         }
+        if local_only:
+            args["skip_download"] = True
         if frame_override is _FRAME_UNSET:
             try:
                 self._report_progress()
@@ -1164,7 +1308,13 @@ class NativeTradingDataGateway:
                         "sector_adapter_error",
                         str(exc),
                     ) from exc
-                raise
+                if not local_only:
+                    raise
+                retry_args = dict(args)
+                retry_args.pop("skip_download", None)
+                self._report_progress()
+                raw_frame = loader(code, frequency, args=retry_args)
+                self._report_progress()
         else:
             raw_frame = frame_override
         if is_sector:
@@ -1209,9 +1359,10 @@ class NativeTradingDataGateway:
                     str(exc),
                 ) from exc
         fallback_reason_codes: tuple[str, ...] = ()
-        try:
+
+        def close_stock_frame(value: object) -> pd.DataFrame:
             frame = _closed_frame(
-                raw_frame,
+                value,
                 not_after=as_of,
                 minimum_bars=self._config.minimum_bars(frequency),
             )
@@ -1219,7 +1370,28 @@ class NativeTradingDataGateway:
                 frame = normalize_qmt_opening_events_for_completed_minutes(frame)
                 if len(frame) < self._config.minimum_bars("1m"):
                     raise ValueError("kline frame does not meet minimum history")
+            return frame
+
+        validation_error: Exception | None = None
+        try:
+            frame = close_stock_frame(raw_frame)
         except Exception as exc:
+            validation_error = exc
+        if validation_error is not None and local_only:
+            # 批量下载按块报告成功，仍不能代替逐只完整性校验。本地库为空、历史不足
+            # 或行情事实无效时，精确回退原来的逐只下载路径，再执行同一校验。
+            retry_args = dict(args)
+            retry_args.pop("skip_download", None)
+            try:
+                self._report_progress()
+                raw_frame = loader(code, frequency, args=retry_args)
+                self._report_progress()
+                frame = close_stock_frame(raw_frame)
+                validation_error = None
+            except Exception as exc:
+                validation_error = exc
+        if validation_error is not None:
+            exc = validation_error
             if is_sector:
                 raise SectorAnalysisUnavailable(
                     "sector_kline_unavailable",
@@ -1235,6 +1407,7 @@ class NativeTradingDataGateway:
                         exchange=exchange,
                         code=code,
                         as_of=as_of,
+                        skip_download=local_only,
                     )
                 except Exception as fallback_exc:
                     raise ValueError(
@@ -1295,7 +1468,7 @@ class NativeTradingDataGateway:
             return cached[1]
         try:
             self._report_progress()
-            analysis = self._analyzer(
+            analysis = self._analyze_frame(
                 code=analysis_code,
                 frequency=frequency,
                 frame=frame,
@@ -1387,6 +1560,7 @@ class NativeTradingDataGateway:
         exchange: object | None,
         code: str,
         as_of: datetime,
+        skip_download: bool = False,
     ) -> pd.DataFrame:
         """用已完成的 QMT 5m 行情重建一条无效的原生 30m 数据流。
 
@@ -1401,13 +1575,16 @@ class NativeTradingDataGateway:
         requested_thirty = self._config.request_bars("30m")
         minimum_thirty = self._config.minimum_bars("30m")
         self._report_progress()
+        fallback_args: dict[str, object] = {
+            "req_counts": requested_thirty * 6,
+            "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
+        }
+        if skip_download:
+            fallback_args["skip_download"] = True
         raw_five = loader(
             code,
             "5m",
-            args={
-                "req_counts": requested_thirty * 6,
-                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
-            },
+            args=fallback_args,
         )
         self._report_progress()
         five = _closed_frame(
@@ -1424,6 +1601,112 @@ class NativeTradingDataGateway:
             not_after=as_of,
             minimum_bars=minimum_thirty,
         )
+
+    def prepare_local_history(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+    ) -> dict[str, object]:
+        """按频率组合批量补齐 QMT 本地库，随后仍由严格结构入口逐只校验。
+
+        该方法只优化下载传输，不生成、不缓存任何买卖点结论。批量块失败的标的不会
+        获得本地只读资格；逐只结构请求会继续使用原有下载路径。
+        """
+
+        observed_at = normalize_datetime(as_of, "as_of")
+        if type(frequency_requests) is not tuple:
+            raise TypeError("frequency_requests must be an exact tuple")
+        normalized: list[tuple[str, tuple[str, ...]]] = []
+        for item in frequency_requests:
+            if (
+                type(item) is not tuple
+                or len(item) != 2
+                or type(item[0]) is not str
+                or _A_STOCK_CODE.fullmatch(item[0]) is None
+                or type(item[1]) is not tuple
+                or not item[1]
+                or len(item[1]) != len(set(item[1]))
+                or not set(item[1]).issubset(_FREQUENCIES)
+                or item[1]
+                != tuple(
+                    frequency
+                    for frequency in _FREQUENCIES
+                    if frequency in item[1]
+                )
+            ):
+                raise ValueError("frequency_requests contains an invalid row")
+            normalized.append((item[0], item[1]))
+        if tuple(normalized) != tuple(
+            sorted(normalized, key=lambda value: value[0])
+        ) or len({code for code, _frequencies in normalized}) != len(normalized):
+            raise ValueError("frequency_requests must be canonical and unique")
+        if not normalized:
+            return {
+                "schema": "chanlun-screening-local-history-preparation",
+                "as_of": observed_at.isoformat(),
+                "prepared_frequencies_by_code": {},
+                "batch_download_available": False,
+            }
+
+        exchange = self._exchange_provider()
+        downloader = getattr(exchange, "prewarm_batch_download", None)
+        prepared: dict[str, set[str]] = {code: set() for code, _ in normalized}
+        if callable(downloader):
+            grouped: dict[tuple[str, ...], list[str]] = {}
+            for code, frequencies in normalized:
+                grouped.setdefault(frequencies, []).append(code)
+            for frequencies, codes in sorted(grouped.items()):
+                self._report_progress()
+                result = downloader(
+                    tuple(codes),
+                    frequencies,
+                    progress_callback=(
+                        lambda _base, _done, _total: self._report_progress()
+                    ),
+                    req_counts_by_frequency={
+                        frequency: self._config.request_bars(frequency)
+                        for frequency in frequencies
+                    },
+                )
+                self._report_progress()
+                if not isinstance(result, Mapping) or (
+                    result.get("schema") != "chanlun-qmt-batch-download-result"
+                    or result.get("cancelled") is not False
+                    or not isinstance(result.get("successful_by_base"), Mapping)
+                    or not isinstance(result.get("failed_by_base"), Mapping)
+                ):
+                    continue
+                successful_by_base = result["successful_by_base"]
+                failed_by_base = result["failed_by_base"]
+                for code in codes:
+                    for frequency in frequencies:
+                        base = _QMT_DOWNLOAD_BASE_BY_FREQUENCY[frequency]
+                        successes = successful_by_base.get(base, ())
+                        failures = failed_by_base.get(base, ())
+                        if code in successes and code not in failures:
+                            prepared[code].add(frequency)
+
+        prepared_document = {
+            code: tuple(
+                frequency
+                for frequency in _FREQUENCIES
+                if frequency in prepared[code]
+            )
+            for code, _frequencies in normalized
+        }
+        with self._lock:
+            self._prepared_local_frequencies = {
+                (code, observed_at.isoformat()): frequencies
+                for code, frequencies in prepared_document.items()
+                if frequencies
+            }
+        return {
+            "schema": "chanlun-screening-local-history-preparation",
+            "as_of": observed_at.isoformat(),
+            "prepared_frequencies_by_code": prepared_document,
+            "batch_download_available": callable(downloader),
+        }
 
     def _has_current_five_minute_setup(
         self,
@@ -2010,6 +2293,7 @@ class NativeTradingDataGateway:
         sector_members: tuple[str, ...] | None = None,
         frequencies: tuple[str, ...] | None = None,
         higher_timeframe_as_of: datetime | None = None,
+        local_history_frequencies: tuple[str, ...] | None = None,
     ) -> SymbolStructureBundle:
         if _A_STOCK_CODE.fullmatch(code) is None:
             raise ValueError("invalid A-share code")
@@ -2018,6 +2302,22 @@ class NativeTradingDataGateway:
         requested = set(_FREQUENCIES if frequencies is None else frequencies)
         if not requested or not requested.issubset(_FREQUENCIES):
             raise ValueError("frequencies must contain only d, 30m, 5m and 1m")
+        if local_history_frequencies is None:
+            with self._lock:
+                prepared_frequencies = self._prepared_local_frequencies.get(
+                    (code, observed_at.isoformat()),
+                    (),
+                )
+        else:
+            if (
+                type(local_history_frequencies) is not tuple
+                or len(local_history_frequencies)
+                != len(set(local_history_frequencies))
+                or not set(local_history_frequencies).issubset(_FREQUENCIES)
+            ):
+                raise ValueError("local_history_frequencies are invalid")
+            prepared_frequencies = local_history_frequencies
+        prepared_frequency_set = set(prepared_frequencies)
         analyses: dict[str, FrameStructureAnalysis] = {}
         # 共享决策核心从“当前 5m 设置”开始，必须先检查这一必要条件。缺失时，30m/日级
         # 背景、1m 精细触发和月/周/日风险事实都无法生成决策记录，无需读取或计算。
@@ -2031,6 +2331,7 @@ class NativeTradingDataGateway:
                 analysis_code=code,
                 frequency="5m",
                 as_of=observed_at,
+                skip_download="5m" in prepared_frequency_set,
             )
             if "5m" in requested or cached_five is None
             else cached_five
@@ -2048,6 +2349,7 @@ class NativeTradingDataGateway:
                         analysis_code=code,
                         frequency=frequency,
                         as_of=observed_at,
+                        skip_download=frequency in prepared_frequency_set,
                     )
                     if frequency in requested or cached is None
                     else cached
@@ -2059,6 +2361,7 @@ class NativeTradingDataGateway:
                     analysis_code=code,
                     frequency="1m",
                     as_of=observed_at,
+                    skip_download="1m" in prepared_frequency_set,
                 )
         bundle_as_of = max(item.closed_at for item in analyses.values())
         # 低级别 1m 精细通道可合理晚于最新已完成板块 5m K 线（如 09:47 对 09:45）。

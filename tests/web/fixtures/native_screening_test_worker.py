@@ -21,15 +21,24 @@ def main() -> int:
         (args.host, args.port),
         authkey=bytes.fromhex(os.environ.pop(AUTHKEY_ENV)),
     )
-    connection.send(
-        {
-            "schema": SCHEMA,
-            "type": "ready",
-            "pid": os.getpid(),
+    handshake = {
+        "schema": SCHEMA,
+        "type": "ready",
+        "pid": os.getpid(),
+        "real_account_access": False,
+        "real_order_transport": False,
+    }
+    probe_mode = os.environ.pop("NATIVE_TEST_MARKET_DATA_PROBE", "ready")
+    if probe_mode != "missing":
+        handshake["market_data_probe"] = {
+            "schema": "chanlun-qmt-market-data-readiness",
+            "ready": probe_mode == "ready",
+            "probe_code": "SH.600000",
+            "provider": "QMT_XTDATA",
             "real_account_access": False,
             "real_order_transport": False,
         }
-    )
+    connection.send(handshake)
     while True:
         request = connection.recv()
         identity = request["request_id"]

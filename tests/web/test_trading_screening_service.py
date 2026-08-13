@@ -4304,6 +4304,95 @@ def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
     assert restarted._priority_monitor_runtime_verified is False
 
 
+def test_priority_monitor_completes_minute_phase_before_candidate_phase(
+    tmp_path: Path,
+) -> None:
+    symbols = ("SZ.000001", "SZ.000002")
+    events: list[tuple[str, object]] = []
+
+    class PhaseMarket(RecordingMarketData):
+        def prepare_local_history(
+            self,
+            *,
+            frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+            as_of: datetime,
+        ) -> dict[str, object]:
+            events.append(("prepare", frequency_requests))
+            return {
+                "schema": "chanlun-screening-local-history-preparation",
+                "as_of": as_of.isoformat(),
+                "prepared_frequencies_by_code": dict(frequency_requests),
+                "batch_download_available": True,
+            }
+
+        def structure_bundle_with_risk_cutoff(
+            self,
+            code: str,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            events.append(("evaluate", code))
+            return super().structure_bundle_with_risk_cutoff(code, **kwargs)
+
+    market = PhaseMarket()
+    catalog = MultiMemberSectorCatalog(symbols)
+    catalog.batch = SectorAssessmentBatch(
+        assessments=(replace(eligible_sector(), regime="supportive"),),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            max_five_minute_candidate_symbols_per_refresh=8,
+            max_thirty_minute_candidate_symbols_per_refresh=8,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": "armed-buy",
+                "code": symbols[0],
+                "point_type": "1buy",
+                "lifecycle_stage": "armed",
+            },
+            {
+                "signal_id": "formed-buy",
+                "code": symbols[1],
+                "point_type": "2buy",
+                "lifecycle_stage": "formed",
+            },
+        ]
+    }
+    # 让 1m 优先标的在 5m/30m 节奏上尚未到期，确保本轮候选名额落到第二只标的。
+    service._candidate_monitor_five_last_success_at = {symbols[0]: AS_OF}
+    service._candidate_monitor_thirty_last_success_at = {symbols[0]: AS_OF}
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    assert events == [
+        (
+            "prepare",
+            ((symbols[0], ("d", "30m", "5m", "1m")),),
+        ),
+        ("evaluate", symbols[0]),
+        (
+            "prepare",
+            ((symbols[1], ("d", "30m", "5m")),),
+        ),
+        ("evaluate", symbols[1]),
+    ]
+
+
 def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
     rows = (
         {

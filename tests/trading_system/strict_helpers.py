@@ -298,6 +298,12 @@ class StrictOnlyCL:
     def process_klines(self, _frame) -> None:
         self.process_calls += 1
 
+    def get_xds(self):
+        return ()
+
+    def release_strict_evidence_cache(self) -> None:
+        return None
+
     def get_strict_evidence(self) -> StrictEvidenceResult:
         self.evidence_calls += 1
         if self.evidence_calls > 1:

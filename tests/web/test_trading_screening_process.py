@@ -219,6 +219,14 @@ def test_authenticated_child_reports_progress_and_safety_boundary(
         assert health["worker_pid"] != os.getpid()
         assert health["isolated_process"] is True
         assert health["loopback_authenticated"] is True
+        assert health["market_data_probe"] == {
+            "schema": "chanlun-qmt-market-data-readiness",
+            "ready": True,
+            "probe_code": "SH.600000",
+            "provider": "QMT_XTDATA",
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
         assert health["minimum_market_data_frequency"] == "1m"
         assert health["tick_data_used"] is False
         assert health["real_account_access"] is False
@@ -273,6 +281,37 @@ def test_worker_startup_fails_closed_when_source_revision_is_missing(
         assert health["ready"] is False
         assert health["expected_application_source_revision"] == expected
         assert health["worker_application_source_revision"] is None
+    finally:
+        transport.shutdown()
+
+
+@pytest.mark.parametrize("probe_mode", ["missing", "not_ready"])
+def test_worker_startup_rejects_missing_or_failed_market_data_probe(
+    tmp_path: Path,
+    probe_mode: str,
+) -> None:
+    """原生进程只有真实行情 RPC 通过后才能进入 ready。"""
+
+    transport = NativeWorkerProcessTransport(
+        log_path=tmp_path / f"native-worker-probe-{probe_mode}.log",
+        worker_command=(sys.executable, str(FIXTURE)),
+        environment={"NATIVE_TEST_MARKET_DATA_PROBE": probe_mode},
+        config=NativeWorkerProcessConfig(
+            startup_timeout_seconds=3.0,
+            native_idle_timeout_seconds=1.0,
+            restart_backoff_seconds=0.05,
+        ),
+    )
+    try:
+        with pytest.raises(
+            NativeScreeningWorkerProtocolError,
+            match="invalid safety handshake",
+        ):
+            transport.startup()
+        health = transport.health_snapshot()
+        assert health["ready"] is False
+        assert health["worker_alive"] is False
+        assert health["market_data_probe"] is None
     finally:
         transport.shutdown()
 
@@ -514,6 +553,72 @@ class _BundleTransport:
         return None
 
 
+class _HistoryPreparationTransport:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def set_progress_callback(self, callback) -> None:
+        self.progress_callback = callback
+
+    def request(self, method: str, **kwargs: object) -> object:
+        self.calls.append((method, kwargs))
+        assert method == "prepare_local_history"
+        requests = kwargs["frequency_requests"]
+        assert type(requests) is tuple
+        return {
+            "schema": "chanlun-screening-local-history-preparation",
+            "as_of": kwargs["as_of"].isoformat(),
+            "prepared_frequencies_by_code": dict(requests),
+            "batch_download_available": True,
+        }
+
+    def health_snapshot(self):
+        return {"ready": True}
+
+    def shutdown(self) -> None:
+        return None
+
+
+def test_process_proxy_preserves_canonical_history_preparation_contract() -> None:
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    requests = (
+        ("SH.600000", ("d", "30m", "5m")),
+        ("SZ.000001", ("d", "30m", "5m", "1m")),
+    )
+    transport = _HistoryPreparationTransport()
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport
+    )
+
+    result = proxy.prepare_local_history(
+        frequency_requests=requests,
+        as_of=as_of,
+    )
+
+    assert result == {
+        "schema": "chanlun-screening-local-history-preparation",
+        "as_of": as_of.isoformat(),
+        "prepared_frequencies_by_code": dict(requests),
+        "batch_download_available": True,
+    }
+    assert transport.calls == [
+        (
+            "prepare_local_history",
+            {"frequency_requests": requests, "as_of": as_of},
+        )
+    ]
+    assert proxy._prepared_local_frequencies("SH.600000", as_of) == (
+        "d",
+        "30m",
+        "5m",
+    )
+    with pytest.raises(ValueError, match="canonical and unique"):
+        proxy.prepare_local_history(
+            frequency_requests=tuple(reversed(requests)),
+            as_of=as_of,
+        )
+
+
 def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
     as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
     cutoff = as_of.replace(minute=45)
@@ -565,6 +670,7 @@ def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
                 "sector_members": ("SH.600000",),
                 "frequencies": ("1m", "5m", "30m", "d"),
                 "higher_timeframe_as_of": cutoff,
+                "local_history_frequencies": (),
             },
         )
     ]

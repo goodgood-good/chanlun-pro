@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time as datetime_time, timedelta
@@ -184,6 +184,8 @@ CANDIDATE_MONITOR_CONTRACT_ID = "bar-cadence-live-candidate-monitor"
 CANDIDATE_MONITOR_LANE_1M = "CURRENT_1M"
 CANDIDATE_MONITOR_LANE_5M = "CURRENT_5M"
 CANDIDATE_MONITOR_LANE_30M = "CURRENT_30M"
+PRIORITY_MONITOR_PUBLISH_BATCH_SIZE = 8
+PRIORITY_MONITOR_PERSIST_BATCH_SIZE = 64
 _CANDIDATE_MONITOR_LANES = frozenset(
     {
         CANDIDATE_MONITOR_LANE_1M,
@@ -992,6 +994,13 @@ class MarketDataGateway(Protocol):
     ) -> Mapping[str, str]: ...
 
     def symbol_name(self, code: str) -> str | None: ...
+
+    def prepare_local_history(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+    ) -> Mapping[str, object]: ...
 
     def structure_bundle(
         self,
@@ -2962,8 +2971,15 @@ class TradingScreeningService:
             return result
 
         try:
-            last_at = datetime.fromisoformat(str(payload["last_at"]))
-            last_at = normalize_datetime(last_at, "priority monitor last_at")
+            raw_last_at = payload.get("last_at")
+            last_at = (
+                None
+                if raw_last_at is None
+                else normalize_datetime(
+                    datetime.fromisoformat(str(raw_last_at)),
+                    "priority monitor last_at",
+                )
+            )
             raw_started_at = payload.get("candidate_monitor_started_at")
             candidate_started_at = (
                 None
@@ -3215,9 +3231,13 @@ class TradingScreeningService:
         thirty_codes: tuple[str, ...] = (),
         successful_five_codes: tuple[str, ...] = (),
         successful_thirty_codes: tuple[str, ...] = (),
+        round_complete: bool = True,
+        round_failed: bool = False,
     ) -> None:
         """发布精简监听状态，不修改覆盖状态。"""
 
+        if round_complete and round_failed:
+            raise ValueError("priority monitor round cannot complete and fail together")
         lane_map = dict(lanes_by_code or {})
         if any(value not in _CANDIDATE_MONITOR_LANES for value in lane_map.values()):
             raise ValueError("candidate monitor lane is invalid")
@@ -3298,12 +3318,20 @@ class TradingScreeningService:
                 self._candidate_monitor_last_errors = tuple(
                     copy.deepcopy(value) for value in candidate_errors
                 )
-            self._priority_monitor_last_at = observed_at
-            self._priority_monitor_last_codes = tuple(codes)
-            self._priority_monitor_last_errors = tuple(
-                copy.deepcopy(value) for value in errors
-            )
-            self._priority_monitor_runtime_verified = True
+            if round_complete:
+                self._priority_monitor_last_at = observed_at
+                self._priority_monitor_last_codes = tuple(codes)
+                self._priority_monitor_last_errors = tuple(
+                    copy.deepcopy(value) for value in errors
+                )
+                self._priority_monitor_runtime_verified = True
+            elif round_failed:
+                # 未完整结束的轮次必须保持立即到期，不能因已经发布了部分标的而被
+                # 误记成该分钟已完成；错误仍单独暴露给健康检查。
+                self._priority_monitor_last_errors = tuple(
+                    copy.deepcopy(value) for value in errors
+                )
+                self._priority_monitor_runtime_verified = False
             self._priority_monitor_presentation_revision = sha256_json(
                 {
                     "observed_at": observed_at,
@@ -3673,23 +3701,189 @@ class TradingScreeningService:
             except Exception as exc:
                 return code, (), exc
 
-        results = []
-        worker_count = min(
-            self._config.stock_worker_count,
-            max(1, len(codes)),
-        )
-        if worker_count == 1:
-            results = [evaluate(code) for code in codes]
-        else:
+        priority_preparation_errors: list[dict[str, object]] = []
+        candidate_preparation_errors: list[dict[str, object]] = []
+        history_preparer = getattr(self._market_data, "prepare_local_history", None)
+
+        def prepare_history(
+            phase_codes: tuple[str, ...],
+            *,
+            phase: str,
+        ) -> None:
+            if not phase_codes or not callable(history_preparer):
+                return
+            try:
+                history_preparer(
+                    frequency_requests=tuple(
+                        (
+                            code,
+                            tuple(
+                                frequency
+                                for frequency in SCREENING_STRUCTURE_FREQUENCIES
+                                if frequency in frequencies_by_code[code]
+                                or frequency in {"d", "30m", "5m"}
+                            ),
+                        )
+                        for code in sorted(phase_codes)
+                    ),
+                    as_of=observed_at,
+                )
+            except Exception as exc:
+                # 批量准备只是传输优化。失败后各结构请求会沿用原有逐只下载路径；
+                # 仍保留明确告警，避免健康页在 SLA 已退化时误报容量充足。
+                error = {
+                    "error_type": "priority_monitor_history_preparation_error",
+                    "reason_code": "PRIORITY_MONITOR_BATCH_HISTORY_PREPARATION_FAILED",
+                    "reason": (
+                        f"phase={phase} {type(exc).__name__}: {str(exc)[:140]}"
+                    ),
+                }
+                if phase == "priority_1m":
+                    priority_preparation_errors.append(error)
+                else:
+                    candidate_preparation_errors.append(error)
+
+        results: list[tuple[str, tuple[dict[str, object], ...], Exception | None]] = []
+        partial_results: list[
+            tuple[str, tuple[dict[str, object], ...], Exception | None]
+        ] = []
+        partial_state_persisted = False
+        successful_since_partial_persist = 0
+
+        def publish_completed_minute_results() -> None:
+            nonlocal partial_state_persisted, successful_since_partial_persist
+            if not partial_results:
+                return
+            batch = tuple(partial_results)
+            partial_results.clear()
+            successful = tuple(code for code, _rows, exc in batch if exc is None)
+            if not successful:
+                return
+            batch_documents = tuple(
+                document
+                for _code, rows, exc in batch
+                if exc is None
+                for document in rows
+            )
+            self._record_priority_monitor_result(
+                observed_at=observed_at,
+                codes=(),
+                errors=(),
+                documents=batch_documents,
+                successful_codes=successful,
+                lanes_by_code={code: lanes_by_code[code] for code in successful},
+                round_complete=False,
+            )
+            successful_since_partial_persist += len(successful)
+            if (
+                not partial_state_persisted
+                or successful_since_partial_persist
+                >= PRIORITY_MONITOR_PERSIST_BATCH_SIZE
+            ):
+                try:
+                    self._persist_priority_monitor_state()
+                except Exception as exc:
+                    # 分发器有独立的幂等事件账本；实时状态文件瞬时失败时仍应继续
+                    # 通知本批标的，整轮结尾会再次尝试原子落盘。
+                    errors_during_publish.append(
+                        {
+                            "error_type": "priority_monitor_state_persistence_error",
+                            "reason_code": "PRIORITY_MONITOR_STATE_PERSISTENCE_FAILED",
+                            "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+                        }
+                    )
+                else:
+                    partial_state_persisted = True
+                    successful_since_partial_persist = 0
+            if self._notifier is None:
+                return
+            successful_set = set(successful)
+            partial_previous = {
+                "signals": [
+                    document
+                    for signal_id, document in sorted(previous_documents_by_id.items())
+                    if signal_id in prior_stages
+                    and document.get("code") in successful_set
+                ]
+            }
+            partial_current = {
+                "signals": list(batch_documents),
+                "notification_authoritative_codes": list(successful),
+            }
+            try:
+                self._notifier.dispatch_changes(partial_previous, partial_current)
+            except Exception as exc:
+                # 通知分发器自身会持久化待重试事件；整轮末尾仍会用完整结果再试，
+                # 单个通知传输失败不得中止其他标的的结构识别。
+                errors_during_publish.append(
+                    {
+                        "error_type": "priority_monitor_notification_error",
+                        "reason_code": "PRIORITY_MONITOR_NOTIFICATION_FAILED",
+                        "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    }
+                )
+
+        errors_during_publish: list[dict[str, object]] = []
+
+        def consume_result(
+            result: tuple[
+                str,
+                tuple[dict[str, object], ...],
+                Exception | None,
+            ],
+        ) -> None:
+            results.append(result)
+            if result[0] not in minute_code_set:
+                return
+            partial_results.append(result)
+            if len(partial_results) >= PRIORITY_MONITOR_PUBLISH_BATCH_SIZE:
+                publish_completed_minute_results()
+
+        def evaluate_phase(
+            phase_codes: tuple[str, ...],
+            *,
+            phase: str,
+        ) -> None:
+            if not phase_codes:
+                return
+            prepare_history(phase_codes, phase=phase)
+            worker_count = min(
+                self._config.stock_worker_count,
+                len(phase_codes),
+            )
+            if worker_count == 1:
+                for code in phase_codes:
+                    consume_result(evaluate(code))
+                return
             with ThreadPoolExecutor(
                 max_workers=worker_count,
-                thread_name_prefix="TradingPriorityMonitor",
+                thread_name_prefix=(
+                    "TradingPriority1m"
+                    if phase == "priority_1m"
+                    else "TradingCandidateCadence"
+                ),
             ) as executor:
-                results = list(executor.map(evaluate, codes))
+                futures = {
+                    executor.submit(evaluate, code): code for code in phase_codes
+                }
+                for future in as_completed(futures):
+                    consume_result(future.result())
+
+        # 当前 1m 买卖点拥有绝对调度优先级。5m/30m 轮换发现不得先占满结构
+        # 工作进程；全部 1m 标的完成并分批发布后，才处理本轮较低频候选。
+        evaluate_phase(minute_codes, phase="priority_1m")
+        publish_completed_minute_results()
+        candidate_codes = tuple(code for code in codes if code not in minute_code_set)
+        evaluate_phase(candidate_codes, phase="candidate_cadence")
 
         documents: list[dict[str, object]] = []
-        errors: list[dict[str, object]] = []
-        candidate_errors: list[dict[str, object]] = []
+        errors: list[dict[str, object]] = [
+            *errors_during_publish,
+            *priority_preparation_errors,
+        ]
+        candidate_errors: list[dict[str, object]] = list(
+            candidate_preparation_errors
+        )
         for code, rows, exc in results:
             if exc is None:
                 documents.extend(rows)
@@ -3819,6 +4013,8 @@ class TradingScreeningService:
                 observed_at=observed_at,
                 codes=completed_codes,
                 errors=(error,),
+                round_complete=completed_this_observation,
+                round_failed=not completed_this_observation,
             )
             try:
                 self._persist_priority_monitor_state()
@@ -4895,6 +5091,12 @@ class TradingScreeningService:
         elif not priority_monitor_session_open:
             priority_monitor_status = "not_due"
             priority_monitor_ready = True
+        elif priority_monitor_last_errors:
+            # 明确运行故障比“尚未完成本轮验证”更有诊断价值；失败轮次仍保持
+            # runtime_verified=False，因此调度器会立即重试而不是等待下一周期。
+            priority_monitor_status = "degraded"
+            priority_monitor_ready = False
+            priority_monitor_reason_codes.append("PRIORITY_MONITOR_DEGRADED")
         elif not priority_monitor_runtime_verified:
             priority_monitor_status = "awaiting_runtime_verification"
             priority_monitor_ready = False
@@ -4914,10 +5116,6 @@ class TradingScreeningService:
             priority_monitor_status = "stale"
             priority_monitor_ready = False
             priority_monitor_reason_codes.append("PRIORITY_MONITOR_STALE")
-        elif priority_monitor_last_errors:
-            priority_monitor_status = "degraded"
-            priority_monitor_ready = False
-            priority_monitor_reason_codes.append("PRIORITY_MONITOR_DEGRADED")
         else:
             priority_monitor_status = "verified"
             priority_monitor_ready = True

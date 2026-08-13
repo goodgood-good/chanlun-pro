@@ -30,6 +30,9 @@ from zoneinfo import ZoneInfo
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.incremental_scan import BarKey
+from chanlun.decision_support.trading_system.screening_structure import (
+    SCREENING_STRUCTURE_FREQUENCIES,
+)
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     calculate_forward_application_source_revision,
     content_addressed_source_revision_from_build,
@@ -711,6 +714,7 @@ class NativeWorkerProcessTransport:
         self._connection: Connection | None = None
         self._worker_pid: int | None = None
         self._worker_application_source_revision: str | None = None
+        self._worker_market_data_probe: dict[str, object] | None = None
         self._started_at: datetime | None = None
         self._request_started_at: datetime | None = None
         self._last_progress_at: datetime | None = None
@@ -841,12 +845,24 @@ class NativeWorkerProcessTransport:
                 if isinstance(handshake, Mapping)
                 else None
             )
+            worker_market_data_probe = (
+                handshake.get("market_data_probe")
+                if isinstance(handshake, Mapping)
+                else None
+            )
             if not isinstance(handshake, Mapping) or (
                 handshake.get("schema") != IPC_SCHEMA
                 or handshake.get("type") != "ready"
                 or type(handshake.get("pid")) is not int
                 or handshake.get("real_account_access") is not False
                 or handshake.get("real_order_transport") is not False
+                or not isinstance(worker_market_data_probe, Mapping)
+                or worker_market_data_probe.get("schema")
+                != "chanlun-qmt-market-data-readiness"
+                or worker_market_data_probe.get("ready") is not True
+                or worker_market_data_probe.get("provider") != "QMT_XTDATA"
+                or worker_market_data_probe.get("real_account_access") is not False
+                or worker_market_data_probe.get("real_order_transport") is not False
             ):
                 raise NativeScreeningWorkerProtocolError(
                     "native worker returned an invalid safety handshake"
@@ -879,6 +895,7 @@ class NativeWorkerProcessTransport:
             self._worker_application_source_revision = (
                 None if worker_source_revision is None else str(worker_source_revision)
             )
+            self._worker_market_data_probe = dict(worker_market_data_probe)
             self._started_at = started
             self._last_progress_at = started
             self._last_response_at = started
@@ -915,6 +932,7 @@ class NativeWorkerProcessTransport:
             self._process = None
             self._worker_pid = None
             self._worker_application_source_revision = None
+            self._worker_market_data_probe = None
             self._in_flight_request_id = None
             self._request_started_at = None
         try:
@@ -1137,6 +1155,11 @@ class NativeWorkerProcessTransport:
                 "worker_application_source_revision": (
                     self._worker_application_source_revision
                 ),
+                "market_data_probe": (
+                    None
+                    if self._worker_market_data_probe is None
+                    else dict(self._worker_market_data_probe)
+                ),
                 "application_source_revision_match": revision_match,
                 "started_at": _iso(self._started_at),
                 "in_flight": self._in_flight_request_id is not None,
@@ -1250,6 +1273,9 @@ class NativeTradingDataGatewayProcessProxy:
         self._symbol_names: dict[str, str] = {}
         self._instrument_types: dict[str, str] = {}
         self._trading_session_cache: dict[date, dict[str, object]] = {}
+        self._prepared_history_lock = RLock()
+        self._prepared_history_as_of: datetime | None = None
+        self._prepared_history_by_code: dict[str, tuple[str, ...]] = {}
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         for transport in (self._transport, *self._structure_transports):
@@ -1835,6 +1861,92 @@ class NativeTradingDataGatewayProcessProxy:
                 "invalid native realtime quote result"
             ) from exc
 
+    def prepare_local_history(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+    ) -> Mapping[str, object]:
+        """在一次分钟轮次前合并 QMT 补数，并认证可供各结构分片本地读取的范围。"""
+
+        observed_at = normalize_datetime(as_of, "as_of")
+        if type(frequency_requests) is not tuple:
+            raise TypeError("frequency_requests must be an exact tuple")
+        raw_requests = frequency_requests
+        if any(
+            type(item) is not tuple
+            or len(item) != 2
+            or type(item[0]) is not str
+            or _stock_codes((item[0],)) != (item[0],)
+            or type(item[1]) is not tuple
+            or not item[1]
+            or len(item[1]) != len(set(item[1]))
+            or item[1]
+            != tuple(
+                frequency
+                for frequency in SCREENING_STRUCTURE_FREQUENCIES
+                if frequency in item[1]
+            )
+            for item in raw_requests
+        ):
+            raise ValueError("frequency_requests contains an invalid row")
+        if raw_requests != tuple(sorted(raw_requests, key=lambda item: item[0])) or len(
+            {item[0] for item in raw_requests}
+        ) != len(raw_requests):
+            raise ValueError("frequency_requests must be canonical and unique")
+        canonical = raw_requests
+        if not canonical:
+            with self._prepared_history_lock:
+                self._prepared_history_as_of = observed_at
+                self._prepared_history_by_code = {}
+            return {
+                "schema": "chanlun-screening-local-history-preparation",
+                "as_of": observed_at.isoformat(),
+                "prepared_frequencies_by_code": {},
+                "batch_download_available": False,
+            }
+        # 只让一个结构工作进程执行批量补数；QMT 本地库由全部分片共享，控制进程
+        # 不参与，实时逐笔仍可服务。
+        value = self._structure_transports[0].request(
+            "prepare_local_history",
+            frequency_requests=canonical,
+            as_of=observed_at,
+        )
+        if not isinstance(value, Mapping) or (
+            value.get("schema") != "chanlun-screening-local-history-preparation"
+            or value.get("as_of") != observed_at.isoformat()
+            or not isinstance(value.get("prepared_frequencies_by_code"), Mapping)
+        ):
+            raise NativeScreeningWorkerProtocolError(
+                "invalid local history preparation result"
+            )
+        raw = value["prepared_frequencies_by_code"]
+        prepared: dict[str, tuple[str, ...]] = {}
+        for code, requested_frequencies in canonical:
+            frequencies = raw.get(code)
+            if (
+                type(frequencies) is not tuple
+                or len(frequencies) != len(set(frequencies))
+                or not set(frequencies).issubset(set(requested_frequencies))
+            ):
+                raise NativeScreeningWorkerProtocolError(
+                    "local history preparation scope is invalid"
+                )
+            prepared[code] = frequencies
+        if set(raw) != set(prepared):
+            raise NativeScreeningWorkerProtocolError(
+                "local history preparation codes are invalid"
+            )
+        with self._prepared_history_lock:
+            self._prepared_history_as_of = observed_at
+            self._prepared_history_by_code = dict(prepared)
+        return {
+            "schema": "chanlun-screening-local-history-preparation",
+            "as_of": observed_at.isoformat(),
+            "prepared_frequencies_by_code": dict(prepared),
+            "batch_download_available": value.get("batch_download_available"),
+        }
+
     def symbol_name(self, code: str) -> str | None:
         with self._cache_lock:
             cached = self._symbol_names.get(code)
@@ -1961,10 +2073,25 @@ class NativeTradingDataGatewayProcessProxy:
             sector_members=sector_members,
             frequencies=frequencies,
             higher_timeframe_as_of=higher_timeframe_as_of,
+            local_history_frequencies=self._prepared_local_frequencies(
+                code,
+                as_of,
+            ),
         )
         if not isinstance(value, SymbolStructureBundle):
             raise NativeScreeningWorkerProtocolError("invalid structure bundle result")
         return value
+
+    def _prepared_local_frequencies(
+        self,
+        code: str,
+        as_of: datetime,
+    ) -> tuple[str, ...]:
+        observed_at = normalize_datetime(as_of, "as_of")
+        with self._prepared_history_lock:
+            if self._prepared_history_as_of != observed_at:
+                return ()
+            return self._prepared_history_by_code.get(code, ())
 
     def health_snapshot(self) -> dict[str, object]:
         result = self._transport.health_snapshot()

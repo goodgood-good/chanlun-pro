@@ -38,3 +38,37 @@ def test_stock_info_valid_code_returns_dict(monkeypatch):
     assert info is not None
     assert info["code"] == "SH.600000"
     assert info["name"] == "浦发银行"
+
+
+def test_market_data_readiness_probe_requires_real_instrument(monkeypatch):
+    """就绪探针必须取得有效标的信息，不能把空 RPC 响应误报为可用。"""
+
+    ex = ExchangeQMT()
+    monkeypatch.setattr(ex, "stock_info", lambda _code: None)
+
+    try:
+        ex.market_data_readiness_probe()
+    except RuntimeError as exc:
+        assert "行情 RPC" in str(exc)
+    else:  # pragma: no cover - 明确保护失败分支
+        raise AssertionError("空响应必须使 QMT 行情探针失败")
+
+
+def test_market_data_readiness_probe_returns_read_only_evidence(monkeypatch):
+    ex = ExchangeQMT()
+    monkeypatch.setattr(
+        ex,
+        "stock_info",
+        lambda code: {"code": code, "name": "浦发银行", "precision": 2},
+    )
+
+    result = ex.market_data_readiness_probe()
+
+    assert result == {
+        "schema": "chanlun-qmt-market-data-readiness",
+        "ready": True,
+        "probe_code": "SH.600000",
+        "provider": "QMT_XTDATA",
+        "real_account_access": False,
+        "real_order_transport": False,
+    }

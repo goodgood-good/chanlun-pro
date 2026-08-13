@@ -88,7 +88,7 @@ def _parse_datetime(value: object) -> datetime | None:
 
 
 class AppQmtRuntimeController:
-    """Own QMT bootstrap, daily restart and bounded recovery inside app.py."""
+    """在 app.py 内统一管理 QMT 启动、每日重启和有界故障恢复。"""
 
     def __init__(
         self,
@@ -271,6 +271,39 @@ class AppQmtRuntimeController:
             error = f"QMT helper exited with code {completed.returncode}"
         return observation, None if error is None else str(error)[:300]
 
+    @staticmethod
+    def _observation_ready(observation: Mapping[str, object]) -> bool:
+        """只接受同时通过进程检查和行情 RPC 检查的新协议观察。"""
+
+        return bool(
+            observation.get("ready") is True
+            and observation.get("market_data_rpc_ready") is True
+        )
+
+    @staticmethod
+    def _manual_restart_required(observation: Mapping[str, object]) -> bool:
+        """判断当前实例是否超出应用进程的安全控制权限。"""
+
+        return bool(
+            not AppQmtRuntimeController._observation_ready(observation)
+            and (
+                observation.get("reason_code") == "QMT_MANUAL_RESTART_REQUIRED"
+                or (
+                    observation.get("automatic_control_ready") is False
+                    and int(observation.get("process_count", 0) or 0) > 0
+                )
+            )
+        )
+
+    @staticmethod
+    def _healthy_but_uncontrollable(observation: Mapping[str, object]) -> bool:
+        """健康的提权实例可安全采用，但不能由应用执行强制日重启。"""
+
+        return bool(
+            AppQmtRuntimeController._observation_ready(observation)
+            and observation.get("automatic_control_ready") is False
+        )
+
     def _record(
         self,
         *,
@@ -286,7 +319,7 @@ class AppQmtRuntimeController:
             state["last_attempt_at"] = _canonical_at(observed_at)
             state["observation"] = dict(observation) if observation else None
             state["error"] = error
-            if observation.get("ready") is True and error is None:
+            if self._observation_ready(observation) and error is None:
                 state["last_success_at"] = _canonical_at(observed_at)
             if recovery:
                 state["last_recovery_at"] = _canonical_at(observed_at)
@@ -324,7 +357,7 @@ class AppQmtRuntimeController:
             changed = bool(observation.get("changed"))
             if (
                 notify_change
-                and observation.get("ready") is True
+                and self._observation_ready(observation)
                 and error is None
                 and (changed or action == "Restart")
                 and self._after_change is not None
@@ -353,7 +386,7 @@ class AppQmtRuntimeController:
             self._write_state(state, observed_at)
 
     def startup(self) -> None:
-        """Synchronously establish QMT before native screening starts."""
+        """在原生选股启动前同步建立可用的 QMT 行情服务。"""
 
         reasons = self._configuration_reasons()
         if reasons:
@@ -363,21 +396,29 @@ class AppQmtRuntimeController:
             self._registered_at = observed_at
         self._claim_owner(observed_at)
         status = self._operate("Status", notify_change=False)
+        if self._manual_restart_required(status):
+            raise RuntimeError("QMT_MANUAL_RESTART_REQUIRED")
         in_catchup = bool(
             observed_at.weekday() < 5 and time(8, 30) <= observed_at.time() <= time(10)
         )
-        if in_catchup and not self._fresh_for_session(status, observed_at):
+        if in_catchup and self._healthy_but_uncontrollable(status):
+            self._mark_daily(
+                observed_at=observed_at,
+                status="ADOPTED",
+                reason_code="QMT_HEALTHY_UNCONTROLLABLE_ADOPTED",
+            )
+        elif in_catchup and not self._fresh_for_session(status, observed_at):
             status = self._operate("Restart", notify_change=False)
             self._mark_daily(
                 observed_at=observed_at,
-                status="SUCCEEDED" if status.get("ready") is True else "FAILED",
+                status="SUCCEEDED" if self._observation_ready(status) else "FAILED",
                 reason_code=(
                     "QMT_DAILY_RESTART_SUCCEEDED"
-                    if status.get("ready") is True
+                    if self._observation_ready(status)
                     else "QMT_DAILY_RESTART_FAILED"
                 ),
             )
-        elif status.get("ready") is not True:
+        elif not self._observation_ready(status):
             recovery_action = (
                 "Restart" if int(status.get("process_count", 0) or 0) > 0 else "Ensure"
             )
@@ -392,7 +433,7 @@ class AppQmtRuntimeController:
                 status="ADOPTED",
                 reason_code="QMT_FRESH_START_ADOPTED",
             )
-        if status.get("ready") is not True:
+        if not self._observation_ready(status):
             reason = str(status.get("reason_code") or "QMT_RUNTIME_NOT_READY")
             raise RuntimeError(reason)
 
@@ -436,6 +477,20 @@ class AppQmtRuntimeController:
     def daily_restart(self) -> bool:
         observed_at = self._now()
         status = self._operate("Status", notify_change=False)
+        if self._manual_restart_required(status):
+            self._mark_daily(
+                observed_at=observed_at,
+                status="FAILED",
+                reason_code="QMT_MANUAL_RESTART_REQUIRED",
+            )
+            return False
+        if self._healthy_but_uncontrollable(status):
+            self._mark_daily(
+                observed_at=observed_at,
+                status="ADOPTED",
+                reason_code="QMT_HEALTHY_UNCONTROLLABLE_ADOPTED",
+            )
+            return True
         if self._fresh_for_session(status, observed_at):
             self._mark_daily(
                 observed_at=observed_at,
@@ -444,7 +499,7 @@ class AppQmtRuntimeController:
             )
             return True
         result = self._operate("Restart", notify_change=True)
-        success = result.get("ready") is True
+        success = self._observation_ready(result)
         self._mark_daily(
             observed_at=self._now(),
             status="SUCCEEDED" if success else "FAILED",
@@ -456,8 +511,10 @@ class AppQmtRuntimeController:
 
     def monitor(self) -> bool:
         status = self._operate("Status", notify_change=False)
-        if status.get("ready") is True:
+        if self._observation_ready(status):
             return True
+        if self._manual_restart_required(status):
+            return False
         with self._state_lock:
             state = self._load_state()
         last_recovery = _parse_datetime(state.get("last_recovery_at"))
@@ -475,7 +532,7 @@ class AppQmtRuntimeController:
             notify_change=True,
             recovery=True,
         )
-        return result.get("ready") is True
+        return self._observation_ready(result)
 
     def snapshot(self) -> dict[str, object]:
         now = self._now()
@@ -487,7 +544,7 @@ class AppQmtRuntimeController:
             dict(raw_observation) if isinstance(raw_observation, Mapping) else {}
         )
         configured = not reasons
-        process_ready = observation.get("ready") is True
+        process_ready = self._observation_ready(observation)
         registered = self._registered
         last_attempt = _parse_datetime(state.get("last_attempt_at"))
         observation_fresh = bool(
@@ -546,6 +603,12 @@ class AppQmtRuntimeController:
             "daily_reason_code": state.get("daily_reason_code"),
             "qmt_executable": observation.get("qmt_executable"),
             "qmt_directory": observation.get("qmt_directory"),
+            "market_data_port": observation.get("market_data_port"),
+            "market_data_rpc_ready": observation.get("market_data_rpc_ready") is True,
+            "automatic_control_ready": observation.get("automatic_control_ready"),
+            "uncontrollable_process_ids": observation.get(
+                "uncontrollable_process_ids", []
+            ),
             "log_retention_days": observation.get("log_retention_days"),
             "log_max_total_bytes": observation.get("log_max_total_bytes"),
             "main_process_count": int(observation.get("main_process_count", 0) or 0),
@@ -568,7 +631,7 @@ class AppQmtRuntimeController:
         }
 
     def stop(self) -> None:
-        """Release app ownership without terminating the interactive QMT UI."""
+        """释放应用所有权，不终止交互式 QMT 界面。"""
 
         with self._state_lock:
             existing = _read_mapping(self._owner_path)

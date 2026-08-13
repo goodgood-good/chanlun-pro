@@ -110,6 +110,26 @@ def test_deepcopied_strict_state_remains_incrementally_equivalent() -> None:
         assert _strict_signature(incremental) == _strict_signature(batch)
 
 
+def test_validated_incremental_htf_fast_path_equals_normal_and_cold_batch() -> None:
+    """运行时认证过前缀后，快速入口仍必须与唯一生产结果逐项一致。"""
+
+    frame = _generate_klines(190, 73)
+    normal = CL("TST", FREQUENCY, _config(), market="a")
+    validated = CL("TST", FREQUENCY, _config(), market="a")
+    initial = frame.iloc[:150].reset_index(drop=True)
+    normal.process_klines(initial)
+    validated.process_klines(initial)
+
+    for length in (151, 157, 170, 190):
+        prefix = frame.iloc[:length].reset_index(drop=True)
+        normal.process_klines(prefix)
+        validated.process_validated_incremental_klines(prefix)
+        cold = CL("TST", FREQUENCY, _config(), market="a")
+        cold.process_klines(prefix)
+        assert _strict_signature(validated) == _strict_signature(normal)
+        assert _strict_signature(validated) == _strict_signature(cold)
+
+
 def test_real_data_strict_evidence_equals_cold_batch() -> None:
     path = FIXTURES / "SH.600519_5m.parquet"
     if not path.exists():
