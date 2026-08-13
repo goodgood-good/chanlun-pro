@@ -5,6 +5,11 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, Mapping
 
+from chanlun.core.strict_structure.models import (
+    STRICT_POINT_TYPES,
+    STRICT_POINT_TYPE_SET,
+    StrictPointType,
+)
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.a_share_minute_grid import (
     a_share_optional_entry_valid_until,
@@ -17,16 +22,10 @@ if TYPE_CHECKING:
     )
 
 
-PointType = Literal["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]
-CANONICAL_POINT_TYPES: tuple[PointType, ...] = (
-    "1buy",
-    "2buy",
-    "3buy",
-    "1sell",
-    "2sell",
-    "3sell",
-)
-CANONICAL_POINT_TYPE_SET: frozenset[PointType] = frozenset(CANONICAL_POINT_TYPES)
+PointType = StrictPointType
+# 决策层只引用严格结构核心发布的六类点协议，不再维护第二份类型清单。
+CANONICAL_POINT_TYPES: tuple[PointType, ...] = STRICT_POINT_TYPES
+CANONICAL_POINT_TYPE_SET: frozenset[PointType] = STRICT_POINT_TYPE_SET
 # 人工复核时按类别成对展示，避免三类买点把一、二类卖点挤到队列末端。
 POINT_REVIEW_ORDER: tuple[PointType, ...] = (
     "1buy",

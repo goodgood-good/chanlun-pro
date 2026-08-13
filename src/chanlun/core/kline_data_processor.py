@@ -84,12 +84,11 @@ class KlineDataProcessor:
         close,
         volume=0.0,
     ) -> List[Kline]:
-        """Fast path for one already-normalized bar.
+        """处理单根已规范化 K 线的快速路径。
 
-        Walk-forward replay feeds one visible bar at a time.  Building a
-        one-row DataFrame for every bar spends most of its time in pandas, so
-        this path creates the same ``Kline`` object directly and then reuses the
-        normal internal append/update logic.
+        前向回放每次只输入一根可见 K 线。若每根都构造单行 DataFrame，大部分时间
+        会耗在 pandas 上；本路径直接创建等价 ``Kline`` 对象，再复用规范的内部
+        追加和更新逻辑。
         """
         if date is None:
             return []

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Interface for the single production Chanlun runtime."""
+"""唯一缠论生产运行时接口。"""
 
 from __future__ import annotations
 

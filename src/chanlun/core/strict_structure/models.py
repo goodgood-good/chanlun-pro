@@ -16,6 +16,15 @@ from chanlun.core.strict_structure.identity import (
 
 Direction = Literal["up", "down"]
 StrictPointType = Literal["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]
+STRICT_POINT_TYPES: tuple[StrictPointType, ...] = (
+    "1buy",
+    "2buy",
+    "3buy",
+    "1sell",
+    "2sell",
+    "3sell",
+)
+STRICT_POINT_TYPE_SET: frozenset[StrictPointType] = frozenset(STRICT_POINT_TYPES)
 
 
 class SourceKind(str, Enum):
@@ -2188,7 +2197,7 @@ def build_strict_point_id(
 
     if not price_basis_revision or not price_basis_revision.strip():
         raise ValueError("price_basis_revision is required")
-    if point_type not in {"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}:
+    if point_type not in STRICT_POINT_TYPE_SET:
         raise ValueError("unsupported strict point type")
     if type(structural_level) is not int or structural_level < 0:
         raise ValueError("structural_level must be non-negative")

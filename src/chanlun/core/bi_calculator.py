@@ -5,12 +5,11 @@ from chanlun.core.types import FX, BI, CLKline
 
 
 def _fractal_lock_witness(fx: FX):
-    """Return the first physical prefix that already confirms ``fx``.
+    """返回第一次足以确认 ``fx`` 的物理 K 线前缀。
 
-    The right shoulder can remain the active inclusion-merged CL K after the
-    fractal first became visible.  A cold batch therefore must replay that
-    shoulder's source-K prefixes; taking the final merged shoulder's last date
-    would leak later bars and disagree with bar-by-bar calculation.
+    分型首次可见后，右肩仍可能是正在参与包含合并的缠论 K 线。冷启动批量计算
+    必须重放右肩的源 K 线前缀；若直接采用最终合并右肩的最后日期，会泄露后续
+    K 线并与逐根计算产生差异。
     """
 
     cl_klines = [cl_kline for cl_kline in fx.klines if cl_kline is not None]
@@ -31,8 +30,8 @@ def _fractal_lock_witness(fx: FX):
             right_high = min(source.h for source in prefix)
             right_low = min(source.l for source in prefix)
         else:
-        # 未合并的肩部只有一根来源 K 线。方向缺失属于畸形中间状态，
-        # 此时重放其最新来源快照。
+            # 未合并的肩部只有一根来源 K 线。方向缺失属于畸形中间状态，
+            # 此时重放其最新来源快照。
             right_high = prefix[-1].h
             right_low = prefix[-1].l
 
@@ -159,13 +158,11 @@ class BiCalculator:
         done: bool,
         lock_witness=None,
     ) -> None:
-        """Set BI completion and the next-endpoint witness together.
+        """同时设置笔的完成状态和下一端点见证。
 
-        A stroke remains the active pending stroke even after its own end fractal
-        becomes visible: a later, opposite endpoint can still replace that tail.
-        It is immutable only once the following stroke endpoint exists.  Using
-        ``bi.end`` alone backdates the lock to a prefix where the stroke was still
-        pending.
+        即使自身结束分型已经可见，该笔仍是当前待定笔，后续相反端点仍可能替换其
+        尾部；只有下一笔端点存在后它才不可变。若只使用 ``bi.end``，会把锁定时刻
+        错误提前到该笔仍处于待定状态的前缀。
         """
 
         bi._end.done = done
@@ -183,7 +180,7 @@ class BiCalculator:
         bi.locked_at = witness
 
     def _first_following_endpoint_witness(self, bi: BI):
-        """Replay the first later fractal that makes the following stroke valid."""
+        """重放第一个使后续笔成立的更晚分型。"""
 
         for candidate in self.fxs:
             if candidate.k.index <= bi._end.k.index:

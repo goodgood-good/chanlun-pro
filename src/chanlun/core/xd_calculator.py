@@ -20,12 +20,10 @@ _TYPE2_INVALIDATED = "invalidated"
 
 @dataclass(frozen=True)
 class _GapConfirmationInvalidated:
-    """A pending type-2 gap was invalidated by a later locked BI.
+    """待定的第二种缺口确认被更晚锁定的笔否定。
 
-    The invalidating BI is causal evidence even when the segment is
-    subsequently recognised through the ordinary no-gap branch.  Dropping
-    this timestamp used to let a later prefix create an XD whose ``locked_at``
-    was back-dated to before that XD was observable.
+    即使线段随后通过普通无缺口分支成立，这根否定笔仍是因果证据。若丢失该
+    时间，更晚前缀可能生成一条 ``locked_at`` 被错误提前到线段可见之前的线段。
     """
 
     witnessed_at: object
@@ -57,7 +55,7 @@ def _overlap(a, b) -> bool:
 
 
 def _elem_farthest_bi_index(elem: dict) -> int:
-    """Return the farthest physical BI represented by a feature element."""
+    """返回特征元素所代表的最远物理笔序号。"""
 
     merged = elem.get('merged_bis')
     if merged:
@@ -626,7 +624,7 @@ class XdCalculator:
     _DEFER_DONE = 4
 
     def _freeze_confirmed_candidate(self, segs, locked_candidates) -> None:
-        """Freeze geometry and the first witness once two successors exist."""
+        """后继证据充足后冻结候选线段几何及其首个见证。"""
         if len(segs) <= self._DEFER_DONE:
             return
         index = len(segs) - self._DEFER_DONE - 1
@@ -907,7 +905,7 @@ class XdCalculator:
     # 检查第二种情况。
     # ----------------------------------------------------------
     def _check_type2(self, all_bis, mid_elem, seg_type) -> tuple[str, Optional[int]]:
-        """Return type-2 status and the farthest causal witness BI index."""
+        """返回第二种情况状态及最远因果见证笔序号。"""
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
         start_pos = target_bi.index + 1

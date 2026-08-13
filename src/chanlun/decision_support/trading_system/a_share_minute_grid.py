@@ -1,4 +1,4 @@
-"""One authoritative A-share completed-1m session and entry-TTL contract."""
+"""A 股已完成一分钟交易时段与入场有效期的唯一权威契约。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def a_share_completed_one_minute_closes(
     *,
     timezone: tzinfo | None = _CN,
 ) -> tuple[datetime, ...]:
-    """Return the 240 QMT end labels for one A-share continuous session."""
+    """返回一个 A 股连续竞价交易日的 240 个 QMT 结束标签。"""
 
     morning = datetime.combine(session, time(9, 31), tzinfo=timezone)
     afternoon = datetime.combine(session, time(13, 1), tzinfo=timezone)
@@ -30,11 +30,10 @@ def a_share_completed_one_minute_closes(
 def a_share_completed_one_minute_prefix_closes(
     not_after: datetime,
 ) -> tuple[datetime, ...]:
-    """Return the exact completed continuous-auction prefix at a cutoff.
+    """返回截止时刻已经完成的精确连续竞价前缀。
 
-    This is the causal reference grid for an intraday screening observation:
-    lunch, the opening auction and seconds inside a minute never manufacture a
-    bar, while an after-close cutoff resolves to the full 240-bar session.
+    这是盘中筛选观测的因果参考网格：午休、开盘集合竞价以及一分钟内的秒级时刻
+    都不会凭空生成 K 线；收盘后的截止时刻则解析为完整的 240 根交易日序列。
     """
 
     cutoff = normalize_datetime(not_after, "not_after")
@@ -49,7 +48,7 @@ def validate_a_share_completed_one_minute_interval(
     opened_at: datetime,
     closed_at: datetime,
 ) -> None:
-    """Require one exact exchange-aligned completed continuous-auction minute."""
+    """要求一个与交易所时钟严格对齐、已经完成的连续竞价分钟。"""
 
     opened = normalize_datetime(opened_at, "opened_at")
     closed = normalize_datetime(closed_at, "closed_at")
@@ -78,7 +77,7 @@ def validate_a_share_complete_session_closes(
     *,
     session: date,
 ) -> None:
-    """Require the chronological, gap-free 240-close grid for one session."""
+    """要求一个按时间顺序排列且无缺口的 240 分钟收盘网格。"""
 
     normalized = tuple(
         normalize_datetime(value, "closed_at") for value in closes
@@ -95,7 +94,7 @@ def validate_a_share_completed_one_minute_prefix_closes(
     *,
     not_after: datetime,
 ) -> None:
-    """Require every and only the completed 1m closes knowable at a cutoff."""
+    """要求恰好包含截止时刻可知的全部已完成一分钟收盘点。"""
 
     normalized = tuple(
         normalize_datetime(value, "closed_at") for value in closes
@@ -110,7 +109,7 @@ def validate_a_share_completed_one_minute_prefix_closes(
 def a_share_optional_entry_valid_until(
     confirmation_bar_closed_at: datetime,
 ) -> datetime:
-    """Return the exact one-locator-bar TTL without crossing lunch or close."""
+    """返回不跨越午休或收盘的一根定位 K 线精确有效期。"""
 
     closed_at = normalize_datetime(
         confirmation_bar_closed_at,

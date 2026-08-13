@@ -8,7 +8,7 @@ from typing import List
 
 
 def _slot_setstate(obj, state):
-    """Restore only the canonical state emitted by the current slotted type."""
+    """只恢复当前插槽类型生成的规范状态。"""
     if (
         type(state) is not tuple
         or len(state) != 2
