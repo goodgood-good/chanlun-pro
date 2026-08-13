@@ -67,6 +67,7 @@ from chanlun.decision_support.trading_system.live_human_review import (
     _jsonable,
     _mwd_warmup_diagnostic_chain_is_consistent,
     _risk_evidence_is_consistent,
+    coverage_manifest_dispositions_are_consistent,
     live_human_review_document,
     live_screening_semantic_snapshot_document,
     live_screening_snapshot_content_sha256,
@@ -2153,6 +2154,11 @@ def test_live_adapter_recomputes_partial_universe_coverage_claims() -> None:
             "error_type": "stock_analysis_error",
             "code": failed_code,
             "reason_code": "QMT_DATA_UNAVAILABLE",
+            "failure_class": "UNCLASSIFIED_FAILURE",
+            "retry_policy": "NEXT_COVERAGE_CYCLE",
+            "deterministic_for_coverage_epoch": False,
+            "remote_error_type": "RuntimeError",
+            "reason": "QMT data unavailable",
         }
     ]
     partial["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(partial)
@@ -2178,6 +2184,47 @@ def test_live_adapter_recomputes_partial_universe_coverage_claims() -> None:
     )
     with pytest.raises(ValueError, match="boundary is incomplete"):
         validate_live_review_snapshot(missing_error)
+
+
+def test_coverage_dispositions_require_authenticated_retry_evidence() -> None:
+    snapshot = live_snapshot()
+    manifest = copy.deepcopy(snapshot["coverage_manifest"])
+    code = str(manifest["completed_codes"][0])
+    manifest["failed_codes"] = [code]
+    manifest["backoff_frequencies"] = {code: ["d", "30m", "5m", "1m"]}
+    runtime_error = {
+        "code": code,
+        "error_type": "stock_analysis_error",
+        "reason_code": "NATIVE_WORKER_TIMEOUT",
+        "failure_class": "RUNTIME_FAILURE",
+        "retry_policy": "NEXT_REFRESH_AFTER_BACKOFF",
+        "deterministic_for_coverage_epoch": False,
+        "remote_error_type": "NativeScreeningWorkerTimeout",
+        "reason": "native worker made no progress",
+    }
+
+    assert coverage_manifest_dispositions_are_consistent(
+        manifest,
+        [runtime_error],
+    )
+
+    for forged_errors in (
+        [],
+        [{**runtime_error, "failure_class": "MARKET_DATA_REJECTION"}],
+        [{**runtime_error, "retry_policy": "NEXT_MARKET_DATA_EPOCH"}],
+        [{**runtime_error, "deterministic_for_coverage_epoch": True}],
+        [
+            {
+                key: value
+                for key, value in runtime_error.items()
+                if key != "remote_error_type"
+            }
+        ],
+    ):
+        assert not coverage_manifest_dispositions_are_consistent(
+            manifest,
+            forged_errors,
+        )
 
 
 def test_live_adapter_authenticates_minimum_history_exclusions() -> None:

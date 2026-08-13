@@ -98,6 +98,7 @@ from chanlun.decision_support.trading_system.live_human_review import (
     MONITOR_INSTRUMENT_EXCLUSION_CONTRACT_ID,
     SECTOR_COVERAGE_CONTRACT_ID,
     SIGNAL_DOCUMENT_CONTRACT_ID,
+    coverage_manifest_dispositions_are_consistent,
     live_screening_snapshot_content_sha256,
     monitor_instrument_exclusions_are_consistent,
     screening_coverage_epoch_id,
@@ -2481,6 +2482,9 @@ def _cache_contract_is_valid(
         and isinstance(value.get("snapshot_content_sha256"), str)
         and monitor_instrument_exclusions_are_consistent(value)
         and isinstance(value.get("coverage_manifest"), Mapping)
+        and coverage_manifest_dispositions_are_consistent(
+            value["coverage_manifest"], value.get("errors")
+        )
         and value["coverage_manifest"].get("schema") == COVERAGE_MANIFEST_SCHEMA
         and value["coverage_manifest"].get("coverage_state_contract_id")
         == COVERAGE_STATE_CONTRACT_ID
@@ -3950,10 +3954,10 @@ class TradingScreeningService:
         if (
             exclusion_codes != sorted(set(exclusion_codes))
             or set(exclusion_codes) != excluded
-            or completed & excluded
-            or completed & failed
-            or excluded & failed
-            or (completed | excluded | failed) - discovered
+            or not coverage_manifest_dispositions_are_consistent(
+                manifest,
+                snapshot.get("errors"),
+            )
         ):
             return False
         screening_policy_id = manifest.get("screening_policy_id")
@@ -7060,6 +7064,7 @@ class TradingScreeningService:
             for code in symbols
             if code not in completed_codes and code not in excluded_codes
         )
+        stock_batch_errors = errors[len(sector_errors) :]
         if not monitoring_only_refresh:
             self._coverage_cycle_batch_count += 1
             self._coverage_cycle_completed_codes.update(completed_codes)
@@ -7074,13 +7079,16 @@ class TradingScreeningService:
                     None,
                 )
             for code in excluded_codes:
+                self._coverage_cycle_completed_codes.discard(code)
                 self._coverage_cycle_failed_codes.discard(code)
                 self._coverage_cycle_errors.pop(
                     f"stock_analysis_error:{code}",
                     None,
                 )
+            for code in failed_codes:
+                self._coverage_cycle_excluded_codes.discard(code)
+                self._coverage_cycle_exclusions.pop(code, None)
             self._record_cycle_exclusions(exclusions)
-        stock_batch_errors = errors[len(sector_errors) :]
         if monitoring_only_refresh:
             # 全市场覆盖账本已经完成。同截止点复查失败时必须保留最近有效信号，仅作为
             # 运行健康问题展示；若加入 ``errors``，标的错误码会与清单失败码不一致，
@@ -7358,6 +7366,7 @@ class TradingScreeningService:
             if (
                 code in completed_codes
                 or code in excluded_codes
+                or code not in self._coverage_cycle_completed_codes
                 or code not in retained_scope
             ):
                 continue

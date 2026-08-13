@@ -4681,6 +4681,126 @@ def test_partial_epoch_restores_exact_sector_batch_across_restart(
     )
 
 
+def test_runtime_retry_retains_last_success_and_restores_frozen_sector_state(
+    tmp_path: Path,
+) -> None:
+    """有认证运行故障时可保留最近成功证据，但重启不得重算板块。"""
+
+    class NativeScreeningWorkerUnavailable(RuntimeError):
+        pass
+
+    cache_path = tmp_path / "snapshot.json"
+    symbols = ("SZ.000001", "SZ.000002")
+    batch = _evidence_sector_batch(symbols, context_revision="runtime-retry")
+    market = RecordingMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=EvidenceSectorCatalog(batch, symbols),
+        engine=RecordingEngine(),
+        scan_planner=SequencedPlanner((symbols,)),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(max_symbols_per_refresh=1),
+    )
+    first = service.refresh_now()
+    retained_code = symbols[0]
+    assert first["coverage_manifest"]["completed_codes"] == [retained_code]
+
+    original = market.structure_bundle
+
+    def fail_retained_code(code, **kwargs):
+        if code == retained_code:
+            market.bundle_codes.append(code)
+            raise NativeScreeningWorkerUnavailable("worker restarted")
+        return original(code, **kwargs)
+
+    market.structure_bundle = fail_retained_code
+    service._pending_frequencies[retained_code] = set(
+        trading_screening_subject.SCREENING_STRUCTURE_FREQUENCIES
+    )
+    retried = service.refresh_now()
+    manifest = retried["coverage_manifest"]
+
+    assert retained_code in manifest["completed_codes"]
+    assert retained_code in manifest["failed_codes"]
+    assert retained_code in manifest["backoff_frequencies"]
+    assert _cache_is_valid(
+        retried,
+        service._config,
+        service._decision_core_id,
+        service._selection_research_revision,
+    )
+
+    restarted_catalog = HydratingEvidenceSectorCatalog(batch, symbols)
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=restarted_catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SHOULD.NOT.REPLAN",)),
+        cache_path=cache_path,
+        clock=lambda: AS_OF + timedelta(minutes=1),
+        notifier=None,
+        config=TradingScreeningConfig(max_symbols_per_refresh=1),
+    )
+
+    assert restarted._coverage_cycle_sector_restored is True
+    assert restarted._coverage_cycle_sector_batch is not None
+    assert restarted._coverage_cycle_sector_members == {
+        eligible_sector().sector_id: symbols
+    }
+    assert restarted_catalog.assessment_calls == []
+
+
+def test_minimum_history_exclusion_retracts_previous_success_and_signal(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    symbols = ("SZ.000001",)
+    batch = _evidence_sector_batch(symbols, context_revision="history-exclusion")
+    market = ActionableMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=EvidenceSectorCatalog(batch, symbols),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=SequencedPlanner((symbols,)),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(max_symbols_per_refresh=1),
+    )
+    first = service.refresh_now()
+    failed_code = symbols[0]
+    assert any(row["code"] == failed_code for row in first["signals"])
+
+    original = market.structure_bundle
+
+    def reject_history(code, **kwargs):
+        if code == failed_code:
+            market.bundle_codes.append(code)
+            raise ValueError("kline frame does not meet minimum history")
+        return original(code, **kwargs)
+
+    market.structure_bundle = reject_history
+    service._pending_frequencies[failed_code] = set(
+        trading_screening_subject.SCREENING_STRUCTURE_FREQUENCIES
+    )
+    failed = service.refresh_now()
+    manifest = failed["coverage_manifest"]
+
+    assert failed_code not in manifest["completed_codes"]
+    assert failed_code not in manifest["failed_codes"]
+    assert failed_code in manifest["excluded_codes"]
+    assert failed_code in manifest["deferred_frequencies"]
+    assert all(row["code"] != failed_code for row in failed["signals"])
+    assert _cache_is_valid(
+        failed,
+        service._config,
+        service._decision_core_id,
+        service._selection_research_revision,
+    )
+
+
 def test_complete_epoch_keeps_full_coverage_during_post_restart_monitoring(
     tmp_path: Path,
 ) -> None:

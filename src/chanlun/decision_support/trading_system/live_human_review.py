@@ -761,6 +761,130 @@ def monitor_instrument_exclusions_are_consistent(
     )
 
 
+def coverage_manifest_dispositions_are_consistent(
+    manifest: Mapping[str, object],
+    errors: object,
+) -> bool:
+    """统一校验覆盖结果、重试队列与错误证据的关系。
+
+    ``completed_codes`` 表示仍有可复用的最近成功证据，``failed_codes`` 表示最近一次
+    尝试失败。因此只要失败文档与即时、退避或下一周期队列精确匹配，二者可以重叠；
+    确定性排除始终与成功、失败互斥。该规则由生成、恢复和人工复核共同使用，防止同一
+    份快照在写入端有效、重启端却无法恢复。
+    """
+
+    if not isinstance(errors, list):
+        return False
+    try:
+        discovered = set(
+            _canonical_code_list(manifest.get("discovered_codes"), "discovered codes")
+        )
+        completed = set(
+            _canonical_code_list(manifest.get("completed_codes"), "completed codes")
+        )
+        failed = set(
+            _canonical_code_list(manifest.get("failed_codes"), "failed codes")
+        )
+        excluded = set(
+            _canonical_code_list(manifest.get("excluded_codes"), "excluded codes")
+        )
+        pending = _frequency_code_set(
+            manifest.get("pending_frequencies"), "pending frequencies"
+        )
+        backoff = _frequency_code_set(
+            manifest.get("backoff_frequencies"), "backoff frequencies"
+        )
+        deferred = _frequency_code_set(
+            manifest.get("deferred_frequencies"), "deferred frequencies"
+        )
+    except (TypeError, ValueError):
+        return False
+
+    stock_errors: dict[str, Mapping[str, object]] = {}
+    stock_error_fields = {
+        "code",
+        "error_type",
+        "reason_code",
+        "failure_class",
+        "retry_policy",
+        "deterministic_for_coverage_epoch",
+        "remote_error_type",
+        "reason",
+    }
+    for raw in errors:
+        if not isinstance(raw, Mapping):
+            return False
+        if raw.get("error_type") != "stock_analysis_error":
+            continue
+        code = raw.get("code")
+        if (
+            set(raw) != stock_error_fields
+            or not isinstance(code, str)
+            or not code
+            or code in stock_errors
+            or not isinstance(raw.get("reason_code"), str)
+            or not raw.get("reason_code")
+            or not isinstance(raw.get("remote_error_type"), str)
+            or not raw.get("remote_error_type")
+            or not isinstance(raw.get("reason"), str)
+            or not raw.get("reason")
+        ):
+            return False
+        stock_errors[code] = raw
+    immediate_retry = pending | backoff
+    retained_failures = completed & failed
+
+    def retry_evidence_matches_queue(code: str) -> bool:
+        error = stock_errors.get(code)
+        if error is None:
+            return False
+        failure_class = error.get("failure_class")
+        retry_policy = error.get("retry_policy")
+        deterministic = error.get("deterministic_for_coverage_epoch")
+        if retry_policy == "NEXT_REFRESH_AFTER_BACKOFF":
+            return bool(
+                failure_class == "RUNTIME_FAILURE"
+                and deterministic is False
+                and code in immediate_retry
+                and code not in deferred
+            )
+        if retry_policy == "NEXT_MARKET_DATA_EPOCH":
+            return bool(
+                failure_class == "MARKET_DATA_REJECTION"
+                and deterministic is True
+                and code in deferred
+                and code not in immediate_retry
+            )
+        if retry_policy == "NEXT_COVERAGE_CYCLE":
+            return bool(
+                failure_class == "UNCLASSIFIED_FAILURE"
+                and deterministic is False
+                and code in deferred
+                and code not in immediate_retry
+            )
+        return False
+
+    return bool(
+        set(stock_errors) == failed
+        and not completed & excluded
+        and not excluded & failed
+        and not (completed | excluded | failed) - discovered
+        and not pending - discovered
+        and not backoff - discovered
+        and not pending & excluded
+        and not backoff & excluded
+        and not pending & backoff
+        and not backoff & deferred
+        and not deferred - (failed | excluded)
+        and not excluded - deferred
+        and not backoff - failed
+        and not failed - (immediate_retry | deferred)
+        and not ((pending & completed) - failed)
+        and not retained_failures - (immediate_retry | deferred)
+        and all(retry_evidence_matches_queue(code) for code in failed)
+    )
+
+
 def _coverage_manifest_is_consistent(
     payload: Mapping[str, object],
     *,
@@ -818,7 +942,8 @@ def _coverage_manifest_is_consistent(
             parameter_set_id=str(payload.get("parameter_set_id")),
         )
         if (
-            set(manifest) != COVERAGE_MANIFEST_FIELDS
+            not coverage_manifest_dispositions_are_consistent(manifest, errors)
+            or set(manifest) != COVERAGE_MANIFEST_FIELDS
             or manifest.get("schema") != COVERAGE_MANIFEST_SCHEMA
             or manifest.get("coverage_state_contract_id") != COVERAGE_STATE_CONTRACT_ID
             or manifest.get("signal_document_contract_id")
@@ -830,20 +955,8 @@ def _coverage_manifest_is_consistent(
             or manifest.get("sector_strength_evidence_revision")
             != payload.get("sector_strength_evidence_revision")
             or not _is_sha256_identity(manifest.get("sector_catalog_revision"))
-            or completed & failed
-            or completed & excluded
-            or excluded & failed
             or excluded != set(exclusion_reasons)
-            or attempted - discovered
-            or pending - discovered
-            or backoff - discovered
-            or deferred - (failed | excluded)
-            or excluded - deferred
             or discarded & discovered
-            or pending & attempted
-            or backoff & attempted
-            or pending & backoff
-            or backoff & deferred
             or (complete and attempted != discovered)
             or (complete and (pending or backoff))
             or audit.get("coverage_cycle_complete") is not complete
@@ -3792,6 +3905,7 @@ __all__ = (
     "SECTOR_COVERAGE_CONTRACT_ID",
     "live_screening_semantic_snapshot_document",
     "live_screening_snapshot_content_sha256",
+    "coverage_manifest_dispositions_are_consistent",
     "monitor_instrument_exclusions_are_consistent",
     "live_human_review_document",
     "live_signal_human_review_alert",
