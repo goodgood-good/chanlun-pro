@@ -22,7 +22,11 @@ from chanlun.decision_support.trading_system.human_assisted_decision import (
 from chanlun.decision_support.trading_system.signal_alignment import (
     unified_signal_alignment_contract,
 )
-from tests.trading_system.helpers import confirmed_point, deterministic_bundle
+from tests.trading_system.helpers import (
+    confirmed_point,
+    deterministic_bundle,
+    eligible_sector,
+)
 
 
 def _gate(
@@ -240,7 +244,7 @@ def test_mwd_gate_keeps_candidate_visible_but_blocks_non_green_entry() -> None:
         deterministic_bundle(),
         higher_timeframe_gates=HigherTimeframeGateBundle(
             market=_gate("MARKET", "GREEN"),
-            sector=_gate("QMT:GICS3:bank", "GREEN"),
+            sector=_gate(eligible_sector().sector_id, "GREEN"),
             symbol=_gate("SZ.000001", "RED"),
         ),
         enforce_higher_timeframe_entry_gate=True,
@@ -288,7 +292,7 @@ def test_mwd_evidence_keeps_market_and_symbol_causes_separate() -> None:
                 reason_codes=(market_reason,),
                 period_diagnostics=_period_diagnostics("MARKET"),
             ),
-            sector=_gate("QMT:GICS3:bank", "GREEN"),
+            sector=_gate(eligible_sector().sector_id, "GREEN"),
             symbol=_gate(
                 "SZ.000001",
                 "UNRESOLVED",
@@ -331,7 +335,7 @@ def test_unconverged_warmup_blocks_entry_without_hiding_technical_candidate() ->
         deterministic_bundle(),
         higher_timeframe_gates=HigherTimeframeGateBundle(
             market=_gate("MARKET", "GREEN"),
-            sector=_gate("QMT:GICS3:bank", "GREEN"),
+            sector=_gate(eligible_sector().sector_id, "GREEN"),
             symbol=_gate("SZ.000001", "GREEN"),
         ),
         enforce_higher_timeframe_entry_gate=True,

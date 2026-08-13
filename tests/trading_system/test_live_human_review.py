@@ -324,6 +324,7 @@ def _decisions():
         five_points=(confirmed_point("1sell"),),
         one_points=(confirmed_point("1sell", frequency="1m", minutes_after=1),),
         opposite_points=(),
+        entry_execution_boundaries=(),
     )
     return core, (
         *core.decision_documents(buy_bundle),
@@ -986,6 +987,18 @@ def test_live_snapshot_rejects_setup_available_after_market_cutoff() -> None:
     snapshot = live_snapshot()
     future = deterministic_bundle().as_of + timedelta(minutes=1)
     snapshot["signals"][0]["setup_5m"]["available_at"] = future.isoformat()
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    with pytest.raises(ValueError, match="timeframe provenance is invalid"):
+        validate_live_review_snapshot(snapshot)
+
+
+def test_live_snapshot_rejects_removed_invalidated_point_status() -> None:
+    snapshot = live_snapshot()
+    snapshot["signals"][0]["setup_5m"]["status"] = "invalidated"
+    snapshot["signals"][0]["setup_5m"]["confirmed_at"] = None
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
     )

@@ -1,7 +1,6 @@
-"""Current-contract fixtures for trading-system tests.
+"""交易系统当前契约使用的测试夹具。
 
-These helpers construct only the strict public decision models. They do not
-adapt removed core buy/sell-point, center, or recursive-branch objects.
+这些工具只构造严格的公开决策模型，不再适配已经删除的旧买卖点、中枢或递归分支对象。
 """
 
 from __future__ import annotations
@@ -39,6 +38,7 @@ AS_OF = datetime(2026, 7, 20, 15, 0, tzinfo=CN)
 def confirmed_point(
     point_type: str,
     *,
+    code: str = "SZ.000001",
     frequency: str = "5m",
     tower: str = "formal",
     level: int = 0,
@@ -47,15 +47,22 @@ def confirmed_point(
     center_id: str | None = "center-a",
     center_zd: float | None = 9.0,
     center_zg: float | None = 9.8,
-    center_ordinal: int | None = 1,
-    variant: str = "standard",
+    center_ordinal: int | None = None,
+    variant: str | None = None,
     minutes_after: int = 0,
     available_minutes_after: int = 0,
     price_basis_revision: str = "test-raw",
 ) -> StructuralPoint:
     typed_point = cast(PointType, point_type)
     typed_tower = cast(StructureTower, tower)
-    typed_variant = cast(PointVariant, variant)
+    effective_variant = (
+        variant
+        if variant is not None
+        else "strict"
+        if point_type in {"2buy", "2sell"}
+        else "standard"
+    )
+    typed_variant = cast(PointVariant, effective_variant)
     anchor_at = POINT_AT + timedelta(minutes=minutes_after)
     side = "buy" if point_type.endswith("buy") else "sell"
     invalidation = (
@@ -65,8 +72,27 @@ def confirmed_point(
         if side == "buy"
         else anchor + 0.2
     )
+    effective_center_ordinal = (
+        1 if point_type in {"3buy", "3sell"} and center_ordinal is None
+        else center_ordinal
+    )
+    parent_point_id = (
+        build_point_id(
+            code=code,
+            price_basis_revision=price_basis_revision,
+            point_type=cast(PointType, f"1{side}"),
+            source_frequency=frequency,
+            tower=typed_tower,
+            recursive_level=level,
+            anchor_at=anchor_at - timedelta(minutes=5),
+            center_id=center_id,
+            parent_point_id=None,
+        )
+        if point_type in {"2buy", "2sell"}
+        else None
+    )
     point_id = build_point_id(
-        code="SZ.000001",
+        code=code,
         price_basis_revision=price_basis_revision,
         point_type=typed_point,
         source_frequency=frequency,
@@ -74,11 +100,11 @@ def confirmed_point(
         recursive_level=level,
         anchor_at=anchor_at,
         center_id=center_id,
-        parent_point_id=None,
+        parent_point_id=parent_point_id,
     )
     return StructuralPoint(
         point_id=point_id,
-        code="SZ.000001",
+        code=code,
         point_type=typed_point,
         side=cast(PointSide, side),
         status="confirmed",
@@ -95,9 +121,9 @@ def confirmed_point(
         center_id=center_id,
         center_zd=center_zd,
         center_zg=center_zg,
-        center_ordinal=center_ordinal,
-        divergence_kind="qs" if point_type.startswith("1") else None,
-        parent_point_id=None,
+        center_ordinal=effective_center_ordinal,
+        divergence_kind="trend" if point_type.startswith("1") else None,
+        parent_point_id=parent_point_id,
         evidence_codes=("test_fixture",),
     )
 
@@ -170,6 +196,7 @@ def hostile_sector() -> SectorAssessment:
 def provisional_point(
     point_type: str,
     *,
+    code: str = "SZ.000001",
     frequency: str = "5m",
     tower: str = "formal",
     level: int = 0,
@@ -177,13 +204,13 @@ def provisional_point(
 ) -> ProvisionalCandidate:
     side = "buy" if point_type.endswith("buy") else "sell"
     parent_point_id = (
-        f"parent:{side}:{tower}:{level}"
+        f"parent:{code}:{side}:{tower}:{level}"
         if point_type in {"2buy", "2sell"}
         else None
     )
     return ProvisionalCandidate(
-        candidate_id=f"candidate:{point_type}:{tower}:{level}",
-        code="SZ.000001",
+        candidate_id=f"candidate:{code}:{point_type}:{tower}:{level}",
+        code=code,
         point_type=cast(PointType, point_type),
         side=cast(PointSide, side),
         status="provisional",
@@ -232,7 +259,7 @@ def valid_selection_research() -> SelectionResearchSnapshot:
 
 
 def deterministic_bundle() -> SymbolStructureBundle:
-    """Build one current strict bundle shared by decision-surface tests."""
+    """构造一份供决策边界测试共用的当前严格结构包。"""
 
     return SymbolStructureBundle(
         code="SZ.000001",

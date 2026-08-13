@@ -1014,7 +1014,7 @@ def test_structure_bundle_attaches_and_enforces_mwd_risk_gates() -> None:
         calls.append(kwargs)
         return HigherTimeframeGateBundle(
             market=evidence("MARKET", kwargs["as_of"]),
-            sector=evidence("QMT:GICS3:bank", kwargs["as_of"]),
+            sector=evidence(kwargs["sector_id"], kwargs["as_of"]),
             symbol=evidence("SZ.000001", kwargs["as_of"]),
         )
 
@@ -1064,7 +1064,7 @@ def test_structure_bundle_keeps_newer_1m_signal_but_freezes_mwd_cutoff() -> None
         observed_at = kwargs["as_of"]
         return HigherTimeframeGateBundle(
             market=evidence("MARKET", observed_at),
-            sector=evidence("QMT:GICS3:bank", observed_at),
+            sector=evidence(kwargs["sector_id"], observed_at),
             symbol=evidence("SZ.000001", observed_at),
         )
 

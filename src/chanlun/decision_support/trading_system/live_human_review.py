@@ -1169,12 +1169,11 @@ def _point_document_is_causal(
     frequency: str,
     evidence_cutoff: datetime,
 ) -> bool:
-    """Validate the portable time ordering of one structure point.
+    """校验一份结构点文档的可移植因果时序。
 
-    A semantic snapshot hash only authenticates what the page claims.  These
-    timestamps must also prove that the 5m setup or 1m locator was available by
-    the declared market-data cutoff; otherwise a caller can move one nested
-    fact into the future and simply re-identify the whole snapshot.
+    语义快照哈希只能证明页面声明的内容未变化；这些时间还必须证明 5 分钟设置或
+    1 分钟定位点在声明的行情截止点前已经可见。正式点仅有 ``confirmed`` 状态，
+    盘中候选仅有 ``provisional`` 状态；结构失效属于信号生命周期，不是点位状态。
     """
 
     if not isinstance(raw, Mapping):
@@ -1192,7 +1191,7 @@ def _point_document_is_causal(
     status = raw.get("status")
     return bool(
         raw.get("source_frequency") == frequency
-        and status in {"provisional", "confirmed", "invalidated"}
+        and status in {"provisional", "confirmed"}
         and anchor_at.tzinfo is not None
         and available_at.tzinfo is not None
         and anchor_at <= available_at <= evidence_cutoff

@@ -1,6 +1,8 @@
 from dataclasses import replace
 from datetime import timedelta
 
+import pytest
+
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     _TechnicalSignalEvaluator,
@@ -157,11 +159,10 @@ def test_repeated_evaluation_is_deterministic() -> None:
 
 def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
     stale_at = AS_OF - timedelta(days=8)
-    stale = replace(
-        confirmed_point("3buy", center_ordinal=1),
-        anchor_at=stale_at,
-        confirmed_at=stale_at,
-        available_at=stale_at,
+    stale = confirmed_point(
+        "3buy",
+        center_ordinal=1,
+        minutes_after=-(8 * 24 * 60),
     )
     older_one_buy = confirmed_point("1buy")
     latest_one_buy = confirmed_point("1buy", minutes_after=5)
@@ -182,3 +183,55 @@ def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
         independent_two_sell.point_id,
         latest_one_buy.point_id,
     ]
+
+
+@pytest.mark.parametrize(
+    ("field", "point"),
+    (
+        ("daily_points", confirmed_point("1buy", frequency="d", code="SZ.000002")),
+        (
+            "thirty_points",
+            confirmed_point("1buy", frequency="30m", code="SZ.000002"),
+        ),
+        ("five_points", confirmed_point("1buy", code="SZ.000002")),
+        ("five_points", provisional_point("2buy", code="SZ.000002")),
+        (
+            "one_points",
+            confirmed_point("1buy", frequency="1m", code="SZ.000002"),
+        ),
+        ("opposite_points", confirmed_point("1sell", code="SZ.000002")),
+    ),
+)
+def test_structure_bundle_rejects_cross_symbol_points(field, point) -> None:
+    with pytest.raises(ValueError, match="标的与结构包标的不一致"):
+        SymbolStructureBundle(
+            code="SZ.000001",
+            as_of=AS_OF,
+            sector=eligible_sector(),
+            thirty_direction="neutral",
+            thirty_points=(point,) if field == "thirty_points" else (),
+            five_points=(point,) if field == "five_points" else (),
+            one_points=(point,) if field == "one_points" else (),
+            opposite_points=(point,) if field == "opposite_points" else (),
+            daily_points=(point,) if field == "daily_points" else (),
+        )
+
+
+def test_structure_bundle_rejects_wrong_frequency_even_without_recursive_flag() -> None:
+    with pytest.raises(ValueError, match="各周期只能接收本周期"):
+        symbol_bundle(
+            five_points=(confirmed_point("1buy", frequency="30m"),),
+        )
+
+
+def test_structure_bundle_rejects_future_and_unconfirmed_formal_points() -> None:
+    future = confirmed_point("1buy", minutes_after=24 * 60)
+    with pytest.raises(ValueError, match="不能晚于结构包决策时点"):
+        symbol_bundle(five_points=(future,))
+
+    with pytest.raises(ValueError, match="正式买卖点必须已经确认"):
+        replace(
+            confirmed_point("1buy"),
+            status="invalidated",
+            confirmed_at=None,
+        )

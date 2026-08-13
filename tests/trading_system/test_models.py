@@ -8,6 +8,7 @@ from chanlun.decision_support.trading_system.models import (
     StructuralPoint,
     build_point_id,
 )
+from tests.trading_system.helpers import confirmed_point
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -46,7 +47,7 @@ def _point(*, level: int, price_basis_revision: str) -> StructuralPoint:
         center_id="center-a",
         center_zd=9.40,
         center_zg=9.80,
-        center_ordinal=1,
+        center_ordinal=None,
         divergence_kind="trend",
         parent_point_id=None,
         evidence_codes=("trend_divergence",),
@@ -72,3 +73,37 @@ def test_confirmed_point_requires_basis_and_causal_availability() -> None:
         replace(point, available_at=AT)
     with pytest.raises(ValueError, match="invalid structure identity"):
         replace(point, tower="bi")
+    with pytest.raises(ValueError, match="身份与正式结构证据不一致"):
+        replace(point, code="SZ.000002")
+
+
+def test_formal_point_classes_require_their_own_structural_lineage() -> None:
+    with pytest.raises(ValueError, match="一类买卖点必须来自正式"):
+        confirmed_point("1buy", variant="strict")
+    with pytest.raises(ValueError, match="二类买卖点缺少一类父点或形态证据"):
+        confirmed_point("2buy", variant="standard")
+    with pytest.raises(ValueError, match="三类买卖点必须保留完整中枢血缘"):
+        confirmed_point(
+            "3buy",
+            center_id=None,
+            center_zd=None,
+            center_zg=None,
+        )
+
+
+def test_small_to_large_second_class_requires_exact_parent_and_three_segments() -> None:
+    point = confirmed_point("2buy", level=1)
+    carriers = ("离开段", "反向段", "再离开段")
+    complete = replace(
+        point,
+        evidence_codes=("test_fixture", "small_to_large_reversal"),
+        related_point_ids=(point.parent_point_id,),
+        small_to_large_carrier_unit_ids=carriers,
+    )
+
+    assert complete.related_point_ids == (complete.parent_point_id,)
+    assert complete.small_to_large_carrier_unit_ids == carriers
+    with pytest.raises(ValueError, match="小转大二类点必须保留完整"):
+        replace(complete, related_point_ids=())
+    with pytest.raises(ValueError, match="小转大二类点必须保留完整"):
+        replace(complete, small_to_large_carrier_unit_ids=carriers[:2])

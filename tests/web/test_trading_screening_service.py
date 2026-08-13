@@ -1679,7 +1679,10 @@ def test_old_signal_contract_is_rebuilt_without_reusing_signal_rows(
         config=TradingScreeningConfig(max_symbols_per_refresh=2),
     )
     current = first.refresh_now()
-    assert {row["code"] for row in current["signals"]} == {"SZ.000001"}
+    assert {row["code"] for row in current["signals"]} == {
+        "SZ.000001",
+        "SZ.000002",
+    }
 
     noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
     unscanned_noncurrent_signal = dict(noncurrent["signals"][0])
@@ -2704,8 +2707,15 @@ class ActionableMarketData(RecordingMarketData):
             sector=sector,
             thirty_direction="neutral",
             thirty_points=(),
-            five_points=(confirmed_point("2buy"),),
-            one_points=(confirmed_point("1buy", frequency="1m", minutes_after=1),),
+            five_points=(confirmed_point("2buy", code=code),),
+            one_points=(
+                confirmed_point(
+                    "1buy",
+                    code=code,
+                    frequency="1m",
+                    minutes_after=1,
+                ),
+            ),
             opposite_points=(),
         )
 
@@ -2782,6 +2792,7 @@ class NativeDailyAheadMarketData(ActionableMarketData):
             symbol=code,
             observed_at=bundle.as_of,
             reason_code="QMT_NATIVE_DAILY_AHEAD_OF_ONE_MINUTE_BASE",
+            sector_subject=bundle.sector.sector_id,
         )
         return replace(
             bundle,
@@ -2906,10 +2917,11 @@ class CausalCutoffMarketData(RecordingMarketData):
             sector=sector,
             thirty_direction="neutral",
             thirty_points=(),
-            five_points=(confirmed_point("2buy", minutes_after=295),),
+            five_points=(confirmed_point("2buy", code=code, minutes_after=295),),
             one_points=(
                 confirmed_point(
                     "1buy",
+                    code=code,
                     frequency="1m",
                     minutes_after=300,
                 ),
@@ -3167,7 +3179,7 @@ class ApproachingMarketData(RecordingMarketData):
             sector=sector,
             thirty_direction="neutral",
             thirty_points=(),
-            five_points=(provisional_point("2buy"),),
+            five_points=(provisional_point("2buy", code=code),),
             one_points=(),
             opposite_points=(),
         )
@@ -4389,9 +4401,10 @@ def test_priority_monitor_notification_is_early_and_idempotent(
                     opposite_points=(),
                     physical_timeframe_recursive=True,
                 )
-            setup = confirmed_point("2buy", minutes_after=295)
+            setup = confirmed_point("2buy", code=code, minutes_after=295)
             trigger = confirmed_point(
                 "1buy",
+                code=code,
                 frequency="1m",
                 minutes_after=298,
             )
@@ -6359,20 +6372,7 @@ def test_removed_nontradable_monitor_cannot_reenter_through_previous_signal(
             return tuple(code for code in codes if code != "SH.000001")
 
         def structure_bundle(self, code: str, **kwargs) -> SymbolStructureBundle:
-            bundle = super().structure_bundle(code, **kwargs)
-
-            def for_code(point):
-                return replace(
-                    point,
-                    code=code,
-                    point_id=f"{point.point_id}:{code}",
-                )
-
-            return replace(
-                bundle,
-                five_points=tuple(for_code(point) for point in bundle.five_points),
-                one_points=tuple(for_code(point) for point in bundle.one_points),
-            )
+            return super().structure_bundle(code, **kwargs)
 
     class PreviousScopePlanner:
         def __init__(self) -> None:

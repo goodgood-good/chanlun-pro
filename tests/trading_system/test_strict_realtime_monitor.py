@@ -8,7 +8,10 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from chanlun.decision_support.trading_system.models import StructuralPoint
+from chanlun.decision_support.trading_system.models import (
+    StructuralPoint,
+    build_point_id,
+)
 from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     StrictPhysicalMonitorState,
     collect_strict_monitor_events,
@@ -27,8 +30,23 @@ CN = ZoneInfo("Asia/Shanghai")
 AT = datetime(2026, 8, 5, 10, 0, tzinfo=CN)
 
 
-def _point(point_type: str, *, point_id: str = "strict-point") -> StructuralPoint:
+def _point(
+    point_type: str,
+    *,
+    center_id: str = "strict-center",
+) -> StructuralPoint:
     side = "buy" if point_type.endswith("buy") else "sell"
+    point_id = build_point_id(
+        code="TSLA.US",
+        price_basis_revision="provider-basis",
+        point_type=point_type,
+        source_frequency="1m",
+        tower="formal",
+        recursive_level=0,
+        anchor_at=AT,
+        center_id=center_id,
+        parent_point_id=None,
+    )
     return StructuralPoint(
         point_id=point_id,
         code="TSLA.US",
@@ -45,9 +63,9 @@ def _point(point_type: str, *, point_id: str = "strict-point") -> StructuralPoin
         available_at=AT,
         structure_anchor_price=100.0,
         structure_invalidation_price=99.0 if side == "buy" else 101.0,
-        center_id="strict-center",
-        center_zd=99.0,
-        center_zg=100.0,
+        center_id=center_id,
+        center_zd=98.0 if side == "buy" else 101.0,
+        center_zg=99.0 if side == "buy" else 102.0,
         center_ordinal=1,
         divergence_kind=None,
         parent_point_id=None,
@@ -80,7 +98,7 @@ class _StrictState:
 
 
 def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
-    point = _point("3buy", point_id="sha256:strict-third-buy")
+    point = _point("3buy")
 
     [event] = collect_strict_monitor_events(
         {"TSLA.US": _StrictState((point,))},
@@ -97,8 +115,8 @@ def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
 
 
 def test_strict_collector_applies_high_level_gate_but_keeps_sell_points() -> None:
-    buy = _point("3buy", point_id="buy")
-    sell = _point("3sell", point_id="sell")
+    buy = _point("3buy")
+    sell = _point("3sell")
 
     events = collect_strict_monitor_events(
         {"TSLA.US": _StrictState((buy, sell), big="down")},
@@ -106,7 +124,9 @@ def test_strict_collector_applies_high_level_gate_but_keeps_sell_points() -> Non
         holdings=set(),
     )
 
-    assert [(event.side, event.evidence_id) for event in events] == [("sell", "sell")]
+    assert [(event.side, event.evidence_id) for event in events] == [
+        ("sell", sell.point_id)
+    ]
 
 
 def test_strict_collector_fails_closed_without_reusing_cached_points() -> None:
@@ -313,7 +333,7 @@ def test_first_successful_refresh_only_builds_a_semantic_baseline(monkeypatch) -
         "TSLA.US",
         SimpleNamespace(market="us", kline_time_label="start"),
     )
-    current_points = [_point("3buy", point_id="first-build-id")]
+    current_points = [_point("3buy", center_id="first-build-center")]
     evidence_by_frequency = {
         frequency: SimpleNamespace(
             frequency=frequency,
@@ -342,7 +362,7 @@ def test_first_successful_refresh_only_builds_a_semantic_baseline(monkeypatch) -
     )
 
     assert state.refresh() == []
-    current_points[:] = [_point("3buy", point_id="rebuilt-same-occurrence")]
+    current_points[:] = [_point("3buy", center_id="rebuilt-center")]
     assert state.refresh() == []
 
 

@@ -72,6 +72,7 @@ def test_each_buy_class_has_an_independent_risk_lane(
 def test_three_buy_requires_one_tick_clearance_but_not_first_center() -> None:
     touching = valid_entry_inputs(
         "3buy",
+        anchor=9.8,
         variant="boundary_touch",
         center_ordinal=1,
     )

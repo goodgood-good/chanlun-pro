@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 PointType = Literal["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]
 PointSide = Literal["buy", "sell"]
-PointStatus = Literal["provisional", "confirmed", "invalidated"]
+PointStatus = Literal["confirmed"]
 PointVariant = Literal["standard", "strict", "weak_divergence", "boundary_touch"]
 StructureTower = Literal["formal"]
 ContextDirection = Literal["up", "down", "neutral"]
@@ -114,11 +114,28 @@ class StructuralPoint:
     small_to_large_carrier_unit_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or not self.code.strip():
+            raise ValueError("买卖点标的不能为空")
+        if self.point_type not in {
+            "1buy",
+            "2buy",
+            "3buy",
+            "1sell",
+            "2sell",
+            "3sell",
+        }:
+            raise ValueError("买卖点类型无效")
         expected_side = "buy" if self.point_type.endswith("buy") else "sell"
         if self.side != expected_side:
             raise ValueError("point_type and side disagree")
-        if self.tower != "formal" or self.recursive_level < 0:
+        if (
+            self.tower != "formal"
+            or type(self.recursive_level) is not int
+            or self.recursive_level < 0
+        ):
             raise ValueError("invalid structure identity")
+        if not isinstance(self.source_frequency, str) or not self.source_frequency:
+            raise ValueError("买卖点物理周期不能为空")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
         anchor_at = normalize_datetime(self.anchor_at, "anchor_at")
@@ -134,10 +151,20 @@ class StructuralPoint:
             if available_at < confirmed_at:
                 raise ValueError("available_at cannot precede confirmed_at")
             object.__setattr__(self, "confirmed_at", confirmed_at)
-        if self.status == "confirmed" and self.confirmed_at is None:
-            raise ValueError("confirmed point requires confirmed_at")
-        if self.status != "confirmed" and self.confirmed_at is not None:
-            raise ValueError("non-confirmed point cannot carry confirmed_at")
+        if self.status != "confirmed" or self.confirmed_at is None:
+            raise ValueError("正式买卖点必须已经确认")
+        if self.point_id != build_point_id(
+            code=self.code,
+            price_basis_revision=self.price_basis_revision,
+            point_type=self.point_type,
+            source_frequency=self.source_frequency,
+            tower=self.tower,
+            recursive_level=self.recursive_level,
+            anchor_at=anchor_at,
+            center_id=self.center_id,
+            parent_point_id=self.parent_point_id,
+        ):
+            raise ValueError("买卖点身份与正式结构证据不一致")
         object.__setattr__(self, "evidence_codes", tuple(self.evidence_codes))
         object.__setattr__(self, "related_point_ids", tuple(self.related_point_ids))
         object.__setattr__(
@@ -152,10 +179,46 @@ class StructuralPoint:
             raise ValueError("related point ids must be unique non-empty strings")
         if self.point_id in self.related_point_ids:
             raise ValueError("structural point cannot reference itself")
+        if (self.center_zd is None) != (self.center_zg is None):
+            raise ValueError("中枢上下沿必须同时存在")
+        if (
+            self.center_zd is not None
+            and self.center_zg is not None
+            and self.center_zd > self.center_zg
+        ):
+            raise ValueError("中枢区间无效")
+        if self.point_type in {"1buy", "1sell"} and (
+            self.variant != "standard"
+            or self.divergence_kind not in {"trend", "consolidation"}
+        ):
+            raise ValueError("一类买卖点必须来自正式趋势背驰或盘整背驰")
+        if self.point_type in {"2buy", "2sell"} and (
+            self.variant not in {"strict", "weak_divergence"}
+            or self.parent_point_id is None
+            or (
+                self.variant == "weak_divergence"
+                and self.divergence_kind != "consolidation"
+            )
+            or self.variant == "strict"
+            and self.divergence_kind is not None
+        ):
+            raise ValueError("二类买卖点缺少一类父点或形态证据")
+        if self.point_type in {"3buy", "3sell"} and (
+            self.variant not in {"standard", "boundary_touch"}
+            or self.center_id is None
+            or self.center_zd is None
+            or self.center_zg is None
+            or self.center_ordinal is None
+            or self.divergence_kind is not None
+        ):
+            raise ValueError("三类买卖点必须保留完整中枢血缘")
+        if self.point_type not in {"3buy", "3sell"} and self.center_ordinal is not None:
+            raise ValueError("中枢序号只属于三类买卖点")
         is_small_to_large = "small_to_large_reversal" in self.evidence_codes
         if is_small_to_large:
             if (
                 self.point_type not in {"2buy", "2sell"}
+                or self.related_point_ids != (self.parent_point_id,)
                 or len(self.small_to_large_carrier_unit_ids) != 3
                 or len(set(self.small_to_large_carrier_unit_ids)) != 3
                 or any(
@@ -185,6 +248,18 @@ class StructuralPoint:
             and self.structure_invalidation_price < self.structure_anchor_price
         ):
             raise ValueError("sell invalidation cannot be below point anchor")
+        if self.point_type == "3buy" and (
+            self.structure_anchor_price < self.center_zg
+            or (self.variant == "boundary_touch")
+            != (self.structure_anchor_price == self.center_zg)
+        ):
+            raise ValueError("三买回抽必须保持在中枢上沿之外")
+        if self.point_type == "3sell" and (
+            self.structure_anchor_price > self.center_zd
+            or (self.variant == "boundary_touch")
+            != (self.structure_anchor_price == self.center_zd)
+        ):
+            raise ValueError("三卖回抽必须保持在中枢下沿之外")
         if self.center_ordinal is not None and self.center_ordinal <= 0:
             raise ValueError("center_ordinal must be positive")
         if len(self.evidence_codes) != len(set(self.evidence_codes)):

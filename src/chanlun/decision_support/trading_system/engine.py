@@ -82,6 +82,42 @@ class SymbolStructureBundle:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of", normalize_datetime(self.as_of, "as_of"))
+        if not isinstance(self.code, str) or not self.code.strip():
+            raise ValueError("结构包标的不能为空")
+        frequency_points = (
+            ("日线", "d", self.daily_points),
+            ("30 分钟", "30m", self.thirty_points),
+            ("5 分钟", "5m", self.five_points),
+            ("1 分钟", "1m", self.one_points),
+        )
+        all_point_groups = (
+            *((name, points) for name, _frequency, points in frequency_points),
+            ("反向证据", self.opposite_points),
+        )
+        for name, points in all_point_groups:
+            if any(point.code != self.code for point in points):
+                raise ValueError(f"{name}买卖点标的与结构包标的不一致")
+            identities = tuple(
+                point.candidate_id
+                if isinstance(point, ProvisionalCandidate)
+                else point.point_id
+                for point in points
+            )
+            if len(identities) != len(set(identities)):
+                raise ValueError(f"{name}买卖点身份不能重复")
+            if any(_point_time(point) > self.as_of for point in points):
+                raise ValueError(f"{name}买卖点证据不能晚于结构包决策时点")
+            if any(
+                isinstance(point, StructuralPoint) and not point.confirmed
+                for point in points
+            ):
+                raise ValueError(f"{name}正式买卖点必须已经确认")
+        if any(
+            point.source_frequency != frequency
+            for _name, frequency, points in frequency_points
+            for point in points
+        ):
+            raise ValueError("各周期只能接收本周期产生的买卖点")
         if self.held_level is not None and self.held_level < 0:
             raise ValueError("held_level cannot be negative")
         if len(self.warmup_reason_codes) != len(set(self.warmup_reason_codes)):
@@ -125,22 +161,30 @@ class SymbolStructureBundle:
             value.symbol != self.code
             for value in self.entry_execution_boundaries
         ):
-            raise ValueError("entry execution boundary symbol is inconsistent")
-        if self.physical_timeframe_recursive:
-            frequency_points = (
-                ("d", self.daily_points),
-                ("30m", self.thirty_points),
-                ("5m", self.five_points),
-                ("1m", self.one_points),
-            )
+            raise ValueError("入场执行边界标的与结构包标的不一致")
+        one_minute_buy_points = {
+            point.point_id: point
+            for point in self.one_points
+            if point.side == "buy"
+        }
+        if any(
+            boundary.point_id not in one_minute_buy_points
+            or boundary.confirmation_bar_closed_at
+            != one_minute_buy_points[boundary.point_id].available_at
+            for boundary in self.entry_execution_boundaries
+        ):
+            raise ValueError("入场执行边界没有对应同标的已确认 1 分钟买点")
+        if self.higher_timeframe_gates is not None:
+            gates = self.higher_timeframe_gates
+            if gates.symbol.subject != self.code:
+                raise ValueError("个股高周期风险证据与结构包标的不一致")
+            if gates.sector.subject != self.sector.sector_id:
+                raise ValueError("板块高周期风险证据与结构包板块不一致")
             if any(
-                point.source_frequency != frequency
-                for frequency, points in frequency_points
-                for point in points
+                gate.observed_at > self.as_of
+                for gate in (gates.market, gates.sector, gates.symbol)
             ):
-                raise ValueError(
-                    "physical timeframe bundle accepts only points from its own frequency"
-                )
+                raise ValueError("高周期风险证据不能晚于结构包决策时点")
 
 
 @dataclass(frozen=True, slots=True)
