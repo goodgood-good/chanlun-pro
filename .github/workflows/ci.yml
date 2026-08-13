@@ -125,7 +125,7 @@ jobs:
           poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
       - name: Install test profile dependencies
         # tests/exchange/test_usmart.py 在收集阶段直接导入 Crypto，必须安装 usmart 画像。
-        run: poetry install --extras monitor --extras backtest --extras ai --extras usmart
+        run: poetry install --extras monitor --extras usmart
       - name: Install Playwright browser
         run: poetry run playwright install chromium
       - name: Run tests

@@ -42,15 +42,9 @@ dependencies = [
 ]
 
 # 可选依赖：按需求场景分组安装（默认不装）
-#   poetry install --extras us / hk / usmart / cn-extra / futures / notify / charts / monitor / corpus
+#   poetry install --extras hk / usmart / cn-extra / futures / notify / charts / monitor / corpus
 #   poetry install --all-extras       # 一次装齐
 [project.optional-dependencies]
-us = [
-    "alpaca-py>=0.40.1",
-    "polygon-api-client>=1.14.6",
-    "ib-insync>=0.9.86",
-    "pyjwt>=2.13.0",
-]
 hk = ["futu-api>=9.2.5208"]
 usmart = ["pycryptodome>=3.23.0"]
 cn-extra = ["baostock>=0.8.9"]
@@ -98,8 +92,7 @@ pythonpath = [".", "src", "web/chanlun_chart"]
 package-mode = false
 
 # 本地 wheel 覆盖（与 [project.dependencies] 中无版本的 pytdx / ta-lib 对应）
-# Python 版本约束 >=3.10,<3.14：当前 chanlun-pro env 是 3.10；上界因 alpaca-py
-# 等包对 3.14+ 的依赖图变化，Poetry resolver 在更宽范围下找不到统一版本。
+# Python 版本约束 >=3.10,<3.14：当前运行环境使用 3.10；上界用于固定已验证的依赖图。
 [tool.poetry.dependencies]
 python = ">=3.10,<3.14"
 # ta-lib 本地 wheel 按 Python 版本区分；package/ 下有 cp310/cp311/cp312/cp313 多个

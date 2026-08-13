@@ -93,7 +93,7 @@ REDIS_PORT = 6379
 # 外汇市场支持 tdx_fx / cq / db
 # 数字货币（合约）支持： binance / db
 # 数字货币（现货）支持：binance_spot / db
-# 美股市场支持： alpaca / polygon / ib / tdx_us / cq / usmart / db
+# 美股生产行情只允许：cq（长桥）/ usmart（盈立）
 EXCHANGE_A = "qmt"  # 沪深A股市场（当前产品默认使用 QMT）
 EXCHANGE_HK = "usmart"  # 港股市场
 EXCHANGE_FUTURES = "tdx_futures"  # 期货市场
@@ -144,18 +144,6 @@ TQ_SP_PWD = ''
 # 币安交易所配置
 BINANCE_APIKEY = ''
 BINANCE_SECRET = ''
-
-# 美股 Ploygon API 配置（申请网址 https://polygon.io/）
-POLYGON_APIKEY = ''
-
-# 美股 Alpaca API 配置（申请网址 https://alpaca.markets/）
-ALPACA_APIKEY = ''
-ALPACA_SECRET = ''
-
-# 盈透证券 TWS 设置
-IB_HOST = '127.0.0.1'
-IB_PORT = 7497
-IB_ACCOUNT = ''
 
 # 飞书消息配置 (项目中新的消息推送使用飞书，user_id 是唯一的，不同的市场可以配置不同的机器人，没有设置则使用 default 的机器人)
 # 配置获取方法，在 web 页面的系统设置中有教程
@@ -229,7 +217,7 @@ LB_QUOTA_MONTHLY_LIMIT = 100
 
 # 美股历史 K 线数据源：
 #   "longbridge" - 走长桥（默认；占用 LB_QUOTA_MONTHLY_LIMIT 配额）
-#   "alpaca"     - 走 alpaca，需配置 ALPACA_APIKEY/ALPACA_SECRET 且账号已开
+# 只支持 "longbridge"（长桥）与 "usmart"（盈立）。
 # 长桥实时报价不受影响，仍走 cq。
 US_HISTORY_KLINE_SOURCE = "longbridge"
 

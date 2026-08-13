@@ -140,7 +140,7 @@ def _quota_exhausted_advice(symbol) -> str:
     if upper.endswith(".HK"):
         return "港股建议切回通达信: 设 config.EXCHANGE_HK = 'tdx_hk'"
     if upper.endswith(".US"):
-        return "美股建议切到 alpaca: 设 config.US_HISTORY_KLINE_SOURCE = 'alpaca'"
+        return "美股建议切到盈立: 设 config.EXCHANGE_US = 'usmart' 且 US_HISTORY_KLINE_SOURCE = 'usmart'"
     if upper.endswith((".SH", ".SZ", ".BJ")):
         return "A 股建议切到通达信: 设 config.EXCHANGE_A = 'tdx'"
     return "考虑等待月初配额重置，或切到非长桥数据源"
@@ -198,7 +198,6 @@ class ExchangeChangQiao(Exchange):
         # market 调 all_stocks 都返回同一份美股数据，导致 web 搜索框 A 股/港股全是美股标的。
         # 改为按 market 维度分桶缓存，并支持显式传入 market 区分。
         self.stock_list_cache: Dict[str, List[Dict]] = {}
-        self._alpaca_instance = None
 
         # 线程池配置
         # 建议设置在 8-16 之间。过高可能导致 API 触发流控限制 (Rate Limit)
@@ -827,19 +826,6 @@ class ExchangeChangQiao(Exchange):
 
         return segment_candles, status
 
-    def _should_use_alpaca(self, symbol: str) -> bool:
-        """美股 + config 配置 alpaca 时走 alpaca fallback。"""
-        if not isinstance(symbol, str) or not symbol.endswith(".US"):
-            return False
-        return getattr(config, "US_HISTORY_KLINE_SOURCE", "longbridge") == "alpaca"
-
-    def _get_alpaca(self):
-        """惰性拿到 ExchangeAlpaca 单例（避免启动时无意义触网）。"""
-        if self._alpaca_instance is None:
-            from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
-            self._alpaca_instance = ExchangeAlpaca()
-        return self._alpaca_instance
-
     @time_logger  # 开启耗时监控
     def klines(
             self,
@@ -853,12 +839,6 @@ class ExchangeChangQiao(Exchange):
         获取 Kline 线 (并发优化版)
         """
         args = args or {}
-        # 美股历史 K 线按 config.US_HISTORY_KLINE_SOURCE 选源
-        if self._should_use_alpaca(code):
-            return self._get_alpaca().klines(
-                code, frequency, start_date=start_date, end_date=end_date, args=args
-            )
-
         tz = pytz.timezone("Asia/Shanghai")
 
         # 长桥 API 需要 "<code>.<exchange>" 格式 (如 00700.HK / 600519.SH);

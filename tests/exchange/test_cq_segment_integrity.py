@@ -104,7 +104,6 @@ def _klines_ex(monkeypatch, seg_fn):
     ex = _mk_ex()
     ex.executor = ThreadPoolExecutor(2)
     monkeypatch.setattr(ex, "_fetch_segment_data", seg_fn)
-    monkeypatch.setattr(ex, "_should_use_alpaca", lambda code: False)
     monkeypatch.setattr(ex, "_to_lb_symbol", lambda code: code)
     monkeypatch.setattr(ex, "_market_of_code", lambda code: "a")
     import chanlun.exchange.exchange_cq as cq_mod

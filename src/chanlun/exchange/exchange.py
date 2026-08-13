@@ -751,10 +751,13 @@ def convert_us_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
     return period_klines[["code", "date", "open", "close", "high", "low", "volume"]]
 
 
-def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """将美股 K 线（通达信口径）合成到指定周期，时间戳前对齐（bar 开始时刻，= resample bin 左边界；86024fa8 起改用 bin 起点修实时漂移）。
+def convert_overseas_tdx_kline_frequency(
+    klines: pd.DataFrame,
+    to_f: str,
+) -> pd.DataFrame:
+    """将境外通达信 K 线合成到指定周期，时间戳对齐到柱起点。
 
-    通达信美股行情时间为 UTC+8 存储，resample 前需先转 UTC 才能按自然小时对齐。
+    通达信境外行情以 UTC+8 存储，重采样前先转为 UTC，才能按自然小时对齐。
     """
     period_maps = {
         "2m": "2min",
@@ -790,11 +793,9 @@ def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFr
 
     period_klines.dropna(inplace=True)
     period_klines.reset_index(inplace=True)
-    # date 改用 bin 起点(resample 的 date_index = 周期左边界)转回原 tz, 替代 agg "date":"last"。
-    # 原 "last" 取区间最后一根子周期的 date: 历史完整 bar 无碍, 但实时进行中的部分 bar 会随
-    # 子周期推进而漂移(如 10m bar 的 date 从 20:55→21:00), 导致 SSE 每 8s 重算 merge 时同一
-    # bin 的不同 date 不去重 → 累积成一堆假 bar(fx 10m 实测间隔退化成 [5,5,5...])。用 bin 起点
-    # 后同一 bin 的 date 恒定, merge 正确去重; bar 开始时刻也与 1m/5m 原生 K 线口径一致。
+    # date 改用重采样桶起点（date_index，即周期左边界）并转回原时区，
+    # 替代聚合后的最后一根子周期时间。若使用后者，实时未完成柱会随子周期推进而漂移，
+    # SSE 合并时无法识别为同一根柱并累积出伪柱；固定桶起点后可稳定去重。
     if len(period_klines) > 0:
         _orig_tz = klines["date"].dt.tz
         period_klines["date"] = period_klines["date_index"].dt.tz_convert(_orig_tz)

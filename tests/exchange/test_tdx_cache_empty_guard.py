@@ -1,4 +1,4 @@
-"""R4-C(D4): tdx_us/fx/ny_futures 缓存读分支缺 len==0 判定。
+"""R4-C(D4)：tdx_fx/ny_futures 缓存读取分支缺少空表判定。
 
 get_tdx_klines 对恰 1 根缓存做 iloc[0:-1] 丢末根→返回空(非None)DataFrame;三处 klines()
 原只判 `if X is None` 遂进 else 增量分支, `klines.iloc[-1]["date"]` 抛 IndexError→except
@@ -9,10 +9,8 @@ get_tdx_klines 对恰 1 根缓存做 iloc[0:-1] 丢末根→返回空(非None)Da
 
 import pandas as pd
 
-import chanlun.exchange.exchange_tdx_us as us_mod
 import chanlun.exchange.exchange_tdx_fx as fx_mod
 import chanlun.exchange.exchange_tdx_ny_futures as ny_mod
-from chanlun.exchange.exchange_tdx_us import ExchangeTDXUS
 from chanlun.exchange.exchange_tdx_fx import ExchangeTDXFX
 from chanlun.exchange.exchange_tdx_ny_futures import ExchangeTDXNYFutures
 import chanlun.exchange.exchange_tdx_hk as hk_mod
@@ -61,13 +59,6 @@ def _mk(cls, mod, monkeypatch):
     ex.to_tdx_code = lambda code: (33, "TESTCODE")
     ex.fdb = _EmptyCacheFdb()
     return ex
-
-
-def test_tdx_us_empty_cache_returns_empty_not_crash(monkeypatch):
-    ex = _mk(ExchangeTDXUS, us_mod, monkeypatch)
-    r = ex.klines("AAPL.US", "5m", args={"pages": 1})
-    assert r is not None  # 旧代码走 else→IndexError→None→RetryError
-    assert isinstance(r, pd.DataFrame) and len(r) == 0
 
 
 def test_tdx_fx_empty_cache_returns_empty_not_crash(monkeypatch):

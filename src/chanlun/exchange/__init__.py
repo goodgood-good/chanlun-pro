@@ -11,7 +11,7 @@ _get_exchange_lock = threading.Lock()
 
 
 def market_now_trading(ex: Exchange, market) -> bool | None:
-    """Call the single market-aware trading-session contract."""
+    """调用唯一且感知市场的交易时段契约。"""
 
     market_value = market.value if isinstance(market, Market) else str(market)
     return ex.now_trading(market_value)
@@ -157,27 +157,7 @@ def _build_exchange(market: Market) -> None:
         else:
             raise Exception(f"不支持的数字货币交易所 {config.EXCHANGE_CURRENCY_SPOT}")
     elif market == Market.US:
-        if config.EXCHANGE_US == "alpaca":
-            from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
-
-            g_exchange_obj[market.value] = ExchangeAlpaca()
-        elif config.EXCHANGE_US == "polygon":
-            from chanlun.exchange.exchange_polygon import ExchangePolygon
-
-            g_exchange_obj[market.value] = ExchangePolygon()
-        elif config.EXCHANGE_US == "ib":
-            from chanlun.exchange.exchange_ib import ExchangeIB
-
-            g_exchange_obj[market.value] = ExchangeIB()
-        elif config.EXCHANGE_US == "tdx_us":
-            from chanlun.exchange.exchange_tdx_us import ExchangeTDXUS
-
-            g_exchange_obj[market.value] = ExchangeTDXUS()
-        elif config.EXCHANGE_US == "db":
-            from chanlun.exchange.exchange_db import ExchangeDB
-
-            g_exchange_obj[market.value] = ExchangeDB(Market.US.value)
-        elif config.EXCHANGE_US == "cq":
+        if config.EXCHANGE_US == "cq":
             g_exchange_obj[market.value] = _changqiao_market_view(market)
         elif config.EXCHANGE_US == "usmart":
             from chanlun.exchange.exchange_usmart import ExchangeUSmart

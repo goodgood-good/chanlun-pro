@@ -11,7 +11,7 @@ from chanlun.tools.cache_identity import _fingerprint_files
 def test_source_fingerprint_covers_exchange_dataoutput_files():
     names = {f.name for f in _fingerprint_files()}
     for f in (
-        "exchange_tdx_us.py", "exchange_tdx_hk.py", "exchange_tdx_fx.py",
+        "exchange_cq.py", "exchange_usmart.py", "exchange_tdx_hk.py", "exchange_tdx_fx.py",
         "exchange_qmt.py", "exchange.py", "kline_precision.py",
     ):
         assert f in names, (

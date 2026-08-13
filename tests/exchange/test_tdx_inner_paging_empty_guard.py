@@ -87,12 +87,11 @@ def test_tdx_fx_empty_page_in_incremental_branch_no_crash(monkeypatch):
     assert len(r) == 2
 
 
-def test_all_five_tdx_incremental_branches_have_empty_guard():
+def test_all_active_tdx_incremental_branches_have_empty_guard():
     files = [
         "exchange_tdx_fx",
         "exchange_tdx_futures",
         "exchange_tdx_ny_futures",
-        "exchange_tdx_us",
         "exchange_tdx_hk",
     ]
     base = Path("src/chanlun/exchange")

@@ -87,7 +87,7 @@ _FREQUENCY_LABELS = {
     "y": "Year",
 }
 _CALENDAR_FREQUENCIES = frozenset({"d", "w", "m", "q", "6m", "y"})
-_US_HISTORY_SOURCES = frozenset({"usmart", "longbridge", "alpaca"})
+_US_HISTORY_SOURCES = frozenset({"usmart", "longbridge"})
 _KLINE_COLUMNS = [
     "date",
     "frequency",
@@ -492,14 +492,12 @@ class ExchangeUSmart(Exchange):
         frequency: str,
         right_type: int,
     ) -> Exchange | None:
-        """Return the stable configured US K-line backend for this instance.
+        """返回当前实例稳定配置的美股 K 线后端。
 
-        uSMART's intraday endpoint returns at most 300 rows per page and has a
-        much shorter provider-side retention window than the chart contract.
-        The project already exposes ``US_HISTORY_KLINE_SOURCE``; honoring it
-        here keeps full loads and polling on one provider/price basis. Native
-        uSMART remains the fallback for unsupported periods and non-forward
-        adjustment requests, which the Longbridge adapter cannot represent.
+        uSMART 日内接口每页最多返回三百行，服务端保留窗口也短于图表契约。
+        此处遵守 ``US_HISTORY_KLINE_SOURCE``，使完整加载与轮询始终使用同一
+        数据源和价格基准。长桥无法表示的周期或非前复权请求仍由原生 uSMART
+        提供。
         """
 
         if (
@@ -509,33 +507,28 @@ class ExchangeUSmart(Exchange):
         ):
             return None
         if self._us_history_exchange is None:
-            if self._us_history_source == "longbridge":
-                credentials = tuple(
-                    os.getenv(name)
-                    for name in (
-                        "LONGBRIDGE_APP_KEY",
-                        "LONGBRIDGE_APP_SECRET",
-                        "LONGBRIDGE_ACCESS_TOKEN",
-                    )
+            credentials = tuple(
+                os.getenv(name)
+                for name in (
+                    "LONGBRIDGE_APP_KEY",
+                    "LONGBRIDGE_APP_SECRET",
+                    "LONGBRIDGE_ACCESS_TOKEN",
                 )
-                if not all(credentials):
-        # 控制台访问令牌不足以完成 API 密钥形式的软件开发工具包流程。本次请求全程使用
-        # 已配置的 uSMART 路径以保持行情服务可用；其价格基准元数据可让调用方识别
-        # 后续数据提供方变化并进行原子重建。
-                    if not self._longbridge_fallback_reported:
-                        LogUtil.warning(
-                            "Longbridge history credentials are incomplete; "
-                            "using uSMART history for this US adapter"
-                        )
-                        self._longbridge_fallback_reported = True
-                    return None
-                from chanlun.exchange.exchange_cq import ExchangeChangQiao
+            )
+            # 控制台访问令牌不足以完成 API 密钥形式的软件开发工具包流程。本次请求
+            # 全程使用已配置的 uSMART 路径以保持行情服务可用；价格基准元数据可让
+            # 调用方识别后续数据源变化并进行原子重建。
+            if not all(credentials):
+                if not self._longbridge_fallback_reported:
+                    LogUtil.warning(
+                        "Longbridge history credentials are incomplete; "
+                        "using uSMART history for this US adapter"
+                    )
+                    self._longbridge_fallback_reported = True
+                return None
+            from chanlun.exchange.exchange_cq import ExchangeChangQiao
 
-                self._us_history_exchange = ExchangeChangQiao()
-            else:
-                from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
-
-                self._us_history_exchange = ExchangeAlpaca()
+            self._us_history_exchange = ExchangeChangQiao()
         if frequency not in self._us_history_exchange.support_frequencys():
             return None
         return self._us_history_exchange

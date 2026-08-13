@@ -40,7 +40,7 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 | --- | --- | --- |
 | 沪深 A 股 | `EXCHANGE_A` | `tdx`（通达信）/ `qmt`（迅投）/ `baostock` / `futu`（富途）/ `cq`（长桥）/ `usmart`（盈立）/ `db` |
 | 港股 | `EXCHANGE_HK` | `tdx_hk` / `futu` / `cq` / `usmart` / `db` |
-| 美股 | `EXCHANGE_US` | `tdx_us` / `alpaca` / `polygon` / `ib`（盈透）/ `cq`（长桥）/ `usmart` / `db` |
+| 美股 | `EXCHANGE_US` | `cq`（长桥）/ `usmart`（盈立） |
 | 国内期货 | `EXCHANGE_FUTURES` | `tq`（天勤）/ `tdx_futures` / `db` |
 | 外盘期货 | `EXCHANGE_NY_FUTURES` | `tdx_ny_futures` / `db` |
 | 外汇 | `EXCHANGE_FX` | `tdx_fx` / `cq` / `db` |
@@ -59,7 +59,7 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 | 数据计算 | pandas、numpy、pyarrow、scipy、TA-Lib、MyTT |
 | Web / 图表 | Flask + Tornado（单进程 WSGI）、TradingView Charting Library、SSE |
 | 存储 | file_db（Parquet 本地列存）、SQLAlchemy + SQLite/MySQL、Redis（可选） |
-| 行情 SDK | akshare、longbridge（长桥）、uSMART Open API、pytdx、ccxt、alpaca-py、polygon、ib-insync、futu-api、baostock、tqsdk（天勤） |
+| 行情 SDK | akshare、longbridge（长桥）、uSMART Open API、pytdx、ccxt、futu-api、baostock、tqsdk（天勤） |
 | 通知 | 钉钉 Webhook、lark-oapi（飞书，可选） |
 | 券商行情适配 | 迅投 QMT（vendored `xtquant`） |
 
@@ -89,8 +89,7 @@ pip install poetry
 poetry install                       # 仅核心依赖
 # 按需安装可选市场/功能（extras）：
 #   us / hk / usmart / cn-extra / futures / notify / charts / monitor / corpus
-poetry install --extras us --extras hk
-poetry install --extras usmart          # 盈立 Open API 的 RSA 签名依赖
+poetry install --extras hk --extras usmart
 poetry install --all-extras          # 一次装齐
 
 # 生成配置文件
@@ -101,7 +100,7 @@ cp src/chanlun/config.py.demo src/chanlun/config.py   # Windows: copy
 
 编辑 `src/chanlun/config.py`（或在项目根 `.env` 中以 `KEY=VALUE` 覆盖敏感项）：
 
-- **数据源**：按市场设置 `EXCHANGE_A` / `EXCHANGE_US` / … 及对应 API（通达信目录、长桥、富途、天勤、Alpaca、Polygon、盈透、币安等）。
+- **数据源**：按市场设置 `EXCHANGE_A` / `EXCHANGE_US` / … 及对应 API（QMT、通达信、长桥、盈立、富途、天勤、币安等）。
 - **Web**：`WEB_HOST`（示例配置默认 `127.0.0.1`）、`LOGIN_PWD`、`PRELOAD_MARKETS`（启动预加载的市场，默认 `a/hk/us`）。非回环监听另见下方安全部署要求。
 - **存储**：`DB_TYPE`（`sqlite`/`mysql`）、`DATA_PATH`（默认 `~/.chanlun_pro`）、`REDIS_HOST`（可选）。
 - **实时推送**：`ENABLE_SSE_PUSH`、`SSE_REFRESH_MS`（服务端重算+推送间隔，默认 8000ms）。
@@ -178,7 +177,7 @@ chanlun-pro/
 ├─ src/
 │  ├─ chanlun/                  # 主包
 │  │  ├─ core/                  # 缠论核心算法（笔/线段/中枢/买卖点/背驰/走势类型/递归/区间套）
-│  │  ├─ exchange/              # 行情数据源适配层（tdx/qmt/长桥/富途/binance/alpaca/…）
+│  │  ├─ exchange/              # 行情数据源适配层（tdx/qmt/长桥/盈立/富途/binance/…）
 │  │  ├─ decision_support/      # 唯一严格策略、研究回放与证据契约
 │  │  ├─ trading/、trader/      # 实时筛选所需的行情数据契约与在线适配器
 │  │  ├─ xuangu/                # 共用严格结构逻辑的选股入口

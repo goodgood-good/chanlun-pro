@@ -160,14 +160,15 @@ def test_tdx_ny_futures_stale_cache_unbridged_no_hole(monkeypatch):
         pd.to_datetime(ex.fdb.saved["date"]).dt.strftime("%Y-%m-%d")
     )
 
-def test_all_six_tdx_files_have_unbridged_hole_guard():
-    """R9-tdx242: 6 个 tdx 源(fx/futures/ny/tdx/hk/us)增量分支均须有 un-bridged 留洞守卫
+def test_all_active_tdx_files_have_unbridged_hole_guard():
+    """所有现行通达信源的增量分支都必须具备未衔接留洞守卫。
+
     (_fresh_pages 分离 + _bridged 判定 + 弃陈旧缓存分支), 且保留 R10 空页 break 守卫。"""
     import re
     import pathlib
     base = pathlib.Path("src/chanlun/exchange")
     files = ["exchange_tdx_fx", "exchange_tdx_futures", "exchange_tdx_ny_futures",
-             "exchange_tdx", "exchange_tdx_hk", "exchange_tdx_us"]
+             "exchange_tdx", "exchange_tdx_hk"]
     for name in files:
         src = (base / (name + ".py")).read_text(encoding="utf-8")
         assert "_fresh_pages" in src and "_bridged" in src, name + " 缺 un-bridged 留洞守卫"

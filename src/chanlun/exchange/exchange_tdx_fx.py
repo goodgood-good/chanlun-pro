@@ -11,7 +11,11 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 from chanlun import fun
 from chanlun.market import Market
 from chanlun.persistence.db import db
-from chanlun.exchange.exchange import Exchange, Tick, convert_us_tdx_kline_frequency
+from chanlun.exchange.exchange import (
+    Exchange,
+    Tick,
+    convert_overseas_tdx_kline_frequency,
+)
 from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.persistence.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
@@ -273,12 +277,12 @@ class ExchangeTDXFX(Exchange):
 
             result = klines[["code", "date", "open", "close", "high", "low", "volume"]]
             # 通达信扩展行情无原生 10 分钟周期(frequency_map['10m']=category 0=5分钟),拿到的是
-            # 5 分钟 K 线,需 resample 合成真 10 分钟(与 exchange_tdx_us.py 共用 convert_us_tdx_
+            # 5 分钟 K 线需重采样合成真正的 10 分钟周期。
             # kline_frequency)。共用前提是"date 列已带 tz":本函数上方已 localize 到 +8;us 经
             # _convert_dt 已转为美东时区（并非 UTC+8，因此不能声称美股也按 UTC+8 存储）。
             # convert 内部统一 tz_convert(UTC) 后按 UTC 整 10 分切 bin,故两源通用。
             if frequency == "10m":
-                result = convert_us_tdx_kline_frequency(result, "10m")
+                result = convert_overseas_tdx_kline_frequency(result, "10m")
             result = normalize_kline_precision(result, "fx", code)
             return result
         except TdxConnectionError:
