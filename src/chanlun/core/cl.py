@@ -405,15 +405,27 @@ class CL(ICL):
         self._strict_structure_memo["stroke_observation"] = result
         return result
 
-    def _strict_signal_engine(self):
-        from chanlun.core.strict_structure.signals import StrictSignalEngine
+    def _strict_evidence_assembler(self):
+        from chanlun.core.strict_structure.evidence_assembler import (
+            StrictEvidenceAssembler,
+        )
         from chanlun.core.strict_structure.strength import MacdStrengthProvider
 
-        return StrictSignalEngine(
+        cached = self._strict_structure_memo.get("evidence_assembler")
+        if cached is not None:
+            return cached
+        assembler = StrictEvidenceAssembler(
+            symbol=self.get_code(),
+            source_frequency=self.get_frequency(),
+            source_closed_at=self._strict_as_of(),
+            price_basis_revision=self._strict_price_basis_revision(),
+            structure_price_quantum=self._strict_price_quantum(),
+            strict_config_revision=self._strict_config_revision(),
             structure=self.get_strict_structure_levels(),
             strength=MacdStrengthProvider(self),
-            price_quantum=self._strict_price_quantum(),
         )
+        self._strict_structure_memo["evidence_assembler"] = assembler
+        return assembler
 
     @_strict_runtime_locked
     def get_strict_points(self):
@@ -421,7 +433,7 @@ class CL(ICL):
         cached = self._strict_structure_memo.get("confirmed_points")
         if cached is not None:
             return cached
-        result = self._strict_signal_engine().confirmed_points()
+        result = self._strict_evidence_assembler().confirmed_points()
         self._strict_structure_memo["confirmed_points"] = result
         return result
 
@@ -431,35 +443,23 @@ class CL(ICL):
         cached = self._strict_structure_memo.get("approaching_points")
         if cached is not None:
             return cached
-        result = self._strict_signal_engine().approaching_points(self._strict_as_of())
+        result = self._strict_evidence_assembler().approaching_points()
         self._strict_structure_memo["approaching_points"] = result
         return result
 
     @_strict_runtime_locked
     def get_strict_divergences(self):
-        from chanlun.core.strict_structure.divergence import (
-            collect_formal_divergence_ledger,
-        )
-
         self._validate_strict_structure_metadata()
         cached = self._strict_structure_memo.get("divergences")
         if cached is not None:
             return cached
-        result = collect_formal_divergence_ledger(
-            self.get_strict_structure_levels(),
-            self.get_strict_points(),
-        )
+        result = self._strict_evidence_assembler().divergences()
         self._strict_structure_memo["divergences"] = result
         return result
 
     @_strict_runtime_locked
     @_strict_contract_boundary
     def get_strict_evidence(self):
-        from chanlun.core.strict_structure.identity import (
-            build_strict_evidence_revision,
-        )
-        from chanlun.core.strict_structure.models import StrictEvidenceResult
-
         self._validate_strict_structure_metadata()
         strict_config_revision = self._strict_config_revision()
         cached = self._strict_structure_memo.get("evidence")
@@ -467,32 +467,8 @@ class CL(ICL):
             if cached.strict_config_revision != strict_config_revision:
                 raise ValueError("strict config revision changed within CL lifecycle")
             return cached
-        structure = self.get_strict_structure_levels()
-        confirmed_points = self.get_strict_points()
-        divergences = self.get_strict_divergences()
-        price_basis_revision = self._strict_price_basis_revision()
-        structure_revision = build_strict_evidence_revision(
-            symbol=self.get_code(),
-            source_frequency=self.get_frequency(),
-            price_basis_revision=price_basis_revision,
-            strict_config_revision=strict_config_revision,
-            structure=structure,
-            confirmed_points=confirmed_points,
-            divergences=divergences,
-        )
-        result = StrictEvidenceResult(
-            symbol=self.get_code(),
-            source_frequency=self.get_frequency(),
-            source_closed_at=self._strict_as_of(),
-            price_basis_revision=price_basis_revision,
-            structure_price_quantum=self._strict_price_quantum(),
-            strict_config_revision=strict_config_revision,
-            structure_revision=structure_revision,
-            structure=structure,
+        result = self._strict_evidence_assembler().evidence(
             stroke_center_observations=self.get_stroke_observation_centers(),
-            confirmed_points=confirmed_points,
-            approaching_points=self.get_strict_approaching_points(),
-            divergences=divergences,
         )
         self._strict_structure_memo["evidence"] = result
         return result

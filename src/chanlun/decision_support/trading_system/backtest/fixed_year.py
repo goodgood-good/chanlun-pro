@@ -29,20 +29,17 @@ import pandas as pd
 
 from chanlun.core.cl import CL
 from chanlun.core.strict_structure.formal_state import current_formal_direction
-from chanlun.core.strict_structure.identity import build_strict_evidence_revision
-from chanlun.core.strict_structure.divergence import (
-    collect_formal_divergence_ledger,
+from chanlun.core.strict_structure.evidence_assembler import (
+    StrictEvidenceAssembler,
+    empty_stroke_center_observations,
 )
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
-    CenterLevelResult,
     ConstituentUnit,
     SourceKind,
-    StrictEvidenceResult,
     TrendType,
 )
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
-from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import MacdStrengthProvider
 from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
 from chanlun.core.strict_structure.errors import StrictStructureContractError
@@ -886,51 +883,27 @@ def _causal_confirmed_structure_events(
                     first_seen_trend.trend_id,
                     first_seen_trend,
                 )
-        engine = StrictSignalEngine(
-            structure=structure,
-            strength=strength,
-            price_quantum=price_quantum,
-        )
-        raw_points = engine.confirmed_points()
         strict_config_revision = cast(
             str,
             state.get_config()["strict_config_revision"],
         )
-        divergences = collect_formal_divergence_ledger(
-            structure,
-            raw_points,
-        )
-        structure_revision = build_strict_evidence_revision(
-            symbol=code,
-            source_frequency=frequency,
-            price_basis_revision=price_basis_revision,
-            strict_config_revision=strict_config_revision,
-            structure=structure,
-            confirmed_points=raw_points,
-            divergences=divergences,
-        )
-        snapshot = StrictEvidenceResult(
+        assembler = StrictEvidenceAssembler(
             symbol=code,
             source_frequency=frequency,
             source_closed_at=checkpoint,
             price_basis_revision=price_basis_revision,
             structure_price_quantum=price_quantum,
             strict_config_revision=strict_config_revision,
-            structure_revision=structure_revision,
             structure=structure,
-            stroke_center_observations=CenterLevelResult(
-                structural_level=0,
-                price_basis_revision=price_basis_revision,
-                centers=(),
-                previews=(),
-                events=(),
-                locked_unit_count=0,
-                replay_from=0,
-            ),
-            confirmed_points=raw_points,
-            approaching_points=(),
-            divergences=divergences,
+            strength=strength,
         )
+        snapshot = assembler.evidence(
+            stroke_center_observations=empty_stroke_center_observations(
+                price_basis_revision
+            ),
+            include_approaching=False,
+        )
+        raw_points = snapshot.confirmed_points
         converted_point_ids = structural_point_id_map(
             raw_points,
             code=code,

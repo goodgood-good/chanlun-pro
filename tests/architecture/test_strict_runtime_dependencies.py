@@ -163,3 +163,38 @@ def test_production_cl_calls_bind_market_explicitly() -> None:
             if len(node.args) < 5 and not market_keyword:
                 offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert offenders == []
+
+
+def test_strict_signal_and_divergence_assembly_has_one_production_authority() -> None:
+    """生产代码只能由严格证据装配器组合买卖点、背驰和证据身份。"""
+
+    allowed = {
+        "src/chanlun/core/strict_structure/evidence_assembler.py",
+        # 模型会独立重算修订号以验证不可变证据，属于校验而不是第二套装配。
+        "src/chanlun/core/strict_structure/models.py",
+    }
+    forbidden_calls = (
+        "StrictSignalEngine(",
+        "collect_formal_divergence_ledger(",
+        "build_strict_evidence_revision(",
+    )
+    offenders = []
+    roots = (
+        ROOT / "src/chanlun",
+        ROOT / "web/chanlun_chart/cl_app",
+    )
+    for path in (path for root in roots for path in root.rglob("*.py")):
+        relative = path.relative_to(ROOT).as_posix()
+        if relative in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden_calls:
+            if token in source and not (
+                relative == "src/chanlun/core/strict_structure/identity.py"
+                and token == "build_strict_evidence_revision("
+            ) and not (
+                relative == "src/chanlun/core/strict_structure/divergence.py"
+                and token == "collect_formal_divergence_ledger("
+            ):
+                offenders.append(f"{relative}:{token}")
+    assert offenders == []

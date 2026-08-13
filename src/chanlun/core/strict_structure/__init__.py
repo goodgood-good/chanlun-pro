@@ -26,8 +26,11 @@ from chanlun.core.strict_structure.models import (
     build_strict_point_id,
 )
 from chanlun.core.strict_structure.errors import StrictStructureContractError
+from chanlun.core.strict_structure.evidence_assembler import (
+    StrictEvidenceAssembler,
+    empty_stroke_center_observations,
+)
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
-from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.formal_state import (
     FormalDirectionState,
     current_formal_direction,
@@ -35,9 +38,8 @@ from chanlun.core.strict_structure.formal_state import (
     resolve_level_formal_direction,
     semantic_trend_direction,
 )
-from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
-from chanlun.core.strict_structure.signals import StrictSignalEngine, center_ordinals
+from chanlun.core.strict_structure.signals import center_ordinals
 from chanlun.core.strict_structure.strength import (
     MacdStrengthUnavailable,
     MacdStrengthProvider,
@@ -59,6 +61,7 @@ __all__ = [
     "FormalDirectionState",
     "SourceKind",
     "StrictEvidenceResult",
+    "StrictEvidenceAssembler",
     "StrictLevelResult",
     "StrictPointEvidence",
     "StrictPointStatus",
@@ -66,7 +69,6 @@ __all__ = [
     "STRICT_POINT_TYPE_SET",
     "StrictPointVariant",
     "StrictRecursiveEngine",
-    "StrictSignalEngine",
     "StrictStructureResult",
     "StrictStructureContractError",
     "StrengthSnapshot",
@@ -76,9 +78,8 @@ __all__ = [
     "TrendState",
     "TrendType",
     "build_strict_point_id",
-    "build_strict_evidence_revision",
+    "empty_stroke_center_observations",
     "center_ordinals",
-    "collect_formal_divergence_ledger",
     "current_formal_direction",
     "compare_divergence",
     "MacdStrengthUnavailable",
