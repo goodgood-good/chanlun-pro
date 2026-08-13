@@ -4037,6 +4037,93 @@ def test_restarted_priority_monitor_requires_immediate_runtime_verification(
     ]
 
 
+def test_restarted_priority_monitor_restores_compact_signal_documents(
+    tmp_path: Path,
+) -> None:
+    """精简实时信号不重复携带核心身份，但必须随顶层契约跨重启恢复。"""
+
+    cache_path = tmp_path / "snapshot.json"
+    observed_at = AS_OF.replace(hour=14, minute=58)
+    code = "SZ.000001"
+    signal_id = "priority-signal:SZ.000001"
+    config = TradingScreeningConfig(priority_monitoring_enabled=True)
+    first = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner((code,)),
+        cache_path=cache_path,
+        clock=lambda: observed_at,
+        notifier=None,
+        config=config,
+    )
+    first._record_priority_monitor_result(
+        observed_at=observed_at,
+        codes=(code,),
+        errors=(),
+        documents=(
+            {
+                "signal_id": signal_id,
+                "code": code,
+                "point_type": "1buy",
+                "lifecycle_stage": "armed",
+                "observed_at": observed_at.isoformat(),
+            },
+        ),
+        successful_codes=(code,),
+        lanes_by_code={
+            code: trading_screening_subject.CANDIDATE_MONITOR_LANE_1M,
+        },
+        five_universe=(code,),
+        thirty_universe=(code,),
+        five_codes=(code,),
+        thirty_codes=(code,),
+        successful_five_codes=(code,),
+        successful_thirty_codes=(code,),
+    )
+    first._persist_priority_monitor_state()
+
+    state_path = tmp_path / "trading_priority_monitor_state.json"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    [persisted_document] = persisted["latest_documents"]
+    assert "decision_core_id" not in persisted_document
+    assert persisted_document["presentation_projection"] is True
+    assert persisted_document["full_audit_evidence_embedded"] is False
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner((code,)),
+        cache_path=cache_path,
+        clock=lambda: observed_at + timedelta(seconds=30),
+        notifier=None,
+        config=config,
+    )
+
+    assert restarted._priority_monitor_last_at == observed_at
+    assert restarted._candidate_monitor_five_universe == (code,)
+    assert restarted._candidate_monitor_thirty_universe == (code,)
+    assert restarted._candidate_monitor_five_last_success_at == {
+        code: observed_at
+    }
+    assert restarted._candidate_monitor_thirty_last_success_at == {
+        code: observed_at
+    }
+    assert restarted._priority_monitor_code_observations == {
+        code: (
+            observed_at,
+            trading_screening_subject.CANDIDATE_MONITOR_LANE_1M,
+        )
+    }
+    assert set(restarted._priority_monitor_latest_documents) == {signal_id}
+    restored = restarted._priority_monitor_latest_documents[signal_id]
+    assert restored["observation_lane"] == "PRIORITY_CURRENT_1M"
+    assert restored["monitor_observed_at"] == observed_at.isoformat()
+    assert restored["realtime_observation"] is True
+    assert restarted._priority_monitor_runtime_verified is False
+
+
 def test_candidate_scheduler_covers_a_five_minute_universe_once_per_cadence() -> None:
     universe = tuple(f"SZ.{value:06d}" for value in range(10))
     observed_at = AS_OF.replace(hour=10, minute=0)

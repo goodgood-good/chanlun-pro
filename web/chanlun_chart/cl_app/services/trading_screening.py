@@ -191,6 +191,11 @@ _CANDIDATE_MONITOR_LANES = frozenset(
         CANDIDATE_MONITOR_LANE_30M,
     }
 )
+_CANDIDATE_MONITOR_PRESENTATION_LANES = {
+    CANDIDATE_MONITOR_LANE_1M: "PRIORITY_CURRENT_1M",
+    CANDIDATE_MONITOR_LANE_5M: "CANDIDATE_CURRENT_5M",
+    CANDIDATE_MONITOR_LANE_30M: "CANDIDATE_CURRENT_30M",
+}
 MARKET_CLOSE_CUTOFF = datetime_time(15)
 COMPLETE_CLOSE_IDLE_REASON = "COMPLETE_CLOSE_SNAPSHOT_OUTSIDE_ACTIVE_WINDOW"
 FULL_COVERAGE_PAUSE_REASON = "OUTSIDE_FULL_COVERAGE_REFRESH_WINDOW"
@@ -2887,7 +2892,16 @@ class TradingScreeningService:
             or not isinstance(value.get("code"), str)
             or not value.get("code")
             or not isinstance(value.get("lifecycle_stage"), str)
-            or value.get("decision_core_id") != self._decision_core_id
+            # 实时状态保存的是页面精简投影，按契约不会重复携带审计字段
+            # ``decision_core_id``。顶层身份和内容哈希共同约束全部子文档；
+            # 这里继续严格确认每条记录确实属于统一的精简投影契约。
+            or value.get("presentation_projection") is not True
+            or value.get("full_audit_evidence_embedded") is not False
+            or value.get("observation_lane")
+            not in _CANDIDATE_MONITOR_PRESENTATION_LANES.values()
+            or not isinstance(value.get("monitor_observed_at"), str)
+            or not value.get("monitor_observed_at")
+            or not isinstance(value.get("realtime_observation"), bool)
             for value in raw_documents
         ):
             return
@@ -3013,6 +3027,27 @@ class TradingScreeningService:
             thirty_last_success_at
         ).issubset(set(raw_thirty_universe)):
             return
+        for document in latest_documents.values():
+            code = str(document["code"])
+            observation = code_observations.get(code)
+            if observation is None:
+                return
+            observation_at, lane = observation
+            presentation_lane = _CANDIDATE_MONITOR_PRESENTATION_LANES[lane]
+            try:
+                monitor_observed_at = normalize_datetime(
+                    datetime.fromisoformat(str(document["monitor_observed_at"])),
+                    f"{code} monitor document observed_at",
+                )
+            except ValueError:
+                return
+            if (
+                document.get("observation_lane") != presentation_lane
+                or monitor_observed_at != observation_at
+                or document.get("realtime_observation")
+                is not (lane == CANDIDATE_MONITOR_LANE_1M)
+            ):
+                return
         effective_stages: dict[str, str] = {}
         for key, value in raw_stages.items():
             signal_id = str(key)
@@ -3186,17 +3221,12 @@ class TradingScreeningService:
         lane_map = dict(lanes_by_code or {})
         if any(value not in _CANDIDATE_MONITOR_LANES for value in lane_map.values()):
             raise ValueError("candidate monitor lane is invalid")
-        presentation_lane = {
-            CANDIDATE_MONITOR_LANE_1M: "PRIORITY_CURRENT_1M",
-            CANDIDATE_MONITOR_LANE_5M: "CANDIDATE_CURRENT_5M",
-            CANDIDATE_MONITOR_LANE_30M: "CANDIDATE_CURRENT_30M",
-        }
         compact_documents = None
         if documents is not None:
             compact_documents = tuple(
                 {
                     **_presentation_signal_document(document),
-                    "observation_lane": presentation_lane[
+                    "observation_lane": _CANDIDATE_MONITOR_PRESENTATION_LANES[
                         lane_map[str(document["code"])]
                     ],
                     "monitor_observed_at": observed_at.isoformat(),
