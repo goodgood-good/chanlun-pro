@@ -94,6 +94,11 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_COMPOSITE_PROVIDER,
 )
 from chanlun.tools.log_util import LogUtil
+from cl_app.services.realtime_quotes import (
+    AShareRealtimeQuoteBatch,
+    normalized_a_share_codes,
+    quote_from_exchange_tick,
+)
 
 
 _FREQUENCIES = SCREENING_STRUCTURE_FREQUENCIES
@@ -1880,50 +1885,74 @@ class NativeTradingDataGateway:
         return {code: result[code] for code in normalized}
 
     def tick_probe(self, code: str) -> Mapping[str, object]:
-        """在原生进程内探测一个 A 股实时报价，不泄露原生行情对象。"""
+        """用统一实时行情契约探测一个 A 股报价。"""
 
         if not isinstance(code, str) or _A_STOCK_CODE.fullmatch(code) is None:
             raise ValueError("tick probe requires an exact normalized A-share code")
+        batch = self.realtime_ticks((code,))
+        usable = code in batch.ticks()
+        return {
+            "schema": "chanlun-native-tick-probe",
+            "code": code,
+            "status": (
+                "market_closed"
+                if not batch.market_open
+                else "ready"
+                if usable
+                else "empty"
+            ),
+            "market_open": batch.market_open,
+            "usable": usable,
+            "tick_data_used": batch.tick_data_used,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+
+    def realtime_ticks(
+        self,
+        codes: tuple[str, ...],
+    ) -> AShareRealtimeQuoteBatch:
+        """在原生进程内批量读取 A 股 Tick，并转换为纯 Python 值对象。"""
+
+        normalized = normalized_a_share_codes(codes)
         exchange = self._exchange_provider()
         market_open_probe = getattr(exchange, "now_trading", None)
         if not callable(market_open_probe):
             raise TypeError("exchange must expose now_trading")
         market_open = bool(market_open_probe("a"))
         if not market_open:
-            return {
-                "schema": "chanlun-native-tick-probe",
-                "code": code,
-                "status": "market_closed",
-                "market_open": False,
-                "usable": False,
-                "tick_data_used": False,
-                "real_account_access": False,
-                "real_order_transport": False,
-            }
+            return AShareRealtimeQuoteBatch(
+                requested_codes=normalized,
+                market_open=False,
+                quotes=(),
+                tick_data_used=False,
+            )
+        if not normalized:
+            return AShareRealtimeQuoteBatch(
+                requested_codes=(),
+                market_open=True,
+                quotes=(),
+                tick_data_used=False,
+            )
         loader = getattr(exchange, "ticks", None)
         if not callable(loader):
             raise TypeError("exchange must expose ticks")
         self._report_progress()
-        values = loader([code]) or {}
+        values = loader(list(normalized)) or {}
         self._report_progress()
-        tick = values.get(code) if isinstance(values, Mapping) else None
-        last = None if tick is None else getattr(tick, "last", None)
-        usable = bool(
-            isinstance(last, (Integral, float))
-            and not isinstance(last, bool)
-            and math.isfinite(float(last))
-            and float(last) > 0
+        if not isinstance(values, Mapping):
+            raise TypeError("exchange ticks must return a mapping")
+        quotes = tuple(
+            quote
+            for code in normalized
+            if (quote := quote_from_exchange_tick(code, values.get(code))) is not None
         )
-        return {
-            "schema": "chanlun-native-tick-probe",
-            "code": code,
-            "status": "ready" if usable else "empty",
-            "market_open": True,
-            "usable": usable,
-            "tick_data_used": True,
-            "real_account_access": False,
-            "real_order_transport": False,
-        }
+        return AShareRealtimeQuoteBatch(
+            requested_codes=normalized,
+            market_open=True,
+            quotes=quotes,
+            tick_data_used=True,
+        )
 
     def symbol_name(self, code: str) -> str | None:
         with self._lock:

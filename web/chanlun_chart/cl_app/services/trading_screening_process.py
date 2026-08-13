@@ -54,6 +54,11 @@ from cl_app.services.trading_screening_gateway import (
     _TRADABLE_SCREENING_INSTRUMENT_TYPES,
     _stock_codes,
 )
+from cl_app.services.realtime_quotes import (
+    AShareRealtimeQuoteBatch,
+    normalized_a_share_codes,
+    validated_quote_batch,
+)
 
 
 IPC_SCHEMA = "chanlun-trading-screening-native-ipc"
@@ -932,96 +937,118 @@ class NativeWorkerProcessTransport:
         if not isinstance(method, str) or not method:
             raise ValueError("native worker method is required")
         with self._request_lock:
-            self._spawn()
-            request_id = "sha256:" + uuid4().hex + uuid4().hex
-            started = _now()
-            with self._state_lock:
-                process = self._process
-                connection = self._connection
-                self._in_flight_request_id = request_id
-                self._request_started_at = started
-                self._last_progress_at = started
-                self._last_method = method
-            if process is None or connection is None:
-                raise NativeScreeningWorkerUnavailable("native worker is unavailable")
-            try:
-                connection.send(
-                    {
-                        "schema": IPC_SCHEMA,
-                        "type": "request",
-                        "request_id": request_id,
-                        "method": method,
-                        "kwargs": dict(kwargs),
-                    }
-                )
-                idle_deadline = (
-                    time.monotonic() + self._config.native_idle_timeout_seconds
-                )
-                while True:
-                    if process.poll() is not None:
-                        raise NativeScreeningWorkerUnavailable(
-                            "native worker exited during request "
-                            f"{method} with code {process.returncode}"
-                        )
-                    remaining = idle_deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise NativeScreeningWorkerTimeout(
-                            f"native worker made no progress for "
-                            f"{self._config.native_idle_timeout_seconds:g}s in {method}"
-                        )
-                    if not connection.poll(min(0.2, remaining)):
-                        continue
-                    response = connection.recv()
-                    if not isinstance(response, Mapping) or (
-                        response.get("schema") != IPC_SCHEMA
-                        or response.get("request_id") != request_id
-                    ):
-                        raise NativeScreeningWorkerProtocolError(
-                            "native worker response identity is invalid"
-                        )
-                    response_type = response.get("type")
-                    if response_type == "progress":
-                        progressed = _now()
-                        with self._state_lock:
-                            self._last_progress_at = progressed
-                        idle_deadline = (
-                            time.monotonic() + self._config.native_idle_timeout_seconds
-                        )
-                        self._notify_progress()
-                        continue
-                    if response_type == "error":
-                        name = str(response.get("error_type") or "RemoteError")
-                        message = str(response.get("message") or "")[:400]
-                        with self._state_lock:
-                            self._last_response_at = _now()
-                            self._last_remote_error = f"{name}: {message}"
-                        raise NativeScreeningWorkerRemoteError(
-                            method=method,
-                            remote_error_type=name,
-                            remote_message=message,
-                        )
-                    if response_type != "result" or "value" not in response:
-                        raise NativeScreeningWorkerProtocolError(
-                            "native worker returned an unsupported response"
-                        )
+            return self._request_locked(method, kwargs)
+
+    def request_nowait(self, method: str, **kwargs: object) -> object:
+        """仅在当前没有请求时发送；繁忙时立即失败，不进入等待队列。"""
+
+        if not isinstance(method, str) or not method:
+            raise ValueError("native worker method is required")
+        acquired = self._request_lock.acquire(blocking=False)
+        if not acquired:
+            raise NativeScreeningWorkerUnavailable(
+                "native worker is busy; request was not queued"
+            )
+        try:
+            return self._request_locked(method, kwargs)
+        finally:
+            self._request_lock.release()
+
+    def _request_locked(
+        self,
+        method: str,
+        kwargs: Mapping[str, object],
+    ) -> object:
+        """在调用方已经取得单飞锁后执行一次认证请求。"""
+
+        self._spawn()
+        request_id = "sha256:" + uuid4().hex + uuid4().hex
+        started = _now()
+        with self._state_lock:
+            process = self._process
+            connection = self._connection
+            self._in_flight_request_id = request_id
+            self._request_started_at = started
+            self._last_progress_at = started
+            self._last_method = method
+        if process is None or connection is None:
+            raise NativeScreeningWorkerUnavailable("native worker is unavailable")
+        try:
+            connection.send(
+                {
+                    "schema": IPC_SCHEMA,
+                    "type": "request",
+                    "request_id": request_id,
+                    "method": method,
+                    "kwargs": dict(kwargs),
+                }
+            )
+            idle_deadline = time.monotonic() + self._config.native_idle_timeout_seconds
+            while True:
+                if process.poll() is not None:
+                    raise NativeScreeningWorkerUnavailable(
+                        "native worker exited during request "
+                        f"{method} with code {process.returncode}"
+                    )
+                remaining = idle_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise NativeScreeningWorkerTimeout(
+                        f"native worker made no progress for "
+                        f"{self._config.native_idle_timeout_seconds:g}s in {method}"
+                    )
+                if not connection.poll(min(0.2, remaining)):
+                    continue
+                response = connection.recv()
+                if not isinstance(response, Mapping) or (
+                    response.get("schema") != IPC_SCHEMA
+                    or response.get("request_id") != request_id
+                ):
+                    raise NativeScreeningWorkerProtocolError(
+                        "native worker response identity is invalid"
+                    )
+                response_type = response.get("type")
+                if response_type == "progress":
+                    progressed = _now()
+                    with self._state_lock:
+                        self._last_progress_at = progressed
+                    idle_deadline = (
+                        time.monotonic() + self._config.native_idle_timeout_seconds
+                    )
+                    self._notify_progress()
+                    continue
+                if response_type == "error":
+                    name = str(response.get("error_type") or "RemoteError")
+                    message = str(response.get("message") or "")[:400]
                     with self._state_lock:
                         self._last_response_at = _now()
-                        self._last_remote_error = None
-                    return response["value"]
-            except NativeScreeningWorkerRemoteError:
-                raise
-            except (EOFError, BrokenPipeError, OSError) as exc:
-                message = f"native worker transport failed in {method}: {exc}"
-                self._discard_worker(message)
-                raise NativeScreeningWorkerUnavailable(message) from exc
-            except NativeScreeningWorkerError as exc:
-                self._discard_worker(f"{type(exc).__name__}: {exc}")
-                raise
-            finally:
+                        self._last_remote_error = f"{name}: {message}"
+                    raise NativeScreeningWorkerRemoteError(
+                        method=method,
+                        remote_error_type=name,
+                        remote_message=message,
+                    )
+                if response_type != "result" or "value" not in response:
+                    raise NativeScreeningWorkerProtocolError(
+                        "native worker returned an unsupported response"
+                    )
                 with self._state_lock:
-                    if self._in_flight_request_id == request_id:
-                        self._in_flight_request_id = None
-                        self._request_started_at = None
+                    self._last_response_at = _now()
+                    self._last_remote_error = None
+                return response["value"]
+        except NativeScreeningWorkerRemoteError:
+            raise
+        except (EOFError, BrokenPipeError, OSError) as exc:
+            message = f"native worker transport failed in {method}: {exc}"
+            self._discard_worker(message)
+            raise NativeScreeningWorkerUnavailable(message) from exc
+        except NativeScreeningWorkerError as exc:
+            self._discard_worker(f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            with self._state_lock:
+                if self._in_flight_request_id == request_id:
+                    self._in_flight_request_id = None
+                    self._request_started_at = None
 
     def startup(self) -> None:
         """建立已认证工作进程，但不发出数据请求。
@@ -1769,36 +1796,44 @@ class NativeTradingDataGatewayProcessProxy:
         return {code: result[code] for code in normalized}
 
     def tick_probe(self, code: str) -> Mapping[str, object]:
-        """通过认证子进程探测实时行情，避免 ``xtdata`` 阻塞 Web 主进程。"""
+        """用统一实时行情结果生成就绪探测，不保留第二套 IPC 协议。"""
 
         normalized = _stock_codes((code,))
         if len(normalized) != 1 or normalized[0] != code:
             raise ValueError("tick probe requires an exact normalized A-share code")
-        value = self._transport.request("tick_probe", code=code)
-        if (
-            not isinstance(value, Mapping)
-            or value.get("schema") != "chanlun-native-tick-probe"
-            or value.get("code") != code
-            or value.get("status") not in {"ready", "empty", "market_closed"}
-            or type(value.get("market_open")) is not bool
-            or type(value.get("usable")) is not bool
-            or type(value.get("tick_data_used")) is not bool
-            or value.get("real_account_access") is not False
-            or value.get("real_order_transport") is not False
-            or (value.get("status") == "ready") != (value.get("usable") is True)
-            or (value.get("status") == "market_closed")
-            != (value.get("market_open") is False)
-            or (
-                value.get("market_open") is False
-                and value.get("tick_data_used") is not False
-            )
-            or (
-                value.get("market_open") is True
-                and value.get("tick_data_used") is not True
-            )
-        ):
-            raise NativeScreeningWorkerProtocolError("invalid native tick probe")
-        return dict(value)
+        batch = self.realtime_ticks((code,))
+        usable = code in batch.ticks()
+        return {
+            "schema": "chanlun-native-tick-probe",
+            "code": code,
+            "status": (
+                "market_closed"
+                if not batch.market_open
+                else "ready"
+                if usable
+                else "empty"
+            ),
+            "market_open": batch.market_open,
+            "usable": usable,
+            "tick_data_used": batch.tick_data_used,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+
+    def realtime_ticks(
+        self,
+        codes: tuple[str, ...],
+    ) -> AShareRealtimeQuoteBatch:
+        """单飞读取认证控制进程；繁忙时立即失败，禁止 Web 请求堆积。"""
+
+        normalized = normalized_a_share_codes(codes)
+        value = self._transport.request_nowait("realtime_ticks", codes=normalized)
+        try:
+            return validated_quote_batch(value, requested_codes=normalized)
+        except (TypeError, ValueError) as exc:
+            raise NativeScreeningWorkerProtocolError(
+                "invalid native realtime quote result"
+            ) from exc
 
     def symbol_name(self, code: str) -> str | None:
         with self._cache_lock:

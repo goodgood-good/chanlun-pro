@@ -33,7 +33,7 @@ class _Gateway(Protocol):
 
     def symbol_name(self, code: str) -> object: ...
 
-    def tick_probe(self, code: str) -> object: ...
+    def realtime_ticks(self, codes: tuple[str, ...]) -> object: ...
 
     def structure_bundle(self, code: str, **kwargs: object) -> object: ...
 
@@ -155,13 +155,13 @@ def dispatch_gateway_request(
         if not isinstance(code, str):
             raise ValueError("symbol_name requires code")
         return gateway.symbol_name(code)
-    if method == "tick_probe":
-        if set(kwargs) != {"code"}:
-            raise ValueError("tick_probe requires exactly code")
-        code = kwargs.get("code")
-        if not isinstance(code, str):
-            raise ValueError("tick_probe requires code")
-        return gateway.tick_probe(code)
+    if method == "realtime_ticks":
+        if set(kwargs) != {"codes"}:
+            raise ValueError("realtime_ticks requires exactly codes")
+        codes = kwargs.get("codes")
+        if type(codes) is not tuple or any(type(code) is not str for code in codes):
+            raise ValueError("realtime_ticks requires an exact string tuple")
+        return gateway.realtime_ticks(codes)
     if method == "structure_bundle":
         code = kwargs.get("code")
         if not isinstance(code, str):

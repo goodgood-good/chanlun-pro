@@ -37,6 +37,10 @@ from cl_app.services.trading_screening_gateway import (
     SectorAnalysisExclusion,
     SectorAssessmentBatch,
 )
+from cl_app.services.realtime_quotes import (
+    AShareRealtimeQuote,
+    AShareRealtimeQuoteBatch,
+)
 from cl_app.services.trading_screening_process import (
     NativeScreeningWorkerProtocolError,
     NativeScreeningWorkerRemoteError,
@@ -322,6 +326,20 @@ def test_native_idle_timeout_kills_a_stuck_child(tmp_path: Path) -> None:
         transport.shutdown()
 
 
+def test_native_nowait_request_never_queues_behind_busy_worker(tmp_path: Path) -> None:
+    transport = _transport(tmp_path)
+    transport._request_lock.acquire()
+    started = time.monotonic()
+    try:
+        with pytest.raises(NativeScreeningWorkerUnavailable, match="not queued"):
+            transport.request_nowait("echo", value="later")
+        assert time.monotonic() - started < 0.1
+        assert transport.health_snapshot()["worker_alive"] is False
+    finally:
+        transport._request_lock.release()
+        transport.shutdown()
+
+
 def test_normal_remote_error_keeps_the_isolated_worker_alive(tmp_path: Path) -> None:
     transport = _transport(tmp_path)
     try:
@@ -348,8 +366,8 @@ class _FakeGateway:
     def members(self):
         return {"sector": ("SH.600000",)}
 
-    def tick_probe(self, code):
-        return {"code": code, "usable": True}
+    def realtime_ticks(self, codes):
+        return {"codes": codes}
 
 
 def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
@@ -359,10 +377,11 @@ def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
     }
     assert dispatch_gateway_request(
         gateway,
-        method="tick_probe",
-        kwargs={"code": "SH.600000"},
-    ) == {"code": "SH.600000", "usable": True}
+        method="realtime_ticks",
+        kwargs={"codes": ("SH.600000",)},
+    ) == {"codes": ("SH.600000",)}
     for forbidden in (
+        "tick_probe",
         "screening_instrument_types",
         "tradable_instrument_codes",
         "order",
@@ -410,7 +429,7 @@ class _InstrumentTypeCatalog:
         }
 
 
-class _TickProbeTransport:
+class _RealtimeTickTransport:
     def __init__(self, result: object) -> None:
         self.result = result
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -418,7 +437,7 @@ class _TickProbeTransport:
     def set_progress_callback(self, callback) -> None:
         self.progress_callback = callback
 
-    def request(self, method: str, **kwargs: object) -> object:
+    def request_nowait(self, method: str, **kwargs: object) -> object:
         self.calls.append((method, kwargs))
         return self.result
 
@@ -430,7 +449,16 @@ class _TickProbeTransport:
 
 
 def test_process_proxy_validates_isolated_tick_probe() -> None:
-    result = {
+    batch = AShareRealtimeQuoteBatch(
+        requested_codes=("SH.000001",),
+        market_open=False,
+        quotes=(),
+        tick_data_used=False,
+    )
+    transport = _RealtimeTickTransport(batch)
+    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+
+    assert proxy.tick_probe("SH.000001") == {
         "schema": "chanlun-native-tick-probe",
         "code": "SH.000001",
         "status": "market_closed",
@@ -440,13 +468,28 @@ def test_process_proxy_validates_isolated_tick_probe() -> None:
         "real_account_access": False,
         "real_order_transport": False,
     }
-    transport = _TickProbeTransport(result)
-    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    assert transport.calls == [
+        ("realtime_ticks", {"codes": ("SH.000001",)})
+    ]
 
-    assert proxy.tick_probe("SH.000001") == result
-    assert transport.calls == [("tick_probe", {"code": "SH.000001"})]
-
-    transport.result = {**result, "usable": True}
+    transport.result = AShareRealtimeQuoteBatch(
+        requested_codes=("SZ.000001",),
+        market_open=True,
+        quotes=(
+            AShareRealtimeQuote(
+                code="SZ.000001",
+                last=1.0,
+                buy1=1.0,
+                sell1=1.0,
+                high=1.0,
+                low=1.0,
+                open=1.0,
+                volume=1.0,
+                rate=0.0,
+            ),
+        ),
+        tick_data_used=True,
+    )
     with pytest.raises(NativeScreeningWorkerProtocolError):
         proxy.tick_probe("SH.000001")
 

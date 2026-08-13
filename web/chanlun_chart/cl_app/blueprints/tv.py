@@ -30,6 +30,7 @@ from ..services.constants import (
     market_types,
 )
 from ..services.last_chart_state import record_user_request
+from ..services.realtime_quotes import isolated_a_share_quote_batch
 
 tv_bp = Blueprint("tv", __name__)
 
@@ -361,8 +362,16 @@ def tv_quotes():
 
     for market, code_map in by_market.items():
         try:
-            ex = get_exchange(Market(market))
-            stock_ticks = ex.ticks(list(code_map.keys()))
+            isolated_batch = (
+                isolated_a_share_quote_batch(current_app, list(code_map))
+                if market == Market.A.value
+                else None
+            )
+            if isolated_batch is not None:
+                stock_ticks = isolated_batch.ticks()
+            else:
+                ex = get_exchange(Market(market))
+                stock_ticks = ex.ticks(list(code_map.keys()))
         except Exception:
             LogUtil.exception(
                 f"[tv_quotes] ticks failed market={market} n={len(code_map)}"

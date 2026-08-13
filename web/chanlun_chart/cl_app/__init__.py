@@ -2419,6 +2419,11 @@ def create_app(test_config=None, start_scheduler=False):
             "shutdown_scheduler": shutdown_scheduler,
             "decision_support_trading_screening": (decision_support_trading_screening),
             "decision_support_trading_screening_gateway": trading_gateway,
+            "a_share_realtime_quotes": getattr(
+                trading_gateway,
+                "realtime_ticks",
+                None,
+            ),
             "decision_support_human_review": decision_support_human_review,
             "forward_scheduler_probe": forward_scheduler_probe,
             "app_forward_scheduler": app_forward_scheduler,

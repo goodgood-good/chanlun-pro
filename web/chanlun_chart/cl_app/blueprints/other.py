@@ -14,6 +14,7 @@ from flask_login import login_required
 from chanlun.market import Market
 from chanlun.exchange import get_exchange, market_now_trading
 from chanlun.tools.log_util import LogUtil
+from ..services.realtime_quotes import isolated_a_share_quote_batch
 
 
 other_bp = Blueprint("other", __name__)
@@ -145,17 +146,26 @@ def ticks():
         return _error_response("code_must_be_string", "each code must be a string.", 400)
 
     try:
-        ex = get_exchange(Market(market))
-        stock_ticks = _fetch_ticks_with_us_fallback(ex, market, codes)
-        try:
-            now_trading = market_now_trading(ex, market)
-        except Exception as exc:
-        # 市场时段元数据仅供参考。保留成功获取的价格并暴露未知状态，
-        # 不要丢弃整批结果。
-            LogUtil.warning(
-                f"/ticks market state unavailable market={market} err={exc}"
-            )
-            now_trading = None
+        isolated_batch = (
+            isolated_a_share_quote_batch(current_app, codes)
+            if market == Market.A.value
+            else None
+        )
+        if isolated_batch is not None:
+            stock_ticks = isolated_batch.ticks()
+            now_trading = isolated_batch.market_open
+        else:
+            ex = get_exchange(Market(market))
+            stock_ticks = _fetch_ticks_with_us_fallback(ex, market, codes)
+            try:
+                now_trading = market_now_trading(ex, market)
+            except Exception as exc:
+                # 市场时段元数据仅供参考。保留成功获取的价格并暴露未知状态，
+                # 不要丢弃整批结果。
+                LogUtil.warning(
+                    f"/ticks market state unavailable market={market} err={exc}"
+                )
+                now_trading = None
         # rate 可为 None（盈透经 Redis 透传或币安 ccxt 缺少 percentage），原列表推导中
         # float(None) 抛 TypeError 被外层 except 吞→整批(含健康标的)清空且 now_trading=False
         # 停掉前端轮询。改逐标的隔离 + `or 0` 守零, 镜像 /tv/quotes(tv.py:637)。

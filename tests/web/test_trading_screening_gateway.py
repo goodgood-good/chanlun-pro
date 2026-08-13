@@ -43,6 +43,7 @@ from cl_app.services.trading_screening_gateway import (
     analyze_native_frame_with_warmup,
     audit_native_frame_warmup_envelope,
 )
+from chanlun.exchange.exchange import Tick
 
 
 NOW = datetime.fromisoformat("2026-07-20T10:02:00+08:00")
@@ -1659,6 +1660,45 @@ def test_native_gateway_tick_probe_skips_qmt_when_market_is_closed() -> None:
         "real_account_access": False,
         "real_order_transport": False,
     }
+
+
+def test_native_gateway_realtime_ticks_returns_only_finite_requested_rows() -> None:
+    gateway, _analyzer, stock_exchange = _gateway()
+    stock_exchange.now_trading = lambda market: market == "a"  # type: ignore[method-assign]
+    stock_exchange.ticks = lambda codes: {  # type: ignore[attr-defined]
+        "SH.600000": Tick(
+            code="SH.600000",
+            last=10.5,
+            buy1=10.4,
+            sell1=10.6,
+            high=10.8,
+            low=10.1,
+            open=10.2,
+            volume=1000.0,
+            rate=None,
+        ),
+        "SZ.000001": Tick(
+            code="SZ.000001",
+            last=float("nan"),
+            buy1=0.0,
+            sell1=0.0,
+            high=0.0,
+            low=0.0,
+            open=0.0,
+            volume=0.0,
+            rate=0.0,
+        ),
+    }
+
+    batch = gateway.realtime_ticks(("SZ.000001", "SH.600000"))
+
+    assert batch.requested_codes == ("SH.600000", "SZ.000001")
+    assert batch.market_open is True
+    assert batch.tick_data_used is True
+    assert tuple(quote.code for quote in batch.quotes) == ("SH.600000",)
+    assert batch.quotes[0].rate == 0.0
+    assert batch.real_account_access is False
+    assert batch.real_order_transport is False
 
 
 def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None:
