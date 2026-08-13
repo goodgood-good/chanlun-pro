@@ -8,51 +8,9 @@ import pandas as pd
 
 from chanlun.trading.base import MarketDatas
 from chanlun.exchange.exchange import Exchange
-
-
-def _freq_minutes(frequency: str):
-    """级别字符串 -> 周期分钟数(秒级返回分数分钟, 如 "10s"->1/6); 非(秒/分)级(d/w/月)返回 None=不裁剪。"""
-    f = str(frequency).strip().lower()
-    if f.endswith("s"):
-        try:
-            return max(int(f[:-1]), 1) / 60.0
-        except ValueError:
-            return None
-    if f.endswith("m"):
-        try:
-            return max(int(f[:-1]), 1)
-        except ValueError:
-            return None
-    return None
-
-
-def _drop_unclosed_last_bar(df: pd.DataFrame, frequency: str) -> pd.DataFrame:
-    """丢弃仍在进行(未收盘)的末根 bar, 使实盘缠论信号口径与回测/paper 一致(D2-F4)。
-
-    该函数自包含且不依赖外部时钟参数：用末两根推断间隔，再用与末根同 tz 的当前时刻判断末根
-    周期是否已结束。非分钟级/不足两根时原样返回; 间隔异常(session 首根等)仅裁
-    「标签在未来」的末根, 绝不误删历史收盘 bar。
-    """
-    minutes = _freq_minutes(frequency)
-    if minutes is None or df is None or len(df) < 2:
-        return df
-    try:
-        last_ts = pd.Timestamp(df["date"].iloc[-1])
-        prev_ts = pd.Timestamp(df["date"].iloc[-2])
-    except Exception:
-        return df
-    step = pd.Timedelta(minutes=minutes)
-    if (last_ts - prev_ts) != step:
-        # 间隔异常(session 首根/跳空): 仅裁「标签在未来」的末根(必为进行中bar),
-        # 已收盘 bar 标签必然 <= now, 绝不误删历史收盘 bar。口径同 paper 副本。
-        now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
-        if now < last_ts:
-            return df.iloc[:-1]
-        return df
-    now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
-    if now < last_ts + step:
-        return df.iloc[:-1]
-    return df
+from chanlun.exchange.kline_completion import (
+    drop_unclosed_last_bar as _drop_unclosed_last_bar,
+)
 
 
 class OnlineMarketDatas(MarketDatas):
@@ -98,18 +56,20 @@ class OnlineMarketDatas(MarketDatas):
         return klines
 
     def closed_klines(self, code, frequency) -> pd.DataFrame:
-        """Return the cached frame with any still-open terminal bar removed.
+        """返回循环内缓存行情的已收盘连续前缀。
 
-        Strict live screening, replay and stock selection all consume this
-        exact closed-bar boundary.  Keeping it public avoids each caller
-        reimplementing the wall-clock rule before entering the canonical
-        structure runtime.
+        实时筛选、回放与选股共同使用这一边界，调用方不得在进入唯一结构核心前
+        再实现另一套墙钟判断。
         """
 
-        return _drop_unclosed_last_bar(self.klines(code, frequency), frequency)
+        return _drop_unclosed_last_bar(
+            self.klines(code, frequency),
+            frequency,
+            time_label=getattr(self.ex, "kline_time_label", "start"),
+        )
 
     def closed_bar_as_of(self, code, frequency):
-        """Return the causal close time of the terminal row in closed_klines."""
+        """返回已收盘前缀末行的因果收盘时刻。"""
 
         frame = self.closed_klines(code, frequency)
         if frame is None or frame.empty:

@@ -198,7 +198,13 @@ class StrictPhysicalMonitorState:
         except TypeError:
             return self.ex.klines(self.code, frequency)
 
-    def _closed_frame(self, raw: object, frequency: str) -> pd.DataFrame:
+    def _closed_frame(
+        self,
+        raw: object,
+        frequency: str,
+        *,
+        as_of: datetime | None = None,
+    ) -> pd.DataFrame:
         if not isinstance(raw, pd.DataFrame) or raw.empty:
             raise ValueError(f"{frequency} kline frame is unavailable")
         metadata = strict_snapshot_price_metadata(raw)
@@ -210,6 +216,7 @@ class StrictPhysicalMonitorState:
             raw,
             frequency,
             time_label=self.kline_time_label,
+            as_of=as_of,
         )
         if frame is None or frame.empty:
             raise ValueError(f"{frequency} has no completed kline")
@@ -294,13 +301,21 @@ class StrictPhysicalMonitorState:
         observed_at: datetime,
     ) -> StrictEvidenceResult:
         last = getattr(self, last_attr)
-        frame = self._closed_frame(self._fetch_klines(frequency, last), frequency)
+        frame = self._closed_frame(
+            self._fetch_klines(frequency, last),
+            frequency,
+            as_of=observed_at,
+        )
         metadata = strict_snapshot_price_metadata(frame)
         runtime = self._runtime_by_frequency.get(frequency)
         if runtime is not None and runtime.metadata != metadata:
             # 除权除息或数据源批次改变了结构价格基准。只回放五日增量尾部会混入
             # 不可比较的价格，因此必须重新取得完整预热窗口。
-            frame = self._closed_frame(self._fetch_klines(frequency, None), frequency)
+            frame = self._closed_frame(
+                self._fetch_klines(frequency, None),
+                frequency,
+                as_of=observed_at,
+            )
             metadata = strict_snapshot_price_metadata(frame)
             runtime = None
             setattr(self, last_attr, None)

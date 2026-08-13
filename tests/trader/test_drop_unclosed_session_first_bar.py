@@ -27,8 +27,13 @@ IMPLS = [pytest.param(_drop_unclosed_last_bar, id="online_market_datas")]
 @pytest.mark.parametrize("impl", IMPLS)
 def test_lunch_session_first_forming_bar_dropped(impl):
     # 午后开盘: 末根 13:05(端点标签,未来=进行中), prev=11:30, 间隔 95min != 5m
-    out = impl(_df(["2099-01-01 11:25:00", "2099-01-01 11:30:00",
-                    "2099-01-01 13:05:00"]), "5m")
+    out = impl(
+        _df(["2099-01-01 11:25:00", "2099-01-01 11:30:00",
+             "2099-01-01 13:05:00"]),
+        "5m",
+        time_label="end",
+        as_of=pd.Timestamp("2099-01-01 13:02:00"),
+    )
     assert len(out) == 2
     assert pd.Timestamp(out["date"].iloc[-1]) == pd.Timestamp("2099-01-01 11:30:00")
 
@@ -36,8 +41,13 @@ def test_lunch_session_first_forming_bar_dropped(impl):
 @pytest.mark.parametrize("impl", IMPLS)
 def test_overnight_session_first_forming_bar_dropped(impl):
     # 早盘开盘: 末根今 09:35(未来=进行中), prev=昨 15:00, 间隔 18.5h != 5m
-    out = impl(_df(["2099-01-01 14:55:00", "2099-01-01 15:00:00",
-                    "2099-01-02 09:35:00"]), "5m")
+    out = impl(
+        _df(["2099-01-01 14:55:00", "2099-01-01 15:00:00",
+             "2099-01-02 09:35:00"]),
+        "5m",
+        time_label="end",
+        as_of=pd.Timestamp("2099-01-02 09:32:00"),
+    )
     assert len(out) == 2
     assert pd.Timestamp(out["date"].iloc[-1]) == pd.Timestamp("2099-01-01 15:00:00")
 
@@ -51,7 +61,12 @@ def test_holiday_gap_historical_bar_kept(impl):
 
 @pytest.mark.parametrize("impl", IMPLS)
 def test_regular_forming_bar_still_dropped(impl):
-    out = impl(_df(["2099-01-01 09:30:00", "2099-01-01 09:35:00"]), "5m")
+    out = impl(
+        _df(["2099-01-01 09:30:00", "2099-01-01 09:35:00"]),
+        "5m",
+        time_label="end",
+        as_of=pd.Timestamp("2099-01-01 09:32:00"),
+    )
     assert len(out) == 1
 
 
@@ -64,7 +79,12 @@ def test_regular_closed_bar_still_kept(impl):
 @pytest.mark.parametrize("impl", IMPLS)
 def test_aware_tz_session_first_dropped(impl):
     # aware 时间戳(美股/港股口径)同样裁 session 首根未来末根, 不抛 TypeError
-    out = impl(_df([pd.Timestamp("2099-01-01 11:25:00", tz="Asia/Shanghai"),
-                    pd.Timestamp("2099-01-01 11:30:00", tz="Asia/Shanghai"),
-                    pd.Timestamp("2099-01-01 13:05:00", tz="Asia/Shanghai")]), "5m")
+    out = impl(
+        _df([pd.Timestamp("2099-01-01 11:25:00", tz="Asia/Shanghai"),
+             pd.Timestamp("2099-01-01 11:30:00", tz="Asia/Shanghai"),
+             pd.Timestamp("2099-01-01 13:05:00", tz="Asia/Shanghai")]),
+        "5m",
+        time_label="end",
+        as_of=pd.Timestamp("2099-01-01 13:02:00", tz="Asia/Shanghai"),
+    )
     assert len(out) == 2

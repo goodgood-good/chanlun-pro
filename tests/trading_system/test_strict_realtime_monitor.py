@@ -248,6 +248,33 @@ def test_monitor_snapshot_normalizes_numeric_strings_and_rejects_infinity() -> N
         state._closed_frame(broken, "1m")
 
 
+def test_monitor_uses_frozen_observation_time_for_completed_prefix() -> None:
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="end"),
+    )
+    frame = _frame(metadata=True)
+    frame["date"] = pd.to_datetime(
+        (
+            "2026-08-05 09:55:00+08:00",
+            "2026-08-05 10:00:00+08:00",
+            "2026-08-05 10:05:00+08:00",
+            "2026-08-05 10:10:00+08:00",
+        )
+    )
+
+    closed = state._closed_frame(
+        frame,
+        "5m",
+        as_of=datetime(2026, 8, 5, 10, 3, tzinfo=CN),
+    )
+
+    assert tuple(closed["date"]) == (
+        pd.Timestamp("2026-08-05 09:55:00+08:00"),
+        pd.Timestamp("2026-08-05 10:00:00+08:00"),
+    )
+
+
 def test_valid_but_short_history_is_warming_not_refresh_failure() -> None:
     frame = _frame(metadata=True)
     exchange = SimpleNamespace(
