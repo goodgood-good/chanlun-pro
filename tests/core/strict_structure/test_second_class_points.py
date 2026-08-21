@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import chanlun.core.strict_structure.signals as signal_module
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     establish_center,
@@ -14,6 +15,7 @@ from chanlun.core.strict_structure.models import (
     StrictStructureResult,
     build_strict_point_id,
 )
+from chanlun.core.strict_structure.strength import FormalDivergenceUnavailable
 from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
     unit,
@@ -108,6 +110,20 @@ def test_new_low_pullback_requires_weak_divergence():
     )
 
 
+def test_weak_second_class_skips_formal_divergence_that_is_not_yet_available(
+    monkeypatch,
+):
+    engine = strict_engine(direction="down", values=WEAK_VALUES, weak=True)
+    parent = only_point(engine.first_class_points())
+
+    def unavailable(*_args, **_kwargs):
+        raise FormalDivergenceUnavailable("comparison leg is not locked")
+
+    monkeypatch.setattr(signal_module, "compare_divergence", unavailable)
+
+    assert engine.second_class_points((parent,)) == ()
+
+
 def test_two_sell_is_symmetric():
     engine = strict_engine(direction="up")
     first = only_point(engine.first_class_points())
@@ -129,6 +145,36 @@ def test_unlocked_pullback_remains_non_confirmed():
     projected = replace(engine.structure, levels=(projected_level,))
     projected_engine = engine_for(projected, strengths("down"))
     assert projected_engine.second_class_points((first,)) == ()
+
+
+def test_formed_unlocked_pullback_emits_operational_second_class_preview():
+    for direction, expected in (("down", "2buy"), ("up", "2sell")):
+        engine = strict_engine(direction=direction)
+        level = engine.structure.levels[0]
+        unlocked = replace(
+            level.units[20],
+            locked=False,
+            confirmed_at=None,
+            formed_at=level.units[20].available_at,
+        )
+        projected_level = replace(
+            level,
+            units=level.units[:20] + (unlocked,),
+            center_result=replace(level.center_result, locked_unit_count=20),
+        )
+        projected = replace(engine.structure, levels=(projected_level,))
+
+        points = engine_for(projected, strengths(direction)).approaching_points(
+            unlocked.available_at
+        )
+        point = only_point(
+            point
+            for point in points
+            if point.anchor_unit_id == unlocked.unit_id
+        )
+        assert point.point_type == expected
+        assert point.missing_conditions == ("terminal_unit_audit_lock",)
+        assert "projected_geometric_structure" in point.evidence_codes
 
 
 def test_pullback_touching_first_point_extreme_is_strict_second_class():

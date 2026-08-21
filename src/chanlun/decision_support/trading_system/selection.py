@@ -617,6 +617,8 @@ class SectorStrengthSnapshot:
         )
         if not self.snapshot_id or not self.sector_id:
             raise ValueError("sector strength identity is required")
+        if self.anchor_session > self.observed_at.date():
+            raise ValueError("sector strength anchor cannot be in the future")
         if self.member_count < 0 or self.member_count != len(self.categories):
             raise ValueError("sector member count does not match categories")
         symbols = tuple(symbol for symbol, _category in self.categories)
@@ -629,6 +631,13 @@ class SectorStrengthSnapshot:
                 raise ValueError("unresolved sector strength cannot carry a value or rank")
         elif self.member_count == 0 or self.strength is None or self.rank is None:
             raise ValueError("resolved sector strength requires members, value and rank")
+        else:
+            if not isinstance(self.strength, Decimal) or not self.strength.is_finite():
+                raise ValueError("resolved sector strength must be finite")
+            if not Decimal("1") <= self.strength <= Decimal("9"):
+                raise ValueError("resolved sector strength must be in [1, 9]")
+            if type(self.rank) is not int or self.rank <= 0:
+                raise ValueError("resolved sector rank must be a positive integer")
 
     @property
     def resolved(self) -> bool:
@@ -644,8 +653,14 @@ class CompletedDailyClose:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "known_at", normalize_datetime(self.known_at, "known_at"))
+        if type(self.completed) is not bool:
+            raise TypeError("daily close completed flag must be a bool")
+        if not isinstance(self.close, Decimal) or not self.close.is_finite():
+            raise ValueError("daily close must be a finite Decimal")
         if self.close <= 0:
             raise ValueError("daily close must be positive")
+        if self.completed and self.session > self.known_at.date():
+            raise ValueError("completed daily close cannot be known before its session")
 
 
 def completed_ma5_at(
@@ -704,6 +719,8 @@ def member_ma_strength_category(
     decision_time: datetime,
 ) -> int | None:
     decision = normalize_datetime(decision_time, "decision_time")
+    if anchor_session > decision.date():
+        raise ValueError("sector strength anchor cannot be in the future")
     if member.history_status == "UNEXPLAINED_GAP":
         return None
     visible = tuple(
@@ -741,6 +758,10 @@ def build_sector_strength_snapshot(
     rank: int | None,
 ) -> SectorStrengthSnapshot:
     decision = normalize_datetime(decision_time, "decision_time")
+    if anchor_session > decision.date():
+        raise ValueError("sector strength anchor cannot be in the future")
+    if rank is not None and (type(rank) is not int or rank <= 0):
+        raise ValueError("sector strength rank must be a positive integer")
     symbols = tuple(member.symbol for member in members)
     if symbols != tuple(sorted(set(symbols))):
         raise ValueError("point-in-time sector members must be unique and sorted")

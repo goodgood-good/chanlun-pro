@@ -267,9 +267,11 @@ def deterministic_bundle() -> SymbolStructureBundle:
         sector=eligible_sector(),
         thirty_direction="neutral",
         thirty_points=(),
-        five_points=(confirmed_point("2buy"),),
+        # 默认夹具表达“刚刚出现、仍在 10 分钟新鲜窗口内”的当前信号。
+        # 过期信号由专门用例显式构造，避免所有正常决策测试都在暗中追旧点。
+        five_points=(confirmed_point("2buy", minutes_after=295),),
         one_points=(
-            confirmed_point("1buy", frequency="1m", minutes_after=1),
+            confirmed_point("1buy", frequency="1m", minutes_after=296),
         ),
         opposite_points=(),
         physical_timeframe_recursive=True,

@@ -260,25 +260,41 @@ class DingTalkWebhookNotifier:
     ) -> bool:
         """Send one Markdown alert with optional chart images.
 
-        Rendering is normally best-effort.  Evidence-bound trading alerts are
-        fail-closed when a configured chart provider cannot prove that the
-        claimed point exists in the exact image snapshot.
+        Chart rendering is an enrichment step, not the transport gate.  An
+        evidence-bound alert whose chart cannot be generated is still sent as
+        an explicit text-only, human-review warning so a renderer failure can
+        never erase an already confirmed signal occurrence.
         """
 
         images: Sequence[Mapping[str, str] | str] = ()
         evidence_required = context.get("require_evidence_match") is True
+        evidence_warning = False
         if self._rich_content_provider is not None:
             try:
                 images = self._rich_content_provider(context)
             except Exception as exc:
                 fun.get_logger().warning(
-                    f"[notify] chart enrichment failed: {type(exc).__name__}"
+                    "[notify] chart enrichment failed: "
+                    f"{type(exc).__name__}: {str(exc)[:160]}"
                 )
                 if evidence_required:
-                    return False
+                    evidence_warning = True
             if evidence_required and not images:
                 fun.get_logger().warning(
                     "[notify] evidence-bound chart enrichment returned no image"
                 )
-                return False
+                evidence_warning = True
+        elif evidence_required:
+            evidence_warning = True
+        if evidence_warning:
+            warning = (
+                "图表证据生成失败：信号事件已保留并发送，请打开人工复核页面核对结构；"
+                "本系统不会自动下单。"
+            )
+            lines = (
+                f"{lines}\n{warning}"
+                if isinstance(lines, str)
+                else [*(str(value) for value in lines), warning]
+            )
+            images = ()
         return self._send_content(title, lines, images=images)

@@ -491,8 +491,10 @@ function normalizeClShowConfig(config, interval) {
     for (const { level } of recursiveDisplayLevels(interval)) {
         const centerKey = `center_L${level}`;
         const trendKey = `trend_L${level}`;
+        const pointKey = `point_L${level}`;
         output[centerKey] = has(centerKey) ? source[centerKey] !== false : true;
         output[trendKey] = has(trendKey) ? source[trendKey] !== false : true;
+        output[pointKey] = has(pointKey) ? source[pointKey] !== false : true;
         for (const kind of ['consolidation', 'trend']) {
             const divergenceKey = `divergence_${kind}_L${level}`;
             output[divergenceKey] = has(divergenceKey)
@@ -518,7 +520,9 @@ function strictItemEnabled(cfg, item) {
         return config.trend_all !== false && config[`trend_L${level}`] !== false;
     }
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
-        return config.point_all !== false && config[`point_${item.point_type}`] !== false;
+        return config.point_all !== false
+            && config[`point_L${level}`] !== false
+            && config[`point_${item.point_type}`] !== false;
     }
     if (item.render_kind === 'strict_divergence') {
         return config.divergence_all !== false
@@ -711,6 +715,15 @@ function getTrendVisualStyle(item = {}) {
             linestyle: CHART_CONFIG.LINE_STYLES.DASHED,
         };
     }
+    if (directionStatus === "ended") {
+        // 历史走势只证明几何分解已经结束，不代表当前反转获得了一、二类点
+        // 支撑。它必须弱于当前正式方向，避免实线让人误判为无点反转。
+        return {
+            linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
+            transparency: 46,
+            linestyle: CHART_CONFIG.LINE_STYLES.DASHED,
+        };
+    }
     return {
         linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
         transparency: forming
@@ -734,7 +747,13 @@ function pointTypeLabel(pointType) {
 function getStrictPointVisual(item = {}) {
     const pointType = String(item.point_type || "").toLowerCase();
     const isBuy = String(item.side || "").toLowerCase() === "buy" || pointType.includes("buy");
-    const confirmed = item.render_kind === "point_confirmed";
+    const declaredFormation = ["forming", "geometry_ready", "formed", "confirmed"].includes(item.formation_state)
+        ? (item.formation_state === "formed" ? "geometry_ready" : item.formation_state)
+        : "";
+    const confirmed = declaredFormation
+        ? declaredFormation === "confirmed"
+        : item.render_kind === "point_confirmed";
+    const geometryCandidate = declaredFormation === "geometry_ready";
     const level = Number.isInteger(item.structural_level) ? item.structural_level : 0;
     const levelLabel = item.level_label || `L${level}`;
     const fontsize = confirmed
@@ -745,7 +764,7 @@ function getStrictPointVisual(item = {}) {
         fontsize,
         bold: confirmed,
         transparency: confirmed ? 0 : 45,
-        text: `${isBuy ? "▲" : "▼"}${confirmed ? "" : "接近·"}${levelLabel}·${pointTypeLabel(pointType)}`,
+        text: `${isBuy ? "▲" : "▼"}${confirmed ? "" : geometryCandidate ? "候选待锁·" : "接近·"}${levelLabel}·${pointTypeLabel(pointType)}`,
     };
 }
 
@@ -1989,6 +2008,9 @@ class ChartManager {
                 const _trendLevels = _displayLevels.map((item) => ({
                     label: `${item.label} 走势类型`, key: `trend_L${item.level}`, level: item.level,
                 }));
+                const _pointLevels = _displayLevels.map((item) => ({
+                    label: `${item.label} 买卖点`, key: `point_L${item.level}`, level: item.level,
+                }));
                 const _divergenceLevels = _displayLevels.flatMap((item) => ([
                     {
                         label: `${item.label} 盘整背驰`,
@@ -2083,6 +2105,14 @@ class ChartManager {
 
                         ${_grpTitle('买卖点')}
                         ${_cbRow('point_all', '买卖点总开关')}
+                        <div style="padding:2px 0 2px 14px;font-size:13px;color:#687386;">按周期</div>
+                        <div style="padding-left:14px;display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
+                            ${_pointLevels.map((item) => `
+                                <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
+                                    ${_checked(item.key) ? 'checked' : ''}>
+                                    ${_swatch(getRecursiveLevelColor(_curInterval, item.level))}${item.label}</label>`).join('')}
+                        </div>
+                        <div style="padding:5px 0 2px 14px;font-size:13px;color:#687386;">按类型</div>
                         <div style="padding-left:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:4px 10px;font-size:14px;">
                             ${_pointTypes.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
@@ -2156,6 +2186,7 @@ class ChartManager {
                     'point_all', 'divergence_all',
                     ..._centerLevels.map((item) => item.key),
                     ..._trendLevels.map((item) => item.key),
+                    ..._pointLevels.map((item) => item.key),
                     ..._pointTypes.map((item) => item.key),
                     ..._divergenceLevels.map((item) => item.key),
                 ];
@@ -2962,7 +2993,9 @@ class ChartManager {
         const value = String(resolution == null ? '' : resolution).trim();
         const fixed = {
             '10S': '10s', '30S': '30s',
-            '1D': 'd', '2D': '2d', '1W': 'w', '1M': 'm',
+            '120': '120m', '180': '3h', '240': '4h',
+            '360': '6h', '480': '8h', '720': '12h',
+            '1D': 'd', '2D': '2d', '3D': '3d', '1W': 'w', '1M': 'm',
             '3M': 'q', '12M': 'y',
         };
         if (fixed[value]) return fixed[value];
@@ -3222,10 +3255,27 @@ class ChartManager {
                 for (const point of level[field]) {
                     const pointType = String(point?.point_type || '').toLowerCase();
                     const expectedSide = pointType.endsWith('buy') ? 'buy' : 'sell';
+                    const expectedConfirmed = status === 'confirmed';
+                    const validFormation = expectedConfirmed
+                        ? point?.formation_state === 'confirmed'
+                        : ['forming', 'geometry_ready', 'formed'].includes(point?.formation_state);
+                    const validLockState = expectedConfirmed
+                        ? point?.lock_state === 'locked' || (
+                            point?.lock_state === 'pending'
+                            && point?.operational_confirmation === true
+                            && point?.strict_status === 'approaching'
+                            && point?.contains_forming_segment === false
+                            && point?.contains_unlocked_segment === true
+                        )
+                        : point?.lock_state === 'pending';
                     if (
                         !point
                         || point.render_kind !== renderKind
                         || point.status !== status
+                        || !validFormation
+                        || !validLockState
+                        || typeof point.contains_forming_segment !== 'boolean'
+                        || typeof point.contains_unlocked_segment !== 'boolean'
                         || point.structural_level !== level.structural_level
                         || !STRICT_POINT_TYPES.has(pointType)
                         || point.side !== expectedSide

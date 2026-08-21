@@ -297,6 +297,9 @@ def tv_symbols():
         except (TypeError, ValueError):
             precision = 100
 
+    supported_resolutions = [
+        v for k, v in frequency_maps.items() if k in market_frequencys.get(market, [])
+    ]
     info = {
         "name": stocks["code"],
         "ticker": f"{market}:{stocks['code']}",
@@ -311,10 +314,10 @@ def tv_symbols():
         "pricescale": precision,
 
         "visible_plots_set": "ohlcv",
-        "supported_resolutions": [
-            v for k, v in frequency_maps.items() if k in market_frequencys.get(market, [])
+        "supported_resolutions": supported_resolutions,
+        "intraday_multipliers": [
+            resolution for resolution in supported_resolutions if resolution.isdigit()
         ],
-        "intraday_multipliers": ["1", "5", "15", "30", "60"],
         "has_intraday": True,
         "has_seconds": True if market in ["futures", "ny_futures"] else False,
         "has_daily": True,

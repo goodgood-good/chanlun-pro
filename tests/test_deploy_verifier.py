@@ -123,6 +123,61 @@ def test_deploy_verifier_resolves_default_project_root_after_file_binding():
 
 
 @pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
+def test_deploy_verifier_accepts_current_source_derived_run_revision_by_default():
+    helper = ROOT / "ops" / "deploy_common.ps1"
+    revision_result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                f". '{helper}'; "
+                f"Get-ApplicationSourceRevision -Root '{ROOT}'"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    source_revision = revision_result.stdout.strip().splitlines()[-1]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    original_revision = _HealthHandler.revision
+    _HealthHandler.revision = f"{source_revision}.run.test-instance"
+    thread.start()
+    uri = f"http://127.0.0.1:{server.server_port}/readyz?market=a"
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPT),
+                "-ProjectRoot",
+                str(ROOT),
+                "-HealthUri",
+                uri,
+                "-SkipProcessCheck",
+                "-SkipFreshnessCheck",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        _HealthHandler.revision = original_revision
+        server.shutdown()
+        server.server_close()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DEPLOY-OK" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
 def test_deploy_verifier_rejects_not_ready_status():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

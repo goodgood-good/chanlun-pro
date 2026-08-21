@@ -64,6 +64,12 @@ def test_warm_runtime_result_equals_cold_production_analysis() -> None:
     )
 
     assert warm == cold
+    assert states.full.update_count == 2
+    assert states.full.incremental_update_count == 1
+    assert states.full.rebuild_count == 1
+    assert states.full.last_update_incremental is True
+    assert states.suffix.update_count == 2
+    assert states.suffix.incremental_update_count == 1
 
 
 @pytest.mark.parametrize("change", ("history", "sliding", "price_basis"))
@@ -84,6 +90,9 @@ def test_runtime_rebuilds_when_incremental_proof_is_broken(change: str) -> None:
         changed.attrs["price_basis_revision"] = "sz002299-adjusted"
     changed.attrs = dict(changed.attrs or frame.attrs)
 
-    state.update_from_frame(frame=changed, as_of=_as_of(changed))
+    update = state.update_from_frame(frame=changed, as_of=_as_of(changed))
 
     assert state._state is not previous_engine
+    assert update.incremental_reused is False
+    assert state.rebuild_count == 2
+    assert state.incremental_update_count == 0

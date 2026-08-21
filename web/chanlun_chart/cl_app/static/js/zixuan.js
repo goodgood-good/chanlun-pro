@@ -8,6 +8,7 @@ var ZiXuan = (function () {
   var UPDATE_CLOSED_DELAY_MS = 300000;
   var UPDATE_RETRY_DELAYS_MS = [6000, 12000, 24000, 30000];
   var marketRetryState = {};
+  var marketClosedUntil = {};
   var MARKET_LABELS = {
     a: "A股",
     hk: "港股",
@@ -52,6 +53,7 @@ var ZiXuan = (function () {
     }
     update_poll_generation += 1;
     marketRetryState = {};
+    marketClosedUntil = {};
   }
 
   function marketLabel(market) {
@@ -71,8 +73,13 @@ var ZiXuan = (function () {
     return delay;
   }
 
-  function recordMarketSuccess(market) {
+  function recordMarketSuccess(market, marketState) {
     delete marketRetryState[market];
+    if (marketState === "closed") {
+      marketClosedUntil[market] = Date.now() + UPDATE_CLOSED_DELAY_MS;
+    } else {
+      delete marketClosedUntil[market];
+    }
   }
 
   function nextFailedMarketDelay(markets) {
@@ -84,6 +91,16 @@ var ZiXuan = (function () {
       })
       .filter(function (delay) { return delay > 0; });
     return delays.length ? Math.min.apply(null, delays) : UPDATE_NORMAL_DELAY_MS;
+  }
+
+  function nextClosedMarketDelay(markets) {
+    var now = Date.now();
+    var delays = markets
+      .map(function (market) {
+        return Math.max(0, Number(marketClosedUntil[market] || 0) - now);
+      })
+      .filter(function (delay) { return delay > 0; });
+    return delays.length ? Math.min.apply(null, delays) : UPDATE_CLOSED_DELAY_MS;
   }
 
   function setMarketQuoteState(market, state, detail) {
@@ -117,6 +134,10 @@ var ZiXuan = (function () {
     span.appendChild(input);
     span.appendChild(document.createTextNode(" " + String(name || "")));
     return span.outerHTML;
+  }
+
+  function displayGroupName(name) {
+    return String(name || "") === "我的持仓" ? "人工关注组" : String(name || "");
   }
 
   function rateNode(code, price, rate, color, market) {
@@ -177,7 +198,7 @@ var ZiXuan = (function () {
   }
 
   function setCurrentGroupLabel(group) {
-    $("#zixuan_current_group").text(group || "未选择分组");
+    $("#zixuan_current_group").text(displayGroupName(group) || "未选择分组");
   }
 
   function setGroupError(message) {
@@ -338,7 +359,7 @@ var ZiXuan = (function () {
           layui.each(groups, function (_index, item) {
             groupSelect.append($("<option>", {
               value: String(item.name).trim(),
-              text: String(item.name).trim(),
+              text: displayGroupName(String(item.name).trim()),
             }));
           });
           var canSelectValue = typeof groupSelect.val === "function";
@@ -380,9 +401,10 @@ var ZiXuan = (function () {
               || code !== String(Utils.get_code() || "").replace(/\//g, "__")) return;
           let data = [];
           layui.each(Array.isArray(res) ? res : [], function (i, e) {
-            let templet = checkboxTemplate(e["zx_name"], e["exists"] !== 0);
+            let templet = checkboxTemplate(displayGroupName(e["zx_name"]), e["exists"] !== 0);
             data.push({
-              title: e["zx_name"],
+              title: displayGroupName(e["zx_name"]),
+              rawGroupName: e["zx_name"],
               id: i,
               templet: templet,
               exists: e["exists"],
@@ -423,8 +445,9 @@ var ZiXuan = (function () {
         timeout_update_rates = null;
       }
       marketRetryState = {};
+      marketClosedUntil = {};
       setWatchStatus(
-        ZiXuan.zx_group === "我的持仓" ? "正在刷新持仓行情…" : "正在刷新行情…",
+        "正在刷新行情…",
         "loading"
       );
       if (update_request_in_flight) return true;
@@ -460,23 +483,39 @@ var ZiXuan = (function () {
 
       var now = Date.now();
       var waitingMarkets = [];
+      var sleepingClosedMarkets = [];
       var batches = allBatches.filter(function (batch) {
         var retry = marketRetryState[batch.market];
         if (retry && retry.retryAt > now) {
           waitingMarkets.push(batch.market);
           return false;
         }
+        if (Number(marketClosedUntil[batch.market] || 0) > now) {
+          sleepingClosedMarkets.push(batch.market);
+          return false;
+        }
         return true;
       });
       if (batches.length === 0) {
-        setWatchStatus(
-          waitingMarkets.map(marketLabel).join("、") + "行情暂不可用，稍后重试",
-          "error"
-        );
-        schedule_rate_update(
-          nextFailedMarketDelay(waitingMarkets),
-          request_generation
-        );
+        if (waitingMarkets.length) {
+          setWatchStatus(
+            waitingMarkets.map(marketLabel).join("、") + "行情暂不可用，稍后重试",
+            "error"
+          );
+          schedule_rate_update(
+            Math.min(
+              nextFailedMarketDelay(waitingMarkets),
+              nextClosedMarketDelay(sleepingClosedMarkets)
+            ),
+            request_generation
+          );
+        } else {
+          setWatchStatus("全部市场休市 · 低频检查", "closed");
+          schedule_rate_update(
+            nextClosedMarketDelay(sleepingClosedMarkets),
+            request_generation
+          );
+        }
         return true;
       }
 
@@ -571,7 +610,7 @@ var ZiXuan = (function () {
               failBatch();
               return;
             }
-            recordMarketSuccess(batch.market);
+            recordMarketSuccess(batch.market, response.market_state);
             marketStates[batch.market] = response.market_state;
             setMarketQuoteState(batch.market, "available", "");
             for (let i = 0; i < response.ticks.length; i++) {
@@ -849,7 +888,7 @@ var ZiXuan = (function () {
                         data: {
                             opt: opt,
                             market: Utils.get_market(),
-                            group_name: data["title"],
+                            group_name: data["rawGroupName"] || data["title"],
                             code: data["code"],
                             color: "",
                             direction: "",
@@ -860,7 +899,7 @@ var ZiXuan = (function () {
                                 layer.msg("自选分组更新失败");
                                 return;
                             }
-                            if (data["title"] == ZiXuan.zx_group) {
+                            if ((data["rawGroupName"] || data["title"]) == ZiXuan.zx_group) {
                                 ZiXuan.render_zixuan_opts();
                                 ZiXuan.render_zixuan_stocks();
                             }

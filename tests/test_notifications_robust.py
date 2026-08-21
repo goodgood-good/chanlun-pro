@@ -3,6 +3,8 @@ https:// 前缀)必须按类契约 warning+返回 False, 不得让 urllib Reques
 逃逸——逃逸会击穿 live_monitor 主循环(:2408 无 try 兜底)致常驻实盘进程盘中首个信号猝死,
 且先于 broker.fill_pending/queue_events 交易循环同死(新R3-F1-NOTIF-3)。"""
 
+import json
+
 from chanlun.notifications import DingTalkWebhookNotifier
 
 
@@ -121,19 +123,24 @@ def test_rich_notification_chart_failure_falls_back_to_one_text(monkeypatch):
     assert payload["msgtype"] == "text"
 
 
-def test_evidence_bound_chart_failure_blocks_the_notification(monkeypatch):
+def test_evidence_bound_chart_failure_sends_explicit_text_fallback(monkeypatch):
     import urllib.request
 
     requests = []
+    warnings = []
 
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda request, timeout: requests.append((request, timeout)),
-    )
+    def succeed(request, timeout):
+        requests.append((request, timeout))
+        return _DingTalkSuccess()
+
+    monkeypatch.setattr(urllib.request, "urlopen", succeed)
     monkeypatch.setattr(
         "chanlun.notifications.fun.get_logger",
-        lambda: type("Logger", (), {"warning": lambda _self, _message: None})(),
+        lambda: type(
+            "Logger",
+            (),
+            {"warning": lambda _self, message: warnings.append(message)},
+        )(),
     )
     notifier = DingTalkWebhookNotifier(
         "https://example.invalid/send",
@@ -146,8 +153,13 @@ def test_evidence_bound_chart_failure_blocks_the_notification(monkeypatch):
         "买卖通知",
         ["TSLA.US"],
         {"require_evidence_match": True, "charts": [{"code": "TSLA.US"}]},
-    ) is False
-    assert requests == []
+    ) is True
+    assert len(requests) == 1
+    payload = json.loads(requests[0][0].data.decode("utf-8"))
+    assert payload["msgtype"] == "text"
+    assert "图表证据生成失败" in payload["text"]["content"]
+    assert warnings
+    assert "RuntimeError: claimed marker absent" in warnings[0]
 
 
 def test_persistent_outbound_gate_sends_identical_message_only_once(

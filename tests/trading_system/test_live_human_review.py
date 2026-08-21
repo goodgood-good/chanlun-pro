@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from chanlun.decision_support.trading_system import live_human_review as subject
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     apply_formal_selection_scope,
@@ -29,6 +30,9 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     sector_native_daily_research_bridge_contract,
 )
 from chanlun.decision_support.trading_system.models import EntryExecutionBoundary
+from chanlun.decision_support.trading_system.position_recommendation import (
+    build_position_recommendation,
+)
 from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_QMT_30M_FALLBACK_REASON_CODE,
     SCREENING_WARMUP_FREQUENCIES,
@@ -63,7 +67,9 @@ from chanlun.decision_support.trading_system.live_human_review import (
     MONITOR_INSTRUMENT_EXCLUSION_CONTRACT_ID,
     SECTOR_COVERAGE_CONTRACT_ID,
     SIGNAL_DOCUMENT_CONTRACT_ID,
+    _decision_context_is_consistent,
     _displayed_decision_evidence_is_consistent,
+    _etf_proxy_sector_is_consistent,
     _jsonable,
     _mwd_warmup_diagnostic_chain_is_consistent,
     _risk_evidence_is_consistent,
@@ -314,7 +320,7 @@ def _decisions():
                 raw_low=Decimal("10.00"),
                 raw_close=Decimal("10.20"),
                 raw_volume=Decimal("10000"),
-                entry_valid_until=trigger.available_at.replace(minute=2),
+                entry_valid_until=trigger.available_at + timedelta(minutes=1),
                 raw_price_basis_revision="qmt-none-test",
             ),
         ),
@@ -398,7 +404,7 @@ def live_snapshot() -> dict[str, object]:
                 "market_states": {period: "UNRESOLVED" for period in ("M", "W", "D")},
                 "sector_states": {period: "UNRESOLVED" for period in ("M", "W", "D")},
                 "symbol_states": {period: "UNRESOLVED" for period in ("M", "W", "D")},
-                "new_entry_requires_all_green": True,
+                "new_entry_requires_all_green": False,
                 "session_evidence_contract_id": (
                     HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID
                 ),
@@ -455,22 +461,7 @@ def live_snapshot() -> dict[str, object]:
                 "symbol_native_daily_calendar_coverage_evidence": None,
             }
         )
-        if signal["side"] == "buy":
-            signal["entry_allowed"] = False
-            signal["risk_multiplier"] = "0"
-            if signal["technical_entry_allowed"] is True:
-                signal["decision_reasons"] = list(
-                    dict.fromkeys(
-                        (
-                            *signal["decision_reasons"],
-                            "HIGHER_TIMEFRAME_GATE_NOT_GREEN",
-                            "MARKET_GATE_UNRESOLVED",
-                            "SECTOR_GATE_UNRESOLVED",
-                            "SYMBOL_GATE_UNRESOLVED",
-                            *signal["higher_timeframe_risk"]["reason_codes"],
-                        )
-                    )
-                )
+        # 月/周/日旧风险包保留用于审计，但不再覆盖 5m/1m 已确认的物理结构。
         signal["warmup"] = {
             "converged": True,
             "by_frequency": [
@@ -501,6 +492,7 @@ def live_snapshot() -> dict[str, object]:
                 "schema": "chanlun-trade-setup",
                 "point_id": signal["setup_5m"]["point_id"],
                 "sector_id": sector_document["sector_id"],
+                "sector_required": True,
             }
         )
         signal["signal_id"] = sha256_json(
@@ -1069,12 +1061,128 @@ def test_live_snapshot_validator_covers_review_candidate_conversion(
     )
 
     expected = (
-        "review conversion is invalid"
+        "timeframe provenance is invalid"
         if mutation == "lifecycle_stage"
         else "risk evidence is invalid"
     )
     with pytest.raises(ValueError, match=expected):
         validate_live_review_snapshot(snapshot)
+
+
+def test_invalidated_snapshot_row_is_audited_but_not_revived_for_review() -> None:
+    snapshot = live_snapshot()
+    invalidated = snapshot["signals"][0]
+    invalidated["lifecycle_stage"] = "invalidated"
+    invalidated["technical_entry_allowed"] = False
+    invalidated["entry_allowed"] = False
+    invalidated["risk_multiplier"] = "1.00"
+    invalidated["decision_reasons"] = [
+        "lifecycle_not_actionable",
+        "SAME_PERIOD_CONTEXT_GRADE_UNRESOLVED",
+        "structure_invalidated",
+    ]
+    position_recommendation = build_position_recommendation(
+        side="buy",
+        recommendation="BLOCKED",
+        risk_multiplier="1.00",
+        context_risk_scale="0.50",
+        entry_price=invalidated["setup_5m"]["anchor_price"],
+        structural_stop=invalidated["setup_5m"]["invalidation_price"],
+        exit_action="none",
+    ).document()
+    invalidated["position_recommendation"] = position_recommendation
+    invalidated["execution_profile"].update(
+        execution_trigger_confirmed=False,
+        one_minute_segment_difference_present=False,
+        recommendation="BLOCKED",
+        recommendation_label="当前不满足操作条件，等待结构或数据恢复",
+        hard_blocked=True,
+        hard_block_reason_codes=["structure_invalidated"],
+        advisory_reason_codes=["SAME_PERIOD_CONTEXT_GRADE_UNRESOLVED"],
+        position_recommendation=position_recommendation,
+    )
+    invalidated["decision_document_id"] = signal_decision_document_id(invalidated)
+    snapshot["counts_by_stage"] = {"invalidated": 1, "triggered": 1}
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    _review_at, signals = validate_live_review_snapshot(snapshot)
+    report = live_human_review_document(
+        live_snapshot=snapshot,
+        source_snapshot_sha256=str(snapshot["snapshot_content_sha256"]),
+        session=deterministic_bundle().as_of.date(),
+    )
+
+    assert len(signals) == 2
+    assert report["candidate_funnel"] == {
+        "live_screen_candidate_count": 2,
+        "review_candidate_count": 1,
+    }
+    assert len(report["review_queue"]) == 1
+
+
+def test_sealed_snapshot_validation_is_reused_only_for_the_exact_mapping(
+    monkeypatch,
+) -> None:
+    snapshot = live_snapshot()
+    snapshot_sha256 = str(snapshot["snapshot_content_sha256"])
+    session = deterministic_bundle().as_of.date()
+    validation = subject._validated_live_review_snapshot(
+        snapshot,
+        session=session,
+    )
+
+    def unexpected_revalidation(*_args, **_kwargs):
+        raise AssertionError("sealed snapshot was validated twice")
+
+    monkeypatch.setattr(
+        subject,
+        "validate_live_review_snapshot",
+        unexpected_revalidation,
+    )
+    report = subject.live_human_review_document(
+        live_snapshot=snapshot,
+        source_snapshot_sha256=snapshot_sha256,
+        session=session,
+        _validated_snapshot=validation,
+    )
+
+    assert report["input_hashes"]["live_screening_snapshot"] == snapshot_sha256
+    with pytest.raises(ValueError, match="validation token is invalid"):
+        subject.live_human_review_document(
+            live_snapshot=copy.deepcopy(snapshot),
+            source_snapshot_sha256=snapshot_sha256,
+            session=session,
+            _validated_snapshot=validation,
+        )
+
+
+def test_etf_proxy_sector_contract_does_not_require_a_stock_sector() -> None:
+    code = "SH.513100"
+    assert _etf_proxy_sector_is_consistent(
+        {
+            "sector_id": f"etf-proxy:{code}",
+            "sector_name": "ETF代理路径（不要求个股行业）",
+            "eligible": True,
+            "hard_block": False,
+            "regime": "neutral",
+            "rank": None,
+            "rank_score": 0,
+            "rank_components": {},
+            "reason_codes": ["ETF_PROXY_SECTOR_NOT_REQUIRED"],
+            "horizontal_strength": None,
+            "horizontal_rank": None,
+            "strength_anchor_session": None,
+            "strength_member_count": 0,
+            "strength_source_revision": None,
+            "strength_reason_codes": [],
+            "context_30m": None,
+            "context_5m": None,
+            "context_1m": None,
+        },
+        code=code,
+    )
 
 
 def test_live_snapshot_recomputes_warmup_convergence_from_frequency_rows() -> None:
@@ -1281,7 +1389,7 @@ def test_live_snapshot_recomputes_risk_gate_from_mwd_states() -> None:
             "market_period_diagnostics": _formed_unresolved_diagnostics(
                 snapshot["market_data_as_of"]
             ),
-            "new_entry_requires_all_green": True,
+            "new_entry_requires_all_green": False,
         }
     )
     market_reasons = [
@@ -1401,6 +1509,9 @@ def test_session_gap_diagnostic_is_recomputed_and_cannot_claim_suspension() -> N
                 ],
                 "entry_disposition": "FAIL_CLOSED",
             },
+            # 1m 会话缺口仍需精确保留和验证，但只关闭高周期环境证据；
+            # 不能关闭独立物理 5m 已确认的买卖信号。
+            "data_integrity_hard_block_reason_codes": [],
         }
     )
 
@@ -1443,7 +1554,8 @@ def test_live_snapshot_binds_final_entry_to_risk_and_warmup_gates() -> None:
     buy = next(value for value in snapshot["signals"] if value["side"] == "buy")
     assert buy["technical_entry_allowed"] is True
     assert buy["higher_timeframe_risk"]["market_gate"] == "UNRESOLVED"
-    buy["entry_allowed"] = True
+    # 5 分钟正式点已经允许；无硬阻断时把它篡改为不允许同样会造成展示分叉。
+    buy["entry_allowed"] = False
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
     )
@@ -1475,7 +1587,8 @@ def test_live_snapshot_recomputes_displayed_buy_decision_evidence(
         snapshot
     )
 
-    with pytest.raises(ValueError, match="decision evidence is invalid"):
+    expected = "decision evidence is invalid"
+    with pytest.raises(ValueError, match=expected):
         validate_live_review_snapshot(snapshot)
 
 
@@ -1511,6 +1624,76 @@ def test_displayed_decision_recomputes_provisional_setup_reason() -> None:
         policy=policy,
         risk=risk,
         warmup=warmup,
+    )
+
+
+def test_displayed_decision_accepts_context_warmup_as_advisory_only() -> None:
+    core = HumanAssistedDecisionCore()
+    bundle = replace(
+        deterministic_bundle(),
+        warmup_converged=False,
+        warmup_reason_codes=(
+            "D:WARMUP_TAIL_STABLE",
+            "30M:WARMUP_TAIL_DIVERGED",
+            "5M:WARMUP_TAIL_STABLE",
+            "1M:WARMUP_TAIL_STABLE",
+        ),
+        warmup_by_frequency=(
+            ("d", True, 480, 320),
+            ("30m", False, 480, 320),
+            ("5m", True, 960, 640),
+            ("1m", True, 1440, 960),
+        ),
+        warmup_difference_codes_by_frequency=(
+            ("d", ()),
+            ("30m", ("WARMUP_DIRECTION_CHANGED",)),
+            ("5m", ()),
+            ("1m", ()),
+        ),
+        enforce_warmup_entry_gate=True,
+    )
+    [signal] = core.decision_documents(bundle)
+    policy = core.contract.document()["policy"]
+
+    assert signal["entry_allowed"] is True
+    assert signal["execution_profile"]["hard_blocked"] is False
+    assert "30M:WARMUP_TAIL_DIVERGED" in signal["execution_profile"][
+        "advisory_reason_codes"
+    ]
+    assert _displayed_decision_evidence_is_consistent(
+        signal,
+        policy=policy,
+        risk=signal["higher_timeframe_risk"],
+        warmup=signal["warmup"],
+    )
+
+
+def test_displayed_decision_accepts_risk_only_conflict_as_advisory() -> None:
+    core = HumanAssistedDecisionCore()
+    bundle = replace(
+        deterministic_bundle(),
+        opposite_points=(
+            confirmed_point(
+                "1sell",
+                center_id="unrelated-center",
+                minutes_after=300,
+            ),
+        ),
+    )
+    [signal] = core.decision_documents(bundle)
+    policy = core.contract.document()["policy"]
+
+    assert signal["conflict"]["hard_block"] is False
+    assert signal["entry_allowed"] is True
+    assert signal["execution_profile"]["hard_blocked"] is False
+    assert "lower_or_unrelated_structure_risk" in signal["execution_profile"][
+        "advisory_reason_codes"
+    ]
+    assert _displayed_decision_evidence_is_consistent(
+        signal,
+        policy=policy,
+        risk=signal["higher_timeframe_risk"],
+        warmup=signal["warmup"],
     )
 
 
@@ -1555,9 +1738,7 @@ def test_live_snapshot_rejects_third_class_one_minute_reversal_trigger() -> None
     signal = next(
         value for value in snapshot["signals"] if value["trigger_1m"] is not None
     )
-    signal["trigger_1m"]["point_type"] = (
-        "3buy" if signal["side"] == "buy" else "3sell"
-    )
+    signal["trigger_1m"]["point_type"] = "3buy" if signal["side"] == "buy" else "3sell"
     signal["decision_document_id"] = signal_decision_document_id(signal)
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
@@ -1646,35 +1827,38 @@ def test_live_snapshot_authenticates_sector_eligibility_exclusions() -> None:
         value["sector_id"] = f"qmt-gics3:hostile-{suffix}"
         value["sector_name"] = f"资格排除覆盖行业-{suffix}"
         snapshot["sectors"].append(value)
-    excluded_id = "qmt-gics3:hostile-c"
-    excluded_sector = next(
-        sector for sector in snapshot["sectors"] if sector["sector_id"] == excluded_id
-    )
-    excluded_sector.update(
-        {
-            "context_30m": None,
-            "context_5m": None,
-            "context_1m": None,
-            "rank_components": {},
-            "rank_score": 0,
-            "reason_codes": [
-                "sector_member_coverage_insufficient",
-                "sector_constituent_count_below_minimum",
-            ],
-        }
-    )
+    excluded_ids = ("qmt-gics3:hostile-b", "qmt-gics3:hostile-c")
+    for excluded_id in excluded_ids:
+        excluded_sector = next(
+            sector
+            for sector in snapshot["sectors"]
+            if sector["sector_id"] == excluded_id
+        )
+        excluded_sector.update(
+            {
+                "context_30m": None,
+                "context_5m": None,
+                "context_1m": None,
+                "rank_components": {},
+                "rank_score": 0,
+                "reason_codes": [
+                    "sector_member_coverage_insufficient",
+                    "sector_constituent_count_below_minimum",
+                ],
+            }
+        )
     snapshot["scan_audit"].update(
         {
             "sector_discovered_count": 5,
-            "sector_completed_count": 4,
-            "sector_excluded_count": 1,
+            "sector_completed_count": 3,
+            "sector_excluded_count": 2,
             "sector_failed_count": 0,
             "sector_resolved_count": 5,
-            "sector_completion_ratio": "0.8",
+            "sector_completion_ratio": "0.6",
             "sector_resolution_ratio": "1",
             "sector_failure_counts": {},
             "sector_exclusion_counts": {
-                "sector_member_coverage_insufficient": 1,
+                "sector_member_coverage_insufficient": 2,
             },
             "selected_sector_count": 1,
         }
@@ -1683,7 +1867,7 @@ def test_live_snapshot_authenticates_sector_eligibility_exclusions() -> None:
     snapshot["sector_exclusions"] = [
         {
             "sector_id": excluded_id,
-            "code": "GICS3资格排除覆盖行业-c",
+            "code": f"GICS3资格排除覆盖行业-{excluded_id.rsplit('-', 1)[-1]}",
             "exclusion_type": "sector_analysis_exclusion",
             "eligibility": "MINIMUM_SECTOR_MEMBERS_NOT_MET",
             "reason_code": "sector_member_coverage_insufficient",
@@ -1695,6 +1879,7 @@ def test_live_snapshot_authenticates_sector_eligibility_exclusions() -> None:
             "deterministic_for_catalog_revision": True,
             "retry_policy": "NEXT_SECTOR_CATALOG_REVISION",
         }
+        for excluded_id in excluded_ids
     ]
     _attach_strength_evidence(snapshot)
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
@@ -1724,21 +1909,27 @@ def test_live_adapter_preserves_30m_5m_1m_roles() -> None:
     assert report["scope"]["strategic_frequency"] == "30m"
     assert report["scope"]["tactical_frequency"] == "5m"
     assert report["scope"]["locator_frequency"] == "1m"
+    assert report["scope"]["context_frequency"] == "30m"
+    assert report["scope"]["trade_frequency"] == "5m"
+    assert report["scope"]["segment_difference_frequency"] == "1m"
+    assert report["scope"]["segment_difference_required_for_trade_signal"] is False
     assert report["signal_counts"]["by_alert_type"] == {
-        "POSSIBLE_30M_BUY": 1,
+        "POSSIBLE_30M_BUY": 0,
         "POSSIBLE_30M_EXIT": 0,
-        "POSSIBLE_SELL_REVIEW": 1,
+        "POSSIBLE_SELL_REVIEW": 0,
         "POSSIBLE_5M_TACTICAL_SELL": 0,
         "POSSIBLE_5M_TACTICAL_BUYBACK": 0,
+        "POSSIBLE_5M_TRADE_BUY": 1,
+        "POSSIBLE_5M_TRADE_SELL": 1,
     }
     by_type = {row["alert_type"]: row for row in report["review_queue"]}
-    buy = by_type["POSSIBLE_30M_BUY"]
-    assert "STRATEGIC_CONTEXT_30M" in buy["warning_codes"]
-    assert "TACTICAL_SETUP_5M" in buy["warning_codes"]
-    assert "PRECISE_LOCATOR_1M_PRESENT" in buy["warning_codes"]
+    buy = by_type["POSSIBLE_5M_TRADE_BUY"]
+    assert "CONTEXT_30M" in buy["warning_codes"]
+    assert "TRADE_SIGNAL_5M" in buy["warning_codes"]
+    assert "SEGMENT_DIFFERENCE_1M_PRESENT" in buy["warning_codes"]
     source_buy = next(value for value in snapshot["signals"] if value["side"] == "buy")
     assert Decimal(str(buy["reference_price"])) == Decimal(
-        str(source_buy["trigger_1m"]["anchor_price"])
+        str(source_buy["setup_5m"]["anchor_price"])
     )
     assert Decimal(str(buy["entry_price_cap"])) == Decimal("10.25")
     assert buy["entry_price_cap"] != buy["reference_price"]
@@ -1760,8 +1951,24 @@ def test_live_adapter_preserves_30m_5m_1m_roles() -> None:
         ranking["sector_catalog_revision"]
         == snapshot["coverage_manifest"]["sector_catalog_revision"]
     )
-    sell = by_type["POSSIBLE_SELL_REVIEW"]
-    assert "HUMAN_SELECT_30M_EXIT_OR_5M_TACTICAL_ROLE" in sell["warning_codes"]
+    sell = by_type["POSSIBLE_5M_TRADE_SELL"]
+    assert "TRADE_SIGNAL_5M" in sell["warning_codes"]
+    # 此夹具中的卖点发生在上午、快照在收盘时复核；结构仍保留，但不能
+    # 继续占用 80+ 的“新卖点”即时优先级。
+    assert 40 <= sell["review_priority"] <= 69
+    assert sell["position_recommendation"]["status"] == "CONDITIONAL"
+    assert sell["position_recommendation"]["conditional_options"] == [
+        {
+            "condition": "FIVE_MINUTE_SAME_OR_HIGHER_LEVEL_EXIT",
+            "recommended_ratio": "1",
+            "recommended_percent": "100",
+        },
+        {
+            "condition": "FIVE_MINUTE_LOWER_OR_DIFFERENT_STRUCTURE_REDUCTION",
+            "recommended_ratio": "0.25",
+            "recommended_percent": "25",
+        },
+    ]
     assert (
         "REFERENCE_PRICE_IS_STRUCTURE_ANCHOR_NOT_EXECUTION_QUOTE"
         in report["data_caveats"]
@@ -2065,6 +2272,7 @@ def test_live_alert_explains_watchlist_monitor_origin() -> None:
 def test_live_alert_falls_back_to_five_minute_anchor_without_locator() -> None:
     snapshot = live_snapshot()
     signal = json.loads(json.dumps(snapshot["signals"][0]))
+    signal["segment_difference_1m"] = None
     signal["trigger_1m"] = None
     signal["entry_execution_boundary"] = None
     review_at, _signals = validate_live_review_snapshot(snapshot)
@@ -2111,6 +2319,37 @@ def test_live_adapter_rejects_incomplete_coverage_or_wrong_locator() -> None:
     )
     with pytest.raises(ValueError, match="boundary is malformed"):
         validate_live_review_snapshot(malformed_basis)
+
+
+def test_live_adapter_recomputes_entry_boundary_expiry() -> None:
+    snapshot = live_snapshot()
+    signal = snapshot["signals"][0]
+    assert "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in signal["decision_reasons"]
+
+    signal["decision_reasons"] = [
+        reason
+        for reason in signal["decision_reasons"]
+        if reason != "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
+    ]
+    signal["entry_allowed"] = True
+    signal["risk_multiplier"] = "1.00"
+    profile = signal["execution_profile"]
+    profile["hard_block_reason_codes"] = [
+        reason
+        for reason in profile["hard_block_reason_codes"]
+        if reason != "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
+    ]
+    profile["hard_blocked"] = False
+    profile["recommendation"] = (
+        "CAUTION" if profile["advisory_reason_codes"] else "READY"
+    )
+    signal["decision_document_id"] = signal_decision_document_id(signal)
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    with pytest.raises(ValueError, match="decision evidence is invalid"):
+        validate_live_review_snapshot(snapshot)
 
 
 def test_live_adapter_rejects_incomplete_or_mixed_signal_contract() -> None:
@@ -2350,3 +2589,22 @@ def test_live_adapter_recomputes_decision_core_identity() -> None:
     )
     with pytest.raises(ValueError, match="boundary is incomplete"):
         validate_live_review_snapshot(self_asserted)
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    ("no_active_directional_point", "directional_points_expired"),
+)
+def test_neutral_context_accepts_both_empty_and_expired_point_reasons(
+    reason_code: str,
+) -> None:
+    assert _decision_context_is_consistent(
+        {
+            "direction": "neutral",
+            "disposition": "neutral",
+            "hard_block": False,
+            "dominant_point_id": None,
+            "dominant_point_type": None,
+            "reason_codes": [reason_code],
+        }
+    )

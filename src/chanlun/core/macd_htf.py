@@ -91,6 +91,56 @@ def _causal_bucket_keys(
     return _bucket_keys(t, higher, market)
 
 
+def interpolate_causal_htf_for_chart(
+    result: object,
+) -> Optional[dict[str, list[float]]]:
+    """把因果 HTF 的桶末真值转换成仅供绘图使用的平滑序列。
+
+    严格结构必须保留每根来源 K 线在当时可知的临时值；新高周期桶开始时，
+    EMA 状态会正式推进一次，直接绘制该序列便会出现周期性的阶梯跳变。
+    图表只锚定每个高周期桶的最后一个已知值，并在相邻锚点间线性插值。
+    桶末值以及最新值保持不变，输入对象也不会被改写。
+
+    返回值禁止用于背驰、买卖点或任何交易判定。
+    """
+
+    if not isinstance(result, dict):
+        return None
+
+    names = ("dif", "dea", "hist")
+    arrays: dict[str, np.ndarray] = {}
+    try:
+        for name in names:
+            values = np.asarray(result.get(name, ()), dtype=float)
+            if values.ndim != 1:
+                return None
+            arrays[name] = values
+        bucket_keys = np.asarray(result.get("bucket_keys", ()))
+    except (TypeError, ValueError):
+        return None
+
+    size = arrays["dif"].size
+    if size == 0:
+        return None
+    if any(values.size != size for values in arrays.values()):
+        return None
+    if bucket_keys.ndim != 1 or bucket_keys.size != size:
+        return None
+    if any(not np.isfinite(values).all() for values in arrays.values()):
+        return None
+
+    # 每个连续桶的最后一根是正式高周期值；最后一个开放桶则以当前最新值为锚点。
+    last_positions = np.flatnonzero(
+        np.concatenate((bucket_keys[1:] != bucket_keys[:-1], [True]))
+    )
+    bars = np.arange(size, dtype=float)
+    anchors = last_positions.astype(float)
+    return {
+        name: np.interp(bars, anchors, values[last_positions]).tolist()
+        for name, values in arrays.items()
+    }
+
+
 class CausalPartialHigherMACDCalculator:
     """因果高周期未完成桶的增量 MACD 计算器。
 

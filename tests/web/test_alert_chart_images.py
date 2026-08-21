@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from cl_app import create_app
@@ -9,6 +11,11 @@ from cl_app.services.alert_chart_images import (
     AlertChartImageService,
     SignedAlertChartStore,
 )
+from chanlun.decision_support.trading_system.strict_realtime_monitor import (
+    StrictPhysicalMonitorState,
+)
+import chanlun.decision_support.trading_system.strict_realtime_monitor as monitor_module
+from chanlun.notifications import DingTalkWebhookNotifier
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"test-png-body"
@@ -234,8 +241,26 @@ def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
             self.warmup_ready = True
             return True
 
-        def confirmed_point_occurrence(self, point_type, signal_time, *, frequency):
-            resolutions.append((point_type, signal_time, frequency))
+        def confirmed_point_occurrence(
+            self,
+            point_type,
+            signal_time,
+            *,
+            frequency,
+            evidence_id,
+            recursive_level,
+            anchor_time,
+        ):
+            resolutions.append(
+                (
+                    point_type,
+                    signal_time,
+                    frequency,
+                    evidence_id,
+                    recursive_level,
+                    anchor_time,
+                )
+            )
             return object()
 
         @staticmethod
@@ -261,6 +286,9 @@ def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
                     "artifact_key": "strict-event",
                     "point_type": "3buy",
                     "signal_time": "2026-08-05T10:00:00-04:00",
+                    "evidence_id": "strict-point-id",
+                    "recursive_level": 1,
+                    "anchor_time": "2026-08-05T09:55:00-04:00",
                     "evidence_required": True,
                 }
             ]
@@ -268,14 +296,122 @@ def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
     )
 
     assert browser_calls == []
-    assert resolutions == [("3buy", "2026-08-05T10:00:00-04:00", "1m")]
+    assert resolutions == [
+        (
+            "3buy",
+            "2026-08-05T10:00:00-04:00",
+            "5m",
+            "strict-point-id",
+            1,
+            "2026-08-05T09:55:00-04:00",
+        )
+    ]
     assert [value[1] for value in rendered[0]] == [
         "strict:30m",
         "strict:5m",
         "strict:1m",
     ]
     assert len(images) == 1
-    assert "已核验1分钟3buy" in images[0]["alt"]
+    assert "已核验5m3buy" in images[0]["alt"]
+
+
+def test_qcom_evidence_bound_chart_survives_internal_evidence_id_rebuild(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = SignedAlertChartStore(
+        root=tmp_path,
+        public_base_url="http://47.96.40.233:8890",
+        secret=b"0123456789abcdef0123456789abcdef",
+    )
+    signal_time = datetime.fromisoformat("2026-08-13T22:38:00+08:00")
+    anchor_time = datetime.fromisoformat("2026-08-13T22:30:00+08:00")
+    rebuilt_point = SimpleNamespace(
+        point_type="3buy",
+        point_id="sha256:rebuilt-qcom-evidence",
+        recursive_level=0,
+        anchor_at=anchor_time,
+        available_at=signal_time,
+    )
+    state = StrictPhysicalMonitorState(
+        "QCOM.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    monkeypatch.setattr(state, "evidence", lambda _frequency: object())
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_confirmed_points",
+        lambda *_args, **_kwargs: (rebuilt_point,),
+    )
+
+    def refresh_chart_levels():
+        state.warmup_ready = True
+        return True
+
+    monkeypatch.setattr(state, "refresh_chart_levels", refresh_chart_levels)
+    monkeypatch.setattr(state, "chart_data", lambda frequency: f"qcom:{frequency}")
+    service = AlertChartImageService(
+        store,
+        state_factory=lambda *_args, **_kwargs: state,
+        exchange_provider=lambda market: market.value,
+        renderer=lambda _charts: PNG,
+    )
+
+    context = {
+        "require_evidence_match": True,
+        "charts": [
+                {
+                    "market": "us",
+                    "code": "QCOM.US",
+                    "name": "高通",
+                    "artifact_key": "qcom-old-event",
+                    "point_type": "3buy",
+                    "signal_time": signal_time.isoformat(),
+                    "evidence_id": "sha256:old-qcom-evidence",
+                    "recursive_level": 0,
+                    "anchor_time": anchor_time.isoformat(),
+                    "evidence_required": True,
+                }
+            ],
+    }
+    images = service(context)
+
+    assert len(images) == 1
+    assert "QCOM.US" in images[0]["alt"]
+    assert "已核验5m3buy" in images[0]["alt"]
+
+    requests = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return b'{"errcode": 0}'
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: requests.append((request, timeout)) or _Response(),
+    )
+    notifier = DingTalkWebhookNotifier(
+        "https://example.invalid/send",
+        keyword="买卖通知",
+        rich_content_provider=service,
+    )
+    assert notifier.send_rich(
+        "买卖通知｜关注股｜QCOM.US｜1分钟三类买点",
+        ["高通 QCOM.US · 三类买点"],
+        context,
+    ) is True
+    assert len(requests) == 1
+    payload = json.loads(requests[0][0].data.decode("utf-8"))
+    assert payload["msgtype"] == "markdown"
+    assert "QCOM.US" in payload["markdown"]["text"]
+    assert "![高通 QCOM.US" in payload["markdown"]["text"]
 
 
 def test_evidence_bound_alert_rejects_chart_without_claimed_point(
@@ -317,6 +453,9 @@ def test_evidence_bound_alert_rejects_chart_without_claimed_point(
                         "artifact_key": "missing-event",
                         "point_type": "3buy",
                         "signal_time": "2026-08-05T10:00:00-04:00",
+                        "evidence_id": "missing-point-id",
+                        "recursive_level": 0,
+                        "anchor_time": "2026-08-05T09:55:00-04:00",
                         "evidence_required": True,
                     }
                 ]

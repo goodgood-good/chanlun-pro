@@ -8,6 +8,7 @@ from chanlun.core.strict_structure.divergence import (
 )
 from chanlun.core.strict_structure.formal_state import (
     resolve_formal_direction,
+    resolve_formal_direction_from_components,
     resolve_level_formal_direction,
     semantic_trend_direction,
 )
@@ -283,6 +284,16 @@ def test_level_direction_and_global_direction_share_one_resolver():
     assert resolve_level_formal_direction(evidence, 0) == resolve_formal_direction(
         evidence
     )
+
+
+def test_component_direction_matches_full_revision_hashed_evidence():
+    evidence = _bundle(_structure(38), (_first_sell_support(_structure(38)),))
+
+    assert resolve_formal_direction_from_components(
+        structure=evidence.structure,
+        confirmed_points=evidence.confirmed_points,
+        source_closed_at=evidence.source_closed_at,
+    ) == resolve_formal_direction(evidence)
 
 
 def test_semantic_direction_is_independent_from_endpoint_displacement():

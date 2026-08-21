@@ -57,10 +57,10 @@
           <div class="zx-manager-group-list" id="zixuan_manager_group_list">
             {% for group in zx_groups %}
               <div class="zx-manager-group-row" data-group-name="{{ group['name'] }}">
-                <span class="zx-manager-group-avatar" aria-hidden="true">{{ group['name'][:1] }}</span>
+                <span class="zx-manager-group-avatar" aria-hidden="true">{% if group['name'] == '我的持仓' %}人{% else %}{{ group['name'][:1] }}{% endif %}</span>
                 <span class="zx-manager-group-copy">
-                  <strong>{{ group['name'] }}</strong>
-                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% elif group['name'] == '我的持仓' %}人工持仓监控分组{% else %}跨市场观察分组{% endif %}</small>
+                  <strong>{% if group['name'] == '我的持仓' %}人工关注组{% else %}{{ group['name'] }}{% endif %}</strong>
+                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% elif group['name'] == '我的持仓' %}人工维护的优先监听分组{% else %}跨市场观察分组{% endif %}</small>
                 </span>
                 {% if group['name'] in ('我的关注', '我的持仓') %}
                   <span class="zx-manager-protected">不可删除</span>
@@ -91,7 +91,7 @@
                 <label class="zx-field-label" for="export_zx_group">目标分组</label>
                 <select id="export_zx_group" name="zx_group" aria-label="选择导入导出的目标分组">
                   {% for group in zx_groups %}
-                    <option value="{{ group['name'] }}">{{ group['name'] }}</option>
+                    <option value="{{ group['name'] }}">{% if group['name'] == '我的持仓' %}人工关注组{% else %}{{ group['name'] }}{% endif %}</option>
                   {% endfor %}
                 </select>
               </div>
@@ -114,7 +114,7 @@
         </section>
 
         <aside class="zx-manager-notes" aria-label="分组使用说明">
-          <p><strong>使用建议：</strong>“我的持仓”表示你人工声明需要优先监控，不代表读取了交易账户。分组可以同时包含不同市场标的；买卖点仍由 30 分钟、5 分钟和 1 分钟结构共同复核。</p>
+          <p><strong>使用建议：</strong>“人工关注组”表示由你手工指定需要优先监听的标的。分组可以同时包含不同市场标的；买卖点仍由 30 分钟、5 分钟和 1 分钟结构共同复核。</p>
           <p><strong>A 股代码示例：</strong>600519、SH.600519、SHSE.600519 均可在导入时识别。</p>
         </aside>
       </div>

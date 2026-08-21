@@ -75,12 +75,6 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--bootstrap-repetitions", type=int, default=2000)
     result.add_argument("--force-sectors", action="store_true")
-    result.add_argument(
-        "--selection-research",
-        type=Path,
-        default=None,
-        help="正式研究账本；默认读取输入目录下的 selection_research.json",
-    )
     return result
 
 
@@ -150,6 +144,30 @@ def _frozen_algorithm(
         raise ValueError("extract manifest algorithm revision is inconsistent")
     if qmt_research_contract.algorithm_hashes() != hashes:
         raise RuntimeError("source code changed after symbol extraction")
+    return revision, hashes
+
+
+def _frozen_fact_algorithm(
+    manifest: Mapping[str, object],
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    raw = manifest.get("fact_algorithm")
+    if raw is None:
+        return _frozen_algorithm(manifest)
+    if not isinstance(raw, Mapping):
+        raise ValueError("extract manifest fact algorithm is malformed")
+    revision = raw.get("revision")
+    rows = raw.get("hashes")
+    if not isinstance(revision, str) or not isinstance(rows, list):
+        raise ValueError("extract manifest fact algorithm is malformed")
+    hashes = tuple(
+        (str(row["path"]), str(row["sha256"]))
+        for row in rows
+        if isinstance(row, Mapping)
+    )
+    if len(hashes) != len(rows) or _algorithm_revision(hashes) != revision:
+        raise ValueError("extract manifest fact algorithm revision is inconsistent")
+    if qmt_research_contract.fact_algorithm_hashes() != hashes:
+        raise RuntimeError("symbol-fact source code changed after extraction")
     return revision, hashes
 
 
@@ -442,6 +460,7 @@ def _prefix_audit_failures(
     path: Path,
     manifest_path: Path,
     algorithm_revision: str,
+    fact_algorithm_revision: str,
     snapshot_hash: str,
     symbols: Sequence[SymbolResearchFacts],
 ) -> tuple[str, ...]:
@@ -459,6 +478,10 @@ def _prefix_audit_failures(
         failures.append("prefix_invariance_changed")
     if raw.get("algorithm_revision") != algorithm_revision:
         failures.append("prefix_invariance_algorithm_mismatch")
+    if raw.get("fact_algorithm_revision", raw.get("algorithm_revision")) != (
+        fact_algorithm_revision
+    ):
+        failures.append("prefix_invariance_fact_algorithm_mismatch")
     if raw.get("pit_snapshot_sha256") != snapshot_hash:
         failures.append("prefix_invariance_snapshot_mismatch")
     if raw.get("extract_manifest_sha256") != _sha256(manifest_path):
@@ -482,7 +505,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not isinstance(manifest, Mapping) or not manifest.get("complete"):
         raise RuntimeError("symbol extraction is incomplete")
     algorithm_revision, algorithm_hashes = _frozen_algorithm(manifest)
-    symbols = _load_symbols(directory, manifest, algorithm_revision)
+    fact_algorithm_revision, fact_algorithm_hashes = _frozen_fact_algorithm(manifest)
+    symbols = _load_symbols(directory, manifest, fact_algorithm_revision)
     request = manifest.get("request")
     catalog = manifest.get("catalog")
     if not isinstance(request, Mapping) or not isinstance(catalog, Mapping):
@@ -512,6 +536,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         path=prefix_path,
         manifest_path=manifest_path,
         algorithm_revision=algorithm_revision,
+        fact_algorithm_revision=fact_algorithm_revision,
         snapshot_hash=snapshot_hash,
         symbols=symbols,
     )
@@ -534,44 +559,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "complete": False,
                     "status": "blocked_by_prefix_invariance_gate",
                     "failures": prefix_failures,
-                    "gate": str(gate_path),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            flush=True,
-        )
-        return 3
-    research_path = (
-        args.selection_research.resolve()
-        if args.selection_research is not None
-        else directory / "selection_research.json"
-    )
-    try:
-        research_snapshots, selection_research_by_code = (
-            qmt_research_contract.load_selection_research_ledger(
-                research_path,
-                replay_symbols={row.code for row in symbols},
-            )
-        )
-    except ValueError:
-        failure = "formal_selection_research_ledger_missing_or_invalid"
-        _write_gate(
-            path=gate_path,
-            status="blocked",
-            pnl_generated=False,
-            algorithm_revision=algorithm_revision,
-            snapshot_hash=snapshot_hash,
-            symbols=len(symbols),
-            evaluations=evaluations,
-            failures=(failure,),
-        )
-        print(
-            json.dumps(
-                {
-                    "complete": False,
-                    "status": "blocked_by_formal_selection_research_gate",
-                    "failures": (failure,),
                     "gate": str(gate_path),
                 },
                 ensure_ascii=False,
@@ -624,7 +611,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         symbols,
         sectors,
         initial_cash=args.initial_cash,
-        selection_research_by_code=selection_research_by_code,
+        formal_selection_required=False,
     )
     terminal_same_bar = tuple(
         trade.code
@@ -686,10 +673,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("historical_security_status", Decimal("1")),
             ("corporate_action_accounting", Decimal("1")),
             ("sector_event_coverage", sector_event_coverage),
-            (
-                "formal_selection_research_symbols",
-                Decimal(len(selection_research_by_code)) / Decimal(len(symbols)),
-            ),
+            ("current_production_selection_contract", Decimal("1")),
         ),
     )
     result = BacktestEvaluationResult(
@@ -713,6 +697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "required_benchmarks_not_run",
             "investor_specific_dividend_withholding_tax_not_modelled",
             "terminal_open_positions_are_unrealised",
+            "formal_selection_research_ledger_not_used_by_current_production_policy",
             *(
                 ("historical_sw1_membership_unavailable_for_some_archived_contracts",)
                 if unclassified_contracts
@@ -723,6 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         effective_range=(effective_start, requested_end),
         evaluation_mode="fixed_policy_one_year",
         sector_price_source=PIT_SW1_COMPOSITE_PROVIDER,
+        formal_selection_required=False,
         universe_summary={
             "catalog_source": "qmt_sw1_with_cninfo_effective_dates",
             "selected_symbol_count": len(symbols),
@@ -732,16 +718,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sector_composite_member_limit": None,
             "corporate_action_count": len(snapshot.factors),
             "causal_evaluation_count": evaluations,
-            "formal_selection_research_snapshot_count": len(research_snapshots),
-            "formal_selection_research_symbol_count": len(
-                selection_research_by_code
-            ),
+            "formal_selection_required": False,
         },
         data_source_hashes=(
             ("pit_metadata_snapshot", snapshot_hash),
             ("qmt_extract_manifest", _sha256(manifest_path)),
             ("prefix_invariance_audit", _sha256(prefix_path)),
-            ("formal_selection_research_ledger", _sha256(research_path)),
             (
                 "symbol_fact_checkpoint_tree",
                 _checkpoint_tree(symbol_paths, root=directory),
@@ -755,6 +737,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if qmt_research_contract.algorithm_hashes() != algorithm_hashes:
         raise RuntimeError("source code changed during certified finalization")
+    if (
+        "fact_algorithm" in manifest
+        and qmt_research_contract.fact_algorithm_hashes() != fact_algorithm_hashes
+    ):
+        raise RuntimeError("symbol-fact source changed during certified finalization")
     qmt_research_contract.write_report_atomic(args.report, report)
     _write_gate(
         path=gate_path,

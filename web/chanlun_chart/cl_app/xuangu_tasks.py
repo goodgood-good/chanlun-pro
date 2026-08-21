@@ -125,8 +125,25 @@ def process_xuangu_task(
     """
     log.info(f"{market} 开始执行选股任务 {task_name}")
     try:
+        if task_name not in xuangu_task_configs:
+            raise ValueError("选股任务不存在")
+        normalized_frequencies = strict_xuangu.validate_frequency_sequence(freqs)
+        if len(normalized_frequencies) != int(
+            xuangu_task_configs[task_name]["frequency_num"]
+        ):
+            raise ValueError("选股周期数量与任务契约不一致")
+        if (
+            not opt_types
+            or len(opt_types) != len(set(opt_types))
+            or any(value not in {"long", "short"} for value in opt_types)
+        ):
+            raise ValueError("选股方向必须是唯一的 long/short")
+        freqs = list(normalized_frequencies)
         zx = zixuan.ZiXuan(market)
         ex = get_exchange(Market(market))
+        supported_frequencies = ex.support_frequencys()
+        if any(value not in supported_frequencies for value in freqs):
+            raise ValueError("选股周期不受当前市场支持")
         run_codes = []
         if src_zx_group == "all":
             # 获取当前市场视图绑定的股票代码。
@@ -235,6 +252,18 @@ class XuanguTasks(object):
         """
         if xuangu_task_name not in xuangu_task_configs.keys():
             return False
+        normalized_frequencies = strict_xuangu.validate_frequency_sequence(freqs)
+        if len(normalized_frequencies) != int(
+            xuangu_task_configs[xuangu_task_name]["frequency_num"]
+        ):
+            raise ValueError("选股周期数量与任务契约不一致")
+        if (
+            not opt_type
+            or len(opt_type) != len(set(opt_type))
+            or any(value not in {"long", "short"} for value in opt_type)
+        ):
+            raise ValueError("选股方向必须是唯一的 long/short")
+        freqs = list(normalized_frequencies)
         if self.scheduler is None or not bool(getattr(self.scheduler, "running", False)):
             raise RuntimeError("scheduler is not running")
 

@@ -13,6 +13,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -45,6 +46,9 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
 )
 from chanlun.decision_support.trading_system.sector_first_scope import (
     build_sector_first_scope,
+)
+from chanlun.decision_support.trading_system.signal_alignment import (
+    UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
 )
 from tools import qmt_research_contract
 
@@ -88,6 +92,22 @@ def _algorithm_revision(
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _fact_algorithm_revision(
+    hashes: Sequence[tuple[str, str]] | None = None,
+) -> str:
+    values = tuple(
+        qmt_research_contract.fact_algorithm_hashes() if hashes is None else hashes
+    )
+    return _algorithm_revision(values)
+
+
+@lru_cache(maxsize=1)
+def _current_fact_algorithm_revision() -> str:
+    """Validate once per long-lived worker process, not once per symbol."""
+
+    return _fact_algorithm_revision()
+
+
 def _parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -120,7 +140,7 @@ def parser() -> argparse.ArgumentParser:
         help="first tradable session after the uniform 1m warm-up",
     )
     result.add_argument("--end", type=_parse_date, default=DEFAULT_END)
-    result.add_argument("--workers", type=_positive_int, default=4)
+    result.add_argument("--workers", type=_positive_int, default=6)
     result.add_argument("--limit", type=_positive_int)
     result.add_argument("--codes", help="optional comma-separated normalized codes")
     result.add_argument(
@@ -223,7 +243,7 @@ def _fact_summary(fact: SymbolResearchFacts) -> dict[str, object]:
 
 def _worker(request: WorkerRequest) -> dict[str, object]:
     started = time.perf_counter()
-    if _algorithm_revision() != request.algorithm_revision:
+    if _current_fact_algorithm_revision() != request.algorithm_revision:
         raise RuntimeError("worker algorithm differs from the frozen run revision")
     target = Path(request.target)
     fact = build_symbol_facts(
@@ -238,7 +258,7 @@ def _worker(request: WorkerRequest) -> dict[str, object]:
         memberships=request.memberships,
         qmt_factors=request.factors,
     )
-    if _algorithm_revision() != request.algorithm_revision:
+    if _current_fact_algorithm_revision() != request.algorithm_revision:
         raise RuntimeError("algorithm changed while the symbol fact was built")
     _atomic_bytes(target, pickle.dumps(fact, protocol=pickle.HIGHEST_PROTOCOL))
     return {
@@ -292,7 +312,7 @@ def _catalog_scope(
             "POINT_IN_TIME_SECTOR_TRIGGER",
             "POINT_IN_TIME_SECTOR_MEMBERS",
             "INDIVIDUAL_THREE_PROGRAM",
-            "PHYSICAL_5M_SETUP_1M_TRIGGER_UNIFIED_POINT_CLASSES",
+            UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
         ),
         "sector_first_scope_sha256": sector_first.content_sha256,
         "etf_proxy_role": sector_first.etf_proxy_role,
@@ -311,6 +331,8 @@ def _manifest(
     started_at: datetime,
     algorithm_hashes: Sequence[tuple[str, str]],
     algorithm_revision: str,
+    fact_algorithm_hashes: Sequence[tuple[str, str]],
+    fact_algorithm_revision: str,
 ) -> dict[str, object]:
     symbols_with_market_data = sum(
         any(int(value) > 0 for value in dict(row.get("row_counts", {})).values())
@@ -326,6 +348,13 @@ def _manifest(
             "hashes": [
                 {"path": path, "sha256": digest}
                 for path, digest in algorithm_hashes
+            ],
+        },
+        "fact_algorithm": {
+            "revision": fact_algorithm_revision,
+            "hashes": [
+                {"path": path, "sha256": digest}
+                for path, digest in fact_algorithm_hashes
             ],
         },
         "request": {
@@ -373,6 +402,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("workers cannot exceed 16")
     algorithm_hashes = qmt_research_contract.algorithm_hashes()
     algorithm_revision = _algorithm_revision(algorithm_hashes)
+    fact_algorithm_hashes = qmt_research_contract.fact_algorithm_hashes()
+    fact_algorithm_revision = _fact_algorithm_revision(fact_algorithm_hashes)
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     pit_snapshot_path = args.pit_snapshot.resolve()
@@ -410,7 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_start=args.start,
             requested_end=args.end,
             effective_start=args.effective_start,
-            algorithm_revision=algorithm_revision,
+            algorithm_revision=fact_algorithm_revision,
             target=str(_fact_path(output_dir, code)),
             security_master=snapshot_index.security(code),
             memberships=snapshot_index.memberships_for(code),
@@ -440,6 +471,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             started_at=started_at,
             algorithm_hashes=algorithm_hashes,
             algorithm_revision=algorithm_revision,
+            fact_algorithm_hashes=fact_algorithm_hashes,
+            fact_algorithm_revision=fact_algorithm_revision,
         ),
     )
     started = time.perf_counter()
@@ -474,6 +507,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         started_at=started_at,
                         algorithm_hashes=algorithm_hashes,
                         algorithm_revision=algorithm_revision,
+                        fact_algorithm_hashes=fact_algorithm_hashes,
+                        fact_algorithm_revision=fact_algorithm_revision,
                     )
                     _atomic_json(manifest_path, payload)
                     print(
@@ -506,9 +541,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         started_at=started_at,
         algorithm_hashes=algorithm_hashes,
         algorithm_revision=algorithm_revision,
+        fact_algorithm_hashes=fact_algorithm_hashes,
+        fact_algorithm_revision=fact_algorithm_revision,
     )
     if _algorithm_revision() != algorithm_revision:
         raise RuntimeError("algorithm changed during the extraction run")
+    if _fact_algorithm_revision() != fact_algorithm_revision:
+        raise RuntimeError("fact algorithm changed during the extraction run")
     _atomic_json(manifest_path, final)
     print(json.dumps(final["summary"], ensure_ascii=False, indent=2), flush=True)
     return 0 if final["complete"] else 2

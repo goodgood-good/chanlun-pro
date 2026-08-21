@@ -32,7 +32,14 @@ from chanlun.core.strict_structure.evidence_assembler import (
 )
 from chanlun.core.strict_structure.current_events import (
     CurrentStrictEvents,
+    TerminalSegmentReference,
+    TerminalSegmentRole,
+    TerminalSegmentState,
+    TerminalSegmentWindow,
     current_strict_events,
+    current_strict_point_evidence,
+    terminal_segment_reference,
+    terminal_segment_windows,
 )
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from chanlun.core.strict_structure.formal_state import (
@@ -42,9 +49,14 @@ from chanlun.core.strict_structure.formal_state import (
     resolve_level_formal_direction,
     semantic_trend_direction,
 )
-from chanlun.core.strict_structure.level_catalog import recursive_level_labels
+from chanlun.core.strict_structure.level_catalog import (
+    effective_frequency,
+    effective_frequency_rank,
+    recursive_level_labels,
+)
 from chanlun.core.strict_structure.signals import center_ordinals
 from chanlun.core.strict_structure.strength import (
+    FormalDivergenceUnavailable,
     MacdStrengthUnavailable,
     MacdStrengthProvider,
     StrengthSnapshot,
@@ -63,6 +75,7 @@ __all__ = [
     "ConstituentUnit",
     "CurrentStrictEvents",
     "DivergenceEvidence",
+    "FormalDivergenceUnavailable",
     "FormalDirectionState",
     "SourceKind",
     "StrictEvidenceResult",
@@ -82,11 +95,18 @@ __all__ = [
     "TrendKind",
     "TrendState",
     "TrendType",
+    "TerminalSegmentReference",
+    "TerminalSegmentRole",
+    "TerminalSegmentState",
+    "TerminalSegmentWindow",
     "build_strict_point_id",
     "empty_stroke_center_observations",
+    "effective_frequency",
+    "effective_frequency_rank",
     "center_ordinals",
     "current_formal_direction",
     "current_strict_events",
+    "current_strict_point_evidence",
     "compare_divergence",
     "MacdStrengthUnavailable",
     "MacdStrengthProvider",
@@ -94,4 +114,6 @@ __all__ = [
     "resolve_formal_direction",
     "resolve_level_formal_direction",
     "semantic_trend_direction",
+    "terminal_segment_reference",
+    "terminal_segment_windows",
 ]

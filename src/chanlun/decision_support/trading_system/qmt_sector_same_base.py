@@ -2,36 +2,136 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
-import math
+import hashlib
 from numbers import Integral
-from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
-from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
+from chanlun.decision_support.fingerprints import sha256_json
 
 
 QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT = (
     "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS"
 )
-_SHANGHAI = ZoneInfo("Asia/Shanghai")
 _REQUIRED = ("date", "open", "high", "low", "close", "volume")
-
-
-def _session_five_minute_closes(session: date) -> tuple[datetime, ...]:
-    return tuple(
-        datetime.combine(
-            session,
-            time(hour=minute // 60, minute=minute % 60),
-            tzinfo=_SHANGHAI,
-        )
-        for start, end in (
-            (9 * 60 + 35, 11 * 60 + 30),
-            (13 * 60 + 5, 15 * 60),
-        )
-        for minute in range(start, end + 1, 5)
+_MINUTE_IN_NANOSECONDS = 60_000_000_000
+_FIVE_MINUTE_OFFSETS = np.concatenate(
+    (
+        np.arange(9 * 60 + 35, 11 * 60 + 31, 5, dtype=np.int64),
+        np.arange(13 * 60 + 5, 15 * 60 + 1, 5, dtype=np.int64),
     )
+) * _MINUTE_IN_NANOSECONDS
+_MEMBER_PATH_REVISION_SCHEMA = (
+    "chanlun-qmt-sector-composite-member-path-v2-little-endian-vector"
+)
+_DERIVED_BASE_REVISION_SCHEMA = (
+    "chanlun-qmt-sector-five-minute-derived-base-v2-little-endian-vector"
+)
+
+
+def _update_length_prefixed(digest: object, segment: bytes) -> None:
+    digest.update(len(segment).to_bytes(8, byteorder="big", signed=False))
+    digest.update(segment)
+
+
+def qmt_sector_member_path_revision(frame: pd.DataFrame) -> str | None:
+    """Return the shared exact date/member-mask provenance identity."""
+
+    if frame.empty:
+        return None
+    if "member_mask" not in frame.columns or "date" not in frame.columns:
+        raise ValueError("sector composite member path is unavailable")
+    dates = pd.to_datetime(frame["date"], errors="raise")
+    if dates.dt.tz is None:
+        raise ValueError("sector composite member path dates must be timezone-aware")
+    raw_masks = tuple(frame["member_mask"])
+    if any(
+        isinstance(mask, bool)
+        or not isinstance(mask, Integral)
+        or int(mask) < 0
+        or int(mask) >= 1 << 64
+        for mask in raw_masks
+    ):
+        raise ValueError("sector composite member masks must be uint64 integers")
+    timestamps = np.asarray(
+        pd.DatetimeIndex(dates).tz_convert("UTC").asi8,
+        dtype="<i8",
+    )
+    masks = np.asarray(raw_masks, dtype="<u8")
+    metadata = sha256_json(
+        {
+            "schema": _MEMBER_PATH_REVISION_SCHEMA,
+            "row_count": len(frame),
+            "timestamp_encoding": "utc-nanoseconds-int64-little-endian",
+            "member_mask_encoding": "uint64-little-endian",
+        }
+    ).encode("ascii")
+    digest = hashlib.sha256()
+    for segment in (
+        _MEMBER_PATH_REVISION_SCHEMA.encode("ascii"),
+        metadata,
+        timestamps.tobytes(order="C"),
+        masks.tobytes(order="C"),
+    ):
+        _update_length_prefixed(digest, segment)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _derived_base_revision(
+    frame: pd.DataFrame,
+    *,
+    source_attrs: dict[str, object],
+) -> str:
+    metadata = sha256_json(
+        {
+            "schema": _DERIVED_BASE_REVISION_SCHEMA,
+            "sector_id": source_attrs.get("sector_id"),
+            "sector_membership_revision": source_attrs.get(
+                "sector_membership_revision"
+            ),
+            "sector_composite_members": source_attrs.get(
+                "sector_composite_members"
+            ),
+            "sector_composite_member_path_revision": source_attrs.get(
+                "sector_composite_member_path_revision"
+            ),
+            "row_count": len(frame),
+            "value_columns": tuple(_REQUIRED[1:]),
+            "has_member_mask": "member_mask" in frame.columns,
+        }
+    ).encode("ascii")
+    timestamps = (
+        np.empty(0, dtype="<i8")
+        if frame.empty
+        else np.asarray(
+            pd.DatetimeIndex(frame["date"]).tz_convert("UTC").asi8,
+            dtype="<i8",
+        )
+    )
+    values = np.ascontiguousarray(
+        frame.loc[:, list(_REQUIRED[1:])].to_numpy(
+            dtype=np.float64,
+            copy=True,
+        ),
+        dtype="<f8",
+    )
+    values[values == 0.0] = 0.0
+    masks = (
+        np.asarray(tuple(frame["member_mask"]), dtype="<u8")
+        if "member_mask" in frame.columns
+        else np.empty(0, dtype="<u8")
+    )
+    digest = hashlib.sha256()
+    for segment in (
+        _DERIVED_BASE_REVISION_SCHEMA.encode("ascii"),
+        metadata,
+        timestamps.tobytes(order="C"),
+        values.tobytes(order="C"),
+        masks.tobytes(order="C"),
+    ):
+        _update_length_prefixed(digest, segment)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _normalized_five_minute_frame(value: pd.DataFrame) -> pd.DataFrame:
@@ -55,7 +155,7 @@ def _normalized_five_minute_frame(value: pd.DataFrame) -> pd.DataFrame:
     )
     prices = numeric.loc[:, ["open", "high", "low", "close"]]
     invalid = (
-        ~numeric.map(math.isfinite).all(axis=1)
+        ~np.isfinite(numeric.to_numpy()).all(axis=1)
         | (prices <= 0).any(axis=1)
         | (numeric["volume"] < 0)
         | (numeric["high"] < prices.max(axis=1))
@@ -93,97 +193,79 @@ def derive_qmt_sector_thirty_minute_frame(
         raise ValueError("request_bars must be a positive integer")
     source_attrs = dict(getattr(five_minute_frame, "attrs", {}))
     normalized = _normalized_five_minute_frame(five_minute_frame)
-    accepted: list[pd.DataFrame] = []
-    grouped = tuple(
-        normalized.groupby(normalized["date"].dt.date, sort=True)
-    ) if not normalized.empty else ()
-    for index, (session, rows) in enumerate(grouped):
-        ordered = rows.sort_values("date", kind="stable").reset_index(drop=True)
-        expected = _session_five_minute_closes(session)
-        actual = tuple(
-            normalize_datetime(
-                pd.Timestamp(value).to_pydatetime(),
-                "sector 5m close",
-            )
-            for value in ordered["date"]
-        )
-        if actual == expected:
-            accepted.append(ordered)
+    accepted_rows = np.zeros(len(normalized), dtype=bool)
+    if normalized.empty:
+        session_ranges: tuple[tuple[int, int], ...] = ()
+        minute_offsets = np.empty(0, dtype=np.int64)
+    else:
+        completion_ns = normalized["date"].array.asi8
+        session_ns = normalized["date"].dt.normalize().array.asi8
+        minute_offsets = completion_ns - session_ns
+        changes = np.flatnonzero(session_ns[1:] != session_ns[:-1]) + 1
+        starts = np.concatenate((np.asarray((0,)), changes))
+        ends = np.concatenate((changes, np.asarray((len(normalized),))))
+        session_ranges = tuple(zip(starts.tolist(), ends.tolist()))
+    for index, (start, end) in enumerate(session_ranges):
+        actual = minute_offsets[start:end]
+        observed_count = end - start
+        if np.array_equal(actual, _FIVE_MINUTE_OFFSETS):
+            accepted_rows[start:end] = True
             continue
-        if index == 0 and actual == expected[-len(actual) :]:
+        if (
+            index == 0
+            and observed_count <= len(_FIVE_MINUTE_OFFSETS)
+            and np.array_equal(
+                actual,
+                _FIVE_MINUTE_OFFSETS[-observed_count:],
+            )
+        ):
             # 最早的计数边界后缀没有交易日开盘锚点。
             continue
-        if index == len(grouped) - 1 and actual == expected[: len(actual)]:
-            accepted.append(ordered)
+        if (
+            index == len(session_ranges) - 1
+            and observed_count <= len(_FIVE_MINUTE_OFFSETS)
+            and np.array_equal(
+                actual,
+                _FIVE_MINUTE_OFFSETS[:observed_count],
+            )
+        ):
+            accepted_rows[start:end] = True
             continue
         raise ValueError("sector 5m base is not a completed calendar-grid prefix")
 
-    rows_for_revision = (
-        pd.concat(accepted, ignore_index=True)
-        if accepted
-        else pd.DataFrame(columns=normalized.columns)
+    rows_for_revision = normalized.loc[accepted_rows].reset_index(drop=True)
+    base_revision = _derived_base_revision(
+        rows_for_revision,
+        source_attrs=source_attrs,
     )
-    has_member_mask = "member_mask" in rows_for_revision.columns
-    base_revision = sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-five-minute-derived-base",
-            "sector_id": source_attrs.get("sector_id"),
-            "sector_membership_revision": source_attrs.get(
-                "sector_membership_revision"
-            ),
-            "sector_composite_members": source_attrs.get(
-                "sector_composite_members"
-            ),
-            "sector_composite_member_path_revision": source_attrs.get(
-                "sector_composite_member_path_revision"
-            ),
-            "rows": tuple(
-                {
-                    "date": normalize_datetime(
-                        pd.Timestamp(row.date).to_pydatetime(),
-                        "sector 5m close",
-                    ),
-                    "open": float(row.open),
-                    "high": float(row.high),
-                    "low": float(row.low),
-                    "close": float(row.close),
-                    "volume": float(row.volume),
-                    **(
-                        {"member_mask": int(row.member_mask)}
-                        if has_member_mask
-                        else {}
-                    ),
-                }
-                for row in rows_for_revision.itertuples(index=False)
-            ),
-        }
-    )
-
-    output: list[pd.DataFrame] = []
-    for rows in accepted:
-        complete_count = len(rows) // 6 * 6
-        if complete_count == 0:
-            continue
-        complete = rows.iloc[:complete_count].copy()
-        complete["bucket"] = complete.index // 6
-        output.append(
-            complete.groupby("bucket", sort=True)
+    if rows_for_revision.empty:
+        result = pd.DataFrame(columns=_REQUIRED)
+    else:
+        sessions = rows_for_revision["date"].dt.normalize()
+        grouped_sessions = rows_for_revision.groupby(sessions, sort=False)
+        positions = grouped_sessions.cumcount()
+        session_sizes = grouped_sessions["date"].transform("size")
+        complete_mask = positions < (session_sizes // 6 * 6)
+        complete = rows_for_revision.loc[
+            complete_mask,
+            list(_REQUIRED),
+        ].copy()
+        complete["_session"] = sessions.loc[complete_mask].array
+        complete["_bucket"] = (positions.loc[complete_mask] // 6).array
+        result = (
+            complete.groupby(["_session", "_bucket"], sort=True)
             .agg(
                 date=("date", "last"),
                 open=("open", "first"),
                 high=("high", "max"),
                 low=("low", "min"),
                 close=("close", "last"),
-        # 这是分桶内保守的五分钟最小覆盖量，不是虚构的三十分钟全成员成交量。
+                # Conservative minimum contributor coverage in the bucket.
                 volume=("volume", "min"),
             )
             .reset_index(drop=True)
+            .loc[:, list(_REQUIRED)]
         )
-    result = (
-        pd.concat(output, ignore_index=True)
-        if output
-        else pd.DataFrame(columns=_REQUIRED)
-    )
     if request_bars is not None:
         result = result.tail(request_bars).reset_index(drop=True)
     result.attrs = {
@@ -201,4 +283,5 @@ def derive_qmt_sector_thirty_minute_frame(
 __all__ = (
     "QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT",
     "derive_qmt_sector_thirty_minute_frame",
+    "qmt_sector_member_path_revision",
 )

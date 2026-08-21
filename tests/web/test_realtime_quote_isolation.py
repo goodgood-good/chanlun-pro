@@ -11,6 +11,7 @@ from cl_app import create_app
 from cl_app.blueprints import other as other_mod
 from cl_app.blueprints import tv as tv_mod
 from cl_app.services.realtime_quotes import (
+    AShareDisplayQuoteBatch,
     AShareRealtimeQuote,
     AShareRealtimeQuoteBatch,
 )
@@ -49,6 +50,28 @@ def _batch(codes: tuple[str, ...]) -> AShareRealtimeQuoteBatch:
                 open=1.95,
                 volume=100.0,
                 rate=1.5,
+            )
+            for code in codes
+        ),
+        tick_data_used=bool(codes),
+    )
+
+
+def _closed_display_batch(codes: tuple[str, ...]) -> AShareDisplayQuoteBatch:
+    return AShareDisplayQuoteBatch(
+        requested_codes=codes,
+        market_open=False,
+        quotes=tuple(
+            AShareRealtimeQuote(
+                code=code,
+                last=1.672,
+                buy1=1.671,
+                sell1=1.672,
+                high=1.684,
+                low=1.655,
+                open=1.66,
+                volume=1000.0,
+                rate=0.72,
             )
             for code in codes
         ),
@@ -95,6 +118,31 @@ def test_a_share_quote_routes_use_only_isolated_provider(
         ("SH.600000", "SZ.000001"),
         ("SH.600000", "SZ.000001"),
     ]
+
+
+def test_a_share_quote_routes_render_last_snapshot_while_market_is_closed(
+    isolated_app,
+) -> None:
+    isolated_app.extensions["a_share_realtime_quotes"] = _closed_display_batch
+    client = isolated_app.test_client()
+
+    ticks = client.post(
+        "/ticks",
+        data={"market": "a", "codes": json.dumps(["SH.513100"])},
+    )
+    quotes = client.get("/tv/quotes?symbols=a:SH.513100")
+
+    assert ticks.status_code == 200
+    assert ticks.get_json() == {
+        "ok": True,
+        "market_state": "closed",
+        "now_trading": False,
+        "ticks": [{"code": "SH.513100", "price": 1.672, "rate": 0.72}],
+        "error": None,
+    }
+    assert quotes.status_code == 200
+    assert quotes.get_json()["d"][0]["v"]["lp"] == 1.672
+    assert quotes.get_json()["d"][0]["v"]["chp"] == 0.72
 
 
 def test_missing_isolated_provider_fails_closed_without_qmt_fallback(

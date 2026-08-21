@@ -8,16 +8,26 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeGateBundle,
     HigherTimeframeGateEvidence,
     HigherTimeframePeriodDiagnostic,
+    HigherTimeframeSessionEvidence,
 )
 from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingSupplyFacts,
 )
 from chanlun.decision_support.trading_system.human_assisted_decision import (
+    FIVE_MINUTE_SETUP_SELECTION_REVISION,
     FORMAL_SELECTION_REQUIRED_REASON_CODE,
     HumanAssistedDecisionCore,
     replay_human_assisted_bundles,
+    signal_decision_document_id,
     validate_human_assisted_contract_document,
     validate_signal_decision_document,
+)
+from chanlun.decision_support.trading_system.lifecycle import (
+    STRUCTURE_INVALIDATED_REASON_CODE,
+)
+from chanlun.decision_support.trading_system.models import TradingPolicy
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
+    QmtMinuteSessionIssue,
 )
 from chanlun.decision_support.trading_system.signal_alignment import (
     unified_signal_alignment_contract,
@@ -26,7 +36,27 @@ from tests.trading_system.helpers import (
     confirmed_point,
     deterministic_bundle,
     eligible_sector,
+    provisional_point,
 )
+
+
+def test_stale_confirmed_buy_remains_visible_but_is_not_actionable() -> None:
+    bundle = replace(
+        deterministic_bundle(),
+        five_points=(confirmed_point("2buy"),),
+        one_points=(),
+    )
+
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert document["technical_entry_allowed"] is True
+    assert document["entry_allowed"] is False
+    assert document["position_recommendation"]["status"] == "BLOCKED"
+    assert document["position_recommendation"]["reason_codes"] == [
+        "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE"
+    ]
+    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in document["decision_reasons"]
+    assert validate_signal_decision_document(document) == document["decision_document_id"]
 
 
 def _gate(
@@ -35,6 +65,7 @@ def _gate(
     *,
     reason_codes: tuple[str, ...] = (),
     period_diagnostics: tuple[HigherTimeframePeriodDiagnostic, ...] = (),
+    session_evidence: HigherTimeframeSessionEvidence | None = None,
 ) -> HigherTimeframeGateEvidence:
     return HigherTimeframeGateEvidence(
         subject=subject,
@@ -48,6 +79,7 @@ def _gate(
         source_revision=f"source:{subject}:{gate}",
         reason_codes=reason_codes,
         period_diagnostics=period_diagnostics,
+        session_evidence=session_evidence,
     )
 
 
@@ -121,6 +153,80 @@ def test_page_and_historical_replay_use_identical_decision_documents() -> None:
     assert core.contract.document()["live_status"] == "LIVE_DISABLED"
 
 
+def test_structure_invalidation_reason_is_carried_by_decision_document() -> None:
+    core = HumanAssistedDecisionCore()
+    bundle = replace(deterministic_bundle(), latest_price=9.79)
+
+    [document] = core.decision_documents(bundle)
+
+    assert document["lifecycle_stage"] == "invalidated"
+    assert document["current_price"] == 9.79
+    assert document["decision_reasons"][-1] == STRUCTURE_INVALIDATED_REASON_CODE
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
+
+
+def test_signal_validator_rejects_contradictory_setup_state() -> None:
+    [document] = HumanAssistedDecisionCore().decision_documents(
+        deterministic_bundle()
+    )
+
+    document["setup_5m"]["formation_state"] = "formed"
+
+    with pytest.raises(ValueError, match="formation_state"):
+        validate_signal_decision_document(document)
+
+
+def test_signal_validator_rejects_a_contradictory_recommendation_label() -> None:
+    [document] = HumanAssistedDecisionCore().decision_documents(
+        deterministic_bundle()
+    )
+    document["execution_profile"]["recommendation_label"] = (
+        "等待5分钟买卖点正式确认"
+    )
+
+    with pytest.raises(ValueError, match="recommendation label changed"):
+        validate_signal_decision_document(document)
+
+
+def test_geometric_candidate_has_a_distinct_non_actionable_state() -> None:
+    candidate = replace(
+        provisional_point("3sell"),
+        evidence_codes=(
+            "unfinished_segment_participates",
+            "provisional_center_completion",
+            "core_boundary_held",
+        ),
+    )
+    bundle = replace(
+        deterministic_bundle(),
+        five_points=(candidate,),
+        one_points=(),
+        opposite_points=(),
+    )
+
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert document["lifecycle_stage"] == "formed"
+    assert document["setup_5m"]["formation_state"] == "geometry_ready"
+    assert document["execution_profile"]["recommendation"] == (
+        "GEOMETRY_AWAITING_CONFIRMATION"
+    )
+    assert document["execution_profile"]["recommendation_label"] == (
+        "5分钟买卖点仅为几何候选，尚未达到操作确认"
+    )
+    assert document["position_recommendation"]["basis"] == (
+        "GEOMETRIC_5M_CANDIDATE_AWAITING_CONFIRMATION"
+    )
+    assert "five_minute_geometry_candidate_awaiting_confirmation" in document[
+        "decision_reasons"
+    ]
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
+
+
 def test_sector_selection_scope_is_shared_and_hash_bound() -> None:
     core = HumanAssistedDecisionCore()
     bundle = deterministic_bundle()
@@ -137,12 +243,13 @@ def test_sector_selection_scope_is_shared_and_hash_bound() -> None:
     assert monitor["sector_triggered"] is False
     assert monitor["monitor_only"] is True
     assert monitor_evaluated.entry is not None
-    assert monitor_evaluated.entry.allowed is False
-    assert monitor_evaluated.entry.risk_multiplier == 0
-    assert "QMT_SECTOR_TRIGGER_REQUIRED" in monitor_evaluated.entry.reason_codes
-    assert monitor["entry_allowed"] is False
-    assert monitor["risk_multiplier"] == "0"
+    assert monitor_evaluated.entry.allowed is True
+    assert str(monitor_evaluated.entry.risk_multiplier) == "1.00"
+    assert "QMT_SECTOR_TRIGGER_REQUIRED" in monitor_evaluated.advisory_reason_codes
+    assert monitor["entry_allowed"] is True
+    assert monitor["risk_multiplier"] == "1.00"
     assert "QMT_SECTOR_TRIGGER_REQUIRED" in monitor["decision_reasons"]
+    assert monitor["execution_profile"]["recommendation"] == "CAUTION"
     assert triggered["sector_triggered"] is True
     assert triggered["monitor_only"] is False
     assert triggered["formal_selection"]["status"] == "PASS"
@@ -157,12 +264,65 @@ def test_sector_trigger_cannot_replace_signed_three_program_research() -> None:
     [document] = core.decision_documents(bundle)
 
     assert decision.technical_entry_allowed is True
-    assert decision.entry is not None and decision.entry.allowed is False
-    assert FORMAL_SELECTION_REQUIRED_REASON_CODE in decision.entry.reason_codes
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert FORMAL_SELECTION_REQUIRED_REASON_CODE in decision.advisory_reason_codes
     assert document["sector_triggered"] is True
     assert document["monitor_only"] is True
     assert document["formal_selection"]["research_status"] == "UNRESOLVED"
     assert FORMAL_SELECTION_REQUIRED_REASON_CODE in document["decision_reasons"]
+
+
+def test_manual_signal_mode_does_not_read_formal_research_as_an_entry_gate() -> None:
+    core = HumanAssistedDecisionCore(formal_selection_required=False)
+    bundle = replace(deterministic_bundle(), selection_research=None)
+
+    [decision] = core.evaluate_symbol(bundle)
+    [document] = core.decision_documents(bundle)
+
+    assert decision.technical_entry_allowed is True
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert document["formal_selection_required"] is False
+    assert document["formal_selection"]["research_status"] == "UNRESOLVED"
+    assert document["monitor_only"] is False
+    assert document["entry_allowed"] is True
+    assert FORMAL_SELECTION_REQUIRED_REASON_CODE not in document["decision_reasons"]
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
+
+
+def test_etf_path_ignores_individual_sector_blocks_but_keeps_market_symbol_gates() -> None:
+    core = HumanAssistedDecisionCore(formal_selection_required=False)
+    hostile_sector = replace(
+        eligible_sector(),
+        eligible=False,
+        hard_block=True,
+        regime="hostile",
+        reason_codes=("ETF_INDUSTRY_CLASSIFICATION_NOT_APPLICABLE",),
+    )
+    bundle = replace(
+        deterministic_bundle(),
+        sector=hostile_sector,
+        selection_path="ETF_PROXY",
+        selection_research=None,
+        higher_timeframe_gates=HigherTimeframeGateBundle(
+            market=_gate("MARKET", "GREEN"),
+            sector=_gate(hostile_sector.sector_id, "RED"),
+            symbol=_gate("SZ.000001", "GREEN"),
+        ),
+        enforce_higher_timeframe_entry_gate=True,
+    )
+
+    [decision] = core.evaluate_symbol(bundle)
+    [document] = core.decision_documents(bundle)
+
+    assert decision.setup.sector_required is False
+    assert decision.technical_entry_allowed is True
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert document["selection_path"] == "ETF_PROXY"
+    assert document["entry_allowed"] is True
+    assert "sector_hostile" not in document["decision_reasons"]
+    assert "HIGHER_TIMEFRAME_GATE_NOT_GREEN" not in document["decision_reasons"]
 
 
 def test_page_explanation_fields_do_not_change_shared_decision_identity() -> None:
@@ -185,6 +345,17 @@ def test_page_explanation_fields_do_not_change_shared_decision_identity() -> Non
         validate_signal_decision_document(document)
 
 
+def test_signal_document_rejects_recursive_context_forged_as_5m_trade() -> None:
+    core = HumanAssistedDecisionCore()
+    [document] = core.decision_documents(deterministic_bundle())
+    document["recursive_level"] = 1
+    document["setup_5m"]["recursive_level"] = 1
+    document["decision_document_id"] = signal_decision_document_id(document)
+
+    with pytest.raises(ValueError, match="physical 5m/L0"):
+        validate_signal_decision_document(document)
+
+
 def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     first = HumanAssistedDecisionCore()
     second = HumanAssistedDecisionCore()
@@ -201,6 +372,9 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     )
     assert first.contract.structure_scope == "physical-timeframe-recursive"
     assert first.contract.recursive_structure_allowed is True
+    assert first.contract.five_minute_setup_selection_revision == (
+        FIVE_MINUTE_SETUP_SELECTION_REVISION
+    )
     assert first.contract.physical_structure_frequencies == (
         "d",
         "30m",
@@ -212,6 +386,8 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
         "1sell",
         "2buy",
         "2sell",
+        "3buy",
+        "3sell",
     )
     document = first.contract.document()
     assert document["locator_trigger_point_types"] == [
@@ -219,16 +395,28 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
         "1sell",
         "2buy",
         "2sell",
+        "3buy",
+        "3sell",
     ]
     assert document["policy"]["minimum_tick"] == "0.01"
     assert validate_human_assisted_contract_document(document) == (first.contract_id)
+
+    stale_revision = first.contract.document()
+    stale_revision["five_minute_setup_selection_revision"] = "legacy-mixed-lane"
+    with pytest.raises(ValueError, match="physical structure contract changed"):
+        validate_human_assisted_contract_document(stale_revision)
 
     document["signal_alignment_parameter_set_id"] = "sha256:" + "0" * 64
     with pytest.raises(ValueError, match="physical structure contract changed"):
         validate_human_assisted_contract_document(document)
 
+    with pytest.raises(ValueError, match="requires 5m trade signals"):
+        HumanAssistedDecisionCore(
+            TradingPolicy(require_confirmed_one_minute=True)
+        )
 
-def test_daily_physical_structure_can_block_new_buy_with_recursive_graph() -> None:
+
+def test_daily_physical_structure_downgrades_without_erasing_new_buy() -> None:
     core = HumanAssistedDecisionCore()
     bundle = replace(
         deterministic_bundle(),
@@ -240,17 +428,19 @@ def test_daily_physical_structure_can_block_new_buy_with_recursive_graph() -> No
     [decision] = core.evaluate_symbol(bundle)
     [document] = core.decision_documents(bundle)
 
-    assert decision.entry is not None and decision.entry.allowed is False
-    assert decision.technical_entry_allowed is False
-    assert "daily_structure_hostile" in decision.entry.reason_codes
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert decision.technical_entry_allowed is True
+    assert "daily_structure_hostile" in decision.advisory_reason_codes
     assert document["context_d"]["frequency"] == "d"
     assert document["context_d"]["hard_block"] is True
     assert document["stroke_mode"] == "strict-cl-k-distance"
     assert document["recursive_structure_used"] is True
     assert document["physical_timeframe_recursive"] is True
+    assert document["execution_profile"]["context_grade"] == "C"
+    assert document["execution_profile"]["recommendation"] == "CAUTION"
 
 
-def test_mwd_gate_keeps_candidate_visible_but_blocks_non_green_entry() -> None:
+def test_mwd_gate_is_legacy_advisory_and_does_not_erase_entry() -> None:
     core = HumanAssistedDecisionCore()
     bundle = replace(
         deterministic_bundle(),
@@ -266,9 +456,11 @@ def test_mwd_gate_keeps_candidate_visible_but_blocks_non_green_entry() -> None:
     [document] = core.decision_documents(bundle)
 
     assert decision.technical_entry_allowed is True
-    assert decision.entry is not None and decision.entry.allowed is False
+    assert decision.entry is not None and decision.entry.allowed is True
     assert document["technical_entry_allowed"] is True
-    assert document["entry_allowed"] is False
+    assert document["entry_allowed"] is True
+    assert "HIGHER_TIMEFRAME_CONTEXT_NOT_GREEN" in decision.advisory_reason_codes
+    assert document["execution_profile"]["recommendation"] == "CAUTION"
     assert document["higher_timeframe_risk"] == {
         "market_gate": "GREEN",
         "sector_gate": "GREEN",
@@ -284,11 +476,80 @@ def test_mwd_gate_keeps_candidate_visible_but_blocks_non_green_entry() -> None:
         "sector_reason_codes": [],
         "symbol_reason_codes": [],
         "reason_codes": [],
+        "data_integrity_hard_block_reason_codes": [],
         "market_period_diagnostics": [],
         "sector_period_diagnostics": [],
         "symbol_period_diagnostics": [],
-        "new_entry_requires_all_green": True,
+        "new_entry_requires_all_green": False,
     }
+
+
+def test_higher_timeframe_direction_is_advisory_but_causal_data_error_blocks() -> None:
+    bundle = replace(
+        deterministic_bundle(),
+        higher_timeframe_gates=HigherTimeframeGateBundle(
+            market=_gate("MARKET", "GREEN"),
+            sector=_gate(eligible_sector().sector_id, "GREEN"),
+            symbol=_gate(
+                "SZ.000001",
+                "UNRESOLVED",
+                reason_codes=("QMT_NATIVE_DAILY_AHEAD_OF_ONE_MINUTE_BASE",),
+            ),
+        ),
+        enforce_higher_timeframe_entry_gate=True,
+    )
+
+    [decision] = HumanAssistedDecisionCore().evaluate_symbol(bundle)
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert decision.technical_entry_allowed is True
+    assert decision.entry is not None and decision.entry.allowed is False
+    assert decision.entry.risk_multiplier == 0
+    assert document["entry_allowed"] is False
+    assert document["higher_timeframe_risk"][
+        "data_integrity_hard_block_reason_codes"
+    ] == ["QMT_NATIVE_DAILY_AHEAD_OF_ONE_MINUTE_BASE"]
+    assert document["execution_profile"]["recommendation"] == "BLOCKED"
+
+
+def test_one_minute_session_gap_is_advisory_for_physical_five_minute_signal() -> None:
+    session_code = "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING"
+    session_evidence = HigherTimeframeSessionEvidence.exact(
+        (
+            QmtMinuteSessionIssue(
+                session=deterministic_bundle().as_of.date(),
+                code=session_code,
+                observed_rows=0,
+                detail="trading-calendar session is absent from the QMT 1m prefix",
+            ),
+        )
+    )
+    bundle = replace(
+        deterministic_bundle(),
+        higher_timeframe_gates=HigherTimeframeGateBundle(
+            market=_gate("MARKET", "GREEN"),
+            sector=_gate(eligible_sector().sector_id, "GREEN"),
+            symbol=_gate(
+                "SZ.000001",
+                "UNRESOLVED",
+                reason_codes=(session_code,),
+                session_evidence=session_evidence,
+            ),
+        ),
+        enforce_higher_timeframe_entry_gate=True,
+    )
+
+    [decision] = HumanAssistedDecisionCore().evaluate_symbol(bundle)
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert decision.technical_entry_allowed is True
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert document["entry_allowed"] is True
+    assert document["higher_timeframe_risk"][
+        "data_integrity_hard_block_reason_codes"
+    ] == []
+    assert session_code in document["execution_profile"]["advisory_reason_codes"]
+    assert session_code not in document["execution_profile"]["hard_block_reason_codes"]
 
 
 def test_mwd_evidence_keeps_market_and_symbol_causes_separate() -> None:
@@ -341,7 +602,7 @@ def test_mwd_evidence_keeps_market_and_symbol_causes_separate() -> None:
     ]
 
 
-def test_unconverged_warmup_blocks_entry_without_hiding_technical_candidate() -> None:
+def test_non_trade_period_warmup_divergence_is_advisory_only() -> None:
     core = HumanAssistedDecisionCore()
     bundle = replace(
         deterministic_bundle(),
@@ -352,9 +613,24 @@ def test_unconverged_warmup_blocks_entry_without_hiding_technical_candidate() ->
         ),
         enforce_higher_timeframe_entry_gate=True,
         warmup_converged=False,
-        warmup_reason_codes=("30M:WARMUP_TAIL_DIVERGED",),
-        warmup_by_frequency=(("30m", False, 1600, 1067),),
-        warmup_difference_codes_by_frequency=(("30m", ("WARMUP_DIRECTION_CHANGED",)),),
+        warmup_reason_codes=(
+            "D:WARMUP_TAIL_STABLE",
+            "30M:WARMUP_TAIL_DIVERGED",
+            "5M:WARMUP_TAIL_STABLE",
+            "1M:WARMUP_TAIL_STABLE",
+        ),
+        warmup_by_frequency=(
+            ("d", True, 600, 400),
+            ("30m", False, 1600, 1067),
+            ("5m", True, 1600, 1067),
+            ("1m", True, 1800, 1200),
+        ),
+        warmup_difference_codes_by_frequency=(
+            ("d", ()),
+            ("30m", ("WARMUP_DIRECTION_CHANGED",)),
+            ("5m", ()),
+            ("1m", ()),
+        ),
         enforce_warmup_entry_gate=True,
     )
 
@@ -362,24 +638,149 @@ def test_unconverged_warmup_blocks_entry_without_hiding_technical_candidate() ->
     [document] = core.decision_documents(bundle)
 
     assert decision.technical_entry_allowed is True
-    assert decision.entry is not None and decision.entry.allowed is False
-    assert "WARMUP_CONVERGENCE_GATE_FAILED" in decision.entry.reason_codes
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert "WARMUP_CONVERGENCE_GATE_FAILED" not in decision.entry.reason_codes
+    assert "30M:WARMUP_TAIL_DIVERGED" in decision.advisory_reason_codes
+    assert document["execution_profile"]["recommendation"] == "CAUTION"
+    assert document["execution_profile"]["hard_blocked"] is False
+    assert document["execution_profile"]["hard_block_reason_codes"] == []
+    assert "30M:WARMUP_TAIL_DIVERGED" in document["execution_profile"][
+        "advisory_reason_codes"
+    ]
     assert document["warmup"] == {
         "converged": False,
         "by_frequency": [
+            {
+                "frequency": "d",
+                "converged": True,
+                "full_bar_count": 600,
+                "suffix_bar_count": 400,
+            },
             {
                 "frequency": "30m",
                 "converged": False,
                 "full_bar_count": 1600,
                 "suffix_bar_count": 1067,
-            }
+            },
+            {
+                "frequency": "5m",
+                "converged": True,
+                "full_bar_count": 1600,
+                "suffix_bar_count": 1067,
+            },
+            {
+                "frequency": "1m",
+                "converged": True,
+                "full_bar_count": 1800,
+                "suffix_bar_count": 1200,
+            },
         ],
-        "reason_codes": ["30M:WARMUP_TAIL_DIVERGED"],
+        "reason_codes": [
+            "D:WARMUP_TAIL_STABLE",
+            "30M:WARMUP_TAIL_DIVERGED",
+            "5M:WARMUP_TAIL_STABLE",
+            "1M:WARMUP_TAIL_STABLE",
+        ],
         "difference_codes_by_frequency": [
+            {"frequency": "d", "difference_codes": []},
             {
                 "frequency": "30m",
                 "difference_codes": ["WARMUP_DIRECTION_CHANGED"],
-            }
+            },
+            {"frequency": "5m", "difference_codes": []},
+            {"frequency": "1m", "difference_codes": []},
         ],
         "required_for_new_entry": True,
     }
+
+
+def test_unconverged_five_minute_warmup_blocks_only_with_five_minute_cause() -> None:
+    bundle = replace(
+        deterministic_bundle(),
+        warmup_converged=False,
+        warmup_reason_codes=(
+            "D:WARMUP_TAIL_STABLE",
+            "30M:WARMUP_TAIL_STABLE",
+            "5M:WARMUP_TAIL_DIVERGED",
+            "1M:WARMUP_TAIL_STABLE",
+        ),
+        warmup_by_frequency=(
+            ("d", True, 600, 400),
+            ("30m", True, 1600, 1067),
+            ("5m", False, 1600, 1067),
+            ("1m", True, 1800, 1200),
+        ),
+        warmup_difference_codes_by_frequency=(
+            ("d", ()),
+            ("30m", ()),
+            ("5m", ("WARMUP_DIRECTION_CHANGED",)),
+            ("1m", ()),
+        ),
+        enforce_warmup_entry_gate=True,
+    )
+
+    [decision] = HumanAssistedDecisionCore().evaluate_symbol(bundle)
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert decision.technical_entry_allowed is True
+    assert decision.entry is not None and decision.entry.allowed is False
+    assert decision.entry.reason_codes[-2:] == (
+        "WARMUP_CONVERGENCE_GATE_FAILED",
+        "5M:WARMUP_TAIL_DIVERGED",
+    )
+    assert document["execution_profile"]["hard_block_reason_codes"][-2:] == [
+        "WARMUP_CONVERGENCE_GATE_FAILED",
+        "5M:WARMUP_TAIL_DIVERGED",
+    ]
+    assert "D:WARMUP_TAIL_STABLE" not in document["execution_profile"][
+        "hard_block_reason_codes"
+    ]
+
+
+def test_lower_or_unrelated_conflict_is_advisory_not_a_hard_block() -> None:
+    unrelated_sell = confirmed_point(
+        "1sell",
+        center_id="unrelated-center",
+        minutes_after=300,
+    )
+    bundle = replace(
+        deterministic_bundle(),
+        opposite_points=(unrelated_sell,),
+    )
+
+    [decision] = HumanAssistedDecisionCore().evaluate_symbol(bundle)
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert decision.conflict.hard_block is False
+    assert decision.conflict.risk_only_point_ids == (unrelated_sell.point_id,)
+    assert decision.entry is not None and decision.entry.allowed is True
+    assert document["execution_profile"]["recommendation"] == "CAUTION"
+    assert document["execution_profile"]["hard_blocked"] is False
+    assert document["execution_profile"]["hard_block_reason_codes"] == []
+    assert "lower_or_unrelated_structure_risk" in document["execution_profile"][
+        "advisory_reason_codes"
+    ]
+
+
+def test_mixed_hard_and_risk_only_conflicts_do_not_duplicate_hard_reason_as_advisory() -> None:
+    blocking_sell = confirmed_point("1sell", minutes_after=296)
+    unrelated_sell = confirmed_point(
+        "1sell",
+        center_id="unrelated-center",
+        minutes_after=297,
+    )
+    bundle = replace(
+        deterministic_bundle(),
+        opposite_points=(blocking_sell, unrelated_sell),
+    )
+
+    [decision] = HumanAssistedDecisionCore().evaluate_symbol(bundle)
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+    profile = document["execution_profile"]
+
+    assert decision.conflict.hard_block is True
+    assert decision.conflict.blocking_point_ids == (blocking_sell.point_id,)
+    assert decision.conflict.risk_only_point_ids == (unrelated_sell.point_id,)
+    assert profile["recommendation"] == "BLOCKED"
+    assert "same_or_higher_structure_conflict" in profile["hard_block_reason_codes"]
+    assert "same_or_higher_structure_conflict" not in profile["advisory_reason_codes"]

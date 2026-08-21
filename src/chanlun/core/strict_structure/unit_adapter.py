@@ -75,6 +75,9 @@ def line_to_unit(
     if market_end > as_of:
         raise ValueError("line endpoint cannot exceed as_of")
     locked = bool(line.is_done())
+    forming = bool(getattr(line, "forming", False))
+    if locked and forming:
+        raise ValueError("done line cannot still be forming")
     locked_at = getattr(line, "locked_at", None)
     if locked and locked_at is None:
         raise ValueError("done line requires causal locked_at")
@@ -84,6 +87,19 @@ def line_to_unit(
         raise ValueError("locked_at must not precede line end")
     if locked and locked_at > as_of:
         raise ValueError("locked_at cannot exceed as_of")
+    formed_at = getattr(line, "formed_at", None)
+    if forming and formed_at is not None:
+        raise ValueError("forming line cannot have formed_at")
+    if not forming:
+        # Legacy/synthetic locked lines did not carry a separate geometry
+        # timestamp.  Their lock is a safe (although conservative) fallback.
+        formed_at = formed_at or locked_at
+        if formed_at is not None and formed_at < market_end:
+            raise ValueError("formed_at must not precede line end")
+        if formed_at is not None and formed_at > as_of:
+            raise ValueError("formed_at cannot exceed as_of")
+        if locked_at is not None and formed_at > locked_at:
+            raise ValueError("formed_at cannot exceed locked_at")
 
     start_index = line.start.k.k_index
     end_index = line.end.k.k_index
@@ -105,7 +121,7 @@ def line_to_unit(
         if locked
         else None
     )
-    available_at = confirmed_at if locked else max(as_of, market_end)
+    available_at = confirmed_at if locked else (formed_at or max(as_of, market_end))
     return ConstituentUnit(
         unit_id=unit_id,
         structural_level=structural_level,
@@ -122,6 +138,8 @@ def line_to_unit(
         available_at=available_at,
         locked=locked,
         child_ids=(),
+        forming=forming,
+        formed_at=formed_at,
     )
 
 
@@ -168,6 +186,8 @@ def trend_type_to_unit(trend: TrendType) -> ConstituentUnit:
         child_ids=tuple(
             item.unit_id for item in trend.constituent_units
         ),
+        forming=False,
+        formed_at=trend.confirmed_at,
     )
 
 
@@ -192,6 +212,12 @@ def trend_type_to_observation_unit(trend: TrendType) -> ConstituentUnit:
         available_at=trend.available_at,
         locked=False,
         child_ids=tuple(item.unit_id for item in trend.constituent_units),
+        forming=trend.state is TrendState.FORMING,
+        formed_at=(
+            trend.confirmed_at
+            if trend.state is TrendState.COMPLETE
+            else None
+        ),
     )
 
 

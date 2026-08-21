@@ -9,6 +9,11 @@ from tzlocal import get_localzone
 
 from chanlun import config, fun
 from chanlun.exchange.exchange import Exchange, Tick, convert_currency_kline_frequency
+from chanlun.exchange.exchange_binance_common import (
+    BINANCE_KLINE_TIMEFRAMES,
+    BINANCE_SUPPORTED_FREQUENCIES,
+    BINANCE_SYNTHETIC_FREQUENCIES,
+)
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.utils import config_get_proxy
@@ -23,7 +28,7 @@ class ExchangeBinance(Exchange):
     g_all_stocks = []
 
     def __init__(self):
-        params = {}
+        params = {"options": {"fetchCurrencies": False}}
 
         proxy = config_get_proxy()
 
@@ -49,23 +54,7 @@ class ExchangeBinance(Exchange):
         return "BTC/USDT"
 
     def support_frequencys(self):
-        return {
-            "w": "Week",
-            "d": "Day",
-            "12h": "12H",
-            "8h": "8H",
-            "6h": "6H",
-            "4h": "4H",
-            "3h": "3H",
-            "60m": "1H",
-            "30m": "30m",
-            "15m": "15m",
-            "10m": "10m",
-            "5m": "5m",
-            "3m": "3m",
-            "2m": "2m",
-            "1m": "1m",
-        }
+        return dict(BINANCE_SUPPORTED_FREQUENCIES)
 
     def now_trading(self, market: str):
         """
@@ -189,27 +178,10 @@ class ExchangeBinance(Exchange):
             - 如果start_date为空，则从最新数据往前获取，直到获取10000根或返回不足1000根
             - 如果start_date有值，则从该时间点开始往后获取，直到获取到最新数据
         """
-        # 币安支持的原生周期；10m/2m/3h 是项目自定义级别，用基础周期拉数据后再合并
+        # 币安原生周期直接读取；10m/2m/3h 用基础周期拉取后在本地合成。
         if args is None:
             args = {}
-        frequency_map = {
-            "w": "1w",
-            "d": "1d",
-            "12h": "12h",
-            "8h": "8h",
-            "6h": "6h",
-            "4h": "4h",
-            "3h": "1h",
-            "60m": "1h",
-            "30m": "30m",
-            "15m": "15m",
-            "10m": "5m",
-            "5m": "5m",
-            "3m": "3m",
-            "2m": "1m",
-            "1m": "1m",
-        }
-        if frequency not in frequency_map.keys():
+        if frequency not in BINANCE_KLINE_TIMEFRAMES:
             raise Exception(f"不支持的周期: {frequency}")
 
         start_timestamp = None
@@ -236,7 +208,7 @@ class ExchangeBinance(Exchange):
                     params["endTime"] = current_end
                 kline = self.exchange.fetch_ohlcv(
                     symbol=code,
-                    timeframe=frequency_map[frequency],
+                    timeframe=BINANCE_KLINE_TIMEFRAMES[frequency],
                     limit=1000,
                     params=params,
                 )
@@ -260,7 +232,7 @@ class ExchangeBinance(Exchange):
 
                 kline = self.exchange.fetch_ohlcv(
                     symbol=code,
-                    timeframe=frequency_map[frequency],
+                    timeframe=BINANCE_KLINE_TIMEFRAMES[frequency],
                     limit=1000,
                     params=params,
                 )
@@ -285,8 +257,7 @@ class ExchangeBinance(Exchange):
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
         kline_pd.drop_duplicates(subset=["date"], keep="last", inplace=True)
 
-        # 项目自定义周期（10m/2m/3h）需要将基础周期 K 线合并
-        if frequency in ["10m", "2m", "3h"] and len(kline_pd) > 0:
+        if frequency in BINANCE_SYNTHETIC_FREQUENCIES and len(kline_pd) > 0:
             kline_pd = convert_currency_kline_frequency(kline_pd, frequency)
 
         return kline_pd
@@ -302,24 +273,7 @@ class ExchangeBinance(Exchange):
         """直接请求币安 API 获取 K 线，不走本地数据库缓存，单次最多 1000 根。"""
         if args is None:
             args = {}
-        frequency_map = {
-            "w": "1w",
-            "d": "1d",
-            "12h": "12h",
-            "8h": "8h",
-            "6h": "6h",
-            "4h": "4h",
-            "3h": "1h",
-            "60m": "1h",
-            "30m": "30m",
-            "15m": "15m",
-            "10m": "5m",
-            "5m": "5m",
-            "3m": "3m",
-            "2m": "1m",
-            "1m": "1m",
-        }
-        if frequency not in frequency_map.keys():
+        if frequency not in BINANCE_KLINE_TIMEFRAMES:
             raise Exception(f"不支持的周期: {frequency}")
 
         if start_date is not None:
@@ -348,7 +302,7 @@ class ExchangeBinance(Exchange):
 
         kline = self.exchange.fetch_ohlcv(
             symbol=code,
-            timeframe=frequency_map[frequency],
+            timeframe=BINANCE_KLINE_TIMEFRAMES[frequency],
             limit=1000,
             params=params,
         )
@@ -358,8 +312,7 @@ class ExchangeBinance(Exchange):
         kline_pd["code"] = code
         kline_pd["date"] = pd.to_datetime(kline_pd["date"], unit="ms", utc=True).dt.tz_convert(self.tz)
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
-        # 项目自定义周期（10m/2m/3h）需要将基础周期 K 线合并
-        if frequency in ["10m", "2m", "3h"] and len(kline_pd) > 0:
+        if frequency in BINANCE_SYNTHETIC_FREQUENCIES and len(kline_pd) > 0:
             kline_pd = convert_currency_kline_frequency(kline_pd, frequency)
         kline_pd = normalize_kline_precision(kline_pd, "currency", code)
         return kline_pd

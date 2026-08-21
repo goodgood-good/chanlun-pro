@@ -2,7 +2,6 @@ import atexit
 import datetime
 import hashlib
 import hmac
-import json
 import os
 import threading
 import pathlib
@@ -58,9 +57,6 @@ from chanlun.decision_support.trading_system.trading_session import (
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     calculate_forward_application_source_revision,
     content_addressed_source_revision_from_build,
-)
-from chanlun.decision_support.trading_system.selection import (
-    selection_research_ledger_from_document,
 )
 from .services.job_names import job_display_name
 
@@ -145,11 +141,31 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_SNAPSHOT_PATH=None,
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
-        # 全市场覆盖有意设为显式启用；常驻优先级/持仓监听绝不能把网页重启变成隐式的
-        # 数小时重建。
+        # 生产实时选股只发技术/手工买卖提醒，不读取正式研究账本。正式研究材料仍可在
+        # 离线研究和回放入口使用，但不能成为生产监听的隐藏依赖。
+        TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED=False,
+        TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS",
+                "3600",
+            )
+        ),
+        # 全市场预选默认开启，但只在收盘后至下一交易日盘前的独立窗口运行；已有当前
+        # 完整快照时会自动空闲，网页重启不会无条件触发重复全量计算。
         TRADING_SCREENING_FULL_COVERAGE_ENABLED=(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
+                "1",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
+        # 仅供一次明确运维启动使用：在当前逻辑的完整快照发布前绕过常规盘后窗口。
+        # 环境变量不写入项目配置，完成后即使进程仍存活也会自动恢复时段闸门。
+        TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE=(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
                 "0",
             )
             .strip()
@@ -159,7 +175,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                "256",
+                "512",
             )
         ),
         TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS=int(
@@ -171,11 +187,23 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
         TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS=1800,
         TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
+        TRADING_SCREENING_INCOMPLETE_CHECKPOINT_INTERVAL_SECONDS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_INCOMPLETE_CHECKPOINT_INTERVAL_SECONDS",
+                "120",
+            )
+        ),
+        TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS=float(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
+                "50",
+            )
+        ),
         # 低频候选必须在下一次 1m 监听到期前停止接纳新任务；剩余标的下一轮继续。
         TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS=float(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS",
-                "40",
+                "50",
             )
         ),
         # 系统本地且独立于市场的自选组用于声明手工持仓；它只是一项监听事实，不能由成员
@@ -184,6 +212,16 @@ def create_app(test_config=None, start_scheduler=False):
             "CHANLUN_TRADING_SCREENING_MANUAL_HOLDING_GROUP",
             "我的持仓",
         ).strip(),
+        # 只有明确的人工关注组进入分钟级优先监听。旧版通用选股生成的结果组不再被
+        # 隐式并入；它们仍保留在自选数据库中，且不影响独立的全市场收盘后扫描。
+        TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS=tuple(
+            value.strip()
+            for value in os.environ.get(
+                "CHANLUN_TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS",
+                "我的关注",
+            ).split(",")
+            if value.strip()
+        ),
         HOLDING_GROUP_MONITOR_ENABLED=True,
         HOLDING_GROUP_MONITOR_INTERVAL_SECONDS=int(
             os.environ.get("CHANLUN_HOLDING_GROUP_MONITOR_INTERVAL_SECONDS", "60")
@@ -223,12 +261,20 @@ def create_app(test_config=None, start_scheduler=False):
             )
         ),
         # 收盘后全市场覆盖按启动间隔限流为每分钟一批。常规发现通道应匹配 64 标的总预算；
-        # 若沿用数据类默认 32，会让十个结构进程在大部分间隔内空闲，并使下一交易日预选
+        # 若沿用数据类默认 32，会让三个结构进程在大部分间隔内空闲，并使下一交易日预选
         # 发布时间大致翻倍。
         TRADING_SCREENING_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
                 "64",
+            )
+        ),
+        # Scheduling the full armed/triggered universe is cheap; the absolute
+        # round deadline still limits how much native work may actually start.
+        TRADING_SCREENING_PRIORITY_MAX_SYMBOLS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
+                "512",
             )
         ),
         TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
@@ -243,6 +289,21 @@ def create_app(test_config=None, start_scheduler=False):
             )
         ),
         TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
+        # 原生结构库的长期内存不会完全归还给 Windows。当前候选池约两千只，过早在
+        # 1024 次请求回收会使进程永远无法走完一次缓存轮回；默认允许覆盖完整候选池，
+        # 同时继续由 1536 MiB 工作集硬门提前回收异常增长的进程。
+        TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS",
+                "4096",
+            )
+        ),
+        TRADING_SCREENING_NATIVE_MAX_RSS_MB=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_NATIVE_MAX_RSS_MB",
+                "1536",
+            )
+        ),
         # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多三个结构进程，
         # 另有一个独立控制进程专供逐笔、日历与轻量分类，总原生子进程上限仍为四。
         TRADING_SCREENING_STOCK_WORKERS=int(
@@ -314,6 +375,19 @@ def create_app(test_config=None, start_scheduler=False):
             / "chanlun_human_review"
             / "live_screens"
         ),
+        REALTIME_REVIEW_INBOX=(
+            config.get_data_path()
+            / "monitor"
+            / "realtime_review_inbox.json"
+        ),
+        TRADING_NOTIFICATION_OUTBOX_ENABLED=True,
+        TRADING_NOTIFICATION_OUTBOX_PATH=(
+            config.get_data_path()
+            / "decision_support"
+            / "trading_notification_outbox.json"
+        ),
+        TRADING_NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS=5.0,
+        TRADING_NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS=300.0,
         HUMAN_REVIEW_FORWARD_MARKOUT=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
@@ -1187,6 +1261,11 @@ def create_app(test_config=None, start_scheduler=False):
         payload = {
             "status": "ready" if ready else "not_ready",
             "runtime_ready": ready,
+            # ``status``/``runtime_ready`` only attest that the Web/QMT process
+            # can serve work.  Realtime alert SLOs are reported separately so a
+            # healthy process with a candidate backlog is never mistaken for a
+            # fully operational alert pipeline (or restarted to repair backlog).
+            "status_scope": "PROCESS_RUNTIME",
             # 选股完整性不改变 Web/QMT 进程的 HTTP 就绪码，但必须在顶层明确暴露。
             "selection_ready": selection_ready,
             "selection_status": (
@@ -1196,6 +1275,27 @@ def create_app(test_config=None, start_scheduler=False):
             ),
             "selection_reason_code": (
                 screening_component.get("selection_reason_code")
+                if screening_required
+                else "SCREENING_DISABLED"
+            ),
+            "realtime_alert_ready": (
+                screening_component.get("realtime_alert_ready")
+                if screening_required
+                else None
+            ),
+            "realtime_alert_status": (
+                screening_component.get(
+                    "realtime_alert_status",
+                    "unavailable",
+                )
+                if screening_required
+                else "disabled"
+            ),
+            "realtime_alert_reason_code": (
+                screening_component.get(
+                    "realtime_alert_reason_code",
+                    "REALTIME_ALERT_READINESS_UNAVAILABLE",
+                )
                 if screening_required
                 else "SCREENING_DISABLED"
             ),
@@ -1385,13 +1485,19 @@ def create_app(test_config=None, start_scheduler=False):
         )
         if not default_code:
             raise RuntimeError("default market code is not ready")
-        isolated_probe = getattr(trading_gateway, "tick_probe", None)
-        if market == "a" and callable(isolated_probe):
-            result = isolated_probe(default_code)
-            if result.get("status") == "market_closed":
+        isolated_quote_reader = getattr(trading_gateway, "realtime_ticks", None)
+        if market == "a" and callable(isolated_quote_reader):
+            # Readiness is a lightweight dependency check, not a mandatory
+            # trading observation.  Use the shared, non-queuing quote worker;
+            # the reserved priority structure worker may legitimately spend
+            # many minutes rebuilding the post-close sector snapshot.
+            batch = isolated_quote_reader((default_code,))
+            if getattr(batch, "market_open", None) is False:
                 return {"__market_closed__": True}
-            if result.get("usable") is True:
-                return {default_code: result}
+            ticks_reader = getattr(batch, "ticks", None)
+            values = ticks_reader() if callable(ticks_reader) else None
+            if isinstance(values, Mapping) and default_code in values:
+                return {default_code: values[default_code]}
             return {}
         if market == "a" and app.config.get(
             "TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True
@@ -1497,6 +1603,9 @@ def create_app(test_config=None, start_scheduler=False):
             _ensure_start_is_current()
             sse_stream_service.start_sse_runtime()
             _ensure_start_is_current()
+            if trading_notification_outbox is not None:
+                trading_notification_outbox.start_background()
+                _ensure_start_is_current()
             if app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True):
                 decision_support_trading_screening.start_background()
                 _ensure_start_is_current()
@@ -1606,6 +1715,14 @@ def create_app(test_config=None, start_scheduler=False):
                     wait=True, timeout=1.0
                 ),
             )
+            if trading_notification_outbox is not None:
+                _cleanup(
+                    "trading-notification-outbox",
+                    lambda: trading_notification_outbox.shutdown_background(
+                        wait=True,
+                        timeout=2.0,
+                    ),
+                )
             native_gateway_close = getattr(trading_gateway, "close", None)
             if callable(native_gateway_close):
                 _cleanup("trading-screening-native-gateway", native_gateway_close)
@@ -1705,6 +1822,9 @@ def create_app(test_config=None, start_scheduler=False):
         build_research_audit_snapshot,
     )
     from .services.trading_notifications import SignalNotificationDispatcher
+    from .services.trading_notification_outbox import (
+        DurableTradingNotificationOutbox,
+    )
     from .services.trading_screening import (
         TradingScreeningConfig,
         TradingScreeningService,
@@ -1721,6 +1841,7 @@ def create_app(test_config=None, start_scheduler=False):
         HoldingGroupMonitorService,
         build_non_a_monitor_universe,
     )
+    from .services.realtime_review_inbox import RealtimeReviewInbox
 
     def _trading_screening_exchange():
         from chanlun.exchange import Market, get_exchange
@@ -1734,16 +1855,35 @@ def create_app(test_config=None, start_scheduler=False):
 
         return stock_list_service.get_cached_a_instrument_types(codes)
 
+    def _trading_screening_symbol_names(
+        codes: tuple[str, ...],
+    ) -> dict[str, str | None]:
+        """只读启动期恢复的证券名称，避免候选追赶与页面行情争抢 QMT。"""
+
+        return stock_list_service.get_cached_a_symbol_names(codes)
+
     def _trading_screening_watchlist():
         from chanlun.persistence.db import db
 
-        holding_group = str(
-            app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP") or "我的持仓"
-        ).strip()
+        configured_groups = app.config.get(
+            "TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS",
+            ("我的关注",),
+        )
+        if isinstance(configured_groups, str):
+            configured_groups = tuple(
+                value.strip()
+                for value in configured_groups.split(",")
+                if value.strip()
+            )
+        priority_groups = {
+            str(value).strip()
+            for value in configured_groups
+            if str(value).strip()
+        }
         values = []
         for group in db.zx_get_global_groups():
-            group_name = group.zx_group
-            if group_name == holding_group:
+            group_name = str(group.zx_group).strip()
+            if group_name not in priority_groups:
                 continue
             for stock in db.zx_get_global_group_stocks(group_name):
                 if stock.market != "a":
@@ -1760,31 +1900,32 @@ def create_app(test_config=None, start_scheduler=False):
     decision_support_human_review: HumanReviewScreeningService | None = None
 
     def _trading_screening_manual_holdings_snapshot():
-        from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP, ZiXuan
+        from chanlun.persistence.db import db
+        from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP
 
         holding_group = str(
             app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP")
             or MANUAL_HOLDING_ZX_GROUP
         ).strip()
-        rows = ZiXuan("a").zx_stocks(holding_group)
+        rows = db.zx_get_global_group_stocks(holding_group)
         positions = [
             {
-                "market": str(row.get("market") or ""),
-                "code": str(row.get("code") or ""),
-                "name": str(row.get("name") or row.get("code") or ""),
+                "market": str(row.market or ""),
+                "code": str(row.stock_code or ""),
+                "name": str(row.stock_name or row.stock_code or ""),
                 "monitoring_scope": (
                     "A_SHARE_STRICT_DECISION_CORE"
-                    if row.get("market") == "a"
+                    if row.market == "a"
                     else "NON_A_AUXILIARY_STRUCTURE_RADAR"
                 ),
                 "decision_mode": (
                     "UNIFIED_HUMAN_ASSISTED_DECISION_CORE"
-                    if row.get("market") == "a"
+                    if row.market == "a"
                     else "STRICT_STRUCTURE_OBSERVATION_ONLY"
                 ),
             }
             for row in rows
-            if row.get("market") and row.get("code")
+            if row.market and row.stock_code
         ]
         positions.sort(key=lambda row: (row["market"], row["code"]))
         a_share_priority_count = sum(
@@ -1971,6 +2112,43 @@ def create_app(test_config=None, start_scheduler=False):
         if trading_screening_dingtalk_webhook or trading_screening_dry_run
         else None
     )
+    realtime_review_inbox = RealtimeReviewInbox(
+        pathlib.Path(app.config["REALTIME_REVIEW_INBOX"]),
+        clock=_trading_screening_clock,
+    )
+    trading_notification_outbox = None
+    trading_notification_transport = raw_trading_notifier
+    if raw_trading_notifier is not None and app.config.get(
+        "TRADING_NOTIFICATION_OUTBOX_ENABLED",
+        True,
+    ):
+
+        def _update_realtime_review_delivery(
+            event_id: str,
+            status: str,
+            reason: str | None,
+        ) -> None:
+            realtime_review_inbox.update_delivery(
+                [event_id],
+                status=status,
+                reason=reason,
+            )
+
+        trading_notification_outbox = DurableTradingNotificationOutbox(
+            raw_trading_notifier,
+            state_path=pathlib.Path(
+                app.config["TRADING_NOTIFICATION_OUTBOX_PATH"]
+            ),
+            clock=_trading_screening_clock,
+            delivery_observer=_update_realtime_review_delivery,
+            retry_base_seconds=float(
+                app.config["TRADING_NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS"]
+            ),
+            retry_max_seconds=float(
+                app.config["TRADING_NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS"]
+            ),
+        )
+        trading_notification_transport = trading_notification_outbox
     if app.config.get("HOLDING_GROUP_MONITOR_ENABLED", True):
         holding_group_monitor = HoldingGroupMonitorService(
             # 提供器每次运行都查询全局分组，因此美股自选修改会在一个监听间隔内生效，
@@ -1986,22 +2164,22 @@ def create_app(test_config=None, start_scheduler=False):
                     app.config["HOLDING_GROUP_MONITOR_START_DELAY_SECONDS"]
                 ),
                 max_workers=int(app.config["HOLDING_GROUP_MONITOR_WORKERS"]),
-                op_level="1m",
-                mid_level="5m",
+                op_level="5m",
+                mid_level="1m",
                 big_level="30m",
             ),
+            review_inbox=realtime_review_inbox,
         )
-    trading_notification_dispatcher = (
-        SignalNotificationDispatcher(
-            raw_trading_notifier,
-            state_path=(
-                config.get_data_path()
-                / "decision_support"
-                / "trading_notification_state.json"
-            ),
-        )
-        if raw_trading_notifier is not None
-        else None
+    # 本地人工复核收件箱不依赖钉钉是否配置；外部传输不可用时仍运行严格
+    # 生命周期分发器并保留事件，只把外部投递状态标为 unavailable/failed。
+    trading_notification_dispatcher = SignalNotificationDispatcher(
+        trading_notification_transport,
+        state_path=(
+            config.get_data_path()
+            / "decision_support"
+            / "trading_notification_state.json"
+        ),
+        review_inbox=realtime_review_inbox,
     )
     trading_gateway = app.config.get("TRADING_SCREENING_GATEWAY")
     if trading_gateway is None:
@@ -2016,6 +2194,7 @@ def create_app(test_config=None, start_scheduler=False):
                 watchlist_provider=_trading_screening_watchlist,
                 holdings_provider=_trading_screening_holdings,
                 instrument_type_provider=_trading_screening_instrument_types,
+                symbol_name_provider=_trading_screening_symbol_names,
                 log_path=(
                     config.get_data_path()
                     / "decision_support"
@@ -2031,6 +2210,16 @@ def create_app(test_config=None, start_scheduler=False):
                     restart_backoff_seconds=float(
                         app.config["TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS"]
                     ),
+                    max_completed_requests_per_process=int(
+                        app.config[
+                            "TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS"
+                        ]
+                    ),
+                    max_worker_rss_bytes=(
+                        int(app.config["TRADING_SCREENING_NATIVE_MAX_RSS_MB"])
+                        * 1024
+                        * 1024
+                    ),
                 ),
                 sector_cache_path=(
                     config.get_data_path()
@@ -2044,6 +2233,20 @@ def create_app(test_config=None, start_scheduler=False):
                 structure_worker_count=int(
                     app.config["TRADING_SCREENING_STOCK_WORKERS"]
                 ),
+                runtime_state_cache_secret=(
+                    hmac.new(
+                        (
+                            app.secret_key
+                            if isinstance(app.secret_key, bytes)
+                            else str(app.secret_key).encode("utf-8")
+                        ),
+                        b"chanlun-screening-runtime-state-cache/persistent-secret-v1",
+                        hashlib.sha256,
+                    ).digest()
+                    if content_addressed_source_revision_from_build(build_revision)
+                    is not None
+                    else None
+                ),
             )
         else:
             from chanlun.decision_support.trading_system.higher_timeframe_gate import (
@@ -2052,7 +2255,7 @@ def create_app(test_config=None, start_scheduler=False):
             from chanlun.exchange.qmt_screening_sector_source import (
                 QmtSectorCompositeSource,
                 QmtSectorStrengthSource,
-                build_qmt_gics3_sector_catalog,
+                build_qmt_gics_hierarchy_sector_catalog,
                 qmt_trading_session_evidence,
                 qmt_trading_sessions,
             )
@@ -2066,7 +2269,7 @@ def create_app(test_config=None, start_scheduler=False):
             )
             trading_gateway = NativeTradingDataGateway(
                 exchange_provider=_trading_screening_exchange,
-                sector_provider=build_qmt_gics3_sector_catalog,
+                sector_provider=build_qmt_gics_hierarchy_sector_catalog,
                 sector_frame_provider=sector_frames.frame,
                 sector_strength_provider=sector_strength.strengths,
                 higher_timeframe_provider=higher_timeframe.gates,
@@ -2083,6 +2286,22 @@ def create_app(test_config=None, start_scheduler=False):
     )
     if not callable(qmt_calendar_provider):
         raise TypeError("trading screening calendar provider is unavailable")
+
+    def _a_share_notification_quote(code: str):
+        quote_provider = getattr(
+            trading_gateway,
+            "priority_realtime_ticks",
+            trading_gateway.realtime_ticks,
+        )
+        batch = quote_provider((code,))
+        tick = batch.ticks().get(code)
+        if tick is None:
+            raise RuntimeError("realtime quote is unavailable")
+        return tick
+
+    trading_notification_dispatcher.set_quote_provider(
+        _a_share_notification_quote
+    )
     if official_calendar_path is None:
         trading_session_provider = qmt_calendar_provider
 
@@ -2166,24 +2385,12 @@ def create_app(test_config=None, start_scheduler=False):
             "status": "evidence_unavailable",
             "evidence_grade": "invalid",
         }
-    selection_research_path = (
-        config.get_data_path() / "decision_support" / ("selection_research.json")
-    )
-    try:
-        selection_research = (
-            selection_research_ledger_from_document(
-                json.loads(selection_research_path.read_text(encoding="utf-8"))
-            )
-            if selection_research_path.is_file()
-            else ()
-        )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        app.logger.error(
-            "正式研究账本无效，新买入将保持仅观察：%s: %s",
-            type(exc).__name__,
-            str(exc)[:160],
-        )
-        selection_research = ()
+    # 生产实时监听不读取 selection_research.json。该账本只属于离线研究/回放，
+    # 技术买入提醒由实时严格 5m 正式结构决定；30m/日线用于环境分级，
+    # 1m 只补充可选段差，不参与信号是否成立的判断。
+    app.config["TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED"] = False
+    formal_research_required = False
+    selection_research = ()
     configured_screening_snapshot_path = app.config.get(
         "TRADING_SCREENING_SNAPSHOT_PATH"
     )
@@ -2199,7 +2406,9 @@ def create_app(test_config=None, start_scheduler=False):
     decision_support_trading_screening = TradingScreeningService(
         market_data=trading_gateway,
         sector_catalog=trading_gateway,
-        engine=HumanAssistedDecisionCore(),
+        engine=HumanAssistedDecisionCore(
+            formal_selection_required=formal_research_required,
+        ),
         cache_path=trading_screening_snapshot_path,
         human_review_archive_root=pathlib.Path(
             app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
@@ -2217,16 +2426,28 @@ def create_app(test_config=None, start_scheduler=False):
                     True,
                 )
             ),
+            priority_monitor_time_budget_seconds=float(
+                app.config.get(
+                    "TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
+                    50.0,
+                )
+            ),
             full_coverage_refresh_enabled=bool(
                 app.config.get(
                     "TRADING_SCREENING_FULL_COVERAGE_ENABLED",
+                    True,
+                )
+            ),
+            force_full_coverage_until_complete=bool(
+                app.config.get(
+                    "TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
                     False,
                 )
             ),
             max_five_minute_candidate_symbols_per_refresh=int(
                 app.config.get(
                     "TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                    256,
+                    512,
                 )
             ),
             max_thirty_minute_candidate_symbols_per_refresh=int(
@@ -2239,6 +2460,12 @@ def create_app(test_config=None, start_scheduler=False):
                 app.config.get(
                     "TRADING_SCREENING_SYMBOLS_PER_REFRESH",
                     64,
+                )
+            ),
+            max_monitor_symbols_per_refresh=int(
+                app.config.get(
+                    "TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
+                    512,
                 )
             ),
             max_total_symbols_per_refresh=int(
@@ -2256,7 +2483,7 @@ def create_app(test_config=None, start_scheduler=False):
             candidate_monitor_time_budget_seconds=float(
                 app.config.get(
                     "TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS",
-                    40.0,
+                    50.0,
                 )
             ),
             five_minute_candidate_target_seconds=int(
@@ -2271,8 +2498,14 @@ def create_app(test_config=None, start_scheduler=False):
                     1800,
                 )
             ),
+            incomplete_checkpoint_interval_seconds=int(
+                app.config.get(
+                    "TRADING_SCREENING_INCOMPLETE_CHECKPOINT_INTERVAL_SECONDS",
+                    120,
+                )
+            ),
             max_structure_age_seconds=int(
-                app.config.get("TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS", 864000)
+                app.config.get("TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS", 3600)
             ),
             stock_worker_count=(
                 int(app.config["TRADING_SCREENING_STOCK_WORKERS"])
@@ -2440,6 +2673,8 @@ def create_app(test_config=None, start_scheduler=False):
             "scheduler": scheduler,
             "xuangu_tasks": _xuangu_tasks,
             "holding_group_monitor": holding_group_monitor,
+            "realtime_review_inbox": realtime_review_inbox,
+            "trading_notification_outbox": trading_notification_outbox,
             "readiness": readiness_registry,
             "metadata_warmup_thread": metadata_warmup_thread,
             "login_rate_limiter": login_rate_limiter,
@@ -2452,8 +2687,8 @@ def create_app(test_config=None, start_scheduler=False):
             "decision_support_trading_screening_gateway": trading_gateway,
             "a_share_realtime_quotes": getattr(
                 trading_gateway,
-                "realtime_ticks",
-                None,
+                "display_quote_snapshot",
+                getattr(trading_gateway, "realtime_ticks", None),
             ),
             "decision_support_human_review": decision_support_human_review,
             "forward_scheduler_probe": forward_scheduler_probe,

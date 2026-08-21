@@ -312,7 +312,7 @@ def read_qmt_local_kline(
     return frame, audit
 
 
-def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
+def _derive_completed_30m_reference(frame: pd.DataFrame) -> pd.DataFrame:
     """仅聚合同一交易时段内连续、完整的六根 QMT 五分钟线。
 
     本适配器只为板块研究数据补齐三十分钟行情；本地 QMT 缓存包含一分钟和
@@ -391,25 +391,104 @@ def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def read_qmt_local_derived_30m(
-    *,
-    data_dir: str | os.PathLike[str] | Path,
-    code: str,
-    start_at: datetime,
-    end_at: datetime,
-) -> tuple[pd.DataFrame, QMTLocalKlineAudit]:
-    """读取本地五分钟记录，并按因果时序生成已完成的三十分钟线。"""
+def derive_completed_30m_from_qmt_5m(frame: pd.DataFrame) -> pd.DataFrame:
+    """Vectorized, fail-closed 5m-to-30m exchange-session aggregation."""
 
-    five, source_audit = read_qmt_local_kline(
-        data_dir=data_dir,
-        code=code,
-        frequency="5m",
-        start_at=start_at,
-        end_at=end_at,
+    required = {"time", "open", "high", "low", "close", "volume"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"QMT 5m frame is missing columns: {sorted(missing)!r}")
+    if frame.empty:
+        result = pd.DataFrame(columns=tuple(frame.columns))
+        result.attrs = dict(frame.attrs)
+        result.attrs.update(
+            qmt_transport="LOCAL_5M_DERIVED_30M_READ_ONLY",
+            qmt_derived_grid_revision=_DERIVED_30M_GRID_REVISION,
+            data_grade="RESEARCH_ONLY",
+            live_status="LIVE_DISABLED",
+        )
+        return result
+
+    work = frame.copy()
+    work["_date"] = pd.to_datetime(work["time"], unit="ms", utc=True).dt.tz_convert(CN)
+    if work["_date"].duplicated().any() or not work["_date"].is_monotonic_increasing:
+        raise QMTLocalCacheFormatError("QMT 5m timestamps must be unique and ordered")
+
+    minute_of_day = work["_date"].dt.hour * 60 + work["_date"].dt.minute
+    morning_offset = minute_of_day - (9 * 60 + 35)
+    afternoon_offset = minute_of_day - (13 * 60 + 5)
+    morning = morning_offset.between(0, 23 * 5) & morning_offset.mod(5).eq(0)
+    afternoon = afternoon_offset.between(0, 23 * 5) & afternoon_offset.mod(5).eq(0)
+    valid = morning | afternoon
+    work = work.loc[valid].copy()
+
+    if work.empty:
+        result = pd.DataFrame()
+    else:
+        morning_valid = morning.loc[valid]
+        work["_session"] = work["_date"].dt.normalize()
+        work["_side"] = np.where(morning_valid.to_numpy(), 0, 1)
+        work["_slot"] = np.where(
+            morning_valid.to_numpy(),
+            (morning_offset.loc[valid] // 5).to_numpy(),
+            (afternoon_offset.loc[valid] // 5).to_numpy(),
+        ).astype("int16")
+        work["_bucket"] = (work["_slot"] // 6).astype("int8")
+
+        group_columns = ["_session", "_side", "_bucket"]
+        grouped = work.groupby(group_columns, sort=True, observed=True)
+        completeness = grouped["_slot"].agg(["count", "nunique", "min", "max"])
+        expected_first = (
+            completeness.index.get_level_values("_bucket").to_numpy(dtype="int64")
+            * 6
+        )
+        complete = (
+            (completeness["count"].to_numpy() == 6)
+            & (completeness["nunique"].to_numpy() == 6)
+            & (completeness["min"].to_numpy() == expected_first)
+            & (completeness["max"].to_numpy() == expected_first + 5)
+        )
+        aggregations: dict[str, str] = {
+            "time": "last",
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+        if "amount" in work.columns:
+            aggregations["amount"] = "sum"
+        grouped_rows = grouped.agg(aggregations)
+        result = grouped_rows.iloc[np.flatnonzero(complete)].reset_index(drop=True)
+
+    columns = tuple(value for value in frame.columns if value != "_date")
+    if result.empty:
+        result = pd.DataFrame(columns=columns)
+    else:
+        result = result.loc[:, [value for value in columns if value in result.columns]]
+        result = result.sort_values("time", kind="stable").reset_index(drop=True)
+    result.attrs = dict(frame.attrs)
+    result.attrs.update(
+        qmt_transport="LOCAL_5M_DERIVED_30M_READ_ONLY",
+        qmt_derived_grid_revision=_DERIVED_30M_GRID_REVISION,
+        qmt_derived_from_frequency="5m",
+        data_grade="RESEARCH_ONLY",
+        live_status="LIVE_DISABLED",
     )
-    derived = derive_completed_30m_from_qmt_5m(five)
+    return result
+
+
+def derive_completed_30m_with_audit(
+    frame: pd.DataFrame,
+    source_audit: QMTLocalKlineAudit,
+) -> tuple[pd.DataFrame, QMTLocalKlineAudit]:
+    """Derive 30m bars from one already-frozen 5m byte snapshot."""
+
+    if source_audit.frequency != "5m":
+        raise ValueError("derived 30m audit requires a 5m source audit")
+    derived = derive_completed_30m_from_qmt_5m(frame)
     audit = QMTLocalKlineAudit(
-        code=code,
+        code=source_audit.code,
         frequency="30m_from_5m",
         source_path=source_audit.source_path,
         source_sha256=source_audit.source_sha256,
@@ -433,6 +512,25 @@ def read_qmt_local_derived_30m(
         qmt_local_cache_source_sha256=audit.source_sha256,
     )
     return derived, audit
+
+
+def read_qmt_local_derived_30m(
+    *,
+    data_dir: str | os.PathLike[str] | Path,
+    code: str,
+    start_at: datetime,
+    end_at: datetime,
+) -> tuple[pd.DataFrame, QMTLocalKlineAudit]:
+    """读取本地五分钟记录，并按因果时序生成已完成的三十分钟线。"""
+
+    five, source_audit = read_qmt_local_kline(
+        data_dir=data_dir,
+        code=code,
+        frequency="5m",
+        start_at=start_at,
+        end_at=end_at,
+    )
+    return derive_completed_30m_with_audit(five, source_audit)
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +670,7 @@ __all__ = (
     "qmt_local_kline_path",
     "qmt_local_pershare_path",
     "derive_completed_30m_from_qmt_5m",
+    "derive_completed_30m_with_audit",
     "read_qmt_local_kline",
     "read_qmt_local_derived_30m",
     "read_qmt_local_pershare",

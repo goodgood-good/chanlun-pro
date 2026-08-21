@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from flask import Flask, jsonify
@@ -25,6 +26,7 @@ from chanlun.decision_support.trading_system.backtest.report import (
 from cl_app.blueprints.decision_support import decision_support_bp
 from cl_app.services.research_audit import (
     ResearchAuditUnavailable,
+    build_research_audit_status_snapshot,
     build_research_audit_snapshot,
 )
 from tests.trading_system.backtest.helpers import CN
@@ -308,7 +310,7 @@ def test_page_explains_blocked_gate_generated_no_pnl(
     response = client.get("/decision-support/research-audit")
     html = response.get_data(as_text=True)
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert "未生成正式回测收益" in html
     assert "系统已在计算收益前停止" in html
     assert "historical_sector_membership_unverified" in html
@@ -349,6 +351,9 @@ def test_snapshot_accepts_unified_buy_point_contract(tmp_path: Path) -> None:
 
     assert contract["point_classes_analyzed_independently"] is True
     assert contract["buy_point_classes_share_execution_logic"] is True
+    assert contract["trade_frequency"] == "5m"
+    assert contract["segment_difference_frequency"] == "1m"
+    assert contract["segment_difference_required_for_trade_signal"] is False
 
 
 def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) -> None:
@@ -369,8 +374,8 @@ def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) ->
     assert "chanlun_source_faithful" in html
     assert "未达到实盘标准" in html
     assert "30m 大级别结构" in html
-    assert "5m 可操作级别" in html
-    assert "1m 精细触发" in html
+    assert "5m 操作确认买卖级别" in html
+    assert "1m 段差级别" in html
     assert "一、二、三类买卖点独立" in html
     assert "一、二、三类统一" in html
     assert "5201 / 5227 个历史标的纳入" in html
@@ -416,9 +421,113 @@ def test_page_fails_closed_when_artifact_is_missing(
     assert client.get("/_test/login").status_code == 200
 
     response = client.get("/decision-support/research-audit")
+    data = client.get("/decision-support/research-audit/data")
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert "artifact_unavailable" in response.get_data(as_text=True)
+    assert "历史资料可读取，正式回测结论尚不可用" in response.get_data(
+        as_text=True
+    )
+    assert data.status_code == 200
+    assert data.get_json()["data"]["schema"] == "research-audit-status-page"
+    assert data.get_json()["data"]["formal_report"]["available"] is False
+
+
+def test_status_snapshot_inventory_exposes_real_material_without_pnl(
+    tmp_path: Path,
+) -> None:
+    dataset = (
+        tmp_path
+        / "audit/chanlun_trading_system_backtest/fixed_year_2025_2026"
+    )
+    symbols = dataset / "symbols"
+    symbols.mkdir(parents=True)
+    metadata = {
+        "schema": "chanlun-qmt-pit-metadata/v1",
+        "source_start": "2025-05-01",
+        "source_end": "2026-07-24",
+        "captured_at": "2026-07-27T12:00:00+08:00",
+        "securities": [{"symbol": "688132.SH"}, {"symbol": "513100.SH"}],
+        "memberships": [{"symbol": "688132.SH", "sector": "电子"}],
+        "factors": [{"symbol": "688132.SH", "date": "2026-01-01"}],
+        "qmt_sw1_sector_names": ["电子"],
+        "content_sha256": "sha256:" + "7" * 64,
+    }
+    (dataset / "pit_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    manifest_path = dataset / "extract_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "chanlun-fixed-year-qmt-run",
+                "generated_at": "2026-08-16T12:00:00+08:00",
+                "started_at": "2026-08-16T11:00:00+08:00",
+                "complete": False,
+                "algorithm": {"revision": "sha256:" + "8" * 64},
+                "summary": {
+                    "selected_symbol_count": 2,
+                    "completed_symbol_count": 1,
+                    "failed_symbol_count": 0,
+                    "evaluation_count": 4,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    old_manifest_time = datetime.now().timestamp() - 20 * 60
+    os.utime(manifest_path, (old_manifest_time, old_manifest_time))
+    (symbols / "688132.SH.pkl").write_bytes(b"checkpoint")
+    live_audit = tmp_path / "audit/chanlun_live_integration"
+    live_audit.mkdir(parents=True)
+    (live_audit / "notification_delivery.json").write_text(
+        json.dumps(
+            {
+                "schema": "chanlun-notification-delivery-audit",
+                "status": "passed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (live_audit / "utf8_bom.json").write_bytes(
+        json.dumps({"status": "complete"}).encode("utf-8-sig")
+    )
+    (live_audit / "utf16.json").write_bytes(
+        json.dumps({"status": "complete"}).encode("utf-16")
+    )
+
+    snapshot = build_research_audit_status_snapshot(
+        tmp_path,
+        formal_error_code="causality_gate_unavailable",
+    )
+
+    assert snapshot["schema"] == "research-audit-status-page"
+    assert snapshot["formal_report"]["available"] is False
+    assert "aggregate_out_of_sample" not in snapshot
+    assert snapshot["historical_dataset"]["security_count"] == 2
+    assert snapshot["historical_dataset"]["symbol_checkpoint_count"] == 1
+    assert snapshot["historical_dataset"]["checkpoint_coverage"] == 0.5
+    assert snapshot["historical_replay"]["status"] == "running"
+    assert snapshot["historical_replay"]["completed_symbol_count"] == 1
+    assert snapshot["historical_replay"]["remaining_symbol_count"] == 1
+    assert snapshot["historical_replay"]["completion_ratio"] == 0.5
+    assert snapshot["historical_replay"]["heartbeat_source"] == (
+        "symbol_checkpoint"
+    )
+    assert snapshot["historical_replay"]["latest_checkpoint_modified_at"]
+    assert snapshot["historical_replay"]["manifest_modified_at"]
+    assert snapshot["audit_artifact_count"] == 3
+    assert {row["status"] for row in snapshot["audit_artifacts"]} == {
+        "passed",
+        "complete",
+    }
+    assert {row["encoding"] for row in snapshot["audit_artifacts"]} == {
+        "utf-8",
+        "utf-8-sig",
+        "utf-16",
+    }
 
 
 def test_research_audit_styles_keep_dense_content_readable(app: Flask) -> None:

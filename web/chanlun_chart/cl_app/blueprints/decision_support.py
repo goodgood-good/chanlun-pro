@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import datetime
+import gzip
 from pathlib import Path
+from threading import RLock
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, current_app, make_response, render_template, request
@@ -13,21 +16,41 @@ from flask_login import current_user, login_required
 from chanlun.decision_support.trading_system.lifecycle import (
     lifecycle_stage_from_signal,
 )
+from chanlun.decision_support.fingerprints import sha256_json
 
 from ..services.research_audit import (
     ResearchAuditUnavailable,
+    build_research_audit_status_snapshot,
     build_research_audit_snapshot,
 )
 from ..services.trading_screening import SCHEMA
+from ..services.holding_group_monitor import (
+    SCHEMA as HOLDING_GROUP_MONITOR_SCHEMA,
+)
 from ..services.human_review_screening import (
     HumanReviewScreenUnavailable,
     HumanReviewScreeningService,
     WEB_SCHEMA as HUMAN_REVIEW_WEB_SCHEMA,
 )
+from ..services.realtime_review_inbox import SCHEMA as REALTIME_REVIEW_SCHEMA
+from ..services.realtime_quotes import isolated_a_share_quote_batch
 
 
 decision_support_bp = Blueprint("decision_support", __name__)
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+_JSON_GZIP_MIN_BYTES = 32 * 1024
+_JSON_GZIP_CACHE_CAPACITY = 3
+_JSON_GZIP_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_JSON_GZIP_CACHE_LOCK = RLock()
+_CURRENT_SELECTION_LIFECYCLE_STAGES = frozenset(
+    {
+        "observed",
+        "approaching",
+        "triggered",
+        "executable",
+        "active",
+    }
+)
 
 
 class DecisionSupportError(RuntimeError):
@@ -57,6 +80,74 @@ def _no_store(response):
     return response
 
 
+def _large_json_response(
+    payload: object,
+    *,
+    cache_revision: str | None = None,
+):
+    """为大型轮询响应做标准 HTTP 压缩，同时保留测试和旧客户端兼容性。"""
+
+    accepted = request.accept_encodings.best_match(("gzip", "identity"))
+    if accepted == "gzip" and cache_revision is not None:
+        with _JSON_GZIP_CACHE_LOCK:
+            compressed = _JSON_GZIP_CACHE.pop(cache_revision, None)
+            if compressed is not None:
+                _JSON_GZIP_CACHE[cache_revision] = compressed
+        if compressed is not None:
+            response = make_response(compressed)
+            response.mimetype = "application/json"
+            response.headers["Content-Encoding"] = "gzip"
+            response.headers["X-Content-Revision"] = cache_revision
+            response.vary.add("Accept-Encoding")
+            return _no_store(response)
+
+    response = make_response(payload)
+    response.vary.add("Accept-Encoding")
+    if accepted == "gzip":
+        raw = response.get_data()
+        if len(raw) >= _JSON_GZIP_MIN_BYTES:
+            compressed = gzip.compress(raw, compresslevel=5, mtime=0)
+            if len(compressed) < len(raw):
+                response.set_data(compressed)
+                response.headers["Content-Encoding"] = "gzip"
+                if cache_revision is not None:
+                    with _JSON_GZIP_CACHE_LOCK:
+                        _JSON_GZIP_CACHE.pop(cache_revision, None)
+                        _JSON_GZIP_CACHE[cache_revision] = compressed
+                        while len(_JSON_GZIP_CACHE) > _JSON_GZIP_CACHE_CAPACITY:
+                            _JSON_GZIP_CACHE.popitem(last=False)
+    if cache_revision is not None:
+        response.headers["X-Content-Revision"] = cache_revision
+    return _no_store(response)
+
+
+def _early_signals_response_revision(
+    data: Mapping[str, object],
+    *,
+    scope: str,
+) -> str | None:
+    """用小型动态文档与页面版本组成压缩缓存键，避免重哈希整棵信号树。"""
+
+    presentation_revision = data.get("presentation_revision")
+    if not isinstance(presentation_revision, str) or not presentation_revision:
+        return None
+    try:
+        return sha256_json(
+            {
+                "schema": "chanlun-early-signals-http-revision",
+                "presentation_revision": presentation_revision,
+                "scope": scope,
+                "runtime_health": data.get("runtime_health"),
+                "manual_attention": data.get("manual_attention"),
+                "us_monitor": data.get("us_monitor"),
+                "realtime_notifications": data.get("realtime_notifications"),
+            }
+        )
+    except (TypeError, ValueError):
+        # 版本缓存属于纯性能优化；新增运行时诊断若暂时不能规范哈希，仍按旧路径响应。
+        return None
+
+
 def _no_store_html(template: str, *, status: int = 200, **context):
     return _no_store(make_response(render_template(template, **context), status))
 
@@ -81,10 +172,19 @@ def _presentation_scope(
     for value in output.get("signals", []):
         if not isinstance(value, Mapping):
             continue
-        signal = dict(value)
-        effective_stage = lifecycle_stage_from_signal(signal)
-        if effective_stage is not None:
+        effective_stage = lifecycle_stage_from_signal(value)
+        if effective_stage not in _CURRENT_SELECTION_LIFECYCLE_STAGES:
+            continue
+        # 服务层投影已经写入规范阶段。仅兼容旧测试替身或旧缓存中的缺失/过期值，
+        # 避免每分钟为数千个信号无条件再复制一次字典。
+        if (
+            effective_stage is not None
+            and value.get("lifecycle_stage") != effective_stage
+        ):
+            signal = dict(value)
             signal["lifecycle_stage"] = effective_stage
+        else:
+            signal = value
         signals.append(signal)
     sector_triggered = [
         value
@@ -92,23 +192,23 @@ def _presentation_scope(
         if isinstance(value.get("selection_sources"), (list, tuple))
         and "QMT_SECTOR_TRIGGER" in value["selection_sources"]
     ]
-    manual_holdings = output.get("manual_holdings")
+    manual_attention = output.get("manual_attention")
     manual_a_codes = {
         str(value.get("code"))
         for value in (
-            manual_holdings.get("positions", [])
-            if isinstance(manual_holdings, Mapping)
+            manual_attention.get("symbols", [])
+            if isinstance(manual_attention, Mapping)
             else []
         )
         if isinstance(value, Mapping) and value.get("market") == "a"
     }
-    manual_holding_signals = [
+    manual_attention_signals = [
         value for value in signals if str(value.get("code")) in manual_a_codes
     ]
     selected = sector_triggered if scope == "sector-trigger" else signals
     output["signals"] = selected
-    output["manual_holding_signals"] = (
-        manual_holding_signals if scope == "sector-trigger" else []
+    output["manual_attention_signals"] = (
+        manual_attention_signals if scope == "sector-trigger" else []
     )
     counts_by_stage: dict[str, int] = {}
     counts_by_point_type: dict[str, int] = {}
@@ -138,20 +238,29 @@ def _trading_screening_snapshot(
     service = _trading_screening_service()
     try:
         service.ensure_refresh()
+        reference_provider = getattr(
+            service,
+            "presentation_snapshot_reference",
+            None,
+        )
         presentation_provider = getattr(
             service,
             "presentation_snapshot",
             None,
         )
         payload = (
-            presentation_provider()
-            if callable(presentation_provider)
-            else service.snapshot()
+            reference_provider()
+            if callable(reference_provider)
+            else (
+                presentation_provider()
+                if callable(presentation_provider)
+                else service.snapshot()
+            )
         )
     except Exception as exc:
         raise DecisionSupportError("trading_screening_unavailable") from exc
     if (
-        not isinstance(payload, dict)
+        not isinstance(payload, Mapping)
         or payload.get("schema") != SCHEMA
         or payload.get("sector_first") is not True
         or payload.get("read_only") is not True
@@ -192,33 +301,65 @@ def _trading_screening_snapshot(
         "EXCLUDED_OPERATIONAL_METADATA"
     )
     output["runtime_health"] = runtime_health
-    output["manual_holdings"] = _manual_holdings_snapshot()
+    output["manual_attention"] = _manual_attention_snapshot()
+    output["us_monitor"] = _us_monitor_snapshot()
+    output["realtime_notifications"] = _realtime_review_snapshot()
     return _presentation_scope(output, scope)
 
 
-def _manual_holdings_snapshot() -> dict[str, object]:
-    """返回用户在本地声明的持仓，不访问券商账户。"""
+def _realtime_review_snapshot() -> dict[str, object]:
+    unavailable = {
+        "schema": REALTIME_REVIEW_SCHEMA,
+        "events": [],
+        "event_count": 0,
+        "pending_review_count": 0,
+        "delivery_counts": {},
+        "credentials_exposed": False,
+        "real_account_accessed": False,
+        "real_order_transport_enabled": False,
+        "automated_order_authorized": False,
+        "live_status": "LIVE_DISABLED",
+    }
+    inbox = current_app.extensions.get("realtime_review_inbox")
+    provider = getattr(inbox, "snapshot", None)
+    if not callable(provider):
+        return unavailable
+    try:
+        payload = provider()
+    except Exception:
+        current_app.logger.exception("realtime human review inbox snapshot failed")
+        return unavailable
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") != REALTIME_REVIEW_SCHEMA
+        or not isinstance(payload.get("events"), list)
+        or payload.get("credentials_exposed") is not False
+        or payload.get("real_account_accessed") is not False
+        or payload.get("real_order_transport_enabled") is not False
+        or payload.get("automated_order_authorized") is not False
+        or payload.get("live_status") != "LIVE_DISABLED"
+    ):
+        current_app.logger.error("realtime human review inbox contract invalid")
+        return unavailable
+    return dict(payload)
+
+
+def _manual_attention_snapshot() -> dict[str, object]:
+    """把内部优先分组投影为不含账户语义的人工关注列表。"""
 
     unavailable = {
-        "schema": "chanlun-local-manual-holdings",
-        "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
-        "group_name": "我的持仓",
+        "schema": "chanlun-local-manual-attention",
+        "source": "LOCAL_GLOBAL_ATTENTION_GROUP",
+        "group_name": "人工关注组",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
         "available": False,
         "status": "unavailable",
-        "positions": [],
+        "symbols": [],
         "declared_count": 0,
         "priority_monitor_count": 0,
         "cross_market_monitor_count": 0,
         "covered_monitor_count": 0,
         "unsupported_market_count": 0,
-        "quantity_available": False,
-        "cost_basis_available": False,
-        "sellable_quantity_available": False,
-        "real_account_accessed": False,
-        "real_order_transport_enabled": False,
-        "automated_order_authorized": False,
-        "live_status": "LIVE_DISABLED",
     }
     provider = current_app.config.get(
         "TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"
@@ -228,7 +369,7 @@ def _manual_holdings_snapshot() -> dict[str, object]:
     try:
         value = provider()
     except Exception:
-        current_app.logger.exception("local manual holdings snapshot failed")
+        current_app.logger.exception("local manual attention snapshot failed")
         return unavailable
     positions = value.get("positions") if isinstance(value, Mapping) else None
     allowed_scopes = {
@@ -278,8 +419,8 @@ def _manual_holdings_snapshot() -> dict[str, object]:
     )
     if (
         not isinstance(value, Mapping)
-        or value.get("schema") != unavailable["schema"]
-        or value.get("source") != unavailable["source"]
+        or value.get("schema") != "chanlun-local-manual-holdings"
+        or value.get("source") != "LOCAL_GLOBAL_WATCHLIST_GROUP"
         or value.get("group_scope") != unavailable["group_scope"]
         or value.get("real_account_accessed") is not False
         or value.get("real_order_transport_enabled") is not False
@@ -297,9 +438,51 @@ def _manual_holdings_snapshot() -> dict[str, object]:
         or value.get("covered_monitor_count") != covered_count
         or value.get("unsupported_market_count") != 0
     ):
-        current_app.logger.error("local manual holdings snapshot contract invalid")
+        current_app.logger.error("local manual attention source contract invalid")
         return unavailable
-    output = dict(value)
+    output = {
+        **unavailable,
+        "available": True,
+        "status": "ready",
+        "declared_count": len(positions),
+        "priority_monitor_count": priority_count,
+        "cross_market_monitor_count": cross_market_count,
+        "covered_monitor_count": covered_count,
+        "unsupported_market_count": 0,
+    }
+    a_share_codes = tuple(
+        sorted(
+            str(position["code"])
+            for position in positions
+            if position["market"] == "a"
+        )
+    )
+    quote_batch = None
+    if a_share_codes:
+        try:
+            quote_batch = isolated_a_share_quote_batch(current_app, a_share_codes)
+        except Exception as exc:
+            # The quote lane is display-only and deliberately non-blocking.  A
+            # busy or restarting native process must not hide the declared
+            # holding/watchlist universe or weaken monitor health semantics.
+            current_app.logger.warning(
+                "A-share manual holding quote snapshot unavailable: %s: %s",
+                type(exc).__name__,
+                str(exc)[:160],
+            )
+    quotes_by_code = {} if quote_batch is None else quote_batch.ticks()
+    output["quote_status"] = (
+        "unavailable"
+        if quote_batch is None
+        else "ready"
+        if len(quotes_by_code) == len(a_share_codes)
+        else "partial"
+    )
+    output["quote_market_open"] = (
+        None if quote_batch is None else quote_batch.market_open
+    )
+    output["quote_requested_count"] = len(a_share_codes)
+    output["quote_available_count"] = len(quotes_by_code)
     monitor = current_app.extensions.get("holding_group_monitor")
     try:
         monitor_health = (
@@ -338,7 +521,12 @@ def _manual_holdings_snapshot() -> dict[str, object]:
         current_app.logger.exception("A-share strict holding monitor health failed")
         screening_health = {}
     enriched = []
-    for position in output["positions"]:
+    for position in positions:
+        quote = (
+            quotes_by_code.get(position["code"])
+            if position["market"] == "a"
+            else None
+        )
         if position["monitoring_scope"] == "A_SHARE_STRICT_DECISION_CORE":
             if screening_health.get("priority_monitoring_enabled") is not True:
                 realtime_status = "error"
@@ -356,18 +544,222 @@ def _manual_holdings_snapshot() -> dict[str, object]:
             status = statuses.get((position["market"], position["code"]), {})
             realtime_status = status.get("status", "awaiting_first_run")
             realtime_reason = status.get(
-                "reason_code", "HOLDING_MONITOR_AWAITING_FIRST_RUN"
+                "reason_code", "ATTENTION_MONITOR_AWAITING_FIRST_RUN"
             )
+        realtime_reason = str(realtime_reason).replace(
+            "HOLDING_", "ATTENTION_"
+        )
         enriched.append(
             {
-                **position,
+                "market": position["market"],
+                "code": position["code"],
+                "name": position["name"],
+                "monitoring_scope": position["monitoring_scope"],
+                "decision_mode": position.get("decision_mode"),
                 "realtime_status": realtime_status,
                 "realtime_reason_code": realtime_reason,
+                "quote_available": quote is not None,
+                "current_price": None if quote is None else float(quote.last),
+                "change_percent": None if quote is None else float(quote.rate),
             }
         )
-    output["positions"] = enriched
-    output["realtime_monitor"] = monitor_health
+    output["symbols"] = enriched
     return output
+
+
+def _unavailable_us_monitor(reason_code: str) -> dict[str, object]:
+    return {
+        "schema": "chanlun-us-realtime-monitor",
+        "source_schema": "chanlun-attention-group-monitor",
+        "market": "us",
+        "market_scope": "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+        "decision_mode": "STRICT_STRUCTURE_OBSERVATION_ONLY",
+        "auxiliary_only": True,
+        "full_market_screening": False,
+        "selection_candidates": False,
+        "available": False,
+        "ready": False,
+        "status": "unavailable",
+        "reason_code": reason_code,
+        "job_registered": False,
+        "notification_configured": False,
+        "interval_seconds": None,
+        "op_level": "5m",
+        "mid_level": "1m",
+        "big_level": "30m",
+        "last_run_at": None,
+        "last_completed_at": None,
+        "stale": False,
+        "declared_count": 0,
+        "monitored_count": 0,
+        "covered_count": 0,
+        "active_count": 0,
+        "closed_count": 0,
+        "awaiting_count": 0,
+        "failed_count": 0,
+        "symbols": [],
+        "notification_delivery": {},
+        "research_only": True,
+        "no_order_execution": True,
+        "manual_review_required": True,
+    }
+
+
+def _us_monitor_snapshot() -> dict[str, object]:
+    """提供美股全局分组雷达，页面将其作为非板块线索与 A 股并列。"""
+
+    monitor = current_app.extensions.get("holding_group_monitor")
+    if monitor is None or not callable(getattr(monitor, "health_snapshot", None)):
+        return _unavailable_us_monitor("US_MONITOR_UNAVAILABLE")
+    try:
+        health = monitor.health_snapshot()
+    except Exception:
+        current_app.logger.exception("US attention monitor health failed")
+        return _unavailable_us_monitor("US_MONITOR_HEALTH_UNAVAILABLE")
+    if (
+        not isinstance(health, Mapping)
+        or health.get("schema") != HOLDING_GROUP_MONITOR_SCHEMA
+        or health.get("real_account_accessed") is not False
+        or health.get("real_order_transport_enabled") is not False
+        or health.get("automated_order_authorized") is not False
+        or health.get("live_status") != "LIVE_DISABLED"
+        or (
+            health.get("op_level"),
+            health.get("mid_level"),
+            health.get("big_level"),
+        )
+        != ("5m", "1m", "30m")
+        or not isinstance(health.get("positions"), list)
+    ):
+        current_app.logger.error("US attention monitor health contract invalid")
+        return _unavailable_us_monitor("US_MONITOR_CONTRACT_INVALID")
+
+    allowed_statuses = {
+        "monitoring",
+        "market_closed",
+        "warming_up",
+        "awaiting_first_run",
+        "error",
+    }
+    positions: list[dict[str, object]] = []
+    for raw in health["positions"]:
+        if not isinstance(raw, Mapping) or raw.get("market") != "us":
+            continue
+        groups = raw.get("groups", [])
+        if (
+            not isinstance(raw.get("code"), str)
+            or not raw.get("code")
+            or not isinstance(raw.get("name"), str)
+            or not raw.get("name")
+            or raw.get("status") not in allowed_statuses
+            or raw.get("monitoring_scope") not in {"HOLDING", "WATCHLIST"}
+            or not isinstance(groups, (list, tuple))
+            or any(not isinstance(group, str) or not group for group in groups)
+        ):
+            current_app.logger.error("US attention monitor symbol invalid")
+            return _unavailable_us_monitor("US_MONITOR_CONTRACT_INVALID")
+        positions.append(
+            {
+                "market": "us",
+                "code": raw["code"],
+                "name": raw["name"],
+                "status": raw["status"],
+                "reason_code": str(raw.get("reason_code") or "").replace(
+                    "HOLDING_", "ATTENTION_"
+                ),
+                "monitoring_scope": (
+                    "MANUAL_ATTENTION"
+                    if raw["monitoring_scope"] == "HOLDING"
+                    else "WATCHLIST"
+                ),
+                "groups": [
+                    "人工关注组" if group == "我的持仓" else group
+                    for group in groups
+                ],
+            }
+        )
+    positions.sort(key=lambda row: str(row["code"]))
+
+    active_count = sum(row["status"] == "monitoring" for row in positions)
+    closed_count = sum(row["status"] == "market_closed" for row in positions)
+    awaiting_count = sum(
+        row["status"] in {"warming_up", "awaiting_first_run"}
+        for row in positions
+    )
+    failed_count = sum(row["status"] == "error" for row in positions)
+    covered_count = len(positions) - failed_count
+    job_registered = health.get("job_registered") is True
+    notification_configured = health.get("notification_configured") is True
+    stale = health.get("stale") is True
+    source_status = str(health.get("status") or "")
+    if not job_registered:
+        status, reason = "not_registered", "US_MONITOR_JOB_NOT_REGISTERED"
+    elif not notification_configured:
+        status, reason = "not_ready", "US_NOTIFICATION_NOT_CONFIGURED"
+    elif source_status == "awaiting_first_run":
+        status, reason = "awaiting_first_run", (
+            "US_MONITOR_AWAITING_FIRST_RUN"
+        )
+    elif source_status in {"not_ready", "error"}:
+        status, reason = source_status, (
+            "US_MONITOR_NOT_READY"
+        )
+    elif (
+        source_status == "degraded"
+        and not positions
+        and int(health.get("failed_count") or 0) > 0
+    ):
+        status, reason = "degraded", (
+            "US_MONITOR_DEGRADED"
+        )
+    elif failed_count:
+        status, reason = "degraded", "US_MONITOR_DEGRADED"
+    elif stale:
+        status, reason = "stale", "US_MONITOR_STALE"
+    elif awaiting_count:
+        status, reason = "warming_up", "MULTI_TIMEFRAME_WARMUP_INCOMPLETE"
+    else:
+        status, reason = "ready", "READY"
+    ready = status == "ready"
+    return {
+        "schema": "chanlun-us-realtime-monitor",
+        "source_schema": "chanlun-attention-group-monitor",
+        "market": "us",
+        "market_scope": "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+        "decision_mode": "STRICT_STRUCTURE_OBSERVATION_ONLY",
+        "auxiliary_only": True,
+        "full_market_screening": False,
+        "selection_candidates": False,
+        "available": True,
+        "ready": ready,
+        "status": status,
+        "reason_code": reason,
+        "job_registered": job_registered,
+        "notification_configured": notification_configured,
+        "interval_seconds": health.get("interval_seconds"),
+        "op_level": health.get("op_level"),
+        "mid_level": health.get("mid_level"),
+        "big_level": health.get("big_level"),
+        "last_run_at": health.get("last_run_at"),
+        "last_completed_at": health.get("last_completed_at"),
+        "stale": stale,
+        "declared_count": len(positions),
+        "monitored_count": active_count,
+        "covered_count": covered_count,
+        "active_count": active_count,
+        "closed_count": closed_count,
+        "awaiting_count": awaiting_count,
+        "failed_count": failed_count,
+        "symbols": positions,
+        "notification_delivery": (
+            dict(health["notification_delivery"])
+            if isinstance(health.get("notification_delivery"), Mapping)
+            else {}
+        ),
+        "research_only": True,
+        "no_order_execution": True,
+        "manual_review_required": True,
+    }
 
 
 def _human_review_service() -> HumanReviewScreeningService:
@@ -381,6 +773,52 @@ def _human_review_service() -> HumanReviewScreeningService:
     return value
 
 
+def _realtime_only_human_review_snapshot(
+    *,
+    requested_source: str,
+    reason_code: str,
+) -> dict[str, object]:
+    """Keep the independent realtime inbox reviewable when formal evidence fails.
+
+    The formal candidate archive remains fail-closed: no candidate, feedback path,
+    paper intent, order, or fill is synthesized from an invalid report.  Realtime
+    notifications have their own durable, REVIEW_REQUIRED contract and therefore
+    must not disappear merely because an unrelated historical bundle is stale.
+    """
+
+    return {
+        "schema": HUMAN_REVIEW_WEB_SCHEMA,
+        "source_kind": "realtime",
+        "requested_source": requested_source,
+        "source_options": [],
+        "source_content_sha256": None,
+        "decision_core_id": None,
+        "decision_source_snapshot_id": None,
+        "review_queue": [],
+        "review_queue_count": 0,
+        "reviewed_candidate_count": 0,
+        "formal_review_available": False,
+        "formal_review_unavailable_reason": reason_code,
+        "paper_observation_eligible": False,
+        "paper_observation_reason": "FORMAL_REVIEW_SOURCE_UNAVAILABLE",
+        "virtual_intent_count": 0,
+        "virtual_pending_intent_count": 0,
+        "virtual_cancelled_intent_count": 0,
+        "virtual_operations_cancelled_intent_count": 0,
+        "virtual_reserved_sell_quantity": 0,
+        "virtual_fill_count": 0,
+        "virtual_open_position_count": 0,
+        "highest_status": "REVIEW_REQUIRED",
+        "human_confirmation_required": True,
+        "automated_order_authorized": False,
+        "orders_created": 0,
+        "fills_created": 0,
+        "real_account_accessed": False,
+        "real_order_transport_enabled": False,
+        "live_status": "LIVE_DISABLED",
+    }
+
+
 def _human_review_snapshot(source: str) -> dict[str, object]:
     try:
         service = _human_review_service()
@@ -390,7 +828,17 @@ def _human_review_snapshot(source: str) -> dict[str, object]:
             else service.snapshot(source=source)
         )
     except HumanReviewScreenUnavailable as exc:
-        raise DecisionSupportError(exc.code) from exc
+        if exc.code == "human_review_source_invalid":
+            raise DecisionSupportError(exc.code) from exc
+        current_app.logger.warning(
+            "formal human review snapshot unavailable; serving independent "
+            "realtime review inbox only: %s",
+            exc.code,
+        )
+        payload = _realtime_only_human_review_snapshot(
+            requested_source=source,
+            reason_code=exc.code,
+        )
     if (
         not isinstance(payload, dict)
         or payload.get("schema") != HUMAN_REVIEW_WEB_SCHEMA
@@ -404,6 +852,7 @@ def _human_review_snapshot(source: str) -> dict[str, object]:
     ):
         raise DecisionSupportError("human_review_screening_unavailable")
     output = dict(payload)
+    output["realtime_notifications"] = _realtime_review_snapshot()
     output["forward_operations"] = _human_review_forward_operations()
     return output
 
@@ -519,7 +968,14 @@ def _research_audit_snapshot() -> dict[str, object]:
     try:
         return build_research_audit_snapshot(_research_audit_root())
     except ResearchAuditUnavailable as exc:
-        raise DecisionSupportError(exc.code) from exc
+        try:
+            return build_research_audit_status_snapshot(
+                _research_audit_root(),
+                formal_error_code=exc.code,
+                formal_error_details=exc.details,
+            )
+        except ResearchAuditUnavailable as status_exc:
+            raise DecisionSupportError(status_exc.code) from status_exc
 
 
 @decision_support_bp.get("/decision-support/early-screening")
@@ -536,8 +992,10 @@ def early_signals():
     scope = str(request.args.get("scope") or "all-qualified").strip().lower()
     if scope not in {"sector-trigger", "all-qualified"}:
         scope = "all-qualified"
-    return _no_store(
-        make_response(_ok(_trading_screening_snapshot(scope=scope)))
+    data = _trading_screening_snapshot(scope=scope)
+    return _large_json_response(
+        _ok(data),
+        cache_revision=_early_signals_response_revision(data, scope=scope),
     )
 
 
@@ -617,16 +1075,25 @@ def research_audit():
         audit = build_research_audit_snapshot(_research_audit_root())
     except ResearchAuditUnavailable as exc:
         current_app.logger.warning("research audit unavailable: %s", exc.code)
+        try:
+            audit_status = build_research_audit_status_snapshot(
+                _research_audit_root(),
+                formal_error_code=exc.code,
+                formal_error_details=exc.details,
+            )
+        except ResearchAuditUnavailable:
+            audit_status = None
         return _no_store_html(
             "research_audit.html",
-            status=503,
             audit=None,
+            audit_status=audit_status,
             audit_error_code=exc.code,
             audit_error_details=exc.details,
         )
     return _no_store_html(
         "research_audit.html",
         audit=audit,
+        audit_status=None,
         audit_error_code=None,
         audit_error_details=None,
     )

@@ -1,9 +1,10 @@
-"""为实时选股提供 QMT GICS3 目录及由成分股合成的行业 K 线。"""
+"""为实时选股提供 QMT GICS3/GICS4 目录及由成分股合成的行业 K 线。"""
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable, Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import hashlib
@@ -17,6 +18,7 @@ import unicodedata
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 from xtquant import xtdata
 
@@ -33,6 +35,9 @@ from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import
     build_causal_sector_price_basis_metadata,
     qmt_causal_factor_events_from_frame,
     qmt_causal_factor_revision,
+)
+from chanlun.decision_support.trading_system.qmt_sector_same_base import (
+    qmt_sector_member_path_revision,
 )
 from chanlun.decision_support.trading_system.etf_proxy_facts import DailyMarketBar
 from chanlun.decision_support.trading_system.selection import (
@@ -52,6 +57,7 @@ from chanlun.exchange.qmt_time_contract import qmt_exclusive_download_end
 
 
 QMT_GICS3_CATALOG_SOURCE = "qmt_gics3_components"
+QMT_GICS_HIERARCHY_CATALOG_SOURCE = "qmt_gics3_gics4_hierarchy"
 QMT_GICS3_COMPOSITE_PROVIDER = "qmt-gics3-composite"
 QMT_GICS3_COMPOSITE_ADJUSTMENT = (
     "causal-factor-stable-24-member-median"
@@ -78,6 +84,7 @@ QMT_SECTOR_STRENGTH_ADJUSTMENT = (
 )
 
 _GICS3_PREFIX = "GICS3"
+_GICS4_PREFIX = "GICS4"
 _QMT_A_SHARE_CODE = re.compile(r"^([0-9]{6})\.(SH|SZ|BJ)$")
 _NORMALIZED_A_SHARE_CODE = re.compile(r"^(SH|SZ|BJ)\.([0-9]{6})$")
 _FREQUENCY_SECONDS = {"5m": 5 * 60, "30m": 30 * 60, "1d": 24 * 60 * 60}
@@ -85,11 +92,17 @@ _FIELDS = ("time", "open", "high", "low", "close", "volume")
 _PRICE_FIELDS = ("open", "high", "low", "close")
 _COMPOSITE_QUANTUM = Decimal("0.000001")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
-# 月、周、日收敛门需要 480 个已完成日线观测。两个自然年中的 550 个日历日通常只能
-# 提供约 390 个 A 股交易日，无论 QMT 有多少五分钟历史都无法形成有效行业门。
-# 这里是证据回看范围，不是信号参数；围绕 480 个交易日要求保留充足的节假日和停牌
-# 余量，并在下方精确校验返回的交易所日历。
-_QMT_TRADING_CALENDAR_LOOKBACK_DAYS = 1100
+# 月、周、日收敛门的短前缀需要 480 个已完成日线观测；完整前缀必须覆盖 720 个
+# 交易日，删去最老三分之一后才能仍满足同一最低值。这里是物理证据回看范围，不是
+# 信号参数；四个自然年为节假日和停牌保留余量，并在下方精确校验交易所日历。
+_QMT_TRADING_CALENDAR_LOOKBACK_DAYS = 1460
+# 每个高周期板块需要同时保留 5m 同源流和原生日线。GICS3/GICS4 全量轮转会
+# GICS3+GICS4 全目录会产生数百个大型合成帧；真实生产复算证明 64 个帧可把
+# 隔离进程推到约 2.9 GiB，远超工作进程声明的 1.5 GiB 水位。跨批次复用已经由
+# 内容寻址的磁盘事实缓存承担；内存 LRU 只保留最近 8 个帧，足够覆盖调用方的
+# 紧邻重读，同时给 24k 根 5m 基础帧、结构计算副本和 QMT RPC 留出明确余量。
+_QMT_SECTOR_COMPOSITE_MEMORY_CACHE_CAPACITY = 8
+_QMT_SECTOR_CALENDAR_GRID_CACHE_CAPACITY = 8
 _DAILY_FIELDS = ("time", "open", "high", "low", "close", "volume")
 _FACT_CACHE_ENVELOPE_SCHEMA = "chanlun-qmt-sector-fact-cache-envelope"
 _COMPOSITE_FACT_SCHEMA = "chanlun-qmt-sector-composite-facts"
@@ -104,6 +117,7 @@ def _producer_ast_manifest(
     source: str,
     *,
     roots: tuple[str, ...],
+    excluded_names: frozenset[str] = frozenset(),
 ) -> tuple[tuple[str, str], ...]:
     """Return the transitive top-level implementation used by ``roots``.
 
@@ -141,6 +155,7 @@ def _producer_ast_manifest(
                 isinstance(child, ast.Name)
                 and child.id in definitions
                 and child.id not in selected
+                and child.id not in excluded_names
             ):
                 pending.append(child.id)
     return tuple(
@@ -162,6 +177,18 @@ def _qmt_fact_family_revision(*, family: str, roots: tuple[str, ...]) -> str:
     manifest = _producer_ast_manifest(
         provider.read_text(encoding="utf-8"),
         roots=roots,
+        # 内存/日历 LRU 只改变重复读取成本，不改变任何持久化行情事实。若把这些
+        # 容量值纳入事实生产者身份，每次纯性能调优都会无谓淘汰全市场认证缓存。
+        excluded_names=(
+            frozenset(
+                {
+                    "_QMT_SECTOR_COMPOSITE_MEMORY_CACHE_CAPACITY",
+                    "_QMT_SECTOR_CALENDAR_GRID_CACHE_CAPACITY",
+                }
+            )
+            if family == "INTRADAY_SECTOR_COMPOSITE"
+            else frozenset()
+        ),
     )
     shared_paths = [
         package_root / "exchange" / "price_basis.py",
@@ -183,7 +210,15 @@ def _qmt_fact_family_revision(*, family: str, roots: tuple[str, ...]) -> str:
         / "qmt_causal_factor_adjustment.py"
     )
     if family == "INTRADAY_SECTOR_COMPOSITE":
-        shared_paths.append(package_root / "exchange" / "qmt_time_contract.py")
+        shared_paths.extend(
+            (
+                package_root / "exchange" / "qmt_time_contract.py",
+                package_root
+                / "decision_support"
+                / "trading_system"
+                / "qmt_sector_same_base.py",
+            )
+        )
     shared = tuple(
         {
             "path": path.relative_to(package_root).as_posix(),
@@ -447,12 +482,41 @@ def _latest_completed_qmt_daily_session(observed: datetime) -> date | None:
     return None
 
 
-def _canonical_sector_name(value: str) -> tuple[str, str] | None:
+def _canonical_sector_level_name(
+    value: str,
+    *,
+    prefix: str,
+) -> tuple[str, str] | None:
     text = " ".join(unicodedata.normalize("NFKC", value).strip().split())
-    if not text.startswith(_GICS3_PREFIX):
+    if not text.startswith(prefix):
         return None
-    name = text[len(_GICS3_PREFIX) :].strip()
+    name = text[len(prefix) :].strip()
     return (text, name) if name else None
+
+
+def _canonical_sector_name(value: str) -> tuple[str, str] | None:
+    """Return the legacy GICS3 identity used by the immutable ledger."""
+
+    return _canonical_sector_level_name(value, prefix=_GICS3_PREFIX)
+
+
+def _hierarchy_sector_id(*, source_key: str, taxonomy_level: str) -> str:
+    if taxonomy_level == _GICS3_PREFIX:
+        # 父级沿用旧目录身份，使同一个 GICS3 板块在历史账本和实时分层目录中可直接
+        # 对照；只给新增的 GICS4 定义独立身份空间。
+        schema = "chanlun-qmt-gics3-sector"
+        namespace = "qmt-gics3:"
+    elif taxonomy_level == _GICS4_PREFIX:
+        schema = "chanlun-qmt-gics4-sector"
+        namespace = "qmt-gics4:"
+    else:
+        raise ValueError("unsupported QMT GICS taxonomy level")
+    return namespace + sha256_json(
+        {
+            "schema": schema,
+            "source_key": source_key,
+        }
+    ).removeprefix("sha256:")
 
 
 def _normalized_a_share_code(value: object) -> str | None:
@@ -546,6 +610,387 @@ def _catalog_document(
     }
 
 
+def _canonical_hierarchy_rows(
+    catalog: Mapping[str, object],
+) -> tuple[dict[str, object], ...]:
+    raw_rows = catalog.get("sectors")
+    if (
+        isinstance(raw_rows, (str, bytes))
+        or not isinstance(raw_rows, Sequence)
+        or not raw_rows
+    ):
+        raise ValueError("QMT GICS3/GICS4 hierarchy catalog is empty")
+
+    rows: list[dict[str, object]] = []
+    identities: set[str] = set()
+    source_keys: set[str] = set()
+    membership_owner: dict[tuple[str, str], str] = {}
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("QMT hierarchy catalog row is invalid")
+        sector_id = raw.get("sector_id")
+        name = raw.get("name")
+        source_key = raw.get("source_key")
+        taxonomy_level = raw.get("taxonomy_level")
+        parent_sector_id = raw.get("parent_sector_id")
+        parent_sector_name = raw.get("parent_sector_name")
+        raw_members = raw.get("member_codes")
+        if taxonomy_level not in {_GICS3_PREFIX, _GICS4_PREFIX}:
+            raise ValueError("QMT hierarchy taxonomy level is invalid")
+        expected_source_prefix = str(taxonomy_level)
+        expected_id_prefix = f"qmt-{expected_source_prefix.lower()}:"
+        if (
+            not isinstance(sector_id, str)
+            or not sector_id.startswith(expected_id_prefix)
+            or sector_id
+            != _hierarchy_sector_id(
+                source_key=str(source_key),
+                taxonomy_level=expected_source_prefix,
+            )
+            or not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(source_key, str)
+            or not source_key.startswith(expected_source_prefix)
+            or source_key == expected_source_prefix
+            or sector_id in identities
+            or source_key in source_keys
+        ):
+            raise ValueError("QMT hierarchy sector identity is invalid")
+        if (
+            isinstance(raw_members, (str, bytes))
+            or not isinstance(raw_members, Sequence)
+            or any(
+                not isinstance(value, str)
+                or _NORMALIZED_A_SHARE_CODE.fullmatch(value) is None
+                for value in raw_members
+            )
+        ):
+            raise ValueError("QMT hierarchy members must be normalized A-share codes")
+        members = tuple(sorted(set(raw_members)))
+        if len(members) != len(raw_members):
+            raise ValueError("QMT hierarchy members must be unique")
+        if taxonomy_level == _GICS3_PREFIX:
+            if parent_sector_id is not None or parent_sector_name is not None:
+                raise ValueError("QMT GICS3 parent fields must be empty")
+        elif (
+            parent_sector_id is not None
+            and (
+                not isinstance(parent_sector_id, str)
+                or not parent_sector_id.startswith("qmt-gics3:")
+                or not isinstance(parent_sector_name, str)
+                or not parent_sector_name.strip()
+            )
+        ):
+            raise ValueError("QMT GICS4 parent identity is invalid")
+        elif parent_sector_id is None and (
+            parent_sector_name is not None or members
+        ):
+            raise ValueError("non-empty QMT GICS4 sector must have one parent")
+
+        for member in members:
+            key = (expected_source_prefix, member)
+            previous = membership_owner.get(key)
+            if previous is not None and previous != sector_id:
+                raise ValueError(
+                    f"QMT {expected_source_prefix} member has multiple sectors"
+                )
+            membership_owner[key] = sector_id
+        identities.add(sector_id)
+        source_keys.add(source_key)
+        rows.append(
+            {
+                "sector_id": sector_id,
+                "name": name.strip(),
+                "source_key": source_key,
+                "taxonomy_level": expected_source_prefix,
+                "parent_sector_id": parent_sector_id,
+                "parent_sector_name": parent_sector_name,
+                "member_codes": members,
+            }
+        )
+
+    by_id = {str(row["sector_id"]): row for row in rows}
+    for row in rows:
+        if row["taxonomy_level"] != _GICS4_PREFIX:
+            continue
+        parent_id = row["parent_sector_id"]
+        if parent_id is None:
+            continue
+        parent = by_id.get(str(parent_id))
+        if (
+            parent is None
+            or parent["taxonomy_level"] != _GICS3_PREFIX
+            or row["parent_sector_name"] != parent["name"]
+            or not set(row["member_codes"]).issubset(parent["member_codes"])
+        ):
+            raise ValueError("QMT GICS4 parent relation is inconsistent")
+    if not any(row["taxonomy_level"] == _GICS3_PREFIX for row in rows):
+        raise ValueError("QMT hierarchy catalog has no GICS3 parents")
+    if not any(row["taxonomy_level"] == _GICS4_PREFIX for row in rows):
+        raise ValueError("QMT hierarchy catalog has no GICS4 children")
+    rows.sort(
+        key=lambda row: (
+            0 if row["taxonomy_level"] == _GICS3_PREFIX else 1,
+            str(row["source_key"]),
+        )
+    )
+    return tuple(rows)
+
+
+def qmt_gics_hierarchy_catalog_revision(catalog: Mapping[str, object]) -> str:
+    """Validate and identify the live GICS3-parent/GICS4-child catalog."""
+
+    if catalog.get("source") != QMT_GICS_HIERARCHY_CATALOG_SOURCE:
+        raise ValueError("unsupported QMT hierarchy catalog source")
+    return sha256_json(
+        {
+            "schema": "chanlun-qmt-gics3-gics4-hierarchy-catalog",
+            "sectors": _canonical_hierarchy_rows(catalog),
+        }
+    )
+
+
+def _hierarchy_catalog_document(
+    *,
+    captures: list[tuple[str, str, str, list[object]]],
+    captured_at: datetime,
+    capture_transport: str,
+    capture_evidence: Mapping[str, object] | None = None,
+    eligible_member_codes: frozenset[str] | None = None,
+) -> dict[str, object]:
+    if not captures:
+        raise RuntimeError("QMT GICS3/GICS4 hierarchy catalog is empty")
+
+    normalized: dict[tuple[str, str], set[str]] = {}
+    labels: dict[tuple[str, str], str] = {}
+    all_members_by_level = {
+        _GICS3_PREFIX: set(),
+        _GICS4_PREFIX: set(),
+    }
+    for taxonomy_level, source_key, name, raw_members in captures:
+        key = (taxonomy_level, source_key)
+        if key in normalized:
+            raise RuntimeError(f"duplicate QMT hierarchy sector: {source_key}")
+        members = {
+            code
+            for code in (_normalized_a_share_code(value) for value in raw_members)
+            if code is not None
+        }
+        normalized[key] = members
+        labels[key] = name
+        all_members_by_level[taxonomy_level].update(members)
+
+    included: dict[tuple[str, str], set[str]] = {}
+    for key, members in normalized.items():
+        included[key] = (
+            set(members)
+            if eligible_member_codes is None
+            else set(members & eligible_member_codes)
+        )
+
+    rows: list[dict[str, object]] = []
+    parent_by_member: dict[str, tuple[str, str]] = {}
+    parent_members_by_id: dict[str, set[str]] = {}
+    legacy_parent_rows: list[dict[str, object]] = []
+    excluded_empty_gics3_source_keys: list[str] = []
+    excluded_empty_gics4_source_keys: list[str] = []
+    for taxonomy_level, source_key, _name, _raw_members in captures:
+        if taxonomy_level != _GICS3_PREFIX:
+            continue
+        name = labels[(taxonomy_level, source_key)]
+        sector_id = _hierarchy_sector_id(
+            source_key=source_key,
+            taxonomy_level=taxonomy_level,
+        )
+        for member in normalized[(taxonomy_level, source_key)]:
+            previous = parent_by_member.get(member)
+            if previous is not None and previous[0] != sector_id:
+                raise RuntimeError(
+                    f"QMT GICS3 member belongs to multiple parents: {member}"
+                )
+            parent_by_member[member] = (sector_id, name)
+        members = sorted(included[(taxonomy_level, source_key)])
+        parent_members_by_id[sector_id] = set(members)
+        # QMT's global taxonomy includes categories that currently contain no
+        # member of the authorized A-share universe. Such nodes cannot route
+        # or rank a symbol. Keeping them only creates duplicate/empty filter
+        # chips and unnecessary assessment work; their identities remain in
+        # the authenticated capture evidence below.
+        if not members:
+            excluded_empty_gics3_source_keys.append(source_key)
+            continue
+        legacy_parent_rows.append(
+            {
+                "sector_id": sector_id,
+                "name": name,
+                "source_key": source_key,
+                "member_codes": members,
+            }
+        )
+        rows.append(
+            {
+                "sector_id": sector_id,
+                "name": name,
+                "source_key": source_key,
+                "taxonomy_level": _GICS3_PREFIX,
+                "parent_sector_id": None,
+                "parent_sector_name": None,
+                "member_codes": members,
+            }
+        )
+
+    hierarchy_orphans: set[str] = set()
+    collapsed_degenerate_gics4_source_keys: list[str] = []
+    relation_count = 0
+    for taxonomy_level, source_key, _name, _raw_members in captures:
+        if taxonomy_level != _GICS4_PREFIX:
+            continue
+        short_name = labels[(taxonomy_level, source_key)]
+        raw_members = normalized[(taxonomy_level, source_key)]
+        parent_candidates = {
+            parent_by_member[member]
+            for member in raw_members
+            if member in parent_by_member
+        }
+        if len(parent_candidates) > 1:
+            raise RuntimeError(
+                f"QMT GICS4 sector maps to multiple GICS3 parents: {source_key}"
+            )
+        parent_sector_id: str | None = None
+        parent_sector_name: str | None = None
+        if parent_candidates:
+            parent_sector_id, parent_sector_name = next(iter(parent_candidates))
+        candidate_members = included[(taxonomy_level, source_key)]
+        if parent_sector_id is None:
+            valid_members: set[str] = set()
+        else:
+            valid_members = candidate_members & parent_members_by_id[parent_sector_id]
+        hierarchy_orphans.update(candidate_members - valid_members)
+        if not valid_members:
+            excluded_empty_gics4_source_keys.append(source_key)
+            continue
+        # QMT may publish a GICS4 node that is only an identity copy of its
+        # GICS3 parent: both the normalized label and the eligible constituent
+        # set are identical. Emitting that row creates two independent scans
+        # and the meaningless presentation ``海上运输 → 海上运输``. Collapse
+        # only this exact, auditable equivalence; a same-name child with a
+        # genuinely narrower member set remains a valid fourth-level node.
+        if (
+            parent_sector_id is not None
+            and parent_sector_name == short_name
+            and valid_members == parent_members_by_id[parent_sector_id]
+        ):
+            collapsed_degenerate_gics4_source_keys.append(source_key)
+            continue
+        if parent_sector_id is not None:
+            relation_count += 1
+        display_name = (
+            short_name
+            if parent_sector_name is None
+            else f"{parent_sector_name} → {short_name}"
+        )
+        rows.append(
+            {
+                "sector_id": _hierarchy_sector_id(
+                    source_key=source_key,
+                    taxonomy_level=taxonomy_level,
+                ),
+                "name": display_name,
+                "source_key": source_key,
+                "taxonomy_level": _GICS4_PREFIX,
+                "parent_sector_id": parent_sector_id,
+                "parent_sector_name": parent_sector_name,
+                "member_codes": sorted(valid_members),
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            0 if row["taxonomy_level"] == _GICS3_PREFIX else 1,
+            str(row["source_key"]),
+        )
+    )
+    legacy_parent_rows.sort(key=lambda row: str(row["source_key"]))
+    evidence = dict(capture_evidence or {})
+    evidence.update(
+        {
+            "membership_universe_filter_applied": (
+                eligible_member_codes is not None
+            ),
+            "gics3_sector_count": sum(
+                row["taxonomy_level"] == _GICS3_PREFIX for row in rows
+            ),
+            "gics4_sector_count": sum(
+                row["taxonomy_level"] == _GICS4_PREFIX for row in rows
+            ),
+            "gics4_parent_relation_count": relation_count,
+            "collapsed_degenerate_gics4_sector_count": len(
+                collapsed_degenerate_gics4_source_keys
+            ),
+            "collapsed_degenerate_gics4_source_keys_sha256": sha256_json(
+                tuple(sorted(collapsed_degenerate_gics4_source_keys))
+            ),
+            "excluded_empty_gics3_sector_count": len(
+                excluded_empty_gics3_source_keys
+            ),
+            "excluded_empty_gics3_source_keys_sha256": sha256_json(
+                tuple(sorted(excluded_empty_gics3_source_keys))
+            ),
+            "excluded_empty_gics4_sector_count": len(
+                excluded_empty_gics4_source_keys
+            ),
+            "excluded_empty_gics4_source_keys_sha256": sha256_json(
+                tuple(sorted(excluded_empty_gics4_source_keys))
+            ),
+            "unfiltered_gics3_member_count": len(
+                all_members_by_level[_GICS3_PREFIX]
+            ),
+            "unfiltered_gics4_member_count": len(
+                all_members_by_level[_GICS4_PREFIX]
+            ),
+            "included_gics3_member_count": len(
+                set().union(
+                    *(
+                        set(row["member_codes"])
+                        for row in rows
+                        if row["taxonomy_level"] == _GICS3_PREFIX
+                    )
+                )
+            ),
+            "included_gics4_member_count": len(
+                set().union(
+                    *(
+                        set(row["member_codes"])
+                        for row in rows
+                        if row["taxonomy_level"] == _GICS4_PREFIX
+                    )
+                )
+            ),
+            "hierarchy_orphan_member_count": len(hierarchy_orphans),
+            "hierarchy_orphan_members_sha256": sha256_json(
+                tuple(sorted(hierarchy_orphans))
+            ),
+        }
+    )
+    document: dict[str, object] = {
+        "source": QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+        "captured_at": captured_at.isoformat(),
+        "point_in_time_scope": "CURRENT_CAPTURE_ONLY",
+        "catalog_revision": None,
+        "gics3_catalog_revision": sha256_json(
+            {
+                "schema": "chanlun-qmt-gics3-catalog",
+                "sectors": legacy_parent_rows,
+            }
+        ),
+        "sectors": rows,
+        "capture_transport": capture_transport,
+        "capture_evidence": evidence,
+    }
+    document["catalog_revision"] = qmt_gics_hierarchy_catalog_revision(document)
+    return document
+
+
 def build_qmt_gics3_sector_catalog(
     *,
     captured_at: datetime | None = None,
@@ -606,6 +1051,100 @@ def build_qmt_gics3_sector_catalog(
             captures.append((canonical_key, name, list(response)))
 
     return _catalog_document(
+        captures=captures,
+        captured_at=captured,
+        capture_transport="QMT_RPC",
+        capture_evidence={
+            "membership_universe_source": (
+                f"QMT_RPC:{QMT_CURRENT_A_SHARE_SECTOR}"
+            ),
+            "membership_universe_member_count": len(current_a_share_members),
+        },
+        eligible_member_codes=current_a_share_members,
+    )
+
+
+def build_qmt_gics_hierarchy_sector_catalog(
+    *,
+    captured_at: datetime | None = None,
+) -> dict[str, object]:
+    """Capture the current QMT GICS3/GICS4 hierarchy without fallback data."""
+
+    captured = normalize_datetime(
+        captured_at or datetime.now(_SHANGHAI),
+        "captured_at",
+    )
+    with _XTDATA_NATIVE_LOCK:
+        source_list = xtdata.get_sector_list()
+        if (
+            type(source_list) is not list
+            or not source_list
+            or any(type(item) is not str for item in source_list)
+        ):
+            raise RuntimeError("QMT sector list is unavailable")
+        current_members_raw = xtdata.get_stock_list_in_sector(
+            QMT_CURRENT_A_SHARE_SECTOR,
+            real_timetag=-1,
+        )
+        if type(current_members_raw) is not list or not current_members_raw:
+            raise RuntimeError("QMT current A-share universe is unavailable")
+        current_members = tuple(
+            _normalized_a_share_code(value) for value in current_members_raw
+        )
+        if any(value is None for value in current_members):
+            raise RuntimeError("QMT current A-share universe contains invalid codes")
+        current_a_share_members = frozenset(
+            value for value in current_members if value is not None
+        )
+        if not current_a_share_members:
+            raise RuntimeError("QMT current A-share universe is empty")
+
+        selected: list[tuple[str, str, str, str]] = []
+        canonical_keys: set[str] = set()
+        for raw_key in source_list:
+            parsed_level: tuple[str, tuple[str, str]] | None = None
+            for taxonomy_level in (_GICS3_PREFIX, _GICS4_PREFIX):
+                parsed = _canonical_sector_level_name(
+                    raw_key,
+                    prefix=taxonomy_level,
+                )
+                if parsed is not None:
+                    parsed_level = (taxonomy_level, parsed)
+                    break
+            if parsed_level is None:
+                continue
+            taxonomy_level, (canonical_key, name) = parsed_level
+            if canonical_key in canonical_keys:
+                raise RuntimeError(
+                    f"duplicate QMT hierarchy sector: {canonical_key}"
+                )
+            canonical_keys.add(canonical_key)
+            selected.append((taxonomy_level, canonical_key, raw_key, name))
+        selected.sort(
+            key=lambda item: (
+                0 if item[0] == _GICS3_PREFIX else 1,
+                item[1],
+            )
+        )
+        if not any(item[0] == _GICS3_PREFIX for item in selected):
+            raise RuntimeError("QMT GICS3 parent catalog is empty")
+        if not any(item[0] == _GICS4_PREFIX for item in selected):
+            raise RuntimeError("QMT GICS4 child catalog is empty")
+        captures: list[tuple[str, str, str, list[object]]] = []
+        for taxonomy_level, canonical_key, raw_key, name in selected:
+            response = xtdata.get_stock_list_in_sector(
+                raw_key,
+                real_timetag=-1,
+            )
+            if type(response) is not list:
+                raise RuntimeError(
+                    f"QMT sector membership is unavailable: {canonical_key}"
+                )
+            captures.append(
+                (taxonomy_level, canonical_key, name, list(response))
+            )
+
+    return _hierarchy_catalog_document(
         captures=captures,
         captured_at=captured,
         capture_transport="QMT_RPC",
@@ -861,25 +1400,7 @@ def _attach_native_daily_composite_provenance(
 
 
 def _composite_member_path_revision(frame: pd.DataFrame) -> str | None:
-    if frame.empty:
-        return None
-    if "member_mask" not in frame.columns or "date" not in frame.columns:
-        raise ValueError("sector composite member path is unavailable")
-    return sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-composite-member-path",
-            "rows": tuple(
-                {
-                    "date": normalize_datetime(
-                        pd.Timestamp(row.date).to_pydatetime(),
-                        "sector composite member path date",
-                    ),
-                    "member_mask": int(row.member_mask),
-                }
-                for row in frame.itertuples(index=False)
-            ),
-        }
-    )
+    return qmt_sector_member_path_revision(frame)
 
 
 def _copy_frame(value: pd.DataFrame) -> pd.DataFrame:
@@ -974,8 +1495,8 @@ def _member_ratios(
         frame["date"] = frame["date"].dt.normalize() + pd.Timedelta(hours=15)
     cutoff = pd.Timestamp(normalize_datetime(not_after, "not_after"))
     prices = frame.loc[:, list(_PRICE_FIELDS)]
-    finite = frame.loc[:, list(_FIELDS)].map(
-        lambda value: math.isfinite(float(value))
+    finite = np.isfinite(
+        frame.loc[:, list(_FIELDS)].to_numpy(dtype=np.float64)
     ).all(axis=1)
     valid = (
         finite
@@ -1000,7 +1521,9 @@ def _member_ratios(
         result[f"{field}_ratio"] = frame[field] / previous_close
     result = result.iloc[1:].copy()
     ratios = result.loc[:, [f"{field}_ratio" for field in _PRICE_FIELDS]]
-    valid_ratios = ratios.map(lambda value: math.isfinite(float(value))).all(axis=1)
+    valid_ratios = np.isfinite(
+        ratios.to_numpy(dtype=np.float64)
+    ).all(axis=1)
     valid_ratios &= (ratios > 0).all(axis=1)
     result = result.loc[valid_ratios]
     return None if result.empty else result
@@ -1048,15 +1571,44 @@ class QmtSectorCompositeSource:
         self._fact_cache_directory = cache_directory
         self._fact_cache_revision = cache_revision
         self._lock = RLock()
-        self._cache: dict[
+        self._cache: OrderedDict[
             tuple[str, str, int], tuple[int, str, pd.DataFrame]
-        ] = {}
+        ] = OrderedDict()
         self._prepared_buckets: dict[str, int] = {}
         self._attempted_members: dict[str, set[str]] = {}
         self._trading_dates_cache: tuple[date, tuple[date, ...]] | None = None
+        self._calendar_grid_cache: OrderedDict[
+            tuple[str, int], tuple[tuple[datetime, ...], str]
+        ] = OrderedDict()
         self._factor_cache: dict[
             tuple[date, str], tuple[QmtCausalFactorEvent, ...]
         ] = {}
+
+    def _remember_frame(
+        self,
+        key: tuple[str, str, int],
+        value: tuple[int, str, pd.DataFrame],
+    ) -> None:
+        """在锁内保存一个有界的大型合成数据帧。"""
+
+        self._cache.pop(key, None)
+        self._cache[key] = value
+        while len(self._cache) > _QMT_SECTOR_COMPOSITE_MEMORY_CACHE_CAPACITY:
+            self._cache.popitem(last=False)
+
+    def cache_health_snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "schema": "chanlun-qmt-sector-composite-cache-health",
+                "frame_entries": len(self._cache),
+                "frame_capacity": _QMT_SECTOR_COMPOSITE_MEMORY_CACHE_CAPACITY,
+                "factor_entries": len(self._factor_cache),
+                "calendar_grid_entries": len(self._calendar_grid_cache),
+                "calendar_grid_capacity": (
+                    _QMT_SECTOR_CALENDAR_GRID_CACHE_CAPACITY
+                ),
+                "calendar_lookback_days": _QMT_TRADING_CALENDAR_LOOKBACK_DAYS,
+            }
 
     def _report_progress(self) -> None:
         self._progress_callback()
@@ -1550,20 +2102,51 @@ class QmtSectorCompositeSource:
             self._trading_dates_cache = (observed_day, days)
             return days
 
+    def _calendar_grid(
+        self,
+        as_of: datetime,
+        frequency: str,
+    ) -> tuple[tuple[datetime, ...], str]:
+        observed = normalize_datetime(as_of, "as_of")
+        key = (frequency, self._bucket(observed, frequency))
+        with self._lock:
+            cached = self._calendar_grid_cache.pop(key, None)
+            if cached is not None:
+                self._calendar_grid_cache[key] = cached
+                return cached
+        candidates = tuple(
+            close
+            for trading_day in self._trading_dates(observed)
+            for close in self._session_closes(trading_day, frequency)
+            if close <= observed
+        )
+        if not candidates:
+            raise RuntimeError("QMT trading calendar has no closed sector bar")
+        result = (
+            candidates,
+            sha256_json(
+                {
+                    "schema": "chanlun-qmt-sector-calendar-grid",
+                    "frequency": frequency,
+                    "expected_closes": candidates,
+                }
+            ),
+        )
+        with self._lock:
+            self._calendar_grid_cache[key] = result
+            while (
+                len(self._calendar_grid_cache)
+                > _QMT_SECTOR_CALENDAR_GRID_CACHE_CAPACITY
+            ):
+                self._calendar_grid_cache.popitem(last=False)
+        return result
+
     def _expected_closes(
         self,
         as_of: datetime,
         frequency: str,
     ) -> tuple[datetime, ...]:
-        candidates = tuple(
-            close
-            for trading_day in self._trading_dates(as_of)
-            for close in self._session_closes(trading_day, frequency)
-            if close <= as_of
-        )
-        if not candidates:
-            raise RuntimeError("QMT trading calendar has no closed sector bar")
-        return candidates
+        return self._calendar_grid(as_of, frequency)[0]
 
     def _causal_factor_snapshot(
         self,
@@ -1630,8 +2213,10 @@ class QmtSectorCompositeSource:
         as_of: datetime,
         request_bars: int,
     ) -> pd.DataFrame:
-        if not isinstance(sector_id, str) or not sector_id.startswith("qmt-gics3:"):
-            raise ValueError("invalid QMT GICS3 sector id")
+        if not isinstance(sector_id, str) or not sector_id.startswith(
+            ("qmt-gics3:", "qmt-gics4:")
+        ):
+            raise ValueError("invalid QMT GICS3/GICS4 sector id")
         if not isinstance(sector_name, str) or not sector_name.strip():
             raise ValueError("sector_name is required")
         if frequency not in _FREQUENCY_SECONDS:
@@ -1657,12 +2242,13 @@ class QmtSectorCompositeSource:
         cache_key = (sector_id, frequency, request_bars)
         bucket = self._bucket(observed_at, frequency)
         with self._lock:
-            cached = self._cache.get(cache_key)
+            cached = self._cache.pop(cache_key, None)
             if (
                 cached is not None
                 and cached[0] == bucket
                 and cached[1] == membership_revision
             ):
+                self._cache[cache_key] = cached
                 return _copy_frame(cached[2])
             supersets = tuple(
                 (cached_request_bars, cached_value)
@@ -1681,10 +2267,13 @@ class QmtSectorCompositeSource:
             if supersets:
                 _, reusable = min(supersets, key=lambda item: item[0])
                 sliced = _tail_composite_frame(reusable[2], request_bars)
-                self._cache[cache_key] = (
-                    bucket,
-                    membership_revision,
-                    _copy_frame(sliced),
+                self._remember_frame(
+                    cache_key,
+                    (
+                        bucket,
+                        membership_revision,
+                        _copy_frame(sliced),
+                    ),
                 )
                 return _copy_frame(sliced)
 
@@ -1716,18 +2305,11 @@ class QmtSectorCompositeSource:
                 maximum_composite_members=self._maximum_composite_members,
                 factor_revision=factor_revision,
             )
-            expected_closes = self._expected_closes(
+            expected_closes, calendar_grid_revision = self._calendar_grid(
                 observed_at,
                 frequency,
             )
             expected_closed_at = expected_closes[-1]
-            calendar_grid_revision = sha256_json(
-                {
-                    "schema": "chanlun-qmt-sector-calendar-grid",
-                    "frequency": frequency,
-                    "expected_closes": expected_closes,
-                }
-            )
             fact_path = self._fact_path(
                 sector_id=sector_id,
                 frequency=frequency,
@@ -1761,10 +2343,13 @@ class QmtSectorCompositeSource:
             )
             if persisted is not None:
                 with self._lock:
-                    self._cache[cache_key] = (
-                        bucket,
-                        membership_revision,
-                        _copy_frame(persisted),
+                    self._remember_frame(
+                        cache_key,
+                        (
+                            bucket,
+                            membership_revision,
+                            _copy_frame(persisted),
+                        ),
                     )
                 return _copy_frame(persisted)
             base_frequency = "1d" if frequency == "1d" else "5m"
@@ -1817,8 +2402,7 @@ class QmtSectorCompositeSource:
                     )
                     if ratios is None:
                         continue
-                    ratios.insert(0, "member", native_code)
-                    ratios.insert(1, "member_bit", 1 << member_index)
+                    ratios.insert(0, "member_bit", 1 << member_index)
                     member_frames.append(ratios)
                 if len(member_frames) < self._minimum_member_count:
                     result = empty
@@ -1830,11 +2414,8 @@ class QmtSectorCompositeSource:
                         minimum_bar_coverage=self._minimum_bar_coverage,
                     )
                     grouped = facts.groupby("date", sort=True).agg(
-                        member_count=("member", "nunique"),
-                        member_mask=(
-                            "member_bit",
-                            lambda values: sum(set(int(value) for value in values)),
-                        ),
+                        member_count=("member_bit", "size"),
+                        member_mask=("member_bit", "sum"),
                         open_ratio=("open_ratio", "median"),
                         high_ratio=("high_ratio", "median"),
                         low_ratio=("low_ratio", "median"),
@@ -1860,36 +2441,60 @@ class QmtSectorCompositeSource:
                         # 早期覆盖不足不能使整个当前序列失效；近期缺口仍会因后缀过短
                         # 失败关闭。裁剪后从统一基准重新连乘，避免跨缺口收益污染后缀。
                         grouped = grouped.iloc[-suffix_length:]
-                        rows: list[dict[str, object]] = []
-                        previous_close = 1000.0
-                        for date, item in grouped.iterrows():
-                            open_value = previous_close * float(item["open_ratio"])
-                            close_value = previous_close * float(item["close_ratio"])
-                            high_value = max(
-                                previous_close * float(item["high_ratio"]),
-                                open_value,
-                                close_value,
+                        close_ratios = grouped["close_ratio"].to_numpy(
+                            dtype=np.float64,
+                            copy=False,
+                        )
+                        close_values = np.multiply.accumulate(
+                            np.concatenate(
+                                (np.array([1000.0]), close_ratios)
                             )
-                            low_value = min(
-                                previous_close * float(item["low_ratio"]),
-                                open_value,
-                                close_value,
+                        )[1:]
+                        previous_closes = np.concatenate(
+                            (np.array([1000.0]), close_values[:-1])
+                        )
+                        open_values = previous_closes * grouped[
+                            "open_ratio"
+                        ].to_numpy(dtype=np.float64, copy=False)
+                        high_values = np.maximum.reduce(
+                            (
+                                previous_closes
+                                * grouped["high_ratio"].to_numpy(
+                                    dtype=np.float64,
+                                    copy=False,
+                                ),
+                                open_values,
+                                close_values,
                             )
-                            rows.append(
+                        )
+                        low_values = np.minimum.reduce(
+                            (
+                                previous_closes
+                                * grouped["low_ratio"].to_numpy(
+                                    dtype=np.float64,
+                                    copy=False,
+                                ),
+                                open_values,
+                                close_values,
+                            )
+                        )
+                        result = (
+                            pd.DataFrame(
                                 {
                                     "code": sector_id,
-                                    "date": date,
-                                    "open": open_value,
-                                    "high": high_value,
-                                    "low": low_value,
-                                    "close": close_value,
-                                    "volume": float(item["member_count"]),
-                                    "member_mask": int(item["member_mask"]),
+                                    "date": grouped.index.to_numpy(),
+                                    "open": open_values,
+                                    "high": high_values,
+                                    "low": low_values,
+                                    "close": close_values,
+                                    "volume": grouped[
+                                        "member_count"
+                                    ].to_numpy(dtype=np.float64),
+                                    "member_mask": grouped[
+                                        "member_mask"
+                                    ].to_numpy(dtype=np.int64),
                                 }
                             )
-                            previous_close = close_value
-                        result = (
-                            pd.DataFrame(rows)
                             .tail(request_bars)
                             .reset_index(drop=True)
                         )
@@ -1932,10 +2537,13 @@ class QmtSectorCompositeSource:
 
         if not result.empty:
             with self._lock:
-                self._cache[cache_key] = (
-                    bucket,
-                    membership_revision,
-                    _copy_frame(result),
+                self._remember_frame(
+                    cache_key,
+                    (
+                        bucket,
+                        membership_revision,
+                        _copy_frame(result),
+                    ),
                 )
         return _copy_frame(result)
 
@@ -1974,8 +2582,8 @@ def _daily_rows(
         "Asia/Shanghai"
     )
     prices = frame.loc[:, list(_PRICE_FIELDS)]
-    finite = frame.loc[:, list(_DAILY_FIELDS)].map(
-        lambda value: math.isfinite(float(value))
+    finite = np.isfinite(
+        frame.loc[:, list(_DAILY_FIELDS)].to_numpy(dtype=np.float64)
     ).all(axis=1)
     valid = (
         finite
@@ -3179,6 +3787,7 @@ class QmtSectorStrengthSource:
 __all__ = (
     "QMT_CURRENT_A_SHARE_SECTOR",
     "QMT_GICS3_CATALOG_SOURCE",
+    "QMT_GICS_HIERARCHY_CATALOG_SOURCE",
     "QMT_GICS3_COMPOSITE_ADJUSTMENT",
     "QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT",
     "QMT_GICS3_COMPOSITE_MEMBER_MASK_CONTRACT",
@@ -3192,8 +3801,10 @@ __all__ = (
     "QmtSectorStrengthSource",
     "QMT_GICS3_COMPOSITE_PROVIDER",
     "QmtSectorCompositeSource",
+    "build_qmt_gics_hierarchy_sector_catalog",
     "build_qmt_gics3_sector_catalog",
     "build_qmt_gics3_sector_catalog_from_local_files",
+    "qmt_gics_hierarchy_catalog_revision",
     "qmt_sector_composite_fact_producer_revision",
     "qmt_sector_daily_fact_producer_revision",
     "qmt_trading_session_evidence",

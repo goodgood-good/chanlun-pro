@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
 from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
 import chanlun.decision_support.trading_system.screening_runtime as screening_runtime_module
+from chanlun.exchange import qmt_screening_sector_source as qmt_sector_source
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeDataUnavailable,
     HigherTimeframeGateBundle,
@@ -18,6 +21,7 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     HumanAssistedDecisionCore,
 )
+import chanlun.decision_support.trading_system.live_human_review as live_review_module
 from chanlun.decision_support.trading_system.sector_strength import (
     SectorStrengthEvidence,
     build_horizontal_sector_strength_batch,
@@ -35,6 +39,7 @@ from tests.trading_system.strict_helpers import (
     strict_point,
 )
 from cl_app.services import trading_screening_gateway as gateway_module
+from cl_app.services import trading_screening as screening_module
 from cl_app.services.trading_screening_gateway import (
     FrameStructureAnalysis,
     NativeTradingDataGateway,
@@ -195,7 +200,96 @@ def test_analyzer_uses_canonical_recursive_screening_builder(monkeypatch) -> Non
     assert builder_calls[0]["as_of"] == closed_at
     assert analysis.direction == "neutral"
     assert tuple(point.point_type for point in analysis.confirmed_points) == ("1buy",)
+    assert tuple(point.point_type for point in analysis.setup_confirmed_points) == (
+        "1buy",
+    )
     assert tuple(point.point_type for point in analysis.provisional_points) == ("2buy",)
+
+
+def test_one_minute_analysis_keeps_confirmed_history_for_segment_recovery(
+    monkeypatch,
+) -> None:
+    closed_at = datetime.fromisoformat("2026-07-20T10:01:00+08:00")
+    historical = confirmed_point(
+        "1buy",
+        frequency="1m",
+        anchor=9.9,
+    )
+    evidence = strict_evidence_result(
+        code="SZ.000001",
+        source_frequency="1m",
+        source_closed_at=closed_at,
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "screening_evidence_from_frame",
+        lambda **_kwargs: evidence,
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "extract_current_confirmed_points",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: (historical,),
+    )
+
+    analysis = analyze_native_frame(
+        code="SZ.000001",
+        frequency="1m",
+        frame=_frame(),
+        as_of=closed_at,
+    )
+
+    assert analysis.confirmed_points == ()
+    assert analysis.effective_segment_difference_points == (historical,)
+
+
+def test_five_minute_setup_ledger_keeps_latest_completed_and_unfinished_points(
+    monkeypatch,
+) -> None:
+    closed_at = datetime.fromisoformat("2026-07-20T10:01:00+08:00")
+    confirmed = strict_point(
+        "3buy",
+        available_at=closed_at - timedelta(minutes=30),
+    )
+    approaching = strict_point(
+        "1buy",
+        status=StrictPointStatus.APPROACHING,
+        available_at=closed_at,
+    )
+    evidence = strict_evidence_result(
+        code="SZ.000001",
+        source_frequency="5m",
+        source_closed_at=closed_at,
+        confirmed_points=(confirmed,),
+        approaching_points=(approaching,),
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "screening_evidence_from_frame",
+        lambda **_kwargs: evidence,
+    )
+
+    analysis = analyze_native_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=_frame(),
+        as_of=closed_at,
+    )
+
+    assert [point.point_type for point in analysis.confirmed_points] == ["3buy"]
+    assert [point.point_type for point in analysis.setup_confirmed_points] == [
+        "3buy"
+    ]
+    assert [point.point_type for point in analysis.provisional_points] == ["1buy"]
+    assert analysis.provisional_points[0].terminal_segment is not None
+    assert (
+        analysis.provisional_points[0].terminal_segment.role
+        == "latest_unfinished"
+    )
 
 
 def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
@@ -417,6 +511,160 @@ def test_warmup_requires_same_active_tail_under_shorter_left_history(
     assert result.warmup_converged is False
     assert result.warmup_reason_codes == ("WARMUP_TAIL_DIVERGED",)
     assert result.warmup_difference_codes == ("WARMUP_DIRECTION_CHANGED",)
+
+
+def test_warmup_signature_keeps_an_old_anchor_when_it_is_still_latest_completed(
+) -> None:
+    point = confirmed_point("3buy")
+    point = replace(
+        point,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id="segment:latest-completed",
+            source_kind="segment",
+            direction="down",
+            state="locked",
+            market_start=point.anchor_at - timedelta(days=8),
+            market_end=point.anchor_at,
+            available_at=point.available_at,
+        ),
+    )
+    analysis = FrameStructureAnalysis(
+        closed_at=NOW,
+        direction="up",
+        confirmed_points=(point,),
+        setup_confirmed_points=(point,),
+        provisional_points=(),
+    )
+
+    signature = gateway_module._warmup_tail_signature(
+        analysis,
+        not_before=point.anchor_at + timedelta(days=1),
+    )
+
+    assert len(signature[1]) == 1
+    lane, _observed_at, semantic = signature[1][0]
+    assert lane == ("3buy", "formal", 0, "latest_completed")
+    assert semantic[-1][0] == "latest_completed"
+
+
+def test_five_minute_trade_warmup_ignores_recursive_context_lane_differences(
+    monkeypatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range(
+                "2026-01-01T09:35:00+08:00",
+                periods=1200,
+                freq="5min",
+            ),
+            "open": 10.0,
+            "high": 10.2,
+            "low": 9.8,
+            "close": 10.1,
+            "volume": 1000.0,
+        }
+    )
+    trade_point = confirmed_point("1buy", frequency="5m", level=0)
+    recursive_context_point = confirmed_point(
+        "3sell",
+        frequency="5m",
+        level=1,
+        anchor=8.8,
+    )
+
+    def same_trade_level_with_extra_recursive_context(**kwargs):
+        points = (
+            (trade_point, recursive_context_point)
+            if len(kwargs["frame"]) == 1200
+            else (trade_point,)
+        )
+        return FrameStructureAnalysis(
+            closed_at=kwargs["as_of"],
+            direction="down" if len(points) == 2 else "up",
+            confirmed_points=points,
+            setup_confirmed_points=points,
+            provisional_points=(),
+        )
+
+    monkeypatch.setattr(
+        gateway_module,
+        "analyze_native_frame",
+        same_trade_level_with_extra_recursive_context,
+    )
+
+    result = analyze_native_frame_with_warmup(
+        code="SZ.000001",
+        frequency="5m",
+        frame=frame,
+        as_of=NOW,
+    )
+
+    assert result.warmup_converged is False
+    assert result.warmup_reason_codes == ("WARMUP_TAIL_DIVERGED",)
+    assert result.warmup_difference_codes == (
+        "WARMUP_DIRECTION_CHANGED",
+        "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+    )
+    assert result.trade_level_warmup_converged is True
+    assert result.trade_level_warmup_reason_codes == ("WARMUP_TAIL_STABLE",)
+    assert result.trade_level_warmup_difference_codes == ()
+
+
+def test_five_minute_warmup_still_blocks_trade_level_point_differences(
+    monkeypatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range(
+                "2026-01-01T09:35:00+08:00",
+                periods=1200,
+                freq="5min",
+            ),
+            "open": 10.0,
+            "high": 10.2,
+            "low": 9.8,
+            "close": 10.1,
+            "volume": 1000.0,
+        }
+    )
+    buy = confirmed_point("1buy", frequency="5m", level=0)
+    sell = confirmed_point("1sell", frequency="5m", level=0)
+
+    def different_trade_level(**kwargs):
+        point = buy if len(kwargs["frame"]) == 1200 else sell
+        return FrameStructureAnalysis(
+            closed_at=kwargs["as_of"],
+            direction="neutral",
+            confirmed_points=(point,),
+            setup_confirmed_points=(point,),
+            provisional_points=(),
+        )
+
+    monkeypatch.setattr(
+        gateway_module,
+        "analyze_native_frame",
+        different_trade_level,
+    )
+
+    result = analyze_native_frame_with_warmup(
+        code="SZ.000001",
+        frequency="5m",
+        frame=frame,
+        as_of=NOW,
+    )
+
+    assert result.warmup_converged is False
+    assert result.warmup_reason_codes == ("WARMUP_TAIL_DIVERGED",)
+    assert result.warmup_difference_codes == (
+        "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+    )
+    assert result.trade_level_warmup_converged is False
+    assert result.trade_level_warmup_reason_codes == ("WARMUP_TAIL_DIVERGED",)
+    assert result.trade_level_warmup_difference_codes == (
+        "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+    )
 
 
 def test_warmup_envelope_detects_non_monotonic_prefix_stability(
@@ -901,6 +1149,171 @@ def _gateway(
     return gateway, analyzer, stock_exchange
 
 
+def test_realtime_incremental_refresh_falls_back_when_local_warmup_is_short() -> None:
+    gateway, _analyzer, exchange = _gateway()
+    observed_at = datetime.fromisoformat("2026-07-20T10:02:00+08:00")
+
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=observed_at,
+        fast_incremental_refresh=True,
+    )
+
+    assert len(exchange.calls) == 2
+    assert exchange.calls[0][2]["incremental_refresh_days"] == 14
+    assert "incremental_refresh_days" not in exchange.calls[1][2]
+
+
+class StableIncrementalWindowExchange:
+    supports_stable_incremental_window = True
+
+    def __init__(self) -> None:
+        dates = pd.date_range(
+            "2026-07-20T09:35:00+08:00",
+            periods=5,
+            freq="5min",
+        )
+        self.frame = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.00, 10.02, 10.01, 10.03, 10.04],
+                "high": [10.10, 10.12, 10.11, 10.13, 10.14],
+                "low": [9.90, 9.92, 9.91, 9.93, 9.94],
+                "close": [10.02, 10.01, 10.03, 10.04, 10.05],
+                "volume": [100.0] * 5,
+            }
+        )
+        self.frame.attrs.update(
+            structure_price_quantum="0.01",
+            price_basis_revision="qmt-front-ratio-stable-window",
+            price_basis_provider="qmt",
+            price_basis_adjustment="front_ratio",
+        )
+        self.visible_count = 4
+        self.calls: list[dict[str, object]] = []
+
+    def klines(
+        self,
+        _code: str,
+        _frequency: str,
+        start_date: str | None = None,
+        *,
+        args: dict[str, object],
+    ) -> pd.DataFrame:
+        self.calls.append({"start_date": start_date, "args": dict(args)})
+        frame = self.frame.iloc[: self.visible_count].copy(deep=True)
+        frame.attrs = dict(self.frame.attrs)
+        if start_date is not None:
+            frame = frame.loc[
+                frame["date"] >= pd.Timestamp(start_date, tz="Asia/Shanghai")
+            ].copy()
+            frame.attrs = dict(self.frame.attrs)
+        elif "req_counts" in args:
+            frame = frame.tail(int(args["req_counts"])).copy()
+            frame.attrs = dict(self.frame.attrs)
+        return frame.reset_index(drop=True)
+
+
+def test_hot_qmt_runtime_uses_bounded_stable_left_window_for_real_incremental_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    exchange = StableIncrementalWindowExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    first_at = datetime.fromisoformat("2026-07-20T09:50:00+08:00")
+    second_at = datetime.fromisoformat("2026-07-20T09:55:00+08:00")
+
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=first_at,
+        fast_incremental_refresh=True,
+    )
+    exchange.visible_count = 5
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=second_at,
+        fast_incremental_refresh=True,
+    )
+
+    assert exchange.calls[0]["start_date"] is None
+    assert exchange.calls[0]["args"]["req_counts"] == 4
+    assert exchange.calls[1]["start_date"] == "2026-07-20 09:35:00"
+    assert "req_counts" not in exchange.calls[1]["args"]
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["stable_incremental_window_request.5m"] == 1
+    assert counters["structure_full_incremental.5m"] == 1
+    assert counters["structure_suffix_incremental.5m"] == 1
+
+
+def test_serialized_one_minute_runtime_keeps_stable_window_after_l1_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "1m": 2},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 1, "5m": 8},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 4},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY",
+        {"1m": 16 * 1024 * 1024},
+    )
+    exchange = StableIncrementalWindowExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    first_at = datetime.fromisoformat("2026-07-20T09:50:00+08:00")
+    second_at = datetime.fromisoformat("2026-07-20T09:55:00+08:00")
+
+    for code in ("SZ.000001", "SZ.000002"):
+        gateway._load_analysis(
+            exchange=exchange,
+            code=code,
+            analysis_code=code,
+            frequency="1m",
+            as_of=first_at,
+            fast_incremental_refresh=True,
+        )
+    exchange.visible_count = 5
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="1m",
+        as_of=second_at,
+        fast_incremental_refresh=True,
+    )
+
+    assert exchange.calls[-1]["start_date"] == "2026-07-20 09:35:00"
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["serialized_runtime_cache_hit.1m"] == 1
+    assert counters["structure_full_incremental.1m"] == 1
+    assert counters["structure_suffix_incremental.1m"] == 1
+
+
 def test_native_gateway_attaches_horizontal_strength_and_rank() -> None:
     calls = []
 
@@ -1060,6 +1473,161 @@ def test_structure_bundle_attaches_and_enforces_mwd_risk_gates() -> None:
     assert calls[0]["sector_id"] == sector.sector_id
     assert calls[0]["sector_name"] == sector.sector_name
     assert calls[0]["sector_members"] == ("SH.600000", "SZ.000001")
+
+
+def test_structure_bundle_uses_trade_level_warmup_for_five_minute_gate() -> None:
+    class RecursiveContextDivergenceAnalyzer(RecordingAnalyzer):
+        def __call__(self, *, code, frequency, frame, as_of):
+            self.calls.append((code, frequency))
+            self.frames.append(frame.copy(deep=True))
+            if code != "SZ.000001" or frequency != "5m":
+                return FrameStructureAnalysis(
+                    closed_at=as_of,
+                    direction="neutral",
+                    confirmed_points=(),
+                    provisional_points=(),
+                )
+            point = confirmed_point("1buy", frequency="5m", level=0)
+            return FrameStructureAnalysis(
+                closed_at=as_of,
+                direction="down",
+                confirmed_points=(point,),
+                setup_confirmed_points=(point,),
+                provisional_points=(),
+                warmup_converged=False,
+                warmup_reason_codes=("WARMUP_TAIL_DIVERGED",),
+                warmup_difference_codes=(
+                    "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+                ),
+                trade_level_warmup_converged=True,
+                trade_level_warmup_reason_codes=("WARMUP_TAIL_STABLE",),
+            )
+
+    gateway, _analyzer, _exchange = _gateway(
+        analyzer=RecursiveContextDivergenceAnalyzer()
+    )
+    [sector] = gateway.native_sector_assessments(as_of=NOW).assessments
+
+    bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
+
+    assert bundle.warmup_converged is True
+    assert dict(
+        (frequency, converged)
+        for frequency, converged, _full_count, _suffix_count
+        in bundle.warmup_by_frequency
+    )["5m"] is True
+    assert "5M:WARMUP_TAIL_STABLE" in bundle.warmup_reason_codes
+    assert "5M:WARMUP_TAIL_DIVERGED" not in bundle.warmup_reason_codes
+    assert dict(bundle.warmup_difference_codes_by_frequency)["5m"] == ()
+
+
+def test_structure_bundle_keeps_trade_level_warmup_divergence_blocking() -> None:
+    class TradeLevelDivergenceAnalyzer(RecordingAnalyzer):
+        def __call__(self, *, code, frequency, frame, as_of):
+            self.calls.append((code, frequency))
+            self.frames.append(frame.copy(deep=True))
+            if code != "SZ.000001" or frequency != "5m":
+                return FrameStructureAnalysis(
+                    closed_at=as_of,
+                    direction="neutral",
+                    confirmed_points=(),
+                    provisional_points=(),
+                )
+            point = confirmed_point("1buy", frequency="5m", level=0)
+            return FrameStructureAnalysis(
+                closed_at=as_of,
+                direction="up",
+                confirmed_points=(point,),
+                setup_confirmed_points=(point,),
+                provisional_points=(),
+                warmup_converged=False,
+                warmup_reason_codes=("WARMUP_TAIL_DIVERGED",),
+                warmup_difference_codes=(
+                    "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+                ),
+                trade_level_warmup_converged=False,
+                trade_level_warmup_reason_codes=("WARMUP_TAIL_DIVERGED",),
+                trade_level_warmup_difference_codes=(
+                    "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+                ),
+            )
+
+    gateway, _analyzer, _exchange = _gateway(
+        analyzer=TradeLevelDivergenceAnalyzer()
+    )
+    [sector] = gateway.native_sector_assessments(as_of=NOW).assessments
+
+    bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
+
+    assert bundle.warmup_converged is False
+    assert dict(
+        (frequency, converged)
+        for frequency, converged, _full_count, _suffix_count
+        in bundle.warmup_by_frequency
+    )["5m"] is False
+    assert "5M:WARMUP_TAIL_DIVERGED" in bundle.warmup_reason_codes
+    assert dict(bundle.warmup_difference_codes_by_frequency)["5m"] == (
+        "WARMUP_ACTIVE_POINT_LANES_CHANGED",
+    )
+
+
+def test_sell_only_structure_skips_entry_only_mwd_provider() -> None:
+    class SellOnlyAnalyzer(RecordingAnalyzer):
+        def __call__(self, *, code, frequency, frame, as_of):
+            self.calls.append((code, frequency))
+            self.frames.append(frame.copy(deep=True))
+            return FrameStructureAnalysis(
+                closed_at=as_of,
+                direction="neutral",
+                confirmed_points=(),
+                provisional_points=(
+                    (provisional_point("2sell"),)
+                    if code == "SZ.000001" and frequency == "5m"
+                    else ()
+                ),
+            )
+
+    def entry_only_provider(**_kwargs):
+        raise AssertionError("sell-only structures must not build entry risk")
+
+    gateway, _analyzer, _exchange = _gateway(
+        analyzer=SellOnlyAnalyzer(),
+        higher_timeframe_provider=entry_only_provider,
+    )
+    [sector] = gateway.native_sector_assessments(as_of=NOW).assessments
+
+    bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
+
+    assert bundle.higher_timeframe_gates is not None
+    assert bundle.higher_timeframe_gates.market.gate == "UNRESOLVED"
+    assert bundle.higher_timeframe_gates.sector.gate == "UNRESOLVED"
+    assert bundle.higher_timeframe_gates.symbol.gate == "UNRESOLVED"
+    expected_reason = (
+        "HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY"
+    )
+    assert bundle.higher_timeframe_gates.market.reason_codes == (expected_reason,)
+    assert [point.point_type for point in bundle.five_points] == ["2sell"]
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["higher_timeframe_skipped.sell_only"] == 1
+
+    core = HumanAssistedDecisionCore(formal_selection_required=False)
+    [evaluated] = core.evaluate_symbol(bundle)
+    for attached_gates in (bundle.higher_timeframe_gates, None):
+        document = screening_module._signal_document(
+            evaluated,
+            previous_stage=None,
+            name="test",
+            current_price=10.0,
+            decision_core_id=core.contract_id,
+            selection_sources=(),
+            formal_selection_required=False,
+            higher_timeframe_gates=attached_gates,
+        )
+        assert live_review_module._risk_evidence_is_consistent(
+            document["higher_timeframe_risk"],
+            evidence_cutoff=evaluated.lifecycle.observed_at,
+            expected_symbol="SZ.000001",
+        )
 
 
 def test_structure_bundle_keeps_newer_1m_signal_but_freezes_mwd_cutoff() -> None:
@@ -1471,6 +2039,13 @@ def test_native_gateway_reuses_sector_analysis_when_closed_bar_is_unchanged() ->
         ("qmt-gics3:bank", "30m"),
         ("qmt-gics3:bank", "5m"),
     ]
+    performance = gateway.runtime_health_snapshot()["performance"]
+    assert performance["counters"]["analysis_cache_hit.30m"] == 1
+    assert performance["counters"]["analysis_cache_hit.5m"] == 1
+    assert performance["counters"]["analysis_cache_miss.30m"] == 1
+    assert performance["counters"]["analysis_cache_miss.5m"] == 1
+    assert performance["timings"]["frame_acquisition.30m"]["count"] == 2
+    assert performance["timings"]["structure_analysis.5m"]["count"] == 1
 
 
 def test_analysis_cache_invalidates_when_price_basis_revision_changes() -> None:
@@ -1544,6 +2119,292 @@ def test_analysis_cache_invalidates_when_sector_member_path_changes() -> None:
     assert tuple(analyzer.frames[1]["member_mask"]) == (2, 2)
 
 
+def test_native_gateway_large_caches_are_lru_bounded() -> None:
+    gateway, _analyzer, stock_exchange = _gateway()
+    capacity = gateway_module._ANALYSIS_CACHE_CAPACITY_BY_FREQUENCY["5m"]
+
+    for index in range(capacity + 5):
+        code = f"SZ.{index:06d}"
+        gateway._load_analysis(
+            exchange=stock_exchange,
+            code=code,
+            analysis_code=code,
+            frequency="5m",
+            as_of=NOW,
+        )
+
+    assert len(gateway._analysis_cache) == capacity
+    assert ("SZ.000000", "5m") not in gateway._analysis_cache
+    health = gateway.runtime_health_snapshot()
+    assert health["analysis_cache_entries"] == capacity
+    assert health["analysis_cache_entries_by_frequency"]["5m"] == capacity
+    assert health["analysis_cache_capacities"]["30m"] == 4096
+    assert health["analysis_cache_capacities"]["1m"] == 1024
+    assert health["higher_timeframe_cache_capacity"] == 4096
+
+
+def test_native_gateway_runtime_state_hotset_is_lru_bounded() -> None:
+    gateway, _analyzer, _stock_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+
+    for index in range(12):
+        gateway._analyze_frame(
+            code=f"SZ.{index:06d}",
+            frequency="1m",
+            frame=_frame(),
+            as_of=NOW,
+        )
+
+    cache = gateway._runtime_states_by_frequency["1m"]
+    assert len(cache) == 8
+    assert "SZ.000000" not in cache
+    assert tuple(cache) == tuple(f"SZ.{index:06d}" for index in range(4, 12))
+
+
+def test_native_gateway_restores_evicted_one_minute_runtime_from_bounded_l2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "1m": 2},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 1, "5m": 8},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 4},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY",
+        {"1m": 16 * 1024 * 1024},
+    )
+    gateway, _analyzer, _stock_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+
+    for code in ("SZ.000001", "SZ.000002", "SZ.000001"):
+        gateway._analyze_frame(
+            code=code,
+            frequency="1m",
+            frame=_frame(),
+            as_of=NOW,
+        )
+
+    states = gateway._runtime_states_by_frequency["1m"]["SZ.000001"]
+    assert states.full.last_update_incremental is True
+    assert states.suffix.last_update_incremental is True
+    health = gateway.runtime_health_snapshot()
+    assert health["runtime_cache_role"] == "shared"
+    assert health["serialized_runtime_state_entries"]["1m"] == 1
+    assert health["serialized_runtime_state_bytes"]["1m"] > 0
+    counters = health["performance"]["counters"]
+    assert counters["serialized_runtime_cache_hit.1m"] == 1
+    assert counters["runtime_state_cache_hit.1m"] == 1
+
+
+def test_candidate_disk_runtime_cache_survives_gateway_recreation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR",
+        str(tmp_path / "runtime-state-cache"),
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY",
+        "ab" * 32,
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY",
+        "a" * 40 + ".tree." + "b" * 24,
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_SCOPE",
+        "application_source_revision",
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 8, "5m": 1},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"5m": 4},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY",
+        {"5m": 16 * 1024 * 1024},
+    )
+    first, _analyzer, _stock_exchange = _gateway()
+    first._analyzer = gateway_module.analyze_native_frame_with_warmup
+    for code in ("SZ.000001", "SZ.000002"):
+        first._analyze_frame(
+            code=code,
+            frequency="5m",
+            frame=_frame(),
+            as_of=NOW,
+        )
+
+    first_health = first.runtime_health_snapshot()
+    assert first_health["disk_runtime_state_cache"]["entry_count"] == 1
+    assert first_health["disk_runtime_state_cache"][
+        "authenticated_before_deserialization"
+    ] is True
+    assert first_health["disk_runtime_state_cache"][
+        "application_source_revision_scoped"
+    ] is True
+    assert first_health["disk_runtime_state_cache"][
+        "web_lifecycle_scoped"
+    ] is False
+
+    restarted, _analyzer, _stock_exchange = _gateway()
+    restarted._analyzer = gateway_module.analyze_native_frame_with_warmup
+    restarted._analyze_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=_frame(),
+        as_of=NOW,
+    )
+
+    states = restarted._runtime_states_by_frequency["5m"]["SZ.000001"]
+    assert states.full.last_update_incremental is True
+    assert states.suffix.last_update_incremental is True
+    health = restarted.runtime_health_snapshot()
+    assert health["performance"]["counters"]["disk_runtime_cache_hit.5m"] == 1
+    assert health["disk_runtime_state_cache"]["counters"]["hit"] == 1
+
+
+def test_candidate_disk_runtime_cache_rejects_other_source_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "runtime-state-cache"
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR",
+        str(cache_root),
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY",
+        "ef" * 32,
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY",
+        "a" * 40 + ".tree." + "b" * 24,
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_SCOPE",
+        "application_source_revision",
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 8, "5m": 1},
+    )
+    first, _analyzer, _stock_exchange = _gateway()
+    first._analyzer = gateway_module.analyze_native_frame_with_warmup
+    for code in ("SZ.000001", "SZ.000002"):
+        first._analyze_frame(
+            code=code,
+            frequency="5m",
+            frame=_frame(),
+            as_of=NOW,
+        )
+
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY",
+        "c" * 40 + ".tree." + "d" * 24,
+    )
+    restarted, _analyzer, _stock_exchange = _gateway()
+    restarted._analyzer = gateway_module.analyze_native_frame_with_warmup
+    restarted._analyze_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=_frame(),
+        as_of=NOW,
+    )
+
+    states = restarted._runtime_states_by_frequency["5m"]["SZ.000001"]
+    assert states.full.last_update_incremental is False
+    health = restarted.runtime_health_snapshot()
+    assert health["performance"]["counters"]["disk_runtime_cache_miss.5m"] == 1
+    assert health["disk_runtime_state_cache"]["counters"][
+        "validation_failure"
+    ] == 1
+
+
+def test_candidate_disk_runtime_cache_rejects_tampering_before_pickle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "runtime-state-cache"
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR",
+        str(cache_root),
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY",
+        "cd" * 32,
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 8, "5m": 1},
+    )
+    gateway, _analyzer, _stock_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    for code in ("SZ.000001", "SZ.000002"):
+        gateway._analyze_frame(
+            code=code,
+            frequency="5m",
+            frame=_frame(),
+            as_of=NOW,
+        )
+
+    [cache_file] = list(cache_root.glob("5m/*.clrt"))
+    damaged = bytearray(cache_file.read_bytes())
+    damaged[-1] ^= 0x01
+    cache_file.write_bytes(damaged)
+
+    restarted, _analyzer, _stock_exchange = _gateway()
+    restarted._analyzer = gateway_module.analyze_native_frame_with_warmup
+    restarted._analyze_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=_frame(),
+        as_of=NOW,
+    )
+
+    states = restarted._runtime_states_by_frequency["5m"]["SZ.000001"]
+    assert states.full.last_update_incremental is False
+    health = restarted.runtime_health_snapshot()
+    assert health["performance"]["counters"]["disk_runtime_cache_miss.5m"] == 1
+    assert health["disk_runtime_state_cache"]["counters"][
+        "validation_failure"
+    ] == 1
+
+
 def test_invalid_native_thirty_is_rebuilt_from_completed_same_source_five() -> None:
     exchange = InvalidNativeThirtyExchange()
     analyzer = RecordingAnalyzer()
@@ -1600,6 +2461,25 @@ def test_invalid_native_thirty_fails_closed_when_five_minute_evidence_is_invalid
         )
 
 
+def test_invalid_stock_history_reraises_original_validation_error() -> None:
+    invalid = _frame()
+    invalid.loc[0, "high"] = 1.0
+    exchange = RecordingExchange(invalid)
+    gateway, _analyzer, _sector_exchange = _gateway()
+
+    with pytest.raises(
+        ValueError,
+        match="kline frame contains invalid market facts",
+    ):
+        gateway._load_analysis(
+            exchange=exchange,
+            code="SH.688765",
+            analysis_code="SH.688765",
+            frequency="5m",
+            as_of=NOW,
+        )
+
+
 def test_native_gateway_builds_four_physical_period_bundle_and_keeps_watch_scopes() -> (
     None
 ):
@@ -1651,6 +2531,30 @@ def test_native_gateway_monitor_scope_keeps_only_qmt_stock_and_etf() -> None:
     assert progress == []
 
 
+def test_native_gateway_honors_isolated_worker_etf_type_without_industry_block() -> None:
+    gateway, _analyzer, stock_exchange = _gateway()
+    [stock_sector] = gateway.native_sector_assessments(as_of=NOW).assessments
+
+    bundle = gateway.structure_bundle(
+        "SH.513100",
+        as_of=NOW,
+        sector=replace(
+            stock_sector,
+            eligible=False,
+            hard_block=True,
+            regime="hostile",
+        ),
+        instrument_type="etf_cn",
+    )
+
+    assert bundle.selection_path == "ETF_PROXY"
+    assert bundle.sector.sector_id == "etf-proxy:SH.513100"
+    assert bundle.sector.eligible is True
+    assert bundle.sector.hard_block is False
+    assert bundle.sector.reason_codes == ("ETF_PROXY_SECTOR_NOT_REQUIRED",)
+    assert stock_exchange.type_calls == []
+
+
 def test_native_gateway_retries_unresolved_instrument_type() -> None:
     gateway, _analyzer, stock_exchange = _gateway()
     responses = iter(("unresolved_cn", "stock_cn"))
@@ -1685,6 +2589,41 @@ def test_native_gateway_tick_probe_skips_qmt_when_market_is_closed() -> None:
         "real_account_access": False,
         "real_order_transport": False,
     }
+
+
+def test_native_gateway_display_quotes_keep_last_snapshot_when_market_is_closed() -> None:
+    gateway, _analyzer, stock_exchange = _gateway()
+    calls: list[list[str]] = []
+
+    def ticks(codes: list[str]) -> dict[str, Tick]:
+        calls.append(list(codes))
+        return {
+            "SH.513100": Tick(
+                code="SH.513100",
+                last=1.672,
+                buy1=1.671,
+                sell1=1.672,
+                high=1.684,
+                low=1.655,
+                open=1.66,
+                volume=1000.0,
+                rate=0.72,
+            )
+        }
+
+    stock_exchange.ticks = ticks  # type: ignore[attr-defined]
+
+    batch = gateway.display_quote_snapshot(("SH.513100",))
+
+    assert batch.market_open is False
+    assert batch.tick_data_used is True
+    assert batch.ticks()["SH.513100"].last == 1.672
+    assert batch.ticks()["SH.513100"].rate == 0.72
+    assert calls == [["SH.513100"]]
+
+    # 交易就绪探针仍遵守原有边界：休市不读取逐笔，也不会把展示快照当实时信号。
+    assert gateway.tick_probe("SH.513100")["usable"] is False
+    assert calls == [["SH.513100"]]
 
 
 def test_native_gateway_realtime_ticks_returns_only_finite_requested_rows() -> None:
@@ -1724,6 +2663,36 @@ def test_native_gateway_realtime_ticks_returns_only_finite_requested_rows() -> N
     assert batch.quotes[0].rate == 0.0
     assert batch.real_account_access is False
     assert batch.real_order_transport is False
+
+
+def test_native_gateway_status_requires_exact_same_session_instrument_fact() -> None:
+    gateway, _analyzer, _stock_exchange = _gateway()
+    calls: list[str] = []
+
+    def instrument_detail(native_code: str) -> dict[str, object]:
+        calls.append(native_code)
+        return {
+            "TradingDay": (
+                "20260720" if native_code == "513100.SH" else "20260717"
+            ),
+            "InstrumentStatus": 2,
+            "IsTrading": False,
+            "InstrumentName": "测试证券",
+        }
+
+    gateway._instrument_detail_provider = instrument_detail  # noqa: SLF001
+
+    batch = gateway.current_session_instrument_statuses(
+        ("SZ.301004", "SH.513100"),
+        session=date(2026, 7, 20),
+    )
+
+    assert batch.requested_codes == ("SH.513100", "SZ.301004")
+    assert tuple(fact.code for fact in batch.facts) == ("SH.513100",)
+    assert batch.facts[0].suspended is True
+    assert batch.real_account_access is False
+    assert batch.real_order_transport is False
+    assert calls == ["513100.SH", "301004.SZ"]
 
 
 def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None:
@@ -1844,9 +2813,123 @@ def test_native_gateway_skips_stock_one_minute_analysis_without_current_setup() 
     ] == ["5m"]
 
 
+def test_native_gateway_does_not_expand_a_late_lock_for_an_expired_anchor() -> None:
+    gateway, _analyzer, _sector_exchange = _gateway()
+    delayed = confirmed_point(
+        "3sell",
+        anchor=18.89,
+        stop=24.76,
+        center_zd=24.76,
+        center_zg=27.04,
+        minutes_after=-(27 * 24 * 60),
+        available_minutes_after=27 * 24 * 60,
+    )
+    delayed = replace(delayed, confirmed_at=delayed.available_at)
+    analysis = FrameStructureAnalysis(
+        closed_at=NOW,
+        direction="up",
+        confirmed_points=(delayed,),
+        provisional_points=(),
+    )
+
+    assert delayed.available_at <= NOW
+    assert gateway._has_current_five_minute_setup(analysis) is False
+    assert gateway._has_current_five_minute_buy_setup(analysis) is False
+
+
+def test_native_gateway_keeps_live_formed_candidate_during_lock_wait() -> None:
+    gateway, _analyzer, _sector_exchange = _gateway()
+    formed = replace(
+        provisional_point("3buy"),
+        candidate_id="candidate:SZ.000001:3buy:live-lock-wait",
+        anchor_at=NOW - timedelta(days=5),
+        observed_at=NOW,
+        evidence_codes=(
+            "unfinished_segment_participates",
+            "provisional_center_completion",
+            "core_boundary_held",
+        ),
+    )
+    analysis = FrameStructureAnalysis(
+        closed_at=NOW,
+        direction="up",
+        confirmed_points=(),
+        provisional_points=(formed,),
+    )
+
+    assert gateway._has_current_five_minute_setup(analysis) is True
+    assert gateway._has_current_five_minute_buy_setup(analysis) is True
+
+
+def test_native_gateway_buy_pruning_uses_latest_formed_family_direction() -> None:
+    gateway, _analyzer, _sector_exchange = _gateway()
+    old_buy = confirmed_point(
+        "3buy",
+        minutes_after=-(2 * 24 * 60),
+        center_id="old-buy-center",
+    )
+    formed_sell = replace(
+        provisional_point("3sell"),
+        candidate_id="candidate:SZ.000001:3sell:new-frontier",
+        observed_at=NOW,
+        evidence_codes=(
+            "unfinished_segment_participates",
+            "provisional_center_completion",
+            "core_boundary_held",
+        ),
+    )
+    analysis = FrameStructureAnalysis(
+        closed_at=NOW,
+        direction="down",
+        confirmed_points=(old_buy,),
+        provisional_points=(formed_sell,),
+    )
+
+    assert gateway._has_current_five_minute_setup(analysis) is True
+    assert gateway._has_current_five_minute_buy_setup(analysis) is False
+
+
 def test_native_gateway_rejects_synthetic_sector_catalog() -> None:
     gateway, _analyzer, _sector_exchange = _gateway()
     gateway._sector_provider = lambda: {"source": "synthetic", "sectors": []}
 
     with pytest.raises(ValueError, match="QMT GICS3"):
         gateway.native_sector_assessments(as_of=NOW)
+
+
+def test_native_gateway_preserves_validated_gics4_parent_relations() -> None:
+    gateway, _analyzer, _sector_exchange = _gateway()
+    catalog = qmt_sector_source._hierarchy_catalog_document(
+        captures=[
+            (
+                "GICS3",
+                "GICS3商业银行",
+                "商业银行",
+                ["600000.SH", "000001.SZ"],
+            ),
+            (
+                "GICS4",
+                "GICS4股份制银行",
+                "股份制银行",
+                ["600000.SH", "000001.SZ"],
+            ),
+        ],
+        captured_at=NOW,
+        capture_transport="TEST",
+        eligible_member_codes=frozenset({"SH.600000", "SZ.000001"}),
+    )
+    gateway._sector_provider = lambda: catalog
+
+    batch = gateway.native_sector_assessments(as_of=NOW)
+
+    assert batch.discovered_count == 2
+    assert batch.completed_count == 2
+    assert len(batch.parent_relations) == 1
+    [(child_id, parent_id)] = batch.parent_relations
+    assert child_id.startswith("qmt-gics4:")
+    assert parent_id.startswith("qmt-gics3:")
+    assert {item.sector_id for item in batch.assessments} == {
+        child_id,
+        parent_id,
+    }
+    assert gateway.members()[child_id] == ("SH.600000", "SZ.000001")

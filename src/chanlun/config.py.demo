@@ -141,7 +141,7 @@ TQ_SP_NAME = 'simnow'
 TQ_SP_ACCOUNT = ''
 TQ_SP_PWD = ''
 
-# 币安交易所配置
+# 币安私有账户/交易配置；仅展示现货公共行情时无需填写
 BINANCE_APIKEY = ''
 BINANCE_SECRET = ''
 

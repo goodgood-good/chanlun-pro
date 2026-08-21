@@ -1226,15 +1226,88 @@ def test_review_priority_is_a_transparent_ordering_rule() -> None:
         sector_risk_gate="GREEN",
         symbol_risk_gate="GREEN",
         warning_count=0,
-    ) == 95
-    assert review_priority(
+        position_status="RECOMMENDED",
+        side="buy",
+        lifecycle_stage="triggered",
+    ) == 85
+    rich_diagnostics = review_priority(
         confidence="LOW",
         exact_green=False,
         market_risk_gate="AMBER",
         sector_risk_gate="AMBER",
         symbol_risk_gate="AMBER",
         warning_count=20,
-    ) == 0
+        position_status="NOT_ACTIONABLE",
+        side="buy",
+        lifecycle_stage="triggered",
+    )
+    assert rich_diagnostics == review_priority(
+        confidence="LOW",
+        exact_green=False,
+        market_risk_gate="AMBER",
+        sector_risk_gate="AMBER",
+        symbol_risk_gate="AMBER",
+        warning_count=0,
+        position_status="NOT_ACTIONABLE",
+        side="buy",
+        lifecycle_stage="triggered",
+    ) == 36
+
+
+def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None:
+    common = {
+        "confidence": "LOW",
+        "exact_green": False,
+        "market_risk_gate": "UNRESOLVED",
+        "sector_risk_gate": "UNRESOLVED",
+        "symbol_risk_gate": "UNRESOLVED",
+        "warning_count": 50,
+        "lifecycle_stage": "triggered",
+    }
+    assert review_priority(
+        **common,
+        position_status="BLOCKED",
+        side="buy",
+    ) <= 19
+    structural_sell = review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+        fresh_signal=True,
+    )
+    assert 80 <= structural_sell <= 89
+    manual_attention_sell = review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+        selection_sources=("MANUAL_ATTENTION_MONITOR",),
+        fresh_signal=True,
+    )
+    assert manual_attention_sell >= 90
+    assert manual_attention_sell > structural_sell
+    # 旧归档来源迁移为同一人工关注语义，不能再被解释成真实账户事实。
+    assert review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+        selection_sources=("VIRTUAL_HOLDING_MONITOR",),
+        fresh_signal=True,
+    ) >= 90
+    stale_sell = review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+        selection_sources=("MANUAL_ATTENTION_MONITOR",),
+        fresh_signal=False,
+    )
+    unknown_age_sell = review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+        selection_sources=("MANUAL_ATTENTION_MONITOR",),
+    )
+    assert 40 <= stale_sell <= 69
+    assert unknown_age_sell == stale_sell
 
 
 def test_event_study_uses_only_complete_sessions_after_review_date() -> None:

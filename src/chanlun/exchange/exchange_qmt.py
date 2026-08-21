@@ -36,6 +36,9 @@ class ExchangeQMT(Exchange):
     """QMT（xtquant）沪深 A 股行情适配器。"""
 
     kline_time_label = "end"
+    # 实时严格结构可以用显式 start_date 固定一代运行状态的左边界。调用方在
+    # 这种模式下不再传 req_counts，避免“最新 N 根”每分钟左移并击穿增量前缀。
+    supports_stable_incremental_window = True
 
     def __init__(self):
         xtdata.enable_hello = False
@@ -408,6 +411,7 @@ class ExchangeQMT(Exchange):
                 "research_exact_end",
                 "dividend_type",
                 "skip_download",
+                "incremental_refresh_days",
             }
             if unknown_args:
                 raise ValueError(f"unsupported QMT K-line args: {sorted(unknown_args)}")
@@ -417,6 +421,13 @@ class ExchangeQMT(Exchange):
                 raise ValueError("req_counts must be a positive exact int")
             if "skip_download" in args and type(args["skip_download"]) is not bool:
                 raise ValueError("skip_download must be an exact bool")
+            if "incremental_refresh_days" in args and (
+                type(args["incremental_refresh_days"]) is not int
+                or not 1 <= args["incremental_refresh_days"] <= 60
+            ):
+                raise ValueError(
+                    "incremental_refresh_days must be an exact int inside [1, 60]"
+                )
 
         # QMT 可服务周期 = 原生(frequency_map) + convert 合成(2m/10m resample, 120m 分段)。
         # 其余(q/y/3m/6m 等)convert 不支持:历史会 fallback 读 1m 再 convert 抛异常,被外层
@@ -484,6 +495,18 @@ class ExchangeQMT(Exchange):
         # 预热批量预下载后, 逐只可跳过 download(数据已在本地库), 只读取——省下逐只 QMT 往返。
         # 仅预热路径经 args 显式传入 skip_download=True; 用户实时请求不传, 行为不变。
         _skip_dl = args.get("skip_download", False) if args is not None else False
+        incremental_refresh_days = (
+            args.get("incremental_refresh_days") if args is not None else None
+        )
+        download_query_start = query_start
+        if incremental_refresh_days is not None:
+            # 实时结构已有完整本地历史时，只需下载最近窗口以补齐新完成 K 线；读取仍从
+            # query_start 开始，因而不会缩短用于一、二、三类点识别的完整结构前缀。
+            recent_start = (
+                datetime.datetime.now()
+                - timedelta(days=incremental_refresh_days)
+            ).strftime("%Y%m%d")
+            download_query_start = max(query_start, recent_start)
         price_basis_factors = None
         with _XTDATA_NATIVE_LOCK:
             try:
@@ -491,7 +514,7 @@ class ExchangeQMT(Exchange):
                     xtdata.download_history_data(
                         stock_code=qmt_code,
                         period=qmt_download_period,
-                        start_time=query_start,
+                        start_time=download_query_start,
                         end_time=download_query_end,
                         incrementally=True,
                     )

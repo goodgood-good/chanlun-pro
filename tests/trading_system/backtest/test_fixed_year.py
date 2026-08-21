@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system.backtest import fixed_year
+from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
+    QMTLocalKlineAudit,
+)
 from chanlun.decision_support.trading_system.backtest.fixed_year import (
     FACT_SCHEMA,
     SECTOR_FACT_SCHEMA,
@@ -16,7 +21,7 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
     SparseEvaluationFact,
     SymbolResearchFacts,
     build_symbol_bundle,
-    first_matching_trigger,
+    first_matching_segment_difference,
     run_sparse_portfolio,
     setup_active_ends,
     sparse_evaluation_times,
@@ -32,7 +37,7 @@ from tests.trading_system.helpers import (
 )
 
 
-def test_symbol_bundle_keeps_recursive_small_to_large_points_tradable() -> None:
+def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> None:
     observed_at = datetime(2026, 7, 20, 10, 0, tzinfo=CN)
     sector = eligible_sector()
     thirty_l0 = confirmed_point("1buy", frequency="30m", level=0)
@@ -68,7 +73,7 @@ def test_symbol_bundle_keeps_recursive_small_to_large_points_tradable() -> None:
 
     assert bundle.physical_timeframe_recursive is True
     assert bundle.thirty_points == (thirty_l0, thirty_l1)
-    assert bundle.five_points == (five_l0, five_l1)
+    assert bundle.five_points == (five_l0,)
     assert bundle.one_points == (one_l0, one_l1)
     assert bundle.opposite_points == (
         thirty_l0,
@@ -98,7 +103,58 @@ def test_newer_same_lane_supersedes_setup_before_four_day_expiry() -> None:
     )
 
 
-def test_trigger_must_match_side_time_and_setup_price_band() -> None:
+def test_newer_opposite_direction_supersedes_same_point_family() -> None:
+    old_sell = confirmed_point(
+        "3sell",
+        center_id="old-sell-center",
+        stop=10.2,
+        center_zd=10.1,
+        center_zg=10.3,
+    )
+    new_buy = confirmed_point(
+        "3buy",
+        minutes_after=60,
+        center_id="new-buy-center",
+    )
+
+    ends = setup_active_ends((old_sell, new_buy))
+
+    assert ends[old_sell.point_id] == (new_buy.available_at, True)
+    assert ends[new_buy.point_id] == (
+        new_buy.anchor_at + timedelta(days=4),
+        False,
+    )
+
+
+def test_backtest_does_not_reopen_expired_anchor_on_late_confirmation() -> None:
+    delayed = confirmed_point(
+        "3sell",
+        anchor=18.89,
+        stop=24.76,
+        center_zd=24.76,
+        center_zg=27.04,
+        minutes_after=-(27 * 24 * 60),
+        available_minutes_after=27 * 24 * 60,
+    )
+    delayed = replace(delayed, confirmed_at=delayed.available_at)
+
+    active_end, superseded = setup_active_ends((delayed,))[delayed.point_id]
+
+    assert active_end == delayed.anchor_at + timedelta(days=4)
+    assert active_end < delayed.available_at
+    assert superseded is False
+
+    assert sparse_evaluation_times(
+        five_points=(delayed,),
+        one_points=(),
+        thirty_closes=(),
+        one_closes=(delayed.available_at,),
+        effective_start=delayed.available_at,
+        requested_end=delayed.available_at + timedelta(days=1),
+    ) == ()
+
+
+def test_segment_difference_must_match_side_time_and_setup_price_band() -> None:
     setup = confirmed_point(
         "3buy",
         anchor=10.0,
@@ -124,17 +180,44 @@ def test_trigger_must_match_side_time_and_setup_price_band() -> None:
         minutes_after=3,
     )
 
-    trigger = first_matching_trigger(
+    segment = first_matching_segment_difference(
         setup,
         (wrong_price, wrong_side, match),
         active_end=setup.available_at + timedelta(days=4),
         end_exclusive=False,
     )
 
-    assert trigger == match
+    assert segment == match
 
 
-def test_historical_replay_rejects_third_class_one_minute_trigger() -> None:
+def test_historical_segment_difference_cannot_cross_symbol_boundary() -> None:
+    setup = confirmed_point(
+        "3buy",
+        code="SZ.000001",
+        anchor=10.0,
+        stop=9.8,
+        center_zg=9.9,
+    )
+    other_symbol = confirmed_point(
+        "1buy",
+        code="SH.600000",
+        frequency="1m",
+        anchor=9.9,
+        minutes_after=1,
+    )
+
+    assert (
+        first_matching_segment_difference(
+            setup,
+            (other_symbol,),
+            active_end=setup.available_at + timedelta(days=4),
+            end_exclusive=False,
+        )
+        is None
+    )
+
+
+def test_historical_replay_accepts_valid_third_class_one_minute_segment() -> None:
     setup = confirmed_point(
         "3buy",
         anchor=10.0,
@@ -148,10 +231,111 @@ def test_historical_replay_rejects_third_class_one_minute_trigger() -> None:
         minutes_after=1,
     )
 
+    assert first_matching_segment_difference(
+        setup,
+        (continuation,),
+        active_end=setup.available_at + timedelta(days=4),
+        end_exclusive=False,
+    ) is continuation
+
+
+def test_historical_segment_may_appear_during_five_minute_formation() -> None:
+    setup = confirmed_point(
+        "2buy",
+        anchor=10.0,
+        stop=9.8,
+        available_minutes_after=5,
+    )
+    segment = confirmed_point(
+        "1buy",
+        frequency="1m",
+        anchor=9.9,
+        minutes_after=2,
+    )
+
+    assert first_matching_segment_difference(
+        setup,
+        (segment,),
+        active_end=setup.available_at + timedelta(days=4),
+        end_exclusive=False,
+    ) is segment
+
+
+def test_historical_segment_uses_terminal_segment_start_not_point_anchor() -> None:
+    setup = confirmed_point(
+        "3sell",
+        anchor=10.0,
+        stop=10.2,
+        center_zd=10.1,
+        center_zg=10.3,
+    )
+    setup = replace(
+        setup,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id="segment:historical:sell",
+            source_kind=SourceKind.SEGMENT,
+            direction="up",
+            state="locked",
+            market_start=setup.anchor_at - timedelta(minutes=30),
+            market_end=setup.anchor_at,
+            available_at=setup.available_at,
+        ),
+    )
+    segment = confirmed_point(
+        "1sell",
+        frequency="1m",
+        anchor=10.1,
+        stop=10.2,
+        minutes_after=-5,
+    )
+
+    assert first_matching_segment_difference(
+        setup,
+        (segment,),
+        active_end=setup.available_at + timedelta(days=4),
+        end_exclusive=False,
+    ) is segment
+
+
+def test_historical_segment_anchored_before_terminal_segment_is_rejected_when_seen_late(
+) -> None:
+    setup = confirmed_point(
+        "3buy",
+        anchor=10.0,
+        stop=9.8,
+        center_zg=9.9,
+    )
+    terminal_start = setup.anchor_at - timedelta(minutes=30)
+    setup = replace(
+        setup,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id="segment:historical:late-seen-buy",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=terminal_start,
+            market_end=setup.anchor_at,
+            available_at=setup.available_at,
+        ),
+    )
+    old_segment_seen_late = confirmed_point(
+        "1buy",
+        frequency="1m",
+        anchor=9.9,
+        minutes_after=-31,
+        available_minutes_after=32,
+    )
+
+    assert old_segment_seen_late.anchor_at < terminal_start
+    assert old_segment_seen_late.available_at > terminal_start
     assert (
-        first_matching_trigger(
+        first_matching_segment_difference(
             setup,
-            (continuation,),
+            (old_segment_seen_late,),
             active_end=setup.available_at + timedelta(days=4),
             end_exclusive=False,
         )
@@ -159,7 +343,7 @@ def test_historical_replay_rejects_third_class_one_minute_trigger() -> None:
     )
 
 
-def test_sparse_times_start_at_trigger_then_use_thirty_minute_closes() -> None:
+def test_sparse_times_start_at_first_bar_after_five_minute_signal() -> None:
     setup = confirmed_point(
         "3buy",
         anchor=10.0,
@@ -191,10 +375,10 @@ def test_sparse_times_start_at_trigger_then_use_thirty_minute_closes() -> None:
         requested_end=datetime(2026, 7, 20, 15, 0, tzinfo=CN),
     )
 
-    assert observed == (trigger_at, *thirty_closes)
+    assert observed == (one_closes[0], *thirty_closes)
 
 
-def test_superseding_timestamp_is_excluded_from_previous_setup() -> None:
+def test_superseding_timestamp_starts_the_new_five_minute_setup() -> None:
     first = confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9)
     second = confirmed_point(
         "3buy",
@@ -225,7 +409,11 @@ def test_superseding_timestamp_is_excluded_from_previous_setup() -> None:
         requested_end=second.available_at + timedelta(minutes=30),
     )
 
-    assert second.available_at not in observed
+    assert observed == (
+        first.available_at + timedelta(minutes=1),
+        first.available_at + timedelta(minutes=30),
+        second.available_at,
+    )
 
 
 def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
@@ -325,24 +513,11 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         lambda *_args, **_kwargs: next(sources),
     )
 
-    blocked = run_sparse_portfolio(
-        (facts,),
-        {sector.sector_id: sector_facts},
-        initial_cash=Decimal("1000000"),
-        minute_timeline=(observed_at, *dates),
-    )
-
-    assert blocked.open_positions == ()
-    assert blocked.fills == ()
-
     run = run_sparse_portfolio(
         (facts,),
         {sector.sector_id: sector_facts},
         initial_cash=Decimal("1000000"),
         minute_timeline=(observed_at, *dates),
-        selection_research_by_code={
-            facts.code: (valid_selection_research(),),
-        },
     )
 
     assert run.trades == ()
@@ -500,6 +675,72 @@ def test_relevant_setup_cannot_silently_accept_missing_qmt_one_minute_data(
             requested_end=requested_start + timedelta(days=30),
             algorithm_revision="sha256:" + "a" * 64,
         )
+
+
+def test_build_symbol_facts_reads_one_shared_local_five_minute_snapshot(
+    monkeypatch,
+) -> None:
+    session = datetime(2026, 7, 24, tzinfo=CN)
+    closes = (
+        *(
+            session.replace(hour=9, minute=35) + timedelta(minutes=5 * index)
+            for index in range(24)
+        ),
+        *(
+            session.replace(hour=13, minute=5) + timedelta(minutes=5 * index)
+            for index in range(24)
+        ),
+    )
+    raw = pd.DataFrame(
+        {
+            "time": [int(value.timestamp() * 1000) for value in closes],
+            "open": [10.0] * len(closes),
+            "high": [10.1] * len(closes),
+            "low": [9.9] * len(closes),
+            "close": [10.0] * len(closes),
+            "volume": [1000.0] * len(closes),
+            "amount": [10000.0] * len(closes),
+        }
+    )
+    audit = QMTLocalKlineAudit(
+        code="SZ.000001",
+        frequency="5m",
+        source_path="fixture.DAT",
+        source_sha256="sha256:" + "b" * 64,
+        source_record_count=len(raw),
+        selected_record_count=len(raw),
+        first_at=closes[0],
+        last_at=closes[-1],
+        source_first_at=closes[0],
+        source_last_at=closes[-1],
+    )
+    calls = 0
+
+    def read_once(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return raw.copy(), audit
+
+    monkeypatch.setattr(fixed_year, "resolve_qmt_local_data_dir", lambda: object())
+    monkeypatch.setattr(fixed_year, "read_qmt_local_kline", read_once)
+    monkeypatch.setattr(
+        fixed_year,
+        "_causal_confirmed_points",
+        lambda *_args, **_kwargs: (),
+    )
+
+    facts = fixed_year.build_symbol_facts(
+        code="SZ.000001",
+        sector_id="qmt-sw1:S48",
+        warmup_start=session.date(),
+        requested_start=session.date(),
+        effective_start=session.date(),
+        requested_end=session.date(),
+        algorithm_revision="sha256:" + "a" * 64,
+    )
+
+    assert calls == 1
+    assert dict(facts.row_counts) == {"30m": 8, "5m": 48, "1m": 0}
 
 
 def test_qmt_frame_retries_a_transient_empty_native_response(monkeypatch) -> None:

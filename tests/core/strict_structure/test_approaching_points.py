@@ -51,7 +51,12 @@ def structure_for_units(units):
 
 def projected_structure(values):
     units = list(make_units(values))
-    units[-1] = replace(units[-1], locked=False, confirmed_at=None)
+    units[-1] = replace(
+        units[-1],
+        locked=False,
+        confirmed_at=None,
+        formed_at=units[-1].available_at,
+    )
     return structure_for_units(tuple(units))
 
 
@@ -90,7 +95,8 @@ def test_approaching_point_never_enters_formal_third_class_set():
     engine = engine_for(structure)
     approaching = only_point(engine.approaching_points(tail.available_at))
     assert approaching.confirmed_at is None
-    assert "terminal_unit_locked" in approaching.missing_conditions
+    assert "terminal_unit_audit_lock" in approaching.missing_conditions
+    assert "projected_geometric_structure" in approaching.evidence_codes
     assert approaching.point_id not in {
         point.point_id for point in engine.third_class_points()
     }

@@ -1,4 +1,5 @@
 import threading
+import types
 
 import pytest
 
@@ -13,6 +14,85 @@ from cl_app.services import app_forward_scheduler
 from cl_app.services import app_qmt_runtime
 from cl_app.handlers import sse_stream
 from chanlun.persistence import file_db
+from chanlun.persistence.db import db
+
+
+def test_production_screening_ignores_formal_ledger_and_legacy_result_groups(
+    monkeypatch,
+):
+    app = create_app(
+        start_scheduler=False,
+        test_config={
+            "TESTING": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "WTF_CSRF_ENABLED": False,
+            # 即使旧部署残留此开关，生产实时服务也不得恢复正式账本依赖。
+            "TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED": True,
+            "TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS": (
+                "我的关注",
+                "人工观察",
+            ),
+        },
+    )
+    rows = {
+        "我的关注": (
+            types.SimpleNamespace(
+                market="a", stock_code="SH.513100", stock_name="纳指ETF"
+            ),
+            types.SimpleNamespace(
+                market="us", stock_code="QQQ.US", stock_name="纳指100ETF"
+            ),
+        ),
+        "人工观察": (
+            types.SimpleNamespace(
+                market="a", stock_code="SZ.301004", stock_name="嘉益股份"
+            ),
+        ),
+        "三买": (
+            types.SimpleNamespace(
+                market="a", stock_code="SH.600000", stock_name="旧版结果"
+            ),
+        ),
+        "我的持仓": (
+            types.SimpleNamespace(
+                market="a", stock_code="SZ.000001", stock_name="人工持仓"
+            ),
+            types.SimpleNamespace(
+                market="us", stock_code="QCOM.US", stock_name="高通"
+            ),
+        ),
+    }
+    monkeypatch.setattr(
+        db,
+        "zx_get_global_groups",
+        lambda: tuple(types.SimpleNamespace(zx_group=name) for name in rows),
+    )
+    monkeypatch.setattr(
+        db,
+        "zx_get_global_group_stocks",
+        lambda name: rows[name],
+    )
+    try:
+        screening = app.extensions["decision_support_trading_screening"]
+        gateway = app.extensions["decision_support_trading_screening_gateway"]
+
+        assert app.config["TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED"] is False
+        assert screening._formal_selection_required is False
+        assert screening._selection_research == ()
+        assert gateway._watchlist_provider() == [
+            {"code": "SH.513100", "name": "纳指ETF", "group": "我的关注"},
+            {"code": "SZ.301004", "name": "嘉益股份", "group": "人工观察"},
+        ]
+        holdings = app.config[
+            "TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"
+        ]()
+        assert [
+            (row["market"], row["code"]) for row in holdings["positions"]
+        ] == [("a", "SZ.000001"), ("us", "QCOM.US")]
+        assert holdings["priority_monitor_count"] == 1
+        assert holdings["cross_market_monitor_count"] == 1
+    finally:
+        app.extensions["shutdown_runtime_services"]()
 
 
 def test_scheduler_enabled_factory_runs_the_production_lifecycle(
@@ -163,7 +243,7 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         assert app.extensions["metadata_warmup_thread"] is warmup_thread
         screening = app.extensions["decision_support_trading_screening"]
         assert screening._config.priority_monitoring_enabled is True
-        assert screening._config.max_five_minute_candidate_symbols_per_refresh == 256
+        assert screening._config.max_five_minute_candidate_symbols_per_refresh == 512
         assert screening._config.max_thirty_minute_candidate_symbols_per_refresh == 96
         assert screening._config.max_symbols_per_refresh == 64
         assert screening._config.max_total_symbols_per_refresh == 64
@@ -176,14 +256,37 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         )
         monkeypatch.setattr(
             gateway,
-            "tick_probe",
-            lambda code: {
-                "code": code,
-                "status": "market_closed",
-                "usable": False,
-            },
+            "realtime_ticks",
+            lambda codes: types.SimpleNamespace(
+                requested_codes=codes,
+                market_open=False,
+                ticks=lambda: {},
+            ),
         )
         assert tick_probes["a"]("a") == {"__market_closed__": True}
+
+        quote = object()
+        monkeypatch.setattr(
+            gateway,
+            "realtime_ticks",
+            lambda codes: types.SimpleNamespace(
+                requested_codes=codes,
+                market_open=True,
+                ticks=lambda: {codes[0]: quote},
+            ),
+        )
+        assert tick_probes["a"]("a") == {"SH.000001": quote}
+
+        monkeypatch.setattr(
+            gateway,
+            "realtime_ticks",
+            lambda codes: types.SimpleNamespace(
+                requested_codes=codes,
+                market_open=True,
+                ticks=lambda: {},
+            ),
+        )
+        assert tick_probes["a"]("a") == {}
         assert calls == [
             ("app-qmt-startup", None),
             ("metadata-loaders", None),

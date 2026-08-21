@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     _TechnicalSignalEvaluator,
@@ -8,7 +6,7 @@ from chanlun.decision_support.trading_system.models import TradingPolicy
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
 )
-from tests.trading_system.helpers import eligible_sector
+from tests.trading_system.helpers import confirmed_point, eligible_sector
 from tests.trading_system.strict_helpers import (
     DEFAULT_CLOSED_AT,
     strict_evidence_result,
@@ -60,20 +58,16 @@ def test_empty_strict_snapshot_stays_empty_on_every_frequency() -> None:
     assert _mapped("1m", ()) == ()
 
 
-def test_later_center_three_buy_uses_the_same_execution_logic() -> None:
-    later_three_buy = replace(
-        strict_point("3buy"),
-        center_ordinal=2,
+def test_later_center_three_buy_is_excluded_from_selection() -> None:
+    five = (confirmed_point("3buy", center_ordinal=2),)
+    one = (
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=1,
+        ),
     )
-    raw_trigger = strict_point("1buy")
-    trigger = replace(
-        raw_trigger,
-        anchor_tick=115,
-        invalidation_tick=110,
-        divergence=replace(raw_trigger.divergence, anchor_tick=115),
-    )
-    five = _mapped("5m", (later_three_buy,))
-    one = _mapped("1m", (trigger,))
     bundle = SymbolStructureBundle(
         code="SZ.000001",
         as_of=DEFAULT_CLOSED_AT,
@@ -85,9 +79,7 @@ def test_later_center_three_buy_uses_the_same_execution_logic() -> None:
         opposite_points=(),
     )
 
-    [decision] = _TechnicalSignalEvaluator(TradingPolicy()).evaluate_symbol(bundle)
+    decisions = _TechnicalSignalEvaluator(TradingPolicy()).evaluate_symbol(bundle)
 
     assert five[0].center_ordinal == 2
-    assert decision.entry is not None
-    assert decision.entry.allowed is True
-    assert "three_buy_not_first_center" not in decision.entry.reason_codes
+    assert decisions == ()

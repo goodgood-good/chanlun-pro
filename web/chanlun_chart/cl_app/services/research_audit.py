@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -34,6 +34,16 @@ _CAUSAL_CONTROLS = {
     "delisted_security_zero_recovery",
     "content_addressed_algorithm_data_and_checkpoints",
 }
+_HISTORICAL_DATASET_PATH = (
+    _ARTIFACT_DIRECTORY / "fixed_year_2025_2026"
+)
+_PIT_METADATA_NAME = "pit_metadata.json"
+_EXTRACT_MANIFEST_NAME = "extract_manifest.json"
+_REPLAY_HEARTBEAT_MAX_AGE_SECONDS = 10 * 60
+_AUDIT_CATALOG_DIRECTORIES = (
+    Path("audit/chanlun_live_integration"),
+)
+_AUDIT_CATALOG_LIMIT = 64
 
 
 class ResearchAuditUnavailable(RuntimeError):
@@ -117,6 +127,369 @@ def _load(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(value, dict):
         raise ResearchAuditUnavailable("artifact_invalid_schema")
     return value, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _load_catalog_document(path: Path) -> tuple[dict[str, Any], str, str]:
+    """Read legacy audit records without weakening the formal-report parser.
+
+    Several archived diagnostic exports were written by PowerShell with an
+    explicit UTF-8 or UTF-16 byte-order mark.  They are valid historical JSON,
+    but the certified causality gate/report intentionally remains strict UTF-8
+    through :func:`_load`.
+    """
+
+    try:
+        raw = path.read_bytes()
+        if not raw or len(raw) > _MAX_JSON_BYTES:
+            raise ResearchAuditUnavailable("artifact_invalid_json")
+        if raw.startswith(b"\xef\xbb\xbf"):
+            encoding = "utf-8-sig"
+        elif raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            encoding = "utf-16"
+        else:
+            encoding = "utf-8"
+        value = json.loads(
+            raw.decode(encoding),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except ResearchAuditUnavailable:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ResearchAuditUnavailable("artifact_invalid_json") from exc
+    if not isinstance(value, dict):
+        raise ResearchAuditUnavailable("artifact_invalid_schema")
+    return value, "sha256:" + hashlib.sha256(raw).hexdigest(), encoding
+
+
+def _modified_at(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(
+        timespec="seconds"
+    )
+
+
+def _safe_file(root: Path, candidate: Path) -> Path | None:
+    """Return a regular file contained by *root*, rejecting links and escapes."""
+    try:
+        if candidate.is_symlink():
+            return None
+        path = candidate.resolve(strict=True)
+        path.relative_to(root)
+        if not path.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
+
+
+def _audit_catalog(root: Path) -> list[dict[str, Any]]:
+    candidates: list[Path] = []
+    for relative_directory in _AUDIT_CATALOG_DIRECTORIES:
+        directory = root / relative_directory
+        try:
+            if directory.is_dir() and not directory.is_symlink():
+                candidates.extend(directory.glob("*.json"))
+        except OSError:
+            continue
+    audit_directory = root / "audit"
+    try:
+        if audit_directory.is_dir() and not audit_directory.is_symlink():
+            candidates.extend(audit_directory.glob("*.json"))
+    except OSError:
+        pass
+
+    rows: list[dict[str, Any]] = []
+    unique_paths: set[Path] = set()
+    for candidate in candidates:
+        path = _safe_file(root, candidate)
+        if path is None or path in unique_paths:
+            continue
+        unique_paths.add(path)
+        try:
+            size = path.stat().st_size
+            payload, file_sha256, encoding = _load_catalog_document(path)
+            schema = payload.get("schema")
+            status = payload.get("status")
+            rows.append(
+                {
+                    "name": path.stem,
+                    "relative_path": path.relative_to(root).as_posix(),
+                    "category": (
+                        "实时集成审计"
+                        if "chanlun_live_integration" in path.parts
+                        else "结构一致性审计"
+                    ),
+                    "schema": (
+                        str(schema)[:120]
+                        if isinstance(schema, str) and schema.strip()
+                        else "未声明"
+                    ),
+                    "status": (
+                        str(status)[:80]
+                        if isinstance(status, str) and status.strip()
+                        else "已归档"
+                    ),
+                    "valid_json": True,
+                    "encoding": encoding,
+                    "size_bytes": size,
+                    "modified_at": _modified_at(path),
+                    "file_sha256": file_sha256,
+                }
+            )
+        except (OSError, ResearchAuditUnavailable):
+            rows.append(
+                {
+                    "name": path.stem,
+                    "relative_path": path.relative_to(root).as_posix(),
+                    "category": "审计记录",
+                    "schema": "无法解析",
+                    "status": "格式无效",
+                    "valid_json": False,
+                    "encoding": None,
+                    "size_bytes": path.stat().st_size if path.exists() else 0,
+                    "modified_at": _modified_at(path) if path.exists() else None,
+                    "file_sha256": None,
+                }
+            )
+    rows.sort(key=lambda row: str(row.get("modified_at") or ""), reverse=True)
+    return rows[:_AUDIT_CATALOG_LIMIT]
+
+
+def _historical_dataset_status(root: Path) -> dict[str, Any] | None:
+    directory = root / _HISTORICAL_DATASET_PATH
+    metadata_path = _safe_file(root, directory / _PIT_METADATA_NAME)
+    if metadata_path is None:
+        return None
+    try:
+        payload, file_sha256 = _load(metadata_path)
+        securities = _sequence(payload.get("securities"))
+        memberships = _sequence(payload.get("memberships"))
+        factors = _sequence(payload.get("factors"))
+        sectors = _sequence(payload.get("qmt_sw1_sector_names"))
+        source_start = _text(payload.get("source_start"), max_length=10)
+        source_end = _text(payload.get("source_end"), max_length=10)
+        captured_at = _text(payload.get("captured_at"), max_length=64)
+        schema = _text(payload.get("schema"), max_length=120)
+        content_sha256 = _text(payload.get("content_sha256"), max_length=80)
+        if _HASH_RE.fullmatch(content_sha256) is None:
+            raise ResearchAuditUnavailable("artifact_invalid_schema")
+    except ResearchAuditUnavailable:
+        return {
+            "available": False,
+            "relative_path": metadata_path.relative_to(root).as_posix(),
+            "error_code": "historical_metadata_invalid",
+        }
+
+    checkpoint_count = 0
+    checkpoint_bytes = 0
+    latest_checkpoint_modified_at: datetime | None = None
+    symbol_directory = directory / "symbols"
+    try:
+        if symbol_directory.is_dir() and not symbol_directory.is_symlink():
+            for candidate in symbol_directory.glob("*.pkl"):
+                path = _safe_file(root, candidate)
+                if path is None:
+                    continue
+                stat = path.stat()
+                checkpoint_count += 1
+                checkpoint_bytes += stat.st_size
+                candidate_modified_at = datetime.fromtimestamp(
+                    stat.st_mtime
+                ).astimezone()
+                if (
+                    latest_checkpoint_modified_at is None
+                    or candidate_modified_at > latest_checkpoint_modified_at
+                ):
+                    latest_checkpoint_modified_at = candidate_modified_at
+    except OSError:
+        pass
+    security_count = len(securities)
+    return {
+        "available": True,
+        "schema": schema,
+        "captured_at": captured_at,
+        "source_start": source_start,
+        "source_end": source_end,
+        "security_count": security_count,
+        "sector_count": len(sectors),
+        "membership_count": len(memberships),
+        "corporate_action_count": len(factors),
+        "symbol_checkpoint_count": checkpoint_count,
+        "symbol_checkpoint_bytes": checkpoint_bytes,
+        "checkpoint_coverage": (
+            checkpoint_count / security_count if security_count else 0.0
+        ),
+        "latest_checkpoint_modified_at": (
+            latest_checkpoint_modified_at.isoformat(timespec="seconds")
+            if latest_checkpoint_modified_at is not None
+            else None
+        ),
+        "relative_path": metadata_path.relative_to(root).as_posix(),
+        "content_sha256": content_sha256,
+        "file_sha256": file_sha256,
+        "modified_at": _modified_at(metadata_path),
+    }
+
+
+def _historical_replay_status(
+    root: Path,
+    *,
+    latest_checkpoint_modified_at: object = None,
+) -> dict[str, Any]:
+    directory = root / _HISTORICAL_DATASET_PATH
+    manifest_path = _safe_file(root, directory / _EXTRACT_MANIFEST_NAME)
+    if manifest_path is None:
+        return {
+            "available": False,
+            "status": "not_started",
+            "reason_code": "extract_manifest_unavailable",
+            "relative_path": (
+                _HISTORICAL_DATASET_PATH / _EXTRACT_MANIFEST_NAME
+            ).as_posix(),
+        }
+    try:
+        payload, file_sha256 = _load(manifest_path)
+        schema = _text(payload.get("schema"), max_length=80)
+        summary = _mapping(payload.get("summary"))
+        algorithm = _mapping(payload.get("algorithm"))
+        complete = _boolean(payload.get("complete"))
+        selected = _integer(summary.get("selected_symbol_count"))
+        completed = _integer(summary.get("completed_symbol_count"))
+        failed = _integer(summary.get("failed_symbol_count"))
+        evaluations = _integer(summary.get("evaluation_count"))
+        revision = _text(algorithm.get("revision"), max_length=80)
+        generated_at = _text(payload.get("generated_at"), max_length=64)
+        started_at = _text(payload.get("started_at"), max_length=64)
+        if (
+            schema != "chanlun-fixed-year-qmt-run"
+            or _HASH_RE.fullmatch(revision) is None
+            or selected <= 0
+            or completed > selected
+            or (complete and (completed != selected or failed != 0))
+        ):
+            raise ResearchAuditUnavailable("artifact_invalid_schema")
+    except ResearchAuditUnavailable:
+        return {
+            "available": False,
+            "status": "invalid",
+            "reason_code": "extract_manifest_invalid",
+            "relative_path": manifest_path.relative_to(root).as_posix(),
+        }
+    modified_at = datetime.fromtimestamp(manifest_path.stat().st_mtime).astimezone()
+    checkpoint_modified_at: datetime | None = None
+    try:
+        if latest_checkpoint_modified_at not in (None, ""):
+            checkpoint_modified_at = datetime.fromisoformat(
+                str(latest_checkpoint_modified_at)
+            )
+            if (
+                checkpoint_modified_at.tzinfo is None
+                or checkpoint_modified_at.utcoffset() is None
+            ):
+                checkpoint_modified_at = None
+    except (TypeError, ValueError):
+        checkpoint_modified_at = None
+    heartbeat_at = max(
+        value
+        for value in (modified_at, checkpoint_modified_at)
+        if value is not None
+    )
+    heartbeat_source = (
+        "symbol_checkpoint"
+        if checkpoint_modified_at is not None
+        and checkpoint_modified_at > modified_at
+        else "extract_manifest"
+    )
+    heartbeat_age = max(
+        0.0,
+        (datetime.now().astimezone() - heartbeat_at).total_seconds(),
+    )
+    running = (
+        not complete and heartbeat_age <= _REPLAY_HEARTBEAT_MAX_AGE_SECONDS
+    )
+    status = (
+        "complete"
+        if complete
+        else "running"
+        if running
+        else "failed"
+        if failed
+        else "paused"
+    )
+    return {
+        "available": True,
+        "status": status,
+        "complete": complete,
+        "running": running,
+        "selected_symbol_count": selected,
+        "completed_symbol_count": completed,
+        "failed_symbol_count": failed,
+        "remaining_symbol_count": max(0, selected - completed),
+        "evaluation_count": evaluations,
+        "completion_ratio": completed / selected,
+        "algorithm_revision": revision,
+        "started_at": started_at,
+        "generated_at": generated_at,
+        "heartbeat_age_seconds": round(heartbeat_age, 1),
+        "heartbeat_source": heartbeat_source,
+        "modified_at": heartbeat_at.isoformat(timespec="seconds"),
+        "manifest_modified_at": modified_at.isoformat(timespec="seconds"),
+        "latest_checkpoint_modified_at": (
+            checkpoint_modified_at.isoformat(timespec="seconds")
+            if checkpoint_modified_at is not None
+            else None
+        ),
+        "relative_path": manifest_path.relative_to(root).as_posix(),
+        "file_sha256": file_sha256,
+    }
+
+
+def build_research_audit_status_snapshot(
+    root: str | Path,
+    *,
+    formal_error_code: str,
+    formal_error_details: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    """Expose existing historical evidence without presenting uncertified PnL.
+
+    The certified report remains fail-closed.  This fallback only inventories
+    immutable source material and audit records, so a missing report no longer
+    turns the entire read-only page into an empty error card.
+    """
+    root_path = _root(root)
+    gate_path = _safe_file(root_path, root_path / _CAUSALITY_GATE_PATH)
+    report_path = _safe_file(root_path, root_path / _ARTIFACT_PATH)
+    catalog = _audit_catalog(root_path)
+    dataset = _historical_dataset_status(root_path)
+    replay = _historical_replay_status(
+        root_path,
+        latest_checkpoint_modified_at=(
+            dataset.get("latest_checkpoint_modified_at")
+            if isinstance(dataset, dict)
+            else None
+        ),
+    )
+    return {
+        "schema": "research-audit-status-page",
+        "source_kind": "historical_evidence_inventory",
+        "strategy_id": STRATEGY_ID,
+        "active_strategy_count": 1,
+        "read_only": True,
+        "historical": True,
+        "no_order_execution": True,
+        "formal_report": {
+            "available": False,
+            "error_code": formal_error_code,
+            "error_details": formal_error_details,
+            "causality_gate_present": gate_path is not None,
+            "certified_report_present": report_path is not None,
+        },
+        "historical_dataset": dataset,
+        "historical_replay": replay,
+        "audit_artifacts": catalog,
+        "audit_artifact_count": len(catalog),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -398,14 +771,18 @@ def _validate_report(
         _decimal(value)
 
     contract = _mapping(payload.get("execution_contract"))
-    expected_contract = {
+    current_expected_contract = {
         "context_frequency": "30m",
         "setup_frequency": "5m",
-        "trigger_frequency": "1m",
+        "trade_frequency": "5m",
+        "segment_difference_frequency": "1m",
+        "segment_difference_required_for_trade_signal": False,
+        "execution_observation_frequency": "1m",
         "point_classes_analyzed_independently": True,
         "buy_point_classes_share_execution_logic": True,
         "sector_price_source": "qmt-sw1-pit-composite",
         "sector_price_change_gate": False,
+        "formal_selection_required": False,
         "next_tradable_minute_fill": True,
         "entry_risk_ttl_seconds": 300,
         "entry_liquidity_resize": "one_shot_to_10pct_minute_volume",
@@ -415,7 +792,24 @@ def _validate_report(
         "t_plus_one": True,
         "intraday_structural_stop": True,
     }
-    if any(contract.get(key) != value for key, value in expected_contract.items()):
+    # 旧认证报告仍可只读展示，但新报告必须明确区分“5分钟正式信号”、
+    # “1分钟可选段差”和“1分钟成交观察”，不能再把三者压成 trigger_frequency。
+    legacy_expected_contract = {
+        key: value
+        for key, value in current_expected_contract.items()
+        if key
+        not in {
+            "trade_frequency",
+            "segment_difference_frequency",
+            "segment_difference_required_for_trade_signal",
+            "execution_observation_frequency",
+        }
+    }
+    legacy_expected_contract["trigger_frequency"] = "1m"
+    if not any(
+        all(contract.get(key) == value for key, value in expected.items())
+        for expected in (current_expected_contract, legacy_expected_contract)
+    ):
         raise ResearchAuditUnavailable("strategy_contract_invalid")
 
     metrics = _mapping(payload.get("aggregate_out_of_sample"))
@@ -549,5 +943,6 @@ def build_research_audit_snapshot(root: str | Path) -> dict[str, object]:
 
 __all__ = (
     "ResearchAuditUnavailable",
+    "build_research_audit_status_snapshot",
     "build_research_audit_snapshot",
 )

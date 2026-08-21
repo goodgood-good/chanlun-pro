@@ -1167,6 +1167,12 @@ test('六类确认点和接近点都进入主图且保持各自状态样式', ()
     point_type: pointType,
     side: pointType.endsWith('buy') ? 'buy' : 'sell',
     status,
+    formation_state: status === 'confirmed'
+      ? 'confirmed'
+      : pointType === '3sell' ? 'geometry_ready' : 'forming',
+    lock_state: status === 'confirmed' ? 'locked' : 'pending',
+    contains_forming_segment: status === 'approaching' && pointType !== '3sell',
+    contains_unlocked_segment: status === 'approaching',
     points: [{ time: BASE + 100 + index * 10, price: 10 + index / 10 }],
   });
   strict.levels[0].confirmed_points = types.map((type, index) => point(type, 'confirmed', index));
@@ -1181,7 +1187,7 @@ test('六类确认点和接近点都进入主图且保持各自状态样式', ()
       '▲5m·一买', '▲5m·二买', '▲5m·三买',
       '▼5m·一卖', '▼5m·二卖', '▼5m·三卖',
       '▲接近·5m·一买', '▲接近·5m·二买', '▲接近·5m·三买',
-      '▼接近·5m·一卖', '▼接近·5m·二卖', '▼接近·5m·三卖',
+      '▼接近·5m·一卖', '▼接近·5m·二卖', '▼候选待锁·5m·三卖',
     ].sort(),
   );
   const confirmedBuy = calls.create.find((entry) => entry.options.text === '▲5m·一买');
@@ -1193,6 +1199,39 @@ test('六类确认点和接近点都进入主图且保持各自状态样式', ()
   assert.equal(approachingSell.options.overrides.transparency, 45);
   assert.equal(confirmedBuy.options.overrides.color, sandbox.__STRICT_VISUAL_API.getSignalColor('buy', 'light'));
   assert.equal(approachingSell.options.overrides.color, sandbox.__STRICT_VISUAL_API.getSignalColor('sell', 'light'));
+});
+
+test('最新已完成线段的操作确认点不再画成接近一买', () => {
+  const { cm, calls } = manager('chart-manager-operational-confirmation');
+  const strict = snapshot();
+  strict.levels[0].centers = [];
+  strict.levels[0].confirmed_points = [{
+    schema: 'chanlun-chart-point',
+    render_kind: 'point_confirmed',
+    render_id: '1buy-operational-confirmed',
+    point_id: '1buy-operational-confirmed',
+    structural_level: 0,
+    point_type: '1buy',
+    side: 'buy',
+    status: 'confirmed',
+    strict_status: 'approaching',
+    operational_confirmation: true,
+    confirmation_basis: 'latest_completed_geometry',
+    formation_state: 'confirmed',
+    lock_state: 'pending',
+    contains_forming_segment: false,
+    contains_unlocked_segment: true,
+    terminal_segment_role: 'latest_completed',
+    terminal_segment_state: 'formed',
+    points: [{ time: BASE + 500, price: 10 }],
+  }];
+
+  cm._drawStrictStructure(chartData('replace', strict), '5');
+
+  assert.equal(calls.create.length, 1);
+  assert.equal(calls.create[0].options.text, '▲5m·一买');
+  assert.equal(calls.create[0].options.overrides.bold, true);
+  assert.equal(calls.create[0].options.overrides.transparency, 0);
 });
 
 test('主图拒绝旧买卖点别名而不是静默归类', () => {

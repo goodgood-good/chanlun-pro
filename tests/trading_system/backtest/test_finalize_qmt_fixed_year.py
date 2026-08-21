@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from tools import finalize_qmt_fixed_year as subject
+from tools import finalize_qmt_pit_fixed_year as pit_subject
 from tools import qmt_research_contract
 
 from chanlun.decision_support.trading_system.selection import (
@@ -19,7 +20,7 @@ from chanlun.decision_support.trading_system.selection import (
 CN = ZoneInfo("Asia/Shanghai")
 
 
-def test_formal_selection_research_ledger_loader_is_shared_by_finalizers(
+def test_legacy_formal_selection_research_ledger_loader_remains_valid(
     tmp_path,
 ) -> None:
     observed = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
@@ -55,6 +56,12 @@ def test_formal_selection_research_ledger_loader_is_shared_by_finalizers(
 
     assert snapshots == (snapshot,)
     assert by_symbol == {"SZ.000001": (snapshot,)}
+
+
+def test_current_pit_finalizer_does_not_require_legacy_research_ledger() -> None:
+    option_destinations = {action.dest for action in pit_subject.parser()._actions}
+
+    assert "selection_research" not in option_destinations
 
 
 def test_formal_selection_research_ledger_rejects_empty(

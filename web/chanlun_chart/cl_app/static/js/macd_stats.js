@@ -20,7 +20,8 @@ var MacdStats = (function () {
     const RES_TO_FREQ = {
         '10S': '10s', '30S': '30s', '1': '1m', '2': '2m', '3': '3m', '5': '5m',
         '10': '10m', '15': '15m', '30': '30m', '60': '60m', '120': '120m',
-        '180': '3h', '240': '4h', '1D': 'd', '2D': '2d', '1W': 'w', '1M': 'm',
+        '180': '3h', '240': '4h', '360': '6h', '480': '8h', '720': '12h',
+        '1D': 'd', '2D': '2d', '3D': '3d', '1W': 'w', '1M': 'm',
         '3M': 'q', '12M': 'y',
     };
 
@@ -78,7 +79,12 @@ var MacdStats = (function () {
 
         const code = String(targetCode || '').toLowerCase();
         const itv = String(targetInterval || '').toLowerCase();
-        const mappings = { 'd': '1d', '1d': 'd', 'w': '1w', '1w': 'w', 'm': '1m', '1m': 'm', '1440': '1d', '240': '4h' };
+        const mappings = {
+            'd': '1d', '1d': 'd', 'w': '1w', '1w': 'w', 'm': '1m', '1m': 'm',
+            '1440': '1d', '180': '3h', '3h': '180', '240': '4h', '4h': '240',
+            '360': '6h', '6h': '360', '480': '8h', '8h': '480',
+            '720': '12h', '12h': '720', '3d': '3D',
+        };
 
         for (const df of datafeeds) {
             if (!df || !df._historyProvider || !df._historyProvider.bars_result) continue;

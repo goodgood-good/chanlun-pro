@@ -112,8 +112,17 @@ class ConstituentUnit:
     available_at: datetime
     locked: bool
     child_ids: tuple[str, ...]
+    # ``locked`` is the causal/non-repainting state.  ``forming`` is the
+    # geometric state used by the live tail: several segments may already be
+    # geometrically complete while they are still waiting for a causal lock,
+    # but only the final segment may still be forming.
+    forming: bool = False
     same_level_combination: bool = False
     protected_after_ids: tuple[str, ...] = ()
+    # First causal availability of a geometrically completed unit.  A unit can
+    # be formed but not yet ``locked`` while the anti-repaint audit waits for
+    # additional successor structure.
+    formed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.unit_id:
@@ -144,6 +153,10 @@ class ConstituentUnit:
             raise ValueError("market_end must not precede market_start")
         if type(self.locked) is not bool:
             raise TypeError("locked must be a bool")
+        if type(self.forming) is not bool:
+            raise TypeError("forming must be a bool")
+        if self.locked and self.forming:
+            raise ValueError("a locked unit cannot still be forming")
         if self.locked != (self.confirmed_at is not None):
             raise ValueError("locked and confirmed_at must agree")
         if self.confirmed_at is not None and self.confirmed_at < self.market_end:
@@ -152,6 +165,18 @@ class ConstituentUnit:
             raise ValueError("available_at must not precede market_end")
         if self.confirmed_at is not None and self.available_at < self.confirmed_at:
             raise ValueError("available_at must not precede confirmed_at")
+        formed_at = self.formed_at
+        if self.forming:
+            if formed_at is not None:
+                raise ValueError("a forming unit cannot carry formed_at")
+        else:
+            if formed_at is not None:
+                if formed_at < self.market_end:
+                    raise ValueError("formed_at must not precede market_end")
+                if self.available_at < formed_at:
+                    raise ValueError("available_at must not precede formed_at")
+                if self.confirmed_at is not None and self.confirmed_at < formed_at:
+                    raise ValueError("confirmed_at must not precede formed_at")
 
         child_ids = tuple(self.child_ids)
         if any(not isinstance(child_id, str) or not child_id for child_id in child_ids):
@@ -1463,6 +1488,13 @@ class StrictLevelResult:
             or any(unit.locked for unit in self.units[locked_count:])
         ):
             raise ValueError("center replay counts must match the locked unit prefix")
+        forming_offsets = tuple(
+            offset for offset, unit in enumerate(self.units) if unit.forming
+        )
+        if len(forming_offsets) > 1 or (
+            forming_offsets and forming_offsets[0] != len(self.units) - 1
+        ):
+            raise ValueError("only the terminal strict unit may still be forming")
         units_by_id = {unit.unit_id: unit for unit in self.units}
         centers_by_id = {
             center.center_id: center for center in self.center_result.centers
@@ -1814,33 +1846,67 @@ class StrictEvidenceResult:
         if len({point.point_id for point in all_points}) != len(all_points):
             raise ValueError("confirmed and approaching point ids must be disjoint")
         confirmed_by_id = {point.point_id: point for point in self.confirmed_points}
+        point_by_id = {point.point_id: point for point in all_points}
         # 延迟导入避免模型定义与纯规则模块形成加载环。盘中三类点必须能够从
         # 当前严格中枢/预览账本完整重放，调用方不能自行拼装第二套三类点逻辑。
         from chanlun.core.strict_structure.point_rules import (
-            approaching_third_class_points,
+            approaching_third_class_point_ledger,
         )
 
         expected_approaching_thirds = {
             point.point_id: point
-            for level in self.structure.levels
-            for point in approaching_third_class_points(
-                level,
+            for point in approaching_third_class_point_ledger(
+                self.structure,
                 price_quantum=self.structure_price_quantum,
             )
+            if point.structural_level > 0
         }
         actual_approaching_thirds = {
             point.point_id: point
             for point in self.approaching_points
             if point.point_type in {"3buy", "3sell"}
+            and point.structural_level > 0
         }
         if actual_approaching_thirds != expected_approaching_thirds:
-            raise ValueError("盘中三类点必须精确重放严格中枢账本")
+            missing = tuple(
+                sorted(expected_approaching_thirds.keys() - actual_approaching_thirds)
+            )
+            unexpected = tuple(
+                sorted(actual_approaching_thirds.keys() - expected_approaching_thirds)
+            )
+            changed = tuple(
+                sorted(
+                    point_id
+                    for point_id in (
+                        actual_approaching_thirds.keys()
+                        & expected_approaching_thirds.keys()
+                    )
+                    if actual_approaching_thirds[point_id]
+                    != expected_approaching_thirds[point_id]
+                )
+            )
+            raise ValueError(
+                "盘中三类点必须精确重放严格中枢账本"
+                f"; missing={missing[:3]}; unexpected={unexpected[:3]}; "
+                f"changed={changed[:3]}"
+            )
+        if any(
+            point.point_type in {"3buy", "3sell"}
+            and point.structural_level == 0
+            and "projected_geometric_structure" not in point.evidence_codes
+            and not {
+                "live_first_return",
+                "provisional_center_completion",
+            }.intersection(point.evidence_codes)
+            for point in self.approaching_points
+        ):
+            raise ValueError("物理层盘中三类点必须来自统一几何投影")
         for point in self.approaching_points:
             if point.point_type not in {"2buy", "2sell"}:
                 if point.parent_point_id is not None:
                     raise ValueError("only second-class points may reference a parent")
                 continue
-            parent = confirmed_by_id.get(point.parent_point_id)
+            parent = point_by_id.get(point.parent_point_id)
             expected_parent_type = "1buy" if point.side == "buy" else "1sell"
             if (
                 parent is None
@@ -2083,6 +2149,8 @@ class StrictEvidenceResult:
 
             def ready(unit) -> bool:
                 if unit.locked:
+                    return True
+                if not unit.forming and unit.formed_at is not None:
                     return True
                 if source_level is None:
                     return False

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+
+import chanlun.core.strict_structure.signals as signal_module
 from chanlun.core.strict_structure.models import (
     StrictLevelResult,
     StrictStructureResult,
@@ -14,6 +16,7 @@ from chanlun.core.strict_structure.recursive_engine import (
 )
 from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import (
+    FormalDivergenceUnavailable,
     StrengthSnapshot,
     center_departure_comparison_leg,
     center_entry_comparison_leg,
@@ -213,7 +216,12 @@ def test_post_assembly_strength_cannot_retroactively_create_formal_first_class()
 def test_approaching_first_waits_for_unlocked_third_departure_segment():
     strength = divergent_strength("up")
     units = list(make_units(UP_VALUES, "up"))
-    units[-1] = replace(units[-1], locked=False, confirmed_at=None)
+    units[-1] = replace(
+        units[-1],
+        locked=False,
+        confirmed_at=None,
+        formed_at=units[-1].available_at,
+    )
     center_result, assembly = calculate_level_with_divergence_boundaries(
         tuple(units),
         0,
@@ -240,17 +248,73 @@ def test_approaching_first_waits_for_unlocked_third_departure_segment():
     )
     assert point.point_type == "1sell"
     assert point.anchor_unit_id == units[-1].unit_id
-    assert point.missing_conditions == ("terminal_unit_locked",)
-    assert "live_width_matched_departure_leg" in point.evidence_codes
+    assert point.missing_conditions == ("terminal_unit_audit_lock",)
+    assert "projected_geometric_structure" in point.evidence_codes
+    assert "width_matched_entry_departure_legs" in point.evidence_codes
     assert "comparison_leg_width_3" in point.evidence_codes
     assert "macd_histogram_area_decay" in point.evidence_codes
+
+
+def test_approaching_first_skips_formal_divergence_that_is_not_yet_available(
+    monkeypatch,
+):
+    strength = divergent_strength("up")
+    units = list(make_units(UP_VALUES, "up"))
+    units[-1] = replace(
+        units[-1],
+        locked=False,
+        confirmed_at=None,
+        formed_at=units[-1].available_at,
+    )
+    center_result, assembly = calculate_level_with_divergence_boundaries(
+        tuple(units),
+        0,
+        SourceKind.SEGMENT,
+        strength=strength,
+    )
+    structure = StrictStructureResult(
+        schema="chanlun-structure",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=(
+            StrictLevelResult(
+                structural_level=0,
+                units=tuple(units),
+                center_result=center_result,
+                trend_types=assembly.current_trends,
+                completed_trends=assembly.completed_trends,
+                decomposition_boundaries=assembly.decomposition_boundaries,
+            ),
+        ),
+    )
+
+    def unavailable(*_args, **_kwargs):
+        raise FormalDivergenceUnavailable("comparison leg is not locked")
+
+    monkeypatch.setattr(
+        signal_module,
+        "compare_terminal_trend_divergence",
+        unavailable,
+    )
+
+    assert (
+        engine_for(structure, strength)._approaching_first_class(
+            structure.levels[0],
+            units[-1],
+        )
+        is None
+    )
 
 
 def test_approaching_consolidation_first_class_is_symmetric():
     for direction, expected_type in (("up", "1sell"), ("down", "1buy")):
         strength = consolidation_divergent_strength(direction)
         units = list(make_units(UP_VALUES[:7], direction))
-        units[-1] = replace(units[-1], locked=False, confirmed_at=None)
+        units[-1] = replace(
+            units[-1],
+            locked=False,
+            confirmed_at=None,
+            formed_at=units[-1].available_at,
+        )
         center_result, assembly = calculate_level_with_divergence_boundaries(
             tuple(units),
             0,
@@ -280,8 +344,9 @@ def test_approaching_consolidation_first_class_is_symmetric():
         assert point.point_type == expected_type
         assert point.anchor_unit_id == "u-6"
         assert point.divergence.kind == "consolidation"
-        assert "formal_consolidation_prefix" in point.evidence_codes
-        assert point.missing_conditions == ("terminal_unit_locked",)
+        assert "formal_consolidation_movement" in point.evidence_codes
+        assert "projected_geometric_structure" in point.evidence_codes
+        assert point.missing_conditions == ("terminal_unit_audit_lock",)
 
 
 def test_uncompleted_single_center_does_not_emit_first_class():

@@ -204,7 +204,7 @@ def test_strict_signal_and_divergence_assembly_has_one_production_authority() ->
 
 
 def test_stock_selection_uses_shared_current_strict_event_protocol() -> None:
-    """选股不能再用“点锚定末段”另造当前事件口径。"""
+    """选股必须复用核心定义的末端两线段血缘，不能在选股层另造口径。"""
 
     path = ROOT / "src/chanlun/xuangu/strict_xuangu.py"
     source = path.read_text(encoding="utf-8")

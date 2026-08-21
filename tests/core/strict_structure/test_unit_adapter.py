@@ -18,6 +18,7 @@ class FakeLine:
         end_value,
         *,
         done: bool,
+        forming: bool | None = None,
     ) -> None:
         start_date = BASE + timedelta(minutes=index * 5)
         end_date = start_date + timedelta(minutes=5)
@@ -34,6 +35,12 @@ class FakeLine:
         self.zs_low = min(start_value, end_value) - 1000
         self.zs_high = max(start_value, end_value) + 1000
         self._done = done
+        self.forming = (not done) if forming is None else forming
+        self.formed_at = (
+            None
+            if self.forming
+            else end_date + timedelta(minutes=2)
+        )
 
     def is_done(self) -> bool:
         return self._done
@@ -65,8 +72,35 @@ def test_adapter_keeps_unfinished_lines_out_of_the_locked_prefix(fake_lines):
     )
 
     assert [item.locked for item in values] == [True, True, False]
+    assert [item.forming for item in values] == [False, False, True]
     assert values[-1].confirmed_at is None
     assert values[-1].available_at == BASE + timedelta(hours=2)
+
+
+def test_adapter_distinguishes_formed_unlocked_tail_from_forming_tail() -> None:
+    lines = [
+        FakeLine(0, "down", 120, 90, done=True),
+        FakeLine(1, "up", 90, 125, done=False, forming=False),
+        FakeLine(2, "down", 125, 100, done=False, forming=True),
+    ]
+
+    values = adapt_lines(
+        lines,
+        structural_level=0,
+        source_kind=SourceKind.SEGMENT,
+        price_quantum=Decimal("0.01"),
+        as_of=BASE + timedelta(hours=2),
+        registry=UnitLockRegistry("test-raw"),
+    )
+
+    assert [(item.locked, item.forming) for item in values] == [
+        (True, False),
+        (False, False),
+        (False, True),
+    ]
+    assert values[1].formed_at == lines[1].formed_at
+    assert values[1].available_at == lines[1].formed_at
+    assert values[2].formed_at is None
 
 
 def test_first_lock_time_does_not_move_on_later_updates(fake_done_line):

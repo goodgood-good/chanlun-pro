@@ -647,13 +647,14 @@ class XdCalculator:
     ):
         """发射 segs:推迟 done——末 _DEFER_DONE 条已确认段(反向尚未锁定)标 pending、其余
         done;再补末段未完成线段。"""
-        for s, e, t, _formed_at in segs:
+        for s, e, t, formed_at in segs:
             locked_at = locked_candidates.get((s, e, t))
             self._make_xd(
                 all_bis[s:e + 1],
                 t,
                 done=locked_at is not None,
                 locked_at=locked_at,
+                formed_at=formed_at,
             )
         if pending_tail is not None:
             if segs:
@@ -1002,6 +1003,7 @@ class XdCalculator:
         seg_type: str,
         done: bool,
         locked_at=None,
+        formed_at=None,
     ) -> XD:
         """构造并追加 XD 对象（_emit_segment 与 _emit_pending 的公共逻辑）。
 
@@ -1037,6 +1039,7 @@ class XdCalculator:
             xd.zs_high, xd.zs_low = xd.high, xd.low
         xd.done = done
         xd.locked_at = locked_at if done else None
+        xd.formed_at = formed_at
         self.xds.append(xd)
         return xd
 

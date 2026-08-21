@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="robots" content="noindex,nofollow" />
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}?asset={{ static_asset_token|default('') }}" />
     <title>历史研究 / 审计成果 · 缠论低回撤体系</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/research_audit.css') }}?asset={{ static_asset_token|default('') }}" />
@@ -20,15 +21,15 @@
     <main id="main-content" class="ra-shell">
       <section class="ra-hero" aria-labelledby="ra-page-title">
         <div class="ra-hero-copy">
-          <p class="ra-eyebrow">HISTORICAL RESEARCH · IMMUTABLE AUDIT</p>
+          <p class="ra-eyebrow">历史研究 · 不可变审计</p>
           <div class="ra-title-row">
             <h1 id="ra-page-title">历史研究 / 审计成果</h1>
             <span class="ra-readonly-badge">只读</span>
           </div>
           <p class="ra-lead">
-            这里只展示当前固定交易策略在近一年 QMT 数据上的因果回放，不训练、不调参。
+            这里分层展示当前固定交易策略的正式因果回放，以及已经落盘的历史数据和审计记录，不训练、不调参。
             股票行业按历史生效日期归属到申万一级板块，复权与公司行动只在其生效日后可见。
-            页面不发送交易指令，也不具备下单能力；报告完整性校验失败时整页拒绝展示。
+            页面不发送交易指令，也不具备下单能力；正式报告完整性校验失败时不展示任何收益数字，但仍如实展示已有资料及缺失环节。
           </p>
         </div>
         <aside class="ra-boundary" role="note">
@@ -137,7 +138,7 @@
             <div class="ra-fact"><span>统一可交易区间</span><strong>{{ audit.effective_range.start }} → {{ audit.effective_range.end }}</strong></div>
             <div class="ra-fact"><span>板块范围</span><strong>申万一级全部 {{ audit.universe.eligible_sector_count }} 个板块</strong><small>按每个历史时点的全部有效成分构造板块结构，不使用当前成分回填历史</small></div>
             <div class="ra-fact"><span>股票范围</span><strong>{{ audit.universe.selected_symbol_count }} / {{ audit.universe.archived_intersecting_symbol_count }} 个历史标的纳入</strong><small>缺少可认证历史行业归属而排除：{{ audit.universe.unclassified_excluded_symbol_count }}</small></div>
-            <div class="ra-fact"><span>公司行动记录</span><strong>{{ audit.universe.corporate_action_count }}</strong><small>除权、现金分红与送转只从生效日开始进入价格和账户核算</small></div>
+            <div class="ra-fact"><span>公司行动记录</span><strong>{{ audit.universe.corporate_action_count }}</strong><small>除权、分红与送转只从生效日开始进入价格复权与研究口径</small></div>
             <div class="ra-fact"><span>因果评估时点</span><strong>{{ audit.universe.causal_evaluation_count }}</strong></div>
           </div>
         </section>
@@ -204,17 +205,18 @@
             <div>
               <p class="ra-section-index">03 · EXECUTION CONTRACT</p>
               <h2 id="ra-contract-title">唯一交易契约</h2>
-              <p>高级别给结构背景，最终成交必须等待细级别确认和下一根可交易分钟线。</p>
+              <p>30分钟给环境背景，5分钟给出操作确认买卖点并单列末端结构是否已封存；1分钟只补充段差，历史成交观察使用下一根可见分钟线。</p>
             </div>
           </div>
           <div class="ra-fact-grid">
             <div class="ra-fact"><span>30m 大级别结构</span><strong>独立计算一、二、三类买卖点与递归中枢</strong></div>
-            <div class="ra-fact"><span>5m 可操作级别</span><strong>确认候选结构，不替代精细触发</strong></div>
-            <div class="ra-fact"><span>1m 精细触发</span><strong>同向确认后，最早下一根可交易 1m 成交</strong></div>
+            <div class="ra-fact"><span>5m 操作确认买卖级别</span><strong>达到操作确认后独立形成信号并进入人工复核；末端结构封存状态单列</strong></div>
+            <div class="ra-fact"><span>1m 段差级别</span><strong>只作可选段差与精细定位，不阻断5m信号</strong></div>
             <div class="ra-fact"><span>买卖点通道</span><strong>一、二、三类买卖点独立，不折叠为三买</strong></div>
             <div class="ra-fact"><span>买点执行逻辑</span><strong>一、二、三类统一</strong><small>三买仅保留自身中枢外回抽条件</small></div>
             <div class="ra-fact"><span>板块行情</span><strong>历史时点申万一级有效成分合成板块结构</strong></div>
             <div class="ra-fact"><span>板块涨跌幅</span><strong>{{ "不参与筛选" if not audit.execution_contract.sector_price_change_gate else "参与" }}</strong></div>
+            <div class="ra-fact"><span>旧版正式研究账本</span><strong>{{ "仍要求" if audit.execution_contract.formal_selection_required else "不读取" }}</strong><small>与当前生产选股口径一致</small></div>
             <div class="ra-fact"><span>T+1</span><strong>{{ "严格执行" if audit.execution_contract.t_plus_one else "未启用" }}</strong></div>
             <div class="ra-fact"><span>盘中结构止损</span><strong>{{ "按未复权 low/high 检查" if audit.execution_contract.intraday_structural_stop else "未启用" }}</strong></div>
             <div class="ra-fact"><span>成交可实现性</span><strong>涨跌停、停牌、整手、参与率、历史费率与滑点</strong></div>
@@ -330,6 +332,135 @@
           <span>内容哈希：<code>{{ audit.content_sha256 }}</code></span>
           <span>文件哈希：<code>{{ audit.artifact.file_sha256 }}</code></span>
           <span>生成：{{ audit.generated_at }}</span>
+        </footer>
+      {% elif audit_status %}
+        {% set formal = audit_status.formal_report %}
+        {% set dataset = audit_status.historical_dataset %}
+        {% set replay = audit_status.historical_replay %}
+        {% set error_labels = {
+          'causality_gate_unavailable': '因果性门禁文件尚未生成',
+          'causality_gate_blocked': '因果性门禁未通过',
+          'causality_gate_invalid': '因果性门禁格式或完整性无效',
+          'artifact_unavailable': '正式认证报告尚未生成',
+          'artifact_invalid_json': '正式认证报告不是有效 JSON',
+          'artifact_invalid_schema': '正式认证报告字段不完整',
+          'artifact_hash_mismatch': '正式认证报告内容哈希不一致',
+          'strategy_contract_invalid': '正式认证报告与当前唯一策略不一致'
+        } %}
+        <section class="ra-verdict-panel is-blocked" data-live-ready="false" aria-labelledby="ra-status-title">
+          <header>
+            <div>
+              <p class="ra-section-index">00 · 正式报告状态</p>
+              <h2 id="ra-status-title">{{ '历史回测正在计算，正式结论尚未生成' if replay and replay.running else '历史资料可读取，正式回测结论尚不可用' }}</h2>
+            </div>
+            <strong class="ra-verdict-state">未生成认证结论</strong>
+          </header>
+          <div class="ra-verdict-reasons">
+            <strong>{{ error_labels.get(formal.error_code, '正式成果校验未通过') }}</strong>
+            <span>错误标识：<code>{{ formal.error_code }}</code>。收益、回撤和实盘适用性继续按严格门禁隐藏，不会拿不完整数据冒充成果。</span>
+          </div>
+          <div class="ra-gate-grid" aria-label="正式报告门禁状态">
+            <div class="ra-gate {{ 'ra-gate-pass' if formal.causality_gate_present else 'ra-gate-fail' }}"><code>因果性门禁</code><strong>{{ '已发现' if formal.causality_gate_present else '缺失' }}</strong></div>
+            <div class="ra-gate {{ 'ra-gate-pass' if formal.certified_report_present else 'ra-gate-fail' }}"><code>认证回测报告</code><strong>{{ '已发现' if formal.certified_report_present else '缺失' }}</strong></div>
+          </div>
+        </section>
+
+        {% if formal.error_code == 'causality_gate_blocked' and formal.error_details %}
+          <section class="ra-section" aria-labelledby="ra-blocked-gate-title">
+            <div class="ra-section-heading"><div><p class="ra-section-index">01 · 因果性门禁</p><h2 id="ra-blocked-gate-title">未生成正式回测收益</h2><p>完整无未来函数审计未通过，系统已在计算收益前停止。旧回测收益不会继续展示，也不能作为当前策略结论。</p></div></div>
+            <p>已校验 {{ formal.error_details.validated_symbol_fact_count }} 个标的事实、{{ formal.error_details.validated_decision_count }} 个决策时点；门禁时间：{{ formal.error_details.checked_at }}</p>
+            <ul class="ra-blocker-list">
+              {% for failure in formal.error_details.failures %}
+                <li><strong>{{ failure.code }}</strong><br />现有证据：{{ failure.evidence }}<br />仍需证据：{{ failure.required }}</li>
+              {% endfor %}
+            </ul>
+          </section>
+        {% endif %}
+
+        <section class="ra-section" aria-labelledby="ra-replay-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">01 · 历史回放进度</p><h2 id="ra-replay-title">固定年度因果回放</h2><p>这里只统计当前冻结算法修订已验证的检查点；旧算法遗留文件不会计入本轮完成数。</p></div>
+            {% if replay and replay.available %}
+              {% set replay_labels = {'running': '正在计算', 'complete': '标的提取完成', 'paused': '计算已暂停', 'failed': '存在失败', 'invalid': '进度文件无效'} %}
+              <span class="ra-status {{ 'ra-status-ok' if replay.status == 'complete' else 'ra-status-blocked' }}">{{ replay_labels.get(replay.status, '等待启动') }}</span>
+            {% else %}
+              <span class="ra-status ra-status-blocked">尚未启动</span>
+            {% endif %}
+          </div>
+          {% if replay and replay.available %}
+            <div class="ra-fact-grid">
+              <div class="ra-fact"><span>有效标的进度</span><strong>{{ replay.completed_symbol_count }} / {{ replay.selected_symbol_count }}</strong><small>完成 {{ '%.1f%%'|format((replay.completion_ratio|float) * 100) }}</small></div>
+              <div class="ra-fact"><span>剩余标的</span><strong>{{ replay.remaining_symbol_count }}</strong></div>
+              <div class="ra-fact"><span>失败标的</span><strong>{{ replay.failed_symbol_count }}</strong><small>失败项不会计入正式收益</small></div>
+              <div class="ra-fact"><span>因果评估时点</span><strong>{{ replay.evaluation_count }}</strong></div>
+              <div class="ra-fact"><span>本轮开始</span><strong>{{ replay.started_at }}</strong></div>
+              <div class="ra-fact"><span>最近进度</span><strong>{{ replay.modified_at }}</strong></div>
+            </div>
+            <p class="ra-subtext">
+              {% if replay.running %}后台正在续算，刷新页面即可看到最新进度；全部标的完成后还会依次执行前缀因果审计和正式汇总。{% elif replay.complete %}标的事实已全部提取，正在等待或执行前缀因果审计与正式汇总。{% else %}当前没有持续更新；系统会从已验证检查点续算，不会把旧算法文件混入本轮结果。{% endif %}
+            </p>
+          {% else %}
+            <p class="ra-empty-evidence">尚未发现当前算法修订的提取清单，因此没有可认证的历史收益；磁盘上的旧检查点只作故障恢复素材。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-dataset-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">02 · 历史数据集</p><h2 id="ra-dataset-title">近一年历史数据准备情况</h2><p>以下数字来自实际落盘的 PIT 元数据与逐标的检查点，不代表已经完成回测。</p></div>
+            <span class="ra-status {{ 'ra-status-ok' if dataset and dataset.available else 'ra-status-blocked' }}">{{ '资料可读' if dataset and dataset.available else '资料不可用' }}</span>
+          </div>
+          {% if dataset and dataset.available %}
+            <div class="ra-fact-grid">
+              <div class="ra-fact"><span>历史区间</span><strong>{{ dataset.source_start }} → {{ dataset.source_end }}</strong></div>
+              <div class="ra-fact"><span>PIT 标的档案</span><strong>{{ dataset.security_count }}</strong><small>只统计历史时点可见的证券资料</small></div>
+              <div class="ra-fact"><span>申万一级板块</span><strong>{{ dataset.sector_count }}</strong></div>
+              <div class="ra-fact"><span>历史行业归属</span><strong>{{ dataset.membership_count }}</strong></div>
+              <div class="ra-fact"><span>公司行动记录</span><strong>{{ dataset.corporate_action_count }}</strong></div>
+              <div class="ra-fact"><span>磁盘检查点文件</span><strong>{{ dataset.symbol_checkpoint_count }} / {{ dataset.security_count }}</strong><small>文件覆盖 {{ '%.1f%%'|format((dataset.checkpoint_coverage|float) * 100) }}；可能包含旧算法修订</small></div>
+            </div>
+            <dl class="ra-definition-list">
+              <div><dt>元数据版本</dt><dd><code>{{ dataset.schema }}</code></dd></div>
+              <div><dt>捕获时间</dt><dd>{{ dataset.captured_at }}</dd></div>
+              <div><dt>资料路径</dt><dd><code>{{ dataset.relative_path }}</code></dd></div>
+              <div><dt>文件哈希</dt><dd><code>{{ dataset.file_sha256 }}</code></dd></div>
+            </dl>
+          {% else %}
+            <p class="ra-empty-evidence">尚未找到可解析的近一年 PIT 历史元数据。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-records-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">03 · 审计记录</p><h2 id="ra-records-title">已归档的研究与审计记录</h2><p>仅列出白名单审计目录中的有效 JSON 记录；这些记录是过程证据，不等同于认证收益报告。</p></div>
+            <span class="ra-status ra-status-ok">{{ audit_status.audit_artifact_count }} 条</span>
+          </div>
+          {% if audit_status.audit_artifacts %}
+            <div class="ra-table-wrap">
+              <table class="ra-source-table">
+                <thead><tr><th>更新时间</th><th>记录</th><th>类别</th><th>格式</th><th>状态</th><th>文件哈希</th></tr></thead>
+                <tbody>
+                  {% for row in audit_status.audit_artifacts %}
+                    <tr>
+                      <td>{{ row.modified_at or '未知' }}</td>
+                      <td><strong>{{ row.name }}</strong><small><code>{{ row.relative_path }}</code></small></td>
+                      <td>{{ row.category }}</td>
+                      <td><code>{{ row.schema }}</code></td>
+                      <td>{{ row.status }}</td>
+                      <td><code>{{ row.file_sha256 or '无法校验' }}</code></td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="ra-empty-evidence">白名单目录中暂未发现可展示的审计记录。</p>
+          {% endif %}
+        </section>
+
+        <footer class="ra-footer">
+          <span>策略：<code>{{ audit_status.strategy_id }}</code></span>
+          <span>正式报告：未认证</span>
+          <span>页面生成：{{ audit_status.generated_at }}</span>
         </footer>
       {% else %}
         <section class="ra-error" role="alert">

@@ -12,6 +12,7 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SecurityMasterRecord,
     membership_changes_from_cninfo,
     qmt_factors_from_rows,
+    sha256_json,
     snapshot_from_payload,
     snapshot_payload,
 )
@@ -175,6 +176,22 @@ def test_snapshot_round_trip_verifies_content_hash() -> None:
     tampered["securities"][0]["name"] = "tampered"
     with pytest.raises(ValueError, match="content hash"):
         snapshot_from_payload(tampered)
+
+
+def test_snapshot_loader_accepts_hashed_v1_artifact_without_rewriting_it() -> None:
+    payload = snapshot_payload(_snapshot(), audit={"diagnostic": True})
+    payload["schema"] = "chanlun-qmt-pit-metadata/v1"
+    canonical = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"content_sha256", "audit"}
+    }
+    payload["content_sha256"] = sha256_json(canonical)
+
+    restored = snapshot_from_payload(payload)
+
+    assert restored == _snapshot()
+    assert payload["schema"] == "chanlun-qmt-pit-metadata/v1"
 
 
 def test_conflicting_same_day_memberships_are_rejected() -> None:

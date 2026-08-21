@@ -730,6 +730,16 @@ tbody tr:hover td {
   max-width: 350px;
 }
 
+.ra-source-table td small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ra-muted);
+}
+
+.ra-source-table td code {
+  overflow-wrap: anywhere;
+}
+
 .ra-error {
   padding: 48px;
   border-color: rgba(239, 140, 134, 0.34);

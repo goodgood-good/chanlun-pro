@@ -38,6 +38,8 @@ def close_center_at_divergence(
         or not divergence.is_divergent
     ):
         raise ValueError("center divergence closure evidence does not match its leave")
+    if divergence.available_at < center.available_at:
+        raise ValueError("divergence closure cannot precede center availability")
     width = divergence.comparison_width
     if width == 1:
         if (

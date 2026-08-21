@@ -21,10 +21,10 @@
     <header class="es-topbar cp-product-nav">
       <div class="es-shell es-topbar__inner">
         <a class="es-brand" href="/" aria-label="返回缠论行情工作台">CL</a>
-        <nav class="es-nav" aria-label="研究导航">
+        <nav class="es-nav" aria-label="交易辅助导航">
           <a href="/">行情与画图</a>
           <a href="{{ url_for('decision_support.research_audit') }}">历史研究/审计成果</a>
-          <span>只读研究 · 无订单能力</span>
+          <span>实时信号辅助 · 手工交易</span>
         </nav>
       </div>
     </header>
@@ -42,16 +42,16 @@
     >
       <section class="es-hero" aria-labelledby="es-title">
         <div>
-          <p class="es-sr-only">SECTOR FIRST · STRUCTURE ONLY · READ ONLY</p>
+          <p class="es-sr-only">板块优先 · 只看严格结构 · 手工交易</p>
           <h1 id="es-title">缠论提前选股 · 实时盯盘与个股分析</h1>
           <p class="es-hero__intro">
-            收盘后生成候选，盘中跟踪结构变化；程序只提供线索，由人最终判断，不会自动下单。
+            收盘后生成候选，盘中跟踪结构变化并发送技术买卖信号；由人最终判断，在其他交易软件手工操作，不会自动下单。
             <span class="es-sr-only">提前选股固定使用唯一严格笔和各物理周期的完整递归中枢证据。</span>
           </p>
         </div>
         <aside class="es-boundary-card" aria-label="系统边界">
-          <strong>只读研究</strong>
-          <span>无委托 · 人工确认</span>
+          <strong>手工交易辅助</strong>
+          <span>信号通知 · 无委托 · 人工确认</span>
           <span class="es-sr-only">不连接券商委托，不承诺收益或胜率。</span>
           <a href="{{ url_for('decision_support.research_audit') }}">审计证据</a>
         </aside>
@@ -74,11 +74,11 @@
           <span id="es-status-dot" class="es-status-dot is-loading" aria-hidden="true"></span>
           <div>
             <strong id="es-status">正在读取最新快照</strong>
-            <small id="es-status-detail">等待日线 / 30m / 5m / 1m 统一递归结构数据</small>
+            <small id="es-status-detail">等待日线 / 30m 环境、5m 操作确认与可选 1m 段差数据</small>
           </div>
         </div>
         <dl class="es-status-facts es-status-facts--primary">
-          <div><dt>结构更新时间</dt><dd id="es-generated">尚未发布</dd></div>
+          <div><dt>行情结构截止</dt><dd id="es-generated">尚未发布</dd></div>
           <div><dt>今日候选名单</dt><dd id="es-preselection-status">待生成</dd></div>
           <div><dt>盘中实时预警</dt><dd id="es-priority-monitor-status">待开盘</dd></div>
         </dl>
@@ -101,24 +101,23 @@
       </section>
 
       <details class="es-operation-guide">
-        <summary>查看日线 → 30m → 5m → 1m 筛选流程</summary>
+        <summary>查看日线、30m、5m、1m 的决策分工</summary>
         <section class="es-pipeline" aria-label="四周期筛选链">
-          <article><span>01 · 高级别环境</span><strong>日线结构筛选</strong><p>使用日线严格笔与完整递归中枢，只作真实周期环境判断。</p></article>
+          <article><span>01 · 背景过滤</span><strong>日线环境分级</strong><p>同周期 MA5、MA10、分型与严格结构只给环境分级，不能生成或否定5分钟买卖点。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>02 · 大级别</span><strong>30m 大级别筛选</strong><p>按30分钟严格结构递归划分中枢，并保留各层级买卖点。</p></article>
+          <article><span>02 · 策略环境</span><strong>30m 环境分级</strong><p>同周期均线、分型和走势用于判断顺风、混合或逆风；逆风只降级为谨慎复核。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>03 · 可操作级别</span><strong>5m 可操作级别筛选</strong><p>定位买卖点与失效边界；最后未完成线段可进入待确认观察。</p></article>
+          <article><span>03 · 操作确认</span><strong>5m 买卖点确认</strong><p>最新未完成线段只进入提前观察；最新已完成线段上的一、二、三类买卖点在首个因果形成时刻达到操作确认，末端结构是否封存单独展示。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>04 · 最精细操作</span><strong>1m 精确操作确认</strong><p>使用1分钟严格笔、线段和递归结构核对同向触发。</p></article>
+          <article><span>04 · 段差辅助</span><strong>1m 精细定位</strong><p>1分钟买卖点只提供段差与精细定位；即使暂未出现，也不能阻止已达到操作确认的5分钟信号通知和人工复核。</p></article>
         </section>
       </details>
 
       <section class="es-summary" aria-label="实时快照摘要">
         <article><span>合格板块</span><strong id="es-sector-count">0</strong><small>全部进入股票扫描</small></article>
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>可含未完成线段，仅供提前观察</small></article>
-        <article class="is-watch"><span>已形成</span><strong id="es-formed-count">0</strong><small>离开与首次回抽几何成立，等待线段锁定</small></article>
-        <article class="is-watch"><span>已入观察池</span><strong id="es-armed-count">0</strong><small>已经接近但尚未触发</small></article>
-        <article class="is-trigger"><span>已触发</span><strong id="es-triggered-count">0</strong><small>1m 已给出结构触发</small></article>
+        <article class="is-trigger"><span>5分钟操作确认</span><strong id="es-triggered-count">0</strong><small>达到操作确认后立即通知；后续结构证据和1分钟段差可稍后补充</small></article>
+        <article class="is-segment"><span>严格 1m/L0 段差证据</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">当前已发布范围；全周期扫描未完成前不是全市场终值。证据存在与买入定位窗口是否过期分开显示；不改变5分钟买卖点是否成立</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看段差证据</button></article>
       </section>
       <details class="es-summary-details">
         <summary>其他统计</summary>
@@ -127,32 +126,32 @@
           <span>板块真实触发 <b id="es-sector-trigger-count">0</b></span>
           <span>全部资格观察 <b id="es-total-qualified-count">0</b></span>
           <span>强提示待复核 <b id="es-executable-count">0</b></span>
-          <span>失效/结束 <b id="es-closed-count">0</b></span>
+          <span>失效与结束状态仅保留在人工复核历史，不进入当前选股</span>
         </div>
       </details>
 
       <section class="es-holdings" aria-labelledby="es-holdings-title">
         <header>
           <div>
-            <p class="es-eyebrow">LOCAL GROUP · PRIORITY MONITOR</p>
-            <h2 id="es-holdings-title">我的持仓盯盘</h2>
-            <p id="es-holdings-status">读取当前系统的全局“我的持仓”分组，不访问交易账户。</p>
+            <p class="es-eyebrow">本地分组 · 优先监听</p>
+            <h2 id="es-holdings-title">人工关注组盯盘</h2>
+            <p id="es-holdings-status">读取行情页人工维护的优先关注分组，仅代表监听范围。</p>
           </div>
           <a class="es-button es-button--secondary" href="/">管理分组</a>
         </header>
-        <dl class="es-holdings-summary" aria-label="人工持仓监控摘要">
+        <dl class="es-holdings-summary" aria-label="人工关注监控摘要">
           <div><dt>人工声明</dt><dd id="es-holdings-declared">0</dd></div>
           <div><dt>主动扫描</dt><dd id="es-holdings-monitored">0</dd></div>
           <div><dt>休市/暖机/异常</dt><dd id="es-holdings-unsupported">0</dd></div>
         </dl>
         <div id="es-holdings-list" class="es-holdings-list" role="list" aria-live="polite"></div>
-        <p id="es-holdings-empty" class="es-holdings-empty">“我的持仓”尚无标的；可在行情页把关注标的加入该分组。</p>
+        <p id="es-holdings-empty" class="es-holdings-empty">人工关注组尚无标的；可在行情页把需要优先监听的标的加入该分组。</p>
       </section>
 
       <section id="hr-workspace" class="hr-workspace" aria-labelledby="hr-title">
         <header class="hr-header">
           <div>
-            <p class="es-eyebrow">QMT SECTOR FIRST · HUMAN IN THE LOOP</p>
+            <p class="es-eyebrow">QMT 板块优先 · 人工复核</p>
             <h2 id="hr-title">提前选股与人工复核队列</h2>
             <p>历史复核图会锁定在候选首次可见时刻；信号后的 K 线不会进入图表或结构计算。</p>
           </div>
@@ -170,12 +169,12 @@
 
         <div class="hr-boundary" role="status" aria-live="polite">
           <strong id="hr-status">正在验证人工复核报告</strong>
-          <span id="hr-status-detail">只接受候选报告自身零订单、零成交且哈希验证通过的证据；虚拟账本意图与成交另行展示</span>
-          <b>REVIEW_REQUIRED</b><b>LIVE_DISABLED</b>
+          <span id="hr-status-detail">只接受零订单、零成交且哈希验证通过的候选证据；本页仅展示结构判断与人工复核</span>
+          <b>必须人工复核</b><b>不自动下单</b>
         </div>
 
         <details class="hr-audit-summary">
-          <summary>系统、虚拟账本与审计状态</summary>
+          <summary>系统与审计状态</summary>
           <dl class="hr-summary" aria-label="人工复核摘要">
           <div><dt>候选提醒</dt><dd id="hr-candidate-count">0</dd></div>
           <div><dt>涉及标的</dt><dd id="hr-symbol-count">0</dd></div>
@@ -194,31 +193,10 @@
           <div><dt>源码快照</dt><dd id="hr-decision-source-id">未认证</dd></div>
           <div><dt>观察样本版本</dt><dd id="hr-markout-cohort-status">尚无观察样本</dd></div>
           <div><dt>暖机结构谱系</dt><dd id="hr-forward-lineage-status">尚未开始逐日记录</dd></div>
-          <div><dt>虚拟意图</dt><dd id="hr-virtual-intent-count">0</dd></div>
-          <div><dt>待虚拟成交</dt><dd id="hr-virtual-pending-count">0</dd></div>
-          <div><dt>已撤销虚拟意图</dt><dd id="hr-virtual-cancelled-count">0</dd></div>
-          <div><dt>执行门撤买</dt><dd id="hr-virtual-operations-cancelled-count">0</dd></div>
-          <div><dt>待成交连续性</dt><dd id="hr-pending-continuity-status">无待成交意图</dd></div>
-          <div><dt>执行门处置</dt><dd id="hr-execution-chronology-status">撤买保退出</dd></div>
-          <div><dt>虚拟卖出预留</dt><dd id="hr-virtual-reserved-sell-quantity">0</dd></div>
-          <div><dt>虚拟成交</dt><dd id="hr-virtual-fill-count">0</dd></div>
-          <div><dt>虚拟持仓标的</dt><dd id="hr-virtual-position-count">0</dd></div>
-          <div><dt>板块准入证据</dt><dd id="hr-entry-selection-evidence-status">尚无虚拟买入</dd></div>
-          <div><dt>成交证据</dt><dd id="hr-execution-evidence-status">无虚拟成交</dd></div>
-          <div><dt>时价拒绝</dt><dd id="hr-execution-rejection-evidence-status">无时价拒绝</dd></div>
-          <div><dt>组合拒绝证据</dt><dd id="hr-portfolio-rejection-evidence-status">无组合拒绝</dd></div>
-          <div><dt>组合裁决</dt><dd id="hr-portfolio-decision-audit-status">无组合拒绝</dd></div>
-          <div><dt>成交裁决</dt><dd id="hr-portfolio-fill-decision-audit-status">无组合成交</dd></div>
           <div><dt>信号复用</dt><dd id="hr-signal-lifecycle-status">终态买卖点不可复用</dd></div>
-          <div><dt>短差执行</dt><dd id="hr-tactical-execution-status">固定 100 股（一手）仅观察；不覆盖多手部分成交</dd></div>
-          <div><dt>买入边界</dt><dd id="hr-entry-price-boundary-status">确认 K 高点 / 一根 1m</dd></div>
-          <div><dt>战略退出</dt><dd id="hr-strategic-exit-persistence-status">跨日持续至成交</dd></div>
-          <div><dt>虚拟会计</dt><dd id="hr-paper-accounting-status">无虚拟成交</dd></div>
-          <div><dt>虚拟现金</dt><dd id="hr-paper-cash-balance">1,000,000.00</dd></div>
-          <div><dt>累计费用</dt><dd id="hr-paper-total-fees">0.00</dd></div>
-          <div><dt>日终估值</dt><dd id="hr-paper-valuation-status">尚未开始</dd></div>
-          <div><dt>虚拟市值</dt><dd id="hr-paper-market-value">—</dd></div>
-          <div><dt>虚拟权益</dt><dd id="hr-paper-equity">—</dd></div>
+          <div><dt>段差规则</dt><dd id="hr-tactical-execution-status">1分钟只作定位，不能独立授权买卖；5分钟低级别或异结构卖点确认后，段差处理参考上限 25%</dd></div>
+          <div><dt>段差边界</dt><dd id="hr-entry-price-boundary-status">1分钟确认 K 只作可选精细定位</dd></div>
+          <div><dt>退出规则</dt><dd id="hr-strategic-exit-persistence-status">5分钟同级或更高级别卖点达到操作确认后，由人工核对结构退出规则</dd></div>
           <div><dt>5日筛选观察</dt><dd id="hr-markout-5">尚未积累 · 不可评价</dd></div>
           <div><dt>10日筛选观察</dt><dd id="hr-markout-10">尚未积累 · 不可评价</dd></div>
           <div><dt>20日筛选观察</dt><dd id="hr-markout-20">尚未积累 · 不可评价</dd></div>
@@ -236,21 +214,24 @@
               <input id="hr-search" type="search" autocomplete="off" placeholder="搜索代码或板块" aria-label="搜索人工复核候选" />
             </header>
             <div class="hr-filters" role="group" aria-label="候选筛选">
+              <select id="hr-candidate-kind-filter" aria-label="候选类型">
+                <option value="all" selected>程序候选 + 实时通知</option>
+                <option value="realtime_notification">仅实时通知</option>
+                <option value="screening_candidate">仅程序候选</option>
+              </select>
               <select id="hr-lane-filter" aria-label="复核队列层级">
                 <option value="focus" selected>今日重点</option>
                 <option value="ACTIONABLE_REVIEW">可行动复核</option>
-                <option value="POSITION_MANAGEMENT">持仓与虚拟仓管理</option>
+                <option value="POSITION_MANAGEMENT">结构连续性复核</option>
                 <option value="WATCHLIST">观察池</option>
                 <option value="RESEARCH_ARCHIVE">研究归档</option>
                 <option value="all">全部层级</option>
               </select>
               <select id="hr-alert-filter" aria-label="提醒类型">
                 <option value="all" selected>全部提醒</option>
-                <option value="POSSIBLE_30M_BUY">可能的 30m 买点</option>
-                <option value="POSSIBLE_30M_EXIT">可能的 30m 退出</option>
-                <option value="POSSIBLE_SELL_REVIEW">卖点待人工判断（30m退出或5m短差）</option>
-                <option value="POSSIBLE_5M_TACTICAL_SELL">可能的 5m 短差卖出</option>
-                <option value="POSSIBLE_5M_TACTICAL_BUYBACK">可能的 5m 回补</option>
+                <option value="REALTIME_NOTIFICATION">实时买卖点通知</option>
+                <option value="POSSIBLE_5M_TRADE_BUY">5分钟操作确认买点</option>
+                <option value="POSSIBLE_5M_TRADE_SELL">5分钟操作确认卖点</option>
               </select>
               <select id="hr-review-filter" aria-label="复核状态">
                 <option value="all">全部状态</option>
@@ -268,22 +249,23 @@
                 <span id="hr-selected-sector">请选择候选</span>
                 <h3 id="hr-review-title"><b id="hr-selected-symbol">—</b> · <span id="hr-selected-alert">等待选择</span></h3>
               </div>
-              <strong id="hr-selected-priority">优先级 —</strong>
+              <strong id="hr-selected-priority">人工复核优先级 —</strong>
             </header>
 
             <div class="hr-lock-banner">
-              <span>因果图表锁定</span>
+              <span id="hr-chart-time-mode">因果图表锁定</span>
               <strong id="hr-review-at">—</strong>
-              <small>锁定后不显示未来 K 线；切换候选会重建独立结构快照。</small>
+              <small id="hr-chart-time-note">锁定后不显示未来 K 线；切换候选会重建独立结构快照。</small>
             </div>
 
             <dl class="hr-candidate-facts">
-              <div><dt>结构锚点价（非成交报价）</dt><dd id="hr-reference-price">—</dd></div>
+              <div><dt id="hr-reference-price-label">结构锚点价（非成交报价）</dt><dd id="hr-reference-price">—</dd></div>
               <div><dt>确认 K 最高买入价</dt><dd id="hr-entry-price-cap">—</dd></div>
               <div><dt>确认 K 收盘时刻</dt><dd id="hr-entry-confirmed-at">—</dd></div>
               <div><dt>买入有效至</dt><dd id="hr-entry-valid-until">—</dd></div>
               <div><dt>边界证据</dt><dd id="hr-entry-attestation">—</dd></div>
               <div><dt>结构失效价</dt><dd id="hr-invalidation-price">—</dd></div>
+              <div><dt>结构风险参考</dt><dd id="hr-position-recommendation">—</dd></div>
               <div><dt>市场风险门</dt><dd id="hr-market-risk">—</dd></div>
               <div><dt>板块风险门</dt><dd id="hr-sector-risk">—</dd></div>
               <div><dt>个股风险门</dt><dd id="hr-symbol-risk">—</dd></div>
@@ -293,22 +275,21 @@
               <section><h4>人工确认清单</h4><ul id="hr-checklist"></ul></section>
               <section><h4>程序警告与未决项</h4><ul id="hr-warnings"></ul></section>
               <section class="hr-deep-warmup"><h4>候选多周期深度暖机（仅诊断）</h4><strong id="hr-deep-warmup-status">请选择候选</strong><ul id="hr-deep-warmup"><li>仅对现有排序中的有界候选展示，不改变排名、风险门或模拟资格。</li></ul></section>
-              <section class="hr-paper-path"><h4>虚拟观察路径裁决</h4><strong id="hr-paper-path-status">请选择候选</strong><ul id="hr-paper-path-reasons"><li>选择候选后显示为什么尚未形成意图、待成交或虚拟成交。</li></ul></section>
             </div>
 
             <form id="hr-feedback-form">
               <fieldset id="hr-feedback-fields" disabled>
                 <legend>记录人工识别结果（不会产生订单）</legend>
-                <p class="hr-feedback-rule">只有当前最新的盘中/前向证据可进入虚拟成交。历史或已被新快照替代的报告只记录识别结果，不创建或撤销虚拟意图；若仅调度或同日 Capture 尚未就绪，可先保存“模拟观察”，证据恢复后保持表单不变再次保存，系统会用同一请求 ID 幂等补建虚拟意图。同一有效信号生命周期保存新的复核时，系统只追加撤销事件使尚未成交的旧意图失效；已成交记录不会改写。</p>
+              <p class="hr-feedback-rule">复核记录只保存中枢、走势、级别、买卖点和失效条件判断，不会创建任何委托。</p>
                 <label>中枢判断<select name="center_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认</option><option value="REJECTED">否决</option></select></label>
                 <label>走势类型<select name="trend_judgement" required><option value="UNCERTAIN">不确定</option><option value="UP">上涨</option><option value="DOWN">下跌</option><option value="CONSOLIDATION">盘整</option></select></label>
-                <label>级别判断<select name="level_judgement" required><option value="UNCERTAIN">不确定</option><option value="30M">确认 30m 战略级别</option><option value="5M">确认 5m 短差级别</option><option value="1M">确认 1m 定位级别</option><option value="OTHER">其他级别</option></select></label>
+                <label>级别判断<select name="level_judgement" required><option value="UNCERTAIN">不确定</option><option value="30M">确认 30m 环境级别</option><option value="5M">确认 5m 操作买卖级别</option><option value="1M">确认 1m 段差级别</option><option value="OTHER">其他级别</option></select></label>
                 <label>买卖点<select name="point_judgement" required><option value="UNCERTAIN">不确定</option><option value="BUY_1">一买</option><option value="BUY_2">二买</option><option value="BUY_3">三买</option><option value="SELL_1">一卖</option><option value="SELL_2">二卖</option><option value="SELL_3">三卖</option><option value="NONE">不是买卖点</option></select></label>
                 <label>分解方法<select name="decomposition_judgement" required><option value="UNCERTAIN">不确定</option><option value="SAME_LEVEL">同级别分解</option><option value="CENTER">中枢分解</option><option value="COMBINED">两者结合</option></select></label>
                 <label>中枢扩展<select name="center_expansion_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认存在扩展</option><option value="REJECTED">确认不存在扩展</option></select></label>
                 <label>九段升级<select name="nine_segment_upgrade_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认满足升级</option><option value="REJECTED">确认不满足升级</option></select></label>
-                <label>低级别定位<select name="locator_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">定位有效</option><option value="REJECTED">定位无效</option></select></label>
-                <label>处置<select name="disposition" required><option value="WATCH">继续观察</option><option value="REJECT">拒绝</option><option value="PAPER_OBSERVE">模拟观察</option><option value="NEEDS_MORE_DATA">需要更多数据</option></select></label>
+                <label>1分钟段差判断<select name="locator_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">段差有效</option><option value="REJECTED">段差无效</option></select></label>
+                <label>处置<select name="disposition" required><option value="WATCH">继续观察</option><option value="REJECT">拒绝</option><option value="NEEDS_MORE_DATA">需要更多数据</option></select></label>
                 <label class="hr-notes">复核笔记<textarea name="notes" maxlength="4000" rows="3" placeholder="记录中枢区间、分解依据、失效条件或仍需核对的原文规则"></textarea></label>
                 <button id="hr-submit" class="es-button" type="submit">保存复核记录</button>
               </fieldset>
@@ -327,26 +308,68 @@
         <aside class="es-workspace es-sector-workspace" data-workspace="sector" aria-labelledby="es-sector-title">
           <header class="es-workspace__header">
             <div>
-              <p class="es-eyebrow">QMT GICS3 SECTOR STRUCTURE</p>
+              <p class="es-eyebrow">QMT GICS3 / GICS4 行业层级</p>
               <h2 id="es-sector-title">板块结构雷达</h2>
             </div>
             <button id="es-sector-expand" class="es-text-button" type="button" aria-expanded="false" hidden>显示全部板块</button>
           </header>
-          <p class="es-workspace__help">按 QMT 板块结构与长期强弱排序；点击板块即可筛选下方标的。</p>
+          <p class="es-workspace__help">按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。板块选择只筛 A 股，美股线索不参与板块门且会继续保留。</p>
+          <p id="es-sector-catalog-status" class="es-sector-catalog-status" data-state="loading">正在读取板块目录。</p>
           <details class="es-rule-note">
             <summary>规则与数据口径</summary>
-            <p>板块按点时成分的中长期相对结构排序，不按当日涨跌追强；日线、30m、5m、1m 均只使用决策时已经完成的K线。成分、复权或高周期证据不足时关闭候选，不推测补齐；完整参数和失败原因可在运行诊断与审计证据中查看。</p>
+            <p>板块按点时成分的中长期相对结构排序，不按当日涨跌追强；日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线。日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟操作确认决定主信号，1分钟只作段差辅助；结构、复权或行情证据失真时关闭操作资格。</p>
           </details>
           <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
 
           <details class="es-global-filter-drawer">
-            <summary>高级筛选 <span id="es-filter-summary">全部资格观察 · 全部 · 全部</span></summary>
+            <summary>高级筛选 <span id="es-filter-summary">全部市场 · 全部来源 · 全部状态 · 全部买卖点</span></summary>
             <div class="es-global-filters" aria-label="标的列表筛选条件">
               <fieldset class="es-filter-group">
-                <legend>候选范围</legend>
+                <legend>市场</legend>
                 <div class="es-filter-buttons">
-                  <button type="button" data-selection-scope="sector-trigger" aria-pressed="false">板块已触发</button>
+                  <button class="is-active" type="button" data-market="all" aria-pressed="true">全部市场</button>
+                  <button type="button" data-market="a" aria-pressed="false">A股</button>
+                  <button type="button" data-market="us" aria-pressed="false">美股</button>
+                </div>
+              </fieldset>
+
+              <fieldset class="es-filter-group">
+                <legend>线索来源</legend>
+                <div class="es-filter-buttons">
+                  <button class="is-active" type="button" data-signal-source="all" aria-pressed="true">全部来源</button>
+                  <button type="button" data-signal-source="screening" aria-pressed="false">提前选股</button>
+                  <button type="button" data-signal-source="notification" aria-pressed="false">实时通知</button>
+                  <button type="button" data-signal-source="attention" aria-pressed="false">人工关注组</button>
+                  <button type="button" data-signal-source="watchlist" aria-pressed="false">关注监听</button>
+                </div>
+              </fieldset>
+
+              <fieldset class="es-filter-group">
+                <legend>A股候选范围（美股不受此项限制）</legend>
+                <div class="es-filter-buttons">
+                  <button type="button" data-selection-scope="sector-trigger" aria-pressed="false">A股板块已触发</button>
                   <button class="is-active" type="button" data-selection-scope="all-qualified" aria-pressed="true">全部资格观察</button>
+                </div>
+              </fieldset>
+
+              <fieldset class="es-filter-group">
+                <legend>复核任务</legend>
+                <div class="es-filter-buttons">
+                  <button class="is-active" type="button" data-review-stage="all" aria-pressed="true">全部任务</button>
+                  <button type="button" data-review-stage="forming" aria-pressed="false">形成与等待</button>
+                  <button type="button" data-review-stage="notified" aria-pressed="false">通知待复核</button>
+                  <button type="button" data-review-stage="tracking" aria-pressed="false">结构跟踪</button>
+                </div>
+              </fieldset>
+
+              <fieldset class="es-filter-group">
+                <legend>1分钟段差</legend>
+                <div class="es-filter-buttons">
+                  <button class="is-active" type="button" data-segment-state="all" aria-pressed="true">全部段差状态</button>
+                  <button type="button" data-segment-state="present" aria-pressed="false">有段差证据</button>
+                  <button type="button" data-segment-state="current" aria-pressed="false">买入定位窗口有效</button>
+                  <button type="button" data-segment-state="historical" aria-pressed="false">买入窗口已过/不可用</button>
+                  <button type="button" data-segment-state="absent" aria-pressed="false">段差未出现</button>
                 </div>
               </fieldset>
 
@@ -355,14 +378,11 @@
                 <div id="es-lifecycle-filters" class="es-filter-buttons">
                   <button class="is-active" type="button" data-lifecycle="all" aria-pressed="true">全部</button>
                   <button type="button" data-lifecycle="observed" aria-pressed="false">结构观察</button>
+                  <button type="button" data-lifecycle="monitoring" aria-pressed="false">实时监听</button>
                   <button type="button" data-lifecycle="approaching" aria-pressed="false">即将确认</button>
-                  <button type="button" data-lifecycle="formed" aria-pressed="false">已形成</button>
-                  <button type="button" data-lifecycle="armed" aria-pressed="false">已入观察池</button>
-                  <button type="button" data-lifecycle="triggered" aria-pressed="false">已触发</button>
+                  <button type="button" data-lifecycle="triggered" aria-pressed="false">5分钟操作确认</button>
                   <button type="button" data-lifecycle="executable" aria-pressed="false">强提示待复核</button>
-                  <button type="button" data-lifecycle="active" aria-pressed="false">持有跟踪</button>
-                  <button type="button" data-lifecycle="invalidated" aria-pressed="false">已失效</button>
-                  <button type="button" data-lifecycle="closed" aria-pressed="false">已结束</button>
+                  <button type="button" data-lifecycle="active" aria-pressed="false">结构跟踪</button>
                 </div>
               </fieldset>
 
@@ -380,6 +400,10 @@
                   <button type="button" data-point-type="3sell" aria-pressed="false">三卖</button>
                 </div>
               </fieldset>
+
+              <div class="es-filter-actions">
+                <button id="es-filter-reset" class="es-text-button" type="button">重置全部筛选</button>
+              </div>
             </div>
           </details>
         </aside>
@@ -387,16 +411,49 @@
         <section class="es-workspace es-signal-workspace" data-workspace="signals" aria-labelledby="es-signal-title">
           <header class="es-workspace__header">
             <div>
-              <p class="es-eyebrow">STRUCTURE CLUE QUEUE · HUMAN REVIEW</p>
+              <p class="es-eyebrow">结构线索队列 · 人工复核</p>
               <h2 id="es-signal-title">买卖点线索队列</h2>
             </div>
             <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
           </header>
           <p class="es-workspace__help">点击标的，右侧四周期图同步切换。<span class="es-sr-only">线索只供人工识别，没有一条天然可执行。</span></p>
 
+          <div class="es-signal-channel-bar" role="group" aria-label="六类买卖点快捷筛选">
+            <strong>六类通道</strong>
+            <div class="es-filter-buttons es-point-filters">
+              <button class="is-active" type="button" data-point-type="all" aria-pressed="true">全部</button>
+              <button type="button" data-point-type="1buy" aria-pressed="false">一买</button>
+              <button type="button" data-point-type="2buy" aria-pressed="false">二买</button>
+              <button type="button" data-point-type="3buy" aria-pressed="false">三买</button>
+              <button type="button" data-point-type="1sell" aria-pressed="false">一卖</button>
+              <button type="button" data-point-type="2sell" aria-pressed="false">二卖</button>
+              <button type="button" data-point-type="3sell" aria-pressed="false">三卖</button>
+            </div>
+          </div>
+
+          <div id="es-us-monitor" class="es-us-monitor-compact" aria-labelledby="es-us-monitor-title">
+            <div class="es-us-monitor-compact__header">
+              <span class="es-us-monitor-compact__title"><i id="es-us-monitor-health-panel" data-health="loading" aria-hidden="true"></i><strong id="es-us-monitor-title">美股实时监听</strong></span>
+              <span class="es-us-monitor-compact__actions">
+                <b id="es-us-monitor-health" class="es-us-monitor-compact__health">正在连接</b>
+                <a href="/?market=us">行情</a>
+              </span>
+            </div>
+            <div class="es-us-monitor-compact__summary">
+              <p class="es-us-monitor-compact__updated"><span>最近完成</span><time id="es-us-monitor-updated">等待首次完成</time></p>
+              <dl class="es-us-monitor-compact__metrics" aria-label="美股实时监听摘要">
+                <div><dt>监听</dt><dd id="es-us-monitor-count">0</dd></div>
+                <div><dt>运行</dt><dd id="es-us-monitor-active">0</dd></div>
+                <div><dt>待机</dt><dd id="es-us-monitor-other">0</dd></div>
+                <div><dt>复核累计</dt><dd id="es-us-monitor-notifications">0</dd></div>
+              </dl>
+            </div>
+            <small id="es-us-monitor-status" class="es-sr-only" aria-live="polite">正在读取监听状态。</small>
+          </div>
+
           <label class="es-search">
             <span>搜索</span>
-            <input id="es-signal-search" type="search" autocomplete="off" placeholder="股票代码、名称或板块" />
+            <input id="es-signal-search" type="search" autocomplete="off" placeholder="股票代码、名称、市场或板块" />
           </label>
 
           <div id="es-empty" class="es-empty" hidden>
@@ -417,7 +474,7 @@
         >
           <header class="es-workspace__header es-chart-header">
             <div>
-              <p class="es-eyebrow">MARKET · CHANLUN · DRAWING</p>
+              <p class="es-eyebrow">行情 · 缠论 · 图表</p>
               <h2 id="es-chart-title">多周期行情与结构证据</h2>
             </div>
             <a data-chart-workbench class="es-button es-button--link" href="/" target="_blank" rel="noopener">打开完整画图工作台</a>
@@ -471,7 +528,7 @@
                     <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
                   </article>
                   <article class="es-chart-card is-1m" data-frequency="1m">
-                    <header><strong>1m 精确触发</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <header><strong>1m 段差辅助</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
                     <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
                   </article>
                   <div class="es-chart-resizer is-columns" data-chart-resizer="columns" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整图表左右比例" title="拖动调节左右比例，双击恢复默认"></div>
@@ -483,7 +540,7 @@
 
               <aside id="es-structure-evidence" class="es-evidence-panel" data-evidence-panel aria-label="结构证据与风险" aria-hidden="true">
                 <header>
-                  <div><span>DECISION EVIDENCE</span><strong>结构证据与风险</strong><small>成立 · 缺失 · 否决 · 重评</small></div>
+                  <div><span>决策证据</span><strong>结构证据与风险</strong><small>成立 · 缺失 · 否决 · 重评</small></div>
                   <button type="button" data-evidence-close aria-label="关闭结构证据">关闭</button>
                 </header>
                 <section class="is-established"><h4>成立证据</h4><ul data-evidence-group="established"></ul></section>
@@ -516,7 +573,7 @@
               <dl class="es-decision-risk">
                 <div><dt>结构防守价</dt><dd data-selected-stop>—</dd></div>
                 <div><dt>5m 失效价</dt><dd data-decision-invalidation>—</dd></div>
-                <div><dt>风险乘数</dt><dd data-selected-risk>—</dd></div>
+                <div><dt>结构风险参考</dt><dd data-selected-risk>—</dd></div>
               </dl>
             </section>
 
@@ -536,17 +593,17 @@
               </button>
               <i aria-hidden="true">→</i>
               <button type="button" data-period-node="5m" data-tone="unknown" aria-pressed="true">
-                <span><b>03</b>5m 设置</span>
+                <span><b>03</b>5m 操作确认</span>
                 <strong data-period-state="5m">未知</strong>
                 <small data-period-summary="5m">等待操作级别设置</small>
                 <em data-period-boundary="5m">失效价未提供</em>
               </button>
               <i aria-hidden="true">→</i>
               <button type="button" data-period-node="1m" data-tone="unknown" aria-pressed="false">
-                <span><b>04</b>1m 触发</span>
-                <strong data-period-state="1m">等待</strong>
-                <small data-period-summary="1m">尚未取得同向精确触发</small>
-                <em data-period-boundary="1m">结构止损未提供</em>
+                <span><b>04</b>1m 段差</span>
+                <strong data-period-state="1m">可选</strong>
+                <small data-period-summary="1m">尚未取得段差证据（不阻断5分钟）</small>
+                <em data-period-boundary="1m">只作定位；不能独立授权买卖</em>
               </button>
             </nav>
           </div>
@@ -554,14 +611,15 @@
       </section>
 
       <details class="es-methodology">
-        <summary>查看筛选口径与研究边界</summary>
+        <summary>查看筛选口径与手工交易边界</summary>
         <div>
           <article><strong>板块先行</strong><p>板块和个股都按缠论结构计算；涨跌幅、上涨家数不参与方向判断。</p></article>
           <article><strong>六类点独立</strong><p>一买看背驰反转，二买看首次回试确认，三买看离开中枢后的延续；卖点按对称规则独立处理。</p></article>
           <article><strong>第一中枢约束</strong><p>三买只取第一中枢；序号未知或后续中枢一律关闭。</p></article>
-          <article><strong>结构口径</strong><p>日线、30m、5m、1m 都固定使用严格笔→线段→递归走势与中枢，买卖点来自同一证据图。</p></article>
-          <article><strong>因果边界</strong><p>最后未完成线段参与中枢与候选识别；离开与首次回抽几何成立后显示“已形成”，线段锁定后才进入正式确认。</p></article>
-          <article><strong>当前性窗口</strong><p>5m 设置只保留最近 4 个自然日内、各买卖点在全部递归层级中的最新事件；临近点必须来自当前结构。</p></article>
+          <article><strong>周期分工</strong><p>日线与30分钟负责环境分级，5分钟负责操作确认买卖点，末端结构是否封存另行标示；1分钟只负责段差与精细定位，不是通知闸门。</p></article>
+          <article><strong>均线与分型</strong><p>MA5、MA10和分型必须来自各自物理周期的已完成K线；一类点仅作背景，二类点关注MA5收复/跌破，三类点关注MA5与MA10排列，均不能改写缠论买卖点事实。</p></article>
+          <article><strong>因果边界</strong><p>图上只有最新未完成线段使用一条虚线，其买卖点只显示“接近”。最新线段完成并形成可操作买卖点几何后，按首次因果形成时刻达到5分钟操作确认；后续只继续固化结构证据，不重复通知。</p></article>
+          <article><strong>当前结构</strong><p>当前选股只接受最新已完成线段上的操作确认买卖点和最新未完成线段的接近状态；旧线段、失效、结束及旧版迁移状态均不进入当前列表。</p></article>
         </div>
       </details>
     </main>

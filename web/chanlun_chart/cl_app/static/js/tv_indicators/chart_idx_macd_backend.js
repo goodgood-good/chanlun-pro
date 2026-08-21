@@ -112,7 +112,11 @@ var TvIdxMACDBackend = (function () {
       ['1m', 'm'],
       ['3m', 'q'],
       ['12m', 'y'],
+      ['180', '3h'],
       ['240', '4h'],
+      ['360', '6h'],
+      ['480', '8h'],
+      ['720', '12h'],
     ];
     for (let g = 0; g < GROUPS.length; g++) {
       if (GROUPS[g].indexOf(a) !== -1 && GROUPS[g].indexOf(b) !== -1) return true;
@@ -233,7 +237,12 @@ var TvIdxMACDBackend = (function () {
               // targetCode 使用完整 ticker（如 a:sh.000001）进行 fuzzy 匹配
               let targetCode = rawTicker;
               let targetInterval = rawInterval;
-              const mappings = { 'd': '1d', '1d': 'd', 'w': '1w', '1w': 'w', 'm': '1m', '1m': 'm', '1440': '1d', '240': '4h' };
+              const mappings = {
+                'd': '1d', '1d': 'd', 'w': '1w', '1w': 'w', 'm': '1m', '1m': 'm',
+                '1440': '1d', '180': '3h', '3h': '180', '240': '4h', '4h': '240',
+                '360': '6h', '6h': '360', '480': '8h', '8h': '480',
+                '720': '12h', '12h': '720', '3d': '3D',
+              };
               if (mappings[rawInterval]) targetInterval = mappings[rawInterval];
 
               let barsResult = null;

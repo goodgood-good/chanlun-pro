@@ -49,6 +49,7 @@ class StrictEvidenceAssembler:
         strict_config_revision: str,
         structure: StrictStructureResult,
         strength=None,
+        projection_cache=None,
     ) -> None:
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("严格证据标的不能为空")
@@ -87,6 +88,7 @@ class StrictEvidenceAssembler:
             structure=structure,
             strength=strength,
             price_quantum=structure_price_quantum,
+            projection_cache=projection_cache,
         )
         self._confirmed_points = None
         self._approaching_points = None
@@ -122,14 +124,11 @@ class StrictEvidenceAssembler:
         self,
         *,
         stroke_center_observations: CenterLevelResult,
-        include_approaching: bool = True,
     ) -> StrictEvidenceResult:
         """生成身份完整的原子严格证据快照。"""
 
         if not isinstance(stroke_center_observations, CenterLevelResult):
             raise TypeError("笔中枢观察账本类型无效")
-        if type(include_approaching) is not bool:
-            raise TypeError("是否包含接近点必须是布尔值")
         confirmed_points = self.confirmed_points()
         divergences = self.divergences()
         return StrictEvidenceResult(
@@ -151,9 +150,7 @@ class StrictEvidenceAssembler:
             structure=self.structure,
             stroke_center_observations=stroke_center_observations,
             confirmed_points=confirmed_points,
-            approaching_points=(
-                self.approaching_points() if include_approaching else ()
-            ),
+            approaching_points=self.approaching_points(),
             divergences=divergences,
         )
 

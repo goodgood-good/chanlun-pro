@@ -3,10 +3,14 @@ from datetime import timedelta
 
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
 from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.provisional import (
     ProvisionalCandidate,
     extract_provisional_candidates,
+)
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    point_decision_document,
 )
 from tests.trading_system.helpers import provisional_point
 from tests.trading_system.strict_helpers import (
@@ -34,6 +38,9 @@ def test_provisional_adapter_reads_only_strict_approaching_points() -> None:
     assert candidates[0].candidate_id == raw.point_id
     assert candidates[0].tower == "formal"
     assert candidates[0].observed_at == raw.available_at
+    assert candidates[0].anchor_at == raw.anchor_at
+    assert candidates[0].available_at == raw.available_at
+    assert candidates[0].anchor_at < candidates[0].available_at
     assert candidates[0].missing_conditions == raw.missing_conditions
     assert candidates[0].evidence_codes == raw.evidence_codes
     assert candidates[0].parent_point_id is not None
@@ -41,6 +48,9 @@ def test_provisional_adapter_reads_only_strict_approaching_points() -> None:
     assert candidates[0].related_point_ids == ()
     assert candidates[0].small_to_large_carrier_unit_ids == ()
     assert candidates[0].actionable is False
+    document = point_decision_document(candidates[0])
+    assert document["anchor_at"] == raw.anchor_at.isoformat()
+    assert document["available_at"] == raw.available_at.isoformat()
 
 
 def test_provisional_adapter_rejects_future_visibility() -> None:
@@ -88,6 +98,24 @@ def test_provisional_candidate_rejects_noncanonical_point_type() -> None:
 
     with pytest.raises(ValueError, match="买卖点类型无效"):
         ProvisionalCandidate(**values)
+
+
+def test_provisional_candidate_rejects_opposite_terminal_segment_direction() -> None:
+    valid = provisional_point("3buy")
+    reference = TerminalSegmentReference(
+        role="latest_unfinished",
+        structural_level=0,
+        unit_id="segment:wrong-direction",
+        source_kind="segment",
+        direction="up",
+        state="forming",
+        market_start=valid.anchor_at - timedelta(minutes=30),
+        market_end=valid.anchor_at,
+        available_at=valid.available_at,
+    )
+
+    with pytest.raises(ValueError, match="terminal lineage mismatch"):
+        replace(valid, terminal_segment=reference)
 
 
 def test_provisional_adapter_rejects_non_approaching_endpoint() -> None:

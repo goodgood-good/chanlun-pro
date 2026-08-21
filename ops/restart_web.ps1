@@ -8,6 +8,7 @@
 [CmdletBinding()]
 param(
     [switch]$PreflightOnly,
+    [switch]$SkipWatchdog,
     [ValidateRange(30, 1800)]
     [int]$WebReadinessTimeoutSeconds = 1800
 )
@@ -21,6 +22,7 @@ $AppDir       = Join-Path $ProjectRoot 'web\chanlun_chart'
 $SrcPath      = Join-Path $ProjectRoot 'src'
 $AppScript    = Join-Path $AppDir 'app.py'
 $verifyScript = Join-Path $ProjectRoot 'ops\verify_deploy.ps1'
+$watchdogScript = Join-Path $ProjectRoot 'ops\watch_web.ps1'
 $PreflightTimeoutSec = 30
 $LogDir       = Join-Path $PSScriptRoot 'logs'
 # ----------------------------------------------------------------------------
@@ -88,6 +90,59 @@ function Exit-DeploymentMutex {
     } finally {
         $Mutex.Dispose()
     }
+}
+
+function Test-CurrentProcessElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+function Register-LimitedWebLaunchTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ([string]::IsNullOrWhiteSpace($currentUser)) {
+        throw 'current interactive user identity is unavailable'
+    }
+    $arguments = (
+        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass ' +
+        '-File "{0}" -WebReadinessTimeoutSeconds {1}'
+    ) -f $ScriptPath, $TimeoutSeconds
+    $action = New-ScheduledTaskAction `
+        -Execute 'powershell.exe' `
+        -Argument $arguments
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId $currentUser `
+        -LogonType Interactive `
+        -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Seconds ($TimeoutSeconds + 300))
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Action $action `
+        -Principal $principal `
+        -Settings $settings `
+        -Description 'One-shot limited-token chanlun-pro Web deployment handoff.' `
+        -Force | Out-Null
+}
+
+function Remove-LimitedWebLaunchTask {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask `
+        -TaskName $TaskName `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
 }
 
 function Import-ProjectDotEnv {
@@ -209,6 +264,64 @@ function Get-WebProcs {
         })
 }
 
+function Get-AttestedWebProcs {
+    param(
+        [Parameter(Mandatory = $true)][int[]]$PortOwnerIds,
+        [Parameter(Mandatory = $true)][string]$HealthUri,
+        [Parameter(Mandatory = $true)][string]$ExpectedSourceRevision
+    )
+
+    if ($PortOwnerIds.Count -eq 0) { return @() }
+    try {
+        $health = Invoke-RestMethod -Uri $HealthUri -Method Get -TimeoutSec 3
+    } catch {
+        return @()
+    }
+
+    $reportedPid = 0
+    if (
+        [string]$health.status -ne 'ready' -or
+        -not [int]::TryParse([string]$health.pid, [ref]$reportedPid) -or
+        $PortOwnerIds -notcontains $reportedPid
+    ) {
+        return @()
+    }
+
+    # 计划任务或提权会话中的同用户进程可能拒绝向当前 WMI 会话暴露命令行。
+    # 只有端口 PID、当前 Git 提交前缀和应用专属就绪组件同时吻合时才接纳，不能
+    # 单凭一个可伪造的 HTTP 响应把未知端口所有者纳入停止范围。
+    $treeMarker = '.tree.'
+    $treeMarkerIndex = $ExpectedSourceRevision.IndexOf(
+        $treeMarker,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+    if ($treeMarkerIndex -le 0) { return @() }
+    $expectedCommitPrefix = $ExpectedSourceRevision.Substring(
+        0,
+        $treeMarkerIndex + $treeMarker.Length
+    )
+    $reportedRevision = [string]$health.revision
+    if (
+        [string]::IsNullOrWhiteSpace($reportedRevision) -or
+        -not $reportedRevision.StartsWith(
+            $expectedCommitPrefix,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return @()
+    }
+
+    if ($null -eq $health.components) { return @() }
+    $componentNames = @($health.components.PSObject.Properties.Name)
+    foreach ($requiredComponent in @('scheduler', 'qmt_runtime', 'trading_screening')) {
+        if ($componentNames -notcontains $requiredComponent) { return @() }
+    }
+
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$reportedPid" -ErrorAction SilentlyContinue
+    if ($null -eq $process -or [string]$process.Name -ne 'python.exe') { return @() }
+    return $process
+}
+
 function Get-ListeningProcessIds {
     param([Parameter(Mandatory = $true)][int]$Port)
     @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
@@ -324,6 +437,11 @@ foreach ($requiredFile in @($AppScript, $verifyScript)) {
         Log '===== web restart ABORTED ====='
         exit 1
     }
+}
+if (-not (Test-Path -LiteralPath $watchdogScript -PathType Leaf)) {
+    Log ('ERROR: watchdog script not found: {0}' -f $watchdogScript)
+    Log '===== web restart ABORTED ====='
+    exit 1
 }
 if ($null -eq (Get-Command git -ErrorAction SilentlyContinue)) {
     Log 'ERROR: git is required for source attestation'
@@ -470,9 +588,24 @@ Log ('deployment single-flight lock acquired: {0}; owner PID={1}' -f $deployment
 
 try {
 # --- 1. 先停止网页项目 -------------------------------------------------------
+$portOwners = @(Get-ListeningProcessIds -Port $webPort)
 $webProcs = @(Get-WebProcs)
 $webProcIds = @($webProcs | ForEach-Object { [int]$_.ProcessId })
-$portOwners = @(Get-ListeningProcessIds -Port $webPort)
+$unrecognizedOwners = @($portOwners | Where-Object { $webProcIds -notcontains [int]$_ })
+if ($unrecognizedOwners.Count -gt 0) {
+    $attestedWebProcs = @(
+        Get-AttestedWebProcs `
+            -PortOwnerIds $unrecognizedOwners `
+            -HealthUri $healthUri `
+            -ExpectedSourceRevision $sourceRevision
+    )
+    foreach ($process in $attestedWebProcs) {
+        if ($webProcIds -contains [int]$process.ProcessId) { continue }
+        $webProcs += $process
+        $webProcIds += [int]$process.ProcessId
+        Log ('accepted endpoint-attested web PID={0} with restricted process metadata' -f $process.ProcessId)
+    }
+}
 $foreignOwners = @($portOwners | Where-Object { $webProcIds -notcontains [int]$_ })
 if ($foreignOwners.Count -gt 0) {
     Log ('ERROR: configured port {0} is owned by unrelated PID(s): {1}; existing processes were not stopped' -f $webPort, ($foreignOwners -join ','))
@@ -520,6 +653,117 @@ if ($remainingWebIds.Count -gt 0 -or $remainingPortOwners.Count -gt 0) {
     exit 1
 }
 if (-not $script:PreviousWebWasRunning) { Log 'web project not running on configured port, skip stop' }
+
+# An elevated deployment needs its extra privilege only to stop an elevated
+# legacy process.  Starting the replacement in the same token would make every
+# later release require UAC again.  Hand the empty port to a one-shot scheduled
+# task that explicitly runs under the interactive user's limited token.
+if (Test-CurrentProcessElevated) {
+    $handoffToken = ($deploymentMutexName -replace '[^A-Za-z0-9]', '')
+    if ($handoffToken.Length -gt 16) {
+        $handoffToken = $handoffToken.Substring($handoffToken.Length - 16)
+    }
+    $handoffTaskName = 'ChanlunProWebLaunch-{0}-{1}' -f $handoffToken, $PID
+    try {
+        Register-LimitedWebLaunchTask `
+            -TaskName $handoffTaskName `
+            -ScriptPath $PSCommandPath `
+            -TimeoutSeconds $WebReadinessTimeoutSeconds
+    } catch {
+        Abort-AfterWebStop -Reason (
+            'failed to register limited-token Web launch handoff: {0}' -f `
+                $_.Exception.Message
+        )
+    }
+
+    # HANDOFF-LOCK-RELEASE: the limited child runs the same deployment script
+    # and must be able to acquire the single-flight mutex before starting Web.
+    Log ('deployment single-flight lock released for limited-token handoff: {0}; owner PID={1}' -f $deploymentMutexName, $PID)
+    Exit-DeploymentMutex -Mutex $deploymentMutex
+    $deploymentMutex = $null
+
+    $handoffHealthy = $false
+    $handoffHealth = $null
+    $handoffPid = 0
+    $handoffLastDetail = 'limited-token launch not started'
+    try {
+        # HANDOFF-LIMITED-START: the task principal is RunLevel Limited.
+        Start-ScheduledTask -TaskName $handoffTaskName
+        Log ('limited-token Web launch requested via scheduled task {0}' -f $handoffTaskName)
+        $handoffDeadline = (Get-Date).AddSeconds($WebReadinessTimeoutSeconds)
+        $expectedHandoffRevisionPrefix = '{0}.run.' -f $sourceRevision
+        do {
+            Start-Sleep -Seconds 2
+            try {
+                $candidateHealth = Invoke-RestMethod `
+                    -Uri $healthUri `
+                    -Method Get `
+                    -TimeoutSec 3
+                $handoffLastDetail = (
+                    $candidateHealth | ConvertTo-Json -Compress -Depth 5
+                )
+                $candidatePid = 0
+                $candidateOwners = @(Get-ListeningProcessIds -Port $webPort)
+                if (
+                    $candidateHealth.status -eq 'ready' -and
+                    [string]$candidateHealth.revision -and
+                    [string]$candidateHealth.revision.StartsWith(
+                        $expectedHandoffRevisionPrefix,
+                        [StringComparison]::Ordinal
+                    ) -and
+                    [int]::TryParse(
+                        [string]$candidateHealth.pid,
+                        [ref]$candidatePid
+                    ) -and
+                    $candidateOwners -contains $candidatePid
+                ) {
+                    $handoffHealthy = $true
+                    $handoffHealth = $candidateHealth
+                    $handoffPid = $candidatePid
+                    break
+                }
+            } catch {
+                $handoffLastDetail = $_.Exception.Message
+            }
+        } while ((Get-Date) -lt $handoffDeadline)
+
+        if (-not $handoffHealthy) {
+            Log ('ERROR: limited-token Web launch failed readiness; last readiness: {0}' -f $handoffLastDetail)
+            $handoffOwners = @(Get-ListeningProcessIds -Port $webPort)
+            if ($handoffOwners.Count -eq 0) {
+                $null = Restore-WebService -Reason 'limited-token launch did not bind its port'
+            } else {
+                Log ('preserving not-ready handoff PID(s)={0} because the configured port is owned' -f ($handoffOwners -join ','))
+            }
+            Log '===== web restart ABORTED ====='
+            exit 1
+        }
+
+        Log ('web project ready under limited token PID={0}; open {1}' -f $handoffPid, $healthUri)
+        $handoffRevision = [string]$handoffHealth.revision
+        $verifyOutput = & powershell.exe `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File $verifyScript `
+            -ProjectRoot $ProjectRoot `
+            -HealthUri $healthUri `
+            -ExpectedRevision $handoffRevision `
+            -ExpectedSourceRevision $sourceRevision `
+            -ExpectedProcessId $handoffPid `
+            -SkipFreshnessCheck 2>&1
+        $verifyExit = $LASTEXITCODE
+        foreach ($line in $verifyOutput) { Log ('deploy verify: {0}' -f $line) }
+        if ($verifyExit -ne 0) {
+            Log ('ERROR: limited-token deployment verification failed; preserving ready PID={0}' -f $handoffPid)
+            Log '===== web restart ABORTED ====='
+            exit 1
+        }
+        Log '===== web restart DONE ====='
+        exit 0
+    } finally {
+        Remove-LimitedWebLaunchTask -TaskName $handoffTaskName
+    }
+}
 
 # --- 2. 启动网页服务 ---------------------------------------------------------
 try {
@@ -580,6 +824,25 @@ if ($verifyExit -ne 0) {
     Log ('ERROR: deployment verification failed; preserving ready PID={0}' -f $startedProcess.Id)
     Log '===== web restart ABORTED ====='
     exit 1
+}
+if (-not $SkipWatchdog) {
+    $watchdogArguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        ('"{0}"' -f $watchdogScript),
+        '-ProjectRoot',
+        ('"{0}"' -f $ProjectRoot),
+        '-WebPort',
+        [string]$webPort
+    )
+    $watchdogProcess = Start-Process `
+        -FilePath 'powershell.exe' `
+        -ArgumentList $watchdogArguments `
+        -WindowStyle Hidden `
+        -PassThru
+    Log ('web watchdog launch requested PID={0}; duplicate launches exit safely' -f $watchdogProcess.Id)
 }
 Log '===== web restart DONE ====='
 } finally {

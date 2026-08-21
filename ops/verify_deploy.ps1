@@ -13,6 +13,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$allowDerivedRunRevision = (
+    [string]::IsNullOrWhiteSpace($ExpectedRevision) -and
+    -not $SkipSourceCheck
+)
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -111,10 +115,20 @@ try {
 
         try {
             $health = Invoke-RestMethod -Uri $HealthUri -Method Get -TimeoutSec 10
+            $revisionMatches = (
+                [string]$health.revision -eq $ExpectedRevision -or
+                (
+                    $allowDerivedRunRevision -and
+                    ([string]$health.revision).StartsWith(
+                        "$ExpectedSourceRevision.run.",
+                        [StringComparison]::Ordinal
+                    )
+                )
+            )
             if ($health.status -ne 'ready') {
                 Write-Output "FAIL: readiness status is '$($health.status)'"
                 $ok = $false
-            } elseif ($health.revision -ne $ExpectedRevision) {
+            } elseif (-not $revisionMatches) {
                 Write-Output "FAIL: running revision '$($health.revision)' does not match expected '$ExpectedRevision'"
                 $ok = $false
             } elseif (-not $SkipProcessCheck -and [string]$health.pid -ne [string]$process.ProcessId) {

@@ -9,6 +9,7 @@ from chanlun import fun
 from chanlun.market import Market
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.exchange_binance_common import BINANCE_SUPPORTED_FREQUENCIES
 from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
@@ -104,34 +105,11 @@ class ExchangeDB(Exchange):
                 "15m": "15m",
                 "5m": "5m",
             }
-        elif self.market == Market.CURRENCY.value:
-            return {
-                "w": "Week",
-                "d": "Day",
-                "4h": "4H",
-                "60m": "1H",
-                "30m": "30m",
-                "15m": "15m",
-                "10m": "5m",
-                "5m": "5m",
-                "3m": "3m",
-                "2m": "2m",
-                "1m": "1m",
-            }
-        elif self.market == Market.CURRENCY_SPOT.value:
-            return {
-                "w": "Week",
-                "d": "Day",
-                "4h": "4H",
-                "60m": "1H",
-                "30m": "30m",
-                "15m": "15m",
-                "10m": "5m",
-                "5m": "5m",
-                "3m": "3m",
-                "2m": "2m",
-                "1m": "1m",
-            }
+        elif self.market in (
+            Market.CURRENCY.value,
+            Market.CURRENCY_SPOT.value,
+        ):
+            return dict(BINANCE_SUPPORTED_FREQUENCIES)
         return {"d": "D", "30m": "30m"}
 
     def query_last_datetime(self, code, frequency) -> Union[None, str]:

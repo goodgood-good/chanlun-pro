@@ -103,8 +103,15 @@
   function formatResolution(value) {
     const resolution = String(value || '').trim().toUpperCase();
     const higher = {
+      '120': '2小时',
+      '180': '3小时',
+      '240': '4小时',
+      '360': '6小时',
+      '480': '8小时',
+      '720': '12小时',
       '1D': '日线',
       '2D': '2日线',
+      '3D': '3日线',
       '1W': '周线',
       '1M': '月线',
       '3M': '季线',
@@ -186,11 +193,30 @@
       if (endPrice > startPrice) direction = '向上';
       if (endPrice < startPrice) direction = '向下';
     }
-    const status = String(item.linestyle) === '1' ? '形成中' : '已完成';
+    const explicitState = String(item.state || '').trim().toLowerCase();
+    let status;
+    let endpointStatus;
+    if (explicitState === 'locked' || item.locked === true) {
+      status = '已锁定';
+      endpointStatus = '端点已锁定，不再回改';
+    } else if (explicitState === 'formed') {
+      status = '几何已成形待锁定';
+      endpointStatus = '端点尚未锁定，仍可能回改';
+    } else if (explicitState === 'forming') {
+      status = '形成中';
+      endpointStatus = '结构尚未成形';
+    } else if (String(item.linestyle) === '1') {
+      // 兼容旧快照；新版服务端必须显式传递 state/locked。
+      status = '形成中';
+      endpointStatus = '结构尚未成形';
+    } else {
+      status = '已锁定';
+      endpointStatus = '端点已锁定，不再回改';
+    }
     return {
       exists: true,
       text: `${direction} · ${status}`,
-      meta: `${formatPrice(startPrice)} → ${formatPrice(endPrice)} · ${status === '形成中' ? '未闭合' : '已闭合'}`,
+      meta: `${formatPrice(startPrice)} → ${formatPrice(endPrice)} · ${endpointStatus}`,
       direction,
       status,
       startPrice,
@@ -219,23 +245,33 @@
     const pointLabel = centerPointLabel(expectedType);
     const scope = `${towerLabel}级`;
 
+    if (phase === 'OPERATIONAL_THIRD_CLASS_POINT') {
+      return {
+        status: '已完成',
+        qualification: `${scope}${pointLabel}已达到操作确认；末端结构仍会随新K更新`,
+        evidence: `${scope}${pointLabel}已按最新完成线段达到操作确认`,
+        requirement: '操作确认已满足；末端结构尚未封存',
+        associatedPoint: `${scope}${pointLabel}（操作确认，末端结构未封存）`,
+        tone: 'complete',
+      };
+    }
     if (phase === 'FORMAL_THIRD_CLASS_POINT') {
       return {
         status: '已完成',
-        qualification: `${scope}${pointLabel}已确认`,
-        evidence: `${scope}${pointLabel}已确认`,
-        requirement: '同级别完成条件已满足',
-        associatedPoint: `${scope}${pointLabel}（已确认）`,
+        qualification: `${scope}${pointLabel}操作确认完成，末端结构已封存`,
+        evidence: `${scope}${pointLabel}末端结构已封存`,
+        requirement: '操作确认与同级别末端封存条件均已满足',
+        associatedPoint: `${scope}${pointLabel}（操作确认，末端已封存）`,
         tone: 'complete',
       };
     }
     if (phase === 'GEOMETRIC_THIRD_CLASS_POINT') {
       return {
-        status: `${pointLabel}几何完成，待锁定`,
-        qualification: `${scope}${pointLabel}几何已成立；待线段锁定，仅作观察`,
-        evidence: `${scope}${pointLabel}几何成立（尚未锁定）`,
-        requirement: '等待当前同级别回抽线段锁定，才转为正式完成',
-        associatedPoint: `${scope}${pointLabel}（几何成立，待锁定）`,
+        status: `${pointLabel}候选待锁定`,
+        qualification: `${scope}${pointLabel}的离开与首次回抽几何已出现，但所在线段尚未锁定`,
+        evidence: `${scope}${pointLabel}仅为非交易几何候选`,
+        requirement: '尚未达到操作确认；不得把几何候选当作可操作买卖点',
+        associatedPoint: `${scope}${pointLabel}（候选待锁定）`,
         tone: 'forming',
       };
     }
@@ -244,7 +280,7 @@
         status: '观察证据',
         qualification: `${scope}中枢观察不产生买卖点`,
         evidence: '仅保留非交易结构观察',
-        requirement: '等待正式同级别结构形成',
+        requirement: '等待同级别结构达到操作确认',
         associatedPoint: '无可交易关联买卖点',
         tone: 'neutral',
       };
@@ -588,8 +624,8 @@
     const now = [];
     const formal = formalDirection ? summarizeFormalDirection(formalDirection) : null;
     if (formal) now.push(formal.label);
-    if (xd.exists) now.push(`线段${xd.direction}（${xd.status === '形成中' ? '未闭合' : '已闭合'}）`);
-    if (bi.exists) now.push(`当前笔${bi.direction}（${bi.status === '形成中' ? '未闭合' : '已闭合'}）`);
+    if (xd.exists) now.push(`线段${xd.direction}（${xd.status}）`);
+    if (bi.exists) now.push(`当前笔${bi.direction}（${bi.status}）`);
     const zonePositions = [biZone, xdZone]
       .map(zonePositionLabel)
       .filter(Boolean);
@@ -599,9 +635,11 @@
     if (bi.exists || xd.exists) {
       const conditions = [];
       if (bi.exists && bi.status === '形成中') {
-        conditions.push(`先等待当前${bi.direction}笔闭合`);
+        conditions.push(`先等待当前${bi.direction}笔成形并锁定`);
       } else if (xd.exists && xd.status === '形成中') {
-        conditions.push(`先等待当前${xd.direction}线段闭合`);
+        conditions.push(`先等待当前${xd.direction}线段成形`);
+      } else if (xd.exists && xd.status === '几何已成形待锁定') {
+        conditions.push(`先等待当前${xd.direction}线段端点锁定`);
       } else {
         conditions.push('等待下一笔或线段形成');
       }
@@ -617,7 +655,7 @@
     }
 
     const boundaryFacts = [];
-    if (bi.exists && bi.status === '形成中' && bi.startPrice !== null) {
+    if (bi.exists && bi.status !== '已锁定' && bi.startPrice !== null) {
       const action = bi.direction === '向上' ? '跌破' : (bi.direction === '向下' ? '突破' : '越过');
       boundaryFacts.push(`现价${action}当前${bi.direction}笔起点 ${formatPrice(bi.startPrice)}`);
     } else if (bi.exists && bi.endPrice !== null) {
@@ -687,7 +725,9 @@
     const resolution = String(value == null ? '' : value).trim().toUpperCase();
     const fixed = {
       '10S': '10s', '30S': '30s',
-      '1D': 'd', '2D': '2d', '1W': 'w', '1M': 'm',
+      '120': '120m', '180': '3h', '240': '4h',
+      '360': '6h', '480': '8h', '720': '12h',
+      '1D': 'd', '2D': '2d', '3D': '3d', '1W': 'w', '1M': 'm',
       '3M': 'q', '12M': 'y',
     };
     if (fixed[resolution]) return fixed[resolution];
@@ -705,7 +745,7 @@
   function emptyStrictPointCounts() {
     const counts = {};
     STRICT_POINT_TYPES.forEach((pointType) => {
-      counts[pointType] = { confirmed: 0, approaching: 0 };
+      counts[pointType] = { confirmed: 0, formed: 0, approaching: 0 };
     });
     return counts;
   }
@@ -738,6 +778,7 @@
       centerProjections: [],
       observations: [],
       confirmedPoints: [],
+      formedPoints: [],
       approachingPoints: [],
       divergences: [],
       pointCounts: emptyStrictPointCounts(),
@@ -866,9 +907,26 @@
         level[field].forEach((point) => {
           const pointType = String(point && point.point_type || '').toLowerCase();
           const expectedSide = pointType.endsWith('buy') ? 'buy' : 'sell';
+          const expectedConfirmed = status === 'confirmed';
+          const validFormation = expectedConfirmed
+            ? point && point.formation_state === 'confirmed'
+            : point && ['forming', 'geometry_ready', 'formed'].includes(point.formation_state);
+          const validLockState = expectedConfirmed
+            ? point && (point.lock_state === 'locked' || (
+              point.lock_state === 'pending'
+              && point.operational_confirmation === true
+              && point.strict_status === 'approaching'
+              && point.contains_forming_segment === false
+              && point.contains_unlocked_segment === true
+            ))
+            : point && point.lock_state === 'pending';
           if (!point
             || point.render_kind !== renderKind
             || point.status !== status
+            || !validFormation
+            || !validLockState
+            || typeof point.contains_forming_segment !== 'boolean'
+            || typeof point.contains_unlocked_segment !== 'boolean'
             || point.structural_level !== level.structural_level
             || !STRICT_POINT_TYPE_SET.has(pointType)
             || point.side !== expectedSide
@@ -986,6 +1044,16 @@
       pointLabel: MMD_LABELS[rawType],
       side: item.side,
       status: item.status,
+      strictStatus: item.strict_status || item.status,
+      operationalConfirmation: item.operational_confirmation === true,
+      confirmationBasis: item.confirmation_basis || null,
+      formationState: item.formation_state,
+      lockState: item.lock_state,
+      actionable: item.actionable === true,
+      containsFormingSegment: item.contains_forming_segment === true,
+      containsUnlockedSegment: item.contains_unlocked_segment === true,
+      terminalSegmentRole: item.terminal_segment_role || null,
+      terminalSegmentState: item.terminal_segment_state || null,
       variant: item.variant,
       structuralLevel: item.structural_level,
       sourceKind: item.source_kind,
@@ -1073,8 +1141,10 @@
       level.center_previews.forEach((item) => {
         centerPreviews.push(summarizeStrictCenter(
           item,
-          item.state === 'completed'
-            ? '几何已完成，等待线段锁定，不可直接交易'
+          item.operational_confirmation === true
+            ? '买卖点操作确认已完成；末端结构仍会随新K更新'
+            : item.state === 'completed'
+            ? '离开/回抽几何已出现；仍是候选，尚未达到操作确认'
             : '形成中预览，不可直接交易',
         ));
       });
@@ -1091,7 +1161,12 @@
       level.approaching_points.forEach((item) => {
         rawApproachingPoints.push(item);
         const pointType = String(item.point_type || '').toLowerCase();
-        if (pointCounts[pointType]) pointCounts[pointType].approaching += 1;
+        if (pointCounts[pointType]) {
+          const lane = ['geometry_ready', 'formed'].includes(item.formation_state)
+            ? 'formed'
+            : 'approaching';
+          pointCounts[pointType][lane] += 1;
+        }
       });
       level.divergences.forEach((item) => {
         rawDivergences.push({ ...item, level_label: level.label });
@@ -1102,7 +1177,12 @@
       summarizeStrictCenter(item, '严格笔中枢观察，不可直接交易')
     ));
     const confirmedPoints = rawConfirmedPoints.map(summarizeStrictPoint);
-    const approachingPoints = rawApproachingPoints.map(summarizeStrictPoint);
+    const formedPoints = rawApproachingPoints
+      .filter((item) => ['geometry_ready', 'formed'].includes(item.formation_state))
+      .map(summarizeStrictPoint);
+    const approachingPoints = rawApproachingPoints
+      .filter((item) => item.formation_state === 'forming')
+      .map(summarizeStrictPoint);
     const divergences = rawDivergences.map((item) => (
       summarizeStrictDivergence(item, item.level_label)
     ));
@@ -1181,6 +1261,7 @@
       centerProjections,
       observations,
       confirmedPoints,
+      formedPoints,
       approachingPoints,
       divergences,
       pointCounts,

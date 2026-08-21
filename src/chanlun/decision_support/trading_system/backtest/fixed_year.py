@@ -2,8 +2,8 @@
 
 回放只在进出场结论实际可能改变的时刻评估固定生产策略：
 
-* 已确认的五分钟设置开始可见；
-* 首个匹配且已确认的一分钟触发点开始可见；
+* 已确认的五分钟正式点在下一根可见一分钟柱开始接受成交观察；
+* 一分钟买卖点只记录段差证据，不创建或阻断五分钟正式信号；
 * 设置仍有效时，后续三十分钟收盘改变了环境闸门。
 
 已确认点写入只追加事件账本。全历史严格快照并不等同于该账本：后续线段递归可以合法
@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -28,10 +29,15 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from chanlun.core.cl import CL
-from chanlun.core.strict_structure.formal_state import current_formal_direction
+from chanlun.core.strict_structure.current_events import (
+    current_strict_point_evidence,
+    terminal_segment_reference,
+)
 from chanlun.core.strict_structure.evidence_assembler import (
     StrictEvidenceAssembler,
-    empty_stroke_center_observations,
+)
+from chanlun.core.strict_structure.formal_state import (
+    current_formal_direction_from_components,
 )
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
@@ -45,6 +51,9 @@ from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_l
 from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.decision_support.fingerprints import normalize_datetime
+from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_optional_entry_valid_until,
+)
 from chanlun.decision_support.trading_system.backtest.models import MinuteBar
 from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     QmtFactorAt,
@@ -52,6 +61,8 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SectorMembershipChange,
 )
 from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
+    QMTLocalKlineAudit,
+    derive_completed_30m_with_audit,
     read_qmt_local_derived_30m,
     read_qmt_local_kline,
     resolve_qmt_local_data_dir,
@@ -59,21 +70,29 @@ from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
 from chanlun.decision_support.trading_system.context import classify_context
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.lifecycle import (
-    is_one_minute_reversal_trigger,
+    five_minute_segment_difference_window_start,
+    five_minute_setup_expires_at,
+    five_minute_setup_family_lane,
+    five_minute_setup_is_in_policy_scope,
+    is_one_minute_segment_difference,
 )
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
+    EntryExecutionBoundary,
     MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
     SectorAssessment,
     StructuralPoint,
     StructureTower,
     TimeframeContext,
 )
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
 from chanlun.decision_support.trading_system.runtime_config import (
     strict_cl_config,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
-    extract_confirmed_points,
+    convert_confirmed_point_evidence,
     structural_point_id_map,
 )
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
@@ -272,6 +291,7 @@ def load_qmt_frame(
     end_at: datetime,
     factors: pd.DataFrame | None = None,
     _allow_native_daily: bool = False,
+    _local_five_snapshot: tuple[pd.DataFrame, QMTLocalKlineAudit] | None = None,
 ) -> pd.DataFrame:
     """读取原始 QMT 行，并只用除权日当时已知信息构建因果分析价格基准。"""
 
@@ -286,7 +306,32 @@ def load_qmt_frame(
     frame = pd.DataFrame()
     provider_error: Exception | None = None
     local_directory = resolve_qmt_local_data_dir()
-    if local_directory is not None:
+    if _local_five_snapshot is not None:
+        if frequency not in {"30m", "5m"}:
+            raise ValueError("a shared 5m snapshot only supports 5m or derived 30m")
+        source_frame, source_audit = _local_five_snapshot
+        if source_audit.code != code or source_audit.frequency != "5m":
+            raise ValueError("shared QMT 5m snapshot identity does not match request")
+        if frequency == "30m":
+            frame, local_audit = derive_completed_30m_with_audit(
+                source_frame,
+                source_audit,
+            )
+        else:
+            frame = source_frame.copy()
+            frame.attrs = dict(source_frame.attrs)
+            local_audit = source_audit
+        if not frame.empty:
+            frame.attrs.update(
+                qmt_transport=(
+                    "LOCAL_5M_DERIVED_30M_READ_ONLY"
+                    if frequency == "30m"
+                    else "LOCAL_FIXED_RECORD_READ_ONLY"
+                ),
+                qmt_local_cache_audit_id=local_audit.audit_id,
+                qmt_local_cache_source_sha256=local_audit.source_sha256,
+            )
+    elif local_directory is not None:
         reader = (
             read_qmt_local_derived_30m if frequency == "30m" else read_qmt_local_kline
         )
@@ -761,6 +806,11 @@ def _causal_confirmed_structure_events(
     price_basis_revision = cast(str, frame.attrs["price_basis_revision"])
     strength = MacdStrengthProvider(state)
     max_levels = len(recursive_level_labels(frequency))
+    recursive_engine = StrictRecursiveEngine(
+        max_levels=max_levels,
+        center_prefix_cache=OrderedDict(),
+    )
+    unit_lock_registry = UnitLockRegistry(price_basis_revision)
 
     frozen_segments = []
     point_ledger: dict[str, StructuralPoint] = {}
@@ -809,11 +859,11 @@ def _causal_confirmed_structure_events(
             SourceKind.SEGMENT,
             price_quantum,
             checkpoint,
-            UnitLockRegistry(price_basis_revision),
+            unit_lock_registry,
         )
         if len(units) < 5:
             continue
-        structure = StrictRecursiveEngine(max_levels=max_levels).calculate(
+        structure = recursive_engine.calculate(
             units,
             price_basis_revision=price_basis_revision,
             strength=strength,
@@ -897,13 +947,8 @@ def _causal_confirmed_structure_events(
             structure=structure,
             strength=strength,
         )
-        snapshot = assembler.evidence(
-            stroke_center_observations=empty_stroke_center_observations(
-                price_basis_revision
-            ),
-            include_approaching=False,
-        )
-        raw_points = snapshot.confirmed_points
+        raw_points = assembler.confirmed_points()
+        raw_current = current_strict_point_evidence(structure, raw_points)
         converted_point_ids = structural_point_id_map(
             raw_points,
             code=code,
@@ -912,11 +957,30 @@ def _causal_confirmed_structure_events(
         raw_anchor_by_point_id = {
             converted_point_ids[raw.point_id]: raw.anchor_unit_id for raw in raw_points
         }
-        for point in extract_confirmed_points(
-            snapshot,
+        converted = convert_confirmed_point_evidence(
+            raw_points,
             code=code,
             source_frequency=frequency,
             as_of=checkpoint,
+        )
+        current_ids = {
+            converted_point_ids[point.point_id] for point in raw_current
+        }
+        current_terminal_references = {
+            converted_point_ids[point.point_id]: terminal_segment_reference(
+                structure,
+                structural_level=point.structural_level,
+                unit_id=point.anchor_unit_id,
+            )
+            for point in raw_current
+        }
+        if any(
+            reference is None
+            for reference in current_terminal_references.values()
+        ):
+            raise ValueError("current backtest point lost terminal segment lineage")
+        for point in (
+            item for item in converted if item.point_id in current_ids
         ):
             if windows is not None and not any(
                 start <= point.available_at <= end for start, end in windows
@@ -926,6 +990,7 @@ def _causal_confirmed_structure_events(
             first_seen = replace(
                 point,
                 available_at=max(point.available_at, checkpoint),
+                terminal_segment=current_terminal_references[point.point_id],
             )
             point_ledger.setdefault(first_seen.point_id, first_seen)
             anchor_unit_id = raw_anchor_by_point_id[first_seen.point_id]
@@ -966,7 +1031,7 @@ def _causal_confirmed_structure_events(
 
 
 def _point_lane(point: StructuralPoint) -> tuple[str, str, int]:
-    return point.point_type, point.tower, point.recursive_level
+    return five_minute_setup_family_lane(point)
 
 
 def setup_active_ends(
@@ -981,8 +1046,9 @@ def setup_active_ends(
     output: dict[str, tuple[datetime, bool]] = {}
     for point in reversed(ordered):
         lane = _point_lane(point)
-        expiry = point.available_at + timedelta(
-            seconds=MAX_FIVE_MINUTE_SETUP_AGE_SECONDS
+        expiry = five_minute_setup_expires_at(
+            point,
+            max_setup_age_seconds=MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
         )
         following = next_by_lane.get(lane)
         if following is not None and following <= expiry:
@@ -993,7 +1059,7 @@ def setup_active_ends(
     return output
 
 
-def first_matching_trigger(
+def first_matching_segment_difference(
     setup: StructuralPoint,
     one_points: Sequence[StructuralPoint],
     *,
@@ -1010,13 +1076,17 @@ def first_matching_trigger(
     if boundary is not None:
         prices.append(boundary)
     low, high = min(prices), max(prices)
+    window_start = five_minute_segment_difference_window_start(setup)
     matches = (
         point
         for point in one_points
-        if is_one_minute_reversal_trigger(point)
+        if is_one_minute_segment_difference(point)
+        and point.code == setup.code
         and point.side == setup.side
         and point.point_id != setup.point_id
-        and setup.available_at <= point.available_at
+        and point.price_basis_revision == setup.price_basis_revision
+        and window_start <= point.anchor_at
+        and window_start <= point.available_at
         and (
             point.available_at < active_end
             if end_exclusive
@@ -1036,6 +1106,23 @@ def first_matching_trigger(
     )
 
 
+def first_matching_trigger(
+    setup: StructuralPoint,
+    one_points: Sequence[StructuralPoint],
+    *,
+    active_end: datetime,
+    end_exclusive: bool,
+) -> StructuralPoint | None:
+    """旧接口别名；返回的是可选1分钟段差，不是正式信号触发器。"""
+
+    return first_matching_segment_difference(
+        setup,
+        one_points,
+        active_end=active_end,
+        end_exclusive=end_exclusive,
+    )
+
+
 def sparse_evaluation_times(
     *,
     five_points: Sequence[StructuralPoint],
@@ -1045,7 +1132,11 @@ def sparse_evaluation_times(
     effective_start: datetime,
     requested_end: datetime,
 ) -> tuple[datetime, ...]:
-    """构建已触发当前形态可能发生变化的唯一时间点集合。"""
+    """构建 5 分钟正式点可用后可能发生变化的唯一时间点集合。
+
+    1 分钟结构点只作为段差证据，不能决定一条 5 分钟信号是否进入回放。
+    ``one_points`` 参数为旧事实档案兼容而保留；执行仍落在下一根可见 1 分钟柱。
+    """
 
     start = normalize_datetime(effective_start, "effective_start")
     end = normalize_datetime(requested_end, "requested_end")
@@ -1058,20 +1149,13 @@ def sparse_evaluation_times(
         sorted(normalize_datetime(value, "thirty_close") for value in thirty_closes)
     )
     active_ends = setup_active_ends(five_points)
+    _ = one_points
     output: set[datetime] = set()
     for setup in five_points:
         active_end, superseded = active_ends[setup.point_id]
         if active_end < start or setup.available_at > end:
             continue
-        trigger = first_matching_trigger(
-            setup,
-            one_points,
-            active_end=active_end,
-            end_exclusive=superseded,
-        )
-        if trigger is None or trigger.available_at > end:
-            continue
-        first_at = max(trigger.available_at, start)
+        first_at = max(setup.available_at, start)
         position = bisect_right(one_dates, first_at - timedelta(microseconds=1))
         if position >= len(one_dates):
             continue
@@ -1108,15 +1192,25 @@ def causal_directions(
         if end > cursor:
             chunk = frame.iloc[cursor:end].copy().reset_index(drop=True)
             copy_price_basis_metadata(frame, chunk)
-            state.process_klines(chunk)
+            # ``chunk`` is a monotonic slice of the same immutable frame and
+            # ``cursor`` proves that every prior row is unchanged.  Let the
+            # HTF calculators consume only the revised tail/new rows instead
+            # of revalidating the complete prefix at every evaluation point.
+            state.process_validated_incremental_klines(chunk)
             cursor = end
         if cursor == 0:
             output.append((observed_at, "neutral"))
             unavailable += 1
             continue
         try:
-            evidence = state.get_strict_evidence()
-            direction = cast(ContextDirection, current_formal_direction(evidence))
+            direction = cast(
+                ContextDirection,
+                current_formal_direction_from_components(
+                    structure=state.get_strict_structure_levels(),
+                    confirmed_points=state.get_strict_points(),
+                    source_closed_at=dates[cursor - 1],
+                ),
+            )
             output.append((observed_at, direction))
         except (StrictStructureContractError, TypeError, ValueError):
             output.append((observed_at, "neutral"))
@@ -1292,11 +1386,39 @@ def build_symbol_bundle(
             and point.source_frequency == frequency
         )
 
-    # 回放与实时筛选在每个物理周期消费同一完整递归图；尤其小转大的一、二类点必须保持
-    # 可交易，不能在该边界被丢弃。
+    # 完整递归图保留在事实档案中；订单级别只消费物理 5m/L0。5m/L1 的有效
+    # 周期是 30m，只能进入高周期上下文，不能成为第二条 5m 交易通道。
     thirty = tradable(facts.thirty_points, "30m")
-    five = tradable(facts.five_points, "5m")
+    five_context = tradable(facts.five_points, "5m")
+    five = tuple(
+        point
+        for point in five_context
+        if is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        )
+    )
     one = tradable(facts.one_points, "1m")
+    entry_boundaries = tuple(
+        EntryExecutionBoundary(
+            symbol=facts.code,
+            point_id=point.point_id,
+            source_frequency="1m",
+            confirmation_bar_closed_at=evaluation.bar.closed_at,
+            raw_open=evaluation.bar.raw_open,
+            raw_high=evaluation.bar.raw_high,
+            raw_low=evaluation.bar.raw_low,
+            raw_close=evaluation.bar.raw_close,
+            raw_volume=evaluation.bar.volume,
+            entry_valid_until=a_share_optional_entry_valid_until(
+                evaluation.bar.closed_at
+            ),
+            raw_price_basis_revision=facts.source_revision,
+        )
+        for point in one
+        if point.available_at == evaluation.bar.closed_at
+        and is_one_minute_segment_difference(point)
+    )
     return SymbolStructureBundle(
         code=facts.code,
         as_of=observed_at,
@@ -1307,10 +1429,11 @@ def build_symbol_bundle(
         one_points=one,
         # 与实时网关一致：冲突证据覆盖全部已分析个股周期，并在 ``resolve_conflict``
         # 内按方向和级别过滤。
-        opposite_points=(*thirty, *five, *one),
+        opposite_points=(*thirty, *five_context, *one),
         held_tower=held_tower,
         held_level=held_level,
         physical_timeframe_recursive=True,
+        entry_execution_boundaries=entry_boundaries,
         selection_sources=selection_sources,
         selection_research=selection_research,
     )
@@ -1578,10 +1701,13 @@ def run_sparse_portfolio(
         tuple[SelectionResearchSnapshot, ...],
     ]
     | None = None,
+    formal_selection_required: bool = True,
 ):
     """执行稀疏决策，并逐分钟回放所有持仓与待处理订单。
 
-    新买入要求当时的板块评估确属支持状态，并且存在当时可见的正式个股研究快照。
+    新买入始终要求当时的板块评估确属支持状态。只有调用方明确启用
+    ``formal_selection_required`` 时，才额外要求当时可见的正式个股研究快照；
+    当前生产选股不读取该旧账本，因此正式固定年度回放会显式关闭这一门。
     板块来源由同一次因果回放中的 ``SectorResearchFacts`` 唯一推导，调用方不能再
     用静态标的映射把未来触发回填到整段历史。
     """
@@ -1604,6 +1730,8 @@ def run_sparse_portfolio(
 
     if initial_cash <= 0:
         raise ValueError("initial_cash must be positive")
+    if type(formal_selection_required) is not bool:
+        raise ValueError("formal_selection_required must be a boolean")
     if not symbol_facts:
         raise ValueError("symbol facts are required")
     selection_research = {
@@ -1660,7 +1788,10 @@ def run_sparse_portfolio(
     state = _PortfolioState.initial(initial_cash)
     baseline_at = datetime.combine(effective_start, time(9, 30), tzinfo=CN)
     state.record_equity(baseline_at)
-    engine = HumanAssistedDecisionCore(TradingPolicy())
+    engine = HumanAssistedDecisionCore(
+        TradingPolicy(),
+        formal_selection_required=formal_selection_required,
+    )
     risk_limits = RiskLimits()
     execution_policy = ExecutionPolicy(require_observed_price_range=True)
     actions = tuple(
@@ -1889,6 +2020,18 @@ def build_symbol_facts(
         tzinfo=CN,
     )
     effective_at = datetime.combine(effective_start, time(9, 30), tzinfo=CN)
+    local_directory = resolve_qmt_local_data_dir()
+    local_five_snapshot = (
+        read_qmt_local_kline(
+            data_dir=local_directory,
+            code=code,
+            frequency="5m",
+            start_at=context_start,
+            end_at=end_at,
+        )
+        if local_directory is not None
+        else None
+    )
     frames = {
         frequency: load_qmt_frame(
             code,
@@ -1896,6 +2039,7 @@ def build_symbol_facts(
             start_at=(minute_start if frequency == "1m" else context_start),
             end_at=end_at,
             factors=factors,
+            _local_five_snapshot=local_five_snapshot,
         )
         for frequency in ("30m", "5m")
     }
@@ -1918,12 +2062,22 @@ def build_symbol_facts(
             ),
         ),
     )
-    active_ends = setup_active_ends(five_points)
+    operation_five_points = tuple(
+        point
+        for point in five_points
+        if is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        )
+        and five_minute_setup_is_in_policy_scope(point)
+    )
+    active_ends = setup_active_ends(operation_five_points)
     relevant_setups = tuple(
         setup
-        for setup in five_points
+        for setup in operation_five_points
         if setup.available_at <= end_at
         and active_ends[setup.point_id][0] >= effective_at
+        and setup.available_at <= active_ends[setup.point_id][0]
     )
     has_relevant_setup = bool(relevant_setups)
     one_frame = (
@@ -1961,7 +2115,7 @@ def build_symbol_facts(
         ),
     )
     evaluation_times = sparse_evaluation_times(
-        five_points=five_points,
+        five_points=operation_five_points,
         one_points=one_points,
         thirty_closes=tuple(
             pd.Timestamp(value).to_pydatetime() for value in frames["30m"]["date"]
@@ -2039,6 +2193,7 @@ __all__ = (
     "build_symbol_facts",
     "causal_directions",
     "final_confirmed_points",
+    "first_matching_segment_difference",
     "first_matching_trigger",
     "load_qmt_frame",
     "load_qmt_daily_frame",

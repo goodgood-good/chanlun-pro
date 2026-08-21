@@ -2530,7 +2530,9 @@ def test_latest_materializes_live_scan_and_keeps_old_chart_lock(
     assert first["review_queue_count"] == 2
     assert first["source_options"][0] == "live"
     old = next(
-        row for row in first["review_queue"] if row["alert_type"] == "POSSIBLE_30M_BUY"
+        row
+        for row in first["review_queue"]
+        if row["alert_type"] == "POSSIBLE_5M_TRADE_BUY"
     )
     feedback = live_service.append_feedback(
         candidate_id=old["candidate_id"],

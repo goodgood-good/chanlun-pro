@@ -28,6 +28,7 @@ from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
 )
 from chanlun.decision_support.trading_system.qmt_sector_same_base import (
     derive_qmt_sector_thirty_minute_frame,
+    qmt_sector_member_path_revision,
 )
 from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import (
     QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID,
@@ -93,23 +94,7 @@ def deterministic_current_sector_composite_members(
 
 
 def _member_path_revision(frame: pd.DataFrame) -> str | None:
-    if frame.empty:
-        return None
-    return sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-composite-member-path",
-            "rows": tuple(
-                {
-                    "date": normalize_datetime(
-                        pd.Timestamp(row.date).to_pydatetime(),
-                        "current-sector member path date",
-                    ),
-                    "member_mask": int(row.member_mask),
-                }
-                for row in frame.itertuples(index=False)
-            ),
-        }
-    )
+    return qmt_sector_member_path_revision(frame)
 
 
 def _attach_current_composite_provenance(

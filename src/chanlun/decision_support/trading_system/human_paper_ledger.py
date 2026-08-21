@@ -1609,7 +1609,8 @@ def audit_human_paper_entry_selection_source_bindings(
             continue
         ranking = source_alert.sector_ranking_evidence
         required = (
-            source_alert.alert_type == "POSSIBLE_30M_BUY"
+            source_alert.alert_type
+            in {"POSSIBLE_5M_TRADE_BUY", "POSSIBLE_30M_BUY"}
             and ranking is not None
         )
         raw_evidence = payload.get("entry_selection_evidence")
@@ -2375,7 +2376,8 @@ def build_human_paper_intent(
     ranking = alert.sector_ranking_evidence
     exact_sector_selection_required = (
         is_buy
-        and alert.alert_type == "POSSIBLE_30M_BUY"
+        and alert.alert_type
+        in {"POSSIBLE_5M_TRADE_BUY", "POSSIBLE_30M_BUY"}
         and ranking is not None
     )
     if exact_sector_selection_required:
@@ -2428,10 +2430,17 @@ def build_human_paper_intent(
     program_side: Literal["BUY", "SELL"] = (
         "BUY"
         if alert.alert_type
-        in {"POSSIBLE_30M_BUY", "POSSIBLE_5M_TACTICAL_BUYBACK"}
+        in {
+            "POSSIBLE_5M_TRADE_BUY",
+            "POSSIBLE_30M_BUY",
+            "POSSIBLE_5M_TACTICAL_BUYBACK",
+        }
         else "SELL"
     )
-    tactical_review = alert.alert_type.startswith("POSSIBLE_5M_") or (
+    tactical_review = alert.alert_type in {
+        "POSSIBLE_5M_TACTICAL_SELL",
+        "POSSIBLE_5M_TACTICAL_BUYBACK",
+    } or (
         role_unclassified_sell and feedback.level_judgement == "5M"
     )
     if side != program_side:

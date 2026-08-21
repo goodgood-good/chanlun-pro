@@ -15,7 +15,11 @@ test('_resEquiv: 直接相等与日/周/月等价写法', () => {
   assert.equal(_resEquiv('1d', '1440'), true);
   assert.equal(_resEquiv('1w', 'w'), true);
   assert.equal(_resEquiv('1m', 'm'), true);   // 月线
+  assert.equal(_resEquiv('180', '3h'), true);
   assert.equal(_resEquiv('240', '4h'), true);
+  assert.equal(_resEquiv('360', '6h'), true);
+  assert.equal(_resEquiv('480', '8h'), true);
+  assert.equal(_resEquiv('720', '12h'), true);
   // 不同周期不等价
   assert.equal(_resEquiv('5', '30'), false);
   assert.equal(_resEquiv('5', '1d'), false);

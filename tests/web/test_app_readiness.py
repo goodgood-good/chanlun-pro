@@ -153,9 +153,13 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
     payload = response.get_json()
     assert payload["status"] == "ready"
     assert payload["runtime_ready"] is True
+    assert payload["status_scope"] == "PROCESS_RUNTIME"
     assert payload["selection_ready"] is None
     assert payload["selection_status"] == "disabled"
     assert payload["selection_reason_code"] == "SCREENING_DISABLED"
+    assert payload["realtime_alert_ready"] is None
+    assert payload["realtime_alert_status"] == "disabled"
+    assert payload["realtime_alert_reason_code"] == "SCREENING_DISABLED"
     assert payload["revision"] == "test-revision"
     assert payload["pid"] == os.getpid()
     assert payload["market"] == "a"
@@ -511,6 +515,9 @@ def test_readyz_requires_screening_attestation_when_runtime_is_running(app):
                 "selection_ready": False,
                 "selection_status": "coverage_in_progress",
                 "selection_reason_code": "PRESELECTION_COVERAGE_INCOMPLETE",
+                "realtime_alert_ready": False,
+                "realtime_alert_status": "candidate_monitor_degraded",
+                "realtime_alert_reason_code": "CANDIDATE_MONITOR_CADENCE_OVERDUE",
                 "reasons": [],
             }
         )
@@ -535,10 +542,18 @@ def test_readyz_requires_screening_attestation_when_runtime_is_running(app):
         recovered_payload = recovered.get_json()
         assert recovered_payload["reasons"] == []
         assert recovered_payload["runtime_ready"] is True
+        assert recovered_payload["status_scope"] == "PROCESS_RUNTIME"
         assert recovered_payload["selection_ready"] is False
         assert recovered_payload["selection_status"] == "coverage_in_progress"
         assert recovered_payload["selection_reason_code"] == (
             "PRESELECTION_COVERAGE_INCOMPLETE"
+        )
+        assert recovered_payload["realtime_alert_ready"] is False
+        assert recovered_payload["realtime_alert_status"] == (
+            "candidate_monitor_degraded"
+        )
+        assert recovered_payload["realtime_alert_reason_code"] == (
+            "CANDIDATE_MONITOR_CADENCE_OVERDUE"
         )
     finally:
         scheduler.shutdown(wait=False)

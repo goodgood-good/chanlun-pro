@@ -11,6 +11,7 @@ from flask_login import login_required
 from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.zixuan import ZiXuan
+from chanlun.xuangu.strict_xuangu import validate_frequency_sequence
 
 
 xuangu_bp = Blueprint("xuangu", __name__)
@@ -64,8 +65,15 @@ def xuangu_task_add():
     opt_type = opt_type.split(",")
 
     # 只接受任务执行器明确支持的方向，避免无效任务进入逐标的计算。
-    if not opt_type or any(o not in ("long", "short") for o in opt_type):
-        return {"ok": False, "msg": "选股方向(opt_type)非法，仅支持 long/short"}
+    if (
+        not opt_type
+        or len(opt_type) != len(set(opt_type))
+        or any(o not in ("long", "short") for o in opt_type)
+    ):
+        return {
+            "ok": False,
+            "msg": "选股方向(opt_type)必须唯一且仅支持 long/short",
+        }
     if any(not frequency for frequency in frequencys):
         return {"ok": False, "msg": "选股周期不能为空"}
 
@@ -80,6 +88,11 @@ def xuangu_task_add():
             "ok": False,
             "msg": f"选股周期错误，该任务可选周期数量 : {allow_freq_num}",
         }
+
+    try:
+        frequencys = list(validate_frequency_sequence(frequencys))
+    except ValueError as exc:
+        return {"ok": False, "msg": str(exc)}
 
     try:
         supported_frequencys = get_exchange(Market(market)).support_frequencys()

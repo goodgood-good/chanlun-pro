@@ -13,16 +13,20 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+import ctypes
 import hashlib
+import hmac
 import json
 from multiprocessing.connection import Connection, Listener
 import os
 from pathlib import Path
 from queue import Empty, Queue
+import re
 import secrets
+import shutil
 import subprocess
 import sys
-from threading import Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -60,8 +64,12 @@ from cl_app.services.trading_screening_gateway import (
     _stock_codes,
 )
 from cl_app.services.realtime_quotes import (
+    AShareDisplayQuoteBatch,
+    AShareInstrumentSessionStatusBatch,
     AShareRealtimeQuoteBatch,
     normalized_a_share_codes,
+    validated_display_quote_batch,
+    validated_instrument_session_status_batch,
     validated_quote_batch,
 )
 
@@ -74,11 +82,81 @@ _DEFAULT_WORKER = Path(__file__).with_name("trading_screening_native_worker.py")
 _SECTOR_CACHE_SCHEMA = "chanlun-native-sector-snapshot-cache"
 _SECTOR_CACHE_PAYLOAD_SCHEMA = "chanlun-native-sector-snapshot-cache-payload"
 _SECTOR_SNAPSHOT_PRODUCER_SCHEMA = "chanlun-native-sector-snapshot-producer"
+_STRUCTURE_WORKER_AFFINITY_CONTRACT_ID = (
+    "priority-sector_candidate-sector-symbol-striped-v2"
+)
+_DISPLAY_QUOTE_LOCK_WAIT_SECONDS = 2.0
+# The candidate phase deadline is an admission boundary, not a safe deadline
+# for destroying a process that is already rebuilding one symbol.  A newly
+# started QMT/Chanlun worker may legitimately need more than the remaining lane
+# budget for its first request.  Keep a separate hard ceiling so a hung request
+# is still reclaimed, without turning every near-boundary request into another
+# cold start on the following minute.
+_CANDIDATE_IN_FLIGHT_MINIMUM_SECONDS = 75.0
 _SECTOR_SNAPSHOT_WEB_PRODUCERS = (
     "web/chanlun_chart/cl_app/services/trading_screening_gateway.py",
     "web/chanlun_chart/cl_app/services/trading_screening_native_worker.py",
     "web/chanlun_chart/cl_app/services/trading_screening_process.py",
 )
+_RUNTIME_STATE_CACHE_PRODUCER_SCHEMA = (
+    "chanlun-screening-runtime-state-producer-v1"
+)
+_RUNTIME_STATE_CACHE_PRODUCER_FILES = (
+    "src/chanlun/decision_support/fingerprints.py",
+    "src/chanlun/decision_support/trading_system/runtime_config.py",
+    "src/chanlun/decision_support/trading_system/screening_runtime.py",
+    "src/chanlun/decision_support/trading_system/screening_structure.py",
+    "web/chanlun_chart/cl_app/services/trading_screening_gateway.py",
+)
+
+
+def runtime_state_cache_producer_revision(
+    *,
+    project_root: Path | str | None = None,
+) -> str:
+    """返回可序列化严格结构运行态的最小内容寻址身份。
+
+    缓存里只保存 ``CL``、严格结构运行态和对应行情前缀，不保存环境分级、通知、页面
+    或选股决策。因此这些外围实现变化不应让数千只标的的 5 分钟状态失效。核心结构
+    目录、运行态编解码入口或网关容器变化仍会生成全新身份；载入端还会独立校验
+    Python、pandas 与 numpy ABI，并在行情前缀不一致时自动完整重建。
+    """
+
+    root = _PROJECT_ROOT if project_root is None else Path(project_root).resolve()
+    core_root = root / "src" / "chanlun" / "core"
+    required = tuple(root / value for value in _RUNTIME_STATE_CACHE_PRODUCER_FILES)
+    if not core_root.is_dir() or any(not value.is_file() for value in required):
+        raise RuntimeError("runtime state cache producer source is incomplete")
+    ignored_directories = frozenset(
+        {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+    )
+    paths = {
+        value.resolve()
+        for value in core_root.rglob("*.py")
+        if value.is_file()
+        and not any(part in ignored_directories for part in value.parts)
+    }
+    paths.update(value.resolve() for value in required)
+    manifest = tuple(
+        {
+            "path": value.relative_to(root).as_posix(),
+            "sha256": "sha256:" + hashlib.sha256(value.read_bytes()).hexdigest(),
+        }
+        for value in sorted(paths, key=lambda item: item.relative_to(root).as_posix())
+    )
+    return sha256_json(
+        {
+            "schema": _RUNTIME_STATE_CACHE_PRODUCER_SCHEMA,
+            "files": manifest,
+            "frequency": "5m",
+            "serialized_state": "full-and-warmup-suffix",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+    )
+
+
 def _sector_cache_decision_epoch(value: datetime) -> tuple[date, str, int]:
     """把墙上时钟请求映射到因果 A 股 5m 数据周期。
 
@@ -186,6 +264,14 @@ class NativeScreeningWorkerDeadlineExceeded(NativeScreeningWorkerTimeout):
     reason_code = "CANDIDATE_MONITOR_TIME_BUDGET_EXHAUSTED"
 
 
+class NativePriorityScreeningWorkerDeadlineExceeded(
+    NativeScreeningWorkerDeadlineExceeded
+):
+    """1m 优先读取超过分钟预算；该错误属于实时通道而非候选延期。"""
+
+    reason_code = "PRIORITY_MONITOR_TIME_BUDGET_EXHAUSTED"
+
+
 class NativeScreeningWorkerProtocolError(NativeScreeningWorkerError):
     """已认证子进程返回无效协议消息。"""
 
@@ -210,9 +296,17 @@ class NativeScreeningWorkerRemoteError(NativeScreeningWorkerError):
 
 @dataclass(frozen=True, slots=True)
 class NativeWorkerProcessConfig:
-    startup_timeout_seconds: float = 45.0
+    # A fresh Windows worker independently imports the strict runtime, hashes
+    # the complete decision source tree and proves a read-only QMT RPC before
+    # its authenticated handshake.  Production observations under host load
+    # exceeded the old 45-second limit, which killed healthy workers and made
+    # application startup loop forever.  This remains bounded and applies only
+    # to startup; request idle/deadline controls are unchanged.
+    startup_timeout_seconds: float = 180.0
     native_idle_timeout_seconds: float = 210.0
     restart_backoff_seconds: float = 30.0
+    max_completed_requests_per_process: int = 256
+    max_worker_rss_bytes: int = 1536 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if any(
@@ -224,6 +318,15 @@ class NativeWorkerProcessConfig:
             )
         ):
             raise ValueError("native worker timeouts must be positive numbers")
+        if (
+            type(self.max_completed_requests_per_process) is not int
+            or self.max_completed_requests_per_process <= 0
+        ):
+            raise ValueError(
+                "max_completed_requests_per_process must be a positive integer"
+            )
+        if type(self.max_worker_rss_bytes) is not int or self.max_worker_rss_bytes <= 0:
+            raise ValueError("max_worker_rss_bytes must be a positive integer")
 
 
 def _now() -> datetime:
@@ -232,6 +335,348 @@ def _now() -> datetime:
 
 def _iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _process_memory_bytes(pid: int | None) -> tuple[int | None, int | None]:
+    """读取子进程工作集/RSS 与私有内存，不引入可选运行依赖。"""
+
+    if type(pid) is not int or pid <= 0:
+        return None, None
+    if os.name == "nt":
+        try:
+            from ctypes import wintypes
+
+            class _ProcessMemoryCountersEx(ctypes.Structure):
+                _fields_ = (
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                )
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.OpenProcess.argtypes = (
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            )
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            psapi.GetProcessMemoryInfo.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(_ProcessMemoryCountersEx),
+                wintypes.DWORD,
+            )
+            handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)
+            if not handle:
+                return None, None
+            try:
+                counters = _ProcessMemoryCountersEx()
+                counters.cb = ctypes.sizeof(counters)
+                if not psapi.GetProcessMemoryInfo(
+                    handle,
+                    ctypes.byref(counters),
+                    counters.cb,
+                ):
+                    return None, None
+                return int(counters.WorkingSetSize), int(counters.PrivateUsage)
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None, None
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None, None
+    values: dict[str, int] = {}
+    for line in status.splitlines():
+        name, separator, raw = line.partition(":")
+        if not separator or name not in {"VmRSS", "VmSize"}:
+            continue
+        parts = raw.strip().split()
+        if parts and parts[0].isdigit():
+            values[name] = int(parts[0]) * 1024
+    return values.get("VmRSS"), values.get("VmSize")
+
+
+_RUNTIME_STATE_CACHE_ROOT_PATTERN = re.compile(r"^web-(\d+)-[0-9a-f]{16}$")
+_PERSISTENT_RUNTIME_STATE_CACHE_ROOT_PATTERN = re.compile(
+    r"^runtime-[0-9a-f]{24}$"
+)
+_PERSISTENT_RUNTIME_STATE_CACHE_OWNER_PATTERN = re.compile(
+    r"^\.(runtime-[0-9a-f]{24})\.owner-(\d+)-[0-9a-f]{16}$"
+)
+_RUNTIME_STATE_CACHE_KEY_CONTEXT = (
+    b"chanlun-screening-runtime-state-cache/structure-producer-v1"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeStateCacheSettings:
+    root: Path
+    key_hex: str
+    identity: str
+    scope: str
+    delete_on_close: bool
+
+
+def _runtime_state_cache_settings(
+    *,
+    parent: Path,
+    expected_runtime_state_producer_revision: str,
+    persistent_secret: bytes | None,
+) -> _RuntimeStateCacheSettings:
+    """Build either a Web-lifecycle cache or a structure-producer cache.
+
+    Production supplies a secret derived from the persistent Flask secret.  The
+    resulting HMAC key is stable only for the exact runtime-state producer, so
+    Web, notification and decision-policy changes can reuse the expensive 5m
+    state while any structure/runtime change is isolated into a new directory
+    and key.
+    """
+
+    resolved_parent = parent.resolve()
+    if re.fullmatch(
+        r"sha256:[0-9a-f]{64}", expected_runtime_state_producer_revision
+    ) is None:
+        raise ValueError(
+            "runtime state cache requires a content-addressed producer revision"
+        )
+    if persistent_secret is None:
+        root = (
+            resolved_parent / f"web-{os.getpid()}-{secrets.token_hex(8)}"
+        ).resolve()
+        return _RuntimeStateCacheSettings(
+            root=root,
+            key_hex=secrets.token_hex(32),
+            identity=root.name,
+            scope="web_lifecycle",
+            delete_on_close=True,
+        )
+    if not isinstance(persistent_secret, bytes) or len(persistent_secret) < 32:
+        raise ValueError("runtime state cache persistent secret is too short")
+    revision_bytes = expected_runtime_state_producer_revision.encode("ascii")
+    revision_digest = hashlib.sha256(revision_bytes).hexdigest()
+    root = (resolved_parent / f"runtime-{revision_digest[:24]}").resolve()
+    if (
+        root.parent != resolved_parent
+        or _PERSISTENT_RUNTIME_STATE_CACHE_ROOT_PATTERN.fullmatch(root.name) is None
+    ):
+        raise ValueError("runtime state cache source root is invalid")
+    derived_key = hmac.new(
+        persistent_secret,
+        _RUNTIME_STATE_CACHE_KEY_CONTEXT + b"\0" + revision_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+    return _RuntimeStateCacheSettings(
+        root=root,
+        key_hex=derived_key,
+        identity=expected_runtime_state_producer_revision,
+        scope="runtime_state_producer_revision",
+        delete_on_close=False,
+    )
+
+
+def _process_exists(pid: int) -> bool:
+    if type(pid) is not int or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = (
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            )
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                # ERROR_INVALID_PARAMETER is the documented signal for a PID
+                # that no longer exists.  Access denied (or any other error)
+                # is inconclusive, so preserve the cache rather than risk
+                # deleting another live Web instance's state.
+                return ctypes.get_last_error() != 87
+            kernel32.CloseHandle(handle)
+            return True
+        except (AttributeError, OSError, TypeError, ValueError):
+            # 无法证明进程已经退出时保留缓存，避免误删另一个活动实例。
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, PermissionError):
+        return True
+    return True
+
+
+def _claim_persistent_runtime_state_cache_root(root: Path) -> Path:
+    """为持久缓存登记当前进程租约，供并行或滚动启动安全避让。"""
+
+    resolved = root.resolve()
+    resolved_parent = resolved.parent
+    if _PERSISTENT_RUNTIME_STATE_CACHE_ROOT_PATTERN.fullmatch(resolved.name) is None:
+        raise ValueError("persistent runtime state cache root is invalid")
+    resolved_parent.mkdir(parents=True, exist_ok=True)
+    marker = (
+        resolved_parent
+        / f".{resolved.name}.owner-{os.getpid()}-{secrets.token_hex(8)}"
+    )
+    if (
+        marker.parent.resolve() != resolved_parent
+        or _PERSISTENT_RUNTIME_STATE_CACHE_OWNER_PATTERN.fullmatch(marker.name) is None
+    ):
+        raise ValueError("persistent runtime state cache owner marker is invalid")
+    marker.touch(exist_ok=False)
+    return marker
+
+
+def _release_persistent_runtime_state_cache_root(marker: Path | None) -> None:
+    if marker is None:
+        return
+    match = _PERSISTENT_RUNTIME_STATE_CACHE_OWNER_PATTERN.fullmatch(marker.name)
+    if match is None or int(match.group(2)) != os.getpid():
+        return
+    try:
+        resolved_parent = marker.parent.resolve()
+        resolved = marker.resolve()
+    except OSError:
+        return
+    if resolved.parent != resolved_parent:
+        return
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _cleanup_stale_runtime_state_cache_roots(
+    parent: Path,
+    *,
+    current_root: Path | None = None,
+) -> None:
+    """清理退出的 Web 缓存和无活动租约的旧持久版本缓存。"""
+
+    resolved_parent = parent.resolve()
+    if not resolved_parent.exists():
+        return
+    current_root_name: str | None = None
+    if current_root is not None:
+        try:
+            resolved_current = current_root.resolve()
+        except OSError:
+            resolved_current = None
+        if (
+            resolved_current is not None
+            and resolved_current.parent == resolved_parent
+            and _PERSISTENT_RUNTIME_STATE_CACHE_ROOT_PATTERN.fullmatch(
+                resolved_current.name
+            )
+            is not None
+        ):
+            current_root_name = resolved_current.name
+    try:
+        candidates = tuple(resolved_parent.iterdir())
+    except OSError:
+        return
+
+    active_persistent_roots: set[str] = set()
+    for candidate in candidates:
+        match = _PERSISTENT_RUNTIME_STATE_CACHE_OWNER_PATTERN.fullmatch(
+            candidate.name
+        )
+        if match is None:
+            continue
+        try:
+            if not candidate.is_file():
+                continue
+            owner_pid = int(match.group(2))
+            resolved = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if resolved.parent != resolved_parent:
+            continue
+        if _process_exists(owner_pid):
+            active_persistent_roots.add(match.group(1))
+            continue
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    for candidate in candidates:
+        match = _RUNTIME_STATE_CACHE_ROOT_PATTERN.fullmatch(candidate.name)
+        if match is not None:
+            try:
+                if not candidate.is_dir():
+                    continue
+                owner_pid = int(match.group(1))
+                resolved = candidate.resolve()
+            except (OSError, ValueError):
+                continue
+            if resolved.parent != resolved_parent or _process_exists(owner_pid):
+                continue
+            shutil.rmtree(resolved, ignore_errors=True)
+            continue
+
+        if (
+            _PERSISTENT_RUNTIME_STATE_CACHE_ROOT_PATTERN.fullmatch(candidate.name)
+            is None
+            or candidate.name == current_root_name
+            or candidate.name in active_persistent_roots
+        ):
+            continue
+        try:
+            if not candidate.is_dir():
+                continue
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.parent != resolved_parent:
+            continue
+
+        # Re-read matching leases immediately before deletion to narrow the
+        # startup race with a second Web process claiming this revision.
+        has_live_owner = False
+        try:
+            owner_markers = tuple(
+                resolved_parent.glob(f".{candidate.name}.owner-*")
+            )
+        except OSError:
+            owner_markers = ()
+        for owner_marker in owner_markers:
+            owner_match = _PERSISTENT_RUNTIME_STATE_CACHE_OWNER_PATTERN.fullmatch(
+                owner_marker.name
+            )
+            if owner_match is None:
+                continue
+            try:
+                owner_resolved = owner_marker.resolve()
+                owner_pid = int(owner_match.group(2))
+            except (OSError, ValueError):
+                continue
+            if (
+                owner_resolved.parent == resolved_parent
+                and _process_exists(owner_pid)
+            ):
+                has_live_owner = True
+                break
+        if has_live_owner:
+            continue
+        shutil.rmtree(resolved, ignore_errors=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,6 +1013,7 @@ def _batch_cache_document(value: SectorAssessmentBatch) -> dict[str, object]:
             if value.strength_evidence is None
             else value.strength_evidence.evidence_revision
         ),
+        "parent_relations": [list(item) for item in value.parent_relations],
     }
 
 
@@ -618,6 +1064,25 @@ def _batch_from_cache(value: object) -> SectorAssessmentBatch:
                 _cache_int(pair[1], "sector exclusion-count value", minimum=1),
             )
         )
+    parent_relations: list[tuple[str, str]] = []
+    for index, item in enumerate(
+        _cache_sequence(
+            row.get("parent_relations", ()),
+            "payload.snapshot.assessments.parent_relations",
+        )
+    ):
+        pair = _cache_sequence(
+            item,
+            f"payload.snapshot.assessments.parent_relations[{index}]",
+        )
+        if len(pair) != 2:
+            raise ValueError("sector parent-relation rows must have two values")
+        parent_relations.append(
+            (
+                _cache_string(pair[0], "sector child id"),
+                _cache_string(pair[1], "sector parent id"),
+            )
+        )
     return SectorAssessmentBatch(
         assessments=tuple(
             _assessment_from_cache(item, f"assessment[{index}]")
@@ -650,6 +1115,7 @@ def _batch_from_cache(value: object) -> SectorAssessmentBatch:
             "payload.snapshot.assessments.catalog_revision",
         ),
         strength_evidence=strength_evidence,
+        parent_relations=tuple(parent_relations),
     )
 
 
@@ -723,6 +1189,7 @@ class NativeWorkerProcessTransport:
         self._worker_pid: int | None = None
         self._worker_application_source_revision: str | None = None
         self._worker_market_data_probe: dict[str, object] | None = None
+        self._worker_runtime_health: dict[str, object] | None = None
         self._started_at: datetime | None = None
         self._request_started_at: datetime | None = None
         self._last_progress_at: datetime | None = None
@@ -733,6 +1200,13 @@ class NativeWorkerProcessTransport:
         self._last_failure_monotonic: float | None = None
         self._restart_count = 0
         self._failure_count = 0
+        self._completed_request_count = 0
+        self._total_completed_request_count = 0
+        self._recycle_count = 0
+        self._last_recycled_at: datetime | None = None
+        self._last_recycle_reason: str | None = None
+        self._last_worker_rss_bytes: int | None = None
+        self._last_worker_private_bytes: int | None = None
         self._in_flight_request_id: str | None = None
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
@@ -800,6 +1274,10 @@ class NativeWorkerProcessTransport:
         environment = os.environ.copy()
         if self._environment is not None:
             environment.update(self._environment)
+        # Windows 服务进程可能继承本地代码页；原生工作进程日志统一固定为 UTF-8，
+        # 防止中文诊断写成不可检索的乱码。
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         environment[IPC_AUTHKEY_ENV] = authkey.hex()
         log_handle = self._log_path.open("ab", buffering=0)
         try:
@@ -914,6 +1392,7 @@ class NativeWorkerProcessTransport:
                 None if worker_source_revision is None else str(worker_source_revision)
             )
             self._worker_market_data_probe = dict(worker_market_data_probe)
+            self._worker_runtime_health = None
             self._started_at = started
             self._last_progress_at = started
             self._last_response_at = started
@@ -921,6 +1400,9 @@ class NativeWorkerProcessTransport:
             self._last_remote_error = None
             self._last_failure_monotonic = None
             self._restart_count += 1
+            self._completed_request_count = 0
+            self._last_worker_rss_bytes = None
+            self._last_worker_private_bytes = None
 
     @staticmethod
     def _stop_process(process: subprocess.Popen[bytes] | None) -> None:
@@ -969,6 +1451,41 @@ class NativeWorkerProcessTransport:
             # 运行遥测失败不得破坏有效的行情响应。
             pass
 
+    def _record_completed_request_and_recycle_if_needed(self) -> None:
+        """在响应交付前记录资源水位，并在安全请求边界释放进程。"""
+
+        with self._state_lock:
+            self._completed_request_count += 1
+            self._total_completed_request_count += 1
+            completed = self._completed_request_count
+            pid = self._worker_pid
+        rss_bytes, private_bytes = _process_memory_bytes(pid)
+        with self._state_lock:
+            self._last_worker_rss_bytes = rss_bytes
+            self._last_worker_private_bytes = private_bytes
+        recycle_reason: str | None = None
+        if (
+            rss_bytes is not None
+            and rss_bytes >= self._config.max_worker_rss_bytes
+        ):
+            recycle_reason = (
+                "worker_rss_limit_reached:"
+                f"{rss_bytes}>={self._config.max_worker_rss_bytes}"
+            )
+        elif completed >= self._config.max_completed_requests_per_process:
+            recycle_reason = (
+                "worker_request_limit_reached:"
+                f"{completed}>={self._config.max_completed_requests_per_process}"
+            )
+        if recycle_reason is None:
+            return
+        recycled_at = _now()
+        self._discard_worker(recycle_reason, record_failure=False)
+        with self._state_lock:
+            self._recycle_count += 1
+            self._last_recycled_at = recycled_at
+            self._last_recycle_reason = recycle_reason
+
     def request(self, method: str, **kwargs: object) -> object:
         if not isinstance(method, str) or not method:
             raise ValueError("native worker method is required")
@@ -1014,6 +1531,32 @@ class NativeWorkerProcessTransport:
         if not acquired:
             raise NativeScreeningWorkerUnavailable(
                 "native worker is busy; request was not queued"
+            )
+        try:
+            return self._request_locked(method, kwargs)
+        finally:
+            self._request_lock.release()
+
+    def request_when_available(
+        self,
+        method: str,
+        *,
+        max_wait_seconds: float,
+        **kwargs: object,
+    ) -> object:
+        """只在短预算内等待单飞锁；取得锁后沿用正常原生空闲超时。"""
+
+        if not isinstance(method, str) or not method:
+            raise ValueError("native worker method is required")
+        if (
+            isinstance(max_wait_seconds, bool)
+            or not isinstance(max_wait_seconds, (int, float))
+            or max_wait_seconds <= 0
+        ):
+            raise ValueError("native worker max wait must be positive")
+        if not self._request_lock.acquire(timeout=float(max_wait_seconds)):
+            raise NativeScreeningWorkerUnavailable(
+                "native worker stayed busy beyond the bounded queue wait"
             )
         try:
             return self._request_locked(method, kwargs)
@@ -1115,10 +1658,23 @@ class NativeWorkerProcessTransport:
                     raise NativeScreeningWorkerProtocolError(
                         "native worker returned an unsupported response"
                     )
+                raw_runtime_health = response.get("runtime_health")
+                if raw_runtime_health is not None and (
+                    not isinstance(raw_runtime_health, Mapping)
+                    or raw_runtime_health.get("schema")
+                    != "chanlun-native-screening-runtime-health"
+                ):
+                    raise NativeScreeningWorkerProtocolError(
+                        "native worker returned invalid runtime health"
+                    )
                 with self._state_lock:
                     self._last_response_at = _now()
                     self._last_remote_error = None
-                return response["value"]
+                    if isinstance(raw_runtime_health, Mapping):
+                        self._worker_runtime_health = dict(raw_runtime_health)
+                value = response["value"]
+                self._record_completed_request_and_recycle_if_needed()
+                return value
         except NativeScreeningWorkerRemoteError:
             raise
         except NativeScreeningWorkerDeadlineExceeded as exc:
@@ -1184,6 +1740,7 @@ class NativeWorkerProcessTransport:
         with self._state_lock:
             process = self._process
             alive = process is not None and process.poll() is None
+            worker_pid = self._worker_pid
             backoff_remaining = 0.0
             if self._last_failure_monotonic is not None:
                 backoff_remaining = max(
@@ -1214,6 +1771,18 @@ class NativeWorkerProcessTransport:
                 and "source revision mismatch" in self._last_error
             ):
                 reasons.append("native_screening_worker_source_revision_mismatch")
+            completed_request_count = self._completed_request_count
+            total_completed_request_count = self._total_completed_request_count
+            recycle_count = self._recycle_count
+            last_recycled_at = self._last_recycled_at
+            last_recycle_reason = self._last_recycle_reason
+            observed_rss = self._last_worker_rss_bytes
+            observed_private = self._last_worker_private_bytes
+            live_rss, live_private = _process_memory_bytes(worker_pid if alive else None)
+            if live_rss is not None:
+                observed_rss = live_rss
+            if live_private is not None:
+                observed_private = live_private
             return {
                 "schema": "chanlun-trading-screening-native-health",
                 "required": True,
@@ -1221,8 +1790,11 @@ class NativeWorkerProcessTransport:
                 "status": "ready" if ready else "not_ready",
                 "isolated_process": True,
                 "loopback_authenticated": True,
-                "worker_pid": self._worker_pid,
+                "worker_pid": worker_pid,
                 "worker_alive": alive,
+                "worker_rss_bytes": observed_rss,
+                "worker_private_bytes": observed_private,
+                "max_worker_rss_bytes": self._config.max_worker_rss_bytes,
                 "expected_application_source_revision": (
                     self._expected_application_source_revision
                 ),
@@ -1234,6 +1806,11 @@ class NativeWorkerProcessTransport:
                     if self._worker_market_data_probe is None
                     else dict(self._worker_market_data_probe)
                 ),
+                "runtime_health": (
+                    None
+                    if self._worker_runtime_health is None
+                    else dict(self._worker_runtime_health)
+                ),
                 "application_source_revision_match": revision_match,
                 "started_at": _iso(self._started_at),
                 "in_flight": self._in_flight_request_id is not None,
@@ -1243,6 +1820,14 @@ class NativeWorkerProcessTransport:
                 "last_response_at": _iso(self._last_response_at),
                 "restart_count": self._restart_count,
                 "failure_count": self._failure_count,
+                "completed_request_count": completed_request_count,
+                "total_completed_request_count": total_completed_request_count,
+                "max_completed_requests_per_process": (
+                    self._config.max_completed_requests_per_process
+                ),
+                "recycle_count": recycle_count,
+                "last_recycled_at": _iso(last_recycled_at),
+                "last_recycle_reason": last_recycle_reason,
                 "restart_backoff_remaining_seconds": round(backoff_remaining, 3),
                 "last_error": self._last_error,
                 "last_remote_error": self._last_remote_error,
@@ -1264,6 +1849,10 @@ class NativeTradingDataGatewayProcessProxy:
         holdings_provider: Callable[[], object] = lambda: (),
         instrument_type_provider: Callable[[tuple[str, ...]], Mapping[str, str]]
         | None = None,
+        symbol_name_provider: Callable[
+            [tuple[str, ...]], Mapping[str, str | None]
+        ]
+        | None = None,
         transport: NativeWorkerProcessTransport | None = None,
         log_path: Path | None = None,
         process_config: NativeWorkerProcessConfig = NativeWorkerProcessConfig(),
@@ -1272,6 +1861,7 @@ class NativeTradingDataGatewayProcessProxy:
         worker_environment: Mapping[str, str] | None = None,
         structure_worker_count: int = 1,
         expected_application_source_revision: str | None = None,
+        runtime_state_cache_secret: bytes | None = None,
     ) -> None:
         if not callable(watchlist_provider) or not callable(holdings_provider):
             raise TypeError("watchlist and holdings providers must be callable")
@@ -1279,6 +1869,8 @@ class NativeTradingDataGatewayProcessProxy:
             instrument_type_provider
         ):
             raise TypeError("instrument_type_provider must be callable")
+        if symbol_name_provider is not None and not callable(symbol_name_provider):
+            raise TypeError("symbol_name_provider must be callable")
         if transport is None and log_path is None:
             raise ValueError("log_path is required when no transport is supplied")
         if (sector_cache_path is None) != (sector_cache_revision is None):
@@ -1291,6 +1883,11 @@ class NativeTradingDataGatewayProcessProxy:
             raise ValueError("structure_worker_count must be a positive integer")
         if transport is not None and structure_worker_count != 1:
             raise ValueError("custom transport supports exactly one structure worker")
+        if runtime_state_cache_secret is not None and (
+            not isinstance(runtime_state_cache_secret, bytes)
+            or len(runtime_state_cache_secret) < 32
+        ):
+            raise ValueError("runtime_state_cache_secret must contain at least 32 bytes")
         if transport is None and expected_application_source_revision is None:
             expected_application_source_revision = (
                 calculate_forward_application_source_revision(_PROJECT_ROOT)
@@ -1307,12 +1904,47 @@ class NativeTradingDataGatewayProcessProxy:
         self._watchlist_provider = watchlist_provider
         self._holdings_provider = holdings_provider
         self._instrument_type_provider = instrument_type_provider
+        self._symbol_name_provider = symbol_name_provider
         self._transport = transport or NativeWorkerProcessTransport(
             log_path=log_path,  # type: ignore[arg-type]
             config=process_config,
             environment=worker_environment,
             expected_application_source_revision=(expected_application_source_revision),
         )
+        self._runtime_state_cache_root: Path | None = None
+        self._runtime_state_cache_delete_on_close = False
+        self._runtime_state_cache_owner_marker: Path | None = None
+        runtime_state_cache_key: str | None = None
+        runtime_state_cache_identity: str | None = None
+        runtime_state_cache_scope: str | None = None
+        if transport is None and structure_worker_count > 1:
+            assert log_path is not None
+            assert expected_application_source_revision is not None
+            cache_parent = (
+                log_path.parent / "trading_screening_runtime_state_cache"
+            ).resolve()
+            runtime_cache = _runtime_state_cache_settings(
+                parent=cache_parent,
+                expected_runtime_state_producer_revision=(
+                    runtime_state_cache_producer_revision()
+                ),
+                persistent_secret=runtime_state_cache_secret,
+            )
+            if not runtime_cache.delete_on_close:
+                self._runtime_state_cache_owner_marker = (
+                    _claim_persistent_runtime_state_cache_root(runtime_cache.root)
+                )
+            _cleanup_stale_runtime_state_cache_roots(
+                cache_parent,
+                current_root=runtime_cache.root,
+            )
+            self._runtime_state_cache_root = runtime_cache.root
+            self._runtime_state_cache_delete_on_close = (
+                runtime_cache.delete_on_close
+            )
+            runtime_state_cache_key = runtime_cache.key_hex
+            runtime_state_cache_identity = runtime_cache.identity
+            runtime_state_cache_scope = runtime_cache.scope
         structure_transports: list[NativeWorkerProcessTransport] = [self._transport]
         if transport is None:
             assert log_path is not None
@@ -1321,11 +1953,46 @@ class NativeTradingDataGatewayProcessProxy:
                 worker_log = log_path.with_name(
                     f"{log_path.stem}.structure-{index + 1}{log_path.suffix}"
                 )
+                cache_role = (
+                    "shared"
+                    if structure_worker_count == 1
+                    else "priority"
+                    if index == 0
+                    else "candidate"
+                )
+                structure_environment = {
+                    **dict(worker_environment or {}),
+                    "CHANLUN_SCREENING_WORKER_CACHE_ROLE": cache_role,
+                }
+                if (
+                    cache_role == "candidate"
+                    and self._runtime_state_cache_root is not None
+                    and runtime_state_cache_key is not None
+                    and runtime_state_cache_identity is not None
+                    and runtime_state_cache_scope is not None
+                ):
+                    structure_environment.update(
+                        {
+                            "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR": str(
+                                self._runtime_state_cache_root
+                                / f"structure-{index + 1}"
+                            ),
+                            "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY": (
+                                runtime_state_cache_key
+                            ),
+                            "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY": (
+                                runtime_state_cache_identity
+                            ),
+                            "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_SCOPE": (
+                                runtime_state_cache_scope
+                            ),
+                        }
+                    )
                 structure_transports.append(
                     NativeWorkerProcessTransport(
                         log_path=worker_log,
                         config=process_config,
-                        environment=worker_environment,
+                        environment=structure_environment,
                         expected_application_source_revision=(
                             expected_application_source_revision
                         ),
@@ -1350,6 +2017,7 @@ class NativeTradingDataGatewayProcessProxy:
         self._prepared_history_lock = RLock()
         self._prepared_history_as_of: datetime | None = None
         self._prepared_history_by_code: dict[str, tuple[str, ...]] = {}
+        self._sector_snapshot_in_flight = Event()
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         for transport in (self._transport, *self._structure_transports):
@@ -1364,12 +2032,92 @@ class NativeTradingDataGatewayProcessProxy:
 
         self._transport.startup()
 
-    def _structure_transport(self, code: str) -> NativeWorkerProcessTransport:
-        """让同一标的固定到同一工作进程，以保留内存分析缓存。"""
+    def _structure_transports_for_lane(
+        self,
+        lane: str,
+    ) -> tuple[NativeWorkerProcessTransport, ...]:
+        """返回互不争抢的盘中优先和普通候选工作进程集合。"""
 
-        digest = hashlib.sha256(code.encode("ascii", errors="strict")).digest()
-        index = int.from_bytes(digest[:8], "big") % len(self._structure_transports)
-        return self._structure_transports[index]
+        if lane == "priority":
+            return (
+                self._structure_transports[:1]
+                if len(self._structure_transports) > 1
+                else self._structure_transports
+            )
+        if lane in {"candidate", "candidate_overflow"}:
+            # 只有一个分片时保持兼容；生产的三分片配置把第一个永久留给 1m，
+            # 其余分片并行服务正式 5m 候选。
+            candidates = (
+                self._structure_transports[1:]
+                if len(self._structure_transports) > 1
+                else self._structure_transports
+            )
+            # 原子板块快照固定占用第一个候选分片，可能持续数分钟。生产至少有两个
+            # 候选分片时，期间把普通 5m/30m 轮换收敛到其余分片，避免亲和哈希落到
+            # 长请求的标的连续延期；板块请求结束后立即恢复完整分片和原缓存亲和。
+            if self._sector_snapshot_in_flight.is_set() and len(candidates) > 1:
+                return candidates[1:]
+            return candidates
+        if lane == "coverage":
+            return self._structure_transports
+        raise ValueError("structure worker lane is invalid")
+
+    def _structure_transport(
+        self,
+        affinity_key: str,
+        *,
+        lane: str = "coverage",
+    ) -> NativeWorkerProcessTransport:
+        """让同一通道内的同一亲和组固定到同一工作进程。"""
+
+        transports = self._structure_transports_for_lane(lane)
+        # 所有通道都做确定性分片。同一亲和组若在相邻分钟被轮询到不同进程，进程内的
+        # 行情、严格 CL 状态和高周期事实缓存都会失效，等价于反复冷启动。
+        # 通道本身仍决定可使用的进程集合，因此普通候选不会占用 1m 优先保留分片。
+        digest = hashlib.sha256(affinity_key.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:8], "big") % len(transports)
+        return transports[index]
+
+    @staticmethod
+    def _structure_affinity_key(
+        code: str,
+        sector: SectorAssessment,
+        *,
+        has_sector_members: bool,
+    ) -> str:
+        """Co-locate shared sector facts without losing symbol stickiness.
+
+        A symbol's classified sector is stable for one captured membership
+        epoch, so sector affinity keeps both its CL state and the shared sector
+        composite on one worker. Unclassified and proxy instruments retain
+        symbol affinity to avoid concentrating unrelated instruments.
+        """
+
+        if has_sector_members and sector.sector_id != "unclassified":
+            return f"sector:{sector.sector_id}"
+        return f"symbol:{code}"
+
+    @staticmethod
+    def _lane_structure_affinity_key(
+        code: str,
+        affinity_key: str,
+        *,
+        work_lane: str,
+    ) -> str:
+        """Keep priority/coverage locality while balancing live candidates.
+
+        Candidate workers can each retain the same bounded sector composite, so
+        stable symbol entropy prevents a large supportive sector from pinning a
+        whole cadence batch to one process.  The symbol suffix is deterministic;
+        each code therefore keeps its worker-local strict structure state across
+        later rounds instead of bouncing between shards.
+        """
+
+        if work_lane in {"candidate", "candidate_overflow"} and affinity_key.startswith(
+            "sector:"
+        ):
+            return f"{affinity_key}|symbol:{code}"
+        return affinity_key
 
     def native_sector_assessments(self, *, as_of: datetime) -> SectorAssessmentBatch:
         observed_at = normalize_datetime(as_of, "as_of")
@@ -1378,9 +2126,15 @@ class NativeTradingDataGatewayProcessProxy:
             self._install_sector_snapshot(cached)
             return cached.batch
 
-        # 行业快照可能持续数分钟，必须进入结构进程，不能占用为逐笔、日历和轻量
-        # 分类保留的控制进程。
-        value = self._structure_transports[0].request("sector_snapshot", as_of=as_of)
+        # 行业快照可能持续数分钟。生产多分片配置必须把它放到普通候选分片，第一
+        # 个结构进程永久留给实时优先标的；否则盘中显式重建会让 1m/5m 监听整段过期。
+        # 单分片测试和嵌入式配置仍自然回退到唯一进程。
+        sector_transport = self._structure_transports_for_lane("candidate")[0]
+        self._sector_snapshot_in_flight.set()
+        try:
+            value = sector_transport.request("sector_snapshot", as_of=as_of)
+        finally:
+            self._sector_snapshot_in_flight.clear()
         components = self._validated_atomic_snapshot(value, observed_at)
         self._install_sector_snapshot(components)
         self._persist_sector_snapshot_cache(components, observed_at)
@@ -1978,7 +2732,7 @@ class NativeTradingDataGatewayProcessProxy:
         normalized = _stock_codes((code,))
         if len(normalized) != 1 or normalized[0] != code:
             raise ValueError("tick probe requires an exact normalized A-share code")
-        batch = self.realtime_ticks((code,))
+        batch = self.priority_realtime_ticks((code,))
         usable = code in batch.ticks()
         return {
             "schema": "chanlun-native-tick-probe",
@@ -2012,16 +2766,136 @@ class NativeTradingDataGatewayProcessProxy:
                 "invalid native realtime quote result"
             ) from exc
 
-    def prepare_local_history(
+    def current_session_instrument_statuses(
         self,
+        codes: tuple[str, ...],
         *,
-        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
-        as_of: datetime,
-        deadline_monotonic: float | None = None,
-    ) -> Mapping[str, object]:
-        """在一次分钟轮次前合并 QMT 补数，并认证可供各结构分片本地读取的范围。"""
+        session: date,
+    ) -> AShareInstrumentSessionStatusBatch:
+        """读取认证控制进程中的当日停牌状态，不进入结构计算队列。"""
 
-        observed_at = normalize_datetime(as_of, "as_of")
+        normalized = normalized_a_share_codes(codes)
+        if type(session) is not date:
+            raise TypeError("instrument-status session must be an exact date")
+        value = self._transport.request_nowait(
+            "current_session_instrument_statuses",
+            codes=normalized,
+            session=session,
+        )
+        try:
+            return validated_instrument_session_status_batch(
+                value,
+                requested_codes=normalized,
+                session=session,
+            )
+        except (TypeError, ValueError) as exc:
+            raise NativeScreeningWorkerProtocolError(
+                "invalid native instrument-status result"
+            ) from exc
+
+    def priority_realtime_ticks(
+        self,
+        codes: tuple[str, ...],
+    ) -> AShareRealtimeQuoteBatch:
+        """Read the mandatory-lane quote without contending for the UI worker.
+
+        The shared control process serves display quotes and lightweight
+        catalog requests with non-queuing semantics.  A mandatory monitor must
+        not lose zero-trade evidence merely because that process is busy.  The
+        reserved priority structure workers are otherwise idle before the
+        minute batch is submitted, so probe them without queuing and fall over
+        only when a shard is already occupied.
+        """
+
+        normalized = normalized_a_share_codes(codes)
+        last_busy: NativeScreeningWorkerUnavailable | None = None
+        for transport in self._structure_transports_for_lane("priority"):
+            try:
+                value = transport.request_nowait(
+                    "realtime_ticks",
+                    codes=normalized,
+                )
+            except NativeScreeningWorkerUnavailable as exc:
+                last_busy = exc
+                continue
+            try:
+                return validated_quote_batch(value, requested_codes=normalized)
+            except (TypeError, ValueError) as exc:
+                raise NativeScreeningWorkerProtocolError(
+                    "invalid native priority realtime quote result"
+                ) from exc
+        if last_busy is not None:
+            raise last_busy
+        raise NativeScreeningWorkerUnavailable(
+            "priority quote worker is unavailable"
+        )
+
+    def priority_current_session_instrument_statuses(
+        self,
+        codes: tuple[str, ...],
+        *,
+        session: date,
+    ) -> AShareInstrumentSessionStatusBatch:
+        """Read same-session suspension evidence on a reserved priority shard."""
+
+        normalized = normalized_a_share_codes(codes)
+        if type(session) is not date:
+            raise TypeError("instrument-status session must be an exact date")
+        last_busy: NativeScreeningWorkerUnavailable | None = None
+        for transport in self._structure_transports_for_lane("priority"):
+            try:
+                value = transport.request_nowait(
+                    "current_session_instrument_statuses",
+                    codes=normalized,
+                    session=session,
+                )
+            except NativeScreeningWorkerUnavailable as exc:
+                last_busy = exc
+                continue
+            try:
+                return validated_instrument_session_status_batch(
+                    value,
+                    requested_codes=normalized,
+                    session=session,
+                )
+            except (TypeError, ValueError) as exc:
+                raise NativeScreeningWorkerProtocolError(
+                    "invalid native priority instrument-status result"
+                ) from exc
+        if last_busy is not None:
+            raise last_busy
+        raise NativeScreeningWorkerUnavailable(
+            "priority instrument-status worker is unavailable"
+        )
+
+    def display_quote_snapshot(
+        self,
+        codes: tuple[str, ...],
+    ) -> AShareDisplayQuoteBatch:
+        """读取认证控制进程中的页面展示行情，休市快照不进入交易探针。"""
+
+        normalized = normalized_a_share_codes(codes)
+        # 页面可能同时有自选列表和复核列表读取同一条轻量行情通道。给前一个请求一个
+        # 很短的完成窗口，避免一次毫秒级重叠就让整批价格变空，同时仍禁止无界排队。
+        value = self._transport.request_when_available(
+            "display_quote_snapshot",
+            max_wait_seconds=_DISPLAY_QUOTE_LOCK_WAIT_SECONDS,
+            codes=normalized,
+        )
+        try:
+            return validated_display_quote_batch(
+                value,
+                requested_codes=normalized,
+            )
+        except (TypeError, ValueError) as exc:
+            raise NativeScreeningWorkerProtocolError(
+                "invalid native display quote result"
+            ) from exc
+
+    @staticmethod
+    def _validated_history_requests(
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
         if type(frequency_requests) is not tuple:
             raise TypeError("frequency_requests must be an exact tuple")
         raw_requests = frequency_requests
@@ -2046,26 +2920,69 @@ class NativeTradingDataGatewayProcessProxy:
             {item[0] for item in raw_requests}
         ) != len(raw_requests):
             raise ValueError("frequency_requests must be canonical and unique")
-        canonical = raw_requests
-        if not canonical:
-            with self._prepared_history_lock:
+        return raw_requests
+
+    def _install_prepared_history_scope(
+        self,
+        *,
+        canonical: tuple[tuple[str, tuple[str, ...]], ...],
+        observed_at: datetime,
+        prepared: Mapping[str, tuple[str, ...]],
+        batch_download_available: object,
+        merge: bool = False,
+    ) -> Mapping[str, object]:
+        with self._prepared_history_lock:
+            if merge and self._prepared_history_as_of == observed_at:
+                combined = dict(self._prepared_history_by_code)
+                for code, frequencies in prepared.items():
+                    available = set(combined.get(code, ())).union(frequencies)
+                    combined[code] = tuple(
+                        frequency
+                        for frequency in SCREENING_STRUCTURE_FREQUENCIES
+                        if frequency in available
+                    )
+                self._prepared_history_by_code = combined
+            else:
                 self._prepared_history_as_of = observed_at
-                self._prepared_history_by_code = {}
-            return {
-                "schema": "chanlun-screening-local-history-preparation",
-                "as_of": observed_at.isoformat(),
-                "prepared_frequencies_by_code": {},
-                "batch_download_available": False,
-            }
+                self._prepared_history_by_code = dict(prepared)
+        return {
+            "schema": "chanlun-screening-local-history-preparation",
+            "as_of": observed_at.isoformat(),
+            "prepared_frequencies_by_code": {
+                code: tuple(prepared.get(code, ())) for code, _ in canonical
+            },
+            "batch_download_available": batch_download_available,
+        }
+
+    def prepare_local_history(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+        deadline_monotonic: float | None = None,
+        _lane: str = "coverage",
+    ) -> Mapping[str, object]:
+        """在一次分钟轮次前合并 QMT 补数，并认证可供各结构分片本地读取的范围。"""
+
+        observed_at = normalize_datetime(as_of, "as_of")
+        canonical = self._validated_history_requests(frequency_requests)
+        if not canonical:
+            return self._install_prepared_history_scope(
+                canonical=canonical,
+                observed_at=observed_at,
+                prepared={},
+                batch_download_available=False,
+            )
         # 只让一个结构工作进程执行批量补数；QMT 本地库由全部分片共享，控制进程
         # 不参与，实时逐笔仍可服务。
-        request = self._structure_transports[0].request
+        history_transport = self._structure_transports_for_lane(_lane)[0]
+        request = history_transport.request
         request_kwargs: dict[str, object] = {
             "frequency_requests": canonical,
             "as_of": observed_at,
         }
         if deadline_monotonic is not None:
-            request = self._structure_transports[0].request_until
+            request = history_transport.request_until
             request_kwargs["deadline_monotonic"] = deadline_monotonic
         value = request("prepare_local_history", **request_kwargs)
         if not isinstance(value, Mapping) or (
@@ -2093,15 +3010,12 @@ class NativeTradingDataGatewayProcessProxy:
             raise NativeScreeningWorkerProtocolError(
                 "local history preparation codes are invalid"
             )
-        with self._prepared_history_lock:
-            self._prepared_history_as_of = observed_at
-            self._prepared_history_by_code = dict(prepared)
-        return {
-            "schema": "chanlun-screening-local-history-preparation",
-            "as_of": observed_at.isoformat(),
-            "prepared_frequencies_by_code": dict(prepared),
-            "batch_download_available": value.get("batch_download_available"),
-        }
+        return self._install_prepared_history_scope(
+            canonical=canonical,
+            observed_at=observed_at,
+            prepared=prepared,
+            batch_download_available=value.get("batch_download_available"),
+        )
 
     def prepare_local_history_until(
         self,
@@ -2118,14 +3032,100 @@ class NativeTradingDataGatewayProcessProxy:
             deadline_monotonic=deadline_monotonic,
         )
 
+    def prepare_priority_local_history(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+    ) -> Mapping[str, object]:
+        """登记可复用的低频本地库，禁止盘中优先通道执行无界批量下载。"""
+
+        observed_at = normalize_datetime(as_of, "as_of")
+        canonical = self._validated_history_requests(frequency_requests)
+        # 日线在盘中不会形成新完成 K 线。结构入口固定先刷新 5m；QMT 的 30m 也以
+        # 5m 为下载基础，因此随后只读本地 30m 就已经包含本轮刚刷新的基础事实。
+        # 其余周期仍由有界逐只请求刷新，避免 download_history_data2 卡住数分钟。
+        reusable = {
+            code: tuple(
+                frequency
+                for frequency in SCREENING_STRUCTURE_FREQUENCIES
+                if frequency in {"d", "30m"}
+            )
+            for code, _frequencies in canonical
+        }
+        return self._install_prepared_history_scope(
+            canonical=canonical,
+            observed_at=observed_at,
+            prepared=reusable,
+            batch_download_available=False,
+            merge=True,
+        )
+
+    def prepare_candidate_local_history_until(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+        deadline_monotonic: float,
+    ) -> Mapping[str, object]:
+        """普通候选只刷新会变化的基础周期，禁止重复下载占满分钟预算。"""
+
+        if (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+            or deadline_monotonic <= time.monotonic()
+        ):
+            raise NativeScreeningWorkerDeadlineExceeded(
+                "candidate history preparation deadline already elapsed"
+            )
+        observed_at = normalize_datetime(as_of, "as_of")
+        canonical = self._validated_history_requests(frequency_requests)
+        # 所有结构包都先读取 5m；30m 的 QMT 下载基础同样是 5m，所以在 5m 本轮刷新后
+        # 直接读取本地 30m 可避免同一基础周期下载两次。日线盘中不变，也无需逐只刷新。
+        reusable = {
+            code: tuple(
+                frequency
+                for frequency in SCREENING_STRUCTURE_FREQUENCIES
+                if frequency in {"d", "30m"}
+            )
+            for code, _frequencies in canonical
+        }
+        return self._install_prepared_history_scope(
+            canonical=canonical,
+            observed_at=observed_at,
+            prepared=reusable,
+            batch_download_available=False,
+            merge=True,
+        )
+
     def symbol_name(self, code: str) -> str | None:
         with self._cache_lock:
             cached = self._symbol_names.get(code)
         if cached is not None:
             return cached
+        provider = self._symbol_name_provider
+        if provider is not None:
+            value = provider((code,))
+            if (
+                not isinstance(value, Mapping)
+                or set(value) != {code}
+                or value[code] is not None
+                and (not isinstance(value[code], str) or not value[code].strip())
+            ):
+                raise NativeScreeningWorkerProtocolError(
+                    "invalid in-process symbol name result"
+                )
+            normalized = None if value[code] is None else value[code].strip()
+            if normalized is not None:
+                with self._cache_lock:
+                    self._symbol_names[code] = normalized
+            return normalized
         value = self._transport.request("symbol_name", code=code)
         if value is not None and not isinstance(value, str):
             raise NativeScreeningWorkerProtocolError("invalid symbol name result")
+        if isinstance(value, str) and value:
+            with self._cache_lock:
+                self._symbol_names[code] = value
         return value
 
     def trading_session_evidence(
@@ -2220,6 +3220,130 @@ class NativeTradingDataGatewayProcessProxy:
             deadline_monotonic=deadline_monotonic,
         )
 
+    def priority_structure_bundle_with_risk_cutoff(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+    ) -> SymbolStructureBundle:
+        """在预留分片读取当前 1m 优先结构，不受候选超时回收影响。"""
+
+        return self._structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+            higher_timeframe_as_of=normalize_datetime(
+                risk_evidence_cutoff,
+                "risk_evidence_cutoff",
+            ),
+            work_lane="priority",
+        )
+
+    def candidate_structure_bundle_with_risk_cutoff(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+    ) -> SymbolStructureBundle:
+        """在非优先分片执行无硬超时的盘中全量结构任务。"""
+
+        return self._structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+            higher_timeframe_as_of=normalize_datetime(
+                risk_evidence_cutoff,
+                "risk_evidence_cutoff",
+            ),
+            work_lane="candidate",
+        )
+
+    def priority_structure_bundle_with_risk_cutoff_until(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+        deadline_monotonic: float,
+    ) -> SymbolStructureBundle:
+        """在绝对分钟预算内读取 1m 优先结构，超时后立即释放下一轮。"""
+
+        try:
+            return self._structure_bundle(
+                code,
+                as_of=as_of,
+                sector=sector,
+                frequencies=frequencies,
+                higher_timeframe_as_of=normalize_datetime(
+                    risk_evidence_cutoff,
+                    "risk_evidence_cutoff",
+                ),
+                deadline_monotonic=deadline_monotonic,
+                work_lane="priority",
+            )
+        except NativeScreeningWorkerDeadlineExceeded as exc:
+            raise NativePriorityScreeningWorkerDeadlineExceeded(str(exc)) from exc
+
+    def candidate_structure_bundle_with_risk_cutoff_until(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+        deadline_monotonic: float,
+    ) -> SymbolStructureBundle:
+        """在普通候选分片读取结构；超时只回收候选分片。"""
+
+        return self._structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+            higher_timeframe_as_of=normalize_datetime(
+                risk_evidence_cutoff,
+                "risk_evidence_cutoff",
+            ),
+            deadline_monotonic=deadline_monotonic,
+            work_lane="candidate",
+        )
+
+    def candidate_overflow_structure_bundle_with_risk_cutoff_until(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+        deadline_monotonic: float,
+    ) -> SymbolStructureBundle:
+        """兼容旧调用名，但仍把候选固定在独立候选分片。"""
+
+        return self._structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+            higher_timeframe_as_of=normalize_datetime(
+                risk_evidence_cutoff,
+                "risk_evidence_cutoff",
+            ),
+            deadline_monotonic=deadline_monotonic,
+            work_lane="candidate_overflow",
+        )
+
     def structure_bundle_with_risk_cutoff_until(
         self,
         code: str,
@@ -2250,6 +3374,7 @@ class NativeTradingDataGatewayProcessProxy:
         frequencies: tuple[str, ...],
         higher_timeframe_as_of: datetime | None,
         deadline_monotonic: float | None = None,
+        work_lane: str = "coverage",
     ) -> SymbolStructureBundle:
         with self._cache_lock:
             members = self._sector_members
@@ -2265,22 +3390,61 @@ class NativeTradingDataGatewayProcessProxy:
                 raise NativeScreeningWorkerUnavailable(
                     "atomic sector snapshot has not been captured"
                 )
-        transport = self._structure_transport(code)
-        request = transport.request if deadline_monotonic is None else transport.request_until
+        affinity_key = self._structure_affinity_key(
+            code,
+            sector,
+            has_sector_members=bool(sector_members),
+        )
+        transport = self._structure_transport(
+            self._lane_structure_affinity_key(
+                code,
+                affinity_key,
+                work_lane=work_lane,
+            ),
+            lane=work_lane,
+        )
+        request_deadline_monotonic = deadline_monotonic
+        if deadline_monotonic is not None and work_lane in {
+            "candidate",
+            "candidate_overflow",
+        }:
+            request_deadline_monotonic = max(
+                float(deadline_monotonic),
+                time.monotonic() + _CANDIDATE_IN_FLIGHT_MINIMUM_SECONDS,
+            )
+        request = (
+            transport.request
+            if request_deadline_monotonic is None
+            else transport.request_until
+        )
+        local_history_frequencies = self._prepared_local_frequencies(code, as_of)
+        incremental_refresh_frequencies = tuple(
+            frequency
+            for frequency in ("5m", "1m")
+            if work_lane != "coverage"
+            and frequency in frequencies
+            and frequency not in local_history_frequencies
+        )
+        instrument_type = (
+            "stock_cn"
+            if self._instrument_type_provider is None
+            else self.screening_instrument_types((code,))[code]
+        )
+        if instrument_type not in _TRADABLE_SCREENING_INSTRUMENT_TYPES:
+            raise ValueError("instrument is outside the trading screening scope")
         request_kwargs: dict[str, object] = {
             "code": code,
             "as_of": as_of,
             "sector": sector,
             "sector_members": sector_members,
+            "instrument_type": instrument_type,
             "frequencies": frequencies,
             "higher_timeframe_as_of": higher_timeframe_as_of,
-            "local_history_frequencies": self._prepared_local_frequencies(
-                code,
-                as_of,
-            ),
+            "local_history_frequencies": local_history_frequencies,
+            "incremental_refresh_frequencies": incremental_refresh_frequencies,
         }
-        if deadline_monotonic is not None:
-            request_kwargs["deadline_monotonic"] = deadline_monotonic
+        if request_deadline_monotonic is not None:
+            request_kwargs["deadline_monotonic"] = request_deadline_monotonic
         value = request(
             "structure_bundle",
             **request_kwargs,
@@ -2312,7 +3476,21 @@ class NativeTradingDataGatewayProcessProxy:
             and isinstance(value.get("worker_application_source_revision"), str)
         }
         result["structure_worker_pool"] = {
+            "affinity_contract_id": _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID,
             "configured_worker_count": len(worker_health),
+            "priority_reserved_worker_count": 1 if worker_health else 0,
+            "candidate_worker_count": (
+                max(1, len(worker_health) - 1) if worker_health else 0
+            ),
+            # Kept for health-schema compatibility. Candidate work is never
+            # released onto priority shards during a live monitor round.
+            "candidate_released_worker_count": (
+                max(1, len(worker_health) - 1) if worker_health else 0
+            ),
+            "candidate_disk_runtime_cache_enabled": (
+                self._runtime_state_cache_root is not None
+            ),
+            "lane_isolation_active": len(worker_health) > 1,
             "running_worker_count": sum(
                 value.get("worker_alive") is True for value in worker_health
             ),
@@ -2357,6 +3535,22 @@ class NativeTradingDataGatewayProcessProxy:
                 continue
             seen.add(id(transport))
             transport.shutdown()
+        _release_persistent_runtime_state_cache_root(
+            self._runtime_state_cache_owner_marker
+        )
+        self._runtime_state_cache_owner_marker = None
+        cache_root = self._runtime_state_cache_root
+        if cache_root is None or not self._runtime_state_cache_delete_on_close:
+            return
+        resolved = cache_root.resolve()
+        expected_parent = (
+            cache_root.parent.resolve()
+        )
+        if (
+            resolved.parent == expected_parent
+            and resolved.name.startswith(f"web-{os.getpid()}-")
+        ):
+            shutil.rmtree(resolved, ignore_errors=True)
 
 
 __all__ = (
@@ -2364,6 +3558,7 @@ __all__ = (
     "IPC_AUTHKEY_ENV",
     "NativeScreeningWorkerError",
     "NativeScreeningWorkerDeadlineExceeded",
+    "NativePriorityScreeningWorkerDeadlineExceeded",
     "NativeScreeningWorkerProtocolError",
     "NativeScreeningWorkerRemoteError",
     "NativeScreeningWorkerTimeout",

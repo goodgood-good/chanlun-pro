@@ -4,7 +4,7 @@ from typing import List, Optional
 from chanlun.core.types import FX, BI, CLKline
 
 
-def _fractal_lock_witness(fx: FX):
+def fractal_lock_witness(fx: FX):
     """返回第一次足以确认 ``fx`` 的物理 K 线前缀。
 
     分型首次可见后，右肩仍可能是正在参与包含合并的缠论 K 线。冷启动批量计算
@@ -52,6 +52,11 @@ def _fractal_lock_witness(fx: FX):
         if confirmed:
             return prefix[-1].date
     return None
+
+
+# 兼容核心内部既有私有调用。交易决策上下文需要复用同一套因果确认时刻，
+# 不能另写一份“取右肩最后一根 K 线”的近似规则。
+_fractal_lock_witness = fractal_lock_witness
 
 
 class BiCalculator:

@@ -122,6 +122,7 @@ def _combined_unit(
         child_ids=child_ids,
         same_level_combination=True,
         protected_after_ids=protected_leaves,
+        formed_at=max(item.formed_at or item.confirmed_at for item in group),
     )
 
 

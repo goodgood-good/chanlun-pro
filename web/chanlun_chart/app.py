@@ -5,6 +5,8 @@ GBK 标准流，并在同一进程中启动 Flask/Tornado 服务。
 """
 
 import asyncio
+from concurrent.futures import Future
+import copy
 import json
 import os
 import pathlib
@@ -119,6 +121,14 @@ class NativeHealthHandler(RequestHandler):
 
         future = self._readiness_runner.submit(market, forward_session)
         if future is None:
+            cached = self._readiness_runner.cached_result(
+                market,
+                forward_session,
+                allow_stale=True,
+            )
+            if cached is not None:
+                self._finish_json(*cached)
+                return
             self._finish_json(
                 self._unavailable_payload(market, "health_snapshot_busy"),
                 503,
@@ -131,6 +141,14 @@ class NativeHealthHandler(RequestHandler):
                 timeout=self._readiness_timeout_seconds,
             )
         except asyncio.TimeoutError:
+            cached = self._readiness_runner.cached_result(
+                market,
+                forward_session,
+                allow_stale=True,
+            )
+            if cached is not None:
+                self._finish_json(*cached)
+                return
             self._finish_json(
                 self._unavailable_payload(market, "health_snapshot_timeout"),
                 503,
@@ -149,25 +167,103 @@ class NativeHealthHandler(RequestHandler):
 class NativeReadinessRunner:
     """在独立执行器中单飞运行深度就绪检查。"""
 
-    def __init__(self, flask_app, executor):
+    def __init__(
+        self,
+        flask_app,
+        executor,
+        *,
+        cache_ttl_seconds=5.0,
+        stale_if_busy_seconds=30.0,
+    ):
+        if cache_ttl_seconds <= 0 or stale_if_busy_seconds < cache_ttl_seconds:
+            raise ValueError("readiness cache bounds are invalid")
         self._snapshot = flask_app.extensions["health_snapshot"]
         self._executor = executor
         self._lock = threading.Lock()
         self._in_flight = None
+        self._in_flight_key = None
+        self._cache_ttl_seconds = float(cache_ttl_seconds)
+        self._stale_if_busy_seconds = float(stale_if_busy_seconds)
+        self._cached = {}
+
+    @staticmethod
+    def _key(market, forward_session):
+        return str(market), None if forward_session is None else str(forward_session)
+
+    @staticmethod
+    def _completed_future(value):
+        future = Future()
+        future.set_result(value)
+        return future
+
+    @staticmethod
+    def _cached_payload(value, age_seconds):
+        payload, status_code = value
+        document = copy.deepcopy(payload)
+        if isinstance(document, dict):
+            document["readiness_snapshot_cached"] = True
+            document["readiness_snapshot_age_seconds"] = round(
+                max(0.0, age_seconds),
+                3,
+            )
+        return document, status_code
+
+    def _capture(self, key, future):
+        try:
+            value = future.result()
+            if (
+                not isinstance(value, tuple)
+                or len(value) != 2
+                or not isinstance(value[0], dict)
+                or type(value[1]) is not int
+            ):
+                return
+        except Exception:
+            return
+        with self._lock:
+            self._cached[key] = (time.monotonic(), value)
+            if self._in_flight is future:
+                self._in_flight_key = None
+
+    def cached_result(self, market, forward_session, *, allow_stale=False):
+        key = self._key(market, forward_session)
+        with self._lock:
+            cached = self._cached.get(key)
+            if cached is None:
+                return None
+            captured_at, value = cached
+            age = max(0.0, time.monotonic() - captured_at)
+            maximum = (
+                self._stale_if_busy_seconds
+                if allow_stale
+                else self._cache_ttl_seconds
+            )
+            if age > maximum:
+                return None
+            return self._cached_payload(value, age)
 
     def submit(self, market, forward_session):
-        """提交一次检查；已有检查未完成时快速报告繁忙。"""
+        """复用短时快照；过期后单飞提交一次新的深度检查。"""
 
+        cached = self.cached_result(market, forward_session)
+        if cached is not None:
+            return self._completed_future(cached)
+        key = self._key(market, forward_session)
         with self._lock:
             if self._in_flight is not None and not self._in_flight.done():
                 return None
-            self._in_flight = self._executor.submit(
+            future = self._executor.submit(
                 self._snapshot,
                 "readyz",
                 market,
                 forward_session,
             )
-            return self._in_flight
+            self._in_flight = future
+            self._in_flight_key = key
+        future.add_done_callback(
+            lambda completed, cache_key=key: self._capture(cache_key, completed)
+        )
+        return future
 
 
 class BoundedWSGIContainer(WSGIContainer):

@@ -10,6 +10,40 @@ from app import NativeHealthHandler, NativeReadinessRunner
 from chanlun.tools.daemon_executor import DaemonExecutor
 
 
+def test_readiness_runner_reuses_a_recent_deep_snapshot() -> None:
+    calls = []
+
+    class _FlaskApp:
+        pass
+
+    def health_snapshot(kind, market, forward_session):
+        calls.append((kind, market, forward_session))
+        return {"status": "ready", "market": market}, 200
+
+    flask_app = _FlaskApp()
+    flask_app.extensions = {"health_snapshot": health_snapshot}
+    executor = DaemonExecutor(
+        max_workers=1,
+        thread_name_prefix="ReadinessCacheTest",
+        max_pending=1,
+    )
+    try:
+        runner = NativeReadinessRunner(
+            flask_app,
+            executor,
+            cache_ttl_seconds=5,
+            stale_if_busy_seconds=30,
+        )
+        first = runner.submit("a", None).result(timeout=1)
+        second = runner.submit("a", None).result(timeout=1)
+
+        assert first[0]["status"] == "ready"
+        assert second[0]["readiness_snapshot_cached"] is True
+        assert calls == [("readyz", "a", None)]
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 class TestNativeHealthHandler(AsyncHTTPTestCase):
     def get_app(self):
         class _FlaskApp:

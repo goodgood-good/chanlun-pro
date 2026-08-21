@@ -416,6 +416,34 @@ def test_three_unit_divergence_boundary_appears_only_when_terminal_locks():
     assert boundary.terminal_center_id == locked.centers[-1].center_id
 
 
+def test_unlocked_terminal_divergence_leg_remains_a_forming_trend() -> None:
+    values, _first, _second, _third = three_center_fixture()
+    unlocked_values = (
+        *values[:12],
+        replace(
+            values[12],
+            locked=False,
+            confirmed_at=None,
+            formed_at=values[12].available_at,
+        ),
+    )
+    centers = calculate_centers(
+        unlocked_values,
+        0,
+        SourceKind.SEGMENT,
+    ).centers
+
+    result = assemble_trend_types(
+        centers,
+        unlocked_values,
+        0,
+        strength=BoundaryStrength(),
+    )
+
+    assert result.decomposition_boundaries == ()
+    assert result.current_trends[-1].terminal_divergence is None
+
+
 class PeakDifOnlyDecayStrength:
     def snapshot(self, value):
         key = tuple(value.child_ids) if len(value.child_ids) == 3 else value.unit_id

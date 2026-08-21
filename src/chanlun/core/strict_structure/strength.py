@@ -66,6 +66,10 @@ class MacdStrengthUnavailable(ValueError):
     """请求的结构单元没有与其对齐的方向性 MACD 切片。"""
 
 
+class FormalDivergenceUnavailable(ValueError):
+    """比较腿仍含未锁定单元，因而尚不能发布正式背驰。"""
+
+
 @dataclass(frozen=True, slots=True)
 class ComparisonMeasurement:
     """三段背驰比较腿使用的临时市场区间。
@@ -545,7 +549,9 @@ def compare_comparison_legs(
     ):
         raise ValueError("divergence units must share level, source, and price basis")
     if not earlier.locked or not later.locked:
-        raise ValueError("formal divergence requires locked units")
+        raise FormalDivergenceUnavailable(
+            "formal divergence requires locked units"
+        )
     if earlier.confirmed_at is None or later.confirmed_at is None:
         raise ValueError("formal divergence requires confirmation timestamps")
     if earlier.direction != later.direction:

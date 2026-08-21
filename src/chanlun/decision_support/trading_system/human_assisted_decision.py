@@ -23,12 +23,31 @@ from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     _TechnicalSignalEvaluator,
 )
+from chanlun.decision_support.trading_system.execution_policy import (
+    SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,
+)
 from chanlun.decision_support.trading_system.models import (
-    REVERSAL_SUPPORT_POINT_TYPES,
+    ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES,
     SectorAssessment,
     StructuralPoint,
     TimeframeContext,
     TradingPolicy,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
+from chanlun.decision_support.trading_system.five_minute_setup_state import (
+    FIVE_MINUTE_SETUP_STATE_CONTRACT,
+    GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+    execution_recommendation_label,
+    setup_state_for_point,
+    unconfirmed_setup_recommendation,
+    validate_setup_state_document,
+)
+from chanlun.decision_support.trading_system.position_recommendation import (
+    BUY_SIGNAL_PROTECTION_REASON_CODES,
+    active_signal_age_seconds,
+    build_position_recommendation,
 )
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
 from chanlun.decision_support.trading_system.screening_structure import (
@@ -44,7 +63,12 @@ from chanlun.decision_support.trading_system.selection import (
 
 
 DECISION_CORE_SCHEMA = "chanlun-human-assisted-decision-core"
-SIGNAL_DECISION_DOCUMENT_SCHEMA = "chanlun-human-assisted-signal-decision"
+FIVE_MINUTE_SETUP_SELECTION_REVISION = (
+    "terminal-two-segment-authoritative-state-v9-geometric-candidate"
+)
+SIGNAL_DECISION_DOCUMENT_SCHEMA = (
+    "chanlun-human-assisted-signal-decision-v8-geometric-candidate"
+)
 FORMAL_SELECTION_REQUIRED_REASON_CODE = "SIGNED_SELECTION_RESEARCH_REQUIRED"
 
 _SIGNAL_DECISION_FIELDS = (
@@ -67,11 +91,12 @@ _SIGNAL_DECISION_FIELDS = (
     "context_d",
     "context_30m",
     "setup_5m",
-    "trigger_1m",
+    "segment_difference_1m",
     "entry_execution_boundary",
     "sector",
     "structural_stop",
     "risk_multiplier",
+    "position_recommendation",
     "technical_entry_allowed",
     "entry_allowed",
     "exit_allowed",
@@ -82,6 +107,7 @@ _SIGNAL_DECISION_FIELDS = (
     "selection_path",
     "selection_research",
     "formal_selection",
+    "formal_selection_required",
     "selection_sources",
     "sector_triggered",
     "monitor_only",
@@ -100,6 +126,7 @@ _HIGHER_TIMEFRAME_DECISION_FIELDS = (
     "sector_reason_codes",
     "symbol_reason_codes",
     "reason_codes",
+    "data_integrity_hard_block_reason_codes",
     "market_period_diagnostics",
     "sector_period_diagnostics",
     "symbol_period_diagnostics",
@@ -138,11 +165,18 @@ class HumanAssistedDecisionContract:
     policy: TradingPolicy
     schema: str = DECISION_CORE_SCHEMA
     higher_context_frequency: str = "d"
+    context_frequency: str = "30m"
+    trade_frequency: str = "5m"
+    segment_difference_frequency: str = "1m"
+    segment_difference_point_types: tuple[str, ...] = tuple(
+        sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
+    )
+    # 以下三个字段是旧档案的传输别名，不再代表当前职责命名。
     strategic_frequency: str = "30m"
     tactical_frequency: str = "5m"
     locator_frequency: str = "1m"
     locator_trigger_point_types: tuple[str, ...] = tuple(
-        sorted(REVERSAL_SUPPORT_POINT_TYPES)
+        sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
     )
     physical_structure_frequencies: tuple[str, ...] = ("d", "30m", "5m", "1m")
     stroke_mode: str = STRICT_STROKE_MODE
@@ -153,6 +187,11 @@ class HumanAssistedDecisionContract:
     )
     structure_scope: str = SCREENING_STRUCTURE_SCOPE
     recursive_structure_allowed: bool = True
+    five_minute_setup_selection_revision: str = (
+        FIVE_MINUTE_SETUP_SELECTION_REVISION
+    )
+    five_minute_setup_state_contract: str = FIVE_MINUTE_SETUP_STATE_CONTRACT
+    formal_selection_required: bool = True
     human_confirmation_required: bool = True
     automated_order_authorized: bool = False
     live_status: str = "LIVE_DISABLED"
@@ -161,16 +200,34 @@ class HumanAssistedDecisionContract:
         if self.schema != DECISION_CORE_SCHEMA:
             raise ValueError("human-assisted decision core schema changed")
         if (
+            self.policy.require_confirmed_five_minute is not True
+            or self.policy.require_confirmed_one_minute is not False
+        ):
+            raise ValueError(
+                "human-assisted production policy requires 5m trade signals "
+                "and optional 1m segment evidence"
+            )
+        if (
             self.higher_context_frequency,
+            self.context_frequency,
+            self.trade_frequency,
+            self.segment_difference_frequency,
+        ) != ("d", "30m", "5m", "1m"):
+            raise ValueError("human-assisted canonical timeframe contract changed")
+        if (
             self.strategic_frequency,
             self.tactical_frequency,
             self.locator_frequency,
-        ) != ("d", "30m", "5m", "1m"):
+        ) != ("30m", "5m", "1m"):
             raise ValueError("human-assisted timeframe contract changed")
         if self.locator_trigger_point_types != tuple(
-            sorted(REVERSAL_SUPPORT_POINT_TYPES)
+            sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
         ):
-            raise ValueError("human-assisted one-minute trigger contract changed")
+            raise ValueError("human-assisted legacy one-minute alias changed")
+        if self.segment_difference_point_types != tuple(
+            sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
+        ):
+            raise ValueError("human-assisted one-minute segment contract changed")
         if (
             self.physical_structure_frequencies != ("d", "30m", "5m", "1m")
             or self.stroke_mode != STRICT_STROKE_MODE
@@ -180,6 +237,11 @@ class HumanAssistedDecisionContract:
             != unified_signal_alignment_contract().parameter_set_id
             or self.structure_scope != SCREENING_STRUCTURE_SCOPE
             or not self.recursive_structure_allowed
+            or self.five_minute_setup_selection_revision
+            != FIVE_MINUTE_SETUP_SELECTION_REVISION
+            or self.five_minute_setup_state_contract
+            != FIVE_MINUTE_SETUP_STATE_CONTRACT
+            or type(self.formal_selection_required) is not bool
         ):
             raise ValueError("human-assisted physical structure contract changed")
         if (
@@ -201,6 +263,12 @@ class HumanAssistedDecisionContract:
             # 独立重建身份，而不是信任不透明的自我声明。
             "policy": _trading_policy_document(self.policy),
             "higher_context_frequency": self.higher_context_frequency,
+            "context_frequency": self.context_frequency,
+            "trade_frequency": self.trade_frequency,
+            "segment_difference_frequency": self.segment_difference_frequency,
+            "segment_difference_point_types": list(
+                self.segment_difference_point_types
+            ),
             "strategic_frequency": self.strategic_frequency,
             "tactical_frequency": self.tactical_frequency,
             "locator_frequency": self.locator_frequency,
@@ -216,6 +284,13 @@ class HumanAssistedDecisionContract:
             ),
             "structure_scope": self.structure_scope,
             "recursive_structure_allowed": self.recursive_structure_allowed,
+            "five_minute_setup_selection_revision": (
+                self.five_minute_setup_selection_revision
+            ),
+            "five_minute_setup_state_contract": (
+                self.five_minute_setup_state_contract
+            ),
+            "formal_selection_required": self.formal_selection_required,
             "human_confirmation_required": self.human_confirmation_required,
             "automated_order_authorized": self.automated_order_authorized,
             "live_status": self.live_status,
@@ -283,9 +358,17 @@ def validate_human_assisted_contract_document(
         not isinstance(value, str) for value in locator_trigger_point_types
     ):
         raise ValueError("human-assisted one-minute trigger types are invalid")
+    segment_difference_point_types = document.get("segment_difference_point_types")
+    if not isinstance(segment_difference_point_types, list) or any(
+        not isinstance(value, str) for value in segment_difference_point_types
+    ):
+        raise ValueError("human-assisted one-minute segment types are invalid")
     string_fields = (
         "schema",
         "higher_context_frequency",
+        "context_frequency",
+        "trade_frequency",
+        "segment_difference_frequency",
         "strategic_frequency",
         "tactical_frequency",
         "locator_frequency",
@@ -294,12 +377,15 @@ def validate_human_assisted_contract_document(
         "strict_base_profile_revision",
         "signal_alignment_parameter_set_id",
         "structure_scope",
+        "five_minute_setup_selection_revision",
+        "five_minute_setup_state_contract",
         "live_status",
     )
     if any(not isinstance(document.get(name), str) for name in string_fields):
         raise ValueError("human-assisted decision contract strings are invalid")
     contract_bool_fields = (
         "recursive_structure_allowed",
+        "formal_selection_required",
         "human_confirmation_required",
         "automated_order_authorized",
     )
@@ -315,6 +401,10 @@ def validate_human_assisted_contract_document(
         policy=policy,
         schema=str(document["schema"]),
         higher_context_frequency=str(document["higher_context_frequency"]),
+        context_frequency=str(document["context_frequency"]),
+        trade_frequency=str(document["trade_frequency"]),
+        segment_difference_frequency=str(document["segment_difference_frequency"]),
+        segment_difference_point_types=tuple(segment_difference_point_types),
         strategic_frequency=str(document["strategic_frequency"]),
         tactical_frequency=str(document["tactical_frequency"]),
         locator_frequency=str(document["locator_frequency"]),
@@ -328,6 +418,13 @@ def validate_human_assisted_contract_document(
         ),
         structure_scope=str(document["structure_scope"]),
         recursive_structure_allowed=bool(document["recursive_structure_allowed"]),
+        five_minute_setup_selection_revision=str(
+            document["five_minute_setup_selection_revision"]
+        ),
+        five_minute_setup_state_contract=str(
+            document["five_minute_setup_state_contract"]
+        ),
+        formal_selection_required=bool(document["formal_selection_required"]),
         human_confirmation_required=bool(document["human_confirmation_required"]),
         automated_order_authorized=bool(document["automated_order_authorized"]),
         live_status=str(document["live_status"]),
@@ -337,10 +434,15 @@ def validate_human_assisted_contract_document(
     return contract.contract_id
 
 
-def _context_document(context: TimeframeContext | None) -> dict[str, object] | None:
+def _context_document(
+    context: TimeframeContext | None,
+    *,
+    technical_evidence: object | None = None,
+    signal_assessment: object | None = None,
+) -> dict[str, object] | None:
     if context is None:
         return None
-    return {
+    document = {
         "frequency": context.frequency,
         "direction": context.direction,
         "disposition": context.disposition,
@@ -350,6 +452,11 @@ def _context_document(context: TimeframeContext | None) -> dict[str, object] | N
         "reason_codes": list(context.reason_codes),
         "observed_at": context.observed_at.isoformat(),
     }
+    if technical_evidence is not None:
+        document["same_period_technical_evidence"] = technical_evidence.document()
+    if signal_assessment is not None:
+        document["signal_context_assessment"] = signal_assessment.document()
+    return document
 
 
 def sector_decision_document(
@@ -391,14 +498,30 @@ def _point_identity(point: StructuralPoint | ProvisionalCandidate) -> str:
     return point.point_id if isinstance(point, StructuralPoint) else point.candidate_id
 
 
+def _terminal_segment_document(
+    point: StructuralPoint | ProvisionalCandidate,
+) -> dict[str, object]:
+    reference = point.terminal_segment
+    if reference is None:
+        return {}
+    return {
+        "terminal_segment_role": reference.role,
+        "terminal_segment_level": reference.structural_level,
+        "terminal_segment_id": reference.unit_id,
+        "terminal_segment_source_kind": reference.source_kind.value,
+        "terminal_segment_direction": reference.direction,
+        "terminal_segment_state": reference.state,
+        "terminal_segment_start_at": reference.market_start.isoformat(),
+        "terminal_segment_end_at": reference.market_end.isoformat(),
+        "terminal_segment_available_at": reference.available_at.isoformat(),
+    }
+
+
 def point_decision_document(
     point: StructuralPoint | ProvisionalCandidate,
 ) -> dict[str, object]:
+    setup_state = setup_state_for_point(point).document()
     if isinstance(point, ProvisionalCandidate):
-        unfinished_segment = (
-            "unfinished_segment_participates" in point.evidence_codes
-            or "unfinished_segment_lock" in point.missing_conditions
-        )
         return {
             "point_id": point.candidate_id,
             "point_type": point.point_type,
@@ -407,9 +530,9 @@ def point_decision_document(
             "source_frequency": point.source_frequency,
             "tower": point.tower,
             "recursive_level": point.recursive_level,
-            "anchor_at": point.observed_at.isoformat(),
+            "anchor_at": point.anchor_at.isoformat(),
             "confirmed_at": None,
-            "available_at": point.observed_at.isoformat(),
+            "available_at": point.available_at.isoformat(),
             "price_basis_revision": point.price_basis_revision,
             "anchor_price": point.anchor_price,
             "invalidation_price": point.invalidation_price,
@@ -426,8 +549,8 @@ def point_decision_document(
             ),
             "missing_conditions": list(point.missing_conditions),
             "evidence_codes": list(point.evidence_codes),
-            "contains_unfinished_segment": unfinished_segment,
-            "actionable": False,
+            **_terminal_segment_document(point),
+            **setup_state,
         }
     return {
         "point_id": point.point_id,
@@ -458,23 +581,37 @@ def point_decision_document(
         ),
         "missing_conditions": [],
         "evidence_codes": list(point.evidence_codes),
-        "contains_unfinished_segment": False,
-        "actionable": True,
+        **_terminal_segment_document(point),
+        **setup_state,
     }
 
 
 def apply_formal_selection_scope(
     document: dict[str, object],
     selection_sources: Sequence[str],
+    *,
+    formal_selection_required: bool = True,
 ) -> None:
     """把板块扫描来源和正式研究证据共同绑定到决策身份。"""
 
+    if type(formal_selection_required) is not bool:
+        raise ValueError("formal_selection_required must be a boolean")
     sources = tuple(dict.fromkeys(selection_sources))
     if not sources:
         sources = ("INCREMENTAL_SCAN_SCOPE",)
     sector_triggered = "QMT_SECTOR_TRIGGER" in sources
     document["selection_sources"] = list(sources)
     document["sector_triggered"] = sector_triggered
+    previous_gate = document.get("formal_selection")
+    previous_gate_reasons = tuple(
+        str(value)
+        for value in (
+            previous_gate.get("reason_codes")
+            if isinstance(previous_gate, Mapping)
+            else ()
+        )
+        if isinstance(value, str) and value
+    )
     raw_research = document.get("selection_research")
     research = (
         None
@@ -493,19 +630,69 @@ def apply_formal_selection_scope(
         sector_triggered=sector_triggered,
     )
     document["formal_selection"] = gate.document()
-    document["monitor_only"] = not gate.accepted
-    if document.get("side") == "buy" and not gate.accepted:
+    document["formal_selection_required"] = formal_selection_required
+    document["monitor_only"] = (
+        formal_selection_required and not gate.accepted
+    )
+    if document.get("side") == "buy":
         raw_reasons = document.get("decision_reasons")
         if not isinstance(raw_reasons, list) or any(
             not isinstance(value, str) for value in raw_reasons
         ):
             raise ValueError("signal decision_reasons must be a string list")
-        document["entry_allowed"] = False
-        document["risk_multiplier"] = "0"
         document["decision_reasons"] = list(
-            dict.fromkeys((*raw_reasons, *gate.reason_codes))
+            dict.fromkeys(
+                (
+                    *(
+                        value
+                        for value in raw_reasons
+                        if value not in previous_gate_reasons
+                    ),
+                    *(
+                        gate.reason_codes
+                        if formal_selection_required and not gate.accepted
+                        else ()
+                    ),
+                )
+            )
         )
-    if document.get("decision_document_schema") is not None:
+        profile = document.get("execution_profile")
+        if isinstance(profile, dict):
+            raw_advisories = profile.get("advisory_reason_codes")
+            advisories = (
+                tuple(
+                    value
+                    for value in raw_advisories
+                    if isinstance(value, str)
+                    and value not in previous_gate_reasons
+                )
+                if isinstance(raw_advisories, list)
+                else ()
+            )
+            advisories = tuple(
+                dict.fromkeys(
+                    (
+                        *advisories,
+                        *(
+                            gate.reason_codes
+                            if formal_selection_required and not gate.accepted
+                            else ()
+                        ),
+                    )
+                )
+            )
+            profile["advisory_reason_codes"] = list(advisories)
+            if (
+                profile.get("structure_signal_confirmed") is True
+                and profile.get("hard_blocked") is not True
+            ):
+                profile["recommendation"] = "CAUTION" if advisories else "READY"
+                profile["recommendation_label"] = execution_recommendation_label(
+                    profile["recommendation"]
+                )
+    if document.get("decision_document_schema") is not None and all(
+        name in document for name in _SIGNAL_DECISION_FIELDS
+    ):
         document["decision_document_id"] = signal_decision_document_id(document)
 
 
@@ -549,6 +736,35 @@ def signal_decision_document_id(document: Mapping[str, object]) -> str:
 def validate_signal_decision_document(document: Mapping[str, object]) -> str:
     """验证可移植的页面/回放决策身份并返回该身份。"""
 
+    setup = document.get("setup_5m")
+    recursive_level = (
+        setup.get("recursive_level") if isinstance(setup, Mapping) else None
+    )
+    if (
+        not isinstance(setup, Mapping)
+        or setup.get("source_frequency") != "5m"
+        or type(recursive_level) is not int
+        or not is_five_minute_trade_level("5m", recursive_level)
+        or document.get("recursive_level") != recursive_level
+    ):
+        raise ValueError(
+            "human-assisted signal must use physical 5m/L0 trade evidence"
+        )
+    validate_setup_state_document(setup)
+    profile = document.get("execution_profile")
+    if isinstance(profile, Mapping):
+        recommendation = profile.get("recommendation")
+        if profile.get("recommendation_label") != execution_recommendation_label(
+            recommendation
+        ):
+            raise ValueError("human-assisted execution recommendation label changed")
+    if (
+        "trigger_1m" in document
+        and document.get("trigger_1m") != document.get("segment_difference_1m")
+    ):
+        raise ValueError(
+            "human-assisted signal 1m compatibility alias changed"
+        )
     expected = signal_decision_document_id(document)
     if document.get("decision_document_id") != expected:
         raise ValueError("human-assisted signal decision identity changed")
@@ -560,12 +776,19 @@ def serialize_evaluated_signal(
     *,
     previous_stage: str | None = None,
     name: str | None = None,
+    current_price: float | None = None,
     decision_core_id: str,
     selection_sources: Sequence[str] = (),
+    formal_selection_required: bool = True,
 ) -> dict[str, object]:
     """返回实时选股与回放完全一致使用的标准决策字段。"""
 
     point = item.setup.point
+    if not is_five_minute_trade_level(
+        point.source_frequency,
+        point.recursive_level,
+    ):
+        raise ValueError("human-assisted signal must use physical 5m/L0 trade evidence")
     trigger = item.trigger
     boundary = item.entry_execution_boundary
     if boundary is not None and (
@@ -573,7 +796,9 @@ def serialize_evaluated_signal(
         or boundary.point_id != trigger.point_id
         or boundary.symbol != point.code
     ):
-        raise ValueError("entry execution boundary does not match the 1m trigger")
+        raise ValueError(
+            "entry execution boundary does not match the 1m segment evidence"
+        )
     entry_allowed = item.entry is not None and item.entry.allowed
     exit_allowed = item.exit is not None and item.exit.allowed
     lifecycle_stage = item.lifecycle.stage
@@ -588,7 +813,13 @@ def serialize_evaluated_signal(
             (
                 *((item.entry.reason_codes if item.entry is not None else ())),
                 *((item.exit.reason_codes if item.exit is not None else ())),
+                *item.advisory_reason_codes,
                 *item.conflict.reason_codes,
+                *(
+                    item.lifecycle.reason_codes
+                    if item.lifecycle.stage == "invalidated"
+                    else ()
+                ),
             )
         )
     )
@@ -600,6 +831,9 @@ def serialize_evaluated_signal(
         "point_id": _point_identity(point),
         "code": point.code,
         "name": name,
+        # 最新已完成行情柱的价格只用于通知和页面展示。生命周期已经使用同一
+        # 价格完成失效判断；这里不把易变报价加入不可变决策身份。
+        "current_price": current_price,
         "point_type": point.point_type,
         "side": point.side,
         "tower": point.tower,
@@ -611,16 +845,21 @@ def serialize_evaluated_signal(
         "stroke_mode": STRICT_STROKE_MODE,
         "recursive_structure_used": item.physical_timeframe_recursive,
         "physical_timeframe_recursive": item.physical_timeframe_recursive,
-        "context_d": _context_document(item.daily_context),
-        "context_30m": {
-            "direction": item.setup.context.direction,
-            "disposition": item.setup.context.disposition,
-            "hard_block": item.setup.context.hard_block,
-            "dominant_point_id": item.setup.context.dominant_point_id,
-            "dominant_point_type": item.setup.context.dominant_point_type,
-            "reason_codes": list(item.setup.context.reason_codes),
-        },
+        "context_d": _context_document(
+            item.daily_context,
+            technical_evidence=item.daily_technical_context,
+            signal_assessment=item.context_assessment,
+        ),
+        "context_30m": _context_document(
+            item.setup.context,
+            technical_evidence=item.thirty_technical_context,
+            signal_assessment=item.context_assessment,
+        ),
         "setup_5m": point_decision_document(point),
+        "segment_difference_1m": (
+            None if trigger is None else point_decision_document(trigger)
+        ),
+        # 旧页面/旧归档读取别名；决策身份只绑定上面的规范字段。
         "trigger_1m": None if trigger is None else point_decision_document(trigger),
         "entry_execution_boundary": (
             None if boundary is None else boundary.document()
@@ -659,6 +898,9 @@ def serialize_evaluated_signal(
                 item.sector_higher_timeframe_reason_codes
             ),
             "reason_codes": list(item.higher_timeframe_reason_codes),
+            "data_integrity_hard_block_reason_codes": list(
+                item.higher_timeframe_data_integrity_reason_codes
+            ),
             "market_period_diagnostics": [
                 value.document()
                 for value in item.market_higher_timeframe_diagnostics
@@ -671,7 +913,7 @@ def serialize_evaluated_signal(
                 value.document()
                 for value in item.sector_higher_timeframe_diagnostics
             ],
-            "new_entry_requires_all_green": True,
+            "new_entry_requires_all_green": False,
         },
         "warmup": {
             "converged": item.warmup_converged,
@@ -715,7 +957,175 @@ def serialize_evaluated_signal(
         "automated_order_authorized": False,
         "live_status": "LIVE_DISABLED",
     }
-    apply_formal_selection_scope(document, selection_sources)
+    apply_formal_selection_scope(
+        document,
+        selection_sources,
+        formal_selection_required=formal_selection_required,
+    )
+    structure_confirmed = bool(
+        isinstance(point, StructuralPoint) and point.confirmed
+    )
+    setup_state = setup_state_for_point(point)
+    segment_difference_present = bool(
+        trigger is not None
+        and trigger.confirmed
+        and trigger.source_frequency == "1m"
+        and item.lifecycle.stage in {"triggered", "executable", "active"}
+    )
+    formal_advisories = (
+        ()
+        if not formal_selection_required
+        or item.formal_selection is None
+        or item.formal_selection.accepted
+        else item.formal_selection.reason_codes
+    )
+    structure_relation_advisories = (
+        (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,)
+        if item.exit is not None
+        and SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE in item.exit.reason_codes
+        else ()
+    )
+    advisory_reasons = tuple(
+        dict.fromkeys(
+            (
+                *item.advisory_reason_codes,
+                *(
+                    item.conflict.reason_codes
+                    if item.conflict.risk_only_point_ids
+                    and not item.conflict.hard_block
+                    else ()
+                ),
+                *formal_advisories,
+                *structure_relation_advisories,
+            )
+        )
+    )
+    hard_reasons = tuple(
+        reason
+        for reason in (
+            *((item.entry.reason_codes if item.entry is not None else ())),
+            *((item.exit.reason_codes if item.exit is not None else ())),
+            *(
+                item.conflict.reason_codes
+                if item.conflict.hard_block
+                else ()
+            ),
+            *(
+                item.lifecycle.reason_codes
+                if item.lifecycle.stage == "invalidated"
+                else ()
+            ),
+        )
+        if reason
+        not in {
+            "five_minute_not_confirmed",
+            "lifecycle_not_actionable",
+            "one_minute_not_confirmed",
+            "one_minute_sell_not_confirmed",
+            "sell_not_confirmed",
+            "setup_not_confirmed",
+            GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+            SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,
+        }
+    )
+    if item.lifecycle.stage == "invalidated":
+        recommendation = "BLOCKED"
+    elif hard_reasons:
+        recommendation = "BLOCKED"
+    elif not structure_confirmed:
+        recommendation = unconfirmed_setup_recommendation(
+            setup_state.formation_state
+        )
+    elif advisory_reasons:
+        recommendation = "CAUTION"
+    else:
+        recommendation = "READY"
+    context_grade = (
+        "UNRESOLVED"
+        if item.context_assessment is None
+        else item.context_assessment.grade
+    )
+    context_risk_scale = {
+        "A": "1.00",
+        "B": "0.75",
+        "C": "0.50",
+        "UNRESOLVED": "0.50",
+    }[context_grade]
+    structure_anchor_price = (
+        point.structure_anchor_price
+        if isinstance(point, StructuralPoint)
+        else point.anchor_price
+    )
+    position_recommendation = build_position_recommendation(
+        side=point.side,
+        recommendation=recommendation,
+        risk_multiplier=("0" if item.entry is None else item.entry.risk_multiplier),
+        context_risk_scale=context_risk_scale,
+        # 从实际可见价格量到结构防守位；锚点另行传入用于追价保护和审计。
+        entry_price=(
+            current_price if current_price is not None else structure_anchor_price
+        ),
+        structural_stop=(
+            point.structure_invalidation_price
+            if isinstance(point, StructuralPoint)
+            else point.invalidation_price
+        ),
+        exit_action=("none" if item.exit is None else item.exit.action),
+        structure_anchor_price=structure_anchor_price,
+        signal_age_seconds=(
+            active_signal_age_seconds(
+                point.available_at,
+                item.lifecycle.observed_at,
+                market=(
+                    "a"
+                    if point.code.startswith(("SH.", "SZ.", "BJ."))
+                    else "other"
+                ),
+            )
+            if isinstance(point, StructuralPoint)
+            else None
+        ),
+    )
+    position_recommendation_document = position_recommendation.document()
+    operational_buy_protections = tuple(
+        reason
+        for reason in position_recommendation.reason_codes
+        if reason in BUY_SIGNAL_PROTECTION_REASON_CODES
+    )
+    if point.side == "buy" and operational_buy_protections:
+        # 技术结构仍可继续跟踪，但过期、追价或跌破防守位都不得继续声明
+        # 当前买入可用。具体保护原因保留在规范决策理由中供页面与审计复核。
+        document["entry_allowed"] = False
+        document["decision_reasons"] = list(
+            dict.fromkeys(
+                (*document["decision_reasons"], *operational_buy_protections)
+            )
+        )
+    document["position_recommendation"] = position_recommendation_document
+    document["execution_profile"] = {
+        "structure_signal_confirmed": structure_confirmed,
+        # 兼容旧页面的只读别名；它不再参与 recommendation 或通知资格。
+        "execution_trigger_confirmed": segment_difference_present,
+        "one_minute_role": "SEGMENT_DIFFERENCE_ONLY",
+        "one_minute_required_for_trade_signal": False,
+        "one_minute_segment_difference_present": segment_difference_present,
+        "recommendation": recommendation,
+        "recommendation_label": execution_recommendation_label(recommendation),
+        "hard_blocked": recommendation == "BLOCKED",
+        "hard_block_reason_codes": list(dict.fromkeys(hard_reasons)),
+        "advisory_reason_codes": list(advisory_reasons),
+        "context_grade": context_grade,
+        "context_grade_label": (
+            "待判定（证据不足）"
+            if item.context_assessment is None
+            else item.context_assessment.grade_label
+        ),
+        "context_risk_scale": context_risk_scale,
+        "context_risk_scale_role": "MANUAL_POSITION_SIZING_ONLY",
+        "position_recommendation": position_recommendation_document,
+        "manual_confirmation_required": True,
+        "automated_order_authorized": False,
+    }
     document["decision_document_id"] = signal_decision_document_id(document)
     return document
 
@@ -723,8 +1133,16 @@ def serialize_evaluated_signal(
 class HumanAssistedDecisionCore:
     """页面选股与历史结构包回放的唯一评估器。"""
 
-    def __init__(self, policy: TradingPolicy = TradingPolicy()) -> None:
-        self.contract = HumanAssistedDecisionContract(policy=policy)
+    def __init__(
+        self,
+        policy: TradingPolicy = TradingPolicy(),
+        *,
+        formal_selection_required: bool = True,
+    ) -> None:
+        self.contract = HumanAssistedDecisionContract(
+            policy=policy,
+            formal_selection_required=formal_selection_required,
+        )
         self._technical_evaluator = _TechnicalSignalEvaluator(policy)
 
     @property
@@ -748,25 +1166,18 @@ class HumanAssistedDecisionCore:
                 item,
                 formal_selection=gate,
                 selection_research=bundle.selection_research,
-                entry=(
-                    item.entry
-                    if (
-                        item.entry is None
-                        or item.setup.point.side != "buy"
-                        or gate.accepted
-                    )
-                    else replace(
-                        item.entry,
-                        allowed=False,
-                        risk_multiplier=Decimal("0"),
-                        reason_codes=tuple(
-                            dict.fromkeys(
-                                (
-                                    *item.entry.reason_codes,
-                                    *gate.reason_codes,
-                                )
-                            )
-                        ),
+                advisory_reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *item.advisory_reason_codes,
+                            *(
+                                gate.reason_codes
+                                if item.setup.point.side == "buy"
+                                and self.contract.formal_selection_required
+                                and not gate.accepted
+                                else ()
+                            ),
+                        )
                     )
                 ),
             )
@@ -792,8 +1203,12 @@ class HumanAssistedDecisionCore:
                 item,
                 previous_stage=stages.get(item.lifecycle.signal_id),
                 name=name,
+                current_price=effective_bundle.latest_price,
                 decision_core_id=self.contract_id,
                 selection_sources=effective_bundle.selection_sources,
+                formal_selection_required=(
+                    self.contract.formal_selection_required
+                ),
             )
             for item in self.evaluate_symbol(effective_bundle)
         )
@@ -825,6 +1240,7 @@ def replay_human_assisted_bundles(
 
 __all__ = (
     "DECISION_CORE_SCHEMA",
+    "FIVE_MINUTE_SETUP_SELECTION_REVISION",
     "FORMAL_SELECTION_REQUIRED_REASON_CODE",
     "SIGNAL_DECISION_DOCUMENT_SCHEMA",
     "HumanAssistedDecisionContract",

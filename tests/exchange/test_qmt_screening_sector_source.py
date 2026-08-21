@@ -15,10 +15,13 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QMT_CURRENT_A_SHARE_SECTOR,
     QMT_GICS3_CATALOG_SOURCE,
     QMT_GICS3_COMPOSITE_PROVIDER,
+    QMT_GICS_HIERARCHY_CATALOG_SOURCE,
     QmtSectorCompositeSource,
     QmtSectorStrengthSource,
+    build_qmt_gics_hierarchy_sector_catalog,
     build_qmt_gics3_sector_catalog,
     build_qmt_gics3_sector_catalog_from_local_files,
+    qmt_gics_hierarchy_catalog_revision,
 )
 from chanlun.decision_support.fingerprints import sha256_json
 
@@ -63,6 +66,33 @@ class Daily:
     ) != daily
 
 
+def test_qmt_fact_ast_identity_excludes_only_declared_operational_cache_values() -> (
+    None
+):
+    original = """
+CACHE_CAPACITY = 12
+SEMANTIC_LIMIT = 8
+class Frames:
+    def build(self):
+        return CACHE_CAPACITY + SEMANTIC_LIMIT
+"""
+    cache_changed = original.replace("CACHE_CAPACITY = 12", "CACHE_CAPACITY = 256")
+    semantic_changed = original.replace("SEMANTIC_LIMIT = 8", "SEMANTIC_LIMIT = 9")
+    options = {
+        "roots": ("Frames",),
+        "excluded_names": frozenset({"CACHE_CAPACITY"}),
+    }
+
+    manifest = subject._producer_ast_manifest(original, **options)
+
+    assert subject._producer_ast_manifest(cache_changed, **options) == manifest
+    assert subject._producer_ast_manifest(semantic_changed, **options) != manifest
+    assert subject._producer_ast_manifest(
+        cache_changed,
+        roots=("Frames",),
+    ) != subject._producer_ast_manifest(original, roots=("Frames",))
+
+
 def test_qmt_fact_families_have_distinct_authenticated_revisions() -> None:
     composite = subject.qmt_sector_composite_fact_producer_revision()
     daily = subject.qmt_sector_daily_fact_producer_revision()
@@ -86,12 +116,14 @@ def test_qmt_fact_dependencies_do_not_cross_intraday_and_daily_families(
 
     subject.qmt_sector_composite_fact_producer_revision()
     assert "qmt_time_contract.py" in touched
+    assert "qmt_sector_same_base.py" in touched
     assert "etf_proxy_facts.py" not in touched
 
     touched.clear()
     subject.qmt_sector_daily_fact_producer_revision()
     assert "etf_proxy_facts.py" in touched
     assert "qmt_time_contract.py" not in touched
+    assert "qmt_sector_same_base.py" not in touched
 
 
 class FakeXtdata:
@@ -237,6 +269,84 @@ def test_qmt_catalog_fails_closed_without_current_a_share_universe(
         build_qmt_gics3_sector_catalog(captured_at=AS_OF)
 
 
+def test_qmt_hierarchy_catalog_maps_gics4_to_one_gics3_parent(
+    monkeypatch,
+) -> None:
+    fake = FakeXtdata()
+    fake.members[QMT_CURRENT_A_SHARE_SECTOR].append("600002.SH")
+    fake.members["GICS3EmptyCurrentAShare"] = ["AAPL.US"]
+    fake.members["GICS4EmptyCurrentAShare"] = ["AAPL.US"]
+    fake.members["GICS4股份制银行"] = [
+        "600000.SH",
+        "000001.SZ",
+        "AAPL.US",
+    ]
+    fake.members["GICS4其他银行"] = ["430047.BJ", "600002.SH"]
+    fake.members["GICS4商业银行"] = [
+        "600000.SH",
+        "000001.SZ",
+        "430047.BJ",
+    ]
+    monkeypatch.setattr(
+        fake,
+        "get_sector_list",
+        lambda: [
+            "普通板块",
+            "GICS3EmptyCurrentAShare",
+            "GICS4EmptyCurrentAShare",
+            "GICS4其他银行",
+            "GICS3商业银行",
+            "GICS4商业银行",
+            "GICS4股份制银行",
+        ],
+    )
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+
+    catalog = build_qmt_gics_hierarchy_sector_catalog(captured_at=AS_OF)
+
+    assert catalog["source"] == QMT_GICS_HIERARCHY_CATALOG_SOURCE
+    assert catalog["catalog_revision"] == qmt_gics_hierarchy_catalog_revision(
+        catalog
+    )
+    assert str(catalog["gics3_catalog_revision"]).startswith("sha256:")
+    parents = [
+        row for row in catalog["sectors"] if row["taxonomy_level"] == "GICS3"
+    ]
+    children = [
+        row for row in catalog["sectors"] if row["taxonomy_level"] == "GICS4"
+    ]
+    assert len(parents) == 1
+    assert len(children) == 2
+    [parent] = parents
+    assert parent["parent_sector_id"] is None
+    assert parent["member_codes"] == ["BJ.430047", "SH.600000", "SZ.000001"]
+    assert all(row["parent_sector_id"] == parent["sector_id"] for row in children)
+    assert {row["name"] for row in children} == {
+        "商业银行 → 其他银行",
+        "商业银行 → 股份制银行",
+    }
+    other = next(row for row in children if row["source_key"] == "GICS4其他银行")
+    assert other["member_codes"] == ["BJ.430047"]
+    evidence = catalog["capture_evidence"]
+    assert evidence["gics3_sector_count"] == 1
+    assert evidence["gics4_sector_count"] == 2
+    assert evidence["gics4_parent_relation_count"] == 2
+    assert evidence["collapsed_degenerate_gics4_sector_count"] == 1
+    assert str(
+        evidence["collapsed_degenerate_gics4_source_keys_sha256"]
+    ).startswith("sha256:")
+    assert evidence["excluded_empty_gics3_sector_count"] == 1
+    assert evidence["excluded_empty_gics4_sector_count"] == 1
+    assert str(evidence["excluded_empty_gics3_source_keys_sha256"]).startswith(
+        "sha256:"
+    )
+    assert str(evidence["excluded_empty_gics4_source_keys_sha256"]).startswith(
+        "sha256:"
+    )
+    assert evidence["hierarchy_orphan_member_count"] == 1
+
+
 def test_qmt_local_catalog_is_read_only_deterministic_capture(
     tmp_path: Path,
 ) -> None:
@@ -273,8 +383,10 @@ def test_qmt_local_catalog_is_read_only_deterministic_capture(
     )
 
 
+@pytest.mark.parametrize("sector_id", ("qmt-gics3:test", "qmt-gics4:test"))
 def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     monkeypatch,
+    sector_id: str,
 ) -> None:
     fake = FakeXtdata(latest_probe_end=AS_OF - timedelta(days=1))
     monkeypatch.setattr(subject, "xtdata", fake)
@@ -287,7 +399,7 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     members = tuple(f"SH.6000{index:02d}" for index in range(8))
 
     first = source.frame(
-        sector_id="qmt-gics3:test",
+        sector_id=sector_id,
         sector_name="测试行业",
         members=members,
         frequency="5m",
@@ -296,7 +408,7 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     )
     progress_after_first = len(progress)
     second = source.frame(
-        sector_id="qmt-gics3:test",
+        sector_id=sector_id,
         sector_name="测试行业",
         members=members,
         frequency="5m",
@@ -304,7 +416,7 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
         request_bars=4,
     )
     smaller = source.frame(
-        sector_id="qmt-gics3:test",
+        sector_id=sector_id,
         sector_name="测试行业",
         members=members,
         frequency="5m",
@@ -323,6 +435,7 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     assert len(progress) == progress_after_first
     assert len(fake.download_calls) == len(members)
     assert len(fake.factor_calls) == len(members)
+    assert source.cache_health_snapshot()["frame_capacity"] == 8
     assert fake.download_calls[0]["period"] == "5m"
     assert fake.download_calls[0]["incrementally"] is True
     assert fake.download_calls[0]["end_time"] == "20260723103001"
@@ -363,6 +476,22 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
         "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE"
     )
     assert first.attrs["sector_factor_revision"].startswith("sha256:")
+
+
+def test_composite_memory_frame_cache_is_strictly_bounded() -> None:
+    source = QmtSectorCompositeSource()
+
+    for index in range(12):
+        source._remember_frame(  # noqa: SLF001 - verifies the LRU safety bound
+            (f"sector-{index}", "5m", index),
+            (index, f"revision-{index}", pd.DataFrame({"close": [index + 1]})),
+        )
+
+    health = source.cache_health_snapshot()
+    assert health["frame_entries"] == health["frame_capacity"] == 8
+    assert tuple(source._cache) == tuple(  # noqa: SLF001
+        (f"sector-{index}", "5m", index) for index in range(4, 12)
+    )
 
 
 def test_qmt_component_source_builds_native_daily_research_advisory(

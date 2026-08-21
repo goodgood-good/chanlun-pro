@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import gzip
+import json
+
 from flask import Flask, jsonify
 from flask_login import LoginManager, UserMixin, login_user
 import pytest
 
+from cl_app.blueprints import decision_support as decision_support_module
 from cl_app.blueprints.decision_support import _presentation_scope, decision_support_bp
+from cl_app.services.human_review_screening import HumanReviewScreenUnavailable
+from cl_app.services.realtime_quotes import (
+    AShareDisplayQuoteBatch,
+    AShareRealtimeQuote,
+)
 
 
 class _User(UserMixin):
@@ -130,22 +139,37 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
             "priority_monitor_session_open": True,
             "snapshot_hash_coverage": "EXCLUDED_OPERATIONAL_METADATA",
     }
-    assert payload["data"]["manual_holdings"] == {
-        "schema": "chanlun-local-manual-holdings",
-        "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
-        "group_name": "我的持仓",
+    assert payload["data"]["manual_attention"] == {
+        "schema": "chanlun-local-manual-attention",
+        "source": "LOCAL_GLOBAL_ATTENTION_GROUP",
+        "group_name": "人工关注组",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
         "available": False,
         "status": "unavailable",
-        "positions": [],
+        "symbols": [],
         "declared_count": 0,
             "priority_monitor_count": 0,
             "cross_market_monitor_count": 0,
             "covered_monitor_count": 0,
             "unsupported_market_count": 0,
-        "quantity_available": False,
-        "cost_basis_available": False,
-        "sellable_quantity_available": False,
+    }
+    assert payload["data"]["us_monitor"]["schema"] == (
+        "chanlun-us-realtime-monitor"
+    )
+    assert payload["data"]["us_monitor"]["available"] is False
+    assert payload["data"]["us_monitor"]["reason_code"] == (
+        "US_MONITOR_UNAVAILABLE"
+    )
+    assert payload["data"]["us_monitor"]["op_level"] == "5m"
+    assert payload["data"]["us_monitor"]["mid_level"] == "1m"
+    assert payload["data"]["us_monitor"]["selection_candidates"] is False
+    assert payload["data"]["realtime_notifications"] == {
+        "schema": "chanlun-realtime-review-inbox",
+        "events": [],
+        "event_count": 0,
+        "pending_review_count": 0,
+        "delivery_counts": {},
+        "credentials_exposed": False,
         "real_account_accessed": False,
         "real_order_transport_enabled": False,
         "automated_order_authorized": False,
@@ -153,6 +177,164 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     }
     service = app.extensions["decision_support_trading_screening"]
     assert service.refresh_requests == 1
+
+
+def test_early_signals_compresses_large_response_when_client_accepts_gzip(
+    app: Flask,
+    logged_in_client,
+) -> None:
+    service = app.extensions["decision_support_trading_screening"]
+    original_snapshot = service.snapshot
+
+    def large_snapshot() -> dict[str, object]:
+        payload = original_snapshot()
+        payload["errors"] = ["x" * (40 * 1024)]
+        return payload
+
+    service.snapshot = large_snapshot
+    response = logged_in_client.get(
+        "/decision-support/early-signals",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert "Accept-Encoding" in response.vary
+    payload = json.loads(gzip.decompress(response.get_data()))
+    assert payload["ok"] is True
+    assert payload["data"]["errors"] == ["x" * (40 * 1024)]
+
+
+def test_early_signals_reuses_gzip_bytes_for_the_same_content_revision(
+    app: Flask,
+    logged_in_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = app.extensions["decision_support_trading_screening"]
+    original_snapshot = service.snapshot
+
+    def large_snapshot() -> dict[str, object]:
+        payload = original_snapshot()
+        payload["presentation_revision"] = "sha256:http-cache-test"
+        payload["errors"] = ["stable" * (8 * 1024)]
+        return payload
+
+    service.snapshot = large_snapshot
+    decision_support_module._JSON_GZIP_CACHE.clear()
+    original_compress = decision_support_module.gzip.compress
+    compression_calls = 0
+
+    def recording_compress(*args, **kwargs):
+        nonlocal compression_calls
+        compression_calls += 1
+        return original_compress(*args, **kwargs)
+
+    monkeypatch.setattr(
+        decision_support_module.gzip,
+        "compress",
+        recording_compress,
+    )
+    first = logged_in_client.get(
+        "/decision-support/early-signals",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    second = logged_in_client.get(
+        "/decision-support/early-signals",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.get_data() == second.get_data()
+    assert first.headers["X-Content-Revision"] == second.headers[
+        "X-Content-Revision"
+    ]
+    assert compression_calls == 1
+
+
+def test_early_signals_projects_only_us_auxiliary_monitor_positions(
+    app: Flask,
+    logged_in_client,
+) -> None:
+    class _Monitor:
+        @staticmethod
+        def health_snapshot() -> dict[str, object]:
+            return {
+                "schema": "chanlun-holding-group-monitor",
+                "ready": False,
+                "status": "degraded",
+                "reason_code": "HOLDING_MONITOR_DEGRADED",
+                "job_registered": True,
+                "notification_configured": True,
+                "interval_seconds": 60,
+                "op_level": "5m",
+                "mid_level": "1m",
+                "big_level": "30m",
+                "last_run_at": "2026-08-14T22:30:00+08:00",
+                "last_completed_at": "2026-08-14T22:30:01+08:00",
+                "stale": False,
+                "positions": [
+                    {
+                        "market": "us",
+                        "code": "QCOM.US",
+                        "name": "高通",
+                        "groups": ["我的关注"],
+                        "monitoring_scope": "WATCHLIST",
+                        "status": "monitoring",
+                        "reason_code": "MONITORING_ACTIVE",
+                        "event_present": False,
+                    },
+                    {
+                        "market": "us",
+                        "code": "QQQ.US",
+                        "name": "纳指100ETF",
+                        "groups": ["ETF"],
+                        "monitoring_scope": "WATCHLIST",
+                        "status": "error",
+                        "reason_code": "MARKET_DATA_OR_STRUCTURE_REFRESH_FAILED",
+                        "event_present": False,
+                    },
+                    {
+                        "market": "hk",
+                        "code": "HK.00700",
+                        "name": "腾讯控股",
+                        "groups": ["我的关注"],
+                        "monitoring_scope": "WATCHLIST",
+                        "status": "monitoring",
+                    },
+                ],
+                "notification_delivery": {"failure_count": 1},
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "automated_order_authorized": False,
+                "live_status": "LIVE_DISABLED",
+            }
+
+    app.extensions["holding_group_monitor"] = _Monitor()
+    payload = logged_in_client.get("/decision-support/early-signals").get_json()
+    monitor = payload["data"]["us_monitor"]
+
+    assert monitor["available"] is True
+    assert monitor["ready"] is False
+    assert monitor["status"] == "degraded"
+    assert [row["code"] for row in monitor["symbols"]] == [
+        "QCOM.US",
+        "QQQ.US",
+    ]
+    assert monitor["declared_count"] == 2
+    assert monitor["active_count"] == 1
+    assert monitor["failed_count"] == 1
+    assert monitor["covered_count"] == 1
+    assert monitor["selection_candidates"] is False
+    assert monitor["op_level"] == "5m"
+    assert monitor["mid_level"] == "1m"
+    assert monitor["research_only"] is True
+    assert monitor["no_order_execution"] is True
+    assert monitor["manual_review_required"] is True
+    serialized = json.dumps(monitor, ensure_ascii=False)
+    assert not any(
+        term in serialized
+        for term in ("账户", "持仓", "仓位", "positions", "real_account", "HOLDING")
+    )
 
 
 def test_early_signals_supports_bounded_sector_scope_and_unfiltered_scope(
@@ -222,15 +404,15 @@ def test_early_signals_supports_bounded_sector_scope_and_unfiltered_scope(
     assert sector_payload["total_qualified_signal_count"] == 2
     assert sector_payload["counts_by_stage"] == {"triggered": 1}
     assert [
-        row["code"] for row in sector_payload["manual_holding_signals"]
+        row["code"] for row in sector_payload["manual_attention_signals"]
     ] == ["SZ.000001"]
     assert all_payload["presentation_scope"] == "all-qualified"
     assert len(all_payload["signals"]) == 2
-    assert all_payload["manual_holding_signals"] == []
+    assert all_payload["manual_attention_signals"] == []
     assert all_payload["counts_by_point_type"] == {"3buy": 1, "2buy": 1}
 
 
-def test_server_projection_preserves_declared_holding_signal_stage() -> None:
+def test_server_projection_preserves_declared_attention_signal_stage() -> None:
     output = {
         "signals": [
             {
@@ -249,19 +431,61 @@ def test_server_projection_preserves_declared_holding_signal_stage() -> None:
                 },
             }
         ],
-        "manual_holdings": {
-            "positions": [{"market": "a", "code": "SZ.301004"}],
+        "manual_attention": {
+            "symbols": [{"market": "a", "code": "SZ.301004"}],
         },
     }
 
     projected = _presentation_scope(output, "sector-trigger")
 
     assert projected["signals"][0]["lifecycle_stage"] == "approaching"
-    assert projected["manual_holding_signals"][0]["lifecycle_stage"] == "approaching"
+    assert projected["manual_attention_signals"][0]["lifecycle_stage"] == "approaching"
     assert projected["counts_by_stage"] == {"approaching": 1}
 
 
-def test_early_signals_exposes_cross_market_manual_holdings_without_account_access(
+def test_server_projection_excludes_terminal_and_legacy_lifecycle_rows() -> None:
+    output = {
+        "signals": [
+            {
+                "signal_id": "current",
+                "code": "SZ.000001",
+                "point_type": "3buy",
+                "lifecycle_stage": "triggered",
+                "selection_sources": ["QMT_SECTOR_TRIGGER"],
+            },
+            {
+                "signal_id": "legacy-formed",
+                "code": "SZ.000003",
+                "point_type": "3buy",
+                "lifecycle_stage": "formed",
+                "selection_sources": ["QMT_SECTOR_TRIGGER"],
+            },
+            {
+                "signal_id": "legacy-armed",
+                "code": "SZ.000004",
+                "point_type": "2buy",
+                "lifecycle_stage": "armed",
+                "selection_sources": ["QMT_SECTOR_TRIGGER"],
+            },
+            {
+                "signal_id": "invalidated",
+                "code": "SZ.000002",
+                "point_type": "3sell",
+                "lifecycle_stage": "invalidated",
+                "selection_sources": ["QMT_SECTOR_TRIGGER"],
+            },
+        ],
+        "manual_attention": {"symbols": []},
+    }
+
+    projected = _presentation_scope(output, "all-qualified")
+
+    assert [row["signal_id"] for row in projected["signals"]] == ["current"]
+    assert projected["total_qualified_signal_count"] == 1
+    assert projected["counts_by_stage"] == {"triggered": 1}
+
+
+def test_early_signals_exposes_cross_market_manual_attention_without_account_fields(
     app: Flask,
     logged_in_client,
 ) -> None:
@@ -301,27 +525,75 @@ def test_early_signals_exposes_cross_market_manual_holdings_without_account_acce
         "automated_order_authorized": False,
         "live_status": "LIVE_DISABLED",
     }
+    quote_requests: list[tuple[str, ...]] = []
+
+    def quotes(codes: tuple[str, ...]) -> AShareDisplayQuoteBatch:
+        quote_requests.append(codes)
+        return AShareDisplayQuoteBatch(
+            requested_codes=codes,
+            market_open=False,
+            quotes=(
+                AShareRealtimeQuote(
+                    code="SH.600000",
+                    last=10.25,
+                    buy1=10.24,
+                    sell1=10.25,
+                    high=10.5,
+                    low=10.1,
+                    open=10.2,
+                    volume=1000.0,
+                    rate=1.75,
+                ),
+            ),
+            tick_data_used=True,
+        )
+
+    app.config["TRADING_SCREENING_NATIVE_PROCESS_ISOLATION"] = True
+    app.extensions["a_share_realtime_quotes"] = quotes
 
     payload = logged_in_client.get("/decision-support/early-signals").get_json()
-    holdings = payload["data"]["manual_holdings"]
+    attention = payload["data"]["manual_attention"]
 
-    assert holdings["available"] is True
-    assert holdings["group_scope"] == "GLOBAL_ACROSS_MARKETS"
-    assert [row["market"] for row in holdings["positions"]] == ["a", "hk"]
-    assert holdings["priority_monitor_count"] == 1
-    assert holdings["cross_market_monitor_count"] == 1
-    assert holdings["covered_monitor_count"] == 2
-    assert holdings["unsupported_market_count"] == 0
-    assert holdings["positions"][0]["realtime_status"] == "monitoring"
-    assert holdings["positions"][0]["realtime_reason_code"] == (
+    assert attention["available"] is True
+    assert attention["group_scope"] == "GLOBAL_ACROSS_MARKETS"
+    assert [row["market"] for row in attention["symbols"]] == ["a", "hk"]
+    assert attention["priority_monitor_count"] == 1
+    assert attention["cross_market_monitor_count"] == 1
+    assert attention["covered_monitor_count"] == 2
+    assert attention["unsupported_market_count"] == 0
+    assert attention["symbols"][0]["realtime_status"] == "monitoring"
+    assert attention["symbols"][0]["realtime_reason_code"] == (
         "A_SHARE_STRICT_DECISION_CORE_ACTIVE"
     )
-    assert holdings["positions"][1]["realtime_status"] == "awaiting_first_run"
-    assert holdings["real_account_accessed"] is False
-    assert holdings["automated_order_authorized"] is False
+    assert quote_requests == [("SH.600000",)]
+    assert attention["quote_status"] == "ready"
+    assert attention["quote_market_open"] is False
+    assert attention["quote_available_count"] == 1
+    assert attention["symbols"][0]["quote_available"] is True
+    assert attention["symbols"][0]["current_price"] == 10.25
+    assert attention["symbols"][0]["change_percent"] == 1.75
+    assert attention["symbols"][1]["realtime_status"] == "awaiting_first_run"
+    assert attention["symbols"][1]["quote_available"] is False
+    assert "real_account_accessed" not in attention
+    assert "automated_order_authorized" not in attention
+    serialized = json.dumps(attention, ensure_ascii=False)
+    assert not any(
+        term in serialized
+        for term in (
+            "账户",
+            "持仓",
+            "仓位",
+            "现金",
+            "我的持仓",
+            "manual_holdings",
+            "positions",
+            "real_account",
+            "HOLDING",
+        )
+    )
 
 
-def test_early_signals_fails_closed_on_inconsistent_manual_holdings_contract(
+def test_early_signals_fails_closed_on_inconsistent_manual_attention_source(
     app: Flask,
     logged_in_client,
 ) -> None:
@@ -356,12 +628,12 @@ def test_early_signals_fails_closed_on_inconsistent_manual_holdings_contract(
     }
 
     payload = logged_in_client.get("/decision-support/early-signals").get_json()
-    holdings = payload["data"]["manual_holdings"]
+    attention = payload["data"]["manual_attention"]
 
-    assert holdings["available"] is False
-    assert holdings["positions"] == []
-    assert holdings["quantity_available"] is False
-    assert holdings["real_account_accessed"] is False
+    assert attention["available"] is False
+    assert attention["symbols"] == []
+    assert "quantity_available" not in attention
+    assert "real_account_accessed" not in attention
 
 
 def test_alert_records_route_is_removed(logged_in_client) -> None:
@@ -391,15 +663,33 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "当前候选范围" in html
     assert "板块真实触发" in html
     assert "板块质量" in html
+    assert "QMT GICS3 / GICS4 行业层级" in html
+    assert "按 QMT GICS3 父行业门控" in html
+    assert "优先采用 GICS4 子行业结构与长期强弱" in html
+    assert "子行业数据不足时回退父行业" in html
+    assert "子行业结构明确不利时不回退" in html
     assert "成员日线" in html
     assert "板块按点时成分的中长期相对结构排序" in html
     assert "不按当日涨跌追强" in html
-    assert "日线、30m、5m、1m 均只使用决策时已经完成的K线" in html
-    assert "成分、复权或高周期证据不足时关闭候选" in html
+    assert "日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线" in html
+    assert "日线和30分钟证据不足时标记“待判定”" in html
+    assert "5分钟操作确认决定主信号，1分钟只作段差辅助" in html
+    assert "结构、复权或行情证据失真时关闭操作资格" in html
+    assert "日线与30分钟负责环境分级" in html
+    assert "周线和月线不参与当前执行判断" not in html
     assert "未来除权改写既有排序" not in html
     assert 'data-selection-scope="sector-trigger"' in html
     assert 'data-selection-scope="all-qualified"' in html
-    assert "全部资格观察 · 全部 · 全部" in html
+    assert "全部市场 · 全部来源 · 全部状态 · 全部买卖点" in html
+    assert 'data-market="a"' in html
+    assert 'data-market="us"' in html
+    assert 'data-signal-source="notification"' in html
+    assert 'data-review-stage="notified"' in html
+    assert 'data-lifecycle="monitoring"' in html
+    assert 'id="es-filter-reset"' in html
+    assert 'id="es-us-monitor" class="es-us-monitor-compact"' in html
+    assert 'id="es-us-monitor-list"' not in html
+    assert "板块选择只筛 A 股，美股线索不参与板块门且会继续保留" in html
     assert html.count("data-workspace=") == 3
     assert 'data-workspace="sector"' in html
     assert 'data-workspace="signals"' in html
@@ -412,10 +702,15 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert 'id="es-structure-evidence"' in html
     assert 'data-evidence-panel' in html
     assert 'data-evidence-close' in html
-    assert "30m 大级别筛选" in html
-    assert "5m 可操作级别筛选" in html
-    assert "1m 精确操作确认" in html
-    assert "STRUCTURE CLUE QUEUE · HUMAN REVIEW" in html
+    assert "30m 环境分级" in html
+    assert "5m 买卖点确认" in html
+    assert "1m 精细定位" in html
+    assert "逆风只降级为谨慎复核" in html
+    assert "1分钟买卖点只提供段差与精细定位" in html
+    assert "不能阻止已达到操作确认的5分钟信号通知和人工复核" in html
+    assert "1分钟只作定位，不能独立授权买卖" in html
+    assert "5分钟低级别或异结构卖点确认后，段差处理参考上限 25%" in html
+    assert "结构线索队列 · 人工复核" in html
     assert "买卖点线索队列" in html
     assert "线索只供人工识别，没有一条天然可执行" in html
     assert "ACTIONABLE QUEUE" not in html
@@ -424,7 +719,8 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "请切换“人工复核选股”" in html
     assert "三买只取第一中枢" in html
     assert "历史研究/审计成果" in html
-    assert "只读研究 · 无订单能力" in html
+    assert "实时信号辅助 · 手工交易" in html
+    assert "信号通知 · 无委托 · 人工确认" in html
     assert 'data-human-review-schema="chanlun-human-review-web"' in html
     assert 'data-default-mode="live"' in html
     assert (
@@ -437,13 +733,32 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "今日提前选股（实时）" in html
     assert 'id="hr-workspace"' in html
     assert 'id="hr-candidate-list"' in html
+    assert 'id="hr-candidate-kind-filter"' in html
     assert 'id="hr-feedback-form"' in html
-    assert 'id="hr-virtual-intent-count"' in html
-    assert 'id="hr-virtual-pending-count"' in html
-    assert 'id="hr-virtual-fill-count"' in html
-    assert 'id="hr-virtual-position-count"' in html
-    assert 'id="hr-portfolio-decision-audit-status"' in html
-    assert 'id="hr-portfolio-fill-decision-audit-status"' in html
+    for removed_id in (
+        "hr-virtual-intent-count",
+        "hr-virtual-pending-count",
+        "hr-virtual-fill-count",
+        "hr-virtual-position-count",
+        "hr-portfolio-decision-audit-status",
+        "hr-portfolio-fill-decision-audit-status",
+        "hr-paper-cash-balance",
+        "hr-paper-equity",
+    ):
+        assert f'id="{removed_id}"' not in html
+    assert not any(
+        term in html
+        for term in (
+            "账户",
+            "现金",
+            "持仓",
+            "仓位",
+            "持有",
+            "虚拟",
+            "组合热度",
+            "硬阻断",
+        )
+    )
     assert 'id="hr-signal-lifecycle-status"' in html
     assert 'id="hr-tactical-execution-status"' in html
     assert 'id="hr-entry-confirmed-at"' in html
@@ -474,8 +789,10 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert html.index("human_review_markout_audit.js") < html.index(
         "human_review_screening.js"
     )
-    assert "REVIEW_REQUIRED" in html
-    assert "LIVE_DISABLED" in html
+    assert "必须人工复核" in html
+    assert "不自动下单" in html
+    assert "REVIEW_REQUIRED" not in html
+    assert "LIVE_DISABLED" not in html
     assert "因果图表锁定" in html
     for point_type in ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell"):
         assert f'data-point-type="{point_type}"' in html
@@ -544,6 +861,12 @@ class _HumanReviewService:
         return {}
 
 
+class _UnavailableHumanReviewService(_HumanReviewService):
+    def snapshot(self, *, source="latest"):
+        del source
+        raise HumanReviewScreenUnavailable("human_review_web_bundle_invalid")
+
+
 def test_human_review_data_route_enforces_review_only_contract(
     app, logged_in_client
 ) -> None:
@@ -602,6 +925,11 @@ def test_human_review_data_route_enforces_review_only_contract(
     assert payload["schema"] == "chanlun-human-review-web"
     assert payload["source_kind"] == "historical"
     assert payload["automated_order_authorized"] is False
+    assert payload["realtime_notifications"]["schema"] == (
+        "chanlun-realtime-review-inbox"
+    )
+    assert payload["realtime_notifications"]["events"] == []
+    assert payload["realtime_notifications"]["automated_order_authorized"] is False
     operations = payload["forward_operations"]
     assert operations["session"] == "2026-07-30"
     assert operations["qmt_runtime"]["execution_owner"] == "APP_RUNTIME"
@@ -612,6 +940,66 @@ def test_human_review_data_route_enforces_review_only_contract(
     assert operations["complete"] is False
     assert monitored_sessions[0] is None
     assert monitored_sessions[1].isoformat() == "2026-07-30"
+
+
+def test_human_review_data_keeps_realtime_inbox_when_formal_bundle_is_invalid(
+    app, logged_in_client
+) -> None:
+    app.extensions["decision_support_human_review"] = (
+        _UnavailableHumanReviewService()
+    )
+
+    class _RealtimeInbox:
+        @staticmethod
+        def snapshot():
+            return {
+                "schema": "chanlun-realtime-review-inbox",
+                "events": [
+                    {
+                        "schema": "chanlun-realtime-review-notification",
+                        "notification_id": "sha256:" + "9" * 64,
+                        "market": "us",
+                        "code": "QCOM.US",
+                        "side": "buy",
+                        "signal_time": "2026-08-15T03:10:00+08:00",
+                        "review_required": True,
+                        "automated_action_authorized": False,
+                        "real_order_transport_enabled": False,
+                        "live_status": "LIVE_DISABLED",
+                        "chart_urls": {"1m": "/?market=us&code=QCOM.US"},
+                    }
+                ],
+                "event_count": 1,
+                "pending_review_count": 1,
+                "delivery_counts": {"delivered": 1},
+                "credentials_exposed": False,
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "automated_order_authorized": False,
+                "live_status": "LIVE_DISABLED",
+            }
+
+    app.extensions["realtime_review_inbox"] = _RealtimeInbox()
+
+    response = logged_in_client.get(
+        "/decision-support/human-review/data?source=latest"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert payload["schema"] == "chanlun-human-review-web"
+    assert payload["source_kind"] == "realtime"
+    assert payload["formal_review_available"] is False
+    assert payload["formal_review_unavailable_reason"] == (
+        "human_review_web_bundle_invalid"
+    )
+    assert payload["review_queue"] == []
+    assert payload["realtime_notifications"]["event_count"] == 1
+    assert payload["realtime_notifications"]["events"][0]["code"] == "QCOM.US"
+    assert payload["automated_order_authorized"] is False
+    assert payload["orders_created"] == 0
+    assert payload["fills_created"] == 0
+    assert payload["live_status"] == "LIVE_DISABLED"
 
 
 def test_feedback_route_binds_authenticated_reviewer_and_never_authorizes_orders(

@@ -13,6 +13,10 @@ from chanlun.core.strict_structure.formal_state import (
     resolve_level_formal_direction,
     semantic_trend_direction,
 )
+from chanlun.core.strict_structure.current_events import (
+    TerminalSegmentReference,
+    terminal_segment_reference,
+)
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
     CenterPreview,
@@ -29,6 +33,12 @@ from chanlun.core.strict_structure.models import (
     TrendState,
     TrendType,
     center_seed_size,
+)
+from chanlun.decision_support.trading_system.five_minute_setup_state import (
+    classify_five_minute_setup_state,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
 )
 
 
@@ -48,7 +58,7 @@ def _preview_lifecycle_role_count(preview: CenterPreview) -> int:
 def _unique_units_in_time_order(
     units: Iterable[ConstituentUnit],
 ) -> tuple[ConstituentUnit, ...]:
-    """Return distinct evidence units in their physical market order."""
+    """按物理市场时间顺序返回不重复的证据单元。"""
 
     by_id: dict[str, ConstituentUnit] = {}
     for unit in units:
@@ -65,7 +75,7 @@ def _center_overlap_units(
     center: TrendCenter,
     leaving_unit: ConstituentUnit | None,
 ) -> tuple[ConstituentUnit, ...]:
-    """Return every positively overlapping physical lifecycle component."""
+    """返回中枢生命周期中所有存在正宽重叠的物理构成单元。"""
 
     if center.source_kind is SourceKind.TREND_TYPE:
         return center.body_units
@@ -84,13 +94,12 @@ def _center_overlap_units(
 
 
 def _renderable_center_preview(preview: CenterPreview) -> bool:
-    """Return whether a preview has reached its source-specific chart gate.
+    """返回预览是否已经达到相应来源的图表展示门槛。
 
-    Physical previews are disclosed after ``S0`` entry plus the positive-width
-    middle-three ``S1..S3`` core.  The missing ``S4`` maturity component keeps
-    that rectangle provisional and non-tradable; completed previews and formal
-    centers still require the full five-role lifecycle. Recursive trend-type
-    previews retain their original three-trend gate.
+    物理预览在 ``S0`` 进入段与具有正宽重叠的中间三段 ``S1..S3`` 核心出现后
+    即可展示。缺少 ``S4`` 成熟段时，矩形仍属于不可交易的临时预览；已完成预览
+    与正式中枢仍必须满足完整五角色生命周期。递归走势类型预览继续使用原有的
+    三走势门槛。
     """
 
     if preview.state not in (
@@ -124,7 +133,7 @@ def _renderable_center_preview(preview: CenterPreview) -> bool:
 
 
 def aware_datetime_to_epoch_seconds(value: datetime) -> int:
-    """Convert an aware datetime to an exact UTC Unix-second coordinate."""
+    """把带时区时间精确转换为 UTC Unix 秒坐标。"""
 
     if not isinstance(value, datetime):
         raise TypeError("chart time must be a datetime")
@@ -140,7 +149,7 @@ def _optional_epoch(value: datetime | None) -> int | None:
 
 
 def _unit_audit_payload(unit: ConstituentUnit) -> dict[str, object]:
-    """Serialize one strict unit for center entry/leave audit display."""
+    """序列化一个严格单元，供中枢进入、离开证据审计展示。"""
 
     if not isinstance(unit, ConstituentUnit):
         raise TypeError("center audit unit must be a ConstituentUnit")
@@ -154,6 +163,7 @@ def _unit_audit_payload(unit: ConstituentUnit) -> dict[str, object]:
         "low_tick": unit.low_tick,
         "high_tick": unit.high_tick,
         "locked": unit.locked,
+        "forming": unit.forming,
     }
 
 
@@ -165,7 +175,7 @@ def _center_lifecycle_payload(
     provisional: bool = False,
     observation: bool = False,
 ) -> dict[str, object]:
-    """Serialize the sole same-level departure/return lifecycle contract."""
+    """序列化唯一的同级离开、回返生命周期契约。"""
 
     leave = completion_leave if completed else pending_leave
     expected_point_type = (
@@ -332,7 +342,7 @@ def _center_payload(
 
 
 def strict_center_to_chart_dict(center: TrendCenter) -> dict[str, object]:
-    """Serialize a formal center without changing its source geometry."""
+    """在不改变来源几何的前提下序列化正式中枢。"""
 
     if center.source_kind is SourceKind.STROKE_OBSERVATION:
         raise ValueError("formal serializer rejects stroke observation")
@@ -348,7 +358,7 @@ def strict_center_to_chart_dict(center: TrendCenter) -> dict[str, object]:
 def center_observation_to_chart_dict(
     center: TrendCenter,
 ) -> dict[str, object]:
-    """Serialize an explicitly non-tradable stroke-center observation."""
+    """序列化明确不可交易的笔中枢观察。"""
 
     if center.source_kind is not SourceKind.STROKE_OBSERVATION:
         raise ValueError("center observation requires stroke_observation source")
@@ -363,7 +373,7 @@ def active_center_projection_to_chart_dict(
     center: TrendCenter,
     source_closed_at: datetime,
 ) -> dict[str, object]:
-    """Build the single active box without extending it into the leaving leg."""
+    """构建唯一活动框，但不把框体延伸到离开段。"""
 
     if center.source_kind is SourceKind.STROKE_OBSERVATION:
         raise ValueError("formal center projection rejects stroke observation")
@@ -472,7 +482,7 @@ def strict_center_preview_to_chart_dict(
     units: tuple[ConstituentUnit, ...],
     source_closed_at: datetime,
 ) -> dict[str, object]:
-    """Serialize one non-tradable provisional center lifecycle."""
+    """序列化一个不可交易的临时中枢生命周期。"""
 
     if not isinstance(preview, CenterPreview):
         raise TypeError("preview must be a CenterPreview")
@@ -946,16 +956,59 @@ def _divergence_payload(point: StrictPointEvidence) -> dict[str, object] | None:
 
 def strict_point_to_chart_dict(
     point: StrictPointEvidence,
+    *,
+    terminal_segment: TerminalSegmentReference | None = None,
+    operational_confirmed_at: datetime | None = None,
 ) -> dict[str, object]:
-    """Serialize a confirmed or approaching strict point without reclassification."""
+    """序列化严格点，并显式区分操作确认与防重绘审计锁。
+
+    严格核心的 ``approaching`` 表示锚定线段尚未完成最终防重绘锁；交易层则在
+    最新已完成线段首次保留完整几何时就确认操作点。图表必须展示与选股相同的
+    操作状态，同时通过 ``strict_status`` 和 ``lock_state`` 保留底层审计事实。
+    """
 
     if not isinstance(point, StrictPointEvidence):
         raise TypeError("point must be StrictPointEvidence")
-    status = point.status.value
+    if terminal_segment is not None and (
+        terminal_segment.structural_level != point.structural_level
+        or terminal_segment.unit_id != point.anchor_unit_id
+    ):
+        raise ValueError("chart point terminal segment lineage mismatch")
+    operational_confirmation = operational_confirmed_at is not None
+    if operational_confirmation and (
+        point.status is not StrictPointStatus.APPROACHING
+        or terminal_segment is None
+        or terminal_segment.role != "latest_completed"
+        or terminal_segment.state not in {"formed", "locked"}
+    ):
+        raise ValueError(
+            "operational chart confirmation requires the latest completed segment"
+        )
+    if operational_confirmation and (
+        operational_confirmed_at < point.anchor_at
+        or operational_confirmed_at > point.available_at
+    ):
+        raise ValueError("operational chart confirmation time is invalid")
+
+    strict_status = point.status.value
+    status = "confirmed" if operational_confirmation else strict_status
     evidence_revision = "sha256:" + stable_structure_id(
         "chanlun-chart-point-evidence",
         point.point_id,
+        strict_status,
         status,
+        operational_confirmed_at,
+        (
+            None
+            if terminal_segment is None
+            else (
+                terminal_segment.role,
+                terminal_segment.structural_level,
+                terminal_segment.unit_id,
+                terminal_segment.state,
+                terminal_segment.available_at,
+            )
+        ),
         point.variant.value,
         point.available_at,
         point.evidence_codes,
@@ -963,16 +1016,30 @@ def strict_point_to_chart_dict(
         point.related_point_ids,
         point.small_to_large_carrier_unit_ids,
     )
-    render_kind = (
-        "point_confirmed"
-        if point.status is StrictPointStatus.CONFIRMED
-        else "point_approaching"
-    )
+    render_kind = "point_confirmed" if status == "confirmed" else "point_approaching"
     render_id = (
         point.point_id
         if point.status is StrictPointStatus.CONFIRMED
         else f"{point.point_id}@{evidence_revision}"
     )
+    setup_state = classify_five_minute_setup_state(
+        point_type=point.point_type,
+        status="confirmed" if status == "confirmed" else "provisional",
+        evidence_codes=point.evidence_codes,
+        missing_conditions=point.missing_conditions,
+        terminal_segment_role=(
+            None if terminal_segment is None else terminal_segment.role
+        ),
+        terminal_segment_state=(
+            None if terminal_segment is None else terminal_segment.state
+        ),
+    )
+    evidence_codes = tuple(point.evidence_codes)
+    if (
+        operational_confirmation
+        and "geometry_confirmed_before_audit_lock" not in evidence_codes
+    ):
+        evidence_codes = (*evidence_codes, "geometry_confirmed_before_audit_lock")
     return {
         "schema": "chanlun-chart-point",
         "render_kind": render_kind,
@@ -981,13 +1048,35 @@ def strict_point_to_chart_dict(
         "point_type": point.point_type,
         "side": point.side,
         "status": status,
+        "strict_status": strict_status,
+        "operational_confirmation": operational_confirmation,
+        "confirmation_basis": (
+            "latest_completed_geometry"
+            if operational_confirmation
+            else "strict_audit_lock"
+            if point.status is StrictPointStatus.CONFIRMED
+            else None
+        ),
+        "formation_state": setup_state.formation_state,
+        "lock_state": setup_state.lock_state,
+        "actionable": setup_state.actionable,
+        "contains_forming_segment": setup_state.contains_forming_segment,
+        "contains_unlocked_segment": setup_state.contains_unlocked_segment,
+        "terminal_segment_role": (
+            None if terminal_segment is None else terminal_segment.role
+        ),
+        "terminal_segment_state": (
+            None if terminal_segment is None else terminal_segment.state
+        ),
         "variant": point.variant.value,
         "structural_level": point.structural_level,
         "source_kind": point.source_kind.value,
         "price_basis_revision": point.price_basis_revision,
         "anchor_unit_id": point.anchor_unit_id,
         "anchor_at": aware_datetime_to_epoch_seconds(point.anchor_at),
-        "confirmed_at": _optional_epoch(point.confirmed_at),
+        "confirmed_at": _optional_epoch(
+            operational_confirmed_at if operational_confirmation else point.confirmed_at
+        ),
         "available_at": aware_datetime_to_epoch_seconds(point.available_at),
         "anchor_tick": point.anchor_tick,
         "invalidation_tick": point.invalidation_tick,
@@ -997,18 +1086,91 @@ def strict_point_to_chart_dict(
         "center_ordinal": point.center_ordinal,
         "parent_point_id": point.parent_point_id,
         "divergence": _divergence_payload(point),
-        "evidence_codes": list(point.evidence_codes),
+        "evidence_codes": list(evidence_codes),
         "missing_conditions": list(point.missing_conditions),
         "related_point_ids": list(point.related_point_ids),
         "small_to_large_carrier_unit_ids": list(point.small_to_large_carrier_unit_ids),
         "evidence_revision": evidence_revision,
-        "tradable": point.status is StrictPointStatus.CONFIRMED,
+        "tradable": setup_state.actionable,
         "points": [
             {
                 "time": aware_datetime_to_epoch_seconds(point.anchor_at),
                 "price_tick": point.anchor_tick,
             }
         ],
+    }
+
+
+def _chart_point_terminal_projection(
+    evidence: StrictEvidenceResult,
+    point: StrictPointEvidence,
+) -> tuple[TerminalSegmentReference | None, datetime | None]:
+    """返回图表点的末端血缘与操作确认时刻。
+
+    这里只投影生产交易级别 ``5m/L0``。1 分钟段差、30 分钟环境以及递归高层
+    仍展示严格核心原始状态，不能被误升格为可操作买卖点。
+    """
+
+    reference = terminal_segment_reference(
+        evidence.structure,
+        structural_level=point.structural_level,
+        unit_id=point.anchor_unit_id,
+    )
+    if (
+        point.status is not StrictPointStatus.APPROACHING
+        or not is_five_minute_trade_level(
+            evidence.source_frequency,
+            point.structural_level,
+        )
+        or reference is None
+        or reference.role != "latest_completed"
+    ):
+        return reference, None
+
+    unit = next(
+        (
+            item
+            for level in evidence.structure.levels
+            if level.structural_level == point.structural_level
+            for item in level.units
+            if item.unit_id == point.anchor_unit_id
+        ),
+        None,
+    )
+    if unit is None or unit.formed_at is None:
+        return reference, None
+    # 与 structure_adapter.extract_current_confirmed_points 完全同口径：当前仍为
+    # formed 时使用首次完整几何见证；重建到后来已锁定的历史截面时回溯 formed_at。
+    confirmed_at = point.available_at if reference.state == "formed" else unit.formed_at
+    return reference, confirmed_at
+
+
+def _operational_third_class_center_payload(
+    payload: dict[str, object],
+    *,
+    point: StrictPointEvidence,
+    confirmed_at: datetime,
+) -> dict[str, object]:
+    """把同一三类点的中枢说明同步为操作确认，不改写审计锁事实。"""
+
+    if point.point_type not in {"3buy", "3sell"}:
+        raise ValueError("operational center projection requires a third-class point")
+    if (
+        payload.get("center_id") != point.center_id
+        or payload.get("completion_point_type") != point.point_type
+        or payload.get("completion_phase") != "GEOMETRIC_THIRD_CLASS_POINT"
+    ):
+        return payload
+    return {
+        **payload,
+        "completion_phase": "OPERATIONAL_THIRD_CLASS_POINT",
+        "completion_point_status": "confirmed",
+        "tradable": True,
+        "operational_confirmation": True,
+        "confirmation_basis": "latest_completed_geometry",
+        "audit_lock_state": "pending",
+        "operational_point_id": point.point_id,
+        "operational_confirmed_at": aware_datetime_to_epoch_seconds(confirmed_at),
     }
 
 
@@ -1081,7 +1243,7 @@ def build_strict_structure_snapshot(
     *,
     interval: str,
 ) -> dict[str, object]:
-    """Build one authoritative, window-independent strict chart snapshot."""
+    """构建唯一权威且不依赖可视窗口的严格图表快照。"""
 
     if not isinstance(evidence, StrictEvidenceResult):
         raise TypeError("evidence must be StrictEvidenceResult")
@@ -1098,13 +1260,46 @@ def build_strict_structure_snapshot(
     formal_direction = resolve_formal_direction(evidence)
     formal_direction_payload = _formal_direction_payload(formal_direction)
 
-    confirmed_by_level: dict[int, list[StrictPointEvidence]] = {}
-    approaching_by_level: dict[int, list[StrictPointEvidence]] = {}
+    confirmed_by_level: dict[
+        int,
+        list[
+            tuple[
+                StrictPointEvidence,
+                TerminalSegmentReference | None,
+                datetime | None,
+            ]
+        ],
+    ] = {}
+    approaching_by_level: dict[
+        int,
+        list[
+            tuple[
+                StrictPointEvidence,
+                TerminalSegmentReference | None,
+                datetime | None,
+            ]
+        ],
+    ] = {}
     divergences_by_level: dict[int, list[DivergenceEvidence]] = {}
     for point in _visible(evidence.confirmed_points, evidence.source_closed_at):
-        confirmed_by_level.setdefault(point.structural_level, []).append(point)
+        reference, _operational_at = _chart_point_terminal_projection(
+            evidence,
+            point,
+        )
+        confirmed_by_level.setdefault(point.structural_level, []).append(
+            (point, reference, None)
+        )
     for point in _visible(evidence.approaching_points, evidence.source_closed_at):
-        approaching_by_level.setdefault(point.structural_level, []).append(point)
+        reference, operational_at = _chart_point_terminal_projection(
+            evidence,
+            point,
+        )
+        target = (
+            confirmed_by_level if operational_at is not None else approaching_by_level
+        )
+        target.setdefault(point.structural_level, []).append(
+            (point, reference, operational_at)
+        )
     for divergence in _visible(evidence.divergences, evidence.source_closed_at):
         divergences_by_level.setdefault(
             divergence.structural_level,
@@ -1169,6 +1364,31 @@ def build_strict_structure_snapshot(
             ),
             "preview_id",
         )
+        operational_thirds = tuple(
+            (point, operational_at)
+            for point, _reference, operational_at in confirmed_by_level.get(
+                level.structural_level,
+                (),
+            )
+            if operational_at is not None and point.point_type in {"3buy", "3sell"}
+        )
+        for point, operational_at in operational_thirds:
+            center_payloads = [
+                _operational_third_class_center_payload(
+                    payload,
+                    point=point,
+                    confirmed_at=operational_at,
+                )
+                for payload in center_payloads
+            ]
+            preview_payloads = [
+                _operational_third_class_center_payload(
+                    payload,
+                    point=point,
+                    confirmed_at=operational_at,
+                )
+                for payload in preview_payloads
+            ]
         active_center = (
             centers[-1]
             if centers and centers[-1].state in _ACTIVE_CENTER_STATES
@@ -1207,15 +1427,29 @@ def build_strict_structure_snapshot(
         )
         confirmed_payloads = _sorted_payloads(
             (
-                strict_point_to_chart_dict(point)
-                for point in confirmed_by_level.get(level.structural_level, ())
+                strict_point_to_chart_dict(
+                    point,
+                    terminal_segment=reference,
+                    operational_confirmed_at=operational_at,
+                )
+                for point, reference, operational_at in confirmed_by_level.get(
+                    level.structural_level,
+                    (),
+                )
             ),
             "point_id",
         )
         approaching_payloads = _sorted_payloads(
             (
-                strict_point_to_chart_dict(point)
-                for point in approaching_by_level.get(level.structural_level, ())
+                strict_point_to_chart_dict(
+                    point,
+                    terminal_segment=reference,
+                    operational_confirmed_at=operational_at,
+                )
+                for point, reference, operational_at in approaching_by_level.get(
+                    level.structural_level,
+                    (),
+                )
             ),
             "point_id",
         )
@@ -1270,6 +1504,11 @@ def build_strict_structure_snapshot(
                 "formal_direction": level["formal_direction"],
                 "center_projections": level["center_projections"],
                 "center_previews": level["center_previews"],
+                "operational_confirmed_points": [
+                    point
+                    for point in level["confirmed_points"]
+                    if point.get("operational_confirmation") is True
+                ],
                 "approaching_points": level["approaching_points"],
             }
             for level in levels

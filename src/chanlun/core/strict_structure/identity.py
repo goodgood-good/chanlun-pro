@@ -7,6 +7,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 
 
@@ -24,11 +25,7 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def stable_structure_id(namespace: str, *parts: Any) -> str:
-    """返回与进程无关的结构事实 SHA-256 身份。"""
-
-    if not namespace:
-        raise ValueError("namespace is required")
+def _stable_structure_id_uncached(namespace: str, parts: tuple[Any, ...]) -> str:
     payload = json.dumps(
         [namespace, *(_json_value(part) for part in parts)],
         ensure_ascii=False,
@@ -36,6 +33,29 @@ def stable_structure_id(namespace: str, *parts: Any) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@lru_cache(maxsize=32_768)
+def _stable_structure_id_cached(namespace: str, parts: tuple[Any, ...]) -> str:
+    return _stable_structure_id_uncached(namespace, parts)
+
+
+def stable_structure_id(namespace: str, *parts: Any) -> str:
+    """返回与进程无关的结构事实 SHA-256 身份。
+
+    严格中心重放会多次构造完全相同的单元、事件和走势身份。对可哈希参数使用有界
+    LRU，只消除重复 JSON 编码与 SHA-256，不改变规范载荷；包含列表或映射的罕见
+    调用自动走原路径。
+    """
+
+    if not namespace:
+        raise ValueError("namespace is required")
+    normalized_parts = tuple(parts)
+    try:
+        hash(normalized_parts)
+    except TypeError:
+        return _stable_structure_id_uncached(namespace, normalized_parts)
+    return _stable_structure_id_cached(namespace, normalized_parts)
 
 
 def build_center_id(

@@ -16,6 +16,7 @@ from chanlun.core.strict_structure.models import (
     StrictPointEvidence,
     StrictPointStatus,
     StrictPointVariant,
+    StrictStructureResult,
     TrendCenter,
 )
 
@@ -385,7 +386,39 @@ def approaching_third_class_points(
     )
 
 
+def approaching_third_class_point_ledger(
+    structure: StrictStructureResult,
+    *,
+    price_quantum: Decimal,
+) -> tuple[StrictPointEvidence, ...]:
+    """从整棵严格结构生成唯一的盘中三类点账本。"""
+
+    if not isinstance(structure, StrictStructureResult):
+        raise TypeError("盘中三类点账本需要严格结构")
+    output: dict[str, StrictPointEvidence] = {}
+    for level in structure.levels:
+        for point in approaching_third_class_points(
+            level,
+            price_quantum=price_quantum,
+        ):
+            previous = output.setdefault(point.point_id, point)
+            if previous != point:
+                raise ValueError("盘中三类点身份映射到冲突结构证据")
+    return tuple(
+        sorted(
+            output.values(),
+            key=lambda point: (
+                point.available_at,
+                point.structural_level,
+                point.point_type,
+                point.point_id,
+            ),
+        )
+    )
+
+
 __all__ = (
+    "approaching_third_class_point_ledger",
     "approaching_third_class_points",
     "build_approaching_point_id",
     "center_ordinals",

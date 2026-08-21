@@ -287,6 +287,41 @@ def test_cached_a_instrument_types_fail_closed_on_conflict_or_unknown_type():
     }
 
 
+def test_cached_a_symbol_names_use_only_restored_memory_catalog(monkeypatch):
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = [
+            {"code": "SH.513100", "name": " 纳指ETF ", "type": "etf_cn"},
+            {"code": "SZ.000001", "name": "平安银行", "type": "stock_cn"},
+        ]
+    monkeypatch.setattr(
+        stock_list,
+        "_stocks_cache_file",
+        lambda _market: (_ for _ in ()).throw(
+            AssertionError("证券名称读取不得访问磁盘")
+        ),
+    )
+
+    assert stock_list.get_cached_a_symbol_names(
+        ("SH.513100", "SZ.000001", "SZ.300001")
+    ) == {
+        "SH.513100": "纳指ETF",
+        "SZ.000001": "平安银行",
+        "SZ.300001": None,
+    }
+
+
+def test_cached_a_symbol_names_fail_closed_on_conflicting_rows():
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = [
+            {"code": "SH.513100", "name": "纳指ETF", "type": "etf_cn"},
+            {"code": "SH.513100", "name": "冲突名称", "type": "etf_cn"},
+        ]
+
+    assert stock_list.get_cached_a_symbol_names(("SH.513100",)) == {
+        "SH.513100": None
+    }
+
+
 @pytest.mark.parametrize(
     ("codes", "error"),
     [

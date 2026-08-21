@@ -76,6 +76,8 @@ interface Point {
 // 定义带线型的线段接口
 interface LineSegment {
   linestyle: string;
+  state?: "forming" | "formed" | "locked";
+  locked?: boolean;
   points: Point[];
 }
 
@@ -727,7 +729,7 @@ export class HistoryProvider {
         // 笔与线段按起点身份合并。
         // 用 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
         // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
-        // 未完成线段（linestyle=1）以起点和线型为 key，让本次响应覆盖先前状态。
+        // 三态线段以起点为稳定身份，让本次响应覆盖先前状态。
         //
         // 2026-07 修复(前端幽灵形态)：仅靠 key upsert 只增不删——已完成段一旦起点
         // 被新行情证伪、新响应里不再提及，先前状态会永久残留(后端刚修的同类 bug，
@@ -769,7 +771,7 @@ export class HistoryProvider {
           // 身份 key：仅用起点 (head.time, head.price)。
           // 一根线段从某个起点出发，任意时刻只该有一个状态——
           // 端点(tail)随 K 线包含合并会漂移（CLKline.k.date 会变），
-          // linestyle 也会从 1(未完成) 翻成 0(完成)，
+          // 状态也会从 forming 翻成 formed，再翻成 locked，
           // 把它们写进 key 会同时保留同一根段的前后状态 → 视觉上线段重叠/断裂。
           // 用 head 作为身份，Map.set 让本次响应覆盖先前状态即可。
           const segmentKey = (s: LineSegment): string => {
@@ -777,10 +779,15 @@ export class HistoryProvider {
             return `${head.time}_${head.price}`;
           };
 
-          // 新响应是否带来"未完成段"(linestyle=1)。SSE 全量快照含当前唯一的未完成段;
+          const isForming = (segment: LineSegment): boolean => {
+            const state = String(segment.state || "").toLowerCase();
+            return state ? state === "forming" : Number(segment.linestyle) === 1;
+          };
+
+          // 新响应是否带来形成中尾段。SSE 全量快照含当前唯一的形成中尾段；
           // 向左滚动的历史区间响应则不含。
           const newHasPending = newSegments.some(
-            (s) => s.points && s.points.length > 0 && Number(s.linestyle) === 1
+            (s) => s.points && s.points.length > 0 && isForming(s)
           );
 
           const merged = new Map<string, LineSegment>();
@@ -792,7 +799,7 @@ export class HistoryProvider {
             //    未被新响应提及的已完成段已被证伪，不能只增不删地累积幽灵形态。
             if (
               segment.points.length > 0 &&
-              !(newHasPending && Number(segment.linestyle) === 1) &&
+              !(newHasPending && isForming(segment)) &&
               !isInAuthoritativeWindow(segment)
             ) {
               merged.set(segmentKey(segment), segment);

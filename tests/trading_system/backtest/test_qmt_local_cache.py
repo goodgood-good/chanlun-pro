@@ -271,6 +271,15 @@ def test_local_30m_is_derived_only_from_complete_same_session_5m_buckets(
     )
     _write_kline(tmp_path / "SZ" / "300" / "000001.DAT", rows)
 
+    five, _source_audit = read_qmt_local_kline(
+        data_dir=tmp_path,
+        code="SZ.000001",
+        frequency="5m",
+        start_at=session.replace(hour=9, minute=30),
+        end_at=session.replace(hour=15, minute=0),
+    )
+    reference = subject._derive_completed_30m_reference(five)
+
     frame, audit = read_qmt_local_derived_30m(
         data_dir=tmp_path,
         code="SZ.000001",
@@ -290,3 +299,4 @@ def test_local_30m_is_derived_only_from_complete_same_session_5m_buckets(
     assert audit.selected_record_count == 7
     assert frame.attrs["qmt_transport"] == "LOCAL_5M_DERIVED_30M_READ_ONLY"
     assert frame.attrs["data_grade"] == "RESEARCH_ONLY"
+    assert frame.to_dict("records") == reference.to_dict("records")

@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Mapping
 
 
 SCREENING_WARMUP_FREQUENCIES = ("d", "30m", "5m", "1m")
@@ -68,11 +68,36 @@ def screening_warmup_reason_code(
     return "WARMUP_TAIL_STABLE" if converged else "WARMUP_TAIL_DIVERGED"
 
 
+def five_minute_warmup_converged(raw: object) -> bool | None:
+    """Read the physical 5m warmup gate from a serialized warmup document.
+
+    Current production documents contain one row for every physical period.
+    The aggregate fallback preserves compatibility with old compact callers;
+    malformed or ambiguous row sets return ``None`` so consumers fail closed.
+    """
+
+    if not isinstance(raw, Mapping):
+        return None
+    rows = raw.get("by_frequency")
+    if isinstance(rows, list) and rows:
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, Mapping) and row.get("frequency") == "5m"
+        ]
+        if len(matches) != 1 or type(matches[0].get("converged")) is not bool:
+            return None
+        return bool(matches[0]["converged"])
+    aggregate = raw.get("converged")
+    return aggregate if type(aggregate) is bool else None
+
+
 __all__ = (
     "SCREENING_QMT_30M_FALLBACK_REASON_CODE",
     "SCREENING_WARMUP_DIFFERENCE_CODES",
     "SCREENING_WARMUP_FREQUENCIES",
     "SCREENING_WARMUP_REQUIRED_BARS",
     "expected_screening_warmup_suffix_bar_count",
+    "five_minute_warmup_converged",
     "screening_warmup_reason_code",
 )

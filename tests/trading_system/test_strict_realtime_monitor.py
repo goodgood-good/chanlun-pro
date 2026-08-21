@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -12,6 +12,7 @@ from chanlun.decision_support.trading_system.models import (
     StructuralPoint,
     build_point_id,
 )
+from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
 from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     StrictPhysicalMonitorState,
     StrictRealtimeMonitorEvent,
@@ -35,16 +36,21 @@ def _point(
     point_type: str,
     *,
     center_id: str = "strict-center",
+    recursive_level: int = 0,
+    frequency: str = "5m",
+    anchor_at: datetime = AT,
+    confirmed_at: datetime = AT,
+    available_at: datetime = AT,
 ) -> StructuralPoint:
     side = "buy" if point_type.endswith("buy") else "sell"
     point_id = build_point_id(
         code="TSLA.US",
         price_basis_revision="provider-basis",
         point_type=point_type,
-        source_frequency="1m",
+        source_frequency=frequency,
         tower="formal",
-        recursive_level=0,
-        anchor_at=AT,
+        recursive_level=recursive_level,
+        anchor_at=anchor_at,
         center_id=center_id,
         parent_point_id=None,
     )
@@ -55,13 +61,13 @@ def _point(
         side=side,
         status="confirmed",
         variant="standard",
-        source_frequency="1m",
+        source_frequency=frequency,
         price_basis_revision="provider-basis",
         tower="formal",
-        recursive_level=0,
-        anchor_at=AT,
-        confirmed_at=AT,
-        available_at=AT,
+        recursive_level=recursive_level,
+        anchor_at=anchor_at,
+        confirmed_at=confirmed_at,
+        available_at=available_at,
         structure_anchor_price=100.0,
         structure_invalidation_price=99.0 if side == "buy" else 101.0,
         center_id=center_id,
@@ -95,14 +101,37 @@ def test_monitor_event_rejects_old_point_aliases_and_side_mismatches() -> None:
             bs_type="1buy",
             **{**common, "kind": "small_buy"},
         )
+    with pytest.raises(ValueError, match="物理 5m/L0"):
+        StrictRealtimeMonitorEvent(
+            side="buy",
+            bs_type="1buy",
+            recursive_level=1,
+            evidence_id="point:tsla:5m:l1:1buy",
+            anchor_time=AT.isoformat(),
+            **common,
+        )
+    with pytest.raises(ValueError, match="1 分钟段差证据不完整"):
+        StrictRealtimeMonitorEvent(
+            side="buy",
+            bs_type="1buy",
+            evidence_id="point:tsla:5m:l0:1buy",
+            anchor_time=AT.isoformat(),
+            segment_difference_point_type="1buy",
+            segment_difference_evidence_id="point:tsla:1m:l1:1buy",
+            segment_difference_recursive_level=1,
+            segment_difference_anchor_time=AT.isoformat(),
+            segment_difference_confirmed_time=AT.isoformat(),
+            segment_difference_available_time=AT.isoformat(),
+            **common,
+        )
 
 
 class _StrictState:
-    op_level = "1m"
-    mid_level = "5m"
+    op_level = "5m"
+    mid_level = "1m"
     big_level = "30m"
     last_big = pd.Timestamp(AT)
-    last_px = 100.0
+    last_px = 123.45
     consecutive_refresh_failures = 0
     warmup_ready = True
 
@@ -120,12 +149,12 @@ class _StrictState:
     def mid_dir(self):
         return self._mid
 
-
 def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
     point = _point("3buy")
+    state = _StrictState((point,))
 
     [event] = collect_strict_monitor_events(
-        {"TSLA.US": _StrictState((point,))},
+        {"TSLA.US": state},
         names={"TSLA.US": "Tesla"},
         holdings=set(),
     )
@@ -134,8 +163,643 @@ def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
     assert event.side == "buy"
     assert event.kind == "strict_buy_point"
     assert event.evidence_id == point.point_id
-    assert event.identity == ("strict_buy_point|TSLA.US|3buy|2026-08-05T10:00:00+08:00")
+    assert event.recursive_level == 0
+    assert event.anchor_time == AT.isoformat(timespec="seconds")
+    assert event.confirmed_time == AT.isoformat(timespec="seconds")
+    assert event.identity == (
+        "strict_buy_point|TSLA.US|5m|3buy|L0|"
+        f"{AT.isoformat(timespec='seconds')}|{AT.isoformat(timespec='seconds')}|"
+        f"{point.point_id}"
+    )
+    assert event.delivery_identity == (
+        "strict_buy_point|TSLA.US|5m|3buy|L0|"
+        f"{AT.isoformat(timespec='seconds')}|{AT.isoformat(timespec='seconds')}"
+    )
     assert event.signal_time == AT.isoformat(timespec="seconds")
+    assert event.price == 123.45
+    assert event.structure_anchor_price == 100.0
+
+
+def test_strict_collector_attaches_optional_one_minute_segment_difference() -> None:
+    point = _point("3buy")
+    segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=2),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT,
+    )
+    state = _StrictState((point,))
+    state.segment_difference_for_trade_point = lambda _point: segment
+
+    [event] = collect_strict_monitor_events(
+        {"TSLA.US": state},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert event.signal_role == "TRADE_SIGNAL_5M"
+    assert event.segment_difference_point_type == "1buy"
+    assert event.segment_difference_evidence_id == segment.point_id
+    assert event.segment_difference_recursive_level == 0
+    assert event.segment_difference_available_time == AT.isoformat(timespec="seconds")
+    assert event.segment_difference_divergence_kind == "trend"
+
+
+def test_stage_stable_new_one_minute_segment_emits_a_distinct_enrichment() -> None:
+    point = _point(
+        "3buy",
+        anchor_at=AT - timedelta(hours=1),
+        confirmed_at=AT - timedelta(minutes=20),
+        available_at=AT - timedelta(minutes=20),
+    )
+    segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=2),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT,
+    )
+    state = _StrictState(())
+    state.new_segment_difference_updates = lambda: ((point, segment),)
+
+    [event] = collect_strict_monitor_events(
+        {"TSLA.US": state},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert event.signal_role == "SEGMENT_DIFFERENCE_1M"
+    assert event.kind == "strict_segment_difference_update"
+    assert event.bs_type == "3buy"
+    assert event.signal_time == segment.available_at.isoformat(timespec="seconds")
+    assert event.setup_available_time == point.available_at.isoformat(
+        timespec="seconds"
+    )
+    assert event.segment_difference_point_type == "1buy"
+    assert event.segment_difference_divergence_kind == "trend"
+    assert event.delivery_identity == (
+        "strict_segment_difference_update|TSLA.US|5m|3buy|L0|"
+        f"{point.anchor_at.isoformat(timespec='seconds')}|"
+        f"{point.available_at.isoformat(timespec='seconds')}|1m|1buy|L0|"
+        f"{segment.anchor_at.isoformat(timespec='seconds')}|"
+        f"{segment.available_at.isoformat(timespec='seconds')}"
+    )
+    assert event.identity.endswith(f"|{point.point_id}|{segment.point_id}")
+
+
+def test_same_round_trade_signal_carries_segment_without_duplicate_enrichment() -> None:
+    point = _point("3buy")
+    segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=2),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT,
+    )
+    state = _StrictState((point,))
+    state.segment_difference_for_trade_point = lambda _point: segment
+    state.new_segment_difference_updates = lambda: ((point, segment),)
+
+    events = collect_strict_monitor_events(
+        {"TSLA.US": state},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert len(events) == 1
+    assert events[0].signal_role == "TRADE_SIGNAL_5M"
+    assert events[0].segment_difference_evidence_id == segment.point_id
+
+
+def test_physical_monitor_reports_only_first_fresh_segment_attachment(
+    monkeypatch,
+) -> None:
+    point = _point(
+        "3buy",
+        anchor_at=AT - timedelta(hours=1),
+        confirmed_at=AT - timedelta(minutes=20),
+        available_at=AT - timedelta(minutes=20),
+    )
+    segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=2),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT,
+    )
+    segment_points: list[StructuralPoint] = []
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
+    )
+    state.last_px = 100.0
+    monkeypatch.setattr(
+        state,
+        "_process_level",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            structure=SimpleNamespace(levels=()),
+            approaching_points=(),
+        ),
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_optional_segment_level",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(state, "_refresh_visible_price", lambda: None)
+    monkeypatch.setattr(monitor_module, "_strict_direction", lambda _value: "up")
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, source_frequency, **_kwargs: (
+            (point,) if source_frequency == "5m" else ()
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: tuple(segment_points),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "current_five_minute_setup_points",
+        lambda *_args, **_kwargs: (point,),
+    )
+
+    assert state.refresh() == []
+    assert state.new_segment_difference_updates() == ()
+    segment_points.append(segment)
+    assert state.refresh() == []
+    assert state.new_segment_difference_updates() == ((point, segment),)
+    assert state.refresh() == []
+    assert state.new_segment_difference_updates() == ()
+
+
+def test_physical_monitor_uses_confluence_time_for_earlier_segment_attachment(
+    monkeypatch,
+) -> None:
+    point = _point(
+        "3buy",
+        anchor_at=AT - timedelta(minutes=5),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT - timedelta(minutes=1),
+    )
+    segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=22),
+        confirmed_at=AT - timedelta(minutes=21),
+        available_at=AT - timedelta(minutes=20),
+    )
+    segment_points: list[StructuralPoint] = []
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_level",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            structure=SimpleNamespace(levels=()),
+            approaching_points=(),
+        ),
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_optional_segment_level",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(state, "_refresh_visible_price", lambda: None)
+    monkeypatch.setattr(monitor_module, "_strict_direction", lambda _value: "up")
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, source_frequency, **_kwargs: (
+            (point,) if source_frequency == "5m" else ()
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: tuple(segment_points),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "current_five_minute_setup_points",
+        lambda *_args, **_kwargs: (point,),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "match_one_minute_segment_difference_for_point",
+        lambda _point, candidates, **_kwargs: segment if candidates else None,
+    )
+
+    state.refresh()
+    segment_points.append(segment)
+    state.refresh()
+
+    assert state.new_segment_difference_updates() == ((point, segment),)
+
+
+def test_stale_segment_does_not_consume_a_later_fresh_attachment(
+    monkeypatch,
+) -> None:
+    point = _point(
+        "3buy",
+        anchor_at=AT - timedelta(hours=1),
+        confirmed_at=AT - timedelta(minutes=20),
+        available_at=AT - timedelta(minutes=20),
+    )
+    stale_segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=22),
+        confirmed_at=AT - timedelta(minutes=21),
+        available_at=AT - timedelta(minutes=20),
+    )
+    fresh_segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=2),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT,
+    )
+    segment_points: list[StructuralPoint] = [stale_segment]
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_level",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            structure=SimpleNamespace(levels=()),
+            approaching_points=(),
+        ),
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_optional_segment_level",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(state, "_refresh_visible_price", lambda: None)
+    monkeypatch.setattr(monitor_module, "_strict_direction", lambda _value: "up")
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, source_frequency, **_kwargs: (
+            (point,) if source_frequency == "5m" else ()
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: tuple(segment_points),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "current_five_minute_setup_points",
+        lambda *_args, **_kwargs: (point,),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "match_one_minute_segment_difference_for_point",
+        lambda _point, candidates, **_kwargs: max(
+            candidates,
+            key=lambda candidate: candidate.available_at,
+            default=None,
+        ),
+    )
+
+    state.refresh()
+    assert state.new_segment_difference_updates() == ()
+
+    segment_points.append(fresh_segment)
+    state.refresh()
+
+    assert state.new_segment_difference_updates() == ((point, fresh_segment),)
+
+
+def test_physical_monitor_recovers_a_confirmed_segment_outside_current_tail(
+    monkeypatch,
+) -> None:
+    point = _point(
+        "3buy",
+        anchor_at=AT - timedelta(minutes=5),
+        confirmed_at=AT - timedelta(minutes=1),
+        available_at=AT - timedelta(minutes=1),
+    )
+    historical_segment = _point(
+        "1buy",
+        frequency="1m",
+        anchor_at=AT - timedelta(minutes=3),
+        confirmed_at=AT - timedelta(minutes=2),
+        available_at=AT - timedelta(minutes=2),
+    )
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_level",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            structure=SimpleNamespace(levels=()),
+            approaching_points=(),
+        ),
+    )
+    monkeypatch.setattr(
+        state,
+        "_process_optional_segment_level",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(state, "_refresh_visible_price", lambda: None)
+    monkeypatch.setattr(monitor_module, "_strict_direction", lambda _value: "up")
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, source_frequency, **_kwargs: (
+            (point,) if source_frequency == "5m" else ()
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: (historical_segment,),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "current_five_minute_setup_points",
+        lambda *_args, **_kwargs: (point,),
+    )
+
+    state.refresh()
+
+    assert state.segment_difference_for_trade_point(point) == historical_segment
+    assert state.new_segment_difference_updates() == ((point, historical_segment),)
+
+
+def test_optional_one_minute_outage_does_not_block_five_minute_signal(
+    monkeypatch,
+) -> None:
+    point = _point("3buy")
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
+    )
+    state._runtime_by_frequency["5m"] = SimpleNamespace(
+        cd=SimpleNamespace(
+            get_src_klines=lambda: [SimpleNamespace(c=100.25)],
+        ),
+    )
+
+    def process(frequency, _last_attr, _observed_at):
+        if frequency == "1m":
+            raise monitor_module._WarmupIncomplete("1m segment warming")
+        return SimpleNamespace(
+            structure=SimpleNamespace(levels=()),
+            approaching_points=(),
+        )
+
+    monkeypatch.setattr(state, "_process_level", process)
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, source_frequency, **_kwargs: (
+            (point,) if source_frequency == "5m" else ()
+        ),
+    )
+
+    [event] = collect_strict_monitor_events(
+        {"TSLA.US": state},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert event.bs_type == "3buy"
+    assert event.price == 100.25
+    assert event.price_source == "latest_completed_5m_close"
+    assert event.segment_difference_point_type == ""
+    assert state.warmup_ready is True
+    assert state.segment_difference_ready is False
+    assert state.consecutive_refresh_failures == 0
+
+
+def test_newer_formed_opposite_frontier_suppresses_delayed_lock_notification(
+    monkeypatch,
+) -> None:
+    old_sell = _point(
+        "3sell",
+        center_id="old-sell-center",
+        anchor_at=AT - timedelta(hours=1),
+        confirmed_at=AT,
+        available_at=AT,
+    )
+    approaching = [
+        SimpleNamespace(
+            point_type="3buy",
+            structural_level=0,
+            anchor_at=AT,
+            evidence_codes=(
+                "unfinished_segment_participates",
+                "provisional_center_completion",
+                "core_boundary_held",
+            ),
+        )
+    ]
+    op_evidence = SimpleNamespace(
+        approaching_points=approaching,
+        structure=object(),
+    )
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
+    )
+    state._runtime_by_frequency["5m"] = SimpleNamespace(
+        cd=SimpleNamespace(
+            get_src_klines=lambda: [SimpleNamespace(c=100.25)],
+        ),
+    )
+
+    def process(frequency, _last_attr, _observed_at):
+        if frequency == "1m":
+            raise monitor_module._WarmupIncomplete("1m segment warming")
+        return op_evidence if frequency == "5m" else None
+
+    monkeypatch.setattr(state, "_process_level", process)
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, source_frequency, **_kwargs: (
+            (old_sell,) if source_frequency == "5m" else ()
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_provisional_candidates",
+        lambda *_args, **_kwargs: (
+            ProvisionalCandidate(
+                candidate_id="candidate:TSLA.US:3buy:formed-frontier",
+                code="TSLA.US",
+                point_type="3buy",
+                side="buy",
+                status="provisional",
+                source_frequency="5m",
+                tower="formal",
+                recursive_level=0,
+                observed_at=AT,
+                anchor_at=AT,
+                available_at=AT,
+                anchor_price=100.0,
+                invalidation_price=99.0,
+                price_basis_revision="provider-basis",
+                variant="standard",
+                center_id="new-buy-center",
+                center_zd=98.0,
+                center_zg=99.0,
+                center_ordinal=1,
+                divergence_kind=None,
+                missing_conditions=("unfinished_segment_lock",),
+                evidence_codes=(
+                    "unfinished_segment_participates",
+                    "provisional_center_completion",
+                    "core_boundary_held",
+                ),
+            ),
+        ),
+    )
+
+    assert state.refresh() == []
+    approaching.clear()
+    assert state.refresh() == []
+
+
+def test_trade_point_keeps_confirmation_distinct_from_availability() -> None:
+    confirmed_at = datetime(2026, 8, 5, 10, 1, tzinfo=CN)
+    available_at = datetime(2026, 8, 5, 10, 4, tzinfo=CN)
+    point = _point(
+        "3buy",
+        recursive_level=0,
+        confirmed_at=confirmed_at,
+        available_at=available_at,
+    )
+
+    [event] = collect_strict_monitor_events(
+        {"TSLA.US": _StrictState((point,))},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert event.anchor_time == AT.isoformat(timespec="seconds")
+    assert event.confirmed_time == confirmed_at.isoformat(timespec="seconds")
+    assert event.signal_time == available_at.isoformat(timespec="seconds")
+    assert event.recursive_level == 0
+
+
+def test_recursive_5m_context_does_not_create_a_second_trade_event() -> None:
+    lower = _point("3sell", center_id="lower", recursive_level=0)
+    higher = _point("3sell", center_id="higher", recursive_level=1)
+
+    events = collect_strict_monitor_events(
+        {"TSLA.US": _StrictState((lower, higher))},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert len(events) == 1
+    assert events[0].evidence_id == lower.point_id
+    assert events[0].recursive_level == 0
+
+
+def test_chart_occurrence_resolution_uses_full_recursive_evidence_identity(
+    monkeypatch,
+) -> None:
+    lower = _point("3sell", center_id="lower", recursive_level=0)
+    higher = _point("3sell", center_id="higher", recursive_level=1)
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    monkeypatch.setattr(state, "evidence", lambda _frequency: object())
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_confirmed_points",
+        lambda *_args, **_kwargs: (lower, higher),
+    )
+
+    resolved = state.confirmed_point_occurrence(
+        "3sell",
+        AT.isoformat(),
+        frequency="5m",
+        evidence_id=higher.point_id,
+        recursive_level=1,
+        anchor_time=higher.anchor_at.isoformat(),
+    )
+
+    assert resolved == higher
+
+
+def test_chart_occurrence_resolution_accepts_one_semantic_evidence_revision(
+    monkeypatch,
+) -> None:
+    old = _point("3buy", center_id="old-center")
+    rebuilt = _point("3buy", center_id="rebuilt-center")
+    assert old.point_id != rebuilt.point_id
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    monkeypatch.setattr(state, "evidence", lambda _frequency: object())
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_confirmed_points",
+        lambda *_args, **_kwargs: (rebuilt,),
+    )
+
+    resolved = state.confirmed_point_occurrence(
+        "3buy",
+        AT.isoformat(),
+        frequency="5m",
+        evidence_id=old.point_id,
+        recursive_level=0,
+        anchor_time=old.anchor_at.isoformat(),
+    )
+
+    assert resolved == rebuilt
+
+
+def test_chart_occurrence_resolution_rejects_ambiguous_evidence_revision(
+    monkeypatch,
+) -> None:
+    old = _point("3buy", center_id="old-center")
+    rebuilt_a = _point("3buy", center_id="rebuilt-a")
+    rebuilt_b = _point("3buy", center_id="rebuilt-b")
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    monkeypatch.setattr(state, "evidence", lambda _frequency: object())
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_confirmed_points",
+        lambda *_args, **_kwargs: (rebuilt_a, rebuilt_b),
+    )
+
+    assert state.confirmed_point_occurrence(
+        "3buy",
+        AT.isoformat(),
+        frequency="5m",
+        evidence_id=old.point_id,
+        recursive_level=0,
+        anchor_time=old.anchor_at.isoformat(),
+    ) is None
 
 
 def test_strict_collector_keeps_buy_and_sell_facts_under_high_level_downtrend() -> None:
@@ -153,6 +817,19 @@ def test_strict_collector_keeps_buy_and_sell_facts_under_high_level_downtrend() 
         ("sell", sell.point_id),
     ]
     assert {event.big_dir for event in events} == {"down"}
+
+
+def test_thirty_minute_downturn_is_context_warning_not_sell_signal() -> None:
+    [event] = collect_strict_monitor_events(
+        {"TSLA.US": _StrictState((), big="down")},
+        names={"TSLA.US": "Tesla"},
+        holdings={"TSLA.US"},
+    )
+
+    assert event.side == "risk"
+    assert event.kind == "strict_30m_context_warning"
+    assert event.signal_role == "CONTEXT_WARNING_30M"
+    assert event.bs_type == ""
 
 
 def test_strict_collector_reviews_first_sell_before_third_buy() -> None:
@@ -248,6 +925,44 @@ def test_monitor_snapshot_normalizes_numeric_strings_and_rejects_infinity() -> N
         state._closed_frame(broken, "1m")
 
 
+@pytest.mark.parametrize("bad_price", (0.0, -1.0))
+def test_monitor_snapshot_rejects_non_positive_ohlc(bad_price: float) -> None:
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    broken = _frame(metadata=True)
+    broken.loc[1, ["open", "high", "low", "close"]] = bad_price
+
+    with pytest.raises(ValueError, match="geometry is invalid"):
+        state._closed_frame(broken, "1m")
+
+
+def test_monitor_visible_price_uses_freshest_completed_feed() -> None:
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+
+    def runtime(frequency: str, at: str, price: float):
+        kline = SimpleNamespace(date=pd.Timestamp(at), c=price)
+        return SimpleNamespace(
+            cd=SimpleNamespace(get_src_klines=lambda: [kline]),
+        )
+
+    state._runtime_by_frequency = {
+        "1m": runtime("1m", "2026-08-05T10:03:00+08:00", 100.3),
+        "5m": runtime("5m", "2026-08-05T10:00:00+08:00", 100.5),
+    }
+    state.segment_difference_ready = True
+
+    state._refresh_visible_price()
+
+    assert state.last_px == 100.5
+    assert state.last_px_source == "latest_completed_5m_close"
+    assert state.last_px_observed_at == datetime(2026, 8, 5, 10, 5, tzinfo=CN)
+
+
 def test_monitor_uses_frozen_observation_time_for_completed_prefix() -> None:
     state = StrictPhysicalMonitorState(
         "TSLA.US",
@@ -296,13 +1011,67 @@ def test_valid_but_short_history_is_warming_not_refresh_failure() -> None:
     assert state.consecutive_refresh_failures == 0
 
 
+def test_realtime_monitor_uses_the_shared_screening_warmup_floor() -> None:
+    assert StrictPhysicalMonitorState.MINIMUM_BARS_BY_FREQ == {
+        "d": 480,
+        "30m": 480,
+        "5m": 960,
+        "1m": 1440,
+    }
+
+
+def test_realtime_signal_freshness_is_limited_to_two_operation_bars() -> None:
+    exchange = SimpleNamespace(market="us", kline_time_label="start")
+
+    state = StrictPhysicalMonitorState("TSLA.US", exchange)
+
+    assert state.signal_freshness == pd.Timedelta(minutes=10)
+
+
+def test_freshness_uses_detection_clock_and_rejects_session_old_points() -> None:
+    exchange = SimpleNamespace(market="us", kline_time_label="start")
+    state = StrictPhysicalMonitorState("TSLA.US", exchange)
+    point = _point("3buy")
+
+    assert state._is_fresh_point(
+        point,
+        AT + pd.Timedelta(minutes=10),
+    ) is True
+    assert state._is_fresh_point(
+        point,
+        AT + pd.Timedelta(minutes=10, seconds=1),
+    ) is False
+    assert state._is_fresh_point(
+        point,
+        AT - pd.Timedelta(seconds=1),
+    ) is False
+
+
+def test_realtime_freshness_rejects_a_new_lock_for_an_expired_anchor() -> None:
+    exchange = SimpleNamespace(market="us", kline_time_label="start")
+    state = StrictPhysicalMonitorState("TSLA.US", exchange)
+    delayed = _point(
+        "3sell",
+        anchor_at=AT - timedelta(days=27),
+        confirmed_at=AT,
+        available_at=AT,
+    )
+
+    assert state._is_fresh_point(delayed, AT + timedelta(minutes=5)) is False
+
+
 def test_poll_without_new_completed_bar_reuses_exact_evidence(monkeypatch) -> None:
     frame = _frame(metadata=True)
     state = StrictPhysicalMonitorState(
         "TSLA.US",
         SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
     )
-    monkeypatch.setattr(state, "_fetch_klines", lambda *_args: frame)
+    monkeypatch.setattr(
+        state,
+        "_fetch_klines",
+        lambda *_args, **_kwargs: frame,
+    )
     monkeypatch.setattr(
         state,
         "MINIMUM_BARS_BY_FREQ",
@@ -325,7 +1094,7 @@ def test_poll_without_new_completed_bar_reuses_exact_evidence(monkeypatch) -> No
     assert len(calls) == 1
 
 
-def test_new_completed_bar_rebuilds_from_the_complete_authoritative_frame(
+def test_new_completed_bar_reuses_validated_incremental_state_with_full_frame(
     monkeypatch,
 ) -> None:
     first_frame = _frame(metadata=True)
@@ -360,17 +1129,24 @@ def test_new_completed_bar_rebuilds_from_the_complete_authoritative_frame(
         SimpleNamespace(market="us", kline_time_label="start"),
     )
     frames = iter((first_frame, second_frame))
-    monkeypatch.setattr(state, "_fetch_klines", lambda *_args: next(frames))
+    monkeypatch.setattr(
+        state,
+        "_fetch_klines",
+        lambda *_args, **_kwargs: next(frames),
+    )
     monkeypatch.setattr(
         state,
         "MINIMUM_BARS_BY_FREQ",
         {**state.MINIMUM_BARS_BY_FREQ, "1m": 1},
     )
-    processed_lengths: list[int] = []
+    processed: list[tuple[str, int]] = []
 
     class _CD:
         def process_klines(self, frame):
-            processed_lengths.append(len(frame))
+            processed.append(("full", len(frame)))
+
+        def process_validated_incremental_klines(self, frame):
+            processed.append(("incremental", len(frame)))
 
     def _runtime(_frequency, metadata, source_frame):
         return monitor_module._FrequencyRuntime(
@@ -384,20 +1160,25 @@ def test_new_completed_bar_rebuilds_from_the_complete_authoritative_frame(
     monkeypatch.setattr(
         monitor_module,
         "build_screening_evidence",
-        lambda *_args, **_kwargs: SimpleNamespace(marker=len(processed_lengths)),
+        lambda *_args, **_kwargs: SimpleNamespace(marker=len(processed)),
     )
 
     state._process_level("1m", "last_op", AT)
     state._process_level("1m", "last_op", AT)
 
-    assert processed_lengths == [4, 5]
+    assert processed == [("full", 4), ("incremental", 5)]
     assert len(state._runtime_by_frequency["1m"].source_frame) == 5
+    assert state._runtime_by_frequency["1m"].rebuild_count == 1
+    assert state._runtime_by_frequency["1m"].incremental_update_count == 1
 
 
-def test_first_successful_refresh_only_builds_a_semantic_baseline(monkeypatch) -> None:
+def test_first_refresh_emits_but_evidence_id_rebuild_does_not_repeat_point(
+    monkeypatch,
+) -> None:
     state = StrictPhysicalMonitorState(
         "TSLA.US",
         SimpleNamespace(market="us", kline_time_label="start"),
+        clock=lambda: AT,
     )
     current_points = [_point("3buy", center_id="first-build-center")]
     evidence_by_frequency = {
@@ -421,13 +1202,18 @@ def test_first_successful_refresh_only_builds_a_semantic_baseline(monkeypatch) -
     monkeypatch.setattr(state, "_process_level", _process)
     monkeypatch.setattr(
         monitor_module,
-        "extract_confirmed_points",
+        "extract_current_confirmed_points",
         lambda evidence, **_kwargs: (
-            tuple(current_points) if evidence.frequency == "1m" else ()
+            tuple(current_points) if evidence.frequency == "5m" else ()
         ),
     )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: (),
+    )
 
-    assert state.refresh() == []
+    assert state.refresh() == current_points
     current_points[:] = [_point("3buy", center_id="rebuilt-center")]
     assert state.refresh() == []
 

@@ -113,6 +113,11 @@ def test_full_integration_snapshot_still_binds_forward_adapters() -> None:
     assert (
         "web/chanlun_chart/cl_app/services/human_review_screening.py" in paths
     )
+    assert "web/chanlun_chart/cl_app/services/trading_screening.py" in paths
+    assert (
+        "web/chanlun_chart/cl_app/services/trading_screening_presentation.py"
+        not in paths
+    )
 
 
 def test_replay_snapshot_rejects_a_valid_but_different_replay_cohort() -> None:

@@ -1,3 +1,6 @@
+from dataclasses import replace
+from decimal import Decimal
+
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     establish_center,
@@ -15,6 +18,7 @@ from chanlun.core.strict_structure.models import (
 from chanlun.core.strict_structure.recursive_engine import (
     calculate_level_with_divergence_boundaries,
 )
+from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import (
     StrengthSnapshot,
 )
@@ -205,3 +209,106 @@ def test_completed_trend_emits_trend_divergence_at_recursive_level():
 def test_non_divergent_comparison_is_not_formal_evidence():
     structure, _earlier, _later = completed_trend_fixture(level=1, decayed=False)
     assert collect_formal_divergence_ledger(structure) == ()
+
+
+def test_later_center_geometry_cannot_create_retroactive_hard_boundary() -> None:
+    """回返后才确定的窄中枢不能被更早单段背驰倒写为正式边界。"""
+
+    geometry = (
+        ("up", 30335, 32810, 29638, 32810),
+        ("down", 32810, 23651, 23651, 41261),
+        ("up", 23651, 25347, 22388, 25347),
+        ("up", 25347, 28055, 24003, 28055),
+        ("down", 28055, 24567, 24567, 28055),
+        ("down", 24567, 21776, 21776, 26224),
+        ("up", 21776, 24100, 19885, 24280),
+        ("up", 24100, 28930, 22350, 28930),
+    )
+    values = tuple(
+        replace(
+            unit(
+                index,
+                direction,
+                start_tick,
+                end_tick,
+                locked=index < 7,
+                source_kind=SourceKind.TREND_TYPE,
+                structural_level=1,
+            ),
+            low_tick=low_tick,
+            high_tick=high_tick,
+        )
+        for index, (
+            direction,
+            start_tick,
+            end_tick,
+            low_tick,
+            high_tick,
+        ) in enumerate(geometry)
+    )
+    strength = FixedStrength(
+        {
+            "u-1": (371.05, -6.59, -6.85),
+            "u-5": (103.48, -5.29, -5.59),
+        }
+    )
+    oscillatory_ids = frozenset(
+        {"u-0", "u-2", "u-3", "u-4", "u-5", "u-6", "u-7"}
+    )
+
+    center_result, assembly = calculate_level_with_divergence_boundaries(
+        values,
+        1,
+        SourceKind.TREND_TYPE,
+        oscillatory_ids,
+        strength=strength,
+    )
+
+    assert center_result.centers
+    assert assembly.decomposition_boundaries == ()
+    assert all(
+        trend.terminal_divergence is None
+        for trend in (*assembly.current_trends, *assembly.completed_trends)
+    )
+
+    empty_level = StrictLevelResult(
+        structural_level=0,
+        units=(),
+        center_result=CenterLevelResult(
+            structural_level=0,
+            price_basis_revision=TEST_PRICE_BASIS,
+            centers=(),
+            previews=(),
+            events=(),
+            locked_unit_count=0,
+            replay_from=0,
+        ),
+        trend_types=(),
+        completed_trends=(),
+    )
+    structure = StrictStructureResult(
+        schema="chanlun-structure",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=(
+            empty_level,
+            StrictLevelResult(
+                structural_level=1,
+                units=values,
+                center_result=center_result,
+                trend_types=assembly.current_trends,
+                completed_trends=assembly.completed_trends,
+                decomposition_boundaries=assembly.decomposition_boundaries,
+            ),
+        ),
+    )
+
+    approaching = StrictSignalEngine(
+        structure=structure,
+        price_quantum=Decimal("0.01"),
+        strength=strength,
+    ).approaching_points(values[-1].available_at)
+
+    assert all(
+        point.point_type not in {"1buy", "1sell"}
+        for point in approaching
+    )

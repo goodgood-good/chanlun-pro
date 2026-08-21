@@ -26,8 +26,13 @@ def _klines_df(timestamps, prices):
 class _FakeCL:
     def __init__(self):
         self.n = 0
+        self.validated_incremental_calls = 0
 
     def process_klines(self, klines):
+        self.n = len(klines)
+
+    def process_validated_incremental_klines(self, klines):
+        self.validated_incremental_calls += 1
         self.n = len(klines)
 
 
@@ -66,6 +71,7 @@ def test_reuse_when_prefix_stable(mock_cl):
     )
 
     assert first["id"] == second["id"]
+    assert mock_cl[0].validated_incremental_calls == 1
 
 
 def test_new_runtime_when_first_date_changes(mock_cl):
@@ -75,6 +81,30 @@ def test_new_runtime_when_first_date_changes(mock_cl):
     )
     second = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, _klines_df([940, 1000, 1060], [9, 10, 11]),
+        cache_key="a:SYN:1m",
+    )
+
+    assert first["id"] != second["id"]
+
+
+@pytest.mark.parametrize("revised_field", ("date", "volume"))
+def test_new_runtime_when_immutable_prefix_fact_changes(
+    mock_cl,
+    revised_field,
+):
+    base = _klines_df([1000, 1060, 1120], [10, 11, 12])
+    first = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, base,
+        cache_key="a:SYN:1m",
+    )
+    revised = base.copy()
+    if revised_field == "date":
+        revised.loc[1, "date"] = pd.Timestamp(1070, unit="s", tz="UTC")
+    else:
+        revised.loc[1, "volume"] += 1
+
+    second = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, revised,
         cache_key="a:SYN:1m",
     )
 

@@ -94,6 +94,31 @@ def test_task_add_rejects_unsupported_frequency(app_fake):
     assert fake.run_called is False
 
 
+def test_task_add_rejects_duplicate_opt_type(app_fake):
+    app, fake = app_fake
+    j = _post(app, "long,long").get_json()
+    assert j["ok"] is False
+    assert fake.run_called is False
+
+
+@pytest.mark.parametrize("frequencys", ("5m,5m", "5m,30m"))
+def test_task_add_rejects_duplicate_or_low_to_high_frequency_order(
+    app_fake,
+    frequencys,
+):
+    app, fake = app_fake
+
+    response = _post(
+        app,
+        "long",
+        frequencys=frequencys,
+        task_name="two_freq_task",
+    )
+
+    assert response.get_json()["ok"] is False
+    assert fake.run_called is False
+
+
 def test_task_add_reports_stopped_scheduler(app_fake, monkeypatch):
     app, fake = app_fake
     monkeypatch.setattr(

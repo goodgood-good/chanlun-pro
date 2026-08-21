@@ -8,10 +8,19 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 import hashlib
+import hmac
+import json
 from numbers import Integral
+import os
+from pathlib import Path
+import pickle
 import re
+import sys
+import tempfile
 from threading import RLock
+from time import perf_counter
 from typing import Protocol, cast
+import zlib
 
 import pandas as pd
 import numpy as np
@@ -27,6 +36,10 @@ from chanlun.decision_support.trading_system.context import (
     classify_context,
     context_point_max_age,
 )
+from chanlun.decision_support.trading_system.context_evidence import (
+    SamePeriodTechnicalContext,
+    build_same_period_technical_context,
+)
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeDataUnavailable,
@@ -36,7 +49,8 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 )
 from chanlun.decision_support.trading_system.incremental_scan import BarKey
 from chanlun.decision_support.trading_system.lifecycle import (
-    is_one_minute_reversal_trigger,
+    current_five_minute_setup_points,
+    is_one_minute_segment_difference,
 )
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
@@ -46,9 +60,12 @@ from chanlun.decision_support.trading_system.models import (
     StructuralPoint,
     TimeframeContext,
 )
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
 from chanlun.decision_support.trading_system.provisional import (
     ProvisionalCandidate,
-    extract_provisional_candidates,
+    extract_current_provisional_candidates,
 )
 from chanlun.decision_support.trading_system.qmt_sector_same_base import (
     QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT,
@@ -84,7 +101,8 @@ from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     normalize_qmt_opening_events_for_completed_minutes,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
-    extract_confirmed_points,
+    extract_current_confirmed_points,
+    extract_one_minute_segment_difference_points,
 )
 from chanlun.decision_support.trading_system.warmup_convergence import (
     WarmupConvergenceEnvelope,
@@ -97,9 +115,14 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_CATALOG_SOURCE,
     QMT_GICS3_COMPOSITE_ADJUSTMENT,
     QMT_GICS3_COMPOSITE_PROVIDER,
+    QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+    qmt_gics_hierarchy_catalog_revision,
 )
 from chanlun.tools.log_util import LogUtil
 from cl_app.services.realtime_quotes import (
+    AShareDisplayQuoteBatch,
+    AShareInstrumentSessionStatus,
+    AShareInstrumentSessionStatusBatch,
     AShareRealtimeQuoteBatch,
     normalized_a_share_codes,
     quote_from_exchange_tick,
@@ -124,10 +147,88 @@ _QMT_DOWNLOAD_BASE_BY_FREQUENCY = {
     "5m": "5m",
     "1m": "1m",
 }
+_REALTIME_INCREMENTAL_REFRESH_DAYS = {"5m": 14, "1m": 7}
+
+
+def _default_qmt_instrument_detail(native_code: str) -> object:
+    from xtquant import xtdata
+
+    return xtdata.get_instrument_detail(native_code, iscomplete=False)
 _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY = {
-    "1m": 128,
-    "5m": 160,
+    # 一个严格运行状态会保留完整递归结构；旧上限在单进程中可占用数 GiB。
+    # LRU 只用于分钟级热点复用，覆盖通道被逐出后会从冻结物理帧确定性重建。
+    "1m": 8,
+    "5m": 8,
 }
+# 严格运行态远大于最终分析摘要，不能把数百只待定位标的全部常驻为 Python 对象；
+# 但直接丢弃 LRU 尾部又会让轮转监听每次重放约 12,000 根 K 线。1m 内存二级缓存只
+# 保存本进程刚生成的压缩字节；候选 5m 的完整轮换状态另由 Web 生命周期密钥认证的
+# 本地磁盘层承接工作进程回收。416 个 1m 槽覆盖两个优先分片的热点段差标的；候选
+# 进程的 512 MiB 内存层只负责最快的一组热点，容量不足时按稳定代码哈希保留固定
+# 子集；生产环境的多个候选分片各自承接稳定亲和子集，避免顺序轮询造成零命中抖动。
+_RUNTIME_CACHE_ROLE = os.environ.get(
+    "CHANLUN_SCREENING_WORKER_CACHE_ROLE",
+    "shared",
+).strip().lower()
+if _RUNTIME_CACHE_ROLE not in {"shared", "priority", "candidate"}:
+    _RUNTIME_CACHE_ROLE = "shared"
+_CANDIDATE_CACHE_ROLE = _RUNTIME_CACHE_ROLE == "candidate"
+_SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY = {
+    # 候选分片不计算实时 1m 段差；1m 状态留给优先监听分片，避免覆盖扫描占用内存。
+    "1m": 0 if _CANDIDATE_CACHE_ROLE else 416,
+    # 候选分片可把有界内存层用于轮换 5m 池；优先/共享分片保持较小，避免挤出 1m
+    # 热点或触发 RSS 回收。完整候选轮回由下方认证磁盘层承接。
+    "5m": 256 if _CANDIDATE_CACHE_ROLE else 32,
+}
+_SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY = {
+    "1m": 0 if _CANDIDATE_CACHE_ROLE else 896 * 1024 * 1024,
+    "5m": (512 if _CANDIDATE_CACHE_ROLE else 96) * 1024 * 1024,
+}
+_DISK_RUNTIME_CACHE_SCHEMA = "chanlun-screening-runtime-state-disk-cache-v2"
+_DISK_RUNTIME_CACHE_MAGIC = b"CHANLUN_SCREENING_RUNTIME_STATE_V2"
+_DISK_RUNTIME_CACHE_DIR_ENV = "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR"
+_DISK_RUNTIME_CACHE_KEY_ENV = "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY"
+_DISK_RUNTIME_CACHE_IDENTITY_ENV = (
+    "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY"
+)
+_DISK_RUNTIME_CACHE_SCOPE_ENV = "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_SCOPE"
+_DISK_RUNTIME_CACHE_CAPACITY_ENV = (
+    "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_CAPACITY"
+)
+_DISK_RUNTIME_CACHE_MAX_BYTES_ENV = (
+    "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_MAX_BYTES"
+)
+_DISK_RUNTIME_CACHE_SCOPES = frozenset(
+    {
+        "web_lifecycle",
+        "application_source_revision",
+        "runtime_state_producer_revision",
+    }
+)
+_DISK_RUNTIME_CACHE_ABI = (
+    f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    f"|pandas-{pd.__version__}|numpy-{np.__version__}"
+)
+# 热点标的固定左边界后允许一代状态增长的最大完成 K 线数。达到边界即重新取
+# 规范的最新窗口并完整校验，从而兼顾绝大多数逐 K 线增量与有界内存。
+_RUNTIME_STABLE_WINDOW_EXTRA_BARS = {
+    "1m": 480,
+    "5m": 96,
+}
+_ANALYSIS_CACHE_CAPACITY_BY_FREQUENCY = {
+    # 结果对象只保留很小的结构摘要（真实样本通常约 1--5 KiB），不持有原始行情帧。
+    # 普通候选在优先通道运行期间会集中到一个隔离分片；当前约 2,029 只的工作集若沿
+    # 用 512 槽，会在顺序轮询中产生完整 LRU 抖动，日线、30m 与 5m 摘要每轮都重算。
+    # 4,096 可覆盖当前候选与合理波动，仍由频率分区和固定上限约束内存。
+    "d": 4096,
+    "30m": 4096,
+    "5m": 4096,
+    # 1m 摘要同样很小；覆盖当前约 705 只已武装标的后，同一分钟内的重试或重复
+    # 请求可以直接命中，而逐 K 线运行态仍由单独的压缩 L2 字节预算约束。
+    "1m": 1024,
+}
+_ANALYSIS_CACHE_CAPACITY = sum(_ANALYSIS_CACHE_CAPACITY_BY_FREQUENCY.values())
+_HIGHER_TIMEFRAME_CACHE_CAPACITY = 4096
 _KNOWN_SCREENING_INSTRUMENT_TYPES = frozenset(
     {
         "stock_cn",
@@ -140,18 +241,39 @@ _KNOWN_SCREENING_INSTRUMENT_TYPES = frozenset(
 )
 
 
+def _etf_proxy_sector_assessment(code: str) -> SectorAssessment:
+    """Return the explicit non-industry context used by the ETF path."""
+
+    return SectorAssessment(
+        sector_id=f"etf-proxy:{code}",
+        sector_name="ETF代理路径（不要求个股行业）",
+        eligible=True,
+        hard_block=False,
+        regime="neutral",
+        rank_components=(),
+        reason_codes=("ETF_PROXY_SECTOR_NOT_REQUIRED",),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FrameStructureAnalysis:
     closed_at: datetime
     direction: ContextDirection
     confirmed_points: tuple[StructuralPoint, ...]
     provisional_points: tuple[ProvisionalCandidate, ...]
+    setup_confirmed_points: tuple[StructuralPoint, ...] = ()
+    segment_difference_points: tuple[StructuralPoint, ...] | None = None
+    latest_price: float | None = None
     warmup_converged: bool = True
     warmup_full_bar_count: int = 0
     warmup_suffix_bar_count: int = 0
     warmup_reason_codes: tuple[str, ...] = ()
     warmup_difference_codes: tuple[str, ...] = ()
+    trade_level_warmup_converged: bool | None = None
+    trade_level_warmup_reason_codes: tuple[str, ...] = ()
+    trade_level_warmup_difference_codes: tuple[str, ...] = ()
     entry_execution_boundaries: tuple[EntryExecutionBoundary, ...] = ()
+    same_period_technical_context: SamePeriodTechnicalContext | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -161,6 +283,30 @@ class FrameStructureAnalysis:
         )
         if self.direction not in {"up", "down", "neutral"}:
             raise ValueError("invalid structure direction")
+        if not self.setup_confirmed_points and self.confirmed_points:
+            # 测试夹具和非 5m 调用默认复用已经按末端线段血缘过滤的当前点；
+            # 真实 5m 分析也必须显式传入同一集合。
+            object.__setattr__(
+                self,
+                "setup_confirmed_points",
+                self.confirmed_points,
+            )
+        if any(point.status != "confirmed" for point in self.setup_confirmed_points):
+            raise ValueError("setup confirmed points must be confirmed")
+        if any(
+            point.status != "confirmed"
+            for point in (self.segment_difference_points or ())
+        ):
+            raise ValueError("segment difference points must be confirmed")
+        segment_point_ids = tuple(
+            point.point_id for point in (self.segment_difference_points or ())
+        )
+        if len(segment_point_ids) != len(set(segment_point_ids)):
+            raise ValueError("segment difference point ids must be unique")
+        if self.latest_price is not None and (
+            not np.isfinite(self.latest_price) or self.latest_price <= 0
+        ):
+            raise ValueError("latest_price must be a positive finite number")
         if min(self.warmup_full_bar_count, self.warmup_suffix_bar_count) < 0:
             raise ValueError("warmup bar counts cannot be negative")
         if len(self.warmup_reason_codes) != len(set(self.warmup_reason_codes)):
@@ -171,16 +317,393 @@ class FrameStructureAnalysis:
             SCREENING_WARMUP_DIFFERENCE_CODES
         ):
             raise ValueError("warmup difference codes are invalid")
+        if self.trade_level_warmup_converged not in {None, True, False}:
+            raise ValueError("trade-level warmup convergence is invalid")
+        if len(self.trade_level_warmup_reason_codes) != len(
+            set(self.trade_level_warmup_reason_codes)
+        ):
+            raise ValueError("trade-level warmup reason codes must be unique")
+        if len(self.trade_level_warmup_difference_codes) != len(
+            set(self.trade_level_warmup_difference_codes)
+        ) or not set(self.trade_level_warmup_difference_codes).issubset(
+            SCREENING_WARMUP_DIFFERENCE_CODES
+        ):
+            raise ValueError("trade-level warmup difference codes are invalid")
         if len({value.point_id for value in self.entry_execution_boundaries}) != len(
             self.entry_execution_boundaries
         ):
             raise ValueError("entry execution boundary point ids must be unique")
+        if self.same_period_technical_context is not None and (
+            self.same_period_technical_context.observed_at != self.closed_at
+        ):
+            raise ValueError("same-period technical context time mismatch")
+
+    @property
+    def effective_segment_difference_points(self) -> tuple[StructuralPoint, ...]:
+        """Return the explicit causal ledger or the legacy live-tail fallback."""
+
+        return (
+            self.confirmed_points
+            if self.segment_difference_points is None
+            else self.segment_difference_points
+        )
 
 
 @dataclass(slots=True)
 class _WarmupRuntimeStates:
     full: ScreeningRuntimeState
     suffix: ScreeningRuntimeState
+
+
+@dataclass(frozen=True, slots=True)
+class _SerializedWarmupRuntimeStates:
+    payload: bytes
+    raw_size: int
+    retained_frame_start: datetime | None
+    retained_frame_count: int
+    admission_rank: int
+
+    @property
+    def byte_size(self) -> int:
+        return len(self.payload)
+
+
+class _AuthenticatedRuntimeStateDiskCache:
+    """保存候选 5m 压缩运行态，并在反序列化前验证身份和签名。
+
+    正式运行的目录和 HMAC 密钥绑定精确的结构运行态生产者版本，可以跨普通 Web
+    重启及外围决策代码变化复用；结构生产者或 Python/数据框 ABI 变化时拒绝旧内容。
+    磁盘内容必须先通过 HMAC、身份和长度校验，才会交给 pickle，从而不把持久文件
+    扩大成新的反序列化信任边界。
+    """
+
+    _DEFAULT_CAPACITY = 3072
+    _DEFAULT_MAX_BYTES = 8 * 1024 * 1024 * 1024
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        key: bytes,
+        capacity: int,
+        max_bytes: int,
+        identity: str,
+        scope: str,
+    ) -> None:
+        if len(key) < 32:
+            raise ValueError("runtime disk cache key is too short")
+        if capacity <= 0 or max_bytes <= 0:
+            raise ValueError("runtime disk cache limits must be positive")
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or len(identity) > 512
+            or any(ord(character) < 32 for character in identity)
+        ):
+            raise ValueError("runtime disk cache identity is invalid")
+        if scope not in _DISK_RUNTIME_CACHE_SCOPES:
+            raise ValueError("runtime disk cache scope is invalid")
+        self._root = root.resolve()
+        self._key = key
+        self._capacity = capacity
+        self._max_bytes = max_bytes
+        self._identity = identity
+        self._scope = scope
+        self._lock = RLock()
+        self._entries: dict[Path, tuple[int, int]] = {}
+        self._total_bytes = 0
+        self._counters: Counter[str] = Counter()
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._load_index()
+
+    @classmethod
+    def from_environment(cls) -> "_AuthenticatedRuntimeStateDiskCache | None":
+        root_text = os.environ.get(_DISK_RUNTIME_CACHE_DIR_ENV, "").strip()
+        key_text = os.environ.get(_DISK_RUNTIME_CACHE_KEY_ENV, "").strip()
+        identity = os.environ.get(_DISK_RUNTIME_CACHE_IDENTITY_ENV, "").strip()
+        scope = os.environ.get(
+            _DISK_RUNTIME_CACHE_SCOPE_ENV,
+            "web_lifecycle",
+        ).strip()
+        if not root_text and not key_text:
+            return None
+        if not root_text or not key_text:
+            raise ValueError("runtime disk cache environment is incomplete")
+        try:
+            key = bytes.fromhex(key_text)
+            capacity = int(
+                os.environ.get(
+                    _DISK_RUNTIME_CACHE_CAPACITY_ENV,
+                    str(cls._DEFAULT_CAPACITY),
+                )
+            )
+            max_bytes = int(
+                os.environ.get(
+                    _DISK_RUNTIME_CACHE_MAX_BYTES_ENV,
+                    str(cls._DEFAULT_MAX_BYTES),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("runtime disk cache environment is invalid") from exc
+        if not identity:
+            if scope != "web_lifecycle":
+                raise ValueError("persistent runtime disk cache identity is missing")
+            identity = "legacy-web-lifecycle"
+        return cls(
+            root=Path(root_text),
+            key=key,
+            capacity=capacity,
+            max_bytes=max_bytes,
+            identity=identity,
+            scope=scope,
+        )
+
+    @staticmethod
+    def _admission_rank(code: str) -> int:
+        digest = hashlib.sha256(code.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    def _path(self, *, code: str, frequency: str) -> Path:
+        if frequency != "5m":
+            raise ValueError("disk runtime cache only supports candidate 5m state")
+        rank = self._admission_rank(code)
+        identity = hashlib.sha256(f"{frequency}\0{code}".encode("utf-8")).hexdigest()
+        return self._root / frequency / f"{rank:016x}-{identity}.clrt"
+
+    def _load_index(self) -> None:
+        entries: dict[Path, tuple[int, int]] = {}
+        total_bytes = 0
+        for path in self._root.glob("5m/*.clrt"):
+            try:
+                rank_text = path.name.split("-", 1)[0]
+                rank = int(rank_text, 16)
+                size = path.stat().st_size
+            except (OSError, ValueError):
+                continue
+            if size <= 0:
+                continue
+            entries[path] = (rank, size)
+            total_bytes += size
+        self._entries = entries
+        self._total_bytes = total_bytes
+        self._evict_to_limits()
+
+    def _evict_to_limits(self) -> None:
+        while (
+            len(self._entries) > self._capacity
+            or self._total_bytes > self._max_bytes
+        ):
+            path = max(
+                self._entries,
+                key=lambda value: (self._entries[value][0], value.name),
+            )
+            _rank, size = self._entries.pop(path)
+            self._total_bytes = max(0, self._total_bytes - size)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                self._counters["eviction_failure"] += 1
+            else:
+                self._counters["eviction"] += 1
+
+    def store(
+        self,
+        *,
+        code: str,
+        frequency: str,
+        cached: _SerializedWarmupRuntimeStates,
+    ) -> None:
+        if frequency != "5m":
+            return
+        started = perf_counter()
+        path = self._path(code=code, frequency=frequency)
+        retained_start = (
+            None
+            if cached.retained_frame_start is None
+            else cached.retained_frame_start.isoformat()
+        )
+        header = {
+            "schema": _DISK_RUNTIME_CACHE_SCHEMA,
+            "cache_identity": self._identity,
+            "runtime_abi": _DISK_RUNTIME_CACHE_ABI,
+            "code": code,
+            "frequency": frequency,
+            "raw_size": cached.raw_size,
+            "retained_frame_start": retained_start,
+            "retained_frame_count": cached.retained_frame_count,
+            "admission_rank": cached.admission_rank,
+            "payload_size": len(cached.payload),
+        }
+        header_bytes = json.dumps(
+            header,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        signed = header_bytes + b"\n" + cached.payload
+        signature = hmac.new(self._key, signed, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
+        content = (
+            _DISK_RUNTIME_CACHE_MAGIC
+            + b"\n"
+            + signature
+            + b"\n"
+            + signed
+        )
+        temporary_path: Path | None = None
+        try:
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{path.stem}.",
+                    suffix=".tmp",
+                    dir=path.parent,
+                    delete=False,
+                ) as handle:
+                    temporary_path = Path(handle.name)
+                    handle.write(content)
+                os.replace(temporary_path, path)
+                temporary_path = None
+                previous = self._entries.pop(path, None)
+                if previous is not None:
+                    self._total_bytes = max(0, self._total_bytes - previous[1])
+                size = len(content)
+                self._entries[path] = (cached.admission_rank, size)
+                self._total_bytes += size
+                self._counters["store"] += 1
+                self._evict_to_limits()
+        except OSError:
+            self._counters["store_failure"] += 1
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._counters["store_elapsed_milliseconds"] += max(
+                0,
+                int((perf_counter() - started) * 1000),
+            )
+
+    def load(
+        self,
+        *,
+        code: str,
+        frequency: str,
+    ) -> _SerializedWarmupRuntimeStates | None:
+        if frequency != "5m":
+            return None
+        started = perf_counter()
+        path = self._path(code=code, frequency=frequency)
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            self._counters["miss"] += 1
+            return None
+        except OSError:
+            self._counters["read_failure"] += 1
+            return None
+        try:
+            magic, signature, header_bytes, payload = content.split(b"\n", 3)
+            if magic != _DISK_RUNTIME_CACHE_MAGIC:
+                raise ValueError("runtime disk cache magic changed")
+            expected_signature = hmac.new(
+                self._key,
+                header_bytes + b"\n" + payload,
+                hashlib.sha256,
+            ).hexdigest().encode("ascii")
+            if not hmac.compare_digest(signature, expected_signature):
+                raise ValueError("runtime disk cache signature changed")
+            header = json.loads(header_bytes.decode("ascii"))
+            expected_fields = {
+                "schema",
+                "cache_identity",
+                "runtime_abi",
+                "code",
+                "frequency",
+                "raw_size",
+                "retained_frame_start",
+                "retained_frame_count",
+                "admission_rank",
+                "payload_size",
+            }
+            if not isinstance(header, dict) or set(header) != expected_fields:
+                raise ValueError("runtime disk cache header changed")
+            if (
+                header["schema"] != _DISK_RUNTIME_CACHE_SCHEMA
+                or header["cache_identity"] != self._identity
+                or header["runtime_abi"] != _DISK_RUNTIME_CACHE_ABI
+                or header["code"] != code
+                or header["frequency"] != frequency
+                or type(header["raw_size"]) is not int
+                or header["raw_size"] <= 0
+                or type(header["retained_frame_count"]) is not int
+                or header["retained_frame_count"] <= 0
+                or header["admission_rank"] != self._admission_rank(code)
+                or header["payload_size"] != len(payload)
+            ):
+                raise ValueError("runtime disk cache identity changed")
+            retained_text = header["retained_frame_start"]
+            retained_start = (
+                None
+                if retained_text is None
+                else datetime.fromisoformat(retained_text)
+            )
+            if retained_text is not None and retained_start.tzinfo is None:
+                raise ValueError("runtime disk cache time is naive")
+            cached = _SerializedWarmupRuntimeStates(
+                payload=payload,
+                raw_size=header["raw_size"],
+                retained_frame_start=retained_start,
+                retained_frame_count=header["retained_frame_count"],
+                admission_rank=header["admission_rank"],
+            )
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            self._counters["validation_failure"] += 1
+            with self._lock:
+                previous = self._entries.pop(path, None)
+                if previous is not None:
+                    self._total_bytes = max(0, self._total_bytes - previous[1])
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    self._counters["validation_cleanup_failure"] += 1
+            return None
+        finally:
+            self._counters["load_elapsed_milliseconds"] += max(
+                0,
+                int((perf_counter() - started) * 1000),
+            )
+        self._counters["hit"] += 1
+        return cached
+
+    def health_snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "schema": _DISK_RUNTIME_CACHE_SCHEMA,
+                "enabled": True,
+                "frequency": "5m",
+                "entry_count": len(self._entries),
+                "capacity": self._capacity,
+                "bytes": self._total_bytes,
+                "max_bytes": self._max_bytes,
+                "counters": dict(sorted(self._counters.items())),
+                "authenticated_before_deserialization": True,
+                "web_lifecycle_scoped": self._scope == "web_lifecycle",
+                "application_source_revision_scoped": (
+                    self._scope == "application_source_revision"
+                ),
+                "runtime_state_producer_revision_scoped": (
+                    self._scope == "runtime_state_producer_revision"
+                ),
+                "cache_identity_sha256": (
+                    "sha256:"
+                    + hashlib.sha256(self._identity.encode("utf-8")).hexdigest()
+                ),
+                "runtime_abi": _DISK_RUNTIME_CACHE_ABI,
+            }
 
 
 class SectorAnalysisUnavailable(RuntimeError):
@@ -274,6 +797,8 @@ class SectorAssessmentBatch:
     # 紧凑的成员分类证据，用于重算全部横向强度、跨板块排序和各板块来源身份。
     # 缺失时只能展示，不能进入前向发布。
     strength_evidence: SectorStrengthBatch | None = None
+    # (GICS4 子板块, GICS3 父板块)。旧 GICS3 批次为空，保持历史兼容。
+    parent_relations: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "assessments", tuple(self.assessments))
@@ -281,6 +806,11 @@ class SectorAssessmentBatch:
         object.__setattr__(self, "errors", tuple(self.errors))
         object.__setattr__(self, "exclusion_counts", tuple(self.exclusion_counts))
         object.__setattr__(self, "exclusions", tuple(self.exclusions))
+        object.__setattr__(
+            self,
+            "parent_relations",
+            tuple(tuple(value) for value in self.parent_relations),
+        )
         if self.catalog_revision is not None and (
             not isinstance(self.catalog_revision, str)
             or not self.catalog_revision.startswith("sha256:")
@@ -317,6 +847,23 @@ class SectorAssessmentBatch:
                 raise ValueError(
                     "sector strength evidence membership revision is inconsistent"
                 )
+        assessment_ids = {item.sector_id for item in self.assessments}
+        if self.parent_relations != tuple(sorted(self.parent_relations)):
+            raise ValueError("sector parent relations must be sorted")
+        child_ids: set[str] = set()
+        for relation in self.parent_relations:
+            if (
+                len(relation) != 2
+                or not isinstance(relation[0], str)
+                or not relation[0].startswith("qmt-gics4:")
+                or not isinstance(relation[1], str)
+                or not relation[1].startswith("qmt-gics3:")
+                or relation[0] in child_ids
+                or relation[0] not in assessment_ids
+                or relation[1] not in assessment_ids
+            ):
+                raise ValueError("sector parent relation is invalid")
+            child_ids.add(relation[0])
         if (
             type(self.discovered_count) is not int
             or type(self.completed_count) is not int
@@ -700,7 +1247,7 @@ def _entry_execution_boundaries(
     points: tuple[StructuralPoint, ...],
     raw_frame: pd.DataFrame,
 ) -> tuple[EntryExecutionBoundary, ...]:
-    """把已确认 1m 买点绑定到精确的 QMT 不复权行情。"""
+    """把可选 1m 买入段差绑定到精确的 QMT 不复权行情。"""
 
     metadata = strict_snapshot_price_metadata(raw_frame)
     if (
@@ -716,7 +1263,7 @@ def _entry_execution_boundaries(
         rows_by_time[closed_at] = row
     output: list[EntryExecutionBoundary] = []
     for point in points:
-        if not is_one_minute_reversal_trigger(point) or point.side != "buy":
+        if not is_one_minute_segment_difference(point) or point.side != "buy":
             continue
         row = rows_by_time.get(point.available_at)
         if row is None:
@@ -752,8 +1299,9 @@ def analyze_native_frame(
     closed_at = normalize_datetime(as_of, "as_of")
     # 元数据失败描述输入快照，而非结构引擎契约违规，因此保留公开的 ValueError 分类。
     strict_snapshot_price_metadata(frame)
+    context_runtime_state: ScreeningRuntimeState | None = runtime_state
     try:
-        if runtime_state is None:
+        if runtime_state is None and frequency not in {"d", "30m"}:
             evidence = screening_evidence_from_frame(
                 code=code,
                 frequency=frequency,
@@ -762,7 +1310,13 @@ def analyze_native_frame(
                 market="a",
             )
         else:
-            update = runtime_state.update_from_frame(
+            if context_runtime_state is None:
+                context_runtime_state = ScreeningRuntimeState(
+                    code,
+                    frequency,
+                    market="a",
+                )
+            update = context_runtime_state.update_from_frame(
                 frame=frame,
                 as_of=closed_at,
             )
@@ -770,44 +1324,99 @@ def analyze_native_frame(
     except (StrictStructureContractError, ValueError) as exc:
         raise StrictStructureAnalysisError(str(exc)) from exc
     try:
-        provisional = extract_provisional_candidates(
+        provisional = extract_current_provisional_candidates(
             evidence,
             code=code,
             source_frequency=frequency,
             as_of=closed_at,
         )
-        analysis = FrameStructureAnalysis(
-            closed_at=closed_at,
-            direction=_strict_direction(evidence),
-            confirmed_points=extract_confirmed_points(
+        current_confirmed = extract_current_confirmed_points(
+            evidence,
+            code=code,
+            source_frequency=frequency,
+            as_of=closed_at,
+        )
+        segment_difference_points = (
+            extract_one_minute_segment_difference_points(
                 evidence,
                 code=code,
                 source_frequency=frequency,
                 as_of=closed_at,
-            ),
+            )
+            if frequency == "1m"
+            else current_confirmed
+        )
+        analysis = FrameStructureAnalysis(
+            closed_at=closed_at,
+            direction=_strict_direction(evidence),
+            confirmed_points=current_confirmed,
+            # 交易设置与页面“当前状态”共享同一条末端线段血缘。完整正式点
+            # 账本仍由严格证据保存，只供图表和审计使用，不能再依靠四天时窗
+            # 把已经离开末端两条线段的旧点重新带回实时选股。
+            setup_confirmed_points=current_confirmed,
+            segment_difference_points=segment_difference_points,
             provisional_points=provisional,
+            latest_price=float(
+                pd.to_numeric(frame["close"], errors="raise").iloc[-1]
+            ),
+            same_period_technical_context=(
+                None
+                if frequency not in {"d", "30m"}
+                or context_runtime_state is None
+                or context_runtime_state.cl_state is None
+                else build_same_period_technical_context(
+                    frequency=frequency,
+                    frame=frame,
+                    cl_state=context_runtime_state.cl_state,
+                    as_of=closed_at,
+                )
+            ),
         )
         return analysis
     finally:
-        if runtime_state is not None:
-            runtime_state.release_evidence_cache()
+        if context_runtime_state is not None:
+            context_runtime_state.release_evidence_cache()
 
 
 def _warmup_tail_signature(
     analysis: FrameStructureAnalysis,
     *,
     not_before: datetime,
+    trade_level_only: bool = False,
 ) -> tuple[object, ...]:
-    latest: dict[tuple[str, str, int], tuple[datetime, tuple[object, ...]]] = {}
+    latest: dict[
+        tuple[str, str, int, str],
+        tuple[datetime, tuple[object, ...]],
+    ] = {}
     # 预热门禁只比较已经确认、能够进入正式决策链的证据。未确认候选的形态会
     # 随最后一根行情变化，它们仍展示在观察列表中，但不能让正式历史收敛失效。
-    for point in analysis.confirmed_points:
-        observed_at = point.available_at
-        # 锚点过旧而最近才完成递归确认的点，不是当前尾部信号。锚点时间与
-        # 可用时间必须同时位于活动窗口内，避免旧结构重新进入实时决策。
-        if observed_at < not_before or point.anchor_at < not_before:
+    for point in analysis.setup_confirmed_points:
+        # 操作层签名是完整递归暖机的独立投影，只供股票 5m 入场硬门使用。
+        # 5m/L1+ 分别属于 30m 及更高语境，不能否决完全一致的 5m/L0 设置；
+        # 完整签名仍保留所有递归层级，供板块和多周期环境诊断使用。
+        if trade_level_only and not is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        ):
             continue
-        lane = (point.point_type, point.tower, point.recursive_level)
+        observed_at = point.available_at
+        # 精确末端线段血缘已经证明它仍是当前结构，不能再用固定日历窗口
+        # 把横跨周末或长期延伸的最新已完成线段从预热比较中删除。
+        if point.terminal_segment is None and (
+            observed_at < not_before or point.anchor_at < not_before
+        ):
+            continue
+        terminal_role = (
+            "legacy"
+            if point.terminal_segment is None
+            else point.terminal_segment.role
+        )
+        lane = (
+            point.point_type,
+            point.tower,
+            point.recursive_level,
+            terminal_role,
+        )
         # 对象编号包含完整上游结构血缘。同一个尾部点在截短左侧历史后可能
         # 得到不同编号，因此收敛比较使用稳定语义，正式信号仍保留原始血缘编号。
         semantic = (
@@ -826,12 +1435,26 @@ def _warmup_tail_signature(
             point.variant,
             point.divergence_kind,
             point.evidence_codes,
+            (
+                None
+                if point.terminal_segment is None
+                else (
+                    point.terminal_segment.role,
+                    point.terminal_segment.source_kind.value,
+                    point.terminal_segment.direction,
+                    point.terminal_segment.state,
+                    point.terminal_segment.market_start.isoformat(),
+                    point.terminal_segment.market_end.isoformat(),
+                )
+            ),
         )
         previous = latest.get(lane)
         if previous is None or observed_at > previous[0]:
             latest[lane] = (observed_at, semantic)
     return (
-        analysis.direction,
+        # 当前 ``direction`` 取递归结构中抵达尾部的最高正式层级，并不是
+        # 5m/L0 的交易方向；5m 硬门禁只核对实际进入决策链的 L0 买卖点。
+        None if trade_level_only else analysis.direction,
         tuple(
             (lane, observed_at.isoformat(), semantic)
             for lane, (observed_at, semantic) in sorted(latest.items())
@@ -843,15 +1466,34 @@ def _warmup_latest_points(
     analysis: FrameStructureAnalysis,
     *,
     not_before: datetime,
-) -> dict[tuple[str, str, int], tuple[datetime, StructuralPoint]]:
+    trade_level_only: bool = False,
+) -> dict[tuple[str, str, int, str], tuple[datetime, StructuralPoint]]:
     """返回活动签名使用的各条正式语义通道中的最新点。"""
 
-    latest: dict[tuple[str, str, int], tuple[datetime, StructuralPoint]] = {}
-    for point in analysis.confirmed_points:
-        observed_at = point.available_at
-        if observed_at < not_before or point.anchor_at < not_before:
+    latest: dict[
+        tuple[str, str, int, str], tuple[datetime, StructuralPoint]
+    ] = {}
+    for point in analysis.setup_confirmed_points:
+        if trade_level_only and not is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        ):
             continue
-        lane = (point.point_type, point.tower, point.recursive_level)
+        observed_at = point.available_at
+        if point.terminal_segment is None and (
+            observed_at < not_before or point.anchor_at < not_before
+        ):
+            continue
+        lane = (
+            point.point_type,
+            point.tower,
+            point.recursive_level,
+            (
+                "legacy"
+                if point.terminal_segment is None
+                else point.terminal_segment.role
+            ),
+        )
         previous = latest.get(lane)
         if previous is None or observed_at > previous[0]:
             latest[lane] = (observed_at, point)
@@ -863,14 +1505,23 @@ def _warmup_tail_difference_codes(
     short: FrameStructureAnalysis,
     *,
     not_before: datetime,
+    trade_level_only: bool = False,
 ) -> tuple[str, ...]:
     """解释两段历史的正式证据差异，不放宽活动门禁。"""
 
     codes: list[str] = []
-    if full.direction != short.direction:
+    if not trade_level_only and full.direction != short.direction:
         codes.append("WARMUP_DIRECTION_CHANGED")
-    full_points = _warmup_latest_points(full, not_before=not_before)
-    short_points = _warmup_latest_points(short, not_before=not_before)
+    full_points = _warmup_latest_points(
+        full,
+        not_before=not_before,
+        trade_level_only=trade_level_only,
+    )
+    short_points = _warmup_latest_points(
+        short,
+        not_before=not_before,
+        trade_level_only=trade_level_only,
+    )
     if set(full_points) != set(short_points):
         codes.append("WARMUP_ACTIVE_POINT_LANES_CHANGED")
 
@@ -942,7 +1593,12 @@ def _warmup_tail_difference_codes(
     if not unique and _warmup_tail_signature(
         full,
         not_before=not_before,
-    ) != _warmup_tail_signature(short, not_before=not_before):
+        trade_level_only=trade_level_only,
+    ) != _warmup_tail_signature(
+        short,
+        not_before=not_before,
+        trade_level_only=trade_level_only,
+    ):
         return ("WARMUP_OTHER_SEMANTIC_CHANGED",)
     return unique
 
@@ -972,6 +1628,10 @@ def analyze_native_frame_with_warmup(
             warmup_full_bar_count=len(frame),
             warmup_suffix_bar_count=0,
             warmup_reason_codes=("WARMUP_HISTORY_INSUFFICIENT",),
+            trade_level_warmup_converged=(False if frequency == "5m" else None),
+            trade_level_warmup_reason_codes=(
+                ("WARMUP_HISTORY_INSUFFICIENT",) if frequency == "5m" else ()
+            ),
         )
     trim = len(frame) // 3
     suffix = frame.iloc[trim:].copy().reset_index(drop=True)
@@ -991,7 +1651,10 @@ def analyze_native_frame_with_warmup(
     converged = _warmup_tail_signature(
         full,
         not_before=active_tail_start,
-    ) == _warmup_tail_signature(short, not_before=active_tail_start)
+    ) == _warmup_tail_signature(
+        short,
+        not_before=active_tail_start,
+    )
     difference_codes = (
         ()
         if converged
@@ -1001,6 +1664,25 @@ def analyze_native_frame_with_warmup(
             not_before=active_tail_start,
         )
     )
+    trade_level_converged: bool | None = None
+    trade_level_difference_codes: tuple[str, ...] = ()
+    if frequency == "5m":
+        trade_level_converged = _warmup_tail_signature(
+            full,
+            not_before=active_tail_start,
+            trade_level_only=True,
+        ) == _warmup_tail_signature(
+            short,
+            not_before=active_tail_start,
+            trade_level_only=True,
+        )
+        if not trade_level_converged:
+            trade_level_difference_codes = _warmup_tail_difference_codes(
+                full,
+                short,
+                not_before=active_tail_start,
+                trade_level_only=True,
+            )
     return replace(
         full,
         warmup_converged=converged,
@@ -1010,6 +1692,17 @@ def analyze_native_frame_with_warmup(
             "WARMUP_TAIL_STABLE" if converged else "WARMUP_TAIL_DIVERGED",
         ),
         warmup_difference_codes=difference_codes,
+        trade_level_warmup_converged=trade_level_converged,
+        trade_level_warmup_reason_codes=(
+            ()
+            if trade_level_converged is None
+            else (
+                "WARMUP_TAIL_STABLE"
+                if trade_level_converged
+                else "WARMUP_TAIL_DIVERGED",
+            )
+        ),
+        trade_level_warmup_difference_codes=trade_level_difference_codes,
     )
 
 
@@ -1128,7 +1821,7 @@ def _stock_codes(raw: object) -> tuple[str, ...]:
 def _qmt_catalog_universe(
     rows: Sequence[object],
 ) -> dict[str, str]:
-    """使用已捕获的 QMT GICS3 成员作为板块优先选股范围。
+    """使用已捕获的 QMT GICS 成员作为板块优先选股范围。
 
     目录构建器已经把原生响应规范化并筛成 A 股身份；再与
     ``ExchangeQMT.all_stocks`` 求交既重复，也会让 ``get_full_tick`` 意外影响扫描范围。
@@ -1175,6 +1868,9 @@ class NativeTradingDataGateway:
         trading_session_provider: Callable[..., Mapping[str, object]] | None = None,
         instrument_type_provider: Callable[[tuple[str, ...]], Mapping[str, str]]
         | None = None,
+        instrument_detail_provider: Callable[[str], object] = (
+            _default_qmt_instrument_detail
+        ),
         watchlist_provider: Callable[[], object] = lambda: (),
         holdings_provider: Callable[[], object] = lambda: (),
         analyzer: StructureAnalyzer = analyze_native_frame_with_warmup,
@@ -1188,6 +1884,7 @@ class NativeTradingDataGateway:
             holdings_provider,
             analyzer,
             progress_callback,
+            instrument_detail_provider,
         )
         if any(not callable(provider) for provider in providers):
             raise TypeError("trading gateway providers must be callable")
@@ -1216,6 +1913,7 @@ class NativeTradingDataGateway:
         self._higher_timeframe_provider = higher_timeframe_provider
         self._trading_session_provider = trading_session_provider
         self._instrument_type_provider = instrument_type_provider
+        self._instrument_detail_provider = instrument_detail_provider
         self._watchlist_provider = watchlist_provider
         self._holdings_provider = holdings_provider
         self._analyzer = analyzer
@@ -1229,15 +1927,26 @@ class NativeTradingDataGateway:
         self._instrument_types: dict[str, str] = {}
         self._latest_sector_bars: dict[tuple[str, str], datetime] = {}
         self._emitted_sector_bars: dict[tuple[str, str], datetime] = {}
-        self._analysis_cache: dict[
+        self._analysis_cache: OrderedDict[
             tuple[str, str], tuple[str, FrameStructureAnalysis]
-        ] = {}
+        ] = OrderedDict()
+        self._analysis_cache_entries_by_frequency: Counter[str] = Counter()
         self._runtime_states_by_frequency: dict[
             str, OrderedDict[str, _WarmupRuntimeStates]
         ] = {
             frequency: OrderedDict()
             for frequency in _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
         }
+        self._serialized_runtime_states_by_frequency: dict[
+            str, dict[str, _SerializedWarmupRuntimeStates]
+        ] = {
+            frequency: {}
+            for frequency in _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+        }
+        self._serialized_runtime_state_bytes_by_frequency: Counter[str] = Counter()
+        self._disk_runtime_state_cache = (
+            _AuthenticatedRuntimeStateDiskCache.from_environment()
+        )
         # 批量补数只证明某个精确观察时刻的本地 QMT 基础流可读；结构判断仍走
         # ``_load_analysis`` 的唯一严格入口。本表仅用于跳过重复下载，读取或校验
         # 失败时会立即退回逐只下载，不能把补数成功误当成结构成功。
@@ -1246,9 +1955,12 @@ class NativeTradingDataGateway:
         ] = {}
         # 月/周/日事实冻结在盘中监听所用的显式因果截止点。只缓存完全解析的证据包，
         # 避免重复 1m/5m 观测反复采样数百个日级交易日；瞬时 UNRESOLVED 仍可重试。
-        self._higher_timeframe_cache: dict[
-            tuple[str, str, str, str, str], HigherTimeframeGateBundle
-        ] = {}
+        self._higher_timeframe_cache: OrderedDict[
+            tuple[str, str, str, str, str, str], HigherTimeframeGateBundle
+        ] = OrderedDict()
+        self._performance_counters: Counter[str] = Counter()
+        # name -> (count, total seconds, maximum seconds, last seconds)
+        self._performance_timings: dict[str, tuple[int, float, float, float]] = {}
 
     def _report_progress(self) -> None:
         """在原生调用或高计算量边界前后立即证明进度。
@@ -1258,6 +1970,158 @@ class NativeTradingDataGateway:
         """
 
         self._progress_callback()
+
+    def _record_performance_event(self, name: str, count: int = 1) -> None:
+        """记录不影响交易语义的进程内累计计数。"""
+
+        with self._lock:
+            self._performance_counters[name] += count
+
+    def _record_performance_timing(self, name: str, elapsed: float) -> None:
+        """记录阶段耗时；健康接口只读取快照，不触发行情或结构计算。"""
+
+        seconds = max(0.0, float(elapsed))
+        with self._lock:
+            count, total, maximum, _last = self._performance_timings.get(
+                name,
+                (0, 0.0, 0.0, 0.0),
+            )
+            self._performance_timings[name] = (
+                count + 1,
+                total + seconds,
+                max(maximum, seconds),
+                seconds,
+            )
+
+    @staticmethod
+    def _serialized_runtime_admission_rank(code: str) -> int:
+        digest = hashlib.sha256(code.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    def _restore_serialized_runtime_states(
+        self,
+        *,
+        code: str,
+        frequency: str,
+        cached: _SerializedWarmupRuntimeStates,
+    ) -> _WarmupRuntimeStates | None:
+        """恢复仅由当前进程产生的压缩运行态；任何异常都退回确定性重建。"""
+
+        started = perf_counter()
+        try:
+            raw = zlib.decompress(cached.payload)
+            if len(raw) != cached.raw_size:
+                raise ValueError("serialized runtime size changed")
+            # 内存载荷由本进程生成；磁盘载荷已在进入这里前通过会话 HMAC 校验。
+            states = pickle.loads(raw)  # noqa: S301
+            if (
+                not isinstance(states, _WarmupRuntimeStates)
+                or not isinstance(states.full, ScreeningRuntimeState)
+                or not isinstance(states.suffix, ScreeningRuntimeState)
+                or any(
+                    state.code != code
+                    or state.frequency != frequency
+                    or state.market != "a"
+                    for state in (states.full, states.suffix)
+                )
+                or states.full.retained_frame_start
+                != cached.retained_frame_start
+                or states.full.retained_frame_count
+                != cached.retained_frame_count
+            ):
+                raise ValueError("serialized runtime identity changed")
+        except Exception:
+            self._record_performance_event(
+                f"serialized_runtime_restore_failure.{frequency}"
+            )
+            return None
+        finally:
+            self._record_performance_timing(
+                f"serialized_runtime_restore.{frequency}",
+                perf_counter() - started,
+            )
+        self._record_performance_event(f"serialized_runtime_cache_hit.{frequency}")
+        return states
+
+    def _store_serialized_runtime_states(
+        self,
+        *,
+        code: str,
+        frequency: str,
+        states: _WarmupRuntimeStates,
+    ) -> None:
+        """把 L1 淘汰态压缩进有界、稳定准入的进程内二级缓存。"""
+
+        capacity = _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY.get(frequency, 0)
+        max_bytes = _SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY.get(
+            frequency, 0
+        )
+        if capacity <= 0 or max_bytes <= 0:
+            return
+        started = perf_counter()
+        try:
+            states.full.release_evidence_cache()
+            states.suffix.release_evidence_cache()
+            raw = pickle.dumps(states, protocol=pickle.HIGHEST_PROTOCOL)
+            payload = zlib.compress(raw, level=1)
+            cached = _SerializedWarmupRuntimeStates(
+                payload=payload,
+                raw_size=len(raw),
+                retained_frame_start=states.full.retained_frame_start,
+                retained_frame_count=states.full.retained_frame_count,
+                admission_rank=self._serialized_runtime_admission_rank(code),
+            )
+            if self._disk_runtime_state_cache is not None and frequency == "5m":
+                self._disk_runtime_state_cache.store(
+                    code=code,
+                    frequency=frequency,
+                    cached=cached,
+                )
+            if cached.byte_size > max_bytes:
+                self._record_performance_event(
+                    f"serialized_runtime_oversized.{frequency}"
+                )
+                return
+            with self._lock:
+                cache = self._serialized_runtime_states_by_frequency[frequency]
+                previous = cache.pop(code, None)
+                if previous is not None:
+                    self._serialized_runtime_state_bytes_by_frequency[frequency] -= (
+                        previous.byte_size
+                    )
+                cache[code] = cached
+                self._serialized_runtime_state_bytes_by_frequency[frequency] += (
+                    cached.byte_size
+                )
+                while (
+                    len(cache) > capacity
+                    or self._serialized_runtime_state_bytes_by_frequency[frequency]
+                    > max_bytes
+                ):
+                    rejected_code = max(
+                        cache,
+                        key=lambda value: (
+                            cache[value].admission_rank,
+                            value,
+                        ),
+                    )
+                    rejected = cache.pop(rejected_code)
+                    self._serialized_runtime_state_bytes_by_frequency[frequency] -= (
+                        rejected.byte_size
+                    )
+                    self._performance_counters[
+                        f"serialized_runtime_cache_eviction.{frequency}"
+                    ] += 1
+            self._record_performance_event(f"serialized_runtime_cache_store.{frequency}")
+        except Exception:
+            self._record_performance_event(
+                f"serialized_runtime_store_failure.{frequency}"
+            )
+        finally:
+            self._record_performance_timing(
+                f"serialized_runtime_store.{frequency}",
+                perf_counter() - started,
+            )
 
     def _analyze_frame(
         self,
@@ -1269,40 +2133,265 @@ class NativeTradingDataGateway:
     ) -> FrameStructureAnalysis:
         """调用唯一分析器，并为生产 1m/5m 通道分别保留有界严格状态。"""
 
+        started = perf_counter()
         if (
             self._analyzer is not analyze_native_frame_with_warmup
             or frequency not in _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
         ):
-            return self._analyzer(
-                code=code,
-                frequency=frequency,
-                frame=frame,
-                as_of=as_of,
-        )
+            try:
+                result = self._analyzer(
+                    code=code,
+                    frequency=frequency,
+                    frame=frame,
+                    as_of=as_of,
+                )
+            except Exception:
+                self._record_performance_event(
+                    f"structure_analysis_failure.{frequency}"
+                )
+                raise
+            finally:
+                self._record_performance_timing(
+                    f"structure_analysis.{frequency}",
+                    perf_counter() - started,
+                )
+            self._record_performance_event(
+                f"structure_analysis_success.{frequency}"
+            )
+            return result
+        serialized: _SerializedWarmupRuntimeStates | None = None
         with self._lock:
             cache = self._runtime_states_by_frequency[frequency]
             states = cache.pop(code, None)
+            runtime_state_l1_hit = states is not None
+            if states is None:
+                serialized_cache = self._serialized_runtime_states_by_frequency.get(
+                    frequency
+                )
+                serialized = (
+                    None if serialized_cache is None else serialized_cache.pop(code, None)
+                )
+                if serialized is not None:
+                    self._serialized_runtime_state_bytes_by_frequency[frequency] -= (
+                        serialized.byte_size
+                    )
+        if (
+            states is None
+            and serialized is None
+            and self._disk_runtime_state_cache is not None
+            and frequency == "5m"
+        ):
+            serialized = self._disk_runtime_state_cache.load(
+                code=code,
+                frequency=frequency,
+            )
+            self._record_performance_event(
+                f"disk_runtime_cache_{'hit' if serialized is not None else 'miss'}.{frequency}"
+            )
+        if states is None and serialized is not None:
+            states = self._restore_serialized_runtime_states(
+                code=code,
+                frequency=frequency,
+                cached=serialized,
+            )
+        runtime_state_hit = states is not None
+        with self._lock:
+            cache = self._runtime_states_by_frequency[frequency]
             if states is None:
                 states = _WarmupRuntimeStates(
                     full=ScreeningRuntimeState(code, frequency, market="a"),
                     suffix=ScreeningRuntimeState(code, frequency, market="a"),
                 )
             cache[code] = states
+            evicted: list[tuple[str, _WarmupRuntimeStates]] = []
             while len(cache) > _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY[frequency]:
-                cache.popitem(last=False)
-        return analyze_native_frame_with_warmup(
-            code=code,
-            frequency=frequency,
-            frame=frame,
-            as_of=as_of,
-            runtime_states=states,
+                evicted.append(cache.popitem(last=False))
+        self._record_performance_event(
+            f"runtime_state_l1_cache_{'hit' if runtime_state_l1_hit else 'miss'}.{frequency}"
         )
+        self._record_performance_event(
+            f"runtime_state_cache_{'hit' if runtime_state_hit else 'miss'}.{frequency}"
+        )
+        try:
+            result = analyze_native_frame_with_warmup(
+                code=code,
+                frequency=frequency,
+                frame=frame,
+                as_of=as_of,
+                runtime_states=states,
+            )
+        except Exception:
+            self._record_performance_event(
+                f"structure_analysis_failure.{frequency}"
+            )
+            raise
+        finally:
+            self._record_performance_timing(
+                f"structure_analysis.{frequency}",
+                perf_counter() - started,
+            )
+            for evicted_code, evicted_states in evicted:
+                self._store_serialized_runtime_states(
+                    code=evicted_code,
+                    frequency=frequency,
+                    states=evicted_states,
+                )
+        self._record_performance_event(
+            f"structure_analysis_success.{frequency}"
+        )
+        for label, state in (("full", states.full), ("suffix", states.suffix)):
+            if state.last_update_incremental is None:
+                continue
+            mode = "incremental" if state.last_update_incremental else "rebuild"
+            self._record_performance_event(
+                f"structure_{label}_{mode}.{frequency}"
+            )
+        return result
+
+    def _stable_incremental_start(
+        self,
+        *,
+        exchange: object,
+        code: str,
+        frequency: str,
+    ) -> datetime | None:
+        """Return a bounded generation anchor for a hot QMT runtime state."""
+
+        if getattr(exchange, "supports_stable_incremental_window", False) is not True:
+            return None
+        extra_bars = _RUNTIME_STABLE_WINDOW_EXTRA_BARS.get(frequency)
+        if extra_bars is None:
+            return None
+        with self._lock:
+            cache = self._runtime_states_by_frequency.get(frequency)
+            states = None if cache is None else cache.get(code)
+            serialized_cache = self._serialized_runtime_states_by_frequency.get(
+                frequency
+            )
+            serialized = (
+                None
+                if serialized_cache is None
+                else serialized_cache.get(code)
+            )
+            retained_count = (
+                states.full.retained_frame_count
+                if states is not None
+                else 0
+                if serialized is None
+                else serialized.retained_frame_count
+            )
+            retained_start = (
+                states.full.retained_frame_start
+                if states is not None
+                else None
+                if serialized is None
+                else serialized.retained_frame_start
+            )
+        if (
+            retained_start is None
+            or retained_count <= 0
+            or retained_count
+            >= self._config.request_bars(frequency) + extra_bars
+        ):
+            return None
+        return normalize_datetime(retained_start, "runtime retained frame start")
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         if not callable(callback):
             raise TypeError("progress callback must be callable")
         with self._lock:
             self._progress_callback = callback
+
+    def runtime_health_snapshot(self) -> dict[str, object]:
+        """返回不触发行情读取的有界缓存遥测。"""
+
+        with self._lock:
+            performance_timings = {
+                name: {
+                    "count": count,
+                    "total_seconds": round(total, 6),
+                    "average_seconds": round(total / count, 6),
+                    "maximum_seconds": round(maximum, 6),
+                    "last_seconds": round(last, 6),
+                }
+                for name, (count, total, maximum, last) in sorted(
+                    self._performance_timings.items()
+                )
+                if count > 0
+            }
+            result: dict[str, object] = {
+                "schema": "chanlun-native-screening-runtime-health",
+                "runtime_cache_role": _RUNTIME_CACHE_ROLE,
+                "analysis_cache_entries": len(self._analysis_cache),
+                "analysis_cache_capacity": _ANALYSIS_CACHE_CAPACITY,
+                "analysis_cache_capacities": dict(
+                    _ANALYSIS_CACHE_CAPACITY_BY_FREQUENCY
+                ),
+                "analysis_cache_entries_by_frequency": {
+                    frequency: int(
+                        self._analysis_cache_entries_by_frequency[frequency]
+                    )
+                    for frequency in _ANALYSIS_CACHE_CAPACITY_BY_FREQUENCY
+                },
+                "runtime_state_entries": {
+                    frequency: len(cache)
+                    for frequency, cache in self._runtime_states_by_frequency.items()
+                },
+                "runtime_state_capacities": dict(
+                    _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+                ),
+                "serialized_runtime_state_entries": {
+                    frequency: len(cache)
+                    for frequency, cache in (
+                        self._serialized_runtime_states_by_frequency.items()
+                    )
+                },
+                "serialized_runtime_state_capacities": dict(
+                    _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+                ),
+                "serialized_runtime_state_bytes": {
+                    frequency: int(
+                        self._serialized_runtime_state_bytes_by_frequency[frequency]
+                    )
+                    for frequency in (
+                        _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+                    )
+                },
+                "serialized_runtime_state_max_bytes": dict(
+                    _SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY
+                ),
+                "disk_runtime_state_cache": (
+                    {
+                        "schema": _DISK_RUNTIME_CACHE_SCHEMA,
+                        "enabled": False,
+                        "authenticated_before_deserialization": True,
+                        "web_lifecycle_scoped": True,
+                        "application_source_revision_scoped": False,
+                        "runtime_state_producer_revision_scoped": False,
+                    }
+                    if self._disk_runtime_state_cache is None
+                    else self._disk_runtime_state_cache.health_snapshot()
+                ),
+                "higher_timeframe_cache_entries": len(
+                    self._higher_timeframe_cache
+                ),
+                "higher_timeframe_cache_capacity": (
+                    _HIGHER_TIMEFRAME_CACHE_CAPACITY
+                ),
+                "performance": {
+                    "counters": dict(sorted(self._performance_counters.items())),
+                    "timings": performance_timings,
+                },
+            }
+        provider_owner = getattr(self._higher_timeframe_provider, "__self__", None)
+        provider_health = getattr(provider_owner, "cache_health_snapshot", None)
+        if callable(provider_health):
+            result["higher_timeframe_provider"] = provider_health()
+        sector_owner = getattr(self._sector_frame_provider, "__self__", None)
+        sector_health = getattr(sector_owner, "cache_health_snapshot", None)
+        if callable(sector_health):
+            result["sector_frame_provider"] = sector_health()
+        return result
 
     def _load_analysis(
         self,
@@ -1315,10 +2404,13 @@ class NativeTradingDataGateway:
         sector_source: str | None = None,
         frame_override: object = _FRAME_UNSET,
         skip_download: bool = False,
+        fast_incremental_refresh: bool = False,
     ) -> FrameStructureAnalysis:
+        request_started = perf_counter()
         if sector_source not in {
             None,
             QMT_GICS3_CATALOG_SOURCE,
+            QMT_GICS_HIERARCHY_CATALOG_SOURCE,
         }:
             raise ValueError("unsupported sector source")
         is_sector = sector_source is not None
@@ -1332,6 +2424,14 @@ class NativeTradingDataGateway:
             raise TypeError("exchange must expose klines")
         if type(skip_download) is not bool:
             raise TypeError("skip_download must be an exact bool")
+        if type(fast_incremental_refresh) is not bool:
+            raise TypeError("fast_incremental_refresh must be an exact bool")
+        if fast_incremental_refresh and (
+            frame_override is not _FRAME_UNSET
+            or is_sector
+            or frequency not in _REALTIME_INCREMENTAL_REFRESH_DAYS
+        ):
+            raise ValueError("fast incremental refresh is invalid for this source")
         local_only = bool(
             skip_download and frame_override is _FRAME_UNSET and not is_sector
         )
@@ -1341,10 +2441,42 @@ class NativeTradingDataGateway:
         }
         if local_only:
             args["skip_download"] = True
+        if fast_incremental_refresh:
+            args["incremental_refresh_days"] = _REALTIME_INCREMENTAL_REFRESH_DAYS[
+                frequency
+            ]
+        stable_incremental_start = (
+            self._stable_incremental_start(
+                exchange=exchange,
+                code=analysis_code,
+                frequency=frequency,
+            )
+            if (local_only or fast_incremental_refresh) and exchange is not None
+            else None
+        )
+        if stable_incremental_start is not None:
+            # ``req_counts`` would truncate the anchored response back to the
+            # latest N rows and recreate the moving-left-boundary problem.
+            args.pop("req_counts", None)
+            self._record_performance_event(
+                f"stable_incremental_window_request.{frequency}"
+            )
+        frame_acquisition_started = perf_counter()
         if frame_override is _FRAME_UNSET:
             try:
                 self._report_progress()
-                raw_frame = loader(code, frequency, args=args)
+                raw_frame = (
+                    loader(
+                        code,
+                        frequency,
+                        start_date=stable_incremental_start.strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                        args=args,
+                    )
+                    if stable_incremental_start is not None
+                    else loader(code, frequency, args=args)
+                )
                 self._report_progress()
             except SectorAnalysisUnavailable:
                 raise
@@ -1354,15 +2486,26 @@ class NativeTradingDataGateway:
                         "sector_adapter_error",
                         str(exc),
                     ) from exc
-                if not local_only:
+                if not local_only and not fast_incremental_refresh:
                     raise
                 retry_args = dict(args)
                 retry_args.pop("skip_download", None)
+                retry_args.pop("incremental_refresh_days", None)
+                retry_args["req_counts"] = self._config.request_bars(frequency)
+                if stable_incremental_start is not None:
+                    self._record_performance_event(
+                        f"stable_incremental_window_fallback.{frequency}"
+                    )
                 self._report_progress()
                 raw_frame = loader(code, frequency, args=retry_args)
                 self._report_progress()
         else:
             raw_frame = frame_override
+        self._record_performance_timing(
+            f"frame_acquisition.{frequency}",
+            perf_counter() - frame_acquisition_started,
+        )
+        validation_started = perf_counter()
         if is_sector:
             if not isinstance(raw_frame, pd.DataFrame):
                 raise SectorAnalysisUnavailable(
@@ -1421,13 +2564,23 @@ class NativeTradingDataGateway:
         validation_error: Exception | None = None
         try:
             frame = close_stock_frame(raw_frame)
+            if fast_incremental_refresh and len(frame) < (
+                SCREENING_WARMUP_REQUIRED_BARS[frequency]
+            ):
+                raise ValueError(
+                    "incremental local history does not meet warmup history"
+                )
         except Exception as exc:
             validation_error = exc
-        if validation_error is not None and local_only:
-            # 批量下载按块报告成功，仍不能代替逐只完整性校验。本地库为空、历史不足
-            # 或行情事实无效时，精确回退原来的逐只下载路径，再执行同一校验。
+        if validation_error is not None and (
+            local_only or fast_incremental_refresh
+        ):
+            # 批量资格或短窗增量都不能代替逐只完整性校验。本地库为空、历史不足
+            # 或行情事实无效时，精确回退完整下载路径，再执行同一校验。
             retry_args = dict(args)
             retry_args.pop("skip_download", None)
+            retry_args.pop("incremental_refresh_days", None)
+            retry_args["req_counts"] = self._config.request_bars(frequency)
             try:
                 self._report_progress()
                 raw_frame = loader(code, frequency, args=retry_args)
@@ -1469,10 +2622,18 @@ class NativeTradingDataGateway:
                     f"reason={SCREENING_QMT_30M_FALLBACK_REASON_CODE}"
                 )
             else:
-                raise
+                # ``validation_error`` was captured above and we are no longer
+                # executing inside its ``except`` block.  A bare raise here
+                # produced ``RuntimeError: No active exception to reraise`` and
+                # mislabeled deterministic bad history as an unclassified worker
+                # failure.
+                raise exc
         try:
             strict_snapshot_price_metadata(frame)
-            if sector_source == QMT_GICS3_CATALOG_SOURCE:
+            if sector_source in {
+                QMT_GICS3_CATALOG_SOURCE,
+                QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+            }:
                 expected_provider = QMT_GICS3_COMPOSITE_PROVIDER
                 expected_adjustment = QMT_GICS3_COMPOSITE_ADJUSTMENT
             else:
@@ -1481,7 +2642,11 @@ class NativeTradingDataGateway:
                 frame.attrs.get("price_basis_provider") != expected_provider
                 or frame.attrs.get("price_basis_adjustment") != expected_adjustment
                 or (
-                    sector_source == QMT_GICS3_CATALOG_SOURCE
+                    sector_source
+                    in {
+                        QMT_GICS3_CATALOG_SOURCE,
+                        QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+                    }
                     and (
                         frame.attrs.get("sector_factor_adjustment_contract_id")
                         != QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
@@ -1502,16 +2667,33 @@ class NativeTradingDataGateway:
                 ) from exc
             raise
         closed_at = _market_datetime(frame["date"].iloc[-1], "bar close")
+        revision_started = perf_counter()
         frame_content_revision = _frame_content_revision(frame)
+        self._record_performance_timing(
+            f"frame_revision.{frequency}",
+            perf_counter() - revision_started,
+        )
+        self._record_performance_timing(
+            f"frame_validation_and_revision.{frequency}",
+            perf_counter() - validation_started,
+        )
         cache_key = (analysis_code, frequency)
         with self._lock:
-            cached = self._analysis_cache.get(cache_key)
+            cached = self._analysis_cache.pop(cache_key, None)
+            if cached is not None:
+                self._analysis_cache[cache_key] = cached
         if (
             cached is not None
             and cached[0] == frame_content_revision
             and cached[1].closed_at == closed_at
         ):
+            self._record_performance_event(f"analysis_cache_hit.{frequency}")
+            self._record_performance_timing(
+                f"load_analysis_total.{frequency}",
+                perf_counter() - request_started,
+            )
             return cached[1]
+        self._record_performance_event(f"analysis_cache_miss.{frequency}")
         try:
             self._report_progress()
             analysis = self._analyze_frame(
@@ -1573,7 +2755,7 @@ class NativeTradingDataGateway:
                     analysis,
                     entry_execution_boundaries=_entry_execution_boundaries(
                         code=code,
-                        points=analysis.confirmed_points,
+                        points=analysis.effective_segment_difference_points,
                         raw_frame=raw_confirmation_frame,
                     ),
                 )
@@ -1594,10 +2776,26 @@ class NativeTradingDataGateway:
                 ),
             )
         with self._lock:
+            replaced = self._analysis_cache.pop(cache_key, None)
+            if replaced is None:
+                self._analysis_cache_entries_by_frequency[frequency] += 1
             self._analysis_cache[cache_key] = (
                 frame_content_revision,
                 analysis,
             )
+            capacity = _ANALYSIS_CACHE_CAPACITY_BY_FREQUENCY[frequency]
+            while self._analysis_cache_entries_by_frequency[frequency] > capacity:
+                stale_key = next(
+                    key
+                    for key in self._analysis_cache
+                    if key[1] == frequency
+                )
+                self._analysis_cache.pop(stale_key, None)
+                self._analysis_cache_entries_by_frequency[frequency] -= 1
+        self._record_performance_timing(
+            f"load_analysis_total.{frequency}",
+            perf_counter() - request_started,
+        )
         return analysis
 
     def _validated_thirty_minute_fallback(
@@ -1758,17 +2956,32 @@ class NativeTradingDataGateway:
         self,
         analysis: FrameStructureAnalysis,
     ) -> bool:
-        cutoff = analysis.closed_at.timestamp() - self._config.current_setup_age_seconds
-        return any(
-            (
-                point.observed_at
-                if isinstance(point, ProvisionalCandidate)
-                else point.available_at
-            ).timestamp()
-            >= cutoff
-            for point in (
-                *analysis.confirmed_points,
+        return bool(
+            current_five_minute_setup_points(
+                (
+                *analysis.setup_confirmed_points,
                 *analysis.provisional_points,
+                ),
+                as_of=analysis.closed_at,
+                max_setup_age_seconds=self._config.current_setup_age_seconds,
+            )
+        )
+
+    def _has_current_five_minute_buy_setup(
+        self,
+        analysis: FrameStructureAnalysis,
+    ) -> bool:
+        """Return whether a buy setup needs higher-period integrity evidence."""
+
+        return any(
+            point.side == "buy"
+            for point in current_five_minute_setup_points(
+                (
+                    *analysis.setup_confirmed_points,
+                    *analysis.provisional_points,
+                ),
+                as_of=analysis.closed_at,
+                max_setup_age_seconds=self._config.current_setup_age_seconds,
             )
         )
 
@@ -1778,7 +2991,10 @@ class NativeTradingDataGateway:
         frequency: str,
     ) -> FrameStructureAnalysis | None:
         with self._lock:
-            cached = self._analysis_cache.get((code, frequency))
+            cache_key = (code, frequency)
+            cached = self._analysis_cache.pop(cache_key, None)
+            if cached is not None:
+                self._analysis_cache[cache_key] = cached
         return None if cached is None else cached[1]
 
     def native_sector_assessments(
@@ -1793,12 +3009,20 @@ class NativeTradingDataGateway:
         if not isinstance(raw, Mapping):
             raise TypeError("sector catalog must be a mapping")
         catalog_source = raw.get("source")
-        if catalog_source != QMT_GICS3_CATALOG_SOURCE:
-            raise ValueError("sector catalog must expose QMT GICS3 components")
+        if catalog_source not in {
+            QMT_GICS3_CATALOG_SOURCE,
+            QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+        }:
+            raise ValueError("sector catalog must expose QMT GICS3/GICS4 components")
         rows = raw.get("sectors")
         if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
             raise TypeError("sector catalog must expose a sectors sequence")
-        catalog_revision = qmt_sector_catalog_revision(raw)
+        hierarchy_catalog = catalog_source == QMT_GICS_HIERARCHY_CATALOG_SOURCE
+        catalog_revision = (
+            qmt_gics_hierarchy_catalog_revision(raw)
+            if hierarchy_catalog
+            else qmt_sector_catalog_revision(raw)
+        )
         provided_revision = raw.get("catalog_revision")
         if provided_revision is not None and provided_revision != catalog_revision:
             raise ValueError("QMT sector catalog revision does not match its members")
@@ -1813,6 +3037,7 @@ class NativeTradingDataGateway:
         completed_count = 0
         members_by_sector: dict[str, tuple[str, ...]] = {}
         latest_bars: dict[tuple[str, str], datetime] = {}
+        parent_relations: list[tuple[str, str]] = []
         seen: set[str] = set()
         for row in rows:
             if not isinstance(row, Mapping):
@@ -1820,12 +3045,29 @@ class NativeTradingDataGateway:
             sector_id = row.get("sector_id")
             sector_name = row.get("name")
             source_key = row.get("source_key")
+            taxonomy_level = row.get("taxonomy_level")
+            parent_sector_id = row.get("parent_sector_id")
             raw_members = row.get("member_codes")
-            valid_identity = (
-                isinstance(sector_id, str)
-                and sector_id.startswith("qmt-gics3:")
-                and isinstance(source_key, str)
-                and source_key.startswith("GICS3")
+            valid_identity = bool(
+                (
+                    hierarchy_catalog
+                    and taxonomy_level in {"GICS3", "GICS4"}
+                    and isinstance(sector_id, str)
+                    and sector_id.startswith(
+                        "qmt-gics3:"
+                        if taxonomy_level == "GICS3"
+                        else "qmt-gics4:"
+                    )
+                    and isinstance(source_key, str)
+                    and source_key.startswith(cast(str, taxonomy_level))
+                )
+                or (
+                    not hierarchy_catalog
+                    and isinstance(sector_id, str)
+                    and sector_id.startswith("qmt-gics3:")
+                    and isinstance(source_key, str)
+                    and source_key.startswith("GICS3")
+                )
             )
             if (
                 not valid_identity
@@ -1850,6 +3092,12 @@ class NativeTradingDataGateway:
             seen.add(sector_id)
             discovered_count += 1
             members_by_sector[sector_id] = members
+            if (
+                hierarchy_catalog
+                and taxonomy_level == "GICS4"
+                and isinstance(parent_sector_id, str)
+            ):
+                parent_relations.append((sector_id, parent_sector_id))
             if len(members) < self._config.minimum_sector_members:
                 if catalog_member_count == 0:
                     detail_code = "sector_catalog_members_missing"
@@ -1960,7 +3208,11 @@ class NativeTradingDataGateway:
                     assess_sector(
                         sector_id=sector_id,
                         sector_name=sector_name.strip(),
-                        market_data_source="qmt_gics3_component_composite",
+                        market_data_source=(
+                            "qmt_gics_hierarchy_component_composite"
+                            if hierarchy_catalog
+                            else "qmt_gics3_component_composite"
+                        ),
                         thirty=contexts["30m"],
                         five=contexts["5m"],
                         one=one,
@@ -1981,7 +3233,7 @@ class NativeTradingDataGateway:
                 LogUtil.error(
                     "[trading_screening.sector] "
                     f"sector={sector_id} frequency={current_frequency} "
-                    "provider=qmt-gics3-composite "
+                    "provider=qmt-gics-composite "
                     f"error_type={failure.error_type} reason={failure.reason}"
                 )
                 assessments.append(
@@ -2006,7 +3258,7 @@ class NativeTradingDataGateway:
                 LogUtil.error(
                     "[trading_screening.sector] "
                     f"sector={sector_id} frequency={current_frequency} "
-                    "provider=qmt-gics3-composite "
+                    "provider=qmt-gics-composite "
                     f"error_type={failure.error_type} reason={failure.reason}"
                 )
                 assessments.append(
@@ -2091,6 +3343,46 @@ class NativeTradingDataGateway:
                     )
                     for assessment in assessments
                 ]
+        if parent_relations:
+            unavailable_ids = {
+                item.sector_id for item in (*errors, *exclusions)
+            }
+            assessment_by_id = {
+                item.sector_id: item for item in assessments
+            }
+            child_to_parent = dict(parent_relations)
+            gated: list[SectorAssessment] = []
+            for assessment in assessments:
+                parent_id = child_to_parent.get(assessment.sector_id)
+                if parent_id is None or assessment.sector_id in unavailable_ids:
+                    gated.append(assessment)
+                    continue
+                parent = assessment_by_id.get(parent_id)
+                if (
+                    parent is not None
+                    and parent_id not in unavailable_ids
+                    and parent.eligible
+                    and not parent.hard_block
+                ):
+                    gated.append(assessment)
+                    continue
+                reason_code = (
+                    "gics3_parent_gate_unavailable"
+                    if parent is None or parent_id in unavailable_ids
+                    else "gics3_parent_gate_blocked"
+                )
+                gated.append(
+                    replace(
+                        assessment,
+                        eligible=False,
+                        hard_block=True,
+                        regime="hostile",
+                        reason_codes=tuple(
+                            dict.fromkeys((*assessment.reason_codes, reason_code))
+                        ),
+                    )
+                )
+            assessments = gated
         with self._lock:
             self._members = members_by_sector
             self._symbol_names = symbol_names
@@ -2113,6 +3405,7 @@ class NativeTradingDataGateway:
             exclusions=ordered_exclusions,
             catalog_revision=catalog_revision,
             strength_evidence=strength_evidence,
+            parent_relations=tuple(sorted(parent_relations)),
         )
 
     def members(self) -> Mapping[str, tuple[str, ...]]:
@@ -2283,6 +3576,108 @@ class NativeTradingDataGateway:
             tick_data_used=True,
         )
 
+    def current_session_instrument_statuses(
+        self,
+        codes: tuple[str, ...],
+        *,
+        session: date,
+    ) -> AShareInstrumentSessionStatusBatch:
+        """Read exact QMT same-session suspension facts without account access."""
+
+        normalized = normalized_a_share_codes(codes)
+        if type(session) is not date:
+            raise TypeError("instrument-status session must be an exact date")
+        facts: list[AShareInstrumentSessionStatus] = []
+        for code in normalized:
+            self._report_progress()
+            try:
+                detail = self._instrument_detail_provider(
+                    f"{code[3:]}.{code[:2]}"
+                )
+            except Exception:
+                continue
+            finally:
+                self._report_progress()
+            if not isinstance(detail, Mapping):
+                continue
+            try:
+                trading_day = datetime.strptime(
+                    str(detail.get("TradingDay") or ""),
+                    "%Y%m%d",
+                ).date()
+            except ValueError:
+                continue
+            status = detail.get("InstrumentStatus")
+            raw_is_trading = detail.get("IsTrading")
+            name = str(detail.get("InstrumentName") or "").strip()
+            if (
+                trading_day != session
+                or type(status) is not int
+                or status < 0
+                or (
+                    type(raw_is_trading) is not bool
+                    and not (
+                        type(raw_is_trading) is int
+                        and raw_is_trading in {0, 1}
+                    )
+                )
+                or not name
+            ):
+                continue
+            facts.append(
+                AShareInstrumentSessionStatus(
+                    code=code,
+                    trading_day=trading_day,
+                    instrument_name=name,
+                    instrument_status=status,
+                    is_trading=bool(raw_is_trading),
+                )
+            )
+        return AShareInstrumentSessionStatusBatch(
+            requested_codes=normalized,
+            session=session,
+            facts=tuple(facts),
+        )
+
+    def display_quote_snapshot(
+        self,
+        codes: tuple[str, ...],
+    ) -> AShareDisplayQuoteBatch:
+        """读取页面展示报价；休市也返回 QMT 保存的最近有效快照。"""
+
+        normalized = normalized_a_share_codes(codes)
+        exchange = self._exchange_provider()
+        market_open_probe = getattr(exchange, "now_trading", None)
+        if not callable(market_open_probe):
+            raise TypeError("exchange must expose now_trading")
+        market_open = bool(market_open_probe("a"))
+        if not normalized:
+            return AShareDisplayQuoteBatch(
+                requested_codes=(),
+                market_open=market_open,
+                quotes=(),
+                tick_data_used=False,
+            )
+        loader = getattr(exchange, "ticks", None)
+        if not callable(loader):
+            raise TypeError("exchange must expose ticks")
+        self._report_progress()
+        values = loader(list(normalized)) or {}
+        self._report_progress()
+        if not isinstance(values, Mapping):
+            raise TypeError("exchange ticks must return a mapping")
+        quotes = tuple(
+            quote
+            for code in normalized
+            if (quote := quote_from_exchange_tick(code, values.get(code))) is not None
+        )
+        return AShareDisplayQuoteBatch(
+            requested_codes=normalized,
+            market_open=market_open,
+            quotes=quotes,
+            tick_data_used=True,
+        )
+
     def symbol_name(self, code: str) -> str | None:
         with self._lock:
             cached = self._symbol_names.get(code)
@@ -2340,9 +3735,28 @@ class NativeTradingDataGateway:
         frequencies: tuple[str, ...] | None = None,
         higher_timeframe_as_of: datetime | None = None,
         local_history_frequencies: tuple[str, ...] | None = None,
+        incremental_refresh_frequencies: tuple[str, ...] | None = None,
+        instrument_type: str | None = None,
     ) -> SymbolStructureBundle:
         if _A_STOCK_CODE.fullmatch(code) is None:
             raise ValueError("invalid A-share code")
+        resolved_instrument_type = instrument_type
+        if resolved_instrument_type is None:
+            resolved_instrument_type = "stock_cn"
+            if self._instrument_type_provider is not None:
+                resolved_instrument_type = self.screening_instrument_types((code,))[code]
+        if resolved_instrument_type not in _TRADABLE_SCREENING_INSTRUMENT_TYPES:
+            raise ValueError("instrument is outside the trading screening scope")
+        selection_path = (
+            "ETF_PROXY"
+            if resolved_instrument_type == "etf_cn"
+            else "INDIVIDUAL_THREE_PROGRAM"
+        )
+        effective_sector = (
+            _etf_proxy_sector_assessment(code)
+            if selection_path == "ETF_PROXY"
+            else sector
+        )
         observed_at = normalize_datetime(as_of, "as_of")
         exchange = self._exchange_provider()
         requested = set(_FREQUENCIES if frequencies is None else frequencies)
@@ -2364,9 +3778,27 @@ class NativeTradingDataGateway:
                 raise ValueError("local_history_frequencies are invalid")
             prepared_frequencies = local_history_frequencies
         prepared_frequency_set = set(prepared_frequencies)
+        if incremental_refresh_frequencies is None:
+            incremental_frequencies: tuple[str, ...] = ()
+        elif (
+            type(incremental_refresh_frequencies) is not tuple
+            or len(incremental_refresh_frequencies)
+            != len(set(incremental_refresh_frequencies))
+            or not set(incremental_refresh_frequencies).issubset(
+                _REALTIME_INCREMENTAL_REFRESH_DAYS
+            )
+        ):
+            raise ValueError("incremental_refresh_frequencies are invalid")
+        else:
+            incremental_frequencies = incremental_refresh_frequencies
+        incremental_frequency_set = set(incremental_frequencies)
+        if prepared_frequency_set.intersection(incremental_frequency_set):
+            raise ValueError(
+                "prepared and incremental refresh frequencies must be disjoint"
+            )
         analyses: dict[str, FrameStructureAnalysis] = {}
         # 共享决策核心从“当前 5m 设置”开始，必须先检查这一必要条件。缺失时，30m/日级
-        # 背景、1m 精细触发和月/周/日风险事实都无法生成决策记录，无需读取或计算。
+        # 背景、1m 段差和月/周/日风险事实都无法生成决策记录，无需读取或计算。
         # 这只是执行剪枝：``_has_current_five_minute_setup`` 与统一决策核心内部的
         # 5m 时效契约一致；返回证据包仍携带精确 5m 证据，由共享核心独立证明结果为空。
         cached_five = self._cached_analysis(code, "5m")
@@ -2378,12 +3810,16 @@ class NativeTradingDataGateway:
                 frequency="5m",
                 as_of=observed_at,
                 skip_download="5m" in prepared_frequency_set,
+                fast_incremental_refresh="5m" in incremental_frequency_set,
             )
             if "5m" in requested or cached_five is None
             else cached_five
         )
         has_current_five_minute_setup = self._has_current_five_minute_setup(
             analyses["5m"]
+        )
+        has_current_five_minute_buy_setup = (
+            self._has_current_five_minute_buy_setup(analyses["5m"])
         )
         if has_current_five_minute_setup:
             for frequency in ("d", "30m"):
@@ -2396,6 +3832,9 @@ class NativeTradingDataGateway:
                         frequency=frequency,
                         as_of=observed_at,
                         skip_download=frequency in prepared_frequency_set,
+                        fast_incremental_refresh=(
+                            frequency in incremental_frequency_set
+                        ),
                     )
                     if frequency in requested or cached is None
                     else cached
@@ -2408,6 +3847,7 @@ class NativeTradingDataGateway:
                     frequency="1m",
                     as_of=observed_at,
                     skip_download="1m" in prepared_frequency_set,
+                    fast_incremental_refresh="1m" in incremental_frequency_set,
                 )
         bundle_as_of = max(item.closed_at for item in analyses.values())
         # 低级别 1m 精细通道可合理晚于最新已完成板块 5m K 线（如 09:47 对 09:45）。
@@ -2428,23 +3868,28 @@ class NativeTradingDataGateway:
             risk_as_of = min(bundle_as_of, requested_risk_as_of)
         higher_timeframe_gates = None
         # 决策核心为每个当前 5m 设置输出一个结果。已完成 5m 前缀没有当前设置时，
-        # 无论月/周/日闸门如何，输出都可证明为空元组，因此避免为该空分支读取并重采样
+        # 没有设置时输出可证明为空元组，因此避免为该空分支读取并重采样
         # 约 300 个交易日的 QMT 1m 历史。这仅是执行剪枝；所有可能产生候选的标的仍使用
         # 完全相同的高周期提供器，且下方入场闸门继续关闭失败。
         if (
             self._higher_timeframe_provider is not None
-            and has_current_five_minute_setup
+            and has_current_five_minute_buy_setup
         ):
             resolved_sector_members = (
-                self._members.get(sector.sector_id)
-                if sector_members is None
-                else sector_members
+                None
+                if selection_path == "ETF_PROXY"
+                else (
+                    self._members.get(effective_sector.sector_id)
+                    if sector_members is None
+                    else sector_members
+                )
             )
             higher_timeframe_cache_key = (
                 code,
                 risk_as_of.isoformat(),
-                sector.sector_id,
-                sector.sector_name,
+                effective_sector.sector_id,
+                effective_sector.sector_name,
+                selection_path,
                 sha256_json(
                     {
                         "sector_members": list(resolved_sector_members or ()),
@@ -2452,20 +3897,41 @@ class NativeTradingDataGateway:
                 ),
             )
             with self._lock:
-                higher_timeframe_gates = self._higher_timeframe_cache.get(
-                    higher_timeframe_cache_key
+                higher_timeframe_gates = self._higher_timeframe_cache.pop(
+                    higher_timeframe_cache_key,
+                    None,
                 )
+                if higher_timeframe_gates is not None:
+                    self._higher_timeframe_cache[higher_timeframe_cache_key] = (
+                        higher_timeframe_gates
+                    )
+            self._record_performance_event(
+                "higher_timeframe_cache_hit"
+                if higher_timeframe_gates is not None
+                else "higher_timeframe_cache_miss"
+            )
             try:
                 if higher_timeframe_gates is None:
-                    self._report_progress()
-                    higher_timeframe_gates = self._higher_timeframe_provider(
-                        symbol=code,
-                        as_of=risk_as_of,
-                        sector_id=sector.sector_id,
-                        sector_name=sector.sector_name,
-                        sector_members=resolved_sector_members,
-                    )
-                    self._report_progress()
+                    higher_timeframe_started = perf_counter()
+                    try:
+                        self._report_progress()
+                        higher_timeframe_gates = self._higher_timeframe_provider(
+                            symbol=code,
+                            as_of=risk_as_of,
+                            sector_id=effective_sector.sector_id,
+                            sector_name=(
+                                None
+                                if selection_path == "ETF_PROXY"
+                                else effective_sector.sector_name
+                            ),
+                            sector_members=resolved_sector_members,
+                        )
+                        self._report_progress()
+                    finally:
+                        self._record_performance_timing(
+                            "higher_timeframe_provider",
+                            perf_counter() - higher_timeframe_started,
+                        )
                 if not isinstance(
                     higher_timeframe_gates,
                     HigherTimeframeGateBundle,
@@ -2477,18 +3943,28 @@ class NativeTradingDataGateway:
                     evidence.gate != "UNRESOLVED"
                     for evidence in (
                         higher_timeframe_gates.market,
-                        higher_timeframe_gates.sector,
+                        *(
+                            (higher_timeframe_gates.sector,)
+                            if selection_path
+                            == "INDIVIDUAL_THREE_PROGRAM"
+                            else ()
+                        ),
                         higher_timeframe_gates.symbol,
                     )
                 ):
                     with self._lock:
-                        if len(self._higher_timeframe_cache) >= 4096:
-                            self._higher_timeframe_cache.pop(
-                                next(iter(self._higher_timeframe_cache))
-                            )
+                        self._higher_timeframe_cache.pop(
+                            higher_timeframe_cache_key,
+                            None,
+                        )
                         self._higher_timeframe_cache[higher_timeframe_cache_key] = (
                             higher_timeframe_gates
                         )
+                        while (
+                            len(self._higher_timeframe_cache)
+                            > _HIGHER_TIMEFRAME_CACHE_CAPACITY
+                        ):
+                            self._higher_timeframe_cache.popitem(last=False)
             except HigherTimeframeDataUnavailable as exc:
                 LogUtil.error(
                     "[trading_screening.higher_timeframe.data] "
@@ -2501,7 +3977,7 @@ class NativeTradingDataGateway:
                     session_evidence=HigherTimeframeSessionEvidence.exact(
                         exc.session_issues
                     ),
-                    sector_subject=sector.sector_id,
+                    sector_subject=effective_sector.sector_id,
                 )
             except Exception as exc:
                 LogUtil.error(
@@ -2512,17 +3988,66 @@ class NativeTradingDataGateway:
                     symbol=code,
                     observed_at=risk_as_of,
                     reason_code="QMT_HIGHER_TIMEFRAME_PROVIDER_UNAVAILABLE",
-                    sector_subject=sector.sector_id,
+                    sector_subject=effective_sector.sector_id,
                 )
+        elif (
+            has_current_five_minute_setup
+            and not has_current_five_minute_buy_setup
+        ):
+            # 高周期方向已不再授权买入；这里只为新买入核验同源、日历和预热完整性。
+            # 纯卖出结构仍保留日线/30m环境与全部退出证据，无需重建该买入专用审计包。
+            # M/W/D is an entry-only gate, so a sell-only structure must not
+            # invoke the expensive provider.  It still needs an explicit,
+            # schema-complete unresolved bundle so downstream review never
+            # mistakes an intentional skip for missing evidence.
+            higher_timeframe_gates = unresolved_higher_timeframe_gates(
+                symbol=code,
+                observed_at=risk_as_of,
+                reason_code=(
+                    "HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY"
+                ),
+                sector_subject=effective_sector.sector_id,
+            )
+            self._record_performance_event("higher_timeframe_skipped.sell_only")
         confirmed = tuple(
             point
             for analysis in analyses.values()
             for point in analysis.confirmed_points
         )
+
+        def decision_warmup_converged(frequency: str) -> bool:
+            analysis = analyses[frequency]
+            if (
+                frequency == "5m"
+                and analysis.trade_level_warmup_converged is not None
+            ):
+                return analysis.trade_level_warmup_converged
+            return analysis.warmup_converged
+
+        def decision_warmup_reasons(frequency: str) -> tuple[str, ...]:
+            analysis = analyses[frequency]
+            if (
+                frequency == "5m"
+                and analysis.trade_level_warmup_converged is not None
+            ):
+                return analysis.trade_level_warmup_reason_codes
+            return analysis.warmup_reason_codes
+
+        def decision_warmup_difference_codes(
+            frequency: str,
+        ) -> tuple[str, ...]:
+            analysis = analyses[frequency]
+            if (
+                frequency == "5m"
+                and analysis.trade_level_warmup_converged is not None
+            ):
+                return analysis.trade_level_warmup_difference_codes
+            return analysis.warmup_difference_codes
+
         warmup_by_frequency = tuple(
             (
                 frequency,
-                analyses[frequency].warmup_converged,
+                decision_warmup_converged(frequency),
                 analyses[frequency].warmup_full_bar_count,
                 analyses[frequency].warmup_suffix_bar_count,
             )
@@ -2534,13 +4059,13 @@ class NativeTradingDataGateway:
                 f"{frequency.upper()}:{reason}"
                 for frequency in ("d", "30m", "5m", "1m")
                 if frequency in analyses
-                for reason in analyses[frequency].warmup_reason_codes
+                for reason in decision_warmup_reasons(frequency)
             )
         )
         warmup_difference_codes_by_frequency = tuple(
             (
                 frequency,
-                analyses[frequency].warmup_difference_codes,
+                decision_warmup_difference_codes(frequency),
             )
             for frequency in ("d", "30m", "5m", "1m")
             if frequency in analyses
@@ -2548,7 +4073,7 @@ class NativeTradingDataGateway:
         return SymbolStructureBundle(
             code=code,
             as_of=bundle_as_of,
-            sector=sector,
+            sector=effective_sector,
             daily_direction=(
                 "neutral" if "d" not in analyses else analyses["d"].direction
             ),
@@ -2562,11 +4087,27 @@ class NativeTradingDataGateway:
                 () if "30m" not in analyses else analyses["30m"].confirmed_points
             ),
             five_points=(
-                *analyses["5m"].confirmed_points,
-                *analyses["5m"].provisional_points,
+                *(
+                    point
+                    for point in analyses["5m"].setup_confirmed_points
+                    if is_five_minute_trade_level(
+                        point.source_frequency,
+                        point.recursive_level,
+                    )
+                ),
+                *(
+                    point
+                    for point in analyses["5m"].provisional_points
+                    if is_five_minute_trade_level(
+                        point.source_frequency,
+                        point.recursive_level,
+                    )
+                ),
             ),
             one_points=(
-                () if "1m" not in analyses else analyses["1m"].confirmed_points
+                ()
+                if "1m" not in analyses
+                else analyses["1m"].effective_segment_difference_points
             ),
             opposite_points=confirmed,
             higher_timeframe_gates=higher_timeframe_gates,
@@ -2574,17 +4115,35 @@ class NativeTradingDataGateway:
                 self._higher_timeframe_provider is not None
             ),
             warmup_converged=all(
-                analysis.warmup_converged for analysis in analyses.values()
+                decision_warmup_converged(frequency)
+                for frequency in analyses
             ),
             warmup_reason_codes=warmup_reasons,
             warmup_by_frequency=warmup_by_frequency,
-            warmup_difference_codes_by_frequency=(warmup_difference_codes_by_frequency),
+            warmup_difference_codes_by_frequency=(
+                warmup_difference_codes_by_frequency
+            ),
             enforce_warmup_entry_gate=True,
             physical_timeframe_recursive=True,
             entry_execution_boundaries=(
                 ()
                 if "1m" not in analyses
                 else analyses["1m"].entry_execution_boundaries
+            ),
+            selection_path=selection_path,
+            latest_price=max(
+                analyses.values(),
+                key=lambda analysis: analysis.closed_at,
+            ).latest_price,
+            daily_technical_context=(
+                None
+                if "d" not in analyses
+                else analyses["d"].same_period_technical_context
+            ),
+            thirty_technical_context=(
+                None
+                if "30m" not in analyses
+                else analyses["30m"].same_period_technical_context
             ),
         )
 

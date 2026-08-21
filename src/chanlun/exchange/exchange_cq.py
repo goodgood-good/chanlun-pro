@@ -35,7 +35,7 @@ from chanlun.exchange.price_basis import (
 
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
-_LONGBRIDGE_OHLC_NORMALIZATION_REVISION = "ohlc-envelope-v1"
+_LONGBRIDGE_OHLC_NORMALIZATION_REVISION = "ohlc-envelope"
 
 
 def _get_env(key: str):

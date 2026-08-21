@@ -19,6 +19,7 @@ def assess_sector(
 ) -> SectorAssessment:
     if market_data_source not in {
         "qmt_gics3_component_composite",
+        "qmt_gics_hierarchy_component_composite",
         # 页面、前向模拟和当前成分研究回放共用的规范 QMT 收益率中位数组合。
         "qmt-gics3-composite",
         "qmt-sw1-pit-composite",

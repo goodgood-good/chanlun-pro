@@ -1,8 +1,7 @@
-"""Signed public chart images for DingTalk review notifications.
+"""为钉钉复核通知提供带签名的公开图表图片。
 
-The public route exposes only content-addressed PNG files carrying an HMAC
-signature and expiry.  It never exposes the chart directory, login session,
-market-data API, account state, or order transport.
+公开路由只暴露带有 HMAC 签名和过期时间的内容寻址 PNG 文件，不会暴露图表
+目录、登录会话、行情接口、账户状态或下单通道。
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ _ARTIFACT_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SignedAlertChartStore:
-    """Persist immutable PNGs and issue expiring, unguessable public URLs."""
+    """持久化不可变 PNG，并签发有期限且不可猜测的公开地址。"""
 
     def __init__(
         self,
@@ -173,7 +172,7 @@ class SignedAlertChartStore:
 
 
 class AlertChartImageService:
-    """Build immutable 30m/5m/1m review charts from the strict live core."""
+    """基于严格实时核心生成不可变的 30m、5m、1m 复核图。"""
 
     def __init__(
         self,
@@ -204,8 +203,8 @@ class AlertChartImageService:
             state = self._state_factory(
                 code,
                 exchange,
-                op_level="1m",
-                mid_level="5m",
+                op_level="5m",
+                mid_level="1m",
                 big_level="30m",
             )
             self._states[identity] = state
@@ -238,7 +237,17 @@ class AlertChartImageService:
                 if evidence_required:
                     point_type = str(raw.get("point_type") or "").strip()
                     signal_time = str(raw.get("signal_time") or "").strip()
-                    if not point_type or not signal_time:
+                    evidence_id = str(raw.get("evidence_id") or "").strip()
+                    anchor_time = str(raw.get("anchor_time") or "").strip()
+                    recursive_level = raw.get("recursive_level")
+                    if (
+                        not point_type
+                        or not signal_time
+                        or not evidence_id
+                        or not anchor_time
+                        or type(recursive_level) is not int
+                        or recursive_level < 0
+                    ):
                         raise RuntimeError(
                             f"alert evidence identity incomplete for {market}:{code}"
                         )
@@ -264,7 +273,10 @@ class AlertChartImageService:
                     if not callable(resolve_occurrence) or resolve_occurrence(
                         point_type,
                         signal_time,
-                        frequency="1m",
+                        frequency=str(raw.get("frequency") or "5m"),
+                        evidence_id=evidence_id,
+                        recursive_level=recursive_level,
+                        anchor_time=anchor_time,
                     ) is None:
                         raise RuntimeError(
                             f"alert point absent from chart evidence for {market}:{code}"
@@ -291,7 +303,8 @@ class AlertChartImageService:
                             "url": url,
                             "alt": (
                                 f"{name} {code} 30分钟/5分钟/1分钟结构图"
-                                f"（已核验1分钟{point_type}：{signal_time}）"
+                                f"（已核验{raw.get('frequency') or '5m'}"
+                                f"{point_type}：{signal_time}）"
                             ),
                         }
                     )

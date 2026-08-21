@@ -500,7 +500,10 @@ def select_first_strategic_buy_samples(
         for raw in queue:
             if not isinstance(raw, Mapping):
                 raise ValueError("forward human-review queue entry is invalid")
-            if raw.get("alert_type") != "POSSIBLE_30M_BUY":
+            if raw.get("alert_type") not in {
+                "POSSIBLE_5M_TRADE_BUY",
+                "POSSIBLE_30M_BUY",
+            }:
                 continue
             alert = _alert_from_document(raw)
             sample = ForwardReviewSample(
@@ -817,7 +820,7 @@ def build_forward_review_markout(
         "schema": FORWARD_REVIEW_MARKOUT_SCHEMA,
         "sample_cohort_contract": FORWARD_REVIEW_SAMPLE_COHORT_CONTRACT_ID,
         "through_session": through_session.isoformat(),
-        "population": "FIRST_APPEARANCE_PER_POSSIBLE_30M_BUY_LIFECYCLE",
+        "population": "FIRST_APPEARANCE_PER_5M_TRADE_BUY_LIFECYCLE_V2",
         "horizon_definition": (
             "5th/10th/20th complete trading session after review date; "
             "signal session excluded"
@@ -1287,7 +1290,8 @@ def validate_forward_review_markout_document(
             or not isinstance(policy_id, str)
             or not isinstance(decision_core_id, str)
             or not isinstance(source_snapshot_id, str)
-            or row.get("alert_type") != "POSSIBLE_30M_BUY"
+            or row.get("alert_type")
+            not in {"POSSIBLE_5M_TRADE_BUY", "POSSIBLE_30M_BUY"}
             or _SHA256_ID.fullmatch(str(row.get("source_report_content_sha256")))
             is None
             or source_session not in qualified_source_sessions

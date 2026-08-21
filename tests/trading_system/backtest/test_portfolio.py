@@ -455,6 +455,7 @@ def test_entry_uses_shared_risk_sizing() -> None:
         candidate=RiskCandidate(
             signal_id="entry-a",
             sector_id="TDX.880301",
+            symbol_id=position.code,
             entry_price=position.entry_price,
             stop_price=Decimal("9.80"),
             risk_multiplier=Decimal("1.00"),
@@ -653,7 +654,7 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
         "SZ.000001",
         datetime(2026, 7, 20, 10, 6, tzinfo=CN),
     )
-    buy = confirmed_point("2buy", tower="formal", level=1)
+    buy = confirmed_point("2buy", tower="formal", level=0)
     buy_trigger = confirmed_point(
         "2buy",
         frequency="1m",
@@ -664,7 +665,7 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
     sell = confirmed_point(
         "2sell",
         tower="formal",
-        level=1,
+        level=0,
         minutes_after=2,
     )
     sell_trigger = confirmed_point(

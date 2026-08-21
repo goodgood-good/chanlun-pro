@@ -173,6 +173,8 @@ predict
 
 # 配置文件排除
 /src/chanlun/config.py
+# 运行时通知凭据只保留在本机；提交安全模板而不提交真实 Webhook。
+/config/runtime_credentials.local.json
 # 私有代码排除
 web/chanlun_web/charts/static/datafeeds/udf/node_modules
 web/chanlun_chart/app/static/datafeeds/udf/node_modules

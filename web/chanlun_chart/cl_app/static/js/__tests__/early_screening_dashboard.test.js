@@ -7,6 +7,10 @@ const path = require("node:path");
 
 const uiPath = path.resolve(__dirname, "../early_screening_ui.js");
 const uiSource = fs.readFileSync(uiPath, "utf8");
+
+test("screening guidance never describes structural ratios as account positions", () => {
+  assert.doesNotMatch(uiSource, /段差仓|账户|持仓|仓位|组合热度只可下调/);
+});
 const humanReviewUiPath = path.resolve(
   __dirname,
   "../human_review_screening.js",
@@ -25,6 +29,30 @@ const markoutAuditSource = fs.readFileSync(
   "utf8",
 );
 const dashboardCss = fs.readFileSync(path.resolve(__dirname, "../../css/early_screening.css"), "utf8");
+
+test("live and review requests are bounded and the review queue polls while visible", () => {
+  assert.match(controllerSource, /SNAPSHOT_REQUEST_TIMEOUT_MS\s*=\s*20_000/);
+  assert.match(controllerSource, /new AbortController\(\)/);
+  assert.match(controllerSource, /signal:\s*controller\.signal/);
+  assert.match(controllerSource, /snapshot_request_timeout/);
+  assert.match(humanReviewSource, /REQUEST_TIMEOUT_MS\s*=\s*30_000/);
+  assert.match(humanReviewSource, /new AbortController\(\)/);
+  assert.match(humanReviewSource, /signal:\s*controller\.signal/);
+  assert.match(humanReviewSource, /function schedulePoll\(\)/);
+  assert.match(
+    humanReviewSource,
+    /document\.visibilityState === "visible" && state\.mode === "human-review"/,
+  );
+});
+
+test("manual A-share attention symbols render the isolated quote price and percentage", () => {
+  assert.match(controllerSource, /symbolRow\.quote_available === true/);
+  assert.match(controllerSource, /symbolRow\.current_price/);
+  assert.match(controllerSource, /symbolRow\.change_percent/);
+  assert.match(controllerSource, /change\.toFixed\(2\)\}%/);
+  assert.match(dashboardCss, /\.es-holding-card__quote/);
+  assert.match(dashboardCss, /font-variant-numeric:\s*tabular-nums/);
+});
 
 function loadUi() {
   delete require.cache[require.resolve(uiPath)];
@@ -139,7 +167,7 @@ const snapshot = {
   read_only: true,
   research_only: true,
   no_order_execution: true,
-  counts_by_stage: { armed: 1, triggered: 1 },
+  counts_by_stage: { approaching: 1, triggered: 1 },
   counts_by_point_type: {
     "1buy": 1, "2buy": 1, "3buy": 0,
     "1sell": 0, "2sell": 0, "3sell": 0,
@@ -175,7 +203,7 @@ const snapshot = {
       side: "buy",
       tower: "bi",
       recursive_level: 0,
-      lifecycle_stage: "armed",
+      lifecycle_stage: "approaching",
       observed_at: "2026-07-20T14:55:00+08:00",
       sector: { sector_id: "qmt-gics3:bank", sector_name: "银行" },
       context_30m: { direction: "up", disposition: "supportive" },
@@ -208,6 +236,10 @@ const snapshot = {
       context_30m: { direction: "neutral", disposition: "neutral" },
       setup_5m: { point_type: "2buy", center_ordinal: null },
       trigger_1m: { point_type: "1buy" },
+      entry_execution_boundary: {
+        confirmation_bar_closed_at: "2026-07-20T14:58:00+08:00",
+        entry_valid_until: "2026-07-20T14:59:00+08:00",
+      },
       structural_stop: "7.50",
       risk_multiplier: "1.00",
       entry_allowed: true,
@@ -249,17 +281,41 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(template, /id="es-holdings-declared"/);
   assert.match(template, /id="es-holdings-monitored"/);
   assert.match(template, /id="es-holdings-unsupported"/);
+  assert.match(template, /id="es-us-monitor-title">美股实时监听/);
+  assert.match(template, /id="es-us-monitor" class="es-us-monitor-compact"/);
+  assert.match(template, /id="es-us-monitor-health-panel"/);
+  assert.doesNotMatch(template, /id="es-us-monitor-list"/);
+  assert.doesNotMatch(template, /class="es-us-monitor-columns"/);
+  assert.match(template, /data-market="a"/);
+  assert.match(template, /data-market="us"/);
+  assert.match(template, /美股线索不参与板块门且会继续保留/);
+  assert.match(template, /id="es-us-monitor-active"/);
+  assert.match(template, /id="es-us-monitor-other"/);
+  assert.match(template, /id="es-us-monitor-updated"/);
+  assert.match(template, /id="es-us-monitor-notifications"/);
+  assert.match(template, /<dt>待机<\/dt><dd id="es-us-monitor-other"/);
+  assert.match(template, /class="es-us-monitor-compact__metrics"/);
+  assert.match(template, /id="es-sector-catalog-status"/);
   assert.match(template, /data-selection-scope="sector-trigger"/);
   assert.match(template, /data-selection-scope="all-qualified"/);
-  assert.match(controllerSource, /function renderManualHoldings\(\)/);
+  assert.match(controllerSource, /function renderManualAttention\(\)/);
+  assert.match(controllerSource, /function renderUsMonitorStatus\(\)/);
+  assert.doesNotMatch(controllerSource, /es-us-monitor-card__groups/);
+  assert.match(controllerSource, /function renderSectorCatalogStatus\(\)/);
+  assert.match(controllerSource, /CURRENT_COVERAGE_CYCLE/);
+  assert.match(controllerSource, /CACHED_SECTOR_SNAPSHOT/);
+  assert.match(controllerSource, /LAST_INVALIDATED_SNAPSHOT/);
+  assert.doesNotMatch(controllerSource, /1分钟触发 · 5分钟结构 · 30分钟背景 · 实时监听正常/);
   assert.match(controllerSource, /A_SHARE_STRICT_DECISION_CORE/);
   assert.match(controllerSource, /非A股辅助结构雷达监听中/);
   assert.match(controllerSource, /selectionScope: savedSelectionScope/);
   assert.match(controllerSource, /searchParams\.set\("scope", requestedScope\)/);
   assert.match(controllerSource, /QMT_SECTOR_TRIGGER/);
-  assert.match(controllerSource, /snapshot\.manual_holding_signals/);
+  assert.match(controllerSource, /snapshot\.manual_attention_signals/);
   assert.match(controllerSource, /当前休市 · 开市后自动恢复实时监听/);
   assert.match(dashboardCss, /\.es-holding-card\.is-alert/);
+  assert.match(dashboardCss, /\.es-us-monitor-compact\s*\{/);
+  assert.match(dashboardCss, /\.es-sector-catalog-status\[data-state="preview"\]/);
   assert.match(humanReviewSource, /sector_capture_receipts/);
   assert.match(humanReviewSource, /forward_operations/);
   assert.match(humanReviewSource, /forwardOperations\.qmt_runtime/);
@@ -267,8 +323,8 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /FORWARD_SCHEDULER_NOT_READY_FOR_PAPER/);
   assert.match(humanReviewSource, /FORWARD_SCHEDULER_OBSERVATION_STALE_FOR_PAPER/);
   assert.match(humanReviewSource, /SAME_SESSION_FORWARD_CAPTURE_NOT_READY_FOR_PAPER/);
-  assert.match(humanReviewSource, /尚未获得同日 QMT Capture 回执/);
-  assert.doesNotMatch(humanReviewSource, /09:10 后缺少同日 QMT Capture 回执/);
+  assert.match(humanReviewSource, /尚未获得同日 QMT 盘前抓取回执/);
+  assert.doesNotMatch(humanReviewSource, /09:10 后缺少同日 QMT 盘前抓取回执/);
   assert.match(humanReviewSource, /CAPTURE_MISSING_AFTER_DUE/);
   assert.match(humanReviewSource, /EVALUATION_MISSING_AFTER_DEADLINE/);
   assert.match(humanReviewSource, /DATA_READY_EVENT_MISSING/);
@@ -283,87 +339,62 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /当日回执缺失/);
   assert.match(humanReviewSource, /回执未证明/);
   assert.match(humanReviewSource, /回执无效/);
-  assert.match(template, /id="hr-execution-evidence-status"/);
-  assert.match(template, /id="hr-entry-selection-evidence-status"/);
-  assert.match(template, /id="hr-portfolio-rejection-evidence-status"/);
-  assert.match(template, /id="hr-portfolio-decision-audit-status"/);
-  assert.match(template, /id="hr-portfolio-fill-decision-audit-status"/);
+  assert.match(template, /系统与审计状态/);
+  assert.match(template, /id="hr-position-recommendation"/);
   assert.match(template, /id="hr-tactical-execution-status"/);
-  assert.match(template, /固定 100 股（一手）仅观察；不覆盖多手部分成交/);
-  assert.match(template, /id="hr-virtual-reserved-sell-quantity"/);
-  assert.match(template, /id="hr-virtual-cancelled-count"/);
-  assert.match(template, /id="hr-virtual-operations-cancelled-count"/);
-  assert.match(template, /id="hr-paper-path-status"/);
-  assert.match(template, /id="hr-paper-path-reasons"/);
+  for (const removedId of [
+    "hr-execution-evidence-status",
+    "hr-entry-selection-evidence-status",
+    "hr-portfolio-rejection-evidence-status",
+    "hr-portfolio-decision-audit-status",
+    "hr-portfolio-fill-decision-audit-status",
+    "hr-virtual-reserved-sell-quantity",
+    "hr-virtual-cancelled-count",
+    "hr-virtual-operations-cancelled-count",
+    "hr-paper-path-status",
+    "hr-paper-path-reasons",
+    "hr-paper-accounting-status",
+    "hr-paper-cash-balance",
+    "hr-paper-total-fees",
+    "hr-paper-valuation-status",
+    "hr-paper-market-value",
+    "hr-paper-equity",
+  ]) {
+    assert.doesNotMatch(template, new RegExp(`id="${removedId}"`));
+  }
   assert.match(humanReviewSource, /paperPathDecision/);
   assert.match(humanReviewSource, /HISTORICAL_SOURCE_REVIEW_ONLY/);
   assert.match(humanReviewSource, /SOURCE_SUPERSEDED_FOR_PAPER/);
   assert.match(humanReviewSource, /SOURCE_MARKET_SESSION_NOT_CURRENT_FOR_PAPER/);
   assert.match(humanReviewSource, /CURRENT_MARKET_DATA_SESSION_UNAVAILABLE_FOR_PAPER/);
   assert.match(humanReviewSource, /来源行情会话/);
-  assert.match(humanReviewSource, /归档可做因果复核，但不能创建新的虚拟意图/);
+  assert.match(humanReviewSource, /仅记录人工识别，不建立执行计划/);
   assert.match(humanReviewSource, /HIGHER_TIMEFRAME_GATE_NOT_GREEN/);
   assert.match(humanReviewSource, /NO_CAUSAL_1M_EXECUTION_BAR_REMAINS_BEFORE_TTL/);
   assert.match(humanReviewSource, /INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES/);
-  assert.match(humanReviewSource, /虚拟意图已建立，等待后续合法 1m K 线/);
+  assert.match(humanReviewSource, /观察记录已建立，等待后续合法 1m K 线/);
   assert.match(humanReviewSource, /在账本状态可验证前保持失败关闭/);
-  assert.match(template, /候选报告自身零订单、零成交且哈希验证通过/);
-  assert.match(template, /虚拟账本意图与成交另行展示/);
+  assert.match(template, /只接受零订单、零成交且哈希验证通过的候选证据/);
+  assert.doesNotMatch(template, /账户|现金|持仓|仓位|持有|虚拟|组合热度|硬阻断/);
+  assert.doesNotMatch(uiSource, /持有跟踪|无硬阻断|硬阻断：/);
+  assert.doesNotMatch(controllerSource, /snapshot\.manual_holdings|snapshot\.manual_holding_signals/);
   assert.match(humanReviewSource, /候选报告自身零订单\/零成交/);
-  assert.match(humanReviewSource, /虚拟账本累计/);
+  assert.doesNotMatch(humanReviewSource, /账户|现金|持仓|仓位|虚拟|组合热度/);
   assert.doesNotMatch(humanReviewSource, /QMT 板块先行 · 零订单\/零成交/);
-  assert.match(template, /历史或已被新快照替代的报告只记录识别结果/);
-  assert.match(template, /id="hr-pending-continuity-status"/);
-  assert.match(template, /id="hr-execution-chronology-status"/);
-  assert.match(template, /执行门处置/);
-  assert.match(humanReviewSource, /执行门失败撤买，持久退出继续/);
-  assert.match(
-    humanReviewSource,
-    /optional_buy_data_fault_cancelled/,
-  );
-  assert.match(
-    humanReviewSource,
-    /optional_buy_security_gate_cancelled/,
-  );
-  assert.match(
-    humanReviewSource,
-    /execution_fact_incomplete_optional_buy_cancelled/,
-  );
-  assert.match(
-    humanReviewSource,
-    /persistent_exit_security_blocked_remains_pending/,
-  );
-  assert.match(
-    humanReviewSource,
-    /persistent_exit_fact_incomplete_remains_pending/,
-  );
-  assert.match(humanReviewSource, /persistent_exit_independent_symbol_continues/);
-  assert.match(template, /id="hr-paper-accounting-status"/);
-  assert.match(template, /id="hr-paper-cash-balance"/);
-  assert.match(template, /id="hr-paper-total-fees"/);
-  assert.match(template, /id="hr-paper-valuation-status"/);
-  assert.match(template, /id="hr-paper-market-value"/);
-  assert.match(template, /id="hr-paper-equity"/);
-  assert.match(humanReviewSource, /paper_execution_evidence/);
-  assert.match(humanReviewSource, /paper_entry_selection_attestation/);
-  assert.match(humanReviewSource, /paper_entry_selection_source_audit/);
+  assert.match(template, /复核记录只保存中枢、走势、级别、买卖点和失效条件判断/);
   assert.match(humanReviewSource, /精确 QMT 目录/);
-  assert.match(humanReviewSource, /paper_operations_cancellation_evidence/);
-  assert.match(humanReviewSource, /paper_portfolio_rejection_evidence/);
-  assert.match(humanReviewSource, /paper_portfolio_decision_audit/);
-  assert.match(humanReviewSource, /paper_portfolio_fill_decision_audit/);
   assert.match(humanReviewSource, /terminal_signal_lifecycle_one_shot_enforced/);
   assert.match(humanReviewSource, /fixed_one_lot_tactical_review_only/);
-  assert.match(humanReviewSource, /本页面不验证多手订单的部分成交行为/);
+  assert.match(humanReviewSource, /固定 100 股（一手）仅观察；不覆盖多手部分成交/);
   assert.match(humanReviewSource, /sectorSourceDisclosure/);
   assert.match(humanReviewSource, /sector_higher_timeframe_evidence/);
-  assert.match(humanReviewSource, /原生日线研究桥（AMBER上限）/);
-  assert.match(humanReviewSource, /严格5m暖机/);
+  assert.match(humanReviewSource, /原生日线研究桥（最高为琥珀色）/);
+  assert.match(humanReviewSource, /严格5m历史审计/);
   assert.match(humanReviewSource, /marketSymbolHigherTimeframeDisclosure/);
   assert.match(humanReviewSource, /market_symbol_higher_timeframe_evidence/);
-  assert.match(humanReviewSource, /M\/W\/D结构与来源可复核/);
-  assert.match(humanReviewSource, /M\/W\/D结构可复核·来源未附/);
-  assert.match(humanReviewSource, /M\/W\/D结构可复核·来源部分/);
+  assert.match(humanReviewSource, /日线高级别结构与来源可复核/);
+  assert.match(humanReviewSource, /日线高级别结构可复核·来源未附/);
+  assert.match(humanReviewSource, /日线高级别结构可复核·来源部分/);
   assert.match(humanReviewSource, /完成K线数量及结构映射，已按无效处理/);
   assert.match(humanReviewSource, /evidence_bar_end/);
   assert.match(humanReviewSource, /mapping_candidate_ids/);
@@ -389,10 +420,6 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /adverse_observed_bar_extreme_fill_price_enforced/);
   assert.match(humanReviewSource, /completed_bar_close_fill_timestamp_enforced/);
   assert.match(humanReviewSource, /越价即拒 \/ 整柱严格穿价 \/ 5% \/ 不利极值 \/ 收盘确认/);
-  assert.match(humanReviewSource, /paper_pending_continuity/);
-  assert.match(humanReviewSource, /CAUSAL_GAPS/);
-  assert.match(humanReviewSource, /paper_accounting/);
-  assert.match(humanReviewSource, /paper_valuation/);
   assert.match(humanReviewSource, /source_provenance_available/);
   assert.match(markoutAuditSource, /source_provenance_status/);
   assert.match(template, /id="hr-decision-core-id"/);
@@ -413,29 +440,13 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(markoutAuditSource, /同批样本不足/);
   assert.match(markoutAuditSource, /源码未认证/);
   assert.match(markoutAuditSource, /价格来源未完整/);
-  assert.match(humanReviewSource, /日终净值来源未验证/);
-  assert.match(humanReviewSource, /日终净值连续性未验证/);
-  assert.match(humanReviewSource, /日终净值序列缺失/);
-  assert.match(humanReviewSource, /估值来源已接通 · 尚无日终净值点/);
-  assert.match(humanReviewSource, /valuationStatus === "COMPLETE"/);
-  assert.match(humanReviewSource, /日终净值点 · 截至/);
-  assert.match(humanReviewSource, /latestValuation\.session/);
-  assert.match(humanReviewSource, /OPEN_POSITIONS_UNMARKED/);
-  assert.match(humanReviewSource, /CLOSED_BOOK_NO_DAILY_EQUITY/);
-  assert.match(humanReviewSource, /virtual_reserved_sell_quantity/);
-  assert.match(humanReviewSource, /virtual_cancelled_intent_count/);
-  assert.match(humanReviewSource, /superseded_paper_intents/);
-  assert.match(humanReviewSource, /已追加撤销/);
   assert.match(humanReviewSource, /paper_observation_eligible/);
-  assert.match(humanReviewSource, /paper_reconciliation_pending/);
-  assert.match(humanReviewSource, /paper_reconciliation_eligible/);
   assert.match(humanReviewSource, /feedbackMatchesLatest/);
   assert.match(humanReviewSource, /retryRequestId/);
-  assert.match(humanReviewSource, /paperOption\.disabled = false/);
-  assert.doesNotMatch(humanReviewSource, /paperOption\.disabled = !paperEligible/);
-  assert.match(humanReviewSource, /同一请求 ID 幂等补建虚拟意图/);
+  assert.match(humanReviewSource, /candidate\.realtime_notification === true/);
+  assert.match(humanReviewSource, /mergeRealtimeNotificationQueue\(payload\.data\)/);
+  assert.doesNotMatch(humanReviewSource, /补建虚拟意图/);
   assert.match(humanReviewSource, /REVIEW_ONLY/);
-  assert.match(humanReviewSource, /成交证据对象缺失/);
   assert.match(template, /data-workspace="sector"/);
   assert.match(template, /data-workspace="signals"/);
   assert.match(template, /data-workspace="charts"/);
@@ -446,10 +457,12 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(controllerSource, /后台选股扫描健康门未通过/);
   assert.match(controllerSource, /priority_monitor_ready/);
   assert.match(controllerSource, /盘中实时预警通道尚未就绪/);
+  assert.match(controllerSource, /优先预警正常，候选范围仍在准备/);
+  assert.match(controllerSource, /Ui\.segmentScopeText\(runtimeHealth, audit, segmentEvidenceCount\)/);
   assert.match(controllerSource, /full_coverage_refresh_paused/);
   assert.match(controllerSource, /full_coverage_next_active_at/);
   assert.match(controllerSource, /全市场覆盖等待下一运行窗口/);
-  assert.match(controllerSource, /盘中算力正用于持仓、自选与强板块候选的实时预警/);
+  assert.match(controllerSource, /盘中算力正用于人工关注、自选与强板块候选的实时预警/);
   assert.match(template, /id="es-preselection-status"/);
   assert.match(template, /id="es-priority-monitor-status"/);
   assert.match(template, /id="es-preselection-diagnostic"/);
@@ -462,7 +475,7 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(uiSource, /daily_preselection_expected_session/);
   assert.match(controllerSource, /Ui\.dailyPreselectionText\(runtimeHealth\)/);
   assert.match(controllerSource, /Ui\.priorityMonitorText\(runtimeHealth, liveOverlay\)/);
-  assert.match(template, /4 个自然日/);
+  assert.match(template, /旧线段、失效、结束及旧版迁移状态均不进入当前列表/);
 });
 
 test("desktop layout aligns the signal queue with the chart below a compact sector rail", () => {
@@ -541,7 +554,7 @@ test("human review disclosures execute outside boot and explain sector ranking",
   assert.match(invalid.lines[0], /当前契约要求的完整板块排序证据/);
 });
 
-test("human review carries sector M/W/D diagnostics and labels buy points diagnostic-only", () => {
+test("human review shows daily diagnostics only and labels buy points diagnostic-only", () => {
   const Ui = loadHumanReviewUi();
   const warmup = {
     required_daily_bar_count: 480,
@@ -560,13 +573,13 @@ test("human review carries sector M/W/D diagnostics and labels buy points diagno
     active_gate_unchanged: true,
   };
   const active = {
-    period: "M",
+    period: "D",
     state: "FORMED",
     completed_bar_count: 24,
     evidence_bar_end: "2026-07-31T15:00:00+08:00",
     mapping_unique: true,
-    mapped_center_id: "M-center-1",
-    mapping_candidate_ids: ["M-center-1"],
+    mapped_center_id: "D-center-1",
+    mapping_candidate_ids: ["D-center-1"],
     mapping_supply: {
       classification: "UNIQUE_MAPPING",
       point_evidence_count: 7,
@@ -603,32 +616,32 @@ test("human review carries sector M/W/D diagnostics and labels buy points diagno
     sector_id: "QMT:GICS3:bank",
     observed_at: "2026-08-01T10:00:00+08:00",
     gate: "AMBER",
-    states: { M: "FORMED", W: "NONE", D: "NONE" },
+    states: { M: "FORMED", W: "NONE", D: "FORMED" },
     reason_codes: ["SECTOR_MONTHLY_TOP_FORMED"],
-    period_diagnostics: [active, inactive("W"), inactive("D")],
+    period_diagnostics: [inactive("M"), inactive("W"), active],
     evidence_id: `sha256:${"d".repeat(64)}`,
   };
   const sector = Ui.sectorSourceDisclosure({
     sector_higher_timeframe_evidence: sectorEvidence,
   });
-  assert.match(sector.lines.join("\n"), /板块 M\/W\/D：M 顶部结构已形成/);
-  assert.match(sector.lines.join("\n"), /板块M方向诊断：一买 2 \/ 二买 1/);
+  assert.match(sector.lines.join("\n"), /板块日线：顶部结构已形成 · 研究状态/);
+  assert.match(sector.lines.join("\n"), /板块日线方向诊断：一买 2 \/ 二买 1/);
   assert.match(sector.lines.join("\n"), /稳定身份 3 个/);
   assert.match(sector.lines.join("\n"), /仅供人工识别，不参与卖点映射、风险门或订单/);
-  assert.match(sector.lines.join("\n"), /板块W映射供给：无活动顶部结构/);
+  assert.doesNotMatch(sector.lines.join("\n"), /月线|周线|月\/周\/日/);
   assert.match(sector.lines.join("\n"), /板块当前来源多前缀暖机诊断：非单调/);
   assert.match(sector.lines.join("\n"), /严格5m同源多前缀暖机诊断/);
   assert.match(sector.lines.join("\n"), /合格前缀 4 个（480–960 根日线）/);
-  assert.match(sector.lines.join("\n"), /仅诊断，不改变现有双窗口交易门/);
+  assert.match(sector.lines.join("\n"), /仅作历史稳定性审计，不参与买入放行/);
   assert.deepEqual(sector.factIds, [sectorEvidence.evidence_id]);
 
   const marketSymbol = Ui.marketSymbolHigherTimeframeDisclosure({
     market_symbol_higher_timeframe_evidence: {
       market: {
         gate: "AMBER",
-        states: { M: "FORMED", W: "NONE", D: "NONE" },
+        states: { M: "FORMED", W: "NONE", D: "FORMED" },
         reason_codes: [],
-        period_diagnostics: [active, inactive("W"), inactive("D")],
+        period_diagnostics: [inactive("M"), inactive("W"), active],
         source_support: { warmup_convergence_evidence: convergence },
       },
       symbol_evidence: {
@@ -640,15 +653,16 @@ test("human review carries sector M/W/D diagnostics and labels buy points diagno
       evidence_id: `sha256:${"e".repeat(64)}`,
     },
   });
-  assert.match(marketSymbol.lines.join("\n"), /市场M方向诊断：一买 2 \/ 二买 1/);
-  assert.match(marketSymbol.lines.join("\n"), /市场M\/W\/D多前缀暖机诊断：非单调/);
-  assert.match(marketSymbol.lines.join("\n"), /仅诊断，不改变现有双窗口交易门/);
+  assert.match(marketSymbol.lines.join("\n"), /市场日线方向诊断：一买 2 \/ 二买 1/);
+  assert.match(marketSymbol.lines.join("\n"), /市场高级别历史多前缀暖机诊断：非单调/);
+  assert.match(marketSymbol.lines.join("\n"), /仅作历史稳定性审计，不参与买入放行/);
+  assert.doesNotMatch(marketSymbol.lines.join("\n"), /月线|周线|月\/周\/日/);
 
   const invalid = Ui.sectorSourceDisclosure({});
   assert.match(invalid.lines.join("\n"), /当前契约要求的板块高级别证据/);
 });
 
-test("candidate QMT catalog gate is visible before virtual entry feedback", () => {
+test("candidate QMT catalog gate stays visible in account-free review feedback", () => {
   const Ui = loadHumanReviewUi();
   const snapshot = {
     paper_observation_eligible: true,
@@ -660,7 +674,7 @@ test("candidate QMT catalog gate is visible before virtual entry feedback", () =
     paper_observation_reason: "QMT_RANKING_CATALOG_EXACT_REVISION_UNAVAILABLE_FOR_PAPER_ENTRY",
   });
   assert.equal(blocked.status, "REVIEW_ONLY");
-  assert.match(blocked.headline, /不建立虚拟意图/);
+  assert.match(blocked.headline, /不建立执行计划/);
   assert.match(blocked.reasons[0], /精确 QMT 目录修订尚不可用/);
 
   const exit = Ui.paperPathDecision(snapshot, {
@@ -688,11 +702,11 @@ test("candidate origin distinguishes sector triggers from monitor supplements", 
   assert.equal(ui.selectionLabelForSignal({
     sector_triggered: true,
     selection_sources: ["QMT_SECTOR_TRIGGER", "VIRTUAL_HOLDING_MONITOR"],
-  }), "板块触发 + 持仓监控");
+  }), "板块触发 + 人工关注组监控");
   assert.equal(ui.selectionLabelForSignal({
     sector_triggered: false,
     selection_sources: ["HOLDING_MONITOR"],
-  }), "持仓监控");
+  }), "人工关注组监控");
   assert.equal(ui.selectionLabelForSignal({
     sector_triggered: false,
     selection_sources: ["DECISION_RULE_RECHECK"],
@@ -704,6 +718,21 @@ test("candidate origin distinguishes sector triggers from monitor supplements", 
     }).established,
     ["候选来源：自选监控"],
   );
+});
+
+test("disabled formal research is presented as not required rather than unresolved", () => {
+  const Ui = loadUi();
+  const signal = {
+    ...snapshot.signals[1],
+    formal_selection_required: false,
+    selection_sources: ["ACTIVE_WATCHLIST_MONITOR"],
+  };
+  const groups = Ui.evidenceGroupsForSignal(signal);
+
+  assert.ok(groups.established.includes(
+    "选股口径：实时技术监听不要求离线正式研究；该项不构成阻断",
+  ));
+  assert.equal(groups.blocking.some((line) => /正式研究/.test(line)), false);
 });
 
 test("chart workspace exposes accessible resizers before the dashboard controller boots", () => {
@@ -767,16 +796,49 @@ test("dashboard has six independent point filters", () => {
   }
 });
 
+test("dashboard exposes and persists the optional one-minute segment-difference filter", () => {
+  assert.match(template, /id="es-segment-count"/);
+  assert.match(template, /id="es-show-current-segments"[^>]*>查看段差证据</);
+  for (const state of ["all", "present", "current", "historical", "absent"]) {
+    assert.match(template, new RegExp(`data-segment-state="${state}"`));
+  }
+  assert.match(template, /证据存在与买入定位窗口是否过期分开显示；不改变5分钟买卖点是否成立/);
+  assert.match(controllerSource, /segmentState:\s*\["present", "current", "historical", "absent"\]\.includes\(saved\.segmentState\)/);
+  assert.match(controllerSource, /segmentState:\s*state\.segmentState/);
+  assert.match(controllerSource, /Ui\.segmentDifferenceEvidenceStatusForSignal\(signal\) === "present"/);
+  assert.match(controllerSource, /\[data-segment-state\]/);
+  assert.match(controllerSource, /state\.segmentState = "all"/);
+  assert.match(controllerSource, /state\.segmentState = "present"/);
+  assert.match(controllerSource, /state\.pointType = "all"/);
+  assert.match(controllerSource, /data-screening-mode="live"/);
+  assert.match(controllerSource, /showCurrentSegments\.disabled = segmentEvidenceCount === 0/);
+  assert.match(controllerSource, /\["present", "current", "historical"\]\.includes\(state\.segmentState\)/);
+  assert.match(controllerSource, /state\.segmentState = "all"/);
+});
+
 test("stock selection opens with all six point channels visible", () => {
   assert.match(template, /data-selection-scope="sector-trigger"[^>]*aria-pressed="false"/);
   assert.match(template, /data-selection-scope="all-qualified"[^>]*aria-pressed="true"/);
   assert.match(template, /data-point-type="buy"[^>]*aria-pressed="false"/);
   assert.match(template, /data-point-type="sell"[^>]*aria-pressed="false"/);
   assert.match(template, /data-point-type="all"[^>]*aria-pressed="true"/);
-  assert.match(controllerSource, /pointType:\s*saved\.pointType\s*\|\|\s*"all"/);
-  assert.match(controllerSource, /CANONICAL_SIX_POINT_CHANNELS/);
-  assert.match(controllerSource, /value\.contract\s*===\s*VIEW_CONTRACT/);
+  assert.match(controllerSource, /pointType:\s*pointFilters\.includes\(saved\.pointType\)/);
+  assert.match(controllerSource, /lifecycle:\s*lifecycleFilters\.includes\(saved\.lifecycle\)/);
+  assert.match(
+    controllerSource,
+    /CANONICAL_SIX_POINT_CHANNELS_V6_STRICT_1M_L0_LEDGER/,
+  );
+  assert.match(controllerSource, /value\.contract\s*!==\s*VIEW_CONTRACT/);
+  assert.match(controllerSource, /localStorage\.removeItem\(STORAGE_KEY\)/);
   assert.match(controllerSource, /saved\.selectionScope\s*===\s*"sector-trigger"[\s\S]*?"all-qualified"/);
+  assert.match(template, /class="es-signal-channel-bar"/);
+  const quickChannels = template.match(
+    /class="es-signal-channel-bar"[\s\S]*?<\/div>\s*<\/div>/,
+  );
+  assert.ok(quickChannels);
+  for (const point of ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]) {
+    assert.match(quickChannels[0], new RegExp(`data-point-type="${point}"`));
+  }
   assert.match(humanReviewSource, /alertType:\s*"all"/);
   assert.match(humanReviewSource, /reviewLane:\s*"focus"/);
   assert.match(
@@ -789,11 +851,11 @@ test("stock selection opens with all six point channels visible", () => {
   );
   assert.match(
     template,
-    /value="POSSIBLE_SELL_REVIEW">卖点待人工判断（30m退出或5m短差）/,
+    /value="POSSIBLE_5M_TRADE_BUY">5分钟操作确认买点/,
   );
   assert.match(
     humanReviewSource,
-    /POSSIBLE_SELL_REVIEW:\s*"卖点待人工判断（30m退出或5m短差）"/,
+    /POSSIBLE_5M_TRADE_SELL:\s*"5分钟操作确认卖点"/,
   );
   assert.match(
     humanReviewSource,
@@ -801,11 +863,11 @@ test("stock selection opens with all six point channels visible", () => {
   );
   assert.match(
     humanReviewSource,
-    /WARMUP_CONVERGENCE_REQUIRED_FOR_VIRTUAL_ENTRY:\s*"暖机双窗口尚未一致，不能建立新的虚拟买入"/,
+    /WARMUP_CONVERGENCE_REQUIRED_FOR_VIRTUAL_ENTRY:\s*"暖机双窗口尚未一致，不能进入新的买入观察"/,
   );
   assert.match(
     humanReviewSource,
-    /EXPECTED_REVIEW_LEVEL_30M_OR_5M:\s*"该卖点线索需人工确认是 30m 退出还是 5m 短差"/,
+    /EXPECTED_REVIEW_LEVEL_30M_OR_5M:\s*"旧档案：该卖点线索需人工确认是30分钟退出还是5分钟短差"/,
   );
 });
 
@@ -855,6 +917,48 @@ function sectorSameBaseCoverage({ converged = false, fullCount = 240 } = {}) {
   };
 }
 
+function sellOnlyRisk({ legacy = false } = {}) {
+  const currentReason = "HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY";
+  const genericLegacyReason = "HIGHER_TIMEFRAME_GATE_NOT_ATTACHED";
+  const sectorLegacyReason = "HIGHER_TIMEFRAME_SECTOR_GATE_NOT_ATTACHED";
+  return {
+    market_gate: "UNRESOLVED",
+    sector_gate: "UNRESOLVED",
+    symbol_gate: "UNRESOLVED",
+    new_entry_requires_all_green: false,
+    market_reason_codes: [legacy ? genericLegacyReason : currentReason],
+    sector_reason_codes: [legacy ? sectorLegacyReason : currentReason],
+    symbol_reason_codes: [legacy ? genericLegacyReason : currentReason],
+    reason_codes: legacy
+      ? [genericLegacyReason, sectorLegacyReason]
+      : [currentReason],
+  };
+}
+
+function sellOnlySignal({ legacy = false } = {}) {
+  return {
+    ...snapshot.signals[0],
+    signal_id: legacy ? "legacy-sell-only" : "current-sell-only",
+    point_type: "3sell",
+    side: "sell",
+    selection_path: "INDIVIDUAL_THREE_PROGRAM",
+    entry_allowed: false,
+    technical_entry_allowed: false,
+    higher_timeframe_risk: sellOnlyRisk({ legacy }),
+  };
+}
+
+function withSellOnlyPolicy(signal) {
+  return {
+    ...snapshot,
+    screening_policy: {
+      sell_only_higher_timeframe_evidence_policy:
+        "SCHEMA_COMPLETE_UNRESOLVED_WITHOUT_PROVIDER_CALL",
+    },
+    signals: [signal, snapshot.signals[1]],
+  };
+}
+
 test("normalizeSnapshot fails closed on contradictory sector source contracts", () => {
   const Ui = loadUi();
   const bridgeRisk = {
@@ -898,6 +1002,639 @@ test("normalizeSnapshot fails closed on contradictory sector source contracts", 
     () => Ui.normalizeSnapshot(withRisk(partial)),
     /snapshot_sector_source_invalid/,
   );
+  assert.throws(
+    () => Ui.normalizeSnapshot(withRisk({
+      market_gate: "GREEN",
+      sector_gate: "UNRESOLVED",
+      symbol_gate: "GREEN",
+      market_reason_codes: [],
+      sector_reason_codes: [],
+      symbol_reason_codes: [],
+      reason_codes: [],
+    })),
+    /snapshot_sector_source_invalid/,
+  );
+});
+
+test("normalizeSnapshot displays explicitly unavailable sector sources as fail-closed evidence", () => {
+  const Ui = loadUi();
+  for (const reasonCode of [
+    "QMT_HIGHER_TIMEFRAME_PROVIDER_UNAVAILABLE",
+    "QMT_SECTOR_HIGHER_TIMEFRAME_PROVIDER_UNAVAILABLE",
+  ]) {
+    const unavailableRisk = {
+      market_gate: "GREEN",
+      sector_gate: "UNRESOLVED",
+      symbol_gate: "GREEN",
+      market_reason_codes: [],
+      sector_reason_codes: [reasonCode],
+      symbol_reason_codes: [],
+      reason_codes: [reasonCode],
+    };
+    const normalized = Ui.normalizeSnapshot({
+      ...snapshot,
+      signals: [
+        {
+          ...snapshot.signals[0],
+          entry_allowed: false,
+          higher_timeframe_risk: unavailableRisk,
+        },
+        snapshot.signals[1],
+      ],
+    });
+    const groups = Ui.evidenceGroupsForSignal(normalized.signals[0]);
+
+    assert.match(groups.blocking.join(" "), /板块高级别来源尚未取得/);
+    assert.match(groups.risk.join(" "), /板块高级别提供器当前不可用/);
+    assert.ok(groups.raw.includes(reasonCode));
+  }
+});
+
+test("normalizeSnapshot accepts the explicit ETF proxy sector exemption only", () => {
+  const Ui = loadUi();
+  const etfSignal = {
+    ...snapshot.signals[0],
+    code: "SH.513100",
+    name: "纳指ETF国泰",
+    selection_path: "ETF_PROXY",
+    sector: {
+      sector_id: "etf-proxy:SH.513100",
+      sector_name: "ETF代理",
+      eligible: true,
+      hard_block: false,
+      reason_codes: ["ETF_PROXY_SECTOR_NOT_REQUIRED"],
+    },
+    higher_timeframe_risk: {
+      market_gate: "GREEN",
+      sector_gate: "UNRESOLVED",
+      symbol_gate: "GREEN",
+      market_reason_codes: [],
+      sector_reason_codes: ["QMT_SECTOR_HIGHER_TIMEFRAME_INPUT_UNAVAILABLE"],
+      symbol_reason_codes: [],
+      reason_codes: ["QMT_SECTOR_HIGHER_TIMEFRAME_INPUT_UNAVAILABLE"],
+    },
+  };
+  const withSignal = (signal) => ({
+    ...snapshot,
+    signals: [signal, snapshot.signals[1]],
+  });
+
+  const normalized = Ui.normalizeSnapshot(withSignal(etfSignal));
+  const groups = Ui.evidenceGroupsForSignal(normalized.signals[0]);
+  assert.match(groups.risk.join(" "), /ETF代理路径不要求行业板块高级别来源/);
+  assert.doesNotMatch(groups.blocking.join(" "), /板块高级别来源字段不完整/);
+
+  assert.throws(
+    () => Ui.normalizeSnapshot(withSignal({ ...etfSignal, selection_path: "" })),
+    /snapshot_sector_source_invalid/,
+  );
+  assert.throws(
+    () => Ui.normalizeSnapshot(withSignal({
+      ...etfSignal,
+      sector: { ...etfSignal.sector, hard_block: true },
+    })),
+    /snapshot_sector_source_invalid/,
+  );
+});
+
+test("normalizeSnapshot accepts exact current and migrated sell-only entry-gate declarations", () => {
+  const Ui = loadUi();
+
+  for (const legacy of [false, true]) {
+    const normalized = Ui.normalizeSnapshot(withSellOnlyPolicy(sellOnlySignal({ legacy })));
+    const signal = normalized.signals[0];
+    const groups = Ui.evidenceGroupsForSignal(signal);
+
+    assert.match(groups.risk.join(" "), /纯卖出结构/);
+    assert.match(groups.risk.join(" "), /只用于新买入核验/);
+    assert.doesNotMatch(groups.blocking.join(" "), /来源字段不完整/);
+    assert.equal(
+      Ui.reasonLabel("HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY"),
+      "纯卖出结构不适用买入专用高级别风险门",
+    );
+  }
+});
+
+test("normalizeSnapshot rejects forged or contradictory sell-only exemptions", () => {
+  const Ui = loadUi();
+  const current = sellOnlySignal();
+  const assertSourceRejected = (signal, includePolicy = true) => {
+    const candidate = includePolicy
+      ? withSellOnlyPolicy(signal)
+      : { ...snapshot, signals: [signal, snapshot.signals[1]] };
+    assert.throws(
+      () => Ui.normalizeSnapshot(candidate),
+      /snapshot_sector_source_invalid/,
+    );
+  };
+
+  assertSourceRejected(current, false);
+  assertSourceRejected({ ...current, side: "buy" });
+  assertSourceRejected({ ...current, point_type: "3buy" });
+  assertSourceRejected({ ...current, technical_entry_allowed: true });
+  assertSourceRejected({
+    ...current,
+    higher_timeframe_risk: {
+      ...current.higher_timeframe_risk,
+      sector_gate: "GREEN",
+    },
+  });
+  assertSourceRejected({
+    ...current,
+    presentation_sell_only_higher_timeframe_entry_gate: "CURRENT_EXPLICIT_REASON",
+    higher_timeframe_risk: {
+      ...current.higher_timeframe_risk,
+      sector_reason_codes: ["HIGHER_TIMEFRAME_GATE_NOT_ATTACHED"],
+    },
+  });
+});
+
+test("normalizeUsMonitor isolates auxiliary contract failures and recomputes US counts", () => {
+  const Ui = loadUi();
+  assert.equal(Ui.normalizeSnapshot(snapshot).us_monitor.available, false);
+
+  const monitor = Ui.normalizeUsMonitor({
+    schema: "chanlun-us-realtime-monitor",
+    source_schema: "chanlun-attention-group-monitor",
+    market: "us",
+    market_scope: "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+    decision_mode: "STRICT_STRUCTURE_OBSERVATION_ONLY",
+    auxiliary_only: true,
+    full_market_screening: false,
+    selection_candidates: false,
+    available: true,
+    ready: false,
+    status: "warming_up",
+    reason_code: "MULTI_TIMEFRAME_WARMUP_INCOMPLETE",
+    symbols: [
+      {
+        market: "us", code: "QCOM.US", name: "高通", groups: ["我的关注"],
+        monitoring_scope: "WATCHLIST", status: "monitoring",
+      },
+      {
+        market: "us", code: "QQQ.US", name: "纳指100ETF", groups: ["ETF"],
+        monitoring_scope: "WATCHLIST", status: "market_closed",
+      },
+    ],
+    research_only: true,
+    no_order_execution: true,
+    manual_review_required: true,
+  });
+  assert.equal(monitor.declared_count, 2);
+  assert.equal(monitor.active_count, 1);
+  assert.equal(monitor.closed_count, 1);
+  assert.equal(monitor.failed_count, 0);
+
+  const malformed = Ui.normalizeUsMonitor({ ...monitor, selection_candidates: true });
+  assert.equal(malformed.available, false);
+  assert.equal(malformed.reason_code, "US_MONITOR_CONTRACT_INVALID");
+});
+
+test("US monitor symbols share the signal queue and bypass only A-share sector filters", () => {
+  const Ui = loadUi();
+  const usMonitor = {
+    schema: "chanlun-us-realtime-monitor",
+    source_schema: "chanlun-attention-group-monitor",
+    market: "us",
+    market_scope: "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+    decision_mode: "STRICT_STRUCTURE_OBSERVATION_ONLY",
+    auxiliary_only: true,
+    full_market_screening: false,
+    selection_candidates: false,
+    available: true,
+    ready: true,
+    status: "ready",
+    reason_code: "READY",
+    last_completed_at: "2026-08-15T10:30:00+08:00",
+    symbols: [
+      {
+        market: "us", code: "QCOM.US", name: "高通", groups: ["我的关注"],
+        monitoring_scope: "WATCHLIST", status: "monitoring",
+      },
+      {
+        market: "us", code: "QQQ.US", name: "纳指100ETF", groups: ["人工关注组"],
+        monitoring_scope: "MANUAL_ATTENTION", status: "market_closed",
+      },
+    ],
+    research_only: true,
+    no_order_execution: true,
+    manual_review_required: true,
+  };
+  const normalized = Ui.normalizeSnapshot({ ...snapshot, us_monitor: usMonitor });
+  const usRows = normalized.unified_signals.filter(
+    (row) => Ui.inferSignalMarket(row) === "us",
+  );
+
+  assert.deepEqual(usRows.map((row) => row.code), ["QCOM.US", "QQQ.US"]);
+  assert.ok(usRows.every((row) => row.lifecycle_stage === "monitoring"));
+  assert.ok(usRows.every((row) => row.sector.sector_id === "market:us"));
+  assert.match(usRows[0].chart_urls["1m"], /market=us.*code=QCOM\.US.*intervals=1/);
+  assert.deepEqual(
+    Ui.filterSignals(normalized.unified_signals, {
+      sectorId: "qmt-gics3:bank",
+    }).map((row) => row.code),
+    ["SZ.000001", "QCOM.US", "QQQ.US"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(normalized.unified_signals, { market: "us" })
+      .map((row) => row.code),
+    ["QCOM.US", "QQQ.US"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(normalized.unified_signals, { source: "attention" })
+      .map((row) => row.code),
+    ["QQQ.US"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(normalized.unified_signals, { reviewStage: "tracking" })
+      .map((row) => row.code),
+    ["QCOM.US", "QQQ.US"],
+  );
+});
+
+test("unmatched notification history stays in human review and cannot create a current selection", () => {
+  const Ui = loadUi();
+  const HumanUi = loadHumanReviewUi();
+  const event = {
+    schema: "chanlun-realtime-review-notification",
+    notification_id: `sha256:${"a".repeat(64)}`,
+    source: "CROSS_MARKET_ATTENTION_MONITOR",
+    market: "us",
+    code: "QCOM.US",
+    name: "高通",
+    side: "sell",
+    point_type: "1sell",
+    source_frequency: "1m",
+    trigger_frequency: "1m",
+    signal_time: "2026-08-15T10:25:00-04:00",
+    observed_at: "2026-08-15T10:25:00-04:00",
+    recorded_at: "2026-08-15T22:26:00+08:00",
+    structure_anchor_time: "2026-08-15T10:24:00-04:00",
+    structure_confirmed_at: "2026-08-15T10:22:00-04:00",
+    signal_available_at: "2026-08-15T10:25:00-04:00",
+    detected_at: "2026-08-15T10:25:35-04:00",
+    delivery_updated_at: "2026-08-15T22:26:00+08:00",
+    delivered_at: null,
+    new_stage: "triggered",
+    delivery_status: "failed",
+    delivery_reason: "network",
+    evidence_id: "point:qcom:1sell",
+    recursive_level: 0,
+    anchor_time: "2026-08-15T10:24:00-04:00",
+    current_price: 145.26,
+    reference_price: 145.2,
+    invalidation_price: null,
+    big_direction: "down",
+    mid_direction: "down",
+    is_manual_attention: true,
+    selection_sources: ["MANUAL_ATTENTION_MONITOR"],
+    chart_urls: {
+      d: "/?market=us&code=QCOM.US&layout=single&intervals=D",
+      "30m": "/?market=us&code=QCOM.US&layout=single&intervals=30",
+      "5m": "/?market=us&code=QCOM.US&layout=single&intervals=5",
+      "1m": "/?market=us&code=QCOM.US&layout=single&intervals=1",
+    },
+    review_required: true,
+    automated_action_authorized: false,
+    real_order_transport_enabled: false,
+    live_status: "LIVE_DISABLED",
+  };
+  const inbox = {
+    schema: "chanlun-realtime-review-inbox",
+    events: [event],
+    event_count: 1,
+    pending_review_count: 1,
+    delivery_counts: { failed: 1 },
+    credentials_exposed: false,
+    real_account_accessed: false,
+    real_order_transport_enabled: false,
+    automated_order_authorized: false,
+    live_status: "LIVE_DISABLED",
+  };
+  const notificationObservedAt = new Date("2026-08-15T10:30:00-04:00");
+  const normalized = Ui.normalizeSnapshot({
+    ...snapshot,
+    realtime_notifications: inbox,
+  });
+  const clue = normalized.unified_signals.find((row) => row.code === "QCOM.US");
+
+  assert.equal(clue, undefined);
+  assert.equal(normalized.realtime_notifications.events.length, 1);
+  assert.deepEqual(
+    Ui.filterSignals(normalized.unified_signals, {
+      market: "us", source: "notification", reviewStage: "notified",
+    }),
+    [],
+  );
+  assert.equal(
+    Ui.fullDateTimeText(Ui.realtimeNotificationDisplayTime(event)),
+    "2026-08-15 22:26:00",
+  );
+
+  const review = HumanUi.mergeRealtimeNotificationQueue({
+    review_queue: [{ candidate_id: "formal:1", symbol: "SZ.000001" }],
+  }, notificationObservedAt);
+  assert.equal(review.review_queue_count, 1);
+  const reviewWithInbox = HumanUi.mergeRealtimeNotificationQueue({
+    review_queue: [{ candidate_id: "formal:1", symbol: "SZ.000001" }],
+    realtime_notifications: inbox,
+  }, notificationObservedAt);
+  assert.equal(reviewWithInbox.review_queue_count, 2);
+  assert.equal(reviewWithInbox.current_realtime_notification_count, 1);
+  assert.equal(reviewWithInbox.historical_realtime_notification_count, 0);
+  assert.equal(reviewWithInbox.focus_review_queue_count, 1);
+  assert.equal(reviewWithInbox.review_queue[0].candidate_kind, "realtime_notification");
+  assert.equal(reviewWithInbox.review_queue[0].market, "us");
+  assert.equal(reviewWithInbox.review_queue[0].current_price, 145.26);
+  assert.equal(
+    reviewWithInbox.review_queue[0].entry_confirmation_bar_closed_at,
+    event.structure_confirmed_at,
+  );
+  assert.equal(
+    reviewWithInbox.review_queue[0].review_available_at,
+    event.delivery_updated_at,
+  );
+  assert.equal(
+    reviewWithInbox.review_queue[0].realtime_notification_detected_at,
+    event.detected_at,
+  );
+  assert.equal(
+    reviewWithInbox.review_queue[0].realtime_notification_setup_lock_state,
+    "unknown",
+  );
+  assert.match(
+    HumanUi.realtimeNotificationSetupLockLabel(reviewWithInbox.review_queue[0]),
+    /末端结构封存状态未保存/,
+  );
+  assert.equal(
+    HumanUi.realtimeNotificationTimeLabel(reviewWithInbox.review_queue[0]),
+    "投递更新时间",
+  );
+  assert.equal(reviewWithInbox.review_queue[0].paper_observation_eligible, false);
+  assert.equal(reviewWithInbox.review_queue[0].review_priority, 110);
+  assert.equal(reviewWithInbox.review_queue[0].review_lane, "ACTIONABLE_REVIEW");
+  assert.equal(reviewWithInbox.review_queue[0].realtime_notification_is_historical, false);
+
+  const historical = HumanUi.realtimeNotificationCandidate(
+    event,
+    new Date("2026-08-15T10:36:00-04:00"),
+  );
+  assert.equal(historical.review_priority, 69);
+  assert.equal(historical.review_lane, "RESEARCH_ARCHIVE");
+  assert.equal(historical.confidence, "LOW");
+  assert.equal(historical.realtime_notification_is_historical, true);
+  assert.equal(historical.realtime_notification_current_age_seconds, 660);
+  assert.ok(historical.warning_codes.includes("REALTIME_NOTIFICATION_HISTORICAL"));
+  const historicalQueue = HumanUi.mergeRealtimeNotificationQueue(
+    { review_queue: [], realtime_notifications: inbox },
+    new Date("2026-08-15T10:36:00-04:00"),
+  );
+  assert.equal(historicalQueue.current_realtime_notification_count, 0);
+  assert.equal(historicalQueue.historical_realtime_notification_count, 1);
+  assert.equal(historicalQueue.focus_review_queue_count, 0);
+
+  const degradedReview = HumanUi.mergeRealtimeNotificationQueue({
+    formal_review_available: false,
+    formal_review_unavailable_reason: "human_review_web_bundle_invalid",
+    review_queue: [],
+    realtime_notifications: inbox,
+  }, notificationObservedAt);
+  assert.equal(degradedReview.review_queue_count, 1);
+  assert.equal(degradedReview.formal_review_queue_count, 0);
+  assert.match(
+    HumanUi.formalReviewUnavailableLabel(
+      degradedReview.formal_review_unavailable_reason,
+    ),
+    /旧版程序候选归档.*等待新快照发布/,
+  );
+
+  const unsafe = HumanUi.realtimeNotificationCandidate({
+    ...event,
+    automated_action_authorized: true,
+  }, notificationObservedAt);
+  assert.equal(unsafe, null);
+
+  const legacyWithoutCurrentPrice = HumanUi.realtimeNotificationCandidate({
+    ...event,
+    current_price: undefined,
+    reference_price: 999,
+  }, notificationObservedAt);
+  assert.equal(legacyWithoutCurrentPrice.current_price, undefined);
+});
+
+test("notification history may annotate only the same still-current structure", () => {
+  const Ui = loadUi();
+  const current = snapshot.signals[1];
+  const baseEvent = {
+    schema: "chanlun-realtime-review-notification",
+    notification_id: `sha256:${"b".repeat(64)}`,
+    source: "A_SHARE_STRICT_DECISION_CORE",
+    market: "a",
+    code: current.code,
+    name: current.name,
+    side: current.side,
+    point_type: current.point_type,
+    source_frequency: "5m",
+    signal_time: current.observed_at,
+    signal_available_at: current.observed_at,
+    observed_at: current.observed_at,
+    recorded_at: current.observed_at,
+    detected_at: current.observed_at,
+    delivery_updated_at: current.observed_at,
+    new_stage: "triggered",
+    delivery_status: "delivered",
+    evidence_id: "",
+    recursive_level: 0,
+    current_price: 8.12,
+    chart_urls: { ...current.chart_urls },
+    review_required: true,
+    automated_action_authorized: false,
+    real_order_transport_enabled: false,
+    live_status: "LIVE_DISABLED",
+  };
+  const inbox = {
+    schema: "chanlun-realtime-review-inbox",
+    events: [baseEvent],
+    credentials_exposed: false,
+    real_account_accessed: false,
+    real_order_transport_enabled: false,
+    automated_order_authorized: false,
+    live_status: "LIVE_DISABLED",
+  };
+
+  const annotated = Ui.normalizeSnapshot({
+    ...snapshot,
+    realtime_notifications: inbox,
+  });
+  const currentRow = annotated.unified_signals.find(
+    (row) => row.signal_id === current.signal_id,
+  );
+
+  assert.equal(annotated.unified_signals.length, snapshot.signals.length);
+  assert.equal(currentRow.realtime_notification, true);
+  assert.equal(currentRow.synthetic_notification_projection, undefined);
+  assert.equal(currentRow.notification_current_price, 8.12);
+
+  const invalidated = Ui.normalizeSnapshot({
+    ...snapshot,
+    realtime_notifications: {
+      ...inbox,
+      events: [{ ...baseEvent, new_stage: "invalidated" }],
+    },
+  });
+  assert.equal(
+    invalidated.unified_signals.some((row) => row.signal_id === current.signal_id),
+    false,
+  );
+  assert.equal(invalidated.realtime_notifications.events.length, 1);
+});
+
+test("terminal lifecycle rows are excluded from the normalized current shortlist", () => {
+  const Ui = loadUi();
+  const normalized = Ui.normalizeSnapshot({
+    ...snapshot,
+    signals: [
+      { ...snapshot.signals[0], lifecycle_stage: "invalidated" },
+      snapshot.signals[1],
+    ],
+  });
+
+  assert.deepEqual(normalized.signals.map((row) => row.signal_id), ["signal-2"]);
+  assert.equal(normalized.presentation_signal_count, 1);
+  assert.equal(normalized.total_qualified_signal_count, 1);
+  assert.equal(normalized.counts_by_point_type["1buy"], 0);
+  assert.equal(normalized.counts_by_point_type["2buy"], 1);
+  assert.deepEqual(
+    Ui.filterSignals([
+      { ...snapshot.signals[0], lifecycle_stage: "closed" },
+      snapshot.signals[1],
+    ]).map((row) => row.signal_id),
+    ["signal-2"],
+  );
+});
+
+test("expired one-minute segment stays visible only as historical audit evidence", () => {
+  const Ui = loadUi();
+  const HumanUi = loadHumanReviewUi();
+  const event = {
+    schema: "chanlun-realtime-review-notification",
+    notification_id: `sha256:${"e".repeat(64)}`,
+    source: "A_SHARE_STRICT_DECISION_CORE",
+    market: "a",
+    code: "SH.601231",
+    name: "环旭电子",
+    side: "buy",
+    point_type: "1buy",
+    source_frequency: "5m",
+    trigger_frequency: null,
+    segment_difference_frequency: "1m",
+    segment_difference_present: true,
+    segment_difference_status: "expired",
+    segment_difference_current: false,
+    segment_difference_evidence_status: "present",
+    segment_difference_boundary_status: "expired",
+    segment_difference_point_type: "2buy",
+    segment_difference_divergence_kind: "consolidation",
+    segment_difference_valid_until: "2026-08-03T11:13:00+08:00",
+    setup_lock_state: "pending",
+    signal_time: "2026-08-17T13:55:00+08:00",
+    signal_available_at: "2026-08-17T13:55:00+08:00",
+    structure_confirmed_at: "2026-08-17T13:55:00+08:00",
+    detected_at: "2026-08-17T13:57:22+08:00",
+    recorded_at: "2026-08-17T13:57:34+08:00",
+    delivery_updated_at: "2026-08-17T13:57:34+08:00",
+    delivered_at: "2026-08-17T13:57:34+08:00",
+    delivery_status: "delivered",
+    new_stage: "triggered",
+    evidence_id: "point:601231:5m:1buy",
+    recursive_level: 0,
+    current_price: 29.06,
+    chart_urls: { d: "/d", "30m": "/30", "5m": "/5", "1m": "/1" },
+    review_required: true,
+    automated_action_authorized: false,
+    real_order_transport_enabled: false,
+    live_status: "LIVE_DISABLED",
+  };
+
+  const clue = Ui.realtimeNotificationSignal(event);
+  assert.equal(clue.setup_5m.lock_state, "pending");
+  assert.equal(Ui.setupLockStateForSignal(clue), "pending");
+  assert.equal(clue.segment_difference_1m.point_type, "2buy");
+  assert.equal(clue.segment_difference_1m.divergence_kind, "consolidation");
+  assert.equal(clue.notification_segment_difference_present, true);
+  assert.equal(clue.notification_segment_difference_current, false);
+  assert.equal(clue.notification_segment_difference_status, "expired");
+  const oneMinute = Ui.periodPathForSignal(clue).find(
+    (period) => period.frequency === "1m",
+  );
+  assert.equal(oneMinute.state, "段差证据已出现·定位窗口已过");
+  assert.equal(oneMinute.summary, "二买（盘整背驰） · 严格1m/L0段差证据已留存");
+  assert.match(oneMinute.boundary, /现已过期；段差证据仍保留/);
+
+  const candidate = HumanUi.realtimeNotificationCandidate(event);
+  assert.equal(candidate.realtime_notification_segment_difference_present, true);
+  assert.equal(candidate.realtime_notification_segment_difference_current, false);
+  assert.equal(candidate.realtime_notification_segment_difference_status, "expired");
+  assert.equal(
+    candidate.realtime_notification_segment_difference_divergence_kind,
+    "consolidation",
+  );
+  assert.equal(candidate.realtime_notification_setup_lock_state, "pending");
+  assert.equal(
+    HumanUi.realtimeNotificationSetupLockLabel(candidate),
+    "5分钟操作确认已完成；末端结构仍会随新K更新，不影响当前复核",
+  );
+  assert.equal(
+    HumanUi.realtimeNotificationSetupLockLabel({
+      ...candidate,
+      realtime_notification_setup_lock_state: "locked",
+    }),
+    "5分钟操作确认已完成；末端结构已封存",
+  );
+  assert.ok(candidate.warning_codes.includes("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"));
+  assert.deepEqual(HumanUi.realtimeNotificationSegmentPeriod(candidate), [
+    "段差证据已出现·定位窗口已过",
+    "2buy（盘整背驰）证据仍有效；过期的只是买入定位窗口",
+    "定位窗口有效至 2026-08-03 11:13:00；不影响5分钟信号",
+  ]);
+});
+
+test("segment enrichment projection starts freshness at the later confluence time", () => {
+  const Ui = loadUi();
+  const clue = Ui.realtimeNotificationSignal({
+    notification_id: `sha256:${"f".repeat(64)}`,
+    market: "a",
+    code: "SZ.000001",
+    name: "平安银行",
+    side: "buy",
+    point_type: "3buy",
+    source_frequency: "5m",
+    new_stage: "segment_enriched",
+    signal_time: "2026-08-20T10:00:00+08:00",
+    signal_available_at: "2026-08-20T10:00:00+08:00",
+    segment_difference_frequency: "1m",
+    segment_difference_present: true,
+    segment_difference_status: "current",
+    segment_difference_current: true,
+    segment_difference_evidence_status: "present",
+    segment_difference_boundary_status: "current",
+    segment_difference_point_type: "1buy",
+    segment_difference_divergence_kind: "trend",
+    segment_difference_recursive_level: 0,
+    segment_difference_available_at: "2026-08-20T09:40:00+08:00",
+    delivery_status: "delivered",
+    chart_urls: { d: "/d", "30m": "/30", "5m": "/5", "1m": "/1" },
+  });
+
+  assert.equal(clue.notification_signal_available_at, "2026-08-20T10:00:00+08:00");
+  assert.equal(clue.segment_difference_1m.divergence_kind, "trend");
+  assert.equal(
+    Ui.notificationCurrentAgeSecondsForReview(
+      clue,
+      new Date("2026-08-20T10:01:00+08:00"),
+    ),
+    60,
+  );
 });
 
 test("filters preserve independent point lifecycle sector and query choices", () => {
@@ -931,9 +1668,67 @@ test("filters preserve independent point lifecycle sector and query choices", ()
       .map((row) => row.signal_id),
     ["signal-1"],
   );
+
+  const currentSegment = signals[1];
+  const expiredSegment = {
+    ...currentSegment,
+    signal_id: "signal-segment-expired",
+    decision_reasons: ["ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"],
+  };
+  const unavailableSegment = {
+    ...currentSegment,
+    signal_id: "signal-segment-unavailable",
+    decision_reasons: ["ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"],
+  };
+  const segmentSignals = [signals[0], currentSegment, expiredSegment, unavailableSegment];
+  assert.equal(Ui.segmentDifferenceStatusForSignal(signals[0]), "absent");
+  assert.equal(Ui.segmentDifferenceStatusForSignal(currentSegment), "current");
+  assert.equal(Ui.segmentDifferenceStatusForSignal(expiredSegment), "expired");
+  assert.equal(Ui.segmentDifferenceStatusForSignal(unavailableSegment), "unavailable");
+  assert.deepEqual(
+    Ui.filterSignals(segmentSignals, { segmentState: "present" })
+      .map((row) => row.signal_id),
+    ["signal-2", "signal-segment-expired", "signal-segment-unavailable"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(segmentSignals, { segmentState: "current" })
+      .map((row) => row.signal_id),
+    ["signal-2"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(segmentSignals, { segmentState: "historical" })
+      .map((row) => row.signal_id),
+    ["signal-segment-expired", "signal-segment-unavailable"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(segmentSignals, { segmentState: "absent" })
+      .map((row) => row.signal_id),
+    ["signal-1"],
+  );
+  const sameLevelRecursiveEvidence = {
+    ...currentSegment,
+    signal_id: "signal-1m-chart-l1",
+    trigger_1m: {
+      point_type: "1buy",
+      source_frequency: "1m",
+      recursive_level: 1,
+    },
+  };
+  assert.equal(
+    Ui.segmentDifferenceEvidenceStatusForSignal(sameLevelRecursiveEvidence),
+    "absent",
+  );
+  assert.deepEqual(
+    Ui.filterSignals([sameLevelRecursiveEvidence], { segmentState: "present" }),
+    [],
+  );
+  assert.equal(
+    Ui.emptySignalDetail(Ui.normalizeSnapshot(snapshot), "", { segmentState: "current" }),
+    "当前快照有 1 条严格1m/L0段差证据（买点 1 / 卖点 0），但被其他筛选条件隐藏；点击“查看段差证据”可清除这些筛选。",
+  );
 });
 
-test("review display sorting uses lifecycle then sector rank without mutating facts", () => {
+test("review display sorting keeps confirmed setups ahead of provisional candidates", () => {
   const Ui = loadUi();
   const rows = [
     {
@@ -971,6 +1766,22 @@ test("review display sorting uses lifecycle then sector rank without mutating fa
       lifecycle_stage: "armed",
       sector: { sector_id: "sector-1" },
     },
+    {
+      signal_id: "confirmed-observed",
+      code: "SH.688132",
+      point_type: "3buy",
+      lifecycle_stage: "observed",
+      setup_5m: { status: "confirmed", point_type: "3buy" },
+      sector: { sector_id: "sector-1" },
+    },
+    {
+      signal_id: "provisional-formed",
+      code: "SH.688132",
+      point_type: "3buy",
+      lifecycle_stage: "formed",
+      setup_5m: { status: "provisional", point_type: "3buy" },
+      sector: { sector_id: "sector-1" },
+    },
   ];
   const originalIds = rows.map((row) => row.signal_id);
   const sorted = Ui.sortSignalsForReview(rows, [
@@ -983,9 +1794,301 @@ test("review display sorting uses lifecycle then sector rank without mutating fa
     "armed-ranked-first-sell",
     "armed-ranked",
     "armed-unranked",
+    "confirmed-observed",
+    "provisional-formed",
     "approaching-ranked",
   ]);
   assert.deepEqual(rows.map((row) => row.signal_id), originalIds);
+});
+
+test("live selection sorts the filtered rows by review priority descending", () => {
+  const Ui = loadUi();
+  const rows = [
+    {
+      signal_id: "confirmed-low-priority",
+      code: "SZ.000001",
+      point_type: "1buy",
+      lifecycle_stage: "triggered",
+      review_priority: 25,
+      sector: { sector_id: "sector-1" },
+    },
+    {
+      signal_id: "approaching-high-priority",
+      code: "SZ.000002",
+      point_type: "3buy",
+      lifecycle_stage: "approaching",
+      review_priority: 80,
+      sector: { sector_id: "sector-2" },
+    },
+    {
+      signal_id: "notification-failed",
+      code: "QCOM.US",
+      point_type: "2buy",
+      lifecycle_stage: "triggered",
+      realtime_notification: true,
+      notification_delivery_status: "failed",
+      sector: { sector_id: "market:us" },
+    },
+    {
+      signal_id: "canonical-derived-priority",
+      code: "SZ.000003",
+      point_type: "2buy",
+      side: "buy",
+      lifecycle_stage: "triggered",
+      entry_allowed: true,
+      execution_profile: { recommendation: "READY", context_grade: "A" },
+      higher_timeframe_risk: {
+        market_gate: "GREEN",
+        sector_gate: "GREEN",
+        symbol_gate: "GREEN",
+        reason_codes: [],
+      },
+      warmup: { converged: true, reason_codes: [] },
+      selection_sources: [],
+      decision_reasons: [],
+      sector: { sector_id: "sector-1" },
+    },
+    {
+      signal_id: "priority-unavailable",
+      code: "AAPL.US",
+      point_type: "1buy",
+      lifecycle_stage: "triggered",
+      sector: { sector_id: "market:us" },
+    },
+  ];
+
+  assert.deepEqual(
+    Ui.sortSignalsForReview(rows).map((row) => row.signal_id),
+    [
+      "notification-failed",
+      "canonical-derived-priority",
+      "approaching-high-priority",
+      "confirmed-low-priority",
+      "priority-unavailable",
+    ],
+  );
+  assert.equal(Ui.reviewPriorityForSignal(rows[2]), 110);
+  assert.equal(Ui.reviewPriorityForSignal(rows[3]), 85);
+  assert.equal(Ui.reviewPriorityForSignal(rows[4]), null);
+});
+
+test("derived review priority keeps recommendation bands stable under rich diagnostics", () => {
+  const Ui = loadUi();
+  const diagnosticReasons = Array.from({ length: 40 }, (_, index) => `diagnostic_${index}`);
+  const signal = (signalId, status) => ({
+    signal_id: signalId,
+    code: signalId,
+    point_type: "2buy",
+    side: "buy",
+    lifecycle_stage: "triggered",
+    execution_profile: {
+      recommendation: status === "BLOCKED" ? "BLOCKED" : "CAUTION",
+      context_grade: "B",
+      advisory_reason_codes: diagnosticReasons,
+      hard_block_reason_codes: status === "BLOCKED" ? diagnosticReasons : [],
+    },
+    position_recommendation: { status, reason_codes: diagnosticReasons },
+    higher_timeframe_risk: {
+      market_gate: "UNRESOLVED",
+      sector_gate: "UNRESOLVED",
+      symbol_gate: "UNRESOLVED",
+      reason_codes: diagnosticReasons,
+    },
+    warmup: { converged: true, reason_codes: diagnosticReasons },
+    decision_reasons: diagnosticReasons,
+    selection_sources: ["QMT_SECTOR_ELIGIBLE_SCOPE"],
+  });
+  const rows = [
+    signal("blocked", "BLOCKED"),
+    signal("not-actionable", "NOT_ACTIONABLE"),
+    signal("conditional", "CONDITIONAL"),
+    signal("recommended", "RECOMMENDED"),
+  ];
+
+  assert.deepEqual(
+    Ui.sortSignalsForReview(rows).map((row) => row.signal_id),
+    ["recommended", "conditional", "not-actionable", "blocked"],
+  );
+  assert.ok(Ui.reviewPriorityForSignal(rows[3]) >= 70);
+  assert.ok(Ui.reviewPriorityForSignal(rows[0]) <= 19);
+});
+
+test("confirmed sell review is urgent and manual attention adds account-free priority", () => {
+  const Ui = loadUi();
+  const signal = (signalId, sources) => ({
+    signal_id: signalId,
+    code: signalId,
+    point_type: "2sell",
+    side: "sell",
+    lifecycle_stage: "triggered",
+    execution_profile: { recommendation: "CAUTION", context_grade: "B" },
+    position_recommendation: { status: "CONDITIONAL", reason_codes: ["MANUAL_REVIEW"] },
+    higher_timeframe_risk: {
+      market_gate: "UNRESOLVED",
+      sector_gate: "UNRESOLVED",
+      symbol_gate: "UNRESOLVED",
+      reason_codes: [],
+    },
+    warmup: { converged: true, reason_codes: [] },
+    selection_sources: sources,
+    setup_5m: { available_at: "2026-08-20T14:55:00+08:00" },
+    observed_at: "2026-08-20T15:00:00+08:00",
+  });
+  const structuralSell = signal("structural-sell", ["QMT_SECTOR_ELIGIBLE_SCOPE"]);
+  const manualAttention = signal("manual-attention", ["MANUAL_ATTENTION_MONITOR"]);
+
+  assert.ok(Ui.reviewPriorityForSignal(structuralSell) >= 80);
+  assert.ok(Ui.reviewPriorityForSignal(manualAttention) >= 90);
+  assert.deepEqual(
+    Ui.sortSignalsForReview([structuralSell, manualAttention]).map((row) => row.signal_id),
+    ["manual-attention", "structural-sell"],
+  );
+
+  const staleManualAttention = {
+    ...manualAttention,
+    signal_id: "stale-manual-attention",
+    observed_at: "2026-08-21T15:00:00+08:00",
+    review_priority: 97,
+  };
+  assert.ok(Ui.reviewPriorityForSignal(staleManualAttention) <= 69);
+  assert.match(
+    Ui.decisionSummaryForSignal(staleManualAttention).title,
+    /历史5分钟二卖结构持续跟踪（非新增卖点）/,
+  );
+});
+
+test("signal freshness excludes only the same A-share lunch closure", () => {
+  const Ui = loadUi();
+  const base = {
+    code: "SZ.000001",
+    market: "a",
+    setup_5m: { available_at: "2026-08-20T11:25:00+08:00" },
+    observed_at: "2026-08-20T13:05:00+08:00",
+  };
+
+  assert.equal(Ui.signalAgeSecondsForReview(base), 600);
+  assert.equal(
+    Ui.signalAgeSecondsForReview({ ...base, market: "us" }),
+    6000,
+  );
+  assert.equal(
+    Ui.signalAgeSecondsForReview({
+      ...base,
+      observed_at: "2026-08-21T13:05:00+08:00",
+    }),
+    92400,
+  );
+
+  const staleBuy = {
+    signal_id: "stale-buy",
+    code: "SZ.000001",
+    side: "buy",
+    point_type: "2buy",
+    lifecycle_stage: "triggered",
+    setup_5m: { available_at: "2026-08-19T14:55:00+08:00" },
+    observed_at: "2026-08-20T15:00:00+08:00",
+    execution_profile: { recommendation: "READY", context_grade: "A" },
+    position_recommendation: {
+      status: "RECOMMENDED",
+      side: "buy",
+      recommended_percent: "6.15",
+      reason_codes: ["CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED"],
+    },
+    higher_timeframe_risk: {
+      market_gate: "GREEN",
+      sector_gate: "GREEN",
+      symbol_gate: "GREEN",
+    },
+    warmup: { converged: true },
+  };
+  assert.ok(Ui.reviewPriorityForSignal(staleBuy) <= 19);
+  assert.equal(
+    Ui.positionRecommendationLabel(staleBuy),
+    "本条买入不纳入操作计划：买点已超过10分钟新鲜窗口，等待新的5分钟结构",
+  );
+});
+
+test("realtime notification priority uses current freshness, not only discovery delay", () => {
+  const Ui = loadUi();
+  const notification = {
+    signal_id: "notification-current-age",
+    code: "MSFT.US",
+    market: "us",
+    side: "buy",
+    point_type: "2buy",
+    lifecycle_stage: "triggered",
+    realtime_notification: true,
+    notification_delivery_status: "delivered",
+    notification_signal_available_at: "2026-08-20T10:00:00-04:00",
+    notification_detected_at: "2026-08-20T10:00:30-04:00",
+    execution_profile: { recommendation: "READY", context_grade: "A" },
+    position_recommendation: {
+      status: "RECOMMENDED",
+      side: "buy",
+      basis: "STRUCTURAL_RISK_MODEL_UPPER_BOUND",
+      recommended_percent: "6.15",
+      reason_codes: ["CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED"],
+    },
+  };
+  const freshAt = new Date("2026-08-20T10:05:00-04:00");
+  const staleAt = new Date("2026-08-20T10:11:00-04:00");
+
+  assert.equal(Ui.signalAgeSecondsForReview(notification), 30);
+  assert.equal(Ui.notificationCurrentAgeSecondsForReview(notification, freshAt), 300);
+  assert.equal(Ui.reviewPriorityForSignal(notification, freshAt), 100);
+  assert.equal(
+    Ui.positionRecommendationLabel(notification, "结构风险参考待人工核对", freshAt),
+    "结构风险参考比例：6.15% 以内（按当前价至5分钟防守位测算；仅作结构模型比较）",
+  );
+
+  assert.equal(Ui.notificationCurrentAgeSecondsForReview(notification, staleAt), 660);
+  assert.equal(Ui.reviewPriorityForSignal(notification, staleAt), 69);
+  assert.equal(Ui.decisionSummaryForSignal(notification, staleAt).title, "买点已超过新鲜窗口");
+  assert.equal(
+    Ui.positionRecommendationLabel(notification, "结构风险参考待人工核对", staleAt),
+    "本条买入不纳入操作计划：买点已超过10分钟新鲜窗口，等待新的5分钟结构",
+  );
+
+  const failed = { ...notification, notification_delivery_status: "failed" };
+  assert.equal(Ui.reviewPriorityForSignal(failed, freshAt), 110);
+  assert.equal(Ui.reviewPriorityForSignal(failed, staleAt), 69);
+
+  const lunchNotification = {
+    ...notification,
+    code: "SZ.000001",
+    market: "a",
+    notification_signal_available_at: "2026-08-20T11:25:00+08:00",
+    notification_detected_at: "2026-08-20T11:25:30+08:00",
+  };
+  assert.equal(
+    Ui.notificationCurrentAgeSecondsForReview(
+      lunchNotification,
+      new Date("2026-08-20T13:05:00+08:00"),
+    ),
+    600,
+  );
+  assert.equal(
+    Ui.reviewPriorityForSignal(
+      lunchNotification,
+      new Date("2026-08-20T13:05:00+08:00"),
+    ),
+    100,
+  );
+});
+
+test("human review filters can preserve their rows and then sort priority high to low", () => {
+  const HumanUi = loadHumanReviewUi();
+  const rows = [
+    { candidate_id: "low", review_priority: 20 },
+    { candidate_id: "high", review_priority: 90 },
+    { candidate_id: "middle", review_priority: "55" },
+  ];
+
+  assert.deepEqual(
+    HumanUi.sortCandidatesByReviewPriority(rows).map((row) => row.candidate_id),
+    ["high", "middle", "low"],
+  );
+  assert.deepEqual(rows.map((row) => row.candidate_id), ["low", "high", "middle"]);
 });
 
 test("chart selection defaults to a queue signal and clears an empty filter", () => {
@@ -1018,8 +2121,163 @@ test("signal queue and chart publish one shared selected identity", () => {
   assert.equal(selectedCard.dataset.code, selected.code);
   assert.equal(selectedCard.getAttribute("aria-current"), "true");
   assert.equal(selectedCard.getAttribute("aria-controls"), "es-chart-workspace");
+  const situation = selectedCard.children.find(
+    (child) => child.className === "es-signal-card__evidence",
+  );
+  const tags = selectedCard.children.find(
+    (child) => child.className === "es-signal-card__tags",
+  );
+  assert.match(situation.textContent, /日线 .* · 30m .* · 5m .* · 1m /);
+  assert.ok(tags.children.some(
+    (child) => child.textContent === "1m 段差证据 · 买入窗口有效",
+  ));
   assert.equal(chart.root.dataset.signalId, selected.signal_id);
   assert.equal(chart.root.dataset.selectedCode, selected.code);
+});
+
+test("same symbol confirmed and newer forming structures keep both facts explicit", () => {
+  const Ui = loadUi();
+  const confirmedSell = {
+    ...snapshot.signals[0],
+    signal_id: "confirmed-sell",
+    code: "SH.600215",
+    name: "派斯林",
+    point_type: "1sell",
+    side: "sell",
+    lifecycle_stage: "triggered",
+    observed_at: "2026-08-20T15:00:00+08:00",
+    setup_5m: {
+      point_type: "1sell",
+      status: "confirmed",
+      formation_state: "confirmed",
+      terminal_segment_role: "latest_completed",
+      terminal_segment_end_at: "2026-08-13T14:00:00+08:00",
+    },
+    presentation_sibling_structure_context: {
+      relation: "untrusted_snapshot_value",
+      summary: "不应保留",
+    },
+  };
+  const formingBuy = {
+    ...snapshot.signals[0],
+    signal_id: "forming-buy",
+    code: "SH.600215",
+    name: "派斯林",
+    point_type: "3buy",
+    side: "buy",
+    lifecycle_stage: "approaching",
+    observed_at: "2026-08-20T15:00:00+08:00",
+    setup_5m: {
+      point_type: "3buy",
+      status: "provisional",
+      formation_state: "forming",
+      terminal_segment_role: "latest_unfinished",
+      terminal_segment_end_at: "2026-08-19T14:45:00+08:00",
+    },
+  };
+
+  const [confirmed, forming] = Ui.annotateSiblingStructureContexts([
+    confirmedSell,
+    formingBuy,
+  ]);
+  assert.equal(
+    confirmed.presentation_sibling_structure_context.relation,
+    "opposite_forming_candidate",
+  );
+  assert.equal(
+    confirmed.presentation_sibling_structure_context.summary,
+    "较新的反向三买候选正在形成（未确认）；当前一卖操作确认仍保留",
+  );
+  assert.equal(
+    forming.presentation_sibling_structure_context.relation,
+    "opposite_confirmed_setup",
+  );
+  assert.equal(
+    forming.presentation_sibling_structure_context.summary,
+    "当前为较新的反向三买候选（未确认）；同标的另有一卖操作确认",
+  );
+  assert.equal(
+    confirmedSell.presentation_sibling_structure_context.summary,
+    "不应保留",
+  );
+
+  const signalList = fakeChartRoot();
+  const card = Ui.renderSignalWorkspace(
+    signalList.root,
+    [confirmed, forming],
+    confirmed.signal_id,
+  );
+  const contextLine = card.children.find(
+    (child) => child.className === "es-signal-card__structure-context",
+  );
+  const tags = card.children.find(
+    (child) => child.className === "es-signal-card__tags",
+  );
+  assert.equal(contextLine.dataset.relation, "opposite_forming_candidate");
+  assert.match(contextLine.textContent, /当前一卖操作确认仍保留/);
+  assert.ok(tags.children.some(
+    (child) => child.textContent === "反向候选形成中",
+  ));
+  assert.match(
+    Ui.decisionSummaryForSignal(
+      confirmed,
+      new Date("2026-08-20T15:05:00+08:00"),
+    ).detail,
+    /较新的反向三买候选正在形成（未确认）/,
+  );
+});
+
+test("same point new candidate is annotated but an older unfinished row is not", () => {
+  const Ui = loadUi();
+  const confirmed = {
+    signal_id: "confirmed-3sell",
+    code: "SH.688408",
+    point_type: "3sell",
+    side: "sell",
+    lifecycle_stage: "triggered",
+    observed_at: "2026-08-20T15:00:00+08:00",
+    setup_5m: {
+      status: "confirmed",
+      formation_state: "confirmed",
+      terminal_segment_role: "latest_completed",
+      terminal_segment_end_at: "2026-08-17T14:25:00+08:00",
+    },
+  };
+  const newer = {
+    signal_id: "forming-3sell",
+    code: "SH.688408",
+    point_type: "3sell",
+    side: "sell",
+    lifecycle_stage: "approaching",
+    observed_at: "2026-08-20T15:00:00+08:00",
+    setup_5m: {
+      status: "provisional",
+      formation_state: "forming",
+      terminal_segment_role: "latest_unfinished",
+      terminal_segment_end_at: "2026-08-20T14:25:00+08:00",
+    },
+  };
+  const rows = Ui.annotateSiblingStructureContexts([confirmed, newer]);
+  assert.equal(
+    rows[0].presentation_sibling_structure_context.relation,
+    "same_point_forming_candidate",
+  );
+  assert.match(
+    rows[1].presentation_sibling_structure_context.summary,
+    /另有三卖操作确认/,
+  );
+
+  const older = {
+    ...newer,
+    signal_id: "older-unfinished",
+    setup_5m: {
+      ...newer.setup_5m,
+      terminal_segment_end_at: "2026-08-16T14:25:00+08:00",
+    },
+  };
+  const inconsistent = Ui.annotateSiblingStructureContexts([confirmed, older]);
+  assert.equal(inconsistent[0].presentation_sibling_structure_context, undefined);
+  assert.equal(inconsistent[1].presentation_sibling_structure_context, undefined);
 });
 
 test("signals group by native sector without price-change logic", () => {
@@ -1126,7 +2384,10 @@ test("theater mode synchronizes the workspace body and toggle state", () => {
 });
 
 test("dashboard CSS implements focus dual triple and responsive evidence layouts", () => {
-  assert.match(dashboardCss, /\.es-analysis-grid\s*\{/);
+  assert.match(dashboardCss, /\.es-analysis-grid\s*\{[^}]*overflow:\s*clip/s);
+  assert.match(dashboardCss, /\.es-us-monitor-compact__summary\s*\{[^}]*display:\s*grid/s);
+  assert.match(dashboardCss, /\.es-us-monitor-compact__metrics\s*\{[^}]*repeat\(4,/s);
+  assert.doesNotMatch(dashboardCss, /\.es-us-monitor-compact\s*\{[^}]*grid-template-columns:/s);
   assert.match(dashboardCss, /data-layout="focus"\]\[data-focused-frequency="30m"\]/);
   assert.match(dashboardCss, /data-layout="focus"\]\[data-focused-frequency="5m"\]/);
   assert.match(dashboardCss, /data-layout="focus"\]\[data-focused-frequency="1m"\]/);
@@ -1261,19 +2522,22 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
 
   assert.deepEqual(Ui.LIFECYCLE_LABELS, {
     observed: "结构观察",
+    monitoring: "实时监听",
     approaching: "即将确认",
-    formed: "已形成",
-    armed: "已入观察池",
-    triggered: "1分钟已触发",
+    formed: "几何候选待确认",
+    armed: "旧版等待态",
+    triggered: "5分钟操作确认",
     executable: "强提示待人工复核",
-    active: "持有跟踪",
+    active: "结构持续跟踪",
     invalidated: "结构已失效",
     closed: "跟踪已结束",
   });
-  assert.equal(Ui.lifecycleLabel("triggered"), "1分钟已触发");
+  assert.equal(Ui.lifecycleLabel("triggered"), "5分钟操作确认");
   assert.equal(Ui.lifecycleLabel("unexpected-stage"), "未知状态");
   assert.match(template, /data-lifecycle="approaching"/);
-  assert.match(template, /data-lifecycle="formed"/);
+  assert.doesNotMatch(template, /data-lifecycle="formed"/);
+  assert.doesNotMatch(template, /data-lifecycle="armed"/);
+  assert.doesNotMatch(template, /旧档案：/);
   assert.equal(
     Ui.scanCoverageText({
       planned_symbol_count: 32,
@@ -1480,7 +2744,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
   );
   assert.match(controllerSource, /Ui\.sectorCoverageText\(audit\)/);
   assert.match(controllerSource, /Ui\.scanCoverageText\(audit, snapshot\)/);
-  assert.match(controllerSource, /Ui\.emptySignalDetail\(state\.snapshot, state\.query\)/);
+  assert.match(controllerSource, /Ui\.emptySignalDetail\(state\.snapshot, state\.query,\s*\{/);
   assert.match(controllerSource, /Ui\.scanQualityText\(snapshot\)/);
   assert.match(controllerSource, /Ui\.memberHistoryDiagnosticsText\(snapshot\)/);
   assert.match(controllerSource, /Ui\.scanTimingText\(audit\)/);
@@ -1523,7 +2787,20 @@ test("the current lifecycle field is authoritative", () => {
     setup_5m: { ...formed.setup_5m, point_type: "2buy" },
   };
 
-  const explicitFormed = { ...formed, lifecycle_stage: "formed" };
+  const explicitFormed = {
+    ...formed,
+    lifecycle_stage: "formed",
+    setup_5m: {
+      ...formed.setup_5m,
+      state_contract: "chanlun-five-minute-setup-state-v3-geometric-candidate",
+      formation_state: "geometry_ready",
+      lock_state: "pending",
+      contains_forming_segment: false,
+      contains_unlocked_segment: true,
+      contains_unfinished_segment: true,
+      actionable: false,
+    },
+  };
   assert.equal(Ui.lifecycleStageForSignal(formed), "approaching");
   assert.equal(Ui.lifecycleStageForSignal(explicitFormed), "formed");
   assert.equal(Ui.lifecycleStageForSignal(pending), "approaching");
@@ -1531,16 +2808,149 @@ test("the current lifecycle field is authoritative", () => {
   assert.equal(Ui.decisionSummaryForSignal(explicitFormed).tone, "waiting");
   assert.deepEqual(
     Ui.filterSignals([formed, explicitFormed], { lifecycle: "formed" }),
-    [explicitFormed],
+    [],
   );
-  assert.equal(Ui.lifecycleLabel("formed"), "已形成");
+  assert.equal(Ui.lifecycleLabel("formed"), "几何候选待确认");
+  assert.equal(Ui.setupFormationStateForSignal(explicitFormed), "geometry_ready");
+  assert.equal(Ui.setupLockStateForSignal(explicitFormed), "pending");
+  assert.equal(Ui.pointLabelForSignal(explicitFormed), "三买候选待锁定");
+  const confirmedPending = {
+    ...explicitFormed,
+    lifecycle_stage: "triggered",
+    setup_5m: {
+      ...explicitFormed.setup_5m,
+      status: "confirmed",
+      formation_state: "confirmed",
+      lock_state: "pending",
+      contains_unlocked_segment: true,
+      actionable: true,
+    },
+  };
+  const confirmedLocked = {
+    ...confirmedPending,
+    setup_5m: {
+      ...confirmedPending.setup_5m,
+      lock_state: "locked",
+      contains_unlocked_segment: false,
+    },
+  };
+  assert.equal(Ui.pointLabelForSignal(confirmedPending), "三买操作确认");
+  assert.equal(Ui.pointLabelForSignal(confirmedLocked), "三买操作确认");
+  assert.equal(Ui.periodPathForSignal(confirmedPending)[2].state, "5分钟操作确认");
+  assert.equal(
+    Ui.periodPathForSignal(confirmedLocked)[2].state,
+    "5分钟操作确认·末端已封存",
+  );
+  assert.match(
+    Ui.periodPathForSignal(confirmedPending)[2].summary,
+    /末端结构仍会随新K更新（不影响当前复核）/,
+  );
+  assert.doesNotMatch(Ui.pointLabelForSignal(confirmedPending), /复核中|待确认/);
+  assert.equal(
+    Ui.decisionSummaryForSignal(explicitFormed).title,
+    "5分钟三买几何候选，尚未达到操作确认",
+  );
+  assert.equal(Ui.periodPathForSignal(explicitFormed)[2].state, "候选待锁定");
+  assert.match(Ui.periodPathForSignal(explicitFormed)[2].summary, /^三买候选待锁定 ·/);
+
+  const terminalFormed = {
+    ...explicitFormed,
+    setup_5m: {
+      ...explicitFormed.setup_5m,
+      terminal_segment_role: "latest_completed",
+      terminal_segment_level: 0,
+      terminal_segment_id: "segment-115",
+      terminal_segment_source_kind: "segment",
+      terminal_segment_direction: "down",
+      terminal_segment_state: "formed",
+      terminal_segment_start_at: "2026-08-13T09:35:00+08:00",
+      terminal_segment_end_at: "2026-08-14T13:25:00+08:00",
+      terminal_segment_available_at: "2026-08-18T15:00:00+08:00",
+    },
+  };
+  assert.equal(
+    Ui.terminalSegmentSummary(terminalFormed.setup_5m),
+    "最新几何成形线段 · 向下 · 几何已成形、证据待固化",
+  );
+  assert.match(
+    Ui.periodPathForSignal(terminalFormed)[2].summary,
+    /^最新几何成形线段 · 向下 · 几何已成形、证据待固化 · 三买候选待锁定 ·/,
+  );
+  assert.match(
+    Ui.periodPathForSignal(terminalFormed)[2].boundary,
+    /线段 2026-08-13 09:35:00 → 2026-08-14 13:25:00/,
+  );
+
+  const hardBlockedFormedSell = {
+    ...terminalFormed,
+    point_type: "3sell",
+    side: "sell",
+    setup_5m: {
+      ...terminalFormed.setup_5m,
+      point_type: "3sell",
+      side: "sell",
+    },
+    decision_reasons: [
+      "sell_not_confirmed",
+      "HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED",
+    ],
+    execution_profile: {
+      recommendation: "BLOCKED",
+      recommendation_label: "结构或数据硬条件未通过",
+      hard_blocked: true,
+      hard_block_reason_codes: ["HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED"],
+      advisory_reason_codes: [],
+    },
+  };
+  assert.equal(
+    Ui.decisionSummaryForSignal(hardBlockedFormedSell).title,
+    "5分钟三卖几何候选，尚未达到操作确认",
+  );
+  assert.equal(Ui.decisionSummaryForSignal(hardBlockedFormedSell).tone, "blocked");
+  const formedSellGroups = Ui.evidenceGroupsForSignal(hardBlockedFormedSell);
+  assert.ok(formedSellGroups.established.some((line) => line.includes("三卖离开/回抽几何已出现")));
+  assert.ok(formedSellGroups.blocking.some((line) => line.includes("高周期同源数据完整性")));
+  assert.ok(formedSellGroups.missing.some((line) => line.includes("卖点尚未达到操作确认")));
+
+  const invalidatedFormed = { ...explicitFormed, lifecycle_stage: "invalidated" };
+  assert.equal(Ui.pointLabelForSignal(invalidatedFormed), "三买候选已失效");
+  assert.equal(Ui.periodPathForSignal(invalidatedFormed)[2].state, "候选已失效");
+
+  const explicitlyForming = {
+    ...formed,
+    setup_5m: {
+      ...formed.setup_5m,
+      formation_state: "forming",
+      lock_state: "pending",
+      contains_forming_segment: true,
+      contains_unlocked_segment: true,
+    },
+  };
+  assert.equal(Ui.pointLabelForSignal(explicitlyForming), "三买候选");
+  assert.equal(Ui.periodPathForSignal(explicitlyForming)[2].state, "形成中");
+
+  const invalidatedConfirmed = {
+    ...explicitFormed,
+    lifecycle_stage: "invalidated",
+    setup_5m: {
+      ...explicitFormed.setup_5m,
+      status: "confirmed",
+      formation_state: "confirmed",
+      lock_state: "locked",
+      contains_unlocked_segment: false,
+      actionable: true,
+    },
+  };
+  assert.equal(Ui.pointLabelForSignal(invalidatedConfirmed), "三买已确认后失效");
+  assert.equal(Ui.periodPathForSignal(invalidatedConfirmed)[2].state, "已确认后失效");
+  assert.equal(Ui.decisionSummaryForSignal(invalidatedConfirmed).title, "结构已失效");
 
   const normalized = Ui.normalizeSnapshot({
     ...snapshot,
     signals: [],
-    manual_holding_signals: [explicitFormed],
+    manual_attention_signals: [explicitFormed],
   });
-  assert.equal(normalized.manual_holding_signals[0].lifecycle_stage, "formed");
+  assert.deepEqual(normalized.manual_attention_signals, []);
 });
 
 test("operator status copy explains degraded state without exposing internal codes", () => {
@@ -1564,8 +2974,8 @@ test("operator status copy explains degraded state without exposing internal cod
     "复核材料待重建 · 结构雷达可看 · 下一轮全量扫描 NEXT_SCAN",
   );
   assert.doesNotMatch(summary, /review_blocked|HUMAN_REVIEW_MATERIALIZATION_FAILED/);
-  assert.match(diagnostic, /内部状态 review_blocked/);
-  assert.match(diagnostic, /原因 HUMAN_REVIEW_MATERIALIZATION_FAILED/);
+  assert.match(diagnostic, /内部状态 复核受阻/);
+  assert.match(diagnostic, /原因 人工复核材料生成失败/);
   assert.match(diagnostic, /结构线索 1664（买点 612 \/ 卖点 1052）/);
   assert.doesNotMatch(diagnostic, /重放板块证据/);
 
@@ -1585,22 +2995,206 @@ test("operator status copy explains degraded state without exposing internal cod
     priority_monitor_status: "verified",
     priority_monitor_last_code_count: 13,
     priority_monitor_reason_codes: ["READY"],
+    candidate_monitor_status: "verified",
+    candidate_monitor_reason_codes: [],
+    candidate_monitor_five_minute: {
+      universe_count: 42,
+      current_count: 42,
+      missing_count: 0,
+      overdue_count: 0,
+      target_seconds: 300,
+    },
+    priority_monitor_sector_source_mode: "CURRENT_NATIVE",
+    priority_monitor_immediate_universe_count: 3,
+    priority_monitor_expired_segment_universe_count: 11,
+    realtime_alert_status: "ready",
+    realtime_alert_reason_code: "READY",
     notification_dispatcher_configured: true,
+    notification_operationally_verified: true,
+    notification_delivery: {
+      status: "verified",
+      reason_code: "DELIVERY_SUCCESS_PROVEN",
+    },
     priority_monitor_last_at: "LAST_RUN",
   };
   const monitorSummary = Ui.priorityMonitorText(monitorHealth, { signal_count: 0 });
   assert.equal(
     monitorSummary,
-    "正常 · 复查 13 只 · 暂无新结构变化 · 通知已接通",
+    "正常 · 范围：人工关注/自选/已有信号/支持板块 · 5分钟候选 42/42 只 · 暂无新结构变化 · 通知送达已验证",
   );
   assert.doesNotMatch(monitorSummary, /verified|READY/);
   assert.match(
     Ui.priorityMonitorDiagnosticsText(monitorHealth, { signal_count: 0 }),
-    /内部状态 verified · 原因 READY · 复查 13 只 · 结构变化 0 条/,
+    /总预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟段差复查 新鲜5分钟信号 3 只 · 超过10个交易分钟未排队 11 只.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*通知送达 已验证（已有成功送达证明）/,
+  );
+  const preparingSectorScope = {
+    ...monitorHealth,
+    priority_monitor_sector_source_mode: "STALE_CACHED_SECTOR_SNAPSHOT_FAIL_CLOSED",
+    candidate_monitor_five_minute: {
+      ...monitorHealth.candidate_monitor_five_minute,
+      universe_count: 1,
+      current_count: 1,
+    },
+  };
+  assert.equal(
+    Ui.priorityMonitorText(preparingSectorScope, { signal_count: 0 }),
+    "优先通道正常 · 支持板块范围准备中 · 当前已核验：人工关注/自选/已有信号 · 5分钟候选 1/1 只 · 暂无新结构变化 · 通知送达已验证",
+  );
+  const continuityScope = {
+    ...monitorHealth,
+    priority_monitor_sector_source_mode: "PRESELECTION_CONTINUITY",
+    preselection_continuity_active: true,
+  };
+  const continuitySummary = Ui.priorityMonitorText(continuityScope, {
+    signal_count: 0,
+  });
+  assert.match(continuitySummary, /上一交易日已认证预选范围过渡/);
+  assert.match(continuitySummary, /全部按当前规则实时重算/);
+  assert.doesNotMatch(continuitySummary, /支持板块范围准备中/);
+  const warmingSectorScope = {
+    ...preparingSectorScope,
+    candidate_monitor_status: "warming",
+    candidate_monitor_reason_codes: ["CANDIDATE_MONITOR_WARMING_UP"],
+    realtime_alert_status: "candidate_monitor_degraded",
+    realtime_alert_reason_code: "CANDIDATE_MONITOR_WARMING_UP",
+    candidate_monitor_five_minute: {
+      ...preparingSectorScope.candidate_monitor_five_minute,
+      universe_count: 7,
+      current_count: 7,
+    },
+  };
+  assert.equal(
+    Ui.priorityMonitorText(warmingSectorScope, { signal_count: 0 }),
+    "优先通道正常 · 5分钟候选覆盖暖机中 · 当前已核验：人工关注/自选/新鲜已有信号 · 支持板块范围准备中 · 5分钟候选 7/7 只 · 暂无新结构变化 · 通知送达已验证",
+  );
+  assert.equal(
+    Ui.segmentScopeText({
+      priority_monitor_last_code_count: 2,
+      priority_monitor_immediate_universe_count: 1,
+      priority_monitor_expired_segment_universe_count: 11,
+    }, {}, 0),
+    "最近一轮1分钟原生复查 2 只，其中新鲜5分钟信号 1 只 · 当前未出现严格1m/L0段差证据 · 另有 11 只已超过10个交易分钟，不再占用1分钟队列 · 全市场完整扫描尚未发布",
+  );
+  assert.equal(
+    Ui.segmentScopeText({}, {
+      coverage_cycle_complete: true,
+      coverage_cycle_completed_symbol_count: 5091,
+      discovered_symbol_count: 5101,
+      pending_symbol_count: 0,
+    }, 3),
+    "当前没有新鲜5分钟信号进入1分钟段差复查 · 当前已发布 3 条严格1m/L0段差证据 · 全市场扫描已完成 5091/5101",
   );
   assert.equal(
     Ui.priorityMonitorText({ priority_monitor_status: "not_due" }, {}),
-    "非交易时段 · 开盘后自动盯盘",
+    "非交易时段 · 开盘后盯盘范围：人工关注/自选/已有信号/支持板块候选 · 仅页面提醒",
+  );
+  const afterHoursDiagnostics = Ui.priorityMonitorDiagnosticsText({
+    priority_monitor_status: "not_due",
+    priority_monitor_reason_codes: [],
+    priority_monitor_last_code_count: 2,
+    candidate_monitor_status: "not_due",
+    candidate_monitor_reason_codes: [],
+    candidate_monitor_five_minute: {
+      universe_count: 2,
+      current_count: 2,
+      missing_count: 0,
+      overdue_count: 0,
+      target_seconds: 300,
+    },
+    realtime_alert_status: "not_due",
+    realtime_alert_reason_code: "NON_TRADING_SESSION_NOT_DUE",
+    notification_dispatcher_configured: true,
+    notification_operationally_verified: true,
+    notification_delivery: {
+      status: "verified",
+      reason_code: "DELIVERY_SUCCESS_PROVEN",
+    },
+  }, {});
+  assert.match(afterHoursDiagnostics, /即时复查 未到运行时段（当前不在A股分钟监听时段）/);
+  assert.match(afterHoursDiagnostics, /5分钟候选轮换 未到运行时段（当前不在A股分钟监听时段）/);
+  assert.doesNotMatch(afterHoursDiagnostics, /（）|状态原因未提供/);
+
+  const capacityBlocked = {
+    ...monitorHealth,
+    candidate_monitor_status: "capacity_insufficient",
+    candidate_monitor_reason_codes: [
+      "CANDIDATE_MONITOR_CONFIGURED_CAPACITY_INSUFFICIENT",
+    ],
+    candidate_monitor_five_minute: {
+      universe_count: 2500,
+      current_count: 1200,
+      missing_count: 1300,
+      overdue_count: 0,
+      target_seconds: 300,
+    },
+    realtime_alert_status: "candidate_monitor_degraded",
+    realtime_alert_reason_code: (
+      "CANDIDATE_MONITOR_CONFIGURED_CAPACITY_INSUFFICIENT"
+    ),
+  };
+  assert.equal(
+    Ui.priorityMonitorText(capacityBlocked, {}),
+    "优先通道正常 · 5分钟候选监听容量不足 · 当前优先复查：人工关注/自选/新鲜已有信号 · 5分钟候选 1200/2500 只 · 暂无新结构变化 · 通知送达已验证",
+  );
+
+  const deliveryUnverified = {
+    ...monitorHealth,
+    realtime_alert_status: "notification_unverified",
+    realtime_alert_reason_code: "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED",
+    notification_operationally_verified: false,
+    notification_delivery: {
+      status: "awaiting_first_delivery",
+      reason_code: "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED",
+    },
+  };
+  assert.match(
+    Ui.priorityMonitorText(deliveryUnverified, {}),
+    /时效保障未就绪 · 尚无到期通知事件或成功送达记录.*通知已配置，送达尚未验证/,
+  );
+});
+
+test("signal cards show causal 5m time and demote stale confirmed structures", () => {
+  const Ui = loadUi();
+  const staleBuy = {
+    lifecycle_stage: "executable",
+    side: "buy",
+    setup_5m: { available_at: "2026-08-14T09:40:00+08:00" },
+    observed_at: "2026-08-21T10:38:00+08:00",
+  };
+  const staleSell = { ...staleBuy, side: "sell" };
+
+  assert.equal(
+    Ui.signalCardLifecycleLabel(staleBuy, new Date("2026-08-21T10:38:00+08:00")),
+    "历史买点 · 等待新结构",
+  );
+  assert.equal(
+    Ui.signalCardLifecycleLabel(staleSell, new Date("2026-08-21T10:38:00+08:00")),
+    "历史卖点 · 持续跟踪",
+  );
+  assert.equal(
+    Ui.signalCardLifecycleLabel({
+      lifecycle_stage: "executable",
+      side: "buy",
+      setup_5m: { terminal_segment_end_at: "2026-08-14T09:40:00+08:00" },
+      observed_at: "2026-08-21T10:38:00+08:00",
+    }, new Date("2026-08-21T10:38:00+08:00")),
+    "历史买点 · 等待新结构",
+  );
+  assert.equal(
+    Ui.signalCardLifecycleLabel({ ...staleBuy, setup_5m: { available_at: "2026-08-21T10:35:00+08:00" } }, new Date("2026-08-21T10:38:00+08:00")),
+    "强提示待人工复核",
+  );
+  assert.equal(
+    Ui.signalCardTimeText({ setup_5m: { available_at: "SIGNAL_AT" }, observed_at: "LATEST" }),
+    "5m信号 SIGNAL_AT",
+  );
+  assert.equal(
+    Ui.signalCardTimeText({ setup_5m: { terminal_segment_end_at: "STRUCTURE_AT" }, observed_at: "LATEST" }),
+    "5m结构 STRUCTURE_AT",
+  );
+  assert.equal(
+    Ui.signalCardTimeText({ monitor_observed_at: "LATEST" }),
+    "最近复查 LATEST",
   );
 });
 
@@ -1659,22 +3253,23 @@ test("signal lifecycle selects the analysis-first default chart and honest decis
   assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "observed" }), "5m");
   assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "approaching" }), "5m");
   assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "armed" }), "5m");
-  assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "triggered" }), "1m");
-  assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "executable" }), "1m");
-  assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "active" }), "1m");
+  assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "triggered" }), "5m");
+  assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "executable" }), "5m");
+  assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "active" }), "5m");
   assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "unknown" }), "5m");
 
-  assert.equal(Ui.decisionSummaryForSignal(snapshot.signals[0]).title, "等待 1分钟精确触发");
+  assert.equal(Ui.decisionSummaryForSignal(snapshot.signals[0]).title, "5分钟一买结构仍在形成");
   assert.equal(Ui.decisionSummaryForSignal(snapshot.signals[1]).title, "强提示待人工复核");
   assert.deepEqual(
     Ui.decisionSummaryForSignal({ lifecycle_stage: "armed", setup_5m: {} }),
     {
       tone: "waiting",
-      title: "等待 1分钟精确触发",
+      title: "旧版等待态，下一次计算将迁移",
       detail: "等待剩余结构条件",
       invalidation: "未提供",
       structuralStop: "未提供",
       riskMultiplier: "未提供",
+      positionRecommendation: "结构风险参考待人工核对",
     },
   );
 });
@@ -1707,13 +3302,22 @@ test("period path and evidence groups separate established missing blocking and 
   assert.equal(Ui.reasonLabel("confirmed_buy_structure"), "买入方向结构已确认");
   assert.equal(
     Ui.reasonLabel("QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT"),
-    "月/周/日风险门历史不足 480 根已完成日线，已失败关闭",
+    "高级别历史研究窗口不足 480 根已完成日线，仅作审计提示",
   );
   assert.equal(
     Ui.reasonLabel("QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_DIVERGED"),
-    "月/周/日风险门完整前缀与 320 根后缀结论不一致，已失败关闭",
+    "高级别历史研究完整前缀与 320 根后缀结论不一致，仅作审计提示",
   );
-  assert.equal(Ui.reasonLabel("unmapped_code"), "unmapped_code（未翻译）");
+  assert.equal(Ui.reasonLabel("unmapped_code"), "诊断代码：unmapped_code");
+  assert.equal(
+    Ui.reasonLabel("MARKET_GATE_UNRESOLVED"),
+    "市场高级别研究状态尚未解决，仅作环境提示",
+  );
+  assert.equal(
+    Ui.reasonLabel("projected_geometric_structure"),
+    "使用未锁定末端线段投影结构，仅作候选观察",
+  );
+  assert.equal(Ui.statusLabel("AMBER"), "琥珀色（需复核）");
   assert.deepEqual(
     Ui.periodPathForSignal(signal).map(({ frequency, state, tone, summary, boundary }) => ({
       frequency, state, tone, summary, boundary,
@@ -1731,23 +3335,40 @@ test("period path and evidence groups separate established missing blocking and 
         state: "支持",
         tone: "supportive",
         summary: "方向 向上 · 主导 一买 · 本周期线段中枢",
-        boundary: "无硬阻断",
+        boundary: "没有关键限制",
       },
       {
         frequency: "5m",
         state: "形成中",
         tone: "waiting",
-        summary: "二买 · 严格笔→递归中枢 · 第 0 层 · 第 1 中枢",
+      summary: "二买候选 · 严格笔→递归中枢 · 第 0 层 · 第 1 中枢",
         boundary: "失效价未提供",
       },
       {
         frequency: "1m",
-        state: "等待",
-        tone: "waiting",
-        summary: "尚未取得同向精确触发",
-        boundary: "结构防守价 9.80",
+        state: "可选段差未出现",
+        tone: "neutral",
+        summary: "尚未取得1分钟段差证据（不影响5分钟信号）",
+        boundary: "只作定位；不能独立授权买卖，也无需等待即可复核5分钟信号",
       },
     ],
+  );
+
+  const withSegmentDifference = {
+    ...signal,
+    trigger_1m: {
+      point_type: "1buy",
+      recursive_level: 0,
+      evidence_codes: [],
+    },
+    position_recommendation: { segment_difference_max_percent: "25" },
+  };
+  const segmentNode = Ui.periodPathForSignal(withSegmentDifference).find(
+    ({ frequency }) => frequency === "1m",
+  );
+  assert.equal(
+    segmentNode.boundary,
+    "段差证据已保留；定位边界需人工核对",
   );
 
   const groups = Ui.evidenceGroupsForSignal(signal);
@@ -1757,21 +3378,22 @@ test("period path and evidence groups separate established missing blocking and 
   ]);
   assert.deepEqual(groups.missing, [
     "5分钟：末端结构确认",
-    "1分钟：尚未取得同向精确触发",
-    "1分钟同向确认尚未完成",
+    "1分钟：可选段差证据尚未出现（不阻断5分钟信号）",
+    "旧参数要求1分钟确认；当前生产规则不再使用该硬门槛",
   ]);
   assert.deepEqual(groups.blocking, [
     "较低或无关结构存在风险",
     "板块高级别来源字段不完整，不能据此解除风险门",
   ]);
-  assert.deepEqual(groups.next, ["等待 1分钟同向买卖点闭合"]);
+  assert.deepEqual(groups.next, ["等待 5分钟设置闭合并确认"]);
   assert.deepEqual(groups.risk, [
     "5分钟失效价：未提供",
     "结构防守价：9.80",
-    "风险乘数：0.50",
-    "市场1分钟会话证据：当前契约字段缺失 · 失败关闭",
-    "板块1分钟会话证据：当前契约字段缺失 · 失败关闭",
-    "个股1分钟会话证据：当前契约字段缺失 · 失败关闭",
+    "买入风险缩放系数：×0.50（仅供结构模型比较）",
+    "结构风险参考待人工核对",
+    "市场1分钟会话证据：当前契约字段缺失 · 高周期环境不可判定，不关闭5分钟主信号",
+    "板块1分钟会话证据：当前契约字段缺失 · 高周期环境不可判定，不关闭5分钟主信号",
+    "个股1分钟会话证据：当前契约字段缺失 · 高周期环境不可判定，不关闭5分钟主信号",
   ]);
   assert.deepEqual(groups.raw, [
     "confirmed_buy_structure",
@@ -1780,6 +3402,501 @@ test("period path and evidence groups separate established missing blocking and 
     "one_minute_not_confirmed",
     "lower_or_unrelated_structure_risk",
   ]);
+});
+
+test("evidence uses the five minute invalidation as the structural stop fallback", () => {
+  const Ui = loadUi();
+  const signal = {
+    ...snapshot.signals[0],
+    structural_stop: null,
+    setup_5m: {
+      ...snapshot.signals[0].setup_5m,
+      invalidation_price: "9.87",
+    },
+  };
+
+  const groups = Ui.evidenceGroupsForSignal(signal);
+
+  assert.ok(groups.risk.includes("结构防守价：9.87"));
+  assert.ok(!groups.risk.includes("结构防守价：未提供"));
+});
+
+test("currently emitted screening diagnostics all have human-readable labels", () => {
+  const Ui = loadUi();
+  const emittedCodes = [
+    "QMT_SECTOR_ELIGIBLE_SCOPE",
+    "QMT_SECTOR_TRIGGER",
+    "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH",
+    "MARKET_GATE_UNRESOLVED",
+    "SECTOR_GATE_UNRESOLVED",
+    "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",
+    "projected_geometric_structure",
+    "geometry_confirmed_before_audit_lock",
+    "formal_center",
+    "formal_center_confirmation",
+    "complete_leave",
+    "complete_first_return",
+    "lifecycle_not_actionable",
+    "consolidation_divergence",
+    "complete_adjacent_rebound",
+    "confirmed_first_class_parent",
+    "complete_first_pullback",
+    "width_matched_entry_departure_legs",
+    "confirmed_same_level_boundary",
+    "macd_any_indicator_decay",
+    "strength_source_macd",
+    "formal_consolidation_movement",
+    "single_center_consolidation",
+    "prior_extreme_held",
+    "macd_dif_extreme_decay",
+    "comparison_leg_width_1",
+    "macd_histogram_area_decay",
+    "macd_histogram_peak_decay",
+    "comparison_leg_width_3",
+    "formal_trend",
+    "two_separated_centers",
+    "trend_divergence",
+    "confirmed_lower_level_first_class_parent",
+    "small_to_large_reversal",
+    "live_first_pullback",
+    "prior_extreme_currently_held",
+    "live_first_return",
+    "core_boundary_currently_held",
+    "terminal_unit_locked",
+    `sha256:${"a".repeat(64)}`,
+  ];
+
+  for (const code of emittedCodes) {
+    assert.doesNotMatch(Ui.reasonLabel(code), /^诊断代码：/);
+    assert.doesNotMatch(Ui.reasonLabel(code), /未收录的系统诊断项/);
+  }
+  assert.equal(
+    Ui.reasonLabel("formal_center_confirmation"),
+    "中枢证据继续固化",
+  );
+});
+
+test("position diagnostics use account-free human-readable labels", () => {
+  const Ui = loadUi();
+  const labels = [
+    "HARD_BLOCKED_NO_TRADE",
+    "POSITION_RATIO_INPUT_UNRESOLVED",
+    "STRUCTURAL_RISK_BUDGET_SIZED",
+    "CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED",
+    "STRUCTURAL_MODEL_CAP_REQUIRES_MANUAL_REVIEW",
+    "SAME_OR_HIGHER_STRUCTURE_FULL_EXIT",
+    "LOWER_STRUCTURE_SEGMENT_DIFFERENCE_REDUCTION",
+    "SELL_STRUCTURE_RELATION_REQUIRED",
+    "LEGACY_STRUCTURAL_RISK_MODEL_RATIO",
+    "LEGACY_BUY_RESTRICTION_REQUIRES_REVIEW",
+    "LEGACY_STRUCTURAL_RISK_INPUT_UNRESOLVED",
+  ].map(Ui.reasonLabel);
+
+  for (const label of labels) {
+    assert.doesNotMatch(label, /^诊断代码：/);
+    assert.doesNotMatch(label, /账户|现金|持仓|仓位|组合热度/);
+  }
+});
+
+test("new execution profile keeps adverse context advisory and visible", () => {
+  const Ui = loadUi();
+  const signal = {
+    ...snapshot.signals[1],
+    context_d: {
+      direction: "down",
+      disposition: "hostile",
+      hard_block: true,
+      dominant_point_type: "1sell",
+      reason_codes: ["confirmed_sell_with_down_structure"],
+      same_period_technical_evidence: {
+        ma5: 9,
+        ma10: 10,
+        ma5_vs_ma10: "ma5_below_ma10",
+        fractal_type: "top",
+        fractal_state: "confirmed",
+      },
+    },
+    setup_5m: { ...snapshot.signals[1].setup_5m, status: "confirmed" },
+    trigger_1m: { ...snapshot.signals[1].trigger_1m, status: "confirmed" },
+    decision_reasons: ["daily_structure_hostile", "SAME_PERIOD_CONTEXT_GRADE_C"],
+    execution_profile: {
+      structure_signal_confirmed: true,
+      execution_trigger_confirmed: true,
+      recommendation: "CAUTION",
+      recommendation_label: "结构已触发，环境逆风或证据需人工复核",
+      hard_blocked: false,
+      hard_block_reason_codes: [],
+      advisory_reason_codes: ["daily_structure_hostile", "SAME_PERIOD_CONTEXT_GRADE_C"],
+      context_grade: "C",
+      context_grade_label: "C级（逆风观察）",
+    },
+  };
+
+  assert.equal(
+    Ui.decisionSummaryForSignal(signal).title,
+    "5分钟二买操作确认，末端结构已封存，谨慎人工复核",
+  );
+  const daily = Ui.periodPathForSignal(signal)[0];
+  assert.equal(daily.state, "逆风提示");
+  assert.equal(daily.tone, "waiting");
+  assert.equal(daily.boundary, "仅降低环境等级，不否定5分钟操作确认");
+  assert.match(daily.summary, /MA5 9 \/ MA10 10/);
+  assert.match(daily.summary, /顶分型已确认/);
+  const groups = Ui.evidenceGroupsForSignal(signal);
+  assert.deepEqual(groups.blocking, []);
+  assert.ok(groups.risk.includes("环境提示：日线结构逆风，仅降低等级"));
+  assert.ok(groups.risk.includes("环境提示：日线与30分钟环境逆风，谨慎观察"));
+});
+
+test("higher-timeframe research diagnostics collapse to one non-blocking explanation", () => {
+  const Ui = loadUi();
+  const signal = {
+    ...snapshot.signals[1],
+    execution_profile: {
+      recommendation: "CAUTION",
+      context_grade: "B",
+      hard_blocked: false,
+      hard_block_reason_codes: [],
+      advisory_reason_codes: [
+        "HIGHER_TIMEFRAME_CONTEXT_NOT_GREEN",
+        "MARKET_GATE_UNRESOLVED",
+        "SECTOR_GATE_UNRESOLVED",
+        "SYMBOL_GATE_UNRESOLVED",
+        "M_COMPLETED_MA5_UNAVAILABLE",
+        "W_CENTER_MAPPING_UNRESOLVED",
+        "D_CENTER_MAPPING_UNRESOLVED",
+        "QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT",
+        "SAME_PERIOD_CONTEXT_GRADE_B",
+      ],
+    },
+  };
+  const groups = Ui.evidenceGroupsForSignal(signal);
+  const summaries = groups.risk.filter((line) => line.startsWith("月/周/日高级别研究："));
+
+  assert.equal(summaries.length, 1);
+  assert.match(summaries[0], /不阻断5分钟买卖点/);
+  assert.ok(groups.risk.includes("环境提示：日线与30分钟环境混合或中性"));
+  assert.equal(groups.blocking.some((line) => /高级别研究/.test(line)), false);
+});
+
+test("a hard data-integrity cause is not repeated as an advisory hint", () => {
+  const Ui = loadUi();
+  const reason = "QMT_NATIVE_DAILY_OHLCV_RECONCILIATION_MISMATCH";
+  const signal = {
+    ...snapshot.signals[1],
+    lifecycle_stage: "triggered",
+    decision_reasons: ["HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED", reason],
+    execution_profile: {
+      recommendation: "BLOCKED",
+      hard_blocked: true,
+      hard_block_reason_codes: [
+        "HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED",
+        reason,
+      ],
+      advisory_reason_codes: [reason, "SAME_PERIOD_CONTEXT_GRADE_B"],
+    },
+  };
+  const groups = Ui.evidenceGroupsForSignal(signal);
+
+  assert.ok(groups.blocking.includes(
+    "QMT 原生日线与1分钟派生日线的开高低收量不一致",
+  ));
+  assert.equal(groups.risk.includes(
+    "环境提示：QMT 原生日线与1分钟派生日线的开高低收量不一致",
+  ), false);
+  assert.ok(groups.risk.includes("环境提示：日线与30分钟环境混合或中性"));
+  assert.ok(groups.raw.includes(reason));
+});
+
+test("established facts and hard blockers stay in one visible evidence group", () => {
+  const Ui = loadUi();
+  const warmupReason = "5M:WARMUP_TAIL_DIVERGED";
+  const exactCalendar = {
+    status: "EXACT",
+    native_daily_bar_count: 70,
+    expected_calendar_session_count: 70,
+    native_first_session: "2026-05-14",
+    native_last_session: "2026-08-20",
+  };
+  const signal = {
+    ...snapshot.signals[1],
+    side: "buy",
+    lifecycle_stage: "triggered",
+    decision_reasons: [warmupReason],
+    execution_profile: {
+      recommendation: "BLOCKED",
+      hard_blocked: true,
+      hard_block_reason_codes: [warmupReason],
+      advisory_reason_codes: [],
+    },
+    higher_timeframe_risk: {
+      ...(snapshot.signals[1].higher_timeframe_risk || {}),
+      market_native_daily_calendar_coverage_evidence: exactCalendar,
+      symbol_native_daily_calendar_coverage_evidence: exactCalendar,
+    },
+    warmup: {
+      converged: false,
+      reason_codes: [warmupReason],
+      by_frequency: [],
+      difference_codes_by_frequency: [],
+    },
+    position_recommendation: {
+      side: "buy",
+      status: "BLOCKED",
+      basis: "STALE_BUY_SIGNAL_NO_CHASE",
+      recommended_percent: "0",
+      recommended_ratio: "0",
+      label: "本条买入不纳入操作计划：等待新的5分钟结构",
+      reason_codes: ["BUY_SIGNAL_STALE_NO_CHASE"],
+    },
+  };
+  const groups = Ui.evidenceGroupsForSignal(signal);
+  const exactMarketLine = groups.established.find((line) => (
+    line.startsWith("市场原生日线交易日覆盖：精确")
+  ));
+  const positionLine = Ui.positionRecommendationLabel(signal);
+
+  assert.ok(exactMarketLine);
+  assert.equal(groups.risk.includes(exactMarketLine), false);
+  assert.ok(groups.blocking.includes("5分钟暖机双窗口尾部不一致"));
+  assert.equal(groups.missing.includes("5分钟暖机双窗口尾部不一致"), false);
+  assert.ok(groups.blocking.includes(positionLine));
+  assert.equal(groups.risk.includes(positionLine), false);
+});
+
+test("hard blockers are displayed with their concrete cause", () => {
+  const Ui = loadUi();
+  const base = {
+    ...snapshot.signals[1],
+    lifecycle_stage: "triggered",
+    execution_profile: {
+      recommendation: "BLOCKED",
+      recommendation_label: "结构或数据硬条件未通过",
+      hard_blocked: true,
+      hard_block_reason_codes: [],
+      advisory_reason_codes: [],
+    },
+  };
+  const withReasons = (hardBlockReasonCodes) => ({
+    ...base,
+    execution_profile: {
+      ...base.execution_profile,
+      hard_block_reason_codes: hardBlockReasonCodes,
+    },
+  });
+
+  const dataBlocked = withReasons([
+    "HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED",
+    "QMT_NATIVE_DAILY_AHEAD_OF_ONE_MINUTE_BASE",
+  ]);
+  assert.equal(Ui.hardBlockSummaryForSignal(dataBlocked), "行情数据完整性未通过");
+  assert.equal(Ui.decisionSummaryForSignal(dataBlocked).title, "行情数据完整性未通过");
+  assert.match(Ui.decisionSummaryForSignal(dataBlocked).detail, /时间穿越/);
+
+  const conflictBlocked = withReasons([
+    "structure_conflict",
+    "same_or_higher_structure_conflict",
+  ]);
+  assert.equal(
+    Ui.decisionSummaryForSignal(conflictBlocked).title,
+    "同级或更高级反向结构冲突",
+  );
+
+  const warmupBlocked = withReasons([
+    "WARMUP_CONVERGENCE_GATE_FAILED",
+    "5M:WARMUP_TAIL_DIVERGED",
+  ]);
+  assert.equal(
+    Ui.decisionSummaryForSignal(warmupBlocked).title,
+    "5分钟结构暖机尚未收敛",
+  );
+  assert.match(Ui.decisionSummaryForSignal(warmupBlocked).detail, /双窗口尾部不一致/);
+
+  const clearanceBlocked = withReasons(["three_buy_lacks_tick_clearance"]);
+  assert.equal(
+    Ui.decisionSummaryForSignal(clearanceBlocked).title,
+    "三买离开中枢的价格空间不足",
+  );
+});
+
+test("position copy removes legacy account wording from every displayed state", () => {
+  const Ui = loadUi();
+  const genericBlocked = {
+    side: "buy",
+    lifecycle_stage: "triggered",
+    position_recommendation: {
+      side: "buy",
+      status: "BLOCKED",
+      basis: "NO_TRADE",
+      recommended_percent: "0",
+      label: "建议买入比例：0%（存在结构或数据硬阻断）",
+      reason_codes: ["HARD_BLOCKED_NO_TRADE"],
+    },
+    execution_profile: {
+      hard_blocked: true,
+      hard_block_reason_codes: [
+        "WARMUP_CONVERGENCE_GATE_FAILED",
+        "5M:WARMUP_TAIL_DIVERGED",
+      ],
+    },
+  };
+  assert.equal(
+    Ui.positionRecommendationLabel(genericBlocked),
+    "本条买入不纳入操作计划：5分钟完整历史与对照窗口的活动买卖点不一致，等待重新收敛",
+  );
+  assert.doesNotMatch(
+    Ui.positionRecommendationLabel(genericBlocked),
+    /结构或数据硬阻断/,
+  );
+
+  const calendarBlocked = {
+    ...genericBlocked,
+    execution_profile: {
+      hard_blocked: true,
+      hard_block_reason_codes: [
+        "HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED",
+        "QMT_NATIVE_DAILY_TRADING_CALENDAR_MISMATCH",
+      ],
+    },
+  };
+  assert.equal(
+    Ui.positionRecommendationLabel(calendarBlocked),
+    "本条买入不纳入操作计划：原生日线与交易日历覆盖不一致，等待数据校验通过",
+  );
+
+  const invalidatedSell = {
+    side: "sell",
+    lifecycle_stage: "invalidated",
+    position_recommendation: {
+      side: "sell",
+      status: "BLOCKED",
+      basis: "NO_TRADE",
+      recommended_percent: "0",
+      label: "建议卖出比例：0%（存在结构或数据硬阻断）",
+      reason_codes: ["HARD_BLOCKED_NO_TRADE"],
+    },
+    execution_profile: {
+      hard_blocked: true,
+      hard_block_reason_codes: ["structure_invalidated"],
+    },
+  };
+  assert.equal(
+    Ui.positionRecommendationLabel(invalidatedSell),
+    "本条卖点结构已失效：不再计算卖出比例，结束本结构跟踪",
+  );
+
+  const relationUnknownSell = {
+    side: "sell",
+    lifecycle_stage: "triggered",
+    position_recommendation: {
+      side: "sell",
+      status: "CONDITIONAL",
+      basis: "STRUCTURAL_EXIT_LEVEL_REQUIRED",
+      recommended_percent: null,
+      segment_difference_max_percent: "25",
+      label: "结构退出参考上限 25%",
+      reason_codes: ["SELL_STRUCTURE_RELATION_REQUIRED"],
+    },
+  };
+  const relationUnknownLabel = Ui.positionRecommendationLabel(relationUnknownSell);
+  assert.equal(
+    relationUnknownLabel,
+    "结构退出参考：卖点与目标结构的级别关系待人工核对；同级或更高级别卖点按完整退出规则复核，低级别或不同结构仅作段差处理；关系未确认前不生成退出比例",
+  );
+  assert.doesNotMatch(relationUnknownLabel, /25%|参考上限/);
+
+  const recommended = {
+    side: "buy",
+    position_recommendation: {
+      side: "buy",
+      status: "RECOMMENDED",
+      basis: "ACCOUNT_EQUITY_UPPER_BOUND",
+      recommended_percent: "8.54",
+      label: "建议买入比例：账户权益的 8.54% 以内（现金、行业暴露和组合热度只可下调）",
+      reason_codes: [
+        "CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED",
+        "PORTFOLIO_CAPS_REQUIRE_MANUAL_REVIEW",
+      ],
+    },
+  };
+  const recommendedLabel = Ui.positionRecommendationLabel(recommended);
+  assert.equal(
+    recommendedLabel,
+    "结构风险参考比例：8.54% 以内（按当前价至5分钟防守位测算；仅作结构模型比较）",
+  );
+  assert.doesNotMatch(recommendedLabel, /账户|现金|持仓|仓位|虚拟|组合热度/);
+
+  const HumanUi = loadHumanReviewUi();
+  assert.equal(
+    HumanUi.positionRecommendationLabel(recommended),
+    recommendedLabel,
+  );
+  assert.equal(
+    HumanUi.positionRecommendationLabel(genericBlocked),
+    Ui.positionRecommendationLabel(genericBlocked),
+  );
+
+  const priceProtected = {
+    ...snapshot.signals[1],
+    signal_id: "price-protected",
+    warmup: { converged: true, reason_codes: [] },
+    execution_profile: {
+      recommendation: "CAUTION",
+      recommendation_label: "5分钟操作确认已出现，谨慎人工复核",
+      context_grade: "B",
+      hard_blocked: false,
+      hard_block_reason_codes: [],
+      advisory_reason_codes: [],
+    },
+    position_recommendation: {
+      side: "buy",
+      status: "BLOCKED",
+      basis: "NO_TRADE",
+      recommended_percent: "0",
+      label: "建议买入比例：0%（存在结构或数据硬阻断）",
+      reason_codes: ["BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR"],
+    },
+  };
+  const summary = Ui.decisionSummaryForSignal(priceProtected);
+  assert.equal(summary.tone, "blocked");
+  assert.equal(summary.title, "当前价格触发追价保护");
+  assert.equal(
+    summary.detail,
+    "本条买入不纳入操作计划：当前价已超过结构锚点的5%追价保护线，等待新的5分钟结构",
+  );
+
+  const groups = Ui.evidenceGroupsForSignal(priceProtected);
+  assert.ok(groups.blocking.includes(summary.detail));
+  assert.deepEqual(groups.next, ["不追价、不执行本条买入，等待新的5分钟结构"]);
+
+  const reviewable = {
+    ...priceProtected,
+    signal_id: "reviewable",
+    position_recommendation: {
+      side: "buy",
+      status: "RECOMMENDED",
+      basis: "STRUCTURAL_RISK_MODEL_UPPER_BOUND",
+      recommended_percent: "8.54",
+      reason_codes: ["CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED"],
+    },
+  };
+  assert.ok(
+    Ui.reviewPriorityForSignal(priceProtected)
+      < Ui.reviewPriorityForSignal(reviewable),
+  );
+
+  const signalList = fakeChartRoot();
+  const card = Ui.renderSignalWorkspace(
+    signalList.root,
+    [priceProtected],
+    priceProtected.signal_id,
+  );
+  const cardRisk = card.children.find(
+    (child) => child.className === "es-signal-card__risk",
+  );
+  assert.equal(card.classList.contains("is-position-blocked"), true);
+  assert.match(cardRisk.textContent, /当前价已超过结构锚点的5%追价保护线/);
+  assert.doesNotMatch(cardRisk.textContent, /谨慎人工复核/);
 });
 
 test("unfinished setup evidence remains missing until the structure closes", () => {
@@ -1798,7 +3915,7 @@ test("unfinished setup evidence remains missing until the structure closes", () 
   assert.equal(groups.raw.includes("unfinished_trend_divergence"), true);
 });
 
-test("market sector and symbol MWD diagnostics remain distinct in the evidence panel", () => {
+test("market sector and symbol daily diagnostics remain distinct in the evidence panel", () => {
   const Ui = loadUi();
   const groups = Ui.evidenceGroupsForSignal({
     ...snapshot.signals[0],
@@ -1806,17 +3923,17 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
       market_gate: "AMBER",
       sector_gate: "UNRESOLVED",
       symbol_gate: "UNRESOLVED",
-      market_reason_codes: ["M_CENTER_MAPPING_UNRESOLVED"],
+      market_reason_codes: ["D_CENTER_MAPPING_UNRESOLVED"],
       sector_reason_codes: ["QMT_SECTOR_HIGHER_TIMEFRAME_RISK_UNAVAILABLE"],
       symbol_reason_codes: ["QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING"],
       reason_codes: [
-        "M_CENTER_MAPPING_UNRESOLVED",
+        "D_CENTER_MAPPING_UNRESOLVED",
         "QMT_SECTOR_HIGHER_TIMEFRAME_RISK_UNAVAILABLE",
         "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING",
       ],
       market_period_diagnostics: [
         {
-          period: "M",
+          period: "D",
           state: "FORMED_UNRESOLVED",
           completed_bar_count: 12,
           evidence_bar_end: "2026-02-27T15:00:00+08:00",
@@ -1938,42 +4055,42 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
   });
 
   assert.equal(
-    groups.blocking.some((value) => value.includes("板块风险门 UNRESOLVED")),
+    groups.blocking.some((value) => value.includes("板块风险门 尚未解决")),
     true,
   );
   assert.equal(
     groups.blocking.includes(
-      "市场风险门 AMBER：月线顶分型到周线中枢的映射未解决",
+      "市场风险门 琥珀色（需复核）：日线顶分型到30分钟中枢的映射未解决",
     ),
     true,
   );
   assert.equal(
     groups.blocking.includes(
-      "个股风险门 UNRESOLVED：QMT 1分钟同源序列缺少预期交易日",
+      "个股风险门 尚未解决：QMT 1分钟同源序列缺少预期交易日",
     ),
     true,
   );
   assert.equal(
     groups.risk.includes(
-      "市场M：FORMED_UNRESOLVED · 完成K线 12 · 活动顶分型 2025/11/28 15:00 至 2026/02/27 15:00 · 证据截止 2026/02/27 15:00 · 映射未解决（候选 0） · 映射供给 只有三类点，缺少形成分型的一/二类卖点 · 低级别点 5（一卖 0 / 二卖 0 / 三卖 2 / 三买 3）· 分型内一二卖 0 / 已完成中枢 0 · 高级别顶分型区间内没有含一卖或二卖的已完成次级别中枢",
+      "市场日线：尚未解决 · 完成K线 12 · 活动顶分型 2025/11/28 15:00 至 2026/02/27 15:00 · 证据截止 2026/02/27 15:00 · 映射未解决（候选 0） · 映射供给 只有三类点，缺少形成分型的一/二类卖点 · 低级别点 5（一卖 0 / 二卖 0 / 三卖 2 / 三买 3）· 分型内一二卖 0 / 已完成中枢 0 · 高级别顶分型区间内没有含一卖或二卖的已完成次级别中枢",
     ),
     true,
   );
   assert.equal(
     groups.risk.includes(
-      "个股1分钟缺失交易日 2026-07-23：观测 0 根 · 历史停牌状态未获认证 · 不自动填补 · 失败关闭",
+      "个股1分钟缺失交易日 2026-07-23：观测 0 根 · 历史停牌状态未获认证 · 不自动填补 · 高周期环境失败关闭，不关闭5分钟主信号",
     ),
     true,
   );
   assert.equal(
     groups.risk.includes(
-      "市场月/周/日暖机：一致 · 完整 480 根日线 / 对照后缀 320 根 · 要求 480 根 · 月/周/日风险门双窗口复算一致",
+      "市场高级别历史暖机（仅审计）：一致 · 完整 480 根日线 / 对照后缀 320 根 · 要求 480 根 · 高级别历史研究双窗口复算一致 · 不参与买入放行",
     ),
     true,
   );
   assert.equal(
     groups.risk.includes(
-      "市场原生日线左历史复核：通过 · 原生日线 600 根 / 1分钟派生日线 240 根 · 重叠 240 个交易日（2025-08-01 至 2026-07-23）· 容许价差 1 个量化单位 / 实测最大 0 · 原生日线只补左历史，30分钟仍由1分钟派生 · LIVE_DISABLED",
+      "市场原生日线左历史复核：通过 · 原生日线 600 根 / 1分钟派生日线 240 根 · 重叠 240 个交易日（2025-08-01 至 2026-07-23）· 容许价差 1 个量化单位 / 实测最大 0 · 原生日线只补左历史，30分钟仍由1分钟派生 · 不自动下单",
     ),
     true,
   );
@@ -1985,7 +4102,7 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
   );
   const hasSymbolCalendarGap = (value) => (
     value.includes(
-      "个股原生日线交易日覆盖：UNEXPLAINED_CALENDAR_SESSION_MISSING",
+      "个股原生日线交易日覆盖：尚未解决",
     )
     && value.includes("日历有而日线缺 1 日（2026-07-23）")
     && value.includes("缺失未证明为停牌、不自动填补 · 失败关闭")
@@ -1995,8 +4112,8 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
     true,
     JSON.stringify(groups.blocking, null, 2),
   );
-  assert.equal(groups.risk.some(hasSymbolCalendarGap), true);
-  assert.equal(groups.raw.includes("M_CENTER_MAPPING_UNRESOLVED"), true);
+  assert.equal(groups.risk.some(hasSymbolCalendarGap), false);
+  assert.equal(groups.raw.includes("D_CENTER_MAPPING_UNRESOLVED"), true);
   assert.equal(
     groups.raw.includes(
       "NO_COMPLETED_LOWER_1SELL_2SELL_CENTER_IN_TOP_FRACTAL",
@@ -2038,13 +4155,13 @@ test("sector native-daily research bridge is disclosed and can never look green"
 
   assert.equal(
     groups.risk.includes(
-      "板块高级别来源：QMT 原生日线构造 M/W/D；30m 仍由同一5m基底派生",
+      "板块研究数据来源：QMT 原生日线用于长期历史审计；30分钟仍由同一5分钟基底派生，当前执行只使用日线与30分钟",
     ),
     true,
   );
   assert.equal(
     groups.risk.includes(
-      "研究限制：原生日线与5m/30m非线性聚合尚未调和 · 仅 RESEARCH_ONLY · GREEN 最多降为 AMBER · LIVE_DISABLED",
+      "研究限制：原生日线与5m/30m非线性聚合尚未调和 · 仅供研究 · 绿色结论最多降为琥珀色 · 不自动下单",
     ),
     true,
   );
@@ -2057,7 +4174,7 @@ test("sector native-daily research bridge is disclosed and can never look green"
     true,
   );
   assert.equal(
-    groups.blocking.includes("板块研究桥不能产生 GREEN；当前绿色字段矛盾，继续失败关闭"),
+    groups.blocking.includes("板块研究桥不能产生绿色结论；当前绿色字段矛盾，继续失败关闭"),
     false,
   );
 
@@ -2067,7 +4184,7 @@ test("sector native-daily research bridge is disclosed and can never look green"
   });
   assert.equal(
     forgedGreen.blocking.includes(
-      "板块研究桥不能产生 GREEN；当前绿色字段矛盾，继续失败关闭",
+      "板块研究桥不能产生绿色结论；当前绿色字段矛盾，继续失败关闭",
     ),
     true,
   );
@@ -2102,7 +4219,7 @@ test("strict same-base sector source passes and incomplete source fails closed",
   });
   assert.equal(
     strict.risk.includes(
-      "板块高级别来源：严格同一5m基底；M/W/D 与 30m 均由该基底因果派生",
+      "板块研究数据来源：严格同一5m基底；日线与30分钟均由该基底因果派生，当前执行只使用日线与30分钟",
     ),
     true,
   );
@@ -2172,7 +4289,7 @@ test("missing current session evidence is explicit and not reviewable", () => {
 
   assert.equal(
     groups.risk.includes(
-      "个股1分钟会话证据：当前契约字段缺失 · 失败关闭",
+      "个股1分钟会话证据：当前契约字段缺失 · 高周期环境不可判定，不关闭5分钟主信号",
     ),
     true,
   );
@@ -2259,7 +4376,7 @@ test("manual chart focus survives polling only for the same signal", () => {
   assert.deepEqual(Ui.resolveFocusState(manual, snapshot.signals[0]), manual);
   assert.deepEqual(Ui.resolveFocusState(manual, snapshot.signals[1]), {
     signalId: "signal-2",
-    frequency: "1m",
+    frequency: "5m",
     overrideSignalId: null,
   });
 
@@ -2267,7 +4384,7 @@ test("manual chart focus survives polling only for the same signal", () => {
     ...snapshot.signals[0],
     lifecycle_stage: "triggered",
   });
-  assert.equal(automaticallyTracked.frequency, "1m");
+  assert.equal(automaticallyTracked.frequency, "5m");
   assert.equal(automaticallyTracked.overrideSignalId, null);
 });
 
@@ -2299,18 +4416,18 @@ test("chart workspace renders the decision path evidence groups and active frequ
 
   assert.equal(view.root.dataset.focusedFrequency, "5m");
   assert.equal(view.root.dataset.signalSide, "buy");
-  assert.equal(view.node("[data-selected-stage]").textContent, "已入观察池");
-  assert.equal(view.node("[data-decision-title]").textContent, "等待 1分钟精确触发");
+  assert.equal(view.node("[data-selected-stage]").textContent, "即将确认");
+  assert.equal(view.node("[data-decision-title]").textContent, "5分钟二买结构仍在形成");
   assert.equal(view.node("[data-decision-invalidation]").textContent, "9.90");
   assert.equal(view.node('[data-period-state="30m"]').textContent, "支持");
   assert.equal(view.node('[data-period-state="5m"]').textContent, "形成中");
-  assert.equal(view.node('[data-period-state="1m"]').textContent, "等待");
+  assert.equal(view.node('[data-period-state="1m"]').textContent, "可选段差未出现");
   assert.deepEqual(
     view.node('[data-evidence-group="missing"]').children.map((node) => node.textContent),
     [
       "5分钟：末端结构确认",
-      "1分钟：尚未取得同向精确触发",
-      "1分钟同向确认尚未完成",
+      "1分钟：可选段差证据尚未出现（不阻断5分钟信号）",
+      "旧参数要求1分钟确认；当前生产规则不再使用该硬门槛",
     ],
   );
   assert.equal(

@@ -13,6 +13,10 @@ class _FakeEx:
         self.called = True
         return [{"code": "HK.00700", "name": "TX"}]
 
+    @staticmethod
+    def support_frequencys():
+        return {"5m": "5分钟"}
+
 
 class _FakeZx:
     def __init__(self, market=None):

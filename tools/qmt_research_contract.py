@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
+from collections.abc import Iterable
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -27,8 +30,112 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src"
 
 
+def _local_module_path(module: str) -> Path | None:
+    if module != "chanlun" and not module.startswith("chanlun."):
+        return None
+    base = SOURCE_ROOT.joinpath(*module.split("."))
+    module_path = base.with_suffix(".py")
+    if module_path.is_file():
+        return module_path
+    package_path = base / "__init__.py"
+    return package_path if package_path.is_file() else None
+
+
+def _package_initializers(path: Path) -> tuple[Path, ...]:
+    try:
+        relative = path.relative_to(SOURCE_ROOT)
+    except ValueError:
+        return ()
+    output: list[Path] = []
+    current = SOURCE_ROOT
+    for part in relative.parts[:-1]:
+        current /= part
+        initializer = current / "__init__.py"
+        if initializer.is_file():
+            output.append(initializer)
+    return tuple(output)
+
+
+@lru_cache(maxsize=1)
+def _fact_algorithm_relative_paths() -> tuple[str, ...]:
+    """Return the transitive local-code boundary for per-symbol fact files."""
+
+    class _ModuleImportCollector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.modules: list[str] = []
+
+        def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+            self.modules.extend(alias.name for alias in node.names)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+            if node.level == 0 and node.module:
+                self.modules.append(node.module)
+                self.modules.extend(
+                    f"{node.module}.{alias.name}" for alias in node.names
+                )
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+            return
+
+        def visit_AsyncFunctionDef(  # noqa: N802
+            self, node: ast.AsyncFunctionDef
+        ) -> None:
+            return
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+            return
+
+    pending = [
+        SOURCE_ROOT
+        / "chanlun/decision_support/trading_system/backtest/fixed_year.py",
+        PROJECT_ROOT / "tools/backtest_qmt_fixed_year.py",
+    ]
+    discovered: set[Path] = set()
+    while pending:
+        path = pending.pop().resolve()
+        if path in discovered:
+            continue
+        if not path.is_file():
+            raise FileNotFoundError(f"fact algorithm dependency is missing: {path}")
+        discovered.add(path)
+        pending.extend(
+            initializer
+            for initializer in _package_initializers(path)
+            if initializer.resolve() not in discovered
+        )
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        collector = _ModuleImportCollector()
+        collector.visit(tree)
+        for module in collector.modules:
+            dependency = _local_module_path(module)
+            if dependency is not None and dependency.resolve() not in discovered:
+                pending.append(dependency)
+    return tuple(
+        sorted(path.relative_to(PROJECT_ROOT).as_posix() for path in discovered)
+    )
+
+
+def _hash_relative_paths(
+    relative_paths: Iterable[str],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            relative,
+            "sha256:"
+            + hashlib.sha256((PROJECT_ROOT / relative).read_bytes()).hexdigest(),
+        )
+        for relative in sorted(set(relative_paths))
+    )
+
+
+def fact_algorithm_hashes() -> tuple[tuple[str, str], ...]:
+    """Hash only code that can alter an expensive per-symbol fact checkpoint."""
+
+    return _hash_relative_paths(_fact_algorithm_relative_paths())
+
+
 def algorithm_hashes() -> tuple[tuple[str, str], ...]:
-    """Hash every implementation unit that can change QMT research facts."""
+    """Hash the complete extraction, audit and final-report implementation."""
 
     strategy_root = SOURCE_ROOT / "chanlun/decision_support/trading_system"
     core_root = SOURCE_ROOT / "chanlun/core"
@@ -51,13 +158,8 @@ def algorithm_hashes() -> tuple[tuple[str, str], ...]:
             "tools/snapshot_qmt_pit_metadata.py",
         }
     )
-    return tuple(
-        (
-            relative,
-            "sha256:" + hashlib.sha256((PROJECT_ROOT / relative).read_bytes()).hexdigest(),
-        )
-        for relative in sorted(relative_paths)
-    )
+    relative_paths.update(_fact_algorithm_relative_paths())
+    return _hash_relative_paths(relative_paths)
 
 
 def unavailable_ablations(reason: str) -> tuple[AblationResult, ...]:
@@ -151,6 +253,7 @@ def load_selection_research_ledger(
 
 __all__ = (
     "algorithm_hashes",
+    "fact_algorithm_hashes",
     "load_selection_research_ledger",
     "unavailable_ablations",
     "unavailable_benchmarks",

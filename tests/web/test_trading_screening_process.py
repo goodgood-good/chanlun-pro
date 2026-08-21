@@ -6,10 +6,13 @@ import json
 import os
 from pathlib import Path
 import sys
+from threading import Event, Thread
 import time
 from zoneinfo import ZoneInfo
 
 import pytest
+
+import cl_app.services.trading_screening_process as screening_process_subject
 
 from chanlun.decision_support.trading_system.incremental_scan import BarKey
 from chanlun.decision_support.fingerprints import sha256_json
@@ -38,6 +41,9 @@ from cl_app.services.trading_screening_gateway import (
     SectorAssessmentBatch,
 )
 from cl_app.services.realtime_quotes import (
+    AShareDisplayQuoteBatch,
+    AShareInstrumentSessionStatus,
+    AShareInstrumentSessionStatusBatch,
     AShareRealtimeQuote,
     AShareRealtimeQuoteBatch,
 )
@@ -52,11 +58,229 @@ from cl_app.services.trading_screening_process import (
     NativeWorkerProcessTransport,
     native_sector_snapshot_cache_revision,
     native_sector_snapshot_producer_revision,
+    runtime_state_cache_producer_revision,
 )
 from cl_app import create_app
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "native_screening_test_worker.py"
+
+
+def test_native_worker_default_startup_budget_covers_cold_windows_handshake() -> None:
+    config = NativeWorkerProcessConfig()
+
+    assert config.startup_timeout_seconds >= 120
+    assert config.native_idle_timeout_seconds == 210
+
+
+def test_runtime_state_cache_cleanup_removes_only_dead_owned_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "runtime-cache"
+    dead = parent / "web-123-0123456789abcdef"
+    alive = parent / "web-456-fedcba9876543210"
+    unrelated = parent / "manual-data"
+    for path in (dead, alive, unrelated):
+        path.mkdir(parents=True)
+        (path / "marker.txt").write_text("keep boundary explicit", encoding="utf-8")
+    monkeypatch.setattr(
+        screening_process_subject,
+        "_process_exists",
+        lambda pid: pid == 456,
+    )
+
+    screening_process_subject._cleanup_stale_runtime_state_cache_roots(parent)
+
+    assert not dead.exists()
+    assert alive.exists()
+    assert unrelated.exists()
+
+
+def test_runtime_state_cache_cleanup_reclaims_only_unleased_persistent_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "runtime-cache"
+    current = parent / f"runtime-{'a' * 24}"
+    live = parent / f"runtime-{'b' * 24}"
+    dead = parent / f"runtime-{'c' * 24}"
+    stale = parent / f"runtime-{'d' * 24}"
+    unrelated = parent / "runtime-manual-data"
+    for path in (current, live, dead, stale, unrelated):
+        path.mkdir(parents=True)
+        (path / "marker.txt").write_text("cache payload", encoding="utf-8")
+    live_owner = parent / f".{live.name}.owner-456-{'1' * 16}"
+    dead_owner = parent / f".{dead.name}.owner-123-{'2' * 16}"
+    live_owner.touch()
+    dead_owner.touch()
+    monkeypatch.setattr(
+        screening_process_subject,
+        "_process_exists",
+        lambda pid: pid == 456,
+    )
+
+    screening_process_subject._cleanup_stale_runtime_state_cache_roots(
+        parent,
+        current_root=current,
+    )
+
+    assert current.exists()
+    assert live.exists()
+    assert live_owner.exists()
+    assert not dead.exists()
+    assert not dead_owner.exists()
+    assert not stale.exists()
+    assert unrelated.exists()
+
+
+def test_runtime_state_cache_producer_ignores_decision_only_changes(
+    tmp_path: Path,
+) -> None:
+    producer_paths = (
+        "src/chanlun/core/cl.py",
+        "src/chanlun/decision_support/fingerprints.py",
+        "src/chanlun/decision_support/trading_system/runtime_config.py",
+        "src/chanlun/decision_support/trading_system/screening_runtime.py",
+        "src/chanlun/decision_support/trading_system/screening_structure.py",
+        "web/chanlun_chart/cl_app/services/trading_screening_gateway.py",
+    )
+    for relative in producer_paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {relative}\n", encoding="utf-8")
+    decision_only = (
+        tmp_path
+        / "src/chanlun/decision_support/trading_system/higher_timeframe_gate.py"
+    )
+    decision_only.write_text("# decision v1\n", encoding="utf-8")
+
+    initial = runtime_state_cache_producer_revision(project_root=tmp_path)
+    decision_only.write_text("# decision v2\n", encoding="utf-8")
+    after_decision_change = runtime_state_cache_producer_revision(
+        project_root=tmp_path
+    )
+    runtime_source = (
+        tmp_path
+        / "src/chanlun/decision_support/trading_system/screening_runtime.py"
+    )
+    runtime_source.write_text("# runtime v2\n", encoding="utf-8")
+    after_runtime_change = runtime_state_cache_producer_revision(project_root=tmp_path)
+
+    assert initial == after_decision_change
+    assert after_runtime_change != initial
+
+
+def test_runtime_state_cache_is_stable_only_for_same_producer_revision(
+    tmp_path: Path,
+) -> None:
+    first_revision = "sha256:" + "a" * 64
+    second_revision = "sha256:" + "b" * 64
+    secret = b"stable-production-secret-material"
+
+    first = screening_process_subject._runtime_state_cache_settings(
+        parent=tmp_path,
+        expected_runtime_state_producer_revision=first_revision,
+        persistent_secret=secret,
+    )
+    restarted = screening_process_subject._runtime_state_cache_settings(
+        parent=tmp_path,
+        expected_runtime_state_producer_revision=first_revision,
+        persistent_secret=secret,
+    )
+    changed_source = screening_process_subject._runtime_state_cache_settings(
+        parent=tmp_path,
+        expected_runtime_state_producer_revision=second_revision,
+        persistent_secret=secret,
+    )
+
+    assert first == restarted
+    assert first.scope == "runtime_state_producer_revision"
+    assert first.delete_on_close is False
+    assert first.root.name.startswith("runtime-")
+    assert len(first.key_hex) == 64
+    assert changed_source.root != first.root
+    assert changed_source.key_hex != first.key_hex
+    assert changed_source.identity != first.identity
+
+
+def test_runtime_state_cache_without_persistent_secret_remains_web_scoped(
+    tmp_path: Path,
+) -> None:
+    revision = "sha256:" + "a" * 64
+
+    settings = screening_process_subject._runtime_state_cache_settings(
+        parent=tmp_path,
+        expected_runtime_state_producer_revision=revision,
+        persistent_secret=None,
+    )
+
+    assert settings.scope == "web_lifecycle"
+    assert settings.delete_on_close is True
+    assert settings.root.name.startswith(f"web-{os.getpid()}-")
+    assert settings.identity == settings.root.name
+
+
+def test_process_proxy_provisions_stable_runtime_scoped_candidate_cache(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40 + ".tree." + "b" * 24
+    secret = b"stable-production-secret-material"
+    producer_revision = runtime_state_cache_producer_revision()
+
+    first = NativeTradingDataGatewayProcessProxy(
+        log_path=tmp_path / "native-worker.log",
+        structure_worker_count=3,
+        expected_application_source_revision=revision,
+        runtime_state_cache_secret=secret,
+    )
+    first_candidates = first._structure_transports[1:]  # noqa: SLF001
+    first_environments = [
+        dict(transport._environment or {})  # noqa: SLF001
+        for transport in first_candidates
+    ]
+    first_root = first._runtime_state_cache_root  # noqa: SLF001
+    first_owner = first._runtime_state_cache_owner_marker  # noqa: SLF001
+    assert first_root is not None
+    assert first_owner is not None and first_owner.exists()
+    first_root.mkdir(parents=True)
+    (first_root / "keep.marker").write_text("persistent", encoding="utf-8")
+    first.close()
+    assert not first_owner.exists()
+
+    second = NativeTradingDataGatewayProcessProxy(
+        log_path=tmp_path / "native-worker.log",
+        structure_worker_count=3,
+        expected_application_source_revision=revision,
+        runtime_state_cache_secret=secret,
+    )
+    second_environments = [
+        dict(transport._environment or {})  # noqa: SLF001
+        for transport in second._structure_transports[1:]  # noqa: SLF001
+    ]
+    second_owner = second._runtime_state_cache_owner_marker  # noqa: SLF001
+    try:
+        assert second_owner is not None and second_owner.exists()
+        assert first_root.exists()
+        assert (first_root / "keep.marker").exists()
+        assert second._runtime_state_cache_root == first_root  # noqa: SLF001
+        assert [
+            environment["CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY"]
+            for environment in first_environments
+        ] == [
+            environment["CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY"]
+            for environment in second_environments
+        ]
+        assert all(
+            environment["CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY"]
+            == producer_revision
+            and environment["CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_SCOPE"]
+            == "runtime_state_producer_revision"
+            for environment in second_environments
+        )
+    finally:
+        second.close()
+    assert second_owner is not None and not second_owner.exists()
 
 
 def test_native_qmt_fact_cache_is_official_launch_only(tmp_path: Path) -> None:
@@ -193,6 +417,7 @@ def _transport(
     *,
     idle: float = 1.0,
     backoff: float = 0.05,
+    max_requests: int = 256,
     progress=lambda: None,
 ) -> NativeWorkerProcessTransport:
     return NativeWorkerProcessTransport(
@@ -202,6 +427,7 @@ def _transport(
             startup_timeout_seconds=3.0,
             native_idle_timeout_seconds=idle,
             restart_backoff_seconds=backoff,
+            max_completed_requests_per_process=max_requests,
         ),
         progress_callback=progress,
     )
@@ -233,10 +459,46 @@ def test_authenticated_child_reports_progress_and_safety_boundary(
         assert health["real_account_access"] is False
         assert health["real_order_transport"] is False
         assert health["restart_count"] == 1
+        assert health["completed_request_count"] == 1
+        assert health["total_completed_request_count"] == 1
+        assert health["max_completed_requests_per_process"] == 256
+        assert health["max_worker_rss_bytes"] == 1536 * 1024 * 1024
+        assert health["worker_rss_bytes"] is None or health["worker_rss_bytes"] > 0
         assert progress == ["tick"]
     finally:
         transport.shutdown()
     assert transport.health_snapshot()["worker_alive"] is False
+
+
+def test_worker_recycles_at_completed_request_boundary_without_backoff(
+    tmp_path: Path,
+) -> None:
+    transport = _transport(tmp_path, max_requests=2)
+    try:
+        assert transport.request("echo", value=1) == {"value": 1}
+        first_pid = transport.health_snapshot()["worker_pid"]
+        assert transport.request("echo", value=2) == {"value": 2}
+
+        recycled = transport.health_snapshot()
+        assert recycled["worker_alive"] is False
+        assert recycled["completed_request_count"] == 2
+        assert recycled["total_completed_request_count"] == 2
+        assert recycled["recycle_count"] == 1
+        assert recycled["failure_count"] == 0
+        assert recycled["restart_backoff_remaining_seconds"] == 0.0
+        assert str(recycled["last_recycle_reason"]).startswith(
+            "worker_request_limit_reached:"
+        )
+
+        assert transport.request("echo", value=3) == {"value": 3}
+        restarted = transport.health_snapshot()
+        assert restarted["worker_alive"] is True
+        assert restarted["worker_pid"] != first_pid
+        assert restarted["restart_count"] == 2
+        assert restarted["completed_request_count"] == 1
+        assert restarted["total_completed_request_count"] == 3
+    finally:
+        transport.shutdown()
 
 
 def test_explicit_startup_attests_worker_without_data_request(tmp_path: Path) -> None:
@@ -410,6 +672,26 @@ def test_native_nowait_request_never_queues_behind_busy_worker(tmp_path: Path) -
         transport.shutdown()
 
 
+def test_native_bounded_queue_wait_fails_without_stacking_requests(
+    tmp_path: Path,
+) -> None:
+    transport = _transport(tmp_path)
+    transport._request_lock.acquire()
+    started = time.monotonic()
+    try:
+        with pytest.raises(NativeScreeningWorkerUnavailable, match="bounded queue"):
+            transport.request_when_available(
+                "echo",
+                max_wait_seconds=0.05,
+                value="later",
+            )
+        assert 0.04 <= time.monotonic() - started < 0.5
+        assert transport.health_snapshot()["worker_alive"] is False
+    finally:
+        transport._request_lock.release()
+        transport.shutdown()
+
+
 def test_normal_remote_error_keeps_the_isolated_worker_alive(tmp_path: Path) -> None:
     transport = _transport(tmp_path)
     try:
@@ -439,6 +721,12 @@ class _FakeGateway:
     def realtime_ticks(self, codes):
         return {"codes": codes}
 
+    def display_quote_snapshot(self, codes):
+        return {"display_codes": codes}
+
+    def current_session_instrument_statuses(self, codes, *, session):
+        return {"status_codes": codes, "session": session}
+
 
 def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
     gateway = _FakeGateway()
@@ -450,6 +738,19 @@ def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
         method="realtime_ticks",
         kwargs={"codes": ("SH.600000",)},
     ) == {"codes": ("SH.600000",)}
+    assert dispatch_gateway_request(
+        gateway,
+        method="display_quote_snapshot",
+        kwargs={"codes": ("SH.600000",)},
+    ) == {"display_codes": ("SH.600000",)}
+    assert dispatch_gateway_request(
+        gateway,
+        method="current_session_instrument_statuses",
+        kwargs={"codes": ("SH.600000",), "session": date(2026, 7, 20)},
+    ) == {
+        "status_codes": ("SH.600000",),
+        "session": date(2026, 7, 20),
+    }
     for forbidden in (
         "tick_probe",
         "screening_instrument_types",
@@ -499,6 +800,25 @@ class _InstrumentTypeCatalog:
         }
 
 
+def test_process_proxy_uses_in_process_symbol_catalog_without_native_io() -> None:
+    transport = _InstrumentScopeTransport()
+    calls: list[tuple[str, ...]] = []
+
+    def names(codes: tuple[str, ...]) -> dict[str, str | None]:
+        calls.append(codes)
+        return {code: "纳指ETF" for code in codes}
+
+    proxy = NativeTradingDataGatewayProcessProxy(
+        transport=transport,  # type: ignore[arg-type]
+        symbol_name_provider=names,
+    )
+
+    assert proxy.symbol_name("SH.513100") == "纳指ETF"
+    assert proxy.symbol_name("SH.513100") == "纳指ETF"
+    assert calls == [("SH.513100",)]
+    assert transport.calls == []
+
+
 class _RealtimeTickTransport:
     def __init__(self, result: object) -> None:
         self.result = result
@@ -510,6 +830,16 @@ class _RealtimeTickTransport:
     def request_nowait(self, method: str, **kwargs: object) -> object:
         self.calls.append((method, kwargs))
         return self.result
+
+    def request_when_available(
+        self,
+        method: str,
+        *,
+        max_wait_seconds: float,
+        **kwargs: object,
+    ) -> object:
+        assert max_wait_seconds == 2.0
+        return self.request_nowait(method, **kwargs)
 
     def health_snapshot(self):
         return {"ready": True}
@@ -564,6 +894,129 @@ def test_process_proxy_validates_isolated_tick_probe() -> None:
         proxy.tick_probe("SH.000001")
 
 
+def test_process_proxy_routes_mandatory_quote_to_reserved_priority_worker() -> None:
+    batch = AShareRealtimeQuoteBatch(
+        requested_codes=("SH.513100",),
+        market_open=True,
+        quotes=(
+            AShareRealtimeQuote(
+                code="SH.513100",
+                last=2.264,
+                buy1=0.0,
+                sell1=0.0,
+                high=0.0,
+                low=0.0,
+                open=0.0,
+                volume=0.0,
+                rate=0.0,
+            ),
+        ),
+        tick_data_used=True,
+    )
+    shared = _RealtimeTickTransport(batch)
+    priority = _RealtimeTickTransport(batch)
+    candidate = _RealtimeTickTransport(batch)
+    proxy = NativeTradingDataGatewayProcessProxy(transport=shared)  # type: ignore[arg-type]
+    proxy._structure_transports = (priority, candidate)  # type: ignore[assignment]  # noqa: SLF001
+
+    result = proxy.priority_realtime_ticks(("SH.513100",))
+
+    assert result == batch
+    assert shared.calls == []
+    assert priority.calls == [
+        ("realtime_ticks", {"codes": ("SH.513100",)})
+    ]
+    assert candidate.calls == []
+
+    status_batch = AShareInstrumentSessionStatusBatch(
+        requested_codes=("SH.513100",),
+        session=date(2026, 7, 20),
+        facts=(
+            AShareInstrumentSessionStatus(
+                code="SH.513100",
+                trading_day=date(2026, 7, 20),
+                instrument_name="纳指ETF",
+                instrument_status=2,
+                is_trading=False,
+            ),
+        ),
+    )
+    priority.result = status_batch
+
+    status_result = proxy.priority_current_session_instrument_statuses(
+        ("SH.513100",),
+        session=date(2026, 7, 20),
+    )
+
+    assert status_result == status_batch
+    assert priority.calls[-1] == (
+        "current_session_instrument_statuses",
+        {"codes": ("SH.513100",), "session": date(2026, 7, 20)},
+    )
+
+
+def test_process_proxy_reads_coverage_instrument_status_from_control_worker() -> None:
+    batch = AShareInstrumentSessionStatusBatch(
+        requested_codes=("SZ.000001",),
+        session=date(2026, 7, 20),
+        facts=(
+            AShareInstrumentSessionStatus(
+                code="SZ.000001",
+                trading_day=date(2026, 7, 20),
+                instrument_name="平安银行",
+                instrument_status=2,
+                is_trading=False,
+            ),
+        ),
+    )
+    transport = _RealtimeTickTransport(batch)
+    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+
+    result = proxy.current_session_instrument_statuses(
+        ("SZ.000001",),
+        session=date(2026, 7, 20),
+    )
+
+    assert result == batch
+    assert transport.calls == [
+        (
+            "current_session_instrument_statuses",
+            {"codes": ("SZ.000001",), "session": date(2026, 7, 20)},
+        )
+    ]
+
+
+def test_process_proxy_preserves_closed_market_display_quote_snapshot() -> None:
+    batch = AShareDisplayQuoteBatch(
+        requested_codes=("SH.513100",),
+        market_open=False,
+        quotes=(
+            AShareRealtimeQuote(
+                code="SH.513100",
+                last=1.672,
+                buy1=1.671,
+                sell1=1.672,
+                high=1.684,
+                low=1.655,
+                open=1.66,
+                volume=1000.0,
+                rate=0.72,
+            ),
+        ),
+        tick_data_used=True,
+    )
+    transport = _RealtimeTickTransport(batch)
+    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+
+    result = proxy.display_quote_snapshot(("SH.513100",))
+
+    assert result.market_open is False
+    assert result.ticks()["SH.513100"].last == 1.672
+    assert transport.calls == [
+        ("display_quote_snapshot", {"codes": ("SH.513100",)})
+    ]
+
+
 class _BundleTransport:
     def __init__(self, bundle: SymbolStructureBundle) -> None:
         self.bundle = bundle
@@ -576,6 +1029,19 @@ class _BundleTransport:
         self.calls.append((method, kwargs))
         assert method == "structure_bundle"
         return self.bundle
+
+    def request_until(
+        self,
+        method: str,
+        *,
+        deadline_monotonic: float,
+        **kwargs: object,
+    ) -> object:
+        return self.request(
+            method,
+            deadline_monotonic=deadline_monotonic,
+            **kwargs,
+        )
 
     def health_snapshot(self):
         return {"ready": True}
@@ -650,6 +1116,44 @@ def test_process_proxy_preserves_canonical_history_preparation_contract() -> Non
         )
 
 
+def test_process_proxy_realtime_history_preparation_never_starts_batch_download() -> None:
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    requests = (
+        ("SH.600000", ("d", "30m", "5m", "1m")),
+        ("SZ.000001", ("d", "30m", "5m")),
+    )
+    transport = _HistoryPreparationTransport()
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport
+    )
+
+    priority = proxy.prepare_priority_local_history(
+        frequency_requests=requests,
+        as_of=as_of,
+    )
+
+    assert transport.calls == []
+    assert priority["prepared_frequencies_by_code"] == {
+        "SH.600000": ("d", "30m"),
+        "SZ.000001": ("d", "30m"),
+    }
+    assert proxy._prepared_local_frequencies("SH.600000", as_of) == (  # noqa: SLF001
+        "d",
+        "30m",
+    )
+
+    candidate = proxy.prepare_candidate_local_history_until(
+        frequency_requests=(("SH.600000", ("5m",)),),
+        as_of=as_of,
+        deadline_monotonic=time.monotonic() + 1,
+    )
+
+    assert transport.calls == []
+    assert candidate["prepared_frequencies_by_code"] == {
+        "SH.600000": ("d", "30m")
+    }
+
+
 def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
     as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
     cutoff = as_of.replace(minute=45)
@@ -699,12 +1203,65 @@ def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
                 "as_of": as_of,
                 "sector": sector,
                 "sector_members": ("SH.600000",),
+                "instrument_type": "stock_cn",
                 "frequencies": ("1m", "5m", "30m", "d"),
                 "higher_timeframe_as_of": cutoff,
                 "local_history_frequencies": (),
+                "incremental_refresh_frequencies": (),
             },
         )
     ]
+
+
+def test_process_proxy_candidate_refreshes_only_missing_intraday_frequencies() -> None:
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    sector = SectorAssessment(
+        sector_id="unclassified",
+        sector_name="未分类",
+        eligible=False,
+        hard_block=True,
+        regime="hostile",
+        rank_components=(),
+        reason_codes=("test",),
+    )
+    bundle = SymbolStructureBundle(
+        code="SH.600000",
+        as_of=as_of,
+        sector=sector,
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+    )
+    transport = _BundleTransport(bundle)
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport
+    )
+    proxy.prepare_priority_local_history(
+        frequency_requests=(("SH.600000", ("d", "30m", "5m", "1m")),),
+        as_of=as_of,
+    )
+    deadline = time.monotonic() + 1
+
+    result = proxy.candidate_structure_bundle_with_risk_cutoff_until(
+        "SH.600000",
+        as_of=as_of,
+        sector=sector,
+        frequencies=("1m", "5m", "30m", "d"),
+        risk_evidence_cutoff=as_of,
+        deadline_monotonic=deadline,
+    )
+
+    assert result is bundle
+    request_kwargs = transport.calls[-1][1]
+    assert request_kwargs["local_history_frequencies"] == ("d", "30m")
+    assert request_kwargs["incremental_refresh_frequencies"] == ("5m", "1m")
+    # The lane deadline controls admission.  Once admitted, a candidate gets a
+    # bounded execution window so a cold first request does not destroy the
+    # process and all of its newly restored incremental state.
+    assert request_kwargs["deadline_monotonic"] >= deadline
+    assert request_kwargs["deadline_monotonic"] - time.monotonic() > 70
 
 
 def test_process_proxy_allows_fail_closed_unclassified_structure_without_sector_cache() -> None:
@@ -743,6 +1300,43 @@ def test_process_proxy_allows_fail_closed_unclassified_structure_without_sector_
         risk_evidence_cutoff=as_of,
     ) is bundle
     assert transport.calls[0][1]["sector_members"] == ()
+
+
+def test_process_proxy_passes_etf_type_into_isolated_native_structure_worker() -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    sector = SectorAssessment(
+        sector_id="unclassified",
+        sector_name="未匹配 QMT GICS3 行业",
+        eligible=False,
+        hard_block=True,
+        regime="hostile",
+        rank_components=(),
+        reason_codes=("sector_membership_missing",),
+    )
+    bundle = SymbolStructureBundle(
+        code="SH.513100",
+        as_of=as_of,
+        sector=sector,
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+    )
+    transport = _BundleTransport(bundle)
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        instrument_type_provider=lambda codes: {code: "etf_cn" for code in codes},
+    )
+
+    assert proxy.structure_bundle_with_risk_cutoff(
+        "SH.513100",
+        as_of=as_of,
+        sector=sector,
+        frequencies=("1m", "5m"),
+        risk_evidence_cutoff=as_of,
+    ) is bundle
+    assert transport.calls[0][1]["instrument_type"] == "etf_cn"
 
 
 def test_process_proxy_filters_watchlist_and_holdings_through_shared_catalog() -> None:
@@ -1227,6 +1821,107 @@ def test_proxy_keeps_atomic_sector_dependencies_after_worker_restart() -> None:
     assert transport.calls == [("sector_snapshot", {"as_of": as_of})]
 
 
+def test_atomic_sector_snapshot_never_occupies_reserved_priority_worker() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    priority = _AtomicTransport(_atomic_snapshot(as_of))
+    candidate = _AtomicTransport(_atomic_snapshot(as_of))
+    proxy = NativeTradingDataGatewayProcessProxy(transport=priority)  # type: ignore[arg-type]
+    proxy._structure_transports = (priority, candidate)  # type: ignore[assignment]  # noqa: SLF001
+
+    batch = proxy.native_sector_assessments(as_of=as_of)
+
+    assert batch.completed_count == 1
+    assert priority.calls == []
+    assert candidate.calls == [("sector_snapshot", {"as_of": as_of})]
+
+
+def test_candidate_lane_uses_free_shard_during_atomic_sector_snapshot() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class BlockingAtomicTransport(_AtomicTransport):
+        def __init__(self, snapshot: dict[str, object]) -> None:
+            super().__init__(snapshot)
+            self.started = Event()
+            self.release = Event()
+
+        def request(self, method: str, **kwargs: object) -> object:
+            self.calls.append((method, kwargs))
+            assert method == "sector_snapshot"
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            return self.snapshot
+
+    priority = _AtomicTransport(_atomic_snapshot(as_of))
+    sector = BlockingAtomicTransport(_atomic_snapshot(as_of))
+    available = _AtomicTransport(_atomic_snapshot(as_of))
+    proxy = NativeTradingDataGatewayProcessProxy(transport=priority)  # type: ignore[arg-type]
+    proxy._structure_transports = (  # type: ignore[assignment]  # noqa: SLF001
+        priority,
+        sector,
+        available,
+    )
+    result: list[SectorAssessmentBatch] = []
+    thread = Thread(
+        target=lambda: result.append(proxy.native_sector_assessments(as_of=as_of)),
+        daemon=True,
+    )
+
+    thread.start()
+    assert sector.started.wait(timeout=5)
+    assert proxy._structure_transports_for_lane("candidate") == (available,)  # noqa: SLF001
+    assert proxy._structure_transport(  # noqa: SLF001
+        "SH.600000",
+        lane="candidate",
+    ) is available
+    sector.release.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert result[0].completed_count == 1
+    assert proxy._structure_transports_for_lane("candidate") == (  # noqa: SLF001
+        sector,
+        available,
+    )
+
+
+def test_sector_batch_cache_roundtrips_hierarchy_relations() -> None:
+    parent = SectorAssessment(
+        sector_id="qmt-gics3:parent",
+        sector_name="信息技术",
+        eligible=True,
+        hard_block=False,
+        regime="neutral",
+        rank_components=(("neutral_access", 5),),
+        reason_codes=("test_eligible",),
+    )
+    child = SectorAssessment(
+        sector_id="qmt-gics4:child",
+        sector_name="信息技术 → 半导体",
+        eligible=True,
+        hard_block=False,
+        regime="supportive",
+        rank_components=(("five_support", 30),),
+        reason_codes=("test_eligible",),
+    )
+    expected = SectorAssessmentBatch(
+        assessments=(parent, child),
+        discovered_count=2,
+        completed_count=2,
+        failure_counts=(),
+        errors=(),
+        catalog_revision="sha256:" + "8" * 64,
+        parent_relations=((child.sector_id, parent.sector_id),),
+    )
+
+    document = screening_process_subject._batch_cache_document(expected)
+    restored = screening_process_subject._batch_from_cache(document)
+
+    assert restored == expected
+    assert document["parent_relations"] == [
+        [child.sector_id, parent.sector_id]
+    ]
+
+
 def test_proxy_restores_authenticated_member_routing_without_worker_call() -> None:
     as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
     transport = _AtomicTransport(_atomic_snapshot(as_of))
@@ -1674,6 +2369,18 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
         raising=False,
     )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_NATIVE_MAX_RSS_MB",
+        raising=False,
+    )
     app = create_app(
         start_scheduler=False,
         test_config={
@@ -1688,13 +2395,242 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     expected_workers = min(3, max(1, (os.cpu_count() or 4) // 4))
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == 3
-    assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 256
+    assert app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"] is True
+    assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 512
     assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
     assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64
+    assert app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"] == 512
     assert app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"] == 210.0
+    assert app.config["TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS"] == 4096
+    assert app.config["TRADING_SCREENING_NATIVE_MAX_RSS_MB"] == 1536
     gateway = app.extensions["decision_support_trading_screening_gateway"]
     assert len(gateway._structure_transports) == expected_workers  # noqa: SLF001
     assert gateway._transport not in gateway._structure_transports  # noqa: SLF001
+    expected_cache_roles = (
+        ["shared"]
+        if expected_workers == 1
+        else ["priority"] + ["candidate"] * (expected_workers - 1)
+    )
+    assert [
+        transport._environment["CHANLUN_SCREENING_WORKER_CACHE_ROLE"]
+        for transport in gateway._structure_transports  # noqa: SLF001
+    ] == expected_cache_roles
+    if expected_workers > 1:
+        priority_environments = [
+            transport._environment
+            for transport in gateway._structure_transports[:1]  # noqa: SLF001
+        ]
+        candidate_environments = [
+            transport._environment
+            for transport in gateway._structure_transports[1:]  # noqa: SLF001
+        ]
+        assert all(
+            "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR" not in environment
+            and "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY" not in environment
+            for environment in priority_environments
+        )
+        assert [
+            environment["CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR"].split(
+                "structure-"
+            )[-1]
+            for environment in candidate_environments
+        ] == [str(index) for index in range(2, expected_workers + 1)]
+        assert all(
+            len(
+                bytes.fromhex(
+                    environment["CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY"]
+                )
+            )
+            == 32
+            for environment in candidate_environments
+        )
+    worker_pool = gateway.health_snapshot()["structure_worker_pool"]
+    assert worker_pool["priority_reserved_worker_count"] == 1
+    assert worker_pool["candidate_worker_count"] == max(1, expected_workers - 1)
+    assert worker_pool["candidate_released_worker_count"] == max(
+        1, expected_workers - 1
+    )
+
+
+def test_structure_worker_pool_uses_sticky_symbol_routing_inside_each_lane() -> None:
+    transport = _BundleTransport(
+        SymbolStructureBundle(
+            code="SH.600000",
+            as_of=datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai")),
+            sector=SectorAssessment(
+                sector_id="unclassified",
+                sector_name="未分类",
+                eligible=False,
+                hard_block=True,
+                regime="hostile",
+                rank_components=(),
+                reason_codes=("test",),
+            ),
+            thirty_direction="neutral",
+            thirty_points=(),
+            five_points=(),
+            one_points=(),
+            opposite_points=(),
+        )
+    )
+    gateway = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    priority_worker = object()
+    candidate_workers = (object(), object())
+    gateway._structure_transports = (  # type: ignore[assignment]  # noqa: SLF001
+        priority_worker,
+        *candidate_workers,
+    )
+
+    priority_routes = tuple(
+        gateway._structure_transport(  # noqa: SLF001
+            "SH.600000",
+            lane="priority",
+        )
+        for _ in range(3)
+    )
+    candidate_routes = tuple(
+        gateway._structure_transport(  # noqa: SLF001
+            "SH.600000",
+            lane="candidate",
+        )
+        for _ in range(3)
+    )
+    released_routes = tuple(
+        gateway._structure_transport(  # noqa: SLF001
+            "SH.600000",
+            lane="candidate_overflow",
+        )
+        for _ in range(3)
+    )
+
+    assert priority_routes == (priority_worker,) * 3
+    assert len(set(map(id, candidate_routes))) == 1
+    assert candidate_routes[0] in candidate_workers
+    assert released_routes == candidate_routes
+
+
+def test_unbounded_candidate_structure_never_uses_priority_worker() -> None:
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    sector = SectorAssessment(
+        sector_id="qmt-gics3:software",
+        sector_name="软件",
+        eligible=True,
+        hard_block=False,
+        regime="neutral",
+        rank_components=(),
+        reason_codes=("test",),
+    )
+    bundle = SymbolStructureBundle(
+        code="SH.600000",
+        as_of=as_of,
+        sector=sector,
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+    )
+    priority = _BundleTransport(bundle)
+    candidate_one = _BundleTransport(bundle)
+    candidate_two = _BundleTransport(bundle)
+    gateway = NativeTradingDataGatewayProcessProxy(transport=priority)  # type: ignore[arg-type]
+    gateway._structure_transports = (  # type: ignore[assignment]  # noqa: SLF001
+        priority,
+        candidate_one,
+        candidate_two,
+    )
+    gateway._sector_members = {sector.sector_id: ("SH.600000",)}  # noqa: SLF001
+
+    result = gateway.candidate_structure_bundle_with_risk_cutoff(
+        "SH.600000",
+        as_of=as_of,
+        sector=sector,
+        frequencies=("d", "30m", "5m"),
+        risk_evidence_cutoff=as_of,
+    )
+
+    assert result == bundle
+    assert priority.calls == []
+    assert len(candidate_one.calls) + len(candidate_two.calls) == 1
+
+
+def test_structure_worker_pool_co_locates_classified_sector_symbols() -> None:
+    transport = _BundleTransport(
+        SymbolStructureBundle(
+            code="SH.600000",
+            as_of=datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai")),
+            sector=SectorAssessment(
+                sector_id="unclassified",
+                sector_name="unclassified",
+                eligible=False,
+                hard_block=True,
+                regime="hostile",
+                rank_components=(),
+                reason_codes=("test",),
+            ),
+            thirty_direction="neutral",
+            thirty_points=(),
+            five_points=(),
+            one_points=(),
+            opposite_points=(),
+        )
+    )
+    gateway = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    workers = (object(), object(), object())
+    gateway._structure_transports = workers  # type: ignore[assignment]  # noqa: SLF001
+    sector = SectorAssessment(
+        sector_id="qmt-gics3:software",
+        sector_name="software",
+        eligible=True,
+        hard_block=False,
+        regime="neutral",
+        rank_components=(),
+        reason_codes=("test",),
+    )
+
+    first = gateway._structure_affinity_key(  # noqa: SLF001
+        "SH.600000",
+        sector,
+        has_sector_members=True,
+    )
+    second = gateway._structure_affinity_key(  # noqa: SLF001
+        "SZ.000001",
+        sector,
+        has_sector_members=True,
+    )
+
+    assert first == second == "sector:qmt-gics3:software"
+    assert gateway._structure_transport(  # noqa: SLF001
+        first,
+        lane="coverage",
+    ) is gateway._structure_transport(second, lane="coverage")  # noqa: SLF001
+    assert gateway._structure_affinity_key(  # noqa: SLF001
+        "SH.600000",
+        sector,
+        has_sector_members=False,
+    ) == "symbol:SH.600000"
+    assert gateway._lane_structure_affinity_key(  # noqa: SLF001
+        "SH.600000",
+        first,
+        work_lane="priority",
+    ) == first
+    candidate_keys = tuple(
+        gateway._lane_structure_affinity_key(  # noqa: SLF001
+            f"SH.{600000 + index:06d}",
+            first,
+            work_lane="candidate",
+        )
+        for index in range(16)
+    )
+    assert len(set(candidate_keys)) == len(candidate_keys)
+    assert {
+        id(gateway._structure_transport(key, lane="candidate"))  # noqa: SLF001
+        for key in candidate_keys
+    } == {id(worker) for worker in workers[1:]}
+    gateway._structure_transports = (transport,)  # type: ignore[assignment]  # noqa: SLF001
+    assert gateway.health_snapshot()["structure_worker_pool"][
+        "affinity_contract_id"
+    ] == "priority-sector_candidate-sector-symbol-striped-v2"
 
 
 def test_direct_app_launch_uses_content_addressed_revision_for_worker_caches(

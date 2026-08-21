@@ -278,6 +278,29 @@ def test_current_partial_session_emits_only_completed_intraday_buckets() -> None
     assert result.daily.empty
 
 
+def test_same_base_revision_is_deterministic_and_changes_with_bar_content() -> None:
+    session = date(2026, 7, 24)
+    source = _native_session(session)
+
+    def build(frame: pd.DataFrame):
+        return build_qmt_same_base_stream_frames(
+            symbol="SH.600000",
+            one_minute_frame=frame,
+            decision_time=datetime(2026, 7, 24, 15, 1, tzinfo=CN),
+            expected_sessions=(session,),
+        )
+
+    first = build(source)
+    repeated = build(source.copy())
+    changed_source = source.copy()
+    changed_source.attrs = dict(source.attrs)
+    changed_source.loc[10, "close"] += 0.01
+    changed = build(changed_source)
+
+    assert first.source_base_stream_revision == repeated.source_base_stream_revision
+    assert first.source_base_stream_revision != changed.source_base_stream_revision
+
+
 def test_incomplete_historical_session_fails_closed() -> None:
     session = date(2026, 7, 23)
     source = _native_session(session).iloc[20:].copy()

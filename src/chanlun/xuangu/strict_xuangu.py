@@ -13,8 +13,50 @@ from chanlun.decision_support.trading_system.screening_runtime import (
 )
 
 
+_CALENDAR_MINUTES = {
+    "y": 366 * 24 * 60,
+    "m": 31 * 24 * 60,
+    "w": 7 * 24 * 60,
+    "d": 24 * 60,
+}
+
+
+def _frequency_minutes(frequency: str) -> int:
+    value = str(frequency).strip().lower()
+    if value in _CALENDAR_MINUTES:
+        return _CALENDAR_MINUTES[value]
+    if value.endswith("m") and value[:-1].isdigit() and int(value[:-1]) > 0:
+        return int(value[:-1])
+    raise ValueError(f"无法比较选股周期：{frequency}")
+
+
+def validate_frequency_sequence(frequencies: Iterable[str]) -> tuple[str, ...]:
+    """校验多周期参数唯一，并且严格按照高周期到低周期排列。"""
+
+    if isinstance(frequencies, (str, bytes)):
+        raise ValueError("选股周期必须是周期序列")
+    values = tuple(str(value).strip() for value in frequencies)
+    if not values or any(not value for value in values):
+        raise ValueError("选股周期不能为空")
+    if len(values) != len(set(values)):
+        raise ValueError("选股周期不能重复")
+    spans = tuple(_frequency_minutes(value) for value in values)
+    if any(left <= right for left, right in zip(spans, spans[1:])):
+        raise ValueError("多周期选股必须按高周期到低周期排列")
+    return values
+
+
+def _single_frequency(mk_datas) -> str:
+    frequencies = validate_frequency_sequence(mk_datas.frequencys)
+    if len(frequencies) != 1:
+        raise ValueError("单周期选股必须只提供一个周期")
+    return frequencies[0]
+
+
 def _allowed_sides(opt_types: Iterable[str] | None) -> frozenset[str]:
-    values = tuple(opt_types or ("long",))
+    values = ("long",) if opt_types is None else tuple(opt_types)
+    if not values or len(values) != len(set(values)):
+        raise ValueError("选股方向必须非空且不能重复")
     unknown = set(values) - {"long", "short"}
     if unknown:
         raise ValueError(f"选股方向不受支持：{sorted(unknown)}")
@@ -92,17 +134,60 @@ def _current_divergences(
     )
 
 
-def _event_sides(
+def _current_directional_events(
     evidence: StrictEvidenceResult,
     *,
     allowed: frozenset[str],
+    point_classes: frozenset[str] = frozenset({"1", "2", "3"}),
+    include_divergences: bool = True,
+):
+    events = [
+        (point.side, point.anchor_at, point.available_at)
+        for point in _current_points(
+            evidence,
+            sides=allowed,
+            classes=point_classes,
+        )
+    ]
+    if include_divergences:
+        events.extend(
+            (
+                "buy" if item.direction == "down" else "sell",
+                item.anchor_at,
+                item.available_at,
+            )
+            for item in _current_divergences(evidence, sides=allowed)
+        )
+    return tuple(events)
+
+
+def _causal_confluence_sides(
+    high: StrictEvidenceResult,
+    low: StrictEvidenceResult,
+    *,
+    allowed: frozenset[str],
+    low_point_classes: frozenset[str] = frozenset({"1", "2", "3"}),
+    low_divergences: bool = True,
 ) -> frozenset[str]:
-    sides = {point.side for point in _current_points(evidence, sides=allowed)}
-    sides.update(
-        "buy" if item.direction == "down" else "sell"
-        for item in _current_divergences(evidence, sides=allowed)
+    """返回高周期事件形成以后，由低周期当前事件确认的同向集合。"""
+
+    high_events = _current_directional_events(high, allowed=allowed)
+    low_events = _current_directional_events(
+        low,
+        allowed=allowed,
+        point_classes=low_point_classes,
+        include_divergences=low_divergences,
     )
-    return frozenset(sides)
+    return frozenset(
+        high_side
+        for high_side, high_anchor_at, high_available_at in high_events
+        for low_side, _low_anchor_at, low_available_at in low_events
+        if high_side == low_side
+        # 高周期形态锚点可能早于其正式确认时间。低周期事件只有在高周期证据
+        # 已经可见以后出现，才构成因果共振；仅晚于形态锚点会偷看未来确认。
+        and low_available_at >= high_available_at
+        and low_available_at >= high_anchor_at
+    )
 
 
 def _point_message(evidence: StrictEvidenceResult, points) -> str:
@@ -161,7 +246,7 @@ def _causal_first_parent(evidence, third, *, trend_only: bool):
 
 def _single_class_point(code, mk_datas, opt_types, point_class: str):
     sides = _allowed_sides(opt_types)
-    evidence = _evidence(code, mk_datas, mk_datas.frequencys[0])
+    evidence = _evidence(code, mk_datas, _single_frequency(mk_datas))
     points = _current_points(
         evidence,
         sides=sides,
@@ -190,7 +275,7 @@ def select_strict_class3_after_class1(
     opt_type: list | None = None,
 ):
     sides = _allowed_sides(opt_type)
-    evidence = _evidence(code, mk_datas, mk_datas.frequencys[0])
+    evidence = _evidence(code, mk_datas, _single_frequency(mk_datas))
     thirds = _current_points(
         evidence,
         sides=sides,
@@ -215,7 +300,7 @@ def select_strict_class3_after_trend_divergence(
     opt_type: list | None = None,
 ):
     sides = _allowed_sides(opt_type)
-    evidence = _evidence(code, mk_datas, mk_datas.frequencys[0])
+    evidence = _evidence(code, mk_datas, _single_frequency(mk_datas))
     thirds = _current_points(
         evidence,
         sides=sides,
@@ -242,7 +327,7 @@ def select_strict_point_divergence_confluence(
     """要求当前严格买卖点与严格背驰方向一致。"""
 
     sides = _allowed_sides(opt_type)
-    evidence = _evidence(code, mk_datas, mk_datas.frequencys[0])
+    evidence = _evidence(code, mk_datas, _single_frequency(mk_datas))
     points = _current_points(evidence, sides=sides)
     divergence_sides = {
         "buy" if item.direction == "down" else "sell"
@@ -263,9 +348,12 @@ def select_strict_two_frequency_confluence(
     opt_type: list | None = None,
 ):
     sides = _allowed_sides(opt_type)
-    high = _evidence(code, mk_datas, mk_datas.frequencys[0])
-    low = _evidence(code, mk_datas, mk_datas.frequencys[1])
-    matched = _event_sides(high, allowed=sides) & _event_sides(low, allowed=sides)
+    frequencies = validate_frequency_sequence(mk_datas.frequencys)
+    if len(frequencies) != 2:
+        raise ValueError("双周期严格共振必须提供两个周期")
+    high = _evidence(code, mk_datas, frequencies[0])
+    low = _evidence(code, mk_datas, frequencies[1])
+    matched = _causal_confluence_sides(high, low, allowed=sides)
     if not matched:
         return None
     return {
@@ -283,20 +371,21 @@ def select_strict_lower_class12_confluence(
     opt_type: list | None = None,
 ):
     sides = _allowed_sides(opt_type)
-    high = _evidence(code, mk_datas, mk_datas.frequencys[0])
-    high_sides = _event_sides(high, allowed=sides)
-    if not high_sides:
-        return None
+    frequencies = validate_frequency_sequence(mk_datas.frequencys)
+    if len(frequencies) < 2:
+        raise ValueError("高低周期严格共振至少需要两个周期")
+    high = _evidence(code, mk_datas, frequencies[0])
     matched: set[str] = set()
     matched_frequencies = []
-    for frequency in mk_datas.frequencys[1:]:
+    for frequency in frequencies[1:]:
         low = _evidence(code, mk_datas, frequency)
-        points = _current_points(
+        common = _causal_confluence_sides(
+            high,
             low,
-            sides=sides,
-            classes=frozenset({"1", "2"}),
+            allowed=sides,
+            low_point_classes=frozenset({"1", "2"}),
+            low_divergences=False,
         )
-        common = high_sides & {point.side for point in points}
         if common:
             matched.update(common)
             matched_frequencies.append(frequency)
@@ -315,7 +404,7 @@ def select_closed_ma250(code: str, mk_datas, opt_type: list | None = None):
     """非结构类对照任务，同样使用统一的收盘边界。"""
 
     sides = _allowed_sides(opt_type)
-    frequency = mk_datas.frequencys[0]
+    frequency = _single_frequency(mk_datas)
     frame = _closed_frame(code, mk_datas, frequency)
     closes = pd.to_numeric(frame["close"], errors="raise")
     if len(closes) < 250:
@@ -339,4 +428,5 @@ __all__ = (
     "select_strict_lower_class12_confluence",
     "select_strict_point_divergence_confluence",
     "select_strict_two_frequency_confluence",
+    "validate_frequency_sequence",
 )

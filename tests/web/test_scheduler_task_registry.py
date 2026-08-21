@@ -96,7 +96,7 @@ def test_jobs_snapshot_translates_cached_english_background_task_names():
     }
 
     assert names == {
-        "holding_group_realtime_monitor": "持仓与关注分组跨市场实时监听",
+        "holding_group_realtime_monitor": "人工关注分组跨市场实时监听",
         "qmt_app_daily_restart": "QMT 工作日启动维护（应用托管）",
         "qmt_app_runtime_monitor": "QMT 运行状态与故障恢复监控",
         "forward_capture": "统一策略前向模拟盘前快照采集（应用托管）",

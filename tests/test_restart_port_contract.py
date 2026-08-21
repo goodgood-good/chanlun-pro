@@ -79,6 +79,27 @@ def test_restart_owns_only_the_configured_port_process_and_confirms_shutdown():
     assert "Restore-WebService" in source
 
 
+def test_restart_only_adopts_restricted_web_process_after_multi_factor_attestation():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    ).read_text(encoding="utf-8")
+
+    attestation = source.index("function Get-AttestedWebProcs")
+    port_scan = source.index(
+        "$portOwners = @(Get-ListeningProcessIds -Port $webPort)",
+        attestation,
+    )
+    foreign_rejection = source.index("$foreignOwners = @(", port_scan)
+
+    assert attestation < port_scan < foreign_rejection
+    assert "$PortOwnerIds -notcontains $reportedPid" in source
+    assert "$reportedRevision.StartsWith(" in source
+    assert "$expectedCommitPrefix" in source
+    assert "@('scheduler', 'qmt_runtime', 'trading_screening')" in source
+    assert "[string]$process.Name -ne 'python.exe'" in source
+    assert "accepted endpoint-attested web PID=" in source
+
+
 def test_restart_acquires_single_flight_lock_before_stopping_any_process():
     source = (
         Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
@@ -95,6 +116,28 @@ def test_restart_acquires_single_flight_lock_before_stopping_any_process():
     assert "Exit-DeploymentMutex -Mutex $deploymentMutex" in source
     assert "ReleaseMutex()" in source
     assert ".Dispose()" in source
+
+
+def test_elevated_restart_hands_start_to_limited_task_after_unlocking():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    ).read_text(encoding="utf-8")
+
+    elevated_branch = source.index("if (Test-CurrentProcessElevated)")
+    unlock = source.index("# HANDOFF-LOCK-RELEASE", elevated_branch)
+    limited_start = source.index("# HANDOFF-LIMITED-START", unlock)
+    direct_start = source.index("# --- 2.", limited_start)
+    branch = source[elevated_branch:direct_start]
+
+    assert elevated_branch < unlock < limited_start < direct_start
+    assert "-RunLevel Limited" in source
+    assert "Register-LimitedWebLaunchTask" in branch
+    assert "Exit-DeploymentMutex -Mutex $deploymentMutex" in branch
+    assert "Start-ScheduledTask -TaskName $handoffTaskName" in branch
+    assert "Remove-LimitedWebLaunchTask -TaskName $handoffTaskName" in branch
+    assert "$expectedHandoffRevisionPrefix" in branch
+    assert "$candidateOwners -contains $candidatePid" in branch
+    assert "-ExpectedProcessId $handoffPid" in branch
 
 
 @pytest.mark.skipif(os.name != "nt", reason="restart script targets Windows")

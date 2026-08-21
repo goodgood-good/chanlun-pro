@@ -97,8 +97,8 @@ test('走势类型保持同级颜色但弱于基础结构线', () => {
   const reversal = api.getTrendVisualStyle({ state: 'forming', direction_status: 'awaiting_reversal_support' });
   const consolidation = api.getTrendVisualStyle({ state: 'forming', direction_status: 'consolidation' });
   assert.equal(completed.linewidth, 1);
-  assert.equal(completed.linestyle, 0);
-  assert.equal(completed.transparency, 12);
+  assert.equal(completed.linestyle, 2);
+  assert.equal(completed.transparency, 46);
   assert.equal(forming.linestyle, 2);
   assert.equal(forming.transparency, 30);
   assert.equal(candidate.linestyle, 2);
@@ -112,13 +112,22 @@ test('走势类型保持同级颜色但弱于基础结构线', () => {
 test('买卖点使用中文短标签、方向箭头和级别字号', () => {
   const api = loadStyleApi();
   const confirmed = api.getStrictPointVisual({
-    render_kind: 'point_confirmed', structural_level: 0, level_label: '1m', point_type: '3buy', side: 'buy',
+    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0, level_label: '1m', point_type: '3buy', side: 'buy',
   });
   const higher = api.getStrictPointVisual({
     render_kind: 'point_confirmed', structural_level: 2, level_label: '30m', point_type: '2sell', side: 'sell',
   });
   const approaching = api.getStrictPointVisual({
     render_kind: 'point_approaching', structural_level: 0, level_label: '1m', point_type: '1buy', side: 'buy',
+  });
+  const geometryCandidate = api.getStrictPointVisual({
+    render_kind: 'point_approaching', structural_level: 0, level_label: '5m', point_type: '3buy', side: 'buy',
+    formation_state: 'geometry_ready', lock_state: 'pending',
+    evidence_codes: ['provisional_center_completion', 'core_boundary_held'],
+  });
+  const legacyEvidenceOnly = api.getStrictPointVisual({
+    render_kind: 'point_approaching', structural_level: 0, level_label: '5m', point_type: '3buy', side: 'buy',
+    evidence_codes: ['provisional_center_completion', 'core_boundary_held'],
   });
 
   assert.equal(confirmed.text, '▲1m·三买');
@@ -130,6 +139,8 @@ test('买卖点使用中文短标签、方向箭头和级别字号', () => {
   assert.equal(approaching.fontsize, 11);
   assert.equal(approaching.bold, false);
   assert.equal(approaching.transparency, 45);
+  assert.equal(geometryCandidate.text, '▲候选待锁·5m·三买');
+  assert.equal(legacyEvidenceOnly.text, '▲接近·5m·三买');
 });
 
 test('盘整背驰和趋势背驰不再使用相同字重', () => {

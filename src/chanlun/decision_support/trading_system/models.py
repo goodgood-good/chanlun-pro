@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, Mapping
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
 from chanlun.core.strict_structure.models import (
     STRICT_POINT_TYPES,
     STRICT_POINT_TYPE_SET,
@@ -38,6 +39,18 @@ POINT_REVIEW_ORDER: tuple[PointType, ...] = (
 REVERSAL_SUPPORT_POINT_TYPES: frozenset[PointType] = frozenset(
     {"1buy", "2buy", "1sell", "2sell"}
 )
+CONTINUATION_SUPPORT_POINT_TYPES: frozenset[PointType] = frozenset(
+    {"3buy", "3sell"}
+)
+# 1 分钟段差证据既可以由一、二类反转/回试点完成，也可以由满足严格中枢边界
+# 间隔的三类延续点完成。它只用于 5 分钟正式买卖点之后的段差/精细定位，
+# 不能反过来决定 5 分钟买卖点是否成立。
+ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES: frozenset[PointType] = frozenset(
+    (*REVERSAL_SUPPORT_POINT_TYPES, *CONTINUATION_SUPPORT_POINT_TYPES)
+)
+# 持久化文档和历史研究代码仍使用旧名称。保留只读别名，避免把旧档案误判为
+# 损坏；新决策代码必须使用上面的“段差证据”名称和语义。
+ONE_MINUTE_TRIGGER_POINT_TYPES = ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES
 PointSide = Literal["buy", "sell"]
 PointStatus = Literal["confirmed"]
 PointVariant = Literal["standard", "strict", "weak_divergence", "boundary_touch"]
@@ -132,6 +145,7 @@ class StructuralPoint:
     evidence_codes: tuple[str, ...]
     related_point_ids: tuple[str, ...] = ()
     small_to_large_carrier_unit_ids: tuple[str, ...] = ()
+    terminal_segment: TerminalSegmentReference | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.code, str) or not self.code.strip():
@@ -192,6 +206,23 @@ class StructuralPoint:
             raise ValueError("related point ids must be unique non-empty strings")
         if self.point_id in self.related_point_ids:
             raise ValueError("structural point cannot reference itself")
+        if self.terminal_segment is not None:
+            if not isinstance(self.terminal_segment, TerminalSegmentReference):
+                raise TypeError("terminal_segment must be a terminal reference")
+            if (
+                self.terminal_segment.structural_level != self.recursive_level
+                or self.terminal_segment.market_end != anchor_at
+            ):
+                raise ValueError("structural point terminal lineage mismatch")
+            if (
+                self.terminal_segment.role != "latest_completed"
+                or self.terminal_segment.state not in {"formed", "locked"}
+                or self.terminal_segment.direction
+                != ("down" if self.side == "buy" else "up")
+            ):
+                raise ValueError(
+                    "confirmed point must belong to the formed latest completed segment"
+                )
         if (self.center_zd is None) != (self.center_zg is None):
             raise ValueError("中枢上下沿必须同时存在")
         if (
@@ -285,6 +316,123 @@ class StructuralPoint:
     @property
     def structure_key(self) -> tuple[StructureTower, int, str | None]:
         return self.tower, self.recursive_level, self.center_id
+
+
+_TERMINAL_SEGMENT_DOCUMENT_FIELDS = (
+    "terminal_segment_role",
+    "terminal_segment_level",
+    "terminal_segment_id",
+    "terminal_segment_source_kind",
+    "terminal_segment_direction",
+    "terminal_segment_state",
+    "terminal_segment_start_at",
+    "terminal_segment_end_at",
+    "terminal_segment_available_at",
+)
+
+
+def _terminal_segment_reference_from_document(
+    document: Mapping[str, object],
+) -> TerminalSegmentReference | None:
+    present = tuple(field in document for field in _TERMINAL_SEGMENT_DOCUMENT_FIELDS)
+    if not any(present):
+        return None
+    if not all(present):
+        raise ValueError("terminal segment document is incomplete")
+    return TerminalSegmentReference(
+        role=document["terminal_segment_role"],  # type: ignore[arg-type]
+        structural_level=int(document["terminal_segment_level"]),
+        unit_id=str(document["terminal_segment_id"]),
+        source_kind=document["terminal_segment_source_kind"],  # type: ignore[arg-type]
+        direction=document["terminal_segment_direction"],  # type: ignore[arg-type]
+        state=document["terminal_segment_state"],  # type: ignore[arg-type]
+        market_start=datetime.fromisoformat(
+            str(document["terminal_segment_start_at"])
+        ),
+        market_end=datetime.fromisoformat(str(document["terminal_segment_end_at"])),
+        available_at=datetime.fromisoformat(
+            str(document["terminal_segment_available_at"])
+        ),
+    )
+
+
+def structural_point_from_document(
+    document: Mapping[str, object],
+    *,
+    code: str | None = None,
+) -> StructuralPoint:
+    """从标准决策文档恢复经过模型不变量复核的正式结构点。"""
+
+    def strings(name: str) -> tuple[str, ...]:
+        raw = document.get(name, ())
+        if not isinstance(raw, (list, tuple)) or any(
+            not isinstance(value, str) or not value for value in raw
+        ):
+            raise ValueError(f"structural point {name} is invalid")
+        return tuple(raw)
+
+    try:
+        anchor_at = datetime.fromisoformat(str(document["anchor_at"]))
+        confirmed_at = datetime.fromisoformat(str(document["confirmed_at"]))
+        available_at = datetime.fromisoformat(str(document["available_at"]))
+        point = StructuralPoint(
+            point_id=str(document["point_id"]),
+            code=str(document.get("code") or code or ""),
+            point_type=document["point_type"],  # type: ignore[arg-type]
+            side=document["side"],  # type: ignore[arg-type]
+            status=document["status"],  # type: ignore[arg-type]
+            variant=document["variant"],  # type: ignore[arg-type]
+            source_frequency=str(document["source_frequency"]),
+            price_basis_revision=str(document["price_basis_revision"]),
+            tower=document["tower"],  # type: ignore[arg-type]
+            recursive_level=int(document["recursive_level"]),
+            anchor_at=anchor_at,
+            confirmed_at=confirmed_at,
+            available_at=available_at,
+            structure_anchor_price=float(document["anchor_price"]),
+            structure_invalidation_price=float(document["invalidation_price"]),
+            center_id=(
+                None
+                if document.get("center_id") is None
+                else str(document["center_id"])
+            ),
+            center_zd=(
+                None
+                if document.get("center_zd") is None
+                else float(document["center_zd"])
+            ),
+            center_zg=(
+                None
+                if document.get("center_zg") is None
+                else float(document["center_zg"])
+            ),
+            center_ordinal=(
+                None
+                if document.get("center_ordinal") is None
+                else int(document["center_ordinal"])
+            ),
+            divergence_kind=(
+                None
+                if document.get("divergence_kind") is None
+                else str(document["divergence_kind"])
+            ),
+            parent_point_id=(
+                None
+                if document.get("parent_point_id") is None
+                else str(document["parent_point_id"])
+            ),
+            evidence_codes=strings("evidence_codes"),
+            related_point_ids=strings("related_point_ids"),
+            small_to_large_carrier_unit_ids=strings(
+                "small_to_large_carrier_unit_ids"
+            ),
+            terminal_segment=_terminal_segment_reference_from_document(document),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("structural point document is invalid") from exc
+    if document.get("actionable") is not True:
+        raise ValueError("structural point document is not actionable")
+    return point
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +656,7 @@ class TradeSetup:
     started_at: datetime
     price_low: float
     price_high: float
+    sector_required: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -519,6 +668,8 @@ class TradeSetup:
             raise ValueError("setup prices must be positive")
         if self.price_low > self.price_high:
             raise ValueError("price_low cannot exceed price_high")
+        if type(self.sector_required) is not bool:
+            raise ValueError("sector_required must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,7 +712,9 @@ class ConflictDecision:
 @dataclass(frozen=True, slots=True)
 class TradingPolicy:
     require_confirmed_five_minute: bool = True
-    require_confirmed_one_minute: bool = True
+    # 5 分钟是正式买卖级别。1 分钟只提供段差/精细定位，不是信号成立硬门槛。
+    # 字段为兼容既有参数档案而保留，生产冻结值必须为 False。
+    require_confirmed_one_minute: bool = False
     require_sector_eligibility: bool = True
     require_thirty_minute_context: bool = True
     minimum_tick: Decimal = Decimal("0.01")
@@ -571,6 +724,24 @@ class TradingPolicy:
     max_five_minute_setup_age_seconds: int = MAX_FIVE_MINUTE_SETUP_AGE_SECONDS
 
     def __post_init__(self) -> None:
+        flags = (
+            self.require_confirmed_five_minute,
+            self.require_confirmed_one_minute,
+            self.require_sector_eligibility,
+            self.require_thirty_minute_context,
+        )
+        if any(type(value) is not bool for value in flags):
+            raise TypeError("trading policy flags must be booleans")
+        decimals = (
+            self.minimum_tick,
+            self.first_buy_risk_multiplier,
+            self.second_buy_risk_multiplier,
+            self.third_buy_risk_multiplier,
+        )
+        if any(not isinstance(value, Decimal) for value in decimals):
+            raise TypeError("trading policy price and risk values must be Decimals")
+        if any(not value.is_finite() for value in decimals):
+            raise ValueError("trading policy price and risk values must be finite")
         if self.minimum_tick <= 0:
             raise ValueError("minimum_tick must be positive")
         if (

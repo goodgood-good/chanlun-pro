@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import datetime
 import threading
 from functools import wraps
@@ -116,6 +117,7 @@ class CL(ICL):
             "_strict_htf_macd_by_level",
             "_strict_htf_macd_calculators",
             "_strict_structure_memo",
+            "_strict_center_prefix_cache",
             "_strict_unit_registry",
             "_strict_price_quantum_value",
         }
@@ -152,6 +154,7 @@ class CL(ICL):
             int, CausalPartialHigherMACDCalculator
         ] = {}
         self._strict_structure_memo: dict[object, object] = {}
+        self._strict_center_prefix_cache: OrderedDict[object, object] = OrderedDict()
         self._strict_unit_registry = None
         self._strict_price_quantum_value = None
         self._strict_evidence_lock = threading.RLock()
@@ -374,7 +377,11 @@ class CL(ICL):
             self._strict_registry(),
         )
         labels = recursive_level_labels(self.get_frequency())
-        result = StrictRecursiveEngine(max_levels=len(labels)).calculate(
+        engine = StrictRecursiveEngine(max_levels=len(labels))
+        # 保持只覆写 ``max_levels`` 的研究/测试适配器兼容；缓存是运行时加速附件，
+        # 不属于递归引擎的策略构造参数。
+        engine.center_prefix_cache = self._strict_center_prefix_cache
+        result = engine.calculate(
             units,
             price_basis_revision=price_basis_revision,
             strength=MacdStrengthProvider(self),
@@ -423,6 +430,7 @@ class CL(ICL):
             strict_config_revision=self._strict_config_revision(),
             structure=self.get_strict_structure_levels(),
             strength=MacdStrengthProvider(self),
+            projection_cache=self._strict_center_prefix_cache,
         )
         self._strict_structure_memo["evidence_assembler"] = assembler
         return assembler

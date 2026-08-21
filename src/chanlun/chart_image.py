@@ -1,7 +1,7 @@
-"""Render page-aligned Chanlun evidence into notification-safe PNG images.
+"""把与页面一致的缠论证据渲染为适合通知发送的 PNG 图片。
 
-The notification renderer consumes the same strict structure snapshot as the
-TradingView page so alert images and the current page share one structure.
+通知渲染器与 TradingView 页面消费同一个严格结构快照，保证告警图片和当前页面
+展示的是同一套结构。
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ _POINT_LABELS = {
 
 @lru_cache(maxsize=1)
 def _chinese_font():
-    """Return a bundled system CJK font when the runtime provides one."""
+    """运行环境提供字体时，返回随系统安装的中日韩字体。"""
 
     from matplotlib.font_manager import FontProperties
 
@@ -288,7 +288,9 @@ def _aligned_htf_macd(
     cl_data: ICL,
     all_bars: Sequence[object],
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]] | None:
-    """Return canonical MACD_HTF arrays aligned to every source K-line."""
+    """返回与每根来源 K 线对齐、仅供绘图的平滑高周期 MACD。"""
+
+    from chanlun.core.macd_htf import interpolate_causal_htf_for_chart
 
     result = getattr(cl_data, "_strict_htf_macd_by_level", {}).get(0)
 
@@ -301,6 +303,9 @@ def _aligned_htf_macd(
             for name in ("dif", "dea", "hist")
         )
 
+    if not valid(result):
+        return None
+    result = interpolate_causal_htf_for_chart(result)
     if not valid(result):
         return None
     return tuple(
@@ -437,7 +442,7 @@ def render_multi_timeframe_png(
     height_per_chart: int = 580,
     kline_count: int = 1200,
 ) -> bytes:
-    """Return one vertically aligned PNG for physical 30m/5m/1m charts."""
+    """返回一张纵向对齐物理 30m、5m、1m 图表的 PNG 图片。"""
 
     values = tuple(charts)
     if not values:

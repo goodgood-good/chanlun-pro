@@ -57,7 +57,7 @@ def _validated_frame_context(
     return closed_at, config, snapshot
 
 
-def _incremental_prefix_matches(
+def validated_incremental_prefix_matches(
     previous: pd.DataFrame,
     current: pd.DataFrame,
 ) -> bool:
@@ -87,6 +87,29 @@ class ScreeningRuntimeState:
     market: str = "a"
     _state: CL | None = None
     _frame: pd.DataFrame | None = None
+    update_count: int = 0
+    incremental_update_count: int = 0
+    rebuild_count: int = 0
+    last_update_incremental: bool | None = None
+
+    @property
+    def cl_state(self) -> CL | None:
+        """返回本次已验证的严格运行态，供只读证据投影复用。"""
+
+        return self._state
+
+    @property
+    def retained_frame_start(self) -> datetime | None:
+        """Return the stable left anchor used by a hot incremental generation."""
+
+        if self._frame is None or self._frame.empty:
+            return None
+        value = pd.Timestamp(self._frame["date"].iloc[0])
+        return value.to_pydatetime()
+
+    @property
+    def retained_frame_count(self) -> int:
+        return 0 if self._frame is None else len(self._frame)
 
     def update_from_frame(
         self,
@@ -110,7 +133,7 @@ class ScreeningRuntimeState:
             and self._state.get_frequency() == self.frequency
             and self._state.market == self.market.strip().lower()
             and self._state.get_config() == config
-            and _incremental_prefix_matches(previous_frame, snapshot)
+            and validated_incremental_prefix_matches(previous_frame, snapshot)
         )
         if not reusable:
             self._state = CL(
@@ -125,6 +148,12 @@ class ScreeningRuntimeState:
         else:
             self._state.process_klines(frame)
         self._frame = snapshot
+        self.update_count += 1
+        self.last_update_incremental = reusable
+        if reusable:
+            self.incremental_update_count += 1
+        else:
+            self.rebuild_count += 1
         metadata = strict_snapshot_price_metadata(frame)
         return ScreeningRuntimeUpdate(
             state=self._state,
@@ -132,6 +161,7 @@ class ScreeningRuntimeState:
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,
             strict_config_revision=cast(str, config["strict_config_revision"]),
+            incremental_reused=reusable,
         )
 
     def evidence_from_frame(
@@ -161,6 +191,7 @@ class ScreeningRuntimeUpdate:
     structure_price_quantum: Decimal
     price_basis_revision: str
     strict_config_revision: str
+    incremental_reused: bool
 
     def evidence(self) -> StrictEvidenceResult:
         return build_screening_evidence(
@@ -198,4 +229,5 @@ __all__ = (
     "ScreeningRuntimeState",
     "ScreeningRuntimeUpdate",
     "screening_evidence_from_frame",
+    "validated_incremental_prefix_matches",
 )

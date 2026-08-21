@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -49,10 +50,19 @@ def _frame(evidence=None) -> pd.DataFrame:
 
 
 class _StrictCD:
-    def __init__(self, *, evidence=None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        evidence=None,
+        error: Exception | None = None,
+        bis=(),
+        xds=(),
+    ) -> None:
         self.evidence = evidence or strict_evidence_result()
         self.error = error
         self.evidence_calls = 0
+        self.bis = tuple(bis)
+        self.xds = tuple(xds)
 
     def get_idx(self):
         values = np.array((0.0, 0.1))
@@ -66,10 +76,10 @@ class _StrictCD:
         }
 
     def get_bis(self):
-        return []
+        return list(self.bis)
 
     def get_xds(self):
-        return []
+        return list(self.xds)
 
     def get_strict_evidence(self):
         self.evidence_calls += 1
@@ -102,6 +112,51 @@ def test_chart_payload_uses_only_the_strict_snapshot() -> None:
     assert payload["strict_structure"]["schema"] == "chanlun-chart-structure"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]
     assert len(payload["macd_dif"]) == len(payload["t"]) == 2
+
+
+def test_segment_payload_distinguishes_forming_formed_and_locked() -> None:
+    evidence = strict_evidence_result()
+    start_at = evidence.source_closed_at - timedelta(minutes=5)
+    end_at = evidence.source_closed_at
+
+    def segment(*, locked: bool, forming: bool):
+        start = SimpleNamespace(k=SimpleNamespace(date=start_at), val=10.0)
+        end = SimpleNamespace(k=SimpleNamespace(date=end_at), val=11.0)
+        return SimpleNamespace(
+            start=start,
+            end=end,
+            forming=forming,
+            is_done=lambda: locked,
+        )
+
+    cd = _StrictCD(
+        evidence=evidence,
+        xds=(
+            segment(locked=True, forming=False),
+            segment(locked=False, forming=False),
+            segment(locked=False, forming=True),
+        ),
+    )
+    config = _config() | {"chart_show_xd": "1"}
+
+    payload = cl_data_to_tv_chart(
+        _frame(evidence),
+        config,
+        market="a",
+        code=evidence.symbol,
+        frequency=evidence.source_frequency,
+        strict_runtime=StrictChartRuntimeResult.success(cd),
+    )
+
+    assert [item["state"] for item in payload["xds"]] == [
+        "locked",
+        "formed",
+        "forming",
+    ]
+    # 几何已成形但仍处于防重绘审计缓冲的线段也画实线；只有最后一条
+    # forming 线段可使用虚线。
+    assert [item["linestyle"] for item in payload["xds"]] == ["0", "0", "1"]
+    assert [item["locked"] for item in payload["xds"]] == [True, False, False]
 
 
 def test_strict_structure_failure_is_atomic_unavailable() -> None:

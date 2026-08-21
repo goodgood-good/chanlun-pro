@@ -301,9 +301,14 @@ class XD(LINE):
         self.tzxls: List[TZXL] = []  # 特征序列列表
         self.done: bool = False  # 标记线段是否完成（信号/当下性口径：端点是否已锁定不可回改）
         # 显示口径：是否为"正在形成的最后一段"。与 done 解耦——确认级联推迟 done 的末
-        # 2 条已成形确认段 done=False 但 forming=False（图表画实线），只有真正在建的末段
-        # forming=True（图表画虚线）。详见 xd_calculator._emit_pending。
+        # 几条已成形段 done=False 但 forming=False（图表仍画实线），只有真正在建的末段
+        # forming=True（图表画虚线）。done 是防重绘审计锁，不应把已经几何成形的历史段
+        # 误画成多条“未完成线段”。详见 xd_calculator._emit_pending。
         self.forming: bool = False
+        # First causal witness that made this segment geometrically complete.
+        # This is deliberately independent from ``locked_at``: the latter is
+        # the later non-repainting/audit lock.
+        self.formed_at = None
 
         # 是否是拆分后的线段，如果是，这里会写明原因
         self.is_split: str = ""
@@ -324,6 +329,8 @@ class XD(LINE):
             'di_fx': self.di_fx.to_dict() if self.di_fx else None,
             'tzxls': [tzxl.to_dict() for tzxl in self.tzxls],
             'done': self.done,
+            'forming': self.forming,
+            'formed_at': self.formed_at.isoformat() if self.formed_at is not None else None,
             'is_split': self.is_split,
             'not_del': self.not_del,
             'not_yx': self.not_yx,

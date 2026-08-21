@@ -23,7 +23,13 @@ class _FakeZiXuan:
 
 
 def _patch_task_dependencies(monkeypatch, fake_zx):
-    monkeypatch.setattr(xuangu_tasks, "get_exchange", lambda _market: object())
+    monkeypatch.setattr(
+        xuangu_tasks,
+        "get_exchange",
+        lambda _market: types.SimpleNamespace(
+            support_frequencys=lambda: {"5m": "5分钟"}
+        ),
+    )
     monkeypatch.setattr(
         xuangu_tasks,
         "zixuan",

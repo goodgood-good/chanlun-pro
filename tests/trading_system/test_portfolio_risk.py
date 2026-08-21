@@ -18,6 +18,7 @@ def portfolio(
     drawdown: str = "0",
     open_risk: str = "0",
     sector_value: str = "0",
+    symbol_value: str = "0",
 ) -> PortfolioSnapshot:
     return PortfolioSnapshot(
         equity=Decimal(equity),
@@ -25,6 +26,7 @@ def portfolio(
         drawdown=Decimal(drawdown),
         open_risk_cash=Decimal(open_risk),
         sector_market_values=(("TDX.880301", Decimal(sector_value)),),
+        symbol_market_values=(("SZ.000001", Decimal(symbol_value)),),
     )
 
 
@@ -40,6 +42,7 @@ def candidate(
         entry_price=Decimal(entry),
         stop_price=Decimal(stop),
         risk_multiplier=Decimal(multiplier),
+        symbol_id="SZ.000001",
     )
 
 
@@ -110,6 +113,35 @@ def test_single_symbol_cap_limits_market_value() -> None:
 
     assert order.shares * Decimal("10") <= Decimal("10000")
     assert "symbol_cap" in order.reason_codes
+
+
+def test_single_symbol_cap_subtracts_existing_exposure() -> None:
+    order = size_entry(
+        portfolio=portfolio(symbol_value="9500"),
+        candidate=candidate(stop="9.99"),
+        limits=RiskLimits(),
+    )
+
+    assert order.shares == 0
+    assert order.reason_codes == ("zero_shares",)
+
+
+@pytest.mark.parametrize("value", (Decimal("NaN"), Decimal("Infinity")))
+def test_risk_inputs_reject_non_finite_values(value: Decimal) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        replace(RiskLimits(), base_trade_risk=value)
+    with pytest.raises(ValueError, match="finite"):
+        replace(portfolio(), drawdown=value)
+
+
+def test_risk_candidate_requires_symbol_identity() -> None:
+    with pytest.raises(ValueError, match="identity is required"):
+        replace(candidate(), symbol_id="")
+
+
+def test_lot_size_rejects_boolean_values() -> None:
+    with pytest.raises(ValueError, match="lot_size must be positive"):
+        replace(RiskLimits(), lot_size=True)
 
 
 def test_sector_cap_uses_existing_sector_exposure() -> None:

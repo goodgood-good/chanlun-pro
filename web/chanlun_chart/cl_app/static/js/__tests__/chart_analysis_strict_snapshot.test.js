@@ -118,6 +118,10 @@ function point(pointType, status, overrides = {}) {
     point_type: pointType,
     side: buy ? 'buy' : 'sell',
     status,
+    formation_state: status === 'confirmed' ? 'confirmed' : 'forming',
+    lock_state: status === 'confirmed' ? 'locked' : 'pending',
+    contains_forming_segment: status === 'approaching',
+    contains_unlocked_segment: status === 'approaching',
     variant: 'standard',
     structural_level: 0,
     source_kind: 'segment',
@@ -249,7 +253,11 @@ function snapshot(overrides = {}) {
       approaching_points: [
         point('1sell', 'approaching'),
         point('2sell', 'approaching'),
-        point('3sell', 'approaching'),
+        point('3sell', 'approaching', {
+          formation_state: 'geometry_ready',
+          contains_forming_segment: false,
+          contains_unlocked_segment: true,
+        }),
       ],
       divergences: [divergence('consolidation'), divergence('trend')],
     }],
@@ -303,7 +311,43 @@ test('strict snapshot supplies centers and signals through one contract', () => 
   assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
 });
 
-test('provisional third-class completion is reported as complete but non-tradable', () => {
+test('operational confirmation remains confirmed while disclosing the pending audit lock', () => {
+  const base = snapshot();
+  const operational = point('1buy', 'confirmed', {
+    strict_status: 'approaching',
+    operational_confirmation: true,
+    confirmation_basis: 'latest_completed_geometry',
+    lock_state: 'pending',
+    actionable: true,
+    contains_forming_segment: false,
+    contains_unlocked_segment: true,
+    terminal_segment_role: 'latest_completed',
+    terminal_segment_state: 'formed',
+  });
+  const strict = snapshot({
+    levels: [{
+      ...base.levels[0],
+      confirmed_points: [operational],
+      approaching_points: [],
+    }],
+  });
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+  const confirmed = summary.confirmedPoints[0];
+
+  assert.equal(summary.state, 'ready');
+  assert.equal(confirmed.status, 'confirmed');
+  assert.equal(confirmed.strictStatus, 'approaching');
+  assert.equal(confirmed.operationalConfirmation, true);
+  assert.equal(confirmed.confirmationBasis, 'latest_completed_geometry');
+  assert.equal(confirmed.formationState, 'confirmed');
+  assert.equal(confirmed.lockState, 'pending');
+  assert.equal(confirmed.actionable, true);
+  assert.equal(confirmed.terminalSegmentRole, 'latest_completed');
+  assert.equal(confirmed.terminalSegmentState, 'formed');
+});
+
+test('provisional third-class geometry is reported as a candidate awaiting lock', () => {
   const base = snapshot();
   const completedPreview = centerPreview({
     state: 'completed',
@@ -331,10 +375,49 @@ test('provisional third-class completion is reported as complete but non-tradabl
   assert.equal(summary.centerPreviews[0].tradable, false);
   assert.equal(
     summary.centerPreviews[0].qualification,
-    '几何已完成，等待线段锁定，不可直接交易',
+    '离开/回抽几何已出现；仍是候选，尚未达到操作确认',
   );
-  assert.equal(summary.xdZone.status, '三类卖点几何完成，待锁定');
+  assert.equal(summary.xdZone.status, '三类卖点候选待锁定');
   assert.equal(summary.xdZone.tone, 'forming');
+});
+
+test('operational third-class confirmation updates the center explanation too', () => {
+  const base = snapshot();
+  const operationalPreview = centerPreview({
+    state: 'completed',
+    render_id: 'preview-l0-1@operational@u6',
+    completion_leave_unit_id: 'u5',
+    completion_return_unit_id: 'u6',
+    completion_direction: 'down',
+    pending_leave_unit_id: null,
+    completion_phase: 'OPERATIONAL_THIRD_CLASS_POINT',
+    completion_point_type: '3sell',
+    expected_completion_point_type: '3sell',
+    completion_point_status: 'confirmed',
+    operational_confirmation: true,
+    confirmation_basis: 'latest_completed_geometry',
+    audit_lock_state: 'pending',
+    tradable: true,
+  });
+  const strict = snapshot({
+    levels: [{
+      ...base.levels[0],
+      centers: [],
+      center_previews: [operationalPreview],
+    }],
+  });
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+
+  assert.equal(summary.centerPreviews[0].tradable, true);
+  assert.equal(
+    summary.centerPreviews[0].qualification,
+    '买卖点操作确认已完成；末端结构仍会随新K更新',
+  );
+  assert.equal(summary.xdZone.status, '已完成');
+  assert.equal(summary.xdZone.tone, 'complete');
+  assert.match(summary.xdZone.qualification, /三类卖点已达到操作确认/);
+  assert.match(summary.xdZone.qualification, /末端结构仍会随新K更新/);
 });
 
 test('current stroke and segment status use base geometry from the same response', () => {
@@ -348,6 +431,8 @@ test('current stroke and segment status use base geometry from the same response
     }],
     xds: [{
       linestyle: '0',
+      state: 'locked',
+      locked: true,
       points: [
         { time: CLOSED_AT - 300, price: 11.4 },
         { time: CLOSED_AT, price: 10.1 },
@@ -356,8 +441,26 @@ test('current stroke and segment status use base geometry from the same response
   }), context);
 
   assert.equal(summary.bi.text, '向上 · 形成中');
-  assert.equal(summary.xd.text, '向下 · 已完成');
+  assert.equal(summary.xd.text, '向下 · 已锁定');
   assert.equal(summary.trends[0].directionLabel, '正式向上');
+});
+
+test('几何已成形但未锁定的线段不会显示为完成', () => {
+  const summary = Analysis.summarizeChartData(barsResult(snapshot(), {
+    xds: [{
+      linestyle: '2',
+      state: 'formed',
+      locked: false,
+      points: [
+        { time: CLOSED_AT - 300, price: 9.8 },
+        { time: CLOSED_AT, price: 10.6 },
+      ],
+    }],
+  }), context);
+
+  assert.equal(summary.xd.text, '向上 · 几何已成形待锁定');
+  assert.match(summary.xd.meta, /端点尚未锁定，仍可能回改/);
+  assert.match(summary.plan.wait, /等待当前向上线段端点锁定/);
 });
 
 test('几何反转缺少同级一二类点时不得显示为正式方向', () => {
@@ -409,15 +512,16 @@ test('all six buy and sell point classes stay independent across confirmed and a
   const summary = Analysis.summarizeChartData(barsResult(), context);
 
   assert.deepEqual(summary.pointCounts, {
-    '1buy': { confirmed: 1, approaching: 0 },
-    '2buy': { confirmed: 1, approaching: 0 },
-    '3buy': { confirmed: 1, approaching: 0 },
-    '1sell': { confirmed: 0, approaching: 1 },
-    '2sell': { confirmed: 0, approaching: 1 },
-    '3sell': { confirmed: 0, approaching: 1 },
+    '1buy': { confirmed: 1, formed: 0, approaching: 0 },
+    '2buy': { confirmed: 1, formed: 0, approaching: 0 },
+    '3buy': { confirmed: 1, formed: 0, approaching: 0 },
+    '1sell': { confirmed: 0, formed: 0, approaching: 1 },
+    '2sell': { confirmed: 0, formed: 0, approaching: 1 },
+    '3sell': { confirmed: 0, formed: 1, approaching: 0 },
   });
   assert.equal(summary.confirmedPoints.find((item) => item.pointType === '3buy').centerOrdinal, 1);
   assert.equal(summary.approachingPoints.find((item) => item.pointType === '2sell').missingConditions[0], 'wait-lock');
+  assert.equal(summary.formedPoints.find((item) => item.pointType === '3sell').lockState, 'pending');
   assert.match(summary.confirmedPoints.find((item) => item.pointType === '1buy').evidenceText, /MACD/);
   assert.equal(summary.bc.label, '盘整背驰');
   assert.equal(summary.bc.levelLabel, '5m');

@@ -20,6 +20,7 @@ import time
 from collections import OrderedDict
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from chanlun.exchange.price_basis import (
@@ -177,20 +178,35 @@ def reset_cl_pool() -> None:
 
 
 def _klines_prefix_fp(klines, upto: int) -> str:
-    """对 klines 前 ``upto`` 根的 OHLC 取指纹,用于检测"末根之前的历史根被回填/订正"。
+    """认证前 ``upto`` 根完整 OHLCV 与时间事实，检测历史回填/订正。
 
     持久 CL 增量摄入假设"历史(末根之前)K 线永不变",一旦数据源订正中间某根,增量会
     丢弃该变更 → 增量 != 全量(审计 H1,已由 test_..._mid_bar_revision 实证)。复用前用
     本指纹比对"不可变前缀",变了就放弃复用、重建全量;只追加新根 / 末根更新则前缀不变、
     指纹一致, 照常增量(不伤性能)。upto<=0 表示无历史前缀需校验, 返回固定值。
-    取指纹失败 → 返回 "" (不会等于任何真实 md5), 触发保守重建。
+    时间或成交量也是已认证行情事实：即使 OHLC 未变，它们发生修订也必须重建，
+    否则增量状态与全量图表可能携带不同的时序或成交量。取指纹失败返回空串，触发
+    保守重建。
     """
     if upto <= 0:
         return "0"
     try:
-        cols = [c for c in ("open", "high", "low", "close") if c in klines.columns]
-        arr = klines.iloc[:upto][cols].to_numpy(dtype="float64")
-        return hashlib.md5(arr.tobytes()).hexdigest()
+        required = ("date", "open", "high", "low", "close", "volume")
+        if any(column not in klines.columns for column in required):
+            return ""
+        prefix = klines.iloc[:upto]
+        dates = pd.to_datetime(prefix["date"], errors="coerce", utc=True)
+        numeric = prefix.loc[:, list(required[1:])].apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+        values = numeric.to_numpy(dtype="float64")
+        if dates.isna().any() or not np.isfinite(values).all():
+            return ""
+        digest = hashlib.md5()
+        digest.update(dates.astype("int64").to_numpy().tobytes())
+        digest.update(values.tobytes())
+        return digest.hexdigest()
     except Exception:
         return ""
 
@@ -280,7 +296,21 @@ def recompute_chart_data_from_klines(
             )
             cd = strict_runtime.cd
         else:
-            cd.process_klines(display_klines)
+            # The immutable prefix was already authenticated above by its exact
+            # timestamp/OHLCV fingerprint.  Use the core's certified fast path so every
+            # higher-timeframe MACD calculator does not compare ten thousand
+            # historical rows again on each completed minute.  The path keeps
+            # K-line, inclusion, stroke, segment and strict-structure semantics
+            # identical to ``process_klines``.
+            validated_incremental = getattr(
+                cd,
+                "process_validated_incremental_klines",
+                None,
+            )
+            if callable(validated_incremental):
+                validated_incremental(display_klines)
+            else:
+                cd.process_klines(display_klines)
             strict_runtime = StrictChartRuntimeResult.success(cd)
 
         result = _chart_compute.serialize_chart_data_with_strict_runtime(

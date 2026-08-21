@@ -244,6 +244,34 @@ def _frozen_algorithm(
     return revision, frozen
 
 
+def _frozen_fact_algorithm(
+    manifest: Mapping[str, object],
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    raw = manifest.get("fact_algorithm")
+    if raw is None:
+        return _frozen_algorithm(manifest)
+    if not isinstance(raw, Mapping):
+        raise ValueError("extract manifest fact algorithm is malformed")
+    revision = raw.get("revision")
+    rows = raw.get("hashes")
+    if not isinstance(revision, str) or not isinstance(rows, list):
+        raise ValueError("extract manifest fact algorithm is malformed")
+    hashes: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("extract manifest fact algorithm hash is malformed")
+        path, digest = row.get("path"), row.get("sha256")
+        if not isinstance(path, str) or not isinstance(digest, str):
+            raise ValueError("extract manifest fact algorithm hash is malformed")
+        hashes.append((path, digest))
+    frozen = tuple(hashes)
+    if _algorithm_revision(frozen) != revision:
+        raise ValueError("extract manifest fact algorithm revision is inconsistent")
+    if qmt_research_contract.fact_algorithm_hashes() != frozen:
+        raise RuntimeError("symbol-fact source code changed after extraction")
+    return revision, frozen
+
+
 def _sector_source_revision(
     *,
     sector_id: str,
@@ -450,7 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not manifest.get("complete") and not args.allow_partial:
         raise RuntimeError("symbol extraction is incomplete")
     algorithm_revision, algorithm_hashes = _frozen_algorithm(manifest)
-    symbols = _load_symbols(directory, manifest, algorithm_revision)
+    fact_algorithm_revision, fact_algorithm_hashes = _frozen_fact_algorithm(manifest)
+    symbols = _load_symbols(directory, manifest, fact_algorithm_revision)
     if not symbols:
         raise RuntimeError("no symbol facts are available")
     if not args.allow_research_only:
@@ -682,6 +711,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if qmt_research_contract.algorithm_hashes() != algorithm_hashes:
         raise RuntimeError("source code changed during finalization")
+    if (
+        "fact_algorithm" in manifest
+        and qmt_research_contract.fact_algorithm_hashes() != fact_algorithm_hashes
+    ):
+        raise RuntimeError("symbol-fact source changed during finalization")
     qmt_research_contract.write_report_atomic(args.report, report)
     print(
         json.dumps(

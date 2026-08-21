@@ -112,6 +112,7 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
   assert.ok(source.includes('const _displayLevels = recursiveDisplayLevels(_curInterval)'));
   assert.ok(source.includes('key: `center_L${item.level}`'));
   assert.ok(source.includes('key: `trend_L${item.level}`'));
+  assert.ok(source.includes('key: `point_L${item.level}`'));
   assert.ok(source.includes('key: `divergence_consolidation_L${item.level}`'));
   assert.ok(source.includes('key: `divergence_trend_L${item.level}`'));
   for (const removedKey of ['center_1m', 'center_5m', 'center_30m', 'center_d']) {
@@ -119,6 +120,8 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
   }
   assert.equal(source.includes('严格递归中枢总开关'), false);
   assert.ok(source.includes("_cbRow('center_all', '中枢总开关')"));
+  assert.ok(source.includes('const _pointLevels = _displayLevels.map'));
+  assert.ok(source.includes('..._pointLevels.map((item) => item.key)'));
 });
 
 test('菜单不暴露接近触发或中枢投影复选框', () => {

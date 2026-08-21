@@ -36,7 +36,9 @@ _SECRET_FILE_NAME = ".flask_secret_key"
 _PASSWORD_HASH_PREFIXES = ("pbkdf2:", "scrypt:")
 _RUNTIME_CREDENTIALS_SCHEMA = "chanlun-runtime-credentials"
 _RUNTIME_CREDENTIALS_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "runtime_credentials.json"
+    Path(__file__).resolve().parents[2]
+    / "config"
+    / "runtime_credentials.local.json"
 )
 
 
@@ -250,10 +252,11 @@ def _is_valid_dingtalk_webhook(value: str) -> bool:
 def get_dingtalk_webhook(
     credentials_path: os.PathLike[str] | str | None = None,
 ) -> str:
-    """Resolve the sole DingTalk webhook from environment or repository config.
+    """Resolve the sole DingTalk webhook from environment or local config.
 
     ``CHANLUN_DINGTALK_WEBHOOK`` has explicit precedence. Missing or malformed
-    repository credentials fail closed.
+    local credentials fail closed.  The default file is deliberately ignored by
+    Git; ``CHANLUN_RUNTIME_CREDENTIALS_PATH`` may point outside the repository.
     """
 
     configured = os.environ.get("CHANLUN_DINGTALK_WEBHOOK")
@@ -261,10 +264,11 @@ def get_dingtalk_webhook(
         normalized = configured.strip()
         return normalized if _is_valid_dingtalk_webhook(normalized) else ""
 
-    path = (
-        _RUNTIME_CREDENTIALS_PATH
-        if credentials_path is None
-        else Path(credentials_path)
+    configured_path = os.environ.get("CHANLUN_RUNTIME_CREDENTIALS_PATH")
+    path = Path(credentials_path) if credentials_path is not None else (
+        Path(configured_path).expanduser()
+        if configured_path and configured_path.strip()
+        else _RUNTIME_CREDENTIALS_PATH
     )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -288,10 +292,11 @@ def get_dingtalk_keyword(
     configured = os.environ.get("CHANLUN_DINGTALK_KEYWORD")
     if configured is not None:
         return configured.strip()
-    path = (
-        _RUNTIME_CREDENTIALS_PATH
-        if credentials_path is None
-        else Path(credentials_path)
+    configured_path = os.environ.get("CHANLUN_RUNTIME_CREDENTIALS_PATH")
+    path = Path(credentials_path) if credentials_path is not None else (
+        Path(configured_path).expanduser()
+        if configured_path and configured_path.strip()
+        else _RUNTIME_CREDENTIALS_PATH
     )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))

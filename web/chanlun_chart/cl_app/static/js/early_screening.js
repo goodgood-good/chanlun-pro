@@ -2,8 +2,12 @@
 
 (function startTradingScreeningController() {
   const POLL_INTERVAL_MS = 60_000;
+  const SNAPSHOT_REQUEST_TIMEOUT_MS = 20_000;
   const STORAGE_KEY = "chanlun:trading-screening:view";
-  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS";
+  // The current-only contract invalidates every persisted pre-migration view.
+  // Earlier versions could retain a narrow point/stage/scope filter and make
+  // current first/second-class rows appear to be missing.
+  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS_V6_STRICT_1M_L0_LEDGER";
 
   function boot() {
     const Ui = globalThis.TradingScreeningUi;
@@ -18,6 +22,13 @@
     const signalList = byId("es-signal-list");
     const chartWorkspace = byId("es-chart-workspace");
     const saved = readView();
+    const pointFilters = [
+      "all", "buy", "sell", "1buy", "2buy", "3buy", "1sell", "2sell", "3sell",
+    ];
+    const lifecycleFilters = [
+      "all", "observed", "monitoring", "approaching", "triggered",
+      "executable", "active",
+    ];
     const savedSelectionScope = saved.selectionScope === "sector-trigger"
       ? "sector-trigger"
       : "all-qualified";
@@ -25,8 +36,20 @@
       snapshot: null,
       selectedSignalId: null,
       // 首次打开必须同时展示六类买卖点；用户主动选择的筛选条件仍会持久化。
-      pointType: saved.pointType || "all",
-      lifecycle: saved.lifecycle || "all",
+      pointType: pointFilters.includes(saved.pointType) ? saved.pointType : "all",
+      lifecycle: lifecycleFilters.includes(saved.lifecycle) ? saved.lifecycle : "all",
+      market: ["a", "us"].includes(saved.market) ? saved.market : "all",
+      signalSource: saved.signalSource === "holding"
+        ? "attention"
+        : ["screening", "notification", "attention", "watchlist"].includes(saved.signalSource)
+          ? saved.signalSource
+          : "all",
+      reviewStage: ["forming", "notified", "tracking"].includes(saved.reviewStage)
+        ? saved.reviewStage
+        : "all",
+      segmentState: ["present", "current", "historical", "absent"].includes(saved.segmentState)
+        ? saved.segmentState
+        : "all",
       selectionScope: savedSelectionScope,
       sectorId: "all",
       sectorExpanded: false,
@@ -39,6 +62,8 @@
       mode: root.dataset.defaultMode || "human-review",
       loading: false,
       pollTimer: null,
+      signalRenderLimit: 200,
+      signalFilterKey: "",
     };
 
     const resizeController = Resize.createController(chartWorkspace, state.chartSizing, {
@@ -52,13 +77,41 @@
     const evidenceClose = chartWorkspace && chartWorkspace.querySelector("[data-evidence-close]");
     const theaterToggle = chartWorkspace && chartWorkspace.querySelector("[data-theater-toggle]");
 
+    async function requestJson(endpoint, options) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        SNAPSHOT_REQUEST_TIMEOUT_MS,
+      );
+      try {
+        const response = await fetch(endpoint, { ...options, signal: controller.signal });
+        return { response, payload: await response.json() };
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          throw new Error("snapshot_request_timeout");
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+
     function readView() {
       try {
-        const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-        return value && typeof value === "object" && value.contract === VIEW_CONTRACT
-          ? value
-          : {};
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return {};
+        const value = JSON.parse(raw);
+        if (!value || typeof value !== "object" || value.contract !== VIEW_CONTRACT) {
+          localStorage.removeItem(STORAGE_KEY);
+          return {};
+        }
+        return value;
       } catch (_error) {
+        try {
+          localStorage.removeItem(STORAGE_KEY);
+        } catch (_storageError) {
+          // 本地存储不可用时仍以实时快照为唯一事实来源。
+        }
         return {};
       }
     }
@@ -69,6 +122,10 @@
           contract: VIEW_CONTRACT,
           pointType: state.pointType,
           lifecycle: state.lifecycle,
+          market: state.market,
+          signalSource: state.signalSource,
+          reviewStage: state.reviewStage,
+          segmentState: state.segmentState,
           selectionScope: state.selectionScope,
           layout: state.layout,
           chartSizing: state.chartSizing,
@@ -120,16 +177,22 @@
         ? snapshot.runtime_health
         : {};
       const runtimeReasons = Array.isArray(runtimeHealth.reasons)
-        ? runtimeHealth.reasons.join(" · ")
-        : "screening_health_unavailable";
+        ? runtimeHealth.reasons.map(Ui.reasonLabel).join(" · ")
+        : "选股后台健康状态不可用";
       const priorityMonitorWarning = runtimeHealth.priority_monitoring_enabled === true
         && runtimeHealth.priority_monitor_session_open === true
         && runtimeHealth.priority_monitor_ready !== true;
+      const candidateMonitorWarning = runtimeHealth.priority_monitor_session_open === true
+        && runtimeHealth.candidate_monitor_ready !== true;
       const realtimeAlertWarning = runtimeHealth.priority_monitor_session_open === true
         && runtimeHealth.realtime_alert_ready !== true;
       const priorityMonitorReasons = Array.isArray(runtimeHealth.priority_monitor_reason_codes)
-        ? runtimeHealth.priority_monitor_reason_codes.join(" · ")
-        : "PRIORITY_MONITOR_UNAVAILABLE";
+        ? runtimeHealth.priority_monitor_reason_codes.map(Ui.reasonLabel).join(" · ")
+        : Ui.reasonLabel("PRIORITY_MONITOR_UNAVAILABLE");
+      const candidateMonitorReasons = Array.isArray(runtimeHealth.candidate_monitor_reason_codes)
+        && runtimeHealth.candidate_monitor_reason_codes.length
+        ? runtimeHealth.candidate_monitor_reason_codes.map(Ui.reasonLabel).join(" · ")
+        : Ui.statusLabel(runtimeHealth.candidate_monitor_status, "候选轮换状态待核对");
       const fullCoveragePaused = runtimeHealth.full_coverage_refresh_paused === true;
       const fullCoverageNextActive = Ui.timeText(
         runtimeHealth.full_coverage_next_active_at,
@@ -141,17 +204,32 @@
           "后台选股扫描健康门未通过",
           `当前仍显示最后一份只读快照；${runtimeReasons}`,
         );
-      } else if (priorityMonitorWarning || realtimeAlertWarning) {
+      } else if (priorityMonitorWarning) {
         setStatus(
           "warning",
           "盘中实时预警通道尚未就绪",
-          `提前选股快照仍可查看；优先复查持仓、自选和强板块候选的通道状态：${priorityMonitorReasons}`,
+          `提前选股快照仍可查看；优先复查人工关注、自选和强板块候选的通道状态：${priorityMonitorReasons}`,
         );
-      } else if (snapshot.scan_state === "complete" && !quality.stale) {
+      } else if (candidateMonitorWarning) {
+        setStatus(
+          "loading",
+          "优先预警正常，候选范围仍在准备",
+          `人工关注、自选和新鲜已有信号继续按分钟复查；5分钟支持板块候选：${candidateMonitorReasons}`,
+        );
+      } else if (realtimeAlertWarning) {
+        setStatus(
+          "warning",
+          "实时通知保障尚未就绪",
+          Ui.reasonLabel(runtimeHealth.realtime_alert_reason_code),
+        );
+      } else if (
+        (snapshot.scan_state === "complete" || snapshot.scan_state === "in_progress") &&
+        !quality.stale
+      ) {
         if (cycleInProgress) {
           if (fullCoveragePaused) {
             const liveLane = runtimeHealth.priority_monitor_session_open === true
-              ? "盘中算力正用于持仓、自选与强板块候选的实时预警"
+              ? "盘中算力正用于人工关注、自选与强板块候选的实时预警"
               : "当前不在全市场覆盖运行窗口";
             setStatus(
               "loading",
@@ -192,10 +270,15 @@
       } else if (!snapshot.available) {
         setStatus("loading", "等待首次有效扫描", "后台正在准备原生板块与多周期结构数据");
       } else {
-        setStatus("warning", "快照状态需要复核", Ui.text(snapshot.scan_state, "未知状态"));
+        setStatus("warning", "快照状态需要复核", Ui.statusLabel(snapshot.scan_state));
       }
 
-      setText("es-generated", Ui.timeText(snapshot.generated_at));
+      setText(
+        "es-generated",
+        Ui.fullDateTimeText(
+          snapshot.market_data_as_of || snapshot.as_of || snapshot.generated_at,
+        ),
+      );
       setText("es-sector-completion", sectorCompletion);
       setText("es-completion", completion);
       setText("es-scan-timing", Ui.scanTimingText(audit));
@@ -223,7 +306,10 @@
         `小板块资格排除 ${sectorExcluded} · 历史不足排除 ${excluded} · 真实失败 ${errorCount}`,
       );
       setText("es-sector-count", Ui.selectedSectorCount(snapshot));
-      setText("es-signal-count", snapshot.signals.length);
+      const unifiedSignals = Array.isArray(snapshot.unified_signals)
+        ? snapshot.unified_signals
+        : snapshot.signals;
+      setText("es-signal-count", unifiedSignals.length);
       setText(
         "es-sector-trigger-count",
         Number(snapshot.sector_trigger_signal_count) || 0,
@@ -233,23 +319,45 @@
         Number(snapshot.total_qualified_signal_count) || snapshot.signals.length,
       );
       setText("es-approaching-count", countStage("approaching"));
-      setText("es-formed-count", countStage("formed"));
-      setText("es-armed-count", countStage("armed"));
       setText("es-triggered-count", countStage("triggered"));
+      const segmentEvidenceCount = unifiedSignals.filter(
+        (signal) => Ui.segmentDifferenceEvidenceStatusForSignal(signal) === "present",
+      ).length;
+      setText("es-segment-count", segmentEvidenceCount);
+      const showCurrentSegments = byId("es-show-current-segments");
+      if (showCurrentSegments) {
+        showCurrentSegments.disabled = segmentEvidenceCount === 0;
+        showCurrentSegments.textContent = segmentEvidenceCount === 0
+          ? "当前暂无段差证据"
+          : "查看段差证据";
+      }
+      if (
+        segmentEvidenceCount === 0
+        && ["present", "current", "historical"].includes(state.segmentState)
+      ) {
+        // The strict segment contract changed from accepting recursive 1m/L1
+        // to physical 1m/L0 only.  Never let a stale positive-only filter hide
+        // every still-valid 5m signal when the published scope has no L0 fact.
+        state.segmentState = "all";
+        saveView();
+      }
+      setText(
+        "es-segment-scope",
+        Ui.segmentScopeText(runtimeHealth, audit, segmentEvidenceCount),
+      );
       setText("es-executable-count", countStage("executable"));
-      setText("es-closed-count", countStage("invalidated") + countStage("closed"));
-      document.title = snapshot.signals.length
-        ? `(${snapshot.signals.length}) 缠论提前选股 · 实时盯盘与个股分析`
+      document.title = unifiedSignals.length
+        ? `(${unifiedSignals.length}) 缠论提前选股 · 实时盯盘与个股分析`
         : "缠论提前选股 · 实时盯盘与个股分析";
     }
 
-    function renderManualHoldings() {
+    function renderManualAttention() {
       const snapshot = state.snapshot || {};
-      const holdings = snapshot.manual_holdings && typeof snapshot.manual_holdings === "object"
-        ? snapshot.manual_holdings
+      const attention = snapshot.manual_attention && typeof snapshot.manual_attention === "object"
+        ? snapshot.manual_attention
         : {};
-      const positions = Array.isArray(holdings.positions)
-        ? holdings.positions.filter((row) => row && typeof row === "object")
+      const symbols = Array.isArray(attention.symbols)
+        ? attention.symbols.filter((row) => row && typeof row === "object")
         : [];
       const list = byId("es-holdings-list");
       const empty = byId("es-holdings-empty");
@@ -269,21 +377,17 @@
         executable: 0,
         triggered: 1,
         active: 2,
-        armed: 3,
-        formed: 4,
-        approaching: 5,
-        observed: 6,
-        invalidated: 7,
-        closed: 8,
+        approaching: 3,
+        observed: 4,
       };
       const signalsByIdentity = new Map();
-      const holdingSignals = [
+      const attentionSignals = [
         ...(Array.isArray(snapshot.signals) ? snapshot.signals : []),
-        ...(Array.isArray(snapshot.manual_holding_signals)
-          ? snapshot.manual_holding_signals
+        ...(Array.isArray(snapshot.manual_attention_signals)
+          ? snapshot.manual_attention_signals
           : []),
       ];
-      for (const signal of holdingSignals) {
+      for (const signal of attentionSignals) {
         if (!signal || typeof signal !== "object") continue;
         const code = normalizeCode(signal.code);
         if (!code) continue;
@@ -296,43 +400,43 @@
         if (!current || nextRank < currentRank) signalsByIdentity.set(key, signal);
       }
 
-      const monitored = positions.filter((row) => row.realtime_status === "monitoring").length;
-      const waiting = positions.filter((row) => row.realtime_status !== "monitoring").length;
-      setText("es-holdings-declared", positions.length);
+      const monitored = symbols.filter((row) => row.realtime_status === "monitoring").length;
+      const waiting = symbols.filter((row) => row.realtime_status !== "monitoring").length;
+      setText("es-holdings-declared", symbols.length);
       setText("es-holdings-monitored", monitored);
       setText("es-holdings-unsupported", waiting);
 
-      if (holdings.available !== true) {
-        setText("es-holdings-status", "本地持仓分组暂不可用；未访问任何交易账户。");
-      } else if (positions.length) {
+      if (attention.available !== true) {
+        setText("es-holdings-status", "本地人工关注分组暂不可用。");
+      } else if (symbols.length) {
         setText(
           "es-holdings-status",
-          "A股使用统一选股决策核心；其他市场使用独立辅助结构雷达。两者均不读取交易账户。",
+          "A股使用统一选股决策核心；其他市场使用独立辅助结构雷达。该分组只决定优先监听范围。",
         );
       } else {
         setText(
           "es-holdings-status",
-          "“我的持仓”是人工声明的跨市场分组，不读取 QMT 或其他交易账户。",
+          "人工关注组由用户在行情页维护，只代表跨市场优先监听范围。",
         );
       }
 
       if (empty) {
-        empty.hidden = positions.length !== 0;
-        empty.textContent = holdings.available === true
-          ? "“我的持仓”尚无标的；可在行情页把关注标的加入该分组。"
-          : "暂时无法读取本地“我的持仓”分组，系统不会用账户数据补填。";
+        empty.hidden = symbols.length !== 0;
+        empty.textContent = attention.available === true
+          ? "人工关注组尚无标的；可在行情页把需要优先监听的标的加入该分组。"
+          : "暂时无法读取本地人工关注分组。";
       }
       if (!list) return;
       const fragment = document.createDocumentFragment();
-      const alertStages = new Set(["approaching", "formed", "armed", "triggered", "executable", "active"]);
+      const alertStages = new Set(["approaching", "triggered", "executable", "active"]);
       const marketLabels = {
         a: "A股", hk: "港股", us: "美股", fx: "外汇", futures: "期货",
         ny_futures: "纽约期货", currency: "数字货币", currency_spot: "数字货币现货",
       };
-      for (const position of positions) {
-        const market = Ui.text(position.market, "").trim();
-        const code = Ui.text(position.code, "").trim();
-        const name = Ui.text(position.name, code);
+      for (const symbolRow of symbols) {
+        const market = Ui.text(symbolRow.market, "").trim();
+        const code = Ui.text(symbolRow.code, "").trim();
+        const name = Ui.text(symbolRow.name, code);
         const signal = signalsByIdentity.get(identityKey(market, code)) || null;
         const stage = signal ? Ui.lifecycleStageForSignal(signal) : "";
         const card = document.createElement("a");
@@ -354,38 +458,159 @@
 
         const status = document.createElement("span");
         status.className = "es-holding-card__status";
-        const realtimeStatus = Ui.text(position.realtime_status, "awaiting_first_run");
+        const quote = document.createElement("span");
+        quote.className = "es-holding-card__quote";
+        if (market === "a" && symbolRow.quote_available === true) {
+          const price = Number(symbolRow.current_price);
+          const change = Number(symbolRow.change_percent);
+          if (Number.isFinite(price) && price > 0 && Number.isFinite(change)) {
+            const priceDigits = price < 10 ? 3 : 2;
+            quote.textContent = `${price.toFixed(priceDigits)}  ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+            quote.dataset.direction = change > 0 ? "up" : change < 0 ? "down" : "flat";
+          } else {
+            quote.textContent = "行情暂不可用";
+          }
+        } else if (market === "a") {
+          quote.textContent = "行情暂不可用";
+        } else {
+          quote.hidden = true;
+        }
+        const realtimeStatus = Ui.text(symbolRow.realtime_status, "awaiting_first_run");
         if (realtimeStatus === "error") {
           status.textContent = "实时监听异常 · 系统将重试";
           card.classList.add("is-alert");
         } else if (signal) {
-          const point = Ui.POINT_LABELS[signal.point_type] || Ui.text(signal.point_type, "结构提示");
+          const point = Ui.pointLabelForSignal(signal);
           status.textContent = `${Ui.lifecycleLabel(stage)} · ${point}`;
         } else if (realtimeStatus === "market_closed") {
           status.textContent = "当前休市 · 开市后自动恢复实时监听";
         } else if (realtimeStatus === "warming_up") {
           status.textContent = "多周期历史暖机中 · 暂不产生提醒";
         } else if (realtimeStatus === "monitoring") {
-          status.textContent = position.monitoring_scope === "A_SHARE_STRICT_DECISION_CORE"
+          status.textContent = symbolRow.monitoring_scope === "A_SHARE_STRICT_DECISION_CORE"
             ? "统一决策核心实时监听中 · 暂无新增预警"
             : "非A股辅助结构雷达监听中 · 暂无新增线索";
         } else {
           status.textContent = "等待首次实时检查";
         }
-        card.append(heading, status);
+        card.append(heading, quote, status);
         fragment.append(card);
       }
       list.replaceChildren(fragment);
     }
 
+    function renderUsMonitorStatus() {
+      const snapshot = state.snapshot || {};
+      const monitor = snapshot.us_monitor && typeof snapshot.us_monitor === "object"
+        ? snapshot.us_monitor
+        : {};
+      const symbols = Array.isArray(monitor.symbols)
+        ? monitor.symbols.filter((row) => row && typeof row === "object")
+        : [];
+      const notificationEvents = snapshot.realtime_notifications
+        && Array.isArray(snapshot.realtime_notifications.events)
+        ? snapshot.realtime_notifications.events.filter((row) => row && row.market === "us")
+        : [];
+      const active = symbols.filter((row) => row.status === "monitoring").length;
+      const other = symbols.length - active;
+      setText("es-us-monitor-count", symbols.length);
+      setText("es-us-monitor-active", active);
+      setText("es-us-monitor-other", other);
+      setText("es-us-monitor-notifications", notificationEvents.length);
+      setText(
+        "es-us-monitor-updated",
+        monitor.last_completed_at
+          ? Ui.fullDateTimeText(monitor.last_completed_at)
+          : "尚无完成记录",
+      );
+
+      const healthPanel = byId("es-us-monitor-health-panel");
+      const setMonitorHealth = (health, title, detail) => {
+        if (healthPanel) healthPanel.dataset.health = health;
+        setText("es-us-monitor-health", title);
+        setText("es-us-monitor-status", detail);
+      };
+      if (monitor.available !== true) {
+        setMonitorHealth(
+          "unavailable",
+          "状态暂不可用",
+          "辅助监听会独立重试，A股提前选股快照不受影响。",
+        );
+      } else if (monitor.stale === true || ["stale", "degraded"].includes(monitor.status)) {
+        setMonitorHealth(
+          "attention",
+          "监听需要关注",
+          `${Ui.reasonLabel(monitor.reason_code || "US_MONITOR_UNAVAILABLE")} · 系统将自动重试`,
+        );
+      } else if (monitor.ready === true) {
+        setMonitorHealth(
+          "ready",
+          "运行正常",
+          "最近一轮已完成；结构通知统一进入线索和人工复核队列。",
+        );
+      } else if (monitor.status === "warming_up") {
+        setMonitorHealth(
+          "warming",
+          "历史暖机中",
+          "多周期历史准备完成前不产生结构提醒。",
+        );
+      } else {
+        setMonitorHealth(
+          "loading",
+          "正在准备",
+          Ui.text(monitor.reason_code, "等待首次运行"),
+        );
+      }
+
+    }
+
+    function renderSectorCatalogStatus() {
+      const node = byId("es-sector-catalog-status");
+      if (!node || !state.snapshot) return;
+      const snapshot = state.snapshot;
+      const overlay = snapshot.sector_catalog_overlay
+        && typeof snapshot.sector_catalog_overlay === "object"
+        ? snapshot.sector_catalog_overlay
+        : {};
+      const sectorCount = Array.isArray(snapshot.sectors) ? snapshot.sectors.length : 0;
+      if (overlay.provisional === true && overlay.source === "CURRENT_COVERAGE_CYCLE") {
+        node.dataset.state = "preview";
+        node.textContent = `本轮板块目录已载入 ${sectorCount} 个；个股全覆盖仍在进行，当前仅用于浏览和筛选。`;
+      } else if (overlay.provisional === true && overlay.source === "CACHED_SECTOR_SNAPSHOT") {
+        node.dataset.state = "preview";
+        node.textContent = `已恢复最近一次校验通过的 ${sectorCount} 个板块目录；新快照仍在重建，当前仅用于浏览。`;
+      } else if (sectorCount > 0 && overlay.source === "LAST_INVALIDATED_SNAPSHOT") {
+        node.dataset.state = "preview";
+        node.textContent = `新快照正在重建；暂显示上次的 ${sectorCount} 个板块目录，仅用于浏览。`;
+      } else if (sectorCount > 0 && overlay.source === "PUBLISHED_SNAPSHOT") {
+        node.dataset.state = "published";
+        node.textContent = `当前正式快照已载入 ${sectorCount} 个板块。`;
+      } else if (sectorCount > 0) {
+        node.dataset.state = "preview";
+        node.textContent = `已载入 ${sectorCount} 个板块目录；正式快照状态仍在核对。`;
+      } else if (snapshot.available !== true) {
+        node.dataset.state = "loading";
+        node.textContent = "板块目录正在构建；完成前不会把 0 个板块当成有效结果。";
+      } else {
+        node.dataset.state = "empty";
+        node.textContent = "当前正式快照没有可展示的板块，请查看运行诊断中的板块扫描原因。";
+      }
+    }
+
     function selectionScopedSignals() {
       if (!state.snapshot) return [];
-      return state.selectionScope === "sector-trigger"
-        ? state.snapshot.signals.filter((signal) => (
-          Array.isArray(signal.selection_sources)
-          && signal.selection_sources.includes("QMT_SECTOR_TRIGGER")
-        ))
+      const rows = Array.isArray(state.snapshot.unified_signals)
+        ? state.snapshot.unified_signals
         : state.snapshot.signals;
+      return state.selectionScope === "sector-trigger"
+        ? rows.filter((signal) => (
+          Ui.inferSignalMarket(signal) === "us"
+          || (
+            Array.isArray(signal.selection_sources)
+            && signal.selection_sources.includes("QMT_SECTOR_TRIGGER")
+          )
+        ))
+        : rows;
     }
 
     function currentSignals() {
@@ -395,6 +620,10 @@
         pointType: state.pointType,
         lifecycle: state.lifecycle,
         sectorId: state.sectorId,
+        market: state.market,
+        source: state.signalSource,
+        reviewStage: state.reviewStage,
+        segmentState: state.segmentState,
         query: state.query,
       });
       return Ui.sortSignalsForReview(filtered, state.snapshot.sectors);
@@ -412,25 +641,49 @@
     function syncFilterCounts() {
       if (!state.snapshot) return;
       const scopedSignals = selectionScopedSignals();
+      // Facet counts keep every other active condition and replace only the
+      // dimension being counted.  This avoids showing an attractive count
+      // that would immediately collapse to zero after the user clicks it.
+      const countWith = (overrides) => Ui.filterSignals(scopedSignals, {
+        pointType: state.pointType,
+        lifecycle: state.lifecycle,
+        sectorId: state.sectorId,
+        market: state.market,
+        source: state.signalSource,
+        reviewStage: state.reviewStage,
+        segmentState: state.segmentState,
+        query: state.query,
+        ...overrides,
+      }).length;
       document.querySelectorAll("[data-point-type]").forEach((button) => {
         const point = button.dataset.pointType;
-        const count = point === "all"
-          ? scopedSignals.length
-          : point === "buy"
-            ? scopedSignals.filter((signal) => /buy$/.test(Ui.text(signal.point_type, ""))).length
-            : point === "sell"
-              ? scopedSignals.filter((signal) => /sell$/.test(Ui.text(signal.point_type, ""))).length
-              : scopedSignals.filter((signal) => Ui.text(signal.point_type, "") === point).length;
+        const count = countWith({ pointType: point || "all" });
         button.dataset.count = String(count);
         button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
       });
       document.querySelectorAll("[data-lifecycle]").forEach((button) => {
         const stage = button.dataset.lifecycle;
-        const count = stage === "all"
-          ? scopedSignals.length
-          : scopedSignals.filter(
-            (signal) => Ui.lifecycleStageForSignal(signal) === stage,
-          ).length;
+        const count = countWith({ lifecycle: stage || "all" });
+        button.dataset.count = String(count);
+        button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
+      });
+      document.querySelectorAll("[data-market]").forEach((button) => {
+        const count = countWith({ market: button.dataset.market || "all" });
+        button.dataset.count = String(count);
+        button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
+      });
+      document.querySelectorAll("[data-signal-source]").forEach((button) => {
+        const count = countWith({ source: button.dataset.signalSource || "all" });
+        button.dataset.count = String(count);
+        button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
+      });
+      document.querySelectorAll("[data-review-stage]").forEach((button) => {
+        const count = countWith({ reviewStage: button.dataset.reviewStage || "all" });
+        button.dataset.count = String(count);
+        button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
+      });
+      document.querySelectorAll("[data-segment-state]").forEach((button) => {
+        const count = countWith({ segmentState: button.dataset.segmentState || "all" });
         button.dataset.count = String(count);
         button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
       });
@@ -441,9 +694,17 @@
         .find((button) => button.dataset.lifecycle === state.lifecycle);
       const pointType = Array.from(document.querySelectorAll("[data-point-type]"))
         .find((button) => button.dataset.pointType === state.pointType);
+      const market = Array.from(document.querySelectorAll("[data-market]"))
+        .find((button) => button.dataset.market === state.market);
+      const source = Array.from(document.querySelectorAll("[data-signal-source]"))
+        .find((button) => button.dataset.signalSource === state.signalSource);
+      const reviewStage = Array.from(document.querySelectorAll("[data-review-stage]"))
+        .find((button) => button.dataset.reviewStage === state.reviewStage);
+      const segmentState = Array.from(document.querySelectorAll("[data-segment-state]"))
+        .find((button) => button.dataset.segmentState === state.segmentState);
       setText(
         "es-filter-summary",
-        `${state.selectionScope === "sector-trigger" ? "板块已触发" : "全部资格观察"} · ${lifecycle ? lifecycle.textContent.trim() : "全部"} · ${pointType ? pointType.textContent.trim() : "全部"}`,
+        `${market ? market.textContent.trim() : "全部市场"} · ${source ? source.textContent.trim() : "全部来源"} · ${reviewStage ? reviewStage.textContent.trim() : "全部任务"} · ${segmentState ? segmentState.textContent.trim() : "全部段差状态"} · ${lifecycle ? lifecycle.textContent.trim() : "全部状态"} · ${pointType ? pointType.textContent.trim() : "全部买卖点"}`,
       );
     }
 
@@ -474,13 +735,32 @@
 
     function renderWorkspaces() {
       if (!state.snapshot) return;
+      renderSectorCatalogStatus();
       const filtered = currentSignals();
+      const signalFilterKey = JSON.stringify([
+        state.pointType,
+        state.lifecycle,
+        state.market,
+        state.signalSource,
+        state.reviewStage,
+        state.segmentState,
+        state.selectionScope,
+        state.sectorId,
+        state.query,
+      ]);
+      if (state.signalFilterKey !== signalFilterKey) {
+        state.signalFilterKey = signalFilterKey;
+        state.signalRenderLimit = 200;
+      }
       state.selectedSignalId = Ui.resolveSelectedSignalId(
         state.selectedSignalId,
         filtered,
         state.snapshot.signals,
       );
-      const selected = state.snapshot.signals.find(
+      const unifiedSignals = Array.isArray(state.snapshot.unified_signals)
+        ? state.snapshot.unified_signals
+        : state.snapshot.signals;
+      const selected = unifiedSignals.find(
         (row) => Ui.text(row.signal_id, "") === state.selectedSignalId,
       ) || null;
       state.focusState = Ui.resolveFocusState(state.focusState, selected);
@@ -495,7 +775,19 @@
         },
         { expanded: state.sectorExpanded, limit: 10 },
       );
-      Ui.renderSignalWorkspace(signalList, filtered, state.selectedSignalId, selectSignal);
+      Ui.renderSignalWorkspace(
+        signalList,
+        filtered,
+        state.selectedSignalId,
+        selectSignal,
+        {
+          limit: state.signalRenderLimit,
+          onLoadMore: () => {
+            state.signalRenderLimit += 200;
+            renderWorkspaces();
+          },
+        },
+      );
       if (state.mode !== "human-review") {
         Ui.renderChartWorkspace(chartWorkspace, selected, {
           frequency: state.focusState.frequency,
@@ -511,11 +803,24 @@
       if (empty) empty.hidden = filtered.length !== 0;
       setText(
         "es-empty-detail",
-        Ui.emptySignalDetail(state.snapshot, state.query),
+        Ui.emptySignalDetail(state.snapshot, state.query, {
+          pointType: state.pointType,
+          lifecycle: state.lifecycle,
+          market: state.market,
+          source: state.signalSource,
+          reviewStage: state.reviewStage,
+          segmentState: state.segmentState,
+          selectionScope: state.selectionScope,
+          sectorId: state.sectorId,
+        }),
       );
       syncButtons("[data-point-type]", "pointType", state.pointType);
       syncButtons("[data-lifecycle]", "lifecycle", state.lifecycle);
       syncButtons("[data-selection-scope]", "selectionScope", state.selectionScope);
+      syncButtons("[data-market]", "market", state.market);
+      syncButtons("[data-signal-source]", "signalSource", state.signalSource);
+      syncButtons("[data-review-stage]", "reviewStage", state.reviewStage);
+      syncButtons("[data-segment-state]", "segmentState", state.segmentState);
       syncButtons(".es-layout-switch [data-layout]", "layout", state.layout);
       syncFilterCounts();
       syncFilterSummary();
@@ -524,7 +829,8 @@
 
     function render() {
       snapshotHeader();
-      renderManualHoldings();
+      renderManualAttention();
+      renderUsMonitorStatus();
       renderWorkspaces();
     }
 
@@ -549,12 +855,11 @@
       try {
         const endpoint = new URL(root.dataset.endpoint, window.location.href);
         endpoint.searchParams.set("scope", requestedScope);
-        const response = await fetch(endpoint.toString(), {
+        const { response, payload } = await requestJson(endpoint.toString(), {
           cache: "no-store",
           credentials: "same-origin",
           headers: { Accept: "application/json" },
         });
-        const payload = await response.json();
         if (!response.ok || !payload || payload.ok !== true) throw new Error("snapshot_request_failed");
         const nextSnapshot = Ui.normalizeSnapshot(payload.data);
         if (nextSnapshot.presentation_scope !== requestedScope) {
@@ -569,7 +874,11 @@
           "实时快照暂不可用",
           state.snapshot ? "保留当前页面数据，下一轮继续重试" : "未展示未经验证或边界不完整的数据",
         );
-        console.error("trading_screening_snapshot_failed", error && error.name ? error.name : "Error");
+        console.error(
+          "trading_screening_snapshot_failed",
+          error && error.name ? error.name : "Error",
+          error && error.message ? error.message : "unknown_error",
+        );
         return false;
       } finally {
         state.loading = false;
@@ -589,6 +898,34 @@
     document.querySelectorAll("[data-lifecycle]").forEach((button) => {
       button.addEventListener("click", () => {
         state.lifecycle = button.dataset.lifecycle || "all";
+        saveView();
+        renderWorkspaces();
+      });
+    });
+    document.querySelectorAll("[data-market]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.market = button.dataset.market || "all";
+        saveView();
+        renderWorkspaces();
+      });
+    });
+    document.querySelectorAll("[data-signal-source]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.signalSource = button.dataset.signalSource || "all";
+        saveView();
+        renderWorkspaces();
+      });
+    });
+    document.querySelectorAll("[data-review-stage]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.reviewStage = button.dataset.reviewStage || "all";
+        saveView();
+        renderWorkspaces();
+      });
+    });
+    document.querySelectorAll("[data-segment-state]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.segmentState = button.dataset.segmentState || "all";
         saveView();
         renderWorkspaces();
       });
@@ -651,6 +988,45 @@
     });
     const refreshButton = byId("es-refresh-now");
     if (refreshButton) refreshButton.addEventListener("click", () => void requestSnapshot());
+    const filterReset = byId("es-filter-reset");
+    if (filterReset) filterReset.addEventListener("click", () => {
+      const scopeChanged = state.selectionScope !== "all-qualified";
+      state.pointType = "all";
+      state.lifecycle = "all";
+      state.market = "all";
+      state.signalSource = "all";
+      state.reviewStage = "all";
+      state.segmentState = "all";
+      state.selectionScope = "all-qualified";
+      state.sectorId = "all";
+      state.query = "";
+      if (search) search.value = "";
+      saveView();
+      if (scopeChanged) void requestSnapshot();
+      else renderWorkspaces();
+    });
+    const showCurrentSegments = byId("es-show-current-segments");
+    if (showCurrentSegments) showCurrentSegments.addEventListener("click", () => {
+      const scopeChanged = state.selectionScope !== "all-qualified";
+      state.pointType = "all";
+      state.lifecycle = "all";
+      state.market = "all";
+      state.signalSource = "all";
+      state.reviewStage = "all";
+      state.segmentState = "present";
+      state.selectionScope = "all-qualified";
+      state.sectorId = "all";
+      state.query = "";
+      if (search) search.value = "";
+      saveView();
+      const liveModeButton = document.querySelector('[role="tab"][data-screening-mode="live"]');
+      if (liveModeButton && !liveModeButton.classList.contains("is-active")) {
+        liveModeButton.click();
+        return;
+      }
+      if (scopeChanged || !state.snapshot) void requestSnapshot();
+      else renderWorkspaces();
+    });
     if (sectorExpand) sectorExpand.addEventListener("click", () => {
       state.sectorExpanded = !state.sectorExpanded;
       renderWorkspaces();

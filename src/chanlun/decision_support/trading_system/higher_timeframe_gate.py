@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+import hashlib
 from math import ceil
 from numbers import Integral
 import re
-from typing import Literal
+from time import perf_counter
+from typing import Literal, TypeVar
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
@@ -30,6 +33,7 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
 )
 from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
+    QMT_HIGHER_TIMEFRAME_WARMUP_PHYSICAL_DAILY_BARS,
     QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID,
     QMT_SECTOR_NATIVE_DAILY_RESEARCH_BASE_FREQUENCY,
     QmtHigherTimeframeRiskEnvelope,
@@ -51,7 +55,7 @@ from chanlun.decision_support.trading_system.qmt_native_daily_bridge import (
     build_qmt_native_daily_bridge,
 )
 from chanlun.decision_support.trading_system.qmt_sector_same_base import (
-    derive_qmt_sector_thirty_minute_frame,
+    qmt_sector_member_path_revision,
 )
 from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import (
     QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID,
@@ -61,6 +65,7 @@ from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QmtMinuteSessionIssue,
     build_qmt_same_base_stream_frames,
 )
+from chanlun.decision_support.trading_system.parameters import SelectionPath
 from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 RiskGate = Literal["GREEN", "AMBER", "RED", "UNRESOLVED"]
 RiskPeriod = Literal["M", "W", "D"]
@@ -82,6 +87,13 @@ _QMT_SECTOR_COMPOSITE_MEMBER_MASK_CONTRACT = (
 _QMT_SECTOR_COMPOSITE_METHOD = (
     "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN"
 )
+_MINUTE_IN_NANOSECONDS = 60_000_000_000
+_SECTOR_FIVE_MINUTE_OFFSETS = np.concatenate(
+    (
+        np.arange(9 * 60 + 35, 11 * 60 + 31, 5, dtype=np.int64),
+        np.arange(13 * 60 + 5, 15 * 60 + 1, 5, dtype=np.int64),
+    )
+) * _MINUTE_IN_NANOSECONDS
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID = (
     "chanlun-higher-timeframe-session-evidence"
@@ -93,6 +105,29 @@ HIGHER_TIMEFRAME_EFFECTIVENESS_AUDIT_SCHEMA = (
     "chanlun-higher-timeframe-effectiveness-audit"
 )
 _HIGHER_TIMEFRAME_GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
+# 月/周/日的方向结论已经退出当前执行门槛；这里只保留能够证明输入时间穿越、
+# 同源关系破坏或数值/日历矛盾的原因。普通的环境逆风、历史不足和提供方暂不可用
+# 只进入人工复核提示，不能借“数据安全”之名重新变成旧版全绿门槛。
+HARD_HIGHER_TIMEFRAME_DATA_INTEGRITY_REASON_CODES = frozenset(
+    {
+        "QMT_BENCHMARK_ONE_MINUTE_PREFIX_STALE",
+        "QMT_DAILY_AND_30M_NOT_FROM_SAME_1M_BASE",
+        "QMT_DAILY_AND_30M_PRICE_BASIS_MISMATCH",
+        "QMT_DAILY_BAR_COMPLETION_TIME_UNRESOLVED",
+        "QMT_HIGHER_TIMEFRAME_CALENDAR_COVERAGE_MISMATCH",
+        "QMT_HIGHER_TIMEFRAME_TRADING_CALENDAR_INVALID",
+        "QMT_NATIVE_DAILY_AHEAD_OF_ONE_MINUTE_BASE",
+        "QMT_NATIVE_DAILY_OHLCV_INVALID",
+        "QMT_NATIVE_DAILY_OHLCV_RECONCILIATION_MISMATCH",
+        "QMT_NATIVE_DAILY_PRICE_BASIS_MISMATCH",
+        "QMT_NATIVE_DAILY_SEQUENCE_INVALID",
+        "QMT_NATIVE_DAILY_SESSION_COVERAGE_MISMATCH",
+        "QMT_NATIVE_DAILY_SYMBOL_MISMATCH",
+        "QMT_NATIVE_DAILY_TIMEZONE_UNRESOLVED",
+        "QMT_NATIVE_DAILY_TRADING_CALENDAR_INVALID",
+        "QMT_NATIVE_DAILY_TRADING_CALENDAR_MISMATCH",
+    }
+)
 _A_SHARE_CHART_SYMBOL = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 _RISK_POINT_CHART_INTERVALS = {"30m": "30", "d": "1D", "w": "1W", "m": "1M"}
 _HIGHER_TIMEFRAME_STATES = frozenset(
@@ -106,6 +141,46 @@ _HIGHER_TIMEFRAME_STATES = frozenset(
         "UNRESOLVED",
     }
 )
+_CACHE_KEY = TypeVar("_CACHE_KEY")
+_CACHE_VALUE = TypeVar("_CACHE_VALUE")
+_QMT_MINUTE_FRAME_CACHE_CAPACITY = 4
+_QMT_NATIVE_DAILY_FRAME_CACHE_CAPACITY = 64
+# 风险证据对象不持有原始十万行分钟帧。扩大这些摘要缓存，可以让同一严格风险截止点
+# 下的重复监听直接复用结果；巨大的分钟帧缓存仍保持 4，避免用内存掩盖全量读取问题。
+_QMT_GATE_CACHE_CAPACITY = 512
+_QMT_SECTOR_GATE_CACHE_CAPACITY = 128
+# 三个结构分片承接约两千只活动候选，代码亲和路由后单分片通常约 680 只。
+# 512 会在顺序轮询时形成典型 LRU 抖动：下一轮访问前上一轮头部已被尾部逐出。
+# 组合证据不持有原始分钟帧，容量 1024 可覆盖一个分片并保留合理偏斜余量；
+# 大型原始行情缓存仍保持上方严格小容量。
+# 普通候选在优先监听占用预留分片时会由单个隔离分片顺序处理；容量必须覆盖完整
+# 候选工作集，而不能按全市场三分片的平均值估算，否则约 2,029 只候选会让 1,024
+# 槽 LRU 每轮完全抖动。证据包是紧凑不可变摘要，4,096 槽仍保持明确内存上限。
+_QMT_BUNDLE_CACHE_CAPACITY = 4096
+_QMT_NATIVE_CALENDAR_CACHE_CAPACITY = 512
+
+
+def _lru_get(
+    cache: OrderedDict[_CACHE_KEY, _CACHE_VALUE],
+    key: _CACHE_KEY,
+) -> _CACHE_VALUE | None:
+    value = cache.pop(key, None)
+    if value is not None:
+        cache[key] = value
+    return value
+
+
+def _lru_put(
+    cache: OrderedDict[_CACHE_KEY, _CACHE_VALUE],
+    key: _CACHE_KEY,
+    value: _CACHE_VALUE,
+    *,
+    capacity: int,
+) -> None:
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > capacity:
+        cache.popitem(last=False)
 
 
 def _latest_closed_expected_session(
@@ -161,10 +236,13 @@ def sector_native_daily_research_bridge_contract() -> dict[str, object]:
 class HigherTimeframeSessionEvidence:
     """Presentation evidence for the causal QMT 1m session gate.
 
-    This evidence explains an already fail-closed decision.  It never turns a
-    missing session into a suspension: that requires an independently
-    certified point-in-time trade-status source which the installed QMT client
-    does not expose for history.
+    This evidence fail-closes the derived higher-timeframe context only.  The
+    trading system uses physical 5m structure as the trade signal and 1m only
+    as optional segment-difference evidence, so a historical 1m session issue
+    must remain visible for review without invalidating an independently sound
+    5m signal.  It never turns a missing session into a suspension: that
+    requires an independently certified point-in-time trade-status source which
+    the installed QMT client does not expose for history.
     """
 
     status: Literal["EXACT", "UNAVAILABLE"]
@@ -966,6 +1044,27 @@ class HigherTimeframeGateEvidence:
     def allows_new_entry(self) -> bool:
         return self.gate == "GREEN"
 
+    @property
+    def hard_data_integrity_reason_codes(self) -> tuple[str, ...]:
+        """返回足以关闭物理 5 分钟新买入的数据矛盾。
+
+        ``session_evidence`` 描述的是用于高周期环境派生的 1 分钟序列。其缺口会让
+        高周期环境失败关闭，但 1 分钟在当前交易体系中只承担可选段差定位，不能反向
+        否定已经由独立物理 5 分钟数据确认的买卖点。
+        """
+
+        reasons: list[str] = [
+            value
+            for value in self.reason_codes
+            if value in HARD_HIGHER_TIMEFRAME_DATA_INTEGRITY_REASON_CODES
+        ]
+        # 月/周/日方向及其长窗口收敛只保留为研究提示。它们不再以“历史不足”
+        # 的名义重新成为买入硬门槛；真正的同源、时间穿越和日历矛盾仍在上方集合。
+        coverage = self.native_daily_calendar_coverage_evidence
+        if coverage is not None and coverage.status != "EXACT":
+            reasons.append("QMT_NATIVE_DAILY_TRADING_CALENDAR_MISMATCH")
+        return tuple(dict.fromkeys(reasons))
+
     def document(self) -> dict[str, object]:
         document = {
             "subject": self.subject,
@@ -1118,10 +1217,33 @@ class HigherTimeframeGateBundle:
 
     @property
     def allows_new_entry(self) -> bool:
+        return self.allows_new_entry_for("INDIVIDUAL_THREE_PROGRAM")
+
+    def allows_new_entry_for(self, selection_path: SelectionPath) -> bool:
+        if selection_path == "ETF_PROXY":
+            return (
+                self.market.allows_new_entry
+                and self.symbol.allows_new_entry
+            )
+        if selection_path != "INDIVIDUAL_THREE_PROGRAM":
+            raise ValueError("selection_path is invalid")
         return (
             self.market.allows_new_entry
             and self.sector.allows_new_entry
             and self.symbol.allows_new_entry
+        )
+
+    @property
+    def hard_data_integrity_reason_codes(self) -> tuple[str, ...]:
+        """市场与标的同源数据矛盾是硬门槛；板块缺口只降低环境等级。"""
+
+        return tuple(
+            dict.fromkeys(
+                (
+                    *self.market.hard_data_integrity_reason_codes,
+                    *self.symbol.hard_data_integrity_reason_codes,
+                )
+            )
         )
 
 
@@ -1780,7 +1902,9 @@ def higher_timeframe_effectiveness_audit(
                         )
                         if (
                             subject == "sector"
-                            and not source_symbol.startswith("qmt-gics3:")
+                            and not source_symbol.startswith(
+                                ("qmt-gics3:", "qmt-gics4:")
+                            )
                         ) or (
                             subject != "sector"
                             and _A_SHARE_CHART_SYMBOL.fullmatch(source_symbol)
@@ -3511,7 +3635,8 @@ def build_qmt_sector_same_base_coverage_evidence(
     if work["date"].dt.tz is None:
         raise ValueError("sector 5m coverage requires timezone-aware bars")
     work["date"] = work["date"].dt.tz_convert("Asia/Shanghai")
-    work = work[work["date"] <= pd.Timestamp(observed)].reset_index(drop=True)
+    visible_row_mask = work["date"] <= pd.Timestamp(observed)
+    work = work.loc[visible_row_mask].reset_index(drop=True)
     if (
         work.empty
         or work["date"].duplicated().any()
@@ -3572,8 +3697,83 @@ def build_qmt_sector_same_base_coverage_evidence(
         "qmt_physical_five_minute_source_coverage"
     )
     if raw_physical is None:
-        raise ValueError("sector physical 5m source coverage is required")
-    if raw_physical is not None:
+        # The live QMT composite is assembled from the provider response rather
+        # than directly from an inspectable on-disk member-file inventory.  Its
+        # row/member provenance has already been validated by
+        # ``_sector_same_base_frames`` before this diagnostic is built.  Keep
+        # the physical boundary explicitly unavailable instead of turning a
+        # valid live composite into a provider failure.  This evidence remains
+        # diagnostic-only and never relaxes the frozen warmup requirement.
+        composite_members = five_minute_frame.attrs.get(
+            "sector_composite_members"
+        )
+        required_member_count = five_minute_frame.attrs.get(
+            "sector_composite_required_member_count"
+        )
+        member_masks = five_minute_frame.get("member_mask")
+        if member_masks is not None:
+            # 诊断身份也只能由决策时点可见的前缀构造；未来行中的新成员文件不得反向
+            # 改写较早时点的物理来源边界。
+            member_masks = member_masks.loc[visible_row_mask]
+        if (
+            type(composite_members) is not tuple
+            or not composite_members
+            or type(required_member_count) is not int
+            or member_masks is None
+            or member_masks.empty
+            or any(
+                isinstance(value, bool) or not isinstance(value, Integral)
+                for value in member_masks
+            )
+        ):
+            raise ValueError("sector physical 5m source coverage is required")
+        representative_mask = 0
+        for value in member_masks:
+            representative_mask |= int(value)
+        physical_representative_count = len(composite_members)
+        physical_available_count = representative_mask.bit_count()
+        physical_required_count = required_member_count
+        expected_required_count = max(
+            _QMT_SECTOR_COMPOSITE_MINIMUM_MEMBER_COUNT,
+            ceil(
+                Decimal(physical_representative_count)
+                * Decimal(_QMT_SECTOR_COMPOSITE_MINIMUM_BAR_COVERAGE)
+            ),
+        )
+        if (
+            physical_required_count != expected_required_count
+            or physical_available_count < physical_required_count
+            or physical_available_count > physical_representative_count
+        ):
+            raise ValueError("sector physical 5m source coverage is required")
+        physical_status = "PHYSICAL_QMT_SOURCE_BOUNDARY_UNAVAILABLE"
+        physical_requested_start = pd.Timestamp(
+            work.iloc[0]["date"]
+        ).to_pydatetime()
+        physical_required_start = None
+        physical_inventory_revision = sha256_json(
+            {
+                "schema": (
+                    "chanlun-qmt-live-sector-runtime-source-inventory"
+                ),
+                "sector_id": five_minute_frame.attrs.get("sector_id"),
+                "sector_membership_revision": five_minute_frame.attrs.get(
+                    "sector_membership_revision"
+                ),
+                "sector_composite_members": composite_members,
+                "sector_composite_member_path_revision": (
+                    five_minute_frame.attrs.get(
+                        "sector_composite_member_path_revision"
+                    )
+                ),
+                "first_visible_bar_at": physical_requested_start,
+                "last_visible_bar_at": pd.Timestamp(
+                    work.iloc[-1]["date"]
+                ).to_pydatetime(),
+                "visible_contributor_mask": representative_mask,
+            }
+        )
+    else:
         if not isinstance(raw_physical, Mapping):
             raise ValueError("sector physical 5m source coverage is malformed")
         physical_stable = dict(raw_physical)
@@ -3756,7 +3956,78 @@ def build_qmt_sector_same_base_coverage_evidence(
 def _aggregate_sector_intraday(
     five_minute: pd.DataFrame,
 ) -> pd.DataFrame:
-    return derive_qmt_sector_thirty_minute_frame(five_minute)
+    if five_minute.empty:
+        return pd.DataFrame(
+            columns=("date", "open", "high", "low", "close", "volume")
+        )
+    sessions = five_minute["date"].dt.normalize()
+    grouped_sessions = five_minute.groupby(sessions, sort=False)
+    positions = grouped_sessions.cumcount()
+    session_sizes = grouped_sessions["date"].transform("size")
+    complete_mask = positions < (session_sizes // 6 * 6)
+    complete = five_minute.loc[
+        complete_mask,
+        ["date", "open", "high", "low", "close", "volume"],
+    ].copy()
+    complete["_session"] = sessions.loc[complete_mask].array
+    complete["_bucket"] = (positions.loc[complete_mask] // 6).array
+    return (
+        complete.groupby(["_session", "_bucket"], sort=True)
+        .agg(
+            date=("date", "last"),
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            volume=("volume", "min"),
+        )
+        .reset_index(drop=True)
+    )
+
+
+def _sector_same_base_revision(
+    frame: pd.DataFrame,
+    *,
+    metadata: dict[str, object],
+) -> str:
+    """Bind sector OHLCV/member paths using fixed-width vector encoding."""
+
+    schema = "chanlun-qmt-sector-five-minute-same-base-v2-vector"
+    metadata_revision = sha256_json(
+        {
+            "schema": schema,
+            **metadata,
+            "row_count": len(frame),
+            "timestamp_encoding": "utc-nanoseconds-int64-little-endian",
+            "value_columns": ("open", "high", "low", "close", "volume"),
+            "value_encoding": "float64-little-endian-c-row-major",
+            "member_mask_encoding": "uint64-little-endian",
+        }
+    ).encode("ascii")
+    timestamps = np.asarray(
+        pd.DatetimeIndex(frame["date"]).tz_convert("UTC").asi8,
+        dtype="<i8",
+    )
+    values = np.ascontiguousarray(
+        frame.loc[:, ["open", "high", "low", "close", "volume"]].to_numpy(
+            dtype=np.float64,
+            copy=True,
+        ),
+        dtype="<f8",
+    )
+    values[values == 0.0] = 0.0
+    masks = np.asarray(tuple(frame["member_mask"]), dtype="<u8")
+    digest = hashlib.sha256()
+    for segment in (
+        schema.encode("ascii"),
+        metadata_revision,
+        timestamps.tobytes(order="C"),
+        values.tobytes(order="C"),
+        masks.tobytes(order="C"),
+    ):
+        digest.update(len(segment).to_bytes(8, byteorder="big", signed=False))
+        digest.update(segment)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _aggregate_sector_daily(
@@ -3885,37 +4156,52 @@ def _sector_same_base_frames(
             ("QMT_SECTOR_FIVE_MINUTE_SAME_BASE_STREAM_UNRESOLVED",)
         )
 
-    accepted: list[pd.DataFrame] = []
+    accepted_rows = np.zeros(len(work), dtype=bool)
     complete_sessions: list[date] = []
-    grouped = tuple(work.groupby(work["date"].dt.date, sort=True))
-    for index, (session, rows) in enumerate(grouped):
-        ordered = rows.sort_values("date", kind="stable").reset_index(
-            drop=True
-        )
-        expected = _sector_five_minute_closes(session)
-        actual = tuple(
-            pd.Timestamp(value).to_pydatetime()
-            for value in ordered["date"]
-        )
-        if actual == expected:
-            accepted.append(ordered)
+    completion_ns = work["date"].array.asi8
+    session_ns = work["date"].dt.normalize().array.asi8
+    minute_offsets = completion_ns - session_ns
+    changes = np.flatnonzero(session_ns[1:] != session_ns[:-1]) + 1
+    starts = np.concatenate((np.asarray((0,)), changes))
+    ends = np.concatenate((changes, np.asarray((len(work),))))
+    session_ranges = tuple(zip(starts.tolist(), ends.tolist()))
+    for index, (start, end) in enumerate(session_ranges):
+        session = pd.Timestamp(work.iloc[start]["date"]).date()
+        actual = minute_offsets[start:end]
+        observed_count = end - start
+        if np.array_equal(actual, _SECTOR_FIVE_MINUTE_OFFSETS):
+            accepted_rows[start:end] = True
             complete_sessions.append(session)
             continue
-        if session == decision.date() and actual == expected[: len(actual)]:
-            accepted.append(ordered)
+        if (
+            session == decision.date()
+            and observed_count <= len(_SECTOR_FIVE_MINUTE_OFFSETS)
+            and np.array_equal(
+                actual,
+                _SECTOR_FIVE_MINUTE_OFFSETS[:observed_count],
+            )
+        ):
+            accepted_rows[start:end] = True
             continue
         # 按数量限制的 QMT 读取只能截断最老交易日；内部残缺交易日属于数据缺口，
         # 绝不能静默丢弃。
-        if index == 0 and actual == expected[-len(actual) :]:
+        if (
+            index == 0
+            and observed_count <= len(_SECTOR_FIVE_MINUTE_OFFSETS)
+            and np.array_equal(
+                actual,
+                _SECTOR_FIVE_MINUTE_OFFSETS[-observed_count:],
+            )
+        ):
             continue
         raise HigherTimeframeDataUnavailable(
             ("QMT_SECTOR_FIVE_MINUTE_SESSION_GRID_INVALID",)
         )
-    if not accepted:
+    if not accepted_rows.any():
         raise HigherTimeframeDataUnavailable(
             ("QMT_SECTOR_FIVE_MINUTE_NO_ACCEPTED_COMPLETED_BARS",)
         )
-    normalized = pd.concat(accepted, ignore_index=True)
+    normalized = work.loc[accepted_rows].reset_index(drop=True)
     observed_sessions = frozenset(normalized["date"].dt.date)
     first_observed = min(observed_sessions)
     last_calendar_session = (
@@ -4017,18 +4303,7 @@ def _sector_same_base_frames(
         raise HigherTimeframeDataUnavailable(
             ("QMT_SECTOR_COMPOSITE_MEMBER_PATH_PROVENANCE_MISMATCH",)
         )
-    expected_member_path_revision = sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-composite-member-path",
-            "rows": tuple(
-                {
-                    "date": pd.Timestamp(row.date).to_pydatetime(),
-                    "member_mask": int(row.member_mask),
-                }
-                for row in work.itertuples(index=False)
-            ),
-        }
-    )
+    expected_member_path_revision = qmt_sector_member_path_revision(work)
     if (
         member_mask_contract != _QMT_SECTOR_COMPOSITE_MEMBER_MASK_CONTRACT
         or member_path_revision != expected_member_path_revision
@@ -4060,9 +4335,9 @@ def _sector_same_base_frames(
         raise HigherTimeframeDataUnavailable(
             ("QMT_SECTOR_FIVE_MINUTE_PRICE_BASIS_UNRESOLVED",)
         )
-    base_revision = sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-five-minute-same-base",
+    base_revision = _sector_same_base_revision(
+        normalized,
+        metadata={
             "sector_id": sector_id,
             "decision_time": decision,
             "price_basis_provider": input_attrs.get("price_basis_provider"),
@@ -4086,19 +4361,7 @@ def _sector_same_base_frames(
             "sector_composite_method": input_attrs.get(
                 "sector_composite_method"
             ),
-            "five_minute": tuple(
-                {
-                    "date": pd.Timestamp(row.date).to_pydatetime(),
-                    "open": float(row.open),
-                    "high": float(row.high),
-                    "low": float(row.low),
-                    "close": float(row.close),
-                    "volume": float(row.volume),
-                    "member_mask": int(row.member_mask),
-                }
-                for row in normalized.itertuples(index=False)
-            ),
-        }
+        },
     )
     thirty = _aggregate_sector_intraday(normalized)
     daily = _aggregate_sector_daily(normalized, complete_sessions)
@@ -4321,18 +4584,7 @@ def build_sector_higher_timeframe_research_gate_from_native_daily(
         sector_members,
         expected_composite_members,
     )
-    path_revision = sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-composite-member-path",
-            "rows": tuple(
-                {
-                    "date": pd.Timestamp(row.date).to_pydatetime(),
-                    "member_mask": int(row.member_mask),
-                }
-                for row in daily.itertuples(index=False)
-            ),
-        }
-    )
+    path_revision = qmt_sector_member_path_revision(daily)
     if (
         attrs.get("sector_id") != sector_id
         or attrs.get("sector_membership_scope") != "CALLER_SUPPLIED"
@@ -4572,17 +4824,11 @@ class QmtHigherTimeframeGateSource:
         *,
         exchange_provider: Callable[[], object],
         benchmark_symbol: str = "SH.000300",
-        daily_bars: int = QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
-        thirty_minute_bars: int = (
-            QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS * 8
-        ),
+        daily_bars: int = 60,
+        thirty_minute_bars: int = 240,
         sector_frame_provider: Callable[..., object] | None = None,
-        sector_daily_bars: int = (
-            QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS
-        ),
-        sector_thirty_minute_bars: int = (
-            QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS * 8
-        ),
+        sector_daily_bars: int = 60,
+        sector_thirty_minute_bars: int = 240,
         trading_calendar_provider: Callable[..., Sequence[date]] | None = None,
         refresh_stale_benchmark: bool = True,
     ) -> None:
@@ -4604,59 +4850,127 @@ class QmtHigherTimeframeGateSource:
             raise TypeError("refresh_stale_benchmark must be an exact bool")
         self._exchange_provider = exchange_provider
         self._benchmark_symbol = benchmark_symbol
-        self._daily_bars = daily_bars
+        self._required_daily_bars = daily_bars
+        self._daily_bars = (
+            QMT_HIGHER_TIMEFRAME_WARMUP_PHYSICAL_DAILY_BARS
+            if daily_bars == QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS
+            else daily_bars
+        )
         self._thirty_minute_bars = thirty_minute_bars
         self._sector_frame_provider = sector_frame_provider
         self._trading_calendar_provider = trading_calendar_provider
-        self._sector_daily_bars = sector_daily_bars
-        self._sector_thirty_minute_bars = sector_thirty_minute_bars
-        # 480 是冻结最低值，收敛检查会比较完整前缀与去掉最老三分之一后的后缀；按需
-        # 原生日线建议额外请求 50% 的机械证据余量，但不改变任何交易阈值。
-        sector_native_daily_minimum = max(
-            sector_daily_bars,
-            QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
+        self._required_sector_daily_bars = sector_daily_bars
+        self._sector_daily_bars = (
+            QMT_HIGHER_TIMEFRAME_WARMUP_PHYSICAL_DAILY_BARS
+            if sector_daily_bars
+            == QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS
+            else sector_daily_bars
         )
-        self._sector_native_daily_bars = sector_native_daily_minimum + ceil(
-            sector_native_daily_minimum / 2
+        self._sector_thirty_minute_bars = max(
+            sector_thirty_minute_bars,
+            self._sector_daily_bars * 8,
         )
+        # 原生日线仅承担当前日线环境提示；调用者若显式启用长窗口研究，则严格按
+        # 其给定的物理历史预算读取。默认不再为已退出执行门槛的月/周研究多取 720 根。
+        self._sector_native_daily_bars = self._sector_daily_bars
         sector_required_sessions = max(
-            sector_daily_bars,
-            ceil(sector_thirty_minute_bars / 8),
+            self._sector_daily_bars,
+            ceil(self._sector_thirty_minute_bars / 8),
         )
         self._sector_five_minute_bars = (
             sector_required_sessions + 1
         ) * 48
-        required_sessions = max(
-            daily_bars,
-            ceil(thirty_minute_bars / 8),
-        )
+        required_sessions = ceil(self._thirty_minute_bars / 8)
         # 行情终端除 240 个已完成分钟外还可能包含 09:30 开盘事件；多请求一个交易日可丢弃
         # 仅由请求行数边界造成的开头残片。
         self._one_minute_bars = (required_sessions + 1) * 241
         self._lookback_days = max(120, required_sessions * 2)
         self._native_daily_bars = self._daily_bars + 10
-        self._native_daily_lookback_days = max(730, self._daily_bars * 3)
+        self._native_daily_lookback_days = max(180, self._daily_bars * 3)
         self._refresh_stale_benchmark = refresh_stale_benchmark
         self._benchmark_refresh_attempts: set[date] = set()
-        self._cache: dict[tuple[str, str], HigherTimeframeGateEvidence] = {}
-        self._sector_cache: dict[
+        self._cache: OrderedDict[
             tuple[str, str], HigherTimeframeGateEvidence
-        ] = {}
+        ] = OrderedDict()
+        self._sector_cache: OrderedDict[
+            tuple[str, str], HigherTimeframeGateEvidence
+        ] = OrderedDict()
         # 标的同源 1m 历史可能不完整，而大盘流仍完全有效。对精确决策分钟缓存所得关闭失败
         # 组合，使监听刷新既不重算同一无效流，也不抹除有效市场闸门。
-        self._bundle_cache: dict[
+        self._bundle_cache: OrderedDict[
             tuple[str, str, str | None, str | None],
             HigherTimeframeGateBundle,
-        ] = {}
+        ] = OrderedDict()
         self._calendar_cache: dict[str, tuple] = {}
-        self._minute_cache: dict[tuple[str, str], pd.DataFrame] = {}
-        self._native_daily_cache: dict[tuple[str, str], pd.DataFrame] = {}
+        self._minute_cache: OrderedDict[
+            tuple[str, str], pd.DataFrame
+        ] = OrderedDict()
+        self._native_daily_cache: OrderedDict[
+            tuple[str, str], pd.DataFrame
+        ] = OrderedDict()
         # 原生日线记录可能比本地 1m 库下载同一已完成交易日早几秒可见。每个标的/交易日
         # 明确执行一次盘后刷新以修复传输延迟；刷新后前缀仍不完整时，对账契约继续关闭失败。
         self._native_daily_ahead_refresh_attempts: set[tuple[str, date]] = set()
-        self._native_daily_calendar_coverage_cache: dict[
+        self._native_daily_calendar_coverage_cache: OrderedDict[
             tuple[str, str], QmtNativeDailyCalendarCoverageEvidence
-        ] = {}
+        ] = OrderedDict()
+        self._cache_counters: Counter[str] = Counter()
+        # name -> (count, total seconds, maximum seconds, last seconds)
+        self._performance_timings: dict[str, tuple[int, float, float, float]] = {}
+
+    def _record_timing(self, name: str, elapsed: float) -> None:
+        seconds = max(0.0, float(elapsed))
+        count, total, maximum, _last = self._performance_timings.get(
+            name,
+            (0, 0.0, 0.0, 0.0),
+        )
+        self._performance_timings[name] = (
+            count + 1,
+            total + seconds,
+            max(maximum, seconds),
+            seconds,
+        )
+
+    def cache_health_snapshot(self) -> dict[str, object]:
+        return {
+            "schema": "chanlun-qmt-higher-timeframe-cache-health",
+            "required_daily_bars": self._required_daily_bars,
+            "physical_daily_bars": self._daily_bars,
+            "required_sector_daily_bars": self._required_sector_daily_bars,
+            "physical_sector_daily_bars": self._sector_daily_bars,
+            "one_minute_request_bars": self._one_minute_bars,
+            "sector_five_minute_request_bars": self._sector_five_minute_bars,
+            "minute_frame_entries": len(self._minute_cache),
+            "minute_frame_capacity": _QMT_MINUTE_FRAME_CACHE_CAPACITY,
+            "native_daily_frame_entries": len(self._native_daily_cache),
+            "native_daily_frame_capacity": (
+                _QMT_NATIVE_DAILY_FRAME_CACHE_CAPACITY
+            ),
+            "gate_entries": len(self._cache),
+            "gate_capacity": _QMT_GATE_CACHE_CAPACITY,
+            "sector_gate_entries": len(self._sector_cache),
+            "sector_gate_capacity": _QMT_SECTOR_GATE_CACHE_CAPACITY,
+            "bundle_entries": len(self._bundle_cache),
+            "bundle_capacity": _QMT_BUNDLE_CACHE_CAPACITY,
+            "native_calendar_entries": len(
+                self._native_daily_calendar_coverage_cache
+            ),
+            "native_calendar_capacity": _QMT_NATIVE_CALENDAR_CACHE_CAPACITY,
+            "cache_counters": dict(sorted(self._cache_counters.items())),
+            "performance": {
+                name: {
+                    "count": count,
+                    "total_seconds": round(total, 6),
+                    "average_seconds": round(total / count, 6),
+                    "maximum_seconds": round(maximum, 6),
+                    "last_seconds": round(last, 6),
+                }
+                for name, (count, total, maximum, last) in sorted(
+                    self._performance_timings.items()
+                )
+                if count > 0
+            },
+        }
 
     @staticmethod
     def _drop_requested_leading_fragment(
@@ -4711,14 +5025,17 @@ class QmtHigherTimeframeGateSource:
         key = (symbol, bucket)
         if allow_download:
             self._minute_cache.pop(key, None)
-        cached = self._minute_cache.get(key)
+        cached = _lru_get(self._minute_cache, key)
         if cached is not None:
+            self._cache_counters["minute_frame_hit"] += 1
             return cached
+        self._cache_counters["minute_frame_miss"] += 1
         exchange = self._exchange_provider()
         loader = getattr(exchange, "klines", None)
         if not callable(loader):
             raise TypeError("QMT exchange must expose klines")
         start = observed - timedelta(days=self._lookback_days)
+        load_started = perf_counter()
         frame = loader(
             symbol,
             "1m",
@@ -4733,6 +5050,10 @@ class QmtHigherTimeframeGateSource:
                 "req_counts": self._one_minute_bars,
             },
         )
+        self._record_timing(
+            "one_minute_frame_load",
+            perf_counter() - load_started,
+        )
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("QMT one-minute higher-timeframe base is unavailable")
         frame = self._drop_requested_leading_fragment(
@@ -4740,7 +5061,12 @@ class QmtHigherTimeframeGateSource:
             decision_time=observed,
             requested_rows=self._one_minute_bars,
         )
-        self._minute_cache[key] = frame
+        _lru_put(
+            self._minute_cache,
+            key,
+            frame,
+            capacity=_QMT_MINUTE_FRAME_CACHE_CAPACITY,
+        )
         return frame
 
     def _native_daily_frame(
@@ -4751,14 +5077,17 @@ class QmtHigherTimeframeGateSource:
         observed = normalize_datetime(as_of, "as_of")
         bucket = observed.isoformat(timespec="minutes")
         key = (symbol, bucket)
-        cached = self._native_daily_cache.get(key)
+        cached = _lru_get(self._native_daily_cache, key)
         if cached is not None:
+            self._cache_counters["native_daily_frame_hit"] += 1
             return cached
+        self._cache_counters["native_daily_frame_miss"] += 1
         exchange = self._exchange_provider()
         loader = getattr(exchange, "klines", None)
         if not callable(loader):
             raise TypeError("QMT exchange must expose klines")
         start = observed - timedelta(days=self._native_daily_lookback_days)
+        load_started = perf_counter()
         frame = loader(
             symbol,
             "d",
@@ -4771,9 +5100,18 @@ class QmtHigherTimeframeGateSource:
                 "req_counts": self._native_daily_bars,
             },
         )
+        self._record_timing(
+            "native_daily_frame_load",
+            perf_counter() - load_started,
+        )
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("QMT native daily higher-timeframe history is unavailable")
-        self._native_daily_cache[key] = frame
+        _lru_put(
+            self._native_daily_cache,
+            key,
+            frame,
+            capacity=_QMT_NATIVE_DAILY_FRAME_CACHE_CAPACITY,
+        )
         return frame
 
     def _trading_sessions(self, as_of: datetime) -> tuple[date, ...]:
@@ -4781,7 +5119,9 @@ class QmtHigherTimeframeGateSource:
         bucket = observed.isoformat(timespec="minutes")
         cached = self._calendar_cache.get(bucket)
         if cached is not None:
+            self._cache_counters["trading_calendar_hit"] += 1
             return cached
+        self._cache_counters["trading_calendar_miss"] += 1
         provider = self._trading_calendar_provider
         if provider is None:
             raise HigherTimeframeDataUnavailable(
@@ -4791,10 +5131,15 @@ class QmtHigherTimeframeGateSource:
         if observed.timetz().replace(tzinfo=None) < time(15, 0):
             completed_cutoff -= timedelta(days=1)
         start = (observed - timedelta(days=self._native_daily_lookback_days)).date()
+        load_started = perf_counter()
         values = provider(
             start=start,
             end=completed_cutoff,
             observed_at=observed,
+        )
+        self._record_timing(
+            "trading_calendar_load",
+            perf_counter() - load_started,
         )
         sessions = tuple(values)
         if (
@@ -4824,6 +5169,7 @@ class QmtHigherTimeframeGateSource:
         """Reconcile native D against 1m; keep 30m on the exact 1m prefix."""
 
         def same_base_stream(*, allow_download: bool):
+            build_started = perf_counter()
             stream = build_qmt_same_base_stream_frames(
                 symbol=symbol,
                 one_minute_frame=self._one_minute_frame(
@@ -4833,6 +5179,10 @@ class QmtHigherTimeframeGateSource:
                 ),
                 decision_time=as_of,
                 expected_sessions=expected_sessions,
+            )
+            self._record_timing(
+                "same_base_stream_build",
+                perf_counter() - build_started,
             )
             if (
                 stream.price_basis_revision is None
@@ -4849,6 +5199,7 @@ class QmtHigherTimeframeGateSource:
         stream = same_base_stream(allow_download=False)
         native_daily = self._native_daily_frame(symbol, as_of)
         try:
+            bridge_started = perf_counter()
             bridge = build_qmt_native_daily_bridge(
                 symbol=symbol,
                 native_daily_frame=native_daily,
@@ -4856,6 +5207,10 @@ class QmtHigherTimeframeGateSource:
                 decision_time=as_of,
                 trading_sessions=expected_sessions,
                 max_price_difference_quanta=1,
+            )
+            self._record_timing(
+                "native_daily_bridge",
+                perf_counter() - bridge_started,
             )
         except QmtNativeDailyReconciliationError as exc:
             observed = normalize_datetime(as_of, "as_of").astimezone(
@@ -4890,6 +5245,7 @@ class QmtHigherTimeframeGateSource:
             self._native_daily_ahead_refresh_attempts.add(refresh_key)
             stream = same_base_stream(allow_download=True)
             try:
+                bridge_started = perf_counter()
                 bridge = build_qmt_native_daily_bridge(
                     symbol=symbol,
                     native_daily_frame=native_daily,
@@ -4897,6 +5253,10 @@ class QmtHigherTimeframeGateSource:
                     decision_time=as_of,
                     trading_sessions=expected_sessions,
                     max_price_difference_quanta=1,
+                )
+                self._record_timing(
+                    "native_daily_bridge",
+                    perf_counter() - bridge_started,
                 )
             except QmtNativeDailyReconciliationError as refreshed_exc:
                 raise HigherTimeframeDataUnavailable(
@@ -4910,8 +5270,11 @@ class QmtHigherTimeframeGateSource:
         daily.attrs = dict(bridge.daily.attrs)
         thirty.attrs = dict(bridge.thirty_minute.attrs)
         bucket = normalize_datetime(as_of, "as_of").isoformat(timespec="minutes")
-        self._native_daily_calendar_coverage_cache[(symbol, bucket)] = (
-            bridge.calendar_coverage_evidence
+        _lru_put(
+            self._native_daily_calendar_coverage_cache,
+            (symbol, bucket),
+            bridge.calendar_coverage_evidence,
+            capacity=_QMT_NATIVE_CALENDAR_CACHE_CAPACITY,
         )
         return daily, thirty, bridge.evidence
 
@@ -4962,16 +5325,19 @@ class QmtHigherTimeframeGateSource:
     ) -> HigherTimeframeGateEvidence:
         bucket = normalize_datetime(as_of, "as_of").isoformat(timespec="minutes")
         cache_key = (symbol, bucket)
-        cached = self._cache.get(cache_key)
+        cached = _lru_get(self._cache, cache_key)
         if cached is not None:
+            self._cache_counters["gate_hit"] += 1
             return cached
+        self._cache_counters["gate_miss"] += 1
         daily, thirty, reconciliation = self._frames(
             symbol,
             as_of,
             expected_sessions=trading_sessions,
         )
-        calendar_coverage = self._native_daily_calendar_coverage_cache.get(
-            (symbol, bucket)
+        calendar_coverage = _lru_get(
+            self._native_daily_calendar_coverage_cache,
+            (symbol, bucket),
         )
         inputs = qmt_higher_timeframe_inputs(
             symbol=symbol,
@@ -4982,6 +5348,7 @@ class QmtHigherTimeframeGateSource:
             native_daily_reconciliation_evidence=reconciliation,
             native_daily_calendar_coverage_evidence=calendar_coverage,
         )
+        risk_started = perf_counter()
         envelope = build_qmt_higher_timeframe_risk(
             inputs=inputs,
             trading_sessions=trading_sessions,
@@ -4995,8 +5362,17 @@ class QmtHigherTimeframeGateSource:
                 }
             ),
         )
+        self._record_timing(
+            "symbol_risk_build",
+            perf_counter() - risk_started,
+        )
         result = _from_envelope(envelope)
-        self._cache[cache_key] = result
+        _lru_put(
+            self._cache,
+            cache_key,
+            result,
+            capacity=_QMT_GATE_CACHE_CAPACITY,
+        )
         return result
 
     def _sector_one(
@@ -5020,14 +5396,18 @@ class QmtHigherTimeframeGateSource:
         bucket = normalize_datetime(as_of, "as_of").isoformat(
             timespec="minutes"
         )
-        cached = self._sector_cache.get((sector_identity, bucket))
+        sector_cache_key = (sector_identity, bucket)
+        cached = _lru_get(self._sector_cache, sector_cache_key)
         if cached is not None:
+            self._cache_counters["sector_gate_hit"] += 1
             return cached
+        self._cache_counters["sector_gate_miss"] += 1
         provider = self._sector_frame_provider
         if provider is None:
             raise HigherTimeframeDataUnavailable(
                 ("QMT_SECTOR_HIGHER_TIMEFRAME_RISK_UNAVAILABLE",)
             )
+        sector_frame_started = perf_counter()
         raw = provider(
             sector_id=sector_id,
             sector_name=sector_name,
@@ -5036,10 +5416,15 @@ class QmtHigherTimeframeGateSource:
             as_of=as_of,
             request_bars=self._sector_five_minute_bars,
         )
+        self._record_timing(
+            "sector_frame_load",
+            perf_counter() - sector_frame_started,
+        )
         if not isinstance(raw, pd.DataFrame) or raw.empty:
             raise HigherTimeframeDataUnavailable(
                 ("QMT_SECTOR_FIVE_MINUTE_SAME_BASE_STREAM_UNRESOLVED",)
             )
+        sector_risk_started = perf_counter()
         resolution = resolve_sector_higher_timeframe_gate(
             sector_id=sector_id,
             sector_members=sector_members,
@@ -5058,8 +5443,17 @@ class QmtHigherTimeframeGateSource:
                 request_bars=self._sector_native_daily_bars,
             ),
         )
+        self._record_timing(
+            "sector_risk_build",
+            perf_counter() - sector_risk_started,
+        )
         result = resolution.evidence
-        self._sector_cache[(sector_identity, bucket)] = result
+        _lru_put(
+            self._sector_cache,
+            sector_cache_key,
+            result,
+            capacity=_QMT_SECTOR_GATE_CACHE_CAPACITY,
+        )
         return result
 
     def gates(
@@ -5106,9 +5500,11 @@ class QmtHigherTimeframeGateSource:
             )
         )
         bundle_key = (symbol, bucket, sector_id, sector_identity)
-        cached_bundle = self._bundle_cache.get(bundle_key)
+        cached_bundle = _lru_get(self._bundle_cache, bundle_key)
         if cached_bundle is not None:
+            self._cache_counters["bundle_hit"] += 1
             return cached_bundle
+        self._cache_counters["bundle_miss"] += 1
         try:
             sessions = self._trading_sessions(observed)
         except HigherTimeframeDataUnavailable as exc:
@@ -5218,7 +5614,12 @@ class QmtHigherTimeframeGateSource:
             symbol=symbol_gate,
             sector=sector_gate,
         )
-        self._bundle_cache[bundle_key] = result
+        _lru_put(
+            self._bundle_cache,
+            bundle_key,
+            result,
+            capacity=_QMT_BUNDLE_CACHE_CAPACITY,
+        )
         return result
 
 
@@ -5328,6 +5729,7 @@ def _unresolved_higher_timeframe_gate(
 
 
 __all__ = (
+    "HARD_HIGHER_TIMEFRAME_DATA_INTEGRITY_REASON_CODES",
     "HIGHER_TIMEFRAME_EFFECTIVENESS_AUDIT_SCHEMA",
     "HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID",
     "QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_CONTRACT_ID",

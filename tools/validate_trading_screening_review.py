@@ -26,10 +26,16 @@ for value in (PROJECT_ROOT / "src", PROJECT_ROOT / "web" / "chanlun_chart"):
     if rendered not in sys.path:
         sys.path.insert(0, rendered)
 
+from cl_app.services.live_review_runtime_contract import (  # noqa: E402
+    install_web_live_review_runtime_contract,
+)
+
+install_web_live_review_runtime_contract()
+
 from chanlun.decision_support.trading_system.live_human_review import (
-    live_screening_snapshot_content_sha256,
+    _ValidatedLiveReviewSnapshot,
+    _validated_live_review_snapshot,
     live_human_review_document,
-    validate_live_review_snapshot,
 )
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.decision_source_provenance import (
@@ -52,6 +58,9 @@ from chanlun.decision_support.trading_system.human_review_screening import (
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_WEB_BUNDLE_ARTIFACT_NAME = re.compile(
+    r"^[0-9a-f]{64}\.(?:index\.json|details\.jsonl)$"
+)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -81,6 +90,53 @@ def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _prune_stale_web_bundle_artifacts(
+    *,
+    artifact_root: Path,
+    keep_paths: Sequence[Path],
+) -> tuple[int, int]:
+    """Remove obsolete presentation projections after a new receipt is sealed.
+
+    Canonical dated review reports are deliberately outside ``.web`` and are
+    never touched.  Exact naming and parent checks keep this best-effort cache
+    cleanup from widening into user or audit data.
+    """
+
+    root = artifact_root.resolve()
+    keep: set[Path] = set()
+    for path in keep_paths:
+        resolved = path.resolve()
+        if resolved.parent != root:
+            raise ValueError("live review Web artifact escapes artifact root")
+        keep.add(resolved)
+    if not root.is_dir():
+        return 0, 0
+    removed_count = 0
+    removed_bytes = 0
+    try:
+        candidates = tuple(root.iterdir())
+    except OSError:
+        return 0, 0
+    for candidate in candidates:
+        if _WEB_BUNDLE_ARTIFACT_NAME.fullmatch(candidate.name) is None:
+            continue
+        try:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            resolved = candidate.resolve()
+            if resolved.parent != root or resolved in keep:
+                continue
+            size = candidate.stat().st_size
+            candidate.unlink()
+        except OSError:
+            # A Web request may still hold the previous immutable projection on
+            # Windows.  The next publication retries without failing readiness.
+            continue
+        removed_count += 1
+        removed_bytes += size
+    return removed_count, removed_bytes
 
 
 def _sha256_file(path: Path) -> str:
@@ -292,6 +348,7 @@ def _materialize_human_review_report(
     expected_sha256: str,
     archive_root: Path,
     repository_root: Path,
+    validated_snapshot: _ValidatedLiveReviewSnapshot | None = None,
 ) -> dict[str, object]:
     try:
         review_at = datetime.fromisoformat(str(payload["as_of"]))
@@ -306,6 +363,7 @@ def _materialize_human_review_report(
         source_snapshot_sha256=expected_sha256,
         session=session,
         decision_source_snapshot=decision_sources,
+        _validated_snapshot=validated_snapshot,
     )
     validated_alerts = validate_human_review_screen_document(report)
     content_sha256 = str(report["content_sha256"])
@@ -325,7 +383,11 @@ def _materialize_human_review_report(
         raise ValueError("live screening snapshot changed during validation")
     with interprocess_file_lock(lock_path, timeout_seconds=30.0):
         if report_path.is_file():
-            existing = json.loads(report_path.read_text(encoding="utf-8"))
+            # Stream the JSON decoder from the file handle.  ``read_text`` first
+            # materializes another ~70 MiB Unicode string beside the parsed report,
+            # which needlessly raises the isolated validator's peak working set.
+            with report_path.open("r", encoding="utf-8") as handle:
+                existing = json.load(handle)
             validate_human_review_screen_document(existing)
             if existing.get("content_sha256") != content_sha256:
                 raise ValueError("live human review archive collision")
@@ -376,6 +438,10 @@ def _materialize_human_review_report(
         )
         _write_json_atomic(receipt_path, receipt)
         _write_json_atomic(web_receipt_path, web_receipt)
+        _prune_stale_web_bundle_artifacts(
+            artifact_root=archive_root / ".web",
+            keep_paths=(index_path, detail_path),
+        )
     return {
         "human_review_report_path": str(report_path.resolve()),
         "human_review_report_content_sha256": content_sha256,
@@ -398,7 +464,11 @@ def validate_document(
     if (archive_root is None) != (repository_root is None):
         raise ValueError("archive-root and repository-root must be provided together")
     source_stat = path.stat()
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # The production snapshot is currently around 150 MiB.  Feeding the file
+    # handle directly to ``json.load`` avoids retaining an equally large
+    # intermediate Unicode string while the object graph is constructed.
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
     if not isinstance(payload, Mapping):
         raise ValueError("screening snapshot must be a mapping")
     declared = payload.get("snapshot_content_sha256")
@@ -415,11 +485,13 @@ def validate_document(
         }
     materialization: dict[str, object] = {}
     error: str | None = None
+    validated_snapshot: _ValidatedLiveReviewSnapshot | None = None
     try:
-        if live_screening_snapshot_content_sha256(payload) != expected_sha256:
-            raise ValueError("screening snapshot content hash mismatch")
-        if archive_root is None or repository_root is None:
-            validate_live_review_snapshot(payload)
+        # This common validator recomputes and authenticates the declared content
+        # identity.  Its sealed result is consumed synchronously by the report
+        # builder, eliminating a second full canonical hash of the same 150 MiB
+        # in-memory tree without allowing a different mapping or session through.
+        validated_snapshot = _validated_live_review_snapshot(payload)
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         ready = False
         reason_code = "REVIEW_BOUNDARY_INVALID"
@@ -436,6 +508,7 @@ def validate_document(
                     expected_sha256=expected_sha256,
                     archive_root=archive_root.resolve(),
                     repository_root=repository_root.resolve(),
+                    validated_snapshot=validated_snapshot,
                 )
             except (ArithmeticError, KeyError, OSError, TypeError, ValueError) as exc:
                 ready = False

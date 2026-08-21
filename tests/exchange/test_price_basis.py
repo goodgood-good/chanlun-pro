@@ -130,7 +130,7 @@ def test_provider_basis_revision_is_stable_and_method_specific() -> None:
         code="TSLA.US",
         adjustment="forward",
         structure_price_quantum=Decimal("0.001"),
-        normalization_revision="ohlc-envelope-v1",
+        normalization_revision="ohlc-envelope",
     )
 
     assert first == same
@@ -233,18 +233,18 @@ def test_merge_preserves_provider_ohlc_normalization_audit() -> None:
         code="AAPL.US",
         adjustment="forward",
         structure_price_quantum=Decimal("0.001"),
-        normalization_revision="ohlc-envelope-v1",
+        normalization_revision="ohlc-envelope",
     )
     attach_price_basis_metadata(cached, metadata)
     attach_price_basis_metadata(new, metadata)
     new.attrs.update(
-        ohlc_geometry_normalization="ohlc-envelope-v1",
+        ohlc_geometry_normalization="ohlc-envelope",
         ohlc_geometry_repair_count=1,
         ohlc_geometry_max_adjustment=0.049,
     )
 
     merge_price_basis_metadata(cached, new, target)
 
-    assert target.attrs["ohlc_geometry_normalization"] == "ohlc-envelope-v1"
+    assert target.attrs["ohlc_geometry_normalization"] == "ohlc-envelope"
     assert target.attrs["ohlc_geometry_repair_count"] == 1
     assert target.attrs["ohlc_geometry_max_adjustment"] == pytest.approx(0.049)

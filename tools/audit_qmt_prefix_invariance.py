@@ -7,6 +7,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -80,13 +81,43 @@ def _sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _algorithm_revision() -> str:
+def _algorithm_revision(hashes: Sequence[tuple[str, str]]) -> str:
     encoded = json.dumps(
-        qmt_research_contract.algorithm_hashes(),
+        tuple(hashes),
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _current_fact_algorithm_revision() -> str:
+    return _algorithm_revision(qmt_research_contract.fact_algorithm_hashes())
+
+
+def _frozen_algorithm_entry(
+    manifest: Mapping[str, object],
+    *,
+    key: str,
+    current_hashes: Sequence[tuple[str, str]],
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    raw = manifest.get(key)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"extract manifest has no frozen {key}")
+    revision = raw.get("revision")
+    rows = raw.get("hashes")
+    if not isinstance(revision, str) or not isinstance(rows, list):
+        raise ValueError(f"extract manifest {key} is malformed")
+    hashes = tuple(
+        (str(row["path"]), str(row["sha256"]))
+        for row in rows
+        if isinstance(row, Mapping)
+    )
+    if len(hashes) != len(rows) or _algorithm_revision(hashes) != revision:
+        raise ValueError(f"extract manifest {key} revision is inconsistent")
+    if tuple(current_hashes) != hashes:
+        raise RuntimeError(f"source code changed after frozen {key}")
+    return revision, hashes
 
 
 def _fact_path(directory: Path, code: str) -> Path:
@@ -153,7 +184,7 @@ class Request:
 
 
 def _worker(request: Request) -> dict[str, object]:
-    if _algorithm_revision() != request.algorithm_revision:
+    if _current_fact_algorithm_revision() != request.algorithm_revision:
         raise RuntimeError("worker algorithm differs from frozen extraction")
     path = Path(request.fact_path)
     full = pickle.loads(path.read_bytes())
@@ -239,13 +270,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not isinstance(manifest, Mapping) or not manifest.get("complete"):
         raise RuntimeError("symbol extraction is incomplete")
     request_info = manifest.get("request")
-    algorithm = manifest.get("algorithm")
     symbols = manifest.get("symbols")
-    if not all(isinstance(value, Mapping) for value in (request_info, algorithm, symbols)):
+    if not all(isinstance(value, Mapping) for value in (request_info, symbols)):
         raise ValueError("extract manifest is malformed")
-    algorithm_revision = str(algorithm["revision"])
-    if algorithm_revision != _algorithm_revision():
-        raise RuntimeError("source code changed after symbol extraction")
+    algorithm_revision, algorithm_hashes = _frozen_algorithm_entry(
+        manifest,
+        key="algorithm",
+        current_hashes=qmt_research_contract.algorithm_hashes(),
+    )
+    fact_key = "fact_algorithm" if "fact_algorithm" in manifest else "algorithm"
+    fact_current_hashes = (
+        qmt_research_contract.fact_algorithm_hashes()
+        if fact_key == "fact_algorithm"
+        else qmt_research_contract.algorithm_hashes()
+    )
+    fact_algorithm_revision, fact_algorithm_hashes = _frozen_algorithm_entry(
+        manifest,
+        key=fact_key,
+        current_hashes=fact_current_hashes,
+    )
     warmup_start = date.fromisoformat(str(request_info["warmup_start"]))
     requests: list[Request] = []
     skipped_no_evaluations = 0
@@ -260,7 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fact_path=str(_fact_path(directory, str(code))),
                 target=str(_audit_path(directory, str(code))),
                 warmup_start=warmup_start,
-                algorithm_revision=algorithm_revision,
+                algorithm_revision=fact_algorithm_revision,
             )
         )
     completed: dict[str, dict[str, object]] = {}
@@ -311,6 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "generated_at": datetime.now().astimezone().isoformat(),
         "status": "passed" if not failures and len(completed) == len(requests) else "failed",
         "algorithm_revision": algorithm_revision,
+        "fact_algorithm_revision": fact_algorithm_revision,
         "pit_snapshot_sha256": request_info["pit_snapshot_sha256"],
         "extract_manifest_sha256": _sha256(manifest_path),
         "signal_producing_symbol_count": len(requests),
@@ -324,6 +368,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     }
     output_path = directory / "prefix_invariance_audit.json"
+    if qmt_research_contract.algorithm_hashes() != algorithm_hashes:
+        raise RuntimeError("source code changed during prefix audit")
+    current_fact_hashes = (
+        qmt_research_contract.fact_algorithm_hashes()
+        if fact_key == "fact_algorithm"
+        else qmt_research_contract.algorithm_hashes()
+    )
+    if current_fact_hashes != fact_algorithm_hashes:
+        raise RuntimeError("fact algorithm changed during prefix audit")
     _atomic_json(output_path, output)
     print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
     return 0 if output["status"] == "passed" else 3

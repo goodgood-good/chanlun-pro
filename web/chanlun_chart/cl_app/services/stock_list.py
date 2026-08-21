@@ -177,6 +177,42 @@ def get_cached_a_instrument_types(codes: tuple[str, ...]) -> dict[str, str]:
     }
 
 
+def get_cached_a_symbol_names(codes: tuple[str, ...]) -> dict[str, str | None]:
+    """从已恢复的 A 股证券目录读取名称，不触发 QMT 或磁盘 I/O。"""
+
+    if type(codes) is not tuple or any(
+        type(code) is not str or _A_STOCK_CODE.fullmatch(code) is None
+        for code in codes
+    ):
+        raise TypeError("codes must be an exact normalized A-share tuple")
+    if len(codes) != len(set(codes)) or tuple(sorted(codes)) != codes:
+        raise ValueError("codes must be unique and sorted")
+    requested = set(codes)
+    resolved: dict[str, str] = {}
+    conflicts: set[str] = set()
+    with _stock_cache_lock:
+        cached = tuple(stock_cache.get("a") or ())
+    for row in cached:
+        if not isinstance(row, dict):
+            continue
+        code = row.get("code")
+        raw_name = row.get("name")
+        if code not in requested or not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name:
+            continue
+        previous = resolved.get(code)
+        if previous is not None and previous != name:
+            conflicts.add(code)
+            continue
+        resolved[code] = name
+    return {
+        code: None if code in conflicts else resolved.get(code)
+        for code in codes
+    }
+
+
 def get_symbol_readiness(exchange: str):
     """Return an in-memory snapshot without triggering a refresh or external I/O."""
     with _stock_cache_lock:

@@ -58,6 +58,11 @@ _REQUIRED = ("date", "open", "high", "low", "close", "volume")
 QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS = (
     SCREENING_WARMUP_REQUIRED_BARS["d"]
 )
+# 收敛闸门会删除最老三分之一后再计算一次。完整输入至少需要 720 根，才能让
+# 被比较的短前缀仍保有冻结的 480 根策略最低历史；这只扩大物理证据，不改变阈值。
+QMT_HIGHER_TIMEFRAME_WARMUP_PHYSICAL_DAILY_BARS = (
+    QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS * 3 // 2
+)
 QMT_SECTOR_NATIVE_DAILY_RESEARCH_BASE_FREQUENCY = (
     "5m+native-d-unreconciled-research"
 )
@@ -76,6 +81,9 @@ QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID = sha256_json(
         "frequency": "d",
         "prefix_ratios": QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PREFIX_RATIOS,
         "minimum_prefix_bars": QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
+        "minimum_full_prefix_bars": (
+            QMT_HIGHER_TIMEFRAME_WARMUP_PHYSICAL_DAILY_BARS
+        ),
         "semantic_signature": "chanlun-qmt-mwd-warmup-semantic-tail",
         "diagnostic_only": True,
         "active_pairwise_gate_unchanged": True,
@@ -823,6 +831,7 @@ __all__ = (
     "QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID",
     "QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PREFIX_RATIOS",
     "QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS",
+    "QMT_HIGHER_TIMEFRAME_WARMUP_PHYSICAL_DAILY_BARS",
     "QMT_SECTOR_NATIVE_DAILY_RESEARCH_BASE_FREQUENCY",
     "build_qmt_higher_timeframe_risk",
     "qmt_higher_timeframe_inputs",

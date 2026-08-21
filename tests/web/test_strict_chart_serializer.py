@@ -46,12 +46,15 @@ from chanlun.core.strict_structure.models import (
 )
 from chanlun.core.strict_structure.point_rules import build_approaching_point_id
 from chanlun.core.strict_structure.signals import StrictSignalEngine
+from chanlun.decision_support.trading_system.structure_adapter import (
+    extract_current_confirmed_points,
+)
 from tests.core.strict_structure.helpers import (
     completed_up_center,
     engine_for,
     ongoing_center,
 )
-from tests.trading_system.strict_helpers import strict_point
+from tests.trading_system.strict_helpers import strict_evidence_result, strict_point
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -694,6 +697,76 @@ def test_snapshot_serializes_provisional_third_sell_completion() -> None:
     assert payload["points"][1]["time"] == int(units[3].market_end.timestamp())
 
 
+def test_operational_third_point_updates_the_same_center_explanation() -> None:
+    raw_units = (
+        _unit(0, "down", 140, 110),
+        _unit(1, "up", 110, 130),
+        _unit(2, "down", 130, 115),
+        _unit(3, "up", 115, 125),
+        _unit(4, "down", 125, 90, locked=False),
+        _unit(5, "up", 90, 100, locked=False),
+    )
+    result = calculate_centers(raw_units, 0, SourceKind.SEGMENT)
+    preview = result.previews[0]
+    units = (
+        *raw_units[:4],
+        replace(raw_units[4], formed_at=raw_units[4].available_at),
+        replace(raw_units[5], formed_at=raw_units[5].available_at),
+        replace(
+            _unit(6, "down", 100, 80, locked=False),
+            forming=True,
+        ),
+    )
+    source = strict_point(
+        "3sell",
+        status=StrictPointStatus.APPROACHING,
+        available_at=units[5].available_at,
+    )
+    point = replace(
+        source,
+        point_id=build_approaching_point_id(
+            price_basis_revision=PRICE_BASIS,
+            point_type="3sell",
+            structural_level=0,
+            anchor_unit_id=units[5].unit_id,
+            center_id=preview.formal_center_id,
+            parent_point_id=None,
+        ),
+        anchor_unit_id=units[5].unit_id,
+        anchor_at=units[5].market_end,
+        anchor_tick=units[5].high_tick,
+        invalidation_tick=preview.zd_tick,
+        center_id=preview.formal_center_id,
+        center_zd_tick=preview.zd_tick,
+        center_zg_tick=preview.zg_tick,
+        center_ordinal=1,
+        evidence_codes=("projected_geometric_structure",),
+        missing_conditions=("terminal_unit_locked",),
+    )
+
+    snapshot = build_strict_structure_snapshot(
+        _evidence(
+            formal_centers=(),
+            previews=(preview,),
+            level_units=units,
+            approaching_points=(point,),
+        ),
+        interval="5m",
+    )
+
+    level = snapshot["levels"][0]
+    center_payload = level["center_previews"][0]
+    point_payload = level["confirmed_points"][0]
+    assert center_payload["completion_phase"] == "OPERATIONAL_THIRD_CLASS_POINT"
+    assert center_payload["completion_point_status"] == "confirmed"
+    assert center_payload["operational_confirmation"] is True
+    assert center_payload["audit_lock_state"] == "pending"
+    assert center_payload["tradable"] is True
+    assert point_payload["point_type"] == "3sell"
+    assert point_payload["formation_state"] == "confirmed"
+    assert point_payload["lock_state"] == "pending"
+
+
 def test_completed_preview_serializer_rejects_return_that_crosses_core() -> None:
     units = (
         _unit(0, "down", 140, 110),
@@ -765,7 +838,124 @@ def test_trend_and_point_serializers_preserve_strict_identity() -> None:
     assert point["point_id"] == source_point.point_id
     assert point["point_type"] == "3buy"
     assert point["status"] == "confirmed"
+    assert point["formation_state"] == "confirmed"
+    assert point["lock_state"] == "locked"
+    assert point["contains_forming_segment"] is False
+    assert point["contains_unlocked_segment"] is False
     assert point["center_ordinal"] == 1
+
+
+def test_formed_chart_point_declares_geometry_and_lock_state() -> None:
+    source = replace(
+        strict_point("3sell", status=StrictPointStatus.APPROACHING),
+        evidence_codes=(
+            "unfinished_segment_participates",
+            "provisional_center_completion",
+            "core_boundary_held",
+        ),
+        missing_conditions=(
+            "unfinished_segment_lock",
+            "formal_center_confirmation",
+        ),
+    )
+
+    point = strict_point_to_chart_dict(source)
+
+    assert point["status"] == "approaching"
+    assert point["formation_state"] == "geometry_ready"
+    assert point["lock_state"] == "pending"
+    assert point["contains_forming_segment"] is False
+    assert point["contains_unlocked_segment"] is True
+    assert point["tradable"] is False
+
+
+def test_snapshot_uses_same_latest_completed_operational_confirmation_as_selection() -> (
+    None
+):
+    target = strict_point(
+        "1buy",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=20),
+    )
+    forming_tail = strict_point(
+        "1sell",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=30),
+    )
+    evidence = strict_evidence_result(
+        code="SZ.000061",
+        source_frequency="5m",
+        source_closed_at=BASE + timedelta(hours=5, minutes=30),
+        approaching_points=(target, forming_tail),
+    )
+
+    snapshot = build_strict_structure_snapshot(evidence, interval="5m")
+    selected = extract_current_confirmed_points(
+        evidence,
+        code=evidence.symbol,
+        source_frequency=evidence.source_frequency,
+        as_of=evidence.source_closed_at,
+    )
+    level = snapshot["levels"][0]
+    promoted = next(
+        point for point in level["confirmed_points"] if point["point_type"] == "1buy"
+    )
+    still_forming = next(
+        point for point in level["approaching_points"] if point["point_type"] == "1sell"
+    )
+
+    assert all(
+        point["point_id"] != target.point_id for point in level["approaching_points"]
+    )
+    assert promoted["status"] == "confirmed"
+    assert promoted["strict_status"] == "approaching"
+    assert promoted["operational_confirmation"] is True
+    assert promoted["confirmation_basis"] == "latest_completed_geometry"
+    assert promoted["formation_state"] == "confirmed"
+    assert promoted["lock_state"] == "pending"
+    assert promoted["contains_forming_segment"] is False
+    assert promoted["contains_unlocked_segment"] is True
+    assert promoted["terminal_segment_role"] == "latest_completed"
+    assert promoted["terminal_segment_state"] == "formed"
+    assert promoted["confirmed_at"] == aware_datetime_to_epoch_seconds(
+        target.available_at
+    )
+    assert promoted["confirmed_at"] == aware_datetime_to_epoch_seconds(
+        next(point for point in selected if point.point_type == "1buy").confirmed_at
+    )
+    assert promoted["tradable"] is True
+
+    assert still_forming["status"] == "approaching"
+    assert still_forming["formation_state"] == "forming"
+    assert still_forming["terminal_segment_role"] == "latest_unfinished"
+    assert still_forming["tradable"] is False
+
+
+def test_non_trade_frequency_keeps_latest_completed_point_approaching() -> None:
+    target = strict_point(
+        "1buy",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=20),
+    )
+    forming_tail = strict_point(
+        "1sell",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=30),
+    )
+    evidence = strict_evidence_result(
+        source_frequency="1m",
+        source_closed_at=BASE + timedelta(hours=5, minutes=30),
+        approaching_points=(target, forming_tail),
+    )
+
+    snapshot = build_strict_structure_snapshot(evidence, interval="1m")
+    level = snapshot["levels"][0]
+
+    assert level["confirmed_points"] == []
+    assert {point["point_type"] for point in level["approaching_points"]} == {
+        "1buy",
+        "1sell",
+    }
 
 
 def test_snapshot_revision_is_deterministic_and_window_independent() -> None:

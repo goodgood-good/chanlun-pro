@@ -33,7 +33,7 @@ REQUIRED_ABLATION_IDS = (
     "original_definitions_only",
     "plus_sector_ranking",
     "plus_30m_context",
-    "plus_1m_trigger",
+    "plus_1m_segment_difference",
     "plus_unified_buy_point_execution",
     "plus_portfolio_risk",
 )
@@ -286,6 +286,7 @@ def build_report(
     effective_range: tuple[date, date] | None = None,
     evaluation_mode: str = "walk_forward",
     sector_price_source: str = "qmt_gics3_component_composite",
+    formal_selection_required: bool = False,
     universe_summary: dict[str, object] | None = None,
     data_source_hashes: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, object]:
@@ -308,6 +309,8 @@ def build_report(
         raise ValueError("unsupported evaluation mode")
     if not isinstance(sector_price_source, str) or not sector_price_source.strip():
         raise ValueError("sector price source is required")
+    if type(formal_selection_required) is not bool:
+        raise ValueError("formal_selection_required must be a boolean")
     metrics = calculate_metrics(result.aggregate_run)
     adequacy = sample_adequacy(
         result.aggregate_run,
@@ -459,12 +462,16 @@ def build_report(
         "execution_contract": {
             "context_frequency": "30m",
             "setup_frequency": "5m",
-            "trigger_frequency": "1m",
+            "trade_frequency": "5m",
+            "segment_difference_frequency": "1m",
+            "segment_difference_required_for_trade_signal": False,
+            "execution_observation_frequency": "1m",
             "point_classes_analyzed_independently": True,
             "buy_point_classes_share_execution_logic": True,
             "max_five_minute_setup_age_seconds": (MAX_FIVE_MINUTE_SETUP_AGE_SECONDS),
             "sector_price_source": sector_price_source,
             "sector_price_change_gate": False,
+            "formal_selection_required": formal_selection_required,
             "next_tradable_minute_fill": True,
             "entry_risk_ttl_seconds": 300,
             "entry_liquidity_resize": "one_shot_to_10pct_minute_volume",

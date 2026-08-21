@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal, cast
 
+from chanlun.core.strict_structure.current_events import (
+    TerminalSegmentReference,
+    current_strict_point_evidence,
+    terminal_segment_reference,
+)
 from chanlun.core.strict_structure.models import (
     StrictEvidenceResult,
     StrictPointStatus,
@@ -47,6 +52,12 @@ class ProvisionalCandidate:
     parent_point_id: str | None = None
     related_point_ids: tuple[str, ...] = ()
     small_to_large_carrier_unit_ids: tuple[str, ...] = ()
+    # ``observed_at`` is retained as the compatibility alias of availability.
+    # The structural anchor must remain distinct so UI/audit cannot rewrite a
+    # historical geometry time to the much later causal observation time.
+    anchor_at: datetime | None = None
+    available_at: datetime | None = None
+    terminal_segment: TerminalSegmentReference | None = None
 
     def __post_init__(self) -> None:
         if not self.candidate_id:
@@ -60,11 +71,28 @@ class ProvisionalCandidate:
             raise ValueError("point_type and side disagree")
         if self.tower != "formal" or self.recursive_level < 0:
             raise ValueError("invalid provisional structure identity")
-        object.__setattr__(
-            self,
-            "observed_at",
-            normalize_datetime(self.observed_at, "observed_at"),
+        observed_at = normalize_datetime(self.observed_at, "observed_at")
+        anchor_at = (
+            observed_at
+            if self.anchor_at is None
+            else normalize_datetime(self.anchor_at, "anchor_at")
         )
+        available_at = (
+            observed_at
+            if self.available_at is None
+            else normalize_datetime(self.available_at, "available_at")
+        )
+        # ``dataclasses.replace`` in existing research/tests commonly updates
+        # only the legacy ``observed_at`` field. Keep that field authoritative
+        # as the compatibility alias instead of retaining a stale copied
+        # ``available_at`` value.
+        if observed_at != available_at:
+            available_at = observed_at
+        if anchor_at > available_at:
+            raise ValueError("anchor_at cannot be after available_at")
+        object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(self, "anchor_at", anchor_at)
+        object.__setattr__(self, "available_at", available_at)
         if self.anchor_price <= 0:
             raise ValueError("anchor_price must be positive")
         if self.invalidation_price <= 0:
@@ -123,6 +151,17 @@ class ProvisionalCandidate:
             raise ValueError("related_point_ids must be unique non-empty strings")
         if self.candidate_id in self.related_point_ids:
             raise ValueError("provisional candidate cannot reference itself")
+        if self.terminal_segment is not None:
+            if not isinstance(self.terminal_segment, TerminalSegmentReference):
+                raise TypeError("terminal_segment must be a terminal reference")
+            expected_direction = "down" if self.side == "buy" else "up"
+            if (
+                self.terminal_segment.structural_level != self.recursive_level
+                or self.terminal_segment.market_end != anchor_at
+                or self.terminal_segment.direction != expected_direction
+                or self.terminal_segment.available_at > available_at
+            ):
+                raise ValueError("provisional point terminal lineage mismatch")
         if self.point_type in {"2buy", "2sell"} and self.parent_point_id is None:
             raise ValueError("二类预判点必须引用已确认的一类父点")
         is_small_to_large = "small_to_large_reversal" in self.evidence_codes
@@ -152,10 +191,12 @@ def extract_provisional_candidates(
     if normalize_datetime(evidence.source_closed_at, "source_closed_at") > closed_at:
         raise ValueError("strict evidence snapshot is after as_of")
 
-    confirmed_id_map = structural_point_id_map(
-        evidence.confirmed_points,
+    all_points = (*evidence.confirmed_points, *evidence.approaching_points)
+    point_id_map = structural_point_id_map(
+        all_points,
         code=code,
         source_frequency=source_frequency,
+        allow_identity_aliases=True,
     )
     output: list[ProvisionalCandidate] = []
     for raw in tuple(evidence.approaching_points):
@@ -175,6 +216,8 @@ def extract_provisional_candidates(
                 tower="formal",
                 recursive_level=raw.structural_level,
                 observed_at=observed_at,
+                anchor_at=normalize_datetime(raw.anchor_at, "point.anchor_at"),
+                available_at=observed_at,
                 anchor_price=float(raw.structure_anchor_price),
                 invalidation_price=float(raw.structure_invalidation_price),
                 price_basis_revision=raw.price_basis_revision,
@@ -199,10 +242,10 @@ def extract_provisional_candidates(
                 parent_point_id=(
                     None
                     if raw.parent_point_id is None
-                    else confirmed_id_map[raw.parent_point_id]
+                    else point_id_map[raw.parent_point_id]
                 ),
                 related_point_ids=tuple(
-                    confirmed_id_map[point_id]
+                    point_id_map[point_id]
                     for point_id in raw.related_point_ids
                 ),
                 small_to_large_carrier_unit_ids=(
@@ -214,8 +257,46 @@ def extract_provisional_candidates(
         sorted(
             output,
             key=lambda candidate: (
-                candidate.observed_at,
+                candidate.available_at,
                 candidate.candidate_id,
             ),
         )
+    )
+
+
+def extract_current_provisional_candidates(
+    evidence: StrictEvidenceResult,
+    *,
+    code: str,
+    source_frequency: str,
+    as_of: datetime,
+) -> tuple[ProvisionalCandidate, ...]:
+    """Convert only candidates tied to the actual two-segment live tail."""
+
+    converted = extract_provisional_candidates(
+        evidence,
+        code=code,
+        source_frequency=source_frequency,
+        as_of=as_of,
+    )
+    raw_current = current_strict_point_evidence(
+        evidence.structure,
+        evidence.approaching_points,
+    )
+    references = {
+        raw.point_id: terminal_segment_reference(
+            evidence.structure,
+            structural_level=raw.structural_level,
+            unit_id=raw.anchor_unit_id,
+        )
+        for raw in raw_current
+    }
+    if any(reference is None for reference in references.values()):
+        raise ValueError("current provisional point lost terminal segment lineage")
+    return tuple(
+        replace(candidate, terminal_segment=references[candidate.candidate_id])
+        for candidate in converted
+        if candidate.candidate_id in references
+        and references[candidate.candidate_id] is not None
+        and references[candidate.candidate_id].role == "latest_unfinished"
     )

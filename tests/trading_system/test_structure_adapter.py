@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import chanlun.decision_support.trading_system.structure_adapter as adapter_module
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
@@ -21,6 +22,7 @@ from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import StrengthSnapshot
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
+    extract_one_minute_segment_difference_points,
 )
 from chanlun.decision_support.trading_system.provisional import (
     extract_provisional_candidates,
@@ -33,11 +35,65 @@ from tests.core.strict_structure.helpers import (
     structure_for,
     unit,
 )
+from tests.trading_system.helpers import confirmed_point as trading_point
 
 
 CN = ZoneInfo("Asia/Shanghai")
 AS_OF = datetime(2026, 7, 20, 15, 0, tzinfo=CN)
 SIX_POINT_TYPES = ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
+
+
+def test_one_minute_segment_difference_ledger_merges_history_and_current_tail(
+    monkeypatch,
+) -> None:
+    historical_only = trading_point(
+        "1sell",
+        frequency="1m",
+        minutes_after=0,
+    )
+    historical_overlap = trading_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=1,
+    )
+    current_overlap = replace(
+        historical_overlap,
+        evidence_codes=("current_tail",),
+    )
+    current_only = trading_point(
+        "3buy",
+        frequency="1m",
+        minutes_after=2,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "extract_confirmed_points",
+        lambda *_args, **_kwargs: (historical_only, historical_overlap),
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "extract_current_confirmed_points",
+        lambda *_args, **_kwargs: (current_overlap, current_only),
+    )
+
+    points = extract_one_minute_segment_difference_points(
+        object(),
+        code="SZ.000001",
+        source_frequency="1m",
+        as_of=AS_OF,
+    )
+
+    assert points == (historical_only, current_overlap, current_only)
+
+
+def test_segment_difference_ledger_rejects_non_one_minute_evidence() -> None:
+    with pytest.raises(ValueError, match="require 1m evidence"):
+        extract_one_minute_segment_difference_points(
+            object(),
+            code="SZ.000001",
+            source_frequency="5m",
+            as_of=AS_OF,
+        )
 
 
 SMALL_TO_LARGE_SPECS = (

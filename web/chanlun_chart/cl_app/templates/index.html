@@ -52,7 +52,7 @@
     {% if review_chart_lock and review_chart_lock.lock_kind == 'RISK_POINT_AUDIT' %}
       <aside class="causal-review-lock" role="status" aria-live="polite">
         <div class="causal-review-lock__title">
-          <span>因果审计锁</span>
+          <span>末端结构封存状态</span>
           <span>{{ review_chart_lock.point_type }} · {{ review_chart_lock.source_frequency }} → {{ review_chart_lock.chart_interval }}</span>
           {% if review_chart_lock.chart_source_kind == 'VERIFIED_QMT_SECTOR_ARCHIVE' %}
             <span>回测同源 QMT 板块合成</span>
@@ -606,7 +606,7 @@
                         class="layui-input"
                         maxlength="64"
                         autocomplete="off"
-                        placeholder="例如：一买观察；持仓请使用“我的持仓”" />
+                        placeholder="例如：一买观察；优先监听可使用“人工关注组”" />
                       <button type="submit" id="zixuan_group_submit" class="zx-primary-button">创建分组</button>
                       <button type="button" id="zixuan_group_cancel" class="zx-text-button">取消</button>
                     </div>
@@ -636,7 +636,7 @@
                   <div class="zx-watch-table" aria-label="当前分组标的列表">
                     <table class="layui-hide" id="table_zixuan_list"></table>
                   </div>
-                  <p class="zx-watch-hint">同一分组可包含不同市场；“我的持仓”会进入持仓优先监控。点击行切换主图，右键可排序、标色或移出分组；跨市场标的会自动对齐对应市场。</p>
+                  <p class="zx-watch-hint">同一分组可包含不同市场；“人工关注组”会进入优先监听。点击行切换主图，右键可排序、标色或移出分组；跨市场标的会自动对齐对应市场。</p>
                 </section>
               </div>
             </div>
@@ -970,6 +970,7 @@
   <script src="{{ url_for('static', filename='js/sse_gap.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_structure_reconcile.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/charts.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_line_states.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/macd_stats.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/zixuan.js') }}?asset={{ static_asset_token }}"></script>

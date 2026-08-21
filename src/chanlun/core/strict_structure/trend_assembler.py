@@ -21,6 +21,7 @@ from chanlun.core.strict_structure.models import (
     TrendType,
 )
 from chanlun.core.strict_structure.strength import (
+    FormalDivergenceUnavailable,
     MacdStrengthUnavailable,
     compare_terminal_trend_divergence,
 )
@@ -258,14 +259,20 @@ def _confirmed_divergence_boundary(
                         "盘整背驰的离开段末端不在同级别单元序列中"
                     )
                 compared = (divergence, signal)
-    except (MacdStrengthUnavailable, KeyError):
+    except (FormalDivergenceUnavailable, MacdStrengthUnavailable, KeyError):
         # 稀疏回放或测试强度表可能只保存目标趋势的 MACD 切片；缺失的单中枢
-        # 切片与正式提供者抛出的 MacdStrengthUnavailable 语义相同。
+        # 切片与仍含未锁定比较腿的实时前缀，都只能表示正式背驰尚不可用。
         return None
     if compared is None:
         return None
     divergence, signal = compared
     if not divergence.is_divergent:
+        return None
+    # 一个较窄的中枢可能只在后续回返单元到来后，才取代此前更宽的进行中中枢。
+    # 若再使用更早离开单元上的单段背驰关闭它，就会把“后来才知道的中枢几何”
+    # 倒写到过去，且在硬边界分区中无法因果重放。此类比较只是不成立，不是整只
+    # 标的的结构错误；正式边界必须不早于其终端中枢自身的可用时点。
+    if divergence.available_at < group[-1].available_at:
         return None
     end_index = index.get(signal.unit_id)
     if end_index is None:

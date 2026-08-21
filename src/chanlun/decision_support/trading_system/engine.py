@@ -7,11 +7,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime
+from math import isfinite
 
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.conflicts import resolve_conflict
+from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_optional_entry_valid_until,
+)
 from chanlun.decision_support.trading_system.context import classify_context
+from chanlun.decision_support.trading_system.context_evidence import (
+    SamePeriodTechnicalContext,
+    SignalContextAssessment,
+    assess_signal_context,
+)
 from chanlun.decision_support.trading_system.execution_policy import (
     evaluate_entry_policy,
     evaluate_exit_policy,
@@ -19,7 +28,8 @@ from chanlun.decision_support.trading_system.execution_policy import (
 from chanlun.decision_support.trading_system.lifecycle import (
     advance_lifecycle,
     build_setup,
-    match_one_minute_trigger,
+    current_five_minute_setup_points,
+    match_one_minute_segment_difference,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeGateBundle,
@@ -38,6 +48,9 @@ from chanlun.decision_support.trading_system.models import (
     TimeframeContext,
     TradeSetup,
     TradingPolicy,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
 )
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
 from chanlun.decision_support.trading_system.parameters import SelectionPath
@@ -79,11 +92,56 @@ class SymbolStructureBundle:
     selection_sources: tuple[str, ...] = ()
     selection_path: SelectionPath = "INDIVIDUAL_THREE_PROGRAM"
     selection_research: SelectionResearchSnapshot | None = None
+    latest_price: float | None = None
+    daily_technical_context: SamePeriodTechnicalContext | None = None
+    thirty_technical_context: SamePeriodTechnicalContext | None = None
+    previous_lifecycles: tuple[SignalLifecycle, ...] = ()
+    previous_trigger_points: tuple[StructuralPoint, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of", normalize_datetime(self.as_of, "as_of"))
         if not isinstance(self.code, str) or not self.code.strip():
             raise ValueError("结构包标的不能为空")
+        if self.latest_price is not None and (
+            not isinstance(self.latest_price, (int, float))
+            or isinstance(self.latest_price, bool)
+            or not isfinite(float(self.latest_price))
+            or self.latest_price <= 0
+        ):
+            raise ValueError("最新价格必须为正数")
+        for expected, value in (
+            ("d", self.daily_technical_context),
+            ("30m", self.thirty_technical_context),
+        ):
+            if value is not None and (
+                value.frequency != expected or value.observed_at > self.as_of
+            ):
+                raise ValueError("同周期技术上下文与结构包不一致")
+        if len({item.signal_id for item in self.previous_lifecycles}) != len(
+            self.previous_lifecycles
+        ) or len({item.setup_id for item in self.previous_lifecycles}) != len(
+            self.previous_lifecycles
+        ):
+            raise ValueError("previous lifecycles must be unique")
+        if any(item.observed_at > self.as_of for item in self.previous_lifecycles):
+            raise ValueError("previous lifecycle cannot be after bundle as_of")
+        if len({item.point_id for item in self.previous_trigger_points}) != len(
+            self.previous_trigger_points
+        ) or any(
+            item.code != self.code or item.source_frequency != "1m"
+            for item in self.previous_trigger_points
+        ):
+            raise ValueError("previous trigger points are invalid")
+        previous_trigger_ids = {
+            item.point_id for item in self.previous_trigger_points
+        }
+        # 旧快照可能携带 1 分钟定位点；新 5 分钟正式信号不再要求它。
+        if any(
+            item.trigger_point_id is not None
+            and item.trigger_point_id not in previous_trigger_ids
+            for item in self.previous_lifecycles
+        ):
+            raise ValueError("previous lifecycle segment evidence is incomplete")
         frequency_points = (
             ("日线", "d", self.daily_points),
             ("30 分钟", "30m", self.thirty_points),
@@ -118,6 +176,14 @@ class SymbolStructureBundle:
             for point in points
         ):
             raise ValueError("各周期只能接收本周期产生的买卖点")
+        if any(
+            not is_five_minute_trade_level(
+                point.source_frequency,
+                point.recursive_level,
+            )
+            for point in self.five_points
+        ):
+            raise ValueError("5 分钟交易通道只能接收物理 5m/L0 买卖点")
         if self.held_level is not None and self.held_level < 0:
             raise ValueError("held_level cannot be negative")
         if len(self.warmup_reason_codes) != len(set(self.warmup_reason_codes)):
@@ -200,6 +266,7 @@ class EvaluatedSignal:
     sector_risk_gate: str = "UNRESOLVED"
     symbol_risk_gate: str = "UNRESOLVED"
     higher_timeframe_reason_codes: tuple[str, ...] = ()
+    higher_timeframe_data_integrity_reason_codes: tuple[str, ...] = ()
     market_higher_timeframe_reason_codes: tuple[str, ...] = ()
     sector_higher_timeframe_reason_codes: tuple[str, ...] = ()
     symbol_higher_timeframe_reason_codes: tuple[str, ...] = ()
@@ -226,12 +293,59 @@ class EvaluatedSignal:
     entry_execution_boundary: EntryExecutionBoundary | None = None
     formal_selection: FormalSelectionGate | None = None
     selection_research: SelectionResearchSnapshot | None = None
+    daily_technical_context: SamePeriodTechnicalContext | None = None
+    thirty_technical_context: SamePeriodTechnicalContext | None = None
+    context_assessment: SignalContextAssessment | None = None
+    advisory_reason_codes: tuple[str, ...] = ()
 
 
 def _point_time(point: StructuralPoint | ProvisionalCandidate) -> datetime:
     if isinstance(point, ProvisionalCandidate):
-        return point.observed_at
+        return point.available_at
     return point.available_at
+
+
+def _trade_level_warmup_converged(bundle: SymbolStructureBundle) -> bool:
+    """Return the physical 5m warmup result used by the entry gate.
+
+    Production bundles always carry all four rows.  Falling back to the legacy
+    aggregate keeps hand-built/older callers fail-closed when the 5m row is
+    absent instead of silently authorizing a new entry.
+    """
+
+    for frequency, converged, _full_count, _suffix_count in bundle.warmup_by_frequency:
+        if frequency == "5m":
+            return converged
+    return bundle.warmup_converged
+
+
+def _trade_level_warmup_failure_reasons(
+    bundle: SymbolStructureBundle,
+) -> tuple[str, ...]:
+    """Keep only the 5m cause in the hard-block reason list."""
+
+    return tuple(
+        reason
+        for reason in bundle.warmup_reason_codes
+        if reason.startswith("5M:")
+    )
+
+
+def _context_warmup_advisory_reasons(
+    bundle: SymbolStructureBundle,
+) -> tuple[str, ...]:
+    """Expose non-trade-period divergence as review context, never a veto."""
+
+    diagnostic_failures = {
+        "WARMUP_HISTORY_INSUFFICIENT",
+        "WARMUP_TAIL_DIVERGED",
+    }
+    return tuple(
+        reason
+        for reason in bundle.warmup_reason_codes
+        if reason.split(":", 1)[0] in {"D", "30M", "1M"}
+        and reason.split(":", 1)[-1] in diagnostic_failures
+    )
 
 
 def _current_five_minute_points(
@@ -240,33 +354,12 @@ def _current_five_minute_points(
     as_of: datetime,
     policy: TradingPolicy,
 ) -> tuple[StructuralPoint | ProvisionalCandidate, ...]:
-    cutoff = as_of - timedelta(
-        seconds=policy.max_five_minute_setup_age_seconds
-    )
-    current: dict[
-        tuple[str, StructureTower, int],
-        tuple[datetime, list[StructuralPoint | ProvisionalCandidate]],
-    ] = {}
-    for point in points:
-        if point.source_frequency != "5m":
-            raise ValueError("trade setup requires a 5m point")
-        if isinstance(point, StructuralPoint) and not point.confirmed:
-            continue
-        observed_at = _point_time(point)
-        if observed_at > as_of:
-            raise ValueError("five-minute point cannot be after as_of")
-        if observed_at < cutoff:
-            continue
-        lane = (point.point_type, point.tower, point.recursive_level)
-        previous = current.get(lane)
-        if previous is None or observed_at > previous[0]:
-            current[lane] = (observed_at, [point])
-        elif observed_at == previous[0]:
-            previous[1].append(point)
-    return tuple(
-        point
-        for _observed_at, lane_points in current.values()
-        for point in lane_points
+    """兼容旧内部入口；唯一通道裁剪规则位于生命周期模块。"""
+
+    return current_five_minute_setup_points(
+        points,
+        as_of=as_of,
+        max_setup_age_seconds=policy.max_five_minute_setup_age_seconds,
     )
 
 
@@ -294,6 +387,12 @@ class _TechnicalSignalEvaluator:
             as_of=bundle.as_of,
         )
         gate_bundle = bundle.higher_timeframe_gates
+        higher_timeframe_data_integrity_reasons = (
+            ()
+            if gate_bundle is None
+            or not bundle.enforce_higher_timeframe_entry_gate
+            else gate_bundle.hard_data_integrity_reason_codes
+        )
         market_gate = "UNRESOLVED" if gate_bundle is None else gate_bundle.market.gate
         sector_gate = (
             "UNRESOLVED"
@@ -380,6 +479,12 @@ class _TechnicalSignalEvaluator:
         entry_boundaries = {
             value.point_id: value for value in bundle.entry_execution_boundaries
         }
+        previous_lifecycles = {
+            item.setup_id: item for item in bundle.previous_lifecycles
+        }
+        previous_triggers = {
+            item.point_id: item for item in bundle.previous_trigger_points
+        }
         output: list[EvaluatedSignal] = []
         ordered_points = sorted(
             _current_five_minute_points(
@@ -391,7 +496,7 @@ class _TechnicalSignalEvaluator:
                 (
                     point.available_at
                     if isinstance(point, StructuralPoint)
-                    else point.observed_at
+                    else point.available_at
                 ),
                 point.tower,
                 point.recursive_level,
@@ -403,19 +508,128 @@ class _TechnicalSignalEvaluator:
                 ),
             ),
         )
+        sector_required = (
+            bundle.selection_path == "INDIVIDUAL_THREE_PROGRAM"
+        )
         for point in ordered_points:
-            setup = build_setup(point, context, bundle.sector)
-            trigger = match_one_minute_trigger(
+            setup = build_setup(
+                point,
+                context,
+                bundle.sector,
+                sector_required=sector_required,
+            )
+            previous_lifecycle = previous_lifecycles.get(setup.setup_id)
+            trigger = match_one_minute_segment_difference(
                 setup,
                 bundle.one_points,
                 as_of=bundle.as_of,
+                minimum_tick=self._policy.minimum_tick,
             )
+            if (
+                previous_lifecycle is not None
+                and previous_lifecycle.trigger_point_id is not None
+            ):
+                previous_trigger = previous_triggers.get(
+                    previous_lifecycle.trigger_point_id
+                )
+                if previous_trigger is not None:
+                    persisted_match = match_one_minute_segment_difference(
+                        setup,
+                        (previous_trigger,),
+                        as_of=bundle.as_of,
+                        minimum_tick=self._policy.minimum_tick,
+                    )
+                    if persisted_match is not None:
+                        trigger = persisted_match
             lifecycle = advance_lifecycle(
-                None,
+                previous_lifecycle,
                 setup,
                 trigger,
                 as_of=bundle.as_of,
+                current_price=bundle.latest_price,
+                minimum_tick=self._policy.minimum_tick,
             )
+            entry_boundary = (
+                None if trigger is None else entry_boundaries.get(trigger.point_id)
+            )
+            context_assessment = assess_signal_context(
+                side=point.side,
+                point_type=point.point_type,
+                daily_evidence=bundle.daily_technical_context,
+                thirty_minute_evidence=bundle.thirty_technical_context,
+                daily_structure=daily_context,
+                thirty_minute_structure=context,
+            )
+            higher_timeframe_adverse = (
+                bundle.enforce_higher_timeframe_entry_gate
+                and (
+                    gate_bundle is None
+                    or not gate_bundle.allows_new_entry_for(
+                        bundle.selection_path
+                    )
+                )
+            )
+            advisory_reasons: list[str] = []
+            if setup.context.hard_block:
+                advisory_reasons.append("thirty_minute_hostile")
+            if daily_context.hard_block:
+                advisory_reasons.append("daily_structure_hostile")
+            if setup.sector_required and setup.sector.hard_block:
+                advisory_reasons.append("sector_hostile")
+            if point.side == "buy" and higher_timeframe_adverse:
+                advisory_reasons.extend(
+                    (
+                        "HIGHER_TIMEFRAME_CONTEXT_NOT_GREEN",
+                        f"MARKET_GATE_{market_gate}",
+                        *(
+                            (f"SECTOR_GATE_{sector_gate}",)
+                            if sector_required
+                            else ()
+                        ),
+                        f"SYMBOL_GATE_{symbol_gate}",
+                        *risk_reasons,
+                    )
+                )
+            if context_assessment.grade != "A":
+                advisory_reasons.append(
+                    f"SAME_PERIOD_CONTEXT_GRADE_{context_assessment.grade}"
+                )
+            if point.side == "buy":
+                # 日线、30 分钟只负责环境分级；1 分钟只负责可选段差定位。
+                # 它们的暖机差异需要展示，但不能否定物理 5 分钟正式点。
+                advisory_reasons.extend(
+                    _context_warmup_advisory_reasons(bundle)
+                )
+            advisory_reason_codes = tuple(dict.fromkeys(advisory_reasons))
+            if point.side == "buy" and trigger is not None:
+                if entry_boundary is None and bundle.physical_timeframe_recursive:
+                    advisory_reason_codes = tuple(
+                        dict.fromkeys(
+                            (
+                                *advisory_reason_codes,
+                                (
+                                    "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
+                                    if a_share_optional_entry_valid_until(
+                                        trigger.available_at
+                                    )
+                                    <= bundle.as_of
+                                    else "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"
+                                ),
+                            )
+                        )
+                    )
+                elif (
+                    entry_boundary is not None
+                    and entry_boundary.entry_valid_until <= bundle.as_of
+                ):
+                    advisory_reason_codes = tuple(
+                        dict.fromkeys(
+                            (
+                                *advisory_reason_codes,
+                                "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
+                            )
+                        )
+                    )
             if point.side == "sell":
                 output.append(
                     EvaluatedSignal(
@@ -437,6 +651,9 @@ class _TechnicalSignalEvaluator:
                         sector_risk_gate=sector_gate,
                         symbol_risk_gate=symbol_gate,
                         higher_timeframe_reason_codes=risk_reasons,
+                        higher_timeframe_data_integrity_reason_codes=(
+                            higher_timeframe_data_integrity_reasons
+                        ),
                         market_higher_timeframe_reason_codes=market_risk_reasons,
                         sector_higher_timeframe_reason_codes=sector_risk_reasons,
                         symbol_higher_timeframe_reason_codes=symbol_risk_reasons,
@@ -457,10 +674,12 @@ class _TechnicalSignalEvaluator:
                             bundle.physical_timeframe_recursive
                         ),
                         entry_execution_boundary=(
-                            None
-                            if trigger is None
-                            else entry_boundaries.get(trigger.point_id)
+                            entry_boundary
                         ),
+                        daily_technical_context=bundle.daily_technical_context,
+                        thirty_technical_context=bundle.thirty_technical_context,
+                        context_assessment=context_assessment,
+                        advisory_reason_codes=advisory_reason_codes,
                     )
                 )
                 continue
@@ -476,57 +695,42 @@ class _TechnicalSignalEvaluator:
                 conflict,
                 self._policy,
             )
-            if entry.allowed and daily_context.hard_block:
+            warmup_blocked = bundle.enforce_warmup_entry_gate and not (
+                _trade_level_warmup_converged(bundle)
+            )
+            outer_hard_reasons = tuple(
+                dict.fromkeys(
+                    (
+                        *(
+                            (
+                                "HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED",
+                                *higher_timeframe_data_integrity_reasons,
+                            )
+                            if higher_timeframe_data_integrity_reasons
+                            else ()
+                        ),
+                        *(
+                            (
+                                "WARMUP_CONVERGENCE_GATE_FAILED",
+                                *_trade_level_warmup_failure_reasons(bundle),
+                            )
+                            if warmup_blocked
+                            else ()
+                        ),
+                    )
+                )
+            )
+            # 这是纯 5 分钟结构技术候选标志；数据完整性与预热闸门在下面关闭
+            # 真实可执行性。1 分钟边界只解释段差时机，不是主信号硬门槛。
+            technical_entry_allowed = bool(entry.allowed)
+            if outer_hard_reasons:
                 entry = replace(
                     entry,
                     allowed=False,
                     risk_multiplier=entry.risk_multiplier * 0,
                     reason_codes=tuple(
-                        dict.fromkeys(
-                            (*entry.reason_codes, "daily_structure_hostile")
-                        )
+                        dict.fromkeys((*entry.reason_codes, *outer_hard_reasons))
                     ),
-                )
-            technical_entry_allowed = entry.allowed
-            higher_timeframe_blocked = (
-                bundle.enforce_higher_timeframe_entry_gate
-                and (gate_bundle is None or not gate_bundle.allows_new_entry)
-            )
-            warmup_blocked = (
-                bundle.enforce_warmup_entry_gate and not bundle.warmup_converged
-            )
-            if entry.allowed and (higher_timeframe_blocked or warmup_blocked):
-                reasons = tuple(
-                    dict.fromkeys(
-                        (
-                            *entry.reason_codes,
-                            *(
-                                (
-                                    "HIGHER_TIMEFRAME_GATE_NOT_GREEN",
-                                    f"MARKET_GATE_{market_gate}",
-                                    f"SECTOR_GATE_{sector_gate}",
-                                    f"SYMBOL_GATE_{symbol_gate}",
-                                    *risk_reasons,
-                                )
-                                if higher_timeframe_blocked
-                                else ()
-                            ),
-                            *(
-                                (
-                                    "WARMUP_CONVERGENCE_GATE_FAILED",
-                                    *bundle.warmup_reason_codes,
-                                )
-                                if warmup_blocked
-                                else ()
-                            ),
-                        )
-                    )
-                )
-                entry = replace(
-                    entry,
-                    allowed=False,
-                    risk_multiplier=entry.risk_multiplier * 0,
-                    reason_codes=reasons,
                 )
             output.append(
                 EvaluatedSignal(
@@ -541,6 +745,9 @@ class _TechnicalSignalEvaluator:
                     sector_risk_gate=sector_gate,
                     symbol_risk_gate=symbol_gate,
                     higher_timeframe_reason_codes=risk_reasons,
+                    higher_timeframe_data_integrity_reason_codes=(
+                        higher_timeframe_data_integrity_reasons
+                    ),
                     market_higher_timeframe_reason_codes=market_risk_reasons,
                     sector_higher_timeframe_reason_codes=sector_risk_reasons,
                     symbol_higher_timeframe_reason_codes=symbol_risk_reasons,
@@ -561,10 +768,12 @@ class _TechnicalSignalEvaluator:
                         bundle.physical_timeframe_recursive
                     ),
                     entry_execution_boundary=(
-                        None
-                        if trigger is None
-                        else entry_boundaries.get(trigger.point_id)
+                        entry_boundary
                     ),
+                    daily_technical_context=bundle.daily_technical_context,
+                    thirty_technical_context=bundle.thirty_technical_context,
+                    context_assessment=context_assessment,
+                    advisory_reason_codes=advisory_reason_codes,
                 )
             )
         return tuple(output)

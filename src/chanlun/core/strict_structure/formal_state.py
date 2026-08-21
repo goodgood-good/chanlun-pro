@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from chanlun.core.strict_structure.models import (
@@ -8,6 +9,7 @@ from chanlun.core.strict_structure.models import (
     StrictEvidenceResult,
     StrictLevelResult,
     StrictPointStatus,
+    StrictStructureResult,
     TrendKind,
     TrendState,
     TrendType,
@@ -16,6 +18,13 @@ from chanlun.core.strict_structure.center_relation import classify_center_relati
 
 
 FormalDirection = Literal["up", "down", "neutral"]
+
+
+@dataclass(frozen=True, slots=True)
+class _FormalEvidenceView:
+    structure: StrictStructureResult
+    confirmed_points: tuple
+    source_closed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +207,7 @@ def resolve_level_formal_direction(
 
 
 def resolve_formal_direction(
-    evidence: StrictEvidenceResult,
+    evidence: StrictEvidenceResult | _FormalEvidenceView,
 ) -> FormalDirectionState:
     """解析当前唯一的正式方向，不把历史盘整净位移冒充为趋势。
 
@@ -222,7 +231,44 @@ def resolve_formal_direction(
     return _neutral("no_formal_level_reaches_current_suffix")
 
 
+def resolve_formal_direction_from_components(
+    *,
+    structure: StrictStructureResult,
+    confirmed_points,
+    source_closed_at: datetime,
+) -> FormalDirectionState:
+    """Resolve direction without constructing a revision-hashed evidence snapshot."""
+
+    if not isinstance(structure, StrictStructureResult):
+        raise TypeError("formal direction structure must be StrictStructureResult")
+    if (
+        not isinstance(source_closed_at, datetime)
+        or source_closed_at.tzinfo is None
+        or source_closed_at.utcoffset() is None
+    ):
+        raise ValueError("formal direction source close must be timezone-aware")
+    view = _FormalEvidenceView(
+        structure=structure,
+        confirmed_points=tuple(confirmed_points),
+        source_closed_at=source_closed_at,
+    )
+    return resolve_formal_direction(view)
+
+
 def current_formal_direction(evidence: StrictEvidenceResult) -> FormalDirection:
     """返回供选股、监听和回测共同使用的当前正式方向。"""
 
     return resolve_formal_direction(evidence).direction
+
+
+def current_formal_direction_from_components(
+    *,
+    structure: StrictStructureResult,
+    confirmed_points,
+    source_closed_at: datetime,
+) -> FormalDirection:
+    return resolve_formal_direction_from_components(
+        structure=structure,
+        confirmed_points=confirmed_points,
+        source_closed_at=source_closed_at,
+    ).direction

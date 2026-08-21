@@ -1,10 +1,9 @@
-"""Current diagnostic-only convergence evidence for structure warmup.
+"""结构预热当前使用的纯诊断收敛证据。
 
-The active screening gate currently compares one full history with one shorter
-left-history prefix.  Real QMT A/B probes showed that this pairwise result is
-not monotonic when more history is requested: a frame can look stable at one
-budget, diverge at a longer budget, and become stable again later.  This module
-classifies three or more prefix signatures without changing that active gate.
+实际选股闸门会比较一份完整历史与一份较短的左侧历史前缀。QMT 实盘对照表明，
+随着历史长度增加，这种成对比较并不单调：某个长度可能稳定，更长时又发生分歧，
+再增加历史后重新稳定。本模块在不改变实际闸门的前提下，对三个及以上历史前缀
+签名进行分类。
 """
 
 from __future__ import annotations
@@ -158,7 +157,7 @@ def _classification(
 
 @dataclass(frozen=True, slots=True)
 class WarmupPrefixObservation:
-    """One semantic tail signature under a specific left-history length."""
+    """指定左侧历史长度下的一份语义尾部签名。"""
 
     bar_count: int
     starts_at: datetime
@@ -203,7 +202,7 @@ class WarmupPrefixObservation:
 
 @dataclass(frozen=True, slots=True)
 class WarmupPeriodSemanticFacts:
-    """Human-readable M/W/D facts behind one opaque semantic signature."""
+    """某个不透明语义签名背后可读的月、周、日事实。"""
 
     period: str
     state: str
@@ -258,7 +257,7 @@ class WarmupPeriodSemanticFacts:
             raise ValueError("mapped_center_id must be non-empty when present")
 
     def signature_document(self) -> dict[str, object]:
-        """Recreate the exact canonical document used by the existing hash gate."""
+        """重建现有哈希闸门使用的完全一致的规范文档。"""
 
         return {
             "period": self.period,
@@ -346,7 +345,7 @@ class WarmupPeriodSemanticFacts:
 
 @dataclass(frozen=True, slots=True)
 class WarmupSemanticSnapshot:
-    """The complete M/W/D tail state used for one convergence signature."""
+    """一份收敛签名所使用的完整月、周、日尾部状态。"""
 
     periods: tuple[WarmupPeriodSemanticFacts, ...]
     ma5: tuple[tuple[str, Decimal | None], ...]
@@ -494,7 +493,7 @@ class WarmupSemanticObservation:
 
 @dataclass(frozen=True, slots=True)
 class WarmupConvergenceDiagnosticEnvelope:
-    """Auditable explanation of which M/W/D facts changed by prefix."""
+    """可审计地说明不同前缀改变了哪些月、周、日事实。"""
 
     frequency: str
     as_of: datetime
@@ -658,7 +657,7 @@ class WarmupConvergenceDiagnosticEnvelope:
 
 @dataclass(frozen=True, slots=True)
 class WarmupMappingSupplySnapshot:
-    """M/W/D lower-structure mapping supply for one left-history prefix."""
+    """一个左侧历史前缀对应的月、周、日下层结构映射供给。"""
 
     periods: tuple[tuple[str, RiskMappingSupplyFacts | None], ...]
 
@@ -785,7 +784,7 @@ def _mapping_supply_delta_document(
 
 @dataclass(frozen=True, slots=True)
 class WarmupMappingSupplyComparison:
-    """One changed prefix-period compared with the longest history prefix."""
+    """一个发生变化的前缀周期与最长历史前缀的对照。"""
 
     period: str
     prefix_bar_count: int
@@ -922,7 +921,7 @@ def _supply_matches_semantic_period(
 
 @dataclass(frozen=True, slots=True)
 class WarmupMappingSupplyDiagnosticEnvelope:
-    """Point-level explanation of prefix-sensitive lower-center mapping supply."""
+    """逐点解释对历史前缀敏感的下层中枢映射供给。"""
 
     frequency: str
     as_of: datetime
@@ -1113,7 +1112,7 @@ class WarmupMappingSupplyDiagnosticEnvelope:
 
 @dataclass(frozen=True, slots=True)
 class WarmupConvergenceEnvelope:
-    """Multi-prefix evidence that cannot be mistaken for a trading gate."""
+    """不会被误当成交易闸门的多前缀诊断证据。"""
 
     frequency: str
     as_of: datetime
@@ -1324,13 +1323,11 @@ def classify_warmup_convergence_envelope(
     parameter_set_id: str,
     observations: tuple[WarmupPrefixObservation, ...],
 ) -> WarmupConvergenceEnvelope:
-    """Classify prefix sensitivity against the longest-history signature.
+    """以最长历史签名为基准，对前缀敏感性进行分类。
 
-    Observations are ordered from the shortest to the longest left-history
-    prefix.  ``A, B, A`` is explicitly non-monotonic: the shortest prefix
-    agrees with the longest, while an intermediate prefix does not.  A simple
-    ``A, B, C`` sequence remains prefix-sensitive and is reported as requiring
-    longer history; it is not promoted to stable.
+    观测按左侧历史前缀从短到长排列。``A, B, A`` 明确属于非单调：最短前缀
+    与最长前缀一致，但中间前缀不一致。简单的 ``A, B, C`` 序列仍属于前缀
+    敏感，并报告为需要更长历史，不能提升为稳定状态。
     """
 
     values = tuple(observations)
@@ -1355,7 +1352,7 @@ def bind_warmup_convergence_diagnostic(
     *,
     snapshots: tuple[WarmupSemanticSnapshot, ...],
 ) -> WarmupConvergenceEnvelope:
-    """Attach explanatory M/W/D facts without changing the convergence gate identity."""
+    """附加可解释的月、周、日事实，但不改变收敛闸门身份。"""
 
     values = tuple(snapshots)
     if len(values) != len(envelope.observations):
@@ -1386,7 +1383,7 @@ def bind_warmup_mapping_supply_diagnostic(
     *,
     snapshots: tuple[WarmupMappingSupplySnapshot, ...],
 ) -> WarmupConvergenceEnvelope:
-    """Attach point-level supply deltas without changing either convergence identity."""
+    """附加逐点供给差异，但不改变任一收敛身份。"""
 
     semantic = envelope.diagnostic
     if semantic is None:

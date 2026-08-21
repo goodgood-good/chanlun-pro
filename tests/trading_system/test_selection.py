@@ -81,6 +81,63 @@ def test_sector_strength_retains_missing_member_as_unresolved() -> None:
     assert snapshot.strength is None
 
 
+def test_sector_strength_rejects_future_anchor_and_invalid_rank() -> None:
+    member = SectorMemberHistory(
+        symbol="SH.600000",
+        listed_on=date(2000, 1, 1),
+        history_status="COMPLETE",
+        closes=(),
+    )
+    with pytest.raises(ValueError, match="anchor cannot be in the future"):
+        build_sector_strength_snapshot(
+            snapshot_id="sector:future",
+            sector_id="SW1:bank",
+            anchor_session=NOW.date() + timedelta(days=1),
+            decision_time=NOW,
+            members=(member,),
+            rank=1,
+        )
+    with pytest.raises(ValueError, match="rank must be a positive integer"):
+        build_sector_strength_snapshot(
+            snapshot_id="sector:rank",
+            sector_id="SW1:bank",
+            anchor_session=NOW.date(),
+            decision_time=NOW,
+            members=(member,),
+            rank=0,
+        )
+
+
+@pytest.mark.parametrize("close", (Decimal("NaN"), Decimal("Infinity")))
+def test_completed_daily_close_rejects_non_finite_price(close: Decimal) -> None:
+    with pytest.raises(ValueError, match="finite Decimal"):
+        CompletedDailyClose(
+            session=NOW.date(),
+            close=close,
+            known_at=NOW,
+        )
+
+
+def test_completed_daily_close_rejects_future_session_provenance() -> None:
+    with pytest.raises(ValueError, match="cannot be known before its session"):
+        CompletedDailyClose(
+            session=NOW.date() + timedelta(days=1),
+            close=Decimal("10"),
+            known_at=NOW,
+            completed=True,
+        )
+
+
+def test_completed_daily_close_requires_exact_boolean_completion() -> None:
+    with pytest.raises(TypeError, match="completed flag must be a bool"):
+        CompletedDailyClose(
+            session=NOW.date(),
+            close=Decimal("10"),
+            known_at=NOW,
+            completed=1,  # type: ignore[arg-type]
+        )
+
+
 def test_ma_equal_to_close_is_not_counted_as_standing_above() -> None:
     closes = tuple(
         CompletedDailyClose(

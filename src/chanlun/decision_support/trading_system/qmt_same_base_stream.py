@@ -18,8 +18,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time
+import hashlib
 from typing import Literal, Sequence
 
+import numpy as np
 import pandas as pd
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
@@ -40,6 +42,22 @@ QMT_COMPLETED_ONE_MINUTE_GRID_REVISION = (
     # 完整的 241 行到 240 行映射保持不变。稀疏实时交易日属于当前因果前缀，有意不伪装成
     # 新完成网格，也不使最近一份因果完整日级筛选发布失效。
     "QMT_A_SHARE_END_LABELLED_241_TO_COMPLETED_240_TRADE_AWARE"
+)
+_QMT_SAME_BASE_STREAM_REVISION_SCHEMA = (
+    "chanlun-qmt-same-base-stream-v2-little-endian-vector"
+)
+_MINUTE_IN_NANOSECONDS = 60_000_000_000
+_COMPLETED_MINUTE_OFFSETS = np.concatenate(
+    (
+        np.arange(9 * 60 + 31, 11 * 60 + 31, dtype=np.int64),
+        np.arange(13 * 60 + 1, 15 * 60 + 1, dtype=np.int64),
+    )
+) * _MINUTE_IN_NANOSECONDS
+_NATIVE_MINUTE_OFFSETS = np.concatenate(
+    (
+        np.asarray((9 * 60 + 30,), dtype=np.int64) * _MINUTE_IN_NANOSECONDS,
+        _COMPLETED_MINUTE_OFFSETS,
+    )
 )
 _MISSING_SESSION_DETAIL = (
     "trading-calendar session is absent from the QMT 1m prefix"
@@ -361,45 +379,111 @@ def normalize_qmt_opening_events_for_completed_minutes(
 def _aggregate_intraday(one_minute: pd.DataFrame, minutes: int) -> pd.DataFrame:
     if one_minute.empty:
         return pd.DataFrame(columns=_REQUIRED)
-    output: list[pd.DataFrame] = []
-    for _, rows in one_minute.groupby(one_minute["date"].dt.date, sort=True):
-        ordered = rows.sort_values("date", kind="stable").reset_index(drop=True)
-        complete_count = len(ordered) // minutes * minutes
-        if complete_count == 0:
-            continue
-        complete = ordered.iloc[:complete_count].copy()
-        complete["bucket"] = complete.index // minutes
-        aggregated = (
-            complete.groupby("bucket", sort=True)
-            .agg(
-                date=("date", "last"),
-                open=("open", "first"),
-                high=("high", "max"),
-                low=("low", "min"),
-                close=("close", "last"),
-                volume=("volume", "sum"),
-            )
-        )
-        # QMT 可能在无成交的一分钟记录中沿用前价，此类占位不会为更大周期贡献 OHLC 事实。
-        # 应使用有价格证据记录的首尾和极值；若整个桶成交量为零，则保留确定性沿用回退，
-        # 使已完成交易所网格本身保持完整。
-        traded = complete[complete["volume"] > 0]
-        if not traded.empty:
-            traded_prices = traded.groupby("bucket", sort=True).agg(
-                open=("open", "first"),
-                high=("high", "max"),
-                low=("low", "min"),
-                close=("close", "last"),
-            )
-            aggregated.loc[
-                traded_prices.index,
-                ["open", "high", "low", "close"],
-            ] = traded_prices.loc[:, ["open", "high", "low", "close"]]
-        aggregated = aggregated.reset_index(drop=True)
-        output.append(aggregated)
-    if not output:
+    # The input is already a unique chronological completed-minute stream.
+    # Build every session bucket in one vectorized groupby instead of creating
+    # two DataFrames and two groupby plans per trading day.
+    sessions = one_minute["date"].dt.normalize()
+    grouped_sessions = one_minute.groupby(sessions, sort=False)
+    positions = grouped_sessions.cumcount()
+    session_sizes = grouped_sessions["date"].transform("size")
+    complete_mask = positions < (session_sizes // minutes * minutes)
+    if not complete_mask.any():
         return pd.DataFrame(columns=_REQUIRED)
-    return pd.concat(output, ignore_index=True).loc[:, list(_REQUIRED)]
+    complete = one_minute.loc[complete_mask, list(_REQUIRED)].copy()
+    complete["_session"] = sessions.loc[complete_mask].array
+    complete["_bucket"] = (positions.loc[complete_mask] // minutes).array
+    keys = ["_session", "_bucket"]
+    aggregated = complete.groupby(keys, sort=True).agg(
+        date=("date", "last"),
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    )
+    # QMT may carry stale prices in zero-volume minute placeholders.  Such
+    # rows retain the exchange grid but must not contribute OHLC facts when a
+    # bucket contains real trades.  An all-zero bucket keeps its deterministic
+    # carried bar, matching the previous implementation.
+    traded = complete[complete["volume"] > 0]
+    if not traded.empty:
+        traded_prices = traded.groupby(keys, sort=True).agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+        )
+        aggregated.loc[
+            traded_prices.index,
+            ["open", "high", "low", "close"],
+        ] = traded_prices.loc[:, ["open", "high", "low", "close"]]
+    return aggregated.reset_index(drop=True).loc[:, list(_REQUIRED)]
+
+
+def _qmt_same_base_stream_revision(
+    *,
+    symbol: str,
+    one_minute: pd.DataFrame,
+    input_attrs: dict[str, object],
+    price_basis_revision: str | None,
+    issues: Sequence[QmtMinuteSessionIssue],
+    source_boundary_exclusions: Sequence[QmtMinuteSourceBoundaryExclusion],
+) -> str:
+    """Hash normalized bars without materializing one Python dict per row."""
+
+    metadata = sha256_json(
+        {
+            "schema": _QMT_SAME_BASE_STREAM_REVISION_SCHEMA,
+            "symbol": symbol,
+            "grid_revision": QMT_COMPLETED_ONE_MINUTE_GRID_REVISION,
+            "price_basis_provider": input_attrs.get("price_basis_provider"),
+            "price_basis_adjustment": input_attrs.get("price_basis_adjustment"),
+            "price_basis_revision": price_basis_revision,
+            "row_count": len(one_minute),
+            "timestamp_encoding": "utc-nanoseconds-int64-little-endian",
+            "value_columns": tuple(_REQUIRED[1:]),
+            "value_encoding": "float64-little-endian-c-row-major",
+            "session_issues": tuple(
+                {
+                    "session": value.session.isoformat(),
+                    "code": value.code,
+                    "observed_rows": value.observed_rows,
+                    "detail": value.detail,
+                }
+                for value in issues
+            ),
+            "source_boundary_exclusions": tuple(
+                value.document() for value in source_boundary_exclusions
+            ),
+        }
+    ).encode("ascii")
+    timestamps = (
+        np.empty(0, dtype="<i8")
+        if one_minute.empty
+        else np.asarray(
+            pd.DatetimeIndex(one_minute["date"]).tz_convert("UTC").asi8,
+            dtype="<i8",
+        )
+    )
+    values = np.ascontiguousarray(
+        one_minute.loc[:, list(_REQUIRED[1:])].to_numpy(
+            dtype=np.float64,
+            copy=True,
+        ),
+        dtype="<f8",
+    )
+    # Canonical JSON treated signed zero as integer zero; retain that identity.
+    values[values == 0.0] = 0.0
+    digest = hashlib.sha256()
+    for segment in (
+        _QMT_SAME_BASE_STREAM_REVISION_SCHEMA.encode("ascii"),
+        metadata,
+        timestamps.tobytes(order="C"),
+        values.tobytes(order="C"),
+    ):
+        digest.update(len(segment).to_bytes(8, byteorder="big", signed=False))
+        digest.update(segment)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _aggregate_daily(
@@ -474,7 +558,8 @@ def build_qmt_same_base_stream_frames(
 
     decision = normalize_datetime(decision_time, "decision_time")
     visible = _visible_one_minute(one_minute_frame, decision_time=decision)
-    normalized_parts: list[pd.DataFrame] = []
+    normalized_visible = visible.copy()
+    accepted_rows = np.zeros(len(visible), dtype=bool)
     complete_sessions: list[date] = []
     partial_session: date | None = None
     issues: list[QmtMinuteSessionIssue] = []
@@ -487,16 +572,44 @@ def build_qmt_same_base_stream_frames(
     if evaluation_not_before is not None and type(evaluation_not_before) is not date:
         raise TypeError("evaluation_not_before must be an exact date")
 
-    for session, rows in visible.groupby(visible["date"].dt.date, sort=True):
-        ordered = rows.sort_values("date", kind="stable").reset_index(drop=True)
+    if visible.empty:
+        session_ranges: tuple[tuple[int, int], ...] = ()
+        minute_offsets = np.empty(0, dtype=np.int64)
+    else:
+        completion_ns = visible["date"].array.asi8
+        session_ns = visible["date"].dt.normalize().array.asi8
+        minute_offsets = completion_ns - session_ns
+        changes = np.flatnonzero(session_ns[1:] != session_ns[:-1]) + 1
+        starts = np.concatenate((np.asarray((0,)), changes))
+        ends = np.concatenate((changes, np.asarray((len(visible),))))
+        session_ranges = tuple(zip(starts.tolist(), ends.tolist()))
+
+    for start, end in session_ranges:
+        session = pd.Timestamp(visible.iloc[start]["date"]).date()
+        observed_count = end - start
         observed_sessions.add(session)
-        actual = _naive_times(ordered)
-        native = _expected_native_times(session)
-        completed = _completed_times(session)
-        is_full_native = actual == native
-        is_full_without_opening_event = actual == completed
+        actual = minute_offsets[start:end]
+        is_full_native = np.array_equal(actual, _NATIVE_MINUTE_OFFSETS)
+        is_full_without_opening_event = np.array_equal(
+            actual,
+            _COMPLETED_MINUTE_OFFSETS,
+        )
+        is_native_prefix = (
+            observed_count <= len(_NATIVE_MINUTE_OFFSETS)
+            and np.array_equal(
+                actual,
+                _NATIVE_MINUTE_OFFSETS[:observed_count],
+            )
+        )
+        is_completed_prefix = (
+            observed_count <= len(_COMPLETED_MINUTE_OFFSETS)
+            and np.array_equal(
+                actual,
+                _COMPLETED_MINUTE_OFFSETS[:observed_count],
+            )
+        )
         is_current_prefix = session == decision.date() and (
-            actual == native[: len(actual)] or actual == completed[: len(actual)]
+            is_native_prefix or is_completed_prefix
         )
         if not (is_full_native or is_full_without_opening_event or is_current_prefix):
             if (
@@ -507,12 +620,12 @@ def build_qmt_same_base_stream_frames(
                 source_boundary_exclusions.append(
                     QmtMinuteSourceBoundaryExclusion(
                         session=session,
-                        observed_rows=len(ordered),
+                        observed_rows=observed_count,
                         first_observed_at=pd.Timestamp(
-                            ordered.iloc[0]["date"]
+                            visible.iloc[start]["date"]
                         ).to_pydatetime(),
                         last_observed_at=pd.Timestamp(
-                            ordered.iloc[-1]["date"]
+                            visible.iloc[end - 1]["date"]
                         ).to_pydatetime(),
                         evaluation_not_before=evaluation_not_before,
                     )
@@ -522,19 +635,48 @@ def build_qmt_same_base_stream_frames(
                 QmtMinuteSessionIssue(
                     session=session,
                     code="QMT_ONE_MINUTE_SESSION_GRID_INVALID",
-                    observed_rows=len(ordered),
+                    observed_rows=observed_count,
                     detail=(
                         _INVALID_SESSION_GRID_DETAIL
                     ),
                 )
             )
             continue
-        normalized = normalize_qmt_opening_event_for_completed_minutes(ordered)
-        expected_completed_prefix = completed[: len(normalized)]
-        if _naive_times(normalized) != expected_completed_prefix:
-            raise RuntimeError("normalized QMT 1m session grid is inconsistent")
-        normalized_parts.append(normalized)
-        if len(normalized) == 240:
+        has_opening_event = is_full_native or is_native_prefix
+        normalized_count = observed_count - 1 if has_opening_event else observed_count
+        if has_opening_event and observed_count > 1:
+            accepted_rows[start + 1 : end] = True
+            opening_volume = float(normalized_visible.iloc[start]["volume"])
+            if opening_volume > 0:
+                first_bar = start + 1
+                opening = normalized_visible.iloc[start]
+                normalized_visible.iat[
+                    first_bar,
+                    normalized_visible.columns.get_loc("open"),
+                ] = opening["open"]
+                normalized_visible.iat[
+                    first_bar,
+                    normalized_visible.columns.get_loc("high"),
+                ] = max(
+                    float(opening["high"]),
+                    float(normalized_visible.iloc[first_bar]["high"]),
+                )
+                normalized_visible.iat[
+                    first_bar,
+                    normalized_visible.columns.get_loc("low"),
+                ] = min(
+                    float(opening["low"]),
+                    float(normalized_visible.iloc[first_bar]["low"]),
+                )
+                normalized_visible.iat[
+                    first_bar,
+                    normalized_visible.columns.get_loc("volume"),
+                ] = opening_volume + float(
+                    normalized_visible.iloc[first_bar]["volume"]
+                )
+        elif not has_opening_event:
+            accepted_rows[start:end] = True
+        if normalized_count == 240:
             complete_sessions.append(session)
         else:
             partial_session = session
@@ -571,13 +713,9 @@ def build_qmt_same_base_stream_frames(
                 )
             )
 
-    one_minute = (
-        pd.concat(normalized_parts, ignore_index=True)
-        if normalized_parts
-        else pd.DataFrame(columns=_REQUIRED)
+    one_minute = normalized_visible.loc[accepted_rows, list(_REQUIRED)].reset_index(
+        drop=True
     )
-    if not one_minute.empty:
-        one_minute = one_minute.sort_values("date", kind="stable").reset_index(drop=True)
 
     input_attrs = dict(one_minute_frame.attrs)
     price_basis_revision = input_attrs.get("price_basis_revision")
@@ -611,38 +749,13 @@ def build_qmt_same_base_stream_frames(
             )
         )
 
-    base_revision = sha256_json(
-        {
-            "schema": "chanlun-qmt-same-base-stream",
-            "symbol": symbol,
-            "grid_revision": QMT_COMPLETED_ONE_MINUTE_GRID_REVISION,
-            "price_basis_provider": input_attrs.get("price_basis_provider"),
-            "price_basis_adjustment": input_attrs.get("price_basis_adjustment"),
-            "price_basis_revision": price_basis_revision,
-            "one_minute": tuple(
-                {
-                    "date": pd.Timestamp(row.date).to_pydatetime(),
-                    "open": float(row.open),
-                    "high": float(row.high),
-                    "low": float(row.low),
-                    "close": float(row.close),
-                    "volume": float(row.volume),
-                }
-                for row in one_minute.itertuples(index=False)
-            ),
-            "session_issues": tuple(
-                {
-                    "session": value.session.isoformat(),
-                    "code": value.code,
-                    "observed_rows": value.observed_rows,
-                    "detail": value.detail,
-                }
-                for value in issues
-            ),
-            "source_boundary_exclusions": tuple(
-                value.document() for value in source_boundary_exclusions
-            ),
-        }
+    base_revision = _qmt_same_base_stream_revision(
+        symbol=symbol,
+        one_minute=one_minute,
+        input_attrs=input_attrs,
+        price_basis_revision=price_basis_revision,
+        issues=issues,
+        source_boundary_exclusions=source_boundary_exclusions,
     )
     five_minute = _aggregate_intraday(one_minute, 5)
     thirty_minute = _aggregate_intraday(one_minute, 30)

@@ -1,22 +1,50 @@
 "use strict";
 
 (function startHumanReviewScreening() {
+  const POLL_INTERVAL_MS = 60_000;
+  const REQUEST_TIMEOUT_MS = 30_000;
   const ALERT_LABELS = {
-    POSSIBLE_30M_BUY: "可能的 30m 买点",
-    POSSIBLE_30M_EXIT: "可能的 30m 战略退出",
-    POSSIBLE_SELL_REVIEW: "卖点待人工判断（30m退出或5m短差）",
-    POSSIBLE_5M_TACTICAL_SELL: "可能的 5m 短差卖出",
-    POSSIBLE_5M_TACTICAL_BUYBACK: "可能的 5m 短差回补",
+    POSSIBLE_5M_TRADE_BUY: "5分钟操作确认买点",
+    POSSIBLE_5M_TRADE_SELL: "5分钟操作确认卖点",
+    POSSIBLE_30M_BUY: "旧档案：30分钟买点",
+    POSSIBLE_30M_EXIT: "旧档案：30分钟退出",
+    POSSIBLE_SELL_REVIEW: "旧档案：卖点级别待判断",
+    POSSIBLE_5M_TACTICAL_SELL: "旧档案：5分钟短差卖出",
+    POSSIBLE_5M_TACTICAL_BUYBACK: "旧档案：5分钟短差回补",
+    REALTIME_BUY_POINT: "实时买点通知",
+    REALTIME_SELL_POINT: "实时卖点通知",
+    REALTIME_1M_BUY_SEGMENT: "实时1分钟买入段差补充",
+    REALTIME_1M_SELL_SEGMENT: "实时1分钟卖出段差补充",
+    REALTIME_EXIT: "实时退出通知",
+    REALTIME_INVALIDATED: "实时信号失效通知",
   };
+  const CURRENT_REVIEW_ALERT_TYPES = new Set([
+    "POSSIBLE_5M_TRADE_BUY",
+    "POSSIBLE_5M_TRADE_SELL",
+    "REALTIME_BUY_POINT",
+    "REALTIME_SELL_POINT",
+    "REALTIME_1M_BUY_SEGMENT",
+    "REALTIME_1M_SELL_SEGMENT",
+    "REALTIME_EXIT",
+    "REALTIME_INVALIDATED",
+  ]);
+
+  function reviewAlertVisibleForSource(alertType, source = "latest") {
+    if (["forward", "historical"].includes(source)) return true;
+    return CURRENT_REVIEW_ALERT_TYPES.has(alertType);
+  }
   const CHECKLIST_LABELS = {
+    HUMAN_CONFIRM_30M_CONTEXT: "确认 30分钟环境与走势方向",
     HUMAN_CONFIRM_30M_CENTER_AND_LEVEL: "确认 30m 中枢及其递归级别",
     HUMAN_CONFIRM_SAME_LEVEL_AND_CENTER_DECOMPOSITION: "结合同级别分解与中枢分解",
     HUMAN_CONFIRM_30M_TREND_TYPE: "确认 30m 走势类型",
     HUMAN_CONFIRM_BUY_OR_SELL_POINT: "确认具体一、二、三类买卖点",
-    HUMAN_CONFIRM_5M_TACTICAL_CONTEXT: "确认 5m 短差上下文",
-    HUMAN_CONFIRM_1M_LOCATOR: "用 1m 完成精确定位",
-    HUMAN_CONFIRM_HIGHER_TIMEFRAME_RISK: "核对日、周、月高级别风险",
-    HUMAN_DEFINE_INVALIDATION_AND_ANY_PAPER_PLAN: "定义失效条件及模拟观察计划",
+    HUMAN_CONFIRM_5M_TRADE_POINT: "核对 5分钟操作确认买卖点及对应结构证据",
+    HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE: "核对可选的 1分钟段差位置",
+    HUMAN_CONFIRM_5M_TACTICAL_CONTEXT: "旧档案：确认 5分钟短差上下文",
+    HUMAN_CONFIRM_1M_LOCATOR: "旧档案：用 1分钟完成定位",
+    HUMAN_CONFIRM_HIGHER_TIMEFRAME_RISK: "核对日线与30分钟环境",
+    HUMAN_DEFINE_INVALIDATION_AND_ANY_PAPER_PLAN: "定义失效条件及后续观察计划",
   };
   const FEEDBACK_LABELS = {
     CONFIRMED: "中枢确认", REJECTED: "中枢否决", UNCERTAIN: "不确定",
@@ -27,32 +55,38 @@
   };
   const REVIEW_LANE_LABELS = {
     ACTIONABLE_REVIEW: "可行动复核",
-    POSITION_MANAGEMENT: "持仓与虚拟仓管理",
+    POSITION_MANAGEMENT: "结构连续性复核",
     WATCHLIST: "观察池",
     RESEARCH_ARCHIVE: "研究归档",
   };
+  const CONFIDENCE_LABELS = {
+    HIGH: "高置信度",
+    MEDIUM: "中等置信度",
+    LOW: "低置信度",
+    UNRESOLVED: "置信度待判定",
+  };
   const PAPER_STATUS_LABELS = {
-    PENDING: "虚拟意图已建立，等待后续合法 1m K 线",
-    OBSERVATION_ONLY: "仅保留模拟观察，不进入待成交",
+    PENDING: "观察记录已建立，等待后续合法 1m K 线",
+    OBSERVATION_ONLY: "仅保留人工观察，不进入执行验证",
     BLOCKED_BY_RISK_GATE: "高级别风险门阻断，未进入待成交",
-    VIRTUAL_FILLED: "虚拟成交已记录",
-    CANCELLED: "虚拟意图已撤销",
+    VIRTUAL_FILLED: "规则回放结果已记录",
+    CANCELLED: "观察记录已撤销",
     OPERATIONS_CANCELLED: "执行数据门已撤销可放弃买入",
     EXPIRED: "买入有效期已结束",
-    EXECUTION_REJECTED: "市场执行条件拒绝虚拟成交",
-    CAPITAL_REJECTED: "虚拟资金或槽位约束拒绝成交",
-    PORTFOLIO_REJECTED: "虚拟组合约束拒绝成交",
+    EXECUTION_REJECTED: "市场执行条件拒绝规则回放",
+    CAPITAL_REJECTED: "研究参数约束拒绝规则回放",
+    PORTFOLIO_REJECTED: "组合研究约束拒绝规则回放",
   };
   const PAPER_TAG_LABELS = {
-    PENDING: "虚拟待成交",
-    OBSERVATION_ONLY: "仅模拟观察",
+    PENDING: "待规则验证",
+    OBSERVATION_ONLY: "仅人工观察",
     BLOCKED_BY_RISK_GATE: "风险门阻断",
-    VIRTUAL_FILLED: "虚拟已成交",
-    CANCELLED: "虚拟已撤销",
+    VIRTUAL_FILLED: "规则回放已记录",
+    CANCELLED: "观察记录已撤销",
     OPERATIONS_CANCELLED: "执行门撤买",
     EXPIRED: "买入已过期",
     EXECUTION_REJECTED: "执行条件拒绝",
-    CAPITAL_REJECTED: "资金约束拒绝",
+    CAPITAL_REJECTED: "研究参数约束拒绝",
     PORTFOLIO_REJECTED: "组合约束拒绝",
   };
   const MAPPING_SUPPLY_LABELS = {
@@ -64,39 +98,58 @@
     HIGHEST_MAPPING_NOT_UNIQUE: "最高层级中枢映射不唯一",
     UNIQUE_MAPPING: "已唯一映射",
   };
+  const HIGHER_TIMEFRAME_PERIOD_LABELS = {
+    M: "月线",
+    W: "周线",
+    D: "日线",
+  };
+  const HIGHER_TIMEFRAME_GATE_LABELS = {
+    GREEN: "绿色（通过）",
+    AMBER: "琥珀色（需复核）",
+    RED: "红色（阻断）",
+    UNRESOLVED: "尚未解决",
+    NOT_APPLICABLE: "当前市场不适用",
+  };
+  const ENTRY_BOUNDARY_ATTESTATION_LABELS = {
+    SELF_CONTAINED_RAW_1M_OHLCV: "已附完整1分钟原始价格与成交量证据",
+    MISSING_CURRENT_BOUNDARY_EVIDENCE: "缺少当前买入边界证据",
+    NOT_AVAILABLE: "当前不适用",
+  };
   const PAPER_REASON_LABELS = {
-    HISTORICAL_SOURCE_REVIEW_ONLY: "历史回放只记录人工识别，禁止连接当前行情形成虚拟意图",
-    CURRENT_PAPER_SOURCE_UNAVAILABLE: "当前盘中/前向证据不可用，虚拟路径失败关闭",
+    HISTORICAL_SOURCE_REVIEW_ONLY: "历史回放只记录人工识别，不连接当前行情形成执行计划",
+    CURRENT_PAPER_SOURCE_UNAVAILABLE: "当前盘中/前向证据不可用，后续观察路径失败关闭",
     SOURCE_SUPERSEDED_FOR_PAPER: "该报告已被更新快照替代，只允许留存人工识别",
-    SOURCE_MARKET_SESSION_UNAVAILABLE_FOR_PAPER: "来源报告缺少可验证的行情会话，虚拟路径失败关闭",
-    CURRENT_MARKET_DATA_SESSION_UNAVAILABLE_FOR_PAPER: "当前行情会话水位不可验证，虚拟路径失败关闭",
+    SOURCE_MARKET_SESSION_UNAVAILABLE_FOR_PAPER: "来源报告缺少可验证的行情会话，后续观察路径失败关闭",
+    CURRENT_MARKET_DATA_SESSION_UNAVAILABLE_FOR_PAPER: "当前行情会话水位不可验证，后续观察路径失败关闭",
     SOURCE_MARKET_SESSION_NOT_CURRENT_FOR_PAPER: "来源归档不是当前最新行情会话，只允许因果复核与人工留痕",
-    FORWARD_SCHEDULER_NOT_READY_FOR_PAPER: "前向计划任务契约未就绪，只记录人工判断，不建立虚拟意图",
-    FORWARD_SCHEDULER_OBSERVATION_STALE_FOR_PAPER: "前向计划任务观察已过期，只记录人工判断，不建立虚拟意图",
-    FORWARD_OPERATIONS_CLOCK_INVALID_FOR_PAPER: "前向运行时钟不可验证，虚拟路径失败关闭",
-    SAME_SESSION_FORWARD_CAPTURE_NOT_READY_FOR_PAPER: "尚未获得同日 QMT Capture 回执，只记录人工判断；回执就绪后可重试晋升为虚拟意图",
-    QMT_RANKING_CATALOG_EXACT_REVISION_UNAVAILABLE_FOR_PAPER_ENTRY: "板块排序引用的精确 QMT 目录修订尚不可用，只记录人工判断，不建立新虚拟买入",
-    QMT_RANKING_CATALOG_NAME_MISMATCH_FOR_PAPER_ENTRY: "板块排序名称与精确 QMT 目录不一致，禁止建立新虚拟买入",
-    QMT_RANKING_CATALOG_SYMBOL_NOT_MEMBER_FOR_PAPER_ENTRY: "候选股票不属于板块排序引用的精确 QMT 目录成分，禁止建立新虚拟买入",
-    QMT_RANKING_CATALOG_SECTOR_UNRESOLVED_FOR_PAPER_ENTRY: "板块排序标识无法在精确 QMT 目录中解析，禁止建立新虚拟买入",
-    QMT_RANKING_CATALOG_NOT_EXACT_FOR_PAPER_ENTRY: "板块排序、名称和成分归属未在同一份 QMT 目录修订上闭环，禁止建立新虚拟买入",
+    FORWARD_SCHEDULER_NOT_READY_FOR_PAPER: "前向计划任务契约未就绪，只记录人工判断，不建立执行计划",
+    FORWARD_SCHEDULER_OBSERVATION_STALE_FOR_PAPER: "前向计划任务观察已过期，只记录人工判断，不建立执行计划",
+    FORWARD_OPERATIONS_CLOCK_INVALID_FOR_PAPER: "前向运行时钟不可验证，后续观察路径失败关闭",
+    SAME_SESSION_FORWARD_CAPTURE_NOT_READY_FOR_PAPER: "尚未获得同日 QMT 盘前抓取回执，只记录人工判断；回执就绪后可重新复核",
+    QMT_RANKING_CATALOG_EXACT_REVISION_UNAVAILABLE_FOR_PAPER_ENTRY: "板块排序引用的精确 QMT 目录修订尚不可用，只记录人工判断",
+    QMT_RANKING_CATALOG_NAME_MISMATCH_FOR_PAPER_ENTRY: "板块排序名称与精确 QMT 目录不一致，禁止进入后续观察",
+    QMT_RANKING_CATALOG_SYMBOL_NOT_MEMBER_FOR_PAPER_ENTRY: "候选股票不属于板块排序引用的精确 QMT 目录成分，禁止进入后续观察",
+    QMT_RANKING_CATALOG_SECTOR_UNRESOLVED_FOR_PAPER_ENTRY: "板块排序标识无法在精确 QMT 目录中解析，禁止进入后续观察",
+    QMT_RANKING_CATALOG_NOT_EXACT_FOR_PAPER_ENTRY: "板块排序、名称和成分归属未在同一份 QMT 目录修订上闭环，禁止进入后续观察",
     HUMAN_STRUCTURE_CONFIRMATION_INCOMPLETE: "尚未同时确认中枢和对应递归级别",
     HUMAN_TREND_TYPE_CONFIRMATION_INCOMPLETE: "人工尚未确认走势类型",
-    HUMAN_CONFIRM_TREND_TYPE_BEFORE_VIRTUAL_INTENT: "建立虚拟意图前必须先完成走势类型判断",
+    HUMAN_CONFIRM_TREND_TYPE_BEFORE_VIRTUAL_INTENT: "进入后续观察前必须先完成走势类型判断",
     HUMAN_POINT_SIDE_CONTRADICTS_PROGRAM_CLUE: "人工买卖方向与程序粗筛线索相反",
-    CONTRADICTORY_REVIEW_CANNOT_CREATE_VIRTUAL_INTENT: "相反方向判断只保留反馈，不生成虚拟意图",
-    EXPECTED_REVIEW_LEVEL_30M_OR_5M: "该卖点线索需人工确认是 30m 退出还是 5m 短差",
+    CONTRADICTORY_REVIEW_CANNOT_CREATE_VIRTUAL_INTENT: "相反方向判断只保留反馈，不生成执行计划",
+    EXPECTED_REVIEW_LEVEL_30M_OR_5M: "旧档案：该卖点线索需人工确认是30分钟退出还是5分钟短差",
     SIGNAL_LIFECYCLE_ALREADY_CONSUMED: "该结构信号生命周期已有终态结果，禁止复用",
-    NEW_STRUCTURE_REQUIRED_FOR_NEW_VIRTUAL_CYCLE: "再次建立虚拟周期必须等待新的结构信号",
+    NEW_STRUCTURE_REQUIRED_FOR_NEW_VIRTUAL_CYCLE: "再次开始观察周期必须等待新的结构信号",
     FIXED_ONE_LOT_TACTICAL_TARGET_BELOW_TRADING_UNIT: "一手诊断账本下，5m 短差目标低于最小交易单位",
-    TACTICAL_REVIEW_OBSERVATION_ONLY: "5m 短差当前只作人工观察，不动用 30m 战略仓",
+    TACTICAL_REVIEW_OBSERVATION_ONLY: "5m 短差当前只作人工观察，不改变 30m 结构判断",
     BUY_NOT_TRIGGERED_BY_CURRENT_QMT_SECTOR: "该买入线索不是当前 QMT 板块触发",
     MONITOR_ONLY_NEW_ENTRY_PROHIBITED: "监控补充来源不得创建新的战略买入",
-    VIRTUAL_STRATEGIC_CYCLE_ALREADY_OPEN: "该标的已有虚拟战略周期",
+    VIRTUAL_STRATEGIC_CYCLE_ALREADY_OPEN: "该标的已有开放的结构观察周期",
     ONE_SECURITY_ONE_STRATEGIC_SLOT: "同一标的只允许占用一个战略槽位",
-    HIGHER_TIMEFRAME_GATE_NOT_GREEN: "月/周/日高级别风险门未全部转绿",
-    HIGHER_TIMEFRAME_SECTOR_GATE_NOT_ATTACHED: "板块月/周/日风险门证据未接入",
-    QMT_SECTOR_HIGHER_TIMEFRAME_RISK_UNAVAILABLE: "QMT 板块月/周/日同源风险证据尚未接入",
+    HIGHER_TIMEFRAME_GATE_NOT_GREEN: "高级别历史研究状态未全部就绪（不参与当前执行放行）",
+    HIGHER_TIMEFRAME_GATE_NOT_ATTACHED: "日线高级别研究证据未接入",
+    HIGHER_TIMEFRAME_SECTOR_GATE_NOT_ATTACHED: "板块日线高级别研究证据未接入",
+    HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY: "纯卖出结构不适用买入专用高级别风险门",
+    QMT_SECTOR_HIGHER_TIMEFRAME_RISK_UNAVAILABLE: "QMT 板块日线高级别同源研究证据尚未接入",
     QMT_SECTOR_HIGHER_TIMEFRAME_INPUT_UNAVAILABLE: "板块名称或点时成员清单未接入高级别风险门",
     QMT_SECTOR_HIGHER_TIMEFRAME_PROVIDER_UNAVAILABLE: "QMT 板块高级别行情服务不可用",
     QMT_SECTOR_FIVE_MINUTE_SAME_BASE_STREAM_UNRESOLVED: "QMT 板块5分钟同源合成序列未解决",
@@ -109,15 +162,15 @@
     QMT_SECTOR_COMPOSITE_MEMBER_PATH_PROVENANCE_MISMATCH: "QMT 板块代理逐根贡献成员路径不一致",
     QMT_SECTOR_NATIVE_DAILY_AND_5M_UNRECONCILED_RESEARCH_BRIDGE: "板块原生日线与 5m/30m 非线性聚合尚未调和，只能用于研究，绿色结论最多降为琥珀",
     QMT_SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_UNAVAILABLE: "QMT 板块原生日线研究源不可用，保留严格同源路径并失败关闭",
-    WARMUP_CONVERGENCE_REQUIRED_FOR_VIRTUAL_ENTRY: "暖机双窗口尚未一致，不能建立新的虚拟买入",
+    WARMUP_CONVERGENCE_REQUIRED_FOR_VIRTUAL_ENTRY: "暖机双窗口尚未一致，不能进入新的买入观察",
     WARMUP_DIVERGENCE_IS_NOT_HUMAN_OVERRIDABLE: "暖机属于数据充分性门，不能由人工结构判断覆盖",
     BUY_EXECUTION_BOUNDARY_EVIDENCE_MISSING: "缺少自包含的确认 K 与 1m 买入边界证据",
     STRUCTURE_ANCHOR_IS_NOT_A_BUY_PRICE_CAP: "结构锚点价不能替代确认 K 最高买入价",
     BUY_ENTRY_TTL_EXPIRED_BEFORE_HUMAN_CONFIRMATION: "人工确认时买入有效期已经结束",
     NO_CAUSAL_1M_EXECUTION_BAR_REMAINS_BEFORE_TTL: "有效期内已没有可因果使用的下一根完整 1m K 线",
     NEW_STRUCTURE_REQUIRED_NO_PRICE_CHASING: "不得追价，需等待新的结构信号",
-    SELL_REVIEW_HAS_NO_VIRTUAL_POSITION: "当前没有可供卖出的虚拟持仓",
-    HUMAN_CONFIRMED_PAPER_OBSERVE: "人工已确认 30m 买点并申请虚拟观察",
+    SELL_REVIEW_HAS_NO_VIRTUAL_POSITION: "本条卖点仅作结构观察，不生成研究动作",
+    HUMAN_CONFIRMED_PAPER_OBSERVE: "人工已确认 30m 买点并申请后续观察",
     HUMAN_CONFIRMED_VIRTUAL_EXIT: "人工已确认 30m 战略退出",
     BUY_ORDER_TTL_EXPIRED_WITHOUT_FILL: "买入意图在有效期内未成交",
     BUY_PRICE_CAP_EXCEEDED_AT_FIRST_EXECUTABLE_BAR: "首个合法 1m 执行柱已高于确认 K 最高买入价",
@@ -125,17 +178,84 @@
     OPTIONAL_BUY_CANCELLED_BY_SECURITY_GATE: "停牌/ST/退市等证券状态门阻断，可放弃买入已撤销",
     SECURITY_GATE_CLOSED: "证券交易状态门关闭",
     SECURITY_STATUS_INCOMPLETE: "证券交易状态证据不完整",
-    INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES: "计入费用后虚拟现金不足",
-    NO_FREE_VIRTUAL_STRATEGIC_SLOT: "没有空闲虚拟战略槽位",
-    VIRTUAL_ENTRY_EXCEEDS_ONE_SLOT_NOTIONAL_CAP: "虚拟买入超过单槽资金上限",
-    VIRTUAL_ACCOUNT_EXPOSURE_CAP_EXCEEDED: "虚拟账户总敞口超过上限",
-    VIRTUAL_SYMBOL_ALREADY_OCCUPIES_STRATEGIC_SLOT: "该标的已占用虚拟战略槽位",
+    INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES: "研究预算参数不足",
+    NO_FREE_VIRTUAL_STRATEGIC_SLOT: "没有空闲的结构观察槽位",
+    VIRTUAL_ENTRY_EXCEEDS_ONE_SLOT_NOTIONAL_CAP: "买入观察超过单槽研究上限",
+    VIRTUAL_ACCOUNT_EXPOSURE_CAP_EXCEEDED: "总体研究暴露超过上限",
+    VIRTUAL_SYMBOL_ALREADY_OCCUPIES_STRATEGIC_SLOT: "该标的已占用结构观察槽位",
     SUPERSEDED_BY_LATER_HUMAN_FEEDBACK: "已由同一信号生命周期内更新的人工复核撤销",
+    REALTIME_NOTIFICATION_REVIEW_ONLY: "实时通知已进入人工复核收件箱；当前不建立执行计划",
+    REALTIME_NOTIFICATION_DELIVERY_PENDING: "钉钉通知仍在等待投递",
+    REALTIME_NOTIFICATION_DELIVERY_FAILED: "钉钉投递失败，但结构通知已保留在人工复核收件箱",
+    REALTIME_NOTIFICATION_DELIVERY_EXPIRED: "钉钉投递窗口已过期；结构通知仍保留供复核",
+    REALTIME_NOTIFICATION_HISTORICAL: "通知已超过10分钟新鲜窗口，仅保留为历史结构复核",
+    ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED: "1分钟段差证据仍保留，但当前执行边界已经过期",
+    ONE_MINUTE_SEGMENT_BOUNDARY_MISSING: "1分钟段差证据仍保留，但当前执行边界不可用",
   };
 
   function text(value, fallback = "—") {
     if (value === null || value === undefined || value === "") return fallback;
     return String(value);
+  }
+
+  function laterIsoTime(first, second) {
+    const firstText = text(first, "");
+    const secondText = text(second, "");
+    const firstAt = Date.parse(firstText);
+    const secondAt = Date.parse(secondText);
+    if (Number.isFinite(firstAt) && Number.isFinite(secondAt)) {
+      return secondAt > firstAt ? secondText : firstText;
+    }
+    if (Number.isFinite(firstAt)) return firstText;
+    if (Number.isFinite(secondAt)) return secondText;
+    return firstText || secondText || null;
+  }
+
+  function mappedStateLabel(labels, value, fallback = "尚未解决") {
+    const code = text(value, "").trim();
+    if (!code) return fallback;
+    return labels[code] || `诊断代码：${code}`;
+  }
+
+  function sharedScreeningUi() {
+    let sharedUi = typeof globalThis === "object"
+      ? globalThis.TradingScreeningUi
+      : null;
+    if (
+      (!sharedUi || typeof sharedUi.positionRecommendationLabel !== "function")
+      && typeof module === "object"
+      && module.exports
+      && typeof require === "function"
+    ) {
+      try {
+        sharedUi = require("./early_screening_ui.js");
+      } catch (_error) {
+        sharedUi = null;
+      }
+    }
+    return sharedUi;
+  }
+
+  function positionRecommendationLabel(candidate) {
+    const sharedUi = sharedScreeningUi();
+    if (sharedUi && typeof sharedUi.positionRecommendationLabel === "function") {
+      return sharedUi.positionRecommendationLabel(
+        candidate,
+        "尚未提供结构风险参考；请按结构失效价和操作级别人工核对",
+      );
+    }
+    const recommendation = candidate
+      && candidate.position_recommendation
+      && typeof candidate.position_recommendation === "object"
+      ? candidate.position_recommendation
+      : null;
+    const label = text(
+      recommendation && recommendation.label,
+      "尚未提供结构风险参考；请按结构失效价和操作级别人工核对",
+    );
+    return /(?:\u8d26\u6237|\u6743\u76ca|\u8d44\u91d1|\u73b0\u91d1|\u6301\u4ed3|\u4ed3\u4f4d|\u6301\u6709\u6570\u91cf|\u7ec4\u5408\u70ed\u5ea6)/.test(label)
+      ? "结构风险参考待人工核对"
+      : label;
   }
 
   function timeText(value) {
@@ -146,6 +266,340 @@
       timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false,
     }).format(parsed);
+  }
+
+  function fullDateTimeText(value) {
+    if (!value) return "暂不可用";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return text(value, "暂不可用");
+    const values = Object.fromEntries(
+      new Intl.DateTimeFormat("zh-CN-u-hc-h23", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }).formatToParts(parsed).map((part) => [part.type, part.value]),
+    );
+    return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
+  }
+
+  function realtimeNotificationCandidate(event, observedAt = new Date()) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+    if (
+      event.schema !== "chanlun-realtime-review-notification"
+      || typeof event.notification_id !== "string"
+      || !event.notification_id.startsWith("sha256:")
+      || event.notification_id.length !== 71
+      || !["buy", "sell"].includes(event.side)
+      || !event.code
+      || !event.signal_time
+      || !event.chart_urls
+      || event.review_required !== true
+      || event.automated_action_authorized !== false
+      || event.real_order_transport_enabled !== false
+      || event.live_status !== "LIVE_DISABLED"
+    ) return null;
+    const deliveryWarnings = {
+      pending: ["REALTIME_NOTIFICATION_DELIVERY_PENDING"],
+      failed: ["REALTIME_NOTIFICATION_DELIVERY_FAILED"],
+      expired: ["REALTIME_NOTIFICATION_DELIVERY_EXPIRED"],
+    }[event.delivery_status] || [];
+    const invalidated = ["invalidated", "closed"].includes(event.new_stage);
+    const isExit = event.side === "sell" && !event.point_type;
+    const market = text(event.market, "a").toLowerCase();
+    const signalAvailableAt = event.signal_available_at || event.signal_time;
+    const structureConfirmedAt = event.structure_confirmed_at || signalAvailableAt;
+    const structureAnchorTime = event.structure_anchor_time || event.anchor_time || null;
+    const detectedAt = event.detected_at || event.observed_at || event.recorded_at || signalAvailableAt;
+    const deliveredAt = event.delivered_at || null;
+    const deliveryUpdatedAt = event.delivery_updated_at || event.recorded_at || detectedAt;
+    const notificationTime = deliveredAt || deliveryUpdatedAt || detectedAt;
+    const rawSegmentLevel = event.segment_difference_recursive_level;
+    const segmentLevel = rawSegmentLevel === null || rawSegmentLevel === undefined
+      ? 0
+      : Number(rawSegmentLevel);
+    const segmentPresent = event.segment_difference_present === true
+      && Number.isInteger(segmentLevel)
+      && segmentLevel === 0;
+    const segmentEnriched = event.new_stage === "segment_enriched" && segmentPresent;
+    const notificationFreshnessAt = segmentEnriched
+      ? laterIsoTime(signalAvailableAt, event.segment_difference_available_at)
+      : signalAvailableAt;
+    const sharedUi = sharedScreeningUi();
+    const currentAgeSeconds = sharedUi
+      && typeof sharedUi.notificationCurrentAgeSecondsForReview === "function"
+      ? sharedUi.notificationCurrentAgeSecondsForReview({
+        realtime_notification: true,
+        market,
+        notification_signal_available_at: notificationFreshnessAt,
+      }, observedAt)
+      : null;
+    const historical = currentAgeSeconds !== null && currentAgeSeconds > 600;
+    const segmentStatus = segmentPresent
+      ? text(event.segment_difference_status, "unknown")
+      : "absent";
+    const segmentEvidenceStatus = segmentPresent
+      ? text(event.segment_difference_evidence_status, "present")
+      : "absent";
+    const segmentBoundaryStatus = segmentPresent
+      ? text(
+        event.segment_difference_boundary_status,
+        event.side === "sell" ? "not_applicable" : segmentStatus,
+      )
+      : "absent";
+    const segmentCurrent = segmentPresent
+      && segmentStatus === "current"
+      && event.segment_difference_current === true;
+    const setupLockState = ["pending", "locked"].includes(event.setup_lock_state)
+      ? event.setup_lock_state
+      : "unknown";
+    const segmentWarnings = segmentStatus === "expired"
+      ? ["ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"]
+      : segmentStatus === "unavailable"
+        ? ["ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"]
+        : [];
+    return {
+      candidate_kind: "realtime_notification",
+      candidate_id: event.notification_id,
+      symbol: event.code,
+      market,
+      alert_type: invalidated
+        ? "REALTIME_INVALIDATED"
+        : segmentEnriched
+        ? event.side === "buy" ? "REALTIME_1M_BUY_SEGMENT" : "REALTIME_1M_SELL_SEGMENT"
+        : isExit
+        ? "REALTIME_EXIT"
+        : event.side === "buy" ? "REALTIME_BUY_POINT" : "REALTIME_SELL_POINT",
+      point_type: text(event.point_type, ""),
+      point_side: event.side,
+      notification_source: event.source,
+      notification_delivery_status: event.delivery_status,
+      notification_delivery_reason: event.delivery_reason,
+      review_lane: historical ? "RESEARCH_ARCHIVE" : "ACTIONABLE_REVIEW",
+      review_priority: historical
+        ? 69
+        : event.delivery_status === "failed" ? 110 : 100,
+      // 实时通知已经通过 5m 操作确认条件，但仍明确要求人工复核；使用页面
+      // 契约内的枚举值，避免把展示文案误当成状态码后落入“未收录”兜底。
+      confidence: historical ? "LOW" : "MEDIUM",
+      review_available_at: notificationTime,
+      current_price: event.current_price,
+      position_recommendation: event.position_recommendation && typeof event.position_recommendation === "object"
+        ? { ...event.position_recommendation }
+        : null,
+      reference_price: event.reference_price,
+      entry_price_cap: null,
+      entry_confirmation_bar_closed_at: structureConfirmedAt,
+      entry_valid_until: null,
+      entry_boundary_attestation: "NOT_AVAILABLE",
+      structural_invalidation_price: event.invalidation_price,
+      market_risk_gate: "UNRESOLVED",
+      sector_risk_gate: market === "us" ? "NOT_APPLICABLE" : "UNRESOLVED",
+      symbol_risk_gate: "UNRESOLVED",
+      sector_id: market === "us" ? "market:us" : "realtime-notification:a",
+      sector_name: market === "us" ? "美股（无板块筛选）" : "A股实时通知",
+      sector_name_attestation: market === "us" ? "NOT_APPLICABLE" : "UNCLASSIFIED",
+      sector_membership_attestation: market === "us" ? "NOT_APPLICABLE" : "UNCLASSIFIED",
+      sector_horizontal_rank: null,
+      warning_codes: [
+        "REALTIME_NOTIFICATION_REVIEW_ONLY",
+        ...(historical ? ["REALTIME_NOTIFICATION_HISTORICAL"] : []),
+        ...deliveryWarnings,
+        ...segmentWarnings,
+      ],
+      review_checklist: [
+        "HUMAN_CONFIRM_30M_CONTEXT",
+        "HUMAN_CONFIRM_5M_TRADE_POINT",
+        "HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE",
+        "HUMAN_DEFINE_INVALIDATION_AND_ANY_PAPER_PLAN",
+      ],
+      source_fact_ids: [event.evidence_id, event.notification_id].filter(Boolean),
+      chart_urls: { ...event.chart_urls },
+      feedback_history: [],
+      latest_feedback: null,
+      paper_events: [],
+      paper_observation_eligible: false,
+      paper_observation_reason: "REALTIME_NOTIFICATION_REVIEW_ONLY",
+      evidence_detail_available: false,
+      realtime_notification: true,
+      realtime_notification_current_age_seconds: currentAgeSeconds,
+      realtime_notification_is_historical: historical,
+      realtime_notification_recorded_at: event.recorded_at,
+      realtime_notification_anchor_time: structureAnchorTime,
+      realtime_notification_confirmed_time: structureConfirmedAt,
+      realtime_notification_setup_lock_state: setupLockState,
+      realtime_notification_available_time: signalAvailableAt,
+      realtime_notification_detected_at: detectedAt,
+      realtime_notification_delivery_updated_at: deliveryUpdatedAt,
+      realtime_notification_delivered_at: deliveredAt,
+      realtime_notification_signal_time: signalAvailableAt,
+      realtime_notification_recursive_level: Number(event.recursive_level) || 0,
+      realtime_notification_source_frequency: text(event.source_frequency, "未知周期"),
+      realtime_notification_event_kind: segmentEnriched
+        ? "ONE_MINUTE_SEGMENT_ENRICHMENT"
+        : "FIVE_MINUTE_LIFECYCLE",
+      realtime_notification_segment_difference_present: segmentPresent,
+      realtime_notification_segment_difference_status: segmentStatus,
+      realtime_notification_segment_difference_current: segmentCurrent,
+      realtime_notification_segment_difference_evidence_status: segmentEvidenceStatus,
+      realtime_notification_segment_difference_boundary_status: segmentBoundaryStatus,
+      realtime_notification_segment_difference_point_type: text(event.segment_difference_point_type, ""),
+      realtime_notification_segment_difference_divergence_kind: text(
+        event.segment_difference_divergence_kind,
+        "",
+      ),
+      realtime_notification_segment_difference_valid_until: event.segment_difference_valid_until || null,
+      big_direction: event.big_direction,
+      mid_direction: event.mid_direction,
+    };
+  }
+
+  function realtimeNotificationTimeLabel(candidate) {
+    const status = candidate && candidate.notification_delivery_status;
+    if (status === "delivered") return "送达时间";
+    if (status === "simulated") return "演练记录时间";
+    if (status === "failed") return "投递更新时间";
+    if (status === "expired") return "过期记录时间";
+    return "通知记录时间";
+  }
+
+  function realtimeNotificationSetupLockLabel(candidate) {
+    const state = text(
+      candidate && candidate.realtime_notification_setup_lock_state,
+      "unknown",
+    );
+    if (state === "locked") return "5分钟操作确认已完成；末端结构已封存";
+    if (state === "pending") return "5分钟操作确认已完成；末端结构仍会随新K更新，不影响当前复核";
+    return "5分钟操作确认已记录；末端结构封存状态未保存，可结合当前图表核对";
+  }
+
+  function realtimeNotificationSegmentPeriod(candidate) {
+    const evidenceStatus = text(
+      candidate && candidate.realtime_notification_segment_difference_evidence_status,
+      candidate && candidate.realtime_notification_segment_difference_present === true
+        ? "present"
+        : "absent",
+    );
+    const boundaryStatus = text(
+      candidate && candidate.realtime_notification_segment_difference_boundary_status,
+      candidate && candidate.point_side === "sell" ? "not_applicable" : "unknown",
+    );
+    const point = text(
+      candidate && candidate.realtime_notification_segment_difference_point_type,
+      "1分钟结构点",
+    );
+    const divergence = {
+      trend: "趋势背驰",
+      consolidation: "盘整背驰",
+    }[text(
+      candidate && candidate.realtime_notification_segment_difference_divergence_kind,
+      "",
+    )];
+    const pointEvidence = divergence ? `${point}（${divergence}）` : point;
+    if (evidenceStatus === "present" && boundaryStatus === "current") {
+      return ["段差证据已出现·定位窗口有效", `${pointEvidence}已记录`, "只辅助段差，不改变5分钟信号"];
+    }
+    if (evidenceStatus === "present" && boundaryStatus === "expired") {
+      const validUntil = candidate.realtime_notification_segment_difference_valid_until;
+      return [
+        "段差证据已出现·定位窗口已过",
+        `${pointEvidence}证据仍有效；过期的只是买入定位窗口`,
+        validUntil
+          ? `定位窗口有效至 ${fullDateTimeText(validUntil)}；不影响5分钟信号`
+          : "段差证据保留；不影响5分钟信号",
+      ];
+    }
+    if (evidenceStatus === "present" && boundaryStatus === "unavailable") {
+      return [
+        "段差证据已出现·定位边界缺失",
+        `${pointEvidence}证据已保留，买入定位边界缺失`,
+        "不影响5分钟信号",
+      ];
+    }
+    if (evidenceStatus === "present" && boundaryStatus === "not_applicable") {
+      return [
+        "段差证据已出现",
+        `${pointEvidence}已记录`,
+        "卖点不生成买入定位边界；只作精细复核",
+      ];
+    }
+    if (evidenceStatus === "present") {
+      return [
+        "段差证据已出现·边界待核对",
+        `${pointEvidence}证据已保留，旧记录未保存定位边界状态`,
+        "不能据此单独授权买卖",
+      ];
+    }
+    return [
+      "可选段差未出现",
+      "1分钟只用于段差与精细定位",
+      "不阻止5分钟信号人工复核",
+    ];
+  }
+
+  function mergeRealtimeNotificationQueue(snapshot, observedAt = new Date()) {
+    const safe = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const formal = Array.isArray(safe.review_queue) ? safe.review_queue : [];
+    const inbox = safe.realtime_notifications;
+    const rawEvents = inbox && Array.isArray(inbox.events) ? inbox.events : [];
+    const notifications = rawEvents
+      .map((event) => realtimeNotificationCandidate(event, observedAt))
+      .filter(Boolean);
+    const known = new Set(formal.map((row) => row && row.candidate_id).filter(Boolean));
+    const uniqueNotifications = notifications.filter((row) => !known.has(row.candidate_id));
+    const reviewQueue = [...uniqueNotifications, ...formal];
+    const currentNotifications = uniqueNotifications.filter(
+      (row) => row.realtime_notification_is_historical !== true,
+    );
+    const historicalNotifications = uniqueNotifications.filter(
+      (row) => row.realtime_notification_is_historical === true,
+    );
+    return {
+      ...safe,
+      formal_review_queue_count: formal.length,
+      realtime_notification_count: uniqueNotifications.length,
+      current_realtime_notification_count: currentNotifications.length,
+      historical_realtime_notification_count: historicalNotifications.length,
+      focus_review_queue_count: reviewQueue.filter((row) => (
+        ["ACTIONABLE_REVIEW", "POSITION_MANAGEMENT"].includes(row.review_lane)
+      )).length,
+      review_queue: reviewQueue,
+      review_queue_count: reviewQueue.length,
+    };
+  }
+
+  function sortCandidatesByReviewPriority(candidates) {
+    return (Array.isArray(candidates) ? candidates : []).slice().sort((left, right) => {
+      const priority = (candidate) => {
+        const raw = candidate && candidate.review_priority;
+        const value = typeof raw === "number"
+          ? raw
+          : typeof raw === "string" && raw.trim()
+            ? Number(raw)
+            : Number.NaN;
+        return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+      };
+      const leftPriority = priority(left);
+      const rightPriority = priority(right);
+      if (leftPriority === rightPriority) return 0;
+      if (leftPriority === Number.NEGATIVE_INFINITY) return 1;
+      if (rightPriority === Number.NEGATIVE_INFINITY) return -1;
+      return rightPriority - leftPriority;
+    });
+  }
+
+  function formalReviewUnavailableLabel(reasonCode) {
+    const labels = {
+      human_review_web_bundle_invalid: "旧版程序候选归档与当前字段契约不兼容，等待新快照发布",
+      human_review_web_bundle_unreadable: "程序候选归档暂时无法读取，等待新快照发布",
+      human_review_report_unavailable: "程序候选报告尚未生成",
+      human_review_report_unreadable: "程序候选报告暂时无法读取",
+    };
+    return labels[reasonCode] || "程序候选报告未通过完整性校验";
   }
 
   const WARMUP_CONVERGENCE_STATUS_LABELS = {
@@ -171,9 +625,11 @@
     const range = counts.length
       ? `（${Math.min(...counts)}–${Math.max(...counts)} 根日线）`
       : "";
-    const status = WARMUP_CONVERGENCE_STATUS_LABELS[evidence.status]
-      || text(evidence.status, "未分类");
-    return `${label}多前缀暖机诊断：${status} · 合格前缀 ${observedCount} 个${range} · 仅诊断，不改变现有双窗口交易门`;
+    const status = mappedStateLabel(
+      WARMUP_CONVERGENCE_STATUS_LABELS,
+      evidence.status,
+    );
+    return `${label}多前缀暖机诊断：${status} · 合格前缀 ${observedCount} 个${range} · 仅作历史稳定性审计，不参与买入放行`;
   }
 
   function deepWarmupDiagnosticPresentation(diagnostic) {
@@ -197,7 +653,7 @@
       const reasons = Array.isArray(row.reason_codes) && row.reason_codes.length
         ? ` · ${row.reason_codes.map(paperReasonLabel).join(" / ")}`
         : "";
-      return `${text(row.frequency)}：${WARMUP_CONVERGENCE_STATUS_LABELS[row.status] || text(row.status, "不可用")} · 前缀 ${prefixCounts} · 可用 ${Number(row.available_bar_count || 0)} 根${reasons}`;
+      return `${text(row.frequency)}：${mappedStateLabel(WARMUP_CONVERGENCE_STATUS_LABELS, row.status)} · 前缀 ${prefixCounts} · 可用 ${Number(row.available_bar_count || 0)} 根${reasons}`;
     });
     const nonMonotonic = status === "NON_MONOTONIC"
       || frequencies.some((row) => row && row.status === "NON_MONOTONIC");
@@ -236,7 +692,7 @@
       ? supply.point_type_counts
       : {};
     const lines = [
-      `${label}映射供给：${MAPPING_SUPPLY_LABELS[supply.classification] || text(supply.classification, "未分类")} · 低级别点 ${Number(supply.point_evidence_count || 0)}（一卖 ${Number(counts["1sell"] || 0)} / 二卖 ${Number(counts["2sell"] || 0)} / 三卖 ${Number(counts["3sell"] || 0)} / 三买 ${Number(counts["3buy"] || 0)}）· 分型内一二卖 ${Number(supply.in_top_interval_sell12_count || 0)} / 已完成中枢 ${Number(supply.completed_in_top_interval_sell12_count || 0)}`,
+      `${label}映射供给：${MAPPING_SUPPLY_LABELS[supply.classification] || "未分类"} · 低级别点 ${Number(supply.point_evidence_count || 0)}（一卖 ${Number(counts["1sell"] || 0)} / 二卖 ${Number(counts["2sell"] || 0)} / 三卖 ${Number(counts["3sell"] || 0)} / 三买 ${Number(counts["3buy"] || 0)}）· 分型内一二卖 ${Number(supply.in_top_interval_sell12_count || 0)} / 已完成中枢 ${Number(supply.completed_in_top_interval_sell12_count || 0)}`,
     ];
     const diagnosticCounts = supply.diagnostic_buy_point_type_counts
       && typeof supply.diagnostic_buy_point_type_counts === "object"
@@ -263,25 +719,40 @@
     const reason = String(value || "PAPER_REASON_UNAVAILABLE");
     if (PAPER_REASON_LABELS[reason]) return PAPER_REASON_LABELS[reason];
     if (reason.startsWith("EXPECTED_REVIEW_LEVEL_")) {
-      return `该线索要求确认 ${reason.slice("EXPECTED_REVIEW_LEVEL_".length).toLowerCase()} 级别`;
+      const level = reason.slice("EXPECTED_REVIEW_LEVEL_".length);
+      const levelLabel = { "30M": "30分钟", "5M": "5分钟", "1M": "1分钟" }[level]
+        || "指定周期";
+      return `该线索要求确认 ${levelLabel} 级别`;
     }
     if (reason.startsWith("MARKET_GATE_")) {
-      return `市场高级别风险门：${reason.slice("MARKET_GATE_".length)}`;
+      return `市场高级别风险门：${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, reason.slice("MARKET_GATE_".length))}`;
     }
     if (reason.startsWith("SECTOR_GATE_")) {
-      return `板块高级别风险门：${reason.slice("SECTOR_GATE_".length)}`;
+      return `板块高级别风险门：${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, reason.slice("SECTOR_GATE_".length))}`;
     }
     if (reason.startsWith("SYMBOL_GATE_")) {
-      return `个股高级别风险门：${reason.slice("SYMBOL_GATE_".length)}`;
+      return `个股高级别风险门：${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, reason.slice("SYMBOL_GATE_".length))}`;
     }
-    return reason;
+    return `诊断代码：${reason}`;
   }
 
   Object.assign(PAPER_REASON_LABELS, {
-    QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT: "月/周/日风险门历史不足 480 根已完成日线，已失败关闭",
-    QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_DIVERGED: "月/周/日风险门完整前缀与 320 根后缀结论不一致，已失败关闭",
-    QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_STABLE: "月/周/日风险门双窗口复算一致",
+    QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT: "高级别历史研究窗口不足 480 根已完成日线，仅作审计提示",
+    QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_DIVERGED: "高级别历史研究完整前缀与 320 根后缀结论不一致，仅作审计提示",
+    QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_STABLE: "高级别历史研究双窗口复算一致",
+    PREFIX_SIGNATURE_DIVERGED: "多前缀结构签名不一致",
+    SECTOR_MONTHLY_TOP_FORMED: "板块长期历史顶部结构已形成（研究诊断）",
   });
+
+  function dailyHigherTimeframeReasonCodes(values) {
+    return (Array.isArray(values) ? values : []).filter((value) => {
+      const code = String(value || "");
+      return !code.startsWith("M_")
+        && !code.startsWith("W_")
+        && !code.includes("MONTHLY")
+        && !code.includes("WEEKLY");
+    });
+  }
 
   function deferredEvidenceDisclosure(candidate, label, evidenceId) {
     if (!candidate || candidate.evidence_detail_available !== true) return null;
@@ -290,7 +761,7 @@
       tag: failed ? `${label}加载失败` : `${label}按需加载`,
       lines: [
         failed
-          ? `完整${label}读取失败：${text(failed)}；候选摘要仍保持 REVIEW_REQUIRED / LIVE_DISABLED。`
+          ? `完整${label}读取失败：${text(failed)}；候选摘要仍保持“必须人工复核 / 不自动下单”。`
           : `完整${label}将在选择该候选后读取；首屏只传输已哈希绑定的轻量摘要。`,
       ],
       factIds: evidenceId ? [evidenceId] : [],
@@ -312,7 +783,7 @@
       if (deferred) return deferred;
       return {
         tag: "板块高级别证据无效",
-        lines: ["候选未携带当前契约要求的板块高级别证据，保持 REVIEW_REQUIRED / LIVE_DISABLED"],
+        lines: ["候选未携带当前契约要求的板块高级别证据，保持“必须人工复核 / 不自动下单”"],
         factIds: [],
       };
     }
@@ -320,7 +791,7 @@
       && typeof evidence.strict_same_5m_warmup_evidence === "object"
       ? evidence.strict_same_5m_warmup_evidence
       : {};
-    const strictLine = `严格5m暖机 ${warmup.converged === true ? "一致" : "未通过"} · 完整 ${Number(warmup.full_daily_bar_count || 0)} / 要求 ${Number(warmup.required_daily_bar_count || 0)} 根日线 · ${paperReasonLabel(warmup.reason_code)}`;
+    const strictLine = `严格5m历史审计 ${warmup.converged === true ? "一致" : "未一致"} · 完整 ${Number(warmup.full_daily_bar_count || 0)} / 要求 ${Number(warmup.required_daily_bar_count || 0)} 根日线 · ${paperReasonLabel(warmup.reason_code)} · 不参与买入放行`;
     const convergenceLines = [
       warmupConvergenceDisclosureLine(
         "板块当前来源",
@@ -337,7 +808,7 @@
       ? evidence.states
       : null;
     const diagnostics = Array.isArray(evidence.period_diagnostics)
-      ? evidence.period_diagnostics
+      ? evidence.period_diagnostics.filter((row) => row && row.period === "D")
       : null;
     const hasDecisionFacts = typeof evidence.sector_id === "string"
       && Boolean(evidence.observed_at)
@@ -348,23 +819,20 @@
     if (hasDecisionFacts) {
       decisionLines.push(
         `板块决策身份：${evidence.sector_id} · 观测 ${timeText(evidence.observed_at)}`,
-        `板块 M/W/D：${["M", "W", "D"].map((period) => (
-          `${period} ${HIGHER_TIMEFRAME_STATE_LABELS[states[period]] || text(states[period], "未证明")}`
-        )).join(" · ")} → ${text(evidence.gate, "UNRESOLVED")}`,
+        `板块日线：${mappedStateLabel(HIGHER_TIMEFRAME_STATE_LABELS, states.D)} · 研究状态 ${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, evidence.gate)}`,
       );
       diagnostics.forEach((diagnostic) => {
         const mapping = diagnostic.mapping_unique === true
           ? `映射 ${text(diagnostic.mapped_center_id, "无活动中枢")}`
           : `映射未唯一（${(diagnostic.mapping_candidate_ids || []).length} 个候选）`;
-        const label = `板块${text(diagnostic.period)}`;
+        const label = `板块${HIGHER_TIMEFRAME_PERIOD_LABELS[diagnostic.period] || "未知周期"}`;
         decisionLines.push(
           `${label}：已完成 ${Number(diagnostic.completed_bar_count || 0)} 根 · 证据截止 ${timeText(diagnostic.evidence_bar_end)} · ${mapping}`,
           ...mappingSupplyDisclosureLines(label, diagnostic),
         );
       });
-      const reasons = Array.isArray(evidence.reason_codes)
-        ? evidence.reason_codes.map(paperReasonLabel)
-        : [];
+      const reasons = dailyHigherTimeframeReasonCodes(evidence.reason_codes)
+        .map(paperReasonLabel);
       if (reasons.length) decisionLines.push(`板块原因：${reasons.join("；")}`);
     } else {
       decisionLines.push("板块高级别证据不符合当前契约，状态、结构映射与方向诊断均未认证");
@@ -373,7 +841,7 @@
       return {
         tag: "同一5m基底",
         lines: [
-          "板块高级别来源：M/W/D 与 30m 均由同一5m基底因果派生",
+          "板块研究数据来源：日线与30分钟均由同一5分钟基底因果派生；当前执行只使用日线与30分钟",
           strictLine,
           ...convergenceLines,
           ...decisionLines,
@@ -386,10 +854,10 @@
       === "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH"
     ) {
       return {
-        tag: "原生日线研究桥（AMBER上限）",
+        tag: "原生日线研究桥（最高为琥珀色）",
         lines: [
-          "板块高级别来源：QMT 原生日线构造 M/W/D，30m 仍由5m基底派生",
-          "研究桥尚未与5m/30m非线性聚合调和 · RESEARCH_ONLY / LIVE_DISABLED · GREEN 最多降为 AMBER",
+          "板块研究数据来源：QMT 原生日线用于长期历史审计，30分钟仍由5分钟基底派生；当前执行只使用日线与30分钟",
+          "研究桥尚未与5分钟/30分钟非线性聚合调和 · 仅供研究 / 不自动下单 · 绿色结论最多降为琥珀色",
           strictLine,
           ...convergenceLines,
           `研究桥参数：${String(evidence.research_bridge_parameter_set_id || "缺失")}`,
@@ -400,7 +868,7 @@
     }
     return {
       tag: "板块来源未认证",
-      lines: [`板块高级别来源模式未认证：${String(evidence.source_mode || "缺失")}`],
+      lines: ["板块高级别来源模式未认证；原始模式标识仅保留在审计记录中"],
       factIds: evidence.evidence_id ? [evidence.evidence_id] : [],
     };
   }
@@ -538,14 +1006,14 @@
     if (!evidence) {
       const deferred = deferredEvidenceDisclosure(
         candidate,
-        "市场/个股月周日证据",
+        "市场/个股日线高级别证据",
         candidate && candidate.market_symbol_higher_timeframe_evidence_id,
       );
       if (deferred) return deferred;
       return {
-        tag: "M/W/D证据无效",
+        tag: "日线高级别证据无效",
         lines: [
-          "当前候选缺少市场与个股 M/W/D 分项、完成K线数量及结构映射，已按无效处理",
+          "当前候选缺少市场与个股日线分项、完成K线数量及结构映射，已按无效处理",
         ],
         factIds: [],
       };
@@ -560,38 +1028,35 @@
     )).length;
     const lines = [];
     if (supportCount === 0) {
-      lines.push("M/W/D结构诊断已保存；1m会话、暖机及原生日线核对未随候选保存");
+      lines.push("日线高级别结构诊断已保存；1分钟会话、历史暖机及原生日线核对未随候选保存");
     } else if (supportCount < sideEntries.length) {
-      lines.push("M/W/D结构诊断已保存；市场/个股仅部分具有数据来源支持证据");
+      lines.push("日线高级别结构诊断已保存；市场/个股仅部分具有数据来源支持证据");
     }
     const factIds = [];
     sideEntries.forEach(([label, side]) => {
       const states = side && typeof side.states === "object" ? side.states : {};
       lines.push(
-        `${label} M/W/D：${["M", "W", "D"].map((period) => (
-          `${period} ${HIGHER_TIMEFRAME_STATE_LABELS[states[period]] || text(states[period], "未证明")}`
-        )).join(" · ")} → ${text(side && side.gate, "UNRESOLVED")}`,
+        `${label}日线：${mappedStateLabel(HIGHER_TIMEFRAME_STATE_LABELS, states.D)} · 研究状态 ${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, side && side.gate)}`,
       );
       const diagnostics = side && Array.isArray(side.period_diagnostics)
-        ? side.period_diagnostics
+        ? side.period_diagnostics.filter((row) => row && row.period === "D")
         : [];
       diagnostics.forEach((diagnostic) => {
         const mapping = diagnostic.mapping_unique === true
           ? `映射 ${text(diagnostic.mapped_center_id, "无活动中枢")}`
           : `映射未唯一（${(diagnostic.mapping_candidate_ids || []).length} 个候选）`;
         lines.push(
-          `${label}${text(diagnostic.period)}：已完成 ${Number(diagnostic.completed_bar_count || 0)} 根 · 证据截止 ${timeText(diagnostic.evidence_bar_end)} · ${mapping}`,
+          `${label}${HIGHER_TIMEFRAME_PERIOD_LABELS[diagnostic.period] || "未知周期"}：已完成 ${Number(diagnostic.completed_bar_count || 0)} 根 · 证据截止 ${timeText(diagnostic.evidence_bar_end)} · ${mapping}`,
         );
         lines.push(
           ...mappingSupplyDisclosureLines(
-            `${label}${text(diagnostic.period)}`,
+            `${label}${HIGHER_TIMEFRAME_PERIOD_LABELS[diagnostic.period] || "未知周期"}`,
             diagnostic,
           ),
         );
       });
-      const reasons = side && Array.isArray(side.reason_codes)
-        ? side.reason_codes.map(paperReasonLabel)
-        : [];
+      const reasons = dailyHigherTimeframeReasonCodes(side && side.reason_codes)
+        .map(paperReasonLabel);
       if (reasons.length) lines.push(`${label}原因：${reasons.join("；")}`);
       const support = side && side.source_support
         && typeof side.source_support === "object"
@@ -613,11 +1078,11 @@
       const warmup = support.warmup_evidence;
       if (warmup && typeof warmup === "object") {
         lines.push(
-          `${label}M/W/D暖机：${warmup.converged === true ? "双窗口一致" : "未通过"} · 完整 ${Number(warmup.full_daily_bar_count || 0)} / 要求 ${Number(warmup.required_daily_bar_count || 0)} / 后缀 ${Number(warmup.suffix_daily_bar_count || 0)} 根 · ${paperReasonLabel(warmup.reason_code)}`,
+          `${label}高级别历史暖机（仅审计）：${warmup.converged === true ? "双窗口一致" : "未一致"} · 完整 ${Number(warmup.full_daily_bar_count || 0)} / 要求 ${Number(warmup.required_daily_bar_count || 0)} / 后缀 ${Number(warmup.suffix_daily_bar_count || 0)} 根 · ${paperReasonLabel(warmup.reason_code)}`,
         );
       }
       const convergenceLine = warmupConvergenceDisclosureLine(
-        `${label}M/W/D`,
+        `${label}高级别历史`,
         support.warmup_convergence_evidence,
       );
       if (convergenceLine) lines.push(convergenceLine);
@@ -631,10 +1096,10 @@
     return {
       tag: (
         supportCount === sideEntries.length
-          ? "M/W/D结构与来源可复核"
+          ? "日线高级别结构与来源可复核"
           : supportCount === 0
-            ? "M/W/D结构可复核·来源未附"
-            : "M/W/D结构可复核·来源部分"
+            ? "日线高级别结构可复核·来源未附"
+            : "日线高级别结构可复核·来源部分"
       ),
       lines,
       factIds: [
@@ -691,7 +1156,7 @@
       const reasons = paperEventReasons(latestEvent);
       return {
         status,
-        headline: PAPER_STATUS_LABELS[status] || `虚拟账本状态：${status}`,
+        headline: PAPER_STATUS_LABELS[status] || "观察记录状态暂未分类",
         reasons: reasons.length ? reasons : ["账本已记录该状态，未附加原因码"],
       };
     }
@@ -713,7 +1178,7 @@
       }
       return {
         status: "REVIEW_ONLY",
-        headline: "仅记录人工识别，不建立虚拟意图",
+        headline: "仅记录人工识别，不建立执行计划",
         reasons,
       };
     }
@@ -721,27 +1186,27 @@
     if (!latest) {
       return {
         status: "AWAITING_HUMAN_REVIEW",
-        headline: "尚未人工复核，未申请虚拟观察",
+        headline: "尚未人工复核",
         reasons: ["先确认中枢、走势类型、30m/5m 级别和具体买卖点"],
       };
     }
     if (latest.disposition !== "PAPER_OBSERVE") {
       return {
         status: "NOT_REQUESTED",
-        headline: "人工处置未申请虚拟观察",
+        headline: "人工处置仅作记录",
         reasons: [`当前处置：${FEEDBACK_LABELS[latest.disposition] || latest.disposition || "未指定"}`],
       };
     }
     if (!String(latest.point_judgement || "").match(/^(BUY|SELL)_/)) {
       return {
         status: "NOT_REQUESTED",
-        headline: "模拟观察尚未形成虚拟意图",
+        headline: "观察记录尚未绑定具体买卖点",
         reasons: ["必须先人工确认具体一、二、三类买卖点"],
       };
     }
     return {
       status: "FAIL_CLOSED",
-      headline: "虚拟意图状态未能从账本确认",
+      headline: "观察记录状态未能确认",
       reasons: ["请刷新报告；在账本状态可验证前保持失败关闭"],
     };
   }
@@ -756,7 +1221,7 @@
       const status = document.getElementById("hr-status");
       const detail = document.getElementById("hr-status-detail");
       if (status) status.textContent = "页面样本审计模块缺失";
-      if (detail) detail.textContent = "保持 REVIEW_REQUIRED / LIVE_DISABLED，刷新资源后再复核";
+      if (detail) detail.textContent = "保持“必须人工复核 / 不自动下单”，刷新资源后再复核";
       return;
     }
     root.dataset.humanReviewInitialized = "true";
@@ -773,6 +1238,7 @@
       // Start with today's actionable and open-position workload.  The lane
       // is display-only; it never suppresses source rows or changes a signal.
       alertType: "all",
+      candidateKind: "all",
       reviewLane: "focus",
       reviewState: "all",
       loading: false,
@@ -780,7 +1246,27 @@
       focusedFrequency: "30m",
       formBindingKey: null,
       pendingFeedbackRequestId: null,
+      pollTimer: null,
     };
+
+    async function requestJson(endpoint, options) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        REQUEST_TIMEOUT_MS,
+      );
+      try {
+        const response = await fetch(endpoint, { ...options, signal: controller.signal });
+        return { response, payload: await response.json() };
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          throw new Error("request_timeout");
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
 
     function forwardReasonLabel(value) {
       const reason = text(value, "FORWARD_STATUS_UNAVAILABLE");
@@ -795,31 +1281,31 @@
         SECTOR_LEDGER_UNAVAILABLE: "板块账本不可用",
         SECTOR_CAPTURE_LEDGER_INVALID: "板块账本无效",
         FORWARD_SESSION_NOT_DUE: "当前会话尚未到期",
-        CAPTURE_NOT_DUE: "09:10 前，尚未到 Capture",
+        CAPTURE_NOT_DUE: "09:10 前，尚未到盘前抓取时刻",
         NON_WEEKDAY_SESSION_NOT_DUE: "非工作日，不要求交付",
         NON_TRADING_SESSION_NOT_DUE: "权威日历确认休市，不要求交付",
         TRADING_SESSION_EVIDENCE_UNAVAILABLE: "交易日证据尚未发布，暂不判断交付缺失",
         TRADING_SESSION_EVIDENCE_INVALID: "交易日证据校验失败，已拒绝判断",
-        CAPTURE_MISSING_AFTER_DUE: "Capture 到期未交付",
-        CAPTURE_FAILED: "Capture 执行失败",
-        CAPTURED_WAITING_FOR_EVALUATION: "Capture 已完成，等待 15:20 Evaluate",
-        EVALUATION_PENDING: "Evaluate 覆盖等待窗口内",
-        EVALUATION_MISSING_AFTER_DEADLINE: "Evaluate 截止后仍未归档",
-        DATA_BLOCKED: "Evaluate 被数据门阻断",
-        EVALUATION_BLOCKED: "Evaluate 决策归档被阻断",
-        EVALUATED_WITHOUT_CAPTURE_EVENT: "Evaluate 缺少 Capture 链上证据",
-        DATA_READY_EVENT_MISSING: "Evaluate 缺少完整行情数据门事件",
-        FORWARD_EVENT_SEQUENCE_INVALID: "Capture、数据门与 Evaluate 顺序无效",
-        CAPTURE_IMPLEMENTATION_PROVENANCE_UNATTESTED: "Capture 未记录实现来源，禁止 Evaluate",
-        IMPLEMENTATION_CHANGED_SINCE_CAPTURE: "Capture 后源码发生变化，禁止 Evaluate",
-        CURRENT_IMPLEMENTATION_PROVENANCE_UNAVAILABLE: "当前实现来源无法验证，禁止 Evaluate",
+        CAPTURE_MISSING_AFTER_DUE: "盘前抓取到期未交付",
+        CAPTURE_FAILED: "盘前抓取执行失败",
+        CAPTURED_WAITING_FOR_EVALUATION: "盘前抓取已完成，等待 15:20 盘后评估",
+        EVALUATION_PENDING: "处于盘后评估等待窗口内",
+        EVALUATION_MISSING_AFTER_DEADLINE: "盘后评估截止后仍未归档",
+        DATA_BLOCKED: "盘后评估被数据门阻断",
+        EVALUATION_BLOCKED: "盘后评估决策归档被阻断",
+        EVALUATED_WITHOUT_CAPTURE_EVENT: "盘后评估缺少盘前抓取链上证据",
+        DATA_READY_EVENT_MISSING: "盘后评估缺少完整行情数据门事件",
+        FORWARD_EVENT_SEQUENCE_INVALID: "盘前抓取、数据门与盘后评估顺序无效",
+        CAPTURE_IMPLEMENTATION_PROVENANCE_UNATTESTED: "盘前抓取未记录实现来源，禁止盘后评估",
+        IMPLEMENTATION_CHANGED_SINCE_CAPTURE: "盘前抓取后源码发生变化，禁止盘后评估",
+        CURRENT_IMPLEMENTATION_PROVENANCE_UNAVAILABLE: "当前实现来源无法验证，禁止盘后评估",
         IMPLEMENTATION_PROVENANCE_UNATTESTED: "前向事件未完整记录实现来源",
-        MIXED_IMPLEMENTATION_PROVENANCE: "Capture、数据门与 Evaluate 实现来源不一致",
-        CAPTURE_EVENT_EVIDENCE_UNPROVEN: "Capture 事件未绑定可验证 QMT 回执",
+        MIXED_IMPLEMENTATION_PROVENANCE: "盘前抓取、数据门与盘后评估的实现来源不一致",
+        CAPTURE_EVENT_EVIDENCE_UNPROVEN: "盘前抓取事件未绑定可验证 QMT 回执",
         DATA_READY_EVENT_EVIDENCE_INVALID: "1m/5m 完整行情证据无效",
-        EVALUATION_ARTIFACTS_UNAVAILABLE: "Evaluate 不可变归档证据不可用",
-        EVALUATION_VALUATION_EVIDENCE_MISSING: "Evaluate 缺少当日虚拟估值证据",
-        EVALUATION_ARTIFACT_EVIDENCE_INVALID: "Evaluate 归档对象校验失败",
+        EVALUATION_ARTIFACTS_UNAVAILABLE: "盘后评估的不可变归档证据不可用",
+        EVALUATION_VALUATION_EVIDENCE_MISSING: "盘后评估缺少当日研究估值证据",
+        EVALUATION_ARTIFACT_EVIDENCE_INVALID: "盘后评估归档对象校验失败",
         FORWARD_LEDGER_INVALID: "前向哈希链账本无效",
         FORWARD_ARCHIVE_READINESS_UNAVAILABLE: "归档前置门不可用",
         FORWARD_DELIVERY_READINESS_UNAVAILABLE: "逐日交付门不可用",
@@ -832,7 +1318,7 @@
         SCHEDULED_TASK_RECOVERY_MISMATCH: "前向任务重试/时限契约失配",
         SCHEDULED_TASK_TRIGGER_MISMATCH: "前向任务交易日/时刻契约失配",
       };
-      return labels[reason] || reason;
+      return labels[reason] || "前向运行状态暂未分类";
     }
 
     function setText(id, value) {
@@ -884,11 +1370,12 @@
       setText(
         "hr-mode-description",
         state.mode === "human-review"
-          ? "QMT 板块先行，程序提前定位，人负责确认；所有候选均为 REVIEW_REQUIRED。"
+          ? "QMT 板块先行，程序提前定位，人负责确认；所有候选均必须人工复核。"
           : "查看实时结构雷达；程序信号仍是研究提示，不具备订单权限。",
       );
       window.dispatchEvent(new CustomEvent("chanlun-screening-mode-change", { detail: { mode: state.mode } }));
       if (state.mode === "human-review" && !state.snapshot) void requestSnapshot();
+      else schedulePoll();
     }
 
     function setStatus(kind, title, detail) {
@@ -903,18 +1390,31 @@
         ? state.snapshot.review_queue
         : [];
       const query = state.query.trim().toLowerCase();
-      return rows.filter((row) => {
+      return sortCandidatesByReviewPriority(rows.filter((row) => {
+        if (!reviewAlertVisibleForSource(row.alert_type, state.source)) return false;
         const reviewed = Array.isArray(row.feedback_history) && row.feedback_history.length > 0;
+        const kind = row.candidate_kind === "realtime_notification"
+          ? "realtime_notification"
+          : "screening_candidate";
         const inFocusLane = ["ACTIONABLE_REVIEW", "POSITION_MANAGEMENT"].includes(row.review_lane);
+        if (state.candidateKind !== "all" && state.candidateKind !== kind) return false;
         if (state.reviewLane === "focus" && !inFocusLane) return false;
         if (state.reviewLane !== "all" && state.reviewLane !== "focus" && row.review_lane !== state.reviewLane) return false;
-        if (state.alertType !== "all" && row.alert_type !== state.alertType) return false;
+        if (
+          state.alertType === "REALTIME_NOTIFICATION"
+          && row.realtime_notification !== true
+        ) return false;
+        if (
+          state.alertType !== "all"
+          && state.alertType !== "REALTIME_NOTIFICATION"
+          && row.alert_type !== state.alertType
+        ) return false;
         if (state.reviewState === "pending" && reviewed) return false;
         if (state.reviewState === "reviewed" && !reviewed) return false;
         if (!query) return true;
-        return [row.symbol, row.sector_name, row.alert_type]
+        return [row.symbol, row.sector_name, row.alert_type, row.market === "us" ? "美股" : "A股"]
           .some((value) => text(value, "").toLowerCase().includes(query));
-      });
+      }));
     }
 
     function currentCandidate() {
@@ -952,12 +1452,11 @@
           );
           url.searchParams.set("candidate_id", candidate.candidate_id);
           url.searchParams.set("source_content_sha256", sourceHash);
-          const response = await fetch(`${url.pathname}${url.search}`, {
+          const { response, payload } = await requestJson(`${url.pathname}${url.search}`, {
             cache: "no-store",
             credentials: "same-origin",
             headers: { Accept: "application/json" },
           });
-          const payload = await response.json();
           const detail = payload && payload.data;
           if (
             !response.ok
@@ -1024,7 +1523,7 @@
         ? `${Number(selectionEvidence.verified_catalog_binding_count || 0)}/${Number(selectionSource.required_live_ranked_buy_intent_count || 0)} 精确 QMT 目录`
         : selectionStatus === "NO_SELECTION_ATTESTATIONS"
           && selectionSourceStatus === "NO_REQUIRED_SELECTION_INTENTS"
-          ? "尚无需证明的虚拟买入"
+          ? "尚无需证明的买入观察"
           : selectionStatus === "INCOMPLETE_CATALOG_ARCHIVE"
             ? "QMT 目录归档不完整"
             : selectionSourceStatus === "INCOMPLETE_SOURCE_ARCHIVE"
@@ -1038,7 +1537,7 @@
       const executionEvidenceLabel = executionEvidenceStatus === "COMPLETE"
         ? `${Number(executionEvidence.verified_fill_count || 0)}/${Number(executionEvidence.fill_count || 0)} 完整`
         : executionEvidenceStatus === "NO_FILLS"
-          ? "无虚拟成交"
+          ? "无规则回放结果"
           : executionEvidenceStatus === "MISSING"
               ? "成交证据对象缺失"
               : executionEvidenceStatus === "INVALID"
@@ -1055,7 +1554,7 @@
             ? "证据缺失"
             : executionRejectionStatus === "INVALID"
               ? "证据无效"
-              : executionRejectionStatus;
+              : "尚未验证";
       setText("hr-execution-rejection-evidence-status", executionRejectionLabel);
       const portfolioRejectionEvidence = snapshot.paper_portfolio_rejection_evidence || {};
       const portfolioRejectionEvidenceStatus = text(portfolioRejectionEvidence.status, "UNAVAILABLE");
@@ -1067,7 +1566,7 @@
             ? "缺失"
             : portfolioRejectionEvidenceStatus === "INVALID"
               ? "无效"
-              : portfolioRejectionEvidenceStatus;
+              : "尚未验证";
       setText("hr-portfolio-rejection-evidence-status", portfolioRejectionEvidenceLabel);
       const portfolioDecisionAudit = snapshot.paper_portfolio_decision_audit || {};
       const portfolioDecisionAuditStatus = text(portfolioDecisionAudit.status, "UNAVAILABLE");
@@ -1077,7 +1576,7 @@
           ? "无组合拒绝"
           : portfolioDecisionAuditStatus === "INVALID"
             ? "账本前缀不一致"
-            : portfolioDecisionAuditStatus;
+            : "尚未验证";
       setText("hr-portfolio-decision-audit-status", portfolioDecisionAuditLabel);
       const portfolioFillDecisionAudit = snapshot.paper_portfolio_fill_decision_audit || {};
       const portfolioFillDecisionAuditStatus = text(portfolioFillDecisionAudit.status, "UNAVAILABLE");
@@ -1087,7 +1586,7 @@
           ? "无组合成交"
           : portfolioFillDecisionAuditStatus === "INVALID"
             ? "成交裁决不一致"
-            : portfolioFillDecisionAuditStatus;
+            : "尚未验证";
       setText("hr-portfolio-fill-decision-audit-status", portfolioFillDecisionAuditLabel);
       const paperCapabilities = snapshot.paper_execution_capabilities || {};
       setText(
@@ -1157,15 +1656,15 @@
       const paperAccounting = snapshot.paper_accounting || {};
       const accountingStatus = text(paperAccounting.status, "UNAVAILABLE");
       const accountingLabel = accountingStatus === "NO_FILLS"
-        ? "费用与现金口径已冻结 · 无成交"
+        ? "研究费用口径已冻结 · 无回放结果"
         : accountingStatus === "OPEN_POSITIONS_UNMARKED"
-          ? "现金已重建 · 持仓待日终估值"
+          ? "研究基准已重建 · 开放结构待日终估值"
           : accountingStatus === "CLOSED_BOOK_NO_DAILY_EQUITY"
-            ? "现金已重建 · 缺逐日净值"
+            ? "研究基准已重建 · 缺逐日净值"
             : accountingStatus === "EXECUTION_EVIDENCE_UNVERIFIED"
               ? "成交证据未完整验证"
               : accountingStatus === "CONSTRAINT_VIOLATION"
-                ? "虚拟资金约束异常"
+                ? "研究预算约束异常"
                 : accountingStatus === "PARAMETER_SNAPSHOT_INVALID"
                   ? "冻结参数无效"
                   : "尚未建立";
@@ -1241,13 +1740,13 @@
       setText(
         "hr-qmt-runtime-status",
         qmtRuntime.ready === true
-          ? "APP_RUNTIME / QMT ready"
+          ? "应用运行时 / QMT 已就绪"
           : forwardReasonLabel(qmtRuntime.reason_code),
       );
       setText(
         "hr-forward-scheduler-status",
         forwardScheduler.ready === true
-          ? "APP_RUNTIME / schedule / retry ready"
+          ? "应用运行时 / 调度 / 重试均已就绪"
           : forwardReasonLabel(forwardScheduler.reason_code),
       );
       setText(
@@ -1263,7 +1762,7 @@
       setText(
         "hr-forward-delivery-status",
         `${text(forwardOperations.session, "会话未确定")} · ${
-          deliveryReady ? "Capture + Evaluate 已交付" : forwardReasonLabel(delivery.reason_code)
+          deliveryReady ? "捕获与评估均已交付" : forwardReasonLabel(delivery.reason_code)
         }`,
       );
       setText(
@@ -1281,8 +1780,7 @@
       };
       setText(
         "hr-source-currentness",
-        sourceCurrentnessLabels[sourceCurrentness.status]
-          || text(sourceCurrentness.status, "待验证"),
+        sourceCurrentnessLabels[sourceCurrentness.status] || "待验证",
       );
       setHashIdentity("hr-source-hash", snapshot.source_content_sha256, "来源指纹");
       setHashIdentity("hr-decision-core-id", snapshot.decision_core_id, "决策核心");
@@ -1291,18 +1789,26 @@
         snapshot.decision_source_snapshot_id,
         "源码快照",
       );
-      const virtualLedgerSummary = `虚拟账本累计 ${Number(snapshot.virtual_intent_count || 0)} 个意图 / ${Number(snapshot.virtual_fill_count || 0)} 个成交`;
       setStatus(
         "ready",
         snapshot.source_kind === "forward" ? "前向模拟候选已验证" : "最近一年历史候选已验证",
-        `${snapshot.review_queue_count} 条提醒 · QMT 板块先行 · 候选报告自身零订单/零成交 · ${virtualLedgerSummary} · 图表因果锁定`,
+        `${snapshot.review_queue_count} 条提醒 · QMT 板块先行 · 候选报告自身零订单/零成交 · 图表因果锁定`,
       );
       if (snapshot.source_kind === "live") {
+        const focusReviewCount = Number(
+          snapshot.focus_review_queue_count ?? snapshot.review_queue_count ?? 0,
+        );
+        const historicalNotificationCount = Number(
+          snapshot.historical_realtime_notification_count || 0,
+        );
+        const queueSummary = historicalNotificationCount > 0
+          ? `${focusReviewCount} 条当前重点提醒 · ${historicalNotificationCount} 条历史通知已归档`
+          : `${focusReviewCount} 条当前重点提醒`;
         setText("hr-sample", timeText(sample.market_data_as_of));
         setStatus(
           "ready",
           "盘中实时复核候选已验证并归档",
-          `${snapshot.review_queue_count} 条提醒 · 30m 战略/5m 短差/1m 定位 · 候选报告自身零订单/零成交 · ${virtualLedgerSummary}`,
+          `${queueSummary} · 30分钟环境/5分钟操作确认/结构证据/1分钟可选段差 · 候选报告自身零订单/零成交`,
         );
       }
       if (
@@ -1314,19 +1820,23 @@
         setStatus(
           ["not_due", "pending"].includes(deliveryStatus) ? "pending" : "warning",
           "候选报告可人工复核，但逐日前向交付尚未完成",
-          `${forwardOperations.session} · ${forwardReasonLabel(delivery.reason_code)} · REVIEW_REQUIRED / LIVE_DISABLED`,
+          `${forwardOperations.session} · ${forwardReasonLabel(delivery.reason_code)} · 必须人工复核 / 不自动下单`,
         );
       }
-      if (
-        ["live", "forward"].includes(snapshot.source_kind)
-        && snapshot.paper_observation_eligible !== true
-      ) {
-        const sourceSession = text(snapshot.paper_observation_source_session, "来源会话未知");
-        const currentSession = text(snapshot.paper_observation_current_market_session, "当前会话未证明");
+      if (snapshot.formal_review_available === false) {
+        const currentNotificationCount = Number(
+          snapshot.current_realtime_notification_count || 0,
+        );
+        const historicalNotificationCount = Number(
+          snapshot.historical_realtime_notification_count || 0,
+        );
+        const notificationSummary = historicalNotificationCount > 0
+          ? `${currentNotificationCount} 条当前通知 · ${historicalNotificationCount} 条历史通知已归档`
+          : `${currentNotificationCount} 条当前通知`;
         setStatus(
           "warning",
-          "归档可做因果复核，但不能创建新的虚拟意图",
-          `${paperReasonLabel(snapshot.paper_observation_reason)} · 来源 ${sourceSession} / 当前 ${currentSession} · REVIEW_REQUIRED / LIVE_DISABLED`,
+          "实时通知收件箱可用，程序候选暂未发布",
+          `${notificationSummary} · ${formalReviewUnavailableLabel(snapshot.formal_review_unavailable_reason)} · 不会创建订单`,
         );
       }
       const available = new Set(snapshot.source_options || []);
@@ -1339,13 +1849,12 @@
       replaceList(
         byId("hr-data-caveats"),
         [
-          ...(snapshot.data_caveats || []),
-          ...(paperCapabilities.fixed_one_lot_tactical_review_only === true
-            ? ["虚拟人工观察固定为 100 股（一手）；本页面不验证多手订单的部分成交行为。"]
-            : []),
-          ...((markout.reason_codes || []).map((value) => `筛选观察：${value}`)),
+          ...(snapshot.data_caveats || []).filter(
+            (value) => !/(?:\u8d26\u6237|\u73b0\u91d1|\u6301\u4ed3|\u4ed3\u4f4d|\u865a\u62df)/.test(text(value, "")),
+          ),
+          ...((markout.reason_codes || []).map((value) => `筛选观察：${paperReasonLabel(value)}`)),
           ...(((snapshot.forward_warmup_structure_lineage || {}).reason_codes || [])
-            .map((value) => `暖机谱系：${value}`)),
+            .map((value) => `暖机谱系：${paperReasonLabel(value)}`)),
         ],
         "本报告未提供额外数据限制说明。",
       );
@@ -1365,32 +1874,63 @@
       const top = document.createElement("span");
       top.className = "hr-candidate-card__top";
       const symbol = document.createElement("strong");
-      symbol.textContent = candidate.symbol;
+      symbol.textContent = `${candidate.market === "us" ? "美股" : "A股"} · ${candidate.symbol}`;
       const priority = document.createElement("b");
-      priority.textContent = `原始优先级 ${candidate.review_priority}`;
+      priority.textContent = candidate.realtime_notification === true
+        ? `通知复核排序分 ${candidate.review_priority}`
+        : `基础复核排序分 ${candidate.review_priority}`;
       top.append(symbol, priority);
 
       const alert = document.createElement("span");
       alert.className = "hr-candidate-card__alert";
-      alert.textContent = ALERT_LABELS[candidate.alert_type] || candidate.alert_type;
+      alert.textContent = ALERT_LABELS[candidate.alert_type] || "未收录的线索类型";
       const sector = document.createElement("span");
       sector.className = "hr-candidate-card__sector";
-      const sectorName = sectorNameDisclosure(candidate);
-      sector.textContent = `${sectorName.label} · ${timeText(candidate.review_available_at)}`;
+      const sectorName = candidate.realtime_notification === true
+        ? {
+          label: candidate.sector_name,
+          tag: candidate.market === "us" ? "美股无板块筛选" : "实时通知",
+          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`,
+          factIds: [],
+        }
+        : sectorNameDisclosure(candidate);
+      sector.textContent = candidate.realtime_notification === true
+        ? `${sectorName.label} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`
+        : `${sectorName.label} · ${timeText(candidate.review_available_at)}`;
       const tags = document.createElement("span");
       tags.className = "hr-candidate-card__tags";
-      const sectorSource = sectorSourceDisclosure(candidate);
-      const sectorRanking = sectorRankingDisclosure(candidate);
-      const higherTimeframe = marketSymbolHigherTimeframeDisclosure(candidate);
+      const sectorSource = candidate.realtime_notification === true
+        ? { tag: null, lines: [], factIds: [] }
+        : sectorSourceDisclosure(candidate);
+      const sectorRanking = candidate.realtime_notification === true
+        ? { tag: null, lines: [], factIds: [] }
+        : sectorRankingDisclosure(candidate);
+      const higherTimeframe = candidate.realtime_notification === true
+        ? { tag: null, lines: [], factIds: [] }
+        : marketSymbolHigherTimeframeDisclosure(candidate);
       const deepWarmup = deepWarmupDiagnosticPresentation(
         candidate.deep_warmup_diagnostic,
       );
+      if (candidate.realtime_notification === true) {
+        const tag = document.createElement("span");
+        tag.className = "is-reviewed";
+        const deliveryLabels = {
+          pending: "通知待投递",
+          delivered: "通知已送达",
+          simulated: "通知演练",
+          failed: "投递失败·站内已保留",
+          expired: "投递过期·站内已保留",
+        };
+        tag.textContent = deliveryLabels[candidate.notification_delivery_status]
+          || "实时通知待复核";
+        tags.append(tag);
+      }
       [
         REVIEW_LANE_LABELS[candidate.review_lane],
-        candidate.confidence,
-        candidate.market_risk_gate,
-        candidate.sector_risk_gate,
-        candidate.symbol_risk_gate,
+        mappedStateLabel(CONFIDENCE_LABELS, candidate.confidence, "置信度待判定"),
+        mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.market_risk_gate, "市场研究状态待判定"),
+        mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.sector_risk_gate, "板块研究状态待判定"),
+        mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.symbol_risk_gate, "个股研究状态待判定"),
         sectorName.tag,
         sectorRanking.tag,
         sectorSource.tag,
@@ -1419,19 +1959,14 @@
         tag.textContent = `已复核 ${candidate.feedback_history.length}`;
         tags.append(tag);
       }
-      const paperEvents = Array.isArray(candidate.paper_events) ? candidate.paper_events : [];
-      const latestPaper = paperEvents.length ? paperEvents[paperEvents.length - 1] : null;
-      if (latestPaper && latestPaper.payload) {
-        const tag = document.createElement("span");
-        tag.className = "is-reviewed";
-        const status = paperEventStatus(latestPaper);
-        tag.textContent = PAPER_TAG_LABELS[status] || `虚拟账本 ${status}`;
-        tags.append(tag);
-      }
       button.append(top, alert, sector, tags);
       button.addEventListener("click", () => {
         state.selectedCandidateId = candidate.candidate_id;
-        state.focusedFrequency = candidate.alert_type.startsWith("POSSIBLE_5M") ? "5m" : "30m";
+        state.focusedFrequency = candidate.realtime_notification === true
+          ? candidate.realtime_notification_event_kind === "ONE_MINUTE_SEGMENT_ENRICHMENT"
+            ? "1m"
+            : "5m"
+          : candidate.alert_type.startsWith("POSSIBLE_5M") ? "5m" : "30m";
         render();
         void ensureCandidateDetail(candidate);
       });
@@ -1463,10 +1998,24 @@
 
     function updateChartWorkspace(candidate) {
       if (!candidate) return;
-      const sectorName = sectorNameDisclosure(candidate);
-      const sectorSource = sectorSourceDisclosure(candidate);
-      const sectorRanking = sectorRankingDisclosure(candidate);
-      const higherTimeframe = marketSymbolHigherTimeframeDisclosure(candidate);
+      const realtime = candidate.realtime_notification === true;
+      const sectorName = realtime
+        ? {
+          label: candidate.sector_name,
+          tag: candidate.market === "us" ? "美股无板块筛选" : "实时通知",
+          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`,
+          factIds: [],
+        }
+        : sectorNameDisclosure(candidate);
+      const sectorSource = realtime
+        ? { tag: null, lines: [], factIds: [] }
+        : sectorSourceDisclosure(candidate);
+      const sectorRanking = realtime
+        ? { tag: "实时通知收件箱", lines: ["该记录来自实时买卖点通知，不参与历史筛选排序。"], factIds: [] }
+        : sectorRankingDisclosure(candidate);
+      const higherTimeframe = realtime
+        ? { tag: "待人工核对", lines: ["实时通知保留发生时的结构身份；日线与30分钟环境需在当前图表人工核对。"], factIds: [] }
+        : marketSymbolHigherTimeframeDisclosure(candidate);
       chartWorkspace.dataset.focusedFrequency = state.focusedFrequency;
       chartWorkspace.dataset.signalSide = candidate.alert_type.includes("SELL") || candidate.alert_type.includes("EXIT") ? "sell" : "buy";
       const urls = candidate.chart_urls || {};
@@ -1489,24 +2038,34 @@
 
       setNodeText("[data-selected-code]", candidate.symbol);
       setNodeText("[data-selected-name]", sectorName.label);
-      setNodeText("[data-selected-point]", ALERT_LABELS[candidate.alert_type] || candidate.alert_type);
-      setNodeText("[data-selected-stage]", "待人工识别");
-      setNodeText("[data-selected-tower]", "30m / 5m / 1m 因果复核");
+      setNodeText("[data-selected-point]", ALERT_LABELS[candidate.alert_type] || "未收录的线索类型");
+      setNodeText("[data-selected-stage]", realtime ? "实时通知待人工复核" : "待人工识别");
+      setNodeText("[data-selected-tower]", realtime ? "实时图表 · 非历史因果锁" : "30m / 5m / 1m 因果复核");
       setNodeText("[data-selected-stop]", candidate.structural_invalidation_price);
       setNodeText("[data-decision-invalidation]", candidate.structural_invalidation_price);
+      setText("hr-position-recommendation", positionRecommendationLabel(candidate));
       setNodeText(
         "[data-selected-risk]",
-        `${candidate.market_risk_gate} / ${candidate.sector_risk_gate} / ${candidate.symbol_risk_gate} · ${sectorRanking.tag}${sectorSource.tag ? ` · ${sectorSource.tag}` : ""} · ${higherTimeframe.tag}`,
+        `${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.market_risk_gate, "市场研究状态待判定")} / ${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.sector_risk_gate, "板块研究状态待判定")} / ${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.symbol_risk_gate, "个股研究状态待判定")} · ${sectorRanking.tag}${sectorSource.tag ? ` · ${sectorSource.tag}` : ""} · ${higherTimeframe.tag}`,
       );
-      setNodeText("[data-decision-title]", "程序仅定位，等待人工确认");
-      setNodeText("[data-decision-detail]", `图表已锁定在 ${timeText(candidate.review_available_at)}，不会产生订单。`);
+      setNodeText("[data-decision-title]", realtime ? "实时通知已进入人工复核" : "程序仅定位，等待人工确认");
+      setNodeText(
+        "[data-decision-detail]",
+        realtime
+          ? `结构达到操作确认于 ${fullDateTimeText(candidate.realtime_notification_confirmed_time)}；${realtimeNotificationSetupLockLabel(candidate)}。信号可用于 ${fullDateTimeText(candidate.realtime_notification_available_time)}，监听发现于 ${fullDateTimeText(candidate.realtime_notification_detected_at)}，${realtimeNotificationTimeLabel(candidate)}为 ${fullDateTimeText(candidate.review_available_at)}；通知记录价 ${text(candidate.current_price, "暂不可用")}。这里打开当前实时图表，不会产生订单。`
+          : `图表已锁定在 ${timeText(candidate.review_available_at)}，不会产生订单。`,
+      );
       const decision = chartWorkspace.querySelector("[data-decision-card]");
       if (decision) decision.dataset.tone = "waiting";
 
-      const periods = {
-        "30m": ["人工判定", "确认中枢、走势类型及战略买卖点", `可见至 ${timeText(candidate.review_available_at)}`],
-        "5m": ["辅助定位", "判断次级别离开、回抽与短差上下文", `失效 ${text(candidate.structural_invalidation_price)}`],
-        "1m": ["精确定位", "只用已完成 1m K 线寻找细部位置", "禁止使用 tick 与未来 K 线"],
+      const periods = realtime ? {
+        "30m": ["人工核对", `发生时大级别方向 ${text(candidate.big_direction, "未知")}`, "当前图表会继续更新"],
+        "5m": [candidate.realtime_notification_setup_lock_state === "locked" ? "操作确认·末端已封存" : "操作确认", `通知来源 ${text(candidate.realtime_notification_source_frequency)}；${realtimeNotificationSetupLockLabel(candidate)}`, `通知记录价 ${text(candidate.current_price, "暂不可用")}`],
+        "1m": realtimeNotificationSegmentPeriod(candidate),
+      } : {
+        "30m": ["环境核对", "确认走势方向与风险环境", `可见至 ${timeText(candidate.review_available_at)}`],
+        "5m": ["操作买卖级别", "核对一、二、三类买卖点、结构证据与失效边界", `失效 ${text(candidate.structural_invalidation_price)}`],
+        "1m": ["段差定位", "只用已完成 1分钟K线寻找可选段差位置", "不得反向否定5分钟操作确认"],
       };
       Object.entries(periods).forEach(([frequency, values]) => {
         const node = chartWorkspace.querySelector(`[data-period-node="${frequency}"]`);
@@ -1525,16 +2084,35 @@
       replaceList(chartWorkspace.querySelector('[data-evidence-group="established"]'), [
         sectorName.line,
         ...sectorRanking.lines,
-        `候选报告与参数身份已验证：${text(candidate.candidate_id)}`,
-        `参考价：${text(candidate.reference_price)}`,
+        realtime
+          ? `实时通知身份已保留：${text(candidate.candidate_id)}`
+          : `候选报告与参数身份已验证：${text(candidate.candidate_id)}`,
+        realtime
+          ? `通知记录价：${text(candidate.current_price, "暂不可用")}`
+          : `结构锚点价：${text(candidate.reference_price)}`,
+        ...(realtime ? [
+          `结构锚点：${fullDateTimeText(candidate.realtime_notification_anchor_time)}`,
+          `操作确认：${fullDateTimeText(candidate.realtime_notification_confirmed_time)}`,
+          `5分钟证据状态：${realtimeNotificationSetupLockLabel(candidate)}`,
+          `信号可用：${fullDateTimeText(candidate.realtime_notification_available_time)}`,
+          `监听发现：${fullDateTimeText(candidate.realtime_notification_detected_at)}`,
+          `${realtimeNotificationTimeLabel(candidate)}：${fullDateTimeText(candidate.review_available_at)}`,
+          `递归层级：L${candidate.realtime_notification_recursive_level}`,
+        ] : []),
       ], "没有程序成立证据");
       replaceList(chartWorkspace.querySelector('[data-evidence-group="missing"]'), checklist, "无待人工确认项");
-      replaceList(chartWorkspace.querySelector('[data-evidence-group="blocking"]'), warningLabels, "没有程序硬阻断");
-      replaceList(chartWorkspace.querySelector('[data-evidence-group="next"]'), ["完成人工识别表单", "必要时进入模拟观察，禁止直接交易"], "等待复核");
+      replaceList(chartWorkspace.querySelector('[data-evidence-group="blocking"]'), warningLabels, "没有限制人工复核的关键条件");
+      replaceList(
+        chartWorkspace.querySelector('[data-evidence-group="next"]'),
+        realtime
+          ? [positionRecommendationLabel(candidate), "在当前多周期图中核对结构仍然有效", "只在其他交易软件手工决定，不在本系统下单"]
+          : ["完成人工识别表单", "继续观察并记录结构变化，禁止直接交易"],
+        "等待复核",
+      );
       replaceList(chartWorkspace.querySelector('[data-evidence-group="risk"]'), [
-        `市场风险门：${candidate.market_risk_gate}`,
-        `板块风险门：${candidate.sector_risk_gate}`,
-        `个股风险门：${candidate.symbol_risk_gate}`,
+        `市场研究状态：${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.market_risk_gate)}`,
+        `板块研究状态：${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.sector_risk_gate)}`,
+        `个股研究状态：${mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.symbol_risk_gate)}`,
         ...higherTimeframe.lines,
         ...sectorSource.lines,
         `结构失效价：${text(candidate.structural_invalidation_price)}`,
@@ -1574,7 +2152,7 @@
         const article = document.createElement("article");
         article.className = "hr-feedback-entry";
         const heading = document.createElement("strong");
-        heading.textContent = `${timeText(row.reviewed_at)} · ${FEEDBACK_LABELS[row.disposition] || row.disposition}`;
+        heading.textContent = `${timeText(row.reviewed_at)} · ${FEEDBACK_LABELS[row.disposition] || "未收录的复核结论"}`;
         const decisions = document.createElement("p");
         const primary = [
           row.center_judgement,
@@ -1582,10 +2160,10 @@
           row.level_judgement,
           row.point_judgement,
           row.decomposition_judgement || "UNCERTAIN",
-        ].map((value) => FEEDBACK_LABELS[value] || value);
+        ].map((value) => FEEDBACK_LABELS[value] || "未收录的复核判断");
         const binaryLabel = (value) => ({
           CONFIRMED: "确认", REJECTED: "否决", UNCERTAIN: "不确定",
-        }[value || "UNCERTAIN"] || value || "不确定");
+        }[value || "UNCERTAIN"] || "未收录的判断");
         decisions.textContent = [
           ...primary,
           `扩展 ${binaryLabel(row.center_expansion_judgement)}`,
@@ -1625,7 +2203,12 @@
       };
       Object.entries(latest || defaults).forEach(([name, value]) => {
         const control = form.elements.namedItem(name);
-        if (control && Object.prototype.hasOwnProperty.call(defaults, name)) control.value = value || defaults[name];
+        const displayValue = name === "disposition" && value === "PAPER_OBSERVE"
+          ? "WATCH"
+          : value;
+        if (control && Object.prototype.hasOwnProperty.call(defaults, name)) {
+          control.value = displayValue || defaults[name];
+        }
       });
       if (!latest) {
         Object.entries(defaults).forEach(([name, value]) => {
@@ -1640,7 +2223,8 @@
       const candidate = currentCandidate();
       const form = byId("hr-feedback-form");
       const fieldset = byId("hr-feedback-fields");
-      if (fieldset) fieldset.disabled = !candidate || state.submitting;
+      const realtime = candidate && candidate.realtime_notification === true;
+      if (fieldset) fieldset.disabled = !candidate || realtime || state.submitting;
       if (!candidate) {
         setText("hr-selected-sector", "请选择候选");
         setText("hr-selected-symbol", "—");
@@ -1651,6 +2235,9 @@
         replaceList(byId("hr-deep-warmup"), [], "请选择候选");
         setText("hr-paper-path-status", "请选择候选");
         replaceList(byId("hr-paper-path-reasons"), [], "请选择候选");
+        setText("hr-chart-time-mode", "因果图表锁定");
+        setText("hr-chart-time-note", "锁定后不显示未来 K 线；切换候选会重建独立结构快照。");
+        setText("hr-reference-price-label", "结构锚点价（非成交报价）");
         renderFeedbackHistory(null);
         return;
       }
@@ -1661,28 +2248,71 @@
       ) {
         void ensureCandidateDetail(candidate);
       }
-      const sectorName = sectorNameDisclosure(candidate);
-      setText("hr-selected-sector", `${sectorName.label} · ${candidate.confidence}`);
+      const sectorName = realtime
+        ? {
+          label: candidate.sector_name,
+          tag: candidate.market === "us" ? "美股无板块筛选" : "实时通知",
+          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`,
+          factIds: [],
+        }
+        : sectorNameDisclosure(candidate);
+      setText(
+        "hr-selected-sector",
+        `${sectorName.label} · ${mappedStateLabel(CONFIDENCE_LABELS, candidate.confidence, "置信度待判定")}`,
+      );
       setText("hr-selected-symbol", candidate.symbol);
-      setText("hr-selected-alert", ALERT_LABELS[candidate.alert_type] || candidate.alert_type);
+      setText("hr-selected-alert", ALERT_LABELS[candidate.alert_type] || "未收录的线索类型");
       setText(
         "hr-selected-priority",
-        `${REVIEW_LANE_LABELS[candidate.review_lane] || "复核队列"} · 原始优先级 ${candidate.review_priority}`,
+        `${REVIEW_LANE_LABELS[candidate.review_lane] || "复核队列"} · 复核排序分 ${candidate.review_priority}`,
       );
-      setText("hr-review-at", timeText(candidate.review_available_at));
-      setText("hr-reference-price", candidate.reference_price);
+      setText(
+        "hr-review-at",
+        realtime
+          ? fullDateTimeText(candidate.review_available_at)
+          : timeText(candidate.review_available_at),
+      );
+      setText("hr-chart-time-mode", realtime ? realtimeNotificationTimeLabel(candidate) : "因果图表锁定");
+      setText(
+        "hr-chart-time-note",
+        realtime
+          ? "结构确认、信号可用、监听发现和投递时间已分别留存；下方展示当前实时图表，不冒充历史因果锁。"
+          : "锁定后不显示未来 K 线；切换候选会重建独立结构快照。",
+      );
+      setText(
+        "hr-reference-price-label",
+        realtime ? "通知记录价（当时最新价）" : "结构锚点价（非成交报价）",
+      );
+      setText(
+        "hr-reference-price",
+        realtime ? candidate.current_price : candidate.reference_price,
+      );
       setText("hr-entry-price-cap", candidate.entry_price_cap);
       setText(
         "hr-entry-confirmed-at",
-        timeText(candidate.entry_confirmation_bar_closed_at),
+        realtime
+          ? fullDateTimeText(candidate.entry_confirmation_bar_closed_at)
+          : timeText(candidate.entry_confirmation_bar_closed_at),
       );
       setText("hr-entry-valid-until", timeText(candidate.entry_valid_until));
-      setText("hr-entry-attestation", candidate.entry_boundary_attestation);
+      setText(
+        "hr-entry-attestation",
+        mappedStateLabel(
+          ENTRY_BOUNDARY_ATTESTATION_LABELS,
+          candidate.entry_boundary_attestation,
+          "边界证明尚未提供",
+        ),
+      );
       setText("hr-invalidation-price", candidate.structural_invalidation_price);
-      setText("hr-market-risk", candidate.market_risk_gate);
-      setText("hr-sector-risk", candidate.sector_risk_gate);
-      setText("hr-symbol-risk", candidate.symbol_risk_gate);
-      replaceList(byId("hr-checklist"), (candidate.review_checklist || []).map((code) => CHECKLIST_LABELS[code] || code), "无清单");
+      setText("hr-position-recommendation", positionRecommendationLabel(candidate));
+      setText("hr-market-risk", mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.market_risk_gate));
+      setText("hr-sector-risk", mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.sector_risk_gate));
+      setText("hr-symbol-risk", mappedStateLabel(HIGHER_TIMEFRAME_GATE_LABELS, candidate.symbol_risk_gate));
+      replaceList(
+        byId("hr-checklist"),
+        (candidate.review_checklist || []).map((code) => CHECKLIST_LABELS[code] || "未收录的人工复核项"),
+        "无清单",
+      );
       replaceList(
         byId("hr-warnings"),
         (candidate.warning_codes || []).map(paperReasonLabel),
@@ -1693,37 +2323,22 @@
       );
       setText("hr-deep-warmup-status", deepWarmup.headline);
       replaceList(byId("hr-deep-warmup"), deepWarmup.lines, "尚无诊断证据");
-      applyLatestFeedback(candidate);
+      if (!realtime) applyLatestFeedback(candidate);
       renderFeedbackHistory(candidate);
-      const paperDecision = paperPathDecision(state.snapshot, candidate);
-      setText("hr-paper-path-status", paperDecision.headline);
-      replaceList(byId("hr-paper-path-reasons"), paperDecision.reasons, "未提供虚拟路径原因");
-      const paperEligible = candidate.paper_observation_eligible === true;
-      const disposition = form && form.elements ? form.elements.disposition : null;
-      const paperOption = disposition
-        ? disposition.querySelector('option[value="PAPER_OBSERVE"]')
-        : null;
-      // PAPER_OBSERVE is a human judgement, not an order authorization. It
-      // remains recordable while the scheduler/Capture gate is red; the
-      // backend hashes the feedback but withholds all virtual-intent changes.
-      if (paperOption) paperOption.disabled = false;
-      setText(
-        "hr-feedback-status",
-        paperEligible
-          ? (candidate.latest_feedback ? "已载入最近一次复核，可修改后追加新记录。" : "未复核；确认后可进入虚拟观察。")
-          : `当前候选只允许记录人工识别结果，不会创建新虚拟意图：${paperReasonLabel(candidate.paper_observation_reason || state.snapshot.paper_observation_reason)}。`,
-      );
-      if (candidate.latest_feedback && paperEligible) {
-        setText("hr-feedback-status", `已载入最近复核；${paperDecision.headline}；LIVE_DISABLED。`);
-      }
-      if (candidate.paper_reconciliation_pending === true) {
+      if (realtime) {
         setText(
           "hr-feedback-status",
-          candidate.paper_reconciliation_eligible === true
-            ? "此前的模拟观察判断已留痕，运行证据现已就绪；保持表单不变再次保存，将以同一请求 ID 幂等补建虚拟意图。LIVE_DISABLED。"
-            : `模拟观察判断已留痕，正在等待运行证据恢复；恢复后保持表单不变再次保存即可幂等补建虚拟意图：${paperReasonLabel(candidate.paper_observation_reason || state.snapshot.paper_observation_reason)}。`,
+          "实时买卖点通知已进入人工复核队列；当前为只读复核，不能保存反馈或创建委托。",
         );
+        updateChartWorkspace(candidate);
+        return;
       }
+      setText(
+        "hr-feedback-status",
+        candidate.latest_feedback
+          ? "已载入最近一次复核，可修改后追加新记录。"
+          : "未复核；保存后只记录结构判断，不创建委托。",
+      );
       updateChartWorkspace(candidate);
     }
 
@@ -1734,23 +2349,33 @@
       renderSelected();
     }
 
+    function schedulePoll() {
+      window.clearTimeout(state.pollTimer);
+      state.pollTimer = window.setTimeout(() => {
+        if (document.visibilityState === "visible" && state.mode === "human-review") {
+          void requestSnapshot();
+        } else {
+          schedulePoll();
+        }
+      }, POLL_INTERVAL_MS);
+    }
+
     async function requestSnapshot() {
       if (state.loading) return;
       state.loading = true;
       const refresh = byId("hr-refresh");
       if (refresh) refresh.disabled = true;
-      setStatus("loading", "正在验证人工复核报告", "核对候选报告自身零订单/零成交边界、QMT 板块快照与反馈链；虚拟账本另行验证");
+      setStatus("loading", "正在验证人工复核报告", "核对候选报告自身零订单/零成交边界、QMT 板块快照与反馈链");
       try {
         const url = new URL(root.dataset.humanReviewEndpoint, window.location.origin);
         url.searchParams.set("source", state.source);
-        const response = await fetch(`${url.pathname}${url.search}`, {
+        const { response, payload } = await requestJson(`${url.pathname}${url.search}`, {
           cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" },
         });
-        const payload = await response.json();
         if (!response.ok || !payload || payload.ok !== true || payload.data.schema !== root.dataset.humanReviewSchema) {
           throw new Error((payload && payload.code) || "human_review_snapshot_failed");
         }
-        state.snapshot = payload.data;
+        state.snapshot = mergeRealtimeNotificationQueue(payload.data);
         render();
       } catch (error) {
         setStatus("error", "人工复核队列暂不可用", text(error && error.message, "报告未通过安全验证"));
@@ -1758,6 +2383,7 @@
       } finally {
         state.loading = false;
         if (refresh) refresh.disabled = false;
+        schedulePoll();
       }
     }
 
@@ -1767,6 +2393,13 @@
       const candidate = currentCandidate();
       const form = event.currentTarget;
       if (!candidate || !form.reportValidity()) return;
+      if (candidate.realtime_notification === true) {
+        setText(
+          "hr-feedback-status",
+          "实时通知是只读复核记录，不能写入正式候选反馈或创建委托。",
+        );
+        return;
+      }
       state.submitting = true;
       const fieldset = byId("hr-feedback-fields");
       if (fieldset) fieldset.disabled = true;
@@ -1785,7 +2418,7 @@
         state.pendingFeedbackRequestId = retryRequestId || `human-review-${unique}`;
       }
       try {
-        const response = await fetch(root.dataset.humanFeedbackEndpoint, {
+        const { response, payload } = await requestJson(root.dataset.humanFeedbackEndpoint, {
           method: "POST",
           cache: "no-store",
           credentials: "same-origin",
@@ -1797,32 +2430,23 @@
             request_id: state.pendingFeedbackRequestId,
           }),
         });
-        const payload = await response.json();
         if (!response.ok || !payload || payload.ok !== true) throw new Error((payload && payload.code) || "feedback_write_failed");
         state.pendingFeedbackRequestId = null;
-        setText("hr-feedback-status", "复核记录已保存；LIVE_DISABLED，未产生任何订单。正在刷新反馈链…");
+        setText("hr-feedback-status", "复核记录已保存；不自动下单，未产生任何订单。正在刷新反馈链…");
         await requestSnapshot();
-        const superseded = payload.data && Array.isArray(payload.data.superseded_paper_intents)
-          ? payload.data.superseded_paper_intents
-          : [];
-        const refreshedCandidate = currentCandidate();
-        const paperDecision = paperPathDecision(state.snapshot, refreshedCandidate);
-        const cancellationStatus = superseded.length
-          ? `；已追加撤销 ${superseded.length} 个先前待成交虚拟意图`
-          : "";
-        const feedbackHeadline = refreshedCandidate
-          && refreshedCandidate.paper_reconciliation_pending === true
-          ? "人工判断已留痕，虚拟意图尚未建立；运行证据恢复后保持表单不变再次保存即可幂等补建"
-          : paperDecision.headline;
         setText(
           "hr-feedback-status",
-          `复核已保存；${feedbackHeadline}${cancellationStatus}；LIVE_DISABLED，未产生真实订单或撤单。`,
+          "复核已保存；只记录结构判断，不自动下单，未产生任何委托或撤销操作。",
         );
       } catch (error) {
         setText("hr-feedback-status", `保存失败：${text(error && error.message, "请重试")}`);
       } finally {
         state.submitting = false;
-        if (fieldset) fieldset.disabled = !currentCandidate();
+        const activeCandidate = currentCandidate();
+        if (fieldset) {
+          fieldset.disabled = !activeCandidate
+            || activeCandidate.realtime_notification === true;
+        }
       }
     }
 
@@ -1837,8 +2461,14 @@
     byId("hr-search").addEventListener("input", (event) => { state.query = event.target.value; render(); });
     byId("hr-lane-filter").addEventListener("change", (event) => { state.reviewLane = event.target.value; render(); });
     byId("hr-alert-filter").addEventListener("change", (event) => { state.alertType = event.target.value; render(); });
+    byId("hr-candidate-kind-filter").addEventListener("change", (event) => { state.candidateKind = event.target.value; render(); });
     byId("hr-review-filter").addEventListener("change", (event) => { state.reviewState = event.target.value; render(); });
     byId("hr-feedback-form").addEventListener("submit", submitFeedback);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && state.mode === "human-review") {
+        void requestSnapshot();
+      }
+    });
     chartWorkspace.querySelectorAll("[data-focus-frequency], [data-period-node]").forEach((button) => {
       button.addEventListener("click", () => {
         if (state.mode !== "human-review") return;
@@ -1857,10 +2487,22 @@
       sectorSourceDisclosure,
       marketSymbolHigherTimeframeDisclosure,
       mappingSupplyDisclosureLines,
+      mappedStateLabel,
       warmupConvergenceDisclosureLine,
       deepWarmupDiagnosticPresentation,
       deferredEvidenceDisclosure,
       paperPathDecision,
+      paperReasonLabel,
+      positionRecommendationLabel,
+      realtimeNotificationCandidate,
+      realtimeNotificationSegmentPeriod,
+      realtimeNotificationSetupLockLabel,
+      realtimeNotificationTimeLabel,
+      fullDateTimeText,
+      mergeRealtimeNotificationQueue,
+      sortCandidatesByReviewPriority,
+      reviewAlertVisibleForSource,
+      formalReviewUnavailableLabel,
       text,
       timeText,
     };

@@ -15,6 +15,76 @@ from chanlun.decision_support.trading_system.live_review_materialization import 
 import tools.validate_trading_screening_review as subject
 
 
+def test_prune_stale_web_bundle_artifacts_preserves_current_and_unrelated(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / ".web"
+    artifact_root.mkdir()
+    current_index = artifact_root / f"{'a' * 64}.index.json"
+    current_detail = artifact_root / f"{'a' * 64}.details.jsonl"
+    stale_index = artifact_root / f"{'b' * 64}.index.json"
+    stale_detail = artifact_root / f"{'b' * 64}.details.jsonl"
+    unrelated = artifact_root / "manual-notes.json"
+    for path, content in (
+        (current_index, b"current index"),
+        (current_detail, b"current detail"),
+        (stale_index, b"stale index"),
+        (stale_detail, b"stale detail"),
+        (unrelated, b"keep unrelated"),
+    ):
+        path.write_bytes(content)
+
+    removed_count, removed_bytes = subject._prune_stale_web_bundle_artifacts(
+        artifact_root=artifact_root,
+        keep_paths=(current_index, current_detail),
+    )
+
+    assert removed_count == 2
+    assert removed_bytes == len(b"stale index") + len(b"stale detail")
+    assert current_index.is_file()
+    assert current_detail.is_file()
+    assert unrelated.is_file()
+    assert not stale_index.exists()
+    assert not stale_detail.exists()
+
+
+def test_validator_reuses_one_sealed_snapshot_validation_for_materialization(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    snapshot_sha256 = "sha256:" + "a" * 64
+    source = tmp_path / "screening.json"
+    source.write_text(
+        json.dumps({"snapshot_content_sha256": snapshot_sha256}),
+        encoding="utf-8",
+    )
+    validation = object()
+    validation_calls: list[object] = []
+    materialization_calls: list[object] = []
+
+    def validate(payload):
+        validation_calls.append(payload)
+        return validation
+
+    def materialize(**kwargs):
+        materialization_calls.append(kwargs["validated_snapshot"])
+        return {}
+
+    monkeypatch.setattr(subject, "_validated_live_review_snapshot", validate)
+    monkeypatch.setattr(subject, "_materialize_human_review_report", materialize)
+
+    result = subject.validate_document(
+        path=source,
+        expected_sha256=snapshot_sha256,
+        archive_root=tmp_path / "archive",
+        repository_root=tmp_path,
+    )
+
+    assert result["ready"] is True
+    assert len(validation_calls) == 1
+    assert materialization_calls == [validation]
+
+
 def test_materializer_receipt_binds_nested_decision_source_identity(
     tmp_path: Path,
     monkeypatch,

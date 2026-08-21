@@ -31,8 +31,12 @@ frequency_maps = {
     "120m": "120",
     "3h": "180",
     "4h": "240",
+    "6h": "360",
+    "8h": "480",
+    "12h": "720",
     "d": "1D",
     "2d": "2D",
+    "3d": "3D",
     "w": "1W",
     "m": "1M",
     "q": "3M",
@@ -74,8 +78,14 @@ _MARKET_FREQUENCY_FALLBACKS = {
     "futures": _STOCK_FUTURES_FREQUENCY_FALLBACK,
     "ny_futures": _STOCK_FUTURES_FREQUENCY_FALLBACK,
     "fx": (*_STOCK_FUTURES_FREQUENCY_FALLBACK, "q"),
-    "currency": ("1m", "5m", "15m", "30m", "60m", "3h", "4h", "d", "w"),
-    "currency_spot": ("1m", "5m", "15m", "30m", "60m", "4h", "d", "w"),
+    "currency": (
+        "1m", "2m", "3m", "5m", "10m", "15m", "30m", "60m", "120m",
+        "3h", "4h", "6h", "8h", "12h", "d", "3d", "w", "m",
+    ),
+    "currency_spot": (
+        "1m", "2m", "3m", "5m", "10m", "15m", "30m", "60m", "120m",
+        "3h", "4h", "6h", "8h", "12h", "d", "3d", "w", "m",
+    ),
 }
 
 

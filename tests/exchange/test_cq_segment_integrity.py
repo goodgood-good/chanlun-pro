@@ -233,6 +233,6 @@ def test_longbridge_repairs_only_invalid_ohlc_envelope_and_records_audit(
     assert frame.iloc[0]["close"] == 311.628
     assert frame.iloc[0]["high"] == 312.059
     assert frame.iloc[0]["low"] == 308.053
-    assert frame.attrs["ohlc_geometry_normalization"] == "ohlc-envelope-v1"
+    assert frame.attrs["ohlc_geometry_normalization"] == "ohlc-envelope"
     assert frame.attrs["ohlc_geometry_repair_count"] == 1
     assert frame.attrs["ohlc_geometry_max_adjustment"] == pytest.approx(0.049)

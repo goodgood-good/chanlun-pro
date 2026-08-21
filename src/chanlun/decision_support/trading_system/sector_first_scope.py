@@ -17,6 +17,9 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     PITMetadataIndex,
     PITMetadataSnapshot,
 )
+from chanlun.decision_support.trading_system.signal_alignment import (
+    UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
+)
 
 
 SECTOR_FIRST_SCOPE_SCHEMA = "chanlun-sector-first-scope"
@@ -126,7 +129,7 @@ class SectorFirstScope:
                 "POINT_IN_TIME_SECTOR_MEMBERS",
                 "INDIVIDUAL_THREE_PROGRAM",
                 "MARKET_SECTOR_SYMBOL_HIGHER_TIMEFRAME_RISK",
-                "PHYSICAL_5M_SETUP_1M_TRIGGER_UNIFIED_POINT_CLASSES",
+                UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
                 "SHARED_PORTFOLIO_AND_EXECUTION_CORE",
             ),
         }

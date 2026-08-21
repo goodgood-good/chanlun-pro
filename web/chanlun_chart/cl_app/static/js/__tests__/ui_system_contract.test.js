@@ -95,6 +95,28 @@ test('login, research and workbench surfaces share product identity without losi
   assert.match(audit, /历史研究 \/ 审计成果/);
 });
 
+test('visible workbench copy uses the user-facing anti-repaint review term', () => {
+  for (const name of ['index.html', 'early_screening.html', 'research_audit.html']) {
+    const source = template(name);
+    assert.doesNotMatch(source, /审计锁/, `${name} exposes obsolete internal lock wording`);
+  }
+  assert.match(template('index.html'), /末端结构封存状态/);
+  assert.match(template('research_audit.html'), /末端结构封存状态/);
+});
+
+test('decision-support pages never imply that a real account is connected', () => {
+  assert.doesNotMatch(
+    template('early_screening.html'),
+    /账户|现金|持仓|仓位|组合热度/,
+    'early screening exposes account-dependent wording',
+  );
+  assert.doesNotMatch(
+    template('research_audit.html'),
+    /账户/,
+    'research audit implies account integration instead of historical replay',
+  );
+});
+
 test('long configuration choices wrap inside their grid card without horizontal overflow', () => {
   const css = fs.readFileSync(cssPath, 'utf8');
 

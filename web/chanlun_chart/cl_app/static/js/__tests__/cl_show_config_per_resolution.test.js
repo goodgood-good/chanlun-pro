@@ -151,6 +151,7 @@ test('current schema retains only current fields and period levels', () => {
     ...api.DEFAULT,
     fx: false,
     center_L0: false,
+    point_L1: false,
     removed_switch: true,
   }, '5');
 
@@ -158,7 +159,11 @@ test('current schema retains only current fields and period levels', () => {
   assert.equal(config.center_L0, false);
   assert.equal(config.center_L1, true);
   assert.equal(config.center_L2, true);
+  assert.equal(config.point_L0, true);
+  assert.equal(config.point_L1, false);
+  assert.equal(config.point_L2, true);
   assert.equal(Object.hasOwn(config, 'center_L3'), false);
+  assert.equal(Object.hasOwn(config, 'point_L3'), false);
   assert.equal(Object.hasOwn(config, 'removed_switch'), false);
 });
 
@@ -185,6 +190,7 @@ test('current center trend point and divergence gates remain independent', () =>
     trend_L1: false,
     point_all: true,
     point_1buy: false,
+    point_L1: false,
     divergence_all: true,
     divergence_consolidation_L1: false,
     divergence_trend_L1: true,
@@ -192,7 +198,15 @@ test('current center trend point and divergence gates remain independent', () =>
 
   assert.equal(api.enabled(config, { render_kind: 'formal_center', structural_level: 1 }), false);
   assert.equal(api.enabled(config, { render_kind: 'strict_trend', structural_level: 1 }), false);
-  assert.equal(api.enabled(config, { render_kind: 'point_confirmed', point_type: '1buy' }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'point_confirmed', structural_level: 0, point_type: '1buy',
+  }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'point_confirmed', structural_level: 1, point_type: '2buy',
+  }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'point_approaching', structural_level: 0, point_type: '2buy',
+  }), true);
   assert.equal(api.enabled(config, {
     render_kind: 'strict_divergence', structural_level: 1, kind: 'consolidation',
   }), false);

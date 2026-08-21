@@ -36,6 +36,8 @@ def _chart_data(times: list[int]) -> dict[str, object]:
 
 def test_calendar_coordinates_use_utc_period_anchors() -> None:
     assert chart_bar_time_coordinate(_ts(2026, 7, 22, 7), "d") == _ts(2026, 7, 22)
+    assert chart_bar_time_coordinate(_ts(2026, 7, 22, 7), "3D") == _ts(2026, 7, 22)
+    assert chart_bar_time_coordinate(_ts(2026, 7, 22, 7), "3d") == _ts(2026, 7, 22)
     assert chart_bar_time_coordinate(_ts(2026, 7, 19, 7), "w") == _ts(2026, 7, 13)
     assert chart_bar_time_coordinate(_ts(2026, 7, 31, 7), "m") == _ts(2026, 7, 1)
     assert chart_bar_time_coordinate(_ts(2026, 9, 30, 7), "q") == _ts(2026, 7, 1)

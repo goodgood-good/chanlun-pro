@@ -35,11 +35,22 @@ class _Gateway(Protocol):
 
     def realtime_ticks(self, codes: tuple[str, ...]) -> object: ...
 
+    def current_session_instrument_statuses(
+        self,
+        codes: tuple[str, ...],
+        *,
+        session: object,
+    ) -> object: ...
+
+    def display_quote_snapshot(self, codes: tuple[str, ...]) -> object: ...
+
     def prepare_local_history(self, **kwargs: object) -> object: ...
 
     def structure_bundle(self, code: str, **kwargs: object) -> object: ...
 
     def trading_session_evidence(self, **kwargs: object) -> object: ...
+
+    def runtime_health_snapshot(self) -> Mapping[str, object]: ...
 
 
 def _probe_a_share_market_data() -> dict[str, object]:
@@ -184,6 +195,29 @@ def dispatch_gateway_request(
         if type(codes) is not tuple or any(type(code) is not str for code in codes):
             raise ValueError("realtime_ticks requires an exact string tuple")
         return gateway.realtime_ticks(codes)
+    if method == "current_session_instrument_statuses":
+        if set(kwargs) != {"codes", "session"}:
+            raise ValueError(
+                "current_session_instrument_statuses requires codes and session"
+            )
+        codes = kwargs.get("codes")
+        if type(codes) is not tuple or any(type(code) is not str for code in codes):
+            raise ValueError(
+                "current_session_instrument_statuses requires an exact string tuple"
+            )
+        return gateway.current_session_instrument_statuses(
+            codes,
+            session=kwargs.get("session"),
+        )
+    if method == "display_quote_snapshot":
+        if set(kwargs) != {"codes"}:
+            raise ValueError("display_quote_snapshot requires exactly codes")
+        codes = kwargs.get("codes")
+        if type(codes) is not tuple or any(type(code) is not str for code in codes):
+            raise ValueError(
+                "display_quote_snapshot requires an exact string tuple"
+            )
+        return gateway.display_quote_snapshot(codes)
     if method == "prepare_local_history":
         if set(kwargs) != {"frequency_requests", "as_of"}:
             raise ValueError(
@@ -200,6 +234,9 @@ def dispatch_gateway_request(
         code = kwargs.get("code")
         if not isinstance(code, str):
             raise ValueError("structure_bundle requires code")
+        instrument_type = kwargs.get("instrument_type")
+        if instrument_type not in {"stock_cn", "etf_cn"}:
+            raise ValueError("structure_bundle requires an exact tradable instrument type")
         sector_members = kwargs.get("sector_members")
         if type(sector_members) is not tuple or any(
             type(value) is not str for value in sector_members
@@ -212,14 +249,26 @@ def dispatch_gateway_request(
             raise ValueError(
                 "structure_bundle requires exact local_history_frequencies"
             )
+        incremental_refresh_frequencies = kwargs.get(
+            "incremental_refresh_frequencies"
+        )
+        if type(incremental_refresh_frequencies) is not tuple or any(
+            type(value) is not str or value not in {"5m", "1m"}
+            for value in incremental_refresh_frequencies
+        ):
+            raise ValueError(
+                "structure_bundle requires exact incremental refresh frequencies"
+            )
         return gateway.structure_bundle(
             code,
             as_of=kwargs.get("as_of"),
             sector=kwargs.get("sector"),
             sector_members=sector_members,
+            instrument_type=instrument_type,
             frequencies=kwargs.get("frequencies"),
             higher_timeframe_as_of=kwargs.get("higher_timeframe_as_of"),
             local_history_frequencies=local_history_frequencies,
+            incremental_refresh_frequencies=incremental_refresh_frequencies,
         )
     if method == "trading_session_evidence":
         if set(kwargs) != {"session", "observed_at"}:
@@ -241,7 +290,7 @@ def _build_gateway(connection: Connection, request_id: list[str | None]) -> _Gat
     from chanlun.exchange.qmt_screening_sector_source import (
         QmtSectorCompositeSource,
         QmtSectorStrengthSource,
-        build_qmt_gics3_sector_catalog,
+        build_qmt_gics_hierarchy_sector_catalog,
         qmt_trading_session_evidence,
         qmt_trading_sessions,
     )
@@ -291,7 +340,7 @@ def _build_gateway(connection: Connection, request_id: list[str | None]) -> _Gat
     )
     return NativeTradingDataGateway(
         exchange_provider=exchange_provider,
-        sector_provider=build_qmt_gics3_sector_catalog,
+        sector_provider=build_qmt_gics_hierarchy_sector_catalog,
         sector_frame_provider=sector_frames.frame,
         sector_strength_provider=sector_strength.strengths,
         higher_timeframe_provider=higher_timeframe.gates,
@@ -347,6 +396,7 @@ def run_worker(connection: Connection) -> int:
                 method=method,
                 kwargs={str(key): item for key, item in kwargs.items()},
             )
+            runtime_health = gateway.runtime_health_snapshot()
             _send_to_parent(
                 connection,
                 {
@@ -354,6 +404,7 @@ def run_worker(connection: Connection) -> int:
                     "type": "result",
                     "request_id": identity,
                     "value": value,
+                    "runtime_health": dict(runtime_health),
                 },
             )
         except Exception as exc:

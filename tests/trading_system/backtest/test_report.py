@@ -408,4 +408,10 @@ def test_execution_contract_discloses_unified_buy_point_execution() -> None:
     contract = report["execution_contract"]
     assert contract["point_classes_analyzed_independently"] is True
     assert contract["buy_point_classes_share_execution_logic"] is True
+    assert contract["trade_frequency"] == "5m"
+    assert contract["segment_difference_frequency"] == "1m"
+    assert contract["segment_difference_required_for_trade_signal"] is False
+    assert contract["execution_observation_frequency"] == "1m"
+    assert "trigger_frequency" not in contract
     assert contract["max_five_minute_setup_age_seconds"] == 345600
+    assert contract["formal_selection_required"] is False

@@ -1,13 +1,13 @@
 """把共享实时决策文档因果转换为人工复核提醒。
 
 分阶段扫描器和历史回放共同使用 ``HumanAssistedDecisionCore``。本模块是唯一可以
-把规范决策文档转换为复核提醒的位置；它保留 30m 战略环境、5m setup 与 1m 定位
+把规范决策文档转换为复核提醒的位置；它保留 30m 环境、5m 正式买卖与 1m 段差
 的区别，且永远不会创建具有下单能力的对象。
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import re
@@ -16,6 +16,9 @@ from zoneinfo import ZoneInfo
 
 from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
+from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_optional_entry_valid_until,
+)
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     decision_source_snapshot_id,
 )
@@ -23,7 +26,12 @@ from chanlun.decision_support.trading_system.human_assisted_decision import (
     validate_signal_decision_document,
     validate_human_assisted_contract_document,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    STRUCTURE_INVALIDATED_REASON_CODE,
+    is_one_minute_segment_difference_document,
+)
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
+    HARD_HIGHER_TIMEFRAME_DATA_INTEGRITY_REASON_CODES,
     HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID,
     QMT_SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_MODE,
     QMT_SECTOR_SAME_BASE_SOURCE_MODE,
@@ -34,8 +42,23 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 from chanlun.decision_support.trading_system.models import (
     CANONICAL_POINT_TYPE_SET,
     EntryExecutionBoundary,
-    REVERSAL_SUPPORT_POINT_TYPES,
     parse_entry_execution_boundary_document,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
+from chanlun.decision_support.trading_system.position_recommendation import (
+    BUY_SIGNAL_PROTECTION_REASON_CODES,
+    active_signal_age_seconds,
+    build_position_recommendation,
+    parse_position_recommendation_document,
+)
+from chanlun.decision_support.trading_system.five_minute_setup_state import (
+    GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+    canonical_setup_state_document,
+    execution_recommendation_label,
+    unconfirmed_setup_reason_code,
+    unconfirmed_setup_recommendation,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_QMT_30M_FALLBACK_REASON_CODE,
@@ -43,6 +66,7 @@ from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_WARMUP_FREQUENCIES,
     SCREENING_WARMUP_REQUIRED_BARS,
     expected_screening_warmup_suffix_bar_count,
+    five_minute_warmup_converged,
     screening_warmup_reason_code,
 )
 from chanlun.decision_support.trading_system.sector_strength import (
@@ -60,6 +84,9 @@ from chanlun.decision_support.trading_system.human_review_screening import (
     review_priority,
     sector_higher_timeframe_review_evidence_from_risk,
     sector_ranking_review_evidence_from_live_sector,
+)
+from chanlun.decision_support.trading_system.execution_policy import (
+    SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,
 )
 from chanlun.decision_support.trading_system.selection import (
     HIGHER_TIMEFRAME_RISK_STATES,
@@ -98,7 +125,9 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
 
 
 LIVE_SCREENING_SCHEMA = "chanlun-trading-screening"
-SIGNAL_DOCUMENT_CONTRACT_ID = "chanlun-strict-human-assisted-signal-document"
+SIGNAL_DOCUMENT_CONTRACT_ID = (
+    "chanlun-strict-human-assisted-signal-document-v6-geometric-candidate"
+)
 _GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
 _RISK_PERIODS = ("M", "W", "D")
 _RISK_DECISION_FIELDS = frozenset(
@@ -113,6 +142,7 @@ _RISK_DECISION_FIELDS = frozenset(
         "sector_reason_codes",
         "symbol_reason_codes",
         "reason_codes",
+        "data_integrity_hard_block_reason_codes",
         "market_period_diagnostics",
         "sector_period_diagnostics",
         "symbol_period_diagnostics",
@@ -182,15 +212,18 @@ _QMT_MWD_WARMUP_BLOCKING_CODES = frozenset(
 _LIFECYCLE_STAGES = frozenset(
     {"approaching", "formed", "armed", "observed", "triggered", "executable"}
 )
+_SNAPSHOT_AUDIT_STAGES = frozenset({"invalidated"})
 _SELECTION_SOURCES = frozenset(
     {
         "QMT_SECTOR_TRIGGER",
         "QMT_SECTOR_ELIGIBLE_SCOPE",
         "ACTIVE_WATCHLIST_MONITOR",
+        "MANUAL_ATTENTION_MONITOR",
         "HOLDING_MONITOR",
         "VIRTUAL_HOLDING_MONITOR",
         "PREVIOUS_SIGNAL_MONITOR",
         "DECISION_RULE_RECHECK",
+        "PRESELECTION_CONTINUITY_RECHECK",
         "INCREMENTAL_SCAN_SCOPE",
     }
 )
@@ -226,16 +259,34 @@ COVERAGE_MANIFEST_FIELDS = frozenset(
 )
 SECTOR_COVERAGE_CONTRACT_ID = "chanlun-screening-sector-coverage"
 MONITOR_INSTRUMENT_EXCLUSION_CONTRACT_ID = "chanlun-monitor-instrument-exclusion"
-COVERAGE_EXCLUSION_REASON_CODES = frozenset({"KLINE_MINIMUM_HISTORY_NOT_MET"})
+COVERAGE_EXCLUSION_ELIGIBILITY_BY_REASON = {
+    "KLINE_MINIMUM_HISTORY_NOT_MET": "INSUFFICIENT_MINIMUM_HISTORY",
+    "CURRENT_SESSION_SUSPENDED": "CURRENT_SESSION_SUSPENDED",
+}
+COVERAGE_EXCLUSION_REASON_CODES = frozenset(COVERAGE_EXCLUSION_ELIGIBILITY_BY_REASON)
 _MONITOR_SELECTION_SOURCES = frozenset(
     {
         "ACTIVE_WATCHLIST_MONITOR",
+        "MANUAL_ATTENTION_MONITOR",
         "HOLDING_MONITOR",
         "VIRTUAL_HOLDING_MONITOR",
         "PREVIOUS_SIGNAL_MONITOR",
         "DECISION_RULE_RECHECK",
     }
 )
+_LIVE_REVIEW_VALIDATION_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedLiveReviewSnapshot:
+    """Process-local proof that one exact in-memory snapshot passed validation."""
+
+    seal: object
+    payload: Mapping[str, object]
+    snapshot_content_sha256: str
+    review_at: datetime
+    signals: tuple[Mapping[str, object], ...]
+    session: date | None
 
 
 def _is_sha256_identity(value: object) -> bool:
@@ -626,7 +677,8 @@ def _coverage_exclusion_documents(raw: object) -> dict[str, str]:
             or not isinstance(reason_code, str)
             or reason_code not in COVERAGE_EXCLUSION_REASON_CODES
             or document.get("exclusion_type") != "stock_analysis_exclusion"
-            or document.get("eligibility") != "INSUFFICIENT_MINIMUM_HISTORY"
+            or document.get("eligibility")
+            != COVERAGE_EXCLUSION_ELIGIBILITY_BY_REASON[reason_code]
             or document.get("retry_policy") != "NEXT_MARKET_DATA_EPOCH"
             or document.get("deterministic_for_coverage_epoch") is not True
             or not isinstance(document.get("remote_error_type"), str)
@@ -774,9 +826,7 @@ def coverage_manifest_dispositions_are_consistent(
         completed = set(
             _canonical_code_list(manifest.get("completed_codes"), "completed codes")
         )
-        failed = set(
-            _canonical_code_list(manifest.get("failed_codes"), "failed codes")
-        )
+        failed = set(_canonical_code_list(manifest.get("failed_codes"), "failed codes"))
         excluded = set(
             _canonical_code_list(manifest.get("excluded_codes"), "excluded codes")
         )
@@ -1132,9 +1182,17 @@ def _decision_context_is_consistent(raw: object) -> bool:
         if dominant_id is not None:
             return False
         disposition = "neutral"
-        reason = "no_active_directional_point"
+        # The producer distinguishes a genuinely empty context from one whose
+        # visible directional points have all aged out of the active window.
+        # Both states correctly have no dominant point and remain neutral.
+        valid_reason_codes = (
+            ["no_active_directional_point"],
+            ["directional_points_expired"],
+        )
     else:
-        if dominant_type not in CANONICAL_POINT_TYPE_SET or not _is_sha256_identity(dominant_id):
+        if dominant_type not in CANONICAL_POINT_TYPE_SET or not _is_sha256_identity(
+            dominant_id
+        ):
             return False
         if str(dominant_type).endswith("buy"):
             disposition = "supportive"
@@ -1145,11 +1203,39 @@ def _decision_context_is_consistent(raw: object) -> bool:
         else:
             disposition = "neutral"
             reason = "mixed_or_transition_structure"
+        valid_reason_codes = ([reason],)
     return bool(
         raw.get("disposition") == disposition
         and raw.get("hard_block") is (disposition == "hostile")
-        and raw.get("reason_codes") == [reason]
+        and raw.get("reason_codes") in valid_reason_codes
     )
+
+
+def _etf_proxy_sector_is_consistent(raw: object, *, code: object) -> bool:
+    """Validate the synthetic sector carried by the ETF no-sector path."""
+
+    if not isinstance(raw, Mapping) or not isinstance(code, str) or not code:
+        return False
+    return dict(raw) == {
+        "sector_id": f"etf-proxy:{code}",
+        "sector_name": "ETF代理路径（不要求个股行业）",
+        "eligible": True,
+        "hard_block": False,
+        "regime": "neutral",
+        "rank": None,
+        "rank_score": 0,
+        "rank_components": {},
+        "reason_codes": ["ETF_PROXY_SECTOR_NOT_REQUIRED"],
+        "horizontal_strength": None,
+        "horizontal_rank": None,
+        "strength_anchor_session": None,
+        "strength_member_count": 0,
+        "strength_source_revision": None,
+        "strength_reason_codes": [],
+        "context_30m": None,
+        "context_5m": None,
+        "context_1m": None,
+    }
 
 
 def _point_document_is_causal(
@@ -1275,6 +1361,59 @@ def _warmup_evidence_is_consistent(raw: object) -> bool:
         and raw.get("converged") is all(converged_values)
         and reasons in accepted_reasons
     )
+
+
+def _warmup_execution_partition(
+    raw: Mapping[str, object],
+) -> tuple[bool, tuple[str, ...], tuple[str, ...]] | None:
+    """Split warmup evidence into the 5m gate and context-only diagnostics."""
+
+    rows = raw.get("by_frequency")
+    reasons = _unique_string_list(raw.get("reason_codes"))
+    if not isinstance(rows, list) or reasons is None:
+        return None
+    # Hand-built legacy bundles may omit per-period rows.  Match the core's
+    # fail-closed aggregate fallback; production snapshots still require all
+    # four rows through ``_warmup_evidence_is_consistent``.
+    if not rows:
+        aggregate = raw.get("converged")
+        if type(aggregate) is not bool:
+            return None
+        return (
+            aggregate,
+            tuple(reason for reason in reasons if reason.startswith("5M:")),
+            tuple(
+                reason
+                for reason in reasons
+                if reason.split(":", 1)[0] in {"D", "30M", "1M"}
+                and reason.split(":", 1)[-1]
+                in {"WARMUP_HISTORY_INSUFFICIENT", "WARMUP_TAIL_DIVERGED"}
+            ),
+        )
+    five_minute_rows = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("frequency") == "5m"
+    ]
+    if len(five_minute_rows) != 1:
+        return None
+    five_minute_converged = five_minute_rows[0].get("converged")
+    if type(five_minute_converged) is not bool:
+        return None
+    diagnostic_failures = {
+        "WARMUP_HISTORY_INSUFFICIENT",
+        "WARMUP_TAIL_DIVERGED",
+    }
+    trade_level_reasons = tuple(
+        reason for reason in reasons if reason.startswith("5M:")
+    )
+    context_advisories = tuple(
+        reason
+        for reason in reasons
+        if reason.split(":", 1)[0] in {"D", "30M", "1M"}
+        and reason.split(":", 1)[-1] in diagnostic_failures
+    )
+    return five_minute_converged, trade_level_reasons, context_advisories
 
 
 def _unique_string_list(raw: object) -> tuple[str, ...] | None:
@@ -1846,7 +1985,7 @@ def _risk_evidence_is_consistent(
     symbol_reasons = _unique_string_list(raw.get("symbol_reason_codes"))
     merged_reasons = _unique_string_list(raw.get("reason_codes"))
     if (
-        raw.get("new_entry_requires_all_green") is not True
+        raw.get("new_entry_requires_all_green") is not False
         or market_reasons is None
         or sector_reasons is None
         or symbol_reasons is None
@@ -2160,9 +2299,13 @@ def _risk_evidence_is_consistent(
         reconciliation = raw.get(f"{prefix}_native_daily_reconciliation_evidence")
         return (coverage.status == "EXACT") == (reconciliation is not None)
 
-    return calendar_side_is_consistent(
+    calendar_valid = calendar_side_is_consistent(
         "market", None, market_reasons
     ) and calendar_side_is_consistent("symbol", expected_symbol, symbol_reasons)
+    return bool(
+        calendar_valid
+        and _higher_timeframe_data_integrity_reason_codes_from_risk(raw) is not None
+    )
 
 
 def _formal_selection_gate_is_consistent(
@@ -2174,11 +2317,13 @@ def _formal_selection_gate_is_consistent(
     raw_sources = signal.get("selection_sources")
     raw_gate = signal.get("formal_selection")
     raw_research = signal.get("selection_research")
+    formal_selection_required = signal.get("formal_selection_required")
     if (
         selection_path not in {"INDIVIDUAL_THREE_PROGRAM", "ETF_PROXY"}
         or not isinstance(raw_sources, list)
         or any(not isinstance(value, str) for value in raw_sources)
         or not isinstance(raw_gate, Mapping)
+        or type(formal_selection_required) is not bool
     ):
         return False, (), False
     try:
@@ -2200,9 +2345,41 @@ def _formal_selection_gate_is_consistent(
     consistent = bool(
         dict(raw_gate) == expected.document()
         and signal.get("sector_triggered") is expected.sector_triggered
-        and signal.get("monitor_only") is (not expected.accepted)
+        and signal.get("monitor_only")
+        is (formal_selection_required and not expected.accepted)
     )
-    return consistent, expected.reason_codes, expected.accepted
+    return (
+        consistent,
+        expected.reason_codes,
+        not formal_selection_required or expected.accepted,
+    )
+
+
+def _higher_timeframe_data_integrity_reason_codes_from_risk(
+    risk: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """复算方向分级之外、真正能够硬关闭新买入的数据矛盾。"""
+
+    declared = _unique_string_list(risk.get("data_integrity_hard_block_reason_codes"))
+    if declared is None:
+        return None
+    reasons: list[str] = []
+    for subject in ("market", "symbol"):
+        subject_reasons = _unique_string_list(risk.get(f"{subject}_reason_codes"))
+        if subject_reasons is None:
+            return None
+        reasons.extend(
+            value
+            for value in subject_reasons
+            if value in HARD_HIGHER_TIMEFRAME_DATA_INTEGRITY_REASON_CODES
+        )
+
+        coverage = risk.get(f"{subject}_native_daily_calendar_coverage_evidence")
+        if isinstance(coverage, Mapping) and coverage.get("status") != "EXACT":
+            reasons.append("QMT_NATIVE_DAILY_TRADING_CALENDAR_MISMATCH")
+
+    expected = tuple(dict.fromkeys(reasons))
+    return expected if declared == expected else None
 
 
 def _entry_gate_is_consistent(
@@ -2211,12 +2388,7 @@ def _entry_gate_is_consistent(
     risk: Mapping[str, object],
     warmup: Mapping[str, object],
 ) -> bool:
-    """校验序列化最终决策是否严格绑定全部入场门槛。
-
-    ``technical_entry_allowed`` 记录正式研究、月周日风险以及成对预热门槛生效前的
-    纯技术结论。因此最终买入许可必须是全部门槛的合取；卖出信号使用独立离场策略，
-    不能在这里获得入场许可。
-    """
+    """校验结构执行硬条件；环境与研究范围由执行画像单独校验。"""
 
     side = signal.get("side")
     technical = signal.get("technical_entry_allowed")
@@ -2234,18 +2406,50 @@ def _entry_gate_is_consistent(
     formal_consistent, _formal_reasons, formal_accepted = (
         _formal_selection_gate_is_consistent(signal)
     )
+    if isinstance(signal.get("execution_profile"), Mapping):
+        data_integrity_reasons = (
+            _higher_timeframe_data_integrity_reason_codes_from_risk(risk)
+        )
+        warmup_partition = _warmup_execution_partition(warmup)
+        if data_integrity_reasons is None or warmup_partition is None:
+            return False
+        five_minute_warmup_converged, _trade_reasons, _context_reasons = (
+            warmup_partition
+        )
+        # 月/周/日方向、板块环境和研究范围只生成提示；物理预热与能够证明
+        # 时间穿越、同源破坏或日历矛盾的数据事实仍然硬关闭新买入。
+        decision_reasons = _unique_string_list(signal.get("decision_reasons"))
+        if decision_reasons is None:
+            return False
+        operationally_blocked = bool(
+            {
+                "BUY_ENTRY_EXECUTION_BOUNDARY_MISSING",
+                "BUY_ENTRY_EXECUTION_BOUNDARY_EXPIRED",
+                *BUY_SIGNAL_PROTECTION_REASON_CODES,
+            }.intersection(decision_reasons)
+        )
+        return bool(
+            formal_consistent
+            and entry_allowed
+            is (
+                technical
+                and five_minute_warmup_converged
+                and not data_integrity_reasons
+                and not operationally_blocked
+            )
+            and exit_allowed is False
+        )
+    sector_required = signal.get("selection_path") == ("INDIVIDUAL_THREE_PROGRAM")
     expected_entry = bool(
         technical
         and warmup.get("converged") is True
         and risk.get("market_gate") == "GREEN"
-        and risk.get("sector_gate") == "GREEN"
+        and (not sector_required or risk.get("sector_gate") == "GREEN")
         and risk.get("symbol_gate") == "GREEN"
         and formal_accepted
     )
     return bool(
-        formal_consistent
-        and entry_allowed is expected_entry
-        and exit_allowed is False
+        formal_consistent and entry_allowed is expected_entry and exit_allowed is False
     )
 
 
@@ -2281,6 +2485,397 @@ def _decision_decimal(raw: object) -> Decimal | None:
     return value if value.is_finite() and value >= 0 else None
 
 
+def _confirmed_five_minute_operation_setup(
+    setup: object,
+    *,
+    side: str | None = None,
+) -> bool:
+    """Fail closed unless review evidence is a confirmed physical 5m/L0 setup."""
+
+    if not isinstance(setup, Mapping):
+        return False
+    recursive_level = setup.get("recursive_level")
+    return bool(
+        isinstance(setup.get("price_basis_revision"), str)
+        and setup.get("price_basis_revision")
+        and setup.get("status") == "confirmed"
+        and setup.get("source_frequency") == "5m"
+        and type(recursive_level) is int
+        and is_five_minute_trade_level("5m", recursive_level)
+        and (side is None or setup.get("side") == side)
+    )
+
+
+def _canonical_setup_formation_state(setup: Mapping[str, object]) -> str | None:
+    """Recompute the setup state instead of trusting a display field."""
+
+    try:
+        value = canonical_setup_state_document(setup).get("formation_state")
+    except (TypeError, ValueError):
+        return None
+    return str(value) if value in {"forming", "geometry_ready", "confirmed"} else None
+
+
+def _separated_buy_decision_evidence_is_consistent(
+    signal: Mapping[str, object],
+    *,
+    policy: Mapping[str, object],
+    risk: Mapping[str, object],
+    warmup: Mapping[str, object],
+    conflict_reasons: tuple[str, ...],
+) -> bool:
+    """复算“5分钟结构事实 / 1分钟可选段差 / 环境分级”的买入决策。"""
+
+    profile = signal.get("execution_profile")
+    setup = signal.get("setup_5m")
+    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    sector = signal.get("sector")
+    context = signal.get("context_30m")
+    daily_context = signal.get("context_d")
+    decision_reasons = _unique_string_list(signal.get("decision_reasons"))
+    multiplier = _decision_decimal(signal.get("risk_multiplier"))
+    if (
+        not isinstance(profile, Mapping)
+        or not all(
+            isinstance(value, Mapping)
+            for value in (setup, sector, context, daily_context)
+        )
+        or (trigger is not None and not isinstance(trigger, Mapping))
+        or decision_reasons is None
+        or multiplier is None
+    ):
+        return False
+    warmup_partition = _warmup_execution_partition(warmup)
+    if warmup_partition is None:
+        return False
+    (
+        five_minute_warmup_converged,
+        trade_level_warmup_reasons,
+        context_warmup_advisories,
+    ) = warmup_partition
+    confirmed_point = _confirmed_five_minute_operation_setup(
+        setup,
+        side="buy",
+    )
+    formation_state = _canonical_setup_formation_state(setup)
+    if formation_state is None:
+        return False
+    minimum_tick = _decision_decimal(policy.get("minimum_tick"))
+    trigger_confirmed = bool(
+        confirmed_point
+        and isinstance(trigger, Mapping)
+        and minimum_tick is not None
+        and is_one_minute_segment_difference_document(
+            trigger,
+            minimum_tick=minimum_tick,
+            expected_side="buy",
+        )
+        and signal.get("lifecycle_stage") in {"triggered", "executable"}
+    )
+    core_reasons: list[str] = []
+    if policy.get("require_confirmed_five_minute") is True and not confirmed_point:
+        core_reasons.append(
+            unconfirmed_setup_reason_code(
+                formation_state,
+                forming_reason_code="five_minute_not_confirmed",
+            )
+        )
+    if signal.get("lifecycle_stage") not in {"triggered", "executable", "active"}:
+        core_reasons.append("lifecycle_not_actionable")
+    if policy.get("require_confirmed_one_minute") is True and not trigger_confirmed:
+        core_reasons.append("one_minute_not_confirmed")
+    conflict = signal.get("conflict")
+    if isinstance(conflict, Mapping) and conflict.get("hard_block") is True:
+        core_reasons.append("structure_conflict")
+    if confirmed_point and setup.get("point_type") == "3buy":
+        try:
+            clearance = Decimal(str(setup["anchor_price"])) - Decimal(
+                str(setup["center_zg"])
+            )
+            minimum_tick = Decimal(str(policy["minimum_tick"]))
+        except (InvalidOperation, KeyError, TypeError, ValueError):
+            clearance = None
+            minimum_tick = Decimal("0")
+        if (
+            setup.get("variant") == "boundary_touch"
+            or clearance is None
+            or not clearance.is_finite()
+            or clearance < minimum_tick
+        ):
+            core_reasons.append("three_buy_lacks_tick_clearance")
+    # 技术候选由 5 分钟正式点和结构冲突决定。1 分钟边界只描述段差时机，
+    # 缺失或过期不能关闭 5 分钟主信号。
+    technical_entry_allowed = not core_reasons
+    data_integrity_reasons = _higher_timeframe_data_integrity_reason_codes_from_risk(
+        risk
+    )
+    if data_integrity_reasons is None:
+        return False
+    data_integrity_blocked = bool(data_integrity_reasons)
+    warmup_blocked = not five_minute_warmup_converged
+    entry_reasons = list(core_reasons)
+    if data_integrity_blocked:
+        entry_reasons.extend(
+            (
+                "HIGHER_TIMEFRAME_DATA_INTEGRITY_GATE_FAILED",
+                *data_integrity_reasons,
+            )
+        )
+    if warmup_blocked:
+        entry_reasons.extend(
+            (
+                "WARMUP_CONVERGENCE_GATE_FAILED",
+                *trade_level_warmup_reasons,
+            )
+        )
+
+    advisory_reasons: list[str] = []
+    if context.get("hard_block") is True:
+        advisory_reasons.append("thirty_minute_hostile")
+    if daily_context.get("hard_block") is True:
+        advisory_reasons.append("daily_structure_hostile")
+    if (
+        signal.get("selection_path") == "INDIVIDUAL_THREE_PROGRAM"
+        and sector.get("hard_block") is True
+    ):
+        advisory_reasons.append("sector_hostile")
+    raw_profile_advisories = _unique_string_list(profile.get("advisory_reason_codes"))
+    if raw_profile_advisories is None:
+        return False
+    if "HIGHER_TIMEFRAME_CONTEXT_NOT_GREEN" in raw_profile_advisories:
+        sector_required = signal.get("selection_path") == "INDIVIDUAL_THREE_PROGRAM"
+        if not (
+            risk.get("market_gate") != "GREEN"
+            or sector_required
+            and risk.get("sector_gate") != "GREEN"
+            or risk.get("symbol_gate") != "GREEN"
+        ):
+            return False
+        advisory_reasons.extend(
+            (
+                "HIGHER_TIMEFRAME_CONTEXT_NOT_GREEN",
+                f"MARKET_GATE_{risk.get('market_gate')}",
+                *(
+                    (f"SECTOR_GATE_{risk.get('sector_gate')}",)
+                    if sector_required
+                    else ()
+                ),
+                f"SYMBOL_GATE_{risk.get('symbol_gate')}",
+                *(str(value) for value in risk.get("reason_codes") or ()),
+            )
+        )
+    assessment = context.get("signal_context_assessment")
+    if not isinstance(assessment, Mapping):
+        return False
+    grade = assessment.get("grade")
+    if grade not in {"A", "B", "C", "UNRESOLVED"}:
+        return False
+    if grade != "A":
+        advisory_reasons.append(f"SAME_PERIOD_CONTEXT_GRADE_{grade}")
+    advisory_reasons.extend(context_warmup_advisories)
+    if trigger_confirmed and signal.get("physical_timeframe_recursive") is True:
+        raw_boundary = signal.get("entry_execution_boundary")
+        if raw_boundary is None:
+            try:
+                trigger_available_at = datetime.fromisoformat(
+                    str(trigger["available_at"])
+                )
+                observed_at = datetime.fromisoformat(str(signal["observed_at"]))
+                inferred_valid_until = a_share_optional_entry_valid_until(
+                    trigger_available_at
+                )
+            except (KeyError, TypeError, ValueError):
+                return False
+            if observed_at.tzinfo is None:
+                return False
+            advisory_reasons.append(
+                "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
+                if inferred_valid_until <= observed_at
+                else "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"
+            )
+        else:
+            try:
+                boundary = parse_entry_execution_boundary_document(raw_boundary)
+                observed_at = datetime.fromisoformat(str(signal["observed_at"]))
+            except (TypeError, ValueError):
+                return False
+            if observed_at.tzinfo is None:
+                return False
+            if boundary.entry_valid_until <= observed_at:
+                advisory_reasons.append("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED")
+    conflict = signal.get("conflict")
+    conflict_hard = bool(
+        isinstance(conflict, Mapping) and conflict.get("hard_block") is True
+    )
+    if conflict_reasons and not conflict_hard:
+        advisory_reasons.extend(conflict_reasons)
+    formal_consistent, formal_reasons, formal_accepted = (
+        _formal_selection_gate_is_consistent(signal)
+    )
+    if not formal_consistent:
+        return False
+    if not formal_accepted:
+        advisory_reasons.extend(formal_reasons)
+    expected_advisories = tuple(dict.fromkeys(advisory_reasons))
+    setup_conflict_reasons = (
+        (
+            unconfirmed_setup_reason_code(
+                formation_state,
+                forming_reason_code="setup_not_confirmed",
+            ),
+        )
+        if setup.get("status") == "provisional"
+        else ()
+    )
+    base_expected_decision_reasons = tuple(
+        dict.fromkeys(
+            (
+                *entry_reasons,
+                *expected_advisories,
+                *(conflict_reasons if conflict_hard else ()),
+                *setup_conflict_reasons,
+                *(
+                    (STRUCTURE_INVALIDATED_REASON_CODE,)
+                    if signal.get("lifecycle_stage") == "invalidated"
+                    else ()
+                ),
+            )
+        )
+    )
+    multiplier_field = {
+        "1buy": "first_buy_risk_multiplier",
+        "2buy": "second_buy_risk_multiplier",
+        "3buy": "third_buy_risk_multiplier",
+    }.get(str(setup.get("point_type")))
+    try:
+        expected_multiplier = (
+            Decimal(str(policy[multiplier_field]))
+            if confirmed_point and multiplier_field is not None
+            else Decimal("0")
+        )
+        expected_stop = (
+            Decimal(str(setup["invalidation_price"])) if confirmed_point else None
+        )
+        actual_stop = (
+            None
+            if signal.get("structural_stop") is None
+            else Decimal(str(signal["structural_stop"]))
+        )
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return False
+    if data_integrity_blocked or warmup_blocked:
+        expected_multiplier *= 0
+    hard_profile_reasons = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    reason
+                    for reason in entry_reasons
+                    if reason
+                    not in {
+                        "five_minute_not_confirmed",
+                        "lifecycle_not_actionable",
+                        "one_minute_not_confirmed",
+                        GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+                    }
+                ),
+                *(conflict_reasons if conflict_hard else ()),
+                *(
+                    (STRUCTURE_INVALIDATED_REASON_CODE,)
+                    if signal.get("lifecycle_stage") == "invalidated"
+                    else ()
+                ),
+            )
+        )
+    )
+    if signal.get("lifecycle_stage") == "invalidated":
+        recommendation = "BLOCKED"
+    elif hard_profile_reasons:
+        recommendation = "BLOCKED"
+    elif not confirmed_point:
+        recommendation = unconfirmed_setup_recommendation(formation_state)
+    elif expected_advisories:
+        recommendation = "CAUTION"
+    else:
+        recommendation = "READY"
+    context_scale = {
+        "A": "1.00",
+        "B": "0.75",
+        "C": "0.50",
+        "UNRESOLVED": "0.50",
+    }[grade]
+    try:
+        setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
+        signal_observed_at = datetime.fromisoformat(str(signal["observed_at"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    signal_age_seconds = active_signal_age_seconds(
+        setup_available_at,
+        signal_observed_at,
+        market=(
+            "a"
+            if str(signal.get("code") or "").startswith(("SH.", "SZ.", "BJ."))
+            else "other"
+        ),
+    )
+    if signal_age_seconds is None:
+        return False
+    expected_position_recommendation = build_position_recommendation(
+        side="buy",
+        recommendation=recommendation,
+        risk_multiplier=expected_multiplier,
+        context_risk_scale=context_scale,
+        entry_price=(
+            signal.get("current_price")
+            if signal.get("current_price") is not None
+            else setup.get("anchor_price")
+        ),
+        structural_stop=setup.get("invalidation_price"),
+        exit_action="none",
+        structure_anchor_price=setup.get("anchor_price"),
+        signal_age_seconds=signal_age_seconds,
+    ).document()
+    operational_buy_protections = tuple(
+        reason
+        for reason in expected_position_recommendation["reason_codes"]
+        if reason in BUY_SIGNAL_PROTECTION_REASON_CODES
+    )
+    expected_decision_reasons = tuple(
+        dict.fromkeys(
+            (*base_expected_decision_reasons, *operational_buy_protections)
+        )
+    )
+    return bool(
+        profile.get("structure_signal_confirmed") is confirmed_point
+        and profile.get("execution_trigger_confirmed") is trigger_confirmed
+        and profile.get("one_minute_role") == "SEGMENT_DIFFERENCE_ONLY"
+        and profile.get("one_minute_required_for_trade_signal") is False
+        and profile.get("one_minute_segment_difference_present") is trigger_confirmed
+        and profile.get("recommendation") == recommendation
+        and profile.get("recommendation_label")
+        == execution_recommendation_label(recommendation)
+        and profile.get("hard_blocked") is (recommendation == "BLOCKED")
+        and _unique_string_list(profile.get("hard_block_reason_codes"))
+        == hard_profile_reasons
+        and raw_profile_advisories == expected_advisories
+        and profile.get("context_grade") == grade
+        and profile.get("context_risk_scale") == context_scale
+        and profile.get("context_risk_scale_role") == "MANUAL_POSITION_SIZING_ONLY"
+        and signal.get("position_recommendation") == expected_position_recommendation
+        and profile.get("position_recommendation") == expected_position_recommendation
+        and profile.get("manual_confirmation_required") is True
+        and profile.get("automated_order_authorized") is False
+        and signal.get("technical_entry_allowed") is technical_entry_allowed
+        and signal.get("entry_allowed")
+        is (not entry_reasons and not operational_buy_protections)
+        and signal.get("exit_allowed") is False
+        and signal.get("exit_action") == "none"
+        and multiplier == expected_multiplier
+        and actual_stop == expected_stop
+        and decision_reasons == expected_decision_reasons
+    )
+
+
 def _buy_decision_evidence_is_consistent(
     signal: Mapping[str, object],
     *,
@@ -2289,8 +2884,16 @@ def _buy_decision_evidence_is_consistent(
     warmup: Mapping[str, object],
     conflict_reasons: tuple[str, ...],
 ) -> bool:
+    if isinstance(signal.get("execution_profile"), Mapping):
+        return _separated_buy_decision_evidence_is_consistent(
+            signal,
+            policy=policy,
+            risk=risk,
+            warmup=warmup,
+            conflict_reasons=conflict_reasons,
+        )
     setup = signal.get("setup_5m")
-    trigger = signal.get("trigger_1m")
+    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
     sector = signal.get("sector")
     context = signal.get("context_30m")
     daily_context = signal.get("context_d")
@@ -2313,18 +2916,20 @@ def _buy_decision_evidence_is_consistent(
     confirmed_structural_point = bool(
         has_structural_lineage and setup.get("status") == "confirmed"
     )
-    confirmed_buy = bool(
-        confirmed_structural_point
-        and setup.get("side") == "buy"
-        and setup.get("source_frequency") == "5m"
+    confirmed_buy = _confirmed_five_minute_operation_setup(
+        setup,
+        side="buy",
     )
+    minimum_tick = _decision_decimal(policy.get("minimum_tick"))
     trigger_confirmed = bool(
         confirmed_structural_point
         and isinstance(trigger, Mapping)
-        and trigger.get("status") == "confirmed"
-        and trigger.get("side") == setup.get("side")
-        and trigger.get("source_frequency") == "1m"
-        and trigger.get("point_type") in REVERSAL_SUPPORT_POINT_TYPES
+        and minimum_tick is not None
+        and is_one_minute_segment_difference_document(
+            trigger,
+            minimum_tick=minimum_tick,
+            expected_side=str(setup.get("side")),
+        )
         and signal.get("lifecycle_stage") in {"triggered", "executable"}
     )
     entry_reasons: list[str] = []
@@ -2334,6 +2939,7 @@ def _buy_decision_evidence_is_consistent(
         entry_reasons.append("one_minute_not_confirmed")
     if (
         policy.get("require_sector_eligibility") is True
+        and signal.get("selection_path") == "INDIVIDUAL_THREE_PROGRAM"
         and sector.get("hard_block") is True
     ):
         entry_reasons.append("sector_hostile")
@@ -2397,9 +3003,10 @@ def _buy_decision_evidence_is_consistent(
         entry_reasons.append("daily_structure_hostile")
         expected_multiplier *= 0
     technical_entry_allowed = not entry_reasons
+    sector_required = signal.get("selection_path") == ("INDIVIDUAL_THREE_PROGRAM")
     risk_blocked = bool(
         risk.get("market_gate") != "GREEN"
-        or risk.get("sector_gate") != "GREEN"
+        or (sector_required and risk.get("sector_gate") != "GREEN")
         or risk.get("symbol_gate") != "GREEN"
     )
     warmup_blocked = warmup.get("converged") is not True
@@ -2409,7 +3016,11 @@ def _buy_decision_evidence_is_consistent(
                 (
                     "HIGHER_TIMEFRAME_GATE_NOT_GREEN",
                     f"MARKET_GATE_{risk.get('market_gate')}",
-                    f"SECTOR_GATE_{risk.get('sector_gate')}",
+                    *(
+                        (f"SECTOR_GATE_{risk.get('sector_gate')}",)
+                        if sector_required
+                        else ()
+                    ),
                     f"SYMBOL_GATE_{risk.get('symbol_gate')}",
                     *(str(value) for value in risk.get("reason_codes") or ()),
                 )
@@ -2446,6 +3057,11 @@ def _buy_decision_evidence_is_consistent(
                 *expected_entry_reasons,
                 *conflict_reasons,
                 *setup_conflict_reasons,
+                *(
+                    (STRUCTURE_INVALIDATED_REASON_CODE,)
+                    if signal.get("lifecycle_stage") == "invalidated"
+                    else ()
+                ),
             )
         )
     )
@@ -2486,39 +3102,239 @@ def _displayed_decision_evidence_is_consistent(
             warmup=warmup,
             conflict_reasons=conflict_reasons,
         )
+    if isinstance(signal.get("execution_profile"), Mapping):
+        profile = signal["execution_profile"]
+        setup = signal.get("setup_5m")
+        trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+        sector = signal.get("sector")
+        daily_context = signal.get("context_d")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (profile, setup, context, sector, daily_context)
+        ) or (trigger is not None and not isinstance(trigger, Mapping)):
+            return False
+        confirmed_sell = _confirmed_five_minute_operation_setup(
+            setup,
+            side="sell",
+        )
+        formation_state = _canonical_setup_formation_state(setup)
+        if formation_state is None:
+            return False
+        minimum_tick = _decision_decimal(policy.get("minimum_tick"))
+        trigger_confirmed = bool(
+            confirmed_sell
+            and isinstance(trigger, Mapping)
+            and minimum_tick is not None
+            and is_one_minute_segment_difference_document(
+                trigger,
+                minimum_tick=minimum_tick,
+                expected_side="sell",
+            )
+            and signal.get("lifecycle_stage") in {"triggered", "executable"}
+        )
+        exit_action = signal.get("exit_action")
+        lifecycle_actionable = signal.get("lifecycle_stage") in {
+            "triggered",
+            "executable",
+            "active",
+        }
+        if not confirmed_sell:
+            exit_reasons = (
+                unconfirmed_setup_reason_code(
+                    formation_state,
+                    forming_reason_code="sell_not_confirmed",
+                ),
+            )
+        elif not lifecycle_actionable:
+            exit_reasons = ("lifecycle_not_actionable",)
+        elif (
+            policy.get("require_confirmed_one_minute") is True and not trigger_confirmed
+        ):
+            exit_reasons = ("one_minute_sell_not_confirmed",)
+        elif exit_action == "none":
+            exit_reasons = (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,)
+        elif exit_action == "exit_full":
+            exit_reasons = ("same_or_higher_sell",)
+        elif exit_action == "reduce_tactical":
+            exit_reasons = ("lower_or_different_structure_sell",)
+        else:
+            return False
+        context_advisories: list[str] = []
+        if context.get("hard_block") is True:
+            context_advisories.append("thirty_minute_hostile")
+        if daily_context.get("hard_block") is True:
+            context_advisories.append("daily_structure_hostile")
+        if (
+            signal.get("selection_path") == "INDIVIDUAL_THREE_PROGRAM"
+            and sector.get("hard_block") is True
+        ):
+            context_advisories.append("sector_hostile")
+        assessment = context.get("signal_context_assessment")
+        if not isinstance(assessment, Mapping) or assessment.get("grade") not in {
+            "A",
+            "B",
+            "C",
+            "UNRESOLVED",
+        }:
+            return False
+        grade = str(assessment["grade"])
+        if grade != "A":
+            context_advisories.append(f"SAME_PERIOD_CONTEXT_GRADE_{grade}")
+        expected_profile_advisories = tuple(
+            dict.fromkeys(
+                (
+                    *context_advisories,
+                    *(
+                        (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,)
+                        if exit_reasons
+                        == (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,)
+                        else ()
+                    ),
+                )
+            )
+        )
+        expected_decision_reasons = tuple(
+            dict.fromkeys(
+                (
+                    *exit_reasons,
+                    *context_advisories,
+                    *(
+                        (STRUCTURE_INVALIDATED_REASON_CODE,)
+                        if signal.get("lifecycle_stage") == "invalidated"
+                        else ()
+                    ),
+                )
+            )
+        )
+        hard_profile_reasons = tuple(
+            reason
+            for reason in expected_decision_reasons
+            if reason
+            not in {
+                "sell_not_confirmed",
+                "lifecycle_not_actionable",
+                "one_minute_sell_not_confirmed",
+                GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+                SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,
+                *expected_profile_advisories,
+            }
+        )
+        if signal.get("lifecycle_stage") == "invalidated":
+            recommendation = "BLOCKED"
+        elif hard_profile_reasons:
+            recommendation = "BLOCKED"
+        elif not confirmed_sell:
+            recommendation = unconfirmed_setup_recommendation(formation_state)
+        elif expected_profile_advisories:
+            recommendation = "CAUTION"
+        else:
+            recommendation = "READY"
+        context_scale = {
+            "A": "1.00",
+            "B": "0.75",
+            "C": "0.50",
+            "UNRESOLVED": "0.50",
+        }[grade]
+        expected_position_recommendation = build_position_recommendation(
+            side="sell",
+            recommendation=recommendation,
+            risk_multiplier="0",
+            context_risk_scale=context_scale,
+            entry_price=(
+                signal.get("current_price")
+                if signal.get("current_price") is not None
+                else setup.get("anchor_price")
+            ),
+            structural_stop=setup.get("invalidation_price"),
+            exit_action=str(exit_action),
+            structure_anchor_price=setup.get("anchor_price"),
+        ).document()
+        return bool(
+            signal.get("side") == "sell"
+            and _decision_decimal(signal.get("risk_multiplier")) == Decimal("0")
+            and signal.get("structural_stop") is None
+            and signal.get("technical_entry_allowed") is False
+            and signal.get("entry_allowed") is False
+            and type(signal.get("exit_allowed")) is bool
+            and signal.get("exit_allowed") is (exit_action != "none")
+            and not conflict_reasons
+            and decision_reasons == expected_decision_reasons
+            and profile.get("structure_signal_confirmed") is confirmed_sell
+            and profile.get("execution_trigger_confirmed") is trigger_confirmed
+            and profile.get("one_minute_role") == "SEGMENT_DIFFERENCE_ONLY"
+            and profile.get("one_minute_required_for_trade_signal") is False
+            and profile.get("one_minute_segment_difference_present")
+            is trigger_confirmed
+            and profile.get("recommendation") == recommendation
+            and profile.get("recommendation_label")
+            == execution_recommendation_label(recommendation)
+            and profile.get("hard_blocked") is (recommendation == "BLOCKED")
+            and _unique_string_list(profile.get("hard_block_reason_codes"))
+            == hard_profile_reasons
+            and _unique_string_list(profile.get("advisory_reason_codes"))
+            == expected_profile_advisories
+            and profile.get("context_grade") == grade
+            and profile.get("context_risk_scale") == context_scale
+            and profile.get("context_risk_scale_role") == "MANUAL_POSITION_SIZING_ONLY"
+            and signal.get("position_recommendation")
+            == expected_position_recommendation
+            and profile.get("position_recommendation")
+            == expected_position_recommendation
+            and profile.get("manual_confirmation_required") is True
+            and profile.get("automated_order_authorized") is False
+        )
     multiplier = _decision_decimal(signal.get("risk_multiplier"))
     setup = signal.get("setup_5m")
-    trigger = signal.get("trigger_1m")
+    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
     if not isinstance(setup, Mapping):
         return False
-    confirmed_sell = bool(
-        isinstance(setup.get("price_basis_revision"), str)
-        and setup.get("price_basis_revision")
-        and setup.get("status") == "confirmed"
-        and setup.get("side") == "sell"
-        and setup.get("source_frequency") == "5m"
+    confirmed_sell = _confirmed_five_minute_operation_setup(
+        setup,
+        side="sell",
     )
+    minimum_tick = _decision_decimal(policy.get("minimum_tick"))
     trigger_confirmed = bool(
         isinstance(trigger, Mapping)
-        and trigger.get("status") == "confirmed"
-        and trigger.get("side") == "sell"
-        and trigger.get("source_frequency") == "1m"
-        and trigger.get("point_type") in REVERSAL_SUPPORT_POINT_TYPES
+        and minimum_tick is not None
+        and is_one_minute_segment_difference_document(
+            trigger,
+            minimum_tick=minimum_tick,
+            expected_side="sell",
+        )
         and signal.get("lifecycle_stage") in {"triggered", "executable"}
     )
     exit_action = signal.get("exit_action")
+    lifecycle_actionable = signal.get("lifecycle_stage") in {
+        "triggered",
+        "executable",
+        "active",
+    }
     if not confirmed_sell:
         expected_sell_reasons = ("sell_not_confirmed",)
+    elif not lifecycle_actionable:
+        expected_sell_reasons = ("lifecycle_not_actionable",)
     elif policy.get("require_confirmed_one_minute") is True and not trigger_confirmed:
         expected_sell_reasons = ("one_minute_sell_not_confirmed",)
     elif exit_action == "none":
-        expected_sell_reasons = ("no_active_position",)
+        expected_sell_reasons = (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,)
     elif exit_action == "exit_full":
         expected_sell_reasons = ("same_or_higher_sell",)
     elif exit_action == "reduce_tactical":
         expected_sell_reasons = ("lower_or_different_structure_sell",)
     else:
         return False
+    expected_sell_reasons = tuple(
+        dict.fromkeys(
+            (
+                *expected_sell_reasons,
+                *(
+                    (STRUCTURE_INVALIDATED_REASON_CODE,)
+                    if signal.get("lifecycle_stage") == "invalidated"
+                    else ()
+                ),
+            )
+        )
+    )
     return bool(
         signal.get("side") == "sell"
         and multiplier == Decimal("0")
@@ -3012,8 +3828,13 @@ def validate_live_review_snapshot(
         payload
     )
     try:
-        sector_coverage = (
+        sector_completion = (
             Decimal(str(audit.get("sector_completion_ratio")))
+            if isinstance(audit, Mapping)
+            else Decimal("NaN")
+        )
+        sector_resolution = (
+            Decimal(str(audit.get("sector_resolution_ratio")))
             if isinstance(audit, Mapping)
             else Decimal("NaN")
         )
@@ -3023,7 +3844,8 @@ def validate_live_review_snapshot(
             else Decimal("NaN")
         )
     except (InvalidOperation, TypeError, ValueError):
-        sector_coverage = Decimal("NaN")
+        sector_completion = Decimal("NaN")
+        sector_resolution = Decimal("NaN")
         stock_coverage = Decimal("NaN")
     if (
         payload.get("schema") != LIVE_SCREENING_SCHEMA
@@ -3052,6 +3874,9 @@ def validate_live_review_snapshot(
         or not decision_core_id.startswith("sha256:")
         or verified_decision_core_id != decision_core_id
         or decision_core.get("contract_id") != decision_core_id
+        or decision_core.get("context_frequency") != "30m"
+        or decision_core.get("trade_frequency") != "5m"
+        or decision_core.get("segment_difference_frequency") != "1m"
         or decision_core.get("strategic_frequency") != "30m"
         or decision_core.get("tactical_frequency") != "5m"
         or decision_core.get("locator_frequency") != "1m"
@@ -3066,8 +3891,12 @@ def validate_live_review_snapshot(
         or market_data_as_of.astimezone(ZoneInfo("Asia/Shanghai")).date()
         != review_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
         or audit.get("coverage_cycle_complete") is not True
-        or not sector_coverage.is_finite()
-        or sector_coverage < Decimal("0.80")
+        or not sector_completion.is_finite()
+        or not sector_resolution.is_finite()
+        # GICS4 + GICS3 会包含不少成员数不足的小板块。经下方强校验认证的
+        # “确定性排除”同样属于已解析覆盖，不能再按直接完成率误判为缺失。
+        # 对仍有瞬时失败的旧快照则继续保留至少 80% 的直接完成门槛。
+        or (sector_completion < Decimal("0.80") and sector_resolution != Decimal("1"))
         or not stock_coverage.is_finite()
         or stock_coverage < MIN_LIVE_REVIEW_STOCK_COVERAGE
         or int(audit.get("pending_symbol_count") or 0) != 0
@@ -3108,6 +3937,15 @@ def validate_live_review_snapshot(
         # 合格板块成员变成可选项。
         raise ValueError("live screening eligible sector member coverage is incomplete")
 
+    decision_policy = decision_core.get("policy")
+    decision_minimum_tick = (
+        _decision_decimal(decision_policy.get("minimum_tick"))
+        if isinstance(decision_policy, Mapping)
+        else None
+    )
+    if decision_minimum_tick is None or decision_minimum_tick <= 0:
+        raise ValueError("live screening decision minimum tick is invalid")
+
     signals: list[Mapping[str, object]] = []
     diagnostic_memo: dict[tuple[str, str], bool] = {}
     for raw in raw_signals:
@@ -3125,7 +3963,13 @@ def validate_live_review_snapshot(
             else market_data_as_of
         )
         setup = raw.get("setup_5m")
-        trigger = raw.get("trigger_1m")
+        if (
+            "segment_difference_1m" in raw
+            and "trigger_1m" in raw
+            and raw.get("segment_difference_1m") != raw.get("trigger_1m")
+        ):
+            raise ValueError("live screening signal timeframe provenance is invalid")
+        trigger = raw.get("segment_difference_1m", raw.get("trigger_1m"))
         daily_context = raw.get("context_d")
         entry_boundary = _entry_boundary_from_document(
             raw.get("entry_execution_boundary")
@@ -3197,10 +4041,14 @@ def validate_live_review_snapshot(
             frequency="1m",
             evidence_cutoff=signal_evidence_cutoff,
         )
-        trigger_is_reversal_point = bool(
+        trigger_is_execution_point = bool(
             trigger is None
             or isinstance(trigger, Mapping)
-            and trigger.get("point_type") in REVERSAL_SUPPORT_POINT_TYPES
+            and is_one_minute_segment_difference_document(
+                trigger,
+                minimum_tick=decision_minimum_tick,
+                expected_side=str(raw.get("side")),
+            )
         )
         trigger_available_at = None
         if isinstance(trigger, Mapping):
@@ -3252,6 +4100,11 @@ def validate_live_review_snapshot(
                         )
                     )
                 )
+            elif raw.get("selection_path") == "ETF_PROXY":
+                sector_document_consistent = _etf_proxy_sector_is_consistent(
+                    signal_sector,
+                    code=raw.get("code"),
+                )
             elif "QMT_SECTOR_TRIGGER" not in selection_sources:
                 sector_document_consistent = signal_sector_id == "unclassified"
         signal_identity_consistent = False
@@ -3264,6 +4117,8 @@ def validate_live_review_snapshot(
                         "schema": "chanlun-trade-setup",
                         "point_id": setup_point_id,
                         "sector_id": sector_id,
+                        "sector_required": raw.get("selection_path")
+                        == "INDIVIDUAL_THREE_PROGRAM",
                     }
                 )
                 expected_signal_id = sha256_json(
@@ -3308,7 +4163,9 @@ def validate_live_review_snapshot(
             or not setup_is_causal
             or (trigger is not None and not isinstance(trigger, Mapping))
             or not trigger_is_causal
-            or not trigger_is_reversal_point
+            or not trigger_is_execution_point
+            or raw.get("lifecycle_stage")
+            not in (_LIFECYCLE_STAGES | _SNAPSHOT_AUDIT_STAGES)
             or isinstance(trigger, Mapping)
             and (
                 trigger.get("side") != raw.get("side")
@@ -3344,6 +4201,12 @@ def validate_live_review_snapshot(
         # 预热文档或结构价格会让 /readyz 报告就绪，却在日级链构造提醒时才失败。构造器没有
         # 输入输出或下单权限，在此调用可让该校验器的所有消费者共用同一语义边界。
         for signal in signals:
+            # Invalidated rows remain in the immutable screening snapshot for
+            # lifecycle/audit visibility, but they are no longer actionable
+            # review candidates.  Reconstructing a REVIEW_REQUIRED alert from
+            # such a terminal row would incorrectly revive a cancelled setup.
+            if signal.get("lifecycle_stage") in _SNAPSHOT_AUDIT_STAGES:
+                continue
             signal_sector = signal.get("sector")
             sector_id = (
                 signal_sector.get("sector_id")
@@ -3426,7 +4289,7 @@ def validate_live_review_snapshot(
     if (
         normalized_declared_counts(
             payload.get("counts_by_stage"),
-            allowed=_LIFECYCLE_STAGES,
+            allowed=_LIFECYCLE_STAGES | _SNAPSHOT_AUDIT_STAGES,
         )
         != expected_stage_counts
         or normalized_declared_counts(
@@ -3439,20 +4302,40 @@ def validate_live_review_snapshot(
     return review_at, tuple(signals)
 
 
+def _validated_live_review_snapshot(
+    payload: Mapping[str, object],
+    *,
+    session: date | None = None,
+) -> _ValidatedLiveReviewSnapshot:
+    """Validate once and seal the exact mapping for an immediate report build.
+
+    The token is intentionally process-local and identity-bound.  It is used only
+    by the isolated materializer, synchronously, so the expensive 150 MiB semantic
+    hash does not run once before and once again inside the report builder.
+    """
+
+    review_at, signals = validate_live_review_snapshot(payload, session=session)
+    snapshot_content_sha256 = payload.get("snapshot_content_sha256")
+    if not isinstance(snapshot_content_sha256, str):
+        raise ValueError("live screening snapshot identity is unavailable")
+    return _ValidatedLiveReviewSnapshot(
+        seal=_LIVE_REVIEW_VALIDATION_SEAL,
+        payload=payload,
+        snapshot_content_sha256=snapshot_content_sha256,
+        review_at=review_at,
+        signals=signals,
+        session=session,
+    )
+
+
 def _alert_type(signal: Mapping[str, object]) -> str:
     side = signal.get("side")
-    # 实时链在日/30m/5m/1m 各物理周期独立消费规范递归图；保留物理 5m 方向线索，
-    # 由复核契约决定其如何影响已持有的策略周期。
-    if side == "sell" and signal.get("physical_timeframe_recursive") is True:
-        return "POSSIBLE_SELL_REVIEW"
-    if side == "sell" and signal.get("exit_action") == "reduce_tactical":
-        return "POSSIBLE_5M_TACTICAL_SELL"
-    if side == "buy" and signal.get("decision_role") == "TACTICAL_BUYBACK":
-        return "POSSIBLE_5M_TACTICAL_BUYBACK"
+    # 生产决策合同只把 5 分钟正式点当作买卖信号。旧 30m/战术枚举仅用于读取
+    # 历史研究档案，新的实时人工复核记录不得继续写入这些含义冲突的类型。
     if side == "buy":
-        return "POSSIBLE_30M_BUY"
+        return "POSSIBLE_5M_TRADE_BUY"
     if side == "sell":
-        return "POSSIBLE_30M_EXIT"
+        return "POSSIBLE_5M_TRADE_SELL"
     raise ValueError("live screening signal side is invalid")
 
 
@@ -3466,7 +4349,7 @@ def live_signal_human_review_alert(
     sector_strength_evidence_revision: str | None = None,
     sector_catalog_revision: str | None = None,
 ) -> HumanReviewAlert:
-    """转换一个规范的 30 分钟上下文/5 分钟形态/1 分钟定位决策。"""
+    """转换一个规范的 30m环境/5m正式买卖/可选1m段差决策。"""
 
     symbol = signal.get("code")
     signal_id = signal.get("signal_id")
@@ -3489,7 +4372,7 @@ def live_signal_human_review_alert(
     warmup = signal.get("warmup")
     sector = signal.get("sector")
     setup = signal.get("setup_5m")
-    trigger = signal.get("trigger_1m")
+    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
     context = signal.get("context_30m")
     entry_boundary = _entry_boundary_from_document(
         signal.get("entry_execution_boundary")
@@ -3535,19 +4418,38 @@ def live_signal_human_review_alert(
             observed_at=signal_at,
         )
     )
-    reference_source = trigger if trigger is not None else setup
     try:
-        reference_price = Decimal(str(reference_source["anchor_price"]))
+        # 5 分钟是正式买卖级别，人工复核的结构价格必须锚定正式 5m 点；
+        # 可选 1m 段差不得悄悄替换主信号价格。
+        reference_price = Decimal(str(setup["anchor_price"]))
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("live screening structure anchor price is invalid") from exc
     if not reference_price.is_finite() or reference_price <= 0:
         raise ValueError("live screening structure anchor price is invalid")
-    allowed = bool(signal.get("entry_allowed") or signal.get("exit_allowed"))
+    execution_profile = signal.get("execution_profile")
+    recommendation = (
+        str(execution_profile.get("recommendation") or "")
+        if isinstance(execution_profile, Mapping)
+        else ""
+    )
+    profile_context_grade = (
+        str(execution_profile.get("context_grade") or "UNRESOLVED")
+        if isinstance(execution_profile, Mapping)
+        else "UNRESOLVED"
+    )
+    allowed = bool(
+        recommendation == "READY"
+        or not recommendation
+        and (signal.get("entry_allowed") or signal.get("exit_allowed"))
+    )
     confidence = (
         "HIGH"
         if allowed
+        else "LOW"
+        if profile_context_grade in {"C", "UNRESOLVED"}
         else "MEDIUM"
-        if stage in {"observed", "triggered", "executable"}
+        if recommendation == "CAUTION"
+        or stage in {"observed", "triggered", "executable"}
         else "LOW"
         if stage in {"formed", "armed"}
         else "UNRESOLVED"
@@ -3567,19 +4469,15 @@ def live_signal_human_review_alert(
         dict.fromkeys(
             (
                 "STAGED_LIVE_SCREEN_REQUIRES_HUMAN_CONFIRMATION",
-                "STRATEGIC_CONTEXT_30M",
-                "TACTICAL_SETUP_5M",
+                "CONTEXT_30M",
+                "TRADE_SIGNAL_5M",
                 (
-                    "PRECISE_LOCATOR_1M_PRESENT"
+                    "SEGMENT_DIFFERENCE_1M_PRESENT"
                     if trigger is not None
-                    else "PRECISE_LOCATOR_1M_NOT_YET_PRESENT"
+                    else "SEGMENT_DIFFERENCE_1M_NOT_PRESENT_OPTIONAL"
                 ),
                 f"LIFECYCLE_{str(stage).upper()}",
-                *(
-                    ("HUMAN_SELECT_30M_EXIT_OR_5M_TACTICAL_ROLE",)
-                    if alert_type == "POSSIBLE_SELL_REVIEW"
-                    else ()
-                ),
+                *((f"EXECUTION_RECOMMENDATION_{recommendation}",) if recommendation else ()),
                 *(
                     (
                         "UNADJUSTED_1M_CONFIRMATION_BAR_BOUNDARY_PRESENT",
@@ -3597,15 +4495,15 @@ def live_signal_human_review_alert(
                     )
                 ),
                 *(f"SELECTION_SOURCE_{value}" for value in selection_sources),
-                *(
-                    (MONITOR_ONLY_WARNING_CODE,)
-                    if signal.get("monitor_only") is True
-                    else ()
-                ),
+                *((MONITOR_ONLY_WARNING_CODE,) if signal.get("monitor_only") is True else ()),
                 *(str(value) for value in signal.get("decision_reasons") or ()),
                 *(str(value) for value in risk.get("reason_codes") or ()),
                 *(str(value) for value in warmup.get("reason_codes") or ()),
-                *(() if warmup.get("converged") is True else ("WARMUP_NOT_CONVERGED",)),
+                *(
+                    ()
+                    if five_minute_warmup_converged(warmup) is True
+                    else ("WARMUP_NOT_CONVERGED",)
+                ),
             )
         )
     )
@@ -3613,9 +4511,9 @@ def live_signal_human_review_alert(
         {
             "schema": "chanlun-live-human-review-structure",
             "source_snapshot_sha256": source_snapshot_sha256,
-            "strategic_context_30m": dict(context),
-            "tactical_setup_5m": dict(setup),
-            "precise_locator_1m": None if trigger is None else dict(trigger),
+            "context_30m": dict(context),
+            "trade_signal_5m": dict(setup),
+            "segment_difference_1m": None if trigger is None else dict(trigger),
             "signal": dict(signal),
         }
     )
@@ -3647,6 +4545,22 @@ def live_signal_human_review_alert(
     )
     invalidation = signal.get("structural_stop")
     parameters = human_review_screening_parameters()
+    position_recommendation = parse_position_recommendation_document(
+        signal.get("position_recommendation")
+    )
+    try:
+        setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("live screening setup availability time is invalid") from exc
+    signal_age_seconds = active_signal_age_seconds(
+        setup_available_at,
+        signal_at,
+        market=(
+            "a" if symbol.startswith(("SH.", "SZ.", "BJ.")) else "other"
+        ),
+    )
+    if signal_age_seconds is None:
+        raise ValueError("live screening signal freshness is invalid")
     return HumanReviewAlert(
         symbol=symbol,
         alert_type=alert_type,  # type: ignore[arg-type]
@@ -3667,10 +4581,15 @@ def live_signal_human_review_alert(
             sector_risk_gate=sector_gate,
             symbol_risk_gate=symbol_gate,
             warning_count=len(warnings),
+            position_status=position_recommendation.status,
+            side=str(signal.get("side")),
+            selection_sources=selection_sources,
+            lifecycle_stage=str(stage),
+            monitor_only=signal.get("monitor_only") is True,
+            fresh_signal=signal_age_seconds <= Decimal("600"),
             parameters=parameters,
         ),
-        # 这是当前最细的因果结构锚点，不是行情报价或成交承诺：优先使用 1m 定位点；
-        # 定位点仍在形成时退回 5m setup。
+        # 这是 5 分钟正式买卖点的因果结构锚点，不是行情报价或成交承诺。
         reference_price=reference_price,
         structural_invalidation_price=(
             None if invalidation is None else Decimal(str(invalidation))
@@ -3698,6 +4617,7 @@ def live_signal_human_review_alert(
             None if entry_boundary is None else entry_boundary.evidence_id
         ),
         entry_execution_boundary=entry_boundary,
+        position_recommendation=position_recommendation,
     )
 
 
@@ -3708,6 +4628,7 @@ def live_human_review_document(
     session: date,
     result_label: str = "LIVE_INTRADAY_HUMAN_REVIEW_QUEUE",
     decision_source_snapshot: Mapping[str, object] | None = None,
+    _validated_snapshot: _ValidatedLiveReviewSnapshot | None = None,
 ) -> dict[str, object]:
     """构建适合不可变实时归档、仅供复核的报告。"""
 
@@ -3716,10 +4637,26 @@ def live_human_review_document(
         if decision_source_snapshot is None
         else decision_source_snapshot_id(decision_source_snapshot)
     )
-    review_at, signals = validate_live_review_snapshot(
-        live_snapshot,
-        session=session,
-    )
+    if _validated_snapshot is None:
+        review_at, signals = validate_live_review_snapshot(
+            live_snapshot,
+            session=session,
+        )
+    else:
+        validation = _validated_snapshot
+        if (
+            type(validation) is not _ValidatedLiveReviewSnapshot
+            or validation.seal is not _LIVE_REVIEW_VALIDATION_SEAL
+            or validation.payload is not live_snapshot
+            or validation.snapshot_content_sha256 != source_snapshot_sha256
+            or live_snapshot.get("snapshot_content_sha256")
+            != validation.snapshot_content_sha256
+            or (validation.session is not None and validation.session != session)
+            or validation.review_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+            != session
+        ):
+            raise ValueError("live screening validation token is invalid")
+        review_at, signals = validation.review_at, validation.signals
     ranking_documents = {
         str(value["sector_id"]): value
         for value in live_snapshot.get("sectors") or ()
@@ -3759,6 +4696,7 @@ def live_human_review_document(
                     ),
                 )
                 for signal in signals
+                if signal.get("lifecycle_stage") not in _SNAPSHOT_AUDIT_STAGES
             ),
             key=lambda value: (
                 -value.review_priority,
@@ -3791,6 +4729,11 @@ def live_human_review_document(
         "scope": {
             "selection_path": "QMT_CURRENT_SECTOR_TECHNICAL_ONLY",
             "three_program_mode": "DISABLED_USER_AUTHORIZED",
+            "context_frequency": "30m",
+            "trade_frequency": "5m",
+            "segment_difference_frequency": "1m",
+            "segment_difference_required_for_trade_signal": False,
+            # Compatibility aliases retained for previously archived reports.
             "strategic_frequency": "30m",
             "tactical_frequency": "5m",
             "locator_frequency": "1m",
@@ -3844,12 +4787,13 @@ def live_human_review_document(
         ],
         "division_of_responsibility": {
             "program": (
-                "sector ranking, 30m context, 5m setup, 1m locator, causal chart "
+                "sector ranking, 30m context, 5m formal trade point, optional "
+                "1m segment difference, causal chart "
                 "lock, risk and warmup evidence"
             ),
             "human": (
-                "center, trend type, recursive level, strategic/tactical role, "
-                "buy/sell point and any virtual observation decision"
+                "center, trend type, recursive level, position ownership, "
+                "recommended ratio and any manual trade decision"
             ),
         },
         "hard_rejections": list(live_snapshot.get("errors") or ()),
@@ -3858,10 +4802,17 @@ def live_human_review_document(
                 "signal_id": signal.get("signal_id"),
                 "symbol": signal.get("code"),
                 "context_frequency": "30m",
-                "setup_frequency": "5m",
-                "locator_frequency": (
-                    "1m" if signal.get("trigger_1m") is not None else None
+                "trade_frequency": "5m",
+                "segment_difference_frequency": (
+                    "1m"
+                    if signal.get(
+                        "segment_difference_1m",
+                        signal.get("trigger_1m"),
+                    )
+                    is not None
+                    else None
                 ),
+                "position_recommendation": signal.get("position_recommendation"),
                 "decision_reasons": list(signal.get("decision_reasons") or ()),
                 "entry_allowed": bool(signal.get("entry_allowed")),
                 "exit_allowed": bool(signal.get("exit_allowed")),
@@ -3877,6 +4828,7 @@ def live_human_review_document(
 
 
 __all__ = (
+    "COVERAGE_EXCLUSION_ELIGIBILITY_BY_REASON",
     "COVERAGE_EXCLUSION_REASON_CODES",
     "COVERAGE_MANIFEST_SCHEMA",
     "COVERAGE_MANIFEST_FIELDS",

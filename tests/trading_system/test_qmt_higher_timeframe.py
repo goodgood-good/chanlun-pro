@@ -40,6 +40,9 @@ from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QmtMinuteSessionIssue,
     build_qmt_same_base_stream_frames,
 )
+from chanlun.decision_support.trading_system.qmt_sector_same_base import (
+    qmt_sector_member_path_revision,
+)
 from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_COMPOSITE_ADJUSTMENT,
     QMT_GICS3_COMPOSITE_MINIMUM_BAR_COVERAGE,
@@ -237,6 +240,48 @@ def test_sector_coverage_proves_physical_qmt_cache_left_boundary() -> None:
             )
 
 
+def test_live_sector_coverage_keeps_uninspectable_physical_boundary_diagnostic() -> None:
+    session = date(2026, 7, 24)
+    observed_at = datetime(2026, 7, 24, 15, 0, tzinfo=CN)
+    members = tuple(f"SH.6000{index:02d}" for index in range(8))
+    frame = pd.DataFrame(
+        {
+            "date": tuple(subject._sector_five_minute_closes(session)),
+            "member_mask": ((1 << len(members)) - 1,) * 48,
+        }
+    )
+    frame.attrs.update(
+        sector_id="qmt-gics3:live-test",
+        sector_membership_revision="sha256:" + "1" * 64,
+        sector_composite_members=members,
+        sector_composite_required_member_count=8,
+        sector_composite_member_path_revision="sha256:" + "2" * 64,
+    )
+    warmup = QmtHigherTimeframeWarmupEvidence(
+        required_daily_bar_count=480,
+        full_daily_bar_count=1,
+        suffix_daily_bar_count=0,
+        converged=False,
+        reason_code="QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT",
+        full_signature="sha256:" + "8" * 64,
+        suffix_signature=None,
+    )
+
+    coverage = subject.build_qmt_sector_same_base_coverage_evidence(
+        five_minute_frame=frame,
+        observed_at=observed_at,
+        trading_sessions=(session,),
+        warmup_evidence=warmup,
+    )
+
+    assert coverage.physical_source_boundary_status == (
+        "PHYSICAL_QMT_SOURCE_BOUNDARY_UNAVAILABLE"
+    )
+    assert coverage.physical_source_representative_member_count == 8
+    assert coverage.physical_source_available_member_count == 8
+    assert coverage.physical_source_required_contributor_start_at is None
+
+
 def test_sector_resolver_keeps_strict_gate_when_optional_daily_source_fails(
     monkeypatch,
 ) -> None:
@@ -350,18 +395,9 @@ def frame(times: tuple[datetime, ...]) -> pd.DataFrame:
 
 
 def _sector_member_path_revision(value: pd.DataFrame) -> str:
-    return sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-composite-member-path",
-            "rows": tuple(
-                {
-                    "date": pd.Timestamp(row.date).to_pydatetime(),
-                    "member_mask": int(row.member_mask),
-                }
-                for row in value.itertuples(index=False)
-            ),
-        }
-    )
+    revision = qmt_sector_member_path_revision(value)
+    assert revision is not None
+    return revision
 
 
 def _attach_physical_sector_coverage(
@@ -568,6 +604,24 @@ def test_live_gate_derives_daily_and_30m_from_one_completed_1m_prefix() -> None:
     assert exchange.calls[1][1] == "d"
     assert exchange.calls[0][2]["dividend_type"] == "front_ratio"
     assert exchange.calls[0][2]["research_exact_end"] is True
+
+
+def test_production_source_defaults_to_short_daily_advisory_history() -> None:
+    source = QmtHigherTimeframeGateSource(
+        exchange_provider=lambda: object(),
+        trading_calendar_provider=lambda **_kwargs: (),
+    )
+
+    health = source.cache_health_snapshot()
+    assert health["required_daily_bars"] == 60
+    assert health["physical_daily_bars"] == 60
+    assert health["required_sector_daily_bars"] == 60
+    assert health["physical_sector_daily_bars"] == 60
+    # 月/周方向已经退出执行门槛，默认只读取日线提示和 30m 上下文所需历史。
+    assert health["one_minute_request_bars"] == 31 * 241
+    assert health["sector_five_minute_request_bars"] == 61 * 48
+    assert health["minute_frame_capacity"] == 4
+    assert health["bundle_capacity"] == 4096
 
 
 def test_live_gate_refreshes_one_minute_once_when_native_daily_is_ahead() -> None:
@@ -912,7 +966,7 @@ def test_live_same_base_mwd_gate_fails_closed_before_warmup_budget() -> None:
 def test_mwd_gate_becomes_evaluable_only_after_pairwise_warmup_converges() -> None:
     sessions: list[date] = []
     current = date(2024, 1, 2)
-    while len(sessions) < 480:
+    while len(sessions) < 720:
         if current.weekday() < 5:
             sessions.append(current)
         current += timedelta(days=1)
@@ -931,6 +985,8 @@ def test_mwd_gate_becomes_evaluable_only_after_pairwise_warmup_converges() -> No
 
     source = QmtHigherTimeframeGateSource(
         exchange_provider=lambda: Exchange(),
+        daily_bars=480,
+        thirty_minute_bars=480 * 8,
         trading_calendar_provider=_calendar_provider(sessions),
     )
     daily, thirty, reconciliation = source._frames(
@@ -956,11 +1012,11 @@ def test_mwd_gate_becomes_evaluable_only_after_pairwise_warmup_converges() -> No
     assert envelope.grade == "FULL_SYSTEM_ELIGIBLE"
     assert envelope.risk.gate == "GREEN"
     assert envelope.warmup.converged is True
-    assert envelope.warmup.full_daily_bar_count == 480
-    assert envelope.warmup.suffix_daily_bar_count == 320
+    assert envelope.warmup.full_daily_bar_count == 720
+    assert envelope.warmup.suffix_daily_bar_count == 480
     assert envelope.warmup.full_signature == envelope.warmup.suffix_signature
     assert envelope.warmup_convergence is not None
-    assert envelope.warmup_convergence.status == "INSUFFICIENT_PREFIXES"
+    assert envelope.warmup_convergence.status == "STABLE_ALL_PREFIXES"
     assert envelope.warmup_convergence.active_gate_unchanged is True
 
 
@@ -1393,7 +1449,7 @@ def test_sector_gate_uses_one_qmt_five_minute_base_and_fails_short_warmup() -> N
     assert len(provider_calls) == 2
     assert provider_calls[0]["frequency"] == "5m"
     assert provider_calls[1]["frequency"] == "1d"
-    assert provider_calls[1]["request_bars"] == 720
+    assert provider_calls[1]["request_bars"] == 120
     assert provider_calls[0]["members"] == members
 
     broken = sector_five.drop(index=100).reset_index(drop=True)

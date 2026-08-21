@@ -274,6 +274,33 @@ test('one global group batches quotes by each member market', () => {
   assert.deepEqual(h.timers.map((timer) => timer.delay), [3000]);
 });
 
+test('a closed market keeps its last quote without joining every open-market poll', () => {
+  const h = loadZiXuan([
+    { market: 'a', code: 'SH.513100' },
+    { market: 'us', code: 'AAPL.US' },
+  ]);
+
+  h.ZiXuan.stocks_update_rate();
+  const aCall = h.ajaxCalls.find((call) => call.data.market === 'a');
+  const usCall = h.ajaxCalls.find((call) => call.data.market === 'us');
+  completeSuccess(aCall, {
+    ok: true,
+    market_state: 'closed',
+    ticks: [{ code: 'SH.513100', price: 1.672, rate: 0.72 }],
+  });
+  completeSuccess(usCall, {
+    ok: true,
+    market_state: 'open',
+    ticks: [{ code: 'AAPL.US', price: 201.0, rate: 1.0 }],
+  });
+
+  assert.equal(h.replacements(), 2);
+  assert.equal(h.timers[0].delay, 3000);
+  h.fireLatestTimer();
+  assert.equal(h.ajaxCalls.length, 3);
+  assert.equal(h.ajaxCalls[2].data.market, 'us');
+});
+
 test('US quote batches use the same bounded primary-provider timeout', () => {
   const h = loadZiXuan([
     { market: 'a', code: 'SH.600000' },

@@ -80,6 +80,10 @@ from chanlun.decision_support.trading_system.human_paper_valuation import (
 from chanlun.decision_support.trading_system.models import (
     parse_entry_execution_boundary_document,
 )
+from chanlun.decision_support.trading_system.position_recommendation import (
+    PositionRecommendation,
+    parse_position_recommendation_document,
+)
 from chanlun.decision_support.trading_system.bar_execution import (
     STRICT_BAR_EXECUTION_TIMESTAMP_RULE,
     STRICT_BAR_PRICE_RULE,
@@ -93,9 +97,7 @@ from chanlun.decision_support.trading_system.forward_paper import (
     load_forward_contract,
 )
 from chanlun.decision_support.trading_system.live_human_review import (
-    live_human_review_document,
     validate_live_screening_market_watermark,
-    validate_live_review_snapshot,
 )
 from chanlun.decision_support.trading_system.trading_session import (
     resolve_trading_session_requirement,
@@ -122,6 +124,10 @@ from chanlun.decision_support.trading_system.qmt_sector_ledger import (
 )
 
 from .forward_scheduler import validate_forward_scheduler_snapshot
+from .live_review_runtime_contract import (
+    live_human_review_document,
+    validate_live_review_snapshot,
+)
 
 
 SCREEN_SCHEMA = HUMAN_REVIEW_SCREEN_SCHEMA
@@ -135,6 +141,12 @@ _REVIEW_LANE_ORDER = {
     "WATCHLIST": 2,
     "RESEARCH_ARCHIVE": 3,
 }
+_FORMAL_BUY_ALERT_TYPES = frozenset(
+    {"POSSIBLE_5M_TRADE_BUY", "POSSIBLE_30M_BUY"}
+)
+_FORMAL_SELL_ALERT_TYPES = frozenset(
+    {"POSSIBLE_5M_TRADE_SELL", "POSSIBLE_SELL_REVIEW"}
+)
 _FORWARD_SCHEDULER_MAX_AGE = timedelta(seconds=90)
 _FORWARD_SCHEDULER_FUTURE_TOLERANCE = timedelta(seconds=5)
 _FORWARD_CAPTURE_READINESS_CACHE_SECONDS = 300.0
@@ -175,6 +187,9 @@ _COMPACT_CANDIDATE_FIELDS = frozenset(HumanReviewAlert.__dataclass_fields__) - {
     "sector_ranking_attestation",
     "detail_locator",
 }
+_LEGACY_COMPACT_CANDIDATE_FIELDS = _COMPACT_CANDIDATE_FIELDS - {
+    "position_recommendation"
+}
 _COMPACT_RISK_GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
 _COMPACT_MARKET_SYMBOL_SOURCE_ATTESTATIONS = frozenset(
     {"SELF_CONTAINED", "PARTIAL_SOURCE_SUPPORT", "STRUCTURE_ONLY"}
@@ -201,6 +216,7 @@ class _HumanReviewCandidateSummary:
     entry_valid_until: datetime | None
     entry_boundary_evidence_id: str | None
     entry_execution_boundary: object | None
+    position_recommendation: PositionRecommendation | None
     market_risk_gate: str
     sector_risk_gate: str
     symbol_risk_gate: str
@@ -251,7 +267,10 @@ def _optional_decimal(value: object) -> Decimal | None:
 
 
 def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
-    if not isinstance(raw, Mapping) or set(raw) != _COMPACT_CANDIDATE_FIELDS:
+    if not isinstance(raw, Mapping) or set(raw) not in {
+        _COMPACT_CANDIDATE_FIELDS,
+        _LEGACY_COMPACT_CANDIDATE_FIELDS,
+    }:
         raise ValueError("compact human review candidate must be a mapping")
     candidate_id = str(raw.get("candidate_id") or "")
     lifecycle_id = str(raw.get("signal_lifecycle_id") or "")
@@ -287,6 +306,12 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
     boundary = raw.get("entry_execution_boundary")
     parsed_boundary = (
         None if boundary is None else parse_entry_execution_boundary_document(boundary)
+    )
+    recommendation = raw.get("position_recommendation")
+    parsed_recommendation = (
+        None
+        if recommendation is None
+        else parse_position_recommendation_document(recommendation)
     )
     if any(
         not isinstance(raw.get(field), list)
@@ -374,6 +399,7 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
             else str(raw["entry_boundary_evidence_id"])
         ),
         entry_execution_boundary=parsed_boundary,
+        position_recommendation=parsed_recommendation,
         market_risk_gate=str(raw.get("market_risk_gate") or ""),
         sector_risk_gate=str(raw["sector_risk_gate"]),
         symbol_risk_gate=str(raw.get("symbol_risk_gate") or ""),
@@ -439,6 +465,7 @@ def _review_lane(
     """Classify one candidate into a display-only human workload lane."""
 
     is_sell_hint = alert.alert_type in {
+        "POSSIBLE_5M_TRADE_SELL",
         "POSSIBLE_30M_EXIT",
         "POSSIBLE_SELL_REVIEW",
         "POSSIBLE_5M_TACTICAL_SELL",
@@ -446,12 +473,14 @@ def _review_lane(
     }
     if virtual_position_quantity > 0 and is_sell_hint:
         return "POSITION_MANAGEMENT"
-    if alert.alert_type == "POSSIBLE_30M_BUY" and (
+    if alert.alert_type in _FORMAL_BUY_ALERT_TYPES and (
         alert.confidence in {"HIGH", "MEDIUM"} or paper_reconciliation_pending
     ):
         return "ACTIONABLE_REVIEW"
-    if alert.alert_type == "POSSIBLE_30M_BUY":
+    if alert.alert_type in _FORMAL_BUY_ALERT_TYPES:
         return "WATCHLIST"
+    if alert.alert_type in _FORMAL_SELL_ALERT_TYPES:
+        return "ACTIONABLE_REVIEW"
     return "RESEARCH_ARCHIVE"
 
 
@@ -695,7 +724,7 @@ def _paper_entry_sector_eligibility(
     """
 
     ranking = alert.sector_ranking_evidence
-    if alert.alert_type != "POSSIBLE_30M_BUY" or ranking is None:
+    if alert.alert_type not in _FORMAL_BUY_ALERT_TYPES or ranking is None:
         return True, None
     attestation = str(
         sector_presentation.get("sector_ranking_catalog_attestation") or ""
@@ -720,7 +749,7 @@ def _paper_entry_selection_evidence(
 
     ranking = alert.sector_ranking_evidence
     if (
-        alert.alert_type != "POSSIBLE_30M_BUY"
+        alert.alert_type not in _FORMAL_BUY_ALERT_TYPES
         or not feedback.point_judgement.startswith("BUY_")
         or feedback.disposition != "PAPER_OBSERVE"
         or ranking is None
@@ -2657,6 +2686,11 @@ class HumanReviewScreeningService:
                         else alert.entry_valid_until.isoformat()
                     ),
                     "entry_boundary_evidence_id": (alert.entry_boundary_evidence_id),
+                    "position_recommendation": (
+                        None
+                        if alert.position_recommendation is None
+                        else alert.position_recommendation.document()
+                    ),
                     "entry_boundary_attestation": (
                         "SELF_CONTAINED_RAW_1M_OHLCV"
                         if alert.entry_execution_boundary is not None
@@ -3687,7 +3721,7 @@ class HumanReviewScreeningService:
             new_strategic_entry_requested = (
                 feedback.disposition == "PAPER_OBSERVE"
                 and feedback.point_judgement.startswith("BUY_")
-                and alert.alert_type == "POSSIBLE_30M_BUY"
+                and alert.alert_type in _FORMAL_BUY_ALERT_TYPES
             )
             risk_reducing_cancellation_requested = (
                 feedback.disposition != "PAPER_OBSERVE"

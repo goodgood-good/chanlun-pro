@@ -5,8 +5,9 @@ import numpy as np
 import pandas as pd
 
 from chanlun import fun
-from chanlun.core.types import Kline
 from chanlun.core.macd import MACD
+from chanlun.core.macd_htf import interpolate_causal_htf_for_chart
+from chanlun.core.types import Kline
 
 
 
@@ -89,6 +90,8 @@ def cl_data_to_tv_chart(
                         },
                     ],
                     "linestyle": "0" if bi.is_done() else "1",
+                    "state": "locked" if bi.is_done() else "forming",
+                    "locked": bool(bi.is_done()),
                 }
                 for bi in strict_cd.get_bis()
             ]
@@ -108,8 +111,20 @@ def cl_data_to_tv_chart(
                         },
                     ],
                     "linestyle": (
-                        "1" if getattr(xd, "forming", False) else "0"
+                        "0"
+                        if xd.is_done()
+                        else "1"
+                        if getattr(xd, "forming", False)
+                        else "0"
                     ),
+                    "state": (
+                        "locked"
+                        if xd.is_done()
+                        else "forming"
+                        if getattr(xd, "forming", False)
+                        else "formed"
+                    ),
+                    "locked": bool(xd.is_done()),
                 }
                 for xd in strict_cd.get_xds()
             ]
@@ -135,6 +150,11 @@ def cl_data_to_tv_chart(
             raise ValueError(
                 "strict chart higher-timeframe MACD is not aligned with displayed bars"
             )
+        chart_htf = (
+            interpolate_causal_htf_for_chart(strict_htf) if strict_htf else None
+        )
+        if strict_htf and chart_htf is None:
+            raise ValueError("strict chart higher-timeframe MACD context is invalid")
     else:
         # 结构计算失败时绝不启用其他识别引擎；只按固定生产 MACD 参数保留 K 线显示。
         macd = MACD()
@@ -154,6 +174,7 @@ def cl_data_to_tv_chart(
         )
         macd_idx = macd.get_results()["macd"]
         strict_htf = {}
+        chart_htf = None
 
     result = {
         "t": kline_ts,
@@ -166,9 +187,10 @@ def cl_data_to_tv_chart(
         "macd_dea": np.round(macd_idx["dea"], 6).tolist(),
         "macd_hist": np.round(macd_idx["hist"], 6).tolist(),
         "macd_area": np.round(macd_idx.get("hist_area", []), 6).tolist(),
-        "higher_macd_dif": np.round(strict_htf.get("dif", []), 6).tolist(),
-        "higher_macd_dea": np.round(strict_htf.get("dea", []), 6).tolist(),
-        "higher_macd_hist": np.round(strict_htf.get("hist", []), 6).tolist(),
+        # 严格结构继续消费 strict_htf；传给图表的副本只做视觉插值，不参与判定。
+        "higher_macd_dif": np.round((chart_htf or {}).get("dif", []), 6).tolist(),
+        "higher_macd_dea": np.round((chart_htf or {}).get("dea", []), 6).tolist(),
+        "higher_macd_hist": np.round((chart_htf or {}).get("hist", []), 6).tolist(),
         "fxs": fx_data,
         "bis": bi_chart_data,
         "xds": xd_chart_data,

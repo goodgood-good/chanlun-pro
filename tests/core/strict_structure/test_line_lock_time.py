@@ -139,6 +139,8 @@ def test_xd_lock_time_comes_from_a_later_locked_bi_witness(segment_frame):
     locked_xds = [line for line in cd.get_xds() if line.is_done()]
     assert locked_xds
     for xd in locked_xds:
+        assert xd.formed_at is not None
+        assert xd.formed_at <= xd.locked_at
         assert xd.locked_at in bi_witness_times
         assert xd.locked_at >= xd.end.k.date
 

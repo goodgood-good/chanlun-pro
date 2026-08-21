@@ -278,6 +278,7 @@ _CALENDAR_FREQUENCY_ALIASES = {
     "D": "d",
     "1D": "d",
     "2D": "2d",
+    "3D": "3d",
     "W": "w",
     "1W": "w",
     "M": "m",
@@ -291,7 +292,7 @@ def _calendar_frequency(frequency) -> str:
     value = str(frequency or "")
     if value in _CALENDAR_FREQUENCY_ALIASES:
         return _CALENDAR_FREQUENCY_ALIASES[value]
-    if value in {"d", "2d", "w", "m", "q", "y"}:
+    if value in {"d", "2d", "3d", "w", "m", "q", "y"}:
         return value
     return ""
 

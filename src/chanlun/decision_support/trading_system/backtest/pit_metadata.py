@@ -30,6 +30,7 @@ from chanlun.decision_support.trading_system.backtest.models import (
 
 CN = ZoneInfo("Asia/Shanghai")
 PIT_METADATA_SCHEMA = "chanlun-qmt-pit-metadata"
+LEGACY_PIT_METADATA_SCHEMAS = frozenset({"chanlun-qmt-pit-metadata/v1"})
 SW_STANDARD_CODE = "008003"
 _NATIVE_CODE = re.compile(r"^(?P<digits>[0-9]{6})\.(?P<market>SH|SZ|BJ)$")
 _NORMALIZED_CODE = re.compile(r"^(?P<market>SH|SZ|BJ)\.(?P<digits>[0-9]{6})$")
@@ -482,6 +483,9 @@ def snapshot_from_payload(payload: Mapping[str, object]) -> PITMetadataSnapshot:
     }
     if not isinstance(expected_hash, str) or _json_hash(canonical) != expected_hash:
         raise ValueError("PIT metadata content hash mismatch")
+    source_schema = str(payload.get("schema") or "")
+    if source_schema not in {PIT_METADATA_SCHEMA, *LEGACY_PIT_METADATA_SCHEMAS}:
+        raise ValueError("unsupported PIT metadata schema")
     raw_securities = payload.get("securities")
     raw_memberships = payload.get("memberships")
     raw_factors = payload.get("factors")
@@ -554,7 +558,10 @@ def snapshot_from_payload(payload: Mapping[str, object]) -> PITMetadataSnapshot:
         if isinstance(row, Mapping)
     )
     return PITMetadataSnapshot(
-        schema=str(payload.get("schema") or ""),
+        # v1 used the same content contract and was already bound by the hash
+        # above.  Normalize only the in-memory marker; never rewrite the
+        # immutable source artifact used by the audit report.
+        schema=PIT_METADATA_SCHEMA,
         source_start=_iso_date(payload.get("source_start"), "source_start"),
         source_end=_iso_date(payload.get("source_end"), "source_end"),
         captured_at=datetime.fromisoformat(str(payload.get("captured_at"))),
@@ -578,6 +585,7 @@ def sha256_json(value: object) -> str:
 
 
 __all__ = (
+    "LEGACY_PIT_METADATA_SCHEMAS",
     "CN",
     "PIT_METADATA_SCHEMA",
     "PITMetadataSnapshot",

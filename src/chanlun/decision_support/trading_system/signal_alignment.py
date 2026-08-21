@@ -7,34 +7,60 @@ from dataclasses import asdict, dataclass
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.models import (
     CANONICAL_POINT_TYPES,
+    CONTINUATION_SUPPORT_POINT_TYPES,
+    ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES,
     REVERSAL_SUPPORT_POINT_TYPES,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    FIVE_MINUTE_TRADE_RECURSIVE_LEVELS,
 )
 
 
 UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID = (
-    "PHYSICAL_5M_SETUP_1M_TRIGGER_UNIFIED_POINT_CLASSES"
+    "PHYSICAL_5M_L0_TRADE_SIGNAL_1M_SEGMENT_DIFFERENCE_V4"
 )
 
 
 @dataclass(frozen=True, slots=True)
 class UnifiedSignalAlignmentContract:
-    """冻结一、二、三类买卖点进入决策层时的唯一跨周期关系。"""
+    """冻结一、二、三类买卖点进入决策层时的唯一跨周期关系。
+
+    物理 5 分钟第 0 递归级别的正式点独立构成买卖信号；5m/L1 及以上
+    是对应的高周期上下文，不是平行交易通道。1 分钟点是可选的段差/精细
+    定位证据，缺失时不得把已经确认的 5 分钟信号降级或阻止通知。
+    """
 
     contract_id: str = UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID
     structure_authority: str = "STRICT_PHYSICAL_TIMEFRAME_ENGINE"
     context_frequencies: tuple[str, ...] = ("d", "30m")
-    setup_frequency: str = "5m"
-    trigger_frequency: str = "1m"
+    trade_signal_frequency: str = "5m"
+    trade_signal_recursive_levels: tuple[int, ...] = (
+        FIVE_MINUTE_TRADE_RECURSIVE_LEVELS
+    )
+    higher_recursive_trade_evidence_context_only: bool = True
+    segment_difference_frequency: str = "1m"
     point_types: tuple[str, ...] = CANONICAL_POINT_TYPES
     reversal_support_point_types: tuple[str, ...] = tuple(
         point_type
         for point_type in CANONICAL_POINT_TYPES
         if point_type in REVERSAL_SUPPORT_POINT_TYPES
     )
+    continuation_support_point_types: tuple[str, ...] = tuple(
+        point_type
+        for point_type in CANONICAL_POINT_TYPES
+        if point_type in CONTINUATION_SUPPORT_POINT_TYPES
+    )
+    segment_difference_point_types: tuple[str, ...] = tuple(
+        point_type
+        for point_type in CANONICAL_POINT_TYPES
+        if point_type in ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES
+    )
     setup_classes_share_logic: bool = True
     point_classes_share_structure_authority: bool = True
-    trigger_must_match_side: bool = True
+    segment_difference_is_optional: bool = True
+    segment_difference_must_match_side: bool = True
     third_class_can_confirm_reversal: bool = False
+    third_class_can_confirm_continuation: bool = True
     third_class_keeps_center_geometry: bool = True
     small_to_large_second_class_allowed: bool = True
     provisional_points_actionable: bool = False
@@ -45,7 +71,14 @@ class UnifiedSignalAlignmentContract:
         if (
             self.structure_authority != "STRICT_PHYSICAL_TIMEFRAME_ENGINE"
             or self.context_frequencies != ("d", "30m")
-            or (self.setup_frequency, self.trigger_frequency) != ("5m", "1m")
+            or (
+                self.trade_signal_frequency,
+                self.segment_difference_frequency,
+            )
+            != ("5m", "1m")
+            or self.trade_signal_recursive_levels
+            != FIVE_MINUTE_TRADE_RECURSIVE_LEVELS
+            or not self.higher_recursive_trade_evidence_context_only
             or self.point_types != CANONICAL_POINT_TYPES
             or self.reversal_support_point_types
             != tuple(
@@ -53,10 +86,24 @@ class UnifiedSignalAlignmentContract:
                 for point_type in CANONICAL_POINT_TYPES
                 if point_type in REVERSAL_SUPPORT_POINT_TYPES
             )
+            or self.continuation_support_point_types
+            != tuple(
+                point_type
+                for point_type in CANONICAL_POINT_TYPES
+                if point_type in CONTINUATION_SUPPORT_POINT_TYPES
+            )
+            or self.segment_difference_point_types
+            != tuple(
+                point_type
+                for point_type in CANONICAL_POINT_TYPES
+                if point_type in ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES
+            )
             or not self.setup_classes_share_logic
             or not self.point_classes_share_structure_authority
-            or not self.trigger_must_match_side
+            or not self.segment_difference_is_optional
+            or not self.segment_difference_must_match_side
             or self.third_class_can_confirm_reversal
+            or not self.third_class_can_confirm_continuation
             or not self.third_class_keeps_center_geometry
             or not self.small_to_large_second_class_allowed
             or self.provisional_points_actionable

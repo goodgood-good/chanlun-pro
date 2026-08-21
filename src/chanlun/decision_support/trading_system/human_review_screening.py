@@ -1,7 +1,8 @@
 """无下单权限的人工复核缠论筛选。
 
-程序可以缩小 QMT 全市场范围，并把严格递归引擎已经确认的 30m/5m/1m 结构位置
-交给人工复核。它不得重新判断中枢、走势类型、递归级别或买卖点，也不得创建订单。
+程序可以缩小 QMT 全市场范围，并把严格递归引擎已经确认的 30m环境、5m正式买卖点
+和可选1m段差位置交给人工复核。它不得重新判断中枢、走势类型、递归级别或买卖点，
+也不得创建订单。
 历史评估因此只衡量筛选质量，不把人工复核队列冒充组合回测。
 """
 
@@ -36,6 +37,10 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 from chanlun.decision_support.trading_system.models import (
     EntryExecutionBoundary,
     parse_entry_execution_boundary_document,
+)
+from chanlun.decision_support.trading_system.position_recommendation import (
+    PositionRecommendation,
+    parse_position_recommendation_document,
 )
 from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_EVIDENCE_CONTRACT_ID,
@@ -76,6 +81,8 @@ from chanlun.decision_support.trading_system.signal_alignment import (
 
 
 AlertType = Literal[
+    "POSSIBLE_5M_TRADE_BUY",
+    "POSSIBLE_5M_TRADE_SELL",
     "POSSIBLE_30M_BUY",
     "POSSIBLE_30M_EXIT",
     "POSSIBLE_SELL_REVIEW",
@@ -83,6 +90,8 @@ AlertType = Literal[
     "POSSIBLE_5M_TACTICAL_BUYBACK",
 ]
 HUMAN_REVIEW_ALERT_TYPES = (
+    "POSSIBLE_5M_TRADE_BUY",
+    "POSSIBLE_5M_TRADE_SELL",
     "POSSIBLE_30M_BUY",
     "POSSIBLE_30M_EXIT",
     "POSSIBLE_SELL_REVIEW",
@@ -124,12 +133,11 @@ _SECTOR_NATIVE_DAILY_RESEARCH_BLOCKER = (
 )
 
 REVIEW_CHECKLIST = (
-    "HUMAN_CONFIRM_30M_CENTER_AND_LEVEL",
+    "HUMAN_CONFIRM_30M_CONTEXT",
     "HUMAN_CONFIRM_SAME_LEVEL_AND_CENTER_DECOMPOSITION",
     "HUMAN_CONFIRM_30M_TREND_TYPE",
-    "HUMAN_CONFIRM_BUY_OR_SELL_POINT",
-    "HUMAN_CONFIRM_5M_TACTICAL_CONTEXT",
-    "HUMAN_CONFIRM_1M_LOCATOR",
+    "HUMAN_CONFIRM_5M_TRADE_POINT",
+    "HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE",
     "HUMAN_CONFIRM_HIGHER_TIMEFRAME_RISK",
     "HUMAN_DEFINE_INVALIDATION_AND_ANY_PAPER_PLAN",
 )
@@ -140,15 +148,33 @@ class HumanReviewScreeningParameters:
     signal_alignment_parameter_set_id: str
     schema: str = "chanlun-human-review-screening-parameters"
     event_study_horizons: tuple[int, ...] = (5, 10, 20)
-    confidence_scores: tuple[tuple[str, int], ...] = (
-        ("HIGH", 70),
-        ("MEDIUM", 55),
-        ("LOW", 40),
-        ("UNRESOLVED", 25),
+    review_priority_bands: tuple[tuple[str, int, int, int], ...] = (
+        ("BLOCKED", 8, 0, 19),
+        ("NOT_ACTIONABLE", 30, 20, 39),
+        ("UNRESOLVED", 30, 20, 39),
+        ("CONDITIONAL", 55, 40, 69),
+        ("RECOMMENDED", 72, 70, 89),
+        ("STRUCTURAL_SELL_REVIEW", 82, 80, 89),
+        ("MANUAL_ATTENTION_SELL_REVIEW", 92, 90, 100),
     )
-    exact_green_bonus: int = 10
-    green_risk_gate_bonus: int = 5
-    warning_penalty: int = 3
+    confidence_bonuses: tuple[tuple[str, int], ...] = (
+        ("HIGH", 3),
+        ("MEDIUM", 2),
+        ("LOW", 1),
+        ("UNRESOLVED", 0),
+    )
+    lifecycle_bonuses: tuple[tuple[str, int], ...] = (
+        ("executable", 5),
+        ("triggered", 5),
+        ("observed", 3),
+        ("armed", 3),
+        ("formed", 2),
+        ("approaching", 1),
+    )
+    exact_green_bonus: int = 2
+    green_risk_gate_bonus: int = 1
+    monitor_only_penalty: int = 2
+    diagnostic_count_affects_priority: bool = False
     automated_order_authorized: bool = False
     human_confirmation_required: bool = True
     highest_status: str = "REVIEW_REQUIRED"
@@ -162,6 +188,22 @@ class HumanReviewScreeningParameters:
             raise ValueError("人工复核统一信号对齐身份发生变化")
         if self.event_study_horizons != (5, 10, 20):
             raise ValueError("human review event-study horizons changed")
+        expected_bands = {
+            "BLOCKED": (8, 0, 19),
+            "NOT_ACTIONABLE": (30, 20, 39),
+            "UNRESOLVED": (30, 20, 39),
+            "CONDITIONAL": (55, 40, 69),
+            "RECOMMENDED": (72, 70, 89),
+            "STRUCTURAL_SELL_REVIEW": (82, 80, 89),
+            "MANUAL_ATTENTION_SELL_REVIEW": (92, 90, 100),
+        }
+        if {
+            status: (base, minimum, maximum)
+            for status, base, minimum, maximum in self.review_priority_bands
+        } != expected_bands:
+            raise ValueError("human review priority bands changed")
+        if self.diagnostic_count_affects_priority:
+            raise ValueError("diagnostic volume cannot affect review priority")
         if (
             self.automated_order_authorized
             or not self.human_confirmation_required
@@ -2631,19 +2673,78 @@ def review_priority(
     sector_risk_gate: str,
     symbol_risk_gate: str,
     warning_count: int,
+    position_status: str | None = None,
+    side: str | None = None,
+    selection_sources: tuple[str, ...] = (),
+    lifecycle_stage: str | None = None,
+    monitor_only: bool = False,
+    fresh_signal: bool | None = None,
     parameters: HumanReviewScreeningParameters | None = None,
 ) -> int:
-    """Return a review ordering score; it is deliberately not a trade score."""
+    """Return a stable review-urgency score, never a synthetic trade score.
+
+    Structural review state owns the priority band. Confidence, lifecycle and advisory
+    risk gates may only order candidates *inside* that band.  Diagnostic volume
+    is deliberately accepted for audit compatibility but cannot lower priority:
+    otherwise a better documented candidate is ranked below a hard block merely
+    because it carries more evidence codes.
+    """
 
     values = parameters or human_review_screening_parameters()
-    score = dict(values.confidence_scores)[confidence]
+    if type(warning_count) is not int or warning_count < 0:
+        raise ValueError("human review warning count is invalid")
+    if side not in {None, "buy", "sell"}:
+        raise ValueError("human review priority side is invalid")
+    if fresh_signal is not None and type(fresh_signal) is not bool:
+        raise ValueError("human review signal freshness is invalid")
+    if any(not isinstance(value, str) or not value for value in selection_sources):
+        raise ValueError("human review selection sources are invalid")
+
+    actionable_sell_review = bool(
+        side == "sell"
+        # 只有明确证明仍在新信号窗口内，卖点才进入 80+ 的即时复核带。
+        # 未提供或已过期都保留原结构状态，但不能冒充刚出现的卖点。
+        and fresh_signal is True
+        and lifecycle_stage in {"triggered", "executable", "active"}
+        and (position_status in {"CONDITIONAL", "RECOMMENDED"} or exact_green)
+    )
+    manual_attention_sources = {
+        "MANUAL_ATTENTION_MONITOR",
+        # 只为旧归档读取保留；新决策文档不再生成这两个来源码。
+        "HOLDING_MONITOR",
+        "VIRTUAL_HOLDING_MONITOR",
+    }
+    if actionable_sell_review and manual_attention_sources.intersection(
+        selection_sources
+    ):
+        effective_status = "MANUAL_ATTENTION_SELL_REVIEW"
+    elif actionable_sell_review:
+        effective_status = "STRUCTURAL_SELL_REVIEW"
+    elif position_status is not None:
+        effective_status = position_status
+    elif exact_green:
+        effective_status = "RECOMMENDED"
+    elif confidence == "MEDIUM":
+        effective_status = "CONDITIONAL"
+    else:
+        effective_status = "NOT_ACTIONABLE"
+
+    bands = {
+        status: (base, minimum, maximum)
+        for status, base, minimum, maximum in values.review_priority_bands
+    }
+    if effective_status not in bands:
+        raise ValueError("human review position status is invalid")
+    base, minimum, maximum = bands[effective_status]
+    score = base + dict(values.confidence_bonuses)[confidence]
     score += values.exact_green_bonus if exact_green else 0
     score += values.green_risk_gate_bonus * sum(
         gate == "GREEN"
         for gate in (market_risk_gate, sector_risk_gate, symbol_risk_gate)
     )
-    score -= values.warning_penalty * max(0, warning_count)
-    return min(100, max(0, score))
+    score += dict(values.lifecycle_bonuses).get(lifecycle_stage, 0)
+    score -= values.monitor_only_penalty if monitor_only else 0
+    return min(maximum, max(minimum, score))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2676,6 +2777,7 @@ class HumanReviewAlert:
     entry_valid_until: datetime | None = None
     entry_boundary_evidence_id: str | None = None
     entry_execution_boundary: EntryExecutionBoundary | None = None
+    position_recommendation: PositionRecommendation | None = None
     review_checklist: tuple[str, ...] = REVIEW_CHECKLIST
     status: str = "REVIEW_REQUIRED"
     automated_action_authorized: bool = False
@@ -2818,6 +2920,20 @@ class HumanReviewAlert:
             raise ValueError(
                 "human review full entry execution boundary does not match"
             )
+        if self.position_recommendation is not None:
+            expected_side = (
+                "buy"
+                if self.alert_type
+                in {"POSSIBLE_5M_TRADE_BUY", "POSSIBLE_30M_BUY", "POSSIBLE_5M_TACTICAL_BUYBACK"}
+                else "sell"
+            )
+            if (
+                not isinstance(self.position_recommendation, PositionRecommendation)
+                or self.position_recommendation.side != expected_side
+                or self.position_recommendation.manual_confirmation_required is not True
+                or self.position_recommendation.automated_order_authorized is not False
+            ):
+                raise ValueError("human review position recommendation is invalid")
         if (
             self.screening_parameter_set_id
             != human_review_screening_parameters().parameter_set_id
@@ -2864,6 +2980,12 @@ def _human_review_candidate_id(
     stable = {
         field: getattr(alert, field) for field in HumanReviewAlert.__dataclass_fields__
     }
+    if alert.position_recommendation is None:
+        # Keep candidate identities from reports written before the optional
+        # recommendation field was introduced stable and readable.
+        stable.pop("position_recommendation", None)
+    else:
+        stable["position_recommendation"] = alert.position_recommendation.document()
     if alert.sector_higher_timeframe_evidence is not None:
         stable["sector_higher_timeframe_evidence"] = (
             alert.sector_higher_timeframe_evidence.document()
@@ -2908,9 +3030,13 @@ def parse_human_review_alert(
     full_fields = set(alert_fields)
     payload_fields = set(raw) if isinstance(raw, Mapping) else set()
     expected_fields = full_fields | {"candidate_id", "signal_lifecycle_id"}
-    if not isinstance(raw, Mapping) or payload_fields != expected_fields:
+    legacy_fields = expected_fields - {"position_recommendation"}
+    if not isinstance(raw, Mapping) or payload_fields not in {
+        frozenset(expected_fields),
+        frozenset(legacy_fields),
+    }:
         raise ValueError("human review candidate is malformed")
-    values = {field: raw[field] for field in alert_fields}
+    values = {field: raw.get(field) for field in alert_fields}
     try:
         for field in ("signal_at", "review_available_at"):
             values[field] = datetime.fromisoformat(str(values[field]))
@@ -2934,6 +3060,12 @@ def parse_human_review_alert(
             values["entry_execution_boundary"] = (
                 parse_entry_execution_boundary_document(
                     values["entry_execution_boundary"]
+                )
+            )
+        if values.get("position_recommendation") is not None:
+            values["position_recommendation"] = (
+                parse_position_recommendation_document(
+                    values["position_recommendation"]
                 )
             )
         if values.get("sector_higher_timeframe_evidence") is not None:
@@ -3025,6 +3157,10 @@ def human_review_alert_document(alert: HumanReviewAlert) -> dict[str, object]:
     stable = {
         field: getattr(alert, field) for field in HumanReviewAlert.__dataclass_fields__
     }
+    if alert.position_recommendation is None:
+        stable.pop("position_recommendation", None)
+    else:
+        stable["position_recommendation"] = alert.position_recommendation.document()
     if alert.sector_higher_timeframe_evidence is not None:
         stable["sector_higher_timeframe_evidence"] = (
             alert.sector_higher_timeframe_evidence.document()
@@ -3202,7 +3338,7 @@ def evaluate_review_alert(
     else:
         reference = None if not known else known[-1]
     # ``alert.reference_price`` 是复制得到的最细粒度因果结构锚点。
-    # ``alert.reference_price`` 来自 1m 定位点（或 5m 设置）的最细因果结构锚点，
+    # ``alert.reference_price`` 来自 5m 正式买卖点的因果结构锚点，
     # 不是市场报价。后验收益必须从复核时实际可知的最后一根已完成 1m 收盘价开始；
     # 强制二者相等会错误拒绝结构锚点低于或高于最新收盘价的正常候选。
     observed_future_sessions = {bar.observed_at.date() for bar in future}

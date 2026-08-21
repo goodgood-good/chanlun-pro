@@ -333,13 +333,18 @@ class _PortfolioState:
             else (self.peak_equity - equity) / self.peak_equity
         )
         sector_values: dict[str, Decimal] = {}
+        symbol_values: dict[str, Decimal] = {}
         open_risk = _ZERO
         reserved_cash = _ZERO
         for position in self.positions_by_code.values():
+            position_value = position.last_price * Decimal(position.shares)
             sector_values[position.sector_id] = sector_values.get(
                 position.sector_id,
                 _ZERO,
-            ) + position.last_price * Decimal(position.shares)
+            ) + position_value
+            symbol_values[position.code] = (
+                symbol_values.get(position.code, _ZERO) + position_value
+            )
             open_risk += max(
                 _ZERO,
                 (position.last_price - position.structural_stop)
@@ -359,12 +364,17 @@ class _PortfolioState:
                 pending.sector_id,
                 _ZERO,
             ) + pending.reference_price * Decimal(pending.intent.shares)
+            symbol_values[pending.intent.code] = symbol_values.get(
+                pending.intent.code,
+                _ZERO,
+            ) + pending.reference_price * Decimal(pending.intent.shares)
         return PortfolioSnapshot(
             equity=equity,
             available_cash=max(_ZERO, self.cash - reserved_cash),
             drawdown=drawdown,
             open_risk_cash=open_risk,
             sector_market_values=tuple(sorted(sector_values.items())),
+            symbol_market_values=tuple(sorted(symbol_values.items())),
         )
 
     def snapshot(self) -> PortfolioSnapshot:
@@ -405,6 +415,7 @@ class _PortfolioState:
             entry_price=bar.raw_close,
             stop_price=raw_stop,
             risk_multiplier=entry.risk_multiplier,
+            symbol_id=bar.code,
         )
         intent = OrderIntent(
             order_id=f"entry:{entry.signal_id}:{created_at.isoformat()}",
@@ -1043,6 +1054,7 @@ def risk_candidate_from(
         entry_price=bar.raw_close,
         stop_price=_analysis_price_to_raw(entry.structural_stop, bar),
         risk_multiplier=entry.risk_multiplier,
+        symbol_id=bar.code,
     )
 
 

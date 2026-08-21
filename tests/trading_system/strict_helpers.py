@@ -48,6 +48,13 @@ def strict_point(
     )
     anchor_at = available_at - timedelta(minutes=10)
     confirmed_at = available_at - timedelta(minutes=5)
+    anchor_unit_id = stable_structure_id(
+        "chanlun-test-segment",
+        PRICE_BASIS,
+        structural_level,
+        point_type,
+        anchor_at.isoformat(),
+    )
     divergence = raw.divergence
     source_kind = SourceKind.SEGMENT if structural_level == 0 else SourceKind.TREND_TYPE
     if divergence is not None:
@@ -61,10 +68,12 @@ def strict_point(
                 divergence.kind,
                 divergence.direction,
                 divergence.compare_leg_unit_ids,
-                divergence.signal_leg_unit_ids,
+                (anchor_unit_id,),
             ),
             structural_level=structural_level,
             source_kind=source_kind,
+            signal_unit_id=anchor_unit_id,
+            signal_leg_unit_ids=(anchor_unit_id,),
             anchor_at=anchor_at,
             anchor_tick=raw.anchor_tick,
             confirmed_at=confirmed_at,
@@ -74,7 +83,7 @@ def strict_point(
         price_basis_revision=PRICE_BASIS,
         point_type=raw.point_type,
         structural_level=structural_level,
-        anchor_unit_id=raw.anchor_unit_id,
+        anchor_unit_id=anchor_unit_id,
         center_id=raw.center_id,
         parent_point_id=raw.parent_point_id,
     )
@@ -86,6 +95,7 @@ def strict_point(
         status=status,
         structural_level=structural_level,
         source_kind=source_kind,
+        anchor_unit_id=anchor_unit_id,
         anchor_at=anchor_at,
         confirmed_at=(confirmed_at if status is StrictPointStatus.CONFIRMED else None),
         available_at=available_at,
@@ -219,35 +229,53 @@ def strict_evidence_result(
                 raise ValueError("strict test helper only supports raw level zero")
             if point.anchor_unit_id in units_by_id:
                 continue
+            locked = point.status is StrictPointStatus.CONFIRMED
             units_by_id[point.anchor_unit_id] = ConstituentUnit(
                 unit_id=point.anchor_unit_id,
                 structural_level=0,
                 source_kind=SourceKind.SEGMENT,
                 price_basis_revision=PRICE_BASIS,
-                direction="up",
+                direction="down" if point.side == "buy" else "up",
                 start_tick=point.anchor_tick,
                 end_tick=point.anchor_tick,
                 low_tick=point.anchor_tick,
                 high_tick=point.anchor_tick,
                 market_start=point.anchor_at - timedelta(minutes=1),
                 market_end=point.anchor_at,
-                confirmed_at=point.anchor_at,
-                available_at=point.anchor_at,
-                locked=True,
+                confirmed_at=point.anchor_at if locked else None,
+                available_at=(point.anchor_at if locked else point.available_at),
+                locked=locked,
                 child_ids=(),
+                forming=False,
+                formed_at=None if locked else point.available_at,
             )
-        level_units = tuple(
+        ordered_units = list(
             sorted(
                 units_by_id.values(),
-                key=lambda value: (value.market_start, value.unit_id),
+                key=lambda value: (
+                    not value.locked,
+                    value.market_start,
+                    value.unit_id,
+                ),
             )
         )
+        unlocked_indexes = [
+            index for index, value in enumerate(ordered_units) if not value.locked
+        ]
+        if unlocked_indexes:
+            last_unlocked = unlocked_indexes[-1]
+            ordered_units[last_unlocked] = replace(
+                ordered_units[last_unlocked],
+                forming=True,
+                formed_at=None,
+            )
+        level_units = tuple(ordered_units)
         level = replace(
             level,
             units=level_units,
             center_result=replace(
                 level.center_result,
-                locked_unit_count=len(level_units),
+                locked_unit_count=sum(value.locked for value in level_units),
             ),
         )
         structure = replace(structure, levels=(level,))

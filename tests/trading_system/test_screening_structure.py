@@ -40,6 +40,8 @@ def _unit(
     end_tick: int,
     *,
     locked: bool,
+    forming: bool = False,
+    formed_at: datetime | None = None,
 ) -> ConstituentUnit:
     market_start = NOW - timedelta(minutes=7 - index)
     market_end = market_start + timedelta(minutes=1)
@@ -59,6 +61,8 @@ def _unit(
         available_at=market_end if locked else NOW,
         locked=locked,
         child_ids=(),
+        forming=forming,
+        formed_at=formed_at,
     )
 
 
@@ -68,8 +72,8 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         _unit(2, "down", 12, 9, locked=True),
         _unit(3, "up", 9, 11, locked=True),
         _unit(4, "down", 11, 9, locked=True),
-        _unit(5, "up", 9, 13, locked=False),
-        _unit(6, "down", 13, 12, locked=False),
+        _unit(5, "up", 9, 13, locked=False, formed_at=NOW),
+        _unit(6, "down", 13, 12, locked=False, forming=True),
     )
     preview = CenterPreview(
         structural_level=0,

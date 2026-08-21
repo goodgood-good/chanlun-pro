@@ -12,20 +12,38 @@ from chanlun.decision_support.trading_system.models import (
     TradeSetup,
     TradingPolicy,
 )
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
 from chanlun.decision_support.trading_system.lifecycle import (
-    is_one_minute_reversal_trigger,
+    five_minute_setup_is_in_policy_scope,
+    is_one_minute_segment_difference,
+)
+from chanlun.decision_support.trading_system.five_minute_setup_state import (
+    setup_state_for_point,
+    unconfirmed_setup_reason_code,
 )
 
 
-def _valid_one_minute_trigger(
+SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE = (
+    "sell_structure_relation_requires_manual_review"
+)
+
+
+def _valid_one_minute_segment_difference(
     lifecycle: SignalLifecycle,
     point: StructuralPoint,
     trigger: StructuralPoint | None,
+    *,
+    minimum_tick: Decimal,
 ) -> bool:
     return bool(
         lifecycle.stage == "triggered"
         and trigger is not None
-        and is_one_minute_reversal_trigger(trigger)
+        and is_one_minute_segment_difference(
+            trigger,
+            minimum_tick=minimum_tick,
+        )
         and trigger.side == point.side
         and lifecycle.trigger_point_id == trigger.point_id
     )
@@ -44,22 +62,42 @@ def evaluate_entry_policy(
         isinstance(point, StructuralPoint)
         and point.confirmed
         and point.side == "buy"
-        and point.source_frequency == "5m"
+        and is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        )
     )
     if policy.require_confirmed_five_minute and not is_confirmed_buy:
-        reasons.append("five_minute_not_confirmed")
+        reasons.append(
+            unconfirmed_setup_reason_code(
+                setup_state_for_point(point).formation_state,
+                forming_reason_code="five_minute_not_confirmed",
+            )
+            if getattr(point, "status", None) == "provisional"
+            else "five_minute_not_confirmed"
+        )
+    if lifecycle.stage not in {"triggered", "executable", "active"}:
+        reasons.append("lifecycle_not_actionable")
+    # 兼容旧参数档案的安全闸门；当前生产合同冻结为 False。5 分钟正式买点
+    # 本身决定信号成立，1 分钟只作为段差/精细定位证据。
     if policy.require_confirmed_one_minute and not (
         isinstance(point, StructuralPoint)
-        and _valid_one_minute_trigger(lifecycle, point, trigger)
+        and _valid_one_minute_segment_difference(
+            lifecycle,
+            point,
+            trigger,
+            minimum_tick=policy.minimum_tick,
+        )
     ):
         reasons.append("one_minute_not_confirmed")
-    if policy.require_sector_eligibility and setup.sector.hard_block:
-        reasons.append("sector_hostile")
-    if policy.require_thirty_minute_context and setup.context.hard_block:
-        reasons.append("thirty_minute_hostile")
+    # 板块和 30 分钟环境只负责分级，不能否定一个已经存在的 5m 买点。
+    # 两个旧策略开关仍保留在可移植契约中，用来声明应当生成相应上下文，
+    # 但不再作为结构执行硬门槛。
     if conflict.hard_block:
         reasons.append("structure_conflict")
     if isinstance(point, StructuralPoint) and point.point_type == "3buy":
+        if not five_minute_setup_is_in_policy_scope(point):
+            reasons.append("three_buy_not_first_center")
         clearance = (
             None
             if point.center_zg is None
@@ -109,18 +147,36 @@ def evaluate_exit_policy(
         not isinstance(point, StructuralPoint)
         or point.side != "sell"
         or not point.confirmed
-        or point.source_frequency != "5m"
+        or not is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        )
     ):
         return ExitDecision(
             False,
             lifecycle.signal_id,
             "none",
-            ("sell_not_confirmed",),
+            (
+                unconfirmed_setup_reason_code(
+                    setup_state_for_point(point).formation_state,
+                    forming_reason_code="sell_not_confirmed",
+                )
+                if getattr(point, "status", None) == "provisional"
+                else "sell_not_confirmed",
+            ),
         )
-    if policy.require_confirmed_one_minute and not _valid_one_minute_trigger(
+    if lifecycle.stage not in {"triggered", "executable", "active"}:
+        return ExitDecision(
+            False,
+            lifecycle.signal_id,
+            "none",
+            ("lifecycle_not_actionable",),
+        )
+    if policy.require_confirmed_one_minute and not _valid_one_minute_segment_difference(
         lifecycle,
         point,
         trigger,
+        minimum_tick=policy.minimum_tick,
     ):
         return ExitDecision(
             False,
@@ -133,7 +189,7 @@ def evaluate_exit_policy(
             False,
             lifecycle.signal_id,
             "none",
-            ("no_active_position",),
+            (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,),
         )
     if point.tower == held_tower and point.recursive_level >= held_level:
         return ExitDecision(
@@ -153,6 +209,7 @@ def evaluate_exit_policy(
 __all__ = [
     "EntryDecision",
     "ExitDecision",
+    "SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE",
     "TradingPolicy",
     "evaluate_entry_policy",
     "evaluate_exit_policy",

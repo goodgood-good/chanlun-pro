@@ -90,6 +90,7 @@ def test_dingtalk_webhook_loads_only_current_repository_document(
         encoding="utf-8",
     )
     monkeypatch.delenv("CHANLUN_DINGTALK_WEBHOOK", raising=False)
+    monkeypatch.delenv("CHANLUN_DINGTALK_KEYWORD", raising=False)
 
     assert security.get_dingtalk_webhook(path) == webhook
     assert security.get_dingtalk_keyword(path) == "current keyword"
@@ -121,14 +122,36 @@ def test_dingtalk_webhook_rejects_missing_plaintext_or_foreign_credentials(
     assert security.get_dingtalk_webhook(path) == ""
 
 
-def test_repository_runtime_credentials_contain_current_webhook_contract():
-    path = security._RUNTIME_CREDENTIALS_PATH
-    raw = path.read_text(encoding="utf-8")
-    payload = json.loads(raw)
+def test_default_runtime_credentials_are_local_only(monkeypatch):
+    monkeypatch.delenv("CHANLUN_DINGTALK_WEBHOOK", raising=False)
+    monkeypatch.delenv("CHANLUN_RUNTIME_CREDENTIALS_PATH", raising=False)
 
-    assert payload["schema"] == "chanlun-runtime-credentials"
-    assert security._is_valid_dingtalk_webhook(payload["dingtalk_webhook"])
-    assert payload["dingtalk_keyword"] == "买卖通知"
+    assert security._RUNTIME_CREDENTIALS_PATH.name == (
+        "runtime_credentials.local.json"
+    )
+
+
+def test_runtime_credentials_path_can_live_outside_repository(
+    monkeypatch, tmp_path
+):
+    webhook = "https://oapi.dingtalk.com/robot/send?access_token=external"
+    path = tmp_path / "runtime-credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "chanlun-runtime-credentials",
+                "dingtalk_webhook": webhook,
+                "dingtalk_keyword": "买卖通知",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CHANLUN_DINGTALK_WEBHOOK", raising=False)
+    monkeypatch.delenv("CHANLUN_DINGTALK_KEYWORD", raising=False)
+    monkeypatch.setenv("CHANLUN_RUNTIME_CREDENTIALS_PATH", str(path))
+
+    assert security.get_dingtalk_webhook() == webhook
+    assert security.get_dingtalk_keyword() == "买卖通知"
 
 
 def test_external_bind_accepts_password_hash_with_https(monkeypatch):

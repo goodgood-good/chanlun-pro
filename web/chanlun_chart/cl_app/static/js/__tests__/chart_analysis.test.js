@@ -29,7 +29,11 @@ test('summarizeChartData handles an empty or still-loading chart honestly', () =
 
 test('formatResolution covers intraday and higher timeframes', () => {
   assert.equal(Analysis.formatResolution('5'), '5 分钟');
+  assert.equal(Analysis.formatResolution('120'), '2小时');
+  assert.equal(Analysis.formatResolution('360'), '6小时');
+  assert.equal(Analysis.formatResolution('720'), '12小时');
   assert.equal(Analysis.formatResolution('1D'), '日线');
+  assert.equal(Analysis.formatResolution('3D'), '3日线');
   assert.equal(Analysis.formatResolution('1W'), '周线');
   assert.equal(Analysis.formatResolution('1M'), '月线');
   assert.equal(Analysis.formatResolution('10S'), '10 秒');
