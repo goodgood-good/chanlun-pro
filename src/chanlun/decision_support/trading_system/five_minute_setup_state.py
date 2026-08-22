@@ -24,13 +24,17 @@ GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION = (
 GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE = (
     "five_minute_geometry_candidate_awaiting_confirmation"
 )
+WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION = "WAITING_SEGMENT_DIFFERENCE"
 _EXECUTION_RECOMMENDATION_LABELS = {
     "WAITING_STRUCTURE": "5分钟买卖点结构仍在形成",
     GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION: (
         "5分钟买卖点仅为几何候选，尚未达到操作确认"
     ),
-    "READY": "5分钟买卖点已达到操作确认，仍须人工复核",
-    "CAUTION": "5分钟买卖点已达到操作确认，环境逆风或证据需人工复核",
+    WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION: (
+        "5分钟买卖点已确认，等待1分钟区间套精确定位"
+    ),
+    "READY": "5分钟买卖点与1分钟区间套均已确认，仍须人工复核",
+    "CAUTION": "1分钟区间套已确认，环境逆风或证据需人工复核",
     "BLOCKED": "当前不满足操作条件，等待结构或数据恢复",
 }
 
@@ -313,6 +317,7 @@ __all__ = (
     "GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION",
     "GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE",
     "GEOMETRY_READY_EVIDENCE_CODES",
+    "WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION",
     "FiveMinuteSetupState",
     "canonical_setup_state_document",
     "classify_five_minute_setup_state",

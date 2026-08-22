@@ -38,7 +38,7 @@ def _valid_one_minute_segment_difference(
     minimum_tick: Decimal,
 ) -> bool:
     return bool(
-        lifecycle.stage == "triggered"
+        lifecycle.stage in {"triggered", "executable", "active"}
         and trigger is not None
         and is_one_minute_segment_difference(
             trigger,
@@ -78,11 +78,10 @@ def evaluate_entry_policy(
         )
     if lifecycle.stage not in {"triggered", "executable", "active"}:
         reasons.append("lifecycle_not_actionable")
-    # 兼容旧参数档案的安全闸门；当前生产合同冻结为 False。5 分钟正式买点
-    # 本身决定信号成立，1 分钟只作为段差/精细定位证据。
-    if policy.require_confirmed_one_minute and not (
-        isinstance(point, StructuralPoint)
-        and _valid_one_minute_segment_difference(
+    # 5 分钟正式买点本身决定结构信号成立；1 分钟区间套是精确执行闸门。
+    # 缺失时继续保留并通知 5 分钟信号，但不能发布当前买入资格。
+    if policy.require_confirmed_one_minute and is_confirmed_buy and not (
+        _valid_one_minute_segment_difference(
             lifecycle,
             point,
             trigger,

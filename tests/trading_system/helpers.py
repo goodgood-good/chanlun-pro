@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from chanlun.decision_support.trading_system.lifecycle import build_setup
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.models import (
+    EntryExecutionBoundary,
     PointType,
     PointVariant,
     PointSide,
@@ -261,20 +262,36 @@ def valid_selection_research() -> SelectionResearchSnapshot:
 def deterministic_bundle() -> SymbolStructureBundle:
     """构造一份供决策边界测试共用的当前严格结构包。"""
 
+    trigger = confirmed_point("1buy", frequency="1m", minutes_after=296)
     return SymbolStructureBundle(
         code="SZ.000001",
-        as_of=AS_OF,
+        # 生产契约只允许在 1m 确认 K 线后的下一分钟内精确执行。
+        # 通用正常样本放在该窗口中间；过期场景由专门用例显式构造。
+        as_of=trigger.available_at + timedelta(seconds=30),
         sector=eligible_sector(),
         thirty_direction="neutral",
         thirty_points=(),
         # 默认夹具表达“刚刚出现、仍在 10 分钟新鲜窗口内”的当前信号。
         # 过期信号由专门用例显式构造，避免所有正常决策测试都在暗中追旧点。
         five_points=(confirmed_point("2buy", minutes_after=295),),
-        one_points=(
-            confirmed_point("1buy", frequency="1m", minutes_after=296),
-        ),
+        one_points=(trigger,),
         opposite_points=(),
         physical_timeframe_recursive=True,
+        entry_execution_boundaries=(
+            EntryExecutionBoundary(
+                symbol="SZ.000001",
+                point_id=trigger.point_id,
+                source_frequency="1m",
+                confirmation_bar_closed_at=trigger.available_at,
+                raw_open=Decimal("10.10"),
+                raw_high=Decimal("10.25"),
+                raw_low=Decimal("10.00"),
+                raw_close=Decimal("10.20"),
+                raw_volume=Decimal("10000"),
+                entry_valid_until=trigger.available_at + timedelta(minutes=1),
+                raw_price_basis_revision="qmt-none-test",
+            ),
+        ),
         selection_sources=("QMT_SECTOR_TRIGGER",),
         selection_research=valid_selection_research(),
     )

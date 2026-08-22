@@ -3,7 +3,15 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const test = require("node:test");
+const { mock } = require("node:test");
 const path = require("node:path");
+
+// Pure dashboard fixtures describe one frozen review instant.  Keep implicit
+// live-clock calls deterministic; boundary-crossing tests pass their own clock.
+mock.timers.enable({
+  apis: ["Date"],
+  now: new Date("2026-07-20T14:58:30+08:00"),
+});
 
 const uiPath = path.resolve(__dirname, "../early_screening_ui.js");
 const uiSource = fs.readFileSync(uiPath, "utf8");
@@ -798,6 +806,8 @@ test("dashboard has six independent point filters", () => {
 
 test("dashboard exposes and persists the optional one-minute segment-difference filter", () => {
   assert.match(template, /id="es-segment-count"/);
+  assert.match(template, /id="es-precise-count"/);
+  assert.match(template, /与“有段差证据”分开统计/);
   assert.match(template, /id="es-show-current-segments"[^>]*>查看段差证据</);
   for (const state of ["all", "present", "current", "historical", "absent"]) {
     assert.match(template, new RegExp(`data-segment-state="${state}"`));
@@ -812,8 +822,120 @@ test("dashboard exposes and persists the optional one-minute segment-difference 
   assert.match(controllerSource, /state\.pointType = "all"/);
   assert.match(controllerSource, /data-screening-mode="live"/);
   assert.match(controllerSource, /showCurrentSegments\.disabled = segmentEvidenceCount === 0/);
+  assert.match(controllerSource, /Ui\.preciseExecutionReadyForSignal\(signal\)/);
   assert.match(controllerSource, /\["present", "current", "historical"\]\.includes\(state\.segmentState\)/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
+});
+
+test("precise execution readiness is stricter than one-minute segment evidence", () => {
+  const Ui = loadUi();
+  const base = {
+    code: "SZ.000001",
+    side: "buy",
+    entry_allowed: true,
+    exit_allowed: false,
+    segment_difference_1m: {
+      point_type: "1buy",
+      source_frequency: "1m",
+      recursive_level: 0,
+    },
+    entry_execution_boundary: {
+      confirmation_bar_closed_at: "2026-08-20T10:01:00+08:00",
+      entry_valid_until: "2026-08-20T10:02:00+08:00",
+    },
+    position_recommendation: {
+      side: "buy",
+      status: "RECOMMENDED",
+      basis: "STRUCTURAL_RISK_MODEL_UPPER_BOUND",
+      recommended_ratio: "0.25",
+      recommended_percent: "25",
+      reason_codes: ["STRUCTURAL_RISK_BUDGET_SIZED"],
+    },
+    execution_profile: {
+      precision_locator_ready: true,
+      precise_execution_ready: true,
+    },
+  };
+  const insideBoundary = new Date("2026-08-20T10:01:30+08:00");
+  const afterBoundary = new Date("2026-08-20T10:02:01+08:00");
+
+  assert.equal(Ui.segmentDifferenceEvidenceStatusForSignal(base), "present");
+  assert.equal(
+    Ui.segmentDifferenceBoundaryStatusForSignal(base, insideBoundary),
+    "current",
+  );
+  assert.equal(Ui.preciseExecutionReadyForSignal(base, insideBoundary), true);
+  assert.equal(
+    Ui.segmentDifferenceBoundaryStatusForSignal(base, afterBoundary),
+    "expired",
+  );
+  assert.equal(Ui.preciseExecutionReadyForSignal(base, afterBoundary), false);
+  assert.deepEqual(
+    {
+      status: Ui.positionRecommendationForSignal(base, afterBoundary).status,
+      ratio: Ui.positionRecommendationForSignal(base, afterBoundary).recommended_ratio,
+      reasons: Ui.positionRecommendationForSignal(base, afterBoundary).reason_codes,
+    },
+    {
+      status: "BLOCKED",
+      ratio: "0",
+      reasons: [
+        "STRUCTURAL_RISK_BUDGET_SIZED",
+        "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
+      ],
+    },
+  );
+  assert.equal(
+    Ui.preciseExecutionReadyForSignal({
+      ...base,
+      entry_allowed: false,
+      execution_profile: {
+        ...base.execution_profile,
+        precise_execution_ready: false,
+      },
+    }, insideBoundary),
+    false,
+  );
+  assert.equal(
+    Ui.preciseExecutionReadyForSignal({
+      ...base,
+      segment_difference_1m: null,
+      trigger_1m: null,
+    }, insideBoundary),
+    false,
+  );
+});
+
+test("persisted current notification boundary expires against the live clock", () => {
+  const Ui = loadUi();
+  const signal = {
+    side: "buy",
+    synthetic_notification_projection: true,
+    notification_segment_difference_boundary_status: "current",
+    notification_segment_difference_evidence_status: "present",
+    notification_segment_difference_valid_until: "2026-08-20T10:02:00+08:00",
+    segment_difference_1m: {
+      point_type: "1buy",
+      side: "buy",
+      source_frequency: "1m",
+      recursive_level: 0,
+    },
+  };
+
+  assert.equal(
+    Ui.segmentDifferenceBoundaryStatusForSignal(
+      signal,
+      new Date("2026-08-20T10:01:59+08:00"),
+    ),
+    "current",
+  );
+  assert.equal(
+    Ui.segmentDifferenceBoundaryStatusForSignal(
+      signal,
+      new Date("2026-08-20T10:02:00+08:00"),
+    ),
+    "expired",
+  );
 });
 
 test("stock selection opens with all six point channels visible", () => {
@@ -1595,8 +1717,43 @@ test("expired one-minute segment stays visible only as historical audit evidence
   assert.deepEqual(HumanUi.realtimeNotificationSegmentPeriod(candidate), [
     "段差证据已出现·定位窗口已过",
     "2buy（盘整背驰）证据仍有效；过期的只是买入定位窗口",
-    "定位窗口有效至 2026-08-03 11:13:00；不影响5分钟信号",
+    "定位窗口有效至 2026-08-03 11:13:00；5分钟信号保留，精确执行已关闭",
   ]);
+
+  const currentEvent = {
+    ...event,
+    segment_difference_status: "current",
+    segment_difference_current: true,
+    segment_difference_boundary_status: "current",
+    segment_difference_valid_until: "2026-08-17T13:58:00+08:00",
+    position_recommendation: {
+      side: "buy",
+      status: "RECOMMENDED",
+      recommended_ratio: "0.25",
+      recommended_percent: "25",
+      reason_codes: ["STRUCTURAL_RISK_BUDGET_SIZED"],
+    },
+  };
+  const beforeExpiry = HumanUi.realtimeNotificationCandidate(
+    currentEvent,
+    new Date("2026-08-17T13:57:59+08:00"),
+  );
+  const afterExpiry = HumanUi.realtimeNotificationCandidate(
+    currentEvent,
+    new Date("2026-08-17T13:58:00+08:00"),
+  );
+  assert.equal(beforeExpiry.realtime_notification_segment_difference_status, "current");
+  assert.equal(afterExpiry.realtime_notification_segment_difference_status, "expired");
+  assert.equal(afterExpiry.position_recommendation.status, "BLOCKED");
+  assert.equal(afterExpiry.position_recommendation.recommended_ratio, "0");
+  assert.ok(afterExpiry.warning_codes.includes("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"));
+  assert.match(
+    HumanUi.positionRecommendationLabel(
+      beforeExpiry,
+      new Date("2026-08-17T13:58:00+08:00"),
+    ),
+    /定位窗口已过/,
+  );
 });
 
 test("segment enrichment projection starts freshness at the later confluence time", () => {
@@ -3346,10 +3503,10 @@ test("period path and evidence groups separate established missing blocking and 
       },
       {
         frequency: "1m",
-        state: "可选段差未出现",
+        state: "等待1分钟区间套",
         tone: "neutral",
-        summary: "尚未取得1分钟段差证据（不影响5分钟信号）",
-        boundary: "只作定位；不能独立授权买卖，也无需等待即可复核5分钟信号",
+        summary: "尚未取得1分钟区间套（5分钟信号保留，精确执行未解锁）",
+        boundary: "5分钟信号已可复核；未完成1分钟区间套前不生成执行比例",
       },
     ],
   );
@@ -3378,8 +3535,8 @@ test("period path and evidence groups separate established missing blocking and 
   ]);
   assert.deepEqual(groups.missing, [
     "5分钟：末端结构确认",
-    "1分钟：可选段差证据尚未出现（不阻断5分钟信号）",
-    "旧参数要求1分钟确认；当前生产规则不再使用该硬门槛",
+    "1分钟：区间套尚未出现（5分钟信号保留，精确执行未解锁）",
+    "5分钟买点已确认，等待1分钟区间套精确定位",
   ]);
   assert.deepEqual(groups.blocking, [
     "较低或无关结构存在风险",
@@ -4421,13 +4578,13 @@ test("chart workspace renders the decision path evidence groups and active frequ
   assert.equal(view.node("[data-decision-invalidation]").textContent, "9.90");
   assert.equal(view.node('[data-period-state="30m"]').textContent, "支持");
   assert.equal(view.node('[data-period-state="5m"]').textContent, "形成中");
-  assert.equal(view.node('[data-period-state="1m"]').textContent, "可选段差未出现");
+  assert.equal(view.node('[data-period-state="1m"]').textContent, "等待1分钟区间套");
   assert.deepEqual(
     view.node('[data-evidence-group="missing"]').children.map((node) => node.textContent),
     [
       "5分钟：末端结构确认",
-      "1分钟：可选段差证据尚未出现（不阻断5分钟信号）",
-      "旧参数要求1分钟确认；当前生产规则不再使用该硬门槛",
+      "1分钟：区间套尚未出现（5分钟信号保留，精确执行未解锁）",
+      "5分钟买点已确认，等待1分钟区间套精确定位",
     ],
   );
   assert.equal(

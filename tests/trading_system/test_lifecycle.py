@@ -241,7 +241,7 @@ def test_segment_difference_cannot_cross_symbol_boundary() -> None:
     assert match_one_minute_trigger(setup, (other_symbol,), as_of=AS_OF) is None
 
 
-def test_segment_difference_during_five_minute_formation_is_retained() -> None:
+def test_segment_difference_during_five_minute_formation_is_not_an_execution_locator() -> None:
     setup = build_setup(
         confirmed_point(
             "2buy",
@@ -260,7 +260,7 @@ def test_segment_difference_during_five_minute_formation_is_retained() -> None:
     )
 
     assert segment.available_at < setup.point.available_at
-    assert match_one_minute_trigger(setup, (segment,), as_of=AS_OF) == segment
+    assert match_one_minute_trigger(setup, (segment,), as_of=AS_OF) is None
 
 
 @pytest.mark.parametrize(
@@ -270,7 +270,7 @@ def test_segment_difference_during_five_minute_formation_is_retained() -> None:
         ("sell", 10.0, 10.2, 10.1, 10.3, 10.1),
     ),
 )
-def test_segment_difference_inside_real_terminal_segment_precedes_point_anchor(
+def test_segment_difference_inside_real_terminal_segment_is_audit_only_before_setup(
     side: str,
     anchor: float,
     stop: float,
@@ -313,7 +313,8 @@ def test_segment_difference_inside_real_terminal_segment_precedes_point_anchor(
     )
 
     assert segment.available_at < point.anchor_at
-    assert match_one_minute_trigger(setup, (segment,), as_of=AS_OF) == segment
+    assert segment.available_at < point.available_at
+    assert match_one_minute_trigger(setup, (segment,), as_of=AS_OF) is None
 
 
 def test_segment_difference_before_terminal_segment_start_is_rejected() -> None:
@@ -452,6 +453,44 @@ def test_signal_identity_survives_repeated_observation() -> None:
 
     assert repeated.signal_id == first.signal_id
     assert repeated.stage == first.stage == "triggered"
+
+
+def test_later_one_minute_occurrence_updates_locator_without_changing_signal() -> None:
+    setup = build_setup(
+        confirmed_point("2buy"),
+        neutral_context("30m"),
+        eligible_sector(),
+    )
+    first_trigger = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=1,
+    )
+    later_trigger = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=2,
+    )
+    first = advance_lifecycle(
+        None,
+        setup,
+        first_trigger,
+        as_of=AS_OF,
+    )
+
+    rearmed = advance_lifecycle(
+        first,
+        setup,
+        later_trigger,
+        as_of=AS_OF + timedelta(minutes=1),
+    )
+
+    assert rearmed.signal_id == first.signal_id
+    assert rearmed.setup_id == first.setup_id
+    assert rearmed.stage == first.stage == "triggered"
+    assert first.trigger_point_id == first_trigger.point_id
+    assert rearmed.trigger_point_id == later_trigger.point_id
+    assert rearmed.observed_at == AS_OF + timedelta(minutes=1)
 
 
 @pytest.mark.parametrize(

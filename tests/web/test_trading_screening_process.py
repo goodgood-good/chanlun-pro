@@ -2398,6 +2398,9 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"] is True
     assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 512
     assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
+    assert app.config[
+        "TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK"
+    ] == 128
     assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64
     assert app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"] == 512
     assert app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"] == 210.0

@@ -17,7 +17,7 @@ from chanlun.decision_support.trading_system.operation_level import (
 
 
 UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID = (
-    "PHYSICAL_5M_L0_TRADE_SIGNAL_1M_SEGMENT_DIFFERENCE_V4"
+    "PHYSICAL_5M_L0_TRADE_SIGNAL_1M_PRECISE_EXECUTION_V5"
 )
 
 
@@ -26,8 +26,8 @@ class UnifiedSignalAlignmentContract:
     """冻结一、二、三类买卖点进入决策层时的唯一跨周期关系。
 
     物理 5 分钟第 0 递归级别的正式点独立构成买卖信号；5m/L1 及以上
-    是对应的高周期上下文，不是平行交易通道。1 分钟点是可选的段差/精细
-    定位证据，缺失时不得把已经确认的 5 分钟信号降级或阻止通知。
+    是对应的高周期上下文，不是平行交易通道。1 分钟区间套不参与信号
+    是否成立，也不得阻止 5 分钟首次通知，但它是升级为精确执行候选的硬门槛。
     """
 
     contract_id: str = UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID
@@ -57,7 +57,9 @@ class UnifiedSignalAlignmentContract:
     )
     setup_classes_share_logic: bool = True
     point_classes_share_structure_authority: bool = True
+    # 对 5 分钟信号及首次通知可选；对精确执行不可选。
     segment_difference_is_optional: bool = True
+    segment_difference_required_for_precise_execution: bool = True
     segment_difference_must_match_side: bool = True
     third_class_can_confirm_reversal: bool = False
     third_class_can_confirm_continuation: bool = True
@@ -101,6 +103,7 @@ class UnifiedSignalAlignmentContract:
             or not self.setup_classes_share_logic
             or not self.point_classes_share_structure_authority
             or not self.segment_difference_is_optional
+            or not self.segment_difference_required_for_precise_execution
             or not self.segment_difference_must_match_side
             or self.third_class_can_confirm_reversal
             or not self.third_class_can_confirm_continuation

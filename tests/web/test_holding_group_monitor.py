@@ -515,7 +515,7 @@ def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
     assert "状态：1分钟段差新出现，仅补充定位" in line
     assert "5分钟操作确认 2026-08-04 10:00:00" in line
     assert "1分钟段差可用 2026-08-04 10:01:00" in line
-    assert "不能把本通知单独当成买卖授权" in line
+    assert "只有当前有效时才进入精确执行候选" in line
     assert monitor_module._notification_bucket(event) == "segment_sell"
     assert monitor_module._delivery_identity(event) == event.delivery_identity
     assert payload["review_events"][0]["new_stage"] == "segment_enriched"

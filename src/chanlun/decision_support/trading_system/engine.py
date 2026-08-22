@@ -539,7 +539,26 @@ class _TechnicalSignalEvaluator:
                         as_of=bundle.as_of,
                         minimum_tick=self._policy.minimum_tick,
                     )
-                    if persisted_match is not None:
+                    # A persisted locator bridges 5m-only refreshes, but it must
+                    # not pin the setup to an older 1m occurrence forever.  Once
+                    # the realtime bundle contains a later same-side physical
+                    # 1m/L0 point, that newer occurrence re-arms the precise
+                    # execution window for the still-current 5m setup.
+                    if persisted_match is not None and (
+                        trigger is None
+                        or (
+                            persisted_match.available_at,
+                            persisted_match.recursive_level,
+                            persisted_match.tower,
+                            persisted_match.point_id,
+                        )
+                        >= (
+                            trigger.available_at,
+                            trigger.recursive_level,
+                            trigger.tower,
+                            trigger.point_id,
+                        )
+                    ):
                         trigger = persisted_match
             lifecycle = advance_lifecycle(
                 previous_lifecycle,
@@ -595,41 +614,35 @@ class _TechnicalSignalEvaluator:
                     f"SAME_PERIOD_CONTEXT_GRADE_{context_assessment.grade}"
                 )
             if point.side == "buy":
-                # 日线、30 分钟只负责环境分级；1 分钟只负责可选段差定位。
-                # 它们的暖机差异需要展示，但不能否定物理 5 分钟正式点。
+                # 日线、30 分钟只负责环境分级；1 分钟区间套负责精确执行定位。
+                # 暖机差异不能否定物理 5 分钟正式点，但 1 分钟未确认时不得
+                # 生成当前买入资格。
                 advisory_reasons.extend(
                     _context_warmup_advisory_reasons(bundle)
                 )
             advisory_reason_codes = tuple(dict.fromkeys(advisory_reasons))
-            if point.side == "buy" and trigger is not None:
-                if entry_boundary is None and bundle.physical_timeframe_recursive:
-                    advisory_reason_codes = tuple(
-                        dict.fromkeys(
-                            (
-                                *advisory_reason_codes,
-                                (
-                                    "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
-                                    if a_share_optional_entry_valid_until(
-                                        trigger.available_at
-                                    )
-                                    <= bundle.as_of
-                                    else "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"
-                                ),
-                            )
+            entry_boundary_reason: str | None = None
+            if (
+                point.side == "buy"
+                and point.code.startswith(("SH.", "SZ.", "BJ."))
+                and trigger is not None
+                and lifecycle.stage in {"triggered", "executable", "active"}
+                and bundle.physical_timeframe_recursive
+            ):
+                if entry_boundary is None:
+                    entry_boundary_reason = (
+                        "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
+                        if a_share_optional_entry_valid_until(
+                            trigger.available_at
                         )
+                        <= bundle.as_of
+                        else "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"
                     )
                 elif (
                     entry_boundary is not None
                     and entry_boundary.entry_valid_until <= bundle.as_of
                 ):
-                    advisory_reason_codes = tuple(
-                        dict.fromkeys(
-                            (
-                                *advisory_reason_codes,
-                                "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
-                            )
-                        )
-                    )
+                    entry_boundary_reason = "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
             if point.side == "sell":
                 output.append(
                     EvaluatedSignal(
@@ -695,6 +708,25 @@ class _TechnicalSignalEvaluator:
                 conflict,
                 self._policy,
             )
+            # 该标志只回答物理 5 分钟买点本身是否成立。1 分钟区间套及其
+            # 瞬时边界决定精确执行资格，但不能反向抹掉 5 分钟结构信号。
+            technical_entry_allowed = not any(
+                reason
+                not in {
+                    "one_minute_not_confirmed",
+                    "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING",
+                    "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
+                }
+                for reason in entry.reason_codes
+            )
+            if entry_boundary_reason is not None:
+                entry = replace(
+                    entry,
+                    allowed=False,
+                    reason_codes=tuple(
+                        dict.fromkeys((*entry.reason_codes, entry_boundary_reason))
+                    ),
+                )
             warmup_blocked = bundle.enforce_warmup_entry_gate and not (
                 _trade_level_warmup_converged(bundle)
             )
@@ -720,9 +752,6 @@ class _TechnicalSignalEvaluator:
                     )
                 )
             )
-            # 这是纯 5 分钟结构技术候选标志；数据完整性与预热闸门在下面关闭
-            # 真实可执行性。1 分钟边界只解释段差时机，不是主信号硬门槛。
-            technical_entry_allowed = bool(entry.allowed)
             if outer_hard_reasons:
                 entry = replace(
                     entry,

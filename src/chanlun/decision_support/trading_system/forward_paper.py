@@ -1778,6 +1778,8 @@ class ForwardPaperContract:
     tick_data_used: bool = False
     three_program_required: bool = True
     completed_one_minute_execution_only: bool = True
+    segment_difference_required_for_trade_signal: bool = False
+    segment_difference_required_for_precise_execution: bool = True
     signal_bar_fill_allowed: bool = False
     real_account_access: bool = False
     real_order_transport: bool = False
@@ -1814,6 +1816,8 @@ class ForwardPaperContract:
             self.tick_data_used
             or not self.three_program_required
             or not self.completed_one_minute_execution_only
+            or self.segment_difference_required_for_trade_signal
+            or not self.segment_difference_required_for_precise_execution
             or self.signal_bar_fill_allowed
             or self.real_account_access
             or self.real_order_transport
@@ -1869,6 +1873,8 @@ def load_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperContract
         "tick_data_used": False,
         "three_program_mode": "REQUIRED_SIGNED_POINT_IN_TIME",
         "execution_observation": "COMPLETED_1M_BAR",
+        "segment_difference_required_for_trade_signal": False,
+        "segment_difference_required_for_precise_execution": True,
         "signal_bar_fill_allowed": False,
         "live_status": "LIVE_DISABLED",
         "technical_mode": "HUMAN_REVIEW_SCREENING",
@@ -1903,6 +1909,12 @@ def load_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperContract
         slot_fraction=str(payload["slot_fraction"]),
         account_exposure_cap=str(payload["account_exposure_cap"]),
         tactical_ratio=str(payload["tactical_ratio"]),
+        segment_difference_required_for_trade_signal=bool(
+            payload["segment_difference_required_for_trade_signal"]
+        ),
+        segment_difference_required_for_precise_execution=bool(
+            payload["segment_difference_required_for_precise_execution"]
+        ),
         technical_mode=str(payload["technical_mode"]),
         signal_alignment_parameter_set_id=str(
             payload["signal_alignment_parameter_set_id"]

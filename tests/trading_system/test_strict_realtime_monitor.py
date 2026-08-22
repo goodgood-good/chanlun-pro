@@ -498,7 +498,9 @@ def test_physical_monitor_recovers_a_confirmed_segment_outside_current_tail(
         frequency="1m",
         anchor_at=AT - timedelta(minutes=3),
         confirmed_at=AT - timedelta(minutes=2),
-        available_at=AT - timedelta(minutes=2),
+        # The structural anchor may sit outside the current tail, but an
+        # execution locator must become observable after the formal 5m setup.
+        available_at=AT,
     )
     state = StrictPhysicalMonitorState(
         "TSLA.US",

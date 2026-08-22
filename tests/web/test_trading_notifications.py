@@ -235,6 +235,8 @@ def test_execution_profile_hard_block_still_reports_confirmed_structure_as_obser
     blocked["execution_profile"] = {
         "structure_signal_confirmed": True,
         "execution_trigger_confirmed": True,
+        "one_minute_required_for_trade_signal": False,
+        "one_minute_required_for_precise_execution": True,
         # The hard gate remains authoritative if a migrated producer carries
         # a contradictory recommendation.
         "recommendation": "READY",
@@ -285,6 +287,15 @@ def test_a_share_lunch_break_does_not_expire_a_fresh_confirmed_point(
         "confirmed_at": "2026-07-20T11:30:00+08:00",
         "available_at": "2026-07-20T11:30:00+08:00",
     }
+    signal["trigger_1m"] = {
+        **signal["trigger_1m"],
+        "confirmed_at": "2026-07-20T13:01:00+08:00",
+        "available_at": "2026-07-20T13:01:00+08:00",
+    }
+    signal["entry_execution_boundary"] = {
+        "confirmation_bar_closed_at": "2026-07-20T13:01:00+08:00",
+        "entry_valid_until": "2026-07-20T13:02:00+08:00",
+    }
 
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [signal]})
 
@@ -306,6 +317,8 @@ def test_context_caution_still_notifies_for_manual_review(tmp_path: Path) -> Non
     caution["execution_profile"] = {
         "structure_signal_confirmed": True,
         "execution_trigger_confirmed": True,
+        "one_minute_required_for_trade_signal": False,
+        "one_minute_required_for_precise_execution": True,
         "recommendation": "CAUTION",
         "hard_blocked": False,
         "hard_block_reason_codes": [],
@@ -343,6 +356,8 @@ def test_final_position_block_overrides_caution_action_copy() -> None:
     blocked["execution_profile"] = {
         "structure_signal_confirmed": True,
         "execution_trigger_confirmed": True,
+        "one_minute_required_for_trade_signal": False,
+        "one_minute_required_for_precise_execution": True,
         "recommendation": "CAUTION",
         "hard_blocked": False,
         "hard_block_reason_codes": [],
@@ -518,8 +533,59 @@ def test_stage_stable_new_one_minute_segment_sends_enrichment_notification(
     assert "进度：5分钟操作确认→1分钟段差补充" in rendered
     assert "1分钟段差确认 2026-07-20 10:01:00" in rendered
     assert "监听发现：2026-07-20 10:01:30（延迟 30秒）" in rendered
-    assert "1分钟段差只补充定位，不改变原结论" in rendered
+    assert "1分钟区间套已完成且定位窗口有效，现已升级为精确执行候选" in rendered
     assert dispatcher.health_snapshot()["delivered_event_count"] == 1
+
+
+def test_newer_one_minute_segment_rearms_same_five_minute_notification(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    now = [TEST_NOW]
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "segment-rearmed.json",
+        clock=lambda: now[0],
+    )
+    previous = signal_document("triggered")
+    dispatcher.dispatch_changes(
+        {"signals": [_without_one_minute_segment(previous)]},
+        {"signals": [previous]},
+    )
+    current = signal_document("triggered")
+    current["observed_at"] = "2026-07-20T10:02:30+08:00"
+    current["trigger_1m"] = {
+        **current["trigger_1m"],
+        "point_id": "trigger:rearmed-1m-1buy",
+        "anchor_at": "2026-07-20T10:00:00+08:00",
+        "available_at": "2026-07-20T10:02:00+08:00",
+        "confirmed_at": "2026-07-20T10:02:00+08:00",
+    }
+    current["entry_execution_boundary"] = {
+        "confirmation_bar_closed_at": "2026-07-20T10:02:00+08:00",
+        "entry_valid_until": "2026-07-20T10:03:00+08:00",
+    }
+    now[0] = datetime(
+        2026,
+        7,
+        20,
+        10,
+        2,
+        30,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    )
+
+    dispatcher.dispatch_changes(
+        {"signals": [previous]},
+        {"signals": [current]},
+    )
+
+    assert len(sender.messages) == 2
+    assert "1分钟段差新出现" in sender.messages[1][0]
+    assert "1分钟段差确认 2026-07-20 10:02:00" in "\n".join(
+        sender.messages[1][1]
+    )
+    assert dispatcher.health_snapshot()["delivered_event_count"] == 2
 
 
 def test_segment_enrichment_rich_notification_uses_one_minute_evidence(
@@ -1281,6 +1347,23 @@ def test_expired_one_minute_boundary_does_not_suppress_five_minute_signal(
         "1分钟段差：一类买点（递归层级：L0）证据已确认；"
         "买入定位窗口已过，但证据没有消失"
     ) in "\n".join(lines)
+
+
+def test_notification_expires_boundary_crossed_after_snapshot_observation() -> None:
+    signal = signal_document("triggered")
+
+    _title, lines = format_notification(
+        signal,
+        old_stage="triggered",
+        new_stage="segment_enriched",
+        detected_at=datetime.fromisoformat("2026-07-20T10:02:30+08:00"),
+    )
+
+    rendered = "\n".join(lines)
+    assert "定位窗口已过" in rendered
+    assert "精确执行候选已解锁" not in rendered
+    assert "结构模型比例上限" not in rendered
+    assert "本条买入不纳入操作计划" in rendered
 
 
 def test_sell_transition_notifies_without_an_actual_holding_exit_decision(

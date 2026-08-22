@@ -18,6 +18,7 @@ from chanlun.decision_support.trading_system.parameters import (
 )
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
     GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION,
+    WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION,
 )
 from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
 
@@ -40,6 +41,12 @@ _GEOMETRY_AWAITING_CONFIRMATION_BASIS = (
 _UNCONFIRMED_STRUCTURE_REASON = "FIVE_MINUTE_TRADE_SIGNAL_NOT_CONFIRMED"
 _GEOMETRY_AWAITING_CONFIRMATION_REASON = (
     "FIVE_MINUTE_GEOMETRIC_CANDIDATE_AWAITING_CONFIRMATION"
+)
+ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS = (
+    "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED"
+)
+ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON = (
+    "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_FOR_PRECISE_EXECUTION"
 )
 
 
@@ -180,6 +187,15 @@ def _pending_setup_label(*, side: str, geometry_ready: bool) -> str:
     return f"{prefix}：暂不计算（{state}）"
 
 
+def _waiting_segment_difference_label(*, side: str) -> str:
+    prefix = "结构风险参考比例" if side == "buy" else "结构退出参考比例"
+    point = "买点" if side == "buy" else "卖点"
+    return (
+        f"{prefix}：暂不计算（5分钟{point}已确认，"
+        "等待1分钟区间套精确定位）"
+    )
+
+
 def parse_position_recommendation_document(
     raw: object,
 ) -> PositionRecommendation:
@@ -290,6 +306,10 @@ def parse_position_recommendation_document(
                 _GEOMETRY_AWAITING_CONFIRMATION_BASIS,
                 (_GEOMETRY_AWAITING_CONFIRMATION_REASON,),
             ): _pending_setup_label(side=side, geometry_ready=True),
+            (
+                ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS,
+                (ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON,),
+            ): _waiting_segment_difference_label(side=side),
         }
         expected_label = expected_pending.get((basis, tuple(reason_codes)))
         if ratio is not None or options or expected_label is None:
@@ -342,21 +362,6 @@ def build_position_recommendation(
     if side not in {"buy", "sell"}:
         raise ValueError("position recommendation side must be buy or sell")
     segment_ratio = individual_parameter_snapshot().tactical_ratio
-    if recommendation == "BLOCKED":
-        return PositionRecommendation(
-            side=side,
-            status="BLOCKED",
-            basis="NO_TRADE",
-            recommended_ratio=Decimal("0"),
-            recommended_percent="0",
-            label=(
-                f"{'结构风险' if side == 'buy' else '结构退出'}参考："
-                "本条不纳入操作计划（具体限制见诊断）"
-            ),
-            reason_codes=("HARD_BLOCKED_NO_TRADE",),
-            segment_difference_max_ratio=segment_ratio,
-        )
-
     if recommendation == "WAITING_STRUCTURE":
         return PositionRecommendation(
             side=side,
@@ -381,18 +386,16 @@ def build_position_recommendation(
             segment_difference_max_ratio=segment_ratio,
         )
 
+    # A confirmed 5m buy outside the no-chase window is already a deterministic
+    # 0% conclusion.  Evaluate it before the 1m waiting state; otherwise a stale
+    # setup would falsely imply that a later locator can revive the original buy.
     if side == "buy":
-        multiplier = _decimal(risk_multiplier)
-        context_scale = _decimal(context_risk_scale)
         signal_age = (
             None
             if signal_age_seconds is None
             else _decimal(signal_age_seconds)
         )
         maximum_signal_age = _decimal(max_buy_signal_age_seconds)
-        # 信号已经过期是一个独立且更强的 0% 结论，不依赖当前价、结构止损或
-        # 其他比例输入。即使实时行情同时不可用，也必须先保留“不追价”，不能
-        # 把确定的禁止条件降级成普通的参数待核对。
         if (
             maximum_signal_age is None
             or maximum_signal_age <= 0
@@ -405,7 +408,7 @@ def build_position_recommendation(
                 basis="STRUCTURAL_RISK_INPUTS",
                 recommended_ratio=None,
                 recommended_percent=None,
-                label="结构风险参考比例：待核对（结构价格或风险参数不足）",
+                label="结构风险参考比例：待核对（信号时间或风险参数不足）",
                 reason_codes=("POSITION_RATIO_INPUT_UNRESOLVED",),
                 segment_difference_max_ratio=segment_ratio,
             )
@@ -417,13 +420,46 @@ def build_position_recommendation(
                 recommended_ratio=Decimal("0"),
                 recommended_percent="0",
                 label=(
-                    "结构风险参考：本条买入不纳入操作计划（监听发现已超过5分钟信号的10分钟新鲜窗口；"
-                    "仅作延迟复核，不追价）"
+                    "结构风险参考：本条买入不纳入操作计划（发现时已超过"
+                    "5分钟信号的10分钟新鲜窗口，仅作延迟复核，不追价）"
                 ),
                 reason_codes=("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",),
                 segment_difference_max_ratio=segment_ratio,
             )
 
+    # A stale 5m buy is a more specific terminal result than an upstream hard
+    # gate.  Keep this fallback after the freshness check so delayed snapshots
+    # cannot be rendered as if a new 1m locator could still revive them.
+    if recommendation == "BLOCKED":
+        return PositionRecommendation(
+            side=side,
+            status="BLOCKED",
+            basis="NO_TRADE",
+            recommended_ratio=Decimal("0"),
+            recommended_percent="0",
+            label=(
+                f"{'结构风险' if side == 'buy' else '结构退出'}参考："
+                "本条不纳入操作计划（具体限制见诊断）"
+            ),
+            reason_codes=("HARD_BLOCKED_NO_TRADE",),
+            segment_difference_max_ratio=segment_ratio,
+        )
+
+    if recommendation == WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION:
+        return PositionRecommendation(
+            side=side,
+            status="NOT_ACTIONABLE",
+            basis=ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS,
+            recommended_ratio=None,
+            recommended_percent=None,
+            label=_waiting_segment_difference_label(side=side),
+            reason_codes=(ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON,),
+            segment_difference_max_ratio=segment_ratio,
+        )
+
+    if side == "buy":
+        multiplier = _decimal(risk_multiplier)
+        context_scale = _decimal(context_risk_scale)
         price = _decimal(entry_price)
         stop = _decimal(structural_stop)
         anchor = (
@@ -581,6 +617,8 @@ def build_position_recommendation(
 
 __all__ = (
     "BUY_SIGNAL_PROTECTION_REASON_CODES",
+    "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS",
+    "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON",
     "PositionRecommendation",
     "active_signal_age_seconds",
     "build_position_recommendation",

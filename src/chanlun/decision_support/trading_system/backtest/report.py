@@ -465,6 +465,7 @@ def build_report(
             "trade_frequency": "5m",
             "segment_difference_frequency": "1m",
             "segment_difference_required_for_trade_signal": False,
+            "segment_difference_required_for_precise_execution": True,
             "execution_observation_frequency": "1m",
             "point_classes_analyzed_independently": True,
             "buy_point_classes_share_execution_logic": True,

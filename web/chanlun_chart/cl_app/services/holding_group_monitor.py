@@ -1160,8 +1160,8 @@ def _notification_line(
     )
     if segment_update:
         advice = (
-            "操作：1分钟段差只补充原5分钟信号的精细定位；"
-            "不能把本通知单独当成买卖授权"
+            "操作：1分钟区间套证据已补充；先核对定位窗口，只有当前有效时"
+            "才进入精确执行候选，仍须在其他交易软件手工决定"
         )
     elif side == "buy" and position_reasons & _BUY_PROTECTION_REASONS:
         advice = "操作：不追价，等待新的5分钟结构，仅在其他交易软件手工复核"

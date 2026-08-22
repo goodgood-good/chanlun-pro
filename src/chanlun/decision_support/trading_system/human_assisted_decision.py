@@ -39,6 +39,7 @@ from chanlun.decision_support.trading_system.operation_level import (
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
     FIVE_MINUTE_SETUP_STATE_CONTRACT,
     GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+    WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION,
     execution_recommendation_label,
     setup_state_for_point,
     unconfirmed_setup_recommendation,
@@ -201,11 +202,11 @@ class HumanAssistedDecisionContract:
             raise ValueError("human-assisted decision core schema changed")
         if (
             self.policy.require_confirmed_five_minute is not True
-            or self.policy.require_confirmed_one_minute is not False
+            or self.policy.require_confirmed_one_minute is not True
         ):
             raise ValueError(
-                "human-assisted production policy requires 5m trade signals "
-                "and optional 1m segment evidence"
+                "human-assisted production policy requires independent 5m trade "
+                "signals and confirmed 1m segment evidence for precise execution"
             )
         if (
             self.higher_context_frequency,
@@ -686,7 +687,16 @@ def apply_formal_selection_scope(
                 profile.get("structure_signal_confirmed") is True
                 and profile.get("hard_blocked") is not True
             ):
-                profile["recommendation"] = "CAUTION" if advisories else "READY"
+                profile["recommendation"] = (
+                    WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
+                    if profile.get("one_minute_required_for_precise_execution")
+                    is True
+                    and profile.get("one_minute_segment_difference_present")
+                    is not True
+                    else "CAUTION"
+                    if advisories
+                    else "READY"
+                )
                 profile["recommendation_label"] = execution_recommendation_label(
                     profile["recommendation"]
                 )
@@ -758,6 +768,33 @@ def validate_signal_decision_document(document: Mapping[str, object]) -> str:
             recommendation
         ):
             raise ValueError("human-assisted execution recommendation label changed")
+        locator_status = profile.get("precision_locator_status")
+        locator_ready = profile.get("precision_locator_ready")
+        precise_execution_ready = profile.get("precise_execution_ready")
+        if (
+            profile.get("one_minute_required_for_trade_signal") is not False
+            or profile.get("one_minute_required_for_precise_execution") is not True
+            or locator_status
+            not in {
+                "STRUCTURE_PENDING",
+                "WAITING_ONE_MINUTE",
+                "FIVE_MINUTE_EXPIRED",
+                "BOUNDARY_MISSING",
+                "BOUNDARY_EXPIRED",
+                "READY",
+            }
+            or type(locator_ready) is not bool
+            or locator_ready is not (locator_status == "READY")
+            or type(precise_execution_ready) is not bool
+            or precise_execution_ready
+            is not bool(
+                locator_ready
+                and (
+                    document.get("entry_allowed") or document.get("exit_allowed")
+                )
+            )
+        ):
+            raise ValueError("human-assisted 1m precise-execution contract changed")
     if (
         "trigger_1m" in document
         and document.get("trigger_1m") != document.get("segment_difference_1m")
@@ -1036,6 +1073,8 @@ def serialize_evaluated_signal(
         recommendation = unconfirmed_setup_recommendation(
             setup_state.formation_state
         )
+    elif not segment_difference_present:
+        recommendation = WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
     elif advisory_reasons:
         recommendation = "CAUTION"
     else:
@@ -1101,6 +1140,36 @@ def serialize_evaluated_signal(
                 (*document["decision_reasons"], *operational_buy_protections)
             )
         )
+        recommendation = "BLOCKED"
+        hard_reasons = tuple(
+            dict.fromkeys((*hard_reasons, *operational_buy_protections))
+        )
+    if "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in operational_buy_protections:
+        precision_locator_status = "FIVE_MINUTE_EXPIRED"
+    elif not structure_confirmed:
+        precision_locator_status = "STRUCTURE_PENDING"
+    elif not segment_difference_present:
+        precision_locator_status = "WAITING_ONE_MINUTE"
+    elif (
+        point.side != "buy"
+        or not point.code.startswith(("SH.", "SZ.", "BJ."))
+        or not item.physical_timeframe_recursive
+    ):
+        precision_locator_status = "READY"
+    elif boundary is None:
+        precision_locator_status = (
+            "BOUNDARY_EXPIRED"
+            if "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in decision_reasons
+            else "BOUNDARY_MISSING"
+        )
+    elif (
+        "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in decision_reasons
+        or boundary.entry_valid_until <= item.lifecycle.observed_at
+    ):
+        precision_locator_status = "BOUNDARY_EXPIRED"
+    else:
+        precision_locator_status = "READY"
+    precision_locator_ready = precision_locator_status == "READY"
     document["position_recommendation"] = position_recommendation_document
     document["execution_profile"] = {
         "structure_signal_confirmed": structure_confirmed,
@@ -1108,7 +1177,14 @@ def serialize_evaluated_signal(
         "execution_trigger_confirmed": segment_difference_present,
         "one_minute_role": "SEGMENT_DIFFERENCE_ONLY",
         "one_minute_required_for_trade_signal": False,
+        "one_minute_required_for_precise_execution": True,
         "one_minute_segment_difference_present": segment_difference_present,
+        "precision_locator_status": precision_locator_status,
+        "precision_locator_ready": precision_locator_ready,
+        "precise_execution_ready": bool(
+            precision_locator_ready
+            and (document["entry_allowed"] or document["exit_allowed"])
+        ),
         "recommendation": recommendation,
         "recommendation_label": execution_recommendation_label(recommendation),
         "hard_blocked": recommendation == "BLOCKED",

@@ -74,7 +74,7 @@
           <span id="es-status-dot" class="es-status-dot is-loading" aria-hidden="true"></span>
           <div>
             <strong id="es-status">正在读取最新快照</strong>
-            <small id="es-status-detail">等待日线 / 30m 环境、5m 操作确认与可选 1m 段差数据</small>
+            <small id="es-status-detail">等待日线 / 30m 环境、5m 操作确认与1m区间套精确定位数据</small>
           </div>
         </div>
         <dl class="es-status-facts es-status-facts--primary">
@@ -109,7 +109,7 @@
           <i aria-hidden="true">→</i>
           <article><span>03 · 操作确认</span><strong>5m 买卖点确认</strong><p>最新未完成线段只进入提前观察；最新已完成线段上的一、二、三类买卖点在首个因果形成时刻达到操作确认，末端结构是否封存单独展示。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>04 · 段差辅助</span><strong>1m 精细定位</strong><p>1分钟买卖点只提供段差与精细定位；即使暂未出现，也不能阻止已达到操作确认的5分钟信号通知和人工复核。</p></article>
+          <article><span>04 · 精确执行</span><strong>1m 区间套定位</strong><p>1分钟买卖点不创造主信号，也不阻止5分钟结构首报；但必须形成同向区间套后，才升级为精确执行候选并生成结构比例参考。</p></article>
         </section>
       </details>
 
@@ -118,6 +118,7 @@
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>可含未完成线段，仅供提前观察</small></article>
         <article class="is-trigger"><span>5分钟操作确认</span><strong id="es-triggered-count">0</strong><small>达到操作确认后立即通知；后续结构证据和1分钟段差可稍后补充</small></article>
         <article class="is-segment"><span>严格 1m/L0 段差证据</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">当前已发布范围；全周期扫描未完成前不是全市场终值。证据存在与买入定位窗口是否过期分开显示；不改变5分钟买卖点是否成立</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看段差证据</button></article>
+        <article class="is-action"><span>当前精确执行就绪</span><strong id="es-precise-count">0</strong><small>必须同时满足同向1m/L0区间套、定位边界有效以及买入/卖出操作许可；与“有段差证据”分开统计</small></article>
       </section>
       <details class="es-summary-details">
         <summary>其他统计</summary>
@@ -194,8 +195,8 @@
           <div><dt>观察样本版本</dt><dd id="hr-markout-cohort-status">尚无观察样本</dd></div>
           <div><dt>暖机结构谱系</dt><dd id="hr-forward-lineage-status">尚未开始逐日记录</dd></div>
           <div><dt>信号复用</dt><dd id="hr-signal-lifecycle-status">终态买卖点不可复用</dd></div>
-          <div><dt>段差规则</dt><dd id="hr-tactical-execution-status">1分钟只作定位，不能独立授权买卖；5分钟低级别或异结构卖点确认后，段差处理参考上限 25%</dd></div>
-          <div><dt>段差边界</dt><dd id="hr-entry-price-boundary-status">1分钟确认 K 只作可选精细定位</dd></div>
+          <div><dt>区间套规则</dt><dd id="hr-tactical-execution-status">5分钟确认结构信号；1分钟同向区间套解锁精确执行候选，本系统仍不自动下单</dd></div>
+          <div><dt>执行边界</dt><dd id="hr-entry-price-boundary-status">买入只在1分钟定位窗口有效时生成结构比例参考</dd></div>
           <div><dt>退出规则</dt><dd id="hr-strategic-exit-persistence-status">5分钟同级或更高级别卖点达到操作确认后，由人工核对结构退出规则</dd></div>
           <div><dt>5日筛选观察</dt><dd id="hr-markout-5">尚未积累 · 不可评价</dd></div>
           <div><dt>10日筛选观察</dt><dd id="hr-markout-10">尚未积累 · 不可评价</dd></div>
@@ -317,7 +318,7 @@
           <p id="es-sector-catalog-status" class="es-sector-catalog-status" data-state="loading">正在读取板块目录。</p>
           <details class="es-rule-note">
             <summary>规则与数据口径</summary>
-            <p>板块按点时成分的中长期相对结构排序，不按当日涨跌追强；日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线。日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟操作确认决定主信号，1分钟只作段差辅助；结构、复权或行情证据失真时关闭操作资格。</p>
+            <p>板块按点时成分的中长期相对结构排序，不按当日涨跌追强；日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线。日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟操作确认决定主信号和首报，1分钟同向区间套决定是否进入精确执行候选；结构、复权或行情证据失真时关闭操作资格。</p>
           </details>
           <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
 
@@ -616,7 +617,7 @@
           <article><strong>板块先行</strong><p>板块和个股都按缠论结构计算；涨跌幅、上涨家数不参与方向判断。</p></article>
           <article><strong>六类点独立</strong><p>一买看背驰反转，二买看首次回试确认，三买看离开中枢后的延续；卖点按对称规则独立处理。</p></article>
           <article><strong>第一中枢约束</strong><p>三买只取第一中枢；序号未知或后续中枢一律关闭。</p></article>
-          <article><strong>周期分工</strong><p>日线与30分钟负责环境分级，5分钟负责操作确认买卖点，末端结构是否封存另行标示；1分钟只负责段差与精细定位，不是通知闸门。</p></article>
+          <article><strong>周期分工</strong><p>日线与30分钟负责环境分级，5分钟负责操作确认买卖点和结构首报，末端结构是否封存另行标示；1分钟同向区间套负责精确执行定位，不是通知闸门，但未完成时不生成执行比例。</p></article>
           <article><strong>均线与分型</strong><p>MA5、MA10和分型必须来自各自物理周期的已完成K线；一类点仅作背景，二类点关注MA5收复/跌破，三类点关注MA5与MA10排列，均不能改写缠论买卖点事实。</p></article>
           <article><strong>因果边界</strong><p>图上只有最新未完成线段使用一条虚线，其买卖点只显示“接近”。最新线段完成并形成可操作买卖点几何后，按首次因果形成时刻达到5分钟操作确认；后续只继续固化结构证据，不重复通知。</p></article>
           <article><strong>当前结构</strong><p>当前选股只接受最新已完成线段上的操作确认买卖点和最新未完成线段的接近状态；旧线段、失效、结束及旧版迁移状态均不进入当前列表。</p></article>

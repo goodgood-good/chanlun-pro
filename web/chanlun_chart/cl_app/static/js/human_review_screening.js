@@ -236,7 +236,30 @@
     return sharedUi;
   }
 
-  function positionRecommendationLabel(candidate) {
+  function boundaryStatusAt(status, validUntil, evaluatedAt = new Date()) {
+    if (status !== "current") return status;
+    const validUntilMillis = Date.parse(text(validUntil, ""));
+    const evaluatedMillis = evaluatedAt instanceof Date
+      ? evaluatedAt.getTime()
+      : Date.parse(text(evaluatedAt, ""));
+    return Number.isFinite(validUntilMillis)
+      && Number.isFinite(evaluatedMillis)
+      && validUntilMillis <= evaluatedMillis
+      ? "expired"
+      : status;
+  }
+
+  function positionRecommendationLabel(candidate, evaluatedAt = new Date()) {
+    const liveBoundaryStatus = candidate && candidate.realtime_notification === true
+      ? boundaryStatusAt(
+        text(candidate.realtime_notification_segment_difference_boundary_status, "unknown"),
+        candidate.realtime_notification_segment_difference_valid_until,
+        evaluatedAt,
+      )
+      : "not_applicable";
+    if (candidate && candidate.point_side === "buy" && liveBoundaryStatus === "expired") {
+      return "结构风险参考：本条买入不纳入操作计划（1分钟区间套定位窗口已过）";
+    }
     const sharedUi = sharedScreeningUi();
     if (sharedUi && typeof sharedUi.positionRecommendationLabel === "function") {
       return sharedUi.positionRecommendationLabel(
@@ -339,29 +362,65 @@
       }, observedAt)
       : null;
     const historical = currentAgeSeconds !== null && currentAgeSeconds > 600;
-    const segmentStatus = segmentPresent
-      ? text(event.segment_difference_status, "unknown")
-      : "absent";
     const segmentEvidenceStatus = segmentPresent
       ? text(event.segment_difference_evidence_status, "present")
       : "absent";
-    const segmentBoundaryStatus = segmentPresent
+    const persistedSegmentBoundaryStatus = segmentPresent
       ? text(
         event.segment_difference_boundary_status,
-        event.side === "sell" ? "not_applicable" : segmentStatus,
+        event.side === "sell"
+          ? "not_applicable"
+          : text(event.segment_difference_status, "unknown"),
       )
       : "absent";
+    const segmentBoundaryStatus = boundaryStatusAt(
+      persistedSegmentBoundaryStatus,
+      event.segment_difference_valid_until,
+      observedAt,
+    );
+    const segmentStatus = segmentBoundaryStatus === "not_applicable"
+      ? "current"
+      : segmentBoundaryStatus;
     const segmentCurrent = segmentPresent
-      && segmentStatus === "current"
+      && segmentBoundaryStatus === "current"
       && event.segment_difference_current === true;
     const setupLockState = ["pending", "locked"].includes(event.setup_lock_state)
       ? event.setup_lock_state
       : "unknown";
-    const segmentWarnings = segmentStatus === "expired"
+    const segmentWarnings = segmentBoundaryStatus === "expired"
       ? ["ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"]
-      : segmentStatus === "unavailable"
+      : segmentBoundaryStatus === "unavailable"
         ? ["ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"]
         : [];
+    const eventPositionRecommendation = event.position_recommendation
+      && typeof event.position_recommendation === "object"
+      ? { ...event.position_recommendation }
+      : null;
+    const positionRecommendation = event.side === "buy"
+      && segmentEvidenceStatus === "present"
+      && segmentBoundaryStatus === "expired"
+      ? {
+        ...(eventPositionRecommendation || {}),
+        side: "buy",
+        status: "BLOCKED",
+        basis: "NO_TRADE",
+        recommended_ratio: "0",
+        recommended_percent: "0",
+        label: "结构风险参考：本条买入不纳入操作计划（1分钟区间套定位窗口已过）",
+        reason_codes: [
+          ...new Set([
+            ...(
+              eventPositionRecommendation
+              && Array.isArray(eventPositionRecommendation.reason_codes)
+                ? eventPositionRecommendation.reason_codes
+                : []
+            ),
+            "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
+          ]),
+        ],
+        conditional_options: [],
+      }
+      : eventPositionRecommendation;
     return {
       candidate_kind: "realtime_notification",
       candidate_id: event.notification_id,
@@ -388,9 +447,7 @@
       confidence: historical ? "LOW" : "MEDIUM",
       review_available_at: notificationTime,
       current_price: event.current_price,
-      position_recommendation: event.position_recommendation && typeof event.position_recommendation === "object"
-        ? { ...event.position_recommendation }
-        : null,
+      position_recommendation: positionRecommendation,
       reference_price: event.reference_price,
       entry_price_cap: null,
       entry_confirmation_bar_closed_at: structureConfirmedAt,
@@ -477,16 +534,20 @@
     return "5分钟操作确认已记录；末端结构封存状态未保存，可结合当前图表核对";
   }
 
-  function realtimeNotificationSegmentPeriod(candidate) {
+  function realtimeNotificationSegmentPeriod(candidate, evaluatedAt = new Date()) {
     const evidenceStatus = text(
       candidate && candidate.realtime_notification_segment_difference_evidence_status,
       candidate && candidate.realtime_notification_segment_difference_present === true
         ? "present"
         : "absent",
     );
-    const boundaryStatus = text(
-      candidate && candidate.realtime_notification_segment_difference_boundary_status,
-      candidate && candidate.point_side === "sell" ? "not_applicable" : "unknown",
+    const boundaryStatus = boundaryStatusAt(
+      text(
+        candidate && candidate.realtime_notification_segment_difference_boundary_status,
+        candidate && candidate.point_side === "sell" ? "not_applicable" : "unknown",
+      ),
+      candidate && candidate.realtime_notification_segment_difference_valid_until,
+      evaluatedAt,
     );
     const point = text(
       candidate && candidate.realtime_notification_segment_difference_point_type,
@@ -501,7 +562,7 @@
     )];
     const pointEvidence = divergence ? `${point}（${divergence}）` : point;
     if (evidenceStatus === "present" && boundaryStatus === "current") {
-      return ["段差证据已出现·定位窗口有效", `${pointEvidence}已记录`, "只辅助段差，不改变5分钟信号"];
+      return ["区间套已确认·定位窗口有效", `${pointEvidence}已记录`, "已升级为精确执行候选，仍须人工复核"];
     }
     if (evidenceStatus === "present" && boundaryStatus === "expired") {
       const validUntil = candidate.realtime_notification_segment_difference_valid_until;
@@ -509,35 +570,35 @@
         "段差证据已出现·定位窗口已过",
         `${pointEvidence}证据仍有效；过期的只是买入定位窗口`,
         validUntil
-          ? `定位窗口有效至 ${fullDateTimeText(validUntil)}；不影响5分钟信号`
-          : "段差证据保留；不影响5分钟信号",
+          ? `定位窗口有效至 ${fullDateTimeText(validUntil)}；5分钟信号保留，精确执行已关闭`
+          : "区间套证据保留；5分钟信号保留，精确执行已关闭",
       ];
     }
     if (evidenceStatus === "present" && boundaryStatus === "unavailable") {
       return [
         "段差证据已出现·定位边界缺失",
         `${pointEvidence}证据已保留，买入定位边界缺失`,
-        "不影响5分钟信号",
+        "5分钟信号保留；精确执行边界恢复前不生成比例",
       ];
     }
     if (evidenceStatus === "present" && boundaryStatus === "not_applicable") {
       return [
         "段差证据已出现",
         `${pointEvidence}已记录`,
-        "卖点不生成买入定位边界；只作精细复核",
+        "卖出区间套已确认；核对持有结构级别后人工复核",
       ];
     }
     if (evidenceStatus === "present") {
       return [
         "段差证据已出现·边界待核对",
         `${pointEvidence}证据已保留，旧记录未保存定位边界状态`,
-        "不能据此单独授权买卖",
+        "边界核对完成前不生成精确执行比例",
       ];
     }
     return [
-      "可选段差未出现",
-      "1分钟只用于段差与精细定位",
-      "不阻止5分钟信号人工复核",
+      "等待1分钟区间套",
+      "5分钟信号已保留并可人工复核",
+      "区间套未确认前不生成精确执行比例",
     ];
   }
 
@@ -1808,7 +1869,7 @@
         setStatus(
           "ready",
           "盘中实时复核候选已验证并归档",
-          `${queueSummary} · 30分钟环境/5分钟操作确认/结构证据/1分钟可选段差 · 候选报告自身零订单/零成交`,
+          `${queueSummary} · 30分钟环境/5分钟操作确认/结构证据/1分钟区间套精确定位 · 候选报告自身零订单/零成交`,
         );
       }
       if (
@@ -2065,7 +2126,7 @@
       } : {
         "30m": ["环境核对", "确认走势方向与风险环境", `可见至 ${timeText(candidate.review_available_at)}`],
         "5m": ["操作买卖级别", "核对一、二、三类买卖点、结构证据与失效边界", `失效 ${text(candidate.structural_invalidation_price)}`],
-        "1m": ["段差定位", "只用已完成 1分钟K线寻找可选段差位置", "不得反向否定5分钟操作确认"],
+        "1m": ["区间套定位", "只用已完成1分钟K线确认同向区间套", "不否定5分钟信号；未确认前不生成执行比例"],
       };
       Object.entries(periods).forEach(([frequency, values]) => {
         const node = chartWorkspace.querySelector(`[data-period-node="${frequency}"]`);

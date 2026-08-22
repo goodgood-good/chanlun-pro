@@ -405,16 +405,17 @@
     SAME_OR_HIGHER_STRUCTURE_FULL_EXIT: "同级或更高级别卖点按完整退出规则处理",
     LOWER_STRUCTURE_SEGMENT_DIFFERENCE_REDUCTION: "低级别或不同结构卖点只按段差规则处理",
     SELL_STRUCTURE_RELATION_REQUIRED: "卖点与目标结构的级别关系需人工核对",
+    ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_FOR_PRECISE_EXECUTION: "5分钟信号已确认，等待1分钟区间套精确定位",
     LEGACY_STRUCTURAL_RISK_MODEL_RATIO: "历史通知只保留结构模型比较值",
     LEGACY_BUY_RESTRICTION_REQUIRES_REVIEW: "历史买入限制原因需重新核对",
     LEGACY_STRUCTURAL_RISK_INPUT_UNRESOLVED: "历史通知的结构价格或风险参数不完整",
     directional_points_expired: "方向性买卖点已超过当前有效窗口",
-    stock_one_minute_trigger_only: "个股1分钟数据只用于段差与精细定位",
+    stock_one_minute_trigger_only: "个股1分钟数据用于区间套与精确执行定位",
     core_confirmed_point: "核心买卖点已达到操作确认",
     five_minute_geometric_point_formed: "旧版含义：5分钟离开/回抽几何已出现；仍未达到操作确认",
     five_minute_geometric_candidate_awaiting_confirmation: "5分钟仅出现非交易几何候选，尚未达到操作确认",
-    one_minute_not_confirmed: "旧参数要求1分钟确认；当前生产规则不再使用该硬门槛",
-    one_minute_sell_not_confirmed: "旧参数要求1分钟卖点确认；当前生产规则不再使用该硬门槛",
+    one_minute_not_confirmed: "5分钟买点已确认，等待1分钟区间套精确定位",
+    one_minute_sell_not_confirmed: "5分钟卖点已确认，等待1分钟区间套精确定位",
     confirmed_sell_with_down_structure: "下跌结构中的卖点已确认",
     confirmed_buy_structure: "买入方向结构已确认",
     terminal_line_confirmed: "末端结构确认",
@@ -666,15 +667,16 @@
     return trigger ? "present" : "absent";
   }
 
-  function segmentDifferenceBoundaryStatusForSignal(signal) {
+  function segmentDifferenceBoundaryStatusForSignal(signal, evaluatedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
+    let persisted = "";
     if (safeSignal.synthetic_notification_projection === true) {
-      const persisted = text(
+      persisted = text(
         safeSignal.notification_segment_difference_boundary_status,
         "",
       );
       if ([
-        "absent", "current", "expired", "unavailable", "unknown", "not_applicable",
+        "absent", "expired", "unavailable", "unknown", "not_applicable",
       ].includes(persisted)) return persisted;
     }
     const trigger = segmentDifferenceForSignal(safeSignal);
@@ -694,13 +696,40 @@
     const boundary = isRecord(safeSignal.entry_execution_boundary)
       ? safeSignal.entry_execution_boundary
       : {};
-    const validUntil = Date.parse(text(boundary.entry_valid_until, ""));
-    const observedAt = Date.parse(text(safeSignal.observed_at, ""));
-    if (Number.isFinite(validUntil) && Number.isFinite(observedAt) && validUntil <= observedAt) {
+    const boundaryValue = boundary.entry_valid_until
+      || safeSignal.notification_segment_difference_valid_until;
+    const validUntil = Date.parse(text(boundaryValue, ""));
+    const evaluatedMillis = evaluatedAt instanceof Date
+      ? evaluatedAt.getTime()
+      : Date.parse(text(evaluatedAt, ""));
+    if (
+      Number.isFinite(validUntil)
+      && Number.isFinite(evaluatedMillis)
+      && validUntil <= evaluatedMillis
+    ) {
       return "expired";
     }
     if (reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_MISSING")) return "unavailable";
-    return Object.keys(boundary).length ? "current" : "unavailable";
+    if (persisted === "current") return "current";
+    return Object.keys(boundary).length || boundaryValue ? "current" : "unavailable";
+  }
+
+  function preciseExecutionReadyForSignal(signal, evaluatedAt = new Date()) {
+    const safeSignal = isRecord(signal) ? signal : {};
+    const profile = isRecord(safeSignal.execution_profile)
+      ? safeSignal.execution_profile
+      : {};
+    const trigger = segmentDifferenceForSignal(safeSignal);
+    const side = text(safeSignal.side || (trigger && trigger.side), "");
+    const boundaryStatus = segmentDifferenceBoundaryStatusForSignal(
+      safeSignal,
+      evaluatedAt,
+    );
+    return segmentDifferenceEvidenceStatusForSignal(safeSignal) === "present"
+      && (side === "buy" ? boundaryStatus === "current" : boundaryStatus === "not_applicable")
+      && profile.precision_locator_ready === true
+      && profile.precise_execution_ready === true
+      && (safeSignal.entry_allowed === true || safeSignal.exit_allowed === true);
   }
 
   function recommendationReasonCodes(signal, recommendation, profile) {
@@ -713,16 +742,40 @@
     ]);
   }
 
-  function positionRecommendationForSignal(signal) {
+  function positionRecommendationForSignal(signal, evaluatedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     const profile = isRecord(safeSignal.execution_profile)
       ? safeSignal.execution_profile
       : {};
-    return isRecord(safeSignal.position_recommendation)
+    const recommendation = isRecord(safeSignal.position_recommendation)
       ? safeSignal.position_recommendation
       : isRecord(profile.position_recommendation)
         ? profile.position_recommendation
         : {};
+    const trigger = segmentDifferenceForSignal(safeSignal);
+    const side = text(
+      safeSignal.side || (trigger && trigger.side) || recommendation.side,
+      "",
+    );
+    if (
+      side !== "buy"
+      || segmentDifferenceEvidenceStatusForSignal(safeSignal) !== "present"
+      || segmentDifferenceBoundaryStatusForSignal(safeSignal, evaluatedAt) !== "expired"
+    ) return recommendation;
+    return {
+      ...recommendation,
+      side: "buy",
+      status: "BLOCKED",
+      basis: "NO_TRADE",
+      recommended_ratio: "0",
+      recommended_percent: "0",
+      label: "结构风险参考：本条买入不纳入操作计划（1分钟区间套定位窗口已过）",
+      reason_codes: uniqueText([
+        ...(Array.isArray(recommendation.reason_codes) ? recommendation.reason_codes : []),
+        "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
+      ]),
+      conditional_options: [],
+    };
   }
 
   function blockedPositionReason(signal, recommendation, profile) {
@@ -750,6 +803,12 @@
     }
     if (reasons.has("CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP")) {
       return "本条买入不纳入操作计划：当前价已触及或跌破5分钟结构防守位";
+    }
+    if (reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED")) {
+      return "5分钟信号仍保留，但1分钟区间套定位窗口已过；等待新的1分钟区间套";
+    }
+    if (reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_MISSING")) {
+      return "5分钟信号仍保留，但1分钟区间套精确执行边界不可用";
     }
     if (reasons.has("WARMUP_CONVERGENCE_GATE_FAILED")) {
       return "本条买入不纳入操作计划：5分钟完整历史与对照窗口的活动买卖点不一致，等待重新收敛";
@@ -795,6 +854,12 @@
     if (reasons.has("CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP")) {
       return "当前价格已触及结构防守位";
     }
+    if (reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED")) {
+      return "1分钟定位窗口已过";
+    }
+    if (reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_MISSING")) {
+      return "1分钟精确执行边界不可用";
+    }
     if (isRecord(profile) && profile.hard_blocked === true) {
       return hardBlockSummaryForSignal(signal);
     }
@@ -816,6 +881,12 @@
       || reasons.has("CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP")
     ) {
       return "不追价、不执行本条买入，等待新的5分钟结构";
+    }
+    if (
+      reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED")
+      || reasons.has("ONE_MINUTE_SEGMENT_BOUNDARY_MISSING")
+    ) {
+      return "保留5分钟结构观察，等待新的有效1分钟区间套";
     }
     if (reasons.has("WARMUP_CONVERGENCE_GATE_FAILED")) {
       return "保持观察，等待5分钟暖机重新收敛后再评估买入";
@@ -994,7 +1065,7 @@
         return `当前快照有 ${matchingSegments.length} 条严格1m/L0段差证据（买点 ${buys} / 卖点 ${sells}），但被其他筛选条件隐藏；点击“查看段差证据”可清除这些筛选。`;
       }
       return requestedSegmentState === "present"
-        ? "当前已发布范围确实没有严格1m/L0段差证据；若全周期仍在扫描，这不是全市场终值，也不影响5分钟操作确认信号。"
+        ? "当前已发布范围确实没有严格1m/L0段差证据；若全周期仍在扫描，这不是全市场终值。5分钟操作信号仍保留，但精确执行与执行比例继续锁定。"
         : "当前快照没有仍在有效期内的买入定位窗口；已有段差证据仍会单独保留。";
     }
     const code = exactCoverageCodeForQuery(snapshot, query);
@@ -1782,6 +1853,8 @@
       : null;
     const positionRecommendation = positionRecommendationForSignal(safeSignal);
     const positionBlocked = positionRecommendation.status === "BLOCKED";
+    const waitingSegmentDifference = positionRecommendation.basis
+      === "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED";
     const recommendation = text(profile && profile.recommendation, "");
     const pointLabel = POINT_LABELS[safeSignal.point_type] || "买卖点";
     const setupLockState = setupLockStateForSignal(safeSignal);
@@ -1814,6 +1887,12 @@
     } else if (staleBuy) {
       tone = "blocked";
       title = "买点已超过新鲜窗口";
+    } else if (
+      recommendation === "WAITING_SEGMENT_DIFFERENCE"
+      || waitingSegmentDifference
+    ) {
+      tone = "waiting";
+      title = `5分钟${pointLabel}已确认，等待1分钟区间套精确定位`;
     } else if (positionBlocked) {
       tone = "blocked";
       title = blockedPositionTitle(
@@ -1979,7 +2058,7 @@
                     : segmentBoundaryStatus === "not_applicable"
                       ? "段差证据已出现"
                       : "段差证据已出现·边界待核对"
-                    : "可选段差未出现",
+                    : "等待1分钟区间套",
           tone: closed
             ? "blocked"
             : segmentEvidenceStatus === "present" && triggerKnown
@@ -1987,16 +2066,16 @@
               : "neutral",
           summary: segmentEvidenceStatus === "present" && triggerKnown
             ? `${recordedSegmentEvidence} · 严格${segmentFrequency}/L0段差证据已留存`
-                  : "1分钟只用于段差/精细定位，不影响5分钟操作确认成立",
+                  : "5分钟信号已成立；等待1分钟区间套后才进入精确执行候选",
           boundary: segmentEvidenceStatus === "present" && triggerKnown
             ? segmentBoundaryStatus === "current"
-              ? `买入定位窗口有效至 ${segmentValidUntil}；1分钟不能独立授权买卖`
+              ? `买入定位窗口有效至 ${segmentValidUntil}；精确执行候选已解锁，仍须人工复核`
               : segmentBoundaryStatus === "expired"
                 ? `买入定位窗口有效至 ${segmentValidUntil}，现已过期；段差证据仍保留`
                 : segmentBoundaryStatus === "not_applicable"
-                  ? "卖点不生成买入定位边界；段差证据用于精细复核"
+                  ? "卖出区间套已确认；核对持有结构级别后人工复核"
                   : "段差证据保留，买入定位边界需人工核对"
-                : "无需等待1分钟即可复核5分钟信号",
+                : "5分钟信号已首报；精确执行需等待1分钟区间套",
           evidence: notificationEvidence,
         },
       ];
@@ -2079,7 +2158,7 @@
       setupState = "未知";
     }
 
-    let triggerState = "可选段差未出现";
+    let triggerState = "等待1分钟区间套";
     let triggerTone = "neutral";
     if (triggerKnown && trigger.status === "invalidated") {
       triggerState = "已失效";
@@ -2145,16 +2224,16 @@
         tone: triggerTone,
         summary: triggerKnown && segmentEvidenceStatus === "present"
           ? `${triggerPoint} · 严格1m/L0段差证据已确认`
-          : "尚未取得1分钟段差证据（不影响5分钟信号）",
+          : "尚未取得1分钟区间套（5分钟信号保留，精确执行未解锁）",
         boundary: triggerKnown && segmentEvidenceStatus === "present"
           ? segmentBoundaryStatus === "current"
-            ? "买入定位窗口仍有效；1分钟不能独立授权买卖"
+            ? "买入定位窗口仍有效；已进入精确执行候选，仍须人工复核"
             : segmentBoundaryStatus === "expired"
               ? "买入定位窗口已过，但段差结构证据仍保留；不追价"
               : segmentBoundaryStatus === "not_applicable"
-                ? "卖点不生成买入定位边界；1分钟只作精细复核"
+                ? "卖出区间套已确认；核对持有结构级别后人工复核"
                 : "段差证据已保留；定位边界需人工核对"
-          : "只作定位；不能独立授权买卖，也无需等待即可复核5分钟信号",
+          : "5分钟信号已可复核；未完成1分钟区间套前不生成执行比例",
         evidence: triggerEvidence.map(reasonLabel),
       },
     ];
@@ -2653,7 +2732,7 @@
       ...prefixedLabels("5分钟", setupPendingEvidence),
       ...prefixedLabels("5分钟", setupMissing),
       ...prefixedLabels("1分钟", triggerMissing),
-      ...(trigger ? [] : ["1分钟：可选段差证据尚未出现（不阻断5分钟信号）"]),
+      ...(trigger ? [] : ["1分钟：区间套尚未出现（5分钟信号保留，精确执行未解锁）"]),
       ...missingDecisions.map(reasonLabel),
       ...(warmup.converged === false
         ? warmupReasons
@@ -2677,10 +2756,10 @@
       formed: "仅出现买卖点几何候选；等待达到操作确认",
       armed: "旧版等待态；下一次计算按5分钟操作确认迁移",
       triggered: lockState === "pending"
-        ? "5分钟操作确认已成立；直接人工复核，1分钟段差可选"
+        ? "5分钟操作确认已成立；等待1分钟区间套后进入精确执行候选"
         : lockState === "locked"
-          ? "5分钟买卖点操作确认且末端结构已封存；直接人工复核，1分钟段差可选"
-          : "5分钟操作确认已记录、结构证据状态待核对；直接人工复核，1分钟段差可选",
+          ? "5分钟买卖点操作确认且末端结构已封存；等待1分钟区间套精确定位"
+          : "5分钟操作确认已记录、结构证据状态待核对；等待1分钟区间套精确定位",
       executable: "人工复核中枢、走势类型、级别与买卖点",
       active: "跟踪反向买卖点与结构止损",
       invalidated: "信号已失效，等待新的结构设置",
@@ -3659,7 +3738,7 @@
           ? "RECOMMENDED"
           : recommendation === "CAUTION"
             ? "CONDITIONAL"
-            : ["WAITING_STRUCTURE", "GEOMETRY_AWAITING_CONFIRMATION"].includes(recommendation)
+            : ["WAITING_STRUCTURE", "GEOMETRY_AWAITING_CONFIRMATION", "WAITING_SEGMENT_DIFFERENCE"].includes(recommendation)
               ? "NOT_ACTIONABLE"
               : "";
     }
@@ -4032,7 +4111,7 @@
           unavailable: "段差证据已出现（边界缺失）",
           unknown: "段差证据已出现（边界待核对）",
           not_applicable: "段差证据已出现",
-        }[segmentBoundaryStatus] || "段差证据已出现") : "可选段差未出现"}`;
+        }[segmentBoundaryStatus] || "段差证据已出现") : "等待1分钟区间套（精确执行未解锁）"}`;
     const meta = element(documentRef, "span", "es-signal-card__meta");
     meta.append(element(
       documentRef,
@@ -4218,7 +4297,7 @@
         ["d", "未知", "等待日线线段结构证据", "日线环境边界未提供"],
         ["30m", "未知", "等待大级别环境证据", "环境边界未提供"],
         ["5m", "未知", "等待操作级别设置", "失效价未提供"],
-        ["1m", "可选", "尚未取得段差证据（不阻断5分钟）", "只作定位；不能独立授权买卖"],
+        ["1m", "等待区间套", "5分钟信号保留，精确执行未解锁", "未完成1分钟区间套前不生成执行比例"],
       ];
       for (const [periodFrequency, state, summary, boundary] of emptyPeriods) {
         const periodNode = rootElement.querySelector(`[data-period-node="${periodFrequency}"]`);
@@ -4392,6 +4471,8 @@
     notificationCurrentAgeSecondsForReview,
     pointLabelForSignal,
     positionRecommendationLabel,
+    positionRecommendationForSignal,
+    preciseExecutionReadyForSignal,
     inferSignalMarket,
     realtimeNotificationSignal,
     realtimeNotificationDisplayTime,

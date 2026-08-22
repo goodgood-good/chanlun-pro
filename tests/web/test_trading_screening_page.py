@@ -673,7 +673,10 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "不按当日涨跌追强" in html
     assert "日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线" in html
     assert "日线和30分钟证据不足时标记“待判定”" in html
-    assert "5分钟操作确认决定主信号，1分钟只作段差辅助" in html
+    assert (
+        "5分钟操作确认决定主信号和首报，1分钟同向区间套决定是否进入精确执行候选"
+        in html
+    )
     assert "结构、复权或行情证据失真时关闭操作资格" in html
     assert "日线与30分钟负责环境分级" in html
     assert "周线和月线不参与当前执行判断" not in html
@@ -704,12 +707,12 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert 'data-evidence-close' in html
     assert "30m 环境分级" in html
     assert "5m 买卖点确认" in html
-    assert "1m 精细定位" in html
+    assert "1m 区间套定位" in html
     assert "逆风只降级为谨慎复核" in html
-    assert "1分钟买卖点只提供段差与精细定位" in html
-    assert "不能阻止已达到操作确认的5分钟信号通知和人工复核" in html
-    assert "1分钟只作定位，不能独立授权买卖" in html
-    assert "5分钟低级别或异结构卖点确认后，段差处理参考上限 25%" in html
+    assert "1分钟买卖点不创造主信号，也不阻止5分钟结构首报" in html
+    assert "必须形成同向区间套后，才升级为精确执行候选并生成结构比例参考" in html
+    assert "5分钟确认结构信号；1分钟同向区间套解锁精确执行候选" in html
+    assert "本系统仍不自动下单" in html
     assert "结构线索队列 · 人工复核" in html
     assert "买卖点线索队列" in html
     assert "线索只供人工识别，没有一条天然可执行" in html

@@ -777,6 +777,7 @@ def _validate_report(
         "trade_frequency": "5m",
         "segment_difference_frequency": "1m",
         "segment_difference_required_for_trade_signal": False,
+        "segment_difference_required_for_precise_execution": True,
         "execution_observation_frequency": "1m",
         "point_classes_analyzed_independently": True,
         "buy_point_classes_share_execution_logic": True,
@@ -793,7 +794,12 @@ def _validate_report(
         "intraday_structural_stop": True,
     }
     # 旧认证报告仍可只读展示，但新报告必须明确区分“5分钟正式信号”、
-    # “1分钟可选段差”和“1分钟成交观察”，不能再把三者压成 trigger_frequency。
+    # “1分钟精确执行区间套”和“1分钟成交观察”，不能再把三者压成 trigger_frequency。
+    previous_current_expected_contract = {
+        key: value
+        for key, value in current_expected_contract.items()
+        if key != "segment_difference_required_for_precise_execution"
+    }
     legacy_expected_contract = {
         key: value
         for key, value in current_expected_contract.items()
@@ -802,13 +808,18 @@ def _validate_report(
             "trade_frequency",
             "segment_difference_frequency",
             "segment_difference_required_for_trade_signal",
+            "segment_difference_required_for_precise_execution",
             "execution_observation_frequency",
         }
     }
     legacy_expected_contract["trigger_frequency"] = "1m"
     if not any(
         all(contract.get(key) == value for key, value in expected.items())
-        for expected in (current_expected_contract, legacy_expected_contract)
+        for expected in (
+            current_expected_contract,
+            previous_current_expected_contract,
+            legacy_expected_contract,
+        )
     ):
         raise ResearchAuditUnavailable("strategy_contract_invalid")
 

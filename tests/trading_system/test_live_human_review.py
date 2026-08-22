@@ -373,7 +373,6 @@ def live_snapshot() -> dict[str, object]:
         "rank_components": {
             "thirty_support": 40,
             "five_support": 0,
-            "one_support": 0,
             "neutral_access": 5,
         },
         "reason_codes": ["structural_ranking_only"],
@@ -779,7 +778,6 @@ def _with_hostile_sector(snapshot: dict[str, object]) -> dict[str, object]:
             "rank_components": {
                 "thirty_support": 0,
                 "five_support": 0,
-                "one_support": 0,
                 "neutral_access": 0,
             },
             "reason_codes": ["higher_structure_sell_risk"],
@@ -1078,6 +1076,7 @@ def test_invalidated_snapshot_row_is_audited_but_not_revived_for_review() -> Non
     invalidated["risk_multiplier"] = "1.00"
     invalidated["decision_reasons"] = [
         "lifecycle_not_actionable",
+        "one_minute_not_confirmed",
         "SAME_PERIOD_CONTEXT_GRADE_UNRESOLVED",
         "structure_invalidated",
     ]
@@ -1094,6 +1093,9 @@ def test_invalidated_snapshot_row_is_audited_but_not_revived_for_review() -> Non
     invalidated["execution_profile"].update(
         execution_trigger_confirmed=False,
         one_minute_segment_difference_present=False,
+        precision_locator_status="WAITING_ONE_MINUTE",
+        precision_locator_ready=False,
+        precise_execution_ready=False,
         recommendation="BLOCKED",
         recommendation_label="当前不满足操作条件，等待结构或数据恢复",
         hard_blocked=True,
@@ -1601,6 +1603,7 @@ def test_displayed_decision_recomputes_provisional_setup_reason() -> None:
         five_points=(provisional_point("2buy"),),
         one_points=(),
         opposite_points=(),
+        entry_execution_boundaries=(),
     )
     signal = core.decision_documents(bundle)[0]
     policy = core.contract.document()["policy"]
@@ -1676,7 +1679,7 @@ def test_displayed_decision_accepts_risk_only_conflict_as_advisory() -> None:
             confirmed_point(
                 "1sell",
                 center_id="unrelated-center",
-                minutes_after=300,
+                minutes_after=296,
             ),
         ),
     )
@@ -1938,7 +1941,7 @@ def test_live_adapter_preserves_30m_5m_1m_roles() -> None:
         buy["entry_execution_boundary"]["evidence_id"]
         == buy["entry_boundary_evidence_id"]
     )
-    assert "BUY_ENTRY_BOUNDARY_ALREADY_EXPIRED" in buy["warning_codes"]
+    assert "BUY_ENTRY_BOUNDARY_ALREADY_EXPIRED" not in buy["warning_codes"]
     ranking = buy["sector_ranking_evidence"]
     assert ranking["rank_components"] == source_buy["sector"]["rank_components"]
     assert ranking["rank_score"] == source_buy["sector"]["rank_score"]
@@ -2322,8 +2325,10 @@ def test_live_adapter_rejects_incomplete_coverage_or_wrong_locator() -> None:
 
 
 def test_live_adapter_recomputes_entry_boundary_expiry() -> None:
-    snapshot = live_snapshot()
-    signal = snapshot["signals"][0]
+    core = HumanAssistedDecisionCore()
+    bundle = deterministic_bundle()
+    expired_at = bundle.entry_execution_boundaries[0].entry_valid_until
+    [signal] = core.decision_documents(replace(bundle, as_of=expired_at))
     assert "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in signal["decision_reasons"]
 
     signal["decision_reasons"] = [
@@ -2344,12 +2349,13 @@ def test_live_adapter_recomputes_entry_boundary_expiry() -> None:
         "CAUTION" if profile["advisory_reason_codes"] else "READY"
     )
     signal["decision_document_id"] = signal_decision_document_id(signal)
-    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
-        snapshot
-    )
 
-    with pytest.raises(ValueError, match="decision evidence is invalid"):
-        validate_live_review_snapshot(snapshot)
+    assert not _displayed_decision_evidence_is_consistent(
+        signal,
+        policy=core.contract.document()["policy"],
+        risk=signal["higher_timeframe_risk"],
+        warmup=signal["warmup"],
+    )
 
 
 def test_live_adapter_rejects_incomplete_or_mixed_signal_contract() -> None:

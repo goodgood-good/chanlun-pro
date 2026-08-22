@@ -15,9 +15,9 @@ from chanlun.exchange.exchange_binance_common import (
     BINANCE_SUPPORTED_FREQUENCIES,
     BINANCE_SYNTHETIC_FREQUENCIES,
     configure_spot_public_market_data,
+    normalize_binance_kline_frame,
 )
 from chanlun.exchange.exchange_db import ExchangeDB
-from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.utils import config_get_proxy
 
 
@@ -135,9 +135,13 @@ class ExchangeBinanceSpot(Exchange):
                 # 退市/下架/全新无数据交易对: 在线零 bar 返回 None, 不能喂 insert_klines
                 # (None.empty AttributeError→except吞→RetryError), 如实返回空(对齐 tdx 家族)
                 if online_klines is None or len(online_klines) == 0:
-                    return pd.DataFrame()
+                    return normalize_binance_kline_frame(
+                        pd.DataFrame(), market="currency_spot", code=code
+                    )
                 self.db_exchange.insert_klines(code, frequency, online_klines)
-                online_klines = normalize_kline_precision(online_klines, "currency_spot", code)
+                online_klines = normalize_binance_kline_frame(
+                    online_klines, market="currency_spot", code=code
+                )
                 return online_klines
             else:
                 # 取倒数第二条作为增量起点，让最后一根未收盘 bar 也能被覆盖更新
@@ -155,7 +159,9 @@ class ExchangeBinanceSpot(Exchange):
             klines = pd.concat([db_klines, online_klines], ignore_index=True)
             klines.drop_duplicates(subset=["date"], keep="last", inplace=True)
             klines = klines.sort_values(by="date", ascending=True)
-            klines = normalize_kline_precision(klines[-10000::], "currency_spot", code)
+            klines = normalize_binance_kline_frame(
+                klines[-10000::], market="currency_spot", code=code
+            )
             return klines
         except Exception as e:
             print(f"{code} - {frequency} Error : {e}")
@@ -322,7 +328,9 @@ class ExchangeBinanceSpot(Exchange):
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
         if frequency in BINANCE_SYNTHETIC_FREQUENCIES and len(kline_pd) > 0:
             kline_pd = convert_currency_kline_frequency(kline_pd, frequency)
-        kline_pd = normalize_kline_precision(kline_pd, "currency_spot", code)
+        kline_pd = normalize_binance_kline_frame(
+            kline_pd, market="currency_spot", code=code
+        )
         return kline_pd
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:

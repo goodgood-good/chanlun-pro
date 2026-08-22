@@ -1247,7 +1247,7 @@ def _entry_execution_boundaries(
     points: tuple[StructuralPoint, ...],
     raw_frame: pd.DataFrame,
 ) -> tuple[EntryExecutionBoundary, ...]:
-    """把可选 1m 买入段差绑定到精确的 QMT 不复权行情。"""
+    """把 1m 买入区间套绑定到精确执行所需的 QMT 不复权行情。"""
 
     metadata = strict_snapshot_price_metadata(raw_frame)
     if (
@@ -2722,7 +2722,7 @@ class NativeTradingDataGateway:
             and frequency == "1m"
             and any(
                 point.confirmed and point.side == "buy"
-                for point in analysis.confirmed_points
+                for point in analysis.effective_segment_difference_points
             )
         ):
             # 结构在冻结复权基准上计算；可选入场上限属于执行事实，必须取自准确的

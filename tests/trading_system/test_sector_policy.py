@@ -37,6 +37,31 @@ def test_sector_price_return_is_not_an_input() -> None:
     assert "return_pct" not in parameters
 
 
+def test_one_minute_context_does_not_change_sector_selection_priority() -> None:
+    common = {
+        "sector_name": "执行定位隔离",
+        "market_data_source": "qmt_gics3_component_composite",
+        "thirty": neutral_context("30m"),
+        "five": neutral_context("5m"),
+        "data_complete": True,
+    }
+    neutral_one = assess_sector(
+        sector_id="TDX.880301",
+        one=neutral_context("1m"),
+        **common,
+    )
+    supportive_one = assess_sector(
+        sector_id="TDX.880302",
+        one=supportive_context("1m"),
+        **common,
+    )
+
+    assert neutral_one.rank_components == supportive_one.rank_components
+    assert neutral_one.rank_score == supportive_one.rank_score == 5
+    assert neutral_one.regime == supportive_one.regime == "neutral"
+    assert "one_support" not in dict(supportive_one.rank_components)
+
+
 def test_certified_qmt_sw1_pit_composite_is_an_allowed_sector_source() -> None:
     assessment = assess_sector(
         sector_id="qmt-sw1:S27",

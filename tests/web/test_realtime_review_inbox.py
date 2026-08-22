@@ -430,6 +430,68 @@ def test_segment_evidence_and_buy_entry_boundary_are_independent_axes() -> None:
     assert segment_difference_boundary_status(expired_buy) == "expired"
 
 
+def test_buy_boundary_uses_review_time_instead_of_snapshot_observation_time() -> None:
+    buy = {
+        "side": "buy",
+        "observed_at": "2026-08-17T10:05:30+08:00",
+        "trigger_1m": {"side": "buy", "point_type": "1buy"},
+        "entry_execution_boundary": {
+            "entry_valid_until": "2026-08-17T10:06:00+08:00",
+        },
+    }
+
+    assert segment_difference_boundary_status(buy) == "current"
+    assert (
+        segment_difference_boundary_status(
+            buy,
+            evaluated_at="2026-08-17T10:06:30+08:00",
+        )
+        == "expired"
+    )
+
+
+def test_review_event_expires_boundary_at_recording_time() -> None:
+    document = {
+        "code": "SH.688132",
+        "name": "测试股票",
+        "side": "buy",
+        "market": "a",
+        "observed_at": "2026-08-15T10:29:30+08:00",
+        "setup_5m": {
+            "point_id": "point:688132:5m:3buy",
+            "point_type": "3buy",
+            "recursive_level": 0,
+            "confirmed_at": "2026-08-15T10:25:00+08:00",
+            "available_at": "2026-08-15T10:25:00+08:00",
+        },
+        "trigger_1m": {
+            "point_id": "point:688132:1m:1buy",
+            "point_type": "1buy",
+            "side": "buy",
+            "recursive_level": 0,
+            "confirmed_at": "2026-08-15T10:29:00+08:00",
+            "available_at": "2026-08-15T10:29:00+08:00",
+        },
+        "entry_execution_boundary": {
+            "entry_valid_until": "2026-08-15T10:30:00+08:00",
+        },
+    }
+
+    event = a_share_notification_event(
+        event_id="event:delivery-clock-expired",
+        document=document,
+        old_stage="triggered",
+        new_stage="segment_enriched",
+        delivery_status="delivered",
+        detected_at="2026-08-15T10:29:30+08:00",
+        recorded_at=datetime(2026, 8, 15, 10, 30, 30, tzinfo=CN),
+    )
+
+    assert event["segment_difference_status"] == "expired"
+    assert event["segment_difference_boundary_status"] == "expired"
+    assert event["segment_difference_current"] is False
+
+
 def test_inbox_persists_updates_delivery_and_never_stores_credentials(tmp_path):
     path = tmp_path / "realtime_review_inbox.json"
     clock_values = iter([NOW + timedelta(minutes=1)])

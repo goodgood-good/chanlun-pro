@@ -170,6 +170,7 @@ def segment_difference_review_status(
     document: Mapping[str, object],
     *,
     trigger: Mapping[str, object] | None = None,
+    evaluated_at: object | None = None,
 ) -> str:
     """Classify recorded 1m evidence without overstating its current validity."""
 
@@ -190,7 +191,11 @@ def segment_difference_review_status(
         raw_valid_until = boundary.get("entry_valid_until")
         if raw_valid_until not in (None, ""):
             valid_until = _aware_datetime(raw_valid_until)
-            observed_at = _aware_datetime(document.get("observed_at"))
+            observed_at = _aware_datetime(
+                document.get("observed_at")
+                if evaluated_at is None
+                else evaluated_at
+            )
             if valid_until is None or observed_at is None:
                 return "unavailable"
             if valid_until <= observed_at:
@@ -224,6 +229,7 @@ def segment_difference_boundary_status(
     document: Mapping[str, object],
     *,
     trigger: Mapping[str, object] | None = None,
+    evaluated_at: object | None = None,
 ) -> str:
     """Classify only the optional buy-entry locator boundary.
 
@@ -242,7 +248,11 @@ def segment_difference_boundary_status(
     if side != "buy":
         return "not_applicable"
 
-    legacy = segment_difference_review_status(document, trigger=trigger)
+    legacy = segment_difference_review_status(
+        document,
+        trigger=trigger,
+        evaluated_at=evaluated_at,
+    )
     if legacy in {"current", "expired", "unavailable", "unknown"}:
         return legacy
     return "unknown"
@@ -808,6 +818,7 @@ def a_share_notification_event(
     segment_status = segment_difference_review_status(
         document,
         trigger=trigger,
+        evaluated_at=recorded_at_text,
     )
     segment_evidence_status = segment_difference_evidence_status(
         document,
@@ -816,6 +827,7 @@ def a_share_notification_event(
     segment_boundary_status = segment_difference_boundary_status(
         document,
         trigger=trigger,
+        evaluated_at=recorded_at_text,
     )
     raw_boundary = document.get("entry_execution_boundary")
     segment_valid_until = (

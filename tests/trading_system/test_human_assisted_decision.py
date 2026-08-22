@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
@@ -24,6 +25,7 @@ from chanlun.decision_support.trading_system.human_assisted_decision import (
 )
 from chanlun.decision_support.trading_system.lifecycle import (
     STRUCTURE_INVALIDATED_REASON_CODE,
+    lifecycle_state_from_signal_document,
 )
 from chanlun.decision_support.trading_system.models import TradingPolicy
 from chanlun.decision_support.trading_system.qmt_same_base_stream import (
@@ -40,11 +42,42 @@ from tests.trading_system.helpers import (
 )
 
 
-def test_stale_confirmed_buy_remains_visible_but_is_not_actionable() -> None:
+def test_confirmed_buy_without_one_minute_remains_visible_but_not_executable() -> None:
     bundle = replace(
         deterministic_bundle(),
-        five_points=(confirmed_point("2buy"),),
+        five_points=(confirmed_point("2buy", minutes_after=295),),
         one_points=(),
+        entry_execution_boundaries=(),
+    )
+
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert document["technical_entry_allowed"] is True
+    assert document["entry_allowed"] is False
+    assert document["position_recommendation"]["status"] == "NOT_ACTIONABLE"
+    assert document["position_recommendation"]["basis"] == (
+        "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED"
+    )
+    assert document["position_recommendation"]["recommended_ratio"] is None
+    assert document["execution_profile"]["recommendation"] == (
+        "WAITING_SEGMENT_DIFFERENCE"
+    )
+    assert document["execution_profile"]["precision_locator_status"] == (
+        "WAITING_ONE_MINUTE"
+    )
+    assert document["execution_profile"]["precise_execution_ready"] is False
+    assert "one_minute_not_confirmed" in document["decision_reasons"]
+    assert validate_signal_decision_document(document) == document["decision_document_id"]
+
+
+def test_stale_five_minute_buy_is_expired_instead_of_waiting_for_one_minute() -> None:
+    base = deterministic_bundle()
+    setup = base.five_points[0]
+    bundle = replace(
+        base,
+        as_of=setup.available_at + timedelta(minutes=11),
+        one_points=(),
+        entry_execution_boundaries=(),
     )
 
     [document] = HumanAssistedDecisionCore().decision_documents(bundle)
@@ -52,11 +85,76 @@ def test_stale_confirmed_buy_remains_visible_but_is_not_actionable() -> None:
     assert document["technical_entry_allowed"] is True
     assert document["entry_allowed"] is False
     assert document["position_recommendation"]["status"] == "BLOCKED"
+    assert document["position_recommendation"]["recommended_percent"] == "0"
+    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in document["decision_reasons"]
+    profile = document["execution_profile"]
+    assert profile["recommendation"] == "BLOCKED"
+    assert profile["precision_locator_status"] == "FIVE_MINUTE_EXPIRED"
+    assert profile["precision_locator_ready"] is False
+    assert profile["precise_execution_ready"] is False
+    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in profile[
+        "hard_block_reason_codes"
+    ]
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
+
+
+def test_hard_block_does_not_hide_stale_five_minute_locator_status() -> None:
+    base = deterministic_bundle()
+    setup = base.five_points[0]
+    bundle = replace(
+        base,
+        as_of=setup.available_at + timedelta(minutes=11),
+        one_points=(),
+        entry_execution_boundaries=(),
+        opposite_points=(confirmed_point("1sell", minutes_after=295),),
+    )
+
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    profile = document["execution_profile"]
+    assert profile["recommendation"] == "BLOCKED"
+    assert profile["precision_locator_status"] == "FIVE_MINUTE_EXPIRED"
+    assert "same_or_higher_structure_conflict" in profile["hard_block_reason_codes"]
+    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in profile[
+        "hard_block_reason_codes"
+    ]
     assert document["position_recommendation"]["reason_codes"] == [
         "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE"
     ]
-    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in document["decision_reasons"]
-    assert validate_signal_decision_document(document) == document["decision_document_id"]
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
+
+
+def test_persisted_one_minute_boundary_reports_expired_at_current_bundle_time() -> None:
+    core = HumanAssistedDecisionCore()
+    first_bundle = deterministic_bundle()
+    [first_document] = core.decision_documents(first_bundle)
+    lifecycle, trigger = lifecycle_state_from_signal_document(first_document)
+    assert trigger is not None
+    [boundary] = first_bundle.entry_execution_boundaries
+    expired_bundle = replace(
+        first_bundle,
+        as_of=boundary.entry_valid_until,
+        previous_lifecycles=(lifecycle,),
+        previous_trigger_points=(trigger,),
+    )
+
+    [expired_document] = core.decision_documents(expired_bundle)
+
+    assert "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in expired_document[
+        "decision_reasons"
+    ]
+    assert expired_document["execution_profile"]["precision_locator_status"] == (
+        "BOUNDARY_EXPIRED"
+    )
+    assert expired_document["execution_profile"]["precision_locator_ready"] is False
+    assert expired_document["execution_profile"]["precise_execution_ready"] is False
+    assert validate_signal_decision_document(expired_document) == expired_document[
+        "decision_document_id"
+    ]
 
 
 def _gate(
@@ -204,6 +302,7 @@ def test_geometric_candidate_has_a_distinct_non_actionable_state() -> None:
         five_points=(candidate,),
         one_points=(),
         opposite_points=(),
+        entry_execution_boundaries=(),
     )
 
     [document] = HumanAssistedDecisionCore().decision_documents(bundle)
@@ -341,7 +440,10 @@ def test_page_explanation_fields_do_not_change_shared_decision_identity() -> Non
     assert validate_signal_decision_document(document) == identity
 
     document["entry_allowed"] = not document["entry_allowed"]
-    with pytest.raises(ValueError, match="decision identity changed"):
+    with pytest.raises(
+        ValueError,
+        match="precise-execution contract changed|decision identity changed",
+    ):
         validate_signal_decision_document(document)
 
 
@@ -410,9 +512,9 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     with pytest.raises(ValueError, match="physical structure contract changed"):
         validate_human_assisted_contract_document(document)
 
-    with pytest.raises(ValueError, match="requires 5m trade signals"):
+    with pytest.raises(ValueError, match="requires independent 5m trade"):
         HumanAssistedDecisionCore(
-            TradingPolicy(require_confirmed_one_minute=True)
+            TradingPolicy(require_confirmed_one_minute=False)
         )
 
 
@@ -741,7 +843,7 @@ def test_lower_or_unrelated_conflict_is_advisory_not_a_hard_block() -> None:
     unrelated_sell = confirmed_point(
         "1sell",
         center_id="unrelated-center",
-        minutes_after=300,
+        minutes_after=296,
     )
     bundle = replace(
         deterministic_bundle(),
@@ -763,11 +865,11 @@ def test_lower_or_unrelated_conflict_is_advisory_not_a_hard_block() -> None:
 
 
 def test_mixed_hard_and_risk_only_conflicts_do_not_duplicate_hard_reason_as_advisory() -> None:
-    blocking_sell = confirmed_point("1sell", minutes_after=296)
+    blocking_sell = confirmed_point("1sell", minutes_after=295)
     unrelated_sell = confirmed_point(
         "1sell",
         center_id="unrelated-center",
-        minutes_after=297,
+        minutes_after=296,
     )
     bundle = replace(
         deterministic_bundle(),

@@ -712,9 +712,9 @@ class ConflictDecision:
 @dataclass(frozen=True, slots=True)
 class TradingPolicy:
     require_confirmed_five_minute: bool = True
-    # 5 分钟是正式买卖级别。1 分钟只提供段差/精细定位，不是信号成立硬门槛。
-    # 字段为兼容既有参数档案而保留，生产冻结值必须为 False。
-    require_confirmed_one_minute: bool = False
+    # 5 分钟独立决定结构信号是否成立并触发首次提醒；1 分钟区间套不创造
+    # 主信号，但必须确认后才能把该信号升级为精确执行候选。
+    require_confirmed_one_minute: bool = True
     require_sector_eligibility: bool = True
     require_thirty_minute_context: bool = True
     minimum_tick: Decimal = Decimal("0.01")

@@ -523,15 +523,13 @@ def _setup_price_range(point: StructuralPoint) -> tuple[float, float]:
 def five_minute_segment_difference_window_start(
     setup_point: StructuralPoint,
 ) -> datetime:
-    """Return the causal start of the 1m locator window for a 5m setup.
+    """Return the structural audit start of the 1m evidence window.
 
     A production 5m point is anchored at the *end* of its terminal segment.
-    Lower-level buy/sell and divergence evidence that precisely locates that
-    endpoint can therefore become available while the terminal segment is
-    still forming.  Using ``setup_point.anchor_at`` as the lower bound silently
-    discards exactly that evidence.  Current production points carry terminal
-    lineage, so use the segment's market start; legacy points without lineage
-    retain the historical anchor-based boundary.
+    Lower-level evidence can exist while that segment is forming, so the audit
+    window starts at the segment's market start.  Executable matching below has
+    an additional causal gate: a 1m locator must become available no earlier
+    than the formal 5m setup itself.
     """
 
     if (
@@ -577,7 +575,7 @@ def _segment_difference_matches_five_minute_point(
         and segment_point.confirmed_at is not None
         and setup_point.available_at <= closed_at
         and window_start <= segment_point.anchor_at
-        and window_start <= segment_point.available_at <= closed_at
+        and setup_point.available_at <= segment_point.available_at <= closed_at
         and price_low
         <= segment_point.structure_anchor_price
         <= price_high
@@ -659,11 +657,11 @@ def match_one_minute_segment_difference_for_point(
     as_of: datetime,
     minimum_tick: Decimal | float | str = Decimal("0.01"),
 ) -> StructuralPoint | None:
-    """为一个已确认的 5 分钟正式点选择最近的可选 1 分钟段差。
+    """为已确认的 5 分钟正式点选择最近的因果 1 分钟段差。
 
-    段差可以在 5 分钟末端线段形成期间已经出现，也可以在正式点可用后补充；
-    生产点的时间下界是末端线段起点，旧点才回退到结构锚点。它只补充定位
-    证据，不参与 5 分钟信号是否成立的判断。
+    形成期间的低级别结构仍属于底层审计事实，但不能充当事后才确认的 5m
+    信号之执行定位器。这里只返回在正式 5m 点可用后出现的 1m 证据；它不
+    参与 5m 主信号是否成立的判断。
     """
 
     if (
@@ -676,7 +674,6 @@ def match_one_minute_segment_difference_for_point(
     ):
         return None
     closed_at = normalize_datetime(as_of, "as_of")
-    window_start = five_minute_segment_difference_window_start(setup_point)
     matches = tuple(
         point
         for point in points
@@ -686,7 +683,6 @@ def match_one_minute_segment_difference_for_point(
             as_of=closed_at,
             minimum_tick=minimum_tick,
         )
-        and window_start <= point.available_at
     )
     return max(
         matches,
@@ -874,8 +870,12 @@ def advance_lifecycle(
         and previous.stage in {"triggered", "executable", "active"}
         and not invalidated
     ):
-        if previous.trigger_point_id is not None or valid_trigger is None:
+        if valid_trigger is None or previous.trigger_point_id == valid_trigger.point_id:
             return previous
+        # The 5m signal identity and monotonic stage remain unchanged, while a
+        # later valid 1m occurrence may replace an expired locator.  Recording
+        # the new point and observation time keeps the lifecycle evidence
+        # consistent with the decision document and its new execution boundary.
         return SignalLifecycle(
             signal_id=signal_id,
             setup_id=setup.setup_id,

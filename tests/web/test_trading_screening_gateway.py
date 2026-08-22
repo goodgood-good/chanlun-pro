@@ -942,6 +942,62 @@ class OpeningAuctionAnalyzer(RecordingAnalyzer):
         )
 
 
+class HistoricalOnlyOpeningAuctionAnalyzer(RecordingAnalyzer):
+    def __call__(self, *, code, frequency, frame, as_of):
+        self.calls.append((code, frequency))
+        self.frames.append(frame.copy(deep=True))
+        historical = confirmed_point(
+            "1buy",
+            code=code,
+            frequency="1m",
+            minutes_after=1,
+        )
+        return FrameStructureAnalysis(
+            closed_at=as_of,
+            direction="neutral",
+            confirmed_points=(),
+            provisional_points=(),
+            segment_difference_points=(historical,),
+        )
+
+
+def test_native_gateway_builds_boundary_for_historical_only_segment_point() -> None:
+    exchange = OpeningAuctionExchange()
+    analyzer = HistoricalOnlyOpeningAuctionAnalyzer()
+    gateway = NativeTradingDataGateway(
+        exchange_provider=lambda: exchange,
+        sector_provider=lambda: {"source": "test", "sectors": ()},
+        watchlist_provider=lambda: (),
+        holdings_provider=lambda: (),
+        analyzer=analyzer,
+        config=NativeTradingGatewayConfig(
+            request_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 300)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 2)),
+            minimum_sector_members=1,
+        ),
+    )
+
+    analysis = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.300412",
+        analysis_code="SZ.300412",
+        frequency="1m",
+        as_of=datetime.fromisoformat("2026-07-20T10:01:30+08:00"),
+    )
+
+    assert analysis.confirmed_points == ()
+    assert len(analysis.effective_segment_difference_points) == 1
+    [boundary] = analysis.entry_execution_boundaries
+    assert boundary.confirmation_bar_closed_at == datetime.fromisoformat(
+        "2026-07-20T10:01:00+08:00"
+    )
+    assert boundary.entry_valid_until == datetime.fromisoformat(
+        "2026-07-20T10:02:00+08:00"
+    )
+    assert len(exchange.calls) == 2
+    assert exchange.calls[1]["dividend_type"] == "none"
+
+
 def test_native_gateway_merges_opening_event_for_structure_and_entry_boundary() -> None:
     """The page and replay must consume the same completed 240-bar 1m grid."""
 

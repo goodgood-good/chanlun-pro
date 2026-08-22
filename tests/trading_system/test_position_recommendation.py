@@ -114,6 +114,17 @@ def test_stale_buy_remains_zero_percent_when_realtime_price_is_missing() -> None
     assert value.reason_codes == ("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",)
 
 
+def test_stale_buy_cannot_remain_in_one_minute_waiting_state() -> None:
+    value = recommendation(
+        recommendation="WAITING_SEGMENT_DIFFERENCE",
+        signal_age_seconds=601,
+    )
+
+    assert value.status == "BLOCKED"
+    assert value.recommended_ratio == Decimal("0")
+    assert value.reason_codes == ("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",)
+
+
 def test_active_signal_age_excludes_only_same_day_a_share_lunch() -> None:
     started = datetime(2026, 7, 20, 11, 25, tzinfo=CN)
     ended = datetime(2026, 7, 20, 13, 5, tzinfo=CN)

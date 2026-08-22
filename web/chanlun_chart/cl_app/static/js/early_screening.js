@@ -324,6 +324,10 @@
         (signal) => Ui.segmentDifferenceEvidenceStatusForSignal(signal) === "present",
       ).length;
       setText("es-segment-count", segmentEvidenceCount);
+      const preciseExecutionReadyCount = unifiedSignals.filter(
+        (signal) => Ui.preciseExecutionReadyForSignal(signal),
+      ).length;
+      setText("es-precise-count", preciseExecutionReadyCount);
       const showCurrentSegments = byId("es-show-current-segments");
       if (showCurrentSegments) {
         showCurrentSegments.disabled = segmentEvidenceCount === 0;

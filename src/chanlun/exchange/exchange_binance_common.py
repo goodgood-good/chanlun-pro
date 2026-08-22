@@ -4,9 +4,25 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
+
+from chanlun.exchange.kline_precision import (
+    normalize_kline_precision,
+    resolve_structure_price_quantum,
+)
+from chanlun.exchange.price_basis import (
+    attach_price_basis_metadata,
+    build_provider_price_basis_metadata,
+)
+
 
 # Binance documents this host specifically for unauthenticated Spot market data.
 BINANCE_SPOT_PUBLIC_API_URL = "https://data-api.binance.vision/api/v3"
+
+# The strict-structure runtime hashes this revision together with market, symbol,
+# adjustment and price quantum.  Bump it whenever Binance OHLC normalization
+# semantics change so cached structure snapshots cannot cross price bases.
+BINANCE_OHLC_NORMALIZATION_REVISION = "kline-precision-round-half-up-v1"
 
 
 # Project frequency -> CCXT/Binance native timeframe.  The three entries whose
@@ -54,6 +70,35 @@ BINANCE_SUPPORTED_FREQUENCIES = {
     "2m": "2m",
     "1m": "1m",
 }
+
+
+def normalize_binance_kline_frame(
+    frame: pd.DataFrame | None,
+    *,
+    market: str,
+    code: str,
+) -> pd.DataFrame | None:
+    """Normalize Binance OHLC and attach the strict price-basis contract."""
+
+    if market not in {"currency", "currency_spot"}:
+        raise ValueError(f"unsupported Binance market for price basis: {market}")
+    normalized = normalize_kline_precision(frame, market, code)
+    if normalized is None:
+        return None
+    quantum = resolve_structure_price_quantum(market, code)
+    if quantum is None:
+        raise ValueError(
+            f"Binance structure price quantum is unavailable: {market}:{code}"
+        )
+    metadata = build_provider_price_basis_metadata(
+        provider="binance",
+        market=market,
+        code=code,
+        adjustment="none",
+        structure_price_quantum=quantum,
+        normalization_revision=BINANCE_OHLC_NORMALIZATION_REVISION,
+    )
+    return attach_price_basis_metadata(normalized, metadata)
 
 
 def configure_spot_public_market_data(exchange: Any) -> Any:

@@ -199,7 +199,7 @@ def test_sell_exit_is_not_blocked_by_sector_state() -> None:
     assert decision.action == "exit_full"
 
 
-def test_default_sell_exit_is_based_on_confirmed_five_minute_point() -> None:
+def test_default_sell_exit_requires_one_minute_precision_locator() -> None:
     five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
     armed = advance_lifecycle(None, setup, None, as_of=AS_OF)
@@ -220,20 +220,23 @@ def test_default_sell_exit_is_based_on_confirmed_five_minute_point() -> None:
         held_level=0,
     )
 
-    assert without_segment.allowed is True
-    assert without_segment.action == "exit_full"
+    assert without_segment.allowed is False
+    assert without_segment.action == "none"
+    assert without_segment.reason_codes == ("one_minute_sell_not_confirmed",)
+    assert accepted.allowed is True
     assert accepted.action == "exit_full"
 
 
 def test_sell_without_reference_structure_requires_relation_review() -> None:
     five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
-    lifecycle = advance_lifecycle(None, setup, None, as_of=AS_OF)
+    one_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
+    lifecycle = advance_lifecycle(None, setup, one_sell, as_of=AS_OF)
 
     decision = evaluate_exit_policy(
         lifecycle,
         setup,
-        None,
+        one_sell,
         held_tower=None,
         held_level=None,
     )
@@ -277,7 +280,7 @@ def test_legacy_one_minute_gate_rejects_invalid_segment_when_enabled() -> None:
     assert decision.reason_codes == ("one_minute_sell_not_confirmed",)
 
 
-def test_environment_and_one_minute_are_advisory_under_production_policy() -> None:
+def test_environment_is_advisory_but_one_minute_gates_precise_execution() -> None:
     five_buy = confirmed_point("3buy", frequency="5m", center_ordinal=1)
     setup = build_setup(five_buy, hostile_context("30m"), hostile_sector())
     observed = advance_lifecycle(None, setup, None, as_of=AS_OF)
@@ -301,7 +304,8 @@ def test_environment_and_one_minute_are_advisory_under_production_policy() -> No
         ),
     )
 
-    assert default.allowed is True
+    assert default.allowed is False
+    assert default.reason_codes == ("one_minute_not_confirmed",)
     assert ablated.allowed is True
 
 

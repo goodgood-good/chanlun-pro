@@ -12,6 +12,7 @@ from chanlun.decision_support.trading_system.engine import (
 from tests.trading_system.helpers import (
     AS_OF,
     confirmed_point,
+    deterministic_bundle,
     eligible_sector,
     hostile_sector,
     provisional_point,
@@ -103,14 +104,16 @@ def test_recursive_5m_context_is_not_a_trade_setup() -> None:
         )
 
 
-def test_confirmed_five_minute_point_does_not_require_one_minute_segment() -> None:
+def test_confirmed_five_minute_point_survives_while_execution_waits_for_one_minute() -> None:
     evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
         symbol_bundle(five_points=(confirmed_point("2buy"),))
     )
 
     assert evaluated[0].lifecycle.stage == "triggered"
     assert evaluated[0].entry is not None
-    assert evaluated[0].entry.allowed is True
+    assert evaluated[0].technical_entry_allowed is True
+    assert evaluated[0].entry.allowed is False
+    assert evaluated[0].entry.reason_codes == ("one_minute_not_confirmed",)
     assert evaluated[0].trigger is None
 
 
@@ -333,6 +336,46 @@ def test_repeated_evaluation_is_deterministic() -> None:
     second = engine.evaluate_symbol(replace(bundle))
 
     assert first == second
+
+
+def test_newer_one_minute_occurrence_rearms_existing_five_minute_setup() -> None:
+    engine = _TechnicalSignalEvaluator()
+    first_bundle = deterministic_bundle()
+    [first] = engine.evaluate_symbol(first_bundle)
+    old_trigger = first_bundle.one_points[0]
+    old_boundary = first_bundle.entry_execution_boundaries[0]
+    new_trigger = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=298,
+    )
+    new_boundary = replace(
+        old_boundary,
+        point_id=new_trigger.point_id,
+        confirmation_bar_closed_at=new_trigger.available_at,
+        entry_valid_until=new_trigger.available_at + timedelta(minutes=1),
+    )
+    second_bundle = replace(
+        first_bundle,
+        as_of=new_trigger.available_at + timedelta(seconds=30),
+        one_points=(old_trigger, new_trigger),
+        entry_execution_boundaries=(old_boundary, new_boundary),
+        previous_lifecycles=(first.lifecycle,),
+        previous_trigger_points=(old_trigger,),
+    )
+
+    [second] = engine.evaluate_symbol(second_bundle)
+
+    assert first.trigger == old_trigger
+    assert old_boundary.entry_valid_until < second_bundle.as_of
+    assert second.trigger == new_trigger
+    assert second.lifecycle.signal_id == first.lifecycle.signal_id
+    assert second.lifecycle.stage == first.lifecycle.stage
+    assert second.lifecycle.trigger_point_id == new_trigger.point_id
+    assert second.lifecycle.observed_at == second_bundle.as_of
+    assert second.entry_execution_boundary == new_boundary
+    assert second.entry is not None
+    assert second.entry.allowed is True
 
 
 def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:

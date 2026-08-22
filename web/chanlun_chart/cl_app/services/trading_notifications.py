@@ -32,11 +32,14 @@ from chanlun.decision_support.trading_system.operation_level import (
     is_five_minute_trade_level,
 )
 from chanlun.decision_support.trading_system.position_recommendation import (
+    ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS,
+    ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON,
     active_signal_age_seconds,
     build_position_recommendation,
 )
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
     GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION,
+    WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
     STRICT_STRATEGY_ID,
@@ -160,18 +163,34 @@ def _new_segment_attached(
     previous: Mapping[str, object] | None,
     current: Mapping[str, object],
 ) -> bool:
-    """Return true only for the first causal attachment to an existing setup."""
+    """Return true for a new causal 1m occurrence on an existing 5m setup.
+
+    The first attachment and every later, semantically distinct re-armed
+    occurrence are notification events.  Rebuilt internal IDs for the same
+    completed 1m bar remain deduplicated by the occurrence key.
+    """
 
     if not isinstance(previous, Mapping):
         return False
-    if _recorded_segment(previous) or not _recorded_segment(current):
+    current_segment = _recorded_segment(current)
+    if not current_segment:
         return False
     previous_stage = _stage(previous)
     current_stage = _stage(current)
+    previous_occurrence = _segment_occurrence_key(
+        previous,
+        _SEGMENT_ENRICHED_STAGE,
+    )
+    current_occurrence = _segment_occurrence_key(
+        current,
+        _SEGMENT_ENRICHED_STAGE,
+    )
     return bool(
         previous_stage in _SEGMENT_ATTACHABLE_STAGES
         and current_stage in _SEGMENT_ATTACHABLE_STAGES
         and _signal_semantic_key(previous) == _signal_semantic_key(current)
+        and current_occurrence is not None
+        and current_occurrence != previous_occurrence
     )
 
 
@@ -490,8 +509,8 @@ def _notification_eligibility_reason(
 
     ``entry_allowed`` 和 ``exit_allowed`` 是正式操作资格，不是买卖点是否
     存在的判据。风险门、三程序或持仓身份未通过时，结构点仍需通知，但正文
-    必须标明仅供观察；结构权威、预热收敛和时效性仍然失败关闭。1 分钟只
-    是可选段差证据，缺失时不能压掉 5 分钟通知。
+    必须标明仅供观察；结构权威、预热收敛和时效性仍然失败关闭。1 分钟
+    缺失时不能压掉 5 分钟通知，但必须保持“等待区间套”、不得生成执行比例。
     """
 
     if new_stage in {"invalidated", "closed"}:
@@ -551,6 +570,11 @@ def _notification_eligibility_reason(
             return "FIVE_MINUTE_STRUCTURE_NOT_CONFIRMED"
         if execution_profile.get("one_minute_required_for_trade_signal") is True:
             return "ONE_MINUTE_ROLE_CONTRACT_INVALID"
+        if (
+            execution_profile.get("one_minute_required_for_precise_execution")
+            is not True
+        ):
+            return "ONE_MINUTE_PRECISE_EXECUTION_CONTRACT_INVALID"
         # ``hard_blocked`` is an execution/sizing verdict, not a structural
         # existence verdict.  Confirmed points still need an observation alert;
         # the formatter exposes the block reasons and keeps action at 0%.
@@ -871,8 +895,16 @@ def _notification_position_recommendation(
         side == "buy"
         and str(signal.get("realtime_quote_status") or "") == "unavailable"
     )
+    boundary_expired = bool(
+        side == "buy"
+        and segment_difference_boundary_status(
+            signal,
+            evaluated_at=detected_at,
+        )
+        == "expired"
+    )
     projected = _mapping(signal.get("notification_position_recommendation"))
-    if projected and not realtime_quote_unavailable:
+    if projected and not realtime_quote_unavailable and not boundary_expired:
         return projected
 
     canonical = _mapping(signal.get("position_recommendation"))
@@ -883,14 +915,17 @@ def _notification_position_recommendation(
     # an inconsistent READY recommendation behind.
     recommendation = (
         "BLOCKED"
-        if profile.get("hard_blocked") is True
+        if profile.get("hard_blocked") is True or boundary_expired
         else str(profile.get("recommendation") or "")
     )
     if not recommendation:
         recommendation = {
             "BLOCKED": "BLOCKED",
             "NOT_ACTIONABLE": (
-                GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION
+                WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
+                if canonical.get("basis")
+                == ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS
+                else GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION
                 if canonical.get("basis")
                 == "GEOMETRIC_5M_CANDIDATE_AWAITING_CONFIRMATION"
                 else "WAITING_STRUCTURE"
@@ -1125,6 +1160,10 @@ def _blocked_position_reason_text(
         return "当前价已超过结构锚点的5%追价保护线，等待新的5分钟结构"
     if "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP" in reasons:
         return "当前价已触及或跌破5分钟结构防守位"
+    if "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in reasons:
+        return "1分钟区间套定位窗口已过，等待新的1分钟区间套"
+    if "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING" in reasons:
+        return "1分钟区间套已出现，但精确执行边界不可用"
     if "WARMUP_CONVERGENCE_GATE_FAILED" in reasons:
         return "5分钟完整历史与对照窗口的活动买卖点不一致，等待重新收敛"
     if "QMT_NATIVE_DAILY_TRADING_CALENDAR_MISMATCH" in reasons:
@@ -1153,27 +1192,31 @@ def _action_advice(
     if new_stage == "closed":
         return "操作：结束跟踪"
     if new_stage == _SEGMENT_ENRICHED_STAGE:
-        boundary_status = segment_difference_boundary_status(signal)
+        boundary_status = segment_difference_boundary_status(
+            signal,
+            evaluated_at=detected_at,
+        )
         if boundary_status == "current":
             return (
-                "操作：1分钟段差只补充精细定位；立即核对定位窗口和原5分钟结构，"
-                "不能把本通知单独当成买卖授权"
+                "操作：1分钟区间套已完成且定位窗口有效，现已升级为精确执行候选；"
+                "核对原5分钟结构与风险比例后，在其他交易软件手工决定"
             )
         if boundary_status == "expired":
             return (
-                "操作：1分钟段差证据已出现，但买入定位窗口已过；只复核原5分钟结构，"
-                "不追价"
+                "操作：1分钟区间套证据已出现，但定位窗口已过，精确执行资格关闭；"
+                "不追价，等待新的1分钟区间套"
             )
         if boundary_status == "unavailable":
             return (
-                "操作：1分钟段差证据已出现，但买入定位边界缺失；"
-                "只补充原5分钟信号的结构定位，不能独立授权买卖"
+                "操作：1分钟区间套证据已出现，但精确执行边界缺失；"
+                "暂不生成执行比例，等待边界恢复或新的1分钟区间套"
             )
         if boundary_status == "not_applicable":
             return (
-                "操作：1分钟卖出段差只补充原5分钟卖点的精细复核；卖点不生成买入定位边界"
+                "操作：1分钟卖出区间套已完成；核对原5分钟卖点与持有结构级别后，"
+                "在其他交易软件手工决定"
             )
-        return "操作：1分钟段差只补充原5分钟信号的结构定位；不能独立授权买卖"
+        return "操作：1分钟区间套状态待核对；未确认前不生成精确执行比例"
 
     point = str(point_type or "").strip()
     side = str(signal.get("side") or "").strip()
@@ -1196,6 +1239,15 @@ def _action_advice(
         if isinstance(value, str)
     }
     if side == "buy":
+        if (
+            operational.get("status") == "NOT_ACTIONABLE"
+            and ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON
+            in operational_reasons
+        ):
+            return (
+                "操作：5分钟买点已确认并已提醒；等待1分钟区间套精确定位，"
+                "当前不生成买入比例"
+            )
         if operational.get("status") == "BLOCKED":
             if operational_reasons & {
                 "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",
@@ -1245,6 +1297,15 @@ def _action_advice(
             f"操作：{condition}在其他交易软件手工确认并分批{action}；本系统不会自动下单"
         )
     if side == "sell":
+        if (
+            operational.get("status") == "NOT_ACTIONABLE"
+            and ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON
+            in operational_reasons
+        ):
+            return (
+                "操作：5分钟卖点已确认并已提醒；等待1分钟区间套精确定位，"
+                "当前不生成退出比例"
+            )
         if signal.get("exit_allowed") is not True:
             return (
                 "操作：结构卖出提醒已达到操作确认；请核对卖点级别与结构仍然有效，"
@@ -1317,6 +1378,11 @@ def _position_recommendation_line(
         )
     if status == "NOT_ACTIONABLE":
         basis = str(recommendation.get("basis") or "")
+        if basis == ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS:
+            return (
+                "风险参考：暂不计算（5分钟买卖点已确认，"
+                "等待1分钟区间套精确定位）"
+            )
         if side == "buy":
             state = (
                 "5分钟买点仅为几何候选，尚未达到操作确认"
@@ -1407,20 +1473,24 @@ def _operation_status_text(
     operational_status: str,
     operational_reason_codes: set[str],
     recommendation: str,
+    detected_at: object | None = None,
 ) -> str:
     if new_stage == "invalidated":
         return "已失效，不再按原结构操作"
     if new_stage == "closed":
         return "跟踪结束"
     if new_stage == _SEGMENT_ENRICHED_STAGE:
-        boundary_status = segment_difference_boundary_status(signal)
+        boundary_status = segment_difference_boundary_status(
+            signal,
+            evaluated_at=detected_at,
+        )
         if boundary_status == "current":
-            return "1分钟段差新出现，买入定位窗口仍有效"
+            return "1分钟区间套已确认，精确执行候选已解锁"
         if boundary_status == "expired":
-            return "1分钟段差新出现，买入定位窗口已过"
+            return "1分钟区间套已确认，但定位窗口已过"
         if boundary_status == "not_applicable":
-            return "1分钟卖出段差新出现，等待人工复核"
-        return "1分钟段差新出现，定位边界待人工核对"
+            return "1分钟卖出区间套已确认，等待人工复核"
+        return "1分钟区间套已确认，定位边界待人工核对"
     if side == "buy":
         if operational_status == "BLOCKED":
             return (
@@ -1431,13 +1501,21 @@ def _operation_status_text(
         if delayed_discovery:
             return "延迟发现，仅复核，不追价"
         if operational_status in {"UNRESOLVED", "NOT_ACTIONABLE"}:
-            return "仅观察，结构风险待核对"
+            return (
+                "5分钟信号已确认，等待1分钟区间套"
+                if operational_status == "NOT_ACTIONABLE"
+                else "仅观察，结构风险待核对"
+            )
         if recommendation == "CAUTION" or (
             not recommendation and signal.get("entry_allowed") is not True
         ):
             return "仅观察，待人工复核"
         return "可人工复核执行"
     if side == "sell":
+        if operational_status == "BLOCKED":
+            return "卖出结构保留，当前精确执行已关闭"
+        if operational_status == "NOT_ACTIONABLE":
+            return "5分钟卖点已确认，等待1分钟区间套"
         return "卖出或退出复核"
     return "待人工复核"
 
@@ -1462,6 +1540,7 @@ def format_notification(
     segment_boundary_status = segment_difference_boundary_status(
         signal,
         trigger=trigger,
+        evaluated_at=detected_at,
     )
     sector = _mapping(signal.get("sector"))
     code = _text(signal.get("code"))
@@ -1620,7 +1699,7 @@ def format_notification(
         and segment_boundary_status == "not_applicable"
         else (f"1分钟段差：{trigger_evidence}证据已记录；定位边界状态待核对")
         if trigger.get("point_type") and segment_evidence_status == "present"
-        else "1分钟段差：暂未出现（不影响5分钟信号成立）"
+        else "1分钟区间套：暂未出现（5分钟信号保留，精确执行尚未解锁）"
     )
     detected_at_value = (
         detected_at or signal.get("monitor_observed_at") or signal.get("observed_at")
@@ -1651,6 +1730,7 @@ def format_notification(
         operational_status=operational_status,
         operational_reason_codes=operational_reason_codes,
         recommendation=recommendation,
+        detected_at=detected_at,
     )
     lines = [
         (
@@ -1658,14 +1738,10 @@ def format_notification(
             f"进度：{old_stage_label}→{new_stage_label}"
         ),
         _price_risk_line(signal, setup),
-        (
-            "风险参考：沿用原5分钟信号的结构风险结论；1分钟段差只补充定位，不改变原结论"
-            if new_stage == _SEGMENT_ENRICHED_STAGE
-            else _position_recommendation_line(
-                signal,
-                detected_at=detected_at,
-                new_stage=new_stage,
-            )
+        _position_recommendation_line(
+            signal,
+            detected_at=detected_at,
+            new_stage=new_stage,
         ),
         "时间：" + "｜".join(time_parts),
         _terminal_segment_text(setup),

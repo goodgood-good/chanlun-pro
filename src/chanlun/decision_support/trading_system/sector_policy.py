@@ -50,10 +50,13 @@ def assess_sector(
             one,
         )
     hard_block = thirty.hard_block
+    # 1m is execution-location evidence only.  Letting its short-lived sector
+    # context contribute to ranking would change which symbols receive scarce
+    # live scan capacity before a 5m setup exists, so sector admission and
+    # priority must remain anchored to 30m context and the 5m trade level.
     components = (
         ("thirty_support", 40 if thirty.disposition == "supportive" else 0),
         ("five_support", 30 if five.disposition == "supportive" else 0),
-        ("one_support", 10 if one.disposition == "supportive" else 0),
         ("neutral_access", 5 if not hard_block else 0),
     )
     has_structural_support = any(

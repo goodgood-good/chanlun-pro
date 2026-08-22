@@ -55,6 +55,7 @@ from chanlun.decision_support.trading_system.position_recommendation import (
 )
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
     GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE,
+    WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION,
     canonical_setup_state_document,
     execution_recommendation_label,
     unconfirmed_setup_reason_code,
@@ -1279,6 +1280,24 @@ def _point_document_is_causal(
     )
 
 
+def _one_minute_locator_follows_five_minute_setup(
+    setup: Mapping[str, object],
+    locator: Mapping[str, object],
+) -> bool:
+    """Require execution evidence to be observable after the formal 5m setup."""
+
+    try:
+        setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
+        locator_available_at = datetime.fromisoformat(str(locator["available_at"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
+        setup_available_at.tzinfo is not None
+        and locator_available_at.tzinfo is not None
+        and setup_available_at <= locator_available_at
+    )
+
+
 def _warmup_evidence_is_consistent(raw: object) -> bool:
     """根据冻结记录重新计算当前成对预热结论。"""
 
@@ -2423,8 +2442,9 @@ def _entry_gate_is_consistent(
             return False
         operationally_blocked = bool(
             {
-                "BUY_ENTRY_EXECUTION_BOUNDARY_MISSING",
-                "BUY_ENTRY_EXECUTION_BOUNDARY_EXPIRED",
+                "one_minute_not_confirmed",
+                "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING",
+                "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED",
                 *BUY_SIGNAL_PROTECTION_REASON_CODES,
             }.intersection(decision_reasons)
         )
@@ -2524,7 +2544,7 @@ def _separated_buy_decision_evidence_is_consistent(
     warmup: Mapping[str, object],
     conflict_reasons: tuple[str, ...],
 ) -> bool:
-    """复算“5分钟结构事实 / 1分钟可选段差 / 环境分级”的买入决策。"""
+    """复算“5分钟结构事实 / 1分钟精确执行 / 环境分级”的买入决策。"""
 
     profile = signal.get("execution_profile")
     setup = signal.get("setup_5m")
@@ -2570,7 +2590,9 @@ def _separated_buy_decision_evidence_is_consistent(
             minimum_tick=minimum_tick,
             expected_side="buy",
         )
-        and signal.get("lifecycle_stage") in {"triggered", "executable"}
+        and _one_minute_locator_follows_five_minute_setup(setup, trigger)
+        and signal.get("lifecycle_stage")
+        in {"triggered", "executable", "active"}
     )
     core_reasons: list[str] = []
     if policy.get("require_confirmed_five_minute") is True and not confirmed_point:
@@ -2582,7 +2604,11 @@ def _separated_buy_decision_evidence_is_consistent(
         )
     if signal.get("lifecycle_stage") not in {"triggered", "executable", "active"}:
         core_reasons.append("lifecycle_not_actionable")
-    if policy.get("require_confirmed_one_minute") is True and not trigger_confirmed:
+    if (
+        policy.get("require_confirmed_one_minute") is True
+        and confirmed_point
+        and not trigger_confirmed
+    ):
         core_reasons.append("one_minute_not_confirmed")
     conflict = signal.get("conflict")
     if isinstance(conflict, Mapping) and conflict.get("hard_block") is True:
@@ -2603,9 +2629,11 @@ def _separated_buy_decision_evidence_is_consistent(
             or clearance < minimum_tick
         ):
             core_reasons.append("three_buy_lacks_tick_clearance")
-    # 技术候选由 5 分钟正式点和结构冲突决定。1 分钟边界只描述段差时机，
-    # 缺失或过期不能关闭 5 分钟主信号。
-    technical_entry_allowed = not core_reasons
+    # 技术候选只回答 5 分钟正式结构是否成立；1 分钟区间套及其瞬时边界
+    # 可以关闭精确执行资格，但不能反向抹掉 5 分钟主信号。
+    technical_entry_allowed = not any(
+        reason != "one_minute_not_confirmed" for reason in core_reasons
+    )
     data_integrity_reasons = _higher_timeframe_data_integrity_reason_codes_from_risk(
         risk
     )
@@ -2673,7 +2701,12 @@ def _separated_buy_decision_evidence_is_consistent(
     if grade != "A":
         advisory_reasons.append(f"SAME_PERIOD_CONTEXT_GRADE_{grade}")
     advisory_reasons.extend(context_warmup_advisories)
-    if trigger_confirmed and signal.get("physical_timeframe_recursive") is True:
+    entry_boundary_reason: str | None = None
+    if (
+        trigger_confirmed
+        and signal.get("physical_timeframe_recursive") is True
+        and str(signal.get("code") or "").startswith(("SH.", "SZ.", "BJ."))
+    ):
         raw_boundary = signal.get("entry_execution_boundary")
         if raw_boundary is None:
             try:
@@ -2688,7 +2721,7 @@ def _separated_buy_decision_evidence_is_consistent(
                 return False
             if observed_at.tzinfo is None:
                 return False
-            advisory_reasons.append(
+            entry_boundary_reason = (
                 "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
                 if inferred_valid_until <= observed_at
                 else "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"
@@ -2702,7 +2735,14 @@ def _separated_buy_decision_evidence_is_consistent(
             if observed_at.tzinfo is None:
                 return False
             if boundary.entry_valid_until <= observed_at:
-                advisory_reasons.append("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED")
+                entry_boundary_reason = "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
+    if entry_boundary_reason is not None:
+        # 生产核心先追加 1 分钟边界原因，再追加外层数据完整性/暖机原因。
+        entry_reasons = [
+            *core_reasons,
+            entry_boundary_reason,
+            *entry_reasons[len(core_reasons) :],
+        ]
     conflict = signal.get("conflict")
     conflict_hard = bool(
         isinstance(conflict, Mapping) and conflict.get("hard_block") is True
@@ -2794,6 +2834,8 @@ def _separated_buy_decision_evidence_is_consistent(
         recommendation = "BLOCKED"
     elif not confirmed_point:
         recommendation = unconfirmed_setup_recommendation(formation_state)
+    elif not trigger_confirmed:
+        recommendation = WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
     elif expected_advisories:
         recommendation = "CAUTION"
     else:
@@ -2840,17 +2882,46 @@ def _separated_buy_decision_evidence_is_consistent(
         for reason in expected_position_recommendation["reason_codes"]
         if reason in BUY_SIGNAL_PROTECTION_REASON_CODES
     )
+    if operational_buy_protections:
+        recommendation = "BLOCKED"
+        hard_profile_reasons = tuple(
+            dict.fromkeys(
+                (*hard_profile_reasons, *operational_buy_protections)
+            )
+        )
     expected_decision_reasons = tuple(
         dict.fromkeys(
             (*base_expected_decision_reasons, *operational_buy_protections)
         )
     )
+    if "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in operational_buy_protections:
+        precision_locator_status = "FIVE_MINUTE_EXPIRED"
+    elif not confirmed_point:
+        precision_locator_status = "STRUCTURE_PENDING"
+    elif not trigger_confirmed:
+        precision_locator_status = "WAITING_ONE_MINUTE"
+    elif entry_boundary_reason == "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED":
+        precision_locator_status = "BOUNDARY_EXPIRED"
+    elif entry_boundary_reason == "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING":
+        precision_locator_status = "BOUNDARY_MISSING"
+    else:
+        precision_locator_status = "READY"
+    precision_locator_ready = precision_locator_status == "READY"
     return bool(
         profile.get("structure_signal_confirmed") is confirmed_point
         and profile.get("execution_trigger_confirmed") is trigger_confirmed
         and profile.get("one_minute_role") == "SEGMENT_DIFFERENCE_ONLY"
         and profile.get("one_minute_required_for_trade_signal") is False
+        and profile.get("one_minute_required_for_precise_execution") is True
         and profile.get("one_minute_segment_difference_present") is trigger_confirmed
+        and profile.get("precision_locator_status") == precision_locator_status
+        and profile.get("precision_locator_ready") is precision_locator_ready
+        and profile.get("precise_execution_ready")
+        is bool(
+            precision_locator_ready
+            and not entry_reasons
+            and not operational_buy_protections
+        )
         and profile.get("recommendation") == recommendation
         and profile.get("recommendation_label")
         == execution_recommendation_label(recommendation)
@@ -2930,7 +3001,9 @@ def _buy_decision_evidence_is_consistent(
             minimum_tick=minimum_tick,
             expected_side=str(setup.get("side")),
         )
-        and signal.get("lifecycle_stage") in {"triggered", "executable"}
+        and _one_minute_locator_follows_five_minute_setup(setup, trigger)
+        and signal.get("lifecycle_stage")
+        in {"triggered", "executable", "active"}
     )
     entry_reasons: list[str] = []
     if policy.get("require_confirmed_five_minute") is True and not confirmed_buy:
@@ -3130,7 +3203,9 @@ def _displayed_decision_evidence_is_consistent(
                 minimum_tick=minimum_tick,
                 expected_side="sell",
             )
-            and signal.get("lifecycle_stage") in {"triggered", "executable"}
+            and _one_minute_locator_follows_five_minute_setup(setup, trigger)
+            and signal.get("lifecycle_stage")
+            in {"triggered", "executable", "active"}
         )
         exit_action = signal.get("exit_action")
         lifecycle_actionable = signal.get("lifecycle_stage") in {
@@ -3225,6 +3300,8 @@ def _displayed_decision_evidence_is_consistent(
             recommendation = "BLOCKED"
         elif not confirmed_sell:
             recommendation = unconfirmed_setup_recommendation(formation_state)
+        elif not trigger_confirmed:
+            recommendation = WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
         elif expected_profile_advisories:
             recommendation = "CAUTION"
         else:
@@ -3249,6 +3326,14 @@ def _displayed_decision_evidence_is_consistent(
             exit_action=str(exit_action),
             structure_anchor_price=setup.get("anchor_price"),
         ).document()
+        precision_locator_status = (
+            "STRUCTURE_PENDING"
+            if not confirmed_sell
+            else "WAITING_ONE_MINUTE"
+            if not trigger_confirmed
+            else "READY"
+        )
+        precision_locator_ready = precision_locator_status == "READY"
         return bool(
             signal.get("side") == "sell"
             and _decision_decimal(signal.get("risk_multiplier")) == Decimal("0")
@@ -3263,8 +3348,13 @@ def _displayed_decision_evidence_is_consistent(
             and profile.get("execution_trigger_confirmed") is trigger_confirmed
             and profile.get("one_minute_role") == "SEGMENT_DIFFERENCE_ONLY"
             and profile.get("one_minute_required_for_trade_signal") is False
+            and profile.get("one_minute_required_for_precise_execution") is True
             and profile.get("one_minute_segment_difference_present")
             is trigger_confirmed
+            and profile.get("precision_locator_status") == precision_locator_status
+            and profile.get("precision_locator_ready") is precision_locator_ready
+            and profile.get("precise_execution_ready")
+            is bool(precision_locator_ready and exit_action != "none")
             and profile.get("recommendation") == recommendation
             and profile.get("recommendation_label")
             == execution_recommendation_label(recommendation)
@@ -3301,7 +3391,9 @@ def _displayed_decision_evidence_is_consistent(
             minimum_tick=minimum_tick,
             expected_side="sell",
         )
-        and signal.get("lifecycle_stage") in {"triggered", "executable"}
+        and _one_minute_locator_follows_five_minute_setup(setup, trigger)
+        and signal.get("lifecycle_stage")
+        in {"triggered", "executable", "active"}
     )
     exit_action = signal.get("exit_action")
     lifecycle_actionable = signal.get("lifecycle_stage") in {
@@ -3623,7 +3715,6 @@ def _validated_sector_documents(
                     40 if thirty.get("disposition") == "supportive" else 0
                 ),
                 "five_support": (30 if five.get("disposition") == "supportive" else 0),
-                "one_support": (10 if one.get("disposition") == "supportive" else 0),
                 "neutral_access": 0 if hard_block else 5,
             }
             expected_score = sum(expected_components.values())
@@ -3636,7 +3727,6 @@ def _validated_sector_documents(
                     for name in (
                         "thirty_support",
                         "five_support",
-                        "one_support",
                     )
                 )
                 else "neutral"
@@ -4349,7 +4439,7 @@ def live_signal_human_review_alert(
     sector_strength_evidence_revision: str | None = None,
     sector_catalog_revision: str | None = None,
 ) -> HumanReviewAlert:
-    """转换一个规范的 30m环境/5m正式买卖/可选1m段差决策。"""
+    """转换一个规范的30m环境/5m主信号/1m精确执行决策。"""
 
     symbol = signal.get("code")
     signal_id = signal.get("signal_id")
@@ -4420,7 +4510,7 @@ def live_signal_human_review_alert(
     )
     try:
         # 5 分钟是正式买卖级别，人工复核的结构价格必须锚定正式 5m 点；
-        # 可选 1m 段差不得悄悄替换主信号价格。
+        # 必需的 1m 精确执行证据也不得悄悄替换主信号价格。
         reference_price = Decimal(str(setup["anchor_price"]))
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("live screening structure anchor price is invalid") from exc
@@ -4733,6 +4823,7 @@ def live_human_review_document(
             "trade_frequency": "5m",
             "segment_difference_frequency": "1m",
             "segment_difference_required_for_trade_signal": False,
+            "segment_difference_required_for_precise_execution": True,
             # Compatibility aliases retained for previously archived reports.
             "strategic_frequency": "30m",
             "tactical_frequency": "5m",

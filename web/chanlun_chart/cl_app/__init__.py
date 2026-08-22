@@ -184,6 +184,12 @@ def create_app(test_config=None, start_scheduler=False):
                 "96",
             )
         ),
+        TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
+                "128",
+            )
+        ),
         TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
         TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS=1800,
         TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
@@ -2386,8 +2392,8 @@ def create_app(test_config=None, start_scheduler=False):
             "evidence_grade": "invalid",
         }
     # 生产实时监听不读取 selection_research.json。该账本只属于离线研究/回放，
-    # 技术买入提醒由实时严格 5m 正式结构决定；30m/日线用于环境分级，
-    # 1m 只补充可选段差，不参与信号是否成立的判断。
+    # 技术买入提醒由实时严格 5m 正式结构决定；30m/日线用于环境分级。
+    # 1m 不参与信号是否成立的判断，但必须完成区间套后才解锁精确执行候选。
     app.config["TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED"] = False
     formal_research_required = False
     selection_research = ()
@@ -2454,6 +2460,12 @@ def create_app(test_config=None, start_scheduler=False):
                 app.config.get(
                     "TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
                     96,
+                )
+            ),
+            supportive_discovery_max_sector_rank=int(
+                app.config.get(
+                    "TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
+                    128,
                 )
             ),
             max_symbols_per_refresh=int(
