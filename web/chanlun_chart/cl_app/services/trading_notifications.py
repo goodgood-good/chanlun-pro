@@ -95,7 +95,7 @@ _STAGE_LABELS = {
     "active": "结构持续跟踪",
     "invalidated": "结构已失效",
     "closed": "跟踪已结束",
-    _SEGMENT_ENRICHED_STAGE: "1分钟段差补充",
+    _SEGMENT_ENRICHED_STAGE: "1分钟区间套定位补充",
 }
 _POINT_LABELS = {
     "1buy": "一类买点",
@@ -1606,8 +1606,8 @@ def format_notification(
         headline = new_stage_label
         notification_kind = "信号失效" if new_stage == "invalidated" else "跟踪结束"
     elif new_stage == _SEGMENT_ENRICHED_STAGE:
-        headline = f"5分钟{setup_point}＋1分钟{trigger_evidence}"
-        notification_kind = "1分钟段差新出现"
+        headline = f"5分钟{setup_point}＋1分钟区间套{trigger_evidence}"
+        notification_kind = "1分钟精确定位新出现"
     else:
         headline = f"5分钟{setup_point}"
         notification_kind = (
@@ -1672,32 +1672,32 @@ def format_notification(
     )
     trigger_level = _recursive_level_text(trigger.get("recursive_level"))
     trigger_structure = (
-        (f"1分钟段差：{trigger_evidence}（{trigger_level}）已确认；买入定位窗口仍有效")
+        (f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）已确认；精确买入位置仍有效")
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "current"
         else (
-            f"1分钟段差：{trigger_evidence}（{trigger_level}）证据已确认；"
-            "买入定位窗口已过，但证据没有消失"
+            f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）历史证据保留；"
+            "买入精确定位窗口已过"
         )
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "expired"
         else (
-            f"1分钟段差：{trigger_evidence}（{trigger_level}）证据已确认；"
-            "买入定位边界不可用"
+            f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）历史证据保留；"
+            "买入精确定位边界不可用"
         )
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "unavailable"
         else (
-            f"1分钟段差：{trigger_evidence}（{trigger_level}）证据已确认；"
-            "卖点不适用买入定位边界"
+            f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）已确认；"
+            "卖出精确位置已确认"
         )
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "not_applicable"
-        else (f"1分钟段差：{trigger_evidence}证据已记录；定位边界状态待核对")
+        else (f"1分钟区间套定位：{trigger_evidence}证据已记录；精确定位边界待核对")
         if trigger.get("point_type") and segment_evidence_status == "present"
         else "1分钟区间套：暂未出现（5分钟信号保留，精确执行尚未解锁）"
     )
@@ -1711,7 +1711,7 @@ def format_notification(
     )
     if new_stage == _SEGMENT_ENRICHED_STAGE:
         time_parts = [
-            f"1分钟段差确认 {_notification_time_text(_segment_time(signal))}",
+            f"1分钟定位确认 {_notification_time_text(_segment_time(signal))}",
             f"原5分钟{confirmation_caption} {confirmed_at}",
         ]
     else:

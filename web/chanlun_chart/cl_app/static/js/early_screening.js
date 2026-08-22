@@ -7,7 +7,7 @@
   // The current-only contract invalidates every persisted pre-migration view.
   // Earlier versions could retain a narrow point/stage/scope filter and make
   // current first/second-class rows appear to be missing.
-  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS_V6_STRICT_1M_L0_LEDGER";
+  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS_V7_5M_TRADE_1M_PRECISION";
 
   function boot() {
     const Ui = globalThis.TradingScreeningUi;
@@ -318,36 +318,39 @@
         "es-total-qualified-count",
         Number(snapshot.total_qualified_signal_count) || snapshot.signals.length,
       );
+      const currentSignals = unifiedSignals.filter(Ui.isCurrentSelectionSignal);
       setText("es-approaching-count", countStage("approaching"));
-      setText("es-triggered-count", countStage("triggered"));
-      const segmentEvidenceCount = unifiedSignals.filter(
-        (signal) => Ui.segmentDifferenceEvidenceStatusForSignal(signal) === "present",
+      const fiveMinuteConfirmedCount = currentSignals.filter(
+        (signal) => Ui.fiveMinuteTradeSignalConfirmedForSignal(signal),
       ).length;
-      setText("es-segment-count", segmentEvidenceCount);
-      const preciseExecutionReadyCount = unifiedSignals.filter(
-        (signal) => Ui.preciseExecutionReadyForSignal(signal),
+      setText("es-triggered-count", fiveMinuteConfirmedCount);
+      const precisionLocatorCount = currentSignals.filter(
+        (signal) => Ui.currentPrecisionLocatorReadyForSignal(signal),
+      ).length;
+      setText("es-segment-count", precisionLocatorCount);
+      const preciseExecutionReadyCount = currentSignals.filter(
+        (signal) => Ui.currentPreciseExecutionReadyForSignal(signal),
       ).length;
       setText("es-precise-count", preciseExecutionReadyCount);
       const showCurrentSegments = byId("es-show-current-segments");
       if (showCurrentSegments) {
-        showCurrentSegments.disabled = segmentEvidenceCount === 0;
-        showCurrentSegments.textContent = segmentEvidenceCount === 0
-          ? "当前暂无段差证据"
-          : "查看段差证据";
+        showCurrentSegments.disabled = precisionLocatorCount === 0;
+        showCurrentSegments.textContent = precisionLocatorCount === 0
+          ? "当前暂无精确定位"
+          : "查看当前定位";
       }
       if (
-        segmentEvidenceCount === 0
-        && ["present", "current", "historical"].includes(state.segmentState)
+        precisionLocatorCount === 0
+        && state.segmentState === "current"
       ) {
-        // The strict segment contract changed from accepting recursive 1m/L1
-        // to physical 1m/L0 only.  Never let a stale positive-only filter hide
-        // every still-valid 5m signal when the published scope has no L0 fact.
+        // 当前定位只属于仍有效的 5 分钟候选。定位清空后不能让旧的正向筛选
+        // 继续隐藏全部 5 分钟交易级别信号。
         state.segmentState = "all";
         saveView();
       }
       setText(
         "es-segment-scope",
-        Ui.segmentScopeText(runtimeHealth, audit, segmentEvidenceCount),
+        Ui.segmentScopeText(runtimeHealth, precisionLocatorCount),
       );
       setText("es-executable-count", countStage("executable"));
       document.title = unifiedSignals.length
@@ -708,7 +711,7 @@
         .find((button) => button.dataset.segmentState === state.segmentState);
       setText(
         "es-filter-summary",
-        `${market ? market.textContent.trim() : "全部市场"} · ${source ? source.textContent.trim() : "全部来源"} · ${reviewStage ? reviewStage.textContent.trim() : "全部任务"} · ${segmentState ? segmentState.textContent.trim() : "全部段差状态"} · ${lifecycle ? lifecycle.textContent.trim() : "全部状态"} · ${pointType ? pointType.textContent.trim() : "全部买卖点"}`,
+        `${market ? market.textContent.trim() : "全部市场"} · ${source ? source.textContent.trim() : "全部来源"} · ${reviewStage ? reviewStage.textContent.trim() : "全部任务"} · ${segmentState ? segmentState.textContent.trim() : "全部定位状态"} · ${lifecycle ? lifecycle.textContent.trim() : "全部状态"} · ${pointType ? pointType.textContent.trim() : "全部买卖点"}`,
       );
     }
 
@@ -1017,7 +1020,7 @@
       state.market = "all";
       state.signalSource = "all";
       state.reviewStage = "all";
-      state.segmentState = "present";
+      state.segmentState = "current";
       state.selectionScope = "all-qualified";
       state.sectorId = "all";
       state.query = "";

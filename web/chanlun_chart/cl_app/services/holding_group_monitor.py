@@ -997,7 +997,7 @@ def _event_operation_status(event: object) -> str:
     if str(getattr(event, "signal_role", "") or "") == (
         "SEGMENT_DIFFERENCE_1M"
     ):
-        return "1分钟段差新出现，仅补充定位"
+        return "1分钟区间套定位新出现，仅补充精确位置"
     recommendation = getattr(event, "position_recommendation", None)
     status = (
         str(recommendation.get("status") or "")
@@ -1112,7 +1112,7 @@ def _notification_line(
         ]
         rendered_signal_time = _render_notification_time(signal_time)
         if segment_update:
-            time_parts.append(f"1分钟段差可用 {rendered_signal_time}")
+            time_parts.append(f"1分钟定位可用 {rendered_signal_time}")
         elif rendered_signal_time != _render_notification_time(confirmed_time):
             time_parts.append(f"信号可用 {rendered_signal_time}")
         time_parts.append(
@@ -1129,9 +1129,9 @@ def _notification_line(
             if divergence_label:
                 segment_label = f"{segment_label}（{divergence_label}）"
             segment_level = int(getattr(event, "segment_difference_recursive_level", 0) or 0)
-            segment_text = f"1分钟段差{segment_label}（L{segment_level}）"
+            segment_text = f"1分钟区间套定位：{segment_label}（L{segment_level}）"
         else:
-            segment_text = "1分钟段差未出现（不阻断5分钟信号）"
+            segment_text = "1分钟区间套定位未完成（不影响5分钟主信号）"
         big_dir = _DIRECTION_LABELS.get(
             str(getattr(event, "big_dir", "") or ""),
             str(getattr(event, "big_dir", "") or "未知"),
@@ -1327,9 +1327,9 @@ def _notification_title(market: str, events: Sequence[object]) -> str:
     scope = next(iter(scopes)) if len(scopes) == 1 else "关注线索"
     buckets = {_notification_bucket(event) for event in events}
     kind = (
-        "1分钟卖出段差补充"
+        "1分钟卖出精确定位补充"
         if buckets == {"segment_sell"}
-        else "1分钟买入段差补充"
+        else "1分钟买入精确定位补充"
         if buckets == {"segment_buy"}
         else
         "新买点·待人工确认"

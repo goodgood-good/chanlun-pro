@@ -13,8 +13,8 @@
     POSSIBLE_5M_TACTICAL_BUYBACK: "旧档案：5分钟短差回补",
     REALTIME_BUY_POINT: "实时买点通知",
     REALTIME_SELL_POINT: "实时卖点通知",
-    REALTIME_1M_BUY_SEGMENT: "实时1分钟买入段差补充",
-    REALTIME_1M_SELL_SEGMENT: "实时1分钟卖出段差补充",
+    REALTIME_1M_BUY_SEGMENT: "实时1分钟买入精确定位补充",
+    REALTIME_1M_SELL_SEGMENT: "实时1分钟卖出精确定位补充",
     REALTIME_EXIT: "实时退出通知",
     REALTIME_INVALIDATED: "实时信号失效通知",
   };
@@ -40,7 +40,7 @@
     HUMAN_CONFIRM_30M_TREND_TYPE: "确认 30m 走势类型",
     HUMAN_CONFIRM_BUY_OR_SELL_POINT: "确认具体一、二、三类买卖点",
     HUMAN_CONFIRM_5M_TRADE_POINT: "核对 5分钟操作确认买卖点及对应结构证据",
-    HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE: "核对可选的 1分钟段差位置",
+    HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE: "核对 1分钟区间套精确位置",
     HUMAN_CONFIRM_5M_TACTICAL_CONTEXT: "旧档案：确认 5分钟短差上下文",
     HUMAN_CONFIRM_1M_LOCATOR: "旧档案：用 1分钟完成定位",
     HUMAN_CONFIRM_HIGHER_TIMEFRAME_RISK: "核对日线与30分钟环境",
@@ -189,8 +189,8 @@
     REALTIME_NOTIFICATION_DELIVERY_FAILED: "钉钉投递失败，但结构通知已保留在人工复核收件箱",
     REALTIME_NOTIFICATION_DELIVERY_EXPIRED: "钉钉投递窗口已过期；结构通知仍保留供复核",
     REALTIME_NOTIFICATION_HISTORICAL: "通知已超过10分钟新鲜窗口，仅保留为历史结构复核",
-    ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED: "1分钟段差证据仍保留，但当前执行边界已经过期",
-    ONE_MINUTE_SEGMENT_BOUNDARY_MISSING: "1分钟段差证据仍保留，但当前执行边界不可用",
+    ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED: "1分钟区间套历史证据仍保留，但当前精确定位边界已经过期",
+    ONE_MINUTE_SEGMENT_BOUNDARY_MISSING: "1分钟区间套历史证据仍保留，但当前精确定位边界不可用",
   };
 
   function text(value, fallback = "—") {
@@ -567,8 +567,8 @@
     if (evidenceStatus === "present" && boundaryStatus === "expired") {
       const validUntil = candidate.realtime_notification_segment_difference_valid_until;
       return [
-        "段差证据已出现·定位窗口已过",
-        `${pointEvidence}证据仍有效；过期的只是买入定位窗口`,
+        "历史区间套定位已过",
+        `${pointEvidence}区间套证据仍保留；买入精确定位窗口已过期`,
         validUntil
           ? `定位窗口有效至 ${fullDateTimeText(validUntil)}；5分钟信号保留，精确执行已关闭`
           : "区间套证据保留；5分钟信号保留，精确执行已关闭",
@@ -576,21 +576,21 @@
     }
     if (evidenceStatus === "present" && boundaryStatus === "unavailable") {
       return [
-        "段差证据已出现·定位边界缺失",
+        "历史区间套定位边界缺失",
         `${pointEvidence}证据已保留，买入定位边界缺失`,
         "5分钟信号保留；精确执行边界恢复前不生成比例",
       ];
     }
     if (evidenceStatus === "present" && boundaryStatus === "not_applicable") {
       return [
-        "段差证据已出现",
+        "卖出区间套定位已确认",
         `${pointEvidence}已记录`,
         "卖出区间套已确认；核对持有结构级别后人工复核",
       ];
     }
     if (evidenceStatus === "present") {
       return [
-        "段差证据已出现·边界待核对",
+        "区间套定位边界待核对",
         `${pointEvidence}证据已保留，旧记录未保存定位边界状态`,
         "边界核对完成前不生成精确执行比例",
       ];

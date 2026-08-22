@@ -299,8 +299,8 @@ def test_every_non_a_holding_is_routed_to_its_own_market(tmp_path):
         assert "监听发现 2026-08-04 10:01:00" in lines[0]
         assert "最近1分钟收盘价：10.000" in lines[0]
         assert "同级或更高级别卖点按完整退出规则复核" in lines[0]
-        assert "1分钟段差" in lines[0]
-        assert "1分钟段差未出现（不阻断5分钟信号）" in lines[0]
+        assert "1分钟区间套定位" in lines[0]
+        assert "1分钟区间套定位未完成（不影响5分钟主信号）" in lines[0]
         assert "关系未确认前不生成退出比例" in lines[0]
         assert "25%" not in lines[0]
         assert "30分钟向下" in lines[0]
@@ -485,7 +485,7 @@ def test_recursive_us_notification_separates_every_event_time() -> None:
     assert "信号可用 2026-08-15 02:13:00" in line
     assert "监听发现 2026-08-15 02:14:05" in line
     assert "最近1分钟收盘价：581.250" in line
-    assert "1分钟段差一类买点（趋势背驰）（L0）" in line
+    assert "1分钟区间套定位：一类买点（趋势背驰）（L0）" in line
 
 
 def test_notification_labels_five_minute_price_fallback_honestly() -> None:
@@ -510,11 +510,11 @@ def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
     service, _notifier, _exchange_calls = _service(tmp_path, [])
     payload = service._event_notification_payload("us", [event])
 
-    assert "1分钟卖出段差补充" in title
+    assert "1分钟卖出精确定位补充" in title
     assert "5分钟一类卖点＋1分钟二类卖点" in title
-    assert "状态：1分钟段差新出现，仅补充定位" in line
+    assert "状态：1分钟区间套定位新出现，仅补充精确位置" in line
     assert "5分钟操作确认 2026-08-04 10:00:00" in line
-    assert "1分钟段差可用 2026-08-04 10:01:00" in line
+    assert "1分钟定位可用 2026-08-04 10:01:00" in line
     assert "只有当前有效时才进入精确执行候选" in line
     assert monitor_module._notification_bucket(event) == "segment_sell"
     assert monitor_module._delivery_identity(event) == event.delivery_identity

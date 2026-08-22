@@ -188,11 +188,11 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
     assert "监听发现：2026-07-20 10:01:30" in rendered
     assert "最近已完成K线收盘价：10.25" in rendered
     assert "5分钟三类买点（递归层级：L0）" in rendered
-    assert "1分钟段差：一类买点（递归层级：L0）" in rendered
+    assert "1分钟区间套定位：一类买点（递归层级：L0）" in rendered
     assert "防守价：9.80（跌破买入结构失效）" in rendered
     assert "30分钟向上（有利）" in rendered
     assert "5分钟三类买点" in rendered
-    assert "1分钟段差：一类买点" in rendered
+    assert "1分钟区间套定位：一类买点" in rendered
     assert "在其他交易软件手工确认并分批买入" in rendered
     assert "本系统不会自动下单" in rendered
     assert (
@@ -528,10 +528,10 @@ def test_stage_stable_new_one_minute_segment_sends_enrichment_notification(
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
     rendered = "\n".join(lines)
-    assert "1分钟段差新出现" in title
-    assert "5分钟三类买点＋1分钟一类买点" in title
-    assert "进度：5分钟操作确认→1分钟段差补充" in rendered
-    assert "1分钟段差确认 2026-07-20 10:01:00" in rendered
+    assert "1分钟精确定位新出现" in title
+    assert "5分钟三类买点＋1分钟区间套一类买点" in title
+    assert "进度：5分钟操作确认→1分钟区间套定位补充" in rendered
+    assert "1分钟定位确认 2026-07-20 10:01:00" in rendered
     assert "监听发现：2026-07-20 10:01:30（延迟 30秒）" in rendered
     assert "1分钟区间套已完成且定位窗口有效，现已升级为精确执行候选" in rendered
     assert dispatcher.health_snapshot()["delivered_event_count"] == 1
@@ -581,8 +581,8 @@ def test_newer_one_minute_segment_rearms_same_five_minute_notification(
     )
 
     assert len(sender.messages) == 2
-    assert "1分钟段差新出现" in sender.messages[1][0]
-    assert "1分钟段差确认 2026-07-20 10:02:00" in "\n".join(
+    assert "1分钟精确定位新出现" in sender.messages[1][0]
+    assert "1分钟定位确认 2026-07-20 10:02:00" in "\n".join(
         sender.messages[1][1]
     )
     assert dispatcher.health_snapshot()["delivered_event_count"] == 2
@@ -696,8 +696,8 @@ def test_segment_formed_inside_five_minute_structure_is_fresh_at_confluence(
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
     rendered = "\n".join(lines)
-    assert "1分钟一类买点（趋势背驰）" in title
-    assert "1分钟段差：一类买点（趋势背驰）" in rendered
+    assert "1分钟区间套一类买点（趋势背驰）" in title
+    assert "1分钟区间套定位：一类买点（趋势背驰）" in rendered
     assert "监听发现：2026-07-20 10:01:30（延迟 1分30秒）" in rendered
     assert dispatcher.health_snapshot()["last_suppressed_reason"] is None
     persisted = json.loads(
@@ -758,7 +758,7 @@ def test_five_minute_transition_takes_precedence_over_simultaneous_segment(
     dispatcher.dispatch_changes({"signals": [current]}, {"signals": [current]})
 
     assert len(sender.messages) == 1
-    assert "1分钟段差新出现" not in sender.messages[0][0]
+    assert "1分钟精确定位新出现" not in sender.messages[0][0]
     assert "5分钟三类买点" in sender.messages[0][0]
 
 
@@ -833,7 +833,7 @@ def test_delivered_five_minute_stage_change_cannot_swallow_new_segment(
     )
 
     assert len(sender.messages) == 2
-    assert "1分钟段差新出现" in sender.messages[1][0]
+    assert "1分钟精确定位新出现" in sender.messages[1][0]
     persisted = json.loads(
         (tmp_path / f"segment-during-{current_stage}.json").read_text(
             encoding="utf-8"
@@ -868,8 +868,8 @@ def test_pending_five_minute_retry_absorbs_simultaneous_segment(
     )
 
     assert len(sender.messages) == 2
-    assert "1分钟段差新出现" not in sender.messages[1][0]
-    assert "1分钟段差：一类买点" in "\n".join(sender.messages[1][1])
+    assert "1分钟精确定位新出现" not in sender.messages[1][0]
+    assert "1分钟区间套定位：一类买点" in "\n".join(sender.messages[1][1])
     assert dispatcher.health_snapshot()["delivered_event_count"] == 1
 
 
@@ -1319,7 +1319,7 @@ def test_standard_third_class_one_minute_continuation_trigger_notifies(
     )
 
     assert len(sender.messages) == 1
-    assert "1分钟段差：三类买点" in "\n".join(sender.messages[0][1])
+    assert "1分钟区间套定位：三类买点" in "\n".join(sender.messages[0][1])
 
 
 def test_expired_one_minute_boundary_does_not_suppress_five_minute_signal(
@@ -1344,8 +1344,8 @@ def test_expired_one_minute_boundary_does_not_suppress_five_minute_signal(
     assert "5分钟三类买点" in title
     assert "段差已定位" not in title
     assert (
-        "1分钟段差：一类买点（递归层级：L0）证据已确认；"
-        "买入定位窗口已过，但证据没有消失"
+        "1分钟区间套定位：一类买点（递归层级：L0）历史证据保留；"
+        "买入精确定位窗口已过"
     ) in "\n".join(lines)
 
 

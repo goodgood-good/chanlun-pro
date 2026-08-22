@@ -243,7 +243,10 @@ const snapshot = {
       sector: { sector_id: "qmt-gics3:real-estate", sector_name: "房地产" },
       context_30m: { direction: "neutral", disposition: "neutral" },
       setup_5m: { point_type: "2buy", center_ordinal: null },
-      trigger_1m: { point_type: "1buy" },
+      trigger_1m: {
+        point_type: "1buy",
+        available_at: "2026-07-20T14:58:00+08:00",
+      },
       entry_execution_boundary: {
         confirmation_bar_closed_at: "2026-07-20T14:58:00+08:00",
         entry_valid_until: "2026-07-20T14:59:00+08:00",
@@ -253,6 +256,10 @@ const snapshot = {
       entry_allowed: true,
       exit_allowed: false,
       decision_reasons: [],
+      execution_profile: {
+        precision_locator_ready: true,
+        precise_execution_ready: true,
+      },
       higher_timeframe_risk: currentHigherTimeframeRisk(),
       chart_urls: {
         "d": "/?market=a&code=SZ.000002&layout=single&intervals=D",
@@ -466,7 +473,7 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(controllerSource, /priority_monitor_ready/);
   assert.match(controllerSource, /盘中实时预警通道尚未就绪/);
   assert.match(controllerSource, /优先预警正常，候选范围仍在准备/);
-  assert.match(controllerSource, /Ui\.segmentScopeText\(runtimeHealth, audit, segmentEvidenceCount\)/);
+  assert.match(controllerSource, /Ui\.segmentScopeText\(runtimeHealth, precisionLocatorCount\)/);
   assert.match(controllerSource, /full_coverage_refresh_paused/);
   assert.match(controllerSource, /full_coverage_next_active_at/);
   assert.match(controllerSource, /全市场覆盖等待下一运行窗口/);
@@ -807,23 +814,25 @@ test("dashboard has six independent point filters", () => {
 test("dashboard exposes and persists the optional one-minute segment-difference filter", () => {
   assert.match(template, /id="es-segment-count"/);
   assert.match(template, /id="es-precise-count"/);
-  assert.match(template, /与“有段差证据”分开统计/);
-  assert.match(template, /id="es-show-current-segments"[^>]*>查看段差证据</);
+  assert.match(template, /5分钟是交易级别，决定主信号是否成立/);
+  assert.match(template, /1分钟不生成独立交易信号/);
+  assert.match(template, /id="es-show-current-segments"[^>]*>查看当前定位</);
   for (const state of ["all", "present", "current", "historical", "absent"]) {
     assert.match(template, new RegExp(`data-segment-state="${state}"`));
   }
-  assert.match(template, /证据存在与买入定位窗口是否过期分开显示；不改变5分钟买卖点是否成立/);
+  assert.match(template, /不累计历史证据/);
   assert.match(controllerSource, /segmentState:\s*\["present", "current", "historical", "absent"\]\.includes\(saved\.segmentState\)/);
   assert.match(controllerSource, /segmentState:\s*state\.segmentState/);
-  assert.match(controllerSource, /Ui\.segmentDifferenceEvidenceStatusForSignal\(signal\) === "present"/);
+  assert.match(controllerSource, /Ui\.currentPrecisionLocatorReadyForSignal\(signal\)/);
+  assert.match(controllerSource, /unifiedSignals\.filter\(Ui\.isCurrentSelectionSignal\)/);
   assert.match(controllerSource, /\[data-segment-state\]/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
-  assert.match(controllerSource, /state\.segmentState = "present"/);
+  assert.match(controllerSource, /state\.segmentState = "current"/);
   assert.match(controllerSource, /state\.pointType = "all"/);
   assert.match(controllerSource, /data-screening-mode="live"/);
-  assert.match(controllerSource, /showCurrentSegments\.disabled = segmentEvidenceCount === 0/);
-  assert.match(controllerSource, /Ui\.preciseExecutionReadyForSignal\(signal\)/);
-  assert.match(controllerSource, /\["present", "current", "historical"\]\.includes\(state\.segmentState\)/);
+  assert.match(controllerSource, /showCurrentSegments\.disabled = precisionLocatorCount === 0/);
+  assert.match(controllerSource, /Ui\.currentPreciseExecutionReadyForSignal\(signal\)/);
+  assert.match(controllerSource, /state\.segmentState === "current"/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
 });
 
@@ -831,6 +840,7 @@ test("precise execution readiness is stricter than one-minute segment evidence",
   const Ui = loadUi();
   const base = {
     code: "SZ.000001",
+    lifecycle_stage: "triggered",
     side: "buy",
     entry_allowed: true,
     exit_allowed: false,
@@ -860,6 +870,10 @@ test("precise execution readiness is stricter than one-minute segment evidence",
   const afterBoundary = new Date("2026-08-20T10:02:01+08:00");
 
   assert.equal(Ui.segmentDifferenceEvidenceStatusForSignal(base), "present");
+  assert.equal(Ui.precisionLocatorReadyForSignal(base, insideBoundary), true);
+  assert.equal(Ui.currentPrecisionLocatorReadyForSignal(base, insideBoundary), true);
+  assert.equal(Ui.currentPreciseExecutionReadyForSignal(base, insideBoundary), true);
+  assert.equal(Ui.fiveMinuteTradeSignalConfirmedForSignal(base), true);
   assert.equal(
     Ui.segmentDifferenceBoundaryStatusForSignal(base, insideBoundary),
     "current",
@@ -870,6 +884,13 @@ test("precise execution readiness is stricter than one-minute segment evidence",
     "expired",
   );
   assert.equal(Ui.preciseExecutionReadyForSignal(base, afterBoundary), false);
+  assert.equal(
+    Ui.fiveMinuteTradeSignalConfirmedForSignal({
+      ...base,
+      lifecycle_stage: "invalidated",
+    }),
+    false,
+  );
   assert.deepEqual(
     {
       status: Ui.positionRecommendationForSignal(base, afterBoundary).status,
@@ -948,7 +969,7 @@ test("stock selection opens with all six point channels visible", () => {
   assert.match(controllerSource, /lifecycle:\s*lifecycleFilters\.includes\(saved\.lifecycle\)/);
   assert.match(
     controllerSource,
-    /CANONICAL_SIX_POINT_CHANNELS_V6_STRICT_1M_L0_LEDGER/,
+    /CANONICAL_SIX_POINT_CHANNELS_V7_5M_TRADE_1M_PRECISION/,
   );
   assert.match(controllerSource, /value\.contract\s*!==\s*VIEW_CONTRACT/);
   assert.match(controllerSource, /localStorage\.removeItem\(STORAGE_KEY\)/);
@@ -1689,9 +1710,12 @@ test("expired one-minute segment stays visible only as historical audit evidence
   const oneMinute = Ui.periodPathForSignal(clue).find(
     (period) => period.frequency === "1m",
   );
-  assert.equal(oneMinute.state, "段差证据已出现·定位窗口已过");
-  assert.equal(oneMinute.summary, "二买（盘整背驰） · 严格1m/L0段差证据已留存");
-  assert.match(oneMinute.boundary, /现已过期；段差证据仍保留/);
+  assert.equal(oneMinute.state, "历史区间套定位已过");
+  assert.equal(
+    oneMinute.summary,
+    "二买（盘整背驰） · 1m/L0历史区间套证据保留（不计入当前定位）",
+  );
+  assert.match(oneMinute.boundary, /现已过期；仅保留历史定位证据/);
 
   const candidate = HumanUi.realtimeNotificationCandidate(event);
   assert.equal(candidate.realtime_notification_segment_difference_present, true);
@@ -1715,8 +1739,8 @@ test("expired one-minute segment stays visible only as historical audit evidence
   );
   assert.ok(candidate.warning_codes.includes("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"));
   assert.deepEqual(HumanUi.realtimeNotificationSegmentPeriod(candidate), [
-    "段差证据已出现·定位窗口已过",
-    "2buy（盘整背驰）证据仍有效；过期的只是买入定位窗口",
+    "历史区间套定位已过",
+    "2buy（盘整背驰）区间套证据仍保留；买入精确定位窗口已过期",
     "定位窗口有效至 2026-08-03 11:13:00；5分钟信号保留，精确执行已关闭",
   ]);
 
@@ -1837,7 +1861,34 @@ test("filters preserve independent point lifecycle sector and query choices", ()
     signal_id: "signal-segment-unavailable",
     decision_reasons: ["ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"],
   };
-  const segmentSignals = [signals[0], currentSegment, expiredSegment, unavailableSegment];
+  const currentSellLocator = {
+    ...currentSegment,
+    signal_id: "signal-sell-locator",
+    point_type: "2sell",
+    side: "sell",
+    trigger_1m: {
+      ...currentSegment.trigger_1m,
+      point_type: "2sell",
+    },
+    entry_allowed: false,
+    exit_allowed: true,
+  };
+  const historicalSellLocator = {
+    ...currentSellLocator,
+    signal_id: "signal-sell-locator-historical",
+    trigger_1m: {
+      ...currentSellLocator.trigger_1m,
+      available_at: "2026-07-20T14:40:00+08:00",
+    },
+  };
+  const segmentSignals = [
+    signals[0],
+    currentSegment,
+    currentSellLocator,
+    historicalSellLocator,
+    expiredSegment,
+    unavailableSegment,
+  ];
   assert.equal(Ui.segmentDifferenceStatusForSignal(signals[0]), "absent");
   assert.equal(Ui.segmentDifferenceStatusForSignal(currentSegment), "current");
   assert.equal(Ui.segmentDifferenceStatusForSignal(expiredSegment), "expired");
@@ -1845,12 +1896,45 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   assert.deepEqual(
     Ui.filterSignals(segmentSignals, { segmentState: "present" })
       .map((row) => row.signal_id),
-    ["signal-2", "signal-segment-expired", "signal-segment-unavailable"],
+    [
+      "signal-2",
+      "signal-sell-locator",
+      "signal-sell-locator-historical",
+      "signal-segment-expired",
+      "signal-segment-unavailable",
+    ],
   );
   assert.deepEqual(
     Ui.filterSignals(segmentSignals, { segmentState: "current" })
       .map((row) => row.signal_id),
-    ["signal-2"],
+    ["signal-2", "signal-sell-locator"],
+  );
+  assert.equal(
+    Ui.precisionLocatorReadyForSignal(
+      historicalSellLocator,
+      new Date("2026-07-20T14:58:30+08:00"),
+    ),
+    true,
+  );
+  assert.equal(
+    Ui.currentPrecisionLocatorReadyForSignal(
+      historicalSellLocator,
+      new Date("2026-07-20T14:58:30+08:00"),
+    ),
+    false,
+  );
+  assert.deepEqual(
+    (() => {
+      const period = Ui.periodPathForSignal(historicalSellLocator).find(
+        (row) => row.frequency === "1m",
+      );
+      return [period.state, period.summary, period.boundary];
+    })(),
+    [
+      "历史卖出区间套定位",
+      "二卖 · 1m/L0历史区间套证据保留（不计入当前定位）",
+      "卖出区间套仅保留为历史定位证据；不计入当前精确位置",
+    ],
   );
   assert.deepEqual(
     Ui.filterSignals(segmentSignals, { segmentState: "historical" })
@@ -1881,7 +1965,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   );
   assert.equal(
     Ui.emptySignalDetail(Ui.normalizeSnapshot(snapshot), "", { segmentState: "current" }),
-    "当前快照有 1 条严格1m/L0段差证据（买点 1 / 卖点 0），但被其他筛选条件隐藏；点击“查看段差证据”可清除这些筛选。",
+    "当前有 1 个5分钟操作候选已完成有效的1m/L0区间套定位（买点 1 / 卖点 0），但被其他筛选条件隐藏；点击“查看当前定位”可清除这些筛选。",
   );
 });
 
@@ -2286,7 +2370,7 @@ test("signal queue and chart publish one shared selected identity", () => {
   );
   assert.match(situation.textContent, /日线 .* · 30m .* · 5m .* · 1m /);
   assert.ok(tags.children.some(
-    (child) => child.textContent === "1m 段差证据 · 买入窗口有效",
+    (child) => child.textContent === "1m 区间套定位 · 买入位置有效",
   ));
   assert.equal(chart.root.dataset.signalId, selected.signal_id);
   assert.equal(chart.root.dataset.selectedCode, selected.code);
@@ -3182,7 +3266,7 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.doesNotMatch(monitorSummary, /verified|READY/);
   assert.match(
     Ui.priorityMonitorDiagnosticsText(monitorHealth, { signal_count: 0 }),
-    /总预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟段差复查 新鲜5分钟信号 3 只 · 超过10个交易分钟未排队 11 只.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*通知送达 已验证（已有成功送达证明）/,
+    /总预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的新鲜5分钟候选 3 只 · 已过定位时窗（仅诊断、不计入当前结果） 11 只.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*通知送达 已验证（已有成功送达证明）/,
   );
   const preparingSectorScope = {
     ...monitorHealth,
@@ -3229,17 +3313,14 @@ test("operator status copy explains degraded state without exposing internal cod
       priority_monitor_last_code_count: 2,
       priority_monitor_immediate_universe_count: 1,
       priority_monitor_expired_segment_universe_count: 11,
-    }, {}, 0),
-    "最近一轮1分钟原生复查 2 只，其中新鲜5分钟信号 1 只 · 当前未出现严格1m/L0段差证据 · 另有 11 只已超过10个交易分钟，不再占用1分钟队列 · 全市场完整扫描尚未发布",
+    }, 0),
+    "当前没有5分钟操作候选完成1m/L0区间套精确定位 · 另有 1 只新鲜5分钟候选正在等待1分钟定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
   );
   assert.equal(
-    Ui.segmentScopeText({}, {
-      coverage_cycle_complete: true,
-      coverage_cycle_completed_symbol_count: 5091,
-      discovered_symbol_count: 5101,
-      pending_symbol_count: 0,
+    Ui.segmentScopeText({
+      priority_monitor_expired_segment_universe_count: 11,
     }, 3),
-    "当前没有新鲜5分钟信号进入1分钟段差复查 · 当前已发布 3 条严格1m/L0段差证据 · 全市场扫描已完成 5091/5101",
+    "当前 3 个5分钟操作候选已完成1m/L0区间套精确定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
   );
   assert.equal(
     Ui.priorityMonitorText({ priority_monitor_status: "not_due" }, {}),
@@ -3525,7 +3606,7 @@ test("period path and evidence groups separate established missing blocking and 
   );
   assert.equal(
     segmentNode.boundary,
-    "段差证据已保留；定位边界需人工核对",
+    "区间套证据已保留；定位边界需人工核对",
   );
 
   const groups = Ui.evidenceGroupsForSignal(signal);

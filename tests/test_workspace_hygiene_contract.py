@@ -60,6 +60,10 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert ".cache\\chanlun_human_review_forward" in source
     assert ".cache\\chanlun_human_review" in source
     assert ".cache\\chanlun_qmt_sector_ledger" in source
+    assert 'Category "legacy_cache"' in source
+    assert ".cache\\chanlun_v3_human_review_forward" in source
+    assert ".cache\\chanlun_v31_csi300_broad_pool" in source
+    assert ".cache\\historical_backtest_preflight_report_20260816" in source
     assert "qmt_runtime_*.log" in source
 
 

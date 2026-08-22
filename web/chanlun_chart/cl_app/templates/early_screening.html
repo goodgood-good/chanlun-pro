@@ -116,9 +116,9 @@
       <section class="es-summary" aria-label="实时快照摘要">
         <article><span>合格板块</span><strong id="es-sector-count">0</strong><small>全部进入股票扫描</small></article>
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>可含未完成线段，仅供提前观察</small></article>
-        <article class="is-trigger"><span>5分钟操作确认</span><strong id="es-triggered-count">0</strong><small>达到操作确认后立即通知；后续结构证据和1分钟段差可稍后补充</small></article>
-        <article class="is-segment"><span>严格 1m/L0 段差证据</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">当前已发布范围；全周期扫描未完成前不是全市场终值。证据存在与买入定位窗口是否过期分开显示；不改变5分钟买卖点是否成立</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看段差证据</button></article>
-        <article class="is-action"><span>当前精确执行就绪</span><strong id="es-precise-count">0</strong><small>必须同时满足同向1m/L0区间套、定位边界有效以及买入/卖出操作许可；与“有段差证据”分开统计</small></article>
+        <article class="is-trigger"><span>当前 5m 操作确认</span><strong id="es-triggered-count">0</strong><small>5分钟是交易级别，决定主信号是否成立；1分钟定位可在首报后补充</small></article>
+        <article class="is-segment"><span>当前 1m 区间套定位</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">仅统计当前5分钟操作候选中，同向1m/L0区间套已经形成且精确位置仍有效的买卖点；不累计历史证据</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看当前定位</button></article>
+        <article class="is-action"><span>当前精确执行就绪</span><strong id="es-precise-count">0</strong><small>在1分钟完成精确定位后，还必须通过买入/卖出操作许可与风险门；1分钟不生成独立交易信号</small></article>
       </section>
       <details class="es-summary-details">
         <summary>其他统计</summary>
@@ -284,12 +284,12 @@
               <p class="hr-feedback-rule">复核记录只保存中枢、走势、级别、买卖点和失效条件判断，不会创建任何委托。</p>
                 <label>中枢判断<select name="center_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认</option><option value="REJECTED">否决</option></select></label>
                 <label>走势类型<select name="trend_judgement" required><option value="UNCERTAIN">不确定</option><option value="UP">上涨</option><option value="DOWN">下跌</option><option value="CONSOLIDATION">盘整</option></select></label>
-                <label>级别判断<select name="level_judgement" required><option value="UNCERTAIN">不确定</option><option value="30M">确认 30m 环境级别</option><option value="5M">确认 5m 操作买卖级别</option><option value="1M">确认 1m 段差级别</option><option value="OTHER">其他级别</option></select></label>
+                <label>级别判断<select name="level_judgement" required><option value="UNCERTAIN">不确定</option><option value="30M">确认 30m 环境级别</option><option value="5M">确认 5m 操作买卖级别</option><option value="1M">确认 1m 区间套定位</option><option value="OTHER">其他级别</option></select></label>
                 <label>买卖点<select name="point_judgement" required><option value="UNCERTAIN">不确定</option><option value="BUY_1">一买</option><option value="BUY_2">二买</option><option value="BUY_3">三买</option><option value="SELL_1">一卖</option><option value="SELL_2">二卖</option><option value="SELL_3">三卖</option><option value="NONE">不是买卖点</option></select></label>
                 <label>分解方法<select name="decomposition_judgement" required><option value="UNCERTAIN">不确定</option><option value="SAME_LEVEL">同级别分解</option><option value="CENTER">中枢分解</option><option value="COMBINED">两者结合</option></select></label>
                 <label>中枢扩展<select name="center_expansion_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认存在扩展</option><option value="REJECTED">确认不存在扩展</option></select></label>
                 <label>九段升级<select name="nine_segment_upgrade_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认满足升级</option><option value="REJECTED">确认不满足升级</option></select></label>
-                <label>1分钟段差判断<select name="locator_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">段差有效</option><option value="REJECTED">段差无效</option></select></label>
+                <label>1分钟区间套定位判断<select name="locator_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">定位有效</option><option value="REJECTED">定位无效</option></select></label>
                 <label>处置<select name="disposition" required><option value="WATCH">继续观察</option><option value="REJECT">拒绝</option><option value="NEEDS_MORE_DATA">需要更多数据</option></select></label>
                 <label class="hr-notes">复核笔记<textarea name="notes" maxlength="4000" rows="3" placeholder="记录中枢区间、分解依据、失效条件或仍需核对的原文规则"></textarea></label>
                 <button id="hr-submit" class="es-button" type="submit">保存复核记录</button>
@@ -364,13 +364,13 @@
               </fieldset>
 
               <fieldset class="es-filter-group">
-                <legend>1分钟段差</legend>
+                <legend>1分钟区间套定位</legend>
                 <div class="es-filter-buttons">
-                  <button class="is-active" type="button" data-segment-state="all" aria-pressed="true">全部段差状态</button>
-                  <button type="button" data-segment-state="present" aria-pressed="false">有段差证据</button>
-                  <button type="button" data-segment-state="current" aria-pressed="false">买入定位窗口有效</button>
-                  <button type="button" data-segment-state="historical" aria-pressed="false">买入窗口已过/不可用</button>
-                  <button type="button" data-segment-state="absent" aria-pressed="false">段差未出现</button>
+                  <button class="is-active" type="button" data-segment-state="all" aria-pressed="true">全部定位状态</button>
+                  <button type="button" data-segment-state="present" aria-pressed="false">保留区间套证据</button>
+                  <button type="button" data-segment-state="current" aria-pressed="false">当前精确定位有效</button>
+                  <button type="button" data-segment-state="historical" aria-pressed="false">历史定位已过/不可用</button>
+                  <button type="button" data-segment-state="absent" aria-pressed="false">等待1分钟定位</button>
                 </div>
               </fieldset>
 
@@ -529,7 +529,7 @@
                     <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
                   </article>
                   <article class="es-chart-card is-1m" data-frequency="1m">
-                    <header><strong>1m 段差辅助</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <header><strong>1m 区间套精确定位</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
                     <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
                   </article>
                   <div class="es-chart-resizer is-columns" data-chart-resizer="columns" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整图表左右比例" title="拖动调节左右比例，双击恢复默认"></div>
@@ -601,9 +601,9 @@
               </button>
               <i aria-hidden="true">→</i>
               <button type="button" data-period-node="1m" data-tone="unknown" aria-pressed="false">
-                <span><b>04</b>1m 段差</span>
+                <span><b>04</b>1m 精确定位</span>
                 <strong data-period-state="1m">可选</strong>
-                <small data-period-summary="1m">尚未取得段差证据（不阻断5分钟）</small>
+                <small data-period-summary="1m">尚未完成区间套精确定位（不影响5分钟主信号）</small>
                 <em data-period-boundary="1m">只作定位；不能独立授权买卖</em>
               </button>
             </nav>

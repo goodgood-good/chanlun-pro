@@ -78,6 +78,42 @@ foreach ($target in $fixedTargets) {
         -Category $target.category
 }
 
+# These cache namespaces and one-off probe outputs were retired before the
+# current unversioned runtime ledgers. Keep the list explicit so cleanup can
+# never expand to the active chanlun_human_review*, chanlun_qmt_sector_ledger,
+# chanlun_scheduler, or chanlun_web_watchdog directories by accident.
+$legacyCacheTargets = @(
+    ".cache\chanlun_v3_available_data",
+    ".cache\chanlun_v3_external_pit",
+    ".cache\chanlun_v3_human_review",
+    ".cache\chanlun_v3_human_review_forward",
+    ".cache\chanlun_v3_qmt_sector_ledger",
+    ".cache\chanlun_v3_scheduler",
+    ".cache\chanlun_v31_159919",
+    ".cache\chanlun_v31_159925",
+    ".cache\chanlun_v31_510330",
+    ".cache\chanlun_v31_510360",
+    ".cache\chanlun_v31_510380",
+    ".cache\chanlun_v31_510390",
+    ".cache\chanlun_v31_csi300_broad_pool",
+    ".cache\chanlun_v31_csi300_etfs",
+    ".cache\diagnostics",
+    ".cache\dingtalk_sdk_probe",
+    ".cache\fixed_year_local_probe",
+    ".cache\fixed_year_local_probe_16",
+    ".cache\fixed_year_preflight_current",
+    ".cache\fixed_year_preflight_current_v2",
+    ".cache\fixed_year_probe",
+    ".cache\historical_backtest_preflight_fix_20260816",
+    ".cache\historical_backtest_preflight_report_20260816",
+    ".cache\icon-preview"
+)
+foreach ($target in $legacyCacheTargets) {
+    Add-CleanupCandidate `
+        -LiteralPath (Join-Path $repositoryRoot $target) `
+        -Category "legacy_cache"
+}
+
 $pythonCaches = @(
     Get-ChildItem -LiteralPath $repositoryRoot -Directory -Force -Recurse `
         -Filter "__pycache__" -ErrorAction SilentlyContinue
