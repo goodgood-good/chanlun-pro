@@ -29,6 +29,7 @@ test('drawing persistence stores only current user sources and validates acknowl
   assert.match(source, /groups:\s*\{\}/);
   assert.match(source, /enqueueLatestDrawingSave/);
   assert.match(source, /payload\.status\s*!==\s*'ok'/);
+  assert.doesNotMatch(source, /saveChartToServer/);
 });
 
 test('watchlist mutations use the CSRF-refreshing request layer', () => {

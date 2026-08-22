@@ -18,8 +18,9 @@ from sqlalchemy import (
     Index,
     create_engine,
     func,
+    inspect,
 )
-from sqlalchemy.dialects.mysql import insert
+from sqlalchemy.dialects.mysql import LONGTEXT as MySQLLongText, insert
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -35,7 +36,7 @@ warnings.filterwarnings("ignore")
 
 from chanlun.db_models.base import Base
 from chanlun.db_models.cache import TableByCache
-from chanlun.db_models.tv_charts import TableByTVCharts
+from chanlun.db_models.tv_charts import TableByTVCharts, TV_CHART_NAME_MAX_LENGTH
 from chanlun.db_models.zixuan import TableByZixuan
 from chanlun.db_models.zixuan_group import TableByZxGroup
 
@@ -92,6 +93,85 @@ def _assert_safe_test_database_config() -> None:
         raise RuntimeError(
             "Tests require an isolated SQLite database under CHANLUN_TEST_DATA_PATH"
         )
+
+
+def _ensure_tv_chart_name_capacity(engine) -> bool:
+    """Expand the legacy MySQL drawing/layout name column when required.
+
+    ``Base.metadata.create_all`` creates missing tables but deliberately does not
+    alter existing columns.  Older installations therefore keep ``VARCHAR(50)``,
+    which is one character too short for the standard currency-spot drawing key
+    ``drawings_default_default_CURRENCY_SPOT:BTC/USDT_all``.
+
+    SQLite does not enforce the declared VARCHAR length, so only MySQL requires
+    an in-place schema upgrade.  Returning whether DDL ran keeps this migration
+    straightforward to verify and makes repeated startups idempotent.
+    """
+    if engine.dialect.name not in {"mysql", "mariadb"}:
+        return False
+
+    columns = inspect(engine).get_columns(TableByTVCharts.__tablename__)
+    name_column = next(
+        (column for column in columns if column["name"] == "name"),
+        None,
+    )
+    if name_column is None:
+        raise RuntimeError("cl_tv_charts.name column is missing after table creation")
+
+    current_length = getattr(name_column["type"], "length", None)
+    if current_length is None or current_length >= TV_CHART_NAME_MAX_LENGTH:
+        return False
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE `cl_tv_charts` "
+            f"MODIFY COLUMN `name` VARCHAR({TV_CHART_NAME_MAX_LENGTH}) NULL "
+            "COMMENT '布局名称'"
+        )
+    LogUtil.info(
+        "Expanded cl_tv_charts.name from VARCHAR(%s) to VARCHAR(%s)",
+        current_length,
+        TV_CHART_NAME_MAX_LENGTH,
+    )
+    return True
+
+
+def _ensure_tv_chart_content_capacity(engine) -> bool:
+    """Expand legacy MySQL ``content`` columns to LONGTEXT when required.
+
+    A fresh SQLAlchemy ``Text`` column is only 64 KiB on MySQL, while saved
+    TradingView layouts and manual drawing collections can be substantially
+    larger.  Existing installations are upgraded in place; SQLite has no
+    equivalent enforced text-size ceiling and needs no DDL.
+    """
+    if engine.dialect.name not in {"mysql", "mariadb"}:
+        return False
+
+    columns = inspect(engine).get_columns(TableByTVCharts.__tablename__)
+    content_column = next(
+        (column for column in columns if column["name"] == "content"),
+        None,
+    )
+    if content_column is None:
+        raise RuntimeError("cl_tv_charts.content column is missing after table creation")
+
+    current_type = content_column["type"]
+    if (
+        isinstance(current_type, MySQLLongText)
+        or str(current_type).upper() == "LONGTEXT"
+    ):
+        return False
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE `cl_tv_charts` "
+            "MODIFY COLUMN `content` LONGTEXT NULL COMMENT '布局内容'"
+        )
+    LogUtil.info(
+        "Expanded cl_tv_charts.content from %s to LONGTEXT",
+        current_type,
+    )
+    return True
 
 
 @fun.singleton
@@ -154,6 +234,8 @@ class DB(object):
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
 
         Base.metadata.create_all(self.engine)
+        _ensure_tv_chart_name_capacity(self.engine)
+        _ensure_tv_chart_content_capacity(self.engine)
 
         self.__cache_tables = {}
         # 轻量级缓存：最后一根K线时间，降低重复查询成本。

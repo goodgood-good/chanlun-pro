@@ -1253,6 +1253,9 @@ class ChartManager {
     scheduleDrawingsSave(reason = 'unspecified') {
         if (!this.chart || this.shouldSuppressDrawingSave()) return Promise.resolve();
         if (typeof this.chart.getLineToolsState !== 'function') return Promise.resolve();
+        if (!this.save_load_adapter || typeof this.save_load_adapter.saveLineToolsAndGroups !== 'function') {
+            return Promise.resolve();
+        }
 
         try {
             this._pendingSaveState = this.chart.getLineToolsState();
@@ -1279,11 +1282,7 @@ class ChartManager {
                 }
 
                 try {
-                    if (this.save_load_adapter && typeof this.save_load_adapter.saveLineToolsAndGroups === 'function') {
-                        await this.save_load_adapter.saveLineToolsAndGroups('default', 'default', state, { reason });
-                    } else if (typeof this.widget?.saveChartToServer === 'function') {
-                        await this.widget.saveChartToServer();
-                    }
+                    await this.save_load_adapter.saveLineToolsAndGroups('default', 'default', state, { reason });
                 } catch (e) {
                     console.debug('[DEBUG-CHARTS] drawing save skipped', e);
                 }

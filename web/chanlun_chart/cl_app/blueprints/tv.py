@@ -1052,12 +1052,30 @@ def tv_drawings(api_revision):
                 "status": "error",
                 "message": "state must be a JSON object.",
             }, 400
+        if content.get("schema") != _USER_DRAWING_STATE_SCHEMA:
+            # A browser tab can keep running the previous JavaScript bundle
+            # across a server deployment.  A successful quarantine response
+            # stops its failure/retry loop without allowing an old or
+            # schema-less payload (which may contain automatic Chanlun shapes)
+            # to overwrite the current manual-only record.
+            return {
+                "status": "ok",
+                "ignored": True,
+                "reason_code": "LEGACY_DRAWING_STATE_QUARANTINED",
+            }
         normalized = _normalize_user_drawing_state(content)
         if normalized is None:
             return {
                 "status": "error",
-                "message": "unsupported drawing state schema",
+                "message": "invalid drawing state",
             }, 400
+        if not normalized["sources"]:
+            # An empty manual-drawing state has no information to persist.
+            # Removing the row keeps the table from filling with one empty
+            # record per symbol/resolution while GET still returns the same
+            # canonical empty state.
+            db.tv_chart_del_by_name("drawing", drawing_name, client_id, user_id)
+            return {"status": "ok"}
         db.tv_chart_save(
             "drawing",
             client_id,
