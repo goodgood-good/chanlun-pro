@@ -214,6 +214,10 @@ tests/core/baselines.local.json
 # Keep the unique trading specification and formal audit reports visible.
 # The large lesson corpus stays protected by its tree-hash manifest.
 /audit/chanlun_lesson_corpus/
+# Full-market QMT symbol/prefix checkpoints are reproducible local evidence.
+# Keep the compact certified report and causality gate outside this directory
+# visible to Git, but never recommit a partial raw checkpoint set.
+/audit/chanlun_trading_system_backtest/fixed_year_2025_2026/
 !audit/chanlun_live_strategy/*.md
 !audit/chanlun_live_integration/*.md
 !audit/chanlun_trading_system_forward_paper/*.md

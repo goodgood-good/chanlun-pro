@@ -21,7 +21,9 @@ from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import StrengthSnapshot
 from chanlun.decision_support.trading_system.structure_adapter import (
+    convert_current_confirmed_point_evidence,
     extract_confirmed_points,
+    extract_current_confirmed_points,
     extract_one_minute_segment_difference_points,
 )
 from chanlun.decision_support.trading_system.provisional import (
@@ -362,6 +364,45 @@ def test_adapter_reads_only_strict_points() -> None:
     assert points[0].available_at == raw.available_at
     assert points[0].price_basis_revision == raw.price_basis_revision
     assert points[0].structure_anchor_price == float(raw.structure_anchor_price)
+
+
+def test_current_adapter_keeps_geometry_time_after_later_audit_lock() -> None:
+    raw = _aware_point("1sell")
+    evidence = _evidence((raw,))
+    level = evidence.structure.levels[0]
+    anchor_unit = next(
+        unit for unit in level.units if unit.unit_id == raw.anchor_unit_id
+    )
+    formed_at = anchor_unit.available_at
+    structure = replace(
+        evidence.structure,
+        levels=(
+            replace(
+                level,
+                units=tuple(
+                    replace(unit, formed_at=formed_at)
+                    if unit.unit_id == raw.anchor_unit_id
+                    else unit
+                    for unit in level.units
+                ),
+            ),
+            *evidence.structure.levels[1:],
+        ),
+    )
+
+    points = convert_current_confirmed_point_evidence(
+        structure,
+        confirmed_points=evidence.confirmed_points,
+        approaching_points=evidence.approaching_points,
+        code="SZ.000001",
+        source_frequency="1m",
+        as_of=AS_OF,
+    )
+
+    assert len(points) == 1
+    assert points[0].confirmed_at == formed_at
+    assert points[0].available_at == formed_at
+    assert "geometry_confirmed_before_audit_lock" in points[0].evidence_codes
 
 
 def test_adapter_rejects_point_available_after_as_of() -> None:

@@ -149,6 +149,50 @@ def test_local_kline_rejects_changed_sentinel_or_invalid_ohlc(tmp_path: Path) ->
         )
 
 
+def test_local_kline_validates_only_the_exact_requested_history_tail(
+    tmp_path: Path,
+) -> None:
+    anchor = datetime(2026, 7, 24, 0, 0, tzinfo=CN)
+    path = tmp_path / "SH" / "86400" / "600000.DAT"
+    rows = (
+        # This unrelated vendor-era row is malformed (high < open), but it is
+        # older than the two-record production context requested below.
+        (
+            int((anchor - timedelta(days=4)).timestamp()),
+            10_000,
+            9_900,
+            9_800,
+            9_850,
+            10,
+        ),
+        *tuple(
+            (
+                int((anchor - timedelta(days=offset)).timestamp()),
+                10_000 + offset,
+                10_100 + offset,
+                9_900 + offset,
+                10_050 + offset,
+                10,
+            )
+            for offset in (2, 1, 0)
+        ),
+    )
+    _write_kline(path, rows)
+
+    frame, audit = read_qmt_local_kline(
+        data_dir=tmp_path,
+        code="SH.600000",
+        frequency="1d",
+        start_at=anchor,
+        end_at=anchor,
+        history_bars_before_start=2,
+    )
+
+    assert frame["time"].tolist() == [row[0] * 1000 for row in rows[-3:]]
+    assert audit.selected_record_count == 3
+    assert audit.source_record_count == 4
+
+
 def _pershare_record(
     report: datetime,
     announced: datetime,

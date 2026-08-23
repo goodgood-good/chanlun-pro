@@ -19,6 +19,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -29,14 +30,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from chanlun.core.cl import CL
-from chanlun.core.strict_structure.current_events import (
-    current_strict_point_evidence,
-    terminal_segment_reference,
-)
 from chanlun.core.strict_structure.evidence_assembler import (
     StrictEvidenceAssembler,
 )
 from chanlun.core.strict_structure.formal_state import (
+    current_formal_direction,
     current_formal_direction_from_components,
 )
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
@@ -67,14 +65,23 @@ from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
     read_qmt_local_kline,
     resolve_qmt_local_data_dir,
 )
-from chanlun.decision_support.trading_system.context import classify_context
+from chanlun.decision_support.trading_system.context import (
+    classify_context,
+    context_point_max_age,
+)
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
+from chanlun.decision_support.trading_system.higher_timeframe_gate import (
+    HigherTimeframeGateBundle,
+    QmtHigherTimeframeGateSource,
+    unresolved_higher_timeframe_gates,
+)
 from chanlun.decision_support.trading_system.lifecycle import (
     five_minute_segment_difference_window_start,
     five_minute_setup_expires_at,
     five_minute_setup_family_lane,
     five_minute_setup_is_in_policy_scope,
     is_one_minute_segment_difference,
+    structural_point_occurrence_id,
 )
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
@@ -91,9 +98,20 @@ from chanlun.decision_support.trading_system.operation_level import (
 from chanlun.decision_support.trading_system.runtime_config import (
     strict_cl_config,
 )
+from chanlun.decision_support.trading_system.screening_runtime import (
+    screening_evidence_from_frame,
+)
+from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_CANONICAL_REQUEST_BARS,
+    SCREENING_MINIMUM_BARS_BY_FREQUENCY,
+    SCREENING_WARMUP_DIFFERENCE_CODES,
+    SCREENING_WARMUP_REQUIRED_BARS,
+    screening_warmup_reason_code,
+    screening_warmup_tail_signature,
+)
 from chanlun.decision_support.trading_system.structure_adapter import (
-    convert_confirmed_point_evidence,
-    structural_point_id_map,
+    convert_current_confirmed_point_evidence,
+    extract_one_minute_segment_difference_points,
 )
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
 from chanlun.decision_support.trading_system.selection import (
@@ -113,6 +131,7 @@ from chanlun.exchange.price_basis import (
 
 CN = ZoneInfo("Asia/Shanghai")
 FREQUENCIES = ("30m", "5m", "1m")
+FACT_FREQUENCIES = ("d", *FREQUENCIES)
 FRAME_COLUMNS = (
     "code",
     "date",
@@ -127,8 +146,86 @@ FRAME_COLUMNS = (
     "raw_close",
 )
 BASE_FRAME_COLUMNS = FRAME_COLUMNS[:7]
-FACT_SCHEMA = "chanlun-fixed-year-symbol-facts"
-SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts"
+FACT_SCHEMA = "chanlun-fixed-year-symbol-facts-v12"
+SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts-v2"
+
+
+@dataclass(frozen=True, slots=True)
+class FiveMinuteWarmupFact:
+    observed_at: datetime
+    source_closed_at: datetime
+    converged: bool
+    full_bar_count: int
+    suffix_bar_count: int
+    reason_code: str
+    difference_codes: tuple[str, ...] = ()
+    production_five_points: tuple[StructuralPoint, ...] = ()
+    production_one_points: tuple[StructuralPoint, ...] = ()
+    one_minute_bar_count: int = 0
+
+    def __post_init__(self) -> None:
+        observed = normalize_datetime(self.observed_at, "warmup observed_at")
+        source_closed = normalize_datetime(
+            self.source_closed_at,
+            "warmup source_closed_at",
+        )
+        if source_closed > observed:
+            raise ValueError("warmup source close cannot follow its decision")
+        expected_reason = screening_warmup_reason_code(
+            frequency="5m",
+            converged=self.converged,
+            full_bar_count=self.full_bar_count,
+            suffix_bar_count=self.suffix_bar_count,
+        )
+        if self.reason_code != expected_reason:
+            raise ValueError("5m warmup reason contradicts its measurement")
+        if (
+            type(self.difference_codes) is not tuple
+            or len(self.difference_codes) != len(set(self.difference_codes))
+            or not set(self.difference_codes).issubset(
+                SCREENING_WARMUP_DIFFERENCE_CODES
+            )
+            or (self.converged and self.difference_codes)
+        ):
+            raise ValueError("5m warmup difference codes are inconsistent")
+        if type(self.one_minute_bar_count) is not int or self.one_minute_bar_count < 0:
+            raise ValueError("1m production history count is invalid")
+        point_groups = (
+            ("5m", self.production_five_points),
+            ("1m", self.production_one_points),
+        )
+        for frequency, points in point_groups:
+            if type(points) is not tuple:
+                raise ValueError("production execution points must be tuples")
+            if len({point.point_id for point in points}) != len(points):
+                raise ValueError("production execution points must be unique")
+            if any(
+                not isinstance(point, StructuralPoint)
+                or not point.confirmed
+                or point.source_frequency != frequency
+                or point.available_at > observed
+                for point in points
+            ):
+                raise ValueError("production execution point is invalid")
+        if any(
+            point.available_at != observed for point in self.production_one_points
+        ):
+            raise ValueError("production 1m locator must become available now")
+        if (
+            self.one_minute_bar_count
+            < SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
+            and self.production_one_points
+        ):
+            raise ValueError("production 1m locator lacks minimum history")
+        codes = {
+            point.code
+            for _frequency, points in point_groups
+            for point in points
+        }
+        if len(codes) > 1:
+            raise ValueError("production execution points mix symbols")
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "source_closed_at", source_closed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,12 +234,54 @@ class SparseEvaluationFact:
     thirty_direction: ContextDirection
     bar: MinuteBar
     sector_id: str | None = None
+    daily_direction: ContextDirection = "neutral"
+    higher_timeframe_gates: HigherTimeframeGateBundle | None = None
+    one_minute_bar_count: int = SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
 
     def __post_init__(self) -> None:
         observed = normalize_datetime(self.observed_at, "observed_at")
         if self.bar.closed_at != observed:
             raise ValueError("evaluation bar must close at observed_at")
+        if self.daily_direction not in {"up", "down", "neutral"}:
+            raise ValueError("daily direction is invalid")
+        if type(self.one_minute_bar_count) is not int or self.one_minute_bar_count < 0:
+            raise ValueError("evaluation 1m history count is invalid")
+        gates = self.higher_timeframe_gates
+        if gates is not None and any(
+            value.observed_at != observed
+            for value in (gates.market, gates.sector, gates.symbol)
+        ):
+            raise ValueError("higher-timeframe gate must match the evaluation time")
         object.__setattr__(self, "observed_at", observed)
+
+
+@dataclass(frozen=True, slots=True)
+class PointVisibilityInterval:
+    """A half-open interval in which one causal structural point is current."""
+
+    point_id: str
+    visible_from: datetime
+    visible_until: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.point_id, str) or not self.point_id:
+            raise ValueError("point visibility requires a point id")
+        start = normalize_datetime(self.visible_from, "point visible_from")
+        end = (
+            None
+            if self.visible_until is None
+            else normalize_datetime(self.visible_until, "point visible_until")
+        )
+        if end is not None and end <= start:
+            raise ValueError("point visibility interval must be non-empty")
+        object.__setattr__(self, "visible_from", start)
+        object.__setattr__(self, "visible_until", end)
+
+    def contains(self, observed_at: datetime) -> bool:
+        value = normalize_datetime(observed_at, "point visibility observation")
+        return self.visible_from <= value and (
+            self.visible_until is None or value < self.visible_until
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,10 +295,16 @@ class SymbolResearchFacts:
     requested_end: date
     effective_start: date
     row_counts: tuple[tuple[str, int], ...]
+    daily_points: tuple[StructuralPoint, ...]
     thirty_points: tuple[StructuralPoint, ...]
     five_points: tuple[StructuralPoint, ...]
     one_points: tuple[StructuralPoint, ...]
     evaluations: tuple[SparseEvaluationFact, ...]
+    daily_point_visibility: tuple[PointVisibilityInterval, ...] = ()
+    thirty_point_visibility: tuple[PointVisibilityInterval, ...] = ()
+    five_point_visibility: tuple[PointVisibilityInterval, ...] = ()
+    one_point_visibility: tuple[PointVisibilityInterval, ...] = ()
+    five_minute_warmup: tuple[FiveMinuteWarmupFact, ...] = ()
     direction_unavailable_count: int = 0
     security_master: SecurityMasterRecord | None = None
     memberships: tuple[SectorMembershipChange, ...] = ()
@@ -184,11 +329,57 @@ class SymbolResearchFacts:
         if not self.requested_start <= self.effective_start <= self.requested_end:
             raise ValueError("invalid fixed-year fact range")
         names = tuple(name for name, _count in self.row_counts)
-        if names != FREQUENCIES or any(count < 0 for _name, count in self.row_counts):
-            raise ValueError("row counts must cover 30m, 5m and 1m")
+        if names != FACT_FREQUENCIES or any(
+            count < 0 for _name, count in self.row_counts
+        ):
+            raise ValueError("row counts must cover d, 30m, 5m and 1m")
         times = tuple(row.observed_at for row in self.evaluations)
         if times != tuple(sorted(set(times))):
             raise ValueError("evaluation facts must be unique and chronological")
+        warmup_times = tuple(row.observed_at for row in self.five_minute_warmup)
+        if (
+            warmup_times != tuple(sorted(set(warmup_times)))
+            or not set(warmup_times).issubset(times)
+        ):
+            raise ValueError("5m warmup facts must match unique evaluation times")
+        locator_times = {
+            point.available_at
+            for point in self.one_points
+            if point.available_at in set(times)
+            and is_one_minute_segment_difference(point)
+        }
+        if set(warmup_times) != locator_times:
+            raise ValueError(
+                "every candidate 1m locator requires an exact production snapshot"
+            )
+        for frequency, points, visibility in (
+            ("d", self.daily_points, self.daily_point_visibility),
+            ("30m", self.thirty_points, self.thirty_point_visibility),
+            ("5m", self.five_points, self.five_point_visibility),
+            ("1m", self.one_points, self.one_point_visibility),
+        ):
+            point_ids = {point.point_id for point in points}
+            if any(interval.point_id not in point_ids for interval in visibility):
+                raise ValueError(f"{frequency} visibility references an unknown point")
+            interval_order = tuple(
+                (interval.visible_from, interval.point_id)
+                for interval in visibility
+            )
+            if interval_order != tuple(sorted(interval_order)):
+                raise ValueError(
+                    f"{frequency} visibility intervals must be chronological"
+                )
+            intervals_by_point: dict[str, list[PointVisibilityInterval]] = {}
+            for interval in visibility:
+                intervals_by_point.setdefault(interval.point_id, []).append(interval)
+            for intervals in intervals_by_point.values():
+                for previous, current in zip(intervals, intervals[1:]):
+                    if previous.visible_until is None or (
+                        previous.visible_until > current.visible_from
+                    ):
+                        raise ValueError(
+                            f"{frequency} visibility intervals cannot overlap"
+                        )
         if self.direction_unavailable_count < 0:
             raise ValueError("direction unavailable count cannot be negative")
         if self.security_master is not None and self.security_master.code != self.code:
@@ -218,6 +409,7 @@ class SectorResearchFacts:
     row_count: int
     thirty_points: tuple[StructuralPoint, ...]
     assessments: tuple[tuple[datetime, SectorAssessment], ...]
+    thirty_point_visibility: tuple[PointVisibilityInterval, ...] = ()
     direction_unavailable_count: int = 0
     error: str | None = None
 
@@ -242,6 +434,35 @@ class SectorResearchFacts:
         times = tuple(observed_at for observed_at, _row in self.assessments)
         if times != tuple(sorted(set(times))):
             raise ValueError("sector assessments must be unique and chronological")
+        point_ids = {point.point_id for point in self.thirty_points}
+        if len(point_ids) != len(self.thirty_points):
+            raise ValueError("sector point identities must be unique")
+        visibility_ids = {
+            interval.point_id for interval in self.thirty_point_visibility
+        }
+        if visibility_ids != point_ids:
+            raise ValueError("every sector point requires a visibility interval")
+        visibility_by_point: dict[str, list[PointVisibilityInterval]] = {}
+        for interval in self.thirty_point_visibility:
+            visibility_by_point.setdefault(interval.point_id, []).append(interval)
+        for point_id, intervals in visibility_by_point.items():
+            point = next(
+                candidate
+                for candidate in self.thirty_points
+                if candidate.point_id == point_id
+            )
+            if any(interval.visible_from < point.available_at for interval in intervals):
+                raise ValueError("sector point cannot be visible before availability")
+            ordered = tuple(
+                sorted(intervals, key=lambda interval: interval.visible_from)
+            )
+            if tuple(intervals) != ordered:
+                raise ValueError("sector point visibility must be chronological")
+            for previous, current in zip(ordered, ordered[1:]):
+                if previous.visible_until is None or (
+                    previous.visible_until > current.visible_from
+                ):
+                    raise ValueError("sector point visibility cannot overlap")
 
 
 def qmt_native_code(code: str) -> str:
@@ -292,6 +513,7 @@ def load_qmt_frame(
     factors: pd.DataFrame | None = None,
     _allow_native_daily: bool = False,
     _local_five_snapshot: tuple[pd.DataFrame, QMTLocalKlineAudit] | None = None,
+    _history_bars_before_start: int | None = None,
 ) -> pd.DataFrame:
     """读取原始 QMT 行，并只用除权日当时已知信息构建因果分析价格基准。"""
 
@@ -301,6 +523,13 @@ def load_qmt_frame(
     end = normalize_datetime(end_at, "end_at")
     if start > end:
         raise ValueError("start_at cannot follow end_at")
+    if _history_bars_before_start is not None and (
+        type(_history_bars_before_start) is not int
+        or _history_bars_before_start <= 0
+    ):
+        raise ValueError("history bars before start must be a positive integer")
+    if _local_five_snapshot is not None and _history_bars_before_start is not None:
+        raise ValueError("shared QMT snapshots cannot apply a history lookback")
     native = qmt_native_code(code)
     fields = ("time", "open", "high", "low", "close", "volume")
     frame = pd.DataFrame()
@@ -343,6 +572,9 @@ def load_qmt_frame(
         }
         if frequency != "30m":
             reader_arguments["frequency"] = frequency
+            reader_arguments["history_bars_before_start"] = (
+                _history_bars_before_start
+            )
         frame, local_audit = reader(**reader_arguments)  # type: ignore[arg-type]
         if not frame.empty:
             frame.attrs.update(
@@ -365,7 +597,11 @@ def load_qmt_frame(
                         field_list=list(fields),
                         stock_list=[native],
                         period=frequency,
-                        start_time=start.strftime("%Y%m%d%H%M%S"),
+                        start_time=(
+                            ""
+                            if _history_bars_before_start is not None
+                            else start.strftime("%Y%m%d%H%M%S")
+                        ),
                         end_time=end.strftime("%Y%m%d%H%M%S"),
                         count=-1,
                         dividend_type="none",
@@ -400,6 +636,19 @@ def load_qmt_frame(
                         & (candidate["close"] > 0)
                         & (candidate["volume"] >= 0)
                     ].copy()
+                    candidate = candidate[
+                        candidate["time"] <= math.floor(end.timestamp() * 1000)
+                    ].sort_values("time", kind="stable")
+                    if _history_bars_before_start is not None:
+                        start_ms = math.floor(start.timestamp() * 1000)
+                        preceding = candidate[candidate["time"] < start_ms].tail(
+                            _history_bars_before_start
+                        )
+                        current = candidate[candidate["time"] >= start_ms]
+                        candidate = pd.concat(
+                            (preceding, current),
+                            ignore_index=True,
+                        )
                     if not candidate.empty:
                         frame = candidate
                         frame.attrs["qmt_transport"] = "RPC"
@@ -471,6 +720,7 @@ def load_qmt_daily_frame(
     start_at: datetime,
     end_at: datetime,
     factors: pd.DataFrame | None = None,
+    history_bars_before_start: int | None = None,
 ) -> pd.DataFrame:
     """读取 QMT 原生日线，并保持与 1 分钟线相同的因果价格基准。"""
 
@@ -481,6 +731,7 @@ def load_qmt_daily_frame(
         end_at=end_at,
         factors=factors,
         _allow_native_daily=True,
+        _history_bars_before_start=history_bars_before_start,
     )
 
 
@@ -512,7 +763,7 @@ def _symbol_source_revision(
     """
 
     digest = hashlib.sha256()
-    for name in (*FREQUENCIES, "factors"):
+    for name in (*FACT_FREQUENCIES, "factors"):
         frame = factors if name == "factors" else frames[name]
         digest.update(name.encode("utf-8"))
         digest.update(len(frame).to_bytes(8, "big"))
@@ -648,6 +899,7 @@ class CausalStructureEventLedger:
     completed_units: tuple[ConstituentUnit, ...] = ()
     center_completions: tuple[CausalCenterCompletionFact, ...] = ()
     point_anchor_unit_ids: tuple[tuple[str, str], ...] = ()
+    point_visibility: tuple[PointVisibilityInterval, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "points", tuple(self.points))
@@ -659,6 +911,7 @@ class CausalStructureEventLedger:
             "point_anchor_unit_ids",
             tuple(self.point_anchor_unit_ids),
         )
+        object.__setattr__(self, "point_visibility", tuple(self.point_visibility))
         if (
             tuple(
                 sorted(self.points, key=lambda item: (item.available_at, item.point_id))
@@ -719,6 +972,23 @@ class CausalStructureEventLedger:
         unit_ids = {item.unit_id for item in self.completed_units}
         if any(unit_id not in unit_ids for _point_id, unit_id in anchors):
             raise ValueError("causal point anchor references an unknown unit")
+        visibility_order = tuple(
+            (item.visible_from, item.point_id) for item in self.point_visibility
+        )
+        if visibility_order != tuple(sorted(visibility_order)):
+            raise ValueError("causal point visibility must be chronological")
+        visible_point_ids = {item.point_id for item in self.point_visibility}
+        if visible_point_ids != point_ids:
+            raise ValueError("every causal point requires a visibility interval")
+        visibility_by_point: dict[str, list[PointVisibilityInterval]] = {}
+        for interval in self.point_visibility:
+            visibility_by_point.setdefault(interval.point_id, []).append(interval)
+        for intervals in visibility_by_point.values():
+            for previous, current in zip(intervals, intervals[1:]):
+                if previous.visible_until is None or (
+                    previous.visible_until > current.visible_from
+                ):
+                    raise ValueError("causal point visibility cannot overlap")
 
 
 def final_confirmed_structure_events(
@@ -744,13 +1014,80 @@ def _causal_confirmed_points(
     frame: pd.DataFrame,
     *,
     visibility_windows: Sequence[tuple[datetime, datetime]] | None = None,
+    recursive_level_limit: int | None = None,
 ) -> tuple[StructuralPoint, ...]:
     return _causal_confirmed_structure_events(
         code,
         frequency,
         frame,
         visibility_windows=visibility_windows,
+        recursive_level_limit=recursive_level_limit,
+        include_audit_ledger=False,
     ).points
+
+
+def _causally_verified_point_available_at(
+    *,
+    code: str,
+    frequency: str,
+    frame: pd.DataFrame,
+    dates: Sequence[datetime],
+    point: StructuralPoint,
+    checkpoint: datetime,
+    occurrence_cache: dict[int, frozenset[str] | None],
+) -> datetime:
+    """Return the earliest production-observable time for a replay point.
+
+    A live-tail projection evaluated at a later locked-Bi checkpoint can expose
+    a geometrically completed unit whose ``formed_at`` lies much earlier.  That
+    geometry time is causal only when an independent production-sized cold
+    snapshot at that close already exposed the same physical market event.
+    Otherwise later bars discovered the structure and replay must not backfill
+    it into the past.
+
+    Internal center/unit identities may change when the cold window's left
+    boundary changes, so verification uses the stable physical occurrence
+    identity rather than ``point_id``.
+    """
+
+    observed_at = normalize_datetime(checkpoint, "causal point checkpoint")
+    claimed_at = normalize_datetime(point.available_at, "causal point availability")
+    if claimed_at >= observed_at:
+        return claimed_at
+    end = bisect_right(dates, claimed_at)
+    if end <= 0 or dates[end - 1] != claimed_at:
+        return observed_at
+    occurrences = occurrence_cache.get(end)
+    if end not in occurrence_cache:
+        request_bars = SCREENING_CANONICAL_REQUEST_BARS[frequency]
+        minimum_bars = SCREENING_MINIMUM_BARS_BY_FREQUENCY[frequency]
+        if end < minimum_bars:
+            occurrences = None
+        else:
+            start = max(0, end - request_bars)
+            prefix = frame.iloc[start:end].copy().reset_index(drop=True)
+            copy_price_basis_metadata(frame, prefix)
+            try:
+                production_points = _production_current_points(
+                    code,
+                    frequency,
+                    prefix,
+                    as_of=dates[end - 1],
+                )
+            except (StrictStructureContractError, TypeError, ValueError):
+                occurrences = None
+            else:
+                occurrences = frozenset(
+                    structural_point_occurrence_id(candidate)
+                    for candidate in production_points
+                )
+        occurrence_cache[end] = occurrences
+    return (
+        claimed_at
+        if occurrences is not None
+        and structural_point_occurrence_id(point) in occurrences
+        else observed_at
+    )
 
 
 def _causal_confirmed_structure_events(
@@ -759,6 +1096,8 @@ def _causal_confirmed_structure_events(
     frame: pd.DataFrame,
     *,
     visibility_windows: Sequence[tuple[datetime, datetime]] | None = None,
+    recursive_level_limit: int | None = None,
+    include_audit_ledger: bool = True,
 ) -> CausalStructureEventLedger:
     """只从已锁定笔前缀构建并返回只追加事实。
 
@@ -796,6 +1135,14 @@ def _causal_confirmed_structure_events(
     def checkpoint_is_relevant(value: datetime) -> bool:
         return windows is None or any(start <= value <= end for start, end in windows)
 
+    def checkpoint_visibility_floor(value: datetime) -> datetime | None:
+        if windows is None:
+            return None
+        return next(
+            (start for start, end in windows if start <= value <= end),
+            None,
+        )
+
     state = strict_state(code, frequency, frame)
     state.process_klines(frame)
     locked_bis = tuple(item for item in state.get_bis() if item.locked_at is not None)
@@ -805,8 +1152,21 @@ def _causal_confirmed_structure_events(
     price_quantum = Decimal(str(frame.attrs["structure_price_quantum"]))
     price_basis_revision = cast(str, frame.attrs["price_basis_revision"])
     strength = MacdStrengthProvider(state)
-    max_levels = len(recursive_level_labels(frequency))
+    available_levels = len(recursive_level_labels(frequency))
+    if recursive_level_limit is None:
+        max_levels = available_levels
+    elif (
+        type(recursive_level_limit) is not int
+        or not 1 <= recursive_level_limit <= available_levels
+    ):
+        raise ValueError("recursive level limit is outside the frequency catalog")
+    else:
+        max_levels = recursive_level_limit
     recursive_engine = StrictRecursiveEngine(
+        max_levels=max_levels,
+        center_prefix_cache=OrderedDict(),
+    )
+    live_recursive_engine = StrictRecursiveEngine(
         max_levels=max_levels,
         center_prefix_cache=OrderedDict(),
     )
@@ -815,13 +1175,31 @@ def _causal_confirmed_structure_events(
     frozen_segments = []
     point_ledger: dict[str, StructuralPoint] = {}
     point_anchor_ledger: dict[str, str] = {}
+    point_visibility: list[PointVisibilityInterval] = []
+    active_point_starts: dict[str, datetime] = {}
     trend_ledger: dict[str, TrendType] = {}
     unit_ledger: dict[tuple[str, int], ConstituentUnit] = {}
     center_ledger: dict[tuple[str, int], CausalCenterCompletionFact] = {}
+    production_occurrences_by_end: dict[int, frozenset[str] | None] = {}
+    frame_dates = tuple(
+        pd.Timestamp(value).to_pydatetime() for value in frame["date"]
+    )
     next_segment_start: int | None = None
-    prefix_size = 3
+    # Several Bis may become locked at the same completed-bar timestamp.  That
+    # close is one externally observable production snapshot, so replay only
+    # evaluates the largest prefix for each timestamp and never publishes an
+    # intermediate state from the same close.
+    prefix_size_by_checkpoint: dict[datetime, int] = {}
+    for prefix_size in range(3, len(locked_bis) + 1):
+        checkpoint = cast(datetime, locked_bis[prefix_size - 1].locked_at)
+        if checkpoint_is_relevant(checkpoint):
+            prefix_size_by_checkpoint[checkpoint] = prefix_size
+    prefix_sizes = tuple(
+        prefix_size_by_checkpoint[checkpoint]
+        for checkpoint in sorted(prefix_size_by_checkpoint)
+    )
 
-    while prefix_size <= len(locked_bis):
+    for prefix_size in prefix_sizes:
         calculator = XdCalculator()
         prefix = list(locked_bis[:prefix_size])
         if next_segment_start is None:
@@ -830,39 +1208,39 @@ def _causal_confirmed_structure_events(
             # 冻结线段是不可逆因果边界，只重建仍活动的后缀；未来笔不允许穿过已可观测点
             # 向前合并。
             calculator._build_segments(prefix, next_segment_start)
-        completed = tuple(item for item in calculator.xds if item.is_done())
-        if not completed:
-            prefix_size += 1
-            continue
-
-        segment = completed[0]
         checkpoint = locked_bis[prefix_size - 1].locked_at
         if checkpoint is None:
             raise ValueError("causal segment checkpoint must be locked")
-        # 首次产生线段的前缀是最强可见性边界；辅助对象更早的内部时间戳绝不能优先于
-        # 此处实际消费的完整输入前缀。
-        segment.locked_at = checkpoint
-        segment.done = True
-        frozen_segments.append(segment)
-
-        following_start = int(segment.end_line.index) + 1
-        if next_segment_start is not None and following_start <= next_segment_start:
-            raise RuntimeError("causal segment replay did not advance")
-        next_segment_start = following_start
-
-        if not checkpoint_is_relevant(checkpoint):
+        completed = tuple(item for item in calculator.xds if item.is_done())
+        if not completed:
             continue
+        for segment in completed:
+            # All structural changes produced by one locked-Bi prefix are one
+            # atomic close observation.  No consumer can see the transient
+            # states between several segments that freeze at this timestamp.
+            segment.locked_at = checkpoint
+            segment.done = True
+            following_start = int(segment.end_line.index) + 1
+            if (
+                next_segment_start is not None
+                and following_start <= next_segment_start
+            ):
+                raise RuntimeError("causal segment replay did not advance")
+            frozen_segments.append(segment)
+            next_segment_start = following_start
 
-        units = adapt_lines(
-            frozen_segments,
-            0,
-            SourceKind.SEGMENT,
-            price_quantum,
-            checkpoint,
-            unit_lock_registry,
+        units = (
+            adapt_lines(
+                frozen_segments,
+                0,
+                SourceKind.SEGMENT,
+                price_quantum,
+                checkpoint,
+                unit_lock_registry,
+            )
+            if include_audit_ledger
+            else ()
         )
-        if len(units) < 5:
-            continue
         structure = recursive_engine.calculate(
             units,
             price_basis_revision=price_basis_revision,
@@ -937,69 +1315,169 @@ def _causal_confirmed_structure_events(
             str,
             state.get_config()["strict_config_revision"],
         )
-        assembler = StrictEvidenceAssembler(
+        # The append-only ledgers above intentionally use audit-locked units.
+        # The production trading view does not: it also promotes a point on the
+        # latest geometrically completed segment before the later audit lock.
+        # Rebuild the exact live-tail projection from this causal Bi prefix and
+        # pass it through the same adapter used by screening.
+        live_calculator = XdCalculator()
+        live_calculator.calculate(prefix)
+        live_units = adapt_lines(
+            live_calculator.xds,
+            0,
+            SourceKind.SEGMENT,
+            price_quantum,
+            checkpoint,
+            # Each historical close is an independent cold production
+            # projection.  Cross-snapshot identity is enforced by the causal
+            # point ledger below; the per-CL unit registry is intentionally not
+            # shared between cold snapshots.
+            UnitLockRegistry(price_basis_revision),
+        )
+        live_structure = live_recursive_engine.calculate(
+            live_units,
+            price_basis_revision=price_basis_revision,
+            strength=strength,
+        )
+        live_assembler = StrictEvidenceAssembler(
             symbol=code,
             source_frequency=frequency,
             source_closed_at=checkpoint,
             price_basis_revision=price_basis_revision,
             structure_price_quantum=price_quantum,
             strict_config_revision=strict_config_revision,
-            structure=structure,
+            structure=live_structure,
             strength=strength,
+            projection_cache=live_recursive_engine.center_prefix_cache,
         )
-        raw_points = assembler.confirmed_points()
-        raw_current = current_strict_point_evidence(structure, raw_points)
-        converted_point_ids = structural_point_id_map(
-            raw_points,
-            code=code,
-            source_frequency=frequency,
+        needs_geometry_projection = any(
+            target is not None and not target.locked
+            for level in live_structure.levels
+            for target in (
+                next(
+                    (
+                        unit
+                        for unit in reversed(level.units)
+                        if not unit.forming
+                        and (unit.locked or unit.formed_at is not None)
+                    ),
+                    None,
+                ),
+            )
         )
-        raw_anchor_by_point_id = {
-            converted_point_ids[raw.point_id]: raw.anchor_unit_id for raw in raw_points
-        }
-        converted = convert_confirmed_point_evidence(
-            raw_points,
+        current_points = convert_current_confirmed_point_evidence(
+            live_structure,
+            confirmed_points=live_assembler.confirmed_points(),
+            # An approaching point can become operational only when it belongs
+            # to a geometrically completed, not-yet-audit-locked terminal unit.
+            # Forming-tail previews are always rejected by the shared adapter,
+            # so constructing them at every locked-Bi checkpoint is pure waste.
+            approaching_points=(
+                live_assembler.approaching_points()
+                if needs_geometry_projection
+                else ()
+            ),
             code=code,
             source_frequency=frequency,
             as_of=checkpoint,
         )
-        current_ids = {
-            converted_point_ids[point.point_id] for point in raw_current
+        current_by_id = {point.point_id: point for point in current_points}
+        if len(current_by_id) != len(current_points):
+            raise ValueError("current backtest point identities are not unique")
+        live_units_by_key = {
+            (unit.structural_level, unit.unit_id): unit
+            for level in live_structure.levels
+            for unit in level.units
         }
-        current_terminal_references = {
-            converted_point_ids[point.point_id]: terminal_segment_reference(
-                structure,
-                structural_level=point.structural_level,
-                unit_id=point.anchor_unit_id,
-            )
-            for point in raw_current
-        }
-        if any(
-            reference is None
-            for reference in current_terminal_references.values()
-        ):
-            raise ValueError("current backtest point lost terminal segment lineage")
-        for point in (
-            item for item in converted if item.point_id in current_ids
-        ):
-            if windows is not None and not any(
-                start <= point.available_at <= end for start, end in windows
-            ):
-                # 在活动设置窗口之前已可用的点属于历史背景，不是窗口内首个检查点新确认的触发。
+
+        # Persist the exact current-state transitions.  Production consumes
+        # the strict tail projection, so replay must not approximate this
+        # state with an age calculated from a potentially old anchor.
+        visible_current_ids = set(current_by_id)
+        for point_id in tuple(active_point_starts):
+            if point_id in visible_current_ids:
                 continue
-            first_seen = replace(
-                point,
-                available_at=max(point.available_at, checkpoint),
-                terminal_segment=current_terminal_references[point.point_id],
+            visible_from = active_point_starts.pop(point_id)
+            point_visibility.append(
+                PointVisibilityInterval(
+                    point_id=point_id,
+                    visible_from=visible_from,
+                    visible_until=checkpoint,
+                )
             )
-            point_ledger.setdefault(first_seen.point_id, first_seen)
-            anchor_unit_id = raw_anchor_by_point_id[first_seen.point_id]
+        for point_id, point in current_by_id.items():
+            reference = point.terminal_segment
+            if reference is None:
+                raise ValueError("current backtest point lost terminal segment lineage")
+            anchor_unit = live_units_by_key.get(
+                (reference.structural_level, reference.unit_id)
+            )
+            if anchor_unit is None or anchor_unit.forming:
+                raise ValueError(
+                    "operational point anchor is not a completed live unit"
+                )
+            unit_ledger.setdefault(
+                (anchor_unit.unit_id, anchor_unit.structural_level),
+                replace(
+                    anchor_unit,
+                    available_at=max(anchor_unit.available_at, checkpoint),
+                ),
+            )
+            first_observation = point_id not in point_ledger
+            if first_observation:
+                # Preserve an earlier geometry clock only when the same
+                # physical event is independently observable from the exact
+                # production cold window at that close.  This keeps real 1m
+                # locators at their precise minute while preventing a
+                # structure discovered by future bars from being backfilled.
+                first_visible_at = _causally_verified_point_available_at(
+                    code=code,
+                    frequency=frequency,
+                    frame=frame,
+                    dates=frame_dates,
+                    point=point,
+                    checkpoint=checkpoint,
+                    occurrence_cache=production_occurrences_by_end,
+                )
+                point_ledger[point_id] = (
+                    point
+                    if first_visible_at == point.available_at
+                    else replace(point, available_at=first_visible_at)
+                )
             previous_anchor = point_anchor_ledger.setdefault(
-                first_seen.point_id,
-                anchor_unit_id,
+                point_id,
+                reference.unit_id,
             )
-            if previous_anchor != anchor_unit_id:
-                raise ValueError("causal point anchor unit changed across prefixes")
+            if previous_anchor != reference.unit_id:
+                # A still-forming terminal segment may refine its market start
+                # and receive a new internal unit id while retaining the same
+                # formal point, center and terminal market endpoint.  Keep the
+                # first causal witness in the append-only ledger, but reject a
+                # change to any immutable operation semantics.
+                if _operation_point_identity_signature(
+                    point_ledger[point_id]
+                ) != _operation_point_identity_signature(point):
+                    raise ValueError(
+                        "causal point semantics changed across prefixes"
+                    )
+            if point_id not in active_point_starts:
+                visibility_floor = checkpoint_visibility_floor(checkpoint)
+                stored_point = point_ledger[point_id]
+                active_point_starts[point_id] = (
+                    max(stored_point.available_at, visibility_floor)
+                    if first_observation and visibility_floor is not None
+                    else stored_point.available_at
+                    if first_observation
+                    else checkpoint
+                )
+
+    point_visibility.extend(
+        PointVisibilityInterval(
+            point_id=point_id,
+            visible_from=visible_from,
+        )
+        for point_id, visible_from in active_point_starts.items()
+    )
 
     return CausalStructureEventLedger(
         points=tuple(
@@ -1027,6 +1505,12 @@ def _causal_confirmed_structure_events(
             )
         ),
         point_anchor_unit_ids=tuple(sorted(point_anchor_ledger.items())),
+        point_visibility=tuple(
+            sorted(
+                point_visibility,
+                key=lambda item: (item.visible_from, item.point_id),
+            )
+        ),
     )
 
 
@@ -1086,7 +1570,7 @@ def first_matching_segment_difference(
         and point.point_id != setup.point_id
         and point.price_basis_revision == setup.price_basis_revision
         and window_start <= point.anchor_at
-        and window_start <= point.available_at
+        and setup.available_at <= point.available_at
         and (
             point.available_at < active_end
             if end_exclusive
@@ -1123,6 +1607,280 @@ def first_matching_trigger(
     )
 
 
+def _one_minute_visibility_windows(
+    setups: Sequence[StructuralPoint],
+    active_ends: Mapping[str, tuple[datetime, bool]] | None = None,
+    *,
+    end_at: datetime,
+    point_visibility: Sequence[PointVisibilityInterval] = (),
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Return causal 1m evidence windows for the visible 5m tail geometry.
+
+    The terminal-segment start remains a geometric anchor constraint, but the
+    shared live matcher does not allow an earlier 1m point to become a locator
+    retrospectively after the 5m setup is confirmed.  Therefore executable
+    extraction begins at the setup's causal availability time.
+    """
+
+    replay_end = normalize_datetime(end_at, "one minute visibility end")
+    output: list[tuple[datetime, datetime]] = []
+    visibility_by_point: dict[str, list[PointVisibilityInterval]] = {}
+    for interval in point_visibility:
+        visibility_by_point.setdefault(interval.point_id, []).append(interval)
+    for setup in setups:
+        setup_start = setup.available_at
+        if point_visibility:
+            active_windows = tuple(
+                (
+                    max(setup_start, interval.visible_from),
+                    min(interval.visible_until or replay_end, replay_end),
+                )
+                for interval in visibility_by_point.get(setup.point_id, ())
+                if interval.visible_from <= replay_end
+                and (
+                    interval.visible_until is None
+                    or interval.visible_until > max(setup_start, interval.visible_from)
+                )
+            )
+        else:
+            if active_ends is None:
+                raise ValueError("legacy setup windows require active ends")
+            active_windows = (
+                (setup_start, min(active_ends[setup.point_id][0], replay_end)),
+            )
+        output.extend(
+            (window_start, active_end)
+            for window_start, active_end in active_windows
+            if window_start <= active_end
+        )
+    return tuple(output)
+
+
+def _five_minute_replay_windows(
+    points: Sequence[StructuralPoint],
+    point_visibility: Sequence[PointVisibilityInterval],
+) -> dict[str, tuple[tuple[datetime, datetime | None, bool], ...]]:
+    """Return setup-current windows, retaining an explicit legacy fallback."""
+
+    if point_visibility:
+        point_ids = {point.point_id for point in points}
+        if any(interval.point_id not in point_ids for interval in point_visibility):
+            raise ValueError("5m replay visibility references an unknown point")
+        output: dict[str, list[tuple[datetime, datetime | None, bool]]] = {
+            point_id: [] for point_id in point_ids
+        }
+        for interval in point_visibility:
+            output[interval.point_id].append(
+                (interval.visible_from, interval.visible_until, True)
+            )
+        return {point_id: tuple(windows) for point_id, windows in output.items()}
+
+    active_ends = setup_active_ends(points)
+    return {
+        point.point_id: (
+            (
+                point.available_at,
+                active_ends[point.point_id][0],
+                active_ends[point.point_id][1],
+            ),
+        )
+        for point in points
+    }
+
+
+def _causal_one_minute_events_by_windows(
+    code: str,
+    frame: pd.DataFrame,
+    visibility_windows: Sequence[tuple[datetime, datetime]],
+) -> tuple[tuple[StructuralPoint, ...], tuple[PointVisibilityInterval, ...]]:
+    """Replay each active locator epoch from production-sized cold history.
+
+    The live gateway cold-starts 1m analysis with 12,000 completed bars and
+    retains that stable left anchor while a setup stays in the priority lane.
+    A symbol that leaves the lane is not entitled to keep an unbounded annual
+    runtime in the small production cache.  Replaying each disjoint active
+    epoch with the same bounded prefix is both deterministic and faithful to
+    that operational contract.
+    """
+
+    if frame.empty or not visibility_windows:
+        return (), ()
+    normalized = sorted(
+        (
+            normalize_datetime(start, "1m replay window start"),
+            normalize_datetime(end, "1m replay window end"),
+        )
+        for start, end in visibility_windows
+    )
+    if any(start > end for start, end in normalized):
+        raise ValueError("1m replay window start cannot follow end")
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in normalized:
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
+    dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
+    history_bars = SCREENING_CANONICAL_REQUEST_BARS["1m"]
+    points_by_id: dict[str, StructuralPoint] = {}
+    point_visibility: list[PointVisibilityInterval] = []
+    replay_end = max(end for _start, end in merged)
+    for start, end in merged:
+        first = bisect_right(dates, start - timedelta(microseconds=1))
+        stop = bisect_right(dates, end)
+        if first >= len(dates) or stop <= first:
+            continue
+        chunk = frame.iloc[max(0, first - history_bars) : stop].copy()
+        chunk = chunk.reset_index(drop=True)
+        copy_price_basis_metadata(frame, chunk)
+        ledger = _causal_confirmed_structure_events(
+            code,
+            "1m",
+            chunk,
+            visibility_windows=((start, end),),
+            recursive_level_limit=1,
+            include_audit_ledger=False,
+        )
+        # A 1m point that already existed before the parent 5m setup entered
+        # the priority lane is not an interval-nesting locator for that setup.
+        # The generic causal ledger can expose such a still-current point at
+        # the visibility-window floor.  Keeping it would let a later terminal
+        # replay resurrect pre-setup evidence, and the result can then depend
+        # on bars beyond a truncated backtest prefix.  Only points whose own
+        # causal availability belongs to this active 5m epoch are admissible.
+        eligible_points = {
+            point.point_id: point
+            for point in ledger.points
+            if start <= point.available_at <= end
+        }
+        for point in eligible_points.values():
+            previous = points_by_id.setdefault(point.point_id, point)
+            if _operation_point_identity_signature(previous) != (
+                _operation_point_identity_signature(point)
+            ):
+                raise ValueError("1m replay point changed across active epochs")
+        for interval in ledger.point_visibility:
+            if interval.point_id not in eligible_points:
+                continue
+            visible_until = interval.visible_until
+            if visible_until is None and end < replay_end:
+                visible_until = end
+            if visible_until is not None and visible_until <= interval.visible_from:
+                continue
+            point_visibility.append(
+                replace(interval, visible_until=visible_until)
+            )
+    visibility_by_id: dict[str, list[PointVisibilityInterval]] = {}
+    for interval in sorted(
+        point_visibility,
+        key=lambda value: (value.point_id, value.visible_from),
+    ):
+        merged = visibility_by_id.setdefault(interval.point_id, [])
+        if not merged:
+            merged.append(interval)
+            continue
+        previous = merged[-1]
+        if previous.visible_until is None:
+            continue
+        if previous.visible_until < interval.visible_from:
+            merged.append(interval)
+            continue
+        merged[-1] = PointVisibilityInterval(
+            point_id=interval.point_id,
+            visible_from=previous.visible_from,
+            visible_until=(
+                None
+                if interval.visible_until is None
+                else max(previous.visible_until, interval.visible_until)
+            ),
+        )
+    merged_visibility = [
+        interval
+        for intervals in visibility_by_id.values()
+        for interval in intervals
+    ]
+    visible_point_ids = {interval.point_id for interval in merged_visibility}
+    return tuple(
+        sorted(
+            (
+                point
+                for point_id, point in points_by_id.items()
+                if point_id in visible_point_ids
+            ),
+            key=lambda point: (point.available_at, point.point_id),
+        )
+    ), tuple(
+        sorted(
+            merged_visibility,
+            key=lambda interval: (interval.visible_from, interval.point_id),
+        )
+    )
+
+
+def _operation_point_identity_signature(point: StructuralPoint) -> tuple[object, ...]:
+    """Return fields that cannot change when one operation event is reloaded.
+
+    Audit locking may add evidence codes, advance ``formed`` to ``locked``, or
+    refine the start and internal id of the active terminal segment.  Its
+    formal point id, market endpoint, operation class, price evidence and graph
+    links remain immutable.  Confirmation/availability clocks are state
+    observations and the append-only ledger retains their first causal value.
+    """
+
+    terminal = point.terminal_segment
+    terminal_geometry = (
+        None
+        if terminal is None
+        else (
+            terminal.role,
+            terminal.structural_level,
+            terminal.source_kind,
+            terminal.direction,
+            terminal.market_end,
+        )
+    )
+    return (
+        point.point_id,
+        point.code,
+        point.point_type,
+        point.side,
+        point.status,
+        point.variant,
+        point.source_frequency,
+        point.price_basis_revision,
+        point.tower,
+        point.recursive_level,
+        point.anchor_at,
+        point.structure_anchor_price,
+        point.structure_invalidation_price,
+        point.center_id,
+        point.center_zd,
+        point.center_zg,
+        point.center_ordinal,
+        point.divergence_kind,
+        point.parent_point_id,
+        point.related_point_ids,
+        point.small_to_large_carrier_unit_ids,
+        terminal_geometry,
+    )
+
+
+def _causal_one_minute_points_by_windows(
+    code: str,
+    frame: pd.DataFrame,
+    visibility_windows: Sequence[tuple[datetime, datetime]],
+) -> tuple[StructuralPoint, ...]:
+    """Compatibility projection for callers that only need locator events."""
+
+    points, _visibility = _causal_one_minute_events_by_windows(
+        code,
+        frame,
+        visibility_windows,
+    )
+    return points
+
+
 def sparse_evaluation_times(
     *,
     five_points: Sequence[StructuralPoint],
@@ -1131,6 +1889,7 @@ def sparse_evaluation_times(
     one_closes: Sequence[datetime],
     effective_start: datetime,
     requested_end: datetime,
+    five_point_visibility: Sequence[PointVisibilityInterval] = (),
 ) -> tuple[datetime, ...]:
     """构建 5 分钟正式点可用后可能发生变化的唯一时间点集合。
 
@@ -1148,29 +1907,63 @@ def sparse_evaluation_times(
     thirty_dates = tuple(
         sorted(normalize_datetime(value, "thirty_close") for value in thirty_closes)
     )
-    active_ends = setup_active_ends(five_points)
-    _ = one_points
+    replay_windows = _five_minute_replay_windows(
+        five_points,
+        five_point_visibility,
+    )
     output: set[datetime] = set()
     for setup in five_points:
-        active_end, superseded = active_ends[setup.point_id]
-        if active_end < start or setup.available_at > end:
-            continue
-        first_at = max(setup.available_at, start)
-        position = bisect_right(one_dates, first_at - timedelta(microseconds=1))
-        if position >= len(one_dates):
-            continue
-        first_bar = one_dates[position]
-        if first_bar > end or (
-            first_bar >= active_end if superseded else first_bar > active_end
-        ):
-            continue
-        output.add(first_bar)
-        for observed_at in thirty_dates:
-            if observed_at <= first_bar or observed_at > end:
+        for visible_from, raw_active_end, raw_end_exclusive in replay_windows[
+            setup.point_id
+        ]:
+            active_end = min(raw_active_end or end, end)
+            end_exclusive = raw_end_exclusive and (
+                raw_active_end is not None and raw_active_end <= end
+            )
+            if active_end < start or setup.available_at > end:
                 continue
-            if observed_at > active_end or (superseded and observed_at >= active_end):
-                break
-            output.add(observed_at)
+            first_at = max(setup.available_at, visible_from, start)
+            position = bisect_right(
+                one_dates,
+                first_at - timedelta(microseconds=1),
+            )
+            if position >= len(one_dates):
+                continue
+            first_bar = one_dates[position]
+            if first_bar > end or (
+                first_bar >= active_end
+                if end_exclusive
+                else first_bar > active_end
+            ):
+                continue
+            output.add(first_bar)
+            for locator in one_points:
+                locator_at = normalize_datetime(
+                    locator.available_at,
+                    "one minute locator available_at",
+                )
+                if locator_at < first_bar or locator_at > end:
+                    continue
+                if locator_at not in one_dates:
+                    continue
+                if (
+                    first_matching_segment_difference(
+                        setup,
+                        (locator,),
+                        active_end=active_end,
+                        end_exclusive=end_exclusive,
+                    )
+                    is locator
+                ):
+                    output.add(locator_at)
+            for observed_at in thirty_dates:
+                if observed_at <= first_bar or observed_at > end:
+                    continue
+                if observed_at > active_end or (
+                    end_exclusive and observed_at >= active_end
+                ):
+                    break
+                output.add(observed_at)
     return tuple(sorted(output))
 
 
@@ -1178,11 +1971,15 @@ def causal_directions(
     code: str,
     frame: pd.DataFrame,
     observed_times: Sequence[datetime],
+    *,
+    frequency: str = "30m",
 ) -> tuple[tuple[datetime, ContextDirection], int]:
     if not observed_times:
         return (), 0
+    if frequency not in {"d", "30m"}:
+        raise ValueError("causal context direction requires d or 30m")
     dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
-    state = strict_state(code, "30m", frame)
+    state = strict_state(code, frequency, frame)
     cursor = 0
     output: list[tuple[datetime, ContextDirection]] = []
     unavailable = 0
@@ -1216,6 +2013,464 @@ def causal_directions(
             output.append((observed_at, "neutral"))
             unavailable += 1
     return tuple(output), unavailable
+
+
+def _production_current_points(
+    code: str,
+    frequency: str,
+    frame: pd.DataFrame,
+    *,
+    as_of: datetime,
+) -> tuple[StructuralPoint, ...]:
+    evidence = screening_evidence_from_frame(
+        code=code,
+        frequency=frequency,
+        frame=frame,
+        as_of=as_of,
+        market="a",
+    )
+    return convert_current_confirmed_point_evidence(
+        evidence.structure,
+        confirmed_points=evidence.confirmed_points,
+        approaching_points=evidence.approaching_points,
+        code=code,
+        source_frequency=frequency,
+        as_of=as_of,
+    )
+
+
+def _decision_snapshot_point_ledger(
+    snapshots: Sequence[tuple[datetime, tuple[StructuralPoint, ...]]],
+) -> tuple[tuple[StructuralPoint, ...], tuple[PointVisibilityInterval, ...]]:
+    """Freeze exact current-point membership only at replay decision times.
+
+    Daily production analysis is a cold, bounded-window calculation.  It cannot
+    be represented by one ever-growing ``CL`` instance without changing the
+    left boundary that production actually saw.  This ledger records the exact
+    current set at every sparse decision while preserving half-open visibility
+    intervals for the shared bundle adapter.
+    """
+
+    ordered = tuple(sorted(snapshots, key=lambda row: row[0]))
+    times = tuple(row[0] for row in ordered)
+    if times != tuple(sorted(set(times))):
+        raise ValueError("decision point snapshots must be unique and chronological")
+    points_by_id: dict[str, StructuralPoint] = {}
+    active_from: dict[str, datetime] = {}
+    visibility: list[PointVisibilityInterval] = []
+    for observed_at, points in ordered:
+        current = {point.point_id: point for point in points}
+        if len(current) != len(points):
+            raise ValueError("decision point snapshot contains duplicate identities")
+        for point_id in tuple(active_from):
+            if point_id in current:
+                continue
+            visibility.append(
+                PointVisibilityInterval(
+                    point_id=point_id,
+                    visible_from=active_from.pop(point_id),
+                    visible_until=observed_at,
+                )
+            )
+        for point_id, point in current.items():
+            if point.available_at > observed_at:
+                raise ValueError("decision snapshot contains future point evidence")
+            previous = points_by_id.setdefault(point_id, point)
+            if _operation_point_identity_signature(previous) != (
+                _operation_point_identity_signature(point)
+            ):
+                raise ValueError("current point identity changed across decisions")
+            active_from.setdefault(point_id, observed_at)
+    visibility.extend(
+        PointVisibilityInterval(point_id=point_id, visible_from=visible_from)
+        for point_id, visible_from in active_from.items()
+    )
+    return (
+        tuple(
+            sorted(
+                points_by_id.values(),
+                key=lambda point: (point.available_at, point.point_id),
+            )
+        ),
+        tuple(
+            sorted(
+                visibility,
+                key=lambda interval: (interval.visible_from, interval.point_id),
+            )
+        ),
+    )
+
+
+def _production_context_snapshots(
+    code: str,
+    frequency: str,
+    frame: pd.DataFrame,
+    observed_times: Sequence[datetime],
+    *,
+    request_bars: int,
+    minimum_bars: int,
+) -> tuple[
+    tuple[tuple[datetime, ContextDirection], ...],
+    tuple[StructuralPoint, ...],
+    tuple[PointVisibilityInterval, ...],
+    tuple[datetime, ...],
+]:
+    """Rebuild the exact cold production window at each distinct source close."""
+
+    if request_bars <= 0 or minimum_bars <= 0 or minimum_bars > request_bars:
+        raise ValueError("production context bar budgets are invalid")
+    if not observed_times:
+        return (), (), (), ()
+    dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
+    cache: dict[
+        int,
+        tuple[ContextDirection, tuple[StructuralPoint, ...]] | None,
+    ] = {}
+    directions: list[tuple[datetime, ContextDirection]] = []
+    snapshots: list[tuple[datetime, tuple[StructuralPoint, ...]]] = []
+    unavailable: list[datetime] = []
+    for raw_time in sorted(set(observed_times)):
+        observed_at = normalize_datetime(raw_time, "context observation")
+        end = bisect_right(dates, observed_at)
+        measurement = cache.get(end)
+        if end not in cache:
+            if end < minimum_bars:
+                measurement = None
+            else:
+                start = max(0, end - request_bars)
+                prefix = frame.iloc[start:end].copy().reset_index(drop=True)
+                copy_price_basis_metadata(frame, prefix)
+                source_closed_at = dates[end - 1]
+                try:
+                    evidence = screening_evidence_from_frame(
+                        code=code,
+                        frequency=frequency,
+                        frame=prefix,
+                        as_of=source_closed_at,
+                        market="a",
+                    )
+                    points = convert_current_confirmed_point_evidence(
+                        evidence.structure,
+                        confirmed_points=evidence.confirmed_points,
+                        approaching_points=evidence.approaching_points,
+                        code=code,
+                        source_frequency=frequency,
+                        as_of=source_closed_at,
+                    )
+                    direction = cast(
+                        ContextDirection,
+                        current_formal_direction(evidence),
+                    )
+                    measurement = (direction, points)
+                except (
+                    StrictStructureContractError,
+                    TypeError,
+                    ValueError,
+                ):
+                    measurement = None
+            cache[end] = measurement
+        if measurement is None:
+            unavailable.append(observed_at)
+            continue
+        direction, points = measurement
+        directions.append((observed_at, direction))
+        snapshots.append((observed_at, points))
+    point_ledger, visibility = _decision_snapshot_point_ledger(snapshots)
+    return (
+        tuple(directions),
+        point_ledger,
+        visibility,
+        tuple(unavailable),
+    )
+
+
+class _HistoricalQmtFrameExchange:
+    """Read-only causal frame source matching the QMT gateway's row contract."""
+
+    supports_stable_incremental_window = False
+
+    def __init__(
+        self,
+        frames: Mapping[tuple[str, str], pd.DataFrame],
+    ) -> None:
+        self._frames = dict(frames)
+
+    def klines(
+        self,
+        code: str,
+        frequency: str,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        args: Mapping[str, object] | None = None,
+    ) -> pd.DataFrame:
+        try:
+            source = self._frames[(code, frequency)]
+        except KeyError as exc:
+            raise ValueError(f"historical QMT frame is unavailable: {code}/{frequency}") from exc
+        dates = pd.to_datetime(source["date"], errors="raise")
+        if dates.dt.tz is None:
+            raise ValueError("historical QMT frame must be timezone-aware")
+        mask = pd.Series(True, index=source.index)
+        for raw, lower in ((start_date, True), (end_date, False)):
+            if raw is None:
+                continue
+            boundary = pd.Timestamp(raw)
+            if boundary.tzinfo is None:
+                boundary = boundary.tz_localize(CN)
+            else:
+                boundary = boundary.tz_convert(CN)
+            mask &= dates >= boundary if lower else dates <= boundary
+        result = source.loc[mask].copy().reset_index(drop=True)
+        request = dict(args or {}).get("req_counts")
+        if request is not None:
+            if type(request) is not int or request <= 0:
+                raise ValueError("historical QMT req_counts must be positive")
+            result = result.iloc[-request:].copy().reset_index(drop=True)
+        result.attrs = dict(source.attrs)
+        return result
+
+
+@lru_cache(maxsize=8)
+def _historical_benchmark_frames(
+    start_at: datetime,
+    end_at: datetime,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    empty_factors = pd.DataFrame()
+    return (
+        load_qmt_frame(
+            "SH.000300",
+            "1m",
+            start_at=start_at,
+            end_at=end_at,
+            factors=empty_factors,
+        ),
+        load_qmt_daily_frame(
+            "SH.000300",
+            start_at=start_at,
+            end_at=end_at,
+            factors=empty_factors,
+        ),
+    )
+
+
+def _historical_higher_timeframe_gates(
+    *,
+    code: str,
+    one_minute_frame: pd.DataFrame,
+    daily_frame: pd.DataFrame,
+    observed_times: Sequence[datetime],
+    sector_by_time: Mapping[datetime, str | None],
+) -> dict[datetime, HigherTimeframeGateBundle]:
+    """Build production M/W/D integrity evidence at executable buy boundaries.
+
+    The live provider uses today's front-adjusted vendor history.  Historical
+    replay instead supplies point-in-time factor-adjusted prefixes through the
+    same provider so post-decision corporate actions cannot leak backwards.
+    Sector M/W/D remains advisory; the PIT sector gate used by the strategy is
+    replayed separately by ``SectorResearchFacts``.
+    """
+
+    ordered = tuple(sorted(set(observed_times)))
+    if not ordered:
+        return {}
+    earliest = ordered[0] - timedelta(days=365)
+    latest = ordered[-1]
+    benchmark_start = datetime(earliest.year, 1, 1, tzinfo=CN)
+    benchmark_end = datetime(latest.year, 12, 31, 15, 0, tzinfo=CN)
+    benchmark_one, benchmark_daily = _historical_benchmark_frames(
+        benchmark_start,
+        benchmark_end,
+    )
+    exchange = _HistoricalQmtFrameExchange(
+        {
+            ("SH.000300", "1m"): benchmark_one,
+            ("SH.000300", "d"): benchmark_daily,
+            (code, "1m"): one_minute_frame,
+            (code, "d"): daily_frame,
+        }
+    )
+    # Import lazily: unit tests and non-QMT callers can use the fixed-year data
+    # types without requiring a running vendor calendar service.
+    from chanlun.exchange.qmt_screening_sector_source import qmt_trading_sessions
+
+    provider = QmtHigherTimeframeGateSource(
+        exchange_provider=lambda: exchange,
+        sector_frame_provider=None,
+        trading_calendar_provider=qmt_trading_sessions,
+        refresh_stale_benchmark=False,
+    )
+    output: dict[datetime, HigherTimeframeGateBundle] = {}
+    for observed_at in ordered:
+        sector_id = sector_by_time.get(observed_at)
+        try:
+            output[observed_at] = provider.gates(
+                symbol=code,
+                as_of=observed_at,
+                sector_id=sector_id,
+            )
+        except Exception:
+            output[observed_at] = unresolved_higher_timeframe_gates(
+                symbol=code,
+                observed_at=observed_at,
+                reason_code="QMT_HIGHER_TIMEFRAME_PROVIDER_UNAVAILABLE",
+                sector_subject=sector_id,
+            )
+    return output
+
+
+def _five_minute_warmup_facts(
+    code: str,
+    frame: pd.DataFrame,
+    one_minute_frame: pd.DataFrame,
+    observed_times: Sequence[datetime],
+) -> tuple[FiveMinuteWarmupFact, ...]:
+    """Freeze exact production 5m/1m evidence at each locator close."""
+
+    if frame.empty or not observed_times:
+        return ()
+    dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
+    one_dates = tuple(
+        pd.Timestamp(value).to_pydatetime()
+        for value in one_minute_frame.get("date", ())
+    )
+    request_bars = SCREENING_CANONICAL_REQUEST_BARS["5m"]
+    required_bars = SCREENING_WARMUP_REQUIRED_BARS["5m"]
+    minimum_bars = SCREENING_MINIMUM_BARS_BY_FREQUENCY["5m"]
+    measurements: dict[
+        datetime,
+        tuple[
+            bool,
+            int,
+            int,
+            str,
+            tuple[str, ...],
+            tuple[StructuralPoint, ...],
+        ],
+    ] = {}
+    output: list[FiveMinuteWarmupFact] = []
+    for raw_time in sorted(set(observed_times)):
+        observed_at = normalize_datetime(raw_time, "warmup decision time")
+        end = bisect_right(dates, observed_at)
+        if end == 0:
+            continue
+        source_closed_at = dates[end - 1]
+        measurement = measurements.get(source_closed_at)
+        if measurement is None:
+            start = max(0, end - request_bars)
+            full = frame.iloc[start:end].copy().reset_index(drop=True)
+            copy_price_basis_metadata(frame, full)
+            full_count = len(full)
+            full_points = (
+                _production_current_points(
+                    code,
+                    "5m",
+                    full,
+                    as_of=source_closed_at,
+                )
+                if full_count >= minimum_bars
+                else ()
+            )
+            if full_count < required_bars:
+                measurement = (
+                    False,
+                    full_count,
+                    0,
+                    "WARMUP_HISTORY_INSUFFICIENT",
+                    (),
+                    full_points,
+                )
+            else:
+                trim = full_count // 3
+                suffix = full.iloc[trim:].copy().reset_index(drop=True)
+                copy_price_basis_metadata(full, suffix)
+                active_tail_start = max(
+                    pd.Timestamp(suffix.iloc[0]["date"]).to_pydatetime(),
+                    source_closed_at - context_point_max_age("5m"),
+                )
+                suffix_points = _production_current_points(
+                    code,
+                    "5m",
+                    suffix,
+                    as_of=source_closed_at,
+                )
+                full_signature = screening_warmup_tail_signature(
+                    direction="neutral",
+                    points=full_points,
+                    not_before=active_tail_start,
+                    trade_level_only=True,
+                )
+                suffix_signature = screening_warmup_tail_signature(
+                    direction="neutral",
+                    points=suffix_points,
+                    not_before=active_tail_start,
+                    trade_level_only=True,
+                )
+                converged = full_signature == suffix_signature
+                measurement = (
+                    converged,
+                    full_count,
+                    len(suffix),
+                    "WARMUP_TAIL_STABLE"
+                    if converged
+                    else "WARMUP_TAIL_DIVERGED",
+                    () if converged else ("WARMUP_OTHER_SEMANTIC_CHANGED",),
+                    full_points,
+                )
+            measurements[source_closed_at] = measurement
+        (
+            converged,
+            full_count,
+            suffix_count,
+            reason,
+            differences,
+            production_five_points,
+        ) = measurement
+        one_end = bisect_right(one_dates, observed_at)
+        one_start = max(
+            0,
+            one_end - SCREENING_CANONICAL_REQUEST_BARS["1m"],
+        )
+        one_count = one_end - one_start
+        production_one_points: tuple[StructuralPoint, ...] = ()
+        if one_count >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]:
+            one_prefix = one_minute_frame.iloc[one_start:one_end].copy().reset_index(
+                drop=True
+            )
+            copy_price_basis_metadata(one_minute_frame, one_prefix)
+            one_evidence = screening_evidence_from_frame(
+                code=code,
+                frequency="1m",
+                frame=one_prefix,
+                as_of=observed_at,
+                market="a",
+            )
+            production_one_points = tuple(
+                point
+                for point in extract_one_minute_segment_difference_points(
+                    one_evidence,
+                    code=code,
+                    source_frequency="1m",
+                    as_of=observed_at,
+                )
+                if point.available_at == observed_at
+                and is_one_minute_segment_difference(point)
+            )
+        output.append(
+            FiveMinuteWarmupFact(
+                observed_at=observed_at,
+                source_closed_at=source_closed_at,
+                converged=converged,
+                full_bar_count=full_count,
+                suffix_bar_count=suffix_count,
+                reason_code=reason,
+                difference_codes=differences,
+                production_five_points=production_five_points,
+                production_one_points=production_one_points,
+                one_minute_bar_count=one_count,
+            )
+        )
+    return tuple(output)
 
 
 def _neutral_context(frequency: str, observed_at: datetime) -> TimeframeContext:
@@ -1268,7 +2523,10 @@ def sector_facts_from_frame(
             algorithm_revision=algorithm_revision,
             source_revision=source_revision,
         )
-    points = final_confirmed_points(sector_id, "30m", frame)
+    structure_events = final_confirmed_structure_events(sector_id, "30m", frame)
+    points = structure_events.points
+    visibility = structure_events.point_visibility
+    points_by_id = {point.point_id: point for point in points}
     directions, unavailable = causal_directions(sector_id, frame, times)
     frame_closes = tuple(
         sorted(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
@@ -1278,13 +2536,19 @@ def sector_facts_from_frame(
     )
     assessments: list[tuple[datetime, SectorAssessment]] = []
     for observed_at, direction in directions:
-        available = tuple(
-            point for point in points if point.available_at <= observed_at
+        current_ids = {
+            interval.point_id
+            for interval in visibility
+            if interval.contains(observed_at)
+        }
+        current = tuple(
+            points_by_id[point_id]
+            for point_id in sorted(current_ids)
         )
         thirty = classify_context(
             frequency="30m",
             current_direction=direction,
-            points=available,
+            points=current,
             as_of=observed_at,
         )
         expected_position = bisect_right(market_closes, observed_at)
@@ -1321,6 +2585,7 @@ def sector_facts_from_frame(
         row_count=len(frame),
         thirty_points=points,
         assessments=tuple(assessments),
+        thirty_point_visibility=visibility,
         direction_unavailable_count=unavailable,
     )
 
@@ -1386,10 +2651,52 @@ def build_symbol_bundle(
             and point.source_frequency == frequency
         )
 
+    def current_at(points, frequency, visibility):
+        visible = tradable(points, frequency)
+        if not visibility:
+            return visible
+        current_ids = {
+            interval.point_id
+            for interval in visibility
+            if interval.contains(observed_at)
+        }
+        return tuple(point for point in visible if point.point_id in current_ids)
+
+    warmup_by_time = {
+        row.observed_at: row for row in facts.five_minute_warmup
+    }
+    warmup = warmup_by_time.get(observed_at)
+    if (
+        warmup is not None
+        and warmup.one_minute_bar_count != evaluation.one_minute_bar_count
+    ):
+        raise ValueError("execution snapshot 1m history count changed")
+
     # 完整递归图保留在事实档案中；订单级别只消费物理 5m/L0。5m/L1 的有效
     # 周期是 30m，只能进入高周期上下文，不能成为第二条 5m 交易通道。
-    thirty = tradable(facts.thirty_points, "30m")
-    five_context = tradable(facts.five_points, "5m")
+    daily = current_at(
+        facts.daily_points,
+        "d",
+        facts.daily_point_visibility,
+    )
+    thirty = current_at(
+        facts.thirty_points,
+        "30m",
+        facts.thirty_point_visibility,
+    )
+    # At an execution candidate close, replay consumes the exact cold,
+    # canonical production snapshots.  The append-only ledgers remain useful
+    # for discovering candidate times and for audit, but cannot authorize an
+    # order because their arbitrary left boundary may produce a ghost point.
+    five_context = (
+        warmup.production_five_points
+        if warmup is not None
+        else current_at(
+            facts.five_points,
+            "5m",
+            facts.five_point_visibility,
+        )
+    )
     five = tuple(
         point
         for point in five_context
@@ -1398,7 +2705,28 @@ def build_symbol_bundle(
             point.recursive_level,
         )
     )
-    one = tradable(facts.one_points, "1m")
+    one_history_ready = (
+        evaluation.one_minute_bar_count
+        >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
+    )
+    one = (
+        warmup.production_one_points
+        if warmup is not None
+        else tradable(facts.one_points, "1m")
+        if one_history_ready
+        else ()
+    )
+    current_one = (
+        one
+        if warmup is not None
+        else current_at(
+            facts.one_points,
+            "1m",
+            facts.one_point_visibility,
+        )
+        if one_history_ready
+        else ()
+    )
     entry_boundaries = tuple(
         EntryExecutionBoundary(
             symbol=facts.code,
@@ -1416,22 +2744,61 @@ def build_symbol_bundle(
             raw_price_basis_revision=facts.source_revision,
         )
         for point in one
-        if point.available_at == evaluation.bar.closed_at
+        if point.side == "buy"
+        and point.available_at == evaluation.bar.closed_at
         and is_one_minute_segment_difference(point)
     )
+    buy_boundary_present = any(
+        point.side == "buy"
+        and point.available_at == evaluation.bar.closed_at
+        and is_one_minute_segment_difference(point)
+        for point in one
+    )
+    enforce_warmup = buy_boundary_present
+    warmup_converged = True if warmup is None else warmup.converged
+    warmup_reasons: tuple[str, ...] = ()
+    warmup_rows: tuple[tuple[str, bool, int, int], ...] = ()
+    warmup_differences: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    if enforce_warmup:
+        if warmup is None:
+            warmup_converged = False
+            warmup_reasons = ("5M:WARMUP_FACT_MISSING",)
+            warmup_rows = (("5m", False, 0, 0),)
+        else:
+            warmup_reasons = (f"5M:{warmup.reason_code}",)
+            warmup_rows = (
+                (
+                    "5m",
+                    warmup.converged,
+                    warmup.full_bar_count,
+                    warmup.suffix_bar_count,
+                ),
+            )
+            warmup_differences = (("5m", warmup.difference_codes),)
     return SymbolStructureBundle(
         code=facts.code,
         as_of=observed_at,
         sector=sector,
+        daily_direction=evaluation.daily_direction,
+        daily_points=daily,
         thirty_direction=evaluation.thirty_direction,
         thirty_points=thirty,
         five_points=five,
         one_points=one,
         # 与实时网关一致：冲突证据覆盖全部已分析个股周期，并在 ``resolve_conflict``
         # 内按方向和级别过滤。
-        opposite_points=(*thirty, *five_context, *one),
+        opposite_points=(*daily, *thirty, *five_context, *current_one),
         held_tower=held_tower,
         held_level=held_level,
+        warmup_converged=warmup_converged,
+        warmup_reason_codes=warmup_reasons,
+        warmup_by_frequency=warmup_rows,
+        warmup_difference_codes_by_frequency=warmup_differences,
+        enforce_warmup_entry_gate=enforce_warmup,
+        higher_timeframe_gates=evaluation.higher_timeframe_gates,
+        enforce_higher_timeframe_entry_gate=(
+            evaluation.higher_timeframe_gates is not None
+        ),
         physical_timeframe_recursive=True,
         entry_execution_boundaries=entry_boundaries,
         selection_sources=selection_sources,
@@ -2012,13 +3379,10 @@ def build_symbol_facts(
     factors = qmt_factor_frame(factor_rows)
     end_at = datetime.combine(requested_end, time(15, 0), tzinfo=CN)
     context_start = datetime.combine(warmup_start, time(9, 30), tzinfo=CN)
-    # 行情终端 QMT 的滚动一年 1m 边界会在当前墙钟分钟截断首个请求交易日。
-    # 日历日，再由编排器在 1m 预热后统一强制有效起点。
-    minute_start = datetime.combine(
-        requested_start - timedelta(days=1),
-        time(9, 30),
-        tzinfo=CN,
-    )
+    physical_history_start = datetime(1990, 1, 1, tzinfo=CN)
+    # Replay starts with the same 1m warmup horizon as a freshly started live
+    # monitor, then keeps appending closed bars for the complete run.
+    minute_start = context_start
     effective_at = datetime.combine(effective_start, time(9, 30), tzinfo=CN)
     local_directory = resolve_qmt_local_data_dir()
     local_five_snapshot = (
@@ -2026,7 +3390,7 @@ def build_symbol_facts(
             data_dir=local_directory,
             code=code,
             frequency="5m",
-            start_at=context_start,
+            start_at=physical_history_start,
             end_at=end_at,
         )
         if local_directory is not None
@@ -2036,7 +3400,7 @@ def build_symbol_facts(
         frequency: load_qmt_frame(
             code,
             frequency,
-            start_at=(minute_start if frequency == "1m" else context_start),
+            start_at=physical_history_start,
             end_at=end_at,
             factors=factors,
             _local_five_snapshot=local_five_snapshot,
@@ -2051,17 +3415,14 @@ def build_symbol_facts(
             "QMT context history is unavailable for classified security "
             f"{code}: {','.join(missing_context)}"
         )
-    five_points = _causal_confirmed_points(
+    five_ledger = _causal_confirmed_structure_events(
         code,
         "5m",
         frames["5m"],
-        visibility_windows=(
-            (
-                effective_at - timedelta(seconds=MAX_FIVE_MINUTE_SETUP_AGE_SECONDS),
-                end_at,
-            ),
-        ),
+        include_audit_ledger=False,
     )
+    five_points = five_ledger.points
+    five_point_visibility = five_ledger.point_visibility
     operation_five_points = tuple(
         point
         for point in five_points
@@ -2071,15 +3432,52 @@ def build_symbol_facts(
         )
         and five_minute_setup_is_in_policy_scope(point)
     )
-    active_ends = setup_active_ends(operation_five_points)
+    operation_point_ids = {point.point_id for point in operation_five_points}
+    operation_point_visibility = tuple(
+        interval
+        for interval in five_point_visibility
+        if interval.point_id in operation_point_ids
+    )
+    relevant_point_ids = {
+        interval.point_id
+        for interval in operation_point_visibility
+        if interval.visible_from <= end_at
+        and (
+            interval.visible_until is None
+            or interval.visible_until > effective_at
+        )
+    }
     relevant_setups = tuple(
         setup
         for setup in operation_five_points
-        if setup.available_at <= end_at
-        and active_ends[setup.point_id][0] >= effective_at
-        and setup.available_at <= active_ends[setup.point_id][0]
+        if setup.point_id in relevant_point_ids
     )
     has_relevant_setup = bool(relevant_setups)
+    daily_frame = (
+        load_qmt_daily_frame(
+            code,
+            # Production asks for a fixed canonical daily snapshot (with a
+            # smaller admission floor).  Select that exact physical tail
+            # preceding the first tradable session plus every later bar;
+            # pre-tail vendor records are causally irrelevant.
+            start_at=datetime.combine(effective_start, time.min, tzinfo=CN),
+            end_at=end_at,
+            factors=factors,
+            history_bars_before_start=SCREENING_CANONICAL_REQUEST_BARS["d"],
+        )
+        if has_relevant_setup
+        else _empty_frame(code)
+    )
+    if has_relevant_setup and daily_frame.empty:
+        raise RuntimeError(
+            f"QMT daily history is unavailable for a causally relevant setup: {code}"
+        )
+    frames["d"] = daily_frame
+    if relevant_setups:
+        minute_start = min(
+            minute_start,
+            min(point.available_at for point in relevant_setups),
+        )
     one_frame = (
         load_qmt_frame(
             code,
@@ -2102,17 +3500,17 @@ def build_symbol_facts(
         security_master=security_master,
         memberships=membership_rows,
     )
-    one_points = _causal_confirmed_points(
+    one_points, one_point_visibility = _causal_one_minute_events_by_windows(
         code,
-        "1m",
         one_frame,
-        visibility_windows=tuple(
-            (
-                setup.available_at,
-                min(active_ends[setup.point_id][0], end_at),
-            )
-            for setup in relevant_setups
+        _one_minute_visibility_windows(
+            relevant_setups,
+            end_at=end_at,
+            point_visibility=operation_point_visibility,
         ),
+    )
+    one_dates = tuple(
+        pd.Timestamp(value).to_pydatetime() for value in one_frame["date"]
     )
     evaluation_times = sparse_evaluation_times(
         five_points=operation_five_points,
@@ -2120,20 +3518,50 @@ def build_symbol_facts(
         thirty_closes=tuple(
             pd.Timestamp(value).to_pydatetime() for value in frames["30m"]["date"]
         ),
-        one_closes=tuple(
-            pd.Timestamp(value).to_pydatetime() for value in one_frame["date"]
-        ),
+        one_closes=one_dates,
         effective_start=effective_at,
         requested_end=end_at,
+        five_point_visibility=operation_point_visibility,
     )
-    thirty_points = _causal_confirmed_points(
+    thirty_dates = tuple(
+        pd.Timestamp(value).to_pydatetime() for value in frames["30m"]["date"]
+    )
+    context_ready_times = tuple(
+        observed_at
+        for observed_at in evaluation_times
+        if bisect_right(thirty_dates, observed_at)
+        >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["30m"]
+    )
+    thirty_history_unavailable = len(evaluation_times) - len(context_ready_times)
+    (
+        daily_directions,
+        daily_points,
+        daily_point_visibility,
+        daily_unavailable_times,
+    ) = _production_context_snapshots(
+        code,
+        "d",
+        daily_frame,
+        context_ready_times,
+        request_bars=SCREENING_CANONICAL_REQUEST_BARS["d"],
+        minimum_bars=SCREENING_MINIMUM_BARS_BY_FREQUENCY["d"],
+    )
+    daily_direction_by_time = dict(daily_directions)
+    evaluation_times = tuple(
+        observed_at
+        for observed_at in context_ready_times
+        if observed_at in daily_direction_by_time
+    )
+    thirty_ledger = _causal_confirmed_structure_events(
         code,
         "30m",
         frames["30m"],
         visibility_windows=((context_start, max(evaluation_times)),)
         if evaluation_times
         else (),
+        include_audit_ledger=False,
     )
+    thirty_points = thirty_ledger.points
     directions, unavailable = causal_directions(
         code,
         frames["30m"],
@@ -2150,12 +3578,55 @@ def build_symbol_facts(
         available = tuple(row for row in membership_rows if row.known_at <= observed_at)
         return None if not available else available[-1].sector_id
 
+    evaluation_time_set = {
+        observed_at for observed_at in evaluation_times if observed_at in bars
+    }
+    locator_times = tuple(
+        sorted(
+            {
+                point.available_at
+                for point in one_points
+                if point.available_at in evaluation_time_set
+                and is_one_minute_segment_difference(point)
+            }
+        )
+    )
+    buy_locator_times = tuple(
+        observed_at
+        for observed_at in locator_times
+        if any(
+            point.side == "buy" and point.available_at == observed_at
+            for point in one_points
+        )
+    )
+    five_minute_warmup = _five_minute_warmup_facts(
+        code,
+        frames["5m"],
+        one_frame,
+        locator_times,
+    )
+    sector_by_time = {
+        observed_at: sector_at(observed_at) for observed_at in buy_locator_times
+    }
+    higher_timeframe_gates = _historical_higher_timeframe_gates(
+        code=code,
+        one_minute_frame=one_frame,
+        daily_frame=daily_frame,
+        observed_times=buy_locator_times,
+        sector_by_time=sector_by_time,
+    )
     evaluations = tuple(
         SparseEvaluationFact(
             observed_at=observed_at,
             thirty_direction=direction_by_time[observed_at],
             bar=bars[observed_at],
             sector_id=sector_at(observed_at),
+            daily_direction=daily_direction_by_time[observed_at],
+            higher_timeframe_gates=higher_timeframe_gates.get(observed_at),
+            one_minute_bar_count=min(
+                bisect_right(one_dates, observed_at),
+                SCREENING_CANONICAL_REQUEST_BARS["1m"],
+            ),
         )
         for observed_at in evaluation_times
         if observed_at in bars
@@ -2170,13 +3641,23 @@ def build_symbol_facts(
         requested_end=requested_end,
         effective_start=effective_start,
         row_counts=tuple(
-            (frequency, len(frames[frequency])) for frequency in FREQUENCIES
+            (frequency, len(frames[frequency])) for frequency in FACT_FREQUENCIES
         ),
+        daily_points=daily_points,
         thirty_points=thirty_points,
         five_points=five_points,
         one_points=one_points,
         evaluations=evaluations,
-        direction_unavailable_count=unavailable,
+        daily_point_visibility=daily_point_visibility,
+        thirty_point_visibility=thirty_ledger.point_visibility,
+        five_point_visibility=five_point_visibility,
+        one_point_visibility=one_point_visibility,
+        five_minute_warmup=five_minute_warmup,
+        direction_unavailable_count=(
+            unavailable
+            + thirty_history_unavailable
+            + len(daily_unavailable_times)
+        ),
         security_master=security_master,
         memberships=membership_rows,
         factors=factor_rows,
@@ -2184,7 +3665,11 @@ def build_symbol_facts(
 
 
 __all__ = (
+    "CausalStructureEventLedger",
     "FACT_SCHEMA",
+    "FACT_FREQUENCIES",
+    "FiveMinuteWarmupFact",
+    "PointVisibilityInterval",
     "SECTOR_FACT_SCHEMA",
     "SectorResearchFacts",
     "SparseEvaluationFact",
@@ -2195,6 +3680,7 @@ __all__ = (
     "final_confirmed_points",
     "first_matching_segment_difference",
     "first_matching_trigger",
+    "final_confirmed_structure_events",
     "load_qmt_frame",
     "load_qmt_daily_frame",
     "qmt_factor_frame",

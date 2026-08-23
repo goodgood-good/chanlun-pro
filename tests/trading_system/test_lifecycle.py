@@ -52,6 +52,50 @@ def test_five_minute_three_buy_can_use_one_minute_first_buy_trigger() -> None:
     assert trigger.point_type != setup.point.point_type
 
 
+def test_setup_identity_survives_converged_internal_graph_rebuild() -> None:
+    first = confirmed_point("1buy", center_id="left-boundary-center-a")
+    rebuilt = confirmed_point(
+        "1buy",
+        center_id="left-boundary-center-b",
+        available_minutes_after=5,
+    )
+
+    first_setup = build_setup(
+        first,
+        supportive_context("30m"),
+        eligible_sector(),
+    )
+    rebuilt_setup = build_setup(
+        rebuilt,
+        supportive_context("30m"),
+        eligible_sector(),
+    )
+
+    assert first.point_id != rebuilt.point_id
+    assert first.available_at != rebuilt.available_at
+    assert first_setup.setup_id == rebuilt_setup.setup_id
+
+
+def test_setup_identity_changes_when_same_anchor_is_repriced() -> None:
+    first = confirmed_point("2sell", anchor=11.05, stop=11.05)
+    repriced = confirmed_point("2sell", anchor=11.85, stop=11.85)
+
+    first_setup = build_setup(
+        first,
+        supportive_context("30m"),
+        eligible_sector(),
+    )
+    repriced_setup = build_setup(
+        repriced,
+        supportive_context("30m"),
+        eligible_sector(),
+    )
+
+    assert first.anchor_at == repriced.anchor_at
+    assert first.point_id != repriced.point_id
+    assert first_setup.setup_id != repriced_setup.setup_id
+
+
 @pytest.mark.parametrize("point_type", ("1buy", "2buy"))
 def test_buy_setup_accepts_one_or_two_buy_as_reversal_trigger(
     point_type: str,

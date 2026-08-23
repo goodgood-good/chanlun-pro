@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLEANUP = ROOT / "ops" / "cleanup_local_generated_artifacts.ps1"
+RUNTIME_CLEANUP = ROOT / "ops" / "cleanup_legacy_runtime_state.ps1"
 def _git(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(ROOT), *arguments],
@@ -54,9 +55,17 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     source = CLEANUP.read_text(encoding="utf-8")
 
     assert "[switch]$Execute" in source
+    assert "[switch]$PurgeInvalidBacktestFacts" in source
+    assert "[switch]$PurgeRetiredRuntimeState" in source
     assert "if ($Execute)" in source
     assert "Refusing cleanup target outside repository" in source
     assert 'mode = if ($Execute) { "EXECUTE" } else { "DRY_RUN" }' in source
+    assert '@{ path = "output"; category = "generated_output" }' in source
+    assert '@{ path = "tmp"; category = "temporary_artifact" }' in source
+    assert '@{ path = ".omc"; category = "agent_session_artifact" }' in source
+    assert "rootGeneratedLogPath" in source
+    assert "active_app_logs" in source
+    assert "[IO.FileShare]::None" in source
     assert ".cache\\chanlun_human_review_forward" in source
     assert ".cache\\chanlun_human_review" in source
     assert ".cache\\chanlun_qmt_sector_ledger" in source
@@ -65,6 +74,14 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert ".cache\\chanlun_v31_csi300_broad_pool" in source
     assert ".cache\\historical_backtest_preflight_report_20260816" in source
     assert "qmt_runtime_*.log" in source
+    assert "currentQmtLogName" in source
+    assert '"web_recovery_*"' in source
+    assert '"web_watchdog_*"' in source
+    assert "$_.Name -ne $currentQmtLogName" in source
+    assert '-Filter "*.dmp"' in source
+    assert '"server-*.stdout.log"' in source
+    assert '"server-*.stderr.log"' in source
+    assert '-Filter "targeted_v*"' in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="cleanup helper targets Windows")
@@ -89,3 +106,17 @@ def test_local_cleanup_dry_run_never_removes_candidates() -> None:
     assert payload["schema"] == "chanlun-local-generated-artifact-cleanup"
     assert payload["mode"] == "DRY_RUN"
     assert payload["removed_count"] == 0
+
+
+def test_legacy_runtime_cleanup_is_explicit_and_preserves_source_data() -> None:
+    source = RUNTIME_CLEANUP.read_text(encoding="utf-8")
+
+    assert "[switch]$Execute" in source
+    assert 'mode = if ($Execute) { "EXECUTE" } else { "DRY_RUN" }' in source
+    assert "Assert-DirectRuntimeChild" in source
+    assert '"decision_support"' in source
+    assert '"chart_cache"' in source
+    assert '"monitor"' in source
+    assert '"klines"' in source
+    assert '"xdxr"' in source
+    assert '".flask_secret_key"' in source

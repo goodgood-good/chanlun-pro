@@ -88,6 +88,13 @@ def confirmed_point(
             anchor_at=anchor_at - timedelta(minutes=5),
             center_id=center_id,
             parent_point_id=None,
+            variant="standard",
+            structure_anchor_price=anchor,
+            structure_invalidation_price=invalidation,
+            center_zd=center_zd,
+            center_zg=center_zg,
+            center_ordinal=None,
+            divergence_kind="trend",
         )
         if point_type in {"2buy", "2sell"}
         else None
@@ -102,6 +109,13 @@ def confirmed_point(
         anchor_at=anchor_at,
         center_id=center_id,
         parent_point_id=parent_point_id,
+        variant=typed_variant,
+        structure_anchor_price=anchor,
+        structure_invalidation_price=invalidation,
+        center_zd=center_zd,
+        center_zg=center_zg,
+        center_ordinal=effective_center_ordinal,
+        divergence_kind="trend" if point_type.startswith("1") else None,
     )
     return StructuralPoint(
         point_id=point_id,

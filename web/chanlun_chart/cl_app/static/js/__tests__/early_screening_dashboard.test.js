@@ -1713,7 +1713,7 @@ test("expired one-minute segment stays visible only as historical audit evidence
   assert.equal(oneMinute.state, "历史区间套定位已过");
   assert.equal(
     oneMinute.summary,
-    "二买（盘整背驰） · 1m/L0历史区间套证据保留（不计入当前定位）",
+    "二买（盘整背驰） · 1分钟历史区间套证据保留（不计入当前定位）",
   );
   assert.match(oneMinute.boundary, /现已过期；仅保留历史定位证据/);
 
@@ -1932,7 +1932,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
     })(),
     [
       "历史卖出区间套定位",
-      "二卖 · 1m/L0历史区间套证据保留（不计入当前定位）",
+      "二卖 · 1分钟历史区间套证据保留（不计入当前定位）",
       "卖出区间套仅保留为历史定位证据；不计入当前精确位置",
     ],
   );
@@ -1965,7 +1965,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   );
   assert.equal(
     Ui.emptySignalDetail(Ui.normalizeSnapshot(snapshot), "", { segmentState: "current" }),
-    "当前有 1 个5分钟操作候选已完成有效的1m/L0区间套定位（买点 1 / 卖点 0），但被其他筛选条件隐藏；点击“查看当前定位”可清除这些筛选。",
+    "当前有 1 个5分钟操作候选已完成有效的1分钟区间套定位（买点 1 / 卖点 0），但被其他筛选条件隐藏；点击“查看当前定位”可清除这些筛选。",
   );
 });
 
@@ -3247,7 +3247,6 @@ test("operator status copy explains degraded state without exposing internal cod
     },
     priority_monitor_sector_source_mode: "CURRENT_NATIVE",
     priority_monitor_immediate_universe_count: 3,
-    priority_monitor_expired_segment_universe_count: 11,
     realtime_alert_status: "ready",
     realtime_alert_reason_code: "READY",
     notification_dispatcher_configured: true,
@@ -3266,7 +3265,7 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.doesNotMatch(monitorSummary, /verified|READY/);
   assert.match(
     Ui.priorityMonitorDiagnosticsText(monitorHealth, { signal_count: 0 }),
-    /总预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的新鲜5分钟候选 3 只 · 已过定位时窗（仅诊断、不计入当前结果） 11 只.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*通知送达 已验证（已有成功送达证明）/,
+    /总预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的当前5分钟候选 3 只 · 持续轮转直至结构被替换.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*通知送达 已验证（已有成功送达证明）/,
   );
   const preparingSectorScope = {
     ...monitorHealth,
@@ -3312,15 +3311,13 @@ test("operator status copy explains degraded state without exposing internal cod
     Ui.segmentScopeText({
       priority_monitor_last_code_count: 2,
       priority_monitor_immediate_universe_count: 1,
-      priority_monitor_expired_segment_universe_count: 11,
     }, 0),
-    "当前没有5分钟操作候选完成1m/L0区间套精确定位 · 另有 1 只新鲜5分钟候选正在等待1分钟定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
+    "当前没有5分钟操作候选完成1分钟区间套精确定位 · 另有 1 只当前5分钟候选正在等待1分钟定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
   );
   assert.equal(
     Ui.segmentScopeText({
-      priority_monitor_expired_segment_universe_count: 11,
     }, 3),
-    "当前 3 个5分钟操作候选已完成1m/L0区间套精确定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
+    "当前 3 个5分钟操作候选已完成1分钟区间套精确定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
   );
   assert.equal(
     Ui.priorityMonitorText({ priority_monitor_status: "not_due" }, {}),
@@ -3391,7 +3388,7 @@ test("operator status copy explains degraded state without exposing internal cod
   );
 });
 
-test("signal cards show causal 5m time and demote stale confirmed structures", () => {
+test("signal cards keep current 5m structures current regardless of age", () => {
   const Ui = loadUi();
   const staleBuy = {
     lifecycle_stage: "executable",
@@ -3403,11 +3400,11 @@ test("signal cards show causal 5m time and demote stale confirmed structures", (
 
   assert.equal(
     Ui.signalCardLifecycleLabel(staleBuy, new Date("2026-08-21T10:38:00+08:00")),
-    "历史买点 · 等待新结构",
+    "强提示待人工复核",
   );
   assert.equal(
     Ui.signalCardLifecycleLabel(staleSell, new Date("2026-08-21T10:38:00+08:00")),
-    "历史卖点 · 持续跟踪",
+    "强提示待人工复核",
   );
   assert.equal(
     Ui.signalCardLifecycleLabel({
@@ -3416,7 +3413,7 @@ test("signal cards show causal 5m time and demote stale confirmed structures", (
       setup_5m: { terminal_segment_end_at: "2026-08-14T09:40:00+08:00" },
       observed_at: "2026-08-21T10:38:00+08:00",
     }, new Date("2026-08-21T10:38:00+08:00")),
-    "历史买点 · 等待新结构",
+    "强提示待人工复核",
   );
   assert.equal(
     Ui.signalCardLifecycleLabel({ ...staleBuy, setup_5m: { available_at: "2026-08-21T10:35:00+08:00" } }, new Date("2026-08-21T10:38:00+08:00")),

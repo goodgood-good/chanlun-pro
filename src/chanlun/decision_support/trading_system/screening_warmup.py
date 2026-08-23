@@ -7,8 +7,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from types import MappingProxyType
+
+from chanlun.decision_support.fingerprints import normalize_datetime
+from chanlun.decision_support.trading_system.models import (
+    ContextDirection,
+    StructuralPoint,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
 
 
 SCREENING_WARMUP_FREQUENCIES = ("d", "30m", "5m", "1m")
@@ -29,6 +39,19 @@ SCREENING_WARMUP_DIFFERENCE_CODES = frozenset(
 )
 SCREENING_WARMUP_REQUIRED_BARS: Mapping[str, int] = MappingProxyType(
     {"d": 480, "30m": 480, "5m": 960, "1m": 1440}
+)
+# This is the production data-admission floor.  It is deliberately distinct
+# from the stricter convergence history above: a 5m sell may still be needed
+# for risk reduction when the optional convergence comparison is unavailable,
+# while a feed shorter than this floor cannot publish any structural decision.
+SCREENING_MINIMUM_BARS_BY_FREQUENCY: Mapping[str, int] = MappingProxyType(
+    {"d": 240, "30m": 240, "5m": 480, "1m": 960}
+)
+SCREENING_WARMUP_DAYS_BY_FREQUENCY: Mapping[str, int] = MappingProxyType(
+    {"1m": 30, "5m": 120, "30m": 365}
+)
+SCREENING_CANONICAL_REQUEST_BARS: Mapping[str, int] = MappingProxyType(
+    {"d": 1600, "30m": 4000, "5m": 12000, "1m": 12000}
 )
 
 
@@ -92,12 +115,93 @@ def five_minute_warmup_converged(raw: object) -> bool | None:
     return aggregate if type(aggregate) is bool else None
 
 
+def screening_warmup_tail_signature(
+    *,
+    direction: ContextDirection,
+    points: Sequence[StructuralPoint],
+    not_before: datetime,
+    trade_level_only: bool = False,
+) -> tuple[object, ...]:
+    """Build the shared semantic tail used by live and historical gates."""
+
+    cutoff = normalize_datetime(not_before, "warmup tail not_before")
+    latest: dict[
+        tuple[str, str, int, str],
+        tuple[datetime, tuple[object, ...]],
+    ] = {}
+    for point in points:
+        if trade_level_only and not is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        ):
+            continue
+        observed_at = point.available_at
+        if point.terminal_segment is None and (
+            observed_at < cutoff or point.anchor_at < cutoff
+        ):
+            continue
+        terminal_role = (
+            "legacy"
+            if point.terminal_segment is None
+            else point.terminal_segment.role
+        )
+        lane = (
+            point.point_type,
+            point.tower,
+            point.recursive_level,
+            terminal_role,
+        )
+        semantic = (
+            point.side,
+            point.status,
+            point.source_frequency,
+            point.anchor_at.isoformat(),
+            None if point.confirmed_at is None else point.confirmed_at.isoformat(),
+            point.available_at.isoformat(),
+            point.price_basis_revision,
+            point.structure_anchor_price,
+            point.structure_invalidation_price,
+            point.center_zd,
+            point.center_zg,
+            point.center_ordinal,
+            point.variant,
+            point.divergence_kind,
+            point.evidence_codes,
+            (
+                None
+                if point.terminal_segment is None
+                else (
+                    point.terminal_segment.role,
+                    point.terminal_segment.source_kind.value,
+                    point.terminal_segment.direction,
+                    point.terminal_segment.state,
+                    point.terminal_segment.market_start.isoformat(),
+                    point.terminal_segment.market_end.isoformat(),
+                )
+            ),
+        )
+        previous = latest.get(lane)
+        if previous is None or observed_at > previous[0]:
+            latest[lane] = (observed_at, semantic)
+    return (
+        None if trade_level_only else direction,
+        tuple(
+            (lane, observed_at.isoformat(), semantic)
+            for lane, (observed_at, semantic) in sorted(latest.items())
+        ),
+    )
+
+
 __all__ = (
     "SCREENING_QMT_30M_FALLBACK_REASON_CODE",
+    "SCREENING_CANONICAL_REQUEST_BARS",
+    "SCREENING_MINIMUM_BARS_BY_FREQUENCY",
     "SCREENING_WARMUP_DIFFERENCE_CODES",
     "SCREENING_WARMUP_FREQUENCIES",
+    "SCREENING_WARMUP_DAYS_BY_FREQUENCY",
     "SCREENING_WARMUP_REQUIRED_BARS",
     "expected_screening_warmup_suffix_bar_count",
     "five_minute_warmup_converged",
+    "screening_warmup_tail_signature",
     "screening_warmup_reason_code",
 )

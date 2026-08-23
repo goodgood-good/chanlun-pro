@@ -178,8 +178,17 @@ def read_qmt_local_kline(
     frequency: str,
     start_at: datetime,
     end_at: datetime,
+    history_bars_before_start: int | None = None,
 ) -> tuple[pd.DataFrame, QMTLocalKlineAudit]:
-    """Read raw completed QMT bars from one immutable local cache file."""
+    """Read raw completed QMT bars from one immutable local cache file.
+
+    ``history_bars_before_start`` extends the selected range by an exact
+    number of physical records immediately preceding ``start_at``.  It is
+    used when a production request asks for a fixed-size trailing context:
+    records older than that context cannot affect the decision and therefore
+    must not make an otherwise valid replay fail because of an unrelated
+    vendor-era price anomaly.
+    """
 
     directory = resolve_qmt_local_data_dir(data_dir)
     assert directory is not None
@@ -187,6 +196,11 @@ def read_qmt_local_kline(
         raise ValueError("QMT local cache boundaries must be timezone-aware")
     if start_at > end_at:
         raise ValueError("QMT local cache start cannot follow end")
+    if history_bars_before_start is not None and (
+        type(history_bars_before_start) is not int
+        or history_bars_before_start <= 0
+    ):
+        raise ValueError("history_bars_before_start must be a positive integer")
     path = qmt_local_kline_path(directory, code, frequency)
     if not path.is_file():
         empty = pd.DataFrame(columns=("time", "open", "high", "low", "close", "volume"))
@@ -246,7 +260,20 @@ def read_qmt_local_kline(
         )
     start_seconds = math.floor(start_at.timestamp())
     end_seconds = math.floor(end_at.timestamp())
-    mask = (values["time"] >= start_seconds) & (values["time"] <= end_seconds)
+    selection_start_seconds = start_seconds
+    if history_bars_before_start is not None:
+        preceding = np.flatnonzero(values["time"] < start_seconds)
+        if preceding.size:
+            first_position = int(
+                preceding[max(0, preceding.size - history_bars_before_start)]
+            )
+            selection_start_seconds = min(
+                selection_start_seconds,
+                int(values["time"][first_position]),
+            )
+    mask = (values["time"] >= selection_start_seconds) & (
+        values["time"] <= end_seconds
+    )
     selected = values[mask]
     if selected.size:
         timestamps = selected["time"].astype("int64", copy=True)

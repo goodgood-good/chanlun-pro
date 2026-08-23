@@ -227,7 +227,7 @@ def _trigger_occurrence_key(
     signal: Mapping[str, object],
     new_stage: str,
 ) -> tuple[str, ...] | None:
-    """以 5 分钟正式点识别一次买卖信号，不依赖可选 1 分钟段差证据。"""
+    """以 5 分钟正式点识别一次买卖信号，不依赖可选 1 分钟区间套定位。"""
 
     if new_stage not in {"triggered", "executable"}:
         return None
@@ -648,7 +648,7 @@ def _terminal_occurrence_key(
     if new_stage not in {"invalidated", "closed"}:
         return None
     semantic_key = _signal_semantic_key(signal)
-    # 终态只绑定正式 5 分钟发生事实；可选 1 分钟段差证据不改变信号身份。
+    # 终态只绑定正式 5 分钟发生事实；可选 1 分钟区间套定位不改变信号身份。
     if any(not value for value in semantic_key):
         return None
     return (new_stage, *semantic_key)

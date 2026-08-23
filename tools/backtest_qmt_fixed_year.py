@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time as datetime_time
 from functools import lru_cache
 import hashlib
 import json
@@ -22,6 +22,7 @@ import pickle
 import sys
 import time
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,9 @@ from chanlun.decision_support.trading_system.signal_alignment import (
     UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
 )
 from tools import qmt_research_contract
+
+
+CN = ZoneInfo("Asia/Shanghai")
 
 
 RUN_SCHEMA = "chanlun-fixed-year-qmt-run"
@@ -223,6 +227,11 @@ def _load_fact(path: Path, request: WorkerRequest) -> SymbolResearchFacts | None
 
 
 def _fact_summary(fact: SymbolResearchFacts) -> dict[str, object]:
+    replay_end = datetime.combine(
+        fact.requested_end,
+        datetime_time(15, 0),
+        tzinfo=CN,
+    )
     return {
         "code": fact.code,
         "sector_id": fact.sector_id,
@@ -230,11 +239,40 @@ def _fact_summary(fact: SymbolResearchFacts) -> dict[str, object]:
         "source_revision": fact.source_revision,
         "row_counts": dict(fact.row_counts),
         "point_counts": {
+            "d": len(fact.daily_points),
             "30m": len(fact.thirty_points),
             "5m": len(fact.five_points),
             "1m": len(fact.one_points),
         },
+        "point_visibility_interval_counts": {
+            "d": len(fact.daily_point_visibility),
+            "30m": len(fact.thirty_point_visibility),
+            "5m": len(fact.five_point_visibility),
+            "1m": len(fact.one_point_visibility),
+        },
+        "point_current_at_replay_end_counts": {
+            frequency: len(
+                {
+                    interval.point_id
+                    for interval in visibility
+                    if interval.contains(replay_end)
+                }
+            )
+            for frequency, visibility in (
+                ("d", fact.daily_point_visibility),
+                ("30m", fact.thirty_point_visibility),
+                ("5m", fact.five_point_visibility),
+                ("1m", fact.one_point_visibility),
+            )
+        },
         "evaluation_count": len(fact.evaluations),
+        "five_minute_warmup_fact_count": len(fact.five_minute_warmup),
+        "five_minute_warmup_diverged_count": sum(
+            not row.converged for row in fact.five_minute_warmup
+        ),
+        "higher_timeframe_gate_fact_count": sum(
+            row.higher_timeframe_gates is not None for row in fact.evaluations
+        ),
         "direction_unavailable_count": fact.direction_unavailable_count,
         "membership_change_count": len(fact.memberships),
         "corporate_action_count": len(fact.factors),
@@ -386,7 +424,7 @@ def _manifest(
                     int(dict(row.get("row_counts", {})).get(frequency, 0))
                     for row in completed.values()
                 )
-                for frequency in ("30m", "5m", "1m")
+                for frequency in ("d", "30m", "5m", "1m")
             },
         },
         "failures": dict(sorted(failures.items())),

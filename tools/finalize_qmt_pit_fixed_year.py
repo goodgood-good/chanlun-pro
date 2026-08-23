@@ -48,6 +48,18 @@ from chanlun.decision_support.trading_system.backtest.report import (
     BacktestEvaluationResult,
     build_report,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    current_five_minute_setup_points,
+    five_minute_setup_is_in_policy_scope,
+    is_one_minute_segment_difference,
+    match_one_minute_segment_difference_for_point,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
+)
+from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_MINIMUM_BARS_BY_FREQUENCY,
+)
 from tools import qmt_research_contract
 
 
@@ -367,15 +379,93 @@ def _causality_failures(
             or point.confirmed_at is None
             or point.available_at < point.confirmed_at
             for point in (
+                *facts.daily_points,
                 *facts.thirty_points,
                 *facts.five_points,
                 *facts.one_points,
             )
         ):
             failures.append("noncausal_structural_point_registry")
+        for frequency, points, visibility in (
+            ("daily", facts.daily_points, facts.daily_point_visibility),
+            ("thirty_minute", facts.thirty_points, facts.thirty_point_visibility),
+            ("five_minute", facts.five_points, facts.five_point_visibility),
+            ("one_minute", facts.one_points, facts.one_point_visibility),
+        ):
+            points_by_id = {point.point_id: point for point in points}
+            visibility_point_ids = {
+                interval.point_id for interval in visibility
+            }
+            if visibility_point_ids != points_by_id.keys():
+                failures.append(f"{frequency}_current_state_ledger_incomplete")
+            if any(
+                interval.visible_from
+                < points_by_id[interval.point_id].available_at
+                for interval in visibility
+                if interval.point_id in points_by_id
+            ):
+                failures.append(f"{frequency}_state_visible_before_point")
+        operation_point_ids = {
+            point.point_id
+            for point in facts.five_points
+            if is_five_minute_trade_level(
+                point.source_frequency,
+                point.recursive_level,
+            )
+            and five_minute_setup_is_in_policy_scope(point)
+        }
+        warmup_by_time = {
+            row.observed_at: row for row in facts.five_minute_warmup
+        }
         for evaluation in facts.evaluations:
+            if not any(
+                interval.point_id in operation_point_ids
+                and interval.contains(evaluation.observed_at)
+                for interval in facts.five_point_visibility
+            ):
+                failures.append("decision_without_current_five_minute_setup")
             if evaluation.bar.closed_at != evaluation.observed_at:
                 failures.append("decision_bar_not_closed")
+            has_locator_candidate = any(
+                point.available_at == evaluation.observed_at
+                and is_one_minute_segment_difference(point)
+                for point in facts.one_points
+            )
+            execution_snapshot = warmup_by_time.get(evaluation.observed_at)
+            if has_locator_candidate and execution_snapshot is None:
+                failures.append("locator_without_production_execution_snapshot")
+            exact_buy_match = False
+            if execution_snapshot is not None:
+                if (
+                    execution_snapshot.one_minute_bar_count
+                    != evaluation.one_minute_bar_count
+                ):
+                    failures.append("production_one_minute_history_count_changed")
+                if (
+                    execution_snapshot.one_minute_bar_count
+                    < SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
+                ):
+                    failures.append("production_one_minute_history_insufficient")
+                current_setups = current_five_minute_setup_points(
+                    execution_snapshot.production_five_points,
+                    as_of=evaluation.observed_at,
+                )
+                exact_buy_match = any(
+                    setup.side == "buy"
+                    and match_one_minute_segment_difference_for_point(
+                        setup,
+                        (locator,),
+                        as_of=evaluation.observed_at,
+                    )
+                    is not None
+                    for setup in current_setups
+                    for locator in execution_snapshot.production_one_points
+                )
+            if (
+                exact_buy_match
+                and evaluation.higher_timeframe_gates is None
+            ):
+                failures.append("buy_locator_without_higher_timeframe_integrity_gate")
             expected = index.membership_at(facts.code, evaluation.observed_at)
             expected_sector = None if expected is None else expected.sector_id
             if evaluation.sector_id != expected_sector:
@@ -404,6 +494,23 @@ def _causality_failures(
         failures.append("share_reform_outside_certified_contract")
     if any(facts.error is not None for facts in sectors.values()):
         failures.append("sector_composite_incomplete")
+    for facts in sectors.values():
+        point_ids = {point.point_id for point in facts.thirty_points}
+        visibility_ids = {
+            interval.point_id for interval in facts.thirty_point_visibility
+        }
+        if visibility_ids != point_ids:
+            failures.append("sector_current_state_ledger_incomplete")
+        for observed_at, assessment in facts.assessments:
+            context = assessment.thirty_context
+            if context is None or context.dominant_point_id is None:
+                continue
+            if not any(
+                interval.point_id == context.dominant_point_id
+                and interval.contains(observed_at)
+                for interval in facts.thirty_point_visibility
+            ):
+                failures.append("stale_sector_point_at_decision")
     for facts in symbols:
         for evaluation in facts.evaluations:
             if evaluation.sector_id is not None and (
@@ -444,6 +551,16 @@ def _write_gate(
                 "ex_date_only_causal_price_basis",
                 "cash_and_share_corporate_action_accounting",
                 "closed_bar_strict_structure_witnesses",
+                "causal_daily_current_state_intervals",
+                "causal_thirty_minute_current_state_intervals",
+                "causal_five_minute_current_state_intervals",
+                "causal_one_minute_current_state_intervals",
+                "causal_sector_thirty_minute_current_state_intervals",
+                "canonical_production_five_minute_snapshot_at_every_locator",
+                "canonical_production_one_minute_locator_snapshot",
+                "production_five_minute_warmup_gate_at_buy_locator",
+                "production_higher_timeframe_integrity_gate_at_buy_locator",
+                "exact_one_minute_locator_close_evaluation",
                 "next_complete_minute_execution",
                 "observed_range_and_volume_fill_guard",
                 "delisted_security_zero_recovery",
@@ -673,7 +790,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("historical_security_status", Decimal("1")),
             ("corporate_action_accounting", Decimal("1")),
             ("sector_event_coverage", sector_event_coverage),
-            ("current_production_selection_contract", Decimal("1")),
+            ("causal_current_structure_ledgers", Decimal("1")),
+            ("exact_one_minute_locator_scheduling", Decimal("1")),
+            ("entry_higher_timeframe_integrity_evidence", Decimal("1")),
         ),
     )
     result = BacktestEvaluationResult(
@@ -746,7 +865,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _write_gate(
         path=gate_path,
         status="passed",
-        pnl_generated=True,
+        pnl_generated=bool(run.fills),
         algorithm_revision=algorithm_revision,
         snapshot_hash=snapshot_hash,
         symbols=len(symbols),

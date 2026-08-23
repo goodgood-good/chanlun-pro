@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from functools import lru_cache
 import hashlib
@@ -165,13 +165,57 @@ def _projection(
     facts: SymbolResearchFacts,
     cutoff: datetime,
 ) -> tuple[object, ...]:
+    decision_times = tuple(
+        row.observed_at for row in facts.evaluations if row.observed_at <= cutoff
+    )
+    semantic_cutoff = max(decision_times, default=cutoff)
+
+    def clipped_visibility(intervals):
+        return tuple(
+            replace(
+                interval,
+                visible_until=(
+                    None
+                    if interval.visible_until is None
+                    or interval.visible_until > semantic_cutoff
+                    else interval.visible_until
+                ),
+            )
+            for interval in intervals
+            if interval.visible_from <= semantic_cutoff
+        )
+
+    daily_visibility = clipped_visibility(facts.daily_point_visibility)
+    daily_point_ids = {interval.point_id for interval in daily_visibility}
     return (
         tuple(
-            point for point in facts.thirty_points if point.available_at <= cutoff
+            point
+            for point in facts.daily_points
+            if point.point_id in daily_point_ids
         ),
-        tuple(point for point in facts.five_points if point.available_at <= cutoff),
-        tuple(point for point in facts.one_points if point.available_at <= cutoff),
-        tuple(row for row in facts.evaluations if row.observed_at <= cutoff),
+        daily_visibility,
+        tuple(
+            point
+            for point in facts.thirty_points
+            if point.available_at <= semantic_cutoff
+        ),
+        clipped_visibility(facts.thirty_point_visibility),
+        tuple(
+            point for point in facts.five_points if point.available_at <= semantic_cutoff
+        ),
+        clipped_visibility(facts.five_point_visibility),
+        tuple(
+            point for point in facts.one_points if point.available_at <= semantic_cutoff
+        ),
+        clipped_visibility(facts.one_point_visibility),
+        tuple(
+            row
+            for row in facts.five_minute_warmup
+            if row.observed_at <= semantic_cutoff
+        ),
+        tuple(
+            row for row in facts.evaluations if row.observed_at <= semantic_cutoff
+        ),
     )
 
 

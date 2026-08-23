@@ -82,9 +82,6 @@ from chanlun.decision_support.trading_system.lifecycle import (
     lifecycle_stage_from_signal,
 )
 from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
-from chanlun.decision_support.trading_system.position_recommendation import (
-    active_signal_age_seconds,
-)
 from chanlun.decision_support.trading_system.qmt_sector_same_base import (
     QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT,
 )
@@ -213,9 +210,6 @@ ONE_MINUTE_LOCATOR_SLA_SECONDS = 60
 PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor"
 CANDIDATE_MONITOR_CONTRACT_ID = (
     "bar-cadence-live-candidate-monitor-v4-epoch-symbol-exclusions"
-)
-_LEGACY_CANDIDATE_MONITOR_CONTRACT_IDS = frozenset(
-    {"bar-cadence-live-candidate-monitor-v3-ranked-supportive-5m-discovery"}
 )
 CANDIDATE_MONITOR_SYMBOL_EXCLUSION_SCHEMA = (
     "chanlun-candidate-monitor-symbol-exclusion"
@@ -1118,51 +1112,24 @@ def _five_minute_signal_is_fresh_for_segment_monitor(
     signal: Mapping[str, object],
     observed_at: datetime,
 ) -> bool:
-    """Return whether optional 1m enrichment can still produce a timely alert.
+    """Return whether a current 5m setup still belongs in the 1m lane.
 
-    The immutable close snapshot may retain confirmed 5m structures for later
-    review.  Recomputing 1m segment difference for every such historical row on
-    every minute consumes the scarce priority worker while the notification gate
-    will deterministically reject the result as ``FIVE_MINUTE_SIGNAL_STALE``.
-    Only rows inside the same ten active-minute window used by notification and
-    sizing remain in the optional 1m queue.  Legacy/imported fixtures without a
-    causal setup timestamp keep the compatibility behavior; production decision
-    documents always carry one and malformed explicit timestamps fail closed.
+    The ten-active-minute notification window applies to each newly observed
+    event.  A 1m locator that arrives later has its own fresh event timestamp,
+    so the age of the parent 5m setup must not evict an otherwise-current setup
+    from precision monitoring.  Structural replacement, not elapsed time,
+    closes this queue membership.
     """
 
-    observed = normalize_datetime(observed_at, "segment monitor observed_at")
-    setup = signal.get("setup_5m")
-    if not isinstance(setup, Mapping):
+    normalize_datetime(observed_at, "segment monitor observed_at")
+    stage = lifecycle_stage_from_signal(signal)
+    if stage in {"observed", "approaching", "formed", "armed"}:
+        # These rows are either still forming or come from the bounded legacy
+        # migration path.  They need another 5m observation before the service
+        # can prove that the structure was replaced; wall-clock age is not that
+        # proof.  Only confirmed current rows enter the 1m lane below.
         return True
-    raw_times = tuple(
-        setup.get(key)
-        for key in (
-            "available_at",
-            "confirmed_at",
-            # Compact live presentation documents retain the causal terminal
-            # lineage rather than the full point object.  This is the production
-            # timestamp used after the first monitor-state persistence round.
-            "terminal_segment_available_at",
-        )
-    )
-    explicit_times = tuple(value for value in raw_times if value is not None)
-    if not explicit_times:
-        return True
-    signal_at: datetime | None = None
-    for raw in explicit_times:
-        try:
-            parsed = datetime.fromisoformat(raw) if isinstance(raw, str) else raw
-            if not isinstance(parsed, datetime):
-                continue
-            signal_at = normalize_datetime(parsed, "5m setup signal time")
-        except ValueError:
-            continue
-        else:
-            break
-    if signal_at is None:
-        return False
-    age_seconds = active_signal_age_seconds(signal_at, observed, market="a")
-    return bool(age_seconds is not None and age_seconds <= SIGNAL_MAX_AGE_SECONDS)
+    return _is_current_selection_signal(signal)
 
 
 def _signal_side(signal: Mapping[str, object]) -> str | None:
@@ -1190,9 +1157,10 @@ def _one_minute_segment_requires_monitor(
     buy locator is executable for only its declared minute boundary.  Retaining
     that evidence must therefore not permanently remove the 5m setup from the
     1m queue: after the boundary expires (or is missing/malformed), the setup is
-    re-armed so a later same-side physical 1m/L0 point can replace the old
-    locator.  Sell evidence has no buy-entry boundary and remains resolved here;
-    held/watchlisted symbols continue through the mandatory monitoring lane.
+    re-armed so a later same-side physical 1m interval-nesting point can replace
+    the old locator.  Sell evidence has no buy-entry boundary and remains
+    resolved here; held/watchlisted symbols continue through the mandatory
+    monitoring lane.
     """
 
     # Optional discovery capacity is only useful for buy execution.  Sell
@@ -1518,32 +1486,6 @@ def _take_rotating_priority_batch(
             code for code in candidates if code in previous_set
         )
     return candidates[:max_symbols]
-
-
-def _take_stage_aware_priority_batch(
-    immediate_universe: tuple[str, ...],
-    waiting_trigger_universe: tuple[str, ...],
-    *,
-    previous_codes: tuple[str, ...],
-    max_symbols: int,
-) -> tuple[str, ...]:
-    """Keep confirmed/active transitions ahead of the larger armed rotation."""
-
-    if max_symbols <= 0:
-        return ()
-    immediate = _take_rotating_priority_batch(
-        immediate_universe,
-        previous_codes=previous_codes,
-        max_symbols=max_symbols,
-    )
-    remaining = max(0, max_symbols - len(immediate))
-    immediate_set = set(immediate)
-    waiting = _take_rotating_priority_batch(
-        tuple(code for code in waiting_trigger_universe if code not in immediate_set),
-        previous_codes=previous_codes,
-        max_symbols=remaining,
-    )
-    return tuple(dict.fromkeys((*immediate, *waiting)))
 
 
 def _take_rule_recheck_batch(
@@ -3989,8 +3931,6 @@ class TradingScreeningService:
         self._priority_monitor_mandatory_count = 0
         self._priority_monitor_immediate_universe_count = 0
         self._priority_monitor_rearmed_segment_universe_count = 0
-        self._priority_monitor_expired_segment_universe_count = 0
-        self._priority_monitor_waiting_trigger_universe_count = 0
         self._priority_monitor_tracking_universe_count = 0
         self._priority_monitor_scheduled_count = 0
         self._priority_monitor_configured_rotation_seconds: int | None = None
@@ -4252,10 +4192,7 @@ class TradingScreeningService:
             not isinstance(payload, Mapping)
             or payload.get("schema") != PRIORITY_MONITOR_SCHEMA
             or payload.get("candidate_monitor_contract_id")
-            not in {
-                CANDIDATE_MONITOR_CONTRACT_ID,
-                *_LEGACY_CANDIDATE_MONITOR_CONTRACT_IDS,
-            }
+            != CANDIDATE_MONITOR_CONTRACT_ID
             or payload.get("screening_policy_id") != _screening_policy_id()
             or not isinstance(payload.get("decision_core_id"), str)
             or re.fullmatch(
@@ -4345,9 +4282,6 @@ class TradingScreeningService:
         raw_recheck_pending_codes = payload.get(
             "decision_rule_recheck_pending_codes",
             [],
-        )
-        legacy_mixed_recheck_state = (
-            "decision_rule_recheck_last_attempted_codes" not in payload
         )
         raw_recheck_last_attempted_codes = payload.get(
             "decision_rule_recheck_last_attempted_codes",
@@ -4583,40 +4517,6 @@ class TradingScreeningService:
         effective_recheck_attempted_codes = list(raw_recheck_last_attempted_codes)
         effective_recheck_deferred_codes = list(raw_recheck_last_deferred_codes)
         effective_recheck_errors = list(raw_recheck_last_errors)
-        if legacy_mixed_recheck_state and raw_recheck_pending_codes:
-            # 旧状态把一次性规则复核混进正式 5m 候选口径。加载时原地迁移，避免
-            # 重启后继续把历史积压误报成候选 SLA 缺口或候选故障。
-            pending_rechecks = set(raw_recheck_pending_codes)
-            effective_recheck_attempted_codes = [
-                code for code in raw_last_five_codes if code in pending_rechecks
-            ]
-            effective_recheck_deferred_codes = [
-                code for code in raw_last_deferred_codes if code in pending_rechecks
-            ]
-            effective_five_universe = [
-                code for code in raw_five_universe if code not in pending_rechecks
-            ]
-            effective_last_five_codes = [
-                code for code in raw_last_five_codes if code not in pending_rechecks
-            ]
-            effective_last_deferred_codes = [
-                code for code in raw_last_deferred_codes if code not in pending_rechecks
-            ]
-            effective_recheck_errors = [
-                value
-                for value in raw_candidate_errors
-                if value.get("code") in pending_rechecks
-            ]
-            effective_candidate_errors = [
-                value
-                for value in raw_candidate_errors
-                if value.get("code") not in pending_rechecks
-            ]
-            five_last_success_at = {
-                code: value
-                for code, value in five_last_success_at.items()
-                if code not in pending_rechecks
-            }
         effective_stages: dict[str, str] = {}
         for key, value in raw_stages.items():
             signal_id = str(key)
@@ -5506,23 +5406,16 @@ class TradingScreeningService:
                         self._priority_monitor_latest_documents.pop(signal_id, None)
                         self._priority_monitor_signal_stages.pop(signal_id, None)
                         self._priority_monitor_signal_codes.pop(signal_id, None)
-        # Confirmed structures remain visible for review after their notification
-        # window closes, but recalculating every stale row every five minutes can
-        # consume the entire discovery lane while the dispatcher will always
-        # reject it as stale.  Forming setups stay tracked until resolution; a
-        # confirmed setup stays in the recurring lane only while a timely alert
-        # is still possible.  Mandatory and supportive-sector discovery scopes
-        # are added independently below.
+        # A current 5m setup remains in the recurring lane until a newer strict
+        # structure replaces it.  Its original notification may be old, but a
+        # later 1m locator is a new event with its own freshness timestamp.
         recurring_signal_documents = tuple(
             row
             for row in current_signal_documents
             if _signal_side(row) == "buy"
-            and (
-                lifecycle_stage_from_signal(row) == "approaching"
-                or _five_minute_signal_is_fresh_for_segment_monitor(
-                    row,
-                    observed_at,
-                )
+            and _five_minute_signal_is_fresh_for_segment_monitor(
+                row,
+                observed_at,
             )
         )
         signal_candidate_codes = _priority_signal_candidate_codes(
@@ -5589,7 +5482,8 @@ class TradingScreeningService:
         pending_segment_documents = tuple(
             row
             for row in current_signal_documents
-            if _one_minute_segment_requires_monitor(row, observed_at)
+            if _five_minute_signal_is_fresh_for_segment_monitor(row, observed_at)
+            and _one_minute_segment_requires_monitor(row, observed_at)
         )
         rearmed_segment_documents = tuple(
             row
@@ -5599,24 +5493,13 @@ class TradingScreeningService:
                 Mapping,
             )
         )
-        all_immediate_signal_universe = _priority_signal_candidate_codes(
-            pending_segment_documents,
-            excluded_codes=frozenset(
-                (
-                    *excluded_codes,
-                    *mandatory_scope,
-                    *candidate_locator_epoch_excluded_codes,
-                )
-            ),
-            allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
-        )
-        fresh_pending_segment_documents = tuple(
+        current_pending_segment_documents = tuple(
             row
             for row in pending_segment_documents
             if _five_minute_signal_is_fresh_for_segment_monitor(row, observed_at)
         )
         immediate_signal_universe = _priority_signal_candidate_codes(
-            fresh_pending_segment_documents,
+            current_pending_segment_documents,
             excluded_codes=frozenset(
                 (
                     *excluded_codes,
@@ -5644,21 +5527,9 @@ class TradingScreeningService:
             ),
             allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
         )
-        fresh_immediate_codes = set(immediate_signal_universe)
-        expired_segment_universe = tuple(
-            code
-            for code in all_immediate_signal_universe
-            if code not in fresh_immediate_codes
-        )
-        # ``armed`` 只可能来自旧快照，交给 5 分钟通道迁移；它不再占用 1 分钟
-        # 段差容量。
-        waiting_trigger_universe: tuple[str, ...] = ()
-        urgent_signal_universe = tuple(
-            dict.fromkeys((*immediate_signal_universe, *waiting_trigger_universe))
-        )
-        urgent_signal_codes = _take_stage_aware_priority_batch(
+        urgent_signal_universe = immediate_signal_universe
+        urgent_signal_codes = _take_rotating_priority_batch(
             immediate_signal_universe,
-            waiting_trigger_universe,
             previous_codes=previous_priority_codes,
             max_symbols=max(
                 0,
@@ -5666,14 +5537,7 @@ class TradingScreeningService:
                 - len(monitorable_mandatory_codes),
             ),
         )
-        selected_immediate_codes = tuple(
-            code for code in urgent_signal_codes if code in immediate_signal_universe
-        )
-        selected_waiting_codes = tuple(
-            code
-            for code in urgent_signal_codes
-            if code not in immediate_signal_universe
-        )
+        selected_immediate_codes = urgent_signal_codes
         priority_worker_count = self._config.effective_priority_worker_count
         minute_codes = (
             ()
@@ -5688,11 +5552,6 @@ class TradingScreeningService:
                         ),
                         *_priority_affinity_striped_codes(
                             selected_immediate_codes,
-                            sector_by_code=sector_by_code,
-                            worker_count=priority_worker_count,
-                        ),
-                        *_priority_affinity_striped_codes(
-                            selected_waiting_codes,
                             sector_by_code=sector_by_code,
                             worker_count=priority_worker_count,
                         ),
@@ -5723,12 +5582,6 @@ class TradingScreeningService:
             )
             self._priority_monitor_rearmed_segment_universe_count = len(
                 rearmed_segment_universe
-            )
-            self._priority_monitor_expired_segment_universe_count = len(
-                expired_segment_universe
-            )
-            self._priority_monitor_waiting_trigger_universe_count = len(
-                waiting_trigger_universe
             )
             self._priority_monitor_tracking_universe_count = len(urgent_signal_universe)
             self._priority_monitor_scheduled_count = len(minute_codes)
@@ -8550,12 +8403,6 @@ class TradingScreeningService:
             priority_monitor_rearmed_segment_universe_count = (
                 self._priority_monitor_rearmed_segment_universe_count
             )
-            priority_monitor_expired_segment_universe_count = (
-                self._priority_monitor_expired_segment_universe_count
-            )
-            priority_monitor_waiting_trigger_universe_count = (
-                self._priority_monitor_waiting_trigger_universe_count
-            )
             priority_monitor_tracking_universe_count = (
                 self._priority_monitor_tracking_universe_count
             )
@@ -9538,17 +9385,8 @@ class TradingScreeningService:
             "priority_monitor_immediate_universe_count": (
                 priority_monitor_immediate_universe_count
             ),
-            "priority_monitor_segment_difference_universe_count": (
-                priority_monitor_immediate_universe_count
-            ),
             "priority_monitor_rearmed_segment_universe_count": (
                 priority_monitor_rearmed_segment_universe_count
-            ),
-            "priority_monitor_expired_segment_universe_count": (
-                priority_monitor_expired_segment_universe_count
-            ),
-            "priority_monitor_waiting_trigger_universe_count": (
-                priority_monitor_waiting_trigger_universe_count
             ),
             "priority_monitor_tracking_universe_count": (
                 priority_monitor_tracking_universe_count

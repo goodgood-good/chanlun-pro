@@ -9,7 +9,9 @@ from chanlun.core.strict_structure.current_events import (
 )
 from chanlun.core.strict_structure.models import (
     StrictEvidenceResult,
+    StrictPointEvidence,
     StrictPointStatus,
+    StrictStructureResult,
 )
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.models import (
@@ -57,6 +59,25 @@ def structural_point_id_map(
                     None
                     if raw.parent_point_id is None
                     else converted[raw.parent_point_id]
+                ),
+                variant=cast(PointVariant, raw.variant.value),
+                structure_anchor_price=float(raw.structure_anchor_price),
+                structure_invalidation_price=float(
+                    raw.structure_invalidation_price
+                ),
+                center_zd=(
+                    None
+                    if raw.center_zd_tick is None
+                    else float(raw.center_zd_tick * raw.price_quantum)
+                ),
+                center_zg=(
+                    None
+                    if raw.center_zg_tick is None
+                    else float(raw.center_zg_tick * raw.price_quantum)
+                ),
+                center_ordinal=raw.center_ordinal,
+                divergence_kind=(
+                    None if raw.divergence is None else raw.divergence.kind
                 ),
             )
         if len(deferred) == len(pending):
@@ -183,8 +204,38 @@ def extract_current_confirmed_points(
     if normalize_datetime(evidence.source_closed_at, "source_closed_at") > closed_at:
         raise ValueError("strict evidence snapshot is after as_of")
 
-    raw_points = (*evidence.confirmed_points, *evidence.approaching_points)
-    raw_current = current_strict_point_evidence(evidence.structure, raw_points)
+    return convert_current_confirmed_point_evidence(
+        evidence.structure,
+        confirmed_points=evidence.confirmed_points,
+        approaching_points=evidence.approaching_points,
+        code=code,
+        source_frequency=source_frequency,
+        as_of=closed_at,
+    )
+
+
+def convert_current_confirmed_point_evidence(
+    structure: StrictStructureResult,
+    *,
+    confirmed_points: tuple[StrictPointEvidence, ...],
+    approaching_points: tuple[StrictPointEvidence, ...],
+    code: str,
+    source_frequency: str,
+    as_of: datetime,
+) -> tuple[StructuralPoint, ...]:
+    """Convert the production live-tail projection without serializing it.
+
+    Historical replay already owns the exact causal structure snapshot and only
+    needs the same operational conversion as screening.  Keeping this component
+    adapter beside the evidence adapter avoids constructing divergences and a
+    full evidence revision merely to read current setup points.
+    """
+
+    closed_at = normalize_datetime(as_of, "as_of")
+    if not isinstance(structure, StrictStructureResult):
+        raise TypeError("current point conversion requires strict structure")
+    raw_points = (*tuple(confirmed_points), *tuple(approaching_points))
+    raw_current = current_strict_point_evidence(structure, raw_points)
     converted_ids = structural_point_id_map(
         raw_points,
         code=code,
@@ -193,7 +244,7 @@ def extract_current_confirmed_points(
     )
     references = {
         point.point_id: terminal_segment_reference(
-            evidence.structure,
+            structure,
             structural_level=point.structural_level,
             unit_id=point.anchor_unit_id,
         )
@@ -204,7 +255,7 @@ def extract_current_confirmed_points(
 
     units = {
         (level.structural_level, unit.unit_id): unit
-        for level in evidence.structure.levels
+        for level in structure.levels
         for unit in level.units
     }
     output: dict[str, tuple[int, StructuralPoint]] = {}
@@ -212,13 +263,33 @@ def extract_current_confirmed_points(
         reference = references[raw.point_id]
         if reference is None:
             raise AssertionError("terminal reference was validated above")
+        unit = units[(raw.structural_level, raw.anchor_unit_id)]
         if raw.status is StrictPointStatus.CONFIRMED:
-            confirmed_at = raw.confirmed_at
-            available_at = raw.available_at
+            # The trading event starts when the terminal segment first becomes
+            # geometrically complete.  A later audit lock must not move the
+            # same operation point's clock forward after a process restart.
+            geometry_confirmed_at = (
+                unit.formed_at
+                if reference.role == "latest_completed"
+                and unit.formed_at is not None
+                else None
+            )
+            confirmed_at = geometry_confirmed_at or raw.confirmed_at
+            available_at = geometry_confirmed_at or raw.available_at
             priority = 1
-            evidence_codes = raw.evidence_codes
+            evidence_codes = (
+                raw.evidence_codes
+                if geometry_confirmed_at is None
+                else tuple(
+                    dict.fromkeys(
+                        (
+                            *raw.evidence_codes,
+                            "geometry_confirmed_before_audit_lock",
+                        )
+                    )
+                )
+            )
         else:
-            unit = units[(raw.structural_level, raw.anchor_unit_id)]
             if (
                 reference.role != "latest_completed"
                 or unit.formed_at is None

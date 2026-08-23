@@ -102,7 +102,7 @@ from cl_app.services.trading_screening import (
     _current_session_zero_trade_codes,
     _structure_bundle_is_current,
     _structure_bundle_is_current_for_zero_trade_session,
-    _take_stage_aware_priority_batch,
+    _take_rotating_priority_batch,
     _take_rule_recheck_batch,
     _take_due_candidate_batch,
     _sector_source_evidence_complete,
@@ -6432,6 +6432,7 @@ def test_rule_migration_rechecks_only_current_buy_candidates(
     assert service._decision_rule_recheck_pending_codes == {
         "SZ.000001",
         "SZ.000002",
+        "SZ.000003",
     }
 
 
@@ -8086,7 +8087,7 @@ def test_priority_signal_candidates_treat_buy_and_sell_symmetrically() -> None:
     assert urgent == ("BUY_EXECUTABLE", "SELL_ONLY", "BUY_ARMED")
 
 
-def test_segment_monitor_schedules_only_notification_fresh_five_minute_signals(
+def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(
     tmp_path: Path,
 ) -> None:
     observed_at = AS_OF.replace(hour=14, minute=58)
@@ -8181,20 +8182,22 @@ def test_segment_monitor_schedules_only_notification_fresh_five_minute_signals(
 
     requests = dict(market.bundle_frequency_requests)
     assert "1m" in requests[fresh_code]
+    assert "1m" in requests[stale_code]
     assert "1m" in requests[rearmed_code]
     assert "1m" not in requests.get(current_locator_code, ())
-    assert stale_code not in requests
     health = service.health_snapshot()
-    assert health["candidate_monitor_five_minute"]["universe_count"] == 4
-    assert health["priority_monitor_immediate_universe_count"] == 2
+    assert health["candidate_monitor_five_minute"]["universe_count"] == 5
+    assert health["priority_monitor_immediate_universe_count"] == 3
     assert health["priority_monitor_rearmed_segment_universe_count"] == 1
-    assert health["priority_monitor_expired_segment_universe_count"] == 1
-    assert health["priority_monitor_scheduled_count"] == 2
+    assert "priority_monitor_expired_segment_universe_count" not in health
+    assert "priority_monitor_segment_difference_universe_count" not in health
+    assert health["priority_monitor_scheduled_count"] == 3
 
 
-def test_segment_monitor_freshness_uses_active_a_share_minutes() -> None:
+def test_segment_monitor_membership_depends_on_current_structure_not_age() -> None:
     observed_at = datetime(2026, 7, 20, 13, 5, tzinfo=AS_OF.tzinfo)
     signal = {
+        "lifecycle_stage": "triggered",
         "setup_5m": {
             "available_at": datetime(
                 2026,
@@ -8217,6 +8220,7 @@ def test_segment_monitor_freshness_uses_active_a_share_minutes() -> None:
     assert (
         trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
             {
+                "lifecycle_stage": "triggered",
                 "setup_5m": {
                     "terminal_segment_available_at": datetime(
                         2026,
@@ -8235,6 +8239,7 @@ def test_segment_monitor_freshness_uses_active_a_share_minutes() -> None:
     assert (
         trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
             {
+                "lifecycle_stage": "triggered",
                 "setup_5m": {
                     "terminal_segment_available_at": datetime(
                         2026,
@@ -8248,20 +8253,23 @@ def test_segment_monitor_freshness_uses_active_a_share_minutes() -> None:
             },
             observed_at,
         )
-        is False
+        is True
     )
     assert (
         trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
-            {"setup_5m": {"available_at": "malformed"}},
+            {
+                "lifecycle_stage": "triggered",
+                "setup_5m": {"available_at": "malformed"},
+            },
             observed_at,
         )
-        is False
+        is True
     )
     # Imported legacy rows without a causal timestamp retain compatibility; all
     # production decision documents carry an explicit setup time.
     assert (
         trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
-            {"setup_5m": {}},
+            {"lifecycle_stage": "triggered", "setup_5m": {}},
             observed_at,
         )
         is True
@@ -8387,35 +8395,13 @@ def test_priority_monitor_tombstone_persists_until_newer_full_snapshot() -> None
     assert superseded == frozenset({"SH.600001"})
 
 
-def test_stage_aware_priority_batch_never_hides_immediate_state_behind_armed_tail() -> (
-    None
-):
-    first = _take_stage_aware_priority_batch(
-        ("TRIGGERED", "EXECUTABLE"),
-        ("ARMED_A", "ARMED_B", "ARMED_C"),
-        previous_codes=("ARMED_B",),
-        max_symbols=3,
-    )
-    second = _take_stage_aware_priority_batch(
-        ("TRIGGERED", "EXECUTABLE"),
-        ("ARMED_A", "ARMED_B", "ARMED_C"),
-        previous_codes=first,
-        max_symbols=3,
-    )
-
-    assert first[:2] == ("TRIGGERED", "EXECUTABLE")
-    assert second[:2] == ("TRIGGERED", "EXECUTABLE")
-    assert first[2] != second[2]
-
-
-def test_stage_aware_priority_batch_rotates_after_a_partial_deadline_round() -> None:
+def test_priority_batch_rotates_after_a_partial_deadline_round() -> None:
     # The configured admission cap can be much larger than physical per-minute
     # throughput.  Rotate after the last completed code even when the whole
     # universe fits under that configured cap, otherwise the time-budgeted
     # evaluator retries the same prefix forever and starves the tail.
-    batch = _take_stage_aware_priority_batch(
+    batch = _take_rotating_priority_batch(
         ("A", "B", "C", "D"),
-        (),
         previous_codes=("A", "B"),
         max_symbols=512,
     )
@@ -8423,10 +8409,9 @@ def test_stage_aware_priority_batch_rotates_after_a_partial_deadline_round() -> 
     assert batch == ("C", "D", "A", "B")
 
 
-def test_stage_aware_priority_batch_keeps_new_urgent_signal_ahead() -> None:
-    batch = _take_stage_aware_priority_batch(
+def test_priority_batch_keeps_new_urgent_signal_ahead() -> None:
+    batch = _take_rotating_priority_batch(
         ("EXECUTABLE_NEW", "EXECUTABLE_OLD", "TRIGGERED_OLD"),
-        (),
         previous_codes=("EXECUTABLE_OLD",),
         max_symbols=512,
     )

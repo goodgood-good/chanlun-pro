@@ -1117,12 +1117,12 @@
         const buys = matchingSegments.filter((signal) => text(signal.side, "") === "buy").length;
         const sells = matchingSegments.filter((signal) => text(signal.side, "") === "sell").length;
         return requestedSegmentState === "current"
-          ? `当前有 ${matchingSegments.length} 个5分钟操作候选已完成有效的1m/L0区间套定位（买点 ${buys} / 卖点 ${sells}），但被其他筛选条件隐藏；点击“查看当前定位”可清除这些筛选。`
-          : `当前5分钟操作候选中有 ${matchingSegments.length} 个保留1m/L0区间套证据（买点 ${buys} / 卖点 ${sells}），但被其他筛选条件隐藏。`;
+          ? `当前有 ${matchingSegments.length} 个5分钟操作候选已完成有效的1分钟区间套定位（买点 ${buys} / 卖点 ${sells}），但被其他筛选条件隐藏；点击“查看当前定位”可清除这些筛选。`
+          : `当前5分钟操作候选中有 ${matchingSegments.length} 个保留1分钟区间套证据（买点 ${buys} / 卖点 ${sells}），但被其他筛选条件隐藏。`;
       }
       return requestedSegmentState === "present"
-        ? "当前5分钟操作候选中没有1m/L0区间套证据；5分钟主信号仍保留，但尚未完成精确定位。"
-        : "当前5分钟操作候选中没有已完成且仍有效的1m/L0区间套精确定位；历史定位不会计入当前结果。";
+        ? "当前5分钟操作候选中没有1分钟区间套证据；5分钟主信号仍保留，但尚未完成精确定位。"
+        : "当前5分钟操作候选中没有已完成且仍有效的1分钟区间套精确定位；历史定位不会计入当前结果。";
     }
     const code = exactCoverageCodeForQuery(snapshot, query);
     if (code === null) return generic;
@@ -1620,10 +1620,6 @@
       0,
       Number(health.priority_monitor_immediate_universe_count) || 0,
     );
-    const expiredSegmentCount = Math.max(
-      0,
-      Number(health.priority_monitor_expired_segment_universe_count) || 0,
-    );
     const liveSignalCount = Math.max(0, Number(overlay.signal_count) || 0);
     const delivery = isRecord(health.notification_delivery)
       ? health.notification_delivery
@@ -1632,7 +1628,7 @@
       `总预警 ${statusLabel(text(health.realtime_alert_status, "unavailable"))}（${reasonLabel(text(health.realtime_alert_reason_code, "PRIORITY_MONITOR_UNAVAILABLE"))}）`,
       `即时复查 ${statusLabel(priorityStatus)}（${priorityReasons}）· 最近 ${priorityCount} 只`,
       `5分钟候选轮换 ${statusLabel(candidateStatus)}（${candidateReasons}）· 当前 ${candidateCurrent}/${candidateUniverse} 只 · 缺失 ${candidateMissing} · 逾期 ${candidateOverdue}${candidateTarget ? ` · 目标 ${Math.round(candidateTarget / 60)} 分钟` : ""}`,
-      `1分钟精确定位队列 待定位的新鲜5分钟候选 ${freshSegmentCount} 只 · 已过定位时窗（仅诊断、不计入当前结果） ${expiredSegmentCount} 只`,
+      `1分钟精确定位队列 待定位的当前5分钟候选 ${freshSegmentCount} 只 · 持续轮转直至结构被替换`,
       "实时预警范围：人工关注、自选、已有信号和当前支持板块候选；全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警",
       `结构变化 ${liveSignalCount} 条`,
       health.notification_operationally_verified === true
@@ -1656,11 +1652,11 @@
     );
     const parts = [
       locatorCount > 0
-        ? `当前 ${locatorCount} 个5分钟操作候选已完成1m/L0区间套精确定位`
-        : "当前没有5分钟操作候选完成1m/L0区间套精确定位",
+        ? `当前 ${locatorCount} 个5分钟操作候选已完成1分钟区间套精确定位`
+        : "当前没有5分钟操作候选完成1分钟区间套精确定位",
     ];
     if (freshCount > 0) {
-      parts.push(`另有 ${freshCount} 只新鲜5分钟候选正在等待1分钟定位`);
+      parts.push(`另有 ${freshCount} 只当前5分钟候选正在等待1分钟定位`);
     }
     parts.push("5分钟决定交易级别，1分钟只确定精确买卖位置");
     return parts.join(" · ");
@@ -2017,10 +2013,6 @@
         safeSignal.notification_source_frequency,
         text(setup.source_frequency, "未知周期"),
       );
-      const segmentFrequency = text(
-        safeSignal.notification_segment_difference_frequency,
-        text(trigger && trigger.source_frequency, "1m"),
-      );
       const recordedSegmentPoint = POINT_LABELS[
         safeSignal.notification_segment_difference_point_type
       ] || "1分钟结构点";
@@ -2089,8 +2081,8 @@
               : "neutral",
           summary: segmentEvidenceStatus === "present" && triggerKnown
             ? locatorEvidenceCurrent
-              ? `${recordedSegmentEvidence} · ${segmentFrequency}/L0区间套精确定位已确认`
-              : `${recordedSegmentEvidence} · ${segmentFrequency}/L0历史区间套证据保留（不计入当前定位）`
+              ? `${recordedSegmentEvidence} · 1分钟区间套精确定位已确认`
+              : `${recordedSegmentEvidence} · 1分钟历史区间套证据保留（不计入当前定位）`
                   : "5分钟信号已成立；等待1分钟区间套后才进入精确执行候选",
           boundary: segmentEvidenceStatus === "present" && triggerKnown
             ? segmentBoundaryStatus === "current"
@@ -2253,8 +2245,8 @@
         tone: triggerTone,
         summary: triggerKnown && segmentEvidenceStatus === "present"
           ? locatorEvidenceCurrent
-            ? `${triggerPoint} · 1m/L0区间套精确定位已确认`
-            : `${triggerPoint} · 1m/L0历史区间套证据保留（不计入当前定位）`
+            ? `${triggerPoint} · 1分钟区间套精确定位已确认`
+            : `${triggerPoint} · 1分钟历史区间套证据保留（不计入当前定位）`
           : "尚未取得1分钟区间套（5分钟信号保留，精确执行未解锁）",
         boundary: triggerKnown && segmentEvidenceStatus === "present"
           ? segmentBoundaryStatus === "current"
@@ -3139,6 +3131,7 @@
   function signalCardLifecycleLabel(signal, observedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     const stage = lifecycleStageForSignal(safeSignal);
+    if (isCurrentSelectionSignal(safeSignal)) return lifecycleLabel(stage);
     const historical = signalIsHistoricalForReview(safeSignal, observedAt);
     if (
       ["triggered", "executable", "active"].includes(stage)

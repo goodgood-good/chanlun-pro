@@ -136,7 +136,62 @@ def _five_minute_terminal_segment_lane(
     reference = point.terminal_segment
     if reference is None:
         return "legacy", ""
-    return reference.role, reference.unit_id
+    # Strict internal unit ids may legitimately change when the same physical
+    # tail is reconstructed from another converged left boundary.  A trading
+    # lane is the market occurrence, not that implementation id.  Using the
+    # immutable market geometry keeps current-state pruning and persisted
+    # lifecycles stable across a canonical-window rebuild.
+    return (
+        reference.role,
+        "|".join(
+            (
+                reference.source_kind.value,
+                reference.direction,
+                reference.market_start.isoformat(timespec="seconds"),
+                reference.market_end.isoformat(timespec="seconds"),
+            )
+        ),
+    )
+
+
+def structural_point_occurrence_id(point: StructuralPoint) -> str:
+    """Return the stable physical occurrence used by trading lifecycles.
+
+    Center, parent and terminal-unit hashes describe one reconstruction of the
+    strict graph.  They are intentionally absent here because two converged
+    canonical windows can assign different internal hashes to the same point.
+    The terminal unit can be refined, and its geometry-confirmation timestamp
+    can consequently move, while the formal point remains the same operation
+    at the same market anchor.  Internal hashes and ``available_at`` are
+    therefore excluded.  Executable prices and center boundaries are included:
+    a later projection that changes a stop/anchor price is a new causal setup,
+    even when it shares the same timestamp and point class.
+    """
+
+    if not isinstance(point, StructuralPoint):
+        raise TypeError("structural occurrence requires a confirmed point")
+    return sha256_json(
+        {
+            "schema": "chanlun-structural-point-occurrence-v3",
+            "code": point.code,
+            "price_basis_revision": point.price_basis_revision,
+            "source_frequency": point.source_frequency,
+            "point_type": point.point_type,
+            "side": point.side,
+            "variant": point.variant,
+            "tower": point.tower,
+            "recursive_level": point.recursive_level,
+            "anchor_at": point.anchor_at.isoformat(timespec="seconds"),
+            "structure_anchor_price": point.structure_anchor_price,
+            "structure_invalidation_price": (
+                point.structure_invalidation_price
+            ),
+            "center_zd": point.center_zd,
+            "center_zg": point.center_zg,
+            "center_ordinal": point.center_ordinal,
+            "divergence_kind": point.divergence_kind,
+        }
+    )
 
 
 def _five_minute_setup_identity(
@@ -145,7 +200,7 @@ def _five_minute_setup_identity(
     return (
         point.candidate_id
         if isinstance(point, ProvisionalCandidate)
-        else point.point_id
+        else structural_point_occurrence_id(point)
     )
 
 
@@ -481,7 +536,7 @@ def build_setup(
         boundary = point.center_zg if point.side == "buy" else point.center_zd
         if boundary is not None:
             prices.append(boundary)
-        point_identity = point.point_id
+        point_identity = structural_point_occurrence_id(point)
     else:
         started_at = point.available_at
         prices = [point.invalidation_price, point.anchor_price]

@@ -51,6 +51,7 @@ from chanlun.decision_support.trading_system.screening_runtime import (
     validated_incremental_prefix_matches,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_WARMUP_DAYS_BY_FREQUENCY,
     SCREENING_WARMUP_REQUIRED_BARS,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
@@ -315,11 +316,7 @@ class _FrequencyRuntime:
 class StrictPhysicalMonitorState:
     """使用统一筛选决策核心的 5m买卖/1m段差/30m环境增量监听状态。"""
 
-    WARMUP_DAYS_BY_FREQ = {
-        "1m": 30,
-        "5m": 120,
-        "30m": 365,
-    }
+    WARMUP_DAYS_BY_FREQ = dict(SCREENING_WARMUP_DAYS_BY_FREQUENCY)
     # 监听、实时选股和回放共用同一最低预热线。低于该数量时宁可保持
     # ``warming``，也不能用一条更短的监听专用历史产生另一套买卖点。
     MINIMUM_BARS_BY_FREQ = dict(SCREENING_WARMUP_REQUIRED_BARS)

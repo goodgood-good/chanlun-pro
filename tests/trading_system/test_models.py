@@ -27,6 +27,13 @@ def _point(*, level: int, price_basis_revision: str) -> StructuralPoint:
         anchor_at=AT,
         center_id="center-a",
         parent_point_id=None,
+        variant="standard",
+        structure_anchor_price=10.20,
+        structure_invalidation_price=9.80,
+        center_zd=9.40,
+        center_zg=9.80,
+        center_ordinal=None,
+        divergence_kind="trend",
     )
     return StructuralPoint(
         point_id=point_id,
@@ -62,6 +69,13 @@ def test_point_identity_distinguishes_price_basis_and_recursive_level() -> None:
     assert len({raw_l0.point_id, raw_l1.point_id, adjusted_l0.point_id}) == 3
     assert raw_l0.structure_key == ("formal", 0, "center-a")
     assert raw_l0.confirmed is True
+
+
+def test_point_identity_distinguishes_repriced_same_anchor() -> None:
+    original = _point(level=0, price_basis_revision="raw")
+
+    with pytest.raises(ValueError):
+        replace(original, structure_anchor_price=10.30)
 
 
 def test_confirmed_point_requires_basis_and_causal_availability() -> None:

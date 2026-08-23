@@ -53,6 +53,13 @@ def _point(
         anchor_at=anchor_at,
         center_id=center_id,
         parent_point_id=None,
+        variant="standard",
+        structure_anchor_price=100.0,
+        structure_invalidation_price=99.0 if side == "buy" else 101.0,
+        center_zd=98.0 if side == "buy" else 101.0,
+        center_zg=99.0 if side == "buy" else 102.0,
+        center_ordinal=1 if point_type.startswith("3") else None,
+        divergence_kind="trend" if point_type.startswith("1") else None,
     )
     return StructuralPoint(
         point_id=point_id,

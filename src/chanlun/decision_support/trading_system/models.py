@@ -98,6 +98,13 @@ def build_point_id(
     anchor_at: datetime,
     center_id: str | None,
     parent_point_id: str | None,
+    variant: PointVariant,
+    structure_anchor_price: float,
+    structure_invalidation_price: float,
+    center_zd: float | None,
+    center_zg: float | None,
+    center_ordinal: int | None,
+    divergence_kind: str | None,
 ) -> str:
     if not price_basis_revision or not price_basis_revision.strip():
         raise ValueError("price_basis_revision is required")
@@ -105,7 +112,7 @@ def build_point_id(
         raise ValueError("invalid structure identity")
     return sha256_json(
         {
-            "schema": "chanlun-structural-point",
+            "schema": "chanlun-structural-point-v2",
             "code": code,
             "price_basis_revision": price_basis_revision,
             "point_type": point_type,
@@ -115,6 +122,17 @@ def build_point_id(
             "anchor_at": normalize_datetime(anchor_at, "anchor_at").isoformat(),
             "center_id": center_id,
             "parent_point_id": parent_point_id,
+            # An identical market anchor can be re-projected with a different
+            # executable price/risk boundary as the active recursive tail is
+            # rebuilt.  Such a re-priced setup is a new causal event, not an
+            # implementation-id refinement of the old event.
+            "variant": variant,
+            "structure_anchor_price": structure_anchor_price,
+            "structure_invalidation_price": structure_invalidation_price,
+            "center_zd": center_zd,
+            "center_zg": center_zg,
+            "center_ordinal": center_ordinal,
+            "divergence_kind": divergence_kind,
         }
     )
 
@@ -190,6 +208,13 @@ class StructuralPoint:
             anchor_at=anchor_at,
             center_id=self.center_id,
             parent_point_id=self.parent_point_id,
+            variant=self.variant,
+            structure_anchor_price=self.structure_anchor_price,
+            structure_invalidation_price=self.structure_invalidation_price,
+            center_zd=self.center_zd,
+            center_zg=self.center_zg,
+            center_ordinal=self.center_ordinal,
+            divergence_kind=self.divergence_kind,
         ):
             raise ValueError("买卖点身份与正式结构证据不一致")
         object.__setattr__(self, "evidence_codes", tuple(self.evidence_codes))

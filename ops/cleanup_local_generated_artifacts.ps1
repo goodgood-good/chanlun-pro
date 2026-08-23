@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch]$Execute
+    [switch]$Execute,
+    [switch]$PurgeInvalidBacktestFacts,
+    [switch]$PurgeRetiredRuntimeState
 )
 
 Set-StrictMode -Version Latest
@@ -21,11 +23,12 @@ function Get-ArtifactBytes {
         return [int64]$item.Length
     }
 
-    $sum = (
+    $measurement = (
         Get-ChildItem -LiteralPath $LiteralPath -File -Force -Recurse `
             -ErrorAction SilentlyContinue |
             Measure-Object -Property Length -Sum
-    ).Sum
+    )
+    $sum = if ($null -eq $measurement) { $null } else { $measurement.Sum }
     if ($null -eq $sum) {
         return [int64]0
     }
@@ -69,13 +72,65 @@ $fixedTargets = @(
     @{ path = ".playwright-cli"; category = "browser_debug" },
     @{ path = ".pytest_cache"; category = "test_cache" },
     @{ path = ".ruff_cache"; category = "lint_cache" },
-    @{ path = "2026072510712998.dmp"; category = "crash_dump" },
-    @{ path = "20260725110105013.dmp"; category = "crash_dump" }
+    @{ path = ".omc"; category = "agent_session_artifact" },
+    @{ path = "output"; category = "generated_output" },
+    @{ path = "tmp"; category = "temporary_artifact" }
 )
 foreach ($target in $fixedTargets) {
     Add-CleanupCandidate `
         -LiteralPath (Join-Path $repositoryRoot $target.path) `
         -Category $target.category
+}
+
+if ($PurgeInvalidBacktestFacts) {
+    $invalidBacktestTargets = @(
+        "audit\chanlun_trading_system_backtest\fixed_year_2025_2026\prefix_audit",
+        "audit\chanlun_trading_system_backtest\fixed_year_2025_2026\symbols",
+        "audit\chanlun_trading_system_backtest\fixed_year_2025_2026\extract_manifest.json"
+    )
+    foreach ($target in $invalidBacktestTargets) {
+        Add-CleanupCandidate `
+            -LiteralPath (Join-Path $repositoryRoot $target) `
+            -Category "invalid_backtest_artifact"
+    }
+    $backtestAuditRoot = Join-Path `
+        $repositoryRoot `
+        "audit\chanlun_trading_system_backtest"
+    if (Test-Path -LiteralPath $backtestAuditRoot) {
+        $targetedScratchDirectories = @(
+            Get-ChildItem -LiteralPath $backtestAuditRoot -Directory -Force `
+                -Filter "targeted_v*" -ErrorAction SilentlyContinue
+        )
+        foreach ($target in $targetedScratchDirectories) {
+            Add-CleanupCandidate `
+                -LiteralPath $target.FullName `
+                -Category "invalid_backtest_artifact"
+        }
+    }
+}
+
+if ($PurgeRetiredRuntimeState) {
+    $retiredRuntimeTargets = @(
+        ".cache\chanlun_human_review",
+        ".cache\chanlun_human_review_forward",
+        ".cache\chanlun_web_watchdog"
+    )
+    foreach ($target in $retiredRuntimeTargets) {
+        Add-CleanupCandidate `
+            -LiteralPath (Join-Path $repositoryRoot $target) `
+            -Category "retired_runtime_state"
+    }
+}
+
+# Crash dump names are timestamped and cannot be maintained as a finite list.
+# Only root-level ``.dmp`` files are eligible; source and data subtrees remain
+# outside this cleanup rule.
+$rootCrashDumps = @(
+    Get-ChildItem -LiteralPath $repositoryRoot -File -Force -Filter "*.dmp" `
+        -ErrorAction SilentlyContinue
+)
+foreach ($target in $rootCrashDumps) {
+    Add-CleanupCandidate -LiteralPath $target.FullName -Category "crash_dump"
 }
 
 # These cache namespaces and one-off probe outputs were retired before the
@@ -122,16 +177,61 @@ foreach ($target in $pythonCaches) {
     Add-CleanupCandidate -LiteralPath $target.FullName -Category "python_bytecode"
 }
 
+# Root application logs are generated artifacts too, but ``app.log`` may still
+# be held by the currently running Web process.  Probe exclusive access and
+# defer only files that are genuinely active; all historical log files remain
+# eligible immediately.
+$activeRootAppLogs = [System.Collections.Generic.List[string]]::new()
+$rootGeneratedLogPath = Join-Path $repositoryRoot "logs"
+if (Test-Path -LiteralPath $rootGeneratedLogPath) {
+    $rootGeneratedLogs = @(
+        Get-ChildItem -LiteralPath $rootGeneratedLogPath -File -Force `
+            -ErrorAction SilentlyContinue
+    )
+    foreach ($target in $rootGeneratedLogs) {
+        if ($target.Name -eq "app.log") {
+            $exclusiveHandle = $null
+            try {
+                $exclusiveHandle = [IO.File]::Open(
+                    $target.FullName,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::ReadWrite,
+                    [IO.FileShare]::None
+                )
+            } catch [IO.IOException] {
+                $activeRootAppLogs.Add($target.FullName)
+                continue
+            } finally {
+                if ($null -ne $exclusiveHandle) {
+                    $exclusiveHandle.Dispose()
+                }
+            }
+        }
+        Add-CleanupCandidate `
+            -LiteralPath $target.FullName `
+            -Category "generated_log"
+    }
+}
+
 $logRoot = Join-Path $repositoryRoot "ops\logs"
 if (Test-Path -LiteralPath $logRoot) {
+    $currentQmtLogName = 'qmt_runtime_{0}.log' -f (
+        Get-Date -Format 'yyyy-MM-dd'
+    )
     $generatedLogs = @(
         Get-ChildItem -LiteralPath $logRoot -File -Force |
             Where-Object {
                 $_.Name -like "web_restart_*" -or
                 $_.Name -like "web_stdout_*" -or
                 $_.Name -like "web_stderr_*" -or
+                $_.Name -like "web_recovery_*" -or
+                $_.Name -like "web_watchdog_*" -or
                 $_.Name -like "forward_paper_*" -or
-                $_.Name -like "restart_*"
+                $_.Name -like "restart_*" -or
+                (
+                    $_.Name -match '^qmt_runtime_\d{4}-\d{2}-\d{2}\.log$' -and
+                    $_.Name -ne $currentQmtLogName
+                )
             }
     )
     foreach ($target in $generatedLogs) {
@@ -139,13 +239,30 @@ if (Test-Path -LiteralPath $logRoot) {
     }
 }
 
+$auditRoot = Join-Path $repositoryRoot "audit"
+if (Test-Path -LiteralPath $auditRoot) {
+    $generatedAuditLogs = @(
+        Get-ChildItem -LiteralPath $auditRoot -File -Force |
+            Where-Object {
+                $_.Name -like "server-*.stdout.log" -or
+                $_.Name -like "server-*.stderr.log"
+            }
+    )
+    foreach ($target in $generatedAuditLogs) {
+        Add-CleanupCandidate `
+            -LiteralPath $target.FullName `
+            -Category "generated_log"
+    }
+}
+
 $orderedCandidates = @(
     $candidates |
         Sort-Object @{ Expression = { $_.path.Length }; Descending = $true }
 )
-$totalBytes = [int64](
-    ($orderedCandidates | Measure-Object -Property bytes -Sum).Sum
-)
+$totalBytes = [int64]0
+foreach ($target in $orderedCandidates) {
+    $totalBytes += [int64]$target.bytes
+}
 
 if ($Execute) {
     foreach ($target in $orderedCandidates) {
@@ -193,9 +310,11 @@ $result = [ordered]@{
     remaining_count = $remaining.Count
     categories = $byCategory
     protected = [ordered]@{
+        active_app_logs = @($activeRootAppLogs)
         qmt_runtime_logs = @(
             Get-ChildItem -LiteralPath $logRoot -File `
                 -Filter "qmt_runtime_*.log" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq $currentQmtLogName } |
                 Select-Object -ExpandProperty FullName
         )
         active_forward_cache = Test-Path -LiteralPath (

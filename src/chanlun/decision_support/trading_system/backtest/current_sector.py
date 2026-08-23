@@ -897,6 +897,7 @@ def reclassify_current_sector_facts(
         row_count=facts.row_count,
         thirty_points=facts.thirty_points,
         assessments=tuple(assessments),
+        thirty_point_visibility=facts.thirty_point_visibility,
         direction_unavailable_count=facts.direction_unavailable_count,
         error=facts.error,
     )

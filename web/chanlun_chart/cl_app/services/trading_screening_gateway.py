@@ -85,9 +85,12 @@ from chanlun.decision_support.trading_system.screening_structure import (
     SCREENING_STRUCTURE_FREQUENCIES,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_CANONICAL_REQUEST_BARS,
+    SCREENING_MINIMUM_BARS_BY_FREQUENCY,
     SCREENING_QMT_30M_FALLBACK_REASON_CODE,
     SCREENING_WARMUP_DIFFERENCE_CODES,
     SCREENING_WARMUP_REQUIRED_BARS,
+    screening_warmup_tail_signature,
 )
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
 from chanlun.decision_support.trading_system.sector_strength import (
@@ -130,11 +133,8 @@ from cl_app.services.realtime_quotes import (
 
 
 _FREQUENCIES = SCREENING_STRUCTURE_FREQUENCIES
-CANONICAL_REQUEST_BARS_BY_FREQUENCY = (
-    ("d", 1600),
-    ("30m", 4000),
-    ("5m", 12000),
-    ("1m", 12000),
+CANONICAL_REQUEST_BARS_BY_FREQUENCY = tuple(
+    SCREENING_CANONICAL_REQUEST_BARS.items()
 )
 _SECTOR_FREQUENCIES = ("30m", "5m")
 _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
@@ -1024,10 +1024,7 @@ class NativeTradingGatewayConfig:
         CANONICAL_REQUEST_BARS_BY_FREQUENCY
     )
     minimum_bars_by_frequency: tuple[tuple[str, int], ...] = (
-        ("d", 240),
-        ("30m", 240),
-        ("5m", 480),
-        ("1m", 960),
+        tuple(SCREENING_MINIMUM_BARS_BY_FREQUENCY.items())
     )
     minimum_sector_members: int = 8
     current_setup_age_seconds: int = MAX_FIVE_MINUTE_SETUP_AGE_SECONDS
@@ -1384,81 +1381,11 @@ def _warmup_tail_signature(
     not_before: datetime,
     trade_level_only: bool = False,
 ) -> tuple[object, ...]:
-    latest: dict[
-        tuple[str, str, int, str],
-        tuple[datetime, tuple[object, ...]],
-    ] = {}
-    # 预热门禁只比较已经确认、能够进入正式决策链的证据。未确认候选的形态会
-    # 随最后一根行情变化，它们仍展示在观察列表中，但不能让正式历史收敛失效。
-    for point in analysis.setup_confirmed_points:
-        # 操作层签名是完整递归暖机的独立投影，只供股票 5m 入场硬门使用。
-        # 5m/L1+ 分别属于 30m 及更高语境，不能否决完全一致的 5m/L0 设置；
-        # 完整签名仍保留所有递归层级，供板块和多周期环境诊断使用。
-        if trade_level_only and not is_five_minute_trade_level(
-            point.source_frequency,
-            point.recursive_level,
-        ):
-            continue
-        observed_at = point.available_at
-        # 精确末端线段血缘已经证明它仍是当前结构，不能再用固定日历窗口
-        # 把横跨周末或长期延伸的最新已完成线段从预热比较中删除。
-        if point.terminal_segment is None and (
-            observed_at < not_before or point.anchor_at < not_before
-        ):
-            continue
-        terminal_role = (
-            "legacy"
-            if point.terminal_segment is None
-            else point.terminal_segment.role
-        )
-        lane = (
-            point.point_type,
-            point.tower,
-            point.recursive_level,
-            terminal_role,
-        )
-        # 对象编号包含完整上游结构血缘。同一个尾部点在截短左侧历史后可能
-        # 得到不同编号，因此收敛比较使用稳定语义，正式信号仍保留原始血缘编号。
-        semantic = (
-            point.side,
-            point.status,
-            point.source_frequency,
-            point.anchor_at.isoformat(),
-            None if point.confirmed_at is None else point.confirmed_at.isoformat(),
-            point.available_at.isoformat(),
-            point.price_basis_revision,
-            point.structure_anchor_price,
-            point.structure_invalidation_price,
-            point.center_zd,
-            point.center_zg,
-            point.center_ordinal,
-            point.variant,
-            point.divergence_kind,
-            point.evidence_codes,
-            (
-                None
-                if point.terminal_segment is None
-                else (
-                    point.terminal_segment.role,
-                    point.terminal_segment.source_kind.value,
-                    point.terminal_segment.direction,
-                    point.terminal_segment.state,
-                    point.terminal_segment.market_start.isoformat(),
-                    point.terminal_segment.market_end.isoformat(),
-                )
-            ),
-        )
-        previous = latest.get(lane)
-        if previous is None or observed_at > previous[0]:
-            latest[lane] = (observed_at, semantic)
-    return (
-        # 当前 ``direction`` 取递归结构中抵达尾部的最高正式层级，并不是
-        # 5m/L0 的交易方向；5m 硬门禁只核对实际进入决策链的 L0 买卖点。
-        None if trade_level_only else analysis.direction,
-        tuple(
-            (lane, observed_at.isoformat(), semantic)
-            for lane, (observed_at, semantic) in sorted(latest.items())
-        ),
+    return screening_warmup_tail_signature(
+        direction=analysis.direction,
+        points=analysis.setup_confirmed_points,
+        not_before=not_before,
+        trade_level_only=trade_level_only,
     )
 
 
