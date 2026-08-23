@@ -153,6 +153,22 @@ poetry run python web/chanlun_chart/app.py
 
 启动后默认访问 **http://127.0.0.1:9900**；可用 `CHANLUN_WEB_PORT` 改端口，`nobrowser` 参数或环境变量 `CHANLUN_NO_AUTO_OPEN=1` 可关闭自动打开浏览器。
 
+#### 策略验证范围
+
+开发和规则调试默认只回放 `config/research_backtest_sample_48.txt` 中固定的 48 只标的；
+底层回测工具会拒绝未声明范围的调用，避免误跑全市场：
+
+```powershell
+# 默认：48 只快速研究样本
+.\ops\run_historical_backtest.ps1
+
+# 仅在样本验证稳定后的最终验收中显式执行
+.\ops\run_historical_backtest.ps1 -FullMarket
+```
+
+Web 应用同样默认关闭盘后全市场覆盖。最终验收或生产运行需要显式设置
+`CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED=1`；普通启动不会处理五千余只标的。
+
 #### Web 安全部署模式
 
 - 本机使用：保持 `WEB_HOST=127.0.0.1`。此模式允许 HTTP，也允许不设置登录密码；`windows_run.bat` 和每日重启脚本在未显式设置环境变量时会采用该安全默认值。

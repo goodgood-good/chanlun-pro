@@ -49,7 +49,6 @@ from chanlun.decision_support.trading_system.operation_level import (
 )
 from chanlun.decision_support.trading_system.position_recommendation import (
     BUY_SIGNAL_PROTECTION_REASON_CODES,
-    active_signal_age_seconds,
     build_position_recommendation,
     parse_position_recommendation_document,
 )
@@ -2846,22 +2845,6 @@ def _separated_buy_decision_evidence_is_consistent(
         "C": "0.50",
         "UNRESOLVED": "0.50",
     }[grade]
-    try:
-        setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
-        signal_observed_at = datetime.fromisoformat(str(signal["observed_at"]))
-    except (KeyError, TypeError, ValueError):
-        return False
-    signal_age_seconds = active_signal_age_seconds(
-        setup_available_at,
-        signal_observed_at,
-        market=(
-            "a"
-            if str(signal.get("code") or "").startswith(("SH.", "SZ.", "BJ."))
-            else "other"
-        ),
-    )
-    if signal_age_seconds is None:
-        return False
     expected_position_recommendation = build_position_recommendation(
         side="buy",
         recommendation=recommendation,
@@ -2875,7 +2858,6 @@ def _separated_buy_decision_evidence_is_consistent(
         structural_stop=setup.get("invalidation_price"),
         exit_action="none",
         structure_anchor_price=setup.get("anchor_price"),
-        signal_age_seconds=signal_age_seconds,
     ).document()
     operational_buy_protections = tuple(
         reason
@@ -2894,9 +2876,7 @@ def _separated_buy_decision_evidence_is_consistent(
             (*base_expected_decision_reasons, *operational_buy_protections)
         )
     )
-    if "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in operational_buy_protections:
-        precision_locator_status = "FIVE_MINUTE_EXPIRED"
-    elif not confirmed_point:
+    if not confirmed_point:
         precision_locator_status = "STRUCTURE_PENDING"
     elif not trigger_confirmed:
         precision_locator_status = "WAITING_ONE_MINUTE"
@@ -4638,19 +4618,6 @@ def live_signal_human_review_alert(
     position_recommendation = parse_position_recommendation_document(
         signal.get("position_recommendation")
     )
-    try:
-        setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("live screening setup availability time is invalid") from exc
-    signal_age_seconds = active_signal_age_seconds(
-        setup_available_at,
-        signal_at,
-        market=(
-            "a" if symbol.startswith(("SH.", "SZ.", "BJ.")) else "other"
-        ),
-    )
-    if signal_age_seconds is None:
-        raise ValueError("live screening signal freshness is invalid")
     return HumanReviewAlert(
         symbol=symbol,
         alert_type=alert_type,  # type: ignore[arg-type]
@@ -4676,7 +4643,6 @@ def live_signal_human_review_alert(
             selection_sources=selection_sources,
             lifecycle_stage=str(stage),
             monitor_only=signal.get("monitor_only") is True,
-            fresh_signal=signal_age_seconds <= Decimal("600"),
             parameters=parameters,
         ),
         # 这是 5 分钟正式买卖点的因果结构锚点，不是行情报价或成交承诺。

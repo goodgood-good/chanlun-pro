@@ -70,7 +70,7 @@ def test_confirmed_buy_without_one_minute_remains_visible_but_not_executable() -
     assert validate_signal_decision_document(document) == document["decision_document_id"]
 
 
-def test_stale_five_minute_buy_is_expired_instead_of_waiting_for_one_minute() -> None:
+def test_current_five_minute_buy_keeps_waiting_for_one_minute_after_eleven_minutes() -> None:
     base = deterministic_bundle()
     setup = base.five_points[0]
     bundle = replace(
@@ -84,23 +84,20 @@ def test_stale_five_minute_buy_is_expired_instead_of_waiting_for_one_minute() ->
 
     assert document["technical_entry_allowed"] is True
     assert document["entry_allowed"] is False
-    assert document["position_recommendation"]["status"] == "BLOCKED"
-    assert document["position_recommendation"]["recommended_percent"] == "0"
-    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in document["decision_reasons"]
+    assert document["position_recommendation"]["status"] == "NOT_ACTIONABLE"
+    assert document["position_recommendation"]["recommended_percent"] is None
     profile = document["execution_profile"]
-    assert profile["recommendation"] == "BLOCKED"
-    assert profile["precision_locator_status"] == "FIVE_MINUTE_EXPIRED"
+    assert profile["recommendation"] == "WAITING_SEGMENT_DIFFERENCE"
+    assert profile["precision_locator_status"] == "WAITING_ONE_MINUTE"
     assert profile["precision_locator_ready"] is False
     assert profile["precise_execution_ready"] is False
-    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in profile[
-        "hard_block_reason_codes"
-    ]
+    assert profile["hard_block_reason_codes"] == []
     assert validate_signal_decision_document(document) == document[
         "decision_document_id"
     ]
 
 
-def test_hard_block_does_not_hide_stale_five_minute_locator_status() -> None:
+def test_hard_block_does_not_turn_current_five_minute_setup_into_time_expiry() -> None:
     base = deterministic_bundle()
     setup = base.five_points[0]
     bundle = replace(
@@ -115,13 +112,10 @@ def test_hard_block_does_not_hide_stale_five_minute_locator_status() -> None:
 
     profile = document["execution_profile"]
     assert profile["recommendation"] == "BLOCKED"
-    assert profile["precision_locator_status"] == "FIVE_MINUTE_EXPIRED"
+    assert profile["precision_locator_status"] == "WAITING_ONE_MINUTE"
     assert "same_or_higher_structure_conflict" in profile["hard_block_reason_codes"]
-    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in profile[
-        "hard_block_reason_codes"
-    ]
     assert document["position_recommendation"]["reason_codes"] == [
-        "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE"
+        "HARD_BLOCKED_NO_TRADE"
     ]
     assert validate_signal_decision_document(document) == document[
         "decision_document_id"

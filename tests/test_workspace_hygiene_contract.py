@@ -11,6 +11,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CLEANUP = ROOT / "ops" / "cleanup_local_generated_artifacts.ps1"
 RUNTIME_CLEANUP = ROOT / "ops" / "cleanup_legacy_runtime_state.ps1"
+HISTORICAL_BACKTEST = ROOT / "ops" / "run_historical_backtest.ps1"
+RESEARCH_SAMPLE = ROOT / "config" / "research_backtest_sample_48.txt"
+
+
 def _git(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(ROOT), *arguments],
@@ -26,6 +30,29 @@ def test_generated_lesson_corpus_remains_ignored() -> None:
     ignored = _git("check-ignore", "-v", "--", corpus_probe)
     assert ignored.returncode == 0
     assert "/audit/chanlun_lesson_corpus/" in ignored.stdout
+
+
+def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
+    source = HISTORICAL_BACKTEST.read_text(encoding="utf-8-sig")
+    symbols = tuple(
+        line.strip()
+        for line in RESEARCH_SAMPLE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+    assert "[switch]$FullMarket" in source
+    assert "RESEARCH_SAMPLE_48" in source
+    assert "FULL_MARKET_EXPLICIT" in source
+    assert 'if (-not $FullMarket)' in source
+    assert '@("--codes", ($researchCodes -join ","))' in source
+    assert '$extractionArguments += "--full-market"' in source
+    assert '$finalizationArguments += "--reuse-sector-cache"' in source
+    assert '"--sector-workers", "$([Math]::Min($Workers, 3))"' in source
+    assert len(symbols) == len(set(symbols)) == 48
+    assert all(
+        symbol.startswith(("SH.", "SZ.", "BJ.")) and len(symbol) == 9
+        for symbol in symbols
+    )
 
 
 @pytest.mark.parametrize(

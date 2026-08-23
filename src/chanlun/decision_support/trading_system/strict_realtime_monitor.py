@@ -30,7 +30,6 @@ from chanlun.decision_support.trading_system.operation_level import (
 )
 from chanlun.decision_support.trading_system.lifecycle import (
     current_five_minute_setup_points,
-    five_minute_setup_is_current,
     match_one_minute_segment_difference_for_point,
 )
 from chanlun.decision_support.trading_system.provisional import (
@@ -365,13 +364,9 @@ class StrictPhysicalMonitorState:
         self.warmup_ready = False
         self.segment_difference_ready = False
         self.segment_difference_reason = "NOT_REFRESHED"
-        trade_minutes = 5
-        # 实时监听只允许发布最近两根 5 分钟买卖周期 K 线内刚刚可用的信号。
-        # 原来的至少 60 分钟窗口会把暖机重建出的旧结构误当作实时通知。
-        self.signal_freshness = pd.Timedelta(minutes=trade_minutes * 2)
         self._runtime_by_frequency: dict[str, _FrequencyRuntime] = {}
         self._segment_difference_by_trade_point_id: dict[str, StructuralPoint] = {}
-        self._segment_attached_parent_occurrences: set[tuple[str, ...]] = set()
+        self._notified_segment_occurrences: set[tuple[str, ...]] = set()
         self._new_segment_difference_updates: tuple[
             tuple[StructuralPoint, StructuralPoint], ...
         ] = ()
@@ -383,17 +378,6 @@ class StrictPhysicalMonitorState:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("realtime monitor clock must be timezone-aware")
         return value.astimezone(CN)
-
-    def _is_fresh_point(
-        self,
-        point: StructuralPoint,
-        observed_at: datetime,
-    ) -> bool:
-        lag = pd.Timestamp(observed_at) - pd.Timestamp(point.available_at)
-        return bool(
-            pd.Timedelta(0) <= lag <= self.signal_freshness
-            and five_minute_setup_is_current(point, as_of=observed_at)
-        )
 
     def _fetch_klines(
         self,
@@ -815,18 +799,16 @@ class StrictPhysicalMonitorState:
             segment = self._segment_difference_by_trade_point_id.get(point.point_id)
             if segment is None:
                 continue
-            parent_occurrence = self._point_occurrence_key(point)
-            if parent_occurrence in self._segment_attached_parent_occurrences:
+            segment_occurrence = (
+                *self._point_occurrence_key(point),
+                *self._point_occurrence_key(segment),
+            )
+            if segment_occurrence in self._notified_segment_occurrences:
                 continue
-            # 与主选股通知保持相同语义：同一个 5 分钟正式点只在第一条 1 分钟
-            # 新鲜段差证据附着时补充通知，后续证据重建或更新不重复冒充新事件。
-            # 过期或尚未到达观察时刻的旧证据不能提前消耗这个机会，否则同一
-            # 设置稍后真正出现的新鲜 1 分钟段差会被永久吞掉。
-            confluence_at = max(point.available_at, segment.available_at)
-            segment_lag = pd.Timestamp(observed_at) - pd.Timestamp(confluence_at)
-            if pd.Timedelta(0) <= segment_lag <= self.signal_freshness:
-                self._segment_attached_parent_occurrences.add(parent_occurrence)
-                new_segment_updates.append((point, segment))
+            # 5m 父结构由当前末端血缘决定，不按墙钟年龄过期；每个独立的 1m
+            # 区间套定位各通知一次。旧定位的执行边界失效后，后续新定位仍能重启。
+            self._notified_segment_occurrences.add(segment_occurrence)
+            new_segment_updates.append((point, segment))
         self._new_segment_difference_updates = tuple(new_segment_updates)
         self._refresh_visible_price()
 
@@ -837,10 +819,7 @@ class StrictPhysicalMonitorState:
             if occurrence_key in self.seen:
                 continue
             self.seen.add(occurrence_key)
-            if (
-                point.point_id in selected_point_ids
-                and self._is_fresh_point(point, observed_at)
-            ):
+            if point.point_id in selected_point_ids:
                 output.append(point)
         # 为诊断调用方和方向门保留显式引用。1 分钟只提供段差背景。
         if mid is not None and _strict_direction(mid) not in {"up", "down", "neutral"}:
@@ -889,7 +868,7 @@ class StrictPhysicalMonitorState:
     def new_segment_difference_updates(
         self,
     ) -> tuple[tuple[StructuralPoint, StructuralPoint], ...]:
-        """返回本轮首次附着且仍在通知新鲜窗口内的 1 分钟段差。"""
+        """返回本轮首次出现的独立 1 分钟区间套定位。"""
 
         return self._new_segment_difference_updates
 

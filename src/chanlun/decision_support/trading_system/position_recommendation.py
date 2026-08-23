@@ -8,10 +8,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Mapping
-from zoneinfo import ZoneInfo
 
 from chanlun.decision_support.trading_system.parameters import (
     individual_parameter_snapshot,
@@ -25,11 +23,8 @@ from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
 
 _RATIO_QUANTUM = Decimal("0.0001")
 _MAX_BUY_ANCHOR_DRIFT_RATE = Decimal("0.05")
-_MAX_FRESH_BUY_SIGNAL_AGE_SECONDS = Decimal("600")
-_CN = ZoneInfo("Asia/Shanghai")
 BUY_SIGNAL_PROTECTION_REASON_CODES = frozenset(
     {
-        "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",
         "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR",
         "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP",
     }
@@ -65,45 +60,6 @@ def _ratio(value: Decimal) -> Decimal:
 def _percent_text(value: Decimal) -> str:
     rendered = format(value * Decimal("100"), ".2f").rstrip("0").rstrip(".")
     return rendered or "0"
-
-
-def active_signal_age_seconds(
-    signal_at: datetime,
-    observed_at: datetime,
-    *,
-    market: str,
-) -> Decimal | None:
-    """Return causal signal age, excluding only the same A-share lunch closure."""
-
-    if (
-        signal_at.tzinfo is None
-        or signal_at.utcoffset() is None
-        or observed_at.tzinfo is None
-        or observed_at.utcoffset() is None
-        or observed_at < signal_at
-    ):
-        return None
-    started = signal_at.astimezone(_CN)
-    ended = observed_at.astimezone(_CN)
-    elapsed = ended - started
-    if market == "a" and started.date() == ended.date():
-        lunch_started = started.replace(
-            hour=11,
-            minute=31,
-            second=0,
-            microsecond=0,
-        )
-        lunch_ended = started.replace(
-            hour=13,
-            minute=1,
-            second=0,
-            microsecond=0,
-        )
-        overlap_started = max(started, lunch_started)
-        overlap_ended = min(ended, lunch_ended)
-        if overlap_ended > overlap_started:
-            elapsed -= overlap_ended - overlap_started
-    return Decimal(str(max(timedelta(0), elapsed).total_seconds()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,9 +308,7 @@ def build_position_recommendation(
     structural_stop: object,
     exit_action: str,
     structure_anchor_price: object | None = None,
-    signal_age_seconds: object | None = None,
     max_buy_anchor_drift_rate: object = _MAX_BUY_ANCHOR_DRIFT_RATE,
-    max_buy_signal_age_seconds: object = _MAX_FRESH_BUY_SIGNAL_AGE_SECONDS,
     risk_limits: RiskLimits = RiskLimits(),
 ) -> PositionRecommendation:
     """返回可审计的建议比例；数据不足时明确返回“待核对”。"""
@@ -386,50 +340,6 @@ def build_position_recommendation(
             segment_difference_max_ratio=segment_ratio,
         )
 
-    # A confirmed 5m buy outside the no-chase window is already a deterministic
-    # 0% conclusion.  Evaluate it before the 1m waiting state; otherwise a stale
-    # setup would falsely imply that a later locator can revive the original buy.
-    if side == "buy":
-        signal_age = (
-            None
-            if signal_age_seconds is None
-            else _decimal(signal_age_seconds)
-        )
-        maximum_signal_age = _decimal(max_buy_signal_age_seconds)
-        if (
-            maximum_signal_age is None
-            or maximum_signal_age <= 0
-            or (signal_age_seconds is not None and signal_age is None)
-            or (signal_age is not None and signal_age < 0)
-        ):
-            return PositionRecommendation(
-                side=side,
-                status="UNRESOLVED",
-                basis="STRUCTURAL_RISK_INPUTS",
-                recommended_ratio=None,
-                recommended_percent=None,
-                label="结构风险参考比例：待核对（信号时间或风险参数不足）",
-                reason_codes=("POSITION_RATIO_INPUT_UNRESOLVED",),
-                segment_difference_max_ratio=segment_ratio,
-            )
-        if signal_age is not None and signal_age > maximum_signal_age:
-            return PositionRecommendation(
-                side=side,
-                status="BLOCKED",
-                basis="NO_TRADE",
-                recommended_ratio=Decimal("0"),
-                recommended_percent="0",
-                label=(
-                    "结构风险参考：本条买入不纳入操作计划（发现时已超过"
-                    "5分钟信号的10分钟新鲜窗口，仅作延迟复核，不追价）"
-                ),
-                reason_codes=("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",),
-                segment_difference_max_ratio=segment_ratio,
-            )
-
-    # A stale 5m buy is a more specific terminal result than an upstream hard
-    # gate.  Keep this fallback after the freshness check so delayed snapshots
-    # cannot be rendered as if a new 1m locator could still revive them.
     if recommendation == "BLOCKED":
         return PositionRecommendation(
             side=side,
@@ -474,7 +384,6 @@ def build_position_recommendation(
             or price is None
             or stop is None
             or anchor is None
-            or maximum_signal_age is None
             or maximum_anchor_drift is None
             or multiplier <= 0
             or context_scale <= 0
@@ -620,7 +529,6 @@ __all__ = (
     "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS",
     "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON",
     "PositionRecommendation",
-    "active_signal_age_seconds",
     "build_position_recommendation",
     "parse_position_recommendation_document",
 )

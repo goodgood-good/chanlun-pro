@@ -1,18 +1,13 @@
 import copy
-from datetime import datetime
+import inspect
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 import pytest
 
 from chanlun.decision_support.trading_system.position_recommendation import (
-    active_signal_age_seconds,
     build_position_recommendation,
     parse_position_recommendation_document,
 )
-
-
-CN = ZoneInfo("Asia/Shanghai")
 
 
 def recommendation(**overrides: object):
@@ -87,70 +82,35 @@ def test_buy_price_above_anchor_protection_blocks_chasing() -> None:
     assert parse_position_recommendation_document(value.document()) == value
 
 
-def test_late_buy_discovery_is_review_only_and_never_recommends_chasing() -> None:
-    value = recommendation(
-        entry_price="10.20",
-        structure_anchor_price="10.00",
-        structural_stop="9.50",
-        signal_age_seconds=601,
-    )
+def test_position_sizing_has_no_fixed_setup_age_gate() -> None:
+    parameters = inspect.signature(build_position_recommendation).parameters
 
-    assert value.status == "BLOCKED"
-    assert value.recommended_ratio == Decimal("0")
-    assert value.reason_codes == ("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",)
-    assert "延迟复核" in value.label
+    assert "signal_age_seconds" not in parameters
+    assert "max_buy_signal_age_seconds" not in parameters
 
 
-def test_stale_buy_remains_zero_percent_when_realtime_price_is_missing() -> None:
+def test_missing_realtime_price_remains_unresolved() -> None:
     value = recommendation(
         entry_price=None,
         structure_anchor_price="10.00",
         structural_stop="9.50",
-        signal_age_seconds=601,
     )
 
-    assert value.status == "BLOCKED"
-    assert value.recommended_ratio == Decimal("0")
-    assert value.reason_codes == ("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",)
+    assert value.status == "UNRESOLVED"
+    assert value.recommended_ratio is None
+    assert value.reason_codes == ("POSITION_RATIO_INPUT_UNRESOLVED",)
 
 
-def test_stale_buy_cannot_remain_in_one_minute_waiting_state() -> None:
+def test_confirmed_setup_can_wait_for_later_one_minute_locator() -> None:
     value = recommendation(
         recommendation="WAITING_SEGMENT_DIFFERENCE",
-        signal_age_seconds=601,
     )
 
-    assert value.status == "BLOCKED"
-    assert value.recommended_ratio == Decimal("0")
-    assert value.reason_codes == ("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",)
-
-
-def test_active_signal_age_excludes_only_same_day_a_share_lunch() -> None:
-    started = datetime(2026, 7, 20, 11, 25, tzinfo=CN)
-    ended = datetime(2026, 7, 20, 13, 5, tzinfo=CN)
-
-    assert active_signal_age_seconds(started, ended, market="a") == Decimal("600.0")
-    assert active_signal_age_seconds(started, ended, market="us") == Decimal("6000.0")
-    assert active_signal_age_seconds(
-        started,
-        datetime(2026, 7, 21, 13, 5, tzinfo=CN),
-        market="a",
-    ) == Decimal("92400.0")
-
-
-def test_active_signal_age_rejects_naive_or_reversed_chronology() -> None:
-    aware = datetime(2026, 7, 20, 10, 0, tzinfo=CN)
-
-    assert active_signal_age_seconds(
-        datetime(2026, 7, 20, 9, 55),
-        aware,
-        market="a",
-    ) is None
-    assert active_signal_age_seconds(
-        aware,
-        datetime(2026, 7, 20, 9, 55, tzinfo=CN),
-        market="a",
-    ) is None
+    assert value.status == "NOT_ACTIONABLE"
+    assert value.recommended_ratio is None
+    assert value.reason_codes == (
+        "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_FOR_PRECISE_EXECUTION",
+    )
 
 
 def test_unconfirmed_five_minute_structure_has_no_trade_ratio() -> None:

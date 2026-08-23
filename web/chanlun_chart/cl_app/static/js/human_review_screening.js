@@ -188,7 +188,6 @@
     REALTIME_NOTIFICATION_DELIVERY_PENDING: "钉钉通知仍在等待投递",
     REALTIME_NOTIFICATION_DELIVERY_FAILED: "钉钉投递失败，但结构通知已保留在人工复核收件箱",
     REALTIME_NOTIFICATION_DELIVERY_EXPIRED: "钉钉投递窗口已过期；结构通知仍保留供复核",
-    REALTIME_NOTIFICATION_HISTORICAL: "通知已超过10分钟新鲜窗口，仅保留为历史结构复核",
     ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED: "1分钟区间套历史证据仍保留，但当前精确定位边界已经过期",
     ONE_MINUTE_SEGMENT_BOUNDARY_MISSING: "1分钟区间套历史证据仍保留，但当前精确定位边界不可用",
   };
@@ -196,19 +195,6 @@
   function text(value, fallback = "—") {
     if (value === null || value === undefined || value === "") return fallback;
     return String(value);
-  }
-
-  function laterIsoTime(first, second) {
-    const firstText = text(first, "");
-    const secondText = text(second, "");
-    const firstAt = Date.parse(firstText);
-    const secondAt = Date.parse(secondText);
-    if (Number.isFinite(firstAt) && Number.isFinite(secondAt)) {
-      return secondAt > firstAt ? secondText : firstText;
-    }
-    if (Number.isFinite(firstAt)) return firstText;
-    if (Number.isFinite(secondAt)) return secondText;
-    return firstText || secondText || null;
   }
 
   function mappedStateLabel(labels, value, fallback = "尚未解决") {
@@ -349,19 +335,6 @@
       && Number.isInteger(segmentLevel)
       && segmentLevel === 0;
     const segmentEnriched = event.new_stage === "segment_enriched" && segmentPresent;
-    const notificationFreshnessAt = segmentEnriched
-      ? laterIsoTime(signalAvailableAt, event.segment_difference_available_at)
-      : signalAvailableAt;
-    const sharedUi = sharedScreeningUi();
-    const currentAgeSeconds = sharedUi
-      && typeof sharedUi.notificationCurrentAgeSecondsForReview === "function"
-      ? sharedUi.notificationCurrentAgeSecondsForReview({
-        realtime_notification: true,
-        market,
-        notification_signal_available_at: notificationFreshnessAt,
-      }, observedAt)
-      : null;
-    const historical = currentAgeSeconds !== null && currentAgeSeconds > 600;
     const segmentEvidenceStatus = segmentPresent
       ? text(event.segment_difference_evidence_status, "present")
       : "absent";
@@ -438,13 +411,11 @@
       notification_source: event.source,
       notification_delivery_status: event.delivery_status,
       notification_delivery_reason: event.delivery_reason,
-      review_lane: historical ? "RESEARCH_ARCHIVE" : "ACTIONABLE_REVIEW",
-      review_priority: historical
-        ? 69
-        : event.delivery_status === "failed" ? 110 : 100,
+      review_lane: "ACTIONABLE_REVIEW",
+      review_priority: event.delivery_status === "failed" ? 110 : 100,
       // 实时通知已经通过 5m 操作确认条件，但仍明确要求人工复核；使用页面
       // 契约内的枚举值，避免把展示文案误当成状态码后落入“未收录”兜底。
-      confidence: historical ? "LOW" : "MEDIUM",
+      confidence: "MEDIUM",
       review_available_at: notificationTime,
       current_price: event.current_price,
       position_recommendation: positionRecommendation,
@@ -464,7 +435,6 @@
       sector_horizontal_rank: null,
       warning_codes: [
         "REALTIME_NOTIFICATION_REVIEW_ONLY",
-        ...(historical ? ["REALTIME_NOTIFICATION_HISTORICAL"] : []),
         ...deliveryWarnings,
         ...segmentWarnings,
       ],
@@ -483,8 +453,6 @@
       paper_observation_reason: "REALTIME_NOTIFICATION_REVIEW_ONLY",
       evidence_detail_available: false,
       realtime_notification: true,
-      realtime_notification_current_age_seconds: currentAgeSeconds,
-      realtime_notification_is_historical: historical,
       realtime_notification_recorded_at: event.recorded_at,
       realtime_notification_anchor_time: structureAnchorTime,
       realtime_notification_confirmed_time: structureConfirmedAt,
@@ -613,18 +581,11 @@
     const known = new Set(formal.map((row) => row && row.candidate_id).filter(Boolean));
     const uniqueNotifications = notifications.filter((row) => !known.has(row.candidate_id));
     const reviewQueue = [...uniqueNotifications, ...formal];
-    const currentNotifications = uniqueNotifications.filter(
-      (row) => row.realtime_notification_is_historical !== true,
-    );
-    const historicalNotifications = uniqueNotifications.filter(
-      (row) => row.realtime_notification_is_historical === true,
-    );
     return {
       ...safe,
       formal_review_queue_count: formal.length,
       realtime_notification_count: uniqueNotifications.length,
-      current_realtime_notification_count: currentNotifications.length,
-      historical_realtime_notification_count: historicalNotifications.length,
+      current_realtime_notification_count: uniqueNotifications.length,
       focus_review_queue_count: reviewQueue.filter((row) => (
         ["ACTIONABLE_REVIEW", "POSITION_MANAGEMENT"].includes(row.review_lane)
       )).length,
@@ -1859,17 +1820,11 @@
         const focusReviewCount = Number(
           snapshot.focus_review_queue_count ?? snapshot.review_queue_count ?? 0,
         );
-        const historicalNotificationCount = Number(
-          snapshot.historical_realtime_notification_count || 0,
-        );
-        const queueSummary = historicalNotificationCount > 0
-          ? `${focusReviewCount} 条当前重点提醒 · ${historicalNotificationCount} 条历史通知已归档`
-          : `${focusReviewCount} 条当前重点提醒`;
         setText("hr-sample", timeText(sample.market_data_as_of));
         setStatus(
           "ready",
           "盘中实时复核候选已验证并归档",
-          `${queueSummary} · 30分钟环境/5分钟操作确认/结构证据/1分钟区间套精确定位 · 候选报告自身零订单/零成交`,
+          `${focusReviewCount} 条当前重点提醒 · 30分钟环境/5分钟操作确认/结构证据/1分钟区间套精确定位 · 候选报告自身零订单/零成交`,
         );
       }
       if (
@@ -1888,16 +1843,10 @@
         const currentNotificationCount = Number(
           snapshot.current_realtime_notification_count || 0,
         );
-        const historicalNotificationCount = Number(
-          snapshot.historical_realtime_notification_count || 0,
-        );
-        const notificationSummary = historicalNotificationCount > 0
-          ? `${currentNotificationCount} 条当前通知 · ${historicalNotificationCount} 条历史通知已归档`
-          : `${currentNotificationCount} 条当前通知`;
         setStatus(
           "warning",
           "实时通知收件箱可用，程序候选暂未发布",
-          `${notificationSummary} · ${formalReviewUnavailableLabel(snapshot.formal_review_unavailable_reason)} · 不会创建订单`,
+          `${currentNotificationCount} 条当前通知 · ${formalReviewUnavailableLabel(snapshot.formal_review_unavailable_reason)} · 不会创建订单`,
         );
       }
       const available = new Set(snapshot.source_options || []);

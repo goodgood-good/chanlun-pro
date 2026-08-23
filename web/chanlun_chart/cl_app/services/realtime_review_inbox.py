@@ -9,7 +9,7 @@ never contains credentials, account data or order instructions.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -23,6 +23,9 @@ from zoneinfo import ZoneInfo
 
 from chanlun.decision_support.trading_system.models import (
     CANONICAL_POINT_TYPE_SET,
+)
+from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_optional_entry_valid_until,
 )
 from chanlun.decision_support.trading_system.operation_level import (
     is_five_minute_trade_level,
@@ -378,39 +381,6 @@ def _legacy_structural_position_recommendation(
     }
 
 
-def _guard_expired_buy_position(
-    event: dict[str, object],
-) -> dict[str, object]:
-    """Prevent an expired buy notification from advertising a stale ratio.
-
-    The original recommendation remains attached as audit evidence, while the
-    review-facing projection becomes an explicit zero-position/no-chase result.
-    Sell notifications intentionally retain their exit guidance because a late
-    risk-reduction review is not equivalent to chasing an entry.
-    """
-
-    if event.get("delivery_status") != "expired" or event.get("side") != "buy":
-        return event
-    current = event.get("position_recommendation")
-    if isinstance(current, Mapping) and current.get("basis") != (
-        "EXPIRED_NOTIFICATION_NO_CHASE"
-    ):
-        event.setdefault("position_recommendation_at_detection", dict(current))
-    event["position_recommendation"] = {
-        "side": "buy",
-        "status": "BLOCKED",
-        "basis": "EXPIRED_NOTIFICATION_NO_CHASE",
-        "recommended_ratio": "0",
-        "recommended_percent": "0",
-        "label": "通知已过买入有效窗口：建议买入比例 0%；仅保留审计，禁止追价",
-        "reason_codes": ["BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE"],
-        "conditional_options": [],
-        "manual_confirmation_required": True,
-        "automated_order_authorized": False,
-    }
-    return event
-
-
 def _normalize_event(
     raw: object,
     *,
@@ -538,7 +508,6 @@ def _normalize_event(
                     side=side,
                 )
             )
-    _guard_expired_buy_position(normalized)
     segment_present = normalized.get("segment_difference_present") is True
     segment_recursive_level = normalized.get("segment_difference_recursive_level")
     if (
@@ -1039,16 +1008,24 @@ def monitor_notification_event(
             segment_status = "current"
         elif segment_available_at is None:
             segment_status = "unknown"
+        elif normalized_market != "a":
+            # Only A-share raw 1m execution boundaries are currently attested.
+            # Other markets retain the locator evidence without inventing a TTL.
+            segment_status = "unavailable"
         else:
-            segment_deadline = datetime.fromisoformat(
-                segment_available_at
-            ) + timedelta(minutes=10)
-            segment_valid_until = segment_deadline.isoformat(timespec="seconds")
-            segment_status = (
-                "current"
-                if recorded_at.astimezone(CN) <= segment_deadline.astimezone(CN)
-                else "expired"
-            )
+            try:
+                segment_deadline = a_share_optional_entry_valid_until(
+                    datetime.fromisoformat(segment_available_at)
+                )
+            except (TypeError, ValueError):
+                segment_status = "unavailable"
+            else:
+                segment_valid_until = segment_deadline.isoformat(timespec="seconds")
+                segment_status = (
+                    "current"
+                    if recorded_at.astimezone(CN) < segment_deadline.astimezone(CN)
+                    else "expired"
+                )
     setup_lock_state = _text(
         getattr(event, "setup_lock_state", None),
         "unknown",
@@ -1472,7 +1449,6 @@ class RealtimeReviewInbox:
                 event["delivery_updated_at"] = recorded_at
                 if _is_delivered_status(status):
                     event["delivered_at"] = recorded_at
-                _guard_expired_buy_position(event)
                 changed = True
             if changed:
                 self._persist()

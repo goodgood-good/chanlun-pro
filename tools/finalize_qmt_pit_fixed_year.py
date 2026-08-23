@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, datetime, time
 from decimal import Decimal
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -44,6 +46,10 @@ from chanlun.decision_support.trading_system.backtest.pit_sector import (
     PIT_SW1_COMPOSITE_PROVIDER,
     build_pit_sw1_composite,
 )
+from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
+    qmt_local_kline_path,
+    resolve_qmt_local_data_dir,
+)
 from chanlun.decision_support.trading_system.backtest.report import (
     BacktestEvaluationResult,
     build_report,
@@ -60,6 +66,7 @@ from chanlun.decision_support.trading_system.operation_level import (
 from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_MINIMUM_BARS_BY_FREQUENCY,
 )
+from chanlun.decision_support.fingerprints import sha256_json
 from tools import qmt_research_contract
 
 
@@ -69,12 +76,20 @@ DEFAULT_INPUT = Path(
 DEFAULT_REPORT = Path(
     "audit/chanlun_trading_system_backtest/certified_report.json"
 )
+_SECTOR_CACHE_METADATA_SCHEMA = "chanlun-pit-sector-cache-metadata-v1"
 
 
 def _positive_decimal(value: str) -> Decimal:
     result = Decimal(value)
     if not result.is_finite() or result <= 0:
         raise argparse.ArgumentTypeError("value must be a positive decimal")
+    return result
+
+
+def _positive_int(value: str) -> int:
+    result = int(value)
+    if result <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
     return result
 
 
@@ -86,7 +101,16 @@ def parser() -> argparse.ArgumentParser:
         "--initial-cash", type=_positive_decimal, default=Decimal("1000000")
     )
     result.add_argument("--bootstrap-repetitions", type=int, default=2000)
+    result.add_argument("--sector-workers", type=_positive_int, default=3)
     result.add_argument("--force-sectors", action="store_true")
+    result.add_argument(
+        "--reuse-sector-cache",
+        action="store_true",
+        help=(
+            "reuse content-addressed sector facts when their PIT, timeline, "
+            "implementation, and local QMT file inventory are unchanged"
+        ),
+    )
     return result
 
 
@@ -135,6 +159,35 @@ def _algorithm_revision(hashes: Sequence[tuple[str, str]]) -> str:
         tuple(hashes), ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _sector_algorithm_revision(
+    fact_algorithm_hashes: Sequence[tuple[str, str]],
+) -> str:
+    """Bind sector checkpoints without coupling them to report/UI changes."""
+
+    pit_sector_path = (
+        PROJECT_ROOT
+        / "src/chanlun/decision_support/trading_system/backtest/pit_sector.py"
+    )
+    orchestration_source = "\n".join(
+        inspect.getsource(function)
+        for function in (
+            _sector_revision,
+            _build_one_sector_fact,
+        )
+    ).encode("utf-8")
+    extra = (
+        (
+            "src/chanlun/decision_support/trading_system/backtest/pit_sector.py",
+            _sha256(pit_sector_path),
+        ),
+        (
+            "tools/finalize_qmt_pit_fixed_year.py#sector_fact_orchestration",
+            "sha256:" + hashlib.sha256(orchestration_source).hexdigest(),
+        ),
+    )
+    return _algorithm_revision(tuple(sorted((*fact_algorithm_hashes, *extra))))
 
 
 def _frozen_algorithm(
@@ -214,6 +267,151 @@ def _sector_path(directory: Path, sector_id: str) -> Path:
     return directory / "pit_sectors" / f"{sector_id.rsplit(':', 1)[-1]}.pkl"
 
 
+def _sector_cache_metadata_path(directory: Path, sector_id: str) -> Path:
+    return directory / "pit_sectors" / f"{sector_id.rsplit(':', 1)[-1]}.cache.json"
+
+
+def _sector_source_inventory_revision(
+    snapshot: PITMetadataSnapshot,
+    sector_id: str,
+) -> str | None:
+    """Fingerprint cheap immutable-file facts before trusting a sector cache.
+
+    Per-symbol facts already treat their completed checkpoint as immutable until
+    an explicit force run.  The fast sector path follows the same contract while
+    additionally invalidating when a contributing local QMT 5m file changes in
+    path, size, or nanosecond modification time.
+    """
+
+    data_dir = resolve_qmt_local_data_dir()
+    if data_dir is None:
+        return None
+    member_codes = tuple(
+        sorted(
+            {
+                row.code
+                for row in snapshot.memberships
+                if row.sector_id == sector_id
+            }
+        )
+    )
+    rows: list[dict[str, object]] = []
+    for code in dict.fromkeys(("SH.000001", *member_codes)):
+        path = qmt_local_kline_path(data_dir, code, "5m")
+        try:
+            status = path.stat()
+        except FileNotFoundError:
+            rows.append({"code": code, "state": "missing"})
+        else:
+            rows.append(
+                {
+                    "code": code,
+                    "state": "present",
+                    "size": status.st_size,
+                    "mtime_ns": status.st_mtime_ns,
+                }
+            )
+    return sha256_json(
+        {
+            "schema": "chanlun-qmt-sector-source-inventory-v1",
+            "sector_id": sector_id,
+            "files": rows,
+        }
+    )
+
+
+def _sector_cache_context_revision(
+    *,
+    snapshot: PITMetadataSnapshot,
+    snapshot_hash: str,
+    sector_id: str,
+    observed_times: Sequence[datetime],
+    expected_closes: Sequence[datetime],
+    warmup_start: date,
+    requested_end: date,
+    sector_algorithm_revision: str,
+) -> str | None:
+    source_inventory_revision = _sector_source_inventory_revision(
+        snapshot,
+        sector_id,
+    )
+    if source_inventory_revision is None:
+        return None
+    return sha256_json(
+        {
+            "schema": _SECTOR_CACHE_METADATA_SCHEMA,
+            "snapshot_sha256": snapshot_hash,
+            "sector_id": sector_id,
+            "warmup_start": warmup_start.isoformat(),
+            "requested_end": requested_end.isoformat(),
+            "observed_times": [value.isoformat() for value in observed_times],
+            "expected_closes": [value.isoformat() for value in expected_closes],
+            "sector_algorithm_revision": sector_algorithm_revision,
+            "source_inventory_revision": source_inventory_revision,
+        }
+    )
+
+
+def _load_fast_cached_sector(
+    path: Path,
+    metadata_path: Path,
+    *,
+    sector_id: str,
+    sector_algorithm_revision: str,
+    cache_context_revision: str,
+    observed_times: Sequence[datetime],
+) -> SectorResearchFacts | None:
+    if not path.is_file() or not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("schema") != _SECTOR_CACHE_METADATA_SCHEMA
+        or metadata.get("sector_id") != sector_id
+        or metadata.get("sector_algorithm_revision")
+        != sector_algorithm_revision
+        or metadata.get("cache_context_revision") != cache_context_revision
+        or metadata.get("artifact_sha256") != _sha256(path)
+    ):
+        return None
+    source_revision = metadata.get("source_revision")
+    if not isinstance(source_revision, str):
+        return None
+    cached = _load_cached_sector(
+        path,
+        algorithm_revision=sector_algorithm_revision,
+        source_revision=source_revision,
+    )
+    if cached is None or cached.sector_id != sector_id:
+        return None
+    cached_times = tuple(value for value, _assessment in cached.assessments)
+    return cached if cached_times == tuple(observed_times) else None
+
+
+def _write_sector_cache_metadata(
+    metadata_path: Path,
+    artifact_path: Path,
+    *,
+    facts: SectorResearchFacts,
+    sector_algorithm_revision: str,
+    cache_context_revision: str,
+) -> None:
+    _atomic_json(
+        metadata_path,
+        {
+            "schema": _SECTOR_CACHE_METADATA_SCHEMA,
+            "sector_id": facts.sector_id,
+            "sector_algorithm_revision": sector_algorithm_revision,
+            "cache_context_revision": cache_context_revision,
+            "source_revision": facts.source_revision,
+            "artifact_sha256": _sha256(artifact_path),
+        },
+    )
+
+
 def _sector_revision(
     *,
     snapshot_hash: str,
@@ -255,6 +453,119 @@ def _load_cached_sector(
     return value
 
 
+def _build_one_sector_fact(
+    *,
+    directory: Path,
+    snapshot: PITMetadataSnapshot,
+    snapshot_hash: str,
+    names: Mapping[str, str],
+    sector_id: str,
+    observed_times: Sequence[datetime],
+    expected_closes: Sequence[datetime],
+    warmup_start: date,
+    requested_end: date,
+    sector_algorithm_revision: str,
+    force: bool,
+    reuse_cache: bool,
+) -> tuple[SectorResearchFacts, dict[str, object]]:
+    path = _sector_path(directory, sector_id)
+    metadata_path = _sector_cache_metadata_path(directory, sector_id)
+    cache_context_revision = _sector_cache_context_revision(
+        snapshot=snapshot,
+        snapshot_hash=snapshot_hash,
+        sector_id=sector_id,
+        observed_times=observed_times,
+        expected_closes=expected_closes,
+        warmup_start=warmup_start,
+        requested_end=requested_end,
+        sector_algorithm_revision=sector_algorithm_revision,
+    )
+    cached = None
+    if reuse_cache and not force and cache_context_revision is not None:
+        cached = _load_fast_cached_sector(
+            path,
+            metadata_path,
+            sector_id=sector_id,
+            sector_algorithm_revision=sector_algorithm_revision,
+            cache_context_revision=cache_context_revision,
+            observed_times=observed_times,
+        )
+    cache_state = "fast_hit"
+    if cached is not None:
+        facts = cached
+    else:
+        frame = build_pit_sw1_composite(
+            snapshot=snapshot,
+            sector_id=sector_id,
+            start_at=datetime.combine(
+                warmup_start,
+                time(9, 30),
+                tzinfo=snapshot.captured_at.tzinfo,
+            ),
+            end_at=datetime.combine(
+                requested_end,
+                time(15, 0),
+                tzinfo=snapshot.captured_at.tzinfo,
+            ),
+        )
+        revision = _sector_revision(
+            snapshot_hash=snapshot_hash,
+            sector_id=sector_id,
+            observed_times=observed_times,
+            expected_closes=expected_closes,
+            frame=frame,
+        )
+        cached = None if force else _load_cached_sector(
+            path,
+            algorithm_revision=sector_algorithm_revision,
+            source_revision=revision,
+        )
+        if cached is None:
+            member_count = len(
+                {
+                    row.code
+                    for row in snapshot.memberships
+                    if row.sector_id == sector_id
+                }
+            )
+            facts = sector_facts_from_frame(
+                sector_id=sector_id,
+                sector_name=names[sector_id],
+                member_count=member_count,
+                frame=frame,
+                observed_times=observed_times,
+                algorithm_revision=sector_algorithm_revision,
+                source_revision=revision,
+                market_data_source=PIT_SW1_COMPOSITE_PROVIDER,
+                expected_closes=expected_closes,
+            )
+            _atomic_bytes(
+                path,
+                pickle.dumps(facts, protocol=pickle.HIGHEST_PROTOCOL),
+            )
+            cache_state = "rebuilt"
+        else:
+            facts = cached
+            cache_state = "verified_hit"
+        if cache_context_revision is not None:
+            _write_sector_cache_metadata(
+                metadata_path,
+                path,
+                facts=facts,
+                sector_algorithm_revision=sector_algorithm_revision,
+                cache_context_revision=cache_context_revision,
+            )
+    return facts, {
+        "stage": "pit_sector",
+        "sector": sector_id,
+        "events": len(observed_times),
+        "rows": facts.row_count,
+        "members": facts.member_count,
+        "error": facts.error,
+        "cache": cache_state,
+    }
+
+
 def _build_sector_facts(
     *,
     directory: Path,
@@ -263,8 +574,10 @@ def _build_sector_facts(
     snapshot_hash: str,
     warmup_start: date,
     requested_end: date,
-    algorithm_revision: str,
+    sector_algorithm_revision: str,
     force: bool,
+    reuse_cache: bool,
+    workers: int,
 ) -> dict[str, SectorResearchFacts]:
     times_by_sector: dict[str, set[datetime]] = {}
     for facts in symbols:
@@ -294,64 +607,62 @@ def _build_sector_facts(
     )
     if not expected_closes:
         raise RuntimeError("QMT market 30m reference timeline is unavailable")
-    output: dict[str, SectorResearchFacts] = {}
-    for sector_id in sorted(times_by_sector):
-        if sector_id not in names:
-            raise ValueError(f"unknown PIT sector at evaluation: {sector_id}")
-        observed_times = tuple(sorted(times_by_sector[sector_id]))
-        frame = build_pit_sw1_composite(
+    sector_ids = tuple(sorted(times_by_sector))
+    unknown = tuple(value for value in sector_ids if value not in names)
+    if unknown:
+        raise ValueError(f"unknown PIT sector at evaluation: {unknown[0]}")
+
+    def build(sector_id: str) -> tuple[SectorResearchFacts, dict[str, object]]:
+        facts, diagnostic = _build_one_sector_fact(
+            directory=directory,
             snapshot=snapshot,
-            sector_id=sector_id,
-            start_at=datetime.combine(warmup_start, time(9, 30), tzinfo=snapshot.captured_at.tzinfo),
-            end_at=datetime.combine(requested_end, time(15, 0), tzinfo=snapshot.captured_at.tzinfo),
-        )
-        revision = _sector_revision(
             snapshot_hash=snapshot_hash,
+            names=names,
             sector_id=sector_id,
-            observed_times=observed_times,
+            observed_times=tuple(sorted(times_by_sector[sector_id])),
             expected_closes=expected_closes,
-            frame=frame,
+            warmup_start=warmup_start,
+            requested_end=requested_end,
+            sector_algorithm_revision=sector_algorithm_revision,
+            force=force,
+            reuse_cache=reuse_cache,
         )
-        path = _sector_path(directory, sector_id)
-        cached = None if force else _load_cached_sector(
-            path,
-            algorithm_revision=algorithm_revision,
-            source_revision=revision,
-        )
-        if cached is None:
-            member_count = len(
-                {row.code for row in snapshot.memberships if row.sector_id == sector_id}
-            )
-            facts = sector_facts_from_frame(
-                sector_id=sector_id,
-                sector_name=names[sector_id],
-                member_count=member_count,
-                frame=frame,
-                observed_times=observed_times,
-                algorithm_revision=algorithm_revision,
-                source_revision=revision,
-                market_data_source=PIT_SW1_COMPOSITE_PROVIDER,
-                expected_closes=expected_closes,
-            )
-            _atomic_bytes(path, pickle.dumps(facts, protocol=pickle.HIGHEST_PROTOCOL))
-        else:
-            facts = cached
-        output[sector_id] = facts
-        print(
-            json.dumps(
-                {
-                    "stage": "pit_sector",
-                    "sector": sector_id,
-                    "events": len(observed_times),
-                    "rows": facts.row_count,
-                    "members": facts.member_count,
-                    "error": facts.error,
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-    return output
+        return facts, diagnostic
+
+    completed: dict[str, SectorResearchFacts] = {}
+    if workers == 1 or len(sector_ids) <= 1:
+        for sector_id in sector_ids:
+            facts, diagnostic = build(sector_id)
+            completed[sector_id] = facts
+            print(json.dumps(diagnostic, ensure_ascii=False), flush=True)
+    else:
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(sector_ids))
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _build_one_sector_fact,
+                    directory=directory,
+                    snapshot=snapshot,
+                    snapshot_hash=snapshot_hash,
+                    names=names,
+                    sector_id=sector_id,
+                    observed_times=tuple(sorted(times_by_sector[sector_id])),
+                    expected_closes=expected_closes,
+                    warmup_start=warmup_start,
+                    requested_end=requested_end,
+                    sector_algorithm_revision=sector_algorithm_revision,
+                    force=force,
+                    reuse_cache=reuse_cache,
+                ): sector_id
+                for sector_id in sector_ids
+            }
+            for future in as_completed(futures):
+                sector_id = futures[future]
+                facts, diagnostic = future.result()
+                completed[sector_id] = facts
+                print(json.dumps(diagnostic, ensure_ascii=False), flush=True)
+    return {sector_id: completed[sector_id] for sector_id in sector_ids}
 
 
 def _causality_failures(
@@ -623,6 +934,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("symbol extraction is incomplete")
     algorithm_revision, algorithm_hashes = _frozen_algorithm(manifest)
     fact_algorithm_revision, fact_algorithm_hashes = _frozen_fact_algorithm(manifest)
+    sector_algorithm_revision = _sector_algorithm_revision(fact_algorithm_hashes)
     symbols = _load_symbols(directory, manifest, fact_algorithm_revision)
     request = manifest.get("request")
     catalog = manifest.get("catalog")
@@ -691,8 +1003,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         snapshot_hash=snapshot_hash,
         warmup_start=warmup_start,
         requested_end=requested_end,
-        algorithm_revision=algorithm_revision,
+        sector_algorithm_revision=sector_algorithm_revision,
         force=args.force_sectors,
+        reuse_cache=args.reuse_sector_cache,
+        workers=args.sector_workers,
     )
     failures = _causality_failures(
         symbols=symbols,

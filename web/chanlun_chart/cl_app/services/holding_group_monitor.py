@@ -30,7 +30,6 @@ from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     collect_strict_monitor_events,
 )
 from chanlun.decision_support.trading_system.position_recommendation import (
-    active_signal_age_seconds,
     build_position_recommendation,
 )
 
@@ -43,11 +42,9 @@ SCHEMA = "chanlun-holding-group-monitor"
 JOB_ID = "holding_group_realtime_monitor"
 DEDUPE_SCHEMA = "chanlun-holding-group-event-deduper"
 RUNTIME_SCHEMA = "chanlun-holding-group-runtime-ledger"
-_PENDING_NOTIFICATION_MAX_AGE = timedelta(minutes=10)
-_DELAYED_REVIEW_DELIVERY_GRACE = timedelta(minutes=2)
+_PENDING_NOTIFICATION_RETRY_TTL = timedelta(minutes=10)
 _BUY_PROTECTION_REASONS = frozenset(
     {
-        "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",
         "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR",
         "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP",
     }
@@ -851,13 +848,6 @@ def _refresh_event_position_recommendation(
     side = str(getattr(event, "side", "") or "")
     if side not in {"buy", "sell"}:
         return
-    signal_at = _notification_evidence_datetime(event)
-    detected = _notification_datetime(detected_at)
-    age_seconds = (
-        None
-        if signal_at is None or detected is None
-        else active_signal_age_seconds(signal_at, detected, market=market)
-    )
     big_direction = str(getattr(event, "big_dir", "") or "neutral")
     point_type = str(getattr(event, "bs_type", "") or "")
     recommendation = (
@@ -890,7 +880,6 @@ def _refresh_event_position_recommendation(
             structural_stop=getattr(event, "structure_invalidation_price", None),
             exit_action="none",
             structure_anchor_price=getattr(event, "structure_anchor_price", None),
-            signal_age_seconds=age_seconds,
         ).document()
     except (TypeError, ValueError):
         return
@@ -976,9 +965,7 @@ def _notification_position_line(event: object) -> str:
     if status == "BLOCKED" and side == "buy":
         reasons = _position_reasons(event)
         reason = (
-            "发现过晚，不追价"
-            if "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in reasons
-            else "偏离结构锚点过远，不追价"
+            "偏离结构锚点过远，不追价"
             if "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR" in reasons
             else "当前价已到达或跌破结构防守位"
             if "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP" in reasons
@@ -1564,34 +1551,22 @@ class HoldingGroupMonitorService:
         pending: Mapping[str, object],
     ) -> bool:
         review_events = pending.get("review_events")
-        signal_times: list[datetime] = []
         detected_times: list[datetime] = []
         if isinstance(review_events, list) and review_events:
             for event in review_events:
                 if not isinstance(event, Mapping):
                     return True
-                signal_time = _notification_evidence_datetime(event)
-                if signal_time is None:
-                    return True
-                signal_times.append(signal_time)
                 detected_time = _notification_datetime(event.get("detected_at"))
                 if detected_time is not None:
                     detected_times.append(detected_time)
-        if signal_times:
-            # A realtime signal's validity starts when the structure became
-            # actionable, not when a delayed scan happened to queue it.
-            available_at = min(signal_times)
-        else:
-            # Compatibility for queues written before review projections were
-            # persisted. New payloads always take the structural-time path.
-            available_at = _notification_datetime(pending.get("queued_at"))
-            if available_at is None:
-                return True
-        expires_at = available_at + _PENDING_NOTIFICATION_MAX_AGE
-        # 与A股通知一致：及时发现的消息在10分钟边界停止重试；只有监听首次
-        # 在边界后才获得两分钟宽限，并且买点仓位已被重算为0%，仅作延迟复核。
-        if detected_times and min(detected_times) > expires_at:
-            expires_at += _DELAYED_REVIEW_DELIVERY_GRACE
+        retry_started_at = _notification_datetime(pending.get("queued_at"))
+        if retry_started_at is None and detected_times:
+            retry_started_at = min(detected_times)
+        if retry_started_at is None:
+            return True
+        # This is only a bounded external-delivery retry TTL. It never expires
+        # the underlying 5m structure or changes its position recommendation.
+        expires_at = retry_started_at + _PENDING_NOTIFICATION_RETRY_TTL
         return self._now() > expires_at
 
     def _attempt_pending_notification(

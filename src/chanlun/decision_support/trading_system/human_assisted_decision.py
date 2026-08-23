@@ -47,7 +47,6 @@ from chanlun.decision_support.trading_system.five_minute_setup_state import (
 )
 from chanlun.decision_support.trading_system.position_recommendation import (
     BUY_SIGNAL_PROTECTION_REASON_CODES,
-    active_signal_age_seconds,
     build_position_recommendation,
 )
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
@@ -778,7 +777,6 @@ def validate_signal_decision_document(document: Mapping[str, object]) -> str:
             not in {
                 "STRUCTURE_PENDING",
                 "WAITING_ONE_MINUTE",
-                "FIVE_MINUTE_EXPIRED",
                 "BOUNDARY_MISSING",
                 "BOUNDARY_EXPIRED",
                 "READY",
@@ -1111,19 +1109,6 @@ def serialize_evaluated_signal(
         ),
         exit_action=("none" if item.exit is None else item.exit.action),
         structure_anchor_price=structure_anchor_price,
-        signal_age_seconds=(
-            active_signal_age_seconds(
-                point.available_at,
-                item.lifecycle.observed_at,
-                market=(
-                    "a"
-                    if point.code.startswith(("SH.", "SZ.", "BJ."))
-                    else "other"
-                ),
-            )
-            if isinstance(point, StructuralPoint)
-            else None
-        ),
     )
     position_recommendation_document = position_recommendation.document()
     operational_buy_protections = tuple(
@@ -1132,7 +1117,7 @@ def serialize_evaluated_signal(
         if reason in BUY_SIGNAL_PROTECTION_REASON_CODES
     )
     if point.side == "buy" and operational_buy_protections:
-        # 技术结构仍可继续跟踪，但过期、追价或跌破防守位都不得继续声明
+        # 技术结构仍可继续跟踪，但追价或跌破防守位都不得继续声明
         # 当前买入可用。具体保护原因保留在规范决策理由中供页面与审计复核。
         document["entry_allowed"] = False
         document["decision_reasons"] = list(
@@ -1144,9 +1129,7 @@ def serialize_evaluated_signal(
         hard_reasons = tuple(
             dict.fromkeys((*hard_reasons, *operational_buy_protections))
         )
-    if "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in operational_buy_protections:
-        precision_locator_status = "FIVE_MINUTE_EXPIRED"
-    elif not structure_confirmed:
+    if not structure_confirmed:
         precision_locator_status = "STRUCTURE_PENDING"
     elif not segment_difference_present:
         precision_locator_status = "WAITING_ONE_MINUTE"

@@ -155,7 +155,6 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE,
 )
 from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
-from cl_app.services.trading_notifications import SIGNAL_MAX_AGE_SECONDS
 from cl_app.services.trading_screening_gateway import (
     CANONICAL_REQUEST_BARS_BY_FREQUENCY,
     CachedSectorSnapshot,
@@ -1108,7 +1107,7 @@ _CURRENT_SELECTION_LIFECYCLE_STAGES = frozenset(
 )
 
 
-def _five_minute_signal_is_fresh_for_segment_monitor(
+def _current_five_minute_setup_requires_segment_monitor(
     signal: Mapping[str, object],
     observed_at: datetime,
 ) -> bool:
@@ -2231,14 +2230,6 @@ class TradingScreeningConfig:
             < self.five_minute_candidate_target_seconds
         ):
             raise ValueError("candidate cadence targets are inconsistent")
-        if (
-            self.five_minute_candidate_target_seconds
-            + self.candidate_monitor_time_budget_seconds
-            > SIGNAL_MAX_AGE_SECONDS
-        ):
-            raise ValueError(
-                "five minute candidate cadence exceeds notification freshness window"
-            )
         if not Decimal("0") < self.min_scan_completion_ratio <= Decimal("1"):
             raise ValueError("min_scan_completion_ratio must be in (0, 1]")
         if self.max_structure_age_seconds <= 0:
@@ -5408,12 +5399,12 @@ class TradingScreeningService:
                         self._priority_monitor_signal_codes.pop(signal_id, None)
         # A current 5m setup remains in the recurring lane until a newer strict
         # structure replaces it.  Its original notification may be old, but a
-        # later 1m locator is a new event with its own freshness timestamp.
+        # later 1m locator is a distinct structural event.
         recurring_signal_documents = tuple(
             row
             for row in current_signal_documents
             if _signal_side(row) == "buy"
-            and _five_minute_signal_is_fresh_for_segment_monitor(
+            and _current_five_minute_setup_requires_segment_monitor(
                 row,
                 observed_at,
             )
@@ -5482,7 +5473,7 @@ class TradingScreeningService:
         pending_segment_documents = tuple(
             row
             for row in current_signal_documents
-            if _five_minute_signal_is_fresh_for_segment_monitor(row, observed_at)
+            if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
             and _one_minute_segment_requires_monitor(row, observed_at)
         )
         rearmed_segment_documents = tuple(
@@ -5496,7 +5487,7 @@ class TradingScreeningService:
         current_pending_segment_documents = tuple(
             row
             for row in pending_segment_documents
-            if _five_minute_signal_is_fresh_for_segment_monitor(row, observed_at)
+            if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
         )
         immediate_signal_universe = _priority_signal_candidate_codes(
             current_pending_segment_documents,
@@ -5513,7 +5504,7 @@ class TradingScreeningService:
             tuple(
                 row
                 for row in rearmed_segment_documents
-                if _five_minute_signal_is_fresh_for_segment_monitor(
+                if _current_five_minute_setup_requires_segment_monitor(
                     row,
                     observed_at,
                 )
@@ -7234,7 +7225,7 @@ class TradingScreeningService:
             and (
                 lifecycle_stage_from_signal(signal) == "approaching"
                 or snapshot_cutoff is None
-                or _five_minute_signal_is_fresh_for_segment_monitor(
+                or _current_five_minute_setup_requires_segment_monitor(
                     signal,
                     snapshot_cutoff,
                 )
@@ -9527,21 +9518,6 @@ class TradingScreeningService:
             ),
             "candidate_monitor_time_budget_seconds": (
                 self._config.candidate_monitor_time_budget_seconds
-            ),
-            "candidate_monitor_notification_freshness_seconds": (
-                SIGNAL_MAX_AGE_SECONDS
-            ),
-            "candidate_monitor_notification_headroom_seconds": (
-                SIGNAL_MAX_AGE_SECONDS
-                - self._config.five_minute_candidate_target_seconds
-                - self._config.candidate_monitor_time_budget_seconds
-                - self._config.priority_monitor_interval_seconds
-                - self._config.priority_monitor_time_budget_seconds
-            ),
-            "candidate_monitor_initial_notification_headroom_seconds": (
-                SIGNAL_MAX_AGE_SECONDS
-                - self._config.five_minute_candidate_target_seconds
-                - self._config.candidate_monitor_time_budget_seconds
             ),
             "candidate_monitor_supportive_discovery_max_sector_rank": (
                 self._config.supportive_discovery_max_sector_rank

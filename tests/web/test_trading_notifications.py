@@ -651,7 +651,9 @@ def test_segment_enrichment_dedupe_survives_refresh_restart_and_rebuilt_ids(
     assert second_sender.messages == []
 
 
-def test_stale_segment_enrichment_is_suppressed(tmp_path: Path) -> None:
+def test_late_segment_enrichment_is_not_suppressed_by_parent_setup_age(
+    tmp_path: Path,
+) -> None:
     sender = RecordingNotifier()
     dispatcher = SignalNotificationDispatcher(
         sender,
@@ -665,10 +667,8 @@ def test_stale_segment_enrichment_is_suppressed(tmp_path: Path) -> None:
         {"signals": [current]},
     )
 
-    assert sender.messages == []
-    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
-        "ONE_MINUTE_SEGMENT_STALE"
-    )
+    assert len(sender.messages) == 1
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] is None
 
 
 def test_segment_formed_inside_five_minute_structure_is_fresh_at_confluence(
@@ -708,7 +708,7 @@ def test_segment_formed_inside_five_minute_structure_is_fresh_at_confluence(
     assert audit["notification_evidence_at"] == "2026-07-20T10:00:00+08:00"
 
 
-def test_fresh_segment_recomputes_position_age_from_confluence(
+def test_late_segment_does_not_zero_position_from_parent_setup_age(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -735,9 +735,6 @@ def test_fresh_segment_recomputes_position_age_from_confluence(
     [event] = inbox.snapshot()["events"]
     assert event["new_stage"] == "segment_enriched"
     assert event["position_recommendation"]["status"] == "RECOMMENDED"
-    assert "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" not in event[
-        "position_recommendation"
-    ]["reason_codes"]
 
 
 def test_five_minute_transition_takes_precedence_over_simultaneous_segment(
@@ -1144,7 +1141,7 @@ def test_confirmed_buy_point_notifies_even_when_formal_entry_is_blocked(
     assert "其他交易软件手工决定" in rendered
 
 
-def test_delayed_armed_transition_is_suppressed_as_stale(
+def test_delayed_armed_transition_remains_notifiable_while_structure_is_current(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -1157,13 +1154,11 @@ def test_delayed_armed_transition_is_suppressed_as_stale(
 
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [stale]})
 
-    assert sender.messages == []
-    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
-        "FIVE_MINUTE_SIGNAL_STALE"
-    )
+    assert len(sender.messages) == 1
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] is None
 
 
-def test_stale_trigger_first_seen_without_prior_tracking_is_suppressed(
+def test_late_trigger_first_seen_without_prior_tracking_remains_notifiable(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -1176,13 +1171,11 @@ def test_stale_trigger_first_seen_without_prior_tracking_is_suppressed(
 
     dispatcher.dispatch_changes(snapshot(None), {"signals": [stale]})
 
-    assert sender.messages == []
-    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
-        "FIVE_MINUTE_SIGNAL_STALE"
-    )
+    assert len(sender.messages) == 1
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] is None
 
 
-def test_just_late_detection_is_delivered_as_zero_percent_review_within_grace(
+def test_late_detection_keeps_current_setup_waiting_for_one_minute_locator(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -1200,8 +1193,7 @@ def test_just_late_detection_is_delivered_as_zero_percent_review_within_grace(
         state_path=tmp_path / "late-within-grace.json",
         clock=lambda: now,
     )
-    delayed = signal_document("triggered")
-    # 结构快照在严格10分钟边界完成，监听调度在51秒后才拿到它。
+    delayed = _without_one_minute_segment(signal_document("triggered"))
     delayed["observed_at"] = "2026-07-20T10:10:00+08:00"
 
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [delayed]})
@@ -1209,16 +1201,13 @@ def test_just_late_detection_is_delivered_as_zero_percent_review_within_grace(
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
     rendered = "\n".join(lines)
-    assert title.startswith("买卖通知｜延迟买点复核｜")
-    assert (
-        "风险参考：本条买入不纳入操作计划（买点已超过10分钟新鲜窗口，等待新的5分钟结构）"
-        in rendered
-    )
+    assert title.startswith("买卖通知｜新买点·待人工确认｜")
+    assert "结构模型比例上限" in rendered
     assert "监听发现：2026-07-20 10:10:51（延迟 10分51秒）" in rendered
-    assert "不追价，等待新的5分钟结构" in rendered
+    assert "发现时效" not in rendered
 
 
-def test_detection_after_delivery_grace_is_expired_without_quote_or_send(
+def test_late_detection_starts_a_new_transport_retry_window(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -1239,17 +1228,14 @@ def test_detection_after_delivery_grace_is_expired_without_quote_or_send(
         review_inbox=RealtimeReviewInbox(tmp_path / "late-after-grace-review.json"),
         quote_provider=lambda code: quote_calls.append(code) or {"last": 10.1},
     )
-    delayed = signal_document("triggered")
+    delayed = _without_one_minute_segment(signal_document("triggered"))
     delayed["observed_at"] = "2026-07-20T10:10:00+08:00"
 
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [delayed]})
 
-    assert sender.messages == []
-    assert quote_calls == []
-    assert (
-        dispatcher.health_snapshot()["last_suppressed_reason"]
-        == "NOTIFICATION_DELIVERY_EXPIRED"
-    )
+    assert len(sender.messages) == 1
+    assert quote_calls == ["SZ.000001"]
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] is None
 
 
 @pytest.mark.parametrize("point_type", ("3buy", "3sell"))
@@ -1971,7 +1957,7 @@ def test_failed_send_remains_retryable(tmp_path: Path) -> None:
     assert health["delivered_event_count"] == 1
 
 
-def test_failed_send_expires_instead_of_retrying_an_old_trigger(
+def test_failed_send_expires_after_transport_retry_ttl(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier([False, True])
@@ -2008,6 +1994,7 @@ def test_failed_send_expires_instead_of_retrying_an_old_trigger(
         20,
         10,
         11,
+        31,
         tzinfo=ZoneInfo("Asia/Shanghai"),
     )
     dispatcher.dispatch_changes(snapshot("triggered"), snapshot("triggered"))

@@ -2395,7 +2395,7 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     expected_workers = min(3, max(1, (os.cpu_count() or 4) // 4))
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == 3
-    assert app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"] is True
+    assert app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"] is False
     assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 512
     assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
     assert app.config[

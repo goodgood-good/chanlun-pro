@@ -6083,21 +6083,12 @@ def test_candidate_scheduler_covers_a_five_minute_universe_once_per_cadence() ->
     assert set(last_success_at) == set(universe)
 
 
-def test_candidate_cadence_must_fit_inside_notification_freshness_window() -> None:
-    with pytest.raises(
-        ValueError,
-        match="five minute candidate cadence exceeds notification freshness window",
-    ):
-        TradingScreeningConfig(
-            five_minute_candidate_target_seconds=570,
-            candidate_monitor_time_budget_seconds=50,
-        )
-
+def test_candidate_cadence_is_independent_from_transport_retry_ttl() -> None:
     valid = TradingScreeningConfig(
-        five_minute_candidate_target_seconds=550,
+        five_minute_candidate_target_seconds=570,
         candidate_monitor_time_budget_seconds=50,
     )
-    assert valid.five_minute_candidate_target_seconds == 550
+    assert valid.five_minute_candidate_target_seconds == 570
 
 
 def test_candidate_cadence_excludes_lunch_and_closed_days() -> None:
@@ -8211,14 +8202,14 @@ def test_segment_monitor_membership_depends_on_current_structure_not_age() -> No
     }
 
     assert (
-        trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
+        trading_screening_subject._current_five_minute_setup_requires_segment_monitor(
             signal,
             observed_at,
         )
         is True
     )
     assert (
-        trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
+        trading_screening_subject._current_five_minute_setup_requires_segment_monitor(
             {
                 "lifecycle_stage": "triggered",
                 "setup_5m": {
@@ -8237,7 +8228,7 @@ def test_segment_monitor_membership_depends_on_current_structure_not_age() -> No
         is True
     )
     assert (
-        trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
+        trading_screening_subject._current_five_minute_setup_requires_segment_monitor(
             {
                 "lifecycle_stage": "triggered",
                 "setup_5m": {
@@ -8256,7 +8247,7 @@ def test_segment_monitor_membership_depends_on_current_structure_not_age() -> No
         is True
     )
     assert (
-        trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
+        trading_screening_subject._current_five_minute_setup_requires_segment_monitor(
             {
                 "lifecycle_stage": "triggered",
                 "setup_5m": {"available_at": "malformed"},
@@ -8268,7 +8259,7 @@ def test_segment_monitor_membership_depends_on_current_structure_not_age() -> No
     # Imported legacy rows without a causal timestamp retain compatibility; all
     # production decision documents carry an explicit setup time.
     assert (
-        trading_screening_subject._five_minute_signal_is_fresh_for_segment_monitor(
+        trading_screening_subject._current_five_minute_setup_requires_segment_monitor(
             {"lifecycle_stage": "triggered", "setup_5m": {}},
             observed_at,
         )
@@ -8848,9 +8839,9 @@ def test_supportive_sector_discovery_runs_on_five_minute_cadence_and_notifies(
     assert health["candidate_monitor_five_minute"]["scope"] == (
         "OWNED_WATCHED_EXISTING_AND_SUPPORTIVE_SECTOR_DISCOVERY"
     )
-    assert health["candidate_monitor_notification_freshness_seconds"] == 600
-    assert health["candidate_monitor_notification_headroom_seconds"] == 140
-    assert health["candidate_monitor_initial_notification_headroom_seconds"] == 250
+    assert "candidate_monitor_notification_freshness_seconds" not in health
+    assert "candidate_monitor_notification_headroom_seconds" not in health
+    assert "candidate_monitor_initial_notification_headroom_seconds" not in health
     assert health["candidate_notification_streaming_enabled"] is True
     assert health["candidate_notification_publish_batch_size"] == 4
 

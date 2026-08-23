@@ -405,7 +405,6 @@
   const REASON_LABELS = {
     structural_ranking_only: "仅按缠论结构排序",
     HARD_BLOCKED_NO_TRADE: "当前结构条件不适合纳入操作计划",
-    BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE: "买点发现时已超过10分钟新鲜窗口，不追价并等待新的5分钟结构",
     POSITION_RATIO_INPUT_UNRESOLVED: "结构价格或风险参数不足，风险参考待核对",
     STRUCTURAL_RISK_BUDGET_SIZED: "已按5分钟结构锚点至防守位测算风险参考",
     CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED: "已按当前价至5分钟防守位测算风险参考",
@@ -769,11 +768,7 @@
     }
     if (side === "buy") return boundaryStatus === "current";
     if (side !== "sell" || boundaryStatus !== "not_applicable") return false;
-    const ageSeconds = precisionLocatorAgeSecondsForReview(
-      safeSignal,
-      evaluatedAt,
-    );
-    return ageSeconds !== null && ageSeconds <= 600;
+    return true;
   }
 
   function currentPreciseExecutionReadyForSignal(signal, evaluatedAt = new Date()) {
@@ -849,9 +844,6 @@
         ? "本条卖点结构已失效：不再计算卖出比例，结束本结构跟踪"
         : "本条买点结构已失效：本条买入不纳入操作计划，等待新的5分钟结构";
     }
-    if (reasons.has("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE")) {
-      return "本条买入不纳入操作计划：买点已超过10分钟新鲜窗口，等待新的5分钟结构";
-    }
     if (reasons.has("BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR")) {
       return "本条买入不纳入操作计划：当前价已超过结构锚点的5%追价保护线，等待新的5分钟结构";
     }
@@ -899,9 +891,6 @@
       || reasons.has("structure_invalidated")
       || reasons.has("STRUCTURE_INVALIDATED")
     ) return "结构已失效";
-    if (reasons.has("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE")) {
-      return "买点已超过新鲜窗口";
-    }
     if (reasons.has("BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR")) {
       return "当前价格触发追价保护";
     }
@@ -930,7 +919,6 @@
       lifecycleStageForSignal(signal) === "invalidated"
       || reasons.has("structure_invalidated")
       || reasons.has("STRUCTURE_INVALIDATED")
-      || reasons.has("BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE")
       || reasons.has("BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR")
       || reasons.has("CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP")
     ) {
@@ -974,13 +962,6 @@
     const reasons = new Set(
       recommendationReasonCodes(safeSignal, recommendation, profile),
     );
-    const staleSignal = signalIsHistoricalForReview(safeSignal, observedAt);
-    if (
-      side === "buy"
-      && staleSignal
-    ) {
-      return "本条买入不纳入操作计划：买点已超过10分钟新鲜窗口，等待新的5分钟结构";
-    }
     if (status === "BLOCKED") {
       return blockedPositionReason(safeSignal, recommendation, profile);
     }
@@ -1872,12 +1853,6 @@
     const recommendation = text(profile && profile.recommendation, "");
     const pointLabel = POINT_LABELS[safeSignal.point_type] || "买卖点";
     const setupLockState = setupLockStateForSignal(safeSignal);
-    const staleSignal = signalIsHistoricalForReview(safeSignal, observedAt);
-    const staleBuy = text(safeSignal.side, "") === "buy"
-      && staleSignal;
-    const staleConfirmedSell = text(safeSignal.side, "") === "sell"
-      && ["triggered", "executable", "active"].includes(stage)
-      && staleSignal;
     const allowed = !positionBlocked && (recommendation
       ? recommendation === "READY"
       : safeSignal.entry_allowed === true || safeSignal.exit_allowed === true);
@@ -1898,9 +1873,6 @@
     } else if (stage === "approaching") {
       tone = recommendation === "BLOCKED" ? "blocked" : "waiting";
       title = `5分钟${pointLabel}结构仍在形成`;
-    } else if (staleBuy) {
-      tone = "blocked";
-      title = "买点已超过新鲜窗口";
     } else if (
       recommendation === "WAITING_SEGMENT_DIFFERENCE"
       || waitingSegmentDifference
@@ -1917,9 +1889,6 @@
     } else if (recommendation === "BLOCKED") {
       tone = "blocked";
       title = hardBlockSummaryForSignal(safeSignal);
-    } else if (staleConfirmedSell) {
-      tone = "waiting";
-      title = `历史5分钟${pointLabel}结构持续跟踪（非新增卖点）`;
     } else if (recommendation === "CAUTION") {
       tone = "waiting";
       title = setupLockState === "pending"
@@ -1962,11 +1931,7 @@
     const reasons = Array.isArray(safeSignal.decision_reasons)
       ? safeSignal.decision_reasons.filter(Boolean)
       : [];
-    const baseDetail = staleBuy
-      ? "该买点已超过10分钟新信号窗口，仅保留结构复核，不追价"
-      : staleConfirmedSell
-      ? "该卖点结构仍保留供复核，但已超过10分钟新信号窗口，不按新增紧急信号排序"
-      : positionBlocked
+    const baseDetail = positionBlocked
       ? positionRecommendationLabel(safeSignal, "结构风险参考待人工核对", observedAt)
       : recommendation === "BLOCKED"
       ? hardBlockDetailForSignal(safeSignal)
@@ -3079,68 +3044,9 @@
     return activeElapsedSecondsForReview(safeSignal, startedRaw, endedRaw);
   }
 
-  function notificationCurrentAgeSecondsForReview(signal, observedAt = new Date()) {
-    const safeSignal = isRecord(signal) ? signal : {};
-    if (safeSignal.realtime_notification !== true) return null;
-    const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
-    const startedRaw = safeSignal.notification_signal_available_at
-      || safeSignal.realtime_notification_available_time
-      || setup.available_at
-      || setup.confirmed_at
-      || safeSignal.signal_available_at
-      || safeSignal.notification_signal_time
-      || safeSignal.realtime_notification_signal_time
-      || safeSignal.signal_time;
-    return activeElapsedSecondsForReview(safeSignal, startedRaw, observedAt);
-  }
-
-  function precisionLocatorAgeSecondsForReview(signal, observedAt = new Date()) {
-    const safeSignal = isRecord(signal) ? signal : {};
-    const trigger = segmentDifferenceForSignal(safeSignal) || {};
-    const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
-    const startedRaw = trigger.available_at
-      || trigger.confirmed_at
-      || safeSignal.notification_segment_difference_available_at
-      || safeSignal.notification_segment_difference_confirmed_at
-      || setup.available_at
-      || setup.confirmed_at
-      || safeSignal.signal_available_at
-      || safeSignal.observed_at;
-    return activeElapsedSecondsForReview(safeSignal, startedRaw, observedAt);
-  }
-
-  function signalIsStaleForReview(signal, observedAt = new Date()) {
-    const discoveryDelay = signalAgeSecondsForReview(signal);
-    const currentAge = notificationCurrentAgeSecondsForReview(signal, observedAt);
-    return (discoveryDelay !== null && discoveryDelay > 600)
-      || (currentAge !== null && currentAge > 600);
-  }
-
-  function signalIsHistoricalForReview(signal, observedAt = new Date()) {
-    const safeSignal = isRecord(signal) ? signal : {};
-    const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
-    const structureAge = activeElapsedSecondsForReview(
-      safeSignal,
-      setup.terminal_segment_end_at,
-      safeSignal.monitor_observed_at || safeSignal.observed_at || observedAt,
-    );
-    return signalIsStaleForReview(safeSignal, observedAt)
-      || (structureAge !== null && structureAge > 600);
-  }
-
   function signalCardLifecycleLabel(signal, observedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     const stage = lifecycleStageForSignal(safeSignal);
-    if (isCurrentSelectionSignal(safeSignal)) return lifecycleLabel(stage);
-    const historical = signalIsHistoricalForReview(safeSignal, observedAt);
-    if (
-      ["triggered", "executable", "active"].includes(stage)
-      && historical
-    ) {
-      return text(safeSignal.side, "") === "sell"
-        ? "历史卖点 · 持续跟踪"
-        : "历史买点 · 等待新结构";
-    }
     return lifecycleLabel(stage);
   }
 
@@ -3717,11 +3623,7 @@
 
   function reviewPriorityForSignal(signal, observedAt = new Date()) {
     if (!isRecord(signal)) return null;
-    const signalAgeSeconds = signalAgeSecondsForReview(signal);
-    const staleSignal = signalIsHistoricalForReview(signal, observedAt);
-    const staleBuySignal = staleSignal && text(signal.side, "") === "buy";
     if (signal.realtime_notification === true) {
-      if (staleSignal) return 69;
       if (signal.notification_delivery_status === "failed") return 110;
       return 100;
     }
@@ -3732,12 +3634,6 @@
         ? Number(raw)
         : Number.NaN;
     if (Number.isFinite(priority) && priority >= 0) {
-      if (staleBuySignal) {
-        return Math.min(priority, 19);
-      }
-      if (staleSignal && text(signal.side, "") === "sell") {
-        return Math.min(priority, 69);
-      }
       return priority;
     }
 
@@ -3756,8 +3652,7 @@
     const profile = isRecord(signal.execution_profile) ? signal.execution_profile : {};
     const recommendation = text(profile.recommendation, "");
     const positionRecommendation = positionRecommendationForSignal(signal);
-    const positionBlocked = positionRecommendation.status === "BLOCKED"
-      || staleBuySignal;
+    const positionBlocked = positionRecommendation.status === "BLOCKED";
     const contextGrade = text(profile.context_grade, "UNRESOLVED");
     const exactGreen = !positionBlocked && (
       recommendation === "READY"
@@ -3774,9 +3669,7 @@
           : ["formed", "armed"].includes(stage)
             ? "LOW"
             : "UNRESOLVED";
-    let positionStatus = staleBuySignal
-      ? "BLOCKED"
-      : text(positionRecommendation.status, "");
+    let positionStatus = text(positionRecommendation.status, "");
     if (!REVIEW_PRIORITY_POSITION_BANDS[positionStatus]) {
       positionStatus = recommendation === "BLOCKED"
         ? "BLOCKED"
@@ -3791,8 +3684,6 @@
     const selectionSources = uniqueText(signal.selection_sources);
     const actionableSellReview = text(signal.side, "") === "sell"
       && ["triggered", "executable", "active"].includes(stage)
-      && !staleSignal
-      && signalAgeSeconds !== null
       && (["CONDITIONAL", "RECOMMENDED"].includes(positionStatus) || exactGreen);
     const manualAttention = selectionSources.some((source) => [
       "MANUAL_ATTENTION_MONITOR",
@@ -4522,13 +4413,11 @@
     normalizeSnapshot,
     normalizeRealtimeNotifications,
     normalizeUsMonitor,
-    notificationCurrentAgeSecondsForReview,
     pointLabelForSignal,
     positionRecommendationLabel,
     positionRecommendationForSignal,
     precisionLocatorEvidenceCurrentForReview,
     precisionLocatorReadyForSignal,
-    precisionLocatorAgeSecondsForReview,
     preciseExecutionReadyForSignal,
     inferSignalMarket,
     realtimeNotificationSignal,

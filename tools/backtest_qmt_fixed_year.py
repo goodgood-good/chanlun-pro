@@ -148,6 +148,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--limit", type=_positive_int)
     result.add_argument("--codes", help="optional comma-separated normalized codes")
     result.add_argument(
+        "--full-market",
+        action="store_true",
+        help="explicitly authorize processing the complete eligible market",
+    )
+    result.add_argument(
         "--pit-snapshot",
         type=Path,
         default=DEFAULT_PIT_SNAPSHOT,
@@ -434,6 +439,13 @@ def _manifest(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.full_market and (args.codes or args.limit is not None):
+        raise ValueError("--full-market cannot be combined with --codes or --limit")
+    if not args.full_market and not args.codes and args.limit is None:
+        raise ValueError(
+            "bounded research scope required: pass --codes/--limit, or explicitly "
+            "authorize the complete universe with --full-market"
+        )
     if not args.warmup_start <= args.start <= args.effective_start <= args.end:
         raise ValueError("expected warmup_start <= start <= effective_start <= end")
     if args.workers > 16:

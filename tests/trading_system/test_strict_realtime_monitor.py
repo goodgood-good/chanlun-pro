@@ -279,7 +279,7 @@ def test_same_round_trade_signal_carries_segment_without_duplicate_enrichment() 
     assert events[0].segment_difference_evidence_id == segment.point_id
 
 
-def test_physical_monitor_reports_only_first_fresh_segment_attachment(
+def test_physical_monitor_reports_each_segment_occurrence_only_once(
     monkeypatch,
 ) -> None:
     point = _point(
@@ -335,7 +335,7 @@ def test_physical_monitor_reports_only_first_fresh_segment_attachment(
         lambda *_args, **_kwargs: (point,),
     )
 
-    assert state.refresh() == []
+    assert state.refresh() == [point]
     assert state.new_segment_difference_updates() == ()
     segment_points.append(segment)
     assert state.refresh() == []
@@ -344,7 +344,7 @@ def test_physical_monitor_reports_only_first_fresh_segment_attachment(
     assert state.new_segment_difference_updates() == ()
 
 
-def test_physical_monitor_uses_confluence_time_for_earlier_segment_attachment(
+def test_physical_monitor_accepts_locator_older_than_parent_setup(
     monkeypatch,
 ) -> None:
     point = _point(
@@ -411,7 +411,7 @@ def test_physical_monitor_uses_confluence_time_for_earlier_segment_attachment(
     assert state.new_segment_difference_updates() == ((point, segment),)
 
 
-def test_stale_segment_does_not_consume_a_later_fresh_attachment(
+def test_later_locator_on_same_parent_is_a_new_notification_occurrence(
     monkeypatch,
 ) -> None:
     point = _point(
@@ -483,7 +483,7 @@ def test_stale_segment_does_not_consume_a_later_fresh_attachment(
     )
 
     state.refresh()
-    assert state.new_segment_difference_updates() == ()
+    assert state.new_segment_difference_updates() == ((point, stale_segment),)
 
     segment_points.append(fresh_segment)
     state.refresh()
@@ -1029,44 +1029,13 @@ def test_realtime_monitor_uses_the_shared_screening_warmup_floor() -> None:
     }
 
 
-def test_realtime_signal_freshness_is_limited_to_two_operation_bars() -> None:
+def test_realtime_monitor_has_no_fixed_wall_clock_signal_age_window() -> None:
     exchange = SimpleNamespace(market="us", kline_time_label="start")
 
     state = StrictPhysicalMonitorState("TSLA.US", exchange)
 
-    assert state.signal_freshness == pd.Timedelta(minutes=10)
-
-
-def test_freshness_uses_detection_clock_and_rejects_session_old_points() -> None:
-    exchange = SimpleNamespace(market="us", kline_time_label="start")
-    state = StrictPhysicalMonitorState("TSLA.US", exchange)
-    point = _point("3buy")
-
-    assert state._is_fresh_point(
-        point,
-        AT + pd.Timedelta(minutes=10),
-    ) is True
-    assert state._is_fresh_point(
-        point,
-        AT + pd.Timedelta(minutes=10, seconds=1),
-    ) is False
-    assert state._is_fresh_point(
-        point,
-        AT - pd.Timedelta(seconds=1),
-    ) is False
-
-
-def test_realtime_freshness_rejects_a_new_lock_for_an_expired_anchor() -> None:
-    exchange = SimpleNamespace(market="us", kline_time_label="start")
-    state = StrictPhysicalMonitorState("TSLA.US", exchange)
-    delayed = _point(
-        "3sell",
-        anchor_at=AT - timedelta(days=27),
-        confirmed_at=AT,
-        available_at=AT,
-    )
-
-    assert state._is_fresh_point(delayed, AT + timedelta(minutes=5)) is False
+    assert not hasattr(state, "signal_freshness")
+    assert not hasattr(state, "_is_fresh_point")
 
 
 def test_poll_without_new_completed_bar_reuses_exact_evidence(monkeypatch) -> None:

@@ -218,6 +218,7 @@ tests/core/baselines.local.json
 # Keep the compact certified report and causality gate outside this directory
 # visible to Git, but never recommit a partial raw checkpoint set.
 /audit/chanlun_trading_system_backtest/fixed_year_2025_2026/
+/audit/chanlun_trading_system_backtest/research_sample_*/
 !audit/chanlun_live_strategy/*.md
 !audit/chanlun_live_integration/*.md
 !audit/chanlun_trading_system_forward_paper/*.md

@@ -1273,7 +1273,6 @@ def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None
         **common,
         position_status="CONDITIONAL",
         side="sell",
-        fresh_signal=True,
     )
     assert 80 <= structural_sell <= 89
     manual_attention_sell = review_priority(
@@ -1281,7 +1280,6 @@ def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None
         position_status="CONDITIONAL",
         side="sell",
         selection_sources=("MANUAL_ATTENTION_MONITOR",),
-        fresh_signal=True,
     )
     assert manual_attention_sell >= 90
     assert manual_attention_sell > structural_sell
@@ -1291,23 +1289,7 @@ def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None
         position_status="CONDITIONAL",
         side="sell",
         selection_sources=("VIRTUAL_HOLDING_MONITOR",),
-        fresh_signal=True,
     ) >= 90
-    stale_sell = review_priority(
-        **common,
-        position_status="CONDITIONAL",
-        side="sell",
-        selection_sources=("MANUAL_ATTENTION_MONITOR",),
-        fresh_signal=False,
-    )
-    unknown_age_sell = review_priority(
-        **common,
-        position_status="CONDITIONAL",
-        side="sell",
-        selection_sources=("MANUAL_ATTENTION_MONITOR",),
-    )
-    assert 40 <= stale_sell <= 69
-    assert unknown_age_sell == stale_sell
 
 
 def test_event_study_uses_only_complete_sessions_after_review_date() -> None:

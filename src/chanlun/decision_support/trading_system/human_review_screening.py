@@ -2678,7 +2678,6 @@ def review_priority(
     selection_sources: tuple[str, ...] = (),
     lifecycle_stage: str | None = None,
     monitor_only: bool = False,
-    fresh_signal: bool | None = None,
     parameters: HumanReviewScreeningParameters | None = None,
 ) -> int:
     """Return a stable review-urgency score, never a synthetic trade score.
@@ -2695,16 +2694,11 @@ def review_priority(
         raise ValueError("human review warning count is invalid")
     if side not in {None, "buy", "sell"}:
         raise ValueError("human review priority side is invalid")
-    if fresh_signal is not None and type(fresh_signal) is not bool:
-        raise ValueError("human review signal freshness is invalid")
     if any(not isinstance(value, str) or not value for value in selection_sources):
         raise ValueError("human review selection sources are invalid")
 
     actionable_sell_review = bool(
         side == "sell"
-        # 只有明确证明仍在新信号窗口内，卖点才进入 80+ 的即时复核带。
-        # 未提供或已过期都保留原结构状态，但不能冒充刚出现的卖点。
-        and fresh_signal is True
         and lifecycle_stage in {"triggered", "executable", "active"}
         and (position_status in {"CONDITIONAL", "RECOMMENDED"} or exact_green)
     )

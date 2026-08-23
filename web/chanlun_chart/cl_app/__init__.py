@@ -150,12 +150,12 @@ def create_app(test_config=None, start_scheduler=False):
                 "3600",
             )
         ),
-        # 全市场预选默认开启，但只在收盘后至下一交易日盘前的独立窗口运行；已有当前
-        # 完整快照时会自动空闲，网页重启不会无条件触发重复全量计算。
+        # 开发与策略验证默认不运行全市场预选。只有最终验收/生产运行显式设置环境变量
+        # 为 1 才开启盘后完整覆盖，避免每次代码修改都重新处理五千余只标的。
         TRADING_SCREENING_FULL_COVERAGE_ENABLED=(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
-                "1",
+                "0",
             )
             .strip()
             .lower()

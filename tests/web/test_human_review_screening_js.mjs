@@ -151,7 +151,7 @@ test("realtime notification never advertises 1m L1 as strict segment evidence", 
   assert.equal(candidate.alert_type, "REALTIME_BUY_POINT");
 });
 
-test("segment enrichment freshness starts when both 5m setup and 1m evidence are visible", () => {
+test("segment enrichment remains actionable independently of parent setup age", () => {
   const candidate = realtimeNotificationCandidate(
     {
       schema: "chanlun-realtime-review-notification",
@@ -182,8 +182,8 @@ test("segment enrichment freshness starts when both 5m setup and 1m evidence are
     new Date("2026-08-20T10:01:00+08:00"),
   );
 
-  assert.equal(candidate.realtime_notification_current_age_seconds, 60);
-  assert.equal(candidate.realtime_notification_is_historical, false);
+  assert.equal("realtime_notification_current_age_seconds" in candidate, false);
+  assert.equal("realtime_notification_is_historical" in candidate, false);
   assert.equal(candidate.review_lane, "ACTIONABLE_REVIEW");
   assert.equal(
     candidate.realtime_notification_segment_difference_divergence_kind,

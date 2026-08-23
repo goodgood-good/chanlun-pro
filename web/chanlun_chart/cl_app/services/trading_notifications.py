@@ -34,7 +34,6 @@ from chanlun.decision_support.trading_system.operation_level import (
 from chanlun.decision_support.trading_system.position_recommendation import (
     ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS,
     ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON,
-    active_signal_age_seconds,
     build_position_recommendation,
 )
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
@@ -71,9 +70,7 @@ _NOTIFIABLE_TRANSITIONS = {
     ("executable", "invalidated"),
     ("active", "closed"),
 }
-SIGNAL_MAX_AGE_SECONDS = 10 * 60
-_SIGNAL_MAX_AGE = timedelta(seconds=SIGNAL_MAX_AGE_SECONDS)
-_NOTIFICATION_DELIVERY_GRACE = timedelta(minutes=2)
+_NOTIFICATION_RETRY_TTL = timedelta(minutes=10)
 _SEGMENT_ENRICHED_STAGE = "segment_enriched"
 _SEGMENT_ATTACHABLE_STAGES = frozenset({"triggered", "executable", "active"})
 _EVIDENCE_NOTIFICATION_STAGES = frozenset(
@@ -432,51 +429,17 @@ def _notification_evidence_time(
     return max(signal_at, segment_at)
 
 
-def _notification_signal_age(
-    signal: Mapping[str, object],
-    signal_at: datetime,
-    observed_at: datetime,
-) -> timedelta:
-    age_seconds = active_signal_age_seconds(
-        signal_at,
-        observed_at,
-        market=_signal_market(signal),
-    )
-    # 保留负时差供上层返回 SIGNAL_FROM_FUTURE；所有合法非负时差统一使用
-    # 决策核心的新鲜度时钟，避免通知资格与比例建议各算一套。
-    if age_seconds is None:
-        return observed_at - signal_at
-    return timedelta(seconds=float(age_seconds))
-
-
-def _notification_freshness_cutoff(
-    signal: Mapping[str, object],
-    signal_at: datetime,
-) -> datetime:
-    """Map ten active A-share minutes to a wall-clock delivery deadline."""
-
-    raw_cutoff = signal_at + _SIGNAL_MAX_AGE
-    if _signal_market(signal) != "a":
-        return raw_cutoff
-    started = signal_at.astimezone(CN)
-    lunch_started = started.replace(hour=11, minute=31, second=0, microsecond=0)
-    lunch_ended = started.replace(hour=13, minute=1, second=0, microsecond=0)
-    if started.date() != raw_cutoff.astimezone(CN).date():
-        return raw_cutoff
-    if started < lunch_ended and raw_cutoff > lunch_started:
-        active_before_lunch = max(timedelta(0), lunch_started - started)
-        remaining = max(timedelta(0), _SIGNAL_MAX_AGE - active_before_lunch)
-        return lunch_ended + remaining
-    return raw_cutoff
-
-
 def _notification_expires_at(
     signal: Mapping[str, object],
     *,
     new_stage: str,
     detected_at: object | None = None,
 ) -> str | None:
-    """Return the last instant at which an external realtime alert is useful."""
+    """Return the bounded retry deadline for external message transport.
+
+    The deadline starts when the monitor discovers the event. It is deliberately
+    independent from the 5m setup time and never changes structural validity.
+    """
 
     if new_stage not in _EVIDENCE_NOTIFICATION_STAGES:
         return None
@@ -486,15 +449,9 @@ def _notification_expires_at(
     )
     if event_at is None:
         return None
-    freshness_cutoff = _notification_freshness_cutoff(signal, event_at)
     discovered = _parse_time(detected_at)
-    # 正常及时发现的事件仍在 10 分钟边界停止重试。只有监听本身刚刚在边界后
-    # 才启用两分钟调度宽限，用于送出明确标记为“延迟、0%”的复核提示。
-    expires_at = (
-        freshness_cutoff + _NOTIFICATION_DELIVERY_GRACE
-        if discovered is not None and discovered > freshness_cutoff
-        else freshness_cutoff
-    )
+    retry_started_at = event_at if discovered is None else discovered
+    expires_at = retry_started_at + _NOTIFICATION_RETRY_TTL
     return expires_at.isoformat()
 
 
@@ -607,15 +564,8 @@ def _notification_eligibility_reason(
     )
     if event_at is None or observed_at is None:
         return "SIGNAL_TIME_UNAVAILABLE"
-    age = _notification_signal_age(signal, event_at, observed_at)
-    if age < timedelta(0):
+    if observed_at < event_at:
         return "SIGNAL_FROM_FUTURE"
-    if age > _SIGNAL_MAX_AGE:
-        return (
-            "ONE_MINUTE_SEGMENT_STALE"
-            if new_stage == _SEGMENT_ENRICHED_STAGE
-            else "FIVE_MINUTE_SIGNAL_STALE"
-        )
 
     return None
 
@@ -866,21 +816,6 @@ def _structure_anchor_value(setup: Mapping[str, object]) -> object:
     return setup.get("anchor_price") or setup.get("structure_anchor_price")
 
 
-def _signal_age_seconds(
-    signal: Mapping[str, object],
-    detected_at: object | None,
-    *,
-    new_stage: str = "triggered",
-) -> float | None:
-    signal_at = _notification_evidence_time(signal, new_stage=new_stage)
-    detected = _parse_time(
-        detected_at or signal.get("monitor_observed_at") or signal.get("observed_at")
-    )
-    if signal_at is None or detected is None or detected < signal_at:
-        return None
-    return _notification_signal_age(signal, signal_at, detected).total_seconds()
-
-
 def _notification_position_recommendation(
     signal: Mapping[str, object],
     *,
@@ -948,11 +883,6 @@ def _notification_position_recommendation(
             structural_stop=_defense_price_value(setup),
             exit_action=str(signal.get("exit_action") or "none"),
             structure_anchor_price=anchor,
-            signal_age_seconds=_signal_age_seconds(
-                signal,
-                detected_at,
-                new_stage=new_stage,
-            ),
         ).document()
         if realtime_quote_unavailable and result.get("status") in {
             "RECOMMENDED",
@@ -1154,8 +1084,6 @@ def _blocked_position_reason_text(
             if side == "sell"
             else "本条5分钟买点结构已失效，等待新的5分钟结构"
         )
-    if "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE" in reasons:
-        return "买点已超过10分钟新鲜窗口，等待新的5分钟结构"
     if "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR" in reasons:
         return "当前价已超过结构锚点的5%追价保护线，等待新的5分钟结构"
     if "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP" in reasons:
@@ -1250,12 +1178,11 @@ def _action_advice(
             )
         if operational.get("status") == "BLOCKED":
             if operational_reasons & {
-                "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",
                 "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR",
                 "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP",
             }:
                 return (
-                    "操作：5分钟买点已达到操作确认，但当前价格或发现时效已触发0%保护；"
+                    "操作：5分钟买点已达到操作确认，但当前价格已触发0%保护；"
                     "不追价，等待新的5分钟结构，仅在其他交易软件手工复核"
                 )
             return (
@@ -1469,7 +1396,6 @@ def _operation_status_text(
     *,
     side: str,
     new_stage: str,
-    delayed_discovery: bool,
     operational_status: str,
     operational_reason_codes: set[str],
     recommendation: str,
@@ -1498,8 +1424,6 @@ def _operation_status_text(
                 if operational_reason_codes
                 else "禁止买入（具体限制原因待核对）"
             )
-        if delayed_discovery:
-            return "延迟发现，仅复核，不追价"
         if operational_status in {"UNRESOLVED", "NOT_ACTIONABLE"}:
             return (
                 "5分钟信号已确认，等待1分钟区间套"
@@ -1593,15 +1517,6 @@ def format_notification(
         for value in operational_position.get("reason_codes", ())
         if isinstance(value, str)
     }
-    signal_age_seconds = _signal_age_seconds(
-        signal,
-        detected_at,
-        new_stage=new_stage,
-    )
-    delayed_discovery = (
-        signal_age_seconds is not None
-        and signal_age_seconds > _SIGNAL_MAX_AGE.total_seconds()
-    )
     if new_stage in {"invalidated", "closed"}:
         headline = new_stage_label
         notification_kind = "信号失效" if new_stage == "invalidated" else "跟踪结束"
@@ -1611,11 +1526,7 @@ def format_notification(
     else:
         headline = f"5分钟{setup_point}"
         notification_kind = (
-            "延迟买点复核"
-            if side == "buy" and delayed_discovery
-            else "延迟卖点复核"
-            if side == "sell" and delayed_discovery
-            else "买点确认·0%保护"
+            "买点确认·0%保护"
             if side == "buy"
             and operational_status == "BLOCKED"
             and operational_reason_codes
@@ -1726,7 +1637,6 @@ def format_notification(
         signal,
         side=side,
         new_stage=new_stage,
-        delayed_discovery=delayed_discovery,
         operational_status=operational_status,
         operational_reason_codes=operational_reason_codes,
         recommendation=recommendation,

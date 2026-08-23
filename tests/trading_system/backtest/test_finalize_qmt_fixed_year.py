@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
+import pickle
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,10 @@ from tools import finalize_qmt_fixed_year as subject
 from tools import finalize_qmt_pit_fixed_year as pit_subject
 from tools import qmt_research_contract
 
+from chanlun.decision_support.trading_system.backtest.fixed_year import (
+    SECTOR_FACT_SCHEMA,
+    SectorResearchFacts,
+)
 from chanlun.decision_support.trading_system.selection import (
     SelectionResearchSnapshot,
     selection_research_ledger_document,
@@ -62,6 +67,68 @@ def test_current_pit_finalizer_does_not_require_legacy_research_ledger() -> None
     option_destinations = {action.dest for action in pit_subject.parser()._actions}
 
     assert "selection_research" not in option_destinations
+    assert "reuse_sector_cache" in option_destinations
+    assert "sector_workers" in option_destinations
+
+
+def test_fast_sector_cache_requires_exact_context_and_artifact_hash(tmp_path) -> None:
+    algorithm_revision = "sha256:" + "1" * 64
+    source_revision = "sha256:" + "2" * 64
+    context_revision = "sha256:" + "3" * 64
+    facts = SectorResearchFacts(
+        schema=SECTOR_FACT_SCHEMA,
+        algorithm_revision=algorithm_revision,
+        source_revision=source_revision,
+        sector_id="qmt-sw1:S11",
+        sector_name="农林牧渔",
+        member_count=10,
+        row_count=20,
+        thirty_points=(),
+        assessments=(),
+    )
+    artifact = tmp_path / "S11.pkl"
+    metadata = tmp_path / "S11.cache.json"
+    pit_subject._atomic_bytes(artifact, pickle.dumps(facts))
+    pit_subject._write_sector_cache_metadata(
+        metadata,
+        artifact,
+        facts=facts,
+        sector_algorithm_revision=algorithm_revision,
+        cache_context_revision=context_revision,
+    )
+
+    assert pit_subject._load_fast_cached_sector(
+        artifact,
+        metadata,
+        sector_id=facts.sector_id,
+        sector_algorithm_revision=algorithm_revision,
+        cache_context_revision=context_revision,
+        observed_times=(),
+    ) == facts
+    assert (
+        pit_subject._load_fast_cached_sector(
+            artifact,
+            metadata,
+            sector_id=facts.sector_id,
+            sector_algorithm_revision=algorithm_revision,
+            cache_context_revision="sha256:" + "4" * 64,
+            observed_times=(),
+        )
+        is None
+    )
+
+    artifact.write_bytes(artifact.read_bytes() + b"tampered")
+    assert (
+        pit_subject._load_fast_cached_sector(
+            artifact,
+            metadata,
+            sector_id=facts.sector_id,
+            sector_algorithm_revision=algorithm_revision,
+            cache_context_revision=context_revision,
+            observed_times=(),
+        )
+        is None
+    )
 
 
 def test_formal_selection_research_ledger_rejects_empty(

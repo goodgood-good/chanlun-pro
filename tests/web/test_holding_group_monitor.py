@@ -526,7 +526,7 @@ def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
     )
 
 
-def test_segment_enrichment_uses_later_confluence_for_delay_and_expiry(
+def test_segment_enrichment_uses_detection_time_for_transport_retry_ttl(
     tmp_path,
 ) -> None:
     earlier_segment = _segment_sell_update(
@@ -557,7 +557,7 @@ def test_segment_enrichment_uses_later_confluence_for_delay_and_expiry(
     payload = service._event_notification_payload("us", [later_segment])
 
     assert service._pending_notification_expired(payload) is False
-    now[0] = datetime(2026, 8, 4, 10, 10, 1, tzinfo=CN)
+    now[0] = datetime(2026, 8, 4, 10, 11, 1, tzinfo=CN)
     assert service._pending_notification_expired(payload) is True
 
 
@@ -853,9 +853,9 @@ def test_holding_pending_priority_survives_durable_outbox_handoff() -> None:
             "review_events": [
                 {
                     "side": "buy",
-                    "position_recommendation": {
-                        "status": "BLOCKED",
-                        "reason_codes": ["BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE"],
+                        "position_recommendation": {
+                            "status": "BLOCKED",
+                            "reason_codes": ["BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR"],
                     },
                 }
             ],
@@ -977,7 +977,7 @@ def test_failed_delivery_is_not_deduplicated_and_retries(tmp_path):
     assert len(notifier.messages) == 2
 
 
-def test_failed_delivery_expires_after_the_realtime_window(tmp_path):
+def test_failed_delivery_expires_after_transport_retry_ttl(tmp_path):
     positions = [{"market": "us", "code": "TSLA.US", "name": "特斯拉"}]
     notifier = _Notifier([False, True])
     now = [datetime(2026, 8, 4, 10, 1, tzinfo=CN)]
@@ -995,7 +995,7 @@ def test_failed_delivery_expires_after_the_realtime_window(tmp_path):
 
     first = service.run_once()
     assert first["notification_delivery"]["pending_event_count"] == 1
-    now[0] = now[0].replace(minute=11)
+    now[0] = now[0].replace(minute=11, second=1)
 
     second = service.run_once()
 
@@ -1079,7 +1079,7 @@ def test_us_buy_notification_reprices_live_event_and_blocks_chasing(tmp_path) ->
     assert review_event["position_recommendation"]["recommended_percent"] == "0"
 
 
-def test_us_failed_delivery_expires_from_signal_time_not_queue_time(tmp_path):
+def test_us_failed_delivery_retries_from_queue_time_not_signal_time(tmp_path):
     positions = [{"market": "us", "code": "TSLA.US", "name": "Tesla"}]
     notifier = _Notifier([False, True])
     now = [datetime(2026, 8, 4, 10, 1, 30, tzinfo=CN)]
@@ -1095,9 +1095,9 @@ def test_us_failed_delivery_expires_from_signal_time_not_queue_time(tmp_path):
     second = service.run_once()
 
     assert first["notification_delivery"]["pending_event_count"] == 1
-    assert second["sent_count"] == 0
-    assert second["expired_count"] == 1
-    assert len(notifier.messages) == 1
+    assert second["sent_count"] == 1
+    assert second["expired_count"] == 0
+    assert len(notifier.messages) == 2
 
 
 def test_dry_run_never_masquerades_as_verified_delivery(tmp_path):

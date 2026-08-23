@@ -302,7 +302,7 @@ def test_dispatcher_records_pending_until_outbox_transport_succeeds(
         (tmp_path / "outbox.json").read_text(encoding="utf-8")
     )
     queued = next(iter(persisted["pending_events"].values()))
-    assert queued["context"]["expires_at"] == "2026-08-15T10:10:00+08:00"
+    assert queued["context"]["expires_at"] == "2026-08-15T10:11:30+08:00"
     assert queued["context"]["delivery_priority"] == 3
     dispatcher_health = dispatcher.health_snapshot()
     assert dispatcher_health["delivery_mode"] == "DURABLE_BACKGROUND_OUTBOX"

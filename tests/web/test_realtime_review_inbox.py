@@ -280,10 +280,10 @@ def test_cross_market_projection_carries_optional_one_minute_segment() -> None:
 
     assert event["source_frequency"] == "5m"
     assert event["segment_difference_present"] is True
-    assert event["segment_difference_status"] == "current"
-    assert event["segment_difference_current"] is True
+    assert event["segment_difference_status"] == "unavailable"
+    assert event["segment_difference_current"] is False
     assert event["segment_difference_evidence_status"] == "present"
-    assert event["segment_difference_boundary_status"] == "current"
+    assert event["segment_difference_boundary_status"] == "unavailable"
     assert event["segment_difference_point_type"] == "1buy"
     assert event["segment_difference_evidence_id"] == "point:qcom:1m:1buy"
     assert event["segment_difference_recursive_level"] == 0
@@ -351,10 +351,9 @@ def test_cross_market_segment_enrichment_preserves_parent_and_event_times(
     assert event["signal_time"] == "2026-08-15T22:20:00+08:00"
     assert event["signal_available_at"] == "2026-08-15T22:10:00+08:00"
     assert event["structure_confirmed_at"] == "2026-08-15T22:10:00+08:00"
-    assert event["segment_difference_valid_until"] == (
-        "2026-08-15T22:30:00+08:00"
-    )
-    assert event["segment_difference_status"] == "current"
+    assert event["segment_difference_valid_until"] is None
+    assert event["segment_difference_boundary_status"] == "unavailable"
+    assert event["segment_difference_status"] == "unavailable"
     assert event["signal_qualification"] == (
         "confirmed_5m_trade_signal_with_new_1m_segment_enrichment"
     )
@@ -522,7 +521,7 @@ def test_inbox_persists_updates_delivery_and_never_stores_credentials(tmp_path):
     assert reloaded.snapshot()["events"] == snapshot["events"]
 
 
-def test_expired_buy_projects_zero_position_and_preserves_detection_ratio(
+def test_transport_expiry_preserves_structural_position_recommendation(
     tmp_path,
 ):
     path = tmp_path / "expired-buy-inbox.json"
@@ -551,15 +550,10 @@ def test_expired_buy_projects_zero_position_and_preserves_detection_ratio(
 
     [projected] = inbox.snapshot()["events"]
     assert projected["delivery_status"] == "expired"
-    assert projected["position_recommendation"]["status"] == "BLOCKED"
-    assert projected["position_recommendation"]["recommended_ratio"] == "0"
-    assert projected["position_recommendation"]["recommended_percent"] == "0"
-    assert projected["position_recommendation"]["reason_codes"] == [
-        "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE"
-    ]
-    assert (
-        projected["position_recommendation_at_detection"]["recommended_ratio"] == "0.08"
-    )
+    assert projected["position_recommendation"]["status"] == "RECOMMENDED"
+    assert projected["position_recommendation"]["recommended_ratio"] == "0.08"
+    assert projected["position_recommendation"]["recommended_percent"] == "8.00"
+    assert "position_recommendation_at_detection" not in projected
     assert RealtimeReviewInbox(path).snapshot()["events"] == [projected]
 
 

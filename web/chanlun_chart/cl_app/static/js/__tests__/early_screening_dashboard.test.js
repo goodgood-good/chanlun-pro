@@ -1484,7 +1484,6 @@ test("unmatched notification history stays in human review and cannot create a c
   }, notificationObservedAt);
   assert.equal(reviewWithInbox.review_queue_count, 2);
   assert.equal(reviewWithInbox.current_realtime_notification_count, 1);
-  assert.equal(reviewWithInbox.historical_realtime_notification_count, 0);
   assert.equal(reviewWithInbox.focus_review_queue_count, 1);
   assert.equal(reviewWithInbox.review_queue[0].candidate_kind, "realtime_notification");
   assert.equal(reviewWithInbox.review_queue[0].market, "us");
@@ -1516,25 +1515,21 @@ test("unmatched notification history stays in human review and cannot create a c
   assert.equal(reviewWithInbox.review_queue[0].paper_observation_eligible, false);
   assert.equal(reviewWithInbox.review_queue[0].review_priority, 110);
   assert.equal(reviewWithInbox.review_queue[0].review_lane, "ACTIONABLE_REVIEW");
-  assert.equal(reviewWithInbox.review_queue[0].realtime_notification_is_historical, false);
 
-  const historical = HumanUi.realtimeNotificationCandidate(
+  const laterReview = HumanUi.realtimeNotificationCandidate(
     event,
     new Date("2026-08-15T10:36:00-04:00"),
   );
-  assert.equal(historical.review_priority, 69);
-  assert.equal(historical.review_lane, "RESEARCH_ARCHIVE");
-  assert.equal(historical.confidence, "LOW");
-  assert.equal(historical.realtime_notification_is_historical, true);
-  assert.equal(historical.realtime_notification_current_age_seconds, 660);
-  assert.ok(historical.warning_codes.includes("REALTIME_NOTIFICATION_HISTORICAL"));
-  const historicalQueue = HumanUi.mergeRealtimeNotificationQueue(
+  assert.equal(laterReview.review_priority, 110);
+  assert.equal(laterReview.review_lane, "ACTIONABLE_REVIEW");
+  assert.equal(laterReview.confidence, "MEDIUM");
+  assert.equal("realtime_notification_is_historical" in laterReview, false);
+  const laterQueue = HumanUi.mergeRealtimeNotificationQueue(
     { review_queue: [], realtime_notifications: inbox },
     new Date("2026-08-15T10:36:00-04:00"),
   );
-  assert.equal(historicalQueue.current_realtime_notification_count, 0);
-  assert.equal(historicalQueue.historical_realtime_notification_count, 1);
-  assert.equal(historicalQueue.focus_review_queue_count, 0);
+  assert.equal(laterQueue.current_realtime_notification_count, 1);
+  assert.equal(laterQueue.focus_review_queue_count, 1);
 
   const degradedReview = HumanUi.mergeRealtimeNotificationQueue({
     formal_review_available: false,
@@ -1780,7 +1775,7 @@ test("expired one-minute segment stays visible only as historical audit evidence
   );
 });
 
-test("segment enrichment projection starts freshness at the later confluence time", () => {
+test("segment enrichment projection preserves the later confluence time", () => {
   const Ui = loadUi();
   const clue = Ui.realtimeNotificationSignal({
     notification_id: `sha256:${"f".repeat(64)}`,
@@ -1809,13 +1804,6 @@ test("segment enrichment projection starts freshness at the later confluence tim
 
   assert.equal(clue.notification_signal_available_at, "2026-08-20T10:00:00+08:00");
   assert.equal(clue.segment_difference_1m.divergence_kind, "trend");
-  assert.equal(
-    Ui.notificationCurrentAgeSecondsForReview(
-      clue,
-      new Date("2026-08-20T10:01:00+08:00"),
-    ),
-    60,
-  );
 });
 
 test("filters preserve independent point lifecycle sector and query choices", () => {
@@ -1907,7 +1895,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   assert.deepEqual(
     Ui.filterSignals(segmentSignals, { segmentState: "current" })
       .map((row) => row.signal_id),
-    ["signal-2", "signal-sell-locator"],
+    ["signal-2", "signal-sell-locator", "signal-sell-locator-historical"],
   );
   assert.equal(
     Ui.precisionLocatorReadyForSignal(
@@ -1921,7 +1909,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
       historicalSellLocator,
       new Date("2026-07-20T14:58:30+08:00"),
     ),
-    false,
+    true,
   );
   assert.deepEqual(
     (() => {
@@ -1931,9 +1919,9 @@ test("filters preserve independent point lifecycle sector and query choices", ()
       return [period.state, period.summary, period.boundary];
     })(),
     [
-      "历史卖出区间套定位",
-      "二卖 · 1分钟历史区间套证据保留（不计入当前定位）",
-      "卖出区间套仅保留为历史定位证据；不计入当前精确位置",
+      "卖出区间套精确定位有效",
+      "二卖 · 1分钟区间套精确定位已确认",
+      "卖出区间套精确位置有效；核对持有结构级别后人工复核",
     ],
   );
   assert.deepEqual(
@@ -2185,20 +2173,20 @@ test("confirmed sell review is urgent and manual attention adds account-free pri
     ["manual-attention", "structural-sell"],
   );
 
-  const staleManualAttention = {
+  const laterManualAttention = {
     ...manualAttention,
-    signal_id: "stale-manual-attention",
+    signal_id: "later-manual-attention",
     observed_at: "2026-08-21T15:00:00+08:00",
     review_priority: 97,
   };
-  assert.ok(Ui.reviewPriorityForSignal(staleManualAttention) <= 69);
+  assert.ok(Ui.reviewPriorityForSignal(laterManualAttention) >= 90);
   assert.match(
-    Ui.decisionSummaryForSignal(staleManualAttention).title,
-    /历史5分钟二卖结构持续跟踪（非新增卖点）/,
+    Ui.decisionSummaryForSignal(laterManualAttention).title,
+    /5分钟二卖.*操作确认/,
   );
 });
 
-test("signal freshness excludes only the same A-share lunch closure", () => {
+test("signal discovery delay excludes only the same A-share lunch closure", () => {
   const Ui = loadUi();
   const base = {
     code: "SZ.000001",
@@ -2220,8 +2208,8 @@ test("signal freshness excludes only the same A-share lunch closure", () => {
     92400,
   );
 
-  const staleBuy = {
-    signal_id: "stale-buy",
+  const currentBuy = {
+    signal_id: "current-buy",
     code: "SZ.000001",
     side: "buy",
     point_type: "2buy",
@@ -2242,14 +2230,14 @@ test("signal freshness excludes only the same A-share lunch closure", () => {
     },
     warmup: { converged: true },
   };
-  assert.ok(Ui.reviewPriorityForSignal(staleBuy) <= 19);
+  assert.ok(Ui.reviewPriorityForSignal(currentBuy) >= 70);
   assert.equal(
-    Ui.positionRecommendationLabel(staleBuy),
-    "本条买入不纳入操作计划：买点已超过10分钟新鲜窗口，等待新的5分钟结构",
+    Ui.positionRecommendationLabel(currentBuy),
+    "结构风险参考比例：6.15% 以内（按当前价至5分钟防守位测算；仅作结构模型比较）",
   );
 });
 
-test("realtime notification priority uses current freshness, not only discovery delay", () => {
+test("realtime notification priority does not expire a current structure by age", () => {
   const Ui = loadUi();
   const notification = {
     signal_id: "notification-current-age",
@@ -2271,28 +2259,26 @@ test("realtime notification priority uses current freshness, not only discovery 
       reason_codes: ["CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED"],
     },
   };
-  const freshAt = new Date("2026-08-20T10:05:00-04:00");
-  const staleAt = new Date("2026-08-20T10:11:00-04:00");
+  const earlierReviewAt = new Date("2026-08-20T10:05:00-04:00");
+  const laterReviewAt = new Date("2026-08-20T10:11:00-04:00");
 
   assert.equal(Ui.signalAgeSecondsForReview(notification), 30);
-  assert.equal(Ui.notificationCurrentAgeSecondsForReview(notification, freshAt), 300);
-  assert.equal(Ui.reviewPriorityForSignal(notification, freshAt), 100);
+  assert.equal(Ui.reviewPriorityForSignal(notification, earlierReviewAt), 100);
   assert.equal(
-    Ui.positionRecommendationLabel(notification, "结构风险参考待人工核对", freshAt),
+    Ui.positionRecommendationLabel(notification, "结构风险参考待人工核对", earlierReviewAt),
     "结构风险参考比例：6.15% 以内（按当前价至5分钟防守位测算；仅作结构模型比较）",
   );
 
-  assert.equal(Ui.notificationCurrentAgeSecondsForReview(notification, staleAt), 660);
-  assert.equal(Ui.reviewPriorityForSignal(notification, staleAt), 69);
-  assert.equal(Ui.decisionSummaryForSignal(notification, staleAt).title, "买点已超过新鲜窗口");
+  assert.equal(Ui.reviewPriorityForSignal(notification, laterReviewAt), 100);
+  assert.match(Ui.decisionSummaryForSignal(notification, laterReviewAt).title, /5分钟.*买/);
   assert.equal(
-    Ui.positionRecommendationLabel(notification, "结构风险参考待人工核对", staleAt),
-    "本条买入不纳入操作计划：买点已超过10分钟新鲜窗口，等待新的5分钟结构",
+    Ui.positionRecommendationLabel(notification, "结构风险参考待人工核对", laterReviewAt),
+    "结构风险参考比例：6.15% 以内（按当前价至5分钟防守位测算；仅作结构模型比较）",
   );
 
   const failed = { ...notification, notification_delivery_status: "failed" };
-  assert.equal(Ui.reviewPriorityForSignal(failed, freshAt), 110);
-  assert.equal(Ui.reviewPriorityForSignal(failed, staleAt), 69);
+  assert.equal(Ui.reviewPriorityForSignal(failed, earlierReviewAt), 110);
+  assert.equal(Ui.reviewPriorityForSignal(failed, laterReviewAt), 110);
 
   const lunchNotification = {
     ...notification,
@@ -2301,13 +2287,6 @@ test("realtime notification priority uses current freshness, not only discovery 
     notification_signal_available_at: "2026-08-20T11:25:00+08:00",
     notification_detected_at: "2026-08-20T11:25:30+08:00",
   };
-  assert.equal(
-    Ui.notificationCurrentAgeSecondsForReview(
-      lunchNotification,
-      new Date("2026-08-20T13:05:00+08:00"),
-    ),
-    600,
-  );
   assert.equal(
     Ui.reviewPriorityForSignal(
       lunchNotification,
@@ -3664,7 +3643,6 @@ test("currently emitted screening diagnostics all have human-readable labels", (
     "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH",
     "MARKET_GATE_UNRESOLVED",
     "SECTOR_GATE_UNRESOLVED",
-    "BUY_SIGNAL_DISCOVERY_TOO_LATE_NO_CHASE",
     "projected_geometric_structure",
     "geometry_confirmed_before_audit_lock",
     "formal_center",
