@@ -13,6 +13,12 @@ from chanlun.exchange import get_exchange
 from chanlun.zixuan import ZiXuan
 from chanlun.xuangu.strict_xuangu import validate_frequency_sequence
 
+from ..services.trading_screening_scope import (
+    ScreeningScopeAuthorizationError,
+    admit_explicit_validation_codes,
+    parse_explicit_scope_limit,
+)
+
 
 xuangu_bp = Blueprint("xuangu", __name__)
 
@@ -53,13 +59,46 @@ def xuangu_task_list(market):
 @login_required
 def xuangu_task_add():
     _xuangu_tasks = current_app.extensions.get("xuangu_tasks")
-    market = request.form["market"]
-    task_name = request.form["task_name"]
-    frequencys = request.form["frequencys"]
-    # 与 xuangu_list.html 表单字段对齐：选股源 src_zx_group + 目标自选组 target_zx_group。
-    src_zx_group = request.form["src_zx_group"]
-    target_zx_group = request.form["target_zx_group"]
-    opt_type = request.form["opt_type"]
+    payload = request.get_json(silent=True) if request.is_json else None
+
+    def request_value(name: str):
+        if isinstance(payload, dict) and name in payload:
+            return payload.get(name)
+        return request.values.get(name)
+
+    market = request_value("market") or ""
+    task_name = request_value("task_name") or ""
+    frequencys = request_value("frequencys") or ""
+    target_zx_group = request_value("target_zx_group") or ""
+    opt_type = request_value("opt_type") or ""
+
+    # 旧版 ``source=all`` 会在后台展开整个市场。普通 Web 入口现在只接受
+    # 用户逐项提供的代码，并把默认反馈环限制在 12 只、绝对上限限制在 20 只。
+    src_zx_group = str(request_value("src_zx_group") or "").strip()
+    if src_zx_group.casefold() == "all":
+        return {
+            "ok": False,
+            "code": "full_market_source_forbidden",
+            "msg": "普通选股入口已禁用 source=all；请显式填写不超过 12 只代码",
+        }, 400
+    try:
+        scope_limit = parse_explicit_scope_limit(request_value("scope_limit"))
+        explicit_codes = admit_explicit_validation_codes(
+            request_value("codes"),
+            max_symbols=scope_limit,
+        )
+    except ScreeningScopeAuthorizationError as exc:
+        return {
+            "ok": False,
+            "code": exc.reason_code,
+            "msg": str(exc),
+        }, 403
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "code": "explicit_codes_required",
+            "msg": str(exc),
+        }, 400
 
     frequencys = [frequency.strip() for frequency in frequencys.split(",")]
     opt_type = opt_type.split(",")
@@ -103,7 +142,13 @@ def xuangu_task_add():
 
     try:
         run_res = _xuangu_tasks.run_xuangu(
-            market, task_name, frequencys, opt_type, src_zx_group, target_zx_group
+            market,
+            task_name,
+            frequencys,
+            opt_type,
+            list(explicit_codes),
+            target_zx_group,
+            scope_limit,
         )
     except RuntimeError as exc:
         if str(exc) != "scheduler is not running":

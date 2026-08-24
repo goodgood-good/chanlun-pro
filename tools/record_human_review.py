@@ -98,7 +98,7 @@ def parser() -> argparse.ArgumentParser:
         default="UNCERTAIN",
     )
     value.add_argument(
-        "--locator",
+        "--segment-difference",
         choices=("CONFIRMED", "REJECTED", "UNCERTAIN"),
         default="UNCERTAIN",
     )
@@ -156,7 +156,7 @@ def main(
         decomposition_judgement=args.decomposition,
         center_expansion_judgement=args.center_expansion,
         nine_segment_upgrade_judgement=args.nine_segment_upgrade,
-        locator_judgement=args.locator,
+        segment_difference_judgement=args.segment_difference,
         notes=args.notes,
         request_id=args.request_id,
         signal_lifecycle_id=matches[0].signal_lifecycle_id,

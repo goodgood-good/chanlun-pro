@@ -31,17 +31,12 @@ def test_locked_return_into_core_extends_without_moving_core():
     updated, event = advance_center(value, ret)
     assert updated.state is CenterState.ONGOING
     assert updated.pending_leave_unit is None
-    assert updated.extension_units == value.extension_units + (
-        value.pending_leave_unit,
-        ret,
-    )
-    assert updated.body_units == value.body_units + (
-        value.pending_leave_unit,
-        ret,
-    )
+    assert updated.failed_departure_units == (value.pending_leave_unit,)
+    assert updated.extension_units == value.extension_units + (ret,)
+    assert updated.body_units == value.body_units + (ret,)
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (105, 115)
-    assert updated.body_revision == value.body_revision + 2
+    assert updated.body_revision == value.body_revision + 1
     assert event.kind is CenterEventKind.EXTENDED
 
 
@@ -100,12 +95,10 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert first_event.kind is CenterEventKind.EXTENDED
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is leave
-    assert pending.extension_units == value.extension_units + (
-        value.pending_leave_unit,
-        entered,
-    )
+    assert pending.failed_departure_units == (value.pending_leave_unit,)
+    assert pending.extension_units == value.extension_units + (entered,)
     assert leave not in pending.body_units
-    assert pending.body_revision == value.body_revision + 2
+    assert pending.body_revision == value.body_revision + 1
     assert pending.center_id == value.center_id
     assert (pending.zd_tick, pending.zg_tick) == (105, 115)
     assert watch.kind is CenterEventKind.BREAKOUT_WATCH_UP
@@ -125,10 +118,9 @@ def test_opposite_down_crossing_reuses_return_as_new_leave():
 
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is crossed
-    assert pending.extension_units == value.extension_units + (
-        value.pending_leave_unit,
-    )
-    assert crossed.direction != value.entry_unit.direction
+    assert pending.extension_units == value.extension_units
+    assert pending.failed_departure_units == (value.pending_leave_unit,)
+    assert crossed.direction != value.pending_leave_unit.direction
     assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
 
     completed, completion = advance_center(
@@ -147,10 +139,9 @@ def test_opposite_up_crossing_reuses_return_as_new_leave():
 
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is crossed
-    assert pending.extension_units == value.extension_units + (
-        value.pending_leave_unit,
-    )
-    assert crossed.direction != value.entry_unit.direction
+    assert pending.extension_units == value.extension_units
+    assert pending.failed_departure_units == (value.pending_leave_unit,)
+    assert crossed.direction != value.pending_leave_unit.direction
     assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
 
     completed, completion = advance_center(
@@ -179,7 +170,10 @@ def test_transition_rejects_unlocked_cross_context_and_duplicate_evidence():
     with pytest.raises(ValueError, match="transition level/source mismatch"):
         advance_center(value, wrong_level)
 
-    duplicate = replace(unit(5, "down", 130, 120), unit_id=value.entry_unit.unit_id)
+    duplicate = replace(
+        unit(5, "down", 130, 120),
+        unit_id=value.core_units[0].unit_id,
+    )
     with pytest.raises(ValueError, match="unit id already belongs to center"):
         advance_center(value, duplicate)
 

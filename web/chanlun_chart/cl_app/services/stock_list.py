@@ -3,7 +3,7 @@
 设计要点：
 - 启动后延迟 ``PRELOAD_STARTUP_DELAY_SECONDS`` 才开始第一轮；若已从磁盘恢复缓存，
   首轮只确认缓存可用，不立即访问交易所，避免抢占首屏行情请求所需资源。
-- 之后每 ``PRELOAD_INTERVAL_SECONDS`` 周期性刷新交易所数据。
+- 之后每 ``PRELOAD_INTERVAL_SECONDS`` 周期性刷新同一显式准入身份集合。
 - 单市场预加载失败/超时不会影响其他市场（_preload_single_exchange 自吞异常）。
 - 缓存 miss 时按调用方意愿走两条路径：
   - allow_sync_fallback=False: 触发异步刷新 + raise（适合不能阻塞的初始化路径）
@@ -22,14 +22,19 @@ import re
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 
 from cachetools import LRUCache
 import pinyin
 
 from chanlun import config
 from chanlun.market import Market
-from chanlun.exchange import get_exchange
+from chanlun.exchange import get_exchange, resolve_bounded_stock_info
 from chanlun.tools.log_util import LogUtil
+from .trading_screening_scope import (
+    DEFAULT_VALIDATION_COHORT_SIZE,
+    admit_explicit_validation_codes,
+)
 
 # 基础数据缓存（市场 → processed symbols list）
 # 刷新失败后仍须保留最后一次已知有效值；刷新节奏用于跟踪新鲜度。
@@ -44,6 +49,36 @@ _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 _KNOWN_A_INSTRUMENT_TYPES = frozenset(
     {"stock_cn", "etf_cn", "index_cn", "fund_cn", "unsupported_cn"}
 )
+
+# The ordinary application runtime owns a deliberately small identity catalog.
+# These are the same explicit symbols as the focused real-data validation
+# profile; keeping the tuple here makes cold startup independent from a large
+# on-disk catalog and, critically, from ``ExchangeQMT.all_stocks()``.
+DEFAULT_VALIDATION_SYMBOL_CODES = (
+    "SZ.000932",
+    "SZ.000923",
+    "SH.600516",
+    "SZ.001203",
+    "SZ.000783",
+    "SZ.000987",
+    "SH.601377",
+    "SH.601628",
+    "SZ.002377",
+    "SH.601808",
+    "SZ.000698",
+    "SH.600583",
+)
+BOUNDED_VALIDATION_CATALOG = "BOUNDED_VALIDATION_CATALOG"
+FULL_IDENTITY_CATALOG = "FULL_IDENTITY_CATALOG"
+
+# Secure process defaults.  ``create_app`` re-applies its effective config
+# before any preload thread can start, so stale module/cache state from another
+# app factory cannot silently widen the catalog.
+_symbol_catalog_mode = BOUNDED_VALIDATION_CATALOG
+_symbol_catalog_codes_by_exchange = {
+    "a": DEFAULT_VALIDATION_SYMBOL_CODES,
+}
+_full_catalog_refresh_authorized = False
 
 # 全部支持的市场（用于校验配置项）
 _ALL_PRELOAD_EXCHANGES = [
@@ -101,6 +136,102 @@ _preload_handle = None
 _symbol_runtime_closed = False
 
 
+def _catalog_scope_snapshot(exchange: str) -> tuple[str, tuple[str, ...], bool]:
+    """Return the immutable catalog scope without performing external I/O."""
+
+    with _stock_cache_lock:
+        return (
+            _symbol_catalog_mode,
+            tuple(_symbol_catalog_codes_by_exchange.get(exchange, ())),
+            _full_catalog_refresh_authorized,
+        )
+
+
+def _project_rows_to_catalog_scope(exchange: str, rows):
+    """Project restored/last-known rows onto the current bounded admission."""
+
+    mode, admitted_codes, _authorized = _catalog_scope_snapshot(exchange)
+    if mode == FULL_IDENTITY_CATALOG:
+        return list(rows or ())
+    admitted = set(admitted_codes)
+    if not admitted:
+        return []
+    projected = []
+    seen = set()
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code") or "").strip()
+        if code not in admitted or code in seen:
+            continue
+        projected.append(row)
+        seen.add(code)
+    return projected
+
+
+def configure_symbol_catalog(
+    *,
+    validation_codes=None,
+    full_catalog_authorized: bool = False,
+) -> dict[str, object]:
+    """Install the process catalog scope before any preload work starts.
+
+    Ordinary mode always admits an explicit A-share cohort capped at twelve.
+    Full identity enumeration is a separate boolean authorization; it is never
+    inferred from screening/full-coverage settings.
+    """
+
+    global _symbol_catalog_mode, _symbol_catalog_codes_by_exchange
+    global _full_catalog_refresh_authorized
+
+    if type(full_catalog_authorized) is not bool:
+        raise TypeError("full_catalog_authorized must be an exact bool")
+    values = validation_codes
+    if values is None or (isinstance(values, str) and not values.strip()):
+        values = DEFAULT_VALIDATION_SYMBOL_CODES
+    admitted_codes = admit_explicit_validation_codes(
+        values,
+        max_symbols=DEFAULT_VALIDATION_COHORT_SIZE,
+    )
+    invalid_codes = tuple(
+        code for code in admitted_codes if _A_STOCK_CODE.fullmatch(code) is None
+    )
+    if invalid_codes:
+        raise ValueError(
+            "validation symbol catalog accepts only normalized A-share codes: "
+            + ", ".join(invalid_codes)
+        )
+
+    mode = (
+        FULL_IDENTITY_CATALOG
+        if full_catalog_authorized
+        else BOUNDED_VALIDATION_CATALOG
+    )
+    with _stock_cache_lock:
+        _symbol_catalog_mode = mode
+        _full_catalog_refresh_authorized = full_catalog_authorized
+        _symbol_catalog_codes_by_exchange = {"a": tuple(admitted_codes)}
+        if not full_catalog_authorized:
+            for exchange in tuple(stock_cache):
+                allowed = set(_symbol_catalog_codes_by_exchange.get(exchange, ()))
+                projected = [
+                    row
+                    for row in (stock_cache.get(exchange) or ())
+                    if isinstance(row, dict) and row.get("code") in allowed
+                ]
+                if projected:
+                    stock_cache[exchange] = projected
+                else:
+                    stock_cache.pop(exchange, None)
+                _symbol_states.pop(exchange, None)
+    return {
+        "catalog_mode": mode,
+        "admitted_codes": tuple(admitted_codes),
+        "admitted_count": len(admitted_codes),
+        "full_catalog_authorized": full_catalog_authorized,
+    }
+
+
 def _mark_symbol_ready(exchange: str) -> None:
     with _stock_cache_lock:
         _symbol_states[exchange] = {"status": "ready", "last_error": None}
@@ -139,7 +270,7 @@ def get_cached_processed_stock(exchange: str, code: str):
 def get_cached_a_instrument_types(codes: tuple[str, ...]) -> dict[str, str]:
     """从已恢复的唯一 A 股证券目录读取精确类型，不触发 QMT 或磁盘 I/O。
 
-    目录由 ``ExchangeQMT.all_stocks`` 的原生类型事实生成并原子持久化。缺失、冲突或
+    目录由显式准入标的的身份查询生成并原子持久化。缺失、冲突或
     非现行类型一律返回 ``unresolved_cn``，让选股范围按失败关闭处理。
     """
 
@@ -218,6 +349,10 @@ def get_symbol_readiness(exchange: str):
     with _stock_cache_lock:
         cached = stock_cache.get(exchange)
         state = _symbol_states.get(exchange)
+        catalog_mode = _symbol_catalog_mode
+        admitted_codes = tuple(_symbol_catalog_codes_by_exchange.get(exchange, ()))
+        full_catalog_authorized = _full_catalog_refresh_authorized
+        admitted_count = len(admitted_codes)
         if exchange not in PRELOAD_EXCHANGES and not cached:
             return {
                 "market": exchange,
@@ -225,10 +360,18 @@ def get_symbol_readiness(exchange: str):
                 "status": "disabled",
                 "count": 0,
                 "last_error": None,
+                "catalog_mode": catalog_mode,
+                "admitted_count": admitted_count,
+                "full_catalog_authorized": full_catalog_authorized,
             }
         ready = bool(cached)
         if state is None:
-            status = "ready" if ready else "not_ready"
+            status = (
+                "bounded_deferred"
+                if catalog_mode == BOUNDED_VALIDATION_CATALOG
+                and not admitted_codes
+                else "ready" if ready else "not_ready"
+            )
             last_error = None
         else:
             status = state["status"]
@@ -241,6 +384,9 @@ def get_symbol_readiness(exchange: str):
             "status": status,
             "count": len(cached) if cached else 0,
             "last_error": last_error,
+            "catalog_mode": catalog_mode,
+            "admitted_count": admitted_count,
+            "full_catalog_authorized": full_catalog_authorized,
         }
 
 
@@ -355,11 +501,23 @@ def _warm_cache_from_disk() -> None:
     if not PRELOAD_EXCHANGES:
         return
     for exchange in PRELOAD_EXCHANGES:
+        catalog_mode, admitted_codes, _authorized = _catalog_scope_snapshot(exchange)
+        if catalog_mode == BOUNDED_VALIDATION_CATALOG and not admitted_codes:
+            with _stock_cache_lock:
+                stock_cache.pop(exchange, None)
+                _symbol_states[exchange] = {
+                    "status": "bounded_deferred",
+                    "last_error": None,
+                }
+            continue
         raw_stocks = _load_stocks_from_disk(exchange)
         if not raw_stocks:
             continue
         try:
-            processed = _process_stock_list(raw_stocks)
+            scoped_stocks = _project_rows_to_catalog_scope(exchange, raw_stocks)
+            if not scoped_stocks:
+                continue
+            processed = _process_stock_list(scoped_stocks)
             if not processed:
                 _mark_symbol_degraded(exchange, "empty symbol list")
                 continue
@@ -371,14 +529,26 @@ def _warm_cache_from_disk() -> None:
             LogUtil.info(
                 f"[stocks_cache] 从磁盘恢复 {exchange} stocks，共 {len(processed)} 条"
             )
+            if len(scoped_stocks) != len(raw_stocks):
+                # Atomically replace a legacy broad catalog with its admitted
+                # projection so a later restart cannot resurrect out-of-scope
+                # identities even if its in-memory cache is empty.
+                _save_stocks_to_disk(exchange, scoped_stocks)
         except Exception as e:
             _mark_symbol_degraded(exchange, str(e) or type(e).__name__)
             LogUtil.warning(f"[stocks_cache] 恢复 {exchange} 失败: {e}")
 
 
-def _safe_all_stocks(ex):
-    """调用所有市场适配器共享的无参股票列表契约。"""
+def _authorized_full_catalog_rows(ex, exchange: str):
+    """Enumerate a market only while the independent authorization is live."""
 
+    mode, _admitted_codes, authorized = _catalog_scope_snapshot(exchange)
+    if mode != FULL_IDENTITY_CATALOG or not authorized:
+        raise PermissionError(
+            "full identity catalog enumeration is not independently authorized"
+        )
+    if getattr(ex, "all_stocks_requires_explicit_authorization", False) is True:
+        return ex.all_stocks(full_market_authorized=True)
     return ex.all_stocks()
 
 
@@ -398,18 +568,93 @@ def _process_stock_list(all_stocks):
     return processed_list
 
 
+def _bounded_stock_info_rows(ex, exchange: str, admitted_codes: tuple[str, ...]):
+    """Resolve only explicitly admitted identities, never a market catalog."""
+
+    with _stock_cache_lock:
+        existing = {
+            row.get("code"): row.copy()
+            for row in (stock_cache.get(exchange) or ())
+            if isinstance(row, dict) and isinstance(row.get("code"), str)
+        }
+    rows = []
+    unresolved = []
+    fresh_count = 0
+    for code in admitted_codes:
+        try:
+            info = resolve_bounded_stock_info(
+                ex,
+                code,
+                fallback_name=existing.get(code, {}).get("name"),
+                allow_code_fallback=True,
+            )
+        except Exception as exc:
+            unresolved.append(f"{code}: {type(exc).__name__}: {str(exc)[:120]}")
+            if code in existing:
+                rows.append(existing[code])
+            continue
+        if not isinstance(info, Mapping):
+            unresolved.append(f"{code}: identity unavailable")
+            if code in existing:
+                rows.append(existing[code])
+            continue
+        name = str(info.get("name") or "").strip()
+        if not name:
+            unresolved.append(f"{code}: identity name unavailable")
+            if code in existing:
+                rows.append(existing[code])
+            continue
+        row = dict(info)
+        row["code"] = code
+        row["name"] = name
+        instrument_type = row.get("type")
+        if exchange == "a" and instrument_type not in _KNOWN_A_INSTRUMENT_TYPES:
+            previous_type = existing.get(code, {}).get("type")
+            row["type"] = (
+                previous_type
+                if previous_type in _KNOWN_A_INSTRUMENT_TYPES
+                else "stock_cn"
+            )
+        elif not isinstance(instrument_type, str) or not instrument_type:
+            row["type"] = str(existing.get(code, {}).get("type") or "unknown")
+        rows.append(row)
+        fresh_count += 1
+    return rows, tuple(unresolved), fresh_count
+
+
 def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> None:
     """加载单个市场的 symbol 列表并写入缓存。任何异常都被吞掉，仅记日志，避免影响其他市场。
 
     ``skip_if_disk_warm=True`` 时，若 ``stock_cache[exchange]`` 已经被
     ``_warm_cache_from_disk`` 填充，则跳过本次抓取（首轮启动避免与磁盘恢复
-    重复劳动）。后续轮次仍按 ``PRELOAD_INTERVAL_SECONDS`` 节奏正常全量刷新，
-    保证缓存最终一致。``_trigger_async_refresh`` 走默认 False，行为不变。
+    重复劳动）。后续轮次仍按 ``PRELOAD_INTERVAL_SECONDS`` 节奏刷新证券身份目录，
+    保证缓存最终一致；这里只读取代码/名称元数据，不运行逐股策略。
+    ``_trigger_async_refresh`` 走默认 False，行为不变。
     """
+    catalog_mode, admitted_codes, full_catalog_authorized = (
+        _catalog_scope_snapshot(exchange)
+    )
+    if catalog_mode == BOUNDED_VALIDATION_CATALOG and not admitted_codes:
+        with _stock_cache_lock:
+            stock_cache.pop(exchange, None)
+            _symbol_states[exchange] = {
+                "status": "bounded_deferred",
+                "last_error": None,
+            }
+        return
     if skip_if_disk_warm:
         with _stock_cache_lock:
             cached = stock_cache.get(exchange)
-        if cached:
+        cached_codes = {
+            row.get("code")
+            for row in (cached or ())
+            if isinstance(row, dict)
+        }
+        cache_covers_scope = bool(cached) and (
+            catalog_mode == FULL_IDENTITY_CATALOG
+            or set(admitted_codes).issubset(cached_codes)
+        )
+        if cache_covers_scope:
             _mark_symbol_ready(exchange)
             LogUtil.info(
                 f"市场 {exchange} 已由磁盘恢复 {len(cached)} 条，跳过本轮预加载，"
@@ -420,34 +665,62 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
         start_ts = time.time()
         ex = get_exchange(Market(exchange))
         # 短路：如果交易所实例标记了 init_failed（例如通达信连接超时），
-        # 直接跳过 all_stocks 调用，避免再次 30s 阻塞。
+        # 直接跳过身份查询，避免再次阻塞。
         if getattr(ex, "init_failed", False):
             _mark_symbol_degraded(exchange, "exchange init failed")
             LogUtil.warning(f"市场 {exchange} 交易所初始化失败，跳过本次预加载")
             return
-        all_stocks = _safe_all_stocks(ex)
-        if not all_stocks:
+        unresolved = ()
+        if catalog_mode == FULL_IDENTITY_CATALOG:
+            if not full_catalog_authorized:
+                raise RuntimeError(
+                    "full identity catalog refresh requires independent authorization"
+                )
+            raw_stocks = _authorized_full_catalog_rows(ex, exchange)
+            fresh_count = len(raw_stocks or ())
+        else:
+            raw_stocks, unresolved, fresh_count = _bounded_stock_info_rows(
+                ex,
+                exchange,
+                admitted_codes,
+            )
+        if fresh_count <= 0:
             _mark_symbol_degraded(exchange, "empty symbol list")
-            LogUtil.warning(f"市场 {exchange} symbols 刷新返回空列表，保留现有缓存")
+            LogUtil.warning(
+                f"市场 {exchange} 证券身份目录返回空列表，保留现有缓存"
+            )
             return
-        processed_stocks = _process_stock_list(all_stocks)
+        # Re-project immediately before publication.  If another app factory
+        # narrows the process scope while a refresh is in flight, its old
+        # result cannot repopulate out-of-scope identities.
+        raw_stocks = _project_rows_to_catalog_scope(exchange, raw_stocks)
+        processed_stocks = _process_stock_list(raw_stocks)
         if not processed_stocks:
             _mark_symbol_degraded(exchange, "empty symbol list")
             return
         with _stock_cache_lock:
             stock_cache[exchange] = processed_stocks
-            _symbol_states[exchange] = {"status": "ready", "last_error": None}
+            _symbol_states[exchange] = {
+                "status": "degraded" if unresolved else "ready",
+                "last_error": (
+                    f"{len(unresolved)} admitted identities unresolved"
+                    if unresolved
+                    else None
+                ),
+            }
         # 写盘：让下次冷启动直接秒读文件，不再等 28s 通达信。
-        # 失败仅 warn 不影响主流程；空 all_stocks 会被 _save_stocks_to_disk 内部短路。
-        _save_stocks_to_disk(exchange, all_stocks)
+        # 失败仅 warn 不影响主流程；空身份结果会被落盘函数内部短路。
+        _save_stocks_to_disk(exchange, raw_stocks)
         elapsed = time.time() - start_ts
         log_fn = LogUtil.warning if elapsed > _PRELOAD_SLOW_WARN_SECONDS else LogUtil.info
         log_fn(
-            f"市场 {exchange} symbols 预加载完成，共 {len(processed_stocks)} 条，耗时 {elapsed:.2f}s"
+            f"市场 {exchange} 证券身份目录缓存完成，共 {len(processed_stocks)} 条，"
+            f"catalog_mode={catalog_mode} admitted={len(admitted_codes)}，"
+            f"未运行逐股策略，耗时 {elapsed:.2f}s"
         )
     except Exception as e:
         _mark_symbol_degraded(exchange, str(e) or type(e).__name__)
-        LogUtil.error(f"预加载市场 {exchange} symbols 失败: {e}")
+        LogUtil.error(f"加载市场 {exchange} 证券身份目录失败: {e}")
 
 
 class SymbolPreloadHandle:
@@ -645,9 +918,8 @@ def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
     - 缓存命中: 直接返回。
     - 缓存 miss + ``allow_sync_fallback=False``: 触发后台异步刷新并 raise，适合那些"宁可
       报错也不能阻塞"的入口（如图表页面初始化时的 symbol_info 探测）。
-    - 缓存 miss + ``allow_sync_fallback=True``: 同步调用一次 ``ex.all_stocks()`` 直接构建
-      并写入缓存，适合"用户主动点搜索"这种愿意等几秒的场景。否则启动后 60s 预加载空窗期内
-      搜索接口会全 500，用户体感是"搜索框完全坏了"。
+    - 缓存 miss + ``allow_sync_fallback=True``: 同步等待一次显式准入身份查询并写入
+      缓存；普通模式仍不会调用 ``all_stocks()`` 或展开市场目录。
     - 同步路径里任何异常（包括交易所连接超时）都吞掉并返回 ``[]``，搜索框最差是"无结果"。
     """
     with _stock_cache_lock:

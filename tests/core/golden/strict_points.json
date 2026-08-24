@@ -6,11 +6,11 @@
     {
       "anchor_at": "2025-07-02T03:04:00+00:00",
       "available_at": "2025-07-07T05:49:00+00:00",
-      "center_id": "48c335a8779892bd4436975b71284a6b988316462fd4770e3d9f94b0b1cc65b0",
+      "center_id": "69ad49dacc09dae5c712fc872913318460702b852c4d99b64657e67153ba5a8c",
       "center_ordinal": 1,
       "confirmed_at": "2025-07-07T05:49:00+00:00",
       "level": 0,
-      "point_id": "9ee470f02de16b2eebae9d70fd11b2336f0e6fbb882aebc7383d35c89ae428c6",
+      "point_id": "71d535a899552500152076590e968e5aa17b173b3b286e1bded65b73a26f5ab2",
       "point_type": "3buy",
       "strength_source": null,
       "variant": "standard"

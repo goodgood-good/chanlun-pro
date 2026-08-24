@@ -123,7 +123,7 @@ def test_trend_center_rejects_unlocked_initial_or_body_unit():
         )
 
 
-def test_segment_center_requires_exactly_five_body_initial_units():
+def test_segment_center_requires_exactly_three_initial_units():
     value = ongoing_center()
     initial = value.initial_units[:2]
     with pytest.raises(ValueError, match="source-specific center body"):
@@ -148,7 +148,7 @@ def test_recursive_trend_center_can_depart_opposite_its_entry_direction():
         for item in valid_three_center_seed()
     )
     entry = replace(
-        unit(0, "up", 90, seed[0].start_tick),
+        unit(-1, "up", 90, seed[0].start_tick),
         source_kind=SourceKind.TREND_TYPE,
     )
     value = establish_center(
@@ -315,10 +315,10 @@ def test_center_evidence_preserves_external_roles_and_excludes_return():
     assert evidence.initial_unit_ids == tuple(
         item.unit_id for item in value.initial_units
     )
-    assert evidence.entry_unit_id == value.entry_unit.unit_id
+    assert evidence.entry_unit_id == (
+        None if value.entry_unit is None else value.entry_unit.unit_id
+    )
     assert evidence.core_unit_ids == tuple(item.unit_id for item in value.core_units)
-    assert evidence.establishment_unit_id == value.establishment_unit.unit_id
-    assert evidence.initial_exit_unit_id == value.initial_exit_unit.unit_id
     assert evidence.completion_leave_unit_id not in evidence.body_unit_ids
     assert evidence.completion_return_unit_id not in evidence.body_unit_ids
     assert evidence.completed_at == value.completed_at

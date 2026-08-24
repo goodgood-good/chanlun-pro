@@ -29,7 +29,9 @@ from chanlun.decision_support.trading_system.lifecycle import (
     advance_lifecycle,
     build_setup,
     current_five_minute_setup_points,
-    match_one_minute_segment_difference,
+    five_minute_setup_is_executable,
+    match_one_minute_nesting_witness,
+    structural_point_occurrence_id,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeGateBundle,
@@ -209,10 +211,12 @@ class SymbolStructureBundle:
                 or not set(codes).issubset(SCREENING_WARMUP_DIFFERENCE_CODES)
             ):
                 raise ValueError("warmup difference codes are invalid")
-        if len({value.point_id for value in self.entry_execution_boundaries}) != len(
-            self.entry_execution_boundaries
-        ):
-            raise ValueError("entry execution boundary point ids must be unique")
+        boundary_pair_ids = tuple(
+            (value.setup_occurrence_id, value.point_id)
+            for value in self.entry_execution_boundaries
+        )
+        if len(boundary_pair_ids) != len(set(boundary_pair_ids)):
+            raise ValueError("entry execution boundary setup/witness pairs must be unique")
         if (
             len(self.selection_sources) != len(set(self.selection_sources))
             or any(not isinstance(value, str) or not value for value in self.selection_sources)
@@ -233,13 +237,19 @@ class SymbolStructureBundle:
             for point in self.one_points
             if point.side == "buy"
         }
+        five_minute_buy_occurrences = {
+            structural_point_occurrence_id(point)
+            for point in self.five_points
+            if isinstance(point, StructuralPoint) and point.side == "buy"
+        }
         if any(
-            boundary.point_id not in one_minute_buy_points
+            boundary.setup_occurrence_id not in five_minute_buy_occurrences
+            or boundary.point_id not in one_minute_buy_points
             or boundary.confirmation_bar_closed_at
-            != one_minute_buy_points[boundary.point_id].available_at
+            < one_minute_buy_points[boundary.point_id].available_at
             for boundary in self.entry_execution_boundaries
         ):
-            raise ValueError("入场执行边界没有对应同标的已确认 1 分钟买点")
+            raise ValueError("入场执行边界不能早于 1 分钟区间套见证")
         if self.higher_timeframe_gates is not None:
             gates = self.higher_timeframe_gates
             if gates.symbol.subject != self.code:
@@ -356,10 +366,19 @@ def _current_five_minute_points(
 ) -> tuple[StructuralPoint | ProvisionalCandidate, ...]:
     """兼容旧内部入口；唯一通道裁剪规则位于生命周期模块。"""
 
-    return current_five_minute_setup_points(
+    current = current_five_minute_setup_points(
         points,
         as_of=as_of,
         max_setup_age_seconds=policy.max_five_minute_setup_age_seconds,
+    )
+    return tuple(
+        point
+        for point in current
+        if five_minute_setup_is_executable(
+            point,
+            as_of=as_of,
+            max_setup_age_seconds=policy.max_five_minute_setup_age_seconds,
+        )
     )
 
 
@@ -477,7 +496,8 @@ class _TechnicalSignalEvaluator:
             else gate_bundle.sector.period_diagnostics
         )
         entry_boundaries = {
-            value.point_id: value for value in bundle.entry_execution_boundaries
+            (value.setup_occurrence_id, value.point_id): value
+            for value in bundle.entry_execution_boundaries
         }
         previous_lifecycles = {
             item.setup_id: item for item in bundle.previous_lifecycles
@@ -519,7 +539,7 @@ class _TechnicalSignalEvaluator:
                 sector_required=sector_required,
             )
             previous_lifecycle = previous_lifecycles.get(setup.setup_id)
-            trigger = match_one_minute_segment_difference(
+            trigger = match_one_minute_nesting_witness(
                 setup,
                 bundle.one_points,
                 as_of=bundle.as_of,
@@ -533,32 +553,16 @@ class _TechnicalSignalEvaluator:
                     previous_lifecycle.trigger_point_id
                 )
                 if previous_trigger is not None:
-                    persisted_match = match_one_minute_segment_difference(
+                    persisted_match = match_one_minute_nesting_witness(
                         setup,
                         (previous_trigger,),
                         as_of=bundle.as_of,
                         minimum_tick=self._policy.minimum_tick,
                     )
-                    # A persisted locator bridges 5m-only refreshes, but it must
-                    # not pin the setup to an older 1m occurrence forever.  Once
-                    # the realtime bundle contains a later same-side physical
-                    # 1m/L0 point, that newer occurrence re-arms the precise
-                    # execution window for the still-current 5m setup.
-                    if persisted_match is not None and (
-                        trigger is None
-                        or (
-                            persisted_match.available_at,
-                            persisted_match.recursive_level,
-                            persisted_match.tower,
-                            persisted_match.point_id,
-                        )
-                        >= (
-                            trigger.available_at,
-                            trigger.recursive_level,
-                            trigger.tower,
-                            trigger.point_id,
-                        )
-                    ):
+                    # The first exact nesting witness is immutable for this
+                    # setup.  Persist it across a 5m-only refresh, but never
+                    # replace it with a later witness and move/reopen entry.
+                    if persisted_match is not None:
                         trigger = persisted_match
             lifecycle = advance_lifecycle(
                 previous_lifecycle,
@@ -569,8 +573,28 @@ class _TechnicalSignalEvaluator:
                 minimum_tick=self._policy.minimum_tick,
             )
             entry_boundary = (
-                None if trigger is None else entry_boundaries.get(trigger.point_id)
+                None
+                if trigger is None
+                else entry_boundaries.get(
+                    (structural_point_occurrence_id(setup.point), trigger.point_id)
+                )
             )
+            if entry_boundary is not None:
+                jointly_known_at = max(
+                    normalize_datetime(setup.point.available_at, "setup available_at"),
+                    normalize_datetime(trigger.available_at, "witness available_at"),
+                )
+                if (
+                    normalize_datetime(
+                        entry_boundary.confirmation_bar_closed_at,
+                        "entry boundary confirmation_bar_closed_at",
+                    )
+                    != jointly_known_at
+                ):
+                    # A pair-scoped boundary must also be frozen at the first
+                    # timestamp at which the setup and nesting witness were
+                    # jointly known.
+                    entry_boundary = None
             context_assessment = assess_signal_context(
                 side=point.side,
                 point_type=point.point_type,

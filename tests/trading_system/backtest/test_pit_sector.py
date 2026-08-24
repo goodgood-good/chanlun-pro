@@ -13,6 +13,7 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SectorMembershipChange,
 )
 from chanlun.decision_support.trading_system.backtest.pit_sector import (
+    candidate_codes_for_pit_sector,
     composite_from_member_frames,
 )
 
@@ -57,9 +58,7 @@ def test_sector_composite_uses_effective_membership_and_ex_date_factor() -> None
     ]
     # This change is still unavailable on 2025-08-11 and becomes usable on
     # the next calendar day.
-    memberships.append(
-        _membership("SZ.000003", other, "汽车", date(2025, 8, 11))
-    )
+    memberships.append(_membership("SZ.000003", other, "汽车", date(2025, 8, 11)))
     factor = QmtFactorAt(
         code="SZ.000001",
         effective_on=date(2025, 8, 11),
@@ -121,3 +120,48 @@ def test_sector_composite_uses_effective_membership_and_ex_date_factor() -> None
     # member is excluded, leaving two valid all-member observations.
     assert tuple(frame["volume"]) == (3.0, 2.0)
     assert frame.iloc[1]["close"] == 1100.0
+
+
+def test_sector_candidates_exclude_members_that_left_before_replay() -> None:
+    sector = "qmt-sw1:S27"
+    other = "qmt-sw1:S28"
+    codes = ("SZ.000001", "SZ.000002", "SZ.000003")
+    memberships = (
+        _membership(codes[0], sector, "电子", date(2020, 1, 1)),
+        _membership(codes[0], other, "汽车", date(2025, 7, 1)),
+        _membership(codes[1], other, "汽车", date(2020, 1, 1)),
+        _membership(codes[1], sector, "电子", date(2025, 8, 11)),
+        _membership(codes[2], sector, "电子", date(2020, 1, 1)),
+    )
+    snapshot = PITMetadataSnapshot(
+        source_start=date(2020, 1, 1),
+        source_end=date(2025, 8, 20),
+        captured_at=datetime(2025, 8, 21, tzinfo=CN),
+        securities=tuple(
+            SecurityMasterRecord(
+                code=code,
+                name=code,
+                listed_from=date(2020, 1, 1),
+                listed_through=None,
+            )
+            for code in codes
+        ),
+        memberships=tuple(
+            sorted(
+                memberships,
+                key=lambda row: (row.code, row.known_at, row.sector_id),
+            )
+        ),
+        factors=(),
+        qmt_sw1_sector_names=((sector, "电子"), (other, "汽车")),
+        source_hashes=(("fixture", "sha256:" + "2" * 64),),
+    )
+
+    selected = candidate_codes_for_pit_sector(
+        snapshot,
+        sector,
+        start_at=datetime(2025, 8, 10, 9, 30, tzinfo=CN),
+        end_at=datetime(2025, 8, 20, 15, 0, tzinfo=CN),
+    )
+
+    assert selected == ("SZ.000002", "SZ.000003")

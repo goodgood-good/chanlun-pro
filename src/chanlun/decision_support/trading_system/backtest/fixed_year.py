@@ -79,8 +79,10 @@ from chanlun.decision_support.trading_system.lifecycle import (
     five_minute_segment_difference_window_start,
     five_minute_setup_expires_at,
     five_minute_setup_family_lane,
+    five_minute_setup_is_executable,
     five_minute_setup_is_in_policy_scope,
     is_one_minute_segment_difference,
+    match_one_minute_nesting_witness_for_point,
     structural_point_occurrence_id,
 )
 from chanlun.decision_support.trading_system.models import (
@@ -145,6 +147,72 @@ FRAME_COLUMNS = (
     "raw_low",
     "raw_close",
 )
+
+
+def _segment_difference_jointly_known_at(
+    setup: StructuralPoint,
+    witness: StructuralPoint,
+) -> datetime | None:
+    """Return the first causal close at which one exact nesting pair is known."""
+
+    decision_at = max(
+        normalize_datetime(setup.available_at, "setup available_at"),
+        normalize_datetime(witness.available_at, "witness available_at"),
+    )
+    if not five_minute_setup_is_executable(setup, as_of=decision_at):
+        return None
+    if (
+        match_one_minute_nesting_witness_for_point(
+            setup,
+            (witness,),
+            as_of=decision_at,
+        )
+        is not witness
+    ):
+        return None
+    return decision_at
+
+
+def _buy_segment_difference_boundary_times(
+    five_points: Sequence[StructuralPoint],
+    one_points: Sequence[StructuralPoint],
+    *,
+    eligible_times: set[datetime] | None = None,
+) -> set[datetime]:
+    """Return unique first joint-knowledge closes for tradable buy pairs."""
+
+    output: set[datetime] = set()
+    for setup in five_points:
+        if (
+            setup.side != "buy"
+            or not is_five_minute_trade_level(
+                setup.source_frequency,
+                setup.recursive_level,
+            )
+            or not five_minute_setup_is_in_policy_scope(setup)
+        ):
+            continue
+        candidates = tuple(point for point in one_points if point.side == "buy")
+        if not candidates:
+            continue
+        witness = match_one_minute_nesting_witness_for_point(
+            setup,
+            candidates,
+            as_of=max(
+                setup.available_at,
+                *(point.available_at for point in candidates),
+            ),
+        )
+        if witness is None:
+            continue
+        jointly_known_at = _segment_difference_jointly_known_at(setup, witness)
+        if jointly_known_at is not None and (
+            eligible_times is None or jointly_known_at in eligible_times
+        ):
+            output.add(jointly_known_at)
+    return output
+
+
 BASE_FRAME_COLUMNS = FRAME_COLUMNS[:7]
 FACT_SCHEMA = "chanlun-fixed-year-symbol-facts-v12"
 SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts-v2"
@@ -210,13 +278,13 @@ class FiveMinuteWarmupFact:
         if any(
             point.available_at != observed for point in self.production_one_points
         ):
-            raise ValueError("production 1m locator must become available now")
+            raise ValueError("production current 1m point must become available now")
         if (
             self.one_minute_bar_count
             < SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
             and self.production_one_points
         ):
-            raise ValueError("production 1m locator lacks minimum history")
+            raise ValueError("production current 1m point lacks minimum history")
         codes = {
             point.code
             for _frequency, points in point_groups
@@ -342,15 +410,14 @@ class SymbolResearchFacts:
             or not set(warmup_times).issubset(times)
         ):
             raise ValueError("5m warmup facts must match unique evaluation times")
-        locator_times = {
-            point.available_at
-            for point in self.one_points
-            if point.available_at in set(times)
-            and is_one_minute_segment_difference(point)
-        }
-        if set(warmup_times) != locator_times:
+        boundary_times = _buy_segment_difference_boundary_times(
+            self.five_points,
+            self.one_points,
+            eligible_times=set(times),
+        )
+        if set(warmup_times) != boundary_times:
             raise ValueError(
-                "every candidate 1m locator requires an exact production snapshot"
+                "every exact 1m nesting boundary requires a production snapshot"
             )
         for frequency, points, visibility in (
             ("d", self.daily_points, self.daily_point_visibility),
@@ -1428,7 +1495,7 @@ def _causal_confirmed_structure_events(
                 # Preserve an earlier geometry clock only when the same
                 # physical event is independently observable from the exact
                 # production cold window at that close.  This keeps real 1m
-                # locators at their precise minute while preventing a
+                # segment-difference facts at their precise minute while preventing a
                 # structure discovered by future bars from being backfilled.
                 first_visible_at = _causally_verified_point_available_at(
                     code=code,
@@ -1552,58 +1619,20 @@ def first_matching_segment_difference(
 ) -> StructuralPoint | None:
     if setup.source_frequency != "5m" or not setup.confirmed:
         raise ValueError("setup must be a confirmed 5m point")
-    prices = [
-        setup.structure_invalidation_price,
-        setup.structure_anchor_price,
-    ]
-    boundary = setup.center_zg if setup.side == "buy" else setup.center_zd
-    if boundary is not None:
-        prices.append(boundary)
-    low, high = min(prices), max(prices)
-    window_start = five_minute_segment_difference_window_start(setup)
-    matches = (
+    boundary = normalize_datetime(active_end, "active_end")
+    visible = tuple(
         point
         for point in one_points
-        if is_one_minute_segment_difference(point)
-        and point.code == setup.code
-        and point.side == setup.side
-        and point.point_id != setup.point_id
-        and point.price_basis_revision == setup.price_basis_revision
-        and window_start <= point.anchor_at
-        and setup.available_at <= point.available_at
-        and (
-            point.available_at < active_end
+        if (
+            point.available_at < boundary
             if end_exclusive
-            else point.available_at <= active_end
+            else point.available_at <= boundary
         )
-        and low <= point.structure_anchor_price <= high
     )
-    return min(
-        matches,
-        key=lambda point: (
-            point.available_at,
-            point.recursive_level,
-            point.tower,
-            point.point_id,
-        ),
-        default=None,
-    )
-
-
-def first_matching_trigger(
-    setup: StructuralPoint,
-    one_points: Sequence[StructuralPoint],
-    *,
-    active_end: datetime,
-    end_exclusive: bool,
-) -> StructuralPoint | None:
-    """旧接口别名；返回的是可选1分钟段差，不是正式信号触发器。"""
-
-    return first_matching_segment_difference(
+    return match_one_minute_nesting_witness_for_point(
         setup,
-        one_points,
-        active_end=active_end,
-        end_exclusive=end_exclusive,
+        visible,
+        as_of=boundary,
     )
 
 
@@ -1614,13 +1643,7 @@ def _one_minute_visibility_windows(
     end_at: datetime,
     point_visibility: Sequence[PointVisibilityInterval] = (),
 ) -> tuple[tuple[datetime, datetime], ...]:
-    """Return causal 1m evidence windows for the visible 5m tail geometry.
-
-    The terminal-segment start remains a geometric anchor constraint, but the
-    shared live matcher does not allow an earlier 1m point to become a locator
-    retrospectively after the 5m setup is confirmed.  Therefore executable
-    extraction begins at the setup's causal availability time.
-    """
+    """Return causal 1m replay windows covering each complete 5m terminal leg."""
 
     replay_end = normalize_datetime(end_at, "one minute visibility end")
     output: list[tuple[datetime, datetime]] = []
@@ -1628,30 +1651,37 @@ def _one_minute_visibility_windows(
     for interval in point_visibility:
         visibility_by_point.setdefault(interval.point_id, []).append(interval)
     for setup in setups:
-        setup_start = setup.available_at
+        setup_start = five_minute_segment_difference_window_start(setup)
+        setup_end = min(
+            five_minute_setup_expires_at(setup),
+            replay_end,
+        )
         if point_visibility:
             active_windows = tuple(
                 (
-                    max(setup_start, interval.visible_from),
-                    min(interval.visible_until or replay_end, replay_end),
+                    setup_start,
+                    min(interval.visible_until or setup_end, setup_end),
                 )
                 for interval in visibility_by_point.get(setup.point_id, ())
-                if interval.visible_from <= replay_end
+                if interval.visible_from <= setup_end
                 and (
                     interval.visible_until is None
-                    or interval.visible_until > max(setup_start, interval.visible_from)
+                    or interval.visible_until >= setup.available_at
                 )
             )
         else:
             if active_ends is None:
                 raise ValueError("legacy setup windows require active ends")
             active_windows = (
-                (setup_start, min(active_ends[setup.point_id][0], replay_end)),
+                (
+                    setup_start,
+                    min(active_ends[setup.point_id][0], setup_end),
+                ),
             )
         output.extend(
             (window_start, active_end)
             for window_start, active_end in active_windows
-            if window_start <= active_end
+            if setup.available_at <= active_end and window_start <= active_end
         )
     return tuple(output)
 
@@ -1693,7 +1723,7 @@ def _causal_one_minute_events_by_windows(
     frame: pd.DataFrame,
     visibility_windows: Sequence[tuple[datetime, datetime]],
 ) -> tuple[tuple[StructuralPoint, ...], tuple[PointVisibilityInterval, ...]]:
-    """Replay each active locator epoch from production-sized cold history.
+    """Replay each active 5m terminal epoch from production-sized cold history.
 
     The live gateway cold-starts 1m analysis with 12,000 completed bars and
     retains that stable left anchor while a setup stays in the priority lane.
@@ -1742,13 +1772,11 @@ def _causal_one_minute_events_by_windows(
             recursive_level_limit=1,
             include_audit_ledger=False,
         )
-        # A 1m point that already existed before the parent 5m setup entered
-        # the priority lane is not an interval-nesting locator for that setup.
-        # The generic causal ledger can expose such a still-current point at
-        # the visibility-window floor.  Keeping it would let a later terminal
-        # replay resurrect pre-setup evidence, and the result can then depend
-        # on bars beyond a truncated backtest prefix.  Only points whose own
-        # causal availability belongs to this active 5m epoch are admissible.
+        # The window begins at the parent 5m terminal-segment start.  A 1m
+        # witness must itself become causally visible inside that market epoch;
+        # exact full-interval containment is enforced later by the shared
+        # matcher.  This filter also prevents a truncated future prefix from
+        # backfilling older unrelated audit points.
         eligible_points = {
             point.point_id: point
             for point in ledger.points
@@ -1871,7 +1899,7 @@ def _causal_one_minute_points_by_windows(
     frame: pd.DataFrame,
     visibility_windows: Sequence[tuple[datetime, datetime]],
 ) -> tuple[StructuralPoint, ...]:
-    """Compatibility projection for callers that only need locator events."""
+    """Project the causal ledger to 1m segment-difference point events."""
 
     points, _visibility = _causal_one_minute_events_by_windows(
         code,
@@ -1916,11 +1944,19 @@ def sparse_evaluation_times(
         for visible_from, raw_active_end, raw_end_exclusive in replay_windows[
             setup.point_id
         ]:
-            active_end = min(raw_active_end or end, end)
+            active_end = min(
+                raw_active_end or end,
+                five_minute_setup_expires_at(setup),
+                end,
+            )
             end_exclusive = raw_end_exclusive and (
                 raw_active_end is not None and raw_active_end <= end
             )
-            if active_end < start or setup.available_at > end:
+            if (
+                active_end < start
+                or setup.available_at > end
+                or setup.available_at > active_end
+            ):
                 continue
             first_at = max(setup.available_at, visible_from, start)
             position = bisect_right(
@@ -1937,25 +1973,26 @@ def sparse_evaluation_times(
             ):
                 continue
             output.add(first_bar)
-            for locator in one_points:
-                locator_at = normalize_datetime(
-                    locator.available_at,
-                    "one minute locator available_at",
+            witness = match_one_minute_nesting_witness_for_point(
+                setup,
+                tuple(one_points),
+                as_of=active_end,
+            )
+            if witness is not None:
+                jointly_known_at = _segment_difference_jointly_known_at(
+                    setup,
+                    witness,
                 )
-                if locator_at < first_bar or locator_at > end:
-                    continue
-                if locator_at not in one_dates:
-                    continue
                 if (
-                    first_matching_segment_difference(
-                        setup,
-                        (locator,),
-                        active_end=active_end,
-                        end_exclusive=end_exclusive,
+                    jointly_known_at is not None
+                    and first_bar <= jointly_known_at <= end
+                    and jointly_known_at in one_dates
+                    and jointly_known_at <= active_end
+                    and not (
+                    end_exclusive and jointly_known_at >= active_end
                     )
-                    is locator
                 ):
-                    output.add(locator_at)
+                    output.add(jointly_known_at)
             for observed_at in thirty_dates:
                 if observed_at <= first_bar or observed_at > end:
                     continue
@@ -2325,7 +2362,7 @@ def _five_minute_warmup_facts(
     one_minute_frame: pd.DataFrame,
     observed_times: Sequence[datetime],
 ) -> tuple[FiveMinuteWarmupFact, ...]:
-    """Freeze exact production 5m/1m evidence at each locator close."""
+    """Freeze exact production 5m/1m evidence at each joint-knowledge close."""
 
     if frame.empty or not observed_times:
         return ()
@@ -2685,9 +2722,10 @@ def build_symbol_bundle(
         facts.thirty_point_visibility,
     )
     # At an execution candidate close, replay consumes the exact cold,
-    # canonical production snapshots.  The append-only ledgers remain useful
-    # for discovering candidate times and for audit, but cannot authorize an
-    # order because their arbitrary left boundary may produce a ghost point.
+    # canonical production 5m snapshot.  A completed 1m nesting witness may
+    # already have been visible before the 5m point became jointly known, so
+    # its append-only causal ledger entry must be retained alongside the
+    # current 1m tail rather than being dropped solely because it was known first.
     five_context = (
         warmup.production_five_points
         if warmup is not None
@@ -2709,15 +2747,18 @@ def build_symbol_bundle(
         evaluation.one_minute_bar_count
         >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
     )
-    one = (
+    audit_one = (
+        tradable(facts.one_points, "1m") if one_history_ready else ()
+    )
+    production_one = (
         warmup.production_one_points
         if warmup is not None
-        else tradable(facts.one_points, "1m")
+        else audit_one
         if one_history_ready
         else ()
     )
     current_one = (
-        one
+        production_one
         if warmup is not None
         else current_at(
             facts.one_points,
@@ -2727,9 +2768,55 @@ def build_symbol_bundle(
         if one_history_ready
         else ()
     )
+    nested_one_by_id = {
+        point.point_id: point
+        for setup in five
+        if five_minute_setup_is_in_policy_scope(setup)
+        and five_minute_setup_is_executable(setup, as_of=observed_at)
+        for point in audit_one
+        if (
+            jointly_known_at := _segment_difference_jointly_known_at(
+                setup,
+                point,
+            )
+        )
+        is not None
+        and jointly_known_at <= observed_at
+    }
+    one_by_id = {point.point_id: point for point in production_one}
+    one_by_id.update(nested_one_by_id)
+    one = tuple(
+        sorted(
+            one_by_id.values(),
+            key=lambda point: (
+                point.available_at,
+                point.recursive_level,
+                point.tower,
+                point.point_id,
+            ),
+        )
+    )
+    boundary_pairs = {
+        (structural_point_occurrence_id(setup), point.point_id): (setup, point)
+        for setup in five
+        if setup.side == "buy"
+        and five_minute_setup_is_in_policy_scope(setup)
+        and five_minute_setup_is_executable(setup, as_of=observed_at)
+        for point in (
+            match_one_minute_nesting_witness_for_point(
+                setup,
+                one,
+                as_of=observed_at,
+            ),
+        )
+        if point is not None
+        and point.side == "buy"
+        and _segment_difference_jointly_known_at(setup, point) == observed_at
+    }
     entry_boundaries = tuple(
         EntryExecutionBoundary(
             symbol=facts.code,
+            setup_occurrence_id=structural_point_occurrence_id(setup),
             point_id=point.point_id,
             source_frequency="1m",
             confirmation_bar_closed_at=evaluation.bar.closed_at,
@@ -2743,17 +2830,15 @@ def build_symbol_bundle(
             ),
             raw_price_basis_revision=facts.source_revision,
         )
-        for point in one
-        if point.side == "buy"
-        and point.available_at == evaluation.bar.closed_at
-        and is_one_minute_segment_difference(point)
+        for setup, point in sorted(
+            boundary_pairs.values(),
+            key=lambda value: (
+                structural_point_occurrence_id(value[0]),
+                value[1].point_id,
+            ),
+        )
     )
-    buy_boundary_present = any(
-        point.side == "buy"
-        and point.available_at == evaluation.bar.closed_at
-        and is_one_minute_segment_difference(point)
-        for point in one
-    )
+    buy_boundary_present = bool(boundary_pairs)
     enforce_warmup = buy_boundary_present
     warmup_converged = True if warmup is None else warmup.converged
     warmup_reasons: tuple[str, ...] = ()
@@ -3451,6 +3536,8 @@ def build_symbol_facts(
         setup
         for setup in operation_five_points
         if setup.point_id in relevant_point_ids
+        and setup.available_at <= end_at
+        and five_minute_setup_expires_at(setup) >= effective_at
     )
     has_relevant_setup = bool(relevant_setups)
     daily_frame = (
@@ -3476,7 +3563,10 @@ def build_symbol_facts(
     if relevant_setups:
         minute_start = min(
             minute_start,
-            min(point.available_at for point in relevant_setups),
+            min(
+                five_minute_segment_difference_window_start(point)
+                for point in relevant_setups
+            ),
         )
     one_frame = (
         load_qmt_frame(
@@ -3581,38 +3671,29 @@ def build_symbol_facts(
     evaluation_time_set = {
         observed_at for observed_at in evaluation_times if observed_at in bars
     }
-    locator_times = tuple(
+    buy_boundary_times = tuple(
         sorted(
-            {
-                point.available_at
-                for point in one_points
-                if point.available_at in evaluation_time_set
-                and is_one_minute_segment_difference(point)
-            }
-        )
-    )
-    buy_locator_times = tuple(
-        observed_at
-        for observed_at in locator_times
-        if any(
-            point.side == "buy" and point.available_at == observed_at
-            for point in one_points
+            _buy_segment_difference_boundary_times(
+                operation_five_points,
+                one_points,
+                eligible_times=evaluation_time_set,
+            )
         )
     )
     five_minute_warmup = _five_minute_warmup_facts(
         code,
         frames["5m"],
         one_frame,
-        locator_times,
+        buy_boundary_times,
     )
     sector_by_time = {
-        observed_at: sector_at(observed_at) for observed_at in buy_locator_times
+        observed_at: sector_at(observed_at) for observed_at in buy_boundary_times
     }
     higher_timeframe_gates = _historical_higher_timeframe_gates(
         code=code,
         one_minute_frame=one_frame,
         daily_frame=daily_frame,
-        observed_times=buy_locator_times,
+        observed_times=buy_boundary_times,
         sector_by_time=sector_by_time,
     )
     evaluations = tuple(
@@ -3679,7 +3760,6 @@ __all__ = (
     "causal_directions",
     "final_confirmed_points",
     "first_matching_segment_difference",
-    "first_matching_trigger",
     "final_confirmed_structure_events",
     "load_qmt_frame",
     "load_qmt_daily_frame",

@@ -147,19 +147,23 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert config["stroke_rule"] == "strict-cl-k-distance"
     assert config["segment_rule"] == "feature-sequence"
     assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
-    assert config["strict_macd_source"] == "native_l0_causal_recursive"
+    assert config["strict_macd_source"] == (
+        "same-physical-source-native-all-recursive-levels"
+    )
     assert (
         config["strict_macd_level_policy"]
-        == "native_l0_level_plus_one_recursive"
+        == "exact-unit-source-interval"
     )
     assert config["strict_macd_area"] == "same_sign_magnitude"
     assert config["strict_macd_decay_rule"] == "area-or-peak-or-dif"
-    assert config["center_seed_rule"] == ("shared-leave-entry-three-core-five-role")
+    assert config["center_seed_rule"] == (
+        "three-completed-same-level-units-overlap"
+    )
     assert config["center_lifecycle_rule"] == (
-        "bidirectional-shared-leave-first-return-event"
+        "external-departure-first-outside-return-third-class"
     )
     assert config["center_scan_rule"] == (
-        "post-third-point-first-mature-causal-owner"
+        "three-unit-seed-causal-lifecycle-owner"
     )
     assert config["trend_divergence_rule"] == (
         "entry-width-matched-one-or-three-price-extreme-any-macd-decay"

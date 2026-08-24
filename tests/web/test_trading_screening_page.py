@@ -37,6 +37,9 @@ class _TradingScreeningService:
             "priority_monitoring_enabled": True,
             "priority_monitor_ready": True,
             "priority_monitor_session_open": True,
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "validation_cohort_size": 12,
+            "effective_monitor_universe_limit": 12,
         }
 
     def snapshot(self) -> dict[str, object]:
@@ -52,6 +55,12 @@ class _TradingScreeningService:
             "read_only": True,
             "research_only": True,
             "no_order_execution": True,
+            "screening_scope": {
+                "schema": "chanlun-screening-scope-v1",
+                "mode": "VALIDATION_COHORT",
+                "validation_cohort_size": 12,
+                "effective_monitor_universe_limit": 12,
+            },
             "counts_by_stage": {"triggered": 1},
             "counts_by_point_type": {
                 "1buy": 0,
@@ -137,7 +146,16 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
             "priority_monitoring_enabled": True,
             "priority_monitor_ready": True,
             "priority_monitor_session_open": True,
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "validation_cohort_size": 12,
+            "effective_monitor_universe_limit": 12,
             "snapshot_hash_coverage": "EXCLUDED_OPERATIONAL_METADATA",
+    }
+    assert payload["data"]["screening_scope"] == {
+        "schema": "chanlun-screening-scope-v1",
+        "mode": "VALIDATION_COHORT",
+        "validation_cohort_size": 12,
+        "effective_monitor_universe_limit": 12,
     }
     assert payload["data"]["manual_attention"] == {
         "schema": "chanlun-local-manual-attention",
@@ -176,7 +194,7 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
         "live_status": "LIVE_DISABLED",
     }
     service = app.extensions["decision_support_trading_screening"]
-    assert service.refresh_requests == 1
+    assert service.refresh_requests == 0
 
 
 def test_early_signals_compresses_large_response_when_client_accepts_gzip(
@@ -650,6 +668,10 @@ def test_screening_page_uses_new_three_workspace_contract(
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
+    service = logged_in_client.application.extensions[
+        "decision_support_trading_screening"
+    ]
+    assert service.refresh_requests == 0
     assert 'data-schema="chanlun-trading-screening"' in html
     assert 'id="es-sector-completion"' in html
     assert 'id="es-member-history"' in html
@@ -961,6 +983,7 @@ def test_human_review_data_keeps_realtime_inbox_when_formal_bundle_is_invalid(
                     {
                         "schema": "chanlun-realtime-review-notification",
                         "notification_id": "sha256:" + "9" * 64,
+                        "source": "CROSS_MARKET_ATTENTION_MONITOR",
                         "market": "us",
                         "code": "QCOM.US",
                         "side": "buy",
@@ -969,12 +992,28 @@ def test_human_review_data_keeps_realtime_inbox_when_formal_bundle_is_invalid(
                         "automated_action_authorized": False,
                         "real_order_transport_enabled": False,
                         "live_status": "LIVE_DISABLED",
+                        "delivery_status": "delivered",
                         "chart_urls": {"1m": "/?market=us&code=QCOM.US"},
-                    }
+                    },
+                    {
+                        "schema": "chanlun-realtime-review-notification",
+                        "notification_id": "sha256:" + "8" * 64,
+                        "source": "CROSS_MARKET_ATTENTION_MONITOR",
+                        "market": "us",
+                        "code": "TSLA.US",
+                        "side": "sell",
+                        "signal_time": "2026-08-15T03:10:00+08:00",
+                        "review_required": True,
+                        "automated_action_authorized": False,
+                        "real_order_transport_enabled": False,
+                        "live_status": "LIVE_DISABLED",
+                        "delivery_status": "delivered",
+                        "chart_urls": {"1m": "/?market=us&code=TSLA.US"},
+                    },
                 ],
-                "event_count": 1,
-                "pending_review_count": 1,
-                "delivery_counts": {"delivered": 1},
+                "event_count": 2,
+                "pending_review_count": 2,
+                "delivery_counts": {"delivered": 2},
                 "credentials_exposed": False,
                 "real_account_accessed": False,
                 "real_order_transport_enabled": False,
@@ -983,6 +1022,13 @@ def test_human_review_data_keeps_realtime_inbox_when_formal_bundle_is_invalid(
             }
 
     app.extensions["realtime_review_inbox"] = _RealtimeInbox()
+
+    class _Monitor:
+        @staticmethod
+        def admitted_identities():
+            return (("us", "QCOM.US"),)
+
+    app.extensions["holding_group_monitor"] = _Monitor()
 
     response = logged_in_client.get(
         "/decision-support/human-review/data?source=latest"

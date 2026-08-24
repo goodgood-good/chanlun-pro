@@ -80,16 +80,14 @@ def _causal_member_ratios(
     ].copy()
     if work.empty:
         return None
-    work["date"] = pd.to_datetime(
-        work.pop("time"), unit="ms", utc=True
-    ).dt.tz_convert("Asia/Shanghai")
+    work["date"] = pd.to_datetime(work.pop("time"), unit="ms", utc=True).dt.tz_convert(
+        "Asia/Shanghai"
+    )
     work = work.sort_values("date").drop_duplicates("date", keep="last")
     factor = pd.Series(1.0, index=work.index, dtype="float64")
     sessions = work["date"].map(lambda value: value.date())
     for event in index.factors_for(code):
-        factor.loc[sessions >= event.effective_on] *= float(
-            event.raw_price_divisor
-        )
+        factor.loc[sessions >= event.effective_on] *= float(event.raw_price_divisor)
     for field in _PRICES:
         work[field] *= factor
     work["previous_close"] = work["close"].shift(1)
@@ -206,19 +204,33 @@ def composite_from_member_frames(
     return attach_price_basis_metadata(result.reset_index(drop=True), metadata)
 
 
-def _candidate_codes(
+def candidate_codes_for_pit_sector(
     snapshot: PITMetadataSnapshot,
     sector_id: str,
+    *,
+    start_at: datetime,
+    end_at: datetime,
 ) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            {
-                row.code
-                for row in snapshot.memberships
-                if row.sector_id == sector_id
-            }
+    start = normalize_datetime(start_at, "start_at")
+    end = normalize_datetime(end_at, "end_at")
+    if start > end:
+        raise ValueError("sector candidate start cannot follow end")
+    index = PITMetadataIndex(snapshot)
+    historical_candidates = {
+        row.code for row in snapshot.memberships if row.sector_id == sector_id
+    }
+    selected: list[str] = []
+    for code in sorted(historical_candidates):
+        current = index.membership_at(code, start)
+        enters_during_replay = any(
+            row.sector_id == sector_id and start <= row.known_at <= end
+            for row in index.memberships_for(code)
         )
-    )
+        if (
+            current is not None and current.sector_id == sector_id
+        ) or enters_during_replay:
+            selected.append(code)
+    return tuple(selected)
 
 
 def _load_qmt_member_frames(
@@ -283,7 +295,12 @@ def build_pit_sw1_composite(
     start_at: datetime,
     end_at: datetime,
 ) -> pd.DataFrame:
-    codes = _candidate_codes(snapshot, sector_id)
+    codes = candidate_codes_for_pit_sector(
+        snapshot,
+        sector_id,
+        start_at=start_at,
+        end_at=end_at,
+    )
     if not codes:
         return _empty(sector_id)
     frames = _load_qmt_member_frames(
@@ -304,5 +321,6 @@ __all__ = (
     "PIT_SW1_COMPOSITE_ADJUSTMENT",
     "PIT_SW1_COMPOSITE_PROVIDER",
     "build_pit_sw1_composite",
+    "candidate_codes_for_pit_sector",
     "composite_from_member_frames",
 )

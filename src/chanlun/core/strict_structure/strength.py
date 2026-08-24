@@ -176,10 +176,10 @@ class ComparisonLeg:
 
 
 class MacdStrengthProvider:
-    """按唯一结构级别策略读取与来源对齐的 MACD。
+    """在来源 ``CL`` 的原生 MACD 上测量每个结构单元。
 
-    物理第 0 层使用来源 K 线周期的原生 MACD；递归第 N 层使用第 N 级因果局部
-    高周期序列，因此结构递归永远不会改变第 0 层证据的含义。
+    递归层级表示结构关系，不等于固定的物理 K 线周期。L0、L1 以及更高层
+    因而读取同一条原生序列，差别只来自各单元覆盖的精确来源 K 线区间。
     """
 
     def __init__(self, cd) -> None:
@@ -192,7 +192,6 @@ class MacdStrengthProvider:
         ):
             raise ValueError("source K-line dates must be strictly increasing")
 
-        self._series_by_level = {}
         index_values = cd.get_idx()
         if not isinstance(index_values, dict):
             raise ValueError("native MACD index result is invalid")
@@ -200,40 +199,8 @@ class MacdStrengthProvider:
         if not isinstance(native, dict):
             raise ValueError("native MACD index result is unavailable")
         self._validate_series(native, "native MACD")
-        self._series_by_level[0] = (
-            np.asarray(native["hist"], dtype=float).copy(),
-            np.asarray(native["dif"], dtype=float).copy(),
-            self._dates,
-            None,
-        )
-
-        level_series = getattr(cd, "_strict_htf_macd_by_level", None)
-        if level_series is None:
-            return
-        if not isinstance(level_series, dict):
-            raise ValueError("causal HTF MACD level map is invalid")
-        for level, candidate in level_series.items():
-            if type(level) is not int or level < 0 or not isinstance(candidate, dict):
-                raise ValueError("causal HTF MACD level entry is invalid")
-            bucket_keys = tuple(candidate.get("bucket_keys", ()))
-            if (
-                candidate.get("algorithm") != "causal-partial-htf"
-                or tuple(candidate.get("dates", ())) != self._dates
-                or tuple(candidate.get("known_at", ())) != self._dates
-                or len(bucket_keys) != len(self._dates)
-                or any(
-                    bucket_keys[index] > bucket_keys[index + 1]
-                    for index in range(len(bucket_keys) - 1)
-                )
-            ):
-                raise ValueError("causal HTF MACD context is invalid")
-            self._validate_series(candidate, "causal level HTF MACD")
-            self._series_by_level[level + 1] = (
-                np.asarray(candidate["hist"], dtype=float).copy(),
-                np.asarray(candidate["dif"], dtype=float).copy(),
-                tuple(candidate["known_at"]),
-                bucket_keys,
-            )
+        self._hist_series = np.asarray(native["hist"], dtype=float).copy()
+        self._dif_series = np.asarray(native["dif"], dtype=float).copy()
 
     def _validate_series(self, values: dict, label: str) -> None:
         for key in ("hist", "dif"):
@@ -246,12 +213,6 @@ class MacdStrengthProvider:
     def snapshot(
         self, unit: ConstituentUnit | ComparisonMeasurement
     ) -> StrengthSnapshot:
-        selected = self._series_by_level.get(unit.structural_level)
-        if selected is None:
-            raise MacdStrengthUnavailable(
-                "MACD is unavailable for structural level"
-            )
-        hist_series, dif_series, known_at, bucket_keys = selected
         left = bisect_left(self._dates, unit.market_start)
         right = bisect_right(self._dates, unit.market_end)
         if (
@@ -264,17 +225,9 @@ class MacdStrengthProvider:
                 "unit market interval must align with source K lines"
             )
 
-        selected_indexes = tuple(range(left, right))
-        if bucket_keys is not None:
-            # ``causal-partial-htf`` 为每根来源 K 线输出一个临时值，使实时端点
-            # 立即可用；但 MACD 面积仍按高周期 K 线计算，每个覆盖目标桶只统计
-            # 一次，并使用该结构单元端点当时可见的最后一个值。
-            last_by_bucket: dict[object, int] = {}
-            for index in selected_indexes:
-                last_by_bucket[bucket_keys[index]] = index
-            selected_indexes = tuple(sorted(last_by_bucket.values()))
-        hist = hist_series[np.asarray(selected_indexes, dtype=int)]
-        dif = dif_series[np.asarray(selected_indexes, dtype=int)]
+        selected_indexes = np.arange(left, right, dtype=int)
+        hist = self._hist_series[selected_indexes]
+        dif = self._dif_series[selected_indexes]
         if not np.isfinite(hist).all() or not np.isfinite(dif).all():
             raise ValueError("MACD slice must be finite")
         if unit.direction == "up":
@@ -294,10 +247,7 @@ class MacdStrengthProvider:
             histogram_peak=peak,
             dif_extreme=dif_extreme,
             source="macd",
-            available_at=max(
-                unit.available_at,
-                *(known_at[index] for index in selected_indexes),
-            ),
+            available_at=max(unit.available_at, self._dates[right - 1]),
         )
 
 
@@ -393,7 +343,7 @@ def center_entry_comparison_leg(
     视为重叠，此时进入段保持一段宽度。
     """
 
-    if center.source_kind.value == "stroke_observation":
+    if center.source_kind.value == "stroke_observation" or center.entry_unit is None:
         return None
     values = tuple(units)
     index = {item.unit_id: offset for offset, item in enumerate(values)}

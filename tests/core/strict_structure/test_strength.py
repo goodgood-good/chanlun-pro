@@ -15,7 +15,6 @@ from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind
 from chanlun.core.strict_structure.strength import (
     ComparisonMeasurement,
     MacdStrengthProvider,
-    MacdStrengthUnavailable,
     StrengthSnapshot,
     _comparison_measurement,
     compare_divergence,
@@ -29,10 +28,6 @@ BASE = datetime(2026, 1, 5, 9, 30, tzinfo=timezone.utc)
 
 def source_dates(count: int) -> tuple[datetime, ...]:
     return tuple(BASE + timedelta(minutes=index) for index in range(count))
-
-
-def shifted_source_dates(count: int) -> tuple[datetime, ...]:
-    return tuple(value + timedelta(seconds=1) for value in source_dates(count))
 
 
 def source_klines(closes) -> tuple[Kline, ...]:
@@ -51,10 +46,18 @@ def source_klines(closes) -> tuple[Kline, ...]:
 
 
 class FakeCD:
-    def __init__(self, dates, *, native, htf_by_level):
+    def __init__(
+        self,
+        dates,
+        *,
+        native,
+        frequency="5m",
+        legacy_htf_by_level=None,
+    ):
         self._dates = tuple(dates)
         self._native = dict(native)
-        self._strict_htf_macd_by_level = dict(htf_by_level)
+        self._frequency = frequency
+        self._strict_htf_macd_by_level = dict(legacy_htf_by_level or {})
 
     def get_src_klines(self):
         return tuple(SimpleNamespace(date=value) for value in self._dates)
@@ -62,43 +65,28 @@ class FakeCD:
     def get_idx(self):
         return {"macd": dict(self._native)}
 
+    def get_frequency(self):
+        return self._frequency
+
+
 def fake_strength_provider(
     *,
     native_hist,
     native_dif=None,
-    htf_hist=None,
-    htf_dif=None,
-    htf_dates=None,
-    htf_known_at=None,
-    htf_bucket_keys=None,
-    htf_algorithm=None,
+    frequency="5m",
+    legacy_htf_by_level=None,
 ):
     native_hist = tuple(native_hist)
     native = {
         "hist": native_hist,
         "dif": tuple(native_dif if native_dif is not None else native_hist),
     }
-    htf_by_level = {}
-    if htf_hist is not None:
-        selected_hist = tuple(htf_hist)
-        selected_dif = tuple(htf_dif if htf_dif is not None else selected_hist)
-        htf_by_level[0] = {
-            "hist": selected_hist,
-            "dif": selected_dif,
-            "dates": tuple(htf_dates or source_dates(len(selected_hist))),
-            "known_at": tuple(htf_known_at or source_dates(len(selected_hist))),
-            "bucket_keys": tuple(
-                htf_bucket_keys
-                if htf_bucket_keys is not None
-                else range(len(selected_hist))
-            ),
-            "algorithm": htf_algorithm or "causal-partial-htf",
-        }
     return MacdStrengthProvider(
         FakeCD(
             source_dates(len(native_hist)),
             native=native,
-            htf_by_level=htf_by_level,
+            frequency=frequency,
+            legacy_htf_by_level=legacy_htf_by_level,
         )
     )
 
@@ -145,20 +133,9 @@ def test_strength_slice_uses_only_unit_market_interval():
     assert snapshot.histogram_area == 3
 
 
-def test_noncausal_htf_macd_is_rejected():
-    with pytest.raises(ValueError, match="causal HTF MACD context"):
-        fake_strength_provider(
-            native_hist=(9, 9, 9),
-            htf_hist=(1, 2, 1),
-            htf_algorithm="closed-bucket-htf",
-        )
-
-
-def test_physical_strength_uses_native_same_period_macd():
+def test_physical_strength_uses_native_macd():
     provider = fake_strength_provider(
         native_hist=(2, 3, 4),
-        htf_hist=(5, -40, 3),
-        htf_algorithm="causal-partial-htf",
     )
 
     snapshot = provider.snapshot(unit_covering_indexes(0, 2, direction="up"))
@@ -167,42 +144,46 @@ def test_physical_strength_uses_native_same_period_macd():
     assert snapshot.histogram_area == 9
 
 
-def test_recursive_strength_uses_first_causal_partial_higher_period():
+def test_every_recursive_level_uses_native_macd_over_the_exact_source_interval():
     provider = fake_strength_provider(
-        native_hist=(99, 99, 99),
-        htf_hist=(5, -40, 3),
-        htf_algorithm="causal-partial-htf",
+        native_hist=(-99, 2, -3, 4, 5, -7, 99),
+        native_dif=(0, 10, 20, 30, 40, 50, 60),
     )
 
-    snapshot = provider.snapshot(
-        unit_covering_indexes(0, 2, direction="up", structural_level=1)
+    snapshots = tuple(
+        provider.snapshot(
+            unit_covering_indexes(1, 5, direction="up", structural_level=level)
+        )
+        for level in (0, 1, 2)
     )
 
-    assert snapshot.source == "macd"
-    assert snapshot.histogram_area == 8
+    assert {snapshot.source for snapshot in snapshots} == {"macd"}
+    assert {snapshot.histogram_area for snapshot in snapshots} == {11}
+    assert {snapshot.histogram_peak for snapshot in snapshots} == {5}
+    assert {snapshot.dif_extreme for snapshot in snapshots} == {50}
 
 
-def test_formal_strength_fails_closed_when_causal_htf_is_unavailable():
+def test_recursive_strength_needs_no_higher_period_series():
     provider = fake_strength_provider(native_hist=(1, 2, 3))
 
-    with pytest.raises(MacdStrengthUnavailable, match="structural level"):
+    snapshots = tuple(
         provider.snapshot(
-            unit_covering_indexes(0, 2, direction="up", structural_level=1)
+            unit_covering_indexes(0, 2, direction="up", structural_level=level)
         )
+        for level in (1, 2, 7)
+    )
+
+    assert {snapshot.histogram_area for snapshot in snapshots} == {6}
 
 
-def test_formal_causal_htf_snapshot_is_prefix_stable_after_new_source_bar():
+def test_recursive_native_snapshot_is_prefix_stable_after_new_source_bar():
     before = fake_strength_provider(
         native_hist=(1, 2, 1),
-        htf_hist=(4, -1, 2),
-        htf_algorithm="causal-partial-htf",
     ).snapshot(
         unit_covering_indexes(0, 2, direction="up", structural_level=1)
     )
     after = fake_strength_provider(
         native_hist=(1, 2, 1, 9),
-        htf_hist=(4, -1, 2, -999),
-        htf_algorithm="causal-partial-htf",
     ).snapshot(
         unit_covering_indexes(0, 2, direction="up", structural_level=1)
     )
@@ -249,51 +230,56 @@ def test_strength_area_uses_only_histogram_bars_in_leg_direction():
     assert down.histogram_peak == -9
 
 
-def test_causal_htf_area_counts_each_target_bucket_once():
+def test_recursive_strength_counts_each_native_source_bar_once():
     provider = fake_strength_provider(
-        native_hist=(99,) * 10,
-        htf_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4, 1.3, 1.2, 1.1),
-        htf_algorithm="causal-partial-htf",
-        htf_bucket_keys=(0, 0, 0, 0, 0, 1, 1, 1, 1, 1),
+        native_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4, 1.3, 1.2, 1.1),
     )
 
     snapshot = provider.snapshot(
         unit_covering_indexes(0, 9, direction="up", structural_level=1)
     )
 
-    assert snapshot.histogram_area == pytest.approx(2.1)
-    assert snapshot.histogram_peak == pytest.approx(1.1)
+    assert snapshot.histogram_area == pytest.approx(9.5)
+    assert snapshot.histogram_peak == pytest.approx(1.5)
 
 
-def test_causal_htf_open_bucket_uses_only_the_unit_endpoint_sample():
+def test_recursive_strength_ignores_native_bars_after_the_unit_endpoint():
     base = fake_strength_provider(
-        native_hist=(99,) * 7,
-        htf_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4),
-        htf_algorithm="causal-partial-htf",
-        htf_bucket_keys=(0, 0, 0, 0, 0, 1, 1),
+        native_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4),
     ).snapshot(
         unit_covering_indexes(0, 6, direction="up", structural_level=1)
     )
     extended = fake_strength_provider(
-        native_hist=(99,) * 10,
-        htf_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4, -999, -999, -999),
-        htf_algorithm="causal-partial-htf",
-        htf_bucket_keys=(0, 0, 0, 0, 0, 1, 1, 1, 1, 1),
+        native_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4, -999, -999, -999),
     ).snapshot(
         unit_covering_indexes(0, 6, direction="up", structural_level=1)
     )
 
     assert base == extended
-    assert base.histogram_area == pytest.approx(2.4)
+    assert base.histogram_area == pytest.approx(5.9)
 
 
-def test_same_length_but_misaligned_htf_dates_are_rejected():
-    with pytest.raises(ValueError, match="causal HTF MACD context"):
+def test_fixed_frequency_labels_and_legacy_htf_state_do_not_control_strength():
+    legacy = {
+        0: {
+            "hist": (-999, -999, -999),
+            "dif": (-999, -999, -999),
+            "algorithm": "causal-partial-htf",
+        }
+    }
+    snapshots = tuple(
         fake_strength_provider(
-            native_hist=(1, 2, 1),
-            htf_hist=(9, 9, 9),
-            htf_dates=shifted_source_dates(3),
+            native_hist=(1, 2, 3),
+            frequency=frequency,
+            legacy_htf_by_level=legacy,
+        ).snapshot(
+            unit_covering_indexes(0, 2, direction="up", structural_level=2)
         )
+        for frequency in ("1m", "5m", "30m", "d")
+    )
+
+    assert {snapshot.histogram_area for snapshot in snapshots} == {6}
+    assert {snapshot.dif_extreme for snapshot in snapshots} == {3}
 
 
 class TableProvider:

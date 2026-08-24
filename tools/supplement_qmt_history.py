@@ -31,9 +31,10 @@ if str(SOURCE_ROOT) not in sys.path:
 
 
 CN = ZoneInfo("Asia/Shanghai")
-CODE_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
+CODE_RE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 DEFAULT_SCOPE = "\u6caa\u6df1\u4eacA\u80a1"
 SCHEMA = "chanlun-qmt-history-supplement"
+MAX_UNCONFIRMED_CODES = 20
 
 
 def _day(value: str) -> date:
@@ -94,20 +95,35 @@ def _load_resume(path: Path, request: Mapping[str, object]) -> dict[str, object]
     return payload
 
 
-def _parse_codes(raw: str | None, xtdata: object) -> tuple[str, ...]:
-    if raw:
-        candidates = (item.strip().upper() for item in raw.split(","))
-    else:
-        candidates = xtdata.get_stock_list_in_sector(DEFAULT_SCOPE)
-    return tuple(
-        sorted(
-            {
-                code
-                for code in candidates
-                if isinstance(code, str) and CODE_RE.fullmatch(code) is not None
-            }
+def _normalized_codes(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not raw.strip():
+        raise ValueError("--codes must contain at least one normalized stock code")
+    candidates = tuple(item.strip().upper() for item in raw.split(","))
+    if any(value in {"", "ALL", "*"} for value in candidates):
+        raise ValueError("--codes cannot contain empty/all/* scope selectors")
+    invalid = tuple(value for value in candidates if CODE_RE.fullmatch(value) is None)
+    if invalid:
+        raise ValueError(
+            "--codes must use normalized MARKET.###### values: "
+            + ",".join(invalid)
         )
-    )
+    return tuple(sorted(set(candidates)))
+
+
+def _native_code(code: str) -> str:
+    market, digits = code.split(".", 1)
+    return f"{digits}.{market}"
+
+
+def _full_market_codes(xtdata: object) -> tuple[str, ...]:
+    output: set[str] = set()
+    for raw in xtdata.get_stock_list_in_sector(DEFAULT_SCOPE):
+        if not isinstance(raw, str):
+            continue
+        native = raw.strip().upper()
+        if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", native) is not None:
+            output.add(native)
+    return tuple(sorted(output))
 
 
 def _read_time_coverage(
@@ -202,7 +218,20 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--period", choices=("1m", "5m", "30m"), default="1m")
     result.add_argument("--batch-size", type=_positive_int, default=50)
     result.add_argument("--retries", type=_positive_int, default=3)
-    result.add_argument("--codes", help="optional comma-separated native QMT codes")
+    result.add_argument(
+        "--codes",
+        help="required bounded comma-separated normalized codes, e.g. SZ.000001",
+    )
+    result.add_argument(
+        "--full-market",
+        action="store_true",
+        help="explicitly request the complete QMT A-share scope",
+    )
+    result.add_argument(
+        "--confirm-large-scope",
+        action="store_true",
+        help="independent confirmation for more than 20 codes or full market",
+    )
     result.add_argument("--output", type=Path, required=True)
     result.add_argument("--force", action="store_true")
     return result
@@ -214,11 +243,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("start cannot follow end")
     if args.batch_size > 100:
         raise ValueError("batch-size cannot exceed QMT's safe limit of 100")
+    if args.full_market and args.codes is not None:
+        raise ValueError("--full-market cannot be combined with --codes")
+    if args.full_market and not args.confirm_large_scope:
+        raise ValueError("--full-market also requires --confirm-large-scope")
+    if not args.full_market:
+        normalized_codes = _normalized_codes(args.codes)
+        if (
+            len(normalized_codes) > MAX_UNCONFIRMED_CODES
+            and not args.confirm_large_scope
+        ):
+            raise ValueError(
+                f"{len(normalized_codes)} requested codes require "
+                "--confirm-large-scope"
+            )
+        codes = tuple(_native_code(code) for code in normalized_codes)
 
     from xtquant import xtdata
 
     xtdata.enable_hello = False
-    codes = _parse_codes(args.codes, xtdata)
+    if args.full_market:
+        codes = _full_market_codes(xtdata)
     if not codes:
         raise RuntimeError("QMT returned no A-share codes")
     start_text = _request_timestamp(args.start, closing=False)

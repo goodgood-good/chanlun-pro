@@ -43,14 +43,11 @@ CONTINUATION_SUPPORT_POINT_TYPES: frozenset[PointType] = frozenset(
     {"3buy", "3sell"}
 )
 # 1 分钟段差证据既可以由一、二类反转/回试点完成，也可以由满足严格中枢边界
-# 间隔的三类延续点完成。它只用于 5 分钟正式买卖点之后的段差/精细定位，
-# 不能反过来决定 5 分钟买卖点是否成立。
+# 间隔的三类延续点完成。区间套见证可以发生在 5m 末端段形成期间；
+# 执行决策时刻是 5m 设置与完整嵌套 1m 见证首次共同可知的时刻。
 ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES: frozenset[PointType] = frozenset(
     (*REVERSAL_SUPPORT_POINT_TYPES, *CONTINUATION_SUPPORT_POINT_TYPES)
 )
-# 持久化文档和历史研究代码仍使用旧名称。保留只读别名，避免把旧档案误判为
-# 损坏；新决策代码必须使用上面的“段差证据”名称和语义。
-ONE_MINUTE_TRIGGER_POINT_TYPES = ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES
 PointSide = Literal["buy", "sell"]
 PointStatus = Literal["confirmed"]
 PointVariant = Literal["standard", "strict", "weak_divergence", "boundary_touch"]
@@ -73,11 +70,11 @@ MAX_FIVE_MINUTE_SETUP_AGE_SECONDS = 4 * 24 * 60 * 60
 
 ENTRY_EXECUTION_BOUNDARY_POLICY_ID = sha256_json(
     {
-        "schema": "chanlun-human-entry-execution-boundary",
-        "locator_frequency": "1m",
+        "schema": "chanlun-human-entry-execution-boundary-pair-v2",
+        "segment_difference_frequency": "1m",
         "price_cap": "UNADJUSTED_CONFIRMATION_BAR_HIGH",
         "validity": (
-            "NEXT_LOCATOR_BAR_CLOSE_OR_CURRENT_CONTINUOUS_AUCTION_END_FIRST"
+            "NEXT_NESTING_DECISION_BAR_CLOSE_OR_CURRENT_CONTINUOUS_AUCTION_END_FIRST"
         ),
         "signal_bar_fill_allowed": False,
         "price_chasing_allowed": False,
@@ -469,6 +466,7 @@ class EntryExecutionBoundary:
     """
 
     symbol: str
+    setup_occurrence_id: str
     point_id: str
     source_frequency: str
     confirmation_bar_closed_at: datetime
@@ -493,19 +491,23 @@ class EntryExecutionBoundary:
         if (
             not isinstance(self.symbol, str)
             or not self.symbol.strip()
+            or not isinstance(self.setup_occurrence_id, str)
+            or not self.setup_occurrence_id.strip()
             or not isinstance(self.point_id, str)
             or not self.point_id.strip()
         ):
             raise ValueError("entry execution boundary provenance is incomplete")
         if self.source_frequency != "1m":
-            raise ValueError("entry execution boundary requires a 1m locator")
+            raise ValueError(
+                "entry execution boundary requires a 1m segment difference"
+            )
         expected_valid_until = a_share_optional_entry_valid_until(
             self.confirmation_bar_closed_at
         )
         if self.entry_valid_until != expected_valid_until:
             raise ValueError(
                 "entry execution boundary validity must equal the frozen "
-                "A-share locator-bar TTL"
+                "A-share nesting-decision TTL"
             )
         prices = (self.raw_open, self.raw_high, self.raw_low, self.raw_close)
         if any(
@@ -739,7 +741,7 @@ class TradingPolicy:
     require_confirmed_five_minute: bool = True
     # 5 分钟独立决定结构信号是否成立并触发首次提醒；1 分钟区间套不创造
     # 主信号，但必须确认后才能把该信号升级为精确执行候选。
-    require_confirmed_one_minute: bool = True
+    require_one_minute_segment_difference_for_precise_execution: bool = True
     require_sector_eligibility: bool = True
     require_thirty_minute_context: bool = True
     minimum_tick: Decimal = Decimal("0.01")
@@ -751,7 +753,7 @@ class TradingPolicy:
     def __post_init__(self) -> None:
         flags = (
             self.require_confirmed_five_minute,
-            self.require_confirmed_one_minute,
+            self.require_one_minute_segment_difference_for_precise_execution,
             self.require_sector_eligibility,
             self.require_thirty_minute_context,
         )

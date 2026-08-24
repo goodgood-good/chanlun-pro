@@ -75,7 +75,7 @@ def test_physical_frequency_lower_recursive_sell_is_risk_only() -> None:
     assert decision.risk_only_point_ids == (sell.point_id,)
 
 
-def test_effective_recursive_level_overrides_lower_physical_source() -> None:
+def test_recursive_level_does_not_override_lower_physical_source() -> None:
     buy = confirmed_point("2buy", frequency="5m", level=0)
     daily_sell_from_one_minute = confirmed_point(
         "1sell",
@@ -89,7 +89,8 @@ def test_effective_recursive_level_overrides_lower_physical_source() -> None:
         physical_timeframes=True,
     )
 
-    assert decision.hard_block is True
+    assert decision.hard_block is False
+    assert decision.risk_only_point_ids == (daily_sell_from_one_minute.point_id,)
 
 
 def test_higher_recursive_context_cannot_be_promoted_to_trade_setup() -> None:
@@ -97,7 +98,7 @@ def test_higher_recursive_context_cannot_be_promoted_to_trade_setup() -> None:
         setup_for(confirmed_point("2buy", frequency="5m", level=2))
 
 
-def test_same_effective_cross_physical_reversal_blocks_but_third_class_does_not() -> None:
+def test_recursive_one_minute_context_cannot_impersonate_physical_five_minute() -> None:
     buy = confirmed_point("2buy", frequency="5m", level=0)
     reversal = confirmed_point("1sell", frequency="1m", level=1)
     continuation = confirmed_point(
@@ -120,7 +121,8 @@ def test_same_effective_cross_physical_reversal_blocks_but_third_class_does_not(
         physical_timeframes=True,
     )
 
-    assert reversal_decision.hard_block is True
+    assert reversal_decision.hard_block is False
+    assert reversal_decision.risk_only_point_ids == (reversal.point_id,)
     assert continuation_decision.hard_block is False
     assert continuation_decision.risk_only_point_ids == (continuation.point_id,)
 

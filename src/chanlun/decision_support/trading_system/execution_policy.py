@@ -33,26 +33,26 @@ SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE = (
 def _valid_one_minute_segment_difference(
     lifecycle: SignalLifecycle,
     point: StructuralPoint,
-    trigger: StructuralPoint | None,
+    segment_difference: StructuralPoint | None,
     *,
     minimum_tick: Decimal,
 ) -> bool:
     return bool(
         lifecycle.stage in {"triggered", "executable", "active"}
-        and trigger is not None
+        and segment_difference is not None
         and is_one_minute_segment_difference(
-            trigger,
+            segment_difference,
             minimum_tick=minimum_tick,
         )
-        and trigger.side == point.side
-        and lifecycle.trigger_point_id == trigger.point_id
+        and segment_difference.side == point.side
+        and lifecycle.trigger_point_id == segment_difference.point_id
     )
 
 
 def evaluate_entry_policy(
     lifecycle: SignalLifecycle,
     setup: TradeSetup,
-    trigger: StructuralPoint | None,
+    segment_difference: StructuralPoint | None,
     conflict: ConflictDecision,
     policy: TradingPolicy,
 ) -> EntryDecision:
@@ -80,11 +80,13 @@ def evaluate_entry_policy(
         reasons.append("lifecycle_not_actionable")
     # 5 分钟正式买点本身决定结构信号成立；1 分钟区间套是精确执行闸门。
     # 缺失时继续保留并通知 5 分钟信号，但不能发布当前买入资格。
-    if policy.require_confirmed_one_minute and is_confirmed_buy and not (
-        _valid_one_minute_segment_difference(
+    if (
+        policy.require_one_minute_segment_difference_for_precise_execution
+        and is_confirmed_buy
+        and not _valid_one_minute_segment_difference(
             lifecycle,
             point,
-            trigger,
+            segment_difference,
             minimum_tick=policy.minimum_tick,
         )
     ):
@@ -135,7 +137,7 @@ def evaluate_entry_policy(
 def evaluate_exit_policy(
     lifecycle: SignalLifecycle,
     setup: TradeSetup,
-    trigger: StructuralPoint | None,
+    segment_difference: StructuralPoint | None,
     *,
     held_tower: StructureTower | None,
     held_level: int | None,
@@ -171,11 +173,14 @@ def evaluate_exit_policy(
             "none",
             ("lifecycle_not_actionable",),
         )
-    if policy.require_confirmed_one_minute and not _valid_one_minute_segment_difference(
-        lifecycle,
-        point,
-        trigger,
-        minimum_tick=policy.minimum_tick,
+    if (
+        policy.require_one_minute_segment_difference_for_precise_execution
+        and not _valid_one_minute_segment_difference(
+            lifecycle,
+            point,
+            segment_difference,
+            minimum_tick=policy.minimum_tick,
+        )
     ):
         return ExitDecision(
             False,

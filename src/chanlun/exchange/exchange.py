@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Dict, List, Union
 
@@ -8,6 +9,73 @@ import pytz
 
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
+
+SINGLE_SYMBOL_STOCK_INFO = "SINGLE_SYMBOL_STOCK_INFO"
+UNKNOWN_OR_EXPANDING_STOCK_INFO = "UNKNOWN_OR_EXPANDING_STOCK_INFO"
+
+
+class UnsafeStockInfoCapabilityError(RuntimeError):
+    """Raised before an adapter with unknown/catalog-expanding lookup can run."""
+
+
+def supports_bounded_stock_info(exchange) -> bool:
+    """Return true only for adapters explicitly declaring per-code lookup."""
+
+    return (
+        getattr(exchange, "stock_info_query_scope", None)
+        == SINGLE_SYMBOL_STOCK_INFO
+    )
+
+
+def resolve_bounded_stock_info(
+    exchange,
+    code: str,
+    *,
+    fallback_name: str | None = None,
+    allow_code_fallback: bool = False,
+    fallback_when_missing: bool = False,
+) -> dict | None:
+    """Resolve one identity without ever invoking a catalog-expanding adapter.
+
+    Unknown adapters fail before ``stock_info`` unless the caller explicitly
+    permits a local name/code fallback.  A declared single-symbol adapter may
+    be queried once; a missing provider result is only replaced when the caller
+    separately opts into ``fallback_when_missing``.
+    """
+
+    normalized_code = str(code or "").strip()
+    if not normalized_code:
+        raise ValueError("code must be non-empty")
+    explicit_name = str(fallback_name or "").strip()
+
+    def fallback():
+        name = explicit_name or (normalized_code if allow_code_fallback else "")
+        return (
+            {"code": normalized_code, "name": name}
+            if name
+            else None
+        )
+
+    if not supports_bounded_stock_info(exchange):
+        resolved_fallback = fallback()
+        if resolved_fallback is not None:
+            return resolved_fallback
+        raise UnsafeStockInfoCapabilityError(
+            f"{type(exchange).__name__}.stock_info is not declared single-symbol"
+        )
+
+    raw = exchange.stock_info(normalized_code)
+    if not isinstance(raw, Mapping):
+        return fallback() if fallback_when_missing else None
+    resolved = dict(raw)
+    resolved["code"] = normalized_code
+    name = str(resolved.get("name") or "").strip()
+    if not name:
+        if not fallback_when_missing:
+            return None
+        return fallback()
+    resolved["name"] = name
+    return resolved
 
 
 @dataclass
@@ -27,6 +95,10 @@ class Tick:
 
 class Exchange(ABC):
     """各数据源/交易所适配器的抽象基类，定义统一行情与交易接口。"""
+
+    # Secure default: an adapter must explicitly prove that ``stock_info`` is
+    # one-code I/O.  Legacy implementations often call ``all_stocks`` inside.
+    stock_info_query_scope = UNKNOWN_OR_EXPANDING_STOCK_INFO
 
     @abstractmethod
     def default_code(self) -> str:

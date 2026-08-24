@@ -1,4 +1,4 @@
-"""全市场选股和自选导入统一使用市场绑定的无参股票列表契约。"""
+"""普通选股与自选导入都不得隐式展开全市场。"""
 import pathlib
 import types
 
@@ -29,24 +29,37 @@ class _FakeZx:
         return True
 
 
-def test_process_xuangu_task_uses_bound_market_stock_list(monkeypatch):
+def test_process_xuangu_task_uses_only_explicit_codes(monkeypatch):
     fake_ex = _FakeEx()
+    processed = []
     monkeypatch.setattr(xuangu_tasks, "get_exchange", lambda m: fake_ex)
     monkeypatch.setattr(xuangu_tasks, "zixuan", types.SimpleNamespace(ZiXuan=_FakeZx))
     monkeypatch.setattr(
         xuangu_tasks, "utils", types.SimpleNamespace(send_fs_msg=lambda *a, **k: None)
     )
-    monkeypatch.setattr(xuangu_tasks, "process_xuangu_by_code", lambda args: None)
-    xuangu_tasks.process_xuangu_task(
-        "hk", "strict_class1_point", ["5m"], ["long"], "all", "xg-target"
+    monkeypatch.setattr(
+        xuangu_tasks,
+        "process_xuangu_by_code",
+        lambda args: processed.append(args[0]),
     )
-    assert fake_ex.called is True
+    xuangu_tasks.process_xuangu_task(
+        "hk",
+        "strict_class1_point",
+        ["5m"],
+        ["long"],
+        ["HK.00700"],
+        "xg-target",
+    )
+    assert fake_ex.called is False
+    assert processed == ["HK.00700"]
 
 
-def test_zixuan_import_endpoint_uses_safe_all_stocks_wiring():
-    # Flask 上传上下文离线难构造, wiring 用源码扫描钉死
-    # (同 tests/trader/test_open_dedup.py 先例)。
+def test_zixuan_import_endpoint_uses_bounded_identity_wiring():
     src = pathlib.Path(
         "web/chanlun_chart/cl_app/blueprints/zixuan.py"
     ).read_text(encoding="utf-8")
-    assert "_safe_all_stocks(ex)" in src
+    assert "_safe_all_stocks" not in src
+    assert "_MAX_BOUNDED_IMPORT_SYMBOLS = 20" in src
+    assert "admit_explicit_validation_codes(" in src
+    assert "resolve_bounded_stock_info(" in src
+    assert "ex.stock_info(code)" not in src

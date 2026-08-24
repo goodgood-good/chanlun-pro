@@ -5,12 +5,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from chanlun.decision_support.trading_system.lifecycle import build_setup
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
+from chanlun.decision_support.trading_system.lifecycle import (
+    build_setup,
+    structural_point_occurrence_id,
+)
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.models import (
     EntryExecutionBoundary,
@@ -276,7 +282,41 @@ def valid_selection_research() -> SelectionResearchSnapshot:
 def deterministic_bundle() -> SymbolStructureBundle:
     """构造一份供决策边界测试共用的当前严格结构包。"""
 
-    trigger = confirmed_point("1buy", frequency="1m", minutes_after=296)
+    setup_point = confirmed_point("2buy", minutes_after=295)
+    setup_point = replace(
+        setup_point,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:5m:{setup_point.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=setup_point.anchor_at - timedelta(minutes=30),
+            market_end=setup_point.anchor_at,
+            available_at=setup_point.available_at,
+        ),
+    )
+    trigger = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=294,
+        available_minutes_after=2,
+    )
+    trigger = replace(
+        trigger,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:1m:{trigger.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=trigger.anchor_at - timedelta(minutes=1),
+            market_end=trigger.anchor_at,
+            available_at=trigger.available_at,
+        ),
+    )
     return SymbolStructureBundle(
         code="SZ.000001",
         # 生产契约只允许在 1m 确认 K 线后的下一分钟内精确执行。
@@ -287,13 +327,14 @@ def deterministic_bundle() -> SymbolStructureBundle:
         thirty_points=(),
         # 默认夹具表达“刚刚出现、仍在 10 分钟新鲜窗口内”的当前信号。
         # 过期信号由专门用例显式构造，避免所有正常决策测试都在暗中追旧点。
-        five_points=(confirmed_point("2buy", minutes_after=295),),
+        five_points=(setup_point,),
         one_points=(trigger,),
         opposite_points=(),
         physical_timeframe_recursive=True,
         entry_execution_boundaries=(
             EntryExecutionBoundary(
                 symbol="SZ.000001",
+                setup_occurrence_id=structural_point_occurrence_id(setup_point),
                 point_id=trigger.point_id,
                 source_frequency="1m",
                 confirmation_bar_closed_at=trigger.available_at,

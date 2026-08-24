@@ -2,7 +2,6 @@ import io
 
 from cl_app import create_app
 from cl_app.blueprints import zixuan as zixuan_blueprint
-from cl_app.services import stock_list
 
 
 def _app():
@@ -90,6 +89,7 @@ def test_duplicate_group_returns_actionable_failure_contract(monkeypatch):
 
 def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
     replaced = []
+    identity_calls = []
 
     class _ZiXuan:
         zixuan_list = [{"name": "关注"}]
@@ -114,15 +114,22 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
         def add_stock(self, *_args, **_kwargs):
             raise AssertionError("import must not commit one row at a time")
 
+    class _Exchange:
+        stock_info_query_scope = "SINGLE_SYMBOL_STOCK_INFO"
+
+        def all_stocks(self):
+            raise AssertionError("bounded import must never enumerate a market")
+
+        def stock_info(self, code):
+            identity_calls.append(code)
+            return {
+                "SH.600000": {"code": code, "name": "浦发银行"},
+                "SZ.000001": {"code": code, "name": "平安银行"},
+            }.get(code)
+
     monkeypatch.setattr(zixuan_blueprint, "ZiXuan", _ZiXuan)
-    monkeypatch.setattr(zixuan_blueprint, "get_exchange", lambda _market: object())
     monkeypatch.setattr(
-        stock_list,
-        "_safe_all_stocks",
-        lambda _exchange: [
-            {"code": "SH.600000", "name": "浦发银行"},
-            {"code": "SZ.000001", "name": "平安银行"},
-        ],
+        zixuan_blueprint, "get_exchange", lambda _market: _Exchange()
     )
     app = _app()
 
@@ -141,6 +148,7 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "msg": "成功导入 2 条记录"}
+    assert identity_calls == ["SH.600000", "SZ.000001"]
     assert replaced == [
         (
             "关注",
@@ -156,6 +164,92 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
             ],
         )
     ]
+
+
+def test_import_over_twenty_codes_fails_before_exchange_access(monkeypatch):
+    exchange_calls = []
+    monkeypatch.setattr(
+        zixuan_blueprint,
+        "get_exchange",
+        lambda market: exchange_calls.append(market),
+    )
+    app = _app()
+    content = "".join(
+        f"SH.{600000 + index:06d},name-{index}\n" for index in range(21)
+    )
+
+    response = app.test_client().post(
+        "/zixuan_opt_import",
+        data={
+            "market": "a",
+            "zx_group": "关注",
+            "file": (io.BytesIO(content.encode("utf-8")), "stocks.txt"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "ok": False,
+        "msg": "单次导入最多允许 20 个显式代码",
+    }
+    assert exchange_calls == []
+
+
+def test_non_a_import_never_calls_catalog_expanding_stock_info(monkeypatch):
+    calls = {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
+    replaced = []
+
+    class _ZiXuan:
+        zixuan_list = [{"name": "关注"}]
+
+        def __init__(self, _market):
+            pass
+
+        def zx_stocks(self, _group):
+            return []
+
+        def replace_zx_stocks(self, group, stocks):
+            replaced.append((group, stocks))
+            return True
+
+    class _CatalogExpandingExchange:
+        def all_stocks(self):
+            calls["all_stocks"] += 1
+            return [{"code": "HK.00700", "name": "Tencent"}]
+
+        def stock_info(self, code):
+            calls["stock_info"] += 1
+            calls["basicinfo"] += 1
+            return next(
+                row for row in self.all_stocks() if row["code"] == code
+            )
+
+    monkeypatch.setattr(zixuan_blueprint, "ZiXuan", _ZiXuan)
+    monkeypatch.setattr(
+        zixuan_blueprint,
+        "get_exchange",
+        lambda _market: _CatalogExpandingExchange(),
+    )
+    app = _app()
+
+    response = app.test_client().post(
+        "/zixuan_opt_import",
+        data={
+            "market": "hk",
+            "zx_group": "关注",
+            "file": (
+                io.BytesIO("HK.00700,腾讯控股\n".encode("utf-8")),
+                "stocks.txt",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "msg": "成功导入 1 条记录"}
+    assert replaced == [("关注", [{"code": "HK.00700", "name": "腾讯控股"}])]
+    assert calls == {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
 
 
 def test_a_share_holding_membership_edit_wakes_both_live_lanes(monkeypatch):

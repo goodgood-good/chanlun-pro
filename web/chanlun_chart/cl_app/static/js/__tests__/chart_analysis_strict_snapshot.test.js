@@ -32,9 +32,8 @@ function center(overrides = {}) {
     envelope: { dd_tick: 980, gg_tick: 1090, dd_price: 9.8, gg_price: 10.9 },
     entry_unit_id: 'u1',
     core_unit_ids: ['u2', 'u3', 'u4'],
-    initial_exit_unit_id: 'u5',
-    initial_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
-    body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
+    initial_unit_ids: ['u2', 'u3', 'u4'],
+    body_unit_ids: ['u2', 'u3', 'u4'],
     extension_unit_ids: [],
     pending_leave_unit_id: 'u5',
     completion_leave_unit_id: null,
@@ -309,6 +308,26 @@ test('strict snapshot supplies centers and signals through one contract', () => 
   assert.equal(strictOnly.divergences.every((item) => item.compareLegUnitIds.length === 3), true);
   assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
   assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
+});
+
+test('three-unit center keeps an absent entry absent in the analysis summary', () => {
+  const base = snapshot();
+  const strict = snapshot({
+    levels: [{
+      ...base.levels[0],
+      centers: [center({ entry_unit_id: null, entering_segment: null })],
+    }],
+  });
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+  const item = summary.formalCenters[0];
+
+  assert.equal(item.entryUnitId, null);
+  assert.equal(item.enteringSegment, null);
+  assert.equal(Object.hasOwn(item, 'establishmentUnitId'), false);
+  assert.equal(Object.hasOwn(item, 'initialExitUnitId'), false);
+  assert.deepEqual(item.coreUnitIds, ['u2', 'u3', 'u4']);
+  assert.deepEqual(item.initialUnitIds, ['u2', 'u3', 'u4']);
 });
 
 test('operational confirmation remains confirmed while disclosing the pending audit lock', () => {

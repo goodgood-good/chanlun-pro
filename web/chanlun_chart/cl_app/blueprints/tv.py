@@ -18,7 +18,11 @@ from chanlun.cl_utils import (
     query_cl_chart_config,
 )
 from chanlun.persistence.db import db
-from chanlun.exchange import get_exchange
+from chanlun.exchange import (
+    get_exchange,
+    resolve_bounded_stock_info,
+    supports_bounded_stock_info,
+)
 from chanlun.tools.log_util import LogUtil
 
 from ..services.constants import (
@@ -246,6 +250,7 @@ def tv_symbols():
     # 调用 stock_info / xtdata native lock，保证 TradingView 首次 resolveSymbol 能立即完成。
     stocks = get_cached_processed_stock(market, code)
     ex = None
+    bounded_identity_provider_used = False
     if stocks is None:
         try:
             ex = get_exchange(Market(market))
@@ -254,7 +259,12 @@ def tv_symbols():
             return {"s": "error", "errmsg": "invalid market"}
 
         try:
-            stocks = ex.stock_info(code)
+            bounded_identity_provider_used = supports_bounded_stock_info(ex)
+            stocks = resolve_bounded_stock_info(
+                ex,
+                code,
+                allow_code_fallback=True,
+            )
         except Exception as e:
             # 数据源故障(如 QMT/xtquant 不可用)时优雅降级为 error,不抛到 flask 变 500。
             LogUtil.error(f"[tv_symbols] stock_info failed symbol={raw_symbol} err={e}")
@@ -269,7 +279,7 @@ def tv_symbols():
 
     sector = ""
     industry = ""
-    if market == "a" and ex is not None:
+    if market == "a" and ex is not None and bounded_identity_provider_used:
         try:
             gnbk = ex.stock_owner_plate(code)
             sector = " / ".join([_g["name"] for _g in gnbk["GN"]])

@@ -292,8 +292,107 @@ def test_operations_default_to_readiness_probe():
     assert "$health.revision -eq $deploymentRevision" in restart
     assert "[string]$health.pid -eq [string]$startedProcess.Id" in restart
     assert "-ExpectedRevision $deploymentRevision" in restart
-    assert "app.py loads project .env" in windows_run
-    assert "if not defined CHANLUN_WEB_HOST set" not in windows_run
+    assert "[switch]$OpenBrowser" in restart
+    assert '$webUri = "http://${probeHost}:$webPort/"' in restart
+    assert "if ($OpenBrowser) { Open-WebApplication -Uri $webUri }" in restart
+    assert "ops\\restart_web.ps1" in windows_run
+    assert "-OpenBrowser" in windows_run
+    for scope_flag in (
+        "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED",
+        "CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE",
+        "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
+        "CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
+    ):
+        assert f'set "{scope_flag}=0"' in windows_run
+    assert "web\\chanlun_chart\\app.py" not in windows_run
+    assert "poetry run python" not in windows_run
+
+
+def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
+    restart = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
+    windows_run = WINDOWS_RUN.read_text(encoding="utf-8")
+    numeric_scope_names = (
+        "CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE",
+        "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
+        "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
+        "CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
+        "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
+        "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
+        "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
+    )
+
+    dotenv_call = restart.index("Import-ProjectDotEnv -Path")
+    symbol_catalog_codes = restart.index(
+        "'CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES'", dotenv_call
+    )
+    symbol_catalog_authorization = restart.index(
+        "'CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED'",
+        symbol_catalog_codes,
+    )
+    bounded_gate = restart.index(
+        "if (-not $EnableLargeScreeningScope) {", dotenv_call
+    )
+    large_scope_flag = restart.index(
+        "'CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE'", bounded_gate
+    )
+    reset_body = restart[bounded_gate:large_scope_flag]
+
+    assert (
+        dotenv_call
+        < symbol_catalog_codes
+        < symbol_catalog_authorization
+        < bounded_gate
+        < large_scope_flag
+    )
+    assert "[switch]$EnableFullSymbolCatalog" in restart
+    assert "$EnableFullSymbolCatalog.IsPresent" in restart
+    assert "-FullSymbolCatalogEnabled" in restart
+    assert (
+        'set "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED=0"'
+        in windows_run
+    )
+    assert 'set "CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES=' in windows_run
+    assert (
+        "[Environment]::SetEnvironmentVariable($name, '12', 'Process')"
+        in reset_body
+    )
+    for name in numeric_scope_names:
+        assert f"'{name}'" in reset_body
+        assert f'set "{name}=12"' in windows_run
+    assert (
+        "'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS'"
+        in reset_body
+    )
+    assert (
+        'set "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=20"'
+        in windows_run
+    )
+
+    holding_gate = restart.index(
+        "if (-not $EnableLargeHoldingMonitorScope) {", dotenv_call
+    )
+    holding_authorization = restart.index(
+        "'CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED'",
+        holding_gate,
+    )
+    assert "[switch]$EnableLargeHoldingMonitorScope" in restart
+    assert (
+        "'CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS'"
+        in restart[holding_gate:holding_authorization]
+    )
+    assert "-LargeHoldingMonitorScopeEnabled" in restart
+    assert "$EnableLargeHoldingMonitorScope.IsPresent" in restart
+    assert "-LargeScopeEnabled $EnableLargeScreeningScope.IsPresent" in restart
+    assert "-FullCoverageEnabled $EnableFullCoverage.IsPresent" in restart
+    assert (
+        "-ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent"
+        in restart
+    )
+    assert 'set "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS=12"' in windows_run
+    assert (
+        'set "CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED=0"'
+        in windows_run
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
@@ -397,10 +496,12 @@ def test_restart_and_forward_runner_compute_the_same_source_revision():
     assert output[-1] == calculate_forward_application_source_revision(ROOT)
 
 
-def test_windows_launcher_uses_the_same_python_resolution_without_masking_dotenv():
+def test_windows_launcher_delegates_python_resolution_to_managed_restart():
     source = WINDOWS_RUN.read_text(encoding="utf-8")
 
-    assert "CHANLUN_PYTHON" in source
-    assert ".venv\\Scripts\\python.exe" in source
-    assert "poetry run python" in source
+    assert "ops\\restart_web.ps1" in source
+    assert "powershell.exe -NoProfile -ExecutionPolicy Bypass" in source
+    assert "CHANLUN_PYTHON" not in source
+    assert ".venv\\Scripts\\python.exe" not in source
+    assert "poetry run python" not in source
     assert "if not defined CHANLUN_WEB_HOST set" not in source

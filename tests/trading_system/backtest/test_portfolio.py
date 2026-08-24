@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system.backtest.execution import (
     ExecutionPolicy,
 )
@@ -27,6 +29,7 @@ from chanlun.decision_support.trading_system.models import (
     EntryDecision,
     ExitDecision,
     PointType,
+    StructuralPoint,
     StructureTower,
 )
 from chanlun.decision_support.trading_system.portfolio_risk import (
@@ -642,6 +645,27 @@ def test_symbol_input_order_does_not_change_portfolio_result() -> None:
 
 
 def test_position_structure_is_injected_into_same_level_sell_evaluation() -> None:
+    def with_locked_terminal_segment(
+        point: StructuralPoint,
+        *,
+        terminal_minutes: int,
+    ) -> StructuralPoint:
+        return replace(
+            point,
+            terminal_segment=TerminalSegmentReference(
+                role="latest_completed",
+                structural_level=point.recursive_level,
+                unit_id=f"segment:{point.source_frequency}:{point.point_id}",
+                source_kind=SourceKind.SEGMENT,
+                direction="down" if point.side == "buy" else "up",
+                state="locked",
+                market_start=point.anchor_at
+                - timedelta(minutes=terminal_minutes),
+                market_end=point.anchor_at,
+                available_at=point.available_at,
+            ),
+        )
+
     signal_bar = market_bar(
         "SZ.000001",
         datetime(2026, 7, 20, 10, 4, tzinfo=CN),
@@ -654,26 +678,40 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
         "SZ.000001",
         datetime(2026, 7, 20, 10, 6, tzinfo=CN),
     )
-    buy = confirmed_point("2buy", tower="formal", level=0)
-    buy_trigger = confirmed_point(
-        "2buy",
-        frequency="1m",
-        tower="formal",
-        level=0,
-        minutes_after=1,
+    buy = with_locked_terminal_segment(
+        confirmed_point("2buy", tower="formal", level=0),
+        terminal_minutes=30,
     )
-    sell = confirmed_point(
-        "2sell",
-        tower="formal",
-        level=0,
-        minutes_after=2,
+    buy_trigger = with_locked_terminal_segment(
+        confirmed_point(
+            "2buy",
+            frequency="1m",
+            tower="formal",
+            level=0,
+            minutes_after=-1,
+            available_minutes_after=2,
+        ),
+        terminal_minutes=1,
     )
-    sell_trigger = confirmed_point(
-        "2sell",
-        frequency="1m",
-        tower="formal",
-        level=0,
-        minutes_after=3,
+    sell = with_locked_terminal_segment(
+        confirmed_point(
+            "2sell",
+            tower="formal",
+            level=0,
+            minutes_after=2,
+        ),
+        terminal_minutes=30,
+    )
+    sell_trigger = with_locked_terminal_segment(
+        confirmed_point(
+            "2sell",
+            frequency="1m",
+            tower="formal",
+            level=0,
+            minutes_after=1,
+            available_minutes_after=2,
+        ),
+        terminal_minutes=1,
     )
     sector = eligible_sector()
     replay = ScheduledBundleReplay(

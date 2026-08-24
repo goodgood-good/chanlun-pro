@@ -7,7 +7,6 @@ import pytest
 
 from chanlun.core.strict_structure.center_machine import advance_center, establish_center
 from chanlun.core.strict_structure.models import (
-    CenterState,
     SourceKind,
     StrictLevelResult,
     StrictStructureResult,
@@ -19,7 +18,6 @@ from chanlun.core.strict_structure.upgrade_evidence import (
 )
 from tests.core.strict_structure.helpers import (
     completed_up_center,
-    ongoing_center,
     structure_for,
     unit,
 )
@@ -31,81 +29,128 @@ def nine_touch_center(*, structural_level: int = 0):
         if structural_level == 0
         else SourceKind.TREND_TYPE
     )
-    if structural_level == 0:
-        center = ongoing_center(structural_level=structural_level)
-    else:
-        initial = (
-            unit(
-                0,
-                "up",
-                90,
-                120,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-            unit(
-                1,
-                "down",
-                120,
-                100,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-            unit(
-                2,
-                "up",
-                100,
-                115,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-            unit(
-                3,
-                "down",
-                115,
-                105,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-        )
-        center = establish_center(
-            initial[1:],
-            structural_level,
-            source_kind,
-            entry_unit=initial[0],
-        )
-        assert center is not None
-        center, _ = advance_center(
-            center,
-            unit(
-                4,
-                "up",
-                105,
-                130,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-        )
-    # u4 是成立窗口的第五段离开；u5 回到核心后，u4/u5 才成为
-    # 延伸体。再追加四段核心内震荡，正好形成九个真实触核 body units。
+    core = (
+        unit(
+            0,
+            "down",
+            120,
+            100,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            1,
+            "up",
+            100,
+            115,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            2,
+            "down",
+            115,
+            105,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+    )
+    center = establish_center(core, structural_level, source_kind)
+    assert center is not None
+    assert center.entry_unit is None
+    center, _ = advance_center(
+        center,
+        unit(
+            3,
+            "up",
+            105,
+            130,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+    )
+    # The fourth unit departs.  The fifth crosses back into the core, so the
+    # failed departure stays in external history while the return enters the
+    # body.  Five more touching units then produce nine genuine body units.
     additions = (
-        unit(5, "down", 130, 110, structural_level=structural_level, source_kind=source_kind),
-        unit(6, "up", 110, 114, structural_level=structural_level, source_kind=source_kind),
-        unit(7, "down", 114, 106, structural_level=structural_level, source_kind=source_kind),
-        unit(8, "up", 106, 114, structural_level=structural_level, source_kind=source_kind),
-        unit(9, "down", 114, 110, structural_level=structural_level, source_kind=source_kind),
+        unit(
+            4,
+            "down",
+            130,
+            110,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            5,
+            "up",
+            110,
+            114,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            6,
+            "down",
+            114,
+            106,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            7,
+            "up",
+            106,
+            114,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            8,
+            "down",
+            114,
+            110,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            9,
+            "up",
+            110,
+            114,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
     )
     for item in additions:
         center, _ = advance_center(center, item)
     completed, _ = advance_center(
         center,
-        unit(10, "up", 110, 130, structural_level=structural_level, source_kind=source_kind),
+        unit(
+            10,
+            "down",
+            114,
+            90,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
     )
     completed, _ = advance_center(
         completed,
-        unit(11, "down", 130, 116, structural_level=structural_level, source_kind=source_kind),
+        unit(
+            11,
+            "up",
+            90,
+            100,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
     )
-    assert completed.state is CenterState.COMPLETED
+    assert completed.completion_leave_unit is not None
+    assert completed.completion_return_unit is not None
+    assert tuple(item.unit_id for item in completed.failed_departure_units) == (
+        "u-3",
+    )
     assert len(completed.body_units) == 9
     return completed
 
@@ -175,8 +220,9 @@ def test_nine_segment_evidence_links_existing_standard_target_center() -> None:
     target = nine_touch_center(structural_level=1)
     level_zero = structure_for(source).levels[0]
     target_units = (
-        target.entry_unit,
+        *(() if target.entry_unit is None else (target.entry_unit,)),
         *target.body_units,
+        *target.failed_departure_units,
         target.completion_leave_unit,
         target.completion_return_unit,
     )
@@ -220,8 +266,9 @@ def test_future_standard_target_does_not_rewrite_nine_segment_evidence() -> None
     )
     level_zero = structure_for(source).levels[0]
     target_units = (
-        target.entry_unit,
+        *(() if target.entry_unit is None else (target.entry_unit,)),
         *target.body_units,
+        *target.failed_departure_units,
         target.completion_leave_unit,
         target.completion_return_unit,
     )

@@ -28,10 +28,16 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from chanlun.decision_support.trading_system.backtest.data_audit import DataEvidence
+from chanlun.decision_support.trading_system.backtest.causality_gate_contract import (
+    CAUSALITY_GATE_PROVEN_CONTROLS,
+    CAUSALITY_GATE_SCHEMA,
+    causality_gate_state_is_consistent,
+)
 from chanlun.decision_support.trading_system.backtest.fixed_year import (
     FACT_SCHEMA,
     SECTOR_FACT_SCHEMA,
     SectorResearchFacts,
+    SparseEvaluationFact,
     SymbolResearchFacts,
     load_qmt_frame,
     run_sparse_portfolio,
@@ -42,9 +48,13 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     PITMetadataSnapshot,
     load_snapshot,
 )
+from chanlun.decision_support.trading_system.backtest.pit_scope import (
+    validate_scope_proof,
+)
 from chanlun.decision_support.trading_system.backtest.pit_sector import (
     PIT_SW1_COMPOSITE_PROVIDER,
     build_pit_sw1_composite,
+    candidate_codes_for_pit_sector,
 )
 from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
     qmt_local_kline_path,
@@ -56,10 +66,12 @@ from chanlun.decision_support.trading_system.backtest.report import (
 )
 from chanlun.decision_support.trading_system.lifecycle import (
     current_five_minute_setup_points,
+    five_minute_setup_is_executable,
     five_minute_setup_is_in_policy_scope,
-    is_one_minute_segment_difference,
-    match_one_minute_segment_difference_for_point,
+    match_one_minute_nesting_witness_for_point,
+    structural_point_occurrence_id,
 )
+from chanlun.decision_support.trading_system.models import StructuralPoint
 from chanlun.decision_support.trading_system.operation_level import (
     is_five_minute_trade_level,
 )
@@ -70,13 +82,10 @@ from chanlun.decision_support.fingerprints import sha256_json
 from tools import qmt_research_contract
 
 
-DEFAULT_INPUT = Path(
-    "audit/chanlun_trading_system_backtest/fixed_year_2025_2026"
-)
-DEFAULT_REPORT = Path(
-    "audit/chanlun_trading_system_backtest/certified_report.json"
-)
 _SECTOR_CACHE_METADATA_SCHEMA = "chanlun-pit-sector-cache-metadata-v1"
+_SECTOR_COMPOSITE_CACHE_METADATA_SCHEMA = (
+    "chanlun-pit-sector-composite-cache-metadata-v1"
+)
 
 
 def _positive_decimal(value: str) -> Decimal:
@@ -95,13 +104,35 @@ def _positive_int(value: str) -> int:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT)
-    result.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    result.add_argument(
+        "--input-dir",
+        type=Path,
+        required=True,
+        help="explicit sample extraction directory; no full-market default",
+    )
+    result.add_argument(
+        "--report",
+        type=Path,
+        required=True,
+        help="explicit report target paired with the selected input directory",
+    )
     result.add_argument(
         "--initial-cash", type=_positive_decimal, default=Decimal("1000000")
     )
     result.add_argument("--bootstrap-repetitions", type=int, default=2000)
     result.add_argument("--sector-workers", type=_positive_int, default=3)
+    result.add_argument("--max-sector-count", type=_positive_int, default=12)
+    result.add_argument(
+        "--max-sector-closure",
+        type=_positive_int,
+        default=2000,
+        help="maximum unique all-member sector reference symbols before QMT I/O",
+    )
+    result.add_argument(
+        "--confirm-large-sector-scope",
+        action="store_true",
+        help="independently authorize a sector reference scope above its budgets",
+    )
     result.add_argument("--force-sectors", action="store_true")
     result.add_argument(
         "--reuse-sector-cache",
@@ -128,8 +159,7 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
     _atomic_bytes(
         path,
         (
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
-            + "\n"
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         ).encode("utf-8"),
     )
 
@@ -163,6 +193,7 @@ def _algorithm_revision(hashes: Sequence[tuple[str, str]]) -> str:
 
 def _sector_algorithm_revision(
     fact_algorithm_hashes: Sequence[tuple[str, str]],
+    sector_composite_algorithm_revision: str,
 ) -> str:
     """Bind sector checkpoints without coupling them to report/UI changes."""
 
@@ -186,30 +217,20 @@ def _sector_algorithm_revision(
             "tools/finalize_qmt_pit_fixed_year.py#sector_fact_orchestration",
             "sha256:" + hashlib.sha256(orchestration_source).hexdigest(),
         ),
+        (
+            "sector-composite-algorithm-revision",
+            sector_composite_algorithm_revision,
+        ),
     )
     return _algorithm_revision(tuple(sorted((*fact_algorithm_hashes, *extra))))
 
 
-def _frozen_algorithm(
-    manifest: Mapping[str, object],
-) -> tuple[str, tuple[tuple[str, str], ...]]:
-    raw = manifest.get("algorithm")
-    if not isinstance(raw, Mapping):
-        raise ValueError("extract manifest has no frozen algorithm")
-    revision = raw.get("revision")
-    rows = raw.get("hashes")
-    if not isinstance(revision, str) or not isinstance(rows, list):
-        raise ValueError("extract manifest algorithm is malformed")
-    hashes = tuple(
-        (str(row["path"]), str(row["sha256"]))
-        for row in rows
-        if isinstance(row, Mapping)
+def _sector_composite_algorithm_revision() -> str:
+    """Identify only code that can change raw all-member sector prices."""
+
+    return _algorithm_revision(
+        qmt_research_contract.sector_composite_algorithm_hashes()
     )
-    if len(hashes) != len(rows) or _algorithm_revision(hashes) != revision:
-        raise ValueError("extract manifest algorithm revision is inconsistent")
-    if qmt_research_contract.algorithm_hashes() != hashes:
-        raise RuntimeError("source code changed after symbol extraction")
-    return revision, hashes
 
 
 def _frozen_fact_algorithm(
@@ -217,7 +238,7 @@ def _frozen_fact_algorithm(
 ) -> tuple[str, tuple[tuple[str, str], ...]]:
     raw = manifest.get("fact_algorithm")
     if raw is None:
-        return _frozen_algorithm(manifest)
+        raise ValueError("extract manifest has no frozen fact algorithm")
     if not isinstance(raw, Mapping):
         raise ValueError("extract manifest fact algorithm is malformed")
     revision = raw.get("revision")
@@ -271,41 +292,72 @@ def _sector_cache_metadata_path(directory: Path, sector_id: str) -> Path:
     return directory / "pit_sectors" / f"{sector_id.rsplit(':', 1)[-1]}.cache.json"
 
 
+def _sector_composite_path(directory: Path, sector_id: str) -> Path:
+    return directory / "pit_sector_composites" / f"{sector_id.rsplit(':', 1)[-1]}.pkl"
+
+
+def _sector_composite_metadata_path(directory: Path, sector_id: str) -> Path:
+    return (
+        directory
+        / "pit_sector_composites"
+        / f"{sector_id.rsplit(':', 1)[-1]}.cache.json"
+    )
+
+
 def _sector_source_inventory_revision(
     snapshot: PITMetadataSnapshot,
     sector_id: str,
+    *,
+    warmup_start: date,
+    requested_end: date,
 ) -> str | None:
     """Fingerprint cheap immutable-file facts before trusting a sector cache.
 
     Per-symbol facts already treat their completed checkpoint as immutable until
     an explicit force run.  The fast sector path follows the same contract while
-    additionally invalidating when a contributing local QMT 5m file changes in
-    path, size, or nanosecond modification time.
+    additionally invalidating when the selected QMT data root or a contributing
+    local 5m file changes in path, size, or nanosecond modification time.
     """
 
     data_dir = resolve_qmt_local_data_dir()
     if data_dir is None:
         return None
-    member_codes = tuple(
-        sorted(
-            {
-                row.code
-                for row in snapshot.memberships
-                if row.sector_id == sector_id
-            }
-        )
+    member_codes = candidate_codes_for_pit_sector(
+        snapshot,
+        sector_id,
+        start_at=datetime.combine(
+            warmup_start,
+            time(9, 30),
+            tzinfo=snapshot.captured_at.tzinfo,
+        ),
+        end_at=datetime.combine(
+            requested_end,
+            time(15, 0),
+            tzinfo=snapshot.captured_at.tzinfo,
+        ),
     )
     rows: list[dict[str, object]] = []
     for code in dict.fromkeys(("SH.000001", *member_codes)):
         path = qmt_local_kline_path(data_dir, code, "5m")
         try:
+            relative_path = path.relative_to(data_dir).as_posix()
+        except ValueError:
+            relative_path = str(path.resolve())
+        try:
             status = path.stat()
         except FileNotFoundError:
-            rows.append({"code": code, "state": "missing"})
+            rows.append(
+                {
+                    "code": code,
+                    "path": relative_path,
+                    "state": "missing",
+                }
+            )
         else:
             rows.append(
                 {
                     "code": code,
+                    "path": relative_path,
                     "state": "present",
                     "size": status.st_size,
                     "mtime_ns": status.st_mtime_ns,
@@ -314,10 +366,160 @@ def _sector_source_inventory_revision(
     return sha256_json(
         {
             "schema": "chanlun-qmt-sector-source-inventory-v1",
+            "data_dir": str(data_dir),
             "sector_id": sector_id,
             "files": rows,
         }
     )
+
+
+def _sector_composite_cache_context_revision(
+    *,
+    snapshot: PITMetadataSnapshot,
+    snapshot_hash: str,
+    sector_id: str,
+    warmup_start: date,
+    requested_end: date,
+    sector_composite_algorithm_revision: str,
+) -> str | None:
+    source_inventory_revision = _sector_source_inventory_revision(
+        snapshot,
+        sector_id,
+        warmup_start=warmup_start,
+        requested_end=requested_end,
+    )
+    if source_inventory_revision is None:
+        return None
+    return sha256_json(
+        {
+            "schema": _SECTOR_COMPOSITE_CACHE_METADATA_SCHEMA,
+            "snapshot_sha256": snapshot_hash,
+            "sector_id": sector_id,
+            "warmup_start": warmup_start.isoformat(),
+            "requested_end": requested_end.isoformat(),
+            "sector_composite_algorithm_revision": (
+                sector_composite_algorithm_revision
+            ),
+            "source_inventory_revision": source_inventory_revision,
+        }
+    )
+
+
+def _load_fast_cached_sector_composite(
+    path: Path,
+    metadata_path: Path,
+    *,
+    sector_id: str,
+    sector_composite_algorithm_revision: str,
+    cache_context_revision: str,
+) -> pd.DataFrame | None:
+    if not path.is_file() or not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("schema") != _SECTOR_COMPOSITE_CACHE_METADATA_SCHEMA
+        or metadata.get("sector_id") != sector_id
+        or metadata.get("sector_composite_algorithm_revision")
+        != sector_composite_algorithm_revision
+        or metadata.get("cache_context_revision") != cache_context_revision
+        or metadata.get("artifact_sha256") != _sha256(path)
+    ):
+        return None
+    try:
+        frame = pickle.loads(path.read_bytes())
+    except (OSError, EOFError, pickle.PickleError, ValueError, AttributeError):
+        return None
+    required = {"code", "date", "open", "high", "low", "close", "volume"}
+    if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):
+        return None
+    return frame
+
+
+def _write_sector_composite_cache(
+    *,
+    path: Path,
+    metadata_path: Path,
+    frame: pd.DataFrame,
+    sector_id: str,
+    sector_composite_algorithm_revision: str,
+    cache_context_revision: str,
+) -> None:
+    _atomic_bytes(path, pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL))
+    _atomic_json(
+        metadata_path,
+        {
+            "schema": _SECTOR_COMPOSITE_CACHE_METADATA_SCHEMA,
+            "sector_id": sector_id,
+            "sector_composite_algorithm_revision": (
+                sector_composite_algorithm_revision
+            ),
+            "cache_context_revision": cache_context_revision,
+            "artifact_sha256": _sha256(path),
+        },
+    )
+
+
+def _load_or_build_sector_composite(
+    *,
+    directory: Path,
+    snapshot: PITMetadataSnapshot,
+    snapshot_hash: str,
+    sector_id: str,
+    warmup_start: date,
+    requested_end: date,
+    sector_composite_algorithm_revision: str,
+    force: bool,
+    reuse_cache: bool,
+) -> tuple[pd.DataFrame, str]:
+    path = _sector_composite_path(directory, sector_id)
+    metadata_path = _sector_composite_metadata_path(directory, sector_id)
+    context_revision = _sector_composite_cache_context_revision(
+        snapshot=snapshot,
+        snapshot_hash=snapshot_hash,
+        sector_id=sector_id,
+        warmup_start=warmup_start,
+        requested_end=requested_end,
+        sector_composite_algorithm_revision=(sector_composite_algorithm_revision),
+    )
+    cached = None
+    if reuse_cache and not force and context_revision is not None:
+        cached = _load_fast_cached_sector_composite(
+            path,
+            metadata_path,
+            sector_id=sector_id,
+            sector_composite_algorithm_revision=(sector_composite_algorithm_revision),
+            cache_context_revision=context_revision,
+        )
+    if cached is not None:
+        return cached, "fast_hit"
+    frame = build_pit_sw1_composite(
+        snapshot=snapshot,
+        sector_id=sector_id,
+        start_at=datetime.combine(
+            warmup_start,
+            time(9, 30),
+            tzinfo=snapshot.captured_at.tzinfo,
+        ),
+        end_at=datetime.combine(
+            requested_end,
+            time(15, 0),
+            tzinfo=snapshot.captured_at.tzinfo,
+        ),
+    )
+    if reuse_cache and context_revision is not None:
+        _write_sector_composite_cache(
+            path=path,
+            metadata_path=metadata_path,
+            frame=frame,
+            sector_id=sector_id,
+            sector_composite_algorithm_revision=(sector_composite_algorithm_revision),
+            cache_context_revision=context_revision,
+        )
+    return frame, "rebuilt"
 
 
 def _sector_cache_context_revision(
@@ -334,6 +536,8 @@ def _sector_cache_context_revision(
     source_inventory_revision = _sector_source_inventory_revision(
         snapshot,
         sector_id,
+        warmup_start=warmup_start,
+        requested_end=requested_end,
     )
     if source_inventory_revision is None:
         return None
@@ -371,8 +575,7 @@ def _load_fast_cached_sector(
         not isinstance(metadata, Mapping)
         or metadata.get("schema") != _SECTOR_CACHE_METADATA_SCHEMA
         or metadata.get("sector_id") != sector_id
-        or metadata.get("sector_algorithm_revision")
-        != sector_algorithm_revision
+        or metadata.get("sector_algorithm_revision") != sector_algorithm_revision
         or metadata.get("cache_context_revision") != cache_context_revision
         or metadata.get("artifact_sha256") != _sha256(path)
     ):
@@ -428,7 +631,9 @@ def _sector_revision(
     digest.update(
         pd.util.hash_pandas_object(
             frame.reset_index(drop=True), index=False, categorize=False
-        ).to_numpy(dtype="uint64", copy=False).tobytes()
+        )
+        .to_numpy(dtype="uint64", copy=False)
+        .tobytes()
     )
     return "sha256:" + digest.hexdigest()
 
@@ -465,6 +670,7 @@ def _build_one_sector_fact(
     warmup_start: date,
     requested_end: date,
     sector_algorithm_revision: str,
+    sector_composite_algorithm_revision: str,
     force: bool,
     reuse_cache: bool,
 ) -> tuple[SectorResearchFacts, dict[str, object]]:
@@ -491,22 +697,20 @@ def _build_one_sector_fact(
             observed_times=observed_times,
         )
     cache_state = "fast_hit"
+    composite_cache_state = "not_needed"
     if cached is not None:
         facts = cached
     else:
-        frame = build_pit_sw1_composite(
+        frame, composite_cache_state = _load_or_build_sector_composite(
+            directory=directory,
             snapshot=snapshot,
+            snapshot_hash=snapshot_hash,
             sector_id=sector_id,
-            start_at=datetime.combine(
-                warmup_start,
-                time(9, 30),
-                tzinfo=snapshot.captured_at.tzinfo,
-            ),
-            end_at=datetime.combine(
-                requested_end,
-                time(15, 0),
-                tzinfo=snapshot.captured_at.tzinfo,
-            ),
+            warmup_start=warmup_start,
+            requested_end=requested_end,
+            sector_composite_algorithm_revision=(sector_composite_algorithm_revision),
+            force=force,
+            reuse_cache=reuse_cache,
         )
         revision = _sector_revision(
             snapshot_hash=snapshot_hash,
@@ -515,18 +719,31 @@ def _build_one_sector_fact(
             expected_closes=expected_closes,
             frame=frame,
         )
-        cached = None if force else _load_cached_sector(
-            path,
-            algorithm_revision=sector_algorithm_revision,
-            source_revision=revision,
+        cached = (
+            None
+            if force
+            else _load_cached_sector(
+                path,
+                algorithm_revision=sector_algorithm_revision,
+                source_revision=revision,
+            )
         )
         if cached is None:
             member_count = len(
-                {
-                    row.code
-                    for row in snapshot.memberships
-                    if row.sector_id == sector_id
-                }
+                candidate_codes_for_pit_sector(
+                    snapshot,
+                    sector_id,
+                    start_at=datetime.combine(
+                        warmup_start,
+                        time(9, 30),
+                        tzinfo=snapshot.captured_at.tzinfo,
+                    ),
+                    end_at=datetime.combine(
+                        requested_end,
+                        time(15, 0),
+                        tzinfo=snapshot.captured_at.tzinfo,
+                    ),
+                )
             )
             facts = sector_facts_from_frame(
                 sector_id=sector_id,
@@ -563,6 +780,7 @@ def _build_one_sector_fact(
         "members": facts.member_count,
         "error": facts.error,
         "cache": cache_state,
+        "composite_cache": composite_cache_state,
     }
 
 
@@ -575,6 +793,7 @@ def _build_sector_facts(
     warmup_start: date,
     requested_end: date,
     sector_algorithm_revision: str,
+    sector_composite_algorithm_revision: str,
     force: bool,
     reuse_cache: bool,
     workers: int,
@@ -624,6 +843,7 @@ def _build_sector_facts(
             warmup_start=warmup_start,
             requested_end=requested_end,
             sector_algorithm_revision=sector_algorithm_revision,
+            sector_composite_algorithm_revision=(sector_composite_algorithm_revision),
             force=force,
             reuse_cache=reuse_cache,
         )
@@ -636,9 +856,7 @@ def _build_sector_facts(
             completed[sector_id] = facts
             print(json.dumps(diagnostic, ensure_ascii=False), flush=True)
     else:
-        with ProcessPoolExecutor(
-            max_workers=min(workers, len(sector_ids))
-        ) as executor:
+        with ProcessPoolExecutor(max_workers=min(workers, len(sector_ids))) as executor:
             futures = {
                 executor.submit(
                     _build_one_sector_fact,
@@ -652,6 +870,9 @@ def _build_sector_facts(
                     warmup_start=warmup_start,
                     requested_end=requested_end,
                     sector_algorithm_revision=sector_algorithm_revision,
+                    sector_composite_algorithm_revision=(
+                        sector_composite_algorithm_revision
+                    ),
                     force=force,
                     reuse_cache=reuse_cache,
                 ): sector_id
@@ -663,6 +884,129 @@ def _build_sector_facts(
                 completed[sector_id] = facts
                 print(json.dumps(diagnostic, ensure_ascii=False), flush=True)
     return {sector_id: completed[sector_id] for sector_id in sector_ids}
+
+
+def _sector_reference_scope(
+    *,
+    symbols: Sequence[SymbolResearchFacts],
+    snapshot: PITMetadataSnapshot,
+    warmup_start: date,
+    requested_end: date,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    sector_ids = tuple(
+        sorted(
+            {
+                evaluation.sector_id
+                for facts in symbols
+                for evaluation in facts.evaluations
+                if evaluation.sector_id is not None
+            }
+        )
+    )
+    closure_codes = tuple(
+        sorted(
+            {
+                code
+                for sector_id in sector_ids
+                for code in candidate_codes_for_pit_sector(
+                    snapshot,
+                    sector_id,
+                    start_at=datetime.combine(
+                        warmup_start,
+                        time(9, 30),
+                        tzinfo=snapshot.captured_at.tzinfo,
+                    ),
+                    end_at=datetime.combine(
+                        requested_end,
+                        time(15, 0),
+                        tzinfo=snapshot.captured_at.tzinfo,
+                    ),
+                )
+            }
+        )
+    )
+    return sector_ids, closure_codes
+
+
+def _validate_sector_reference_budget(
+    *,
+    sector_ids: Sequence[str],
+    closure_codes: Sequence[str],
+    max_sector_count: int,
+    max_sector_closure: int,
+    confirmed_large_scope: bool,
+) -> None:
+    if confirmed_large_scope:
+        return
+    failures: list[str] = []
+    if len(sector_ids) > max_sector_count:
+        failures.append(f"{len(sector_ids)} sectors exceed budget {max_sector_count}")
+    if len(closure_codes) > max_sector_closure:
+        failures.append(
+            f"{len(closure_codes)} reference symbols exceed budget {max_sector_closure}"
+        )
+    if failures:
+        raise ValueError(
+            "sector reference scope requires explicit large-scope confirmation: "
+            + "; ".join(failures)
+        )
+
+
+def _new_exact_buy_nesting_pairs(
+    facts: SymbolResearchFacts,
+    evaluation: SparseEvaluationFact,
+    *,
+    setup_points: Sequence[StructuralPoint] | None = None,
+) -> tuple[tuple[StructuralPoint, StructuralPoint], ...]:
+    """Return canonical 5m/1m pairs born at this evaluation close."""
+
+    observed_at = evaluation.observed_at
+    if setup_points is None:
+        visible_setup_ids = {
+            interval.point_id
+            for interval in facts.five_point_visibility
+            if interval.contains(observed_at)
+        }
+        candidate_setups = tuple(
+            point for point in facts.five_points if point.point_id in visible_setup_ids
+        )
+    else:
+        candidate_setups = tuple(setup_points)
+    visible_setups = tuple(
+        point
+        for point in candidate_setups
+        if is_five_minute_trade_level(
+            point.source_frequency,
+            point.recursive_level,
+        )
+        and five_minute_setup_is_in_policy_scope(point)
+    )
+    current_setups = current_five_minute_setup_points(
+        visible_setups,
+        as_of=observed_at,
+    )
+    output: list[tuple[StructuralPoint, StructuralPoint]] = []
+    for setup in current_setups:
+        if setup.side != "buy" or not five_minute_setup_is_executable(
+            setup,
+            as_of=observed_at,
+        ):
+            continue
+        witness = match_one_minute_nesting_witness_for_point(
+            setup,
+            facts.one_points,
+            as_of=observed_at,
+        )
+        if (
+            witness is not None
+            and max(
+                setup.available_at,
+                witness.available_at,
+            )
+            == observed_at
+        ):
+            output.append((setup, witness))
+    return tuple(output)
 
 
 def _causality_failures(
@@ -704,14 +1048,11 @@ def _causality_failures(
             ("one_minute", facts.one_points, facts.one_point_visibility),
         ):
             points_by_id = {point.point_id: point for point in points}
-            visibility_point_ids = {
-                interval.point_id for interval in visibility
-            }
+            visibility_point_ids = {interval.point_id for interval in visibility}
             if visibility_point_ids != points_by_id.keys():
                 failures.append(f"{frequency}_current_state_ledger_incomplete")
             if any(
-                interval.visible_from
-                < points_by_id[interval.point_id].available_at
+                interval.visible_from < points_by_id[interval.point_id].available_at
                 for interval in visibility
                 if interval.point_id in points_by_id
             ):
@@ -725,9 +1066,7 @@ def _causality_failures(
             )
             and five_minute_setup_is_in_policy_scope(point)
         }
-        warmup_by_time = {
-            row.observed_at: row for row in facts.five_minute_warmup
-        }
+        warmup_by_time = {row.observed_at: row for row in facts.five_minute_warmup}
         for evaluation in facts.evaluations:
             if not any(
                 interval.point_id in operation_point_ids
@@ -737,16 +1076,36 @@ def _causality_failures(
                 failures.append("decision_without_current_five_minute_setup")
             if evaluation.bar.closed_at != evaluation.observed_at:
                 failures.append("decision_bar_not_closed")
-            has_locator_candidate = any(
-                point.available_at == evaluation.observed_at
-                and is_one_minute_segment_difference(point)
-                for point in facts.one_points
-            )
+            exact_buy_pairs = _new_exact_buy_nesting_pairs(facts, evaluation)
+            has_exact_new_pair = bool(exact_buy_pairs)
             execution_snapshot = warmup_by_time.get(evaluation.observed_at)
-            if has_locator_candidate and execution_snapshot is None:
-                failures.append("locator_without_production_execution_snapshot")
-            exact_buy_match = False
+            snapshot_pairs: tuple[tuple[StructuralPoint, StructuralPoint], ...] = ()
+            if has_exact_new_pair and execution_snapshot is None:
+                failures.append(
+                    "exact_nesting_pair_without_production_execution_snapshot"
+                )
+            if execution_snapshot is not None and not has_exact_new_pair:
+                failures.append(
+                    "production_execution_snapshot_without_exact_nesting_pair"
+                )
             if execution_snapshot is not None:
+                snapshot_pairs = _new_exact_buy_nesting_pairs(
+                    facts,
+                    evaluation,
+                    setup_points=execution_snapshot.production_five_points,
+                )
+                expected_pair_keys = {
+                    (structural_point_occurrence_id(setup), witness.point_id)
+                    for setup, witness in exact_buy_pairs
+                }
+                snapshot_pair_keys = {
+                    (structural_point_occurrence_id(setup), witness.point_id)
+                    for setup, witness in snapshot_pairs
+                }
+                if expected_pair_keys != snapshot_pair_keys:
+                    failures.append(
+                        "production_execution_snapshot_nesting_pair_mismatch"
+                    )
                 if (
                     execution_snapshot.one_minute_bar_count
                     != evaluation.one_minute_bar_count
@@ -757,26 +1116,14 @@ def _causality_failures(
                     < SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
                 ):
                     failures.append("production_one_minute_history_insufficient")
-                current_setups = current_five_minute_setup_points(
-                    execution_snapshot.production_five_points,
-                    as_of=evaluation.observed_at,
-                )
-                exact_buy_match = any(
-                    setup.side == "buy"
-                    and match_one_minute_segment_difference_for_point(
-                        setup,
-                        (locator,),
-                        as_of=evaluation.observed_at,
-                    )
-                    is not None
-                    for setup in current_setups
-                    for locator in execution_snapshot.production_one_points
-                )
             if (
-                exact_buy_match
+                snapshot_pairs
+                and execution_snapshot is not None
                 and evaluation.higher_timeframe_gates is None
             ):
-                failures.append("buy_locator_without_higher_timeframe_integrity_gate")
+                failures.append(
+                    "buy_nesting_pair_without_higher_timeframe_integrity_gate"
+                )
             expected = index.membership_at(facts.code, evaluation.observed_at)
             expected_sector = None if expected is None else expected.sector_id
             if evaluation.sector_id != expected_sector:
@@ -796,7 +1143,9 @@ def _causality_failures(
                 (evaluation.bar.raw_close, evaluation.bar.analysis_close),
             ):
                 expected_value = raw_value * expected_divisor
-                tolerance = max(Decimal("0.0000001"), abs(expected_value) * Decimal("1e-10"))
+                tolerance = max(
+                    Decimal("0.0000001"), abs(expected_value) * Decimal("1e-10")
+                )
                 if abs(analysis_value - expected_value) > tolerance:
                     failures.append("noncausal_price_adjustment")
     if any(row.allot_num > 0 for row in snapshot.factors):
@@ -845,10 +1194,17 @@ def _write_gate(
     failures: Sequence[str],
     report: Path | None = None,
 ) -> None:
+    if not causality_gate_state_is_consistent(
+        status=status,
+        pnl_generated=pnl_generated,
+        failures=failures,
+        report=report,
+    ):
+        raise ValueError("inconsistent causality gate state")
     _atomic_json(
         path,
         {
-            "schema": "chanlun-backtest-causality-gate",
+            "schema": CAUSALITY_GATE_SCHEMA,
             "checked_at": datetime.now().astimezone().isoformat(),
             "status": status,
             "pnl_generated": pnl_generated,
@@ -856,27 +1212,7 @@ def _write_gate(
             "pit_snapshot_sha256": snapshot_hash,
             "validated_symbol_fact_count": symbols,
             "validated_decision_count": evaluations,
-            "proven_controls": [
-                "survivorship_free_effective_dated_security_master",
-                "decision_time_sw1_membership",
-                "ex_date_only_causal_price_basis",
-                "cash_and_share_corporate_action_accounting",
-                "closed_bar_strict_structure_witnesses",
-                "causal_daily_current_state_intervals",
-                "causal_thirty_minute_current_state_intervals",
-                "causal_five_minute_current_state_intervals",
-                "causal_one_minute_current_state_intervals",
-                "causal_sector_thirty_minute_current_state_intervals",
-                "canonical_production_five_minute_snapshot_at_every_locator",
-                "canonical_production_one_minute_locator_snapshot",
-                "production_five_minute_warmup_gate_at_buy_locator",
-                "production_higher_timeframe_integrity_gate_at_buy_locator",
-                "exact_one_minute_locator_close_evaluation",
-                "next_complete_minute_execution",
-                "observed_range_and_volume_fill_guard",
-                "delisted_security_zero_recovery",
-                "content_addressed_algorithm_data_and_checkpoints",
-            ],
+            "proven_controls": CAUSALITY_GATE_PROVEN_CONTROLS,
             "failures": list(failures),
             "report": None if report is None else str(report.resolve()),
         },
@@ -887,7 +1223,7 @@ def _prefix_audit_failures(
     *,
     path: Path,
     manifest_path: Path,
-    algorithm_revision: str,
+    prefix_algorithm_revision: str,
     fact_algorithm_revision: str,
     snapshot_hash: str,
     symbols: Sequence[SymbolResearchFacts],
@@ -904,7 +1240,11 @@ def _prefix_audit_failures(
         failures.append("prefix_invariance_audit_schema_mismatch")
     if raw.get("status") != "passed" or raw.get("failed_codes"):
         failures.append("prefix_invariance_changed")
-    if raw.get("algorithm_revision") != algorithm_revision:
+    recorded_prefix_revision = raw.get(
+        "prefix_algorithm_revision",
+        raw.get("algorithm_revision"),
+    )
+    if recorded_prefix_revision != prefix_algorithm_revision:
         failures.append("prefix_invariance_algorithm_mismatch")
     if raw.get("fact_algorithm_revision", raw.get("algorithm_revision")) != (
         fact_algorithm_revision
@@ -922,6 +1262,29 @@ def _prefix_audit_failures(
     return tuple(dict.fromkeys(failures))
 
 
+def _pit_scope_failures(
+    *,
+    path: Path,
+    snapshot: PITMetadataSnapshot,
+    replay_codes: Sequence[str],
+) -> tuple[str, ...]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ("pit_scope_proof_unreadable",)
+    if not isinstance(raw, Mapping):
+        return ("pit_scope_proof_malformed",)
+    audit = raw.get("audit")
+    scope = audit.get("scope") if isinstance(audit, Mapping) else None
+    if not isinstance(scope, Mapping):
+        return ("pit_scope_proof_missing",)
+    return validate_scope_proof(
+        snapshot=snapshot,
+        scope=scope,
+        replay_codes=replay_codes,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.bootstrap_repetitions <= 0:
@@ -932,9 +1295,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, Mapping) or not manifest.get("complete"):
         raise RuntimeError("symbol extraction is incomplete")
-    algorithm_revision, algorithm_hashes = _frozen_algorithm(manifest)
+    algorithm_hashes = qmt_research_contract.algorithm_hashes()
+    algorithm_revision = _algorithm_revision(algorithm_hashes)
     fact_algorithm_revision, fact_algorithm_hashes = _frozen_fact_algorithm(manifest)
-    sector_algorithm_revision = _sector_algorithm_revision(fact_algorithm_hashes)
+    sector_composite_algorithm_revision = _sector_composite_algorithm_revision()
+    sector_algorithm_revision = _sector_algorithm_revision(
+        fact_algorithm_hashes,
+        sector_composite_algorithm_revision,
+    )
+    prefix_algorithm_revision = _algorithm_revision(
+        qmt_research_contract.prefix_algorithm_hashes()
+    )
     symbols = _load_symbols(directory, manifest, fact_algorithm_revision)
     request = manifest.get("request")
     catalog = manifest.get("catalog")
@@ -956,15 +1327,50 @@ def main(argv: Sequence[str] | None = None) -> int:
     if snapshot_hash != request.get("pit_snapshot_sha256"):
         raise ValueError("PIT metadata changed after symbol extraction")
     snapshot = load_snapshot(snapshot_path)
+    scope_failures = _pit_scope_failures(
+        path=snapshot_path,
+        snapshot=snapshot,
+        replay_codes=tuple(row.code for row in symbols),
+    )
+    if scope_failures:
+        raise ValueError(
+            "PIT historical sector closure proof failed: " + ",".join(scope_failures)
+        )
     requested_start = date.fromisoformat(str(request["requested_start"]))
     effective_start = date.fromisoformat(str(request["effective_start"]))
     requested_end = date.fromisoformat(str(request["requested_end"]))
     warmup_start = date.fromisoformat(str(request["warmup_start"]))
+    sector_ids, sector_closure_codes = _sector_reference_scope(
+        symbols=symbols,
+        snapshot=snapshot,
+        warmup_start=warmup_start,
+        requested_end=requested_end,
+    )
+    _validate_sector_reference_budget(
+        sector_ids=sector_ids,
+        closure_codes=sector_closure_codes,
+        max_sector_count=args.max_sector_count,
+        max_sector_closure=args.max_sector_closure,
+        confirmed_large_scope=args.confirm_large_sector_scope,
+    )
+    print(
+        json.dumps(
+            {
+                "stage": "sector_scope",
+                "selected_symbols": len(symbols),
+                "sectors": len(sector_ids),
+                "reference_symbols": len(sector_closure_codes),
+                "large_scope_confirmed": args.confirm_large_sector_scope,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     prefix_path = directory / "prefix_invariance_audit.json"
     prefix_failures = _prefix_audit_failures(
         path=prefix_path,
         manifest_path=manifest_path,
-        algorithm_revision=algorithm_revision,
+        prefix_algorithm_revision=prefix_algorithm_revision,
         fact_algorithm_revision=fact_algorithm_revision,
         snapshot_hash=snapshot_hash,
         symbols=symbols,
@@ -1004,6 +1410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         warmup_start=warmup_start,
         requested_end=requested_end,
         sector_algorithm_revision=sector_algorithm_revision,
+        sector_composite_algorithm_revision=(sector_composite_algorithm_revision),
         force=args.force_sectors,
         reuse_cache=args.reuse_sector_cache,
         workers=args.sector_workers,
@@ -1069,8 +1476,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for _observed_at, assessment in facts.assessments
     )
     complete_sector_events = sum(
-        "sector_data_incomplete" not in row.reason_codes
-        for row in sector_assessments
+        "sector_data_incomplete" not in row.reason_codes for row in sector_assessments
     )
     sector_event_coverage = (
         Decimal("1")
@@ -1084,7 +1490,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "fixed_policy_single_year_no_parameter_search",
             "malformed_qmt_expiry_sentinels_resolved_by_status_and_observed_bars",
             "gross_cash_dividends_before_investor_specific_holding_period_tax",
-            "terminal_open_positions_marked_to_market_not_same_bar_liquidated",
+            *(
+                ("terminal_open_positions_marked_to_market_not_same_bar_liquidated",)
+                if run.open_positions
+                else ()
+            ),
             *(
                 ("unclassified_archived_contracts_excluded",)
                 if unclassified_contracts
@@ -1105,7 +1515,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("corporate_action_accounting", Decimal("1")),
             ("sector_event_coverage", sector_event_coverage),
             ("causal_current_structure_ledgers", Decimal("1")),
-            ("exact_one_minute_locator_scheduling", Decimal("1")),
+            ("exact_one_minute_nesting_pair_scheduling", Decimal("1")),
             ("entry_higher_timeframe_integrity_evidence", Decimal("1")),
         ),
     )
@@ -1129,7 +1539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "required_ablations_not_run",
             "required_benchmarks_not_run",
             "investor_specific_dividend_withholding_tax_not_modelled",
-            "terminal_open_positions_are_unrealised",
+            *(("terminal_open_positions_are_unrealised",) if run.open_positions else ()),
             "formal_selection_research_ledger_not_used_by_current_production_policy",
             *(
                 ("historical_sw1_membership_unavailable_for_some_archived_contracts",)

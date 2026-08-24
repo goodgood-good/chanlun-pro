@@ -134,7 +134,7 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
     converted = {
         item.unit_id: replace(item, source_kind=SourceKind.STROKE_OBSERVATION)
         for item in (
-            formal.entry_unit,
+            *(() if formal.entry_unit is None else (formal.entry_unit,)),
             *formal.body_units,
             formal.completion_leave_unit,
             formal.completion_return_unit,
@@ -146,18 +146,16 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
             price_basis_revision=formal.price_basis_revision,
             structural_level=formal.structural_level,
             source_kind=SourceKind.STROKE_OBSERVATION.value,
-            entry_unit_id=formal.entry_unit.unit_id,
             initial_unit_ids=tuple(item.unit_id for item in formal.initial_units),
-            establishment_unit_id=formal.establishment_unit.unit_id,
             zd_tick=formal.zd_tick,
             zg_tick=formal.zg_tick,
         ),
         source_kind=SourceKind.STROKE_OBSERVATION,
-        entry_unit=converted[formal.entry_unit.unit_id],
-        establishment_unit=converted[formal.establishment_unit.unit_id],
-        establishment_leave_unit=converted[
-            formal.establishment_leave_unit.unit_id
-        ],
+        entry_unit=(
+            None
+            if formal.entry_unit is None
+            else converted[formal.entry_unit.unit_id]
+        ),
         initial_units=tuple(
             converted[item.unit_id] for item in formal.initial_units
         ),

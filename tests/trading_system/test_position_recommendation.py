@@ -101,7 +101,7 @@ def test_missing_realtime_price_remains_unresolved() -> None:
     assert value.reason_codes == ("POSITION_RATIO_INPUT_UNRESOLVED",)
 
 
-def test_confirmed_setup_can_wait_for_later_one_minute_locator() -> None:
+def test_confirmed_setup_without_nesting_witness_is_not_actionable() -> None:
     value = recommendation(
         recommendation="WAITING_SEGMENT_DIFFERENCE",
     )

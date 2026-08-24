@@ -1273,13 +1273,27 @@ def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None
         **common,
         position_status="CONDITIONAL",
         side="sell",
+        five_minute_trade_signal_fresh=True,
     )
     assert 80 <= structural_sell <= 89
+    stale_structural_sell = review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+        five_minute_trade_signal_fresh=False,
+    )
+    assert 40 <= stale_structural_sell <= 69
+    assert stale_structural_sell == review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="sell",
+    )
     manual_attention_sell = review_priority(
         **common,
         position_status="CONDITIONAL",
         side="sell",
         selection_sources=("MANUAL_ATTENTION_MONITOR",),
+        five_minute_trade_signal_fresh=False,
     )
     assert manual_attention_sell >= 90
     assert manual_attention_sell > structural_sell
@@ -1289,7 +1303,20 @@ def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None
         position_status="CONDITIONAL",
         side="sell",
         selection_sources=("VIRTUAL_HOLDING_MONITOR",),
+        five_minute_trade_signal_fresh=False,
     ) >= 90
+    buy = review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="buy",
+        five_minute_trade_signal_fresh=False,
+    )
+    assert buy == review_priority(
+        **common,
+        position_status="CONDITIONAL",
+        side="buy",
+        five_minute_trade_signal_fresh=True,
+    )
 
 
 def test_event_study_uses_only_complete_sessions_after_review_date() -> None:
@@ -1427,7 +1454,7 @@ def test_feedback_ledger_is_idempotent_hash_chained_and_tamper_evident(
         decomposition_judgement="COMBINED",
         center_expansion_judgement="REJECTED",
         nine_segment_upgrade_judgement="CONFIRMED",
-        locator_judgement="UNCERTAIN",
+        segment_difference_judgement="UNCERTAIN",
         notes="需要人工复核同级别分解。",
     )
 
@@ -1535,7 +1562,7 @@ def test_feedback_ledger_without_structured_fields_is_rejected(tmp_path) -> None
         "decomposition_judgement",
         "center_expansion_judgement",
         "nine_segment_upgrade_judgement",
-        "locator_judgement",
+        "segment_difference_judgement",
     }
     incomplete_identity_fields = tuple(
         field

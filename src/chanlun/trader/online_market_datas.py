@@ -10,6 +10,7 @@ from chanlun.trading.base import MarketDatas
 from chanlun.exchange.exchange import Exchange
 from chanlun.exchange.kline_completion import (
     drop_unclosed_last_bar as _drop_unclosed_last_bar,
+    normalize_completed_bar_labels,
 )
 
 
@@ -62,10 +63,16 @@ class OnlineMarketDatas(MarketDatas):
         再实现另一套墙钟判断。
         """
 
-        return _drop_unclosed_last_bar(
+        time_label = getattr(self.ex, "kline_time_label", "start")
+        closed = _drop_unclosed_last_bar(
             self.klines(code, frequency),
             frequency,
-            time_label=getattr(self.ex, "kline_time_label", "start"),
+            time_label=time_label,
+        )
+        return normalize_completed_bar_labels(
+            closed,
+            frequency,
+            time_label=time_label,
         )
 
     def closed_bar_as_of(self, code, frequency):

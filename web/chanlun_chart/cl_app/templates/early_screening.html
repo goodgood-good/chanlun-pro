@@ -289,7 +289,7 @@
                 <label>分解方法<select name="decomposition_judgement" required><option value="UNCERTAIN">不确定</option><option value="SAME_LEVEL">同级别分解</option><option value="CENTER">中枢分解</option><option value="COMBINED">两者结合</option></select></label>
                 <label>中枢扩展<select name="center_expansion_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认存在扩展</option><option value="REJECTED">确认不存在扩展</option></select></label>
                 <label>九段升级<select name="nine_segment_upgrade_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认满足升级</option><option value="REJECTED">确认不满足升级</option></select></label>
-                <label>1分钟区间套定位判断<select name="locator_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">定位有效</option><option value="REJECTED">定位无效</option></select></label>
+                <label>1分钟区间套段差判断<select name="segment_difference_judgement" required><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">段差有效</option><option value="REJECTED">段差无效</option></select></label>
                 <label>处置<select name="disposition" required><option value="WATCH">继续观察</option><option value="REJECT">拒绝</option><option value="NEEDS_MORE_DATA">需要更多数据</option></select></label>
                 <label class="hr-notes">复核笔记<textarea name="notes" maxlength="4000" rows="3" placeholder="记录中枢区间、分解依据、失效条件或仍需核对的原文规则"></textarea></label>
                 <button id="hr-submit" class="es-button" type="submit">保存复核记录</button>
@@ -346,7 +346,7 @@
               </fieldset>
 
               <fieldset class="es-filter-group">
-                <legend>A股候选范围（美股不受此项限制）</legend>
+                <legend>A股候选范围（美股由独立小范围监听控制）</legend>
                 <div class="es-filter-buttons">
                   <button type="button" data-selection-scope="sector-trigger" aria-pressed="false">A股板块已触发</button>
                   <button class="is-active" type="button" data-selection-scope="all-qualified" aria-pressed="true">全部资格观察</button>

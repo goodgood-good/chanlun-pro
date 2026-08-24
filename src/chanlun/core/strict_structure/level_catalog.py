@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 
-_EFFECTIVE_FREQUENCIES = {
-    "1m": ("1m", "5m", "30m", "d"),
-    "5m": ("5m", "30m", "d"),
-    "30m": ("30m", "d"),
-    "d": ("d",),
-}
-_DISPLAY_LABELS = {"1m": "1m", "5m": "5m", "30m": "30m", "d": "日线"}
+# Recursive structure is derived from one physical bar stream. The engine stops
+# naturally when it can no longer assemble a higher-level unit; this catalog is
+# only a defensive/display bound and must never imply a different bar frequency.
+MAX_RECURSIVE_STRUCTURE_LEVELS = 50
+
 _FREQUENCY_RANK = {"1m": 0, "5m": 1, "30m": 2, "d": 3}
 
 
@@ -26,25 +24,43 @@ def _canonical_frequency(value: str) -> str:
     return f"{raw}m" if raw.isdigit() else raw.lower()
 
 
+def _validate_recursive_level(recursive_level: int) -> None:
+    if type(recursive_level) is not int or recursive_level < 0:
+        raise ValueError("recursive_level must be a non-negative integer")
+    if recursive_level >= MAX_RECURSIVE_STRUCTURE_LEVELS:
+        raise ValueError("recursive level is outside the bounded catalog")
+
+
 def recursive_level_labels(source_frequency: str) -> tuple[str, ...]:
-    key = _canonical_frequency(source_frequency)
-    values = _EFFECTIVE_FREQUENCIES.get(key, (key,))
-    return tuple(_DISPLAY_LABELS.get(value, value) for value in values)
+    """Return explicit structural labels without inventing physical periods."""
+
+    source = _canonical_frequency(source_frequency)
+    return tuple(
+        f"{source}/L{level}" for level in range(MAX_RECURSIVE_STRUCTURE_LEVELS)
+    )
 
 
 def effective_frequency(source_frequency: str, recursive_level: int) -> str:
-    """返回物理周期与递归级别共同代表的唯一有效周期。"""
+    """Return the physical source period for a bounded recursive level.
 
-    if type(recursive_level) is not int or recursive_level < 0:
-        raise ValueError("recursive_level must be a non-negative integer")
-    key = _canonical_frequency(source_frequency)
-    levels = _EFFECTIVE_FREQUENCIES.get(key)
-    if levels is None or recursive_level >= len(levels):
-        raise ValueError("unsupported physical frequency recursive level")
-    return levels[recursive_level]
+    ``recursive_level`` describes structure assembled from the source stream; it
+    is not a resampling operation. Consequently ``5m/L2`` remains physical 5m
+    evidence and must not be relabelled as a 30-minute or daily chart.
+    """
+
+    _validate_recursive_level(recursive_level)
+    return _canonical_frequency(source_frequency)
 
 
 def effective_frequency_rank(source_frequency: str, recursive_level: int) -> int:
-    """返回跨物理周期可直接比较的有效结构级别序号。"""
+    """Return physical-period rank; recursive depth is intentionally separate."""
 
     return _FREQUENCY_RANK[effective_frequency(source_frequency, recursive_level)]
+
+
+__all__ = (
+    "MAX_RECURSIVE_STRUCTURE_LEVELS",
+    "effective_frequency",
+    "effective_frequency_rank",
+    "recursive_level_labels",
+)

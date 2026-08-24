@@ -70,7 +70,7 @@ def signal_document(stage: str = "triggered") -> dict[str, object]:
             "structure_anchor_price": "10.00",
             "invalidation_price": "9.80",
         },
-        "trigger_1m": {
+        "segment_difference_1m": {
             "point_id": "trigger:stable-1m-1buy",
             "point_type": "1buy",
             "side": "buy",
@@ -127,8 +127,8 @@ def shared_trigger_signal(signal_id: str, setup_point_type: str) -> dict[str, ob
         "center_ordinal": 1,
         "invalidation_price": "9.80",
     }
-    signal["trigger_1m"] = {
-        **signal["trigger_1m"],
+    signal["segment_difference_1m"] = {
+        **signal["segment_difference_1m"],
         "point_id": "trigger:shared-1m-1buy",
         "point_type": "1buy",
         "confirmed_at": "2026-07-20T10:01:00+08:00",
@@ -188,7 +188,8 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
     assert "监听发现：2026-07-20 10:01:30" in rendered
     assert "最近已完成K线收盘价：10.25" in rendered
     assert "5分钟三类买点（递归层级：L0）" in rendered
-    assert "1分钟区间套定位：一类买点（递归层级：L0）" in rendered
+    assert "1分钟区间套定位：一类买点" in rendered
+    assert "区间套定位：一类买点（递归层级：L0）" not in rendered
     assert "防守价：9.80（跌破买入结构失效）" in rendered
     assert "30分钟向上（有利）" in rendered
     assert "5分钟三类买点" in rendered
@@ -234,7 +235,6 @@ def test_execution_profile_hard_block_still_reports_confirmed_structure_as_obser
     blocked = signal_document("triggered")
     blocked["execution_profile"] = {
         "structure_signal_confirmed": True,
-        "execution_trigger_confirmed": True,
         "one_minute_required_for_trade_signal": False,
         "one_minute_required_for_precise_execution": True,
         # The hard gate remains authoritative if a migrated producer carries
@@ -287,8 +287,8 @@ def test_a_share_lunch_break_does_not_expire_a_fresh_confirmed_point(
         "confirmed_at": "2026-07-20T11:30:00+08:00",
         "available_at": "2026-07-20T11:30:00+08:00",
     }
-    signal["trigger_1m"] = {
-        **signal["trigger_1m"],
+    signal["segment_difference_1m"] = {
+        **signal["segment_difference_1m"],
         "confirmed_at": "2026-07-20T13:01:00+08:00",
         "available_at": "2026-07-20T13:01:00+08:00",
     }
@@ -316,7 +316,6 @@ def test_context_caution_still_notifies_for_manual_review(tmp_path: Path) -> Non
     caution = signal_document("triggered")
     caution["execution_profile"] = {
         "structure_signal_confirmed": True,
-        "execution_trigger_confirmed": True,
         "one_minute_required_for_trade_signal": False,
         "one_minute_required_for_precise_execution": True,
         "recommendation": "CAUTION",
@@ -355,7 +354,6 @@ def test_final_position_block_overrides_caution_action_copy() -> None:
     blocked = signal_document("triggered")
     blocked["execution_profile"] = {
         "structure_signal_confirmed": True,
-        "execution_trigger_confirmed": True,
         "one_minute_required_for_trade_signal": False,
         "one_minute_required_for_precise_execution": True,
         "recommendation": "CAUTION",
@@ -504,8 +502,7 @@ def _without_one_minute_segment(
     signal: dict[str, object],
 ) -> dict[str, object]:
     previous = dict(signal)
-    previous["trigger_1m"] = None
-    previous.pop("segment_difference_1m", None)
+    previous["segment_difference_1m"] = None
     previous.pop("entry_execution_boundary", None)
     return previous
 
@@ -554,8 +551,8 @@ def test_newer_one_minute_segment_rearms_same_five_minute_notification(
     )
     current = signal_document("triggered")
     current["observed_at"] = "2026-07-20T10:02:30+08:00"
-    current["trigger_1m"] = {
-        **current["trigger_1m"],
+    current["segment_difference_1m"] = {
+        **current["segment_difference_1m"],
         "point_id": "trigger:rearmed-1m-1buy",
         "anchor_at": "2026-07-20T10:00:00+08:00",
         "available_at": "2026-07-20T10:02:00+08:00",
@@ -634,8 +631,8 @@ def test_segment_enrichment_dedupe_survives_refresh_restart_and_rebuilt_ids(
         **rebuilt["setup_5m"],
         "point_id": "setup:rebuilt",
     }
-    rebuilt["trigger_1m"] = {
-        **rebuilt["trigger_1m"],
+    rebuilt["segment_difference_1m"] = {
+        **rebuilt["segment_difference_1m"],
         "point_id": "trigger:rebuilt",
     }
     second_sender = RecordingNotifier()
@@ -680,8 +677,8 @@ def test_segment_formed_inside_five_minute_structure_is_fresh_at_confluence(
         state_path=tmp_path / "formation-segment-enrichment.json",
     )
     current = signal_document("triggered")
-    current["trigger_1m"] = {
-        **current["trigger_1m"],
+    current["segment_difference_1m"] = {
+        **current["segment_difference_1m"],
         "anchor_at": "2026-07-20T09:40:00+08:00",
         "confirmed_at": "2026-07-20T09:50:00+08:00",
         "available_at": "2026-07-20T09:50:00+08:00",
@@ -919,8 +916,8 @@ def test_semantic_trigger_dedupe_survives_restart_and_changed_setup_id(
         **second["setup_5m"],
         "point_id": "setup:rebuilt-same-5m-event",
     }
-    second["trigger_1m"] = {
-        **second["trigger_1m"],
+    second["segment_difference_1m"] = {
+        **second["segment_difference_1m"],
         # A price-basis rebuild may replace this internal ID while leaving the
         # completed trigger bar and every visible notification fact unchanged.
         "point_id": "trigger:rebuilt-same-causal-event",
@@ -946,8 +943,8 @@ def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
     )
     first = shared_trigger_signal("signal:first-trigger", "1buy")
     second = shared_trigger_signal("signal:second-trigger", "2buy")
-    second["trigger_1m"] = {
-        **second["trigger_1m"],
+    second["segment_difference_1m"] = {
+        **second["segment_difference_1m"],
         "point_id": "trigger:distinct-1m-1buy",
         "available_at": "2026-07-20T10:02:00+08:00",
         "confirmed_at": "2026-07-20T10:02:00+08:00",
@@ -981,8 +978,8 @@ def test_same_close_time_with_distinct_l0_segment_anchor_is_not_coalesced(
     )
     first = shared_trigger_signal("signal:level-zero", "1buy")
     second = shared_trigger_signal("signal:level-one", "2buy")
-    second["trigger_1m"] = {
-        **second["trigger_1m"],
+    second["segment_difference_1m"] = {
+        **second["segment_difference_1m"],
         "point_id": "trigger:rebuilt-distinct-anchor",
         "recursive_level": 0,
         "anchor_at": "2026-07-20T09:55:00+08:00",
@@ -1256,8 +1253,8 @@ def test_boundary_touch_third_class_one_minute_point_is_not_a_continuation_trigg
         "point_type": point_type,
         "side": side,
     }
-    signal["trigger_1m"] = {
-        **signal["trigger_1m"],
+    signal["segment_difference_1m"] = {
+        **signal["segment_difference_1m"],
         "point_type": point_type,
         "side": side,
         "variant": "boundary_touch",
@@ -1288,8 +1285,8 @@ def test_standard_third_class_one_minute_continuation_trigger_notifies(
         state_path=tmp_path / "third-continuation.json",
     )
     signal = signal_document("triggered")
-    signal["trigger_1m"] = {
-        **signal["trigger_1m"],
+    signal["segment_difference_1m"] = {
+        **signal["segment_difference_1m"],
         "point_type": "3buy",
         "variant": "standard",
         "center_id": "trigger-center",
@@ -1330,7 +1327,7 @@ def test_expired_one_minute_boundary_does_not_suppress_five_minute_signal(
     assert "5分钟三类买点" in title
     assert "段差已定位" not in title
     assert (
-        "1分钟区间套定位：一类买点（递归层级：L0）历史证据保留；"
+        "1分钟区间套定位：一类买点历史证据保留；"
         "买入精确定位窗口已过"
     ) in "\n".join(lines)
 
@@ -1372,8 +1369,8 @@ def test_sell_transition_notifies_without_an_actual_holding_exit_decision(
                 "point_type": "3sell",
                 "side": "sell",
             },
-            "trigger_1m": {
-                **sell["trigger_1m"],
+            "segment_difference_1m": {
+                **sell["segment_difference_1m"],
                 "point_type": "1sell",
                 "side": "sell",
             },
@@ -1420,8 +1417,8 @@ def test_fresh_sell_alert_is_dispatched_before_lexically_earlier_buy(
                 "point_type": "1sell",
                 "side": "sell",
             },
-            "trigger_1m": {
-                **sell["trigger_1m"],
+            "segment_difference_1m": {
+                **sell["segment_difference_1m"],
                 "point_type": "1sell",
                 "side": "sell",
             },
@@ -1682,7 +1679,7 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
         "center_ordinal": 1,
         "invalidation_price": "10.80",
     }
-    sell["trigger_1m"] = {}
+    sell["segment_difference_1m"] = {}
 
     title, lines = format_notification(
         sell,
@@ -1826,8 +1823,8 @@ def test_terminal_occurrence_ignores_non_trade_recursive_levels(
     )
     first = shared_trigger_signal("signal:l0", "3buy")
     second = shared_trigger_signal("signal:l1", "3buy")
-    second["trigger_1m"] = {
-        **second["trigger_1m"],
+    second["segment_difference_1m"] = {
+        **second["segment_difference_1m"],
         "point_id": "trigger:shared-1m-1buy:l1",
         "recursive_level": 1,
     }

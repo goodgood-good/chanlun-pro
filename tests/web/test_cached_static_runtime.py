@@ -168,6 +168,8 @@ def test_generic_wsgi_full_chart_has_no_vendor_inline_csp_blocks(monkeypatch):
     )
 
     class FakeExchange:
+        stock_info_query_scope = "SINGLE_SYMBOL_STOCK_INFO"
+
         def stock_info(self, code):
             return {"code": code, "name": "Preview", "precision": 100}
 

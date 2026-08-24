@@ -1120,8 +1120,12 @@ def capture_warmup_structure_lineage_snapshot(
             constituents = tuple(
                 line_by_unit_id[value.unit_id].line_id for value in center.body_units
             )
-            entry = line_by_unit_id.get(center.entry_unit.unit_id)
-            if entry is None:
+            entry = (
+                None
+                if center.entry_unit is None
+                else line_by_unit_id.get(center.entry_unit.unit_id)
+            )
+            if center.entry_unit is not None and entry is None:
                 raise ValueError("strict center entry unit was not captured")
             fact = WarmupStructureCenterFacts(
                 center_id=center.center_id,
@@ -1130,7 +1134,7 @@ def capture_warmup_structure_lineage_snapshot(
                 center_index=center_index,
                 direction=center.completion_direction,
                 start_at=normalize_datetime(
-                    center.entry_unit.market_start, "center_start"
+                    center.body_start_market_time, "center_start"
                 ),
                 end_at=normalize_datetime(
                     max(
@@ -1144,10 +1148,14 @@ def capture_warmup_structure_lineage_snapshot(
                 range_low=quantum * center.dd_tick,
                 range_high=quantum * center.gg_tick,
                 completed=center.state
-                in {CenterState.COMPLETED, CenterState.DIVERGENCE_CLOSED},
+                in {
+                    CenterState.COMPLETED,
+                    CenterState.SUPERSEDED,
+                    CenterState.DIVERGENCE_CLOSED,
+                },
                 real=bool(center.tradable),
                 expanded=center.center_id in expanded_center_ids,
-                entry_line_id=entry.line_id,
+                entry_line_id=None if entry is None else entry.line_id,
                 constituent_line_ids=constituents,
             )
             centers.append(fact)
@@ -1168,8 +1176,12 @@ def capture_warmup_structure_lineage_snapshot(
             center_id=point.center_id,
             center_level_rank=point.structural_level,
             point_type=point.point_type,
-            point_anchor_at=point.anchor_at,
-            point_available_at=point.available_at,
+            point_anchor_at=normalize_datetime(
+                point.anchor_at, "strict_point_anchor_at"
+            ),
+            point_available_at=normalize_datetime(
+                point.available_at, "strict_point_available_at"
+            ),
         )
         if point_id not in supply_points:
             continue

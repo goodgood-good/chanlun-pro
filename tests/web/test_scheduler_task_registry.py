@@ -132,7 +132,7 @@ def test_run_xuangu_atomically_rejects_duplicate_concurrent_submission():
     scheduler = _CollisionScheduler()
     tasks = XuanguTasks(scheduler)
     task_key = next(iter(xuangu_task_configs))
-    args = ("a", task_key, ["d"], ["long"], "all", "target")
+    args = ("a", task_key, ["d"], ["long"], ["SZ.000001"], "target")
 
     results = []
     errors = []
@@ -156,7 +156,9 @@ def test_run_xuangu_rejects_submission_when_scheduler_is_stopped():
     task_key = next(iter(xuangu_task_configs))
 
     with pytest.raises(RuntimeError, match="scheduler is not running"):
-        tasks.run_xuangu("a", task_key, ["d"], ["long"], "all", "target")
+        tasks.run_xuangu(
+            "a", task_key, ["d"], ["long"], ["SZ.000001"], "target"
+        )
 
     assert scheduler.add_calls == 0
 

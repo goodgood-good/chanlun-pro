@@ -30,6 +30,7 @@ class _GlobalWatchlistDb:
             ),
         ]
         self.replacements = []
+        self.adds = []
 
     def zx_get_global_groups(self):
         return list(self.groups)
@@ -50,6 +51,12 @@ class _GlobalWatchlistDb:
 
     def zx_replace_group_stocks(self, market, group, stocks):
         self.replacements.append((market, group, stocks))
+        return True
+
+    def zx_add_group_stock(
+        self, market, group, code, name, memo, color, location
+    ):
+        self.adds.append((market, group, code, name, memo, color, location))
         return True
 
 
@@ -128,3 +135,35 @@ def test_system_holding_group_is_global_and_cannot_be_deleted(monkeypatch):
 
     assert watchlist.del_zx_group("我的持仓") is False
     assert "我的持仓" in {group.zx_group for group in fake.groups}
+
+
+def test_non_a_add_uses_code_without_catalog_expanding_stock_info(monkeypatch):
+    fake = _GlobalWatchlistDb()
+    calls = {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
+
+    class _CatalogExpandingExchange:
+        def all_stocks(self):
+            calls["all_stocks"] += 1
+            return [{"code": "HK.00700", "name": "Tencent"}]
+
+        def stock_info(self, code):
+            calls["stock_info"] += 1
+            calls["basicinfo"] += 1
+            return next(
+                row for row in self.all_stocks() if row["code"] == code
+            )
+
+    monkeypatch.setattr(zixuan_module, "db", fake)
+    monkeypatch.setattr(
+        zixuan_module,
+        "get_exchange",
+        lambda _market: _CatalogExpandingExchange(),
+    )
+    watchlist = zixuan_module.ZiXuan("hk")
+
+    assert watchlist.add_stock("跨市场观察", "HK.00700", None) is True
+
+    assert fake.adds == [
+        ("hk", "跨市场观察", "HK.00700", "HK.00700", "", "", "bottom")
+    ]
+    assert calls == {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}

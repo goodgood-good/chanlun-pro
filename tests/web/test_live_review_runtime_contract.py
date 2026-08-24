@@ -69,10 +69,9 @@ def test_unconfirmed_sell_matches_source_auditor_without_account_advisory() -> N
     profile = signal["execution_profile"]
     profile.update(
         structure_signal_confirmed=False,
-        execution_trigger_confirmed=False,
         one_minute_segment_difference_present=False,
-        precision_locator_status="STRUCTURE_PENDING",
-        precision_locator_ready=False,
+        segment_difference_status="STRUCTURE_PENDING",
+        segment_difference_ready=False,
         precise_execution_ready=False,
         recommendation="GEOMETRY_AWAITING_CONFIRMATION",
         recommendation_label="5分钟买卖点仅为几何候选，尚未达到操作确认",
@@ -108,10 +107,9 @@ def test_invalidated_sell_preserves_nonactionable_cause_without_adapter() -> Non
     ]
     profile = signal["execution_profile"]
     profile.update(
-        execution_trigger_confirmed=False,
         one_minute_segment_difference_present=False,
-        precision_locator_status="WAITING_ONE_MINUTE",
-        precision_locator_ready=False,
+        segment_difference_status="WAITING_ONE_MINUTE",
+        segment_difference_ready=False,
         precise_execution_ready=False,
         recommendation="BLOCKED",
         recommendation_label="当前不满足操作条件，等待结构或数据恢复",
@@ -143,10 +141,9 @@ def test_invalidated_buy_may_retain_already_observed_segment_expiry_advisory() -
     ]
     profile = signal["execution_profile"]
     profile.update(
-        execution_trigger_confirmed=False,
         one_minute_segment_difference_present=False,
-        precision_locator_status="WAITING_ONE_MINUTE",
-        precision_locator_ready=False,
+        segment_difference_status="WAITING_ONE_MINUTE",
+        segment_difference_ready=False,
         precise_execution_ready=False,
         recommendation="BLOCKED",
         recommendation_label="当前不满足操作条件，等待结构或数据恢复",

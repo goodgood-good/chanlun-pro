@@ -654,21 +654,54 @@ class DB(object):
                 raise
         return bool(member_count or group_count)
 
-    def zx_get_global_group_stocks(self, zx_group: str) -> List[TableByZixuan]:
-        """Return all members of a group while preserving each member market."""
+    def zx_get_global_group_stocks(
+        self,
+        zx_group: str,
+        *,
+        limit: int | None = None,
+        markets: tuple[str, ...] | None = None,
+    ) -> List[TableByZixuan]:
+        """Return ordered group members, optionally bounded in SQL.
+
+        UI callers omit ``limit`` and retain the complete group.  Runtime
+        monitors must pass an exact positive integer so a large local group is
+        never materialized merely to truncate it in Python.  ``markets`` is
+        applied before the limit, preventing A-share rows from consuming a
+        bounded non-A monitor query.
+        """
+
+        if limit is not None:
+            if type(limit) is not int:
+                raise TypeError("limit must be an exact integer")
+            if limit <= 0:
+                raise ValueError("limit must be positive")
+        market_scope = None
+        if markets is not None:
+            if not isinstance(markets, tuple) or any(
+                type(market) is not str for market in markets
+            ):
+                raise TypeError("markets must be a tuple of strings")
+            market_scope = tuple(
+                dict.fromkeys(market.strip() for market in markets if market.strip())
+            )
+            if not market_scope:
+                return []
 
         with self.Session() as session:
-            return (
-                session.query(TableByZixuan)
-                .filter(TableByZixuan.zx_group == zx_group)
-                .order_by(
-                    TableByZixuan.position.asc(),
-                    TableByZixuan.add_datetime.asc(),
-                    TableByZixuan.market.asc(),
-                    TableByZixuan.stock_code.asc(),
-                )
-                .all()
+            query = session.query(TableByZixuan).filter(
+                TableByZixuan.zx_group == zx_group
             )
+            if market_scope is not None:
+                query = query.filter(TableByZixuan.market.in_(market_scope))
+            query = query.order_by(
+                TableByZixuan.position.asc(),
+                TableByZixuan.add_datetime.asc(),
+                TableByZixuan.market.asc(),
+                TableByZixuan.stock_code.asc(),
+            )
+            if limit is not None:
+                query = query.limit(limit)
+            return query.all()
 
     def zx_add_group_stock(
         self,

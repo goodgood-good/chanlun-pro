@@ -86,6 +86,9 @@ from cl_app.services.human_review_screening import (
     HumanReviewScreeningService,
     _review_lane,
 )
+from cl_app.services.trading_screening_scope import (
+    ScreeningScopeAuthorizationError,
+)
 import tools.validate_trading_screening_review as review_validator_subject
 
 
@@ -263,6 +266,7 @@ def _live_ranked_alert(
     base = _alert()
     boundary = EntryExecutionBoundary(
         symbol=base.symbol,
+        setup_occurrence_id="setup-occurrence:human-review-alert-test",
         point_id=base.source_point_id,
         source_frequency="1m",
         confirmation_bar_closed_at=signal_at,
@@ -463,6 +467,253 @@ def test_immutable_report_validation_is_cached_by_exact_file_identity(
     )
     service._load_path("historical", service.historical_report)
     assert calls == 2
+
+
+def test_archive_projection_intersects_current_admitted_universe(
+    service: HumanReviewScreeningService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scoped = HumanReviewScreeningService(
+        repository_root=service.repository_root,
+        historical_report=service.historical_report,
+        forward_root=service.forward_root,
+        feedback_ledger=service.feedback_ledger,
+        sector_ledger=service.sector_ledger,
+        parameter_snapshot=service.parameter_snapshot,
+        trading_session_provider=_trading_session_provider,
+        candidate_scope_provider=lambda: ("SH.600000",),
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_forward_events",
+        lambda: (_ for _ in ()).throw(AssertionError("forward ledger must be skipped")),
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_forward_markout",
+        lambda: (_ for _ in ()).throw(AssertionError("markout must be skipped")),
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_forward_warmup_structure_lineage",
+        lambda: (_ for _ in ()).throw(AssertionError("warmup must be skipped")),
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_candidate_warmup_diagnostic",
+        lambda _source: (_ for _ in ()).throw(
+            AssertionError("candidate diagnostics must be skipped")
+        ),
+    )
+
+    def forbidden_account_evidence(*_args, **_kwargs):
+        raise AssertionError("global account evidence must be skipped")
+
+    for name in (
+        "audit_human_paper_execution_evidence",
+        "audit_human_paper_execution_rejection_evidence",
+        "audit_human_paper_operations_cancellation_evidence",
+        "audit_human_paper_portfolio_rejection_evidence",
+        "load_human_paper_accounting_parameters",
+        "audit_human_paper_valuation_evidence",
+    ):
+        monkeypatch.setattr(
+            human_review_screening_subject,
+            name,
+            forbidden_account_evidence,
+        )
+
+    projected = scoped.snapshot(source="historical", include_evidence=False)
+    monkeypatch.undo()
+
+    assert projected["review_queue"] == []
+    assert projected["review_queue_count"] == 0
+    assert projected["scope"] == {
+        "projection": "CURRENT_ADMITTED_UNIVERSE",
+        "admitted_code_count": 1,
+        "admitted_candidate_count": 0,
+        "source_archive_aggregates_hidden": True,
+    }
+    assert projected["candidate_funnel"] == {
+        "scope_projection": True,
+        "admitted_candidate_count": 0,
+    }
+    assert projected["signal_counts"] == {
+        "scope_projection": True,
+        "admitted_candidate_count": 0,
+    }
+    assert projected["event_study_summary"] == {}
+    assert projected["forward_markout"]["status"] == "SCOPE_PROJECTED"
+    assert projected["paper_accounting"]["scope_projection"] == (
+        "CURRENT_ADMITTED_UNIVERSE"
+    )
+    with pytest.raises(
+        HumanReviewScreenUnavailable,
+        match="human_review_candidate_not_found",
+    ):
+        scoped.candidate_detail(
+            candidate_id=_alert().candidate_id,
+            source_sha256=str(_report()["content_sha256"]),
+        )
+
+    full = HumanReviewScreeningService(
+        repository_root=service.repository_root,
+        historical_report=service.historical_report,
+        forward_root=service.forward_root,
+        feedback_ledger=service.feedback_ledger,
+        sector_ledger=service.sector_ledger,
+        parameter_snapshot=service.parameter_snapshot,
+        trading_session_provider=_trading_session_provider,
+        candidate_scope_provider=lambda: None,
+    )
+    assert full.snapshot(source="historical", include_evidence=False)[
+        "review_queue_count"
+    ] == 1
+
+
+def test_archive_scope_admits_manual_attention_as_mandatory(
+    service: HumanReviewScreeningService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alert = _alert()
+    admitted_calls: list[tuple[str, ...]] = []
+
+    def admit(mandatory_codes):
+        mandatory = tuple(mandatory_codes)
+        admitted_calls.append(mandatory)
+        return (*mandatory, "SH.600000")
+
+    scoped = HumanReviewScreeningService(
+        repository_root=service.repository_root,
+        historical_report=service.historical_report,
+        forward_root=service.forward_root,
+        feedback_ledger=service.feedback_ledger,
+        sector_ledger=service.sector_ledger,
+        parameter_snapshot=service.parameter_snapshot,
+        trading_session_provider=_trading_session_provider,
+        candidate_scope_provider=lambda: ("SH.600000",),
+        candidate_scope_admission_provider=admit,
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_feedback_entries",
+        lambda: (
+            {
+                "feedback_id": "sha256:" + "1" * 64,
+                "candidate_id": alert.candidate_id,
+                "signal_lifecycle_id": alert.signal_lifecycle_id,
+                "source_screen_content_sha256": _report()["content_sha256"],
+                "reviewed_at": "2026-07-28T12:00:00+08:00",
+                "request_id": "manual-watch",
+                "disposition": "WATCH",
+                "point_judgement": "BUY_3",
+            },
+        ),
+    )
+    monkeypatch.setattr(scoped, "_paper_events", lambda: ())
+
+    projected = scoped.snapshot(source="historical", include_evidence=False)
+
+    assert admitted_calls == [(alert.symbol,)]
+    assert projected["review_queue_count"] == 1
+    assert projected["review_queue"][0]["symbol"] == alert.symbol
+    assert projected["scope"]["admitted_code_count"] == 2
+
+
+def test_archive_scope_keeps_current_position_as_mandatory_projection(
+    service: HumanReviewScreeningService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admitted_calls: list[tuple[str, ...]] = []
+
+    def admit(mandatory_codes):
+        mandatory = tuple(mandatory_codes)
+        admitted_calls.append(mandatory)
+        return (*mandatory, "SH.600000")
+
+    scoped = HumanReviewScreeningService(
+        repository_root=service.repository_root,
+        historical_report=service.historical_report,
+        forward_root=service.forward_root,
+        feedback_ledger=service.feedback_ledger,
+        sector_ledger=service.sector_ledger,
+        parameter_snapshot=service.parameter_snapshot,
+        trading_session_provider=_trading_session_provider,
+        candidate_scope_provider=lambda: ("SH.600000",),
+        candidate_scope_admission_provider=admit,
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_paper_events",
+        lambda: (
+            {
+                "kind": "FILL",
+                "payload": {
+                    "intent_id": "intent-position",
+                    "symbol": _alert().symbol,
+                    "quantity": 100,
+                    "side": "BUY",
+                },
+            },
+        ),
+    )
+
+    projected = scoped.snapshot(source="historical", include_evidence=False)
+
+    assert admitted_calls == [(_alert().symbol,)]
+    assert projected["virtual_open_positions"] == {_alert().symbol: 100}
+    assert projected["virtual_open_position_count"] == 1
+    assert projected["paper_execution_evidence"]["status"] == "SCOPE_PROJECTED"
+
+
+def test_archive_scope_fails_closed_when_mandatory_positions_exceed_limit(
+    service: HumanReviewScreeningService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_mandatory(_mandatory_codes):
+        raise ScreeningScopeAuthorizationError("mandatory scope exceeds limit")
+
+    scoped = HumanReviewScreeningService(
+        repository_root=service.repository_root,
+        historical_report=service.historical_report,
+        forward_root=service.forward_root,
+        feedback_ledger=service.feedback_ledger,
+        sector_ledger=service.sector_ledger,
+        parameter_snapshot=service.parameter_snapshot,
+        trading_session_provider=_trading_session_provider,
+        candidate_scope_provider=lambda: ("SH.600000",),
+        candidate_scope_admission_provider=reject_mandatory,
+    )
+    monkeypatch.setattr(
+        scoped,
+        "_paper_events",
+        lambda: (
+                {
+                    "kind": "FILL",
+                    "payload": {
+                        "intent_id": "intent-1",
+                        "symbol": "SZ.000001",
+                        "quantity": 100,
+                        "side": "BUY",
+                    },
+                },
+                {
+                    "kind": "FILL",
+                    "payload": {
+                        "intent_id": "intent-2",
+                        "symbol": "SZ.000002",
+                        "quantity": 100,
+                        "side": "BUY",
+                    },
+                },
+        ),
+    )
+
+    with pytest.raises(
+        HumanReviewScreenUnavailable,
+        match="human_review_mandatory_scope_exceeds_limit",
+    ):
+        scoped.snapshot(source="historical", include_evidence=False)
 
 
 def test_compact_live_bundle_avoids_full_report_walk_and_loads_one_detail(
@@ -711,6 +962,7 @@ def test_entry_boundary_source_audit_rejects_an_internally_rehashed_intent(
     confirmed_at = datetime(2026, 7, 20, 10, 4, tzinfo=TZ)
     boundary = EntryExecutionBoundary(
         symbol=SYMBOL,
+        setup_occurrence_id="setup-occurrence:source-audit-test",
         point_id="sha256:" + "9" * 64,
         source_frequency="1m",
         confirmation_bar_closed_at=confirmed_at,
@@ -1025,7 +1277,7 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "persistent_sell_five_percent_bar_volume_cap_enforced": True,
         "adverse_observed_bar_extreme_fill_price_enforced": True,
         "completed_bar_close_fill_timestamp_enforced": True,
-        "strategic_buy_one_locator_bar_ttl_enforced": True,
+        "strategic_buy_one_nesting_decision_ttl_enforced": True,
         "strategic_buy_causal_full_1m_window_prechecked": True,
         "full_session_240_bar_grid_required": True,
         "opening_auction_event_merged_into_0931": True,
@@ -1244,7 +1496,7 @@ def test_live_ranked_buy_requires_exact_catalog_before_virtual_intent(
             "decomposition_judgement": "COMBINED",
             "center_expansion_judgement": "REJECTED",
             "nine_segment_upgrade_judgement": "CONFIRMED",
-            "locator_judgement": "CONFIRMED",
+            "segment_difference_judgement": "CONFIRMED",
             "disposition": "PAPER_OBSERVE",
             "notes": "exact QMT catalog may enter the virtual decision path",
         },
@@ -1338,7 +1590,7 @@ def test_live_ranked_buy_requires_exact_catalog_before_virtual_intent(
             "decomposition_judgement": "COMBINED",
             "center_expansion_judgement": "REJECTED",
             "nine_segment_upgrade_judgement": "CONFIRMED",
-            "locator_judgement": "CONFIRMED",
+            "segment_difference_judgement": "CONFIRMED",
             "disposition": "PAPER_OBSERVE",
             "notes": "feedback is retained while the virtual entry is withheld",
         },
@@ -2878,7 +3130,7 @@ def test_historical_feedback_is_hash_chained_but_never_creates_paper_intent(
             "decomposition_judgement": "COMBINED",
             "center_expansion_judgement": "REJECTED",
             "nine_segment_upgrade_judgement": "CONFIRMED",
-            "locator_judgement": "CONFIRMED",
+            "segment_difference_judgement": "CONFIRMED",
             "disposition": "PAPER_OBSERVE",
             "notes": "人工确认后仅进入模拟观察。",
         },
@@ -2897,7 +3149,7 @@ def test_historical_feedback_is_hash_chained_but_never_creates_paper_intent(
             "decomposition_judgement": "COMBINED",
             "center_expansion_judgement": "REJECTED",
             "nine_segment_upgrade_judgement": "CONFIRMED",
-            "locator_judgement": "CONFIRMED",
+            "segment_difference_judgement": "CONFIRMED",
             "disposition": "PAPER_OBSERVE",
             "notes": "人工确认后仅进入模拟观察。",
         },
@@ -2920,7 +3172,7 @@ def test_historical_feedback_is_hash_chained_but_never_creates_paper_intent(
     assert ledger["entries"][0]["decomposition_judgement"] == "COMBINED"
     assert ledger["entries"][0]["center_expansion_judgement"] == "REJECTED"
     assert ledger["entries"][0]["nine_segment_upgrade_judgement"] == ("CONFIRMED")
-    assert ledger["entries"][0]["locator_judgement"] == "CONFIRMED"
+    assert ledger["entries"][0]["segment_difference_judgement"] == "CONFIRMED"
     assert retry["feedback"]["feedback_id"] == result["feedback"]["feedback_id"]
     assert retry["paper_intent"] is None
     assert not service.paper_ledger.exists()

@@ -144,6 +144,10 @@ USMART_LOGIN_PASSWORD=你的盈立登录密码
 windows_run.bat
 ```
 
+该双击入口统一走 `ops/restart_web.ps1` 的就绪与版本校验，并在启动前把 A 股大范围、
+全市场、强制全覆盖及跨市场关注大范围授权清零；数值批次恢复为 12（A 股 admission
+硬上限恢复为 20）。浏览器只会在新进程校验通过后打开。
+
 **手动启动**：
 
 ```bash
@@ -155,19 +159,39 @@ poetry run python web/chanlun_chart/app.py
 
 #### 策略验证范围
 
-开发和规则调试默认只回放 `config/research_backtest_sample_48.txt` 中固定的 48 只标的；
-底层回测工具会拒绝未声明范围的调用，避免误跑全市场：
+开发和规则调试默认只提取 `config/research_backtest_smoke_2.txt` 中固定的 2 只标的；
+确认结构结果后再升级到 12 只验证样本、前缀审计和收益汇总。底层回测工具会拒绝
+未声明范围的调用，避免误跑全市场。每个 profile 使用独立的 `pit_metadata.json`；
+`-GeneratePIT` 只读取已存在且完整的 CNInfo checkpoint 来证明相关 SW1 行业历史成员闭包，
+checkpoint 有缺口就停止，不会在小样本流程里暗中补抓全市场：
+
+日常修改按“单元/合成用例 → 2 只 Extract → 12 只验证”推进；同一数据边界复用
+已有 PIT 和行业缓存，不重复执行 `-GeneratePIT` 或 `Finalize`。只有小样本稳定后才做
+收益汇总，最终全市场验收必须由操作者单独双重授权。
+
+直接调用 `tools/backtest_qmt_fixed_year.py` 时，以过滤后的实际标的数为准：超过
+20 只必须增加 `--confirm-large-scope`；全市场必须同时提供 `--full-market` 和
+`--confirm-large-scope`，两个开关不能互相替代。
 
 ```powershell
-# 默认：48 只快速研究样本
-.\ops\run_historical_backtest.ps1
+# 默认：2 只。首次运行显式生成该 profile 独立的 PIT 行业闭包，再做事实提取
+.\ops\run_historical_backtest.ps1 -GeneratePIT
 
-# 仅在样本验证稳定后的最终验收中显式执行
-.\ops\run_historical_backtest.ps1 -FullMarket
+# 12 只事实提取；确认无误后再分别运行前缀审计和收益汇总
+.\ops\run_historical_backtest.ps1 -Profile validation12 -Stage Extract -GeneratePIT
+.\ops\run_historical_backtest.ps1 -Profile validation12 -Stage Prefix
+.\ops\run_historical_backtest.ps1 -Profile validation12 -Stage Finalize
+
+# 调试入口只保留 2 只和 12 只；全市场是独立入口，必须显式双重确认
+.\ops\run_historical_backtest.ps1 -FullMarket -ConfirmLargeScope -Stage All
 ```
 
-Web 应用同样默认关闭盘后全市场覆盖。最终验收或生产运行需要显式设置
-`CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED=1`；普通启动不会处理五千余只标的。
+Web 应用同样默认关闭盘后全市场覆盖。最终验收或生产运行需要单独调用
+`ops/restart_web.ps1 -EnableLargeScreeningScope -EnableFullCoverage`；普通双击启动
+不会继承旧环境中的宽范围授权，也不会处理五千余只标的。跨市场持仓/关注监听使用
+独立的 `CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS`（默认 12）；托管启动要保留任何
+更大配置都必须在该次启动单独提供 `-EnableLargeHoldingMonitorScope`，且核心会拒绝
+未获该独立授权的 20 只以上范围。A 股大范围开关不会连带放宽它。
 
 #### Web 安全部署模式
 

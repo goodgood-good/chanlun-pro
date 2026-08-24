@@ -9,6 +9,9 @@ from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     _TechnicalSignalEvaluator,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    current_five_minute_setup_points,
+)
 from tests.trading_system.helpers import (
     AS_OF,
     confirmed_point,
@@ -64,12 +67,7 @@ def test_engine_keeps_three_buy_lanes_and_triggers_independent() -> None:
 
 def test_neutral_sector_is_retained() -> None:
     evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
-        symbol_bundle(
-            five_points=(confirmed_point("2buy"),),
-            one_points=(
-                confirmed_point("1buy", frequency="1m", minutes_after=1),
-            ),
-        )
+        deterministic_bundle()
     )
 
     assert evaluated[0].entry is not None
@@ -78,13 +76,7 @@ def test_neutral_sector_is_retained() -> None:
 
 def test_hostile_sector_downgrades_but_does_not_erase_confirmed_entry() -> None:
     evaluated = _TechnicalSignalEvaluator().evaluate_symbol(
-        symbol_bundle(
-            sector=hostile_sector(),
-            five_points=(confirmed_point("2buy"),),
-            one_points=(
-                confirmed_point("1buy", frequency="1m", minutes_after=1),
-            ),
-        )
+        replace(deterministic_bundle(), sector=hostile_sector())
     )
 
     assert evaluated[0].entry is not None
@@ -326,10 +318,7 @@ def test_live_formed_candidate_uses_current_frontier_not_old_geometry_age() -> N
 
 
 def test_repeated_evaluation_is_deterministic() -> None:
-    bundle = symbol_bundle(
-        five_points=(confirmed_point("2buy"),),
-        one_points=(confirmed_point("1buy", frequency="1m", minutes_after=1),),
-    )
+    bundle = deterministic_bundle()
     engine = _TechnicalSignalEvaluator()
 
     first = engine.evaluate_symbol(bundle)
@@ -338,44 +327,98 @@ def test_repeated_evaluation_is_deterministic() -> None:
     assert first == second
 
 
-def test_newer_one_minute_occurrence_rearms_existing_five_minute_setup() -> None:
+def test_later_nested_witness_keeps_first_execution_boundary() -> None:
     engine = _TechnicalSignalEvaluator()
     first_bundle = deterministic_bundle()
     [first] = engine.evaluate_symbol(first_bundle)
-    old_trigger = first_bundle.one_points[0]
+    first_witness = first_bundle.one_points[0]
     old_boundary = first_bundle.entry_execution_boundaries[0]
-    new_trigger = confirmed_point(
+    later_witness = confirmed_point(
         "1buy",
         frequency="1m",
-        minutes_after=298,
+        minutes_after=293,
+        available_minutes_after=5,
+    )
+    later_witness = replace(
+        later_witness,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:1m:{later_witness.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=later_witness.anchor_at - timedelta(minutes=1),
+            market_end=later_witness.anchor_at,
+            available_at=later_witness.available_at,
+        ),
     )
     new_boundary = replace(
         old_boundary,
-        point_id=new_trigger.point_id,
-        confirmation_bar_closed_at=new_trigger.available_at,
-        entry_valid_until=new_trigger.available_at + timedelta(minutes=1),
+        point_id=later_witness.point_id,
+        confirmation_bar_closed_at=later_witness.available_at,
+        entry_valid_until=later_witness.available_at + timedelta(minutes=1),
     )
     second_bundle = replace(
         first_bundle,
-        as_of=new_trigger.available_at + timedelta(seconds=30),
-        one_points=(old_trigger, new_trigger),
+        as_of=later_witness.available_at + timedelta(seconds=30),
+        one_points=(first_witness, later_witness),
         entry_execution_boundaries=(old_boundary, new_boundary),
         previous_lifecycles=(first.lifecycle,),
-        previous_trigger_points=(old_trigger,),
+        previous_trigger_points=(first_witness,),
     )
 
     [second] = engine.evaluate_symbol(second_bundle)
 
-    assert first.trigger == old_trigger
+    assert first.trigger == first_witness
     assert old_boundary.entry_valid_until < second_bundle.as_of
-    assert second.trigger == new_trigger
-    assert second.lifecycle.signal_id == first.lifecycle.signal_id
-    assert second.lifecycle.stage == first.lifecycle.stage
-    assert second.lifecycle.trigger_point_id == new_trigger.point_id
-    assert second.lifecycle.observed_at == second_bundle.as_of
-    assert second.entry_execution_boundary == new_boundary
+    assert second.trigger == first_witness
+    assert second.lifecycle == first.lifecycle
+    assert second.entry_execution_boundary == old_boundary
     assert second.entry is not None
-    assert second.entry.allowed is True
+    assert second.entry.allowed is False
+
+
+def test_shared_witness_boundary_is_not_reused_when_setup_pair_time_ties() -> None:
+    base = deterministic_bundle()
+    first_setup = base.five_points[0]
+    witness = base.one_points[0]
+    first_boundary = base.entry_execution_boundaries[0]
+    later_setup = confirmed_point(
+        "1buy",
+        minutes_after=295,
+    )
+    later_setup = replace(
+        later_setup,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:5m:{later_setup.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=later_setup.anchor_at - timedelta(minutes=30),
+            market_end=later_setup.anchor_at,
+            available_at=later_setup.available_at,
+        ),
+    )
+    assert first_boundary.confirmation_bar_closed_at == witness.available_at
+    assert later_setup.available_at < witness.available_at
+    bundle = replace(
+        base,
+        as_of=witness.available_at + timedelta(seconds=30),
+        five_points=(first_setup, later_setup),
+        entry_execution_boundaries=(first_boundary,),
+    )
+
+    evaluated = {
+        item.setup.point.point_type: item
+        for item in _TechnicalSignalEvaluator().evaluate_symbol(bundle)
+    }
+
+    assert evaluated["2buy"].entry_execution_boundary == first_boundary
+    assert evaluated["1buy"].trigger == witness
+    assert evaluated["1buy"].entry_execution_boundary is None
 
 
 def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
@@ -405,7 +448,7 @@ def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
     ]
 
 
-def test_actual_latest_completed_segment_is_not_expired_by_calendar_age() -> None:
+def test_actual_latest_completed_segment_stays_display_current_but_not_executable() -> None:
     point = confirmed_point(
         "3buy",
         center_ordinal=1,
@@ -430,7 +473,8 @@ def test_actual_latest_completed_segment_is_not_expired_by_calendar_age() -> Non
         symbol_bundle(five_points=(point,))
     )
 
-    assert [item.setup.point for item in evaluated] == [point]
+    assert current_five_minute_setup_points((point,), as_of=AS_OF) == (point,)
+    assert evaluated == ()
 
 
 def test_late_lock_does_not_resurrect_an_expired_structure_anchor() -> None:

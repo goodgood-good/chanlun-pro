@@ -38,6 +38,7 @@ from chanlun.decision_support.trading_system.trading_session import (
 )
 from .app_runtime_owner import pid_alive
 from .job_names import JOB_DISPLAY_NAMES
+from .trading_screening_scope import LARGE_SCOPE_THRESHOLD
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -360,8 +361,42 @@ def evaluation_readiness_from_health(
         pending_symbol_count = int(screening.get("pending_symbol_count", -1))
     except (TypeError, ValueError):
         pending_symbol_count = -1
+    try:
+        scope_mode = str(screening.get("screening_scope_mode") or "")
+        effective_limit = int(
+            screening.get("effective_monitor_universe_limit", -1)
+        )
+        discovered_symbol_count = int(
+            screening.get("discovered_symbol_count", -1)
+        )
+    except (TypeError, ValueError):
+        scope_mode = ""
+        effective_limit = -1
+        discovered_symbol_count = -1
+    large_scope_authorized = screening.get("large_scope_authorized") is True
+    full_coverage_enabled = (
+        screening.get("full_coverage_refresh_enabled") is True
+    )
+    if scope_mode == "FULL_MARKET":
+        scope_ready = large_scope_authorized and full_coverage_enabled
+    elif scope_mode == "LARGE_SCOPE":
+        scope_ready = (
+            large_scope_authorized
+            and effective_limit > 0
+            and 0 <= discovered_symbol_count <= effective_limit
+        )
+    elif scope_mode == "VALIDATION_COHORT":
+        scope_ready = (
+            not large_scope_authorized
+            and 0 < effective_limit <= LARGE_SCOPE_THRESHOLD
+            and 0 <= discovered_symbol_count <= effective_limit
+        )
+    else:
+        scope_ready = False
     coverage_ready = bool(
-        screening.get("coverage_cycle_complete") is True and pending_symbol_count == 0
+        scope_ready
+        and screening.get("coverage_cycle_complete") is True
+        and pending_symbol_count == 0
     )
     ready = bool(
         payload.get("status") == "ready"
@@ -374,6 +409,8 @@ def evaluation_readiness_from_health(
         reason = "READY"
     elif not cutoff_ready:
         reason = "MARKET_CLOSE_DATA_PENDING"
+    elif not scope_ready:
+        reason = "SCREENING_SCOPE_UNAUTHORIZED"
     elif not coverage_ready:
         reason = "SCREENING_COVERAGE_PENDING"
     elif archive.get("ready") is not True:
@@ -408,6 +445,7 @@ class AppForwardSchedulerController:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         python_executable: str | os.PathLike[str] | None = None,
         parameter_snapshot: Path | None = None,
+        pit_snapshot: Path | None = None,
         state_path: Path | None = None,
         owner_path: Path | None = None,
         capture_timeout_seconds: int = 1800,
@@ -437,6 +475,17 @@ class AppForwardSchedulerController:
                 / "config"
                 / "decision_support"
                 / "human_review_parameters.json"
+            ).resolve()
+        )
+        self._pit_snapshot = (
+            Path(pit_snapshot).resolve()
+            if pit_snapshot is not None
+            else (
+                self._root
+                / "audit"
+                / "chanlun_trading_system_backtest"
+                / "research_sample_validation_12"
+                / "pit_metadata.json"
             ).resolve()
         )
         self._forward_contract_id: str | None = None
@@ -752,6 +801,8 @@ class AppForwardSchedulerController:
             str(self._forward_root),
             "--qmt-local-data-dir",
             str(self._qmt),
+            "--pit-snapshot",
+            str(self._pit_snapshot),
             "--session",
             session.isoformat(),
         ]

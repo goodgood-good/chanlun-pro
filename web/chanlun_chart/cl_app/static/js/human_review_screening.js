@@ -42,7 +42,6 @@
     HUMAN_CONFIRM_5M_TRADE_POINT: "核对 5分钟操作确认买卖点及对应结构证据",
     HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE: "核对 1分钟区间套精确位置",
     HUMAN_CONFIRM_5M_TACTICAL_CONTEXT: "旧档案：确认 5分钟短差上下文",
-    HUMAN_CONFIRM_1M_LOCATOR: "旧档案：用 1分钟完成定位",
     HUMAN_CONFIRM_HIGHER_TIMEFRAME_RISK: "核对日线与30分钟环境",
     HUMAN_DEFINE_INVALIDATION_AND_ANY_PAPER_PLAN: "定义失效条件及后续观察计划",
   };
@@ -1138,7 +1137,7 @@
     "decomposition_judgement",
     "center_expansion_judgement",
     "nine_segment_upgrade_judgement",
-    "locator_judgement",
+    "segment_difference_judgement",
     "disposition",
     "notes",
   ];
@@ -1631,7 +1630,7 @@
           && paperCapabilities.strategic_buy_five_percent_bar_volume_cap_enforced === true
           && paperCapabilities.adverse_observed_bar_extreme_fill_price_enforced === true
           && paperCapabilities.completed_bar_close_fill_timestamp_enforced === true
-          && paperCapabilities.strategic_buy_one_locator_bar_ttl_enforced === true
+          && paperCapabilities.strategic_buy_one_nesting_decision_ttl_enforced === true
           && paperCapabilities.strategic_buy_causal_full_1m_window_prechecked === true
           && paperCapabilities.current_review_queue_raw_1m_boundaries_self_contained === true
           && paperCapabilities.structure_anchor_never_used_as_execution_cap === true
@@ -2178,7 +2177,7 @@
           ...primary,
           `扩展 ${binaryLabel(row.center_expansion_judgement)}`,
           `九段 ${binaryLabel(row.nine_segment_upgrade_judgement)}`,
-          `定位 ${binaryLabel(row.locator_judgement)}`,
+          `段差 ${binaryLabel(row.segment_difference_judgement)}`,
         ].join(" · ");
         article.append(heading, decisions);
         if (row.notes) {
@@ -2209,7 +2208,7 @@
         center_judgement: "UNCERTAIN", trend_judgement: "UNCERTAIN", level_judgement: "UNCERTAIN",
         point_judgement: "UNCERTAIN", decomposition_judgement: "UNCERTAIN",
         center_expansion_judgement: "UNCERTAIN", nine_segment_upgrade_judgement: "UNCERTAIN",
-        locator_judgement: "UNCERTAIN", disposition: "WATCH", notes: "",
+        segment_difference_judgement: "UNCERTAIN", disposition: "WATCH", notes: "",
       };
       Object.entries(latest || defaults).forEach(([name, value]) => {
         const control = form.elements.namedItem(name);

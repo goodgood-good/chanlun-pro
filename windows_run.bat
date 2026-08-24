@@ -1,42 +1,35 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
-REM Resolve project root and source path.
+REM Use the managed restart path so readiness, revision and port ownership are
+REM verified before the browser opens. A normal double-click is always bounded.
 set "ROOT_DIR=%~dp0"
 cd /d "%ROOT_DIR%"
 if errorlevel 1 exit /b 1
-set "PYTHONPATH=%ROOT_DIR%src"
-set "APP_SCRIPT=%ROOT_DIR%web\chanlun_chart\app.py"
 
-if exist "%APP_SCRIPT%" goto :resolve_python
-echo ERROR: application script not found: %APP_SCRIPT%
+set "CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE=0"
+set "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED=0"
+set "CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE=0"
+set "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED=0"
+set "CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES=SZ.000932,SZ.000923,SH.600516,SZ.001203,SZ.000783,SZ.000987,SH.601377,SH.601628,SZ.002377,SH.601808,SZ.000698,SH.600583"
+set "CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE=12"
+set "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS=12"
+set "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS=12"
+set "CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK=12"
+set "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH=12"
+set "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=12"
+set "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS=12"
+set "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=20"
+set "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS=12"
+set "CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED=0"
+
+set "RESTART_SCRIPT=%ROOT_DIR%ops\restart_web.ps1"
+if exist "%RESTART_SCRIPT%" goto :restart
+echo ERROR: managed restart script not found: %RESTART_SCRIPT%
 exit /b 1
 
-:resolve_python
-REM app.py loads project .env before resolving CHANLUN_WEB_HOST and
-REM CHANLUN_WEB_PORT. Do not set launcher defaults that mask .env values.
-REM Python resolution matches ops/restart_web.ps1:
-REM CHANLUN_PYTHON, then .venv, then the Poetry environment.
-if defined CHANLUN_PYTHON goto :run_configured_python
-if exist "%ROOT_DIR%.venv\Scripts\python.exe" goto :run_venv_python
-where poetry >nul 2>&1
-if errorlevel 1 goto :missing_python
-poetry run python "%APP_SCRIPT%"
-exit /b %ERRORLEVEL%
-
-:run_configured_python
-if exist "%CHANLUN_PYTHON%" goto :configured_python_exists
-echo ERROR: CHANLUN_PYTHON does not exist: %CHANLUN_PYTHON%
-exit /b 1
-
-:configured_python_exists
-"%CHANLUN_PYTHON%" "%APP_SCRIPT%"
-exit /b %ERRORLEVEL%
-
-:run_venv_python
-"%ROOT_DIR%.venv\Scripts\python.exe" "%APP_SCRIPT%"
-exit /b %ERRORLEVEL%
-
-:missing_python
-echo ERROR: Poetry was not found and no project Python is configured.
-exit /b 1
+:restart
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%RESTART_SCRIPT%" -OpenBrowser
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" echo ERROR: managed web restart failed with exit code %EXIT_CODE%.
+exit /b %EXIT_CODE%

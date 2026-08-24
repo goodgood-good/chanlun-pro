@@ -819,6 +819,16 @@ def test_process_proxy_uses_in_process_symbol_catalog_without_native_io() -> Non
     assert transport.calls == []
 
 
+def test_process_proxy_default_sector_cache_scope_is_fail_closed() -> None:
+    proxy = NativeTradingDataGatewayProcessProxy(
+        transport=_InstrumentScopeTransport(),  # type: ignore[arg-type]
+    )
+
+    assert proxy._sector_cache_scope_mode == "VALIDATION_COHORT"  # noqa: SLF001
+    assert proxy._sector_cache_scope_limit == 12  # noqa: SLF001
+    assert proxy._sector_cache_admitted_codes == ()  # noqa: SLF001
+
+
 class _RealtimeTickTransport:
     def __init__(self, result: object) -> None:
         self.result = result
@@ -1952,6 +1962,7 @@ def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
         transport=first_transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     expected = first.native_sector_assessments(as_of=as_of)
@@ -1970,6 +1981,7 @@ def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
         transport=second_transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     restored = second.native_sector_assessments(as_of=as_of)
 
@@ -1984,6 +1996,99 @@ def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
     cache_health = second.health_snapshot()["sector_snapshot_cache"]
     assert cache_health["state"] == "hit"
     assert cache_health["content_sha256"] == document["content_sha256"]
+
+
+def test_bounded_sector_cache_rejects_legacy_payload_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    cache_path.write_text("{legacy-full-cache-must-not-be-parsed", encoding="utf-8")
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_atomic_snapshot(as_of)),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.bounded",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
+    )
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == cache_path:
+            raise AssertionError("bounded sector restore opened the payload")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    assert proxy.cached_sector_snapshot_for_priority(as_of=as_of) is None
+    health = proxy.health_snapshot()["sector_snapshot_cache"]
+    assert health["state"] == "priority_rejected"
+    assert health["reason"] == "CACHE_SCOPE_PROOF_MISSING_OR_INVALID"
+
+
+def test_bounded_sector_cache_rejects_replaced_payload_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_atomic_snapshot(as_of)),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.bounded",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
+    )
+    first.native_sector_assessments(as_of=as_of)
+    assert first._sector_cache_scope_sidecar_path(cache_path).is_file()
+    cache_path.write_text("{replacement-invalidates-the-small-proof", encoding="utf-8")
+
+    second = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_atomic_snapshot(as_of)),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.bounded",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
+    )
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == cache_path:
+            raise AssertionError("stale sector sidecar admitted a replaced payload")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    assert second.cached_sector_snapshot_for_priority(as_of=as_of) is None
+
+
+def test_bounded_sector_writer_marks_mixed_member_scope_oversize(
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    snapshot = _atomic_snapshot(as_of)
+    snapshot["members"] = {"TDX.880301": ("SH.600000", "SH.600001")}
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(snapshot),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.mixed",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
+    )
+
+    proxy.native_sector_assessments(as_of=as_of)
+
+    proof = json.loads(
+        proxy._sector_cache_scope_sidecar_path(cache_path).read_text(encoding="utf-8")
+    )
+    assert proof["scope_mode"] == "OVERSCOPE"
+    assert proof["strategy_subject_count"] == 2
 
 
 @pytest.mark.parametrize(
@@ -2012,6 +2117,7 @@ def test_proxy_reuses_snapshot_inside_same_causal_market_data_epoch(
         transport=_AtomicTransport(_atomic_snapshot(cached_as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     expected = first.native_sector_assessments(as_of=cached_as_of)
 
@@ -2021,6 +2127,7 @@ def test_proxy_reuses_snapshot_inside_same_causal_market_data_epoch(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     assert second.native_sector_assessments(as_of=requested_as_of) == expected
@@ -2041,6 +2148,7 @@ def test_priority_cache_reader_reuses_stale_snapshot_without_worker_call(
         transport=_AtomicTransport(_atomic_snapshot(cached_as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     expected = first.native_sector_assessments(as_of=cached_as_of)
     transport = _AtomicTransport(_atomic_snapshot(requested_as_of))
@@ -2049,6 +2157,7 @@ def test_priority_cache_reader_reuses_stale_snapshot_without_worker_call(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     restored = second.cached_sector_snapshot_for_priority(as_of=requested_as_of)
@@ -2074,6 +2183,7 @@ def test_proxy_cache_roundtrips_recomputable_sector_strength_evidence(
         transport=_AtomicTransport(_audited_atomic_snapshot(as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     expected = first.native_sector_assessments(as_of=as_of)
     document = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -2088,6 +2198,7 @@ def test_proxy_cache_roundtrips_recomputable_sector_strength_evidence(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     restored = second.native_sector_assessments(as_of=as_of)
 
@@ -2106,6 +2217,7 @@ def test_proxy_cache_roundtrips_sector_eligibility_exclusions(
         transport=_AtomicTransport(_excluded_atomic_snapshot(as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     expected = first.native_sector_assessments(as_of=as_of)
     document = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -2119,6 +2231,7 @@ def test_proxy_cache_roundtrips_sector_eligibility_exclusions(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     restored = second.native_sector_assessments(as_of=as_of)
 
@@ -2141,6 +2254,7 @@ def test_proxy_rejects_tampered_sector_cache_and_refreshes_from_worker(
         transport=_AtomicTransport(_atomic_snapshot(as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     first.native_sector_assessments(as_of=as_of)
     tampered = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -2152,6 +2266,7 @@ def test_proxy_rejects_tampered_sector_cache_and_refreshes_from_worker(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     second.native_sector_assessments(as_of=as_of)
 
@@ -2170,6 +2285,7 @@ def test_proxy_rejects_rehashed_cache_with_future_market_fact(
         transport=_AtomicTransport(_atomic_snapshot(as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     first.native_sector_assessments(as_of=as_of)
     forged = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -2184,6 +2300,7 @@ def test_proxy_rejects_rehashed_cache_with_future_market_fact(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     second.native_sector_assessments(as_of=as_of)
 
@@ -2218,6 +2335,7 @@ def test_proxy_rejects_wrong_time_or_source_revision_cache(
         transport=_AtomicTransport(_atomic_snapshot(cached_as_of)),
         sector_cache_path=cache_path,
         sector_cache_revision="head.tree.abc123",
+        sector_cache_scope_mode="FULL_MARKET",
     )
     first.native_sector_assessments(as_of=cached_as_of)
 
@@ -2226,6 +2344,7 @@ def test_proxy_rejects_wrong_time_or_source_revision_cache(
         transport=transport,
         sector_cache_path=cache_path,
         sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     second.native_sector_assessments(as_of=requested_as_of)
 
@@ -2374,6 +2493,26 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         raising=False,
     )
     monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED",
+        raising=False,
+    )
+    monkeypatch.delenv(
         "CHANLUN_TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS",
         raising=False,
     )
@@ -2396,13 +2535,18 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == 3
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"] is False
-    assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 512
-    assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
+    assert app.config["TRADING_SCREENING_VALIDATION_COHORT_SIZE"] == 12
+    assert app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"] == 20
+    assert app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"] is False
+    assert app.config["HOLDING_GROUP_MONITOR_MAX_SYMBOLS"] == 12
+    assert app.config["HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED"] is False
+    assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 12
+    assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 12
     assert app.config[
         "TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK"
-    ] == 128
-    assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64
-    assert app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"] == 512
+    ] == 12
+    assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 12
+    assert app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"] == 12
     assert app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"] == 210.0
     assert app.config["TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS"] == 4096
     assert app.config["TRADING_SCREENING_NATIVE_MAX_RSS_MB"] == 1536

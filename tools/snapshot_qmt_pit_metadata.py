@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,25 +24,35 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     CN,
     PITMetadataSnapshot,
     SecurityMasterRecord,
+    SectorMembershipChange,
     membership_changes_from_cninfo,
     normalize_qmt_a_share_code,
+    qmt_native_code,
     qmt_factors_from_rows,
     sha256_json,
     snapshot_payload,
     sw1_sector_id,
 )
+from chanlun.decision_support.trading_system.backtest.pit_scope import (
+    FULL_MARKET_MODE,
+    MAX_UNCONFIRMED_REQUESTED_CODES,
+    PIT_SCOPE_SCHEMA,
+    SCOPED_SECTOR_CLOSURE_MODE,
+    relevant_sector_ids,
+    scope_source_hashes,
+    sector_closure_codes,
+    validate_scope_proof,
+)
 
 
 DEFAULT_START = date(2025, 5, 1)
 DEFAULT_END = date(2026, 7, 24)
-DEFAULT_OUTPUT = Path(
-    "audit/chanlun_trading_system_backtest/fixed_year_2025_2026/pit_metadata.json"
-)
 _CNINFO_STANDARD = "008003"
 _CNINFO_HISTORY_URL = "https://webapi.cninfo.com.cn/api/stock/p_stock2110"
 _CNINFO_TAXONOMY_URL = "https://webapi.cninfo.com.cn/api/stock/p_public0002"
 _QMT_CURRENT_A = "\u6caa\u6df1A\u80a1"
 _QMT_EXPIRED_A = "\u8fc7\u671f\u6caa\u6df1A\u80a1"
+_MEMBERSHIP_INDEX_SCHEMA = "chanlun-cninfo-membership-index/v1"
 
 
 def _parse_date(value: str) -> date:
@@ -63,8 +73,48 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--start", type=_parse_date, default=DEFAULT_START)
     result.add_argument("--end", type=_parse_date, default=DEFAULT_END)
-    result.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    result.add_argument("--workers", type=_positive_int, default=6)
+    result.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="explicit profile-specific PIT snapshot target",
+    )
+    result.add_argument("--workers", type=_positive_int, default=2)
+    result.add_argument(
+        "--codes",
+        help="explicit comma-separated normalized stock codes (for example SH.600000)",
+    )
+    result.add_argument(
+        "--codes-file",
+        type=Path,
+        help="UTF-8 file containing one normalized requested stock code per line",
+    )
+    result.add_argument(
+        "--membership-checkpoint-dir",
+        type=Path,
+        help=(
+            "existing complete CNInfo checkpoint directory used to prove the "
+            "historical SW1 closure; scoped capture never fills checkpoint gaps"
+        ),
+    )
+    result.add_argument(
+        "--membership-index",
+        type=Path,
+        help=(
+            "immutable index emitted by an explicitly authorized full PIT "
+            "capture; required for bounded sector-closure resolution"
+        ),
+    )
+    result.add_argument(
+        "--full-market",
+        action="store_true",
+        help="explicitly request a full-market metadata capture",
+    )
+    result.add_argument(
+        "--confirm-large-scope",
+        action="store_true",
+        help="second authorization required for full market or more than 20 subjects",
+    )
     result.add_argument("--force", action="store_true")
     result.add_argument(
         "--refresh-contracts",
@@ -72,6 +122,42 @@ def parser() -> argparse.ArgumentParser:
         help="refresh QMT expired-contract and current-sector files first",
     )
     return result
+
+
+def _normalized_requested_codes(args: argparse.Namespace) -> tuple[str, ...]:
+    if args.full_market and (args.codes or args.codes_file is not None):
+        raise ValueError("--full-market cannot be combined with --codes/--codes-file")
+    if args.codes and args.codes_file is not None:
+        raise ValueError("pass only one of --codes or --codes-file")
+    if args.full_market:
+        if not args.confirm_large_scope:
+            raise ValueError("--full-market requires --confirm-large-scope")
+        return ()
+    if not args.codes and args.codes_file is None:
+        raise ValueError(
+            "bounded PIT scope required: pass --codes/--codes-file, or explicitly "
+            "authorize --full-market --confirm-large-scope"
+        )
+    raw_values = (
+        args.codes.split(",")
+        if args.codes
+        else args.codes_file.read_text(encoding="utf-8").splitlines()
+    )
+    values: list[str] = []
+    for raw in raw_values:
+        code = raw.strip().upper()
+        if not code or code.startswith("#"):
+            continue
+        qmt_native_code(code)
+        values.append(code)
+    requested = tuple(sorted(set(values)))
+    if not requested:
+        raise ValueError("bounded PIT scope is empty")
+    if len(requested) > MAX_UNCONFIRMED_REQUESTED_CODES and not args.confirm_large_scope:
+        raise ValueError(
+            f"{len(requested)} requested codes require --confirm-large-scope"
+        )
+    return requested
 
 
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -188,21 +274,44 @@ def _taxonomy(headers: Mapping[str, str]) -> tuple[dict[str, str], list[object]]
     return dict(sorted(level_one.items())), records
 
 
-def _security_master(
-    start: date,
-    end: date,
-) -> tuple[tuple[SecurityMasterRecord, ...], dict[str, object]]:
-    from xtquant import xtdata
-    import pandas as pd
+def _qmt_a_share_inventory() -> tuple[tuple[str, str], ...]:
+    """Enumerate identities only; this must not read per-instrument details."""
 
+    from xtquant import xtdata
+
+    by_code: dict[str, str] = {}
     native_codes = sorted(
         set(xtdata.get_stock_list_in_sector(_QMT_CURRENT_A))
         | set(xtdata.get_stock_list_in_sector(_QMT_EXPIRED_A))
     )
+    for native in native_codes:
+        try:
+            normalized = normalize_qmt_a_share_code(native)
+        except ValueError:
+            continue
+        if normalized.startswith(("SH.", "SZ.", "BJ.")):
+            by_code[normalized] = native
+    if not by_code:
+        raise RuntimeError("QMT A-share contract inventory is empty")
+    return tuple(sorted(by_code.items()))
+
+
+def _security_master(
+    start: date,
+    end: date,
+    *,
+    native_codes: Sequence[str],
+) -> tuple[tuple[SecurityMasterRecord, ...], dict[str, object]]:
+    from xtquant import xtdata
+    import pandas as pd
+
+    xtdata.enable_hello = False
+
     details: dict[str, Mapping[str, object]] = {}
+    unreadable_details: list[str] = []
     invalid_expiry: list[str] = []
     invalid_open: list[str] = []
-    for native in native_codes:
+    for native in sorted(set(native_codes)):
         try:
             normalized = normalize_qmt_a_share_code(native)
         except ValueError:
@@ -211,6 +320,7 @@ def _security_master(
             continue
         detail = xtdata.get_instrument_detail(native, iscomplete=False)
         if not isinstance(detail, Mapping):
+            unreadable_details.append(native)
             continue
         details[native] = detail
         open_text = str(detail.get("OpenDate") or "").strip()
@@ -269,6 +379,12 @@ def _security_master(
                 )
             )
 
+    if unreadable_details:
+        raise RuntimeError(
+            "QMT security detail is unavailable for scoped contracts: "
+            + ",".join(unreadable_details[:10])
+        )
+
     records: list[SecurityMasterRecord] = []
     pseudo_contracts: list[str] = []
     inferred_active: list[str] = []
@@ -321,6 +437,7 @@ def _security_master(
     if not output:
         raise RuntimeError("QMT point-in-time security master is empty")
     return output, {
+        "detail_read_code_count": len(set(native_codes)),
         "raw_contract_count": len(details),
         "malformed_open_date_count": len(invalid_open),
         "malformed_open_date_without_observed_bars": pseudo_contracts,
@@ -398,6 +515,391 @@ def _valid_checkpoint(path: Path, *, code: str, end: date) -> bool:
         return False
 
 
+def _strict_outside_range_identity_proof(
+    *,
+    code: str,
+    native_code: str,
+    detail: object,
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    """Prove from instrument detail alone that an identity cannot enter replay."""
+
+    if qmt_native_code(code) != native_code:
+        raise RuntimeError(f"QMT identity mapping is inconsistent: {code}")
+    if not isinstance(detail, Mapping):
+        raise RuntimeError(f"QMT instrument detail is unreadable: {code}")
+    open_text = str(detail.get("OpenDate") or "").strip()
+    expiry_text = str(detail.get("ExpireDate") or "").strip()
+    create_text = str(detail.get("CreateDate") or "").strip()
+    raw_dates = {
+        "OpenDate": open_text,
+        "ExpireDate": expiry_text,
+        "CreateDate": create_text,
+    }
+
+    def strict_date(value: str, label: str) -> date:
+        try:
+            parsed = datetime.strptime(value, "%Y%m%d").date()
+        except ValueError as exc:
+            raise RuntimeError(f"QMT {label} is invalid: {code}") from exc
+        if not date(1990, 1, 1) <= parsed <= date(2100, 12, 31):
+            raise RuntimeError(f"QMT {label} is outside the strict range: {code}")
+        return parsed
+
+    # A valid terminal date before replay is sufficient even when old expired
+    # identities expose OpenDate=0.  No listing-start inference is required.
+    if expiry_text not in {"", "0", "99999999"}:
+        try:
+            expiry = strict_date(expiry_text, "ExpireDate")
+        except RuntimeError:
+            expiry = None
+        if expiry is not None and expiry < start:
+            return {
+                "code": code,
+                "native_code": native_code,
+                "listed_from": None,
+                "listed_through": expiry.isoformat(),
+                "created_on": None,
+                "relation": "BEFORE_REPLAY_RANGE",
+                "proof_basis": "EXPIRE_DATE_BEFORE_REPLAY",
+                "raw_date_fields": raw_dates,
+            }
+
+    # Some newly created QMT identities temporarily carry the 1970/zero open
+    # sentinel.  A valid later CreateDate proves the identity did not exist in
+    # replay; it does not imply any K-line or listing-date backfill.
+    if open_text in {"0", "19700101"} and create_text:
+        try:
+            created_on = strict_date(create_text, "CreateDate")
+        except RuntimeError:
+            created_on = None
+        if created_on is not None and created_on > end:
+            return {
+                "code": code,
+                "native_code": native_code,
+                "listed_from": None,
+                "listed_through": None,
+                "created_on": created_on.isoformat(),
+                "relation": "AFTER_REPLAY_RANGE",
+                "proof_basis": "CREATE_DATE_AFTER_REPLAY_WITH_OPEN_PLACEHOLDER",
+                "raw_date_fields": raw_dates,
+            }
+
+    listed_from = strict_date(open_text, "OpenDate")
+    # A valid listing start after replay is independently sufficient.  QMT may
+    # expose non-date expiry sentinels such as 10011011 for newly created
+    # identities; bind that raw value, but never use it to negate OpenDate.
+    if listed_from > end:
+        return {
+            "code": code,
+            "native_code": native_code,
+            "listed_from": listed_from.isoformat(),
+            "listed_through": None,
+            "created_on": None,
+            "relation": "AFTER_REPLAY_RANGE",
+            "proof_basis": "OPEN_DATE_AFTER_REPLAY",
+            "raw_date_fields": raw_dates,
+        }
+    if expiry_text in {"", "0", "99999999"}:
+        listed_through = None
+    else:
+        listed_through = strict_date(expiry_text, "ExpireDate")
+        if listed_through < listed_from:
+            raise RuntimeError(f"QMT listing interval is inverted: {code}")
+    if listed_through is not None and listed_through < start:
+        relation = "BEFORE_REPLAY_RANGE"
+    elif listed_from > end:
+        relation = "AFTER_REPLAY_RANGE"
+    else:
+        raise RuntimeError(
+            "checkpoint-absent identity intersects the replay range: " + code
+        )
+    return {
+        "code": code,
+        "native_code": native_code,
+        "listed_from": listed_from.isoformat(),
+        "listed_through": (
+            None if listed_through is None else listed_through.isoformat()
+        ),
+        "created_on": None,
+        "relation": relation,
+        "proof_basis": "STRICT_LISTING_INTERVAL_OUTSIDE_REPLAY",
+        "raw_date_fields": raw_dates,
+    }
+
+
+def _certify_checkpoint_absent_identities(
+    *,
+    codes: Sequence[str],
+    native_by_code: Mapping[str, str],
+    start: date,
+    end: date,
+    detail_loader: Callable[..., object] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Read details only for absent identities; never infer from bars or network."""
+
+    if detail_loader is None:
+        from xtquant import xtdata
+
+        detail_loader = xtdata.get_instrument_detail
+    proofs: list[dict[str, object]] = []
+    for code in sorted(set(codes)):
+        try:
+            native = native_by_code[code]
+        except KeyError as exc:
+            raise RuntimeError(f"QMT native identity is unavailable: {code}") from exc
+        detail = detail_loader(native, iscomplete=False)
+        proofs.append(
+            _strict_outside_range_identity_proof(
+                code=code,
+                native_code=native,
+                detail=detail,
+                start=start,
+                end=end,
+            )
+        )
+    return tuple(proofs)
+
+
+def _load_scoped_checkpoint_inventory(
+    *,
+    inventory_codes: Sequence[str],
+    checkpoint_dir: Path,
+    end: date,
+) -> tuple[
+    tuple[SectorMembershipChange, ...],
+    tuple[Path, ...],
+    tuple[str, ...],
+]:
+    """Load valid checkpoints and report truly absent identities separately."""
+
+    root = checkpoint_dir.resolve()
+    if not root.is_dir():
+        raise ValueError(f"membership checkpoint directory is missing: {root}")
+    codes = tuple(sorted(set(inventory_codes)))
+    paths_by_code = {
+        code: root / f"{code.replace('.', '_')}.json" for code in codes
+    }
+    corrupt = tuple(
+        code
+        for code, path in paths_by_code.items()
+        if path.exists() and not _valid_checkpoint(path, code=code, end=end)
+    )
+    if corrupt:
+        raise RuntimeError(
+            "historical SW1 closure cannot be certified: "
+            f"{len(corrupt)} invalid CNInfo checkpoints ({','.join(corrupt[:10])})"
+        )
+    missing = tuple(
+        code for code, path in paths_by_code.items() if not path.exists()
+    )
+    valid_paths = tuple(
+        path for path in paths_by_code.values() if path.exists()
+    )
+    memberships: list[SectorMembershipChange] = []
+    for code, path in paths_by_code.items():
+        if not path.exists():
+            continue
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        memberships.extend(
+            membership_changes_from_cninfo(
+                code=code,
+                records=raw["records"],
+                not_after=end,
+            )
+        )
+    return tuple(memberships), valid_paths, missing
+
+
+def _load_complete_checkpoint_inventory(
+    *,
+    inventory_codes: Sequence[str],
+    checkpoint_dir: Path,
+    end: date,
+) -> tuple[tuple[SectorMembershipChange, ...], tuple[Path, ...]]:
+    """Load an already captured universe checkpoint tree without network repair."""
+
+    memberships, paths, missing = _load_scoped_checkpoint_inventory(
+        inventory_codes=inventory_codes,
+        checkpoint_dir=checkpoint_dir,
+        end=end,
+    )
+    if missing:
+        examples = ",".join(missing[:10])
+        raise RuntimeError(
+            "historical SW1 closure cannot be certified: "
+            f"{len(missing)} missing/invalid CNInfo checkpoints ({examples})"
+        )
+    return memberships, paths
+
+
+def _membership_index_payload(
+    *,
+    memberships: Sequence[SectorMembershipChange],
+    checkpoint_paths: Sequence[Path],
+    checkpoint_root: Path,
+    end: date,
+) -> dict[str, object]:
+    checkpoints: list[dict[str, str]] = []
+    for path in sorted(checkpoint_paths, key=lambda value: value.name):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        code = str(raw.get("code") or "")
+        qmt_native_code(code)
+        checkpoints.append(
+            {
+                "code": code,
+                "path": path.relative_to(checkpoint_root).as_posix(),
+                "sha256": _sha256(path),
+            }
+        )
+    membership_rows = [
+        {
+            "code": row.code,
+            "sector_id": row.sector_id,
+            "sector_name": row.sector_name,
+            "industry_code": row.industry_code,
+            "source_changed_on": row.source_changed_on.isoformat(),
+            "known_at": row.known_at.isoformat(),
+        }
+        for row in sorted(
+            memberships,
+            key=lambda value: (value.code, value.known_at, value.sector_id),
+        )
+    ]
+    core: dict[str, object] = {
+        "schema": _MEMBERSHIP_INDEX_SCHEMA,
+        "not_after": end.isoformat(),
+        "checkpoint_count": len(checkpoints),
+        "checkpoints": checkpoints,
+        "memberships": membership_rows,
+        "checkpoint_tree_sha256": sha256_json(checkpoints),
+    }
+    return {**core, "content_sha256": sha256_json(core)}
+
+
+def _load_membership_index(
+    *,
+    path: Path,
+    checkpoint_dir: Path,
+    end: date,
+) -> tuple[
+    tuple[str, ...],
+    tuple[SectorMembershipChange, ...],
+    dict[str, tuple[Path, str]],
+    str,
+]:
+    try:
+        raw = json.loads(path.resolve().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"membership index is unreadable: {path}") from exc
+    if not isinstance(raw, Mapping):
+        raise ValueError("membership index is malformed")
+    core = {key: value for key, value in raw.items() if key != "content_sha256"}
+    if (
+        raw.get("schema") != _MEMBERSHIP_INDEX_SCHEMA
+        or raw.get("not_after") != end.isoformat()
+        or raw.get("content_sha256") != sha256_json(core)
+    ):
+        raise ValueError("membership index identity/content proof is invalid")
+    raw_checkpoints = raw.get("checkpoints")
+    raw_memberships = raw.get("memberships")
+    if not isinstance(raw_checkpoints, list) or not isinstance(raw_memberships, list):
+        raise ValueError("membership index arrays are malformed")
+    root = checkpoint_dir.resolve()
+    checkpoints: dict[str, tuple[Path, str]] = {}
+    for item in raw_checkpoints:
+        if not isinstance(item, Mapping):
+            raise ValueError("membership index checkpoint is malformed")
+        code = str(item.get("code") or "")
+        qmt_native_code(code)
+        expected_relative = f"{code.replace('.', '_')}.json"
+        if item.get("path") != expected_relative or code in checkpoints:
+            raise ValueError("membership index checkpoint identity is invalid")
+        digest = str(item.get("sha256") or "")
+        if not digest.startswith("sha256:") or len(digest) != 71:
+            raise ValueError("membership index checkpoint hash is invalid")
+        checkpoints[code] = (root / expected_relative, digest)
+    codes = tuple(sorted(checkpoints))
+    if int(raw.get("checkpoint_count") or -1) != len(codes):
+        raise ValueError("membership index checkpoint count is invalid")
+    if raw.get("checkpoint_tree_sha256") != sha256_json(raw_checkpoints):
+        raise ValueError("membership index checkpoint tree proof is invalid")
+    memberships: list[SectorMembershipChange] = []
+    try:
+        for item in raw_memberships:
+            if not isinstance(item, Mapping):
+                raise ValueError
+            code = str(item["code"])
+            if code not in checkpoints:
+                raise ValueError
+            memberships.append(
+                SectorMembershipChange(
+                    code=code,
+                    sector_id=str(item["sector_id"]),
+                    sector_name=str(item["sector_name"]),
+                    industry_code=str(item["industry_code"]),
+                    source_changed_on=date.fromisoformat(
+                        str(item["source_changed_on"])
+                    ),
+                    known_at=datetime.fromisoformat(str(item["known_at"])),
+                )
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("membership index history is malformed") from exc
+    return (
+        codes,
+        tuple(memberships),
+        checkpoints,
+        str(raw["checkpoint_tree_sha256"]),
+    )
+
+
+def _verify_indexed_closure_checkpoints(
+    *,
+    codes: Sequence[str],
+    checkpoints: Mapping[str, tuple[Path, str]],
+    end: date,
+) -> tuple[tuple[SectorMembershipChange, ...], tuple[Path, ...]]:
+    memberships: list[SectorMembershipChange] = []
+    paths: list[Path] = []
+    for code in sorted(set(codes)):
+        try:
+            path, digest = checkpoints[code]
+        except KeyError as exc:
+            raise RuntimeError(f"membership index has no checkpoint: {code}") from exc
+        if (
+            not _valid_checkpoint(path, code=code, end=end)
+            or _sha256(path) != digest
+        ):
+            raise RuntimeError(f"indexed membership checkpoint is invalid: {code}")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        memberships.extend(
+            membership_changes_from_cninfo(
+                code=code,
+                records=raw["records"],
+                not_after=end,
+            )
+        )
+        paths.append(path)
+    return tuple(memberships), tuple(paths)
+
+
+def _sector_names_from_memberships(
+    memberships: Sequence[SectorMembershipChange],
+) -> dict[str, str]:
+    latest: dict[str, tuple[datetime, str]] = {}
+    for raw in memberships:
+        sector_id = str(raw.sector_id)
+        candidate = (raw.known_at, str(raw.sector_name))
+        if sector_id not in latest or candidate[0] >= latest[sector_id][0]:
+            latest[sector_id] = candidate
+    return {
+        sector_id: name
+        for sector_id, (_known_at, name) in sorted(latest.items())
+    }
+
+
 def _capture_memberships(
     *,
     securities: Sequence[SecurityMasterRecord],
@@ -468,6 +970,8 @@ def _capture_factors(
     end: date,
 ) -> tuple[tuple[object, ...], list[dict[str, object]]]:
     from xtquant import xtdata
+
+    xtdata.enable_hello = False
 
     output: list[object] = []
     raw_ledger: list[dict[str, object]] = []
@@ -559,32 +1063,183 @@ def _crosscheck(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    requested_codes = _normalized_requested_codes(args)
     if args.start > args.end:
         raise ValueError("start cannot follow end")
     if args.workers > 12:
         raise ValueError("workers cannot exceed 12")
+    if not args.full_market and args.membership_checkpoint_dir is None:
+        raise ValueError(
+            "scoped PIT capture requires --membership-checkpoint-dir; "
+            "checkpoint gaps are never repaired implicitly"
+        )
+    if not args.full_market and args.membership_index is None:
+        raise ValueError(
+            "scoped PIT capture requires an immutable --membership-index; "
+            "create it only through an explicitly authorized full PIT capture"
+        )
+    if args.full_market and args.membership_index is not None:
+        raise ValueError("--full-market cannot be combined with --membership-index")
+    if not args.full_market and args.refresh_contracts:
+        raise ValueError("--refresh-contracts is forbidden for scoped PIT capture")
     output = args.output.resolve()
     source_dir = output.parent / (output.stem + "_sources")
-    source_dir.mkdir(parents=True, exist_ok=True)
-    from xtquant import xtdata
-
-    xtdata.enable_hello = False
-    if args.refresh_contracts:
-        xtdata.download_history_contracts(incrementally=False)
-        xtdata.download_sector_data()
     captured_at = datetime.now().astimezone(CN)
-    headers = _cninfo_headers()
-    taxonomy, raw_taxonomy = _taxonomy(headers)
-    securities, master_audit = _security_master(args.start, args.end)
-    current_sw1 = _qmt_current_sw1(taxonomy)
-    memberships, membership_paths = _capture_memberships(
-        securities=securities,
-        end=args.end,
-        headers=headers,
-        source_dir=source_dir,
-        workers=args.workers,
-        force=args.force,
-    )
+    if not args.full_market:
+        (
+            inventory_codes,
+            indexed_memberships,
+            indexed_checkpoints,
+            checkpoint_tree_hash,
+        ) = _load_membership_index(
+            path=args.membership_index,
+            checkpoint_dir=args.membership_checkpoint_dir,
+            end=args.end,
+        )
+        missing_requested = tuple(sorted(set(requested_codes) - set(inventory_codes)))
+        if missing_requested:
+            raise ValueError(
+                "requested codes are absent from immutable membership index: "
+                + ",".join(missing_requested)
+            )
+        closure_candidate_codes, selected_sector_ids = sector_closure_codes(
+            indexed_memberships,
+            requested_codes=requested_codes,
+            start=args.start,
+            end=args.end,
+        )
+        all_memberships, membership_paths = _verify_indexed_closure_checkpoints(
+            codes=closure_candidate_codes,
+            checkpoints=indexed_checkpoints,
+            end=args.end,
+        )
+        indexed_closure_memberships = tuple(
+            sorted(
+                (
+                    row
+                    for row in indexed_memberships
+                    if row.code in set(closure_candidate_codes)
+                ),
+                key=lambda row: (row.code, row.known_at, row.sector_id),
+            )
+        )
+        verified_closure_memberships = tuple(
+            sorted(
+                all_memberships,
+                key=lambda row: (row.code, row.known_at, row.sector_id),
+            )
+        )
+        if verified_closure_memberships != indexed_closure_memberships:
+            raise RuntimeError("membership index does not match closure checkpoints")
+        inventory_hash = sha256_json(list(inventory_codes))
+        native_by_code = {
+            code: qmt_native_code(code) for code in closure_candidate_codes
+        }
+
+    if args.full_market:
+        from xtquant import xtdata
+
+        xtdata.enable_hello = False
+        if args.refresh_contracts:
+            xtdata.download_history_contracts(incrementally=False)
+            xtdata.download_sector_data()
+        inventory = _qmt_a_share_inventory()
+        inventory_codes = tuple(code for code, _native in inventory)
+        native_by_code = dict(inventory)
+        inventory_hash = sha256_json(list(inventory_codes))
+        source_dir.mkdir(parents=True, exist_ok=True)
+        headers = _cninfo_headers()
+        taxonomy, raw_taxonomy = _taxonomy(headers)
+        securities, master_audit = _security_master(
+            args.start,
+            args.end,
+            native_codes=tuple(native_by_code.values()),
+        )
+        current_sw1 = _qmt_current_sw1(taxonomy)
+        memberships, membership_paths = _capture_memberships(
+            securities=securities,
+            end=args.end,
+            headers=headers,
+            source_dir=source_dir,
+            workers=args.workers,
+            force=args.force,
+        )
+        membership_index_path = source_dir / "membership_index.json"
+        _atomic_json(
+            membership_index_path,
+            _membership_index_payload(
+                memberships=memberships,
+                checkpoint_paths=membership_paths,
+                checkpoint_root=source_dir / "cninfo_memberships",
+                end=args.end,
+            ),
+        )
+        requested_codes = tuple(row.code for row in securities)
+        closure_codes = requested_codes
+        closure_candidate_codes = closure_codes
+        checkpoint_absent_codes: tuple[str, ...] = ()
+        outside_range_proofs: tuple[dict[str, object], ...] = ()
+        detail_read_codes = inventory_codes
+        selected_sector_ids = relevant_sector_ids(
+            memberships,
+            codes=requested_codes,
+            start=args.start,
+            end=args.end,
+        )
+        checkpoint_root = source_dir
+        checkpoint_tree_hash = _tree_hash(
+            membership_paths,
+            root=checkpoint_root,
+        )
+        scope_mode = FULL_MARKET_MODE
+        taxonomy_hash = sha256_json(raw_taxonomy)
+        current_sw1_hash = sha256_json(
+            {key: list(value) for key, value in current_sw1.items()}
+        )
+        checkpoint_hash_name = "cninfo_membership_checkpoint_tree"
+    else:
+        checkpoint_absent_codes: tuple[str, ...] = ()
+        outside_range_proofs: tuple[dict[str, object], ...] = ()
+        securities, master_audit = _security_master(
+            args.start,
+            args.end,
+            native_codes=tuple(
+                native_by_code[code] for code in closure_candidate_codes
+            ),
+        )
+        materialized_codes = tuple(row.code for row in securities)
+        missing_requested_details = tuple(
+            sorted(set(requested_codes) - set(materialized_codes))
+        )
+        if missing_requested_details:
+            raise RuntimeError(
+                "requested codes do not intersect the certified replay range: "
+                + ",".join(missing_requested_details)
+            )
+        closure_codes = materialized_codes
+        detail_read_codes = tuple(sorted(closure_candidate_codes))
+        closure_set = set(closure_codes)
+        memberships = tuple(
+            row for row in all_memberships if row.code in closure_set
+        )
+        taxonomy = _sector_names_from_memberships(memberships)
+        missing_sector_names = tuple(
+            sorted(set(selected_sector_ids) - set(taxonomy))
+        )
+        if missing_sector_names:
+            raise RuntimeError(
+                "historical sector closure has no sector names: "
+                + ",".join(missing_sector_names)
+            )
+        current_sw1 = {}
+        checkpoint_root = args.membership_checkpoint_dir.resolve()
+        scope_mode = SCOPED_SECTOR_CLOSURE_MODE
+        taxonomy_hash = sha256_json(
+            {key: value for key, value in sorted(taxonomy.items())}
+        )
+        current_sw1_hash = None
+        checkpoint_hash_name = "cninfo_membership_universe_checkpoint_tree"
+
     factors, raw_factors = _capture_factors(
         securities=securities,
         start=args.start,
@@ -603,23 +1258,68 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         for row in securities
     ]
+    scope = {
+        "schema": PIT_SCOPE_SCHEMA,
+        "mode": scope_mode,
+        "requested_codes": list(requested_codes),
+        "requested_code_count": len(requested_codes),
+        "selected_sector_ids": list(selected_sector_ids),
+        "selected_sector_count": len(selected_sector_ids),
+        "closure_codes": list(closure_codes),
+        "closure_code_count": len(closure_codes),
+        "closure_candidate_codes": list(closure_candidate_codes),
+        "closure_candidate_code_count": len(closure_candidate_codes),
+        "excluded_closure_candidate_codes": list(
+            sorted(set(closure_candidate_codes) - set(closure_codes))
+        ),
+        "sector_closure_complete": True,
+        "enumerated_contract_code_count": (
+            len(closure_codes) if args.full_market else len(inventory_codes)
+        ),
+        "enumerated_contract_codes_sha256": inventory_hash,
+        "membership_checkpoint_count": (
+            len(membership_paths) if args.full_market else len(inventory_codes)
+        ),
+        "membership_checkpoint_tree_sha256": checkpoint_tree_hash,
+        "missing_checkpoint_codes": [],
+        "checkpoint_absent_identity_codes": list(checkpoint_absent_codes),
+        "uncertified_checkpoint_absent_identity_codes": [],
+        "excluded_identity_codes": [
+            str(row["code"]) for row in outside_range_proofs
+        ],
+        "excluded_identity_count": len(outside_range_proofs),
+        "certified_outside_range_identity_count": len(outside_range_proofs),
+        "certified_outside_range_intervals": list(outside_range_proofs),
+        "certified_outside_range_intervals_sha256": sha256_json(
+            list(outside_range_proofs)
+        ),
+        "detail_read_codes": list(detail_read_codes),
+        "detail_read_code_count": (
+            int(master_audit["detail_read_code_count"])
+            + len(outside_range_proofs)
+        ),
+        "factor_read_code_count": len(securities),
+        "large_scope_confirmed": bool(args.confirm_large_scope),
+    }
+    base_hashes: list[tuple[str, str]] = [
+        ("qmt_security_master", sha256_json(master_payload)),
+        ("qmt_a_share_contract_inventory", inventory_hash),
+        ("cninfo_sw1_taxonomy", taxonomy_hash),
+        (checkpoint_hash_name, checkpoint_tree_hash),
+        ("qmt_corporate_action_ledger", sha256_json(raw_factors)),
+    ]
+    if current_sw1_hash is not None:
+        base_hashes.append(("qmt_current_sw1_crosscheck", current_sw1_hash))
+    if not args.full_market:
+        base_hashes.append(
+            (
+                "cninfo_membership_closure_checkpoint_tree",
+                _tree_hash(membership_paths, root=checkpoint_root),
+            )
+        )
     source_hashes = tuple(
         sorted(
-            (
-                ("qmt_security_master", sha256_json(master_payload)),
-                ("cninfo_sw1_taxonomy", sha256_json(raw_taxonomy)),
-                (
-                    "qmt_current_sw1_crosscheck",
-                    sha256_json(
-                        {key: list(value) for key, value in current_sw1.items()}
-                    ),
-                ),
-                (
-                    "cninfo_membership_checkpoint_tree",
-                    _tree_hash(membership_paths, root=source_dir),
-                ),
-                ("qmt_corporate_action_ledger", sha256_json(raw_factors)),
-            )
+            (*base_hashes, *scope_source_hashes(scope))
         )
     )
     snapshot = PITMetadataSnapshot(
@@ -639,10 +1339,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         qmt_sw1_sector_names=tuple(sorted(taxonomy.items())),
         source_hashes=source_hashes,
     )
+    proof_failures = validate_scope_proof(
+        snapshot=snapshot,
+        scope=scope,
+        replay_codes=requested_codes,
+    )
+    if proof_failures:
+        raise RuntimeError(
+            "generated PIT scope proof is inconsistent: "
+            + ",".join(proof_failures)
+        )
     rights = sum(row.allot_num > 0 for row in snapshot.factors)
     reforms = sum(row.gugai > 0 for row in snapshot.factors)
-    crosscheck = _crosscheck(snapshot=snapshot, current=current_sw1)
+    crosscheck = (
+        _crosscheck(snapshot=snapshot, current=current_sw1)
+        if args.full_market
+        else {
+            "status": "NOT_RUN_FOR_SCOPED_CAPTURE",
+            "reason": "no non-closure QMT sector membership reads",
+        }
+    )
     audit = {
+        "scope": scope,
         "security_count": len(snapshot.securities),
         "membership_change_count": len(snapshot.memberships),
         "classified_security_count": len(
@@ -656,13 +1374,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         "security_master_anomalies": master_audit,
     }
     _atomic_json(output, snapshot_payload(snapshot, audit=audit))
+    console_scope = {
+        "schema": scope["schema"],
+        "mode": scope["mode"],
+        "requested_codes": scope["requested_codes"],
+        "requested_code_count": scope["requested_code_count"],
+        "selected_sector_ids": scope["selected_sector_ids"],
+        "selected_sector_count": scope["selected_sector_count"],
+        "closure_code_count": scope["closure_code_count"],
+        "closure_candidate_code_count": scope["closure_candidate_code_count"],
+        "membership_checkpoint_count": scope["membership_checkpoint_count"],
+        "certified_outside_range_identity_count": scope[
+            "certified_outside_range_identity_count"
+        ],
+        "detail_read_code_count": scope["detail_read_code_count"],
+        "factor_read_code_count": scope["factor_read_code_count"],
+        "large_scope_confirmed": scope["large_scope_confirmed"],
+    }
     print(
         json.dumps(
             {
                 "complete": True,
                 "output": str(output),
                 "content_sha256": _sha256(output),
-                **audit,
+                "scope": console_scope,
+                "security_count": audit["security_count"],
+                "membership_change_count": audit["membership_change_count"],
+                "factor_count": audit["factor_count"],
+                "certifiable_action_contract": audit[
+                    "certifiable_action_contract"
+                ],
             },
             ensure_ascii=False,
             indent=2,

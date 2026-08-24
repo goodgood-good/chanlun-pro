@@ -60,6 +60,9 @@ def app(monkeypatch, tmp_path):
             "status": "ready",
             "count": 1,
             "last_error": None,
+            "catalog_mode": stock_list_service.BOUNDED_VALIDATION_CATALOG,
+            "admitted_count": 12,
+            "full_catalog_authorized": False,
         },
         raising=False,
     )
@@ -174,6 +177,11 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
         "status": "ready",
     }
     assert payload["components"]["symbols"]["ready"] is True
+    assert payload["components"]["symbols"]["catalog_mode"] == (
+        stock_list_service.BOUNDED_VALIDATION_CATALOG
+    )
+    assert payload["components"]["symbols"]["admitted_count"] == 12
+    assert payload["components"]["symbols"]["full_catalog_authorized"] is False
     assert payload["components"]["ticks"] == {
         "required": True,
         "ready": True,

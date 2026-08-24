@@ -94,7 +94,6 @@ _REPLAY_SOURCE_FILES = (
     "tools/qmt_research_contract.py",
     "tools/backtest_qmt_fixed_year.py",
     "tools/audit_qmt_prefix_invariance.py",
-    "tools/finalize_qmt_fixed_year.py",
     "tools/finalize_qmt_pit_fixed_year.py",
     "tools/snapshot_qmt_pit_metadata.py",
     "tools/snapshot_qmt_gics3_sector_ledger.py",

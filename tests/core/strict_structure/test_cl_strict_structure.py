@@ -5,6 +5,9 @@ import pytest
 
 from chanlun.core.cl import CL
 from chanlun.core.strict_structure.base_profile import strict_base_config
+from chanlun.core.strict_structure.level_catalog import (
+    MAX_RECURSIVE_STRUCTURE_LEVELS,
+)
 from chanlun.core.strict_structure.models import SourceKind
 
 
@@ -78,7 +81,7 @@ def test_cl_limits_recursive_depth_to_frequency_catalog(sample_frame, monkeypatc
     cd.process_klines(sample_frame.head(400))
     cd.get_strict_structure_levels()
 
-    assert captured == [3]
+    assert captured == [MAX_RECURSIVE_STRUCTURE_LEVELS]
 
 
 def test_strict_memo_invalidates_but_lock_registry_survives_new_bars(sample_frame):

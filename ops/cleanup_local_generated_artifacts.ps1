@@ -84,9 +84,9 @@ foreach ($target in $fixedTargets) {
 
 if ($PurgeInvalidBacktestFacts) {
     $invalidBacktestTargets = @(
-        "audit\chanlun_trading_system_backtest\fixed_year_2025_2026\prefix_audit",
-        "audit\chanlun_trading_system_backtest\fixed_year_2025_2026\symbols",
-        "audit\chanlun_trading_system_backtest\fixed_year_2025_2026\extract_manifest.json"
+        "audit\chanlun_trading_system_backtest\full_market_explicit\prefix_audit",
+        "audit\chanlun_trading_system_backtest\full_market_explicit\symbols",
+        "audit\chanlun_trading_system_backtest\full_market_explicit\extract_manifest.json"
     )
     foreach ($target in $invalidBacktestTargets) {
         Add-CleanupCandidate `
@@ -99,7 +99,11 @@ if ($PurgeInvalidBacktestFacts) {
     if (Test-Path -LiteralPath $backtestAuditRoot) {
         $targetedScratchDirectories = @(
             Get-ChildItem -LiteralPath $backtestAuditRoot -Directory -Force `
-                -Filter "targeted_v*" -ErrorAction SilentlyContinue
+                -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Name -like "targeted_v*" -or
+                    $_.Name -like "research_diagnostic_*"
+                }
         )
         foreach ($target in $targetedScratchDirectories) {
             Add-CleanupCandidate `
@@ -113,6 +117,7 @@ if ($PurgeRetiredRuntimeState) {
     $retiredRuntimeTargets = @(
         ".cache\chanlun_human_review",
         ".cache\chanlun_human_review_forward",
+        ".cache\chanlun_scheduler",
         ".cache\chanlun_web_watchdog"
     )
     foreach ($target in $retiredRuntimeTargets) {
@@ -214,10 +219,8 @@ if (Test-Path -LiteralPath $rootGeneratedLogPath) {
 }
 
 $logRoot = Join-Path $repositoryRoot "ops\logs"
+$activeOpsLogs = [System.Collections.Generic.List[string]]::new()
 if (Test-Path -LiteralPath $logRoot) {
-    $currentQmtLogName = 'qmt_runtime_{0}.log' -f (
-        Get-Date -Format 'yyyy-MM-dd'
-    )
     $generatedLogs = @(
         Get-ChildItem -LiteralPath $logRoot -File -Force |
             Where-Object {
@@ -228,13 +231,27 @@ if (Test-Path -LiteralPath $logRoot) {
                 $_.Name -like "web_watchdog_*" -or
                 $_.Name -like "forward_paper_*" -or
                 $_.Name -like "restart_*" -or
-                (
-                    $_.Name -match '^qmt_runtime_\d{4}-\d{2}-\d{2}\.log$' -and
-                    $_.Name -ne $currentQmtLogName
-                )
+                $_.Name -eq "historical_backtest.lock" -or
+                $_.Name -match '^qmt_runtime_\d{4}-\d{2}-\d{2}\.log$'
             }
     )
     foreach ($target in $generatedLogs) {
+        $exclusiveHandle = $null
+        try {
+            $exclusiveHandle = [IO.File]::Open(
+                $target.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None
+            )
+        } catch [IO.IOException] {
+            $activeOpsLogs.Add($target.FullName)
+            continue
+        } finally {
+            if ($null -ne $exclusiveHandle) {
+                $exclusiveHandle.Dispose()
+            }
+        }
         Add-CleanupCandidate -LiteralPath $target.FullName -Category "generated_log"
     }
 }
@@ -311,12 +328,7 @@ $result = [ordered]@{
     categories = $byCategory
     protected = [ordered]@{
         active_app_logs = @($activeRootAppLogs)
-        qmt_runtime_logs = @(
-            Get-ChildItem -LiteralPath $logRoot -File `
-                -Filter "qmt_runtime_*.log" -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -eq $currentQmtLogName } |
-                Select-Object -ExpandProperty FullName
-        )
+        active_ops_logs = @($activeOpsLogs)
         active_forward_cache = Test-Path -LiteralPath (
             Join-Path $repositoryRoot ".cache\chanlun_human_review_forward"
         )
@@ -330,14 +342,4 @@ $result = [ordered]@{
 }
 
 $json = $result | ConvertTo-Json -Depth 6
-if ($Execute) {
-    $receiptPath = Join-Path `
-        $repositoryRoot `
-        ".cache\chanlun_scheduler\local_cleanup_latest.json"
-    $receiptDirectory = Split-Path -Parent $receiptPath
-    New-Item -ItemType Directory -Path $receiptDirectory -Force | Out-Null
-    $temporaryReceipt = $receiptPath + ".tmp"
-    Set-Content -LiteralPath $temporaryReceipt -Value $json -Encoding UTF8
-    Move-Item -LiteralPath $temporaryReceipt -Destination $receiptPath -Force
-}
 $json

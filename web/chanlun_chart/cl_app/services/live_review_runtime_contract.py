@@ -46,7 +46,6 @@ def _buy_shadow_matches_original_auditor(shadow: dict[str, object]) -> bool:
     if (
         shadow.get("lifecycle_stage") != "invalidated"
         or not isinstance(profile, dict)
-        or profile.get("execution_trigger_confirmed") is not False
     ):
         return False
     advisories = profile.get("advisory_reason_codes")

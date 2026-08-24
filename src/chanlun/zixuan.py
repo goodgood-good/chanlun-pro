@@ -5,7 +5,7 @@ from chanlun.market import Market
 from chanlun.persistence.db import db
 from sqlalchemy.exc import IntegrityError
 
-from chanlun.exchange import get_exchange
+from chanlun.exchange import get_exchange, resolve_bounded_stock_info
 
 _log = fun.get_logger()
 
@@ -119,7 +119,12 @@ class ZiXuan(object):
         if name is None or name == "" or name == "undefined":
             try:
                 ex = get_exchange(Market(self.market_type))
-                stock_info = ex.stock_info(code)
+                stock_info = resolve_bounded_stock_info(
+                    ex,
+                    code,
+                    allow_code_fallback=True,
+                    fallback_when_missing=True,
+                )
                 name = stock_info["name"]
             except Exception as exc:
                 # 拉取失败时不能继续写空名（否则 UI 上是空白条目，且后续无人知道为什么），
@@ -181,7 +186,12 @@ class ZiXuan(object):
                 try:
                     if ex is None:
                         ex = get_exchange(Market(self.market_type))
-                    stock_info = ex.stock_info(code)
+                    stock_info = resolve_bounded_stock_info(
+                        ex,
+                        code,
+                        allow_code_fallback=True,
+                        fallback_when_missing=True,
+                    )
                     name = stock_info["name"] if stock_info else code
                 except Exception as exc:
                     _log.warning(

@@ -128,6 +128,7 @@ from .live_review_runtime_contract import (
     live_human_review_document,
     validate_live_review_snapshot,
 )
+from .trading_screening_scope import ScreeningScopeAuthorizationError
 
 
 SCREEN_SCHEMA = HUMAN_REVIEW_SCREEN_SCHEMA
@@ -806,6 +807,11 @@ class HumanReviewScreeningService:
         forward_scheduler_provider: Callable[..., Mapping[str, object]] | None = None,
         forward_implementation_provenance_provider: Callable[[], Mapping[str, object]]
         | None = None,
+        candidate_scope_provider: Callable[[], Sequence[str] | None] | None = None,
+        candidate_scope_admission_provider: Callable[
+            [Sequence[str]], Sequence[str] | None
+        ]
+        | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.historical_report = historical_report.resolve()
@@ -838,6 +844,18 @@ class HumanReviewScreeningService:
         self._forward_implementation_provenance_provider = (
             forward_implementation_provenance_provider
             or (lambda: current_forward_implementation_provenance(self.repository_root))
+        )
+        if candidate_scope_provider is not None and not callable(
+            candidate_scope_provider
+        ):
+            raise TypeError("candidate_scope_provider must be callable")
+        self._candidate_scope_provider = candidate_scope_provider
+        if candidate_scope_admission_provider is not None and not callable(
+            candidate_scope_admission_provider
+        ):
+            raise TypeError("candidate_scope_admission_provider must be callable")
+        self._candidate_scope_admission_provider = (
+            candidate_scope_admission_provider
         )
         self.paper_ledger = (
             paper_ledger
@@ -1420,18 +1438,311 @@ class HumanReviewScreeningService:
             self._report_cache[identity] = loaded
             return loaded
 
+    def _base_candidate_codes(self) -> frozenset[str] | None:
+        """Return the screening-owned base scope; ``None`` preserves FULL."""
+
+        provider = self._candidate_scope_provider
+        if provider is None:
+            return None
+        try:
+            raw_codes = provider()
+        except Exception as exc:
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_unavailable"
+            ) from exc
+        if raw_codes is None:
+            return None
+        if isinstance(raw_codes, (str, bytes)):
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            )
+        try:
+            codes = tuple(raw_codes)
+        except TypeError as exc:
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            ) from exc
+        if (
+            any(not isinstance(code, str) or not code for code in codes)
+            or len(codes) != len(set(codes))
+        ):
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            )
+        return frozenset(codes)
+
+    @staticmethod
+    def _mandatory_candidate_codes(
+        candidates: Sequence[_ReviewCandidate],
+        *,
+        paper_events: Sequence[Mapping[str, object]],
+        feedback: Sequence[Mapping[str, object]],
+    ) -> tuple[str, ...]:
+        """Resolve positions, pending intents and current human attention."""
+
+        mandatory = list(human_paper_position_quantities(paper_events))
+        terminal_intents = human_paper_terminal_intent_ids(paper_events)
+        for event in paper_events:
+            payload = event.get("payload")
+            if (
+                event.get("kind") == "INTENT"
+                and isinstance(payload, Mapping)
+                and payload.get("status") == "PENDING"
+                and str(payload.get("intent_id")) not in terminal_intents
+                and isinstance(payload.get("symbol"), str)
+                and payload.get("symbol")
+            ):
+                mandatory.append(str(payload["symbol"]))
+
+        code_by_candidate_id = {
+            candidate.candidate_id: candidate.symbol for candidate in candidates
+        }
+        code_by_lifecycle_id = {
+            candidate.signal_lifecycle_id: candidate.symbol
+            for candidate in candidates
+        }
+        latest_feedback_by_code: dict[
+            str, tuple[tuple[str, str], Mapping[str, object]]
+        ] = {}
+        for row in feedback:
+            code = code_by_candidate_id.get(str(row.get("candidate_id") or ""))
+            if code is None:
+                code = code_by_lifecycle_id.get(
+                    str(row.get("signal_lifecycle_id") or "")
+                )
+            if code is None:
+                continue
+            order = (
+                str(row.get("reviewed_at") or ""),
+                str(row.get("feedback_id") or ""),
+            )
+            previous = latest_feedback_by_code.get(code)
+            if previous is None or order > previous[0]:
+                latest_feedback_by_code[code] = (order, row)
+        mandatory.extend(
+            code
+            for code, (_order, row) in latest_feedback_by_code.items()
+            if row.get("disposition") in {"WATCH", "PAPER_OBSERVE", "NEEDS_MORE_DATA"}
+        )
+        return tuple(dict.fromkeys(mandatory))
+
+    def _admitted_candidate_codes(
+        self,
+        *,
+        candidates: Sequence[_ReviewCandidate] = (),
+        paper_events: Sequence[Mapping[str, object]] | None = None,
+        feedback: Sequence[Mapping[str, object]] | None = None,
+    ) -> frozenset[str] | None:
+        """Admit archive mandatory subjects before any optional base code."""
+
+        base_codes = self._base_candidate_codes()
+        if base_codes is None:
+            return None
+        resolved_paper_events = (
+            self._paper_events() if paper_events is None else tuple(paper_events)
+        )
+        resolved_feedback = (
+            self._feedback_entries() if feedback is None else tuple(feedback)
+        )
+        mandatory_codes = self._mandatory_candidate_codes(
+            candidates,
+            paper_events=resolved_paper_events,
+            feedback=resolved_feedback,
+        )
+        admission_provider = self._candidate_scope_admission_provider
+        if admission_provider is None:
+            if not set(mandatory_codes).issubset(base_codes):
+                raise HumanReviewScreenUnavailable(
+                    "human_review_mandatory_scope_admission_unavailable"
+                )
+            return base_codes
+        try:
+            raw_codes = admission_provider(mandatory_codes)
+        except ScreeningScopeAuthorizationError as exc:
+            raise HumanReviewScreenUnavailable(
+                "human_review_mandatory_scope_exceeds_limit"
+            ) from exc
+        except Exception as exc:
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_unavailable"
+            ) from exc
+        if raw_codes is None:
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            )
+        if isinstance(raw_codes, (str, bytes)):
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            )
+        try:
+            codes = tuple(raw_codes)
+        except TypeError as exc:
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            ) from exc
+        if (
+            any(not isinstance(code, str) or not code for code in codes)
+            or len(codes) != len(set(codes))
+            or not set(mandatory_codes).issubset(codes)
+        ):
+            raise HumanReviewScreenUnavailable(
+                "human_review_candidate_scope_invalid"
+            )
+        return frozenset(codes)
+
+    def _scope_candidates(
+        self,
+        candidates: Sequence[_ReviewCandidate],
+    ) -> tuple[_ReviewCandidate, ...]:
+        admitted_codes = self._admitted_candidate_codes(candidates=candidates)
+        if admitted_codes is None:
+            return tuple(candidates)
+        return tuple(
+            candidate
+            for candidate in candidates
+            if candidate.symbol in admitted_codes
+        )
+
+    def _require_candidate_in_scope(
+        self,
+        candidate: _ReviewCandidate,
+        *,
+        candidates: Sequence[_ReviewCandidate] = (),
+    ) -> None:
+        scope_candidates = tuple(candidates) or (candidate,)
+        admitted_codes = self._admitted_candidate_codes(
+            candidates=scope_candidates,
+        )
+        if admitted_codes is not None and candidate.symbol not in admitted_codes:
+            raise HumanReviewScreenUnavailable("human_review_candidate_not_found")
+
+    @staticmethod
+    def _scope_feedback_entries(
+        feedback: Sequence[Mapping[str, object]],
+        candidates: Sequence[_ReviewCandidate],
+    ) -> tuple[dict[str, object], ...]:
+        candidate_ids = {candidate.candidate_id for candidate in candidates}
+        lifecycle_ids = {candidate.signal_lifecycle_id for candidate in candidates}
+        return tuple(
+            copy.deepcopy(dict(row))
+            for row in feedback
+            if row.get("candidate_id") in candidate_ids
+            or row.get("signal_lifecycle_id") in lifecycle_ids
+        )
+
+    @staticmethod
+    def _scope_paper_events(
+        events: Sequence[Mapping[str, object]],
+        *,
+        admitted_codes: frozenset[str],
+        candidates: Sequence[_ReviewCandidate],
+    ) -> tuple[dict[str, object], ...]:
+        """Keep complete per-symbol event chains and drop global account rows."""
+
+        intent_symbol: dict[str, str] = {}
+        for event in events:
+            payload = event.get("payload")
+            if event.get("kind") != "INTENT" or not isinstance(payload, Mapping):
+                continue
+            intent_id = payload.get("intent_id")
+            symbol = payload.get("symbol")
+            if isinstance(intent_id, str) and isinstance(symbol, str):
+                intent_symbol[intent_id] = symbol
+        candidate_ids = {candidate.candidate_id for candidate in candidates}
+        lifecycle_ids = {candidate.signal_lifecycle_id for candidate in candidates}
+        projected: list[dict[str, object]] = []
+        for event in events:
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            direct_symbol = payload.get("symbol")
+            linked_symbols = {
+                intent_symbol[str(value)]
+                for key, value in payload.items()
+                if "intent_id" in str(key)
+                and str(value) in intent_symbol
+            }
+            if (
+                isinstance(direct_symbol, str)
+                and direct_symbol in admitted_codes
+                or linked_symbols.intersection(admitted_codes)
+                or payload.get("candidate_id") in candidate_ids
+                or payload.get("signal_lifecycle_id") in lifecycle_ids
+            ):
+                projected.append(copy.deepcopy(dict(event)))
+        return tuple(projected)
+
+    @staticmethod
+    def _scope_event_for_display(
+        event: Mapping[str, object],
+        *,
+        admitted_codes: frozenset[str],
+    ) -> dict[str, object]:
+        """Redact nested portfolio subjects from one admitted event copy."""
+
+        code_pattern = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
+
+        def project(value: object) -> object:
+            if isinstance(value, Mapping):
+                result: dict[str, object] = {}
+                for key, nested in value.items():
+                    rendered_key = str(key)
+                    if (
+                        code_pattern.fullmatch(rendered_key) is not None
+                        and rendered_key not in admitted_codes
+                    ):
+                        continue
+                    if isinstance(nested, Mapping):
+                        nested_code = nested.get("symbol", nested.get("code"))
+                        if (
+                            isinstance(nested_code, str)
+                            and code_pattern.fullmatch(nested_code) is not None
+                            and nested_code not in admitted_codes
+                        ):
+                            continue
+                    result[rendered_key] = project(nested)
+                return result
+            if isinstance(value, (list, tuple)):
+                projected_values: list[object] = []
+                for nested in value:
+                    if isinstance(nested, Mapping):
+                        nested_code = nested.get("symbol", nested.get("code"))
+                        if (
+                            isinstance(nested_code, str)
+                            and code_pattern.fullmatch(nested_code) is not None
+                            and nested_code not in admitted_codes
+                        ):
+                            continue
+                    projected_values.append(project(nested))
+                return projected_values
+            return copy.deepcopy(value)
+
+        projected = project(event)
+        assert isinstance(projected, dict)
+        projected["scope_projection"] = "CURRENT_ADMITTED_UNIVERSE"
+        return projected
+
     def _load_source(
-        self, source: str
+        self,
+        source: str,
+        *,
+        apply_scope: bool = True,
     ) -> tuple[str, Path, dict[str, object], tuple[HumanReviewAlert, ...]]:
         kind, path = self._candidate_paths(source)[0]
         payload, alerts = self._load_path(kind, path)
-        return kind, path, payload, alerts
+        return (
+            kind,
+            path,
+            payload,
+            self._scope_candidates(alerts) if apply_scope else alerts,
+        )
 
     def _load_source_for_snapshot(
         self,
         source: str,
         *,
         include_evidence: bool,
+        apply_scope: bool = True,
     ) -> tuple[
         str,
         Path,
@@ -1450,9 +1761,16 @@ class HumanReviewScreeningService:
                         kind,
                         path,
                         loaded.report,
-                        loaded.candidates,
+                        (
+                            self._scope_candidates(loaded.candidates)
+                            if apply_scope
+                            else loaded.candidates
+                        ),
                     )
-        kind, path, report, alerts = self._load_source(source)
+        kind, path, report, alerts = self._load_source(
+            source,
+            apply_scope=apply_scope,
+        )
         return kind, path, report, alerts
 
     def _load_candidate_by_hash(
@@ -1471,14 +1789,19 @@ class HumanReviewScreeningService:
         bundle = self._latest_web_bundle()
         if bundle is not None and bundle.report_content_sha256 == source_sha256:
             loaded = self._load_web_bundle(bundle)
+            candidate = self._candidate_from_web_bundle(
+                loaded,
+                candidate_id=candidate_id,
+            )
+            self._require_candidate_in_scope(
+                candidate,
+                candidates=loaded.candidates,
+            )
             return (
                 "live",
                 bundle.report_path,
                 loaded.report,
-                self._candidate_from_web_bundle(
-                    loaded,
-                    candidate_id=candidate_id,
-                ),
+                candidate,
             )
         kind, path, report, alerts = self._load_by_hash(source_sha256)
         alert = next(
@@ -1487,6 +1810,7 @@ class HumanReviewScreeningService:
         )
         if alert is None:
             raise HumanReviewScreenUnavailable("human_review_candidate_not_found")
+        self._require_candidate_in_scope(alert, candidates=alerts)
         return kind, path, report, alert
 
     def _load_by_hash(
@@ -2361,15 +2685,56 @@ class HumanReviewScreeningService:
         source: str = "latest",
         include_evidence: bool = True,
     ) -> dict[str, object]:
-        kind, path, report, alerts = self._load_source_for_snapshot(
+        kind, path, report, source_alerts = self._load_source_for_snapshot(
             source,
             include_evidence=include_evidence,
+            apply_scope=False,
+        )
+        all_feedback = self._feedback_entries()
+        all_paper_events = self._paper_events()
+        admitted_candidate_codes = self._admitted_candidate_codes(
+            candidates=source_alerts,
+            paper_events=all_paper_events,
+            feedback=all_feedback,
+        )
+        scoped_projection = admitted_candidate_codes is not None
+        alerts = (
+            source_alerts
+            if admitted_candidate_codes is None
+            else tuple(
+                candidate
+                for candidate in source_alerts
+                if candidate.symbol in admitted_candidate_codes
+            )
+        )
+        feedback = (
+            all_feedback
+            if not scoped_projection
+            else self._scope_feedback_entries(all_feedback, alerts)
+        )
+        paper_events = (
+            all_paper_events
+            if admitted_candidate_codes is None
+            else self._scope_paper_events(
+                all_paper_events,
+                admitted_codes=admitted_candidate_codes,
+                candidates=alerts,
+            )
         )
         source_sha256 = str(report["content_sha256"])
         raw_input_hashes = report.get("input_hashes")
         input_hashes = raw_input_hashes if isinstance(raw_input_hashes, Mapping) else {}
-        candidate_warmup_diagnostic = self._candidate_warmup_diagnostic(
-            input_hashes.get("live_screening_snapshot")
+        candidate_warmup_diagnostic = (
+            {
+                "status": "SCOPE_PROJECTED",
+                "candidates": {},
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ADMITTED_UNIVERSE"],
+            }
+            if scoped_projection
+            else self._candidate_warmup_diagnostic(
+                input_hashes.get("live_screening_snapshot")
+            )
         )
         raw_candidate_warmup_views = candidate_warmup_diagnostic.get("candidates")
         candidate_warmup_views = (
@@ -2389,8 +2754,6 @@ class HumanReviewScreeningService:
         )
         sector_catalogs, sector_captured_at, sector_warning = self._sector_catalogs()
         sector_receipt_audit = self._sector_receipt_audit()
-        feedback = self._feedback_entries()
-        paper_events = self._paper_events()
         paper_entry_boundary_attestation = (
             audit_human_paper_entry_boundary_attestations(paper_events)
         )
@@ -2410,114 +2773,249 @@ class HumanReviewScreeningService:
             current_source_sha256=source_sha256,
             current_alerts=alerts,
         )
-        forward_event_source = self._forward_events()
+        forward_event_source = () if scoped_projection else self._forward_events()
         forward_events = () if forward_event_source is None else forward_event_source
         pending_continuity = latest_human_paper_pending_continuity(
             paper_events,
             forward_events,
         )
-        paper_execution_evidence = audit_human_paper_execution_evidence(
-            paper_events,
-            forward_root=self.forward_root,
+        scoped_fill_count = sum(
+            event.get("kind") == "FILL" for event in paper_events
+        )
+        paper_execution_evidence = (
+            {
+                "status": "SCOPE_PROJECTED",
+                "fill_count": scoped_fill_count,
+                "verified_fill_count": 0,
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
+                "tick_data_used": False,
+                "broker_transport_available": False,
+                "live_status": "LIVE_DISABLED",
+            }
+            if scoped_projection
+            else audit_human_paper_execution_evidence(
+                paper_events,
+                forward_root=self.forward_root,
+            )
         )
         paper_execution_rejection_evidence = (
-            audit_human_paper_execution_rejection_evidence(
+            {
+                "schema": "chanlun-human-paper-execution-rejection-evidence-audit",
+                "status": "SCOPE_PROJECTED",
+                "rejection_count": sum(
+                    event.get("kind") == "EXECUTION_REJECT"
+                    for event in paper_events
+                ),
+                "verified_rejection_count": 0,
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
+                "tick_data_used": False,
+                "broker_transport_available": False,
+                "live_status": "LIVE_DISABLED",
+            }
+            if scoped_projection
+            else audit_human_paper_execution_rejection_evidence(
                 paper_events,
                 forward_root=self.forward_root,
             )
         )
         paper_operations_cancellation_evidence = (
-            audit_human_paper_operations_cancellation_evidence(
+            {
+                "schema": "chanlun-human-paper-operations-cancellation-evidence-audit",
+                "status": "SCOPE_PROJECTED",
+                "cancellation_count": sum(
+                    event.get("kind") == "OPERATIONS_CANCEL"
+                    for event in paper_events
+                ),
+                "verified_cancellation_count": 0,
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
+                "tick_data_used": False,
+                "broker_transport_available": False,
+                "live_status": "LIVE_DISABLED",
+            }
+            if scoped_projection
+            else audit_human_paper_operations_cancellation_evidence(
                 paper_events,
                 forward_root=self.forward_root,
             )
         )
         paper_portfolio_rejection_evidence = (
-            audit_human_paper_portfolio_rejection_evidence(
+            {
+                "schema": "chanlun-human-paper-portfolio-rejection-evidence-audit",
+                "status": "SCOPE_PROJECTED",
+                "rejection_count": sum(
+                    event.get("kind") == "PORTFOLIO_REJECT"
+                    for event in paper_events
+                ),
+                "verified_rejection_count": 0,
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
+                "tick_data_used": False,
+                "broker_transport_available": False,
+                "live_status": "LIVE_DISABLED",
+            }
+            if scoped_projection
+            else audit_human_paper_portfolio_rejection_evidence(
                 paper_events,
                 forward_root=self.forward_root,
             )
         )
         accounting_parameters = None
-        try:
-            accounting_parameters = load_human_paper_accounting_parameters(
-                self.parameter_snapshot
-            )
-            paper_portfolio_decision_audit = audit_human_paper_portfolio_decisions(
-                paper_events,
-                parameters=accounting_parameters,
-            )
-            paper_portfolio_fill_decision_audit = (
-                audit_human_paper_portfolio_fill_decisions(
-                    paper_events,
-                    parameters=accounting_parameters,
-                )
-            )
-        except (OSError, TypeError, ValueError) as exc:
+        if scoped_projection:
             paper_portfolio_decision_audit = {
                 "schema": "chanlun-human-paper-portfolio-decision-audit",
-                "status": "PARAMETER_SNAPSHOT_INVALID",
-                "rejection_count": None,
+                "status": "SCOPE_PROJECTED",
+                "rejection_count": sum(
+                    event.get("kind") == "PORTFOLIO_REJECT"
+                    for event in paper_events
+                ),
                 "verified_rejection_count": 0,
-                "invalid_decisions": [
-                    {"reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
-                ],
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
                 "broker_transport_available": False,
                 "live_status": "LIVE_DISABLED",
             }
             paper_portfolio_fill_decision_audit = {
-                "schema": ("chanlun-human-paper-portfolio-fill-decision-audit"),
-                "status": "PARAMETER_SNAPSHOT_INVALID",
-                "approved_fill_count": None,
+                "schema": "chanlun-human-paper-portfolio-fill-decision-audit",
+                "status": "SCOPE_PROJECTED",
+                "approved_fill_count": scoped_fill_count,
                 "verified_approved_fill_count": 0,
-                "invalid_decisions": [
-                    {"reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
-                ],
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
                 "broker_transport_available": False,
                 "live_status": "LIVE_DISABLED",
             }
-        try:
-            if accounting_parameters is None:
-                raise ValueError("human paper accounting parameters are unavailable")
-            paper_accounting = rebuild_human_paper_accounting(
-                paper_events,
-                parameters=load_human_paper_accounting_parameters(
-                    self.parameter_snapshot
-                ),
-                execution_evidence_status=str(
-                    paper_execution_evidence.get("status") or "INVALID"
-                ),
-            )
-        except (OSError, TypeError, ValueError) as exc:
             paper_accounting = {
                 "schema": "chanlun-human-paper-accounting",
-                "status": "PARAMETER_SNAPSHOT_INVALID",
+                "status": "SCOPE_PROJECTED",
                 "accounting_valid": False,
                 "performance_evaluable": False,
                 "fee_model_attached": False,
                 "cash_ledger_attached": False,
                 "cash_ledger_complete": False,
                 "equity_curve_available": False,
-                "reason_codes": [
-                    "FROZEN_ACCOUNTING_PARAMETER_SNAPSHOT_INVALID",
-                    f"{type(exc).__name__}: {str(exc)[:200]}",
-                ],
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
                 "tick_data_used": False,
                 "broker_transport_available": False,
                 "live_status": "LIVE_DISABLED",
             }
-        valuation_source: dict[str, object] = {
-            "forward_root": self.forward_root,
-            # 这些事件通过冻结前向契约和哈希链校验器加载；成功执行的交易日可直接证明
-            # 估值连续性，无需推断周末或交易所假日。
-            "forward_events": forward_event_source,
-        }
-        if accounting_parameters is not None:
-            valuation_source.update(
-                paper_events=paper_events,
-                accounting_parameters=accounting_parameters,
-            )
-        paper_valuation = audit_human_paper_valuation_evidence(**valuation_source)
+        else:
+            try:
+                accounting_parameters = load_human_paper_accounting_parameters(
+                    self.parameter_snapshot
+                )
+                paper_portfolio_decision_audit = audit_human_paper_portfolio_decisions(
+                    paper_events,
+                    parameters=accounting_parameters,
+                )
+                paper_portfolio_fill_decision_audit = (
+                    audit_human_paper_portfolio_fill_decisions(
+                        paper_events,
+                        parameters=accounting_parameters,
+                    )
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                paper_portfolio_decision_audit = {
+                    "schema": "chanlun-human-paper-portfolio-decision-audit",
+                    "status": "PARAMETER_SNAPSHOT_INVALID",
+                    "rejection_count": None,
+                    "verified_rejection_count": 0,
+                    "invalid_decisions": [
+                        {"reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
+                    ],
+                    "broker_transport_available": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+                paper_portfolio_fill_decision_audit = {
+                    "schema": ("chanlun-human-paper-portfolio-fill-decision-audit"),
+                    "status": "PARAMETER_SNAPSHOT_INVALID",
+                    "approved_fill_count": None,
+                    "verified_approved_fill_count": 0,
+                    "invalid_decisions": [
+                        {"reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
+                    ],
+                    "broker_transport_available": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+            try:
+                if accounting_parameters is None:
+                    raise ValueError(
+                        "human paper accounting parameters are unavailable"
+                    )
+                paper_accounting = rebuild_human_paper_accounting(
+                    paper_events,
+                    parameters=load_human_paper_accounting_parameters(
+                        self.parameter_snapshot
+                    ),
+                    execution_evidence_status=str(
+                        paper_execution_evidence.get("status") or "INVALID"
+                    ),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                paper_accounting = {
+                    "schema": "chanlun-human-paper-accounting",
+                    "status": "PARAMETER_SNAPSHOT_INVALID",
+                    "accounting_valid": False,
+                    "performance_evaluable": False,
+                    "fee_model_attached": False,
+                    "cash_ledger_attached": False,
+                    "cash_ledger_complete": False,
+                    "equity_curve_available": False,
+                    "reason_codes": [
+                        "FROZEN_ACCOUNTING_PARAMETER_SNAPSHOT_INVALID",
+                        f"{type(exc).__name__}: {str(exc)[:200]}",
+                    ],
+                    "tick_data_used": False,
+                    "broker_transport_available": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+        if scoped_projection:
+            paper_valuation = {
+                "schema": "chanlun-human-paper-valuation-evidence",
+                "status": "SCOPE_PROJECTED",
+                "performance_evaluable": False,
+                "diagnostic_only": True,
+                "reason_codes": ["BOUNDED_ACCOUNT_EVIDENCE_NOT_REPLAYED"],
+                "broker_transport_available": False,
+                "live_status": "LIVE_DISABLED",
+            }
+        else:
+            valuation_source: dict[str, object] = {
+                "forward_root": self.forward_root,
+                # 这些事件通过冻结前向契约和哈希链校验器加载；成功执行的交易日可直接证明
+                # 估值连续性，无需推断周末或交易所假日。
+                "forward_events": forward_event_source,
+            }
+            if accounting_parameters is not None:
+                valuation_source.update(
+                    paper_events=paper_events,
+                    accounting_parameters=accounting_parameters,
+                )
+            paper_valuation = audit_human_paper_valuation_evidence(**valuation_source)
+        if admitted_candidate_codes is not None:
+            scope_evidence = {
+                "scope_projection": "CURRENT_ADMITTED_UNIVERSE",
+                "admitted_codes": sorted(admitted_candidate_codes),
+                "source_archive_aggregates_hidden": True,
+            }
+            for evidence_document in (
+                paper_entry_boundary_attestation,
+                paper_entry_boundary_source_audit,
+                paper_entry_selection_attestation,
+                paper_entry_selection_source_audit,
+                pending_continuity,
+                paper_execution_evidence,
+                paper_execution_rejection_evidence,
+                paper_operations_cancellation_evidence,
+                paper_portfolio_rejection_evidence,
+                paper_portfolio_decision_audit,
+                paper_portfolio_fill_decision_audit,
+                paper_accounting,
+                paper_valuation,
+            ):
+                evidence_document.update(scope_evidence)
         virtual_positions = human_paper_position_quantities(paper_events)
         virtual_reserved_sells = human_paper_pending_sell_quantities(paper_events)
         paper_candidate_by_intent = {
@@ -2777,7 +3275,17 @@ class HumanReviewScreeningService:
                     "chart_urls": self._chart_urls(alert, source_sha256),
                     "feedback_history": history,
                     "latest_feedback": latest_feedback,
-                    "paper_events": candidate_paper_events,
+                    "paper_events": (
+                        [
+                            self._scope_event_for_display(
+                                event,
+                                admitted_codes=admitted_candidate_codes,
+                            )
+                            for event in candidate_paper_events
+                        ]
+                        if admitted_candidate_codes is not None
+                        else candidate_paper_events
+                    ),
                     "paper_reconciliation_pending": (paper_reconciliation_pending),
                     "paper_reconciliation_eligible": (
                         paper_reconciliation_pending
@@ -2815,11 +3323,14 @@ class HumanReviewScreeningService:
             and isinstance(event_study.get("summary"), Mapping)
             else {}
         )
-        source_options = ["historical"] if self._historical_reports() else []
-        if self._forward_reports():
-            source_options.insert(0, "forward")
-        if self._live_reports():
-            source_options.insert(0, "live")
+        if scoped_projection:
+            source_options = [kind]
+        else:
+            source_options = ["historical"] if self._historical_reports() else []
+            if self._forward_reports():
+                source_options.insert(0, "forward")
+            if self._live_reports():
+                source_options.insert(0, "live")
         if kind == "historical":
             source_currentness = {
                 "status": "CURRENT_RELEASE_SIDECAR",
@@ -3009,7 +3520,19 @@ class HumanReviewScreeningService:
             intent.get("status") == "OBSERVATION_ONLY" for intent in paper_intents
         )
         try:
-            forward_markout = self._forward_markout()
+            forward_markout = (
+                {
+                    "status": "SCOPE_PROJECTED",
+                    "diagnostic_only": True,
+                    "portfolio_performance_evaluable": False,
+                    "summary": {},
+                    "sample": {},
+                    "source_provenance_status": "SCOPE_PROJECTED",
+                    "reason_codes": ["BOUNDED_ADMITTED_UNIVERSE"],
+                }
+                if scoped_projection
+                else self._forward_markout()
+            )
         except HumanReviewScreenUnavailable as exc:
             forward_markout = {
                 "status": "INVALID",
@@ -3022,7 +3545,22 @@ class HumanReviewScreeningService:
             }
             warnings.append(exc.code)
         try:
-            forward_warmup_structure_lineage = self._forward_warmup_structure_lineage()
+            forward_warmup_structure_lineage = (
+                {
+                    "status": "SCOPE_PROJECTED",
+                    "qualified_session_count": 0,
+                    "recorded_session_count": 0,
+                    "structure_event_count": 0,
+                    "subjects": {},
+                    "sessions": [],
+                    "diagnostic_only": True,
+                    "parameters_changed": False,
+                    "live_status": "LIVE_DISABLED",
+                    "reason_codes": ["BOUNDED_ADMITTED_UNIVERSE"],
+                }
+                if scoped_projection
+                else self._forward_warmup_structure_lineage()
+            )
         except HumanReviewScreenUnavailable as exc:
             forward_warmup_structure_lineage = {
                 "status": "INVALID",
@@ -3054,11 +3592,41 @@ class HumanReviewScreeningService:
             "paper_observation_current_market_session": (
                 paper_observation_current_market_session
             ),
-            "sample": report.get("sample") or {},
-            "scope": report.get("scope") or {},
-            "candidate_funnel": report.get("candidate_funnel") or {},
-            "signal_counts": report.get("signal_counts") or {},
-            "event_study_summary": event_summary,
+            "sample": (
+                {
+                    "scope_projection": True,
+                    "admitted_candidate_count": len(alerts),
+                }
+                if scoped_projection
+                else report.get("sample") or {}
+            ),
+            "scope": (
+                {
+                    "projection": "CURRENT_ADMITTED_UNIVERSE",
+                    "admitted_code_count": len(admitted_candidate_codes),
+                    "admitted_candidate_count": len(alerts),
+                    "source_archive_aggregates_hidden": True,
+                }
+                if scoped_projection
+                else report.get("scope") or {}
+            ),
+            "candidate_funnel": (
+                {
+                    "scope_projection": True,
+                    "admitted_candidate_count": len(alerts),
+                }
+                if scoped_projection
+                else report.get("candidate_funnel") or {}
+            ),
+            "signal_counts": (
+                {
+                    "scope_projection": True,
+                    "admitted_candidate_count": len(alerts),
+                }
+                if scoped_projection
+                else report.get("signal_counts") or {}
+            ),
+            "event_study_summary": {} if scoped_projection else event_summary,
             "forward_markout": forward_markout,
             "forward_warmup_structure_lineage": (forward_warmup_structure_lineage),
             "candidate_warmup_diagnostic": candidate_warmup_diagnostic,
@@ -3171,7 +3739,7 @@ class HumanReviewScreeningService:
                 "persistent_sell_five_percent_bar_volume_cap_enforced": True,
                 "adverse_observed_bar_extreme_fill_price_enforced": True,
                 "completed_bar_close_fill_timestamp_enforced": True,
-                "strategic_buy_one_locator_bar_ttl_enforced": True,
+                "strategic_buy_one_nesting_decision_ttl_enforced": True,
                 "strategic_buy_causal_full_1m_window_prechecked": True,
                 "full_session_240_bar_grid_required": True,
                 "opening_auction_event_merged_into_0931": True,
@@ -3673,7 +4241,9 @@ class HumanReviewScreeningService:
                 nine_segment_upgrade_judgement=str(
                     values.get("nine_segment_upgrade_judgement") or "UNCERTAIN"
                 ),
-                locator_judgement=str(values.get("locator_judgement") or "UNCERTAIN"),
+                segment_difference_judgement=str(
+                    values.get("segment_difference_judgement") or "UNCERTAIN"
+                ),
                 notes=notes,
                 request_id=request_id,
                 signal_lifecycle_id=alert.signal_lifecycle_id,

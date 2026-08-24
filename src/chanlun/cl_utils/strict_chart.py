@@ -52,55 +52,32 @@ def _preview_lifecycle_role_count(preview: CenterPreview) -> int:
         preview.pending_leave_unit_id is not None
         or preview.completion_leave_unit_id is not None
     )
-    return 1 + len(preview.unit_ids) + int(leave_present)
-
-
-def _unique_units_in_time_order(
-    units: Iterable[ConstituentUnit],
-) -> tuple[ConstituentUnit, ...]:
-    """按物理市场时间顺序返回不重复的证据单元。"""
-
-    by_id: dict[str, ConstituentUnit] = {}
-    for unit in units:
-        by_id.setdefault(unit.unit_id, unit)
-    return tuple(
-        sorted(
-            by_id.values(),
-            key=lambda unit: (unit.market_start, unit.market_end, unit.unit_id),
-        )
+    # The optional entry leg is evidence for later divergence comparison, not a
+    # constituent role of the center.  The confirming return is likewise a
+    # third-class lifecycle event rather than part of the center body.
+    return (
+        len(preview.unit_ids)
+        + len(preview.failed_departure_unit_ids)
+        + int(leave_present)
     )
 
 
 def _center_overlap_units(
     center: TrendCenter,
-    leaving_unit: ConstituentUnit | None,
 ) -> tuple[ConstituentUnit, ...]:
-    """返回中枢生命周期中所有存在正宽重叠的物理构成单元。"""
+    """Return the three units whose intersection establishes the center.
 
-    if center.source_kind is SourceKind.TREND_TYPE:
-        return center.body_units
-    return _unique_units_in_time_order(
-        (
-            center.entry_unit,
-            *center.body_units,
-            *(
-                ()
-                if center.establishment_leave_unit is None
-                else (center.establishment_leave_unit,)
-            ),
-            *(() if leaving_unit is None else (leaving_unit,)),
-        )
-    )
+    ``entry_unit`` is optional external evidence and is never part of the
+    overlap contract.  Extensions and the leave/return lifecycle have their own
+    serialized fields, so folding them into ``overlap_components`` would make
+    the component count depend on future observations.
+    """
+
+    return center.core_units
 
 
 def _renderable_center_preview(preview: CenterPreview) -> bool:
-    """返回预览是否已经达到相应来源的图表展示门槛。
-
-    物理预览在 ``S0`` 进入段与具有正宽重叠的中间三段 ``S1..S3`` 核心出现后
-    即可展示。缺少 ``S4`` 成熟段时，矩形仍属于不可交易的临时预览；已完成预览
-    与正式中枢仍必须满足完整五角色生命周期。递归走势类型预览继续使用原有的
-    三走势门槛。
-    """
+    """Return whether a preview already has a valid three-unit core."""
 
     if preview.state not in (
         CenterPreviewState.FORMING,
@@ -114,17 +91,6 @@ def _renderable_center_preview(preview: CenterPreview) -> bool:
         or preview.zg_tick is None
     ):
         return False
-    if preview.source_kind is not SourceKind.TREND_TYPE:
-        lifecycle_role_count = _preview_lifecycle_role_count(preview)
-        if preview.establishment_unit_id is None:
-            if (
-                preview.state is not CenterPreviewState.FORMING
-                or len(preview.unit_ids) != 3
-                or lifecycle_role_count != 4
-            ):
-                return False
-        elif lifecycle_role_count < 5:
-            return False
     return (
         preview.zd_tick <= preview.zg_tick
         if preview.source_kind is SourceKind.TREND_TYPE
@@ -217,10 +183,6 @@ def _center_payload(
 ) -> dict[str, object]:
     if not isinstance(center, TrendCenter):
         raise TypeError("center must be a TrendCenter")
-    if not center.has_minimum_physical_roles:
-        raise ValueError(
-            "physical chart center requires exact five-segment establishment"
-        )
     if (
         center.zd_tick > center.zg_tick
         if center.source_kind is SourceKind.TREND_TYPE
@@ -229,13 +191,19 @@ def _center_payload(
         raise ValueError("formal chart center violates source overlap contract")
     leaving_unit = center.completion_leave_unit or center.pending_leave_unit
     establishment_units = center.establishment_units
-    overlap_units = _center_overlap_units(center, leaving_unit)
+    overlap_units = _center_overlap_units(center)
+    failed_revision = (
+        ""
+        if not center.failed_departure_units
+        else f"@failed{len(center.failed_departure_units)}"
+    )
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": render_kind,
         "center_id": center.center_id,
         "render_id": (
-            f"{center.center_id}@{center.body_revision}@{center.state.value}"
+            f"{center.center_id}@{center.body_revision}{failed_revision}"
+            f"@{center.state.value}"
         ),
         "body_revision": center.body_revision,
         "structural_level": center.structural_level,
@@ -263,41 +231,34 @@ def _center_payload(
             },
         ],
         "display_range": {
-            "start_role": "middle_three_first_start",
+            "start_role": "first_three_first_start",
             "end_role": (
-                "body_tail_end" if center.extension_units else "middle_three_last_end"
+                "body_tail_end" if center.extension_units else "first_three_last_end"
             ),
             "includes_entry": False,
             "includes_leave": False,
-            "price_core_source": "middle_three_intersection",
+            "price_core_source": "first_three_intersection",
         },
         "core": {"zd_tick": center.zd_tick, "zg_tick": center.zg_tick},
         "envelope": {"dd_tick": center.dd_tick, "gg_tick": center.gg_tick},
-        "entry_unit_id": center.entry_unit.unit_id,
-        "entry_role": "external_entry",
-        "lifecycle_role_count": center.lifecycle_role_count,
-        "minimum_lifecycle_role_count": (
-            3 if center.source_kind is SourceKind.TREND_TYPE else 5
+        "entry_unit_id": (
+            None if center.entry_unit is None else center.entry_unit.unit_id
         ),
+        "entry_role": None if center.entry_unit is None else "external_entry",
+        "lifecycle_role_count": center.lifecycle_role_count,
+        "minimum_lifecycle_role_count": 3,
         "core_component_count": 3,
         "overlap_component_count": len(overlap_units),
         "establishment_component_count": len(establishment_units),
         "establishment_segment_ids": [unit.unit_id for unit in establishment_units],
         "first_three_component_ids": [unit.unit_id for unit in center.core_units],
         "core_unit_ids": [unit.unit_id for unit in center.core_units],
-        "establishment_unit_id": (
-            None
-            if center.establishment_unit is None
-            else center.establishment_unit.unit_id
-        ),
-        "initial_exit_unit_id": (
-            None
-            if center.initial_exit_unit is None
-            else center.initial_exit_unit.unit_id
-        ),
         "initial_unit_ids": [unit.unit_id for unit in center.initial_units],
         "body_unit_ids": [unit.unit_id for unit in center.body_units],
         "extension_unit_ids": [unit.unit_id for unit in center.extension_units],
+        "failed_departure_unit_ids": [
+            unit.unit_id for unit in center.failed_departure_units
+        ],
         "pending_leave_unit_id": (
             None
             if center.pending_leave_unit is None
@@ -316,7 +277,24 @@ def _center_payload(
         "completion_direction": center.completion_direction,
         "boundary_divergence_id": center.boundary_divergence_id,
         "boundary_anchor_unit_id": center.boundary_anchor_unit_id,
-        "entering_segment": _unit_audit_payload(center.entry_unit),
+        "superseded_by_center_id": center.superseded_by_center_id,
+        "superseded_at": (
+            None
+            if center.superseded_at is None
+            else aware_datetime_to_epoch_seconds(center.superseded_at)
+        ),
+        "supersession_bridge_unit_ids": [
+            item.unit_id for item in center.supersession_bridge_units
+        ],
+        "supersession_bridge_units": [
+            _unit_audit_payload(item)
+            for item in center.supersession_bridge_units
+        ],
+        "entering_segment": (
+            None
+            if center.entry_unit is None
+            else _unit_audit_payload(center.entry_unit)
+        ),
         "first_three_components": [
             _unit_audit_payload(unit) for unit in center.core_units
         ],
@@ -377,10 +355,6 @@ def active_center_projection_to_chart_dict(
 
     if center.source_kind is SourceKind.STROKE_OBSERVATION:
         raise ValueError("formal center projection rejects stroke observation")
-    if not center.has_minimum_physical_roles:
-        raise ValueError(
-            "physical center projection requires exact five-segment establishment"
-        )
     if center.state not in _ACTIVE_CENTER_STATES:
         raise ValueError("center projection requires an active center")
     closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
@@ -393,13 +367,19 @@ def active_center_projection_to_chart_dict(
         center.display_range_start_market_time
     )
     leaving_unit = center.pending_leave_unit
-    overlap_units = _center_overlap_units(center, leaving_unit)
+    overlap_units = _center_overlap_units(center)
+    failed_revision = (
+        ""
+        if not center.failed_departure_units
+        else f"@failed{len(center.failed_departure_units)}"
+    )
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": "center_projection",
         "center_id": center.center_id,
         "render_id": (
-            f"{center.center_id}@{center.body_revision}@{center.state.value}"
+            f"{center.center_id}@{center.body_revision}{failed_revision}"
+            f"@{center.state.value}"
             f"@projection@{closed_epoch}"
         ),
         "body_revision": center.body_revision,
@@ -417,22 +397,22 @@ def active_center_projection_to_chart_dict(
             {"time": lifecycle_end_epoch, "price_tick": center.zd_tick},
         ],
         "display_range": {
-            "start_role": "middle_three_first_start",
+            "start_role": "first_three_first_start",
             "end_role": (
-                "body_tail_end" if center.extension_units else "middle_three_last_end"
+                "body_tail_end" if center.extension_units else "first_three_last_end"
             ),
             "includes_entry": False,
             "includes_leave": False,
-            "price_core_source": "middle_three_intersection",
+            "price_core_source": "first_three_intersection",
         },
         "core": {"zd_tick": center.zd_tick, "zg_tick": center.zg_tick},
         "envelope": {"dd_tick": center.dd_tick, "gg_tick": center.gg_tick},
-        "entry_unit_id": center.entry_unit.unit_id,
-        "entry_role": "external_entry",
-        "lifecycle_role_count": center.lifecycle_role_count,
-        "minimum_lifecycle_role_count": (
-            3 if center.source_kind is SourceKind.TREND_TYPE else 5
+        "entry_unit_id": (
+            None if center.entry_unit is None else center.entry_unit.unit_id
         ),
+        "entry_role": None if center.entry_unit is None else "external_entry",
+        "lifecycle_role_count": center.lifecycle_role_count,
+        "minimum_lifecycle_role_count": 3,
         "core_component_count": 3,
         "overlap_component_count": len(overlap_units),
         "establishment_component_count": len(center.establishment_units),
@@ -440,25 +420,22 @@ def active_center_projection_to_chart_dict(
             unit.unit_id for unit in center.establishment_units
         ],
         "core_unit_ids": [unit.unit_id for unit in center.core_units],
-        "establishment_unit_id": (
-            None
-            if center.establishment_unit is None
-            else center.establishment_unit.unit_id
-        ),
-        "initial_exit_unit_id": (
-            None
-            if center.initial_exit_unit is None
-            else center.initial_exit_unit.unit_id
-        ),
         "initial_unit_ids": [unit.unit_id for unit in center.initial_units],
         "body_unit_ids": [unit.unit_id for unit in center.body_units],
         "extension_unit_ids": [unit.unit_id for unit in center.extension_units],
+        "failed_departure_unit_ids": [
+            unit.unit_id for unit in center.failed_departure_units
+        ],
         "pending_leave_unit_id": (
             None if leaving_unit is None else leaving_unit.unit_id
         ),
         "completion_leave_unit_id": None,
         "completion_return_unit_id": None,
-        "entering_segment": _unit_audit_payload(center.entry_unit),
+        "entering_segment": (
+            None
+            if center.entry_unit is None
+            else _unit_audit_payload(center.entry_unit)
+        ),
         "first_three_component_ids": [unit.unit_id for unit in center.core_units],
         "first_three_components": [
             _unit_audit_payload(unit) for unit in center.core_units
@@ -494,8 +471,15 @@ def strict_center_preview_to_chart_dict(
     if len(by_id) != len(values):
         raise ValueError("chart center preview units require unique ids")
     try:
-        entry = by_id[preview.entry_unit_id]
+        entry = (
+            None
+            if preview.entry_unit_id is None
+            else by_id[preview.entry_unit_id]
+        )
         body = tuple(by_id[item_id] for item_id in preview.unit_ids)
+        failed_departures = tuple(
+            by_id[item_id] for item_id in preview.failed_departure_unit_ids
+        )
         pending_leave = (
             None
             if preview.pending_leave_unit_id is None
@@ -511,28 +495,47 @@ def strict_center_preview_to_chart_dict(
             if preview.completion_return_unit_id is None
             else by_id[preview.completion_return_unit_id]
         )
-        establishment_leave = (
-            None
-            if preview.establishment_leave_unit_id is None
-            else by_id[preview.establishment_leave_unit_id]
-        )
-        establishment_unit = (
-            None
-            if preview.establishment_unit_id is None
-            else by_id[preview.establishment_unit_id]
-        )
     except KeyError as exc:
         raise ValueError("chart center preview unit is absent from level") from exc
     core_units = body[:3]
     seed_width = center_seed_size(preview.source_kind)
     initial_units = body[:seed_width]
-    lifecycle_tail = completion_return or completion_leave or pending_leave or body[-1]
+    transition_units = (
+        *body,
+        *failed_departures,
+        *((pending_leave,) if pending_leave is not None else ()),
+        *((completion_leave,) if completion_leave is not None else ()),
+        *((completion_return,) if completion_return is not None else ()),
+    )
+    transition_ids = tuple(item.unit_id for item in transition_units)
+    if len(transition_ids) != len(set(transition_ids)):
+        raise ValueError("chart center preview transition ownership must be unique")
+    ordered_transitions = tuple(
+        sorted(
+            transition_units,
+            key=lambda item: (item.market_start, item.market_end, item.unit_id),
+        )
+    )
+    body_ids = {item.unit_id for item in body}
+    failed_ids = {item.unit_id for item in failed_departures}
+    if not ordered_transitions or ordered_transitions[0] != body[0]:
+        raise ValueError(
+            "chart center preview transition history must start at its body"
+        )
+    if tuple(
+        item for item in ordered_transitions if item.unit_id in body_ids
+    ) != body:
+        raise ValueError("chart center preview body order conflicts with transitions")
+    if tuple(
+        item for item in ordered_transitions if item.unit_id in failed_ids
+    ) != failed_departures:
+        raise ValueError(
+            "chart center preview failed history order conflicts with transitions"
+        )
+    lifecycle_tail = ordered_transitions[-1]
     lifecycle_units = (
-        (entry,)
-        + body
-        + (() if pending_leave is None else (pending_leave,))
-        + (() if completion_leave is None else (completion_leave,))
-        + (() if completion_return is None else (completion_return,))
+        *((entry,) if entry is not None else ()),
+        *ordered_transitions,
     )
     if any(
         item.structural_level != preview.structural_level
@@ -547,8 +550,6 @@ def strict_center_preview_to_chart_dict(
             unlocked_seen = True
         elif unlocked_seen:
             raise ValueError("chart center preview units must have a locked prefix")
-    if not unlocked_seen and establishment_unit is not None:
-        raise ValueError("chart center preview requires provisional units")
     for previous, current in zip(lifecycle_units, lifecycle_units[1:]):
         if (
             (
@@ -575,18 +576,35 @@ def strict_center_preview_to_chart_dict(
         for item in body
     ):
         raise ValueError("chart center preview body must positively overlap its core")
-    if preview.source_kind is not SourceKind.TREND_TYPE:
-        if max(entry.low_tick, preview.zd_tick) >= min(
-            entry.high_tick, preview.zg_tick
-        ):
+    transition_offsets = {
+        item.unit_id: offset for offset, item in enumerate(ordered_transitions)
+    }
+    for failed in failed_departures:
+        touches_core = max(failed.low_tick, preview.zd_tick) <= min(
+            failed.high_tick,
+            preview.zg_tick,
+        )
+        ends_outside = (
+            failed.end_tick > preview.zg_tick
+            if failed.direction == "up"
+            else failed.end_tick < preview.zd_tick
+        )
+        offset = transition_offsets[failed.unit_id]
+        if offset + 1 >= len(ordered_transitions):
             raise ValueError(
-                "chart center preview entry must positively overlap its core"
+                "chart center preview failed departure requires a return"
             )
-        if establishment_unit is not None and max(
-            establishment_unit.low_tick, preview.zd_tick
-        ) >= min(establishment_unit.high_tick, preview.zg_tick):
+        ret = ordered_transitions[offset + 1]
+        return_overlaps = (
+            max(ret.low_tick, preview.zd_tick)
+            <= min(ret.high_tick, preview.zg_tick)
+            if preview.source_kind is SourceKind.TREND_TYPE
+            else max(ret.low_tick, preview.zd_tick)
+            < min(ret.high_tick, preview.zg_tick)
+        )
+        if not touches_core or not ends_outside or not return_overlaps:
             raise ValueError(
-                "chart center preview fifth unit must positively overlap its core"
+                "chart center preview failed departure geometry is invalid"
             )
     if source_closed_at < lifecycle_tail.market_end:
         raise ValueError("source close cannot precede center preview tail")
@@ -619,34 +637,15 @@ def strict_center_preview_to_chart_dict(
         if preview.state is CenterPreviewState.COMPLETED
         else pending_leave
     )
-    if preview.source_kind is not SourceKind.TREND_TYPE and leaving_unit is not None:
-        if max(leaving_unit.low_tick, preview.zd_tick) >= min(
+    if leaving_unit is not None:
+        if max(leaving_unit.low_tick, preview.zd_tick) > min(
             leaving_unit.high_tick, preview.zg_tick
         ):
             raise ValueError(
-                "chart center preview leave must positively overlap its core"
+                "chart center preview leave must touch its core"
             )
-    initial_exit = establishment_leave
-    establishment_units = (
-        tuple(initial_units)
-        if preview.source_kind is SourceKind.TREND_TYPE
-        else (
-            (entry, *core_units)
-            if establishment_unit is None
-            else (entry, *core_units, establishment_unit)
-        )
-    )
-    overlap_units = (
-        tuple(body)
-        if preview.source_kind is SourceKind.TREND_TYPE
-        else _unique_units_in_time_order(
-            (
-                entry,
-                *body,
-                *(() if leaving_unit is None else (leaving_unit,)),
-            )
-        )
-    )
+    establishment_units = tuple(initial_units)
+    overlap_units = tuple(core_units)
     preview_id = stable_structure_id(
         "chanlun-center-preview",
         preview.price_basis_revision,
@@ -654,18 +653,17 @@ def strict_center_preview_to_chart_dict(
         preview.source_kind.value,
         preview.entry_unit_id,
         preview.unit_ids[:seed_width],
-        preview.establishment_unit_id,
         preview.zd_tick,
         preview.zg_tick,
     )
-    formal_center_id = (
-        preview.formal_center_id
-        if preview.source_kind is SourceKind.TREND_TYPE
-        or preview.establishment_unit_id is not None
-        else None
-    )
+    formal_center_id = preview.formal_center_id
     closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
     completed = preview.state is CenterPreviewState.COMPLETED
+    failed_revision = (
+        ""
+        if not failed_departures
+        else f"@failed{len(failed_departures)}"
+    )
     end_epoch = (
         aware_datetime_to_epoch_seconds(leaving_unit.market_start)
         if leaving_unit is not None
@@ -674,12 +672,13 @@ def strict_center_preview_to_chart_dict(
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": "center_preview",
-        # ``center_id`` 始终表示可提升的正式中枢身份。物理预览在第五段成立
-        # 证据出现之前只能拥有渲染身份，不能提前承诺一个正式中枢。
+        # ``center_id`` is the immutable three-unit seed identity.  A preview
+        # remains non-tradable until its referenced core units are locked.
         "center_id": formal_center_id,
         "preview_id": preview_id,
         "render_id": (
             f"{preview_id}@{preview.state.value}@{len(body) - seed_width}"
+            f"{failed_revision}"
             f"@{preview.completion_return_unit_id or closed_epoch}"
         ),
         "body_revision": len(body) - seed_width,
@@ -701,38 +700,33 @@ def strict_center_preview_to_chart_dict(
             {"time": end_epoch, "price_tick": preview.zd_tick},
         ],
         "display_range": {
-            "start_role": "middle_three_first_start",
-            "end_role": ("body_tail_end" if len(body) > 3 else "middle_three_last_end"),
+            "start_role": "first_three_first_start",
+            "end_role": ("body_tail_end" if len(body) > 3 else "first_three_last_end"),
             "includes_entry": False,
             "includes_leave": False,
-            "price_core_source": "middle_three_intersection",
+            "price_core_source": "first_three_intersection",
         },
         "core": {"zd_tick": preview.zd_tick, "zg_tick": preview.zg_tick},
         "envelope": {
             "dd_tick": min(item.low_tick for item in body),
             "gg_tick": max(item.high_tick for item in body),
         },
-        "entry_unit_id": entry.unit_id,
-        "entry_role": "external_entry",
+        "entry_unit_id": None if entry is None else entry.unit_id,
+        "entry_role": None if entry is None else "external_entry",
         "lifecycle_role_count": _preview_lifecycle_role_count(preview),
-        "minimum_lifecycle_role_count": (
-            3 if preview.source_kind is SourceKind.TREND_TYPE else 5
-        ),
+        "minimum_lifecycle_role_count": 3,
         "core_component_count": 3,
         "overlap_component_count": len(overlap_units),
         "establishment_component_count": len(establishment_units),
         "establishment_segment_ids": [item.unit_id for item in establishment_units],
         "first_three_component_ids": [item.unit_id for item in core_units],
         "core_unit_ids": [item.unit_id for item in core_units],
-        "establishment_unit_id": (
-            None if establishment_unit is None else establishment_unit.unit_id
-        ),
-        "initial_exit_unit_id": (
-            None if initial_exit is None else initial_exit.unit_id
-        ),
         "initial_unit_ids": [item.unit_id for item in initial_units],
         "body_unit_ids": [item.unit_id for item in body],
         "extension_unit_ids": [item.unit_id for item in body[seed_width:]],
+        "failed_departure_unit_ids": [
+            item.unit_id for item in failed_departures
+        ],
         "pending_leave_unit_id": (
             leaving_unit.unit_id
             if (not completed and leaving_unit is not None)
@@ -747,7 +741,9 @@ def strict_center_preview_to_chart_dict(
         "completion_direction": (
             None if completion_leave is None else completion_leave.direction
         ),
-        "entering_segment": _unit_audit_payload(entry),
+        "entering_segment": (
+            None if entry is None else _unit_audit_payload(entry)
+        ),
         "first_three_components": [_unit_audit_payload(item) for item in core_units],
         "overlap_components": [_unit_audit_payload(item) for item in overlap_units],
         "establishment_segments": [
@@ -762,26 +758,14 @@ def strict_center_preview_to_chart_dict(
             else _unit_audit_payload(completion_return)
         ),
         "established_market_time": (
-            None
-            if preview.source_kind is not SourceKind.TREND_TYPE
-            and establishment_unit is None
-            else aware_datetime_to_epoch_seconds(
-                (
-                    initial_units[-1]
-                    if preview.source_kind is SourceKind.TREND_TYPE
-                    else establishment_unit
-                ).market_end
-            )
+            aware_datetime_to_epoch_seconds(initial_units[-1].market_end)
+            if all(item.locked for item in initial_units)
+            else None
         ),
         "established_at": _optional_epoch(
-            None
-            if preview.source_kind is not SourceKind.TREND_TYPE
-            and establishment_unit is None
-            else (
-                initial_units[-1]
-                if preview.source_kind is SourceKind.TREND_TYPE
-                else establishment_unit
-            ).confirmed_at
+            initial_units[-1].confirmed_at
+            if all(item.locked for item in initial_units)
+            else None
         ),
         # 几何完成但回返单元未锁定时没有正式确认时间。这里必须保持空值，
         # 防止消费者把盘中三类形态误当成已确认交易信号。

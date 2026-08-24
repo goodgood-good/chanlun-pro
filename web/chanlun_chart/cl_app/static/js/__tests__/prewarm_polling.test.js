@@ -6,11 +6,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadPrewarmController() {
+function loadPrewarmController(options = {}) {
   const requests = [];
   const timeouts = [];
   const intervals = [];
   const applied = [];
+  const confirmations = [];
+  const values = Object.assign({
+    '#symbols_prewarm_codes': 'SZ.000001',
+    '#symbols_prewarm_scope_limit': '12',
+  }, options.values || {});
 
   function deferredRequest(options) {
     const request = {
@@ -41,7 +46,7 @@ function loadPrewarmController() {
     return chain;
   }
 
-  function jqueryObject() {
+  function jqueryObject(selector) {
     return {
       on() { return this; },
       hide() { return this; },
@@ -50,6 +55,13 @@ function loadPrewarmController() {
       css() { return this; },
       removeClass() { return this; },
       addClass() { return this; },
+      val(value) {
+        if (arguments.length) {
+          values[selector] = value;
+          return this;
+        }
+        return values[selector] || '';
+      },
     };
   }
 
@@ -62,6 +74,10 @@ function loadPrewarmController() {
     console: { log() {}, warn() {}, error() {} },
     $,
     AppRequest: { ajax: deferredRequest },
+    confirm(message) {
+      confirmations.push(message);
+      return options.confirm !== false;
+    },
     setTimeout(callback, delay) {
       const timer = { callback, delay, cleared: false, fired: false };
       timeouts.push(timer);
@@ -110,6 +126,8 @@ function loadPrewarmController() {
     timeouts,
     intervals,
     applied,
+    confirmations,
+    setValue(selector, value) { values[selector] = value; },
     fireNextTimeout() {
       const timer = timeouts.find((item) => !item.cleared && !item.fired);
       assert.ok(timer, 'expected an active timeout');
@@ -196,4 +214,49 @@ test('failed deferred cancel resumes polling instead of freezing the UI', () => 
 
   assert.equal(h.timeouts.length, 1);
   assert.equal(h.timeouts[0].delay, 1500);
+});
+
+test('prewarm start submits only the confirmed explicit validation cohort', () => {
+  const h = loadPrewarmController({
+    values: {
+      '#symbols_prewarm_codes': 'SZ.000001, SH.600000, SZ.000001',
+      '#symbols_prewarm_scope_limit': '12',
+    },
+  });
+
+  h.controller.start();
+
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.confirmations.length, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.requests[0].options.data)),
+    {
+      market: 'a',
+      codes: 'SZ.000001,SH.600000',
+      scope_limit: 12,
+      confirm_explicit_scope: '1',
+    },
+  );
+});
+
+test('prewarm start cannot fall back to an empty, oversized, or unconfirmed market scope', () => {
+  const empty = loadPrewarmController({ values: { '#symbols_prewarm_codes': '' } });
+  assert.equal(empty.controller.start(), false);
+  assert.equal(empty.requests.length, 0);
+
+  const oversized = loadPrewarmController({
+    values: {
+      '#symbols_prewarm_codes': Array.from(
+        { length: 13 },
+        (_, index) => `SZ.${String(index + 1).padStart(6, '0')}`,
+      ).join(','),
+      '#symbols_prewarm_scope_limit': '12',
+    },
+  });
+  assert.equal(oversized.controller.start(), false);
+  assert.equal(oversized.requests.length, 0);
+
+  const declined = loadPrewarmController({ confirm: false });
+  assert.equal(declined.controller.start(), false);
+  assert.equal(declined.requests.length, 0);
 });

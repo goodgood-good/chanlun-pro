@@ -8,6 +8,8 @@ from decimal import Decimal
 
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system import live_human_review as subject
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.human_assisted_decision import (
@@ -29,7 +31,10 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     QmtSectorSameBaseCoverageEvidence,
     sector_native_daily_research_bridge_contract,
 )
-from chanlun.decision_support.trading_system.models import EntryExecutionBoundary
+from chanlun.decision_support.trading_system.models import (
+    EntryExecutionBoundary,
+    StructuralPoint,
+)
 from chanlun.decision_support.trading_system.position_recommendation import (
     build_position_recommendation,
 )
@@ -73,6 +78,7 @@ from chanlun.decision_support.trading_system.live_human_review import (
     _jsonable,
     _mwd_warmup_diagnostic_chain_is_consistent,
     _risk_evidence_is_consistent,
+    _five_minute_trade_signal_is_fresh,
     coverage_manifest_dispositions_are_consistent,
     live_human_review_document,
     live_screening_semantic_snapshot_document,
@@ -105,6 +111,99 @@ def test_live_report_json_adapter_serializes_point_in_time_dates() -> None:
     assert _jsonable({"anchor_session": date(2026, 8, 3)}) == {
         "anchor_session": "2026-08-03"
     }
+
+
+def test_five_minute_sell_freshness_counts_only_same_session_trading_minutes() -> None:
+    cn = deterministic_bundle().as_of.tzinfo
+    assert cn is not None
+
+    assert _five_minute_trade_signal_is_fresh(
+        datetime(2026, 7, 20, 10, 0, tzinfo=cn),
+        datetime(2026, 7, 20, 10, 10, 30, tzinfo=cn),
+        symbol="SZ.000001",
+    )
+    assert not _five_minute_trade_signal_is_fresh(
+        datetime(2026, 7, 20, 10, 0, tzinfo=cn),
+        datetime(2026, 7, 20, 10, 11, tzinfo=cn),
+        symbol="SZ.000001",
+    )
+    assert _five_minute_trade_signal_is_fresh(
+        datetime(2026, 7, 20, 11, 25, tzinfo=cn),
+        datetime(2026, 7, 20, 13, 5, tzinfo=cn),
+        symbol="SZ.000001",
+    )
+    assert not _five_minute_trade_signal_is_fresh(
+        datetime(2026, 7, 20, 14, 55, tzinfo=cn),
+        datetime(2026, 7, 21, 9, 31, tzinfo=cn),
+        symbol="SZ.000001",
+    )
+
+
+def test_one_minute_nesting_witness_can_be_known_before_five_minute_setup() -> None:
+    [signal] = HumanAssistedDecisionCore().decision_documents(deterministic_bundle())
+    setup = copy.deepcopy(signal["setup_5m"])
+    nesting_witness = copy.deepcopy(signal["segment_difference_1m"])
+    setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
+    witness_available_at = setup_available_at - timedelta(minutes=1)
+    nesting_witness["available_at"] = witness_available_at.isoformat()
+    nesting_witness["terminal_segment_available_at"] = witness_available_at.isoformat()
+
+    assert subject._one_minute_nesting_witness_matches_five_minute_setup(
+        setup,
+        nesting_witness,
+        decision_at=setup_available_at,
+    )
+    assert not subject._one_minute_nesting_witness_matches_five_minute_setup(
+        setup,
+        nesting_witness,
+        decision_at=setup_available_at - timedelta(microseconds=1),
+    )
+
+
+def test_one_minute_segment_difference_rejects_partial_interval_overlap() -> None:
+    [signal] = HumanAssistedDecisionCore().decision_documents(deterministic_bundle())
+    setup = copy.deepcopy(signal["setup_5m"])
+    nesting_witness = copy.deepcopy(signal["segment_difference_1m"])
+    outer_start_at = datetime.fromisoformat(str(setup["terminal_segment_start_at"]))
+    nesting_witness["terminal_segment_start_at"] = (
+        outer_start_at - timedelta(minutes=5)
+    ).isoformat()
+
+    assert not subject._one_minute_nesting_witness_matches_five_minute_setup(
+        setup,
+        nesting_witness,
+        decision_at=signal["observed_at"],
+    )
+
+
+def test_nesting_document_normalizes_completed_bar_start_labels() -> None:
+    [signal] = HumanAssistedDecisionCore().decision_documents(deterministic_bundle())
+    setup = copy.deepcopy(signal["setup_5m"])
+    nesting_witness = copy.deepcopy(signal["segment_difference_1m"])
+    outer_start_at = datetime.fromisoformat(str(setup["terminal_segment_start_at"]))
+    nesting_witness["terminal_segment_start_at"] = (
+        outer_start_at - timedelta(minutes=4)
+    ).isoformat()
+
+    assert subject._one_minute_nesting_witness_matches_five_minute_setup(
+        setup,
+        nesting_witness,
+        decision_at=signal["observed_at"],
+    )
+
+
+def test_nested_witness_does_not_require_legacy_setup_price_proximity() -> None:
+    [signal] = HumanAssistedDecisionCore().decision_documents(deterministic_bundle())
+    setup = copy.deepcopy(signal["setup_5m"])
+    nesting_witness = copy.deepcopy(signal["segment_difference_1m"])
+    nesting_witness["anchor_price"] = float(setup["anchor_price"]) + 100.0
+    nesting_witness["invalidation_price"] = float(setup["invalidation_price"]) + 100.0
+
+    assert subject._one_minute_nesting_witness_matches_five_minute_setup(
+        setup,
+        nesting_witness,
+        decision_at=signal["observed_at"],
+    )
 
 
 def _sector_coverage(
@@ -303,32 +402,78 @@ def _attach_strength_evidence(
     manifest["coverage_epoch_id"] = epoch_id
 
 
-def _decisions():
+def _nested_sell_points(*, fresh: bool) -> tuple[StructuralPoint, StructuralPoint]:
+    setup_minutes = 295 if fresh else 0
+    setup = confirmed_point("1sell", minutes_after=setup_minutes)
+    setup = replace(
+        setup,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:5m:{setup.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="up",
+            state="locked",
+            market_start=setup.anchor_at - timedelta(minutes=30),
+            market_end=setup.anchor_at,
+            available_at=setup.available_at,
+        ),
+    )
+    segment_difference = confirmed_point(
+        "1sell",
+        frequency="1m",
+        minutes_after=setup_minutes - 1,
+        available_minutes_after=2,
+    )
+    segment_difference = replace(
+        segment_difference,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:1m:{segment_difference.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="up",
+            state="locked",
+            market_start=segment_difference.anchor_at - timedelta(minutes=1),
+            market_end=segment_difference.anchor_at,
+            available_at=segment_difference.available_at,
+        ),
+    )
+    return setup, segment_difference
+
+
+def _decisions(*, fresh_sell: bool = False):
     core = HumanAssistedDecisionCore()
     base = deterministic_bundle()
-    trigger = base.one_points[0]
+    segment_difference = base.one_points[0]
     buy_bundle = replace(
         base,
         entry_execution_boundaries=(
             EntryExecutionBoundary(
                 symbol=base.code,
-                point_id=trigger.point_id,
+                setup_occurrence_id=(
+                    base.entry_execution_boundaries[0].setup_occurrence_id
+                ),
+                point_id=segment_difference.point_id,
                 source_frequency="1m",
-                confirmation_bar_closed_at=trigger.available_at,
+                confirmation_bar_closed_at=segment_difference.available_at,
                 raw_open=Decimal("10.10"),
                 raw_high=Decimal("10.25"),
                 raw_low=Decimal("10.00"),
                 raw_close=Decimal("10.20"),
                 raw_volume=Decimal("10000"),
-                entry_valid_until=trigger.available_at + timedelta(minutes=1),
+                entry_valid_until=(
+                    segment_difference.available_at + timedelta(minutes=1)
+                ),
                 raw_price_basis_revision="qmt-none-test",
             ),
         ),
     )
+    sell_setup, sell_segment_difference = _nested_sell_points(fresh=fresh_sell)
     sell_bundle = replace(
         buy_bundle,
-        five_points=(confirmed_point("1sell"),),
-        one_points=(confirmed_point("1sell", frequency="1m", minutes_after=1),),
+        five_points=(sell_setup,),
+        one_points=(sell_segment_difference,),
         opposite_points=(),
         entry_execution_boundaries=(),
     )
@@ -338,8 +483,8 @@ def _decisions():
     )
 
 
-def live_snapshot() -> dict[str, object]:
-    core, signals = _decisions()
+def live_snapshot(*, fresh_sell: bool = False) -> dict[str, object]:
+    core, signals = _decisions(fresh_sell=fresh_sell)
     as_of = deterministic_bundle().as_of
     contexts = {
         frequency: {
@@ -353,7 +498,7 @@ def live_snapshot() -> dict[str, object]:
                 (
                     "confirmed_buy_structure"
                     if frequency == "30m"
-                    else "stock_one_minute_trigger_only"
+                    else "stock_one_minute_segment_difference_only"
                     if frequency == "1m"
                     else "no_active_directional_point"
                 )
@@ -1091,10 +1236,9 @@ def test_invalidated_snapshot_row_is_audited_but_not_revived_for_review() -> Non
     ).document()
     invalidated["position_recommendation"] = position_recommendation
     invalidated["execution_profile"].update(
-        execution_trigger_confirmed=False,
         one_minute_segment_difference_present=False,
-        precision_locator_status="WAITING_ONE_MINUTE",
-        precision_locator_ready=False,
+        segment_difference_status="WAITING_ONE_MINUTE",
+        segment_difference_ready=False,
         precise_execution_ready=False,
         recommendation="BLOCKED",
         recommendation_label="当前不满足操作条件，等待结构或数据恢复",
@@ -1660,9 +1804,10 @@ def test_displayed_decision_accepts_context_warmup_as_advisory_only() -> None:
 
     assert signal["entry_allowed"] is True
     assert signal["execution_profile"]["hard_blocked"] is False
-    assert "30M:WARMUP_TAIL_DIVERGED" in signal["execution_profile"][
-        "advisory_reason_codes"
-    ]
+    assert (
+        "30M:WARMUP_TAIL_DIVERGED"
+        in signal["execution_profile"]["advisory_reason_codes"]
+    )
     assert _displayed_decision_evidence_is_consistent(
         signal,
         policy=policy,
@@ -1689,9 +1834,10 @@ def test_displayed_decision_accepts_risk_only_conflict_as_advisory() -> None:
     assert signal["conflict"]["hard_block"] is False
     assert signal["entry_allowed"] is True
     assert signal["execution_profile"]["hard_blocked"] is False
-    assert "lower_or_unrelated_structure_risk" in signal["execution_profile"][
-        "advisory_reason_codes"
-    ]
+    assert (
+        "lower_or_unrelated_structure_risk"
+        in signal["execution_profile"]["advisory_reason_codes"]
+    )
     assert _displayed_decision_evidence_is_consistent(
         signal,
         policy=policy,
@@ -1736,12 +1882,16 @@ def test_live_snapshot_rejects_hostile_sector_in_ranked_subset(
         validate_live_review_snapshot(snapshot)
 
 
-def test_live_snapshot_rejects_third_class_one_minute_reversal_trigger() -> None:
+def test_live_snapshot_rejects_third_class_one_minute_segment_difference() -> None:
     snapshot = live_snapshot()
     signal = next(
-        value for value in snapshot["signals"] if value["trigger_1m"] is not None
+        value
+        for value in snapshot["signals"]
+        if value["segment_difference_1m"] is not None
     )
-    signal["trigger_1m"]["point_type"] = "3buy" if signal["side"] == "buy" else "3sell"
+    signal["segment_difference_1m"]["point_type"] = (
+        "3buy" if signal["side"] == "buy" else "3sell"
+    )
     signal["decision_document_id"] = signal_decision_document_id(signal)
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
@@ -1911,11 +2061,20 @@ def test_live_adapter_preserves_30m_5m_1m_roles() -> None:
 
     assert report["scope"]["strategic_frequency"] == "30m"
     assert report["scope"]["tactical_frequency"] == "5m"
-    assert report["scope"]["locator_frequency"] == "1m"
     assert report["scope"]["context_frequency"] == "30m"
     assert report["scope"]["trade_frequency"] == "5m"
     assert report["scope"]["segment_difference_frequency"] == "1m"
     assert report["scope"]["segment_difference_required_for_trade_signal"] is False
+    for signal in snapshot["signals"]:
+        profile = signal["execution_profile"]
+        assert profile["segment_difference_status"] in {
+            "STRUCTURE_PENDING",
+            "WAITING_ONE_MINUTE",
+            "BOUNDARY_EXPIRED",
+            "BOUNDARY_MISSING",
+            "READY",
+        }
+        assert type(profile["segment_difference_ready"]) is bool
     assert report["signal_counts"]["by_alert_type"] == {
         "POSSIBLE_30M_BUY": 0,
         "POSSIBLE_30M_EXIT": 0,
@@ -1984,6 +2143,22 @@ def test_live_adapter_preserves_30m_5m_1m_roles() -> None:
     assert report["input_hashes"]["decision_source_snapshot_id"] == (
         decision_source_snapshot_id(source_implementation)
     )
+
+
+def test_live_adapter_reserves_immediate_priority_for_fresh_five_minute_sell() -> None:
+    snapshot = live_snapshot(fresh_sell=True)
+    report = live_human_review_document(
+        live_snapshot=snapshot,
+        source_snapshot_sha256=sha256_json(snapshot),
+        session=deterministic_bundle().as_of.date(),
+    )
+
+    sell = next(
+        row
+        for row in report["review_queue"]
+        if row["alert_type"] == "POSSIBLE_5M_TRADE_SELL"
+    )
+    assert 80 <= sell["review_priority"] <= 89
 
 
 def test_live_alert_retains_structured_sector_source_evidence() -> None:
@@ -2272,11 +2447,10 @@ def test_live_alert_explains_watchlist_monitor_origin() -> None:
     assert "MONITOR_ONLY_FORMAL_SELECTION_NOT_PASSED" in alert.warning_codes
 
 
-def test_live_alert_falls_back_to_five_minute_anchor_without_locator() -> None:
+def test_live_alert_falls_back_without_one_minute_segment_difference() -> None:
     snapshot = live_snapshot()
     signal = json.loads(json.dumps(snapshot["signals"][0]))
     signal["segment_difference_1m"] = None
-    signal["trigger_1m"] = None
     signal["entry_execution_boundary"] = None
     review_at, _signals = validate_live_review_snapshot(snapshot)
 
@@ -2291,14 +2465,14 @@ def test_live_alert_falls_back_to_five_minute_anchor_without_locator() -> None:
     assert "BUY_EXECUTION_BOUNDARY_MISSING_REVIEW_ONLY" in alert.warning_codes
 
 
-def test_live_adapter_rejects_incomplete_coverage_or_wrong_locator() -> None:
+def test_live_adapter_rejects_incomplete_coverage_or_wrong_segment_difference() -> None:
     snapshot = live_snapshot()
     snapshot["scan_audit"]["coverage_cycle_complete"] = False
     with pytest.raises(ValueError, match="boundary is incomplete"):
         validate_live_review_snapshot(snapshot)
 
     snapshot = live_snapshot()
-    snapshot["signals"][0]["trigger_1m"]["source_frequency"] = "5m"
+    snapshot["signals"][0]["segment_difference_1m"]["source_frequency"] = "5m"
     snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         snapshot
     )

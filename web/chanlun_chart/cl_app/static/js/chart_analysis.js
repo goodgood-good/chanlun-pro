@@ -959,8 +959,6 @@
       completedAt: toSeconds(item.completed_at),
       entryUnitId: item.entry_unit_id || null,
       coreUnitIds: Array.isArray(item.core_unit_ids) ? item.core_unit_ids.slice() : [],
-      establishmentUnitId: item.establishment_unit_id || null,
-      initialExitUnitId: item.initial_exit_unit_id || null,
       initialUnitIds: Array.isArray(item.initial_unit_ids) ? item.initial_unit_ids.slice() : [],
       bodyUnitIds: Array.isArray(item.body_unit_ids) ? item.body_unit_ids.slice() : [],
       extensionUnitIds: Array.isArray(item.extension_unit_ids) ? item.extension_unit_ids.slice() : [],

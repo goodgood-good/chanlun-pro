@@ -25,7 +25,10 @@ def _resolve(monkeypatch: pytest.MonkeyPatch, symbol: str):
     monkeypatch.setattr(
         tv_module,
         "market_frequencys",
-        {"a": ["1m", "5m", "30m", "d", "w", "m"]},
+        {
+            "a": ["1m", "5m", "30m", "d", "w", "m"],
+            "hk": ["1m", "5m", "30m", "d", "w", "m"],
+        },
     )
     with app.test_request_context(f"/tv/symbols?symbol={symbol}"):
         return tv_module.tv_symbols.__wrapped__()
@@ -75,6 +78,8 @@ def test_tv_symbols_cache_miss_preserves_live_exchange_fallback(
     calls = []
 
     class _Exchange:
+        stock_info_query_scope = "SINGLE_SYMBOL_STOCK_INFO"
+
         def stock_info(self, code):
             calls.append(code)
             return {"code": code, "name": "浦发银行", "precision": 100}
@@ -90,6 +95,36 @@ def test_tv_symbols_cache_miss_preserves_live_exchange_fallback(
     assert payload["ticker"] == "a:SH.600000"
     assert payload["listed_exchange"] == "a"
     assert payload["description"] == "浦发银行"
+
+
+def test_tv_symbols_non_a_miss_never_calls_expanding_stock_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
+
+    class _CatalogExpandingExchange:
+        def all_stocks(self):
+            calls["all_stocks"] += 1
+            return [{"code": "HK.00700", "name": "Tencent"}]
+
+        def stock_info(self, code):
+            calls["stock_info"] += 1
+            calls["basicinfo"] += 1
+            return next(
+                row for row in self.all_stocks() if row["code"] == code
+            )
+
+    monkeypatch.setattr(
+        tv_module,
+        "get_exchange",
+        lambda _market: _CatalogExpandingExchange(),
+    )
+
+    payload = _resolve(monkeypatch, "hk:HK.00700")
+
+    assert payload["ticker"] == "hk:HK.00700"
+    assert payload["description"] == "HK.00700"
+    assert calls == {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
 
 
 def test_cached_symbol_lookup_returns_a_defensive_copy() -> None:

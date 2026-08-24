@@ -31,6 +31,7 @@ def _at(hour: int, minute: int, second: int = 0) -> datetime:
 def _boundary(closed_at: datetime) -> EntryExecutionBoundary:
     return EntryExecutionBoundary(
         symbol="SH.600000",
+        setup_occurrence_id="setup-occurrence:test",
         point_id="sha256:" + "1" * 64,
         source_frequency="1m",
         confirmation_bar_closed_at=closed_at,
@@ -163,7 +164,7 @@ def test_causal_completed_minute_prefix_rejects_stale_or_gapped_evidence() -> No
         (_at(15, 0), _at(15, 0)),
     ),
 )
-def test_optional_entry_ttl_is_one_locator_bar_or_auction_end(
+def test_optional_entry_ttl_is_one_nesting_decision_bar_or_auction_end(
     confirmed: datetime,
     expected: datetime,
 ) -> None:
@@ -176,13 +177,13 @@ def test_boundary_rejects_second_level_confirmation_and_flexible_ttl() -> None:
         _boundary(_at(10, 4, 30))
 
     boundary = _boundary(_at(10, 4))
-    with pytest.raises(ValueError, match="frozen A-share locator-bar TTL"):
+    with pytest.raises(ValueError, match="frozen A-share nesting-decision TTL"):
         replace(
             boundary,
             entry_valid_until=boundary.confirmation_bar_closed_at
             + timedelta(seconds=30),
         )
-    with pytest.raises(ValueError, match="frozen A-share locator-bar TTL"):
+    with pytest.raises(ValueError, match="frozen A-share nesting-decision TTL"):
         replace(
             boundary,
             entry_valid_until=boundary.confirmation_bar_closed_at,

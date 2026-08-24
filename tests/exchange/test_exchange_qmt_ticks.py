@@ -1,7 +1,7 @@
 """锁定 ExchangeQMT.ticks() 的除零保护(新股上市首日等 lastClose=0 场景)。
 
-同类的 all_ticks() 已有 `if _t["lastClose"] != 0 else 0` 保护, 但 ticks() 漏掉:
-lastClose 为 0 时 rate=(last-lastClose)/lastClose*100 抛 ZeroDivisionError。
+历史实现中 ticks() 遗漏了 `lastClose == 0` 的保护:
+lastClose 为 0 时 rate=(last-lastClose)/lastClose*100 会抛 ZeroDivisionError。
 ticks() 被 /tv/quotes 高频轮询(自选组报价)按 market 分组调用, 一个标的除零会被
 该 market 分组的 try/except 兜底吃掉 → 整组标的本轮报价全部失败(炸弹半径放大)。
 

@@ -4,7 +4,7 @@
 提供以下接口：
 - GET  /symbols                       : 渲染独立的"标的列表"页面
 - GET  /symbols/list                  : JSON 数据接口，按市场返回（可选）模糊搜索 + 分页后的标的
-- POST /symbols/prewarm               : 启动当前市场全量缠论数据预热（后台串行执行）
+- POST /symbols/prewarm               : 预热显式指定的小样本标的（后台执行）
 - GET  /symbols/prewarm/status        : 查询当前市场最新一次预热任务的进度
 - POST /symbols/prewarm/cancel        : 取消当前市场正在执行的预热任务
 
@@ -53,7 +53,6 @@ def _env_float(key: str, default: float) -> float:
 from flask import Blueprint, jsonify, render_template, request
 from flask_login import login_required
 
-from chanlun import config
 from chanlun.cl_utils import query_cl_chart_config
 from chanlun.tools.log_util import LogUtil
 
@@ -66,6 +65,12 @@ from ..services.chart_cache import (
 from ..services.chart_compute import compute_and_cache_chart_data, market_now_trading
 from ..services.constants import market_types, resolution_maps
 from ..services.stock_list import get_cached_processed_stocks
+from ..services.trading_screening_scope import (
+    DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
+    ScreeningScopeAuthorizationError,
+    admit_explicit_validation_codes,
+    parse_explicit_scope_limit,
+)
 from ..services.user_activity import (
     _get_last_user_request_time,
     _get_user_recent_codes,
@@ -173,18 +178,11 @@ def _is_us_non_stock(name: str) -> bool:
     )
 
 
-def _apply_market_filter(
-    market: str, all_stocks: List[dict], for_prewarm: bool = False
-) -> List[dict]:
+def _apply_market_filter(market: str, all_stocks: List[dict]) -> List[dict]:
     """对标的列表应用市场过滤(type 白名单 + 美股 name 黑名单).
 
-    供 symbols_list (展示) 和 symbols_prewarm (预热) 共用, 确保
-    预热范围与用户能搜到的标的一致, 不浪费 CPU/磁盘算 ETF 等.
-
-    ``for_prewarm=True`` 时启用仅供预热路径的额外过滤
-    (如 US 市场 ``US_PREWARM_ZIXUAN_ONLY`` 的自选股交集),
-    展示路径必须保持默认 False, 否则用户看到的列表会被错误地
-    截断为自选股 (历史 bug: prewarm 自选股交集错误地溢出到展示路径).
+    仅供 symbols_list 展示使用；预热入口必须直接使用用户显式代码，
+    不再通过本函数展开或过滤整个市场。
     """
     allow_types = STOCK_ONLY_TYPES_BY_MARKET.get(market)
     if allow_types is not None:
@@ -195,20 +193,6 @@ def _apply_market_filter(
         ]
     if market == "us":
         all_stocks = [s for s in all_stocks if not _is_us_non_stock(s.get("name", ""))]
-    # US 市场 prewarm 仅限自选股，保护长桥月度配额。
-    # query_all_zs_stocks 返回分组嵌套结构，需从 stocks 子列表抽 code 拍扁。
-    if for_prewarm and market == "us" and getattr(config, "US_PREWARM_ZIXUAN_ONLY", False):
-        from chanlun.zixuan import ZiXuan
-        zx_codes = {
-            stock["code"]
-            for group in ZiXuan("us").query_all_zs_stocks()
-            for stock in group.get("stocks", [])
-        }
-        before = len(all_stocks)
-        all_stocks = [s for s in all_stocks if s.get("code") in zx_codes]
-        LogUtil.info(
-            f"[_apply_market_filter] US prewarm 仅限自选股，{before} → {len(all_stocks)}"
-        )
     return all_stocks
 
 
@@ -337,7 +321,7 @@ PREWARM_INTERVALS = [
 ]
 
 # 单标的内并发计算的周期数（每个周期一个线程）。
-# 实测全市场预热同时打 8 个并发请求时（2 标的 × 4 周期），长桥 HTTP 连接池被占满，
+# 实测同时打 8 个并发请求时（2 标的 × 4 周期），长桥 HTTP 连接池被占满，
 # 前端 polling 请求被排到队列后面，导致切换标的耗时 10-18 秒。
 # 维持 2，让总在飞请求数 ≤ INFLIGHT_LIMIT，避免 4 周期同时抢信号量。
 # env PREWARM_FREQ_PARALLELISM 可覆盖
@@ -408,12 +392,12 @@ PREWARM_TASK_RETAIN_SECONDS = 3600
 # 任务进度持久化目录与写盘频率
 _PREWARM_PERSIST_DIRNAME = "prewarm_status"
 # 写盘频率：每完成 N 个标的写一次（终态时强制写一次）。
-# 50 是经验值：11k 标的约 220 次写盘，IO 开销 < 1%，崩溃后丢失进度 < 50 个。
+# 小样本任务主要依赖结束时写盘；此阈值保留给显式上限未来调整后的增量进度。
 # max(1, ...) 防 env 写 0 触发 done_now % 0 的 ZeroDivisionError。env PREWARM_PERSIST_EVERY_N_DONE 可覆盖。
 _PREWARM_PERSIST_EVERY_N_DONE = max(1, _env_int("PREWARM_PERSIST_EVERY_N_DONE", 50))
 # Resume 用的"已完成 code 列表"文件后缀：
 # - 每完成一个 code（无论成功/失败）即追加一行，进程崩溃/取消后下次 start() 跳过；
-# - 仅在任务 status==finished（全市场跑完）时删除，cancel/aborted/error 都保留以便续跑；
+# - 仅在本次显式任务 finished 时删除，cancel/aborted/error 都保留以便续跑；
 # - 文件格式为 plain text，每行一个 code，依赖 'a' mode + GIL 实现单进程多线程的写并发。
 _PREWARM_DONE_SUFFIX = "_done.txt"
 
@@ -515,7 +499,7 @@ class PrewarmManager:
     - **互斥粒度按"数据源 group"细化**：同一底层 exchange（如长桥同时承担 us+hk）
       内的 markets 互斥；不同 group 可并行预热。
       group 名取自 ``config.EXCHANGE_<MARKET>``（如 a→qmt、us/hk→cq、futures→tdx_futures）。
-    - 全市场预热实测耗时从顺序 ~3h 降到并行 ~1-1.5h（取决于 group 划分）。
+    - 不同数据源组可并行，组内仍保持互斥，避免共享连接池竞争。
     - xtquant native 线程不安全的约束仍然成立，但只影响共享 xtquant 的 markets，
       不再阻断 HTTP 数据源（cq/binance/futu）的并行启动。
     - 每个 market 只保留最近一次任务（覆盖更早的）。
@@ -726,10 +710,20 @@ class PrewarmManager:
         返回 ``{"ok": bool, "msg": str, "task": dict | None}``。
 
         自动加载 ``<market>_done.txt`` 跳过上次已完成的 code，实现续跑；
-        仅在任务 finished（全市场跑完）时清空该文件。
+        仅在本次显式任务 finished 时清空该文件。
         """
         if not codes:
             return {"ok": False, "msg": "标的列表为空，无需预热", "task": None}
+        if len(codes) > DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS:
+            return {
+                "ok": False,
+                "code": "scope_exceeded",
+                "msg": (
+                    "普通预热入口最多允许 "
+                    f"{DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS} 只显式标的"
+                ),
+                "task": None,
+            }
 
         # 惰性加载历史任务文件
         self._ensure_loaded()
@@ -963,7 +957,7 @@ class PrewarmManager:
             if done_now % _PREWARM_PERSIST_EVERY_N_DONE == 0:
                 self._persist_task(task)
 
-        # QMT 批量预下载(加速): 逐只计算前先把所有标的的基础周期数据批量拉到本地库,
+        # QMT 批量预下载(加速): 逐只计算前先把本次显式标的的基础周期数据批量拉到本地库,
         # 之后逐只 compute 传 skip_download=True 跳过逐只 download。仅 A股/QMT(交易所暴露
         # prewarm_batch_download)生效; 任何异常都降级(batch_predownloaded=False, 逐只仍 download)。
         # 交易时段跳过批量预下载: prewarm_batch_download 同步持 _XTDATA_NATIVE_LOCK(与用户
@@ -1009,8 +1003,7 @@ class PrewarmManager:
                 max_workers=code_parallelism,
                 thread_name_prefix=f"PrewarmCode[{market}]",
             ) as executor:
-                # 分批提交：每次提交 code_parallelism * 4 个任务，避免一次性把 11755 个全塞进去导致
-                # 优先级调整失效（已经塞进队列的都是按提交顺序执行）。
+                # 分批提交，避免一次性塞满执行队列后让最近访问代码的优先级调整失效。
                 # 每批结束后重新按"用户最近看过"排序剩余 pending。
                 batch_size = max(code_parallelism * 4, 8)
                 cursor = 0
@@ -1079,7 +1072,7 @@ class PrewarmManager:
                     task.status = "finished"
                 task.finished_at = time.time()
                 task.current = ("", "")
-            # 仅在 finished（全市场跑完）时清空 done.txt，让下次从头开始；
+            # 仅在本次显式任务 finished 时清空 done.txt，让下次从头开始；
             # cancel/aborted/error 都保留，支持续跑。
             if task.status == "finished":
                 self._clear_done_codes(market)
@@ -1303,31 +1296,58 @@ _prewarm_manager = PrewarmManager()
 @symbols_bp.route("/symbols/prewarm", methods=["POST"])
 @login_required
 def symbols_prewarm():
-    """启动当前市场的全量缠论数据预热。
+    """启动当前市场显式小样本的缠论数据预热。
 
-    Form 参数：
-    - market : 市场代码（必填）
+    Form/JSON 参数：
+    - market                 : 市场代码（必填）
+    - codes                  : 显式代码列表（必填；默认最多 12，只可提升至 20）
+    - scope_limit            : 12（默认）或不超过 20 的显式上限
+    - confirm_explicit_scope : 用户确认本次代码列表（必填）
     """
-    market = (request.values.get("market") or "").strip().lower()
+    payload = request.get_json(silent=True) if request.is_json else None
+
+    def request_value(name: str):
+        if isinstance(payload, dict) and name in payload:
+            return payload.get(name)
+        return request.values.get(name)
+
+    market = str(request_value("market") or "").strip().lower()
     if market not in market_types:
         return jsonify({"ok": False, "msg": f"未知市场: {market!r}"}), 400
 
+    confirmed_value = request_value("confirm_explicit_scope")
+    confirmed = confirmed_value is True or str(confirmed_value or "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not confirmed:
+        return jsonify(
+            {
+                "ok": False,
+                "code": "explicit_scope_confirmation_required",
+                "msg": "请确认本次显式代码列表；预热不会自动处理全市场",
+            }
+        ), 400
+
     try:
-        all_stocks = get_cached_processed_stocks(market, allow_sync_fallback=True) or []
-    except Exception as e:
-        LogUtil.error(f"[symbols_prewarm] get stocks failed market={market}: {e}")
-        return jsonify({"ok": False, "msg": f"获取标的列表失败: {e}"}), 500
+        scope_limit = parse_explicit_scope_limit(request_value("scope_limit"))
+        admitted_codes = admit_explicit_validation_codes(
+            request_value("codes"),
+            max_symbols=scope_limit,
+        )
+    except ScreeningScopeAuthorizationError as exc:
+        return jsonify(
+            {"ok": False, "code": exc.reason_code, "msg": str(exc)}
+        ), 403
+    except ValueError as exc:
+        return jsonify(
+            {"ok": False, "code": "explicit_codes_required", "msg": str(exc)}
+        ), 400
 
-    # 与展示列表过滤同步: 不预热被列表过滤掉的 ETF/Fund/非个股.
-    # for_prewarm=True 启用 US 市场仅自选股的额外过滤(保护长桥月度配额),
-    # 展示路径不能开此开关, 否则会把用户能看到的列表截断为自选股.
-    all_stocks = _apply_market_filter(market, all_stocks, for_prewarm=True)
-
-    codes = [
-        {"code": s.get("code", ""), "name": s.get("name", "")}
-        for s in all_stocks
-        if s.get("code")
-    ]
+    # 名称只影响进度展示，不再为了映射名称读取/展开全市场证券列表。
+    codes = [{"code": code, "name": code} for code in admitted_codes]
 
     result = _prewarm_manager.start(market, codes)
     if result["ok"]:

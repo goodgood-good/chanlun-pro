@@ -30,6 +30,9 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
     load_qmt_daily_frame,
     load_qmt_frame,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    structural_point_occurrence_id,
+)
 from tests.trading_system.backtest.helpers import minute_bar
 from tests.trading_system.helpers import (
     CN,
@@ -37,6 +40,37 @@ from tests.trading_system.helpers import (
     eligible_sector,
     valid_selection_research,
 )
+
+
+def _with_terminal_interval(point, *, market_start):
+    return replace(
+        point,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=point.recursive_level,
+            unit_id=f"segment:{point.source_frequency}:{point.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down" if point.side == "buy" else "up",
+            state="locked",
+            market_start=market_start,
+            market_end=point.anchor_at,
+            available_at=point.available_at,
+        ),
+    )
+
+
+def _strict_setup(point):
+    return _with_terminal_interval(
+        point,
+        market_start=point.anchor_at - timedelta(minutes=30),
+    )
+
+
+def _strict_witness(point):
+    return _with_terminal_interval(
+        point,
+        market_start=point.anchor_at - timedelta(minutes=1),
+    )
 
 
 def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> None:
@@ -91,8 +125,93 @@ def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> N
     )
 
 
-def test_symbol_bundle_uses_current_context_but_keeps_one_minute_event_ledger(
-) -> None:
+def test_preexisting_nested_witness_opens_boundary_once_at_joint_knowledge() -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+            available_minutes_after=5,
+        )
+    )
+    witness = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-5,
+        )
+    )
+    older_witness = _strict_witness(
+        confirmed_point(
+            "2buy",
+            frequency="1m",
+            anchor=9.8,
+            minutes_after=-10,
+        )
+    )
+    jointly_known_at = setup.available_at
+    later_at = jointly_known_at + timedelta(minutes=1)
+    evaluations = tuple(
+        SparseEvaluationFact(
+            observed_at=value,
+            thirty_direction="neutral",
+            bar=minute_bar(opened_at=value - timedelta(minutes=1)),
+        )
+        for value in (jointly_known_at, later_at)
+    )
+    sector = eligible_sector()
+    facts = SymbolResearchFacts(
+        schema=FACT_SCHEMA,
+        algorithm_revision="sha256:" + "a" * 64,
+        source_revision="sha256:" + "b" * 64,
+        code=setup.code,
+        sector_id=sector.sector_id,
+        requested_start=jointly_known_at.date(),
+        requested_end=later_at.date(),
+        effective_start=jointly_known_at.date(),
+        row_counts=(("d", 0), ("30m", 0), ("5m", 1), ("1m", 2)),
+        daily_points=(),
+        thirty_points=(),
+        five_points=(setup,),
+        one_points=(older_witness, witness),
+        evaluations=evaluations,
+        five_minute_warmup=(
+            FiveMinuteWarmupFact(
+                observed_at=jointly_known_at,
+                source_closed_at=jointly_known_at,
+                converged=True,
+                full_bar_count=960,
+                suffix_bar_count=640,
+                reason_code="WARMUP_TAIL_STABLE",
+                production_five_points=(setup,),
+                # The witness was already known before this production close;
+                # it comes from the causal ledger, not a current-1m snapshot.
+                production_one_points=(),
+                one_minute_bar_count=960,
+            ),
+        ),
+    )
+
+    first = build_symbol_bundle(facts, evaluations[0], sector)
+    repeated = build_symbol_bundle(facts, evaluations[1], sector)
+
+    assert witness.available_at < setup.available_at == jointly_known_at
+    assert witness in first.one_points
+    assert len(first.entry_execution_boundaries) == 1
+    assert first.entry_execution_boundaries[0].point_id == witness.point_id
+    assert first.entry_execution_boundaries[0].setup_occurrence_id == (
+        structural_point_occurrence_id(setup)
+    )
+    assert (
+        first.entry_execution_boundaries[0].confirmation_bar_closed_at
+        == jointly_known_at
+    )
+    assert repeated.entry_execution_boundaries == ()
+
+
+def test_symbol_bundle_uses_current_context_but_keeps_one_minute_event_ledger() -> None:
     old = confirmed_point("3buy", center_id="old-center")
     current = confirmed_point(
         "3buy",
@@ -225,17 +344,20 @@ def test_backtest_does_not_reopen_expired_anchor_on_late_confirmation() -> None:
     assert active_end < delayed.available_at
     assert superseded is False
 
-    assert sparse_evaluation_times(
-        five_points=(delayed,),
-        one_points=(),
-        thirty_closes=(),
-        one_closes=(delayed.available_at,),
-        effective_start=delayed.available_at,
-        requested_end=delayed.available_at + timedelta(days=1),
-    ) == ()
+    assert (
+        sparse_evaluation_times(
+            five_points=(delayed,),
+            one_points=(),
+            thirty_closes=(),
+            one_closes=(delayed.available_at,),
+            effective_start=delayed.available_at,
+            requested_end=delayed.available_at + timedelta(days=1),
+        )
+        == ()
+    )
 
 
-def test_terminal_lineage_visibility_keeps_late_confirmed_setup_current() -> None:
+def test_terminal_lineage_does_not_resurrect_expired_execution_setup() -> None:
     delayed = confirmed_point(
         "3sell",
         anchor=18.89,
@@ -262,72 +384,91 @@ def test_terminal_lineage_visibility_keeps_late_confirmed_setup_current() -> Non
     )
 
     assert delayed.anchor_at + timedelta(days=4) < delayed.available_at
-    assert sparse_evaluation_times(
-        five_points=(delayed,),
-        one_points=(),
-        thirty_closes=(),
-        one_closes=(delayed.available_at,),
-        effective_start=delayed.available_at,
-        requested_end=delayed.available_at + timedelta(days=1),
-        five_point_visibility=(
-            PointVisibilityInterval(
-                delayed.point_id,
-                delayed.available_at,
+    assert (
+        sparse_evaluation_times(
+            five_points=(delayed,),
+            one_points=(),
+            thirty_closes=(),
+            one_closes=(delayed.available_at,),
+            effective_start=delayed.available_at,
+            requested_end=delayed.available_at + timedelta(days=1),
+            five_point_visibility=(
+                PointVisibilityInterval(
+                    delayed.point_id,
+                    delayed.available_at,
+                ),
             ),
-        ),
-    ) == (delayed.available_at,)
+        )
+        == ()
+    )
 
 
-def test_segment_difference_must_match_side_time_and_setup_price_band() -> None:
-    setup = confirmed_point(
-        "3buy",
-        anchor=10.0,
-        stop=9.8,
-        center_zg=9.9,
+def test_segment_difference_uses_interval_not_legacy_setup_price_band() -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
     )
-    wrong_price = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=10.2,
-        minutes_after=1,
+    outside_setup_price = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=10.2,
+            minutes_after=-3,
+            available_minutes_after=4,
+        )
     )
-    wrong_side = confirmed_point(
-        "1sell",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=2,
+    wrong_side = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-2,
+            available_minutes_after=4,
+        )
     )
-    match = confirmed_point(
-        "2buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=3,
+    match = _strict_witness(
+        confirmed_point(
+            "2buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=4,
+        )
     )
 
     segment = first_matching_segment_difference(
         setup,
-        (wrong_price, wrong_side, match),
+        (outside_setup_price, wrong_side, match),
         active_end=setup.available_at + timedelta(days=4),
         end_exclusive=False,
     )
 
-    assert segment == match
+    assert segment == outside_setup_price
 
 
 def test_historical_segment_difference_cannot_cross_symbol_boundary() -> None:
-    setup = confirmed_point(
-        "3buy",
-        code="SZ.000001",
-        anchor=10.0,
-        stop=9.8,
-        center_zg=9.9,
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            code="SZ.000001",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
     )
-    other_symbol = confirmed_point(
-        "1buy",
-        code="SH.600000",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=1,
+    other_symbol = _strict_witness(
+        confirmed_point(
+            "1buy",
+            code="SH.600000",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
     )
 
     assert (
@@ -342,47 +483,62 @@ def test_historical_segment_difference_cannot_cross_symbol_boundary() -> None:
 
 
 def test_historical_replay_accepts_valid_third_class_one_minute_segment() -> None:
-    setup = confirmed_point(
-        "3buy",
-        anchor=10.0,
-        stop=9.8,
-        center_zg=9.9,
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
     )
-    continuation = confirmed_point(
-        "3buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=1,
-    )
-
-    assert first_matching_segment_difference(
-        setup,
-        (continuation,),
-        active_end=setup.available_at + timedelta(days=4),
-        end_exclusive=False,
-    ) is continuation
-
-
-def test_historical_segment_cannot_be_backfilled_from_five_minute_formation() -> None:
-    setup = confirmed_point(
-        "2buy",
-        anchor=10.0,
-        stop=9.8,
-        available_minutes_after=5,
-    )
-    segment = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=2,
+    continuation = _strict_witness(
+        confirmed_point(
+            "3buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
     )
 
-    assert first_matching_segment_difference(
-        setup,
-        (segment,),
-        active_end=setup.available_at + timedelta(days=4),
-        end_exclusive=False,
-    ) is None
+    assert (
+        first_matching_segment_difference(
+            setup,
+            (continuation,),
+            active_end=setup.available_at + timedelta(days=4),
+            end_exclusive=False,
+        )
+        is continuation
+    )
+
+
+def test_historical_nested_segment_from_five_minute_formation_is_causal() -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "2buy",
+            anchor=10.0,
+            stop=9.8,
+            available_minutes_after=5,
+        )
+    )
+    segment = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-2,
+        )
+    )
+
+    assert (
+        first_matching_segment_difference(
+            setup,
+            (segment,),
+            active_end=setup.available_at + timedelta(days=4),
+            end_exclusive=False,
+        )
+        is segment
+    )
 
 
 def test_historical_segment_uses_terminal_segment_start_not_point_anchor() -> None:
@@ -407,25 +563,31 @@ def test_historical_segment_uses_terminal_segment_start_not_point_anchor() -> No
             available_at=setup.available_at,
         ),
     )
-    segment = confirmed_point(
-        "1sell",
-        frequency="1m",
-        anchor=10.1,
-        stop=10.2,
-        minutes_after=-5,
-        available_minutes_after=6,
+    segment = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            anchor=10.1,
+            stop=10.2,
+            minutes_after=-5,
+            available_minutes_after=6,
+        )
     )
 
-    assert first_matching_segment_difference(
-        setup,
-        (segment,),
-        active_end=setup.available_at + timedelta(days=4),
-        end_exclusive=False,
-    ) is segment
+    assert (
+        first_matching_segment_difference(
+            setup,
+            (segment,),
+            active_end=setup.available_at + timedelta(days=4),
+            end_exclusive=False,
+        )
+        is segment
+    )
 
 
-def test_historical_segment_anchored_before_terminal_segment_is_rejected_when_seen_late(
-) -> None:
+def test_historical_segment_anchored_before_terminal_segment_is_rejected_when_seen_late() -> (
+    None
+):
     setup = confirmed_point(
         "3buy",
         anchor=10.0,
@@ -447,12 +609,14 @@ def test_historical_segment_anchored_before_terminal_segment_is_rejected_when_se
             available_at=setup.available_at,
         ),
     )
-    old_segment_seen_late = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=-31,
-        available_minutes_after=32,
+    old_segment_seen_late = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-35,
+            available_minutes_after=36,
+        )
     )
 
     assert old_segment_seen_late.anchor_at < terminal_start
@@ -468,42 +632,47 @@ def test_historical_segment_anchored_before_terminal_segment_is_rejected_when_se
     )
 
 
-def test_sparse_times_include_one_minute_locator_close() -> None:
-    setup = confirmed_point(
-        "3buy",
-        anchor=10.0,
-        stop=9.8,
-        center_zg=9.9,
+def test_sparse_times_include_first_jointly_known_nesting_close() -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
     )
-    trigger = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=5,
+    witness = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=6,
+        )
     )
-    trigger_at = trigger.available_at
+    jointly_known_at = witness.available_at
     one_closes = tuple(
-        trigger_at + timedelta(minutes=offset) for offset in range(-2, 93)
+        jointly_known_at + timedelta(minutes=offset) for offset in range(-2, 93)
     )
     thirty_closes = (
-        trigger_at + timedelta(minutes=25),
-        trigger_at + timedelta(minutes=55),
-        trigger_at + timedelta(minutes=85),
+        jointly_known_at + timedelta(minutes=25),
+        jointly_known_at + timedelta(minutes=55),
+        jointly_known_at + timedelta(minutes=85),
     )
 
     observed = sparse_evaluation_times(
         five_points=(setup,),
-        one_points=(trigger,),
+        one_points=(witness,),
         thirty_closes=thirty_closes,
         one_closes=one_closes,
         effective_start=datetime(2026, 7, 20, 9, 30, tzinfo=CN),
         requested_end=datetime(2026, 7, 20, 15, 0, tzinfo=CN),
     )
 
-    assert observed == (one_closes[0], trigger_at, *thirty_closes)
+    assert observed == (one_closes[0], jointly_known_at, *thirty_closes)
 
 
-def test_one_minute_visibility_starts_when_five_minute_setup_is_available() -> None:
+def test_one_minute_visibility_starts_at_five_minute_bar_left_edge() -> None:
     from chanlun.core.strict_structure.models import SourceKind
     from chanlun.decision_support.trading_system.backtest import fixed_year
     from chanlun.decision_support.trading_system.models import (
@@ -538,10 +707,10 @@ def test_one_minute_visibility_starts_when_five_minute_setup_is_available() -> N
         (setup,),
         {setup.point_id: (active_end, False)},
         end_at=active_end,
-    ) == ((setup.available_at, active_end),)
+    ) == ((terminal_start - timedelta(minutes=5), active_end),)
 
 
-def test_one_minute_visibility_preserves_disjoint_five_minute_epochs() -> None:
+def test_one_minute_visibility_drops_epochs_after_execution_expiry() -> None:
     setup = confirmed_point(
         "2sell",
         anchor=10.0,
@@ -569,10 +738,7 @@ def test_one_minute_visibility_preserves_disjoint_five_minute_epochs() -> None:
         (setup,),
         end_at=second_end,
         point_visibility=visibility,
-    ) == (
-        (setup.available_at, first_end),
-        (second_start, second_end),
-    )
+    ) == ((setup.available_at, first_end),)
 
 
 def test_sector_facts_use_only_points_current_at_each_decision(
@@ -671,15 +837,18 @@ def test_one_minute_replay_uses_bounded_cold_history_per_merged_epoch(
     second_start = dates[13_000]
     second_end = dates[13_010]
 
-    assert fixed_year._causal_one_minute_points_by_windows(
-        "SZ.000001",
-        frame,
-        (
-            (first_start, first_end),
-            (dates[12_059], overlapping_end),
-            (second_start, second_end),
-        ),
-    ) == ()
+    assert (
+        fixed_year._causal_one_minute_points_by_windows(
+            "SZ.000001",
+            frame,
+            (
+                (first_start, first_end),
+                (dates[12_059], overlapping_end),
+                (second_start, second_end),
+            ),
+        )
+        == ()
+    )
     assert calls == [
         (
             12_021,
@@ -728,26 +897,32 @@ def test_earlier_geometry_time_requires_independent_production_visibility(
 
     monkeypatch.setattr(fixed_year, "_production_current_points", production)
 
-    assert fixed_year._causally_verified_point_available_at(
-        code=point.code,
-        frequency="1m",
-        frame=source,
-        dates=dates,
-        point=point,
-        checkpoint=checkpoint,
-        occurrence_cache={},
-    ) == point.available_at
+    assert (
+        fixed_year._causally_verified_point_available_at(
+            code=point.code,
+            frequency="1m",
+            frame=source,
+            dates=dates,
+            point=point,
+            checkpoint=checkpoint,
+            occurrence_cache={},
+        )
+        == point.available_at
+    )
 
     returned = ()
-    assert fixed_year._causally_verified_point_available_at(
-        code=point.code,
-        frequency="1m",
-        frame=source,
-        dates=dates,
-        point=point,
-        checkpoint=checkpoint,
-        occurrence_cache={},
-    ) == checkpoint
+    assert (
+        fixed_year._causally_verified_point_available_at(
+            code=point.code,
+            frequency="1m",
+            frame=source,
+            dates=dates,
+            point=point,
+            checkpoint=checkpoint,
+            occurrence_cache={},
+        )
+        == checkpoint
+    )
 
 
 def test_operation_identity_allows_terminal_start_refinement() -> None:
@@ -793,9 +968,7 @@ def test_one_minute_replay_does_not_resurrect_pre_setup_event(
     monkeypatch,
 ) -> None:
     point = confirmed_point("1buy", frequency="1m")
-    dates = tuple(
-        point.available_at + timedelta(minutes=index) for index in range(20)
-    )
+    dates = tuple(point.available_at + timedelta(minutes=index) for index in range(20))
     frame = pd.DataFrame(
         {
             "code": [point.code] * len(dates),
@@ -826,9 +999,7 @@ def test_one_minute_replay_does_not_resurrect_pre_setup_event(
         )
         return SimpleNamespace(
             points=(refined,),
-            point_visibility=(
-                PointVisibilityInterval(refined.point_id, start, end),
-            ),
+            point_visibility=(PointVisibilityInterval(refined.point_id, start, end),),
         )
 
     monkeypatch.setattr(fixed_year, "_causal_confirmed_structure_events", replay)
@@ -847,9 +1018,7 @@ def test_one_minute_replay_keeps_event_created_inside_active_setup_epoch(
     monkeypatch,
 ) -> None:
     point = confirmed_point("1buy", frequency="1m")
-    dates = tuple(
-        point.available_at + timedelta(minutes=index) for index in range(10)
-    )
+    dates = tuple(point.available_at + timedelta(minutes=index) for index in range(10))
     source = pd.DataFrame({"date": dates})
     source.attrs.update(
         structure_price_quantum="0.01",
@@ -860,9 +1029,7 @@ def test_one_minute_replay_keeps_event_created_inside_active_setup_epoch(
     def replay(*_args, **_kwargs):
         return SimpleNamespace(
             points=(point,),
-            point_visibility=(
-                PointVisibilityInterval(point.point_id, *window),
-            ),
+            point_visibility=(PointVisibilityInterval(point.point_id, *window),),
         )
 
     monkeypatch.setattr(fixed_year, "_causal_confirmed_structure_events", replay)
@@ -881,9 +1048,7 @@ def test_one_minute_replay_drops_point_visible_only_at_exclusive_window_end(
     monkeypatch,
 ) -> None:
     point = confirmed_point("1buy", frequency="1m")
-    dates = tuple(
-        point.available_at + timedelta(minutes=index) for index in range(10)
-    )
+    dates = tuple(point.available_at + timedelta(minutes=index) for index in range(10))
     source = pd.DataFrame({"date": dates})
     source.attrs.update(
         structure_price_quantum="0.01",
@@ -897,9 +1062,7 @@ def test_one_minute_replay_drops_point_visible_only_at_exclusive_window_end(
             return SimpleNamespace(points=(), point_visibility=())
         return SimpleNamespace(
             points=(point,),
-            point_visibility=(
-                PointVisibilityInterval(point.point_id, window[1]),
-            ),
+            point_visibility=(PointVisibilityInterval(point.point_id, window[1]),),
         )
 
     monkeypatch.setattr(fixed_year, "_causal_confirmed_structure_events", replay)
@@ -911,35 +1074,40 @@ def test_one_minute_replay_drops_point_visible_only_at_exclusive_window_end(
     ) == ((), ())
 
 
-def test_sparse_locator_event_executes_on_next_complete_minute(
+def test_sparse_nested_witness_executes_on_next_complete_minute(
     monkeypatch,
 ) -> None:
     from chanlun.decision_support.trading_system.backtest import fixed_year
 
-    setup = confirmed_point(
-        "3buy",
-        anchor=10.0,
-        stop=9.8,
-        center_zg=9.9,
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
     )
-    locator = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=5,
+    witness = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=6,
+        )
     )
     one_closes = tuple(
         setup.available_at + timedelta(minutes=value) for value in range(1, 8)
     )
     observed_times = sparse_evaluation_times(
         five_points=(setup,),
-        one_points=(locator,),
+        one_points=(witness,),
         thirty_closes=(),
         one_closes=one_closes,
         effective_start=setup.available_at,
         requested_end=one_closes[-1],
     )
-    assert observed_times == (one_closes[0], locator.available_at)
+    assert observed_times == (one_closes[0], witness.available_at)
 
     def evaluation(observed_at: datetime) -> SparseEvaluationFact:
         return SparseEvaluationFact(
@@ -974,18 +1142,18 @@ def test_sparse_locator_event_executes_on_next_complete_minute(
         daily_points=(),
         thirty_points=(),
         five_points=(setup,),
-        one_points=(locator,),
+        one_points=(witness,),
         evaluations=tuple(evaluation(value) for value in observed_times),
         five_minute_warmup=(
             FiveMinuteWarmupFact(
-                observed_at=locator.available_at,
-                source_closed_at=locator.available_at,
+                observed_at=witness.available_at,
+                source_closed_at=witness.available_at,
                 converged=True,
                 full_bar_count=960,
                 suffix_bar_count=640,
                 reason_code="WARMUP_TAIL_STABLE",
                 production_five_points=(setup,),
-                production_one_points=(locator,),
+                production_one_points=(witness,),
                 one_minute_bar_count=960,
             ),
         ),
@@ -1001,7 +1169,7 @@ def test_sparse_locator_event_executes_on_next_complete_minute(
         thirty_points=(),
         assessments=tuple((value, sector) for value in observed_times),
     )
-    fill_at = locator.available_at + timedelta(minutes=1)
+    fill_at = witness.available_at + timedelta(minutes=1)
     fill_frame = pd.DataFrame(
         {
             "code": [setup.code],
@@ -1048,25 +1216,30 @@ def test_sparse_locator_event_executes_on_next_complete_minute(
 
 
 def test_superseding_timestamp_starts_the_new_five_minute_setup() -> None:
-    first = confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9)
-    second = confirmed_point(
-        "3buy",
-        anchor=10.1,
-        stop=9.9,
-        center_zg=10.0,
-        minutes_after=60,
-        center_id="center-b",
+    first = _strict_setup(confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9))
+    second = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.1,
+            stop=9.9,
+            center_zg=10.0,
+            minutes_after=60,
+            center_id="center-b",
+        )
     )
-    trigger = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=5,
+    witness = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=6,
+        )
     )
 
     observed = sparse_evaluation_times(
         five_points=(first, second),
-        one_points=(trigger,),
+        one_points=(witness,),
         thirty_closes=(
             first.available_at + timedelta(minutes=30),
             second.available_at,
@@ -1080,7 +1253,7 @@ def test_superseding_timestamp_starts_the_new_five_minute_setup() -> None:
 
     assert observed == (
         first.available_at + timedelta(minutes=1),
-        trigger.available_at,
+        witness.available_at,
         first.available_at + timedelta(minutes=30),
         second.available_at,
     )
@@ -1091,19 +1264,24 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
 ) -> None:
     from chanlun.decision_support.trading_system.backtest import fixed_year
 
-    setup = confirmed_point(
-        "3buy",
-        anchor=10.0,
-        stop=9.8,
-        center_zg=9.9,
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
     )
-    trigger = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=5,
+    witness = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=6,
+        )
     )
-    observed_at = trigger.available_at
+    observed_at = witness.available_at
     event_bar = minute_bar(
         opened_at=observed_at - timedelta(minutes=1),
         raw_open="10.00",
@@ -1132,7 +1310,7 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         daily_points=(),
         thirty_points=(),
         five_points=(setup,),
-        one_points=(trigger,),
+        one_points=(witness,),
         evaluations=(evaluation,),
         five_minute_warmup=(
             FiveMinuteWarmupFact(
@@ -1143,7 +1321,7 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
                 suffix_bar_count=640,
                 reason_code="WARMUP_TAIL_STABLE",
                 production_five_points=(setup,),
-                production_one_points=(trigger,),
+                production_one_points=(witness,),
                 one_minute_bar_count=960,
             ),
         ),
@@ -1227,14 +1405,17 @@ def test_sparse_portfolio_neutral_sector_cannot_be_promoted_by_research(
 
     from chanlun.decision_support.trading_system.backtest import fixed_year
 
-    setup = confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9)
-    trigger = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=9.9,
-        minutes_after=5,
+    setup = _strict_setup(confirmed_point("3buy", anchor=10.0, stop=9.8, center_zg=9.9))
+    witness = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=9.9,
+            minutes_after=-1,
+            available_minutes_after=6,
+        )
     )
-    observed_at = trigger.available_at
+    observed_at = witness.available_at
     evaluation = SparseEvaluationFact(
         observed_at,
         "neutral",
@@ -1266,7 +1447,7 @@ def test_sparse_portfolio_neutral_sector_cannot_be_promoted_by_research(
         daily_points=(),
         thirty_points=(),
         five_points=(setup,),
-        one_points=(trigger,),
+        one_points=(witness,),
         evaluations=(evaluation,),
         five_minute_warmup=(
             FiveMinuteWarmupFact(
@@ -1277,7 +1458,7 @@ def test_sparse_portfolio_neutral_sector_cannot_be_promoted_by_research(
                 suffix_bar_count=640,
                 reason_code="WARMUP_TAIL_STABLE",
                 production_five_points=(setup,),
-                production_one_points=(trigger,),
+                production_one_points=(witness,),
                 one_minute_bar_count=960,
             ),
         ),

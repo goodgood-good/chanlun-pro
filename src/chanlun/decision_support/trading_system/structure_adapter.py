@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import cast
 
 from chanlun.core.strict_structure.current_events import (
+    TerminalSegmentReference,
     current_strict_point_evidence,
     terminal_segment_reference,
 )
@@ -88,12 +89,60 @@ def structural_point_id_map(
     return converted
 
 
+def _historical_terminal_segment_reference(
+    structure: StrictStructureResult | None,
+    raw: StrictPointEvidence,
+) -> TerminalSegmentReference | None:
+    """Recover the terminal unit carried by a historical confirmed point.
+
+    ``terminal_segment_reference`` intentionally resolves only the current
+    two-unit live tail.  The 1m interval-nesting ledger also needs older points
+    whose exact anchor unit is still present in ``evidence.structure``.  Such a
+    unit was the point's latest completed segment at the occurrence time, even
+    when it is no longer the structure's current tail.
+    """
+
+    if structure is None:
+        return None
+    unit = next(
+        (
+            unit
+            for level in structure.levels
+            if level.structural_level == raw.structural_level
+            for unit in level.units
+            if unit.unit_id == raw.anchor_unit_id
+        ),
+        None,
+    )
+    expected_direction = "down" if raw.side == "buy" else "up"
+    if (
+        unit is None
+        or unit.forming
+        or not (unit.locked or unit.formed_at is not None)
+        or unit.direction != expected_direction
+        or unit.market_end != raw.anchor_at
+    ):
+        return None
+    return TerminalSegmentReference(
+        role="latest_completed",
+        structural_level=unit.structural_level,
+        unit_id=unit.unit_id,
+        source_kind=unit.source_kind,
+        direction=unit.direction,
+        state="locked" if unit.locked else "formed",
+        market_start=unit.market_start,
+        market_end=unit.market_end,
+        available_at=unit.available_at,
+    )
+
+
 def convert_confirmed_point_evidence(
     raw_points,
     *,
     code: str,
     source_frequency: str,
     as_of: datetime,
+    structure: StrictStructureResult | None = None,
 ) -> tuple[StructuralPoint, ...]:
     """Convert an already validated strict point ledger without materializing a snapshot."""
 
@@ -157,6 +206,10 @@ def convert_confirmed_point_evidence(
                 small_to_large_carrier_unit_ids=(
                     raw.small_to_large_carrier_unit_ids
                 ),
+                terminal_segment=_historical_terminal_segment_reference(
+                    structure,
+                    raw,
+                ),
             )
         )
     return tuple(sorted(output, key=lambda point: (point.available_at, point.point_id)))
@@ -180,6 +233,7 @@ def extract_confirmed_points(
         code=code,
         source_frequency=source_frequency,
         as_of=closed_at,
+        structure=evidence.structure,
     )
 
 
@@ -231,7 +285,7 @@ def convert_current_confirmed_point_evidence(
     full evidence revision merely to read current setup points.
     """
 
-    closed_at = normalize_datetime(as_of, "as_of")
+    normalize_datetime(as_of, "as_of")
     if not isinstance(structure, StrictStructureResult):
         raise TypeError("current point conversion requires strict structure")
     raw_points = (*tuple(confirmed_points), *tuple(approaching_points))
@@ -379,7 +433,7 @@ def extract_one_minute_segment_difference_points(
     source_frequency: str,
     as_of: datetime,
 ) -> tuple[StructuralPoint, ...]:
-    """Build the causal 1m locator ledger used by screening and live monitoring.
+    """Build the causal 1m segment-difference ledger used by all decision paths.
 
     The current-tail projection contains geometry-confirmed operational points,
     while the audit-confirmed ledger retains points that have already left that

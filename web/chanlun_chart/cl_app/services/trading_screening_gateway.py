@@ -50,7 +50,10 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 from chanlun.decision_support.trading_system.incremental_scan import BarKey
 from chanlun.decision_support.trading_system.lifecycle import (
     current_five_minute_setup_points,
-    is_one_minute_segment_difference,
+    five_minute_setup_is_executable,
+    five_minute_setup_is_in_policy_scope,
+    match_one_minute_nesting_witness_for_point,
+    structural_point_occurrence_id,
 )
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
@@ -272,7 +275,6 @@ class FrameStructureAnalysis:
     trade_level_warmup_converged: bool | None = None
     trade_level_warmup_reason_codes: tuple[str, ...] = ()
     trade_level_warmup_difference_codes: tuple[str, ...] = ()
-    entry_execution_boundaries: tuple[EntryExecutionBoundary, ...] = ()
     same_period_technical_context: SamePeriodTechnicalContext | None = None
 
     def __post_init__(self) -> None:
@@ -329,10 +331,6 @@ class FrameStructureAnalysis:
             SCREENING_WARMUP_DIFFERENCE_CODES
         ):
             raise ValueError("trade-level warmup difference codes are invalid")
-        if len({value.point_id for value in self.entry_execution_boundaries}) != len(
-            self.entry_execution_boundaries
-        ):
-            raise ValueError("entry execution boundary point ids must be unique")
         if self.same_period_technical_context is not None and (
             self.same_period_technical_context.observed_at != self.closed_at
         ):
@@ -1241,11 +1239,13 @@ def _entry_valid_until(confirmation_closed_at: datetime) -> datetime:
 def _entry_execution_boundaries(
     *,
     code: str,
-    points: tuple[StructuralPoint, ...],
+    pairs: tuple[tuple[StructuralPoint, StructuralPoint], ...],
+    decision_at: datetime,
     raw_frame: pd.DataFrame,
 ) -> tuple[EntryExecutionBoundary, ...]:
-    """把 1m 买入区间套绑定到精确执行所需的 QMT 不复权行情。"""
+    """把 5m setup/1m 区间套见证对绑定到共同可知时刻的不复权行情。"""
 
+    decision_closed_at = normalize_datetime(decision_at, "decision_at")
     metadata = strict_snapshot_price_metadata(raw_frame)
     if (
         raw_frame.attrs.get("price_basis_provider") != "qmt"
@@ -1254,33 +1254,75 @@ def _entry_execution_boundaries(
         raise ValueError("entry confirmation evidence must be unadjusted QMT data")
     rows_by_time: dict[datetime, object] = {}
     for row in raw_frame.itertuples(index=False):
-        closed_at = _market_datetime(row.date, "raw confirmation bar close")
-        if closed_at in rows_by_time:
+        bar_closed_at = _market_datetime(row.date, "raw confirmation bar close")
+        if bar_closed_at in rows_by_time:
             raise ValueError("raw confirmation bar times must be unique")
-        rows_by_time[closed_at] = row
+        rows_by_time[bar_closed_at] = row
+    row = rows_by_time.get(decision_closed_at)
+    if row is None:
+        return ()
     output: list[EntryExecutionBoundary] = []
-    for point in points:
-        if not is_one_minute_segment_difference(point) or point.side != "buy":
-            continue
-        row = rows_by_time.get(point.available_at)
-        if row is None:
-            continue
+    for setup, point in pairs:
+        if max(setup.available_at, point.available_at) != decision_closed_at:
+            raise ValueError("entry boundary pair is not new at decision time")
         output.append(
             EntryExecutionBoundary(
                 symbol=code,
+                setup_occurrence_id=structural_point_occurrence_id(setup),
                 point_id=point.point_id,
                 source_frequency="1m",
-                confirmation_bar_closed_at=point.available_at,
+                confirmation_bar_closed_at=decision_closed_at,
                 raw_open=Decimal(str(row.open)),
                 raw_high=Decimal(str(row.high)),
                 raw_low=Decimal(str(row.low)),
                 raw_close=Decimal(str(row.close)),
                 raw_volume=Decimal(str(row.volume)),
-                entry_valid_until=_entry_valid_until(point.available_at),
+                entry_valid_until=_entry_valid_until(decision_closed_at),
                 raw_price_basis_revision=metadata.price_basis_revision,
             )
         )
-    return tuple(sorted(output, key=lambda value: value.point_id))
+    return tuple(
+        sorted(
+            output,
+            key=lambda value: (value.setup_occurrence_id, value.point_id),
+        )
+    )
+
+
+def _new_entry_boundary_pairs(
+    *,
+    setup_points: tuple[StructuralPoint, ...],
+    witness_points: tuple[StructuralPoint, ...],
+    decision_at: datetime,
+) -> tuple[tuple[StructuralPoint, StructuralPoint], ...]:
+    """Return each executable 5m buy setup's first exact 1m nesting pair.
+
+    A pair is new only at its first jointly-known timestamp. Re-evaluating a
+    later bar, including after another nested 1m point appears, therefore can
+    never recreate or move the execution window.
+    """
+
+    closed_at = normalize_datetime(decision_at, "decision_at")
+    pairs = {
+        (structural_point_occurrence_id(setup), witness.point_id): (
+            setup,
+            witness,
+        )
+        for setup in setup_points
+        if setup.side == "buy"
+        and five_minute_setup_is_in_policy_scope(setup)
+        and five_minute_setup_is_executable(setup, as_of=closed_at)
+        for witness in (
+            match_one_minute_nesting_witness_for_point(
+                setup,
+                witness_points,
+                as_of=closed_at,
+            ),
+        )
+        if witness is not None
+        and max(setup.available_at, witness.available_at) == closed_at
+    }
+    return tuple(pairs[key] for key in sorted(pairs))
 
 
 def analyze_native_frame(
@@ -2644,55 +2686,6 @@ class NativeTradingDataGateway:
                     str(exc),
                 ) from exc
             raise
-        if (
-            not is_sector
-            and frequency == "1m"
-            and any(
-                point.confirmed and point.side == "buy"
-                for point in analysis.effective_segment_difference_points
-            )
-        ):
-            # 结构在冻结复权基准上计算；可选入场上限属于执行事实，必须取自准确的
-            # 未复权确认 K 线。后者单独读取，绝不能由结构锚点或复权因子推断。
-            try:
-                self._report_progress()
-                raw_confirmation_frame = loader(
-                    code,
-                    "1m",
-                    args={
-                        "req_counts": self._config.request_bars("1m"),
-                        "dividend_type": "none",
-                        "skip_download": True,
-                    },
-                )
-                self._report_progress()
-                raw_confirmation_frame = _closed_frame(
-                    raw_confirmation_frame,
-                    not_after=as_of,
-                    minimum_bars=self._config.minimum_bars("1m"),
-                )
-                raw_confirmation_frame = (
-                    normalize_qmt_opening_events_for_completed_minutes(
-                        raw_confirmation_frame
-                    )
-                )
-                if len(raw_confirmation_frame) < self._config.minimum_bars("1m"):
-                    raise ValueError("kline frame does not meet minimum history")
-                analysis = replace(
-                    analysis,
-                    entry_execution_boundaries=_entry_execution_boundaries(
-                        code=code,
-                        points=analysis.effective_segment_difference_points,
-                        raw_frame=raw_confirmation_frame,
-                    ),
-                )
-            except Exception as exc:
-                # 筛选结果仍可供人工看图复核；下游虚拟意图闸门会把缺失边界视为仅观测，
-                # 因此不会静默变成成交。
-                LogUtil.warning(
-                    "[trading_screening.entry_execution_boundary] "
-                    f"code={code} reason={type(exc).__name__}: {str(exc)[:160]}"
-                )
         if fallback_reason_codes:
             analysis = replace(
                 analysis,
@@ -3128,7 +3121,7 @@ class NativeTradingDataGateway:
                     hard_block=False,
                     dominant_point_id=None,
                     dominant_point_type=None,
-                    reason_codes=("stock_one_minute_trigger_only",),
+                    reason_codes=("stock_one_minute_segment_difference_only",),
                     observed_at=context_time,
                 )
                 assessments.append(
@@ -3777,6 +3770,61 @@ class NativeTradingDataGateway:
                     fast_incremental_refresh="1m" in incremental_frequency_set,
                 )
         bundle_as_of = max(item.closed_at for item in analyses.values())
+        entry_execution_boundaries: tuple[EntryExecutionBoundary, ...] = ()
+        if "1m" in analyses:
+            boundary_pairs = _new_entry_boundary_pairs(
+                setup_points=analyses["5m"].setup_confirmed_points,
+                witness_points=(
+                    analyses["1m"].effective_segment_difference_points
+                ),
+                decision_at=bundle_as_of,
+            )
+            if boundary_pairs:
+                # Structure remains on its frozen adjustment basis.  Only a
+                # newly formed exact setup/witness pair authorizes one local,
+                # unadjusted 1m read for the jointly-known decision bar.
+                try:
+                    raw_loader = getattr(exchange, "klines", None)
+                    if not callable(raw_loader):
+                        raise TypeError("exchange must expose klines")
+                    self._report_progress()
+                    raw_confirmation_frame = raw_loader(
+                        code,
+                        "1m",
+                        args={
+                            "req_counts": self._config.request_bars("1m"),
+                            "dividend_type": "none",
+                            "skip_download": True,
+                        },
+                    )
+                    self._report_progress()
+                    raw_confirmation_frame = _closed_frame(
+                        raw_confirmation_frame,
+                        not_after=bundle_as_of,
+                        minimum_bars=self._config.minimum_bars("1m"),
+                    )
+                    raw_confirmation_frame = (
+                        normalize_qmt_opening_events_for_completed_minutes(
+                            raw_confirmation_frame
+                        )
+                    )
+                    if len(raw_confirmation_frame) < self._config.minimum_bars(
+                        "1m"
+                    ):
+                        raise ValueError("kline frame does not meet minimum history")
+                    entry_execution_boundaries = _entry_execution_boundaries(
+                        code=code,
+                        pairs=boundary_pairs,
+                        decision_at=bundle_as_of,
+                        raw_frame=raw_confirmation_frame,
+                    )
+                except Exception as exc:
+                    # Missing raw execution evidence is fail-closed; the
+                    # structural signal remains available for human review.
+                    LogUtil.warning(
+                        "[trading_screening.entry_execution_boundary] "
+                        f"code={code} reason={type(exc).__name__}: {str(exc)[:160]}"
+                    )
         # 低级别 1m 精细通道可合理晚于最新已完成板块 5m K 线（如 09:47 对 09:45）。
         # 信号保留在该已完成 1m 前缀上，而全部月/周/日风险事实冻结到页面统一行情截止点。
         # 若复用信号墙钟，会让收敛、对账和来源覆盖证据描述 09:47，尽管原子板块快照
@@ -4052,11 +4100,7 @@ class NativeTradingDataGateway:
             ),
             enforce_warmup_entry_gate=True,
             physical_timeframe_recursive=True,
-            entry_execution_boundaries=(
-                ()
-                if "1m" not in analyses
-                else analyses["1m"].entry_execution_boundaries
-            ),
+            entry_execution_boundaries=entry_execution_boundaries,
             selection_path=selection_path,
             latest_price=max(
                 analyses.values(),

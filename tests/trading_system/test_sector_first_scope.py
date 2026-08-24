@@ -11,6 +11,7 @@ from chanlun.decision_support.trading_system.sector_first_scope import (
     current_gics_diagnostic_summary,
 )
 from tools.backtest_qmt_fixed_year import _catalog_scope
+from tools import backtest_qmt_fixed_year
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -112,3 +113,48 @@ def test_current_gics_catalog_is_explicitly_diagnostic_only() -> None:
     assert summary["membership_edge_count"] == 3
     assert summary["unique_member_count"] == 2
     assert summary["historical_backfill_allowed"] is False
+
+
+def test_explicit_codes_do_not_build_the_complete_sector_first_scope(
+    monkeypatch,
+) -> None:
+    start = date(2025, 8, 1)
+    end = date(2026, 7, 24)
+    requested = "SH.600001"
+    snapshot = PITMetadataSnapshot(
+        source_start=date(2025, 5, 1),
+        source_end=end,
+        captured_at=datetime(2026, 7, 27, tzinfo=CN),
+        securities=(
+            SecurityMasterRecord(requested, "A", date(2020, 1, 1), None),
+            SecurityMasterRecord("SZ.000002", "B", date(2020, 1, 1), None),
+        ),
+        memberships=(
+            _membership(requested, "qmt-sw1:S11", datetime(2020, 1, 2, tzinfo=CN)),
+            _membership(
+                "SZ.000002",
+                "qmt-sw1:S11",
+                datetime(2020, 1, 2, tzinfo=CN),
+            ),
+        ),
+        factors=(),
+        qmt_sw1_sector_names=(("qmt-sw1:S11", "one"),),
+        source_hashes=(("fixture", "sha256:" + "1" * 64),),
+    )
+    monkeypatch.setattr(
+        backtest_qmt_fixed_year,
+        "build_sector_first_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded codes must not build full sector-first scope")
+        ),
+    )
+
+    scope, catalog = backtest_qmt_fixed_year._catalog_scope(
+        snapshot,
+        requested_start=start,
+        requested_end=end,
+        requested_codes=(requested,),
+    )
+
+    assert scope == ((requested, "qmt-sw1:S11"),)
+    assert catalog["selection_path"] == "BOUNDED_REQUESTED_CODES"

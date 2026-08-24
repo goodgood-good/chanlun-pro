@@ -69,7 +69,7 @@ def _a_share_event(*, event_id: str = "event:a", status: str = "pending"):
                 "manual_confirmation_required": True,
                 "automated_order_authorized": False,
             },
-            "trigger_1m": {
+            "segment_difference_1m": {
                 "point_id": "point:688132:3buy",
                 "point_type": "1buy",
                 "confirmed_at": "2026-08-15T10:27:00+08:00",
@@ -107,7 +107,7 @@ def test_a_share_projection_is_review_only_and_has_four_chart_periods():
     assert event["position_recommendation"]["recommended_percent"] == "0"
     assert event["current_price_source"] == "latest_completed_1m_close"
     assert event["source_frequency"] == "5m"
-    assert event["trigger_frequency"] is None
+    assert event["trade_frequency"] == "5m"
     assert event["segment_difference_frequency"] == "1m"
     assert event["segment_difference_present"] is True
     assert event["segment_difference_status"] == "current"
@@ -165,7 +165,7 @@ def test_cross_market_projection_preserves_us_identity_and_source_frequency():
     assert event["point_type"] == "3sell"
     assert event["trigger_point_type"] is None
     assert event["source_frequency"] == "5m"
-    assert event["trigger_frequency"] is None
+    assert event["trade_frequency"] == "5m"
     assert event["segment_difference_present"] is False
     assert event["segment_difference_status"] == "absent"
     assert event["segment_difference_current"] is False
@@ -377,7 +377,7 @@ def test_expired_a_share_segment_is_preserved_as_audit_evidence_not_current():
             "confirmed_at": "2026-08-17T13:55:00+08:00",
             "available_at": "2026-08-17T13:55:00+08:00",
         },
-        "trigger_1m": {
+        "segment_difference_1m": {
             "point_id": "point:601231:1m:2buy",
             "point_type": "2buy",
             "anchor_at": "2026-07-30T13:04:00+08:00",
@@ -412,12 +412,12 @@ def test_segment_evidence_and_buy_entry_boundary_are_independent_axes() -> None:
     sell = {
         "side": "sell",
         "observed_at": "2026-08-17T10:05:00+08:00",
-        "trigger_1m": {"side": "sell", "point_type": "1sell"},
+        "segment_difference_1m": {"side": "sell", "point_type": "1sell"},
     }
     expired_buy = {
         "side": "buy",
         "observed_at": "2026-08-17T10:05:00+08:00",
-        "trigger_1m": {"side": "buy", "point_type": "1buy"},
+        "segment_difference_1m": {"side": "buy", "point_type": "1buy"},
         "entry_execution_boundary": {
             "entry_valid_until": "2026-08-17T10:04:00+08:00",
         },
@@ -433,7 +433,7 @@ def test_buy_boundary_uses_review_time_instead_of_snapshot_observation_time() ->
     buy = {
         "side": "buy",
         "observed_at": "2026-08-17T10:05:30+08:00",
-        "trigger_1m": {"side": "buy", "point_type": "1buy"},
+        "segment_difference_1m": {"side": "buy", "point_type": "1buy"},
         "entry_execution_boundary": {
             "entry_valid_until": "2026-08-17T10:06:00+08:00",
         },
@@ -463,7 +463,7 @@ def test_review_event_expires_boundary_at_recording_time() -> None:
             "confirmed_at": "2026-08-15T10:25:00+08:00",
             "available_at": "2026-08-15T10:25:00+08:00",
         },
-        "trigger_1m": {
+        "segment_difference_1m": {
             "point_id": "point:688132:1m:1buy",
             "point_type": "1buy",
             "side": "buy",
@@ -777,62 +777,19 @@ def test_new_account_coupled_guidance_is_rejected_instead_of_silently_stored(
         inbox.record(clean)
 
 
-def test_pre_contract_one_minute_notification_is_kept_as_legacy_audit_only(
+def test_persisted_one_minute_l1_is_discarded_as_invalid_segment_evidence(
     tmp_path,
 ) -> None:
-    path = tmp_path / "legacy-one-minute.json"
-    legacy = _a_share_event()
-    legacy["source_frequency"] = "1m"
-    legacy["trigger_frequency"] = "1m"
-    legacy["segment_difference_frequency"] = None
-    legacy["segment_difference_present"] = False
-    for key in (
-        "segment_difference_point_type",
-        "segment_difference_evidence_id",
-        "segment_difference_anchor_time",
-        "segment_difference_confirmed_at",
-        "segment_difference_available_at",
-        "segment_difference_recursive_level",
-        "segment_difference_divergence_kind",
-    ):
-        legacy[key] = None
+    path = tmp_path / "invalid-one-minute-l1.json"
+    invalid = _a_share_event()
+    invalid["segment_difference_recursive_level"] = 1
     path.write_text(
-        json.dumps({"schema": SCHEMA, "events": [legacy]}),
+        json.dumps({"schema": SCHEMA, "events": [invalid]}),
         encoding="utf-8",
     )
 
-    [migrated] = RealtimeReviewInbox(path).snapshot()["events"]
-
-    assert migrated["source_frequency"] == "1m"
-    assert migrated["legacy_semantics"] == (
-        "ONE_MINUTE_NOTIFICATION_BEFORE_5M_TRADE_CONTRACT"
-    )
-
-
-def test_persisted_one_minute_l1_is_kept_but_not_advertised_as_segment(
-    tmp_path,
-) -> None:
-    path = tmp_path / "legacy-one-minute-l1.json"
-    legacy = _a_share_event()
-    legacy["segment_difference_recursive_level"] = 1
-    path.write_text(
-        json.dumps({"schema": SCHEMA, "events": [legacy]}),
-        encoding="utf-8",
-    )
-
-    [migrated] = RealtimeReviewInbox(path).snapshot()["events"]
-
-    assert migrated["segment_difference_present"] is False
-    assert migrated["segment_difference_status"] == "absent"
-    assert migrated["segment_difference_evidence_status"] == "absent"
-    assert migrated["segment_difference_recursive_level"] is None
-    assert migrated["segment_difference_divergence_kind"] is None
-    assert migrated["legacy_semantics"] == (
-        "ONE_MINUTE_L1_EFFECTIVE_5M_NOT_STRICT_SEGMENT"
-    )
-    assert migrated["legacy_non_strict_segment_difference"][
-        "segment_difference_recursive_level"
-    ] == 1
+    assert RealtimeReviewInbox(path).snapshot()["events"] == []
+    assert json.loads(path.read_text(encoding="utf-8"))["events"] == []
 
 
 def test_delivery_timestamp_is_recorded_only_after_success(tmp_path) -> None:

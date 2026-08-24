@@ -109,7 +109,7 @@ def validate_a_share_completed_one_minute_prefix_closes(
 def a_share_optional_entry_valid_until(
     confirmation_bar_closed_at: datetime,
 ) -> datetime:
-    """返回不跨越午休或收盘的一根定位 K 线精确有效期。"""
+    """返回不跨越午休或收盘的联合决策一分钟有效期。"""
 
     closed_at = normalize_datetime(
         confirmation_bar_closed_at,

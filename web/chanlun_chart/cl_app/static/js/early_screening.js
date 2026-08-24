@@ -159,7 +159,12 @@
         ? snapshot.scan_audit
         : {};
       const quality = snapshot.data_quality;
-      const completion = Ui.scanCoverageText(audit, snapshot);
+      const runtimeHealth = snapshot.runtime_health && typeof snapshot.runtime_health === "object"
+        ? snapshot.runtime_health
+        : {};
+      const scopeFacts = Ui.screeningScopeFacts(runtimeHealth, snapshot);
+      const scopeLabel = Ui.screeningScopeLabel(runtimeHealth, snapshot);
+      const completion = Ui.scanCoverageText(audit, snapshot, runtimeHealth);
       const sectorCompletion = Ui.sectorCoverageText(audit);
       const pending = Math.max(0, Number(audit.pending_symbol_count) || 0);
       const excluded = Math.max(
@@ -170,12 +175,10 @@
         0,
         Number(audit.sector_excluded_count) || 0,
       );
-      const cycleInProgress = pending > 0 || audit.coverage_cycle_complete === false;
+      const cycleInProgress = !scopeFacts.validation
+        && (pending > 0 || audit.coverage_cycle_complete === false);
       const errorCount = Array.isArray(snapshot.errors) ? snapshot.errors.length : 0;
       const failureCodes = Array.isArray(quality.failure_codes) ? quality.failure_codes : [];
-      const runtimeHealth = snapshot.runtime_health && typeof snapshot.runtime_health === "object"
-        ? snapshot.runtime_health
-        : {};
       const runtimeReasons = Array.isArray(runtimeHealth.reasons)
         ? runtimeHealth.reasons.map(Ui.reasonLabel).join(" · ")
         : "选股后台健康状态不可用";
@@ -198,7 +201,25 @@
         runtimeHealth.full_coverage_next_active_at,
       );
 
-      if (runtimeHealth.required === true && runtimeHealth.ready !== true) {
+      if (scopeFacts.validation) {
+        const runtimeBlocked = runtimeHealth.required === true
+          && runtimeHealth.ready !== true;
+        const validationPreparing = priorityMonitorWarning || candidateMonitorWarning;
+        const detail = runtimeBlocked
+          ? `当前仅保留固定小样本；后台状态：${runtimeReasons}`
+          : priorityMonitorWarning
+            ? `固定小样本的分钟级优先复查尚未就绪：${priorityMonitorReasons}`
+            : candidateMonitorWarning
+              ? `固定小样本的5分钟候选仍在准备：${candidateMonitorReasons}`
+              : realtimeAlertWarning
+                ? `固定小样本可查看；通知状态：${Ui.reasonLabel(runtimeHealth.realtime_alert_reason_code)}`
+                : "代码修改阶段只处理固定验证范围，不读取旧扫描剩余队列。";
+        setStatus(
+          runtimeBlocked || realtimeAlertWarning ? "warning" : validationPreparing ? "loading" : "ready",
+          scopeLabel,
+          detail,
+        );
+      } else if (runtimeHealth.required === true && runtimeHealth.ready !== true) {
         setStatus(
           "warning",
           "后台选股扫描健康门未通过",
@@ -281,8 +302,13 @@
       );
       setText("es-sector-completion", sectorCompletion);
       setText("es-completion", completion);
-      setText("es-scan-timing", Ui.scanTimingText(audit));
-      setText("es-quality", Ui.scanQualityText(snapshot));
+      setText(
+        "es-scan-timing",
+        scopeFacts.validation
+          ? "验证范围固定，代码修改后仅复查小样本"
+          : Ui.scanTimingText(audit),
+      );
+      setText("es-quality", Ui.scanQualityText(snapshot, runtimeHealth));
       setText("es-member-history", Ui.memberHistoryDiagnosticsText(snapshot));
       const liveOverlay = snapshot.priority_live_overlay
         && typeof snapshot.priority_live_overlay === "object"
@@ -324,23 +350,23 @@
         (signal) => Ui.fiveMinuteTradeSignalConfirmedForSignal(signal),
       ).length;
       setText("es-triggered-count", fiveMinuteConfirmedCount);
-      const precisionLocatorCount = currentSignals.filter(
-        (signal) => Ui.currentPrecisionLocatorReadyForSignal(signal),
+      const segmentDifferenceCount = currentSignals.filter(
+        (signal) => Ui.currentSegmentDifferenceReadyForSignal(signal),
       ).length;
-      setText("es-segment-count", precisionLocatorCount);
+      setText("es-segment-count", segmentDifferenceCount);
       const preciseExecutionReadyCount = currentSignals.filter(
         (signal) => Ui.currentPreciseExecutionReadyForSignal(signal),
       ).length;
       setText("es-precise-count", preciseExecutionReadyCount);
       const showCurrentSegments = byId("es-show-current-segments");
       if (showCurrentSegments) {
-        showCurrentSegments.disabled = precisionLocatorCount === 0;
-        showCurrentSegments.textContent = precisionLocatorCount === 0
+        showCurrentSegments.disabled = segmentDifferenceCount === 0;
+        showCurrentSegments.textContent = segmentDifferenceCount === 0
           ? "当前暂无精确定位"
           : "查看当前定位";
       }
       if (
-        precisionLocatorCount === 0
+        segmentDifferenceCount === 0
         && state.segmentState === "current"
       ) {
         // 当前定位只属于仍有效的 5 分钟候选。定位清空后不能让旧的正向筛选
@@ -350,7 +376,7 @@
       }
       setText(
         "es-segment-scope",
-        Ui.segmentScopeText(runtimeHealth, precisionLocatorCount),
+        Ui.segmentScopeText(runtimeHealth, segmentDifferenceCount),
       );
       setText("es-executable-count", countStage("executable"));
       document.title = unifiedSignals.length

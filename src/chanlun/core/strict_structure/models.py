@@ -36,9 +36,8 @@ class SourceKind(str, Enum):
 def center_seed_size(source_kind: SourceKind) -> int:
     """返回中枢三段价格核心的宽度。
 
-    ``initial_units`` 始终保存用于冻结 ``ZD/ZG`` 交集的三段。物理线段/笔中枢
-    另有五段成立门槛（进入段 + 这三段 + 成熟段）；递归走势类型中枢则保留
-    原始的三段已完成低级别走势。
+    ``initial_units`` 始终保存用于冻结 ``ZD/ZG`` 交集的三个连续、已完成同级
+    单元。该定义对线段、笔观察和递归走势类型一致。
     """
 
     SourceKind(source_kind)
@@ -48,6 +47,7 @@ def center_seed_size(source_kind: SourceKind) -> int:
 class CenterState(str, Enum):
     ONGOING = "ongoing"
     COMPLETED = "completed"
+    SUPERSEDED = "superseded"
     DIVERGENCE_CLOSED = "divergence_closed"
 
 
@@ -64,6 +64,7 @@ class CenterEventKind(str, Enum):
     BREAKOUT_WATCH_DOWN = "breakout_watch_down"
     COMPLETED_UP = "center_completed_up"
     COMPLETED_DOWN = "center_completed_down"
+    SUPERSEDED = "center_superseded"
 
 
 class CenterRelation(str, Enum):
@@ -213,9 +214,7 @@ class TrendCenter:
     source_kind: SourceKind
     price_basis_revision: str
     state: CenterState
-    entry_unit: ConstituentUnit
-    establishment_unit: ConstituentUnit | None
-    establishment_leave_unit: ConstituentUnit | None
+    entry_unit: ConstituentUnit | None
     initial_units: tuple[ConstituentUnit, ...]
     body_units: tuple[ConstituentUnit, ...]
     extension_units: tuple[ConstituentUnit, ...]
@@ -233,8 +232,12 @@ class TrendCenter:
     completed_at: datetime | None
     available_at: datetime
     body_revision: int
+    failed_departure_units: tuple[ConstituentUnit, ...] = ()
     boundary_divergence_id: str | None = None
     boundary_anchor_unit_id: str | None = None
+    superseded_by_center_id: str | None = None
+    superseded_at: datetime | None = None
+    supersession_bridge_units: tuple[ConstituentUnit, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
@@ -242,6 +245,16 @@ class TrendCenter:
         object.__setattr__(self, "initial_units", tuple(self.initial_units))
         object.__setattr__(self, "body_units", tuple(self.body_units))
         object.__setattr__(self, "extension_units", tuple(self.extension_units))
+        object.__setattr__(
+            self,
+            "failed_departure_units",
+            tuple(self.failed_departure_units),
+        )
+        object.__setattr__(
+            self,
+            "supersession_bridge_units",
+            tuple(self.supersession_bridge_units),
+        )
 
         if not self.center_id:
             raise ValueError("center_id is required")
@@ -256,8 +269,6 @@ class TrendCenter:
             )
         if self.body_units != self.initial_units + self.extension_units:
             raise ValueError("body units must equal initial plus extension units")
-        if not isinstance(self.entry_unit, ConstituentUnit):
-            raise ValueError("center requires an external entry unit")
         if any(
             item.structural_level != self.structural_level
             or item.source_kind is not self.source_kind
@@ -271,45 +282,18 @@ class TrendCenter:
             raise ValueError("center body price basis mismatch")
         if any(not item.locked for item in self.body_units):
             raise ValueError("formal center body units must be locked")
-        if (
-            self.entry_unit.structural_level != self.structural_level
-            or self.entry_unit.source_kind is not self.source_kind
-        ):
-            raise ValueError("center entry level/source mismatch")
-        if self.entry_unit.price_basis_revision != self.price_basis_revision:
-            raise ValueError("center entry price basis mismatch")
-        if not self.entry_unit.locked:
-            raise ValueError("formal center entry unit must be locked")
-        if self.entry_unit in self.body_units:
-            raise ValueError("external entry must not enter center body")
-
-        establishment_unit = self.establishment_unit
-        initial_leave = self.establishment_leave_unit
-        if self.source_kind is SourceKind.TREND_TYPE:
-            if establishment_unit is not None or initial_leave is not None:
-                raise ValueError(
-                    "recursive trend-type center has no physical fifth segment"
-                )
-        else:
-            if establishment_unit is None:
-                raise ValueError(
-                    "physical center requires a fifth establishment segment"
-                )
+        if self.entry_unit is not None:
             if (
-                establishment_unit.structural_level != self.structural_level
-                or establishment_unit.source_kind is not self.source_kind
+                self.entry_unit.structural_level != self.structural_level
+                or self.entry_unit.source_kind is not self.source_kind
             ):
-                raise ValueError("establishment unit level/source mismatch")
-            if establishment_unit.price_basis_revision != self.price_basis_revision:
-                raise ValueError("establishment unit price basis mismatch")
-            if not establishment_unit.locked:
-                raise ValueError("establishment unit must be locked")
-            if establishment_unit in self.initial_units:
-                raise ValueError(
-                    "fifth establishment unit must follow the middle-three core"
-                )
-            if initial_leave is not None and initial_leave != establishment_unit:
-                raise ValueError("initial leave must be the fifth establishment unit")
+                raise ValueError("center entry level/source mismatch")
+            if self.entry_unit.price_basis_revision != self.price_basis_revision:
+                raise ValueError("center entry price basis mismatch")
+            if not self.entry_unit.locked:
+                raise ValueError("formal center entry unit must be locked")
+            if self.entry_unit in self.body_units:
+                raise ValueError("external entry must not enter center body")
 
         expected_zd = max(item.low_tick for item in self.core_units)
         expected_zg = min(item.high_tick for item in self.core_units)
@@ -330,64 +314,24 @@ class TrendCenter:
             raise ValueError(
                 "each center body unit must overlap the frozen center core"
             )
-        if self.source_kind is not SourceKind.TREND_TYPE:
-            if not self._overlaps_core(self.entry_unit):
-                raise ValueError("entry unit must positively overlap center core")
-            if establishment_unit is None or not self._overlaps_core(
-                establishment_unit
-            ):
-                raise ValueError(
-                    "fifth establishment unit must positively overlap center core"
-                )
-            if initial_leave is not None:
-                if not self._outside_in_direction(initial_leave):
-                    raise ValueError(
-                        "initial leave endpoint must be outside center core"
-                    )
-            else:
-                if (
-                    not self.extension_units
-                    or self.extension_units[0] != establishment_unit
-                ):
-                    raise ValueError(
-                        "non-leaving fifth unit must be the first center extension"
-                    )
-                if self._outside_in_direction(establishment_unit):
-                    raise ValueError(
-                        "outside fifth unit must be represented as initial leave"
-                    )
-
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
-        for previous, current in zip(self.body_units, self.body_units[1:]):
-            # 线段恒有方向，故线段中枢的构成段必然交替。走势类型中枢不同：盘整
-            # 没有方向，「上涨—盘整—上涨」是合法构成，此处无法分辨盘整，故把
-            # 交替判定留给持有 oscillatory_ids 的 center_machine。
-            if (
-                self.source_kind is SourceKind.SEGMENT
-                and previous.direction == current.direction
-            ):
-                raise ValueError("center body directions must alternate")
-            if previous.end_tick != current.start_tick:
-                raise ValueError("center body prices must connect")
-            if current.market_start < previous.market_end:
-                raise ValueError("center body intervals must not overlap")
+        if any(
+            current.market_start < previous.market_end
+            for previous, current in zip(self.body_units, self.body_units[1:])
+        ):
+            raise ValueError("center body intervals must be time ordered")
 
         first = self.body_units[0]
-        if self.entry_unit.end_tick != first.start_tick:
-            raise ValueError("center entry must connect to first core unit")
-        if first.market_start < self.entry_unit.market_end:
-            raise ValueError("center body cannot overlap external entry")
+        if self.entry_unit is not None:
+            if self.entry_unit.end_tick != first.start_tick:
+                raise ValueError("center entry must connect to first core unit")
+            if first.market_start < self.entry_unit.market_end:
+                raise ValueError("center body cannot overlap external entry")
 
         if self.body_start_market_time != self.body_units[0].market_start:
             raise ValueError("body start time must equal first body unit")
-        maturity_unit = (
-            self.initial_units[-1]
-            if self.source_kind is SourceKind.TREND_TYPE
-            else self.establishment_unit
-        )
-        if maturity_unit is None:
-            raise ValueError("physical center maturity evidence is missing")
+        maturity_unit = self.initial_units[-1]
         if self.established_market_time != maturity_unit.market_end:
             raise ValueError(
                 "established market time must equal final initial body unit end"
@@ -403,9 +347,9 @@ class TrendCenter:
         if self.available_at < self.established_at:
             raise ValueError("available_at must not precede established_at")
         center_evidence = (
-            (self.entry_unit,)
+            (() if self.entry_unit is None else (self.entry_unit,))
             + self.body_units
-            + (() if self.establishment_unit is None else (self.establishment_unit,))
+            + self.failed_departure_units
         )
         if self.available_at < max(item.available_at for item in center_evidence):
             raise ValueError("center availability must cover body evidence")
@@ -413,8 +357,7 @@ class TrendCenter:
             raise ValueError("body_revision must equal extension unit count")
 
         for terminal in (
-            self.establishment_unit,
-            self.establishment_leave_unit,
+            *self.failed_departure_units,
             self.pending_leave_unit,
             self.completion_leave_unit,
             self.completion_return_unit,
@@ -428,6 +371,21 @@ class TrendCenter:
                 terminal.price_basis_revision != self.price_basis_revision
             ):
                 raise ValueError("center lifecycle unit price basis mismatch")
+        if any(not item.locked for item in self.failed_departure_units):
+            raise ValueError("failed departure history must be locked")
+        if any(
+            not self._touches_core(item) or not self._outside_in_direction(item)
+            for item in self.failed_departure_units
+        ):
+            raise ValueError("failed departure history has invalid leave geometry")
+        if set(item.unit_id for item in self.failed_departure_units) & set(
+            item.unit_id for item in self.body_units
+        ):
+            raise ValueError("failed departures must stay outside center body")
+        if self.entry_unit is not None and self.entry_unit.unit_id in {
+            item.unit_id for item in self.failed_departure_units
+        }:
+            raise ValueError("center entry cannot be failed departure history")
 
         def validate_pending_leave() -> None:
             pending = self.pending_leave_unit
@@ -437,8 +395,8 @@ class TrendCenter:
                 raise ValueError("pending leave must stay outside center body")
             if not pending.locked:
                 raise ValueError("pending leave must be locked")
-            if not self._overlaps_core(pending):
-                raise ValueError("pending leave must overlap center core")
+            if not self._touches_core(pending):
+                raise ValueError("pending leave must touch center core")
             if not self._outside_in_direction(pending):
                 raise ValueError("pending leave endpoint must be outside center core")
             self._validate_external_leave(pending)
@@ -456,7 +414,7 @@ class TrendCenter:
                 raise ValueError("completion return must not enter center body")
             if not leave.locked or not ret.locked:
                 raise ValueError("completion evidence must be locked")
-            if not self._overlaps_core(leave) or not self._outside_in_direction(leave):
+            if not self._touches_core(leave) or not self._outside_in_direction(leave):
                 raise ValueError("completion leave geometry is invalid")
             self._validate_external_leave(leave)
             if (
@@ -485,6 +443,16 @@ class TrendCenter:
             ):
                 raise ValueError("center availability must cover completion evidence")
 
+        has_supersession = (
+            self.superseded_by_center_id is not None
+            or self.superseded_at is not None
+            or bool(self.supersession_bridge_units)
+        )
+        if self.state is not CenterState.SUPERSEDED and has_supersession:
+            raise ValueError(
+                "only a superseded center may carry successor evidence"
+            )
+
         if self.state is CenterState.ONGOING:
             if (
                 self.completion_leave_unit is not None
@@ -507,6 +475,59 @@ class TrendCenter:
             ):
                 raise ValueError("completed center cannot carry boundary evidence")
             validate_completion()
+        elif self.state is CenterState.SUPERSEDED:
+            if (
+                self.pending_leave_unit is not None
+                or self.completion_leave_unit is not None
+                or self.completion_return_unit is not None
+                or self.completed_at is not None
+            ):
+                raise ValueError(
+                    "superseded center cannot fabricate third-class completion"
+                )
+            if (
+                self.boundary_divergence_id is not None
+                or self.boundary_anchor_unit_id is not None
+            ):
+                raise ValueError("superseded center cannot carry boundary evidence")
+            if (
+                not self.superseded_by_center_id
+                or self.superseded_by_center_id == self.center_id
+                or self.superseded_at is None
+            ):
+                raise ValueError(
+                    "superseded center requires a distinct successor and close time"
+                )
+            if self.superseded_at < self.established_at:
+                raise ValueError(
+                    "superseded_at cannot precede center establishment"
+                )
+            if self.available_at < self.superseded_at:
+                raise ValueError(
+                    "superseded center availability must cover successor evidence"
+                )
+            bridge = self.supersession_bridge_units
+            if any(
+                item.structural_level != self.structural_level
+                or item.source_kind is not self.source_kind
+                or item.price_basis_revision != self.price_basis_revision
+                or not item.locked
+                for item in bridge
+            ):
+                raise ValueError("supersession bridge context is incompatible")
+            if {item.unit_id for item in bridge} & {
+                item.unit_id
+                for item in (*self.body_units, *self.failed_departure_units)
+            }:
+                raise ValueError(
+                    "supersession bridge must stay outside body and failed history"
+                )
+            if bridge and self.available_at < max(
+                item.available_at for item in bridge
+            ):
+                raise ValueError(
+                    "superseded center availability must cover bridge evidence"
+                )
         else:
             if not self.boundary_divergence_id or not self.boundary_anchor_unit_id:
                 raise ValueError(
@@ -530,17 +551,107 @@ class TrendCenter:
             else:
                 validate_completion()
 
+        transition_units = (
+            *self.body_units,
+            *self.failed_departure_units,
+            *self.supersession_bridge_units,
+            *(
+                ()
+                if self.pending_leave_unit is None
+                else (self.pending_leave_unit,)
+            ),
+            *(
+                ()
+                if self.completion_leave_unit is None
+                else (self.completion_leave_unit,)
+            ),
+            *(
+                ()
+                if self.completion_return_unit is None
+                else (self.completion_return_unit,)
+            ),
+        )
+        transition_ids = tuple(item.unit_id for item in transition_units)
+        if len(transition_ids) != len(set(transition_ids)):
+            raise ValueError("center transition ownership must be unique")
+        if (
+            self.entry_unit is not None
+            and self.entry_unit.unit_id in set(transition_ids)
+        ):
+            raise ValueError("center entry must stay outside transition ownership")
+        ordered_transitions = tuple(
+            sorted(
+                transition_units,
+                key=lambda item: (item.market_start, item.market_end, item.unit_id),
+            )
+        )
+        if not ordered_transitions or ordered_transitions[0] != self.body_units[0]:
+            raise ValueError(
+                "center transition history must start at its first body unit"
+            )
+        body_ids = {item.unit_id for item in self.body_units}
+        failed_ids = {item.unit_id for item in self.failed_departure_units}
+        bridge_ids = {item.unit_id for item in self.supersession_bridge_units}
+        if (
+            tuple(
+                item for item in ordered_transitions if item.unit_id in body_ids
+            )
+            != self.body_units
+        ):
+            raise ValueError("center body order conflicts with physical transitions")
+        if (
+            tuple(
+                item for item in ordered_transitions if item.unit_id in failed_ids
+            )
+            != self.failed_departure_units
+        ):
+            raise ValueError(
+                "failed departure order conflicts with physical transitions"
+            )
+        if (
+            tuple(
+                item for item in ordered_transitions if item.unit_id in bridge_ids
+            )
+            != self.supersession_bridge_units
+        ):
+            raise ValueError(
+                "supersession bridge order conflicts with physical transitions"
+            )
+        physical_chain = (
+            *((self.entry_unit,) if self.entry_unit is not None else ()),
+            *ordered_transitions,
+        )
+        for previous, current in zip(physical_chain, physical_chain[1:]):
+            pair_label = (
+                "center body"
+                if previous.unit_id in body_ids and current.unit_id in body_ids
+                else "center transition"
+            )
+            if (
+                self.source_kind is SourceKind.SEGMENT
+                and previous.direction == current.direction
+            ):
+                raise ValueError(f"{pair_label} directions must alternate")
+            if previous.end_tick != current.start_tick:
+                raise ValueError(f"{pair_label} prices must connect")
+            if current.market_start < previous.market_end:
+                raise ValueError(f"{pair_label} intervals must not overlap")
+        transition_offset = {
+            item.unit_id: offset for offset, item in enumerate(ordered_transitions)
+        }
+        for failed in self.failed_departure_units:
+            offset = transition_offset[failed.unit_id]
+            if offset + 1 >= len(ordered_transitions):
+                raise ValueError("failed departure requires its disproving return")
+            ret = ordered_transitions[offset + 1]
+            if not self._overlaps_core(ret):
+                raise ValueError("failed departure return must re-enter center core")
+
         expected_center_id = build_center_id(
             price_basis_revision=self.price_basis_revision,
             structural_level=self.structural_level,
             source_kind=self.source_kind.value,
-            entry_unit_id=self.entry_unit.unit_id,
             initial_unit_ids=tuple(item.unit_id for item in self.initial_units),
-            establishment_unit_id=(
-                None
-                if self.establishment_unit is None
-                else self.establishment_unit.unit_id
-            ),
             zd_tick=self.zd_tick,
             zg_tick=self.zg_tick,
         )
@@ -554,6 +665,12 @@ class TrendCenter:
             return left <= right
         return left < right
 
+    def _touches_core(self, item: ConstituentUnit) -> bool:
+        return max(item.low_tick, self.zd_tick) <= min(
+            item.high_tick,
+            self.zg_tick,
+        )
+
     def _outside_in_direction(self, item: ConstituentUnit) -> bool:
         return (
             item.end_tick > self.zg_tick
@@ -562,7 +679,10 @@ class TrendCenter:
         )
 
     def _validate_external_leave(self, leave: ConstituentUnit) -> None:
-        previous = self.body_units[-1]
+        previous = max(
+            (*self.body_units, *self.failed_departure_units),
+            key=lambda item: (item.market_start, item.market_end, item.unit_id),
+        )
         if (
             leave.end_tick == previous.end_tick
             and leave.market_end == previous.market_end
@@ -604,31 +724,16 @@ class TrendCenter:
         return self.core_body_end_market_time
 
     @property
-    def initial_exit_unit(self) -> ConstituentUnit | None:
-        """若第五段已是外部离开段，则返回该段。"""
-
-        return self.establishment_leave_unit
-
-    @property
     def maturity_unit(self) -> ConstituentUnit:
         """返回锁定后使中枢正式成立的不可变单元。"""
 
-        if self.source_kind is SourceKind.TREND_TYPE:
-            return self.initial_units[-1]
-        if self.establishment_unit is None:  # 由 ``__post_init__`` 保护
-            raise ValueError("physical center maturity evidence is missing")
-        return self.establishment_unit
+        return self.initial_units[-1]
 
     @property
     def establishment_units(self) -> tuple[ConstituentUnit, ...]:
         """返回用于建立该中枢的精确来源窗口。"""
 
-        if self.source_kind is SourceKind.TREND_TYPE:
-            return self.initial_units
-        maturity = self.establishment_unit
-        if maturity is None:  # 由 ``__post_init__`` 保护，同时保持精确类型
-            return ()
-        return (self.entry_unit, *self.initial_units, maturity)
+        return self.initial_units
 
     @property
     def lifecycle_leave_unit(self) -> ConstituentUnit | None:
@@ -637,29 +742,34 @@ class TrendCenter:
         return self.completion_leave_unit or self.pending_leave_unit
 
     @property
-    def lifecycle_role_count(self) -> int:
-        """统计进入段、真实本体段和一段外部离开段。
+    def structurally_closed(self) -> bool:
+        """Whether locked later structure prevents further center extension.
 
-        完成回返用于确认三类点，故意不计入中枢五角色。失败离开及其回返会先
-        折叠进 ``body_units``，只有确认离开失败后才作为延伸段计数。
+        A third-class completion and a disjoint successor center both close
+        the old center structurally.  Only the former owns leave/return
+        evidence and can be interpreted as a third-class point.
         """
 
-        return (
-            1
-            + len(self.body_units)
-            + (1 if self.lifecycle_leave_unit is not None else 0)
-        )
+        return self.state in (CenterState.COMPLETED, CenterState.SUPERSEDED)
 
     @property
-    def has_minimum_physical_roles(self) -> bool:
-        """返回该对象是否已具备离开内部物理状态机的最低角色数。"""
+    def structural_closed_at(self) -> datetime | None:
+        if self.state is CenterState.COMPLETED:
+            return self.completed_at
+        if self.state is CenterState.SUPERSEDED:
+            return self.superseded_at
+        return None
 
-        if self.source_kind is SourceKind.TREND_TYPE:
-            return True
-        return (
-            self.establishment_unit is not None
-            and len(self.establishment_units) == 5
-            and self.lifecycle_role_count >= 5
+    @property
+    def lifecycle_role_count(self) -> int:
+        """统计本体、已证伪离开历史和当前外部离开单元。
+
+        完成回返用于确认三类点，故意不计入中枢本体。已证伪离开保留为外部
+        历史；真正回到核心的回返单元才进入 ``extension_units``。
+        """
+
+        return len(self.body_units) + len(self.failed_departure_units) + (
+            1 if self.lifecycle_leave_unit is not None else 0
         )
 
     @property
@@ -692,9 +802,10 @@ class TrendCenter:
         if leave is None or ret is None or self.completed_at is None:
             return None
         evidence = (
-            self.entry_unit,
+            *(() if self.entry_unit is None else (self.entry_unit,)),
             *self.establishment_units,
             *self.body_units,
+            *self.failed_departure_units,
             leave,
             ret,
         )
@@ -710,34 +821,51 @@ class CenterPreview:
     structural_level: int
     source_kind: SourceKind
     price_basis_revision: str
-    entry_unit_id: str
+    entry_unit_id: str | None
     unit_ids: tuple[str, ...]
     state: CenterPreviewState
     zd_tick: int | None
     zg_tick: int | None
     available_at: datetime
+    failed_departure_unit_ids: tuple[str, ...] = ()
     pending_leave_unit_id: str | None = None
     completion_leave_unit_id: str | None = None
     completion_return_unit_id: str | None = None
-    establishment_unit_id: str | None = None
-    establishment_leave_unit_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
         object.__setattr__(self, "state", CenterPreviewState(self.state))
         object.__setattr__(self, "unit_ids", tuple(self.unit_ids))
+        object.__setattr__(
+            self,
+            "failed_departure_unit_ids",
+            tuple(self.failed_departure_unit_ids),
+        )
         if type(self.structural_level) is not int or self.structural_level < 0:
             raise ValueError("structural_level must be >= 0")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
-        if not self.entry_unit_id:
-            raise ValueError("preview requires an external entry unit")
         if not self.unit_ids:
             raise ValueError("preview must reference at least one body unit")
         if len(set(self.unit_ids)) != len(self.unit_ids):
             raise ValueError("preview unit ids must be unique")
-        if self.entry_unit_id in self.unit_ids:
+        if self.entry_unit_id is not None and self.entry_unit_id in self.unit_ids:
             raise ValueError("preview entry must stay outside its body")
+        if len(set(self.failed_departure_unit_ids)) != len(
+            self.failed_departure_unit_ids
+        ):
+            raise ValueError("preview failed departure ids must be unique")
+        if set(self.failed_departure_unit_ids) & set(self.unit_ids):
+            raise ValueError("preview failed departures must stay outside its body")
+        if self.failed_departure_unit_ids and (
+            len(self.unit_ids) < 3
+            or self.zd_tick is None
+            or self.zg_tick is None
+            or self.state is CenterPreviewState.TOUCH_ONLY
+        ):
+            raise ValueError(
+                "preview failed departures require a source-valid center core"
+            )
         if (self.zd_tick is None) != (self.zg_tick is None):
             raise ValueError("preview core ticks must be both present or both absent")
         if self.state is CenterPreviewState.TOUCH_ONLY and (
@@ -792,23 +920,13 @@ class CenterPreview:
             raise ValueError("preview lifecycle unit ids must be distinct")
         if set(lifecycle_ids) & set(self.unit_ids):
             raise ValueError("preview lifecycle units must stay outside its body")
-        if self.entry_unit_id in lifecycle_ids:
+        if set(lifecycle_ids) & set(self.failed_departure_unit_ids):
+            raise ValueError(
+                "preview current lifecycle must stay outside failed history"
+            )
+        external_ids = (*self.failed_departure_unit_ids, *lifecycle_ids)
+        if self.entry_unit_id is not None and self.entry_unit_id in external_ids:
             raise ValueError("preview entry and lifecycle units must be distinct")
-        if (
-            self.establishment_leave_unit_id is not None
-            and self.establishment_leave_unit_id != self.establishment_unit_id
-        ):
-            raise ValueError(
-                "preview initial leave must be its fifth establishment unit"
-            )
-        if self.source_kind is SourceKind.TREND_TYPE and (
-            self.establishment_unit_id is not None
-            or self.establishment_leave_unit_id is not None
-        ):
-            raise ValueError(
-                "trend-type preview has no physical fifth establishment unit"
-            )
-
     @property
     def formal_center_id(self) -> str | None:
         """返回该预览锁定后将采用的正式中枢身份。
@@ -824,9 +942,7 @@ class CenterPreview:
             price_basis_revision=self.price_basis_revision,
             structural_level=self.structural_level,
             source_kind=self.source_kind.value,
-            entry_unit_id=self.entry_unit_id,
             initial_unit_ids=self.unit_ids[: center_seed_size(self.source_kind)],
-            establishment_unit_id=self.establishment_unit_id,
             zd_tick=self.zd_tick,
             zg_tick=self.zg_tick,
         )
@@ -858,12 +974,11 @@ class CenterEvidence:
     dd_tick: int
     gg_tick: int
     initial_unit_ids: tuple[str, ...]
-    entry_unit_id: str
+    entry_unit_id: str | None
     core_unit_ids: tuple[str, str, str]
-    establishment_unit_id: str | None
-    initial_exit_unit_id: str | None
     body_unit_ids: tuple[str, ...]
     extension_unit_ids: tuple[str, ...]
+    failed_departure_unit_ids: tuple[str, ...]
     pending_leave_unit_id: str | None
     completion_leave_unit_id: str | None
     completion_return_unit_id: str | None
@@ -876,6 +991,9 @@ class CenterEvidence:
     body_revision: int
     boundary_divergence_id: str | None = None
     boundary_anchor_unit_id: str | None = None
+    superseded_by_center_id: str | None = None
+    superseded_at: datetime | None = None
+    supersession_bridge_unit_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_center(cls, center: TrendCenter) -> "CenterEvidence":
@@ -892,20 +1010,15 @@ class CenterEvidence:
             dd_tick=center.dd_tick,
             gg_tick=center.gg_tick,
             initial_unit_ids=tuple(item.unit_id for item in center.initial_units),
-            entry_unit_id=center.entry_unit.unit_id,
+            entry_unit_id=(
+                None if center.entry_unit is None else center.entry_unit.unit_id
+            ),
             core_unit_ids=tuple(item.unit_id for item in center.core_units),
-            establishment_unit_id=(
-                None
-                if center.establishment_unit is None
-                else center.establishment_unit.unit_id
-            ),
-            initial_exit_unit_id=(
-                None
-                if center.initial_exit_unit is None
-                else center.initial_exit_unit.unit_id
-            ),
             body_unit_ids=tuple(item.unit_id for item in center.body_units),
             extension_unit_ids=tuple(item.unit_id for item in center.extension_units),
+            failed_departure_unit_ids=tuple(
+                item.unit_id for item in center.failed_departure_units
+            ),
             pending_leave_unit_id=(
                 None
                 if center.pending_leave_unit is None
@@ -930,6 +1043,11 @@ class CenterEvidence:
             body_revision=center.body_revision,
             boundary_divergence_id=center.boundary_divergence_id,
             boundary_anchor_unit_id=center.boundary_anchor_unit_id,
+            superseded_by_center_id=center.superseded_by_center_id,
+            superseded_at=center.superseded_at,
+            supersession_bridge_unit_ids=tuple(
+                item.unit_id for item in center.supersession_bridge_units
+            ),
         )
 
 
@@ -948,6 +1066,44 @@ class CenterLevelResult:
         object.__setattr__(self, "previews", tuple(self.previews))
         object.__setattr__(self, "events", tuple(self.events))
 
+        if len({center.center_id for center in self.centers}) != len(self.centers):
+            raise ValueError("center level identities must be unique")
+        for index, center in enumerate(self.centers):
+            if center.state is not CenterState.SUPERSEDED:
+                continue
+            if index + 1 >= len(self.centers):
+                raise ValueError("superseded center requires its successor snapshot")
+            successor = self.centers[index + 1]
+            if center.superseded_by_center_id != successor.center_id:
+                raise ValueError(
+                    "superseded center must reference the immediate successor"
+                )
+            if center.superseded_at != successor.established_at:
+                raise ValueError(
+                    "supersession time must equal successor establishment"
+                )
+            boundary_unit = (
+                center.supersession_bridge_units[-1]
+                if center.supersession_bridge_units
+                else center.body_units[-1]
+            )
+            if successor.entry_unit != boundary_unit:
+                raise ValueError(
+                    "successor entry must equal the supersession boundary unit"
+                )
+            if boundary_unit.end_tick != successor.body_units[0].start_tick:
+                raise ValueError("supersession boundary prices must connect")
+            if successor.body_units[0].market_start < boundary_unit.market_end:
+                raise ValueError("supersession boundary intervals must not overlap")
+            cores_overlap = not (
+                successor.zd_tick > center.zg_tick
+                or successor.zg_tick < center.zd_tick
+            )
+            if cores_overlap:
+                raise ValueError(
+                    "successor center core must stay outside the superseded core"
+                )
+
         ongoing = [
             center for center in self.centers if center.state is CenterState.ONGOING
         ]
@@ -965,39 +1121,14 @@ class CenterLevelResult:
             return
 
         active = ongoing[0]
-        active_seed = tuple(
-            item.unit_id
-            for item in (
-                active.establishment_units
-                if active.source_kind is not SourceKind.TREND_TYPE
-                else (active.entry_unit, *active.initial_units)
-            )
-        )
+        active_seed = tuple(item.unit_id for item in active.initial_units)
         seed_width = center_seed_size(active.source_kind)
-        forming_seed = (
-            forming[0].entry_unit_id,
-            *forming[0].unit_ids[:seed_width],
-            *(
-                ()
-                if active.source_kind is SourceKind.TREND_TYPE
-                or forming[0].establishment_unit_id is None
-                else (forming[0].establishment_unit_id,)
-            ),
-        )
+        forming_seed = forming[0].unit_ids[:seed_width]
         if forming_seed == active_seed:
             return
         active_completion_observed = any(
             preview.state is CenterPreviewState.COMPLETED
-            and (
-                preview.entry_unit_id,
-                *preview.unit_ids[:seed_width],
-                *(
-                    ()
-                    if active.source_kind is SourceKind.TREND_TYPE
-                    or preview.establishment_unit_id is None
-                    else (preview.establishment_unit_id,)
-                ),
-            )
+            and preview.unit_ids[:seed_width]
             == active_seed
             for preview in self.previews
         )
@@ -1106,14 +1237,13 @@ class TrendType:
 
         if self.state in (TrendState.COMPLETE, TrendState.LOCKED):
             if self.terminal_divergence is None:
-                if any(
-                    center.state is not CenterState.COMPLETED for center in self.centers
-                ):
-                    raise ValueError("completed trend requires completed centers")
+                if any(not center.structurally_closed for center in self.centers):
+                    raise ValueError(
+                        "completed trend requires structurally closed centers"
+                    )
             elif (
                 any(
-                    center.state is not CenterState.COMPLETED
-                    for center in self.centers[:-1]
+                    not center.structurally_closed for center in self.centers[:-1]
                 )
                 or self.centers[-1].state is not CenterState.DIVERGENCE_CLOSED
             ):
@@ -1129,11 +1259,17 @@ class TrendType:
         for center in self.centers:
             missing = tuple(
                 item
-                for item in center.body_units
+                for item in (
+                    *center.body_units,
+                    *center.failed_departure_units,
+                    *center.supersession_bridge_units,
+                )
                 if item.unit_id not in constituent_ids
             )
             if missing:
-                raise ValueError("trend must contain every center body unit")
+                raise ValueError(
+                    "trend must contain every center body and bridge unit"
+                )
         for center in self.centers[:-1]:
             if (
                 center.completion_return_unit is not None
@@ -1239,6 +1375,10 @@ class TrendType:
                 else terminal.low_tick
                 < min(item.low_tick for item in self.constituent_units[:-1])
             )
+            if terminal_center.entry_unit is None:
+                raise ValueError(
+                    "terminal divergence requires an external center entry leg"
+                )
             if (
                 terminal.direction != self.direction
                 or divergence.compare_unit_id != terminal_center.entry_unit.unit_id
@@ -1503,10 +1643,12 @@ class StrictLevelResult:
             raise ValueError("strict level center ids must be unique")
         for center in self.center_result.centers:
             evidence_units = (
-                center.entry_unit,
+                *(() if center.entry_unit is None else (center.entry_unit,)),
                 *center.establishment_units,
                 *center.body_units,
                 *center.extension_units,
+                *center.failed_departure_units,
+                *center.supersession_bridge_units,
                 *(
                     ()
                     if center.pending_leave_unit is None
@@ -1527,16 +1669,19 @@ class StrictLevelResult:
                 raise ValueError("center evidence is not closed over level units")
         for preview in self.center_result.previews:
             referenced = (
-                preview.entry_unit_id,
+                *(
+                    ()
+                    if preview.entry_unit_id is None
+                    else (preview.entry_unit_id,)
+                ),
                 *preview.unit_ids,
+                *preview.failed_departure_unit_ids,
                 *(
                     unit_id
                     for unit_id in (
                         preview.pending_leave_unit_id,
                         preview.completion_leave_unit_id,
                         preview.completion_return_unit_id,
-                        preview.establishment_unit_id,
-                        preview.establishment_leave_unit_id,
                     )
                     if unit_id is not None
                 ),
@@ -1548,20 +1693,12 @@ class StrictLevelResult:
                 if (
                     preview.formal_center_id is None
                     or len(preview.unit_ids) < seed_width
-                    or (
-                        preview.source_kind is SourceKind.SEGMENT
-                        and preview.establishment_unit_id is None
-                    )
                 ):
                     raise ValueError("已完成中枢预览缺少正式成立种子")
                 lifecycle_ids = (
                     preview.entry_unit_id,
                     *preview.unit_ids,
-                    *(
-                        ()
-                        if preview.establishment_unit_id is None
-                        else (preview.establishment_unit_id,)
-                    ),
+                    *preview.failed_departure_unit_ids,
                     preview.completion_leave_unit_id,
                     preview.completion_return_unit_id,
                 )
@@ -1603,8 +1740,10 @@ class StrictLevelResult:
                 raise ValueError("boundary anchor is missing from level units")
             for center in self.center_result.centers:
                 evidence = (
-                    center.entry_unit,
+                    *(() if center.entry_unit is None else (center.entry_unit,)),
                     *center.body_units,
+                    *center.failed_departure_units,
+                    *center.supersession_bridge_units,
                     *(
                         ()
                         if center.pending_leave_unit is None

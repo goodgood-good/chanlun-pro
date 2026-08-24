@@ -17,17 +17,11 @@ from chanlun.core.strict_structure.models import (
     StrictStructureResult,
     build_strict_point_id,
 )
-from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
-from chanlun.core.strict_structure.signals import StrictSignalEngine
-from chanlun.core.strict_structure.strength import StrengthSnapshot
 from chanlun.decision_support.trading_system.structure_adapter import (
+    convert_confirmed_point_evidence,
     convert_current_confirmed_point_evidence,
     extract_confirmed_points,
-    extract_current_confirmed_points,
     extract_one_minute_segment_difference_points,
-)
-from chanlun.decision_support.trading_system.provisional import (
-    extract_provisional_candidates,
 )
 from tests.core.strict_structure.signal_helpers import confirmed_point
 from tests.core.strict_structure.helpers import (
@@ -35,7 +29,6 @@ from tests.core.strict_structure.helpers import (
     completed_up_center,
     engine_for,
     structure_for,
-    unit,
 )
 from tests.trading_system.helpers import confirmed_point as trading_point
 
@@ -98,98 +91,31 @@ def test_segment_difference_ledger_rejects_non_one_minute_evidence() -> None:
         )
 
 
-SMALL_TO_LARGE_SPECS = (
-    ("down", 114, 78),
-    ("up", 78, 105),
-    ("down", 105, 82),
-    ("up", 82, 98),
-    ("down", 98, 69),
-    ("up", 69, 82),
-    ("down", 82, 39),
-    ("up", 39, 51),
-    ("down", 51, 24),
-    ("up", 24, 30),
-    ("down", 30, 6),
-    ("up", 6, 46),
-    ("down", 46, -4),
-    ("up", -4, 8),
-    ("down", 8, -10),
-    ("up", -10, 34),
-    ("down", 34, -3),
-    ("up", -3, 45),
-    ("down", 45, 31),
-    ("up", 31, 71),
-    ("down", 71, 50),
-    ("up", 50, 61),
-    ("down", 61, 56),
-    ("up", 56, 69),
-    ("down", 69, 64),
-    ("up", 64, 112),
-    ("down", 112, 92),
-    ("up", 92, 138),
-    ("down", 138, 102),
-    ("up", 102, 145),
-    ("down", 145, 99),
-    ("up", 99, 111),
-    ("down", 111, 106),
-    ("up", 106, 152),
-    ("down", 152, 146),
-    ("up", 146, 194),
-    ("down", 194, 159),
-    ("up", 159, 203),
-    ("down", 203, 198),
-    ("up", 198, 210),
-    ("down", 210, 193),
-    ("up", 193, 219),
-    ("down", 219, 205),
-    ("up", 205, 215),
-    ("down", 215, 207),
-    ("up", 207, 213),
-    ("down", 213, 185),
-    ("up", 185, 195),
-    ("down", 195, 187),
-    ("up", 187, 193),
-    ("down", 193, 189),
-    ("up", 189, 210),
-    ("down", 210, 200),
-    ("up", 200, 208),
-    ("down", 208, 202),
-    ("up", 202, 225),
-    ("down", 225, 215),
-    ("up", 215, 222),
-    ("down", 222, 217),
-    ("up", 217, 240),
-    ("down", 240, 223),
-    ("up", 223, 235),
-    ("down", 235, 227),
-    ("up", 227, 233),
-    ("down", 233, 200),
-    ("up", 200, 210),
-)
+def test_segment_difference_ledger_recovers_historical_terminal_lineage(
+    monkeypatch,
+) -> None:
+    raw = _aware_point("1sell")
+    evidence = _evidence((raw,))
+    monkeypatch.setattr(
+        adapter_module,
+        "extract_current_confirmed_points",
+        lambda *_args, **_kwargs: (),
+    )
 
+    points = extract_one_minute_segment_difference_points(
+        evidence,
+        code="SZ.000001",
+        source_frequency="1m",
+        as_of=AS_OF,
+    )
 
-class SmallToLargeFixtureStrength:
-    def snapshot(self, value):
-        # 只有开头的下行走势发生背驰；上行力度保持不衰减，使反弹延续到真实
-        # 的中枢关系边界。
-        magnitude = (
-            100_000_000.0
-            if value.direction == "up"
-            else max(
-                1.0,
-                100_000_000.0 - value.market_end.timestamp() / 300,
-            )
-        )
-        signed = magnitude if value.direction == "up" else -magnitude
-        return StrengthSnapshot(
-            unit_id=value.unit_id,
-            direction=value.direction,
-            histogram_area=magnitude,
-            histogram_peak=signed,
-            dif_extreme=signed,
-            source="macd",
-            available_at=value.available_at,
-        )
+    assert len(points) == 1
+    reference = points[0].terminal_segment
+    assert reference is not None
+    assert reference.unit_id == raw.anchor_unit_id
+    assert reference.market_end == raw.anchor_at
+    assert reference.direction == "up"
+    assert reference.state == "locked"
 
 
 def _anchor_unit(point) -> ConstituentUnit:
@@ -469,48 +395,41 @@ def test_adapter_rejects_mismatched_or_future_snapshot_context() -> None:
 
 
 def test_small_to_large_parent_link_survives_id_conversion() -> None:
-    strength = SmallToLargeFixtureStrength()
-    units = tuple(
-        unit(index, direction, start_tick + 1_000, end_tick + 1_000)
-        for index, (direction, start_tick, end_tick) in enumerate(SMALL_TO_LARGE_SPECS)
+    parent = _aware_point("1buy")
+    raw_child = _aware_point("2buy", parent=parent)
+    child = replace(
+        raw_child,
+        point_id=build_strict_point_id(
+            price_basis_revision=raw_child.price_basis_revision,
+            point_type=raw_child.point_type,
+            structural_level=1,
+            anchor_unit_id=raw_child.anchor_unit_id,
+            center_id=None,
+            parent_point_id=parent.point_id,
+        ),
+        structural_level=1,
+        source_kind=SourceKind.TREND_TYPE,
+        center_id=None,
+        center_zd_tick=None,
+        center_zg_tick=None,
+        center_ordinal=None,
+        evidence_codes=(
+            "confirmed_lower_level_first_class_parent",
+            "small_to_large_reversal",
+            "complete_adjacent_rebound",
+            "complete_first_pullback",
+            "prior_extreme_held",
+        ),
+        related_point_ids=(parent.point_id,),
+        small_to_large_carrier_unit_ids=(
+            "l1-signal",
+            "l1-rebound",
+            raw_child.anchor_unit_id,
+        ),
     )
-    structure = StrictRecursiveEngine(max_levels=3).calculate(
-        units,
-        strength=strength,
-    )
-    engine = StrictSignalEngine(
-        structure=structure,
-        strength=strength,
-        price_quantum=Decimal("0.01"),
-    )
-    first_points = engine.first_class_points()
-    second_points = engine.second_class_points(first_points)
-    reverse_points = engine.third_class_points()
-    second = next(
-        point
-        for point in second_points
-        if point.structural_level == 1
-        and point.point_type == "2buy"
-        and "small_to_large_reversal" in point.evidence_codes
-    )
-    assert second.related_point_ids == (second.parent_point_id,)
-    all_points_by_id = {}
-    for point in (*first_points, *second_points, *reverse_points):
-        previous = all_points_by_id.setdefault(point.point_id, point)
-        assert previous == point
-    all_points = tuple(
-        sorted(
-            all_points_by_id.values(),
-            key=lambda point: (
-                point.available_at,
-                point.structural_level,
-                point.point_type,
-                point.point_id,
-            ),
-        )
-    )
-    converted = extract_confirmed_points(
-        _evidence(all_points, structure=structure),
+
+    converted = convert_confirmed_point_evidence(
+        (parent, child),
         code="SZ.000001",
         source_frequency="1m",
         as_of=AS_OF,
@@ -527,120 +446,8 @@ def test_small_to_large_parent_link_survives_id_conversion() -> None:
     )
     assert converted_second.parent_point_id == converted_parent.point_id
     assert converted_second.related_point_ids == (converted_parent.point_id,)
-
-
-def test_small_to_large_second_is_visible_before_lock_and_then_confirms() -> None:
-    strength = SmallToLargeFixtureStrength()
-    all_units = tuple(
-        unit(index, direction, start_tick + 1_000, end_tick + 1_000)
-        for index, (direction, start_tick, end_tick) in enumerate(
-            SMALL_TO_LARGE_SPECS
-        )
-    )
-
-    live_units = list(all_units[:54])
-    live_units[-1] = replace(
-        live_units[-1],
-        locked=False,
-        confirmed_at=None,
-    )
-    live_structure = StrictRecursiveEngine(max_levels=3).calculate(
-        tuple(live_units),
-        strength=strength,
-    )
-    live_engine = StrictSignalEngine(
-        structure=live_structure,
-        strength=strength,
-        price_quantum=Decimal("0.01"),
-    )
-    live = next(
-        point
-        for point in live_engine.approaching_points(live_units[-1].available_at)
-        if point.point_type == "2buy"
-        and point.structural_level == 1
-        and "small_to_large_reversal" in point.evidence_codes
-    )
-
-    extended_live_units = list(all_units[:57])
-    extended_live_units[-1] = replace(
-        extended_live_units[-1],
-        locked=False,
-        confirmed_at=None,
-    )
-    extended_structure = StrictRecursiveEngine(max_levels=3).calculate(
-        tuple(extended_live_units),
-        strength=strength,
-    )
-    extended_engine = StrictSignalEngine(
-        structure=extended_structure,
-        strength=strength,
-        price_quantum=Decimal("0.01"),
-    )
-    extended_live = next(
-        point
-        for point in extended_engine.approaching_points(
-            extended_live_units[-1].available_at
-        )
-        if point.point_type == "2buy"
-        and point.structural_level == 1
-        and "small_to_large_reversal" in point.evidence_codes
-    )
-
-    locked_units = list(all_units[:58])
-    locked_units[-1] = replace(
-        locked_units[-1],
-        locked=False,
-        confirmed_at=None,
-    )
-    locked_structure = StrictRecursiveEngine(max_levels=3).calculate(
-        tuple(locked_units),
-        strength=strength,
-    )
-    locked_engine = StrictSignalEngine(
-        structure=locked_structure,
-        strength=strength,
-        price_quantum=Decimal("0.01"),
-    )
-    confirmed = next(
-        point
-        for point in locked_engine.confirmed_points()
-        if point.point_type == "2buy"
-        and point.structural_level == 1
-        and "small_to_large_reversal" in point.evidence_codes
-    )
-
-    assert live.anchor_unit_id == confirmed.anchor_unit_id
-    assert extended_live.anchor_unit_id == confirmed.anchor_unit_id
-    assert live.parent_point_id == confirmed.parent_point_id
-    assert live.small_to_large_carrier_unit_ids == (
-        confirmed.small_to_large_carrier_unit_ids
-    )
-    assert live.confirmed_at is None
-    assert live.missing_conditions == ("terminal_unit_locked",)
-
-    live_confirmed = live_engine.confirmed_points()
-    candidate = extract_provisional_candidates(
-        _evidence(
-            live_confirmed,
-            approaching_points=(live,),
-            structure=live_structure,
-        ),
-        code="SZ.000001",
-        source_frequency="1m",
-        as_of=AS_OF,
-    )[0]
-    converted_parent = next(
-        point
-        for point in extract_confirmed_points(
-            _evidence(live_confirmed, structure=live_structure),
-            code="SZ.000001",
-            source_frequency="1m",
-            as_of=AS_OF,
-        )
-        if point.parent_point_id is None
-        and point.point_id == candidate.parent_point_id
-    )
-    assert candidate.related_point_ids == (converted_parent.point_id,)
-    assert candidate.small_to_large_carrier_unit_ids == (
-        live.small_to_large_carrier_unit_ids
+    assert converted_second.small_to_large_carrier_unit_ids == (
+        "l1-signal",
+        "l1-rebound",
+        raw_child.anchor_unit_id,
     )

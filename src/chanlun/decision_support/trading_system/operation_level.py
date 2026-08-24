@@ -14,12 +14,12 @@ def is_five_minute_trade_level(
 ) -> bool:
     """Return whether evidence is the physical 5m level used for orders.
 
-    A recursive level belongs to the effective frequency declared by the
-    strict level catalog.  Therefore 5m/L1 is 30m context, not a second 5m
-    order lane; only 5m/L0 can create a trade setup or notification.
+    Recursive structure does not change the source bar period. Only 5m/L0 can
+    create a trade setup or notification; 5m/L1+ is recursive context derived
+    from the same physical chart.
     """
 
-    if source_frequency != "5m":
+    if recursive_level != FIVE_MINUTE_TRADE_RECURSIVE_LEVELS[0]:
         return False
     try:
         return effective_frequency(source_frequency, recursive_level) == "5m"
@@ -33,13 +33,12 @@ def is_one_minute_segment_level(
 ) -> bool:
     """Return whether evidence is genuinely below the physical 5m trade level.
 
-    The physical 1m chart contains recursive lanes, but 1m/L1 is an effective
-    5m structure.  It can be useful as same-level context; it is not the
-    subordinate 1-minute locator required by interval nesting and must not be
-    counted or announced as a strict 1m segment-difference point.
+    The physical 1m chart contains recursive context lanes, but only its base
+    segment-difference stream is the subordinate witness required by interval
+    nesting. It cannot independently create a trade-level setup.
     """
 
-    if source_frequency != "1m":
+    if recursive_level != ONE_MINUTE_SEGMENT_RECURSIVE_LEVELS[0]:
         return False
     try:
         return effective_frequency(source_frequency, recursive_level) == "1m"

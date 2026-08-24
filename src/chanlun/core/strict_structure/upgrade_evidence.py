@@ -5,11 +5,7 @@ from datetime import datetime
 from enum import Enum
 
 from chanlun.core.strict_structure.identity import stable_structure_id
-from chanlun.core.strict_structure.models import (
-    CenterState,
-    StrictStructureResult,
-    TrendCenter,
-)
+from chanlun.core.strict_structure.models import StrictStructureResult, TrendCenter
 
 
 class UpgradeEvidenceKind(str, Enum):
@@ -111,8 +107,9 @@ class RecursiveUpgradeEvidence:
 def _center_touch_units(center: TrendCenter):
     """只返回真正接触中枢核心的低级别走势。
 
-    所有来源类型都以三段作为冻结中枢核心。失败离开及其重新进入段会折叠进
-    ``body_units``；成功的待确认/已完成离开段保留在外部，因此无需在此按位置排除。
+    所有来源类型都以三段作为冻结中枢核心。已证伪离开保留在
+    ``failed_departure_units`` 外部历史中，只有真正重新进入核心的回返才进入
+    ``body_units``；成功的待确认/已完成离开与外部回返也都不属于中枢本体。
     """
 
     return center.body_units
@@ -143,10 +140,10 @@ def _nine_segment_evidence(
     *,
     target_centers: tuple[TrendCenter, ...],
 ) -> RecursiveUpgradeEvidence | None:
-    if center.state is not CenterState.COMPLETED:
+    if not center.structurally_closed:
         return None
-    # ``body_units`` 已只包含接触中枢的走势；进入段、成功离开段与首次回返段
-    # 都属于外部生命周期证据。
+    # ``body_units`` 已只包含正宽接触核心的走势；进入段、已证伪离开、成功离开
+    # 与外部回返都属于外部生命周期证据。
     touch_units = _center_touch_units(center)
     if len(touch_units) < 9:
         return None
@@ -215,8 +212,8 @@ def _expansion_pair(
     current: TrendCenter,
 ) -> RecursiveUpgradeEvidence | None:
     if (
-        previous.state is not CenterState.COMPLETED
-        or current.state is not CenterState.COMPLETED
+        not previous.structurally_closed
+        or not current.structurally_closed
     ):
         return None
     core_separated = (
@@ -289,7 +286,7 @@ def collect_recursive_upgrade_evidence(
             tuple(
                 center
                 for center in levels[index + 1].center_result.centers
-                if center.state is CenterState.COMPLETED
+                if center.structurally_closed
                 and (as_of is None or center.available_at <= as_of)
             )
             if index + 1 < len(levels)
@@ -298,7 +295,7 @@ def collect_recursive_upgrade_evidence(
         completed = tuple(
             center
             for center in level.center_result.centers
-            if center.state is CenterState.COMPLETED
+            if center.structurally_closed
             and (as_of is None or center.available_at <= as_of)
         )
         for center in completed:

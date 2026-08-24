@@ -3169,17 +3169,9 @@ class ChartManager {
 
         const previewUnits = new Set(previewUnitIds.filter(Boolean));
         const sharedUnitIds = centerUnitIds.filter((unitId) => previewUnits.has(unitId));
-        if (!sharedUnitIds.length) return false;
-
-        // 相邻中枢允许以前一中枢的最后一段作为后一中枢的进入段；这只是
-        // 首尾衔接，不是两个候选争夺同一段中枢主体。只有共享了额外构成段
-        // 时，才由更晚的形成中预览取得唯一显示权。
-        const sharedBoundaryOnly = (
-            sharedUnitIds.length === 1
-            && sharedUnitIds[0] === centerUnitIds[centerUnitIds.length - 1]
-            && sharedUnitIds[0] === preview?.entry_unit_id
-        );
-        return !sharedBoundaryOnly;
+        // Optional entry legs are external evidence.  Only shared center-body
+        // units can make a preview supersede the current formal rectangle.
+        return sharedUnitIds.length > 0;
     }
 
     _strictRenderGroups(snapshot, context) {

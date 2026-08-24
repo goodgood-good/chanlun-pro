@@ -91,7 +91,7 @@
               <span class="cp-section-index">02</span>
               <div>
                 <h2 id="data-scope-title">数据范围</h2>
-                <p>选择参与计算的行情周期与标的来源。</p>
+                <p>选择行情周期，并逐项填写本次验证使用的少量标的。</p>
               </div>
             </div>
           </div>
@@ -106,13 +106,20 @@
               </div>
             </div>
             <div class="layui-form-item cp-field--span-2">
-              <label class="layui-form-label">选股源</label>
+              <label class="layui-form-label" for="xuangu_codes">显式代码</label>
               <div class="layui-input-block">
-                <select class="form-control" name="src_zx_group" lay-filter="src_zx_group">
-                  <option value="all">默认所有标的</option>
-                  {% for zg in zixuan_groups %}
-                  <option value="{{ zg['name'] }}">自选组 · {{ zg['name'] }}</option>
-                  {% endfor %}
+                <textarea id="xuangu_codes" class="form-control layui-textarea" name="codes"
+                  rows="3" autocomplete="off"
+                  placeholder="例如：SZ.000001, SH.600000（逗号、空格或换行分隔）"></textarea>
+                <p class="cp-help-text">不会展开“所有标的”或自选组；默认最多 12 只，代码会按输入顺序去重。</p>
+              </div>
+            </div>
+            <div class="layui-form-item cp-field--span-2">
+              <label class="layui-form-label">验证上限</label>
+              <div class="layui-input-block">
+                <select class="form-control" name="scope_limit" lay-filter="scope_limit">
+                  <option value="12" selected>小样本 · 最多 12 只</option>
+                  <option value="20">扩展验证 · 最多 20 只</option>
                 </select>
               </div>
             </div>
@@ -160,13 +167,13 @@
             <span class="cp-section-index">04</span>
             <div>
               <h2 id="task-boundary-title">运行边界</h2>
-              <p>传统任务的标的代码范围说明。</p>
+              <p>传统入口当前只承担小样本验证。</p>
             </div>
           </div>
         </div>
         <div class="cp-note">
           <span aria-hidden="true">i</span>
-          <div>沪深市场处理 <code>SZ.00</code>、<code>SZ.30</code>、<code>SH.60</code>、<code>SH.68</code> 开头的股票；期货处理以 <code>L8</code> 结尾的主连代码。</div>
+          <div>必须逐项填写代码；普通入口硬上限为 20 只，超过后不会创建后台任务，也不会读取全市场标的列表。</div>
         </div>
       </section>
     </main>
@@ -205,6 +212,20 @@
             });
             if (!runConfig.frequencys) { layer.msg('至少选择一个运行周期'); return false; }
             if (!runConfig.opt_type) { layer.msg('至少选择一个选股方向'); return false; }
+            var explicitCodes = String(runConfig.codes || '').split(/[\s,，;；]+/).filter(Boolean);
+            explicitCodes = explicitCodes.filter(function (value, index, values) {
+              return values.indexOf(value) === index;
+            });
+            var scopeLimit = parseInt(runConfig.scope_limit || '12', 10);
+            if (explicitCodes.length === 0) {
+              layer.msg('请显式填写本次验证的标的代码');
+              return false;
+            }
+            if (explicitCodes.length > scopeLimit || explicitCodes.length > 20) {
+              layer.msg('当前验证上限为 ' + Math.min(scopeLimit, 20) + ' 只，请缩小代码列表');
+              return false;
+            }
+            runConfig.codes = explicitCodes.join(',');
 
             var $submit = $('#run_xuangu_submit');
             $submit.prop('disabled', true).addClass('layui-btn-disabled').text('提交中…');

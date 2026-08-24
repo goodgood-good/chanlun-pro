@@ -28,7 +28,9 @@ class _FakeXuanguTasks:
             "two_freq_task": {"frequency_num": 2},
         }
 
-    def run_xuangu(self, market, task_name, frequencys, opt_type, src, target):
+    def run_xuangu(
+        self, market, task_name, frequencys, opt_type, codes, target, scope_limit
+    ):
         self.run_called = True
         return True
 
@@ -51,7 +53,7 @@ def app_fake(monkeypatch):
 def _post(app, opt_type, frequencys="5m", task_name="my_task"):
     return app.test_client().post("/xuangu/task_add", data={
         "market": "a", "task_name": task_name, "frequencys": frequencys,
-        "src_zx_group": "g1", "target_zx_group": "g2", "opt_type": opt_type,
+        "codes": "SZ.000001", "target_zx_group": "g2", "opt_type": opt_type,
     })
 
 

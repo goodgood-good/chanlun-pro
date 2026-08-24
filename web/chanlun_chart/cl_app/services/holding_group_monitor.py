@@ -1,4 +1,4 @@
-"""为全市场关注分组提供只读的缠论结构线索。
+"""为经统一范围准入的跨市场关注标的提供只读缠论结构线索。
 
 板块先行决策服务专用于 A 股；本服务为其余市场提供独立的辅助观察通道。A 股持仓
 仍只进入 ``TradingScreeningService`` 及其 ``HumanAssistedDecisionCore``。
@@ -35,6 +35,12 @@ from chanlun.decision_support.trading_system.position_recommendation import (
 
 from .job_names import JOB_DISPLAY_NAMES
 from .realtime_review_inbox import monitor_notification_event
+from .trading_screening_scope import (
+    DEFAULT_VALIDATION_COHORT_SIZE,
+    ScreeningScopeAuthorizationError,
+    ScreeningUniverseAdmission,
+    admit_screening_universe,
+)
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -283,7 +289,15 @@ class HoldingMonitorRuntimeLedger:
         self.path = Path(path)
         self._clock = clock or (lambda: datetime.now(CN))
         self._lock = threading.RLock()
-        self._state = self._load()
+        loaded = self._load()
+        # Disk-restored deliveries remain quarantined until the current group
+        # universe has passed admission.  Health/page reads before the first
+        # scheduled run therefore cannot expose or send old pending events.
+        self._quarantined_pending_notifications = dict(
+            loaded["pending_notifications"]
+        )
+        loaded["pending_notifications"] = {}
+        self._state = loaded
 
     @staticmethod
     def _empty() -> dict[str, object]:
@@ -674,15 +688,61 @@ class HoldingMonitorRuntimeLedger:
         self,
         desired: set[tuple[str, str]],
     ) -> None:
-        """Keep already detected events even if the manual group later changes.
+        """Discard persisted runtime state outside the currently admitted scope.
 
-        A watchlist edit is not evidence that a previously detected structure
-        event never happened.  Pending batches are therefore resolved only by
-        delivery or the explicit realtime expiry policy; the review inbox stays
-        complete and no recorded signal silently disappears.
+        Pending delivery is operational work, not historical evidence.  A batch
+        restored from disk must therefore prove that every one of its symbols is
+        still admitted before it may be displayed or sent.  Mixed-scope batches
+        are dropped whole so an old line/title/chart can never leak alongside an
+        otherwise admitted event.
         """
 
-        _ = desired
+        admitted = {
+            (str(market).strip().lower(), str(code).strip())
+            for market, code in desired
+            if str(market).strip() and str(code).strip()
+        }
+        with self._lock:
+            changed = bool(self._quarantined_pending_notifications)
+            pending = self._state["pending_notifications"]
+            source_pending = {
+                market: list(queue) for market, queue in pending.items()
+            }
+            for market, queue in self._quarantined_pending_notifications.items():
+                source_pending.setdefault(market, []).extend(queue)
+            self._quarantined_pending_notifications = {}
+            projected: dict[str, list[dict[str, object]]] = {}
+            for market, queue in source_pending.items():
+                market_text = str(market).strip().lower()
+                retained = [
+                    batch
+                    for batch in queue
+                    if isinstance(batch, Mapping)
+                    and bool(batch.get("codes"))
+                    and all(
+                        (market_text, str(code).strip()) in admitted
+                        for code in batch.get("codes", ())
+                    )
+                ]
+                if retained:
+                    projected[market_text] = retained
+            if projected != pending:
+                self._state["pending_notifications"] = projected
+                changed = True
+
+            for key in ("last_big_directions", "active_outages"):
+                current = self._state[key]
+                retained = {
+                    identity: value
+                    for identity, value in current.items()
+                    if "|" in identity
+                    and tuple(identity.split("|", 1)) in admitted
+                }
+                if retained != current:
+                    self._state[key] = retained
+                    changed = True
+            if changed:
+                self._persist()
 
     def _persist(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1115,8 +1175,10 @@ def _notification_line(
             )
             if divergence_label:
                 segment_label = f"{segment_label}（{divergence_label}）"
-            segment_level = int(getattr(event, "segment_difference_recursive_level", 0) or 0)
-            segment_text = f"1分钟区间套定位：{segment_label}（L{segment_level}）"
+            # 递归层级属于结构引擎内部血缘，不是 1 分钟主交易级别。
+            # 对外只说明它是 5 分钟操作点的区间套精确定位，避免再次把
+            # 1 分钟结构血缘误读成独立交易信号。
+            segment_text = f"1分钟区间套定位：{segment_label}"
         else:
             segment_text = "1分钟区间套定位未完成（不影响5分钟主信号）"
         big_dir = _DIRECTION_LABELS.get(
@@ -1379,6 +1441,8 @@ class HoldingGroupMonitorConfig:
     start_delay_seconds: int = 8
     max_workers: int = 4
     max_events_per_notification: int = 3
+    max_symbols: int = DEFAULT_VALIDATION_COHORT_SIZE
+    large_scope_authorized: bool = False
     op_level: str = "5m"
     mid_level: str = "1m"
     big_level: str = "30m"
@@ -1389,10 +1453,19 @@ class HoldingGroupMonitorConfig:
             "start_delay_seconds",
             "max_workers",
             "max_events_per_notification",
+            "max_symbols",
         ):
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
+        if type(self.large_scope_authorized) is not bool:
+            raise TypeError("large_scope_authorized must be a bool")
+        # Reuse the Web screening admission authority instead of maintaining a
+        # second, weaker interpretation of the >20-symbol authorization gate.
+        admit_screening_universe(
+            max_symbols=self.max_symbols,
+            large_scope_authorized=self.large_scope_authorized,
+        )
         if len({self.op_level, self.mid_level, self.big_level}) != 3:
             raise ValueError("holding monitor levels must be distinct")
         if (self.op_level, self.mid_level, self.big_level) != (
@@ -1427,7 +1500,7 @@ def _default_market_open(exchange: object, market: str, _now: datetime) -> bool:
 
 
 class HoldingGroupMonitorService:
-    """增量观察全部已声明持仓，并发送新事件。"""
+    """增量观察范围获准的持仓/关注标的，并发送新事件。"""
 
     def __init__(
         self,
@@ -1480,6 +1553,7 @@ class HoldingGroupMonitorService:
         self._job_registered = False
         self._scheduler: object | None = None
         self._last_result: dict[str, object] | None = None
+        self._admitted_identities: frozenset[tuple[str, str]] = frozenset()
         self._log = fun.get_logger()
 
     def _record_review_events(
@@ -1841,6 +1915,19 @@ class HoldingGroupMonitorService:
         value["delivery_mode"] = mode
         return value
 
+    def admitted_identities(self) -> tuple[tuple[str, str], ...]:
+        """Return the last scope-proven cross-market universe for page filtering."""
+
+        with self._lock:
+            return tuple(sorted(self._admitted_identities))
+
+    def _replace_admitted_identities(
+        self,
+        desired: set[tuple[str, str]],
+    ) -> None:
+        with self._lock:
+            self._admitted_identities = frozenset(desired)
+
     def _now(self) -> datetime:
         value = self._clock()
         if not isinstance(value, datetime):
@@ -1932,6 +2019,41 @@ class HoldingGroupMonitorService:
         valid.sort(key=lambda row: (row["market"], row["code"]))
         invalid.sort(key=lambda row: (str(row["market"]), str(row["code"])))
         return valid, invalid
+
+    @staticmethod
+    def _scope_identity(row: Mapping[str, object]) -> str:
+        return HoldingMonitorRuntimeLedger.identity(
+            str(row.get("market") or "").strip().lower(),
+            str(row.get("code") or "").strip(),
+        )
+
+    def _admit_positions(
+        self,
+        rows: Sequence[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], ScreeningUniverseAdmission]:
+        """Admit holdings first and defer ordinary group members deterministically."""
+
+        by_identity = {self._scope_identity(row): row for row in rows}
+        mandatory = tuple(
+            identity
+            for identity, row in by_identity.items()
+            if row.get("is_holding") is True
+        )
+        optional = tuple(
+            identity
+            for identity, row in by_identity.items()
+            if row.get("is_holding") is not True
+        )
+        admission = admit_screening_universe(
+            mandatory_codes=mandatory,
+            signal_codes=optional,
+            max_symbols=self._config.max_symbols,
+            large_scope_authorized=self._config.large_scope_authorized,
+        )
+        return (
+            [by_identity[identity] for identity in admission.admitted_codes],
+            admission,
+        )
 
     def _sync_market_states(
         self,
@@ -2336,15 +2458,22 @@ class HoldingGroupMonitorService:
                     raise TypeError("positions provider must return a sequence")
                 valid, invalid = self._normalize_positions(raw_positions)
             except Exception as exc:
-                recovery_results = [
-                    self._drain_pending_notifications(market)
-                    for market in sorted(self._runtime_ledger.pending_markets())
-                ]
+                # Without a fresh universe proof no restored symbol is trusted.
+                # Purge before any notification, exchange or structure access.
+                self._runtime_ledger.prune_pending_notifications(set())
+                self._states.clear()
+                self._replace_admitted_identities(set())
                 result = {
                     "schema": SCHEMA,
                     "observed_at": observed_at.isoformat(),
                     "status": "error",
                     "reason_code": "HOLDING_GROUP_UNAVAILABLE",
+                    "scope_authorized": False,
+                    "scope_limit": self._config.max_symbols,
+                    "large_scope_authorized": self._config.large_scope_authorized,
+                    "requested_count": 0,
+                    "mandatory_count": 0,
+                    "deferred_count": 0,
                     "declared_count": 0,
                     "monitored_count": 0,
                     "covered_count": 0,
@@ -2353,12 +2482,8 @@ class HoldingGroupMonitorService:
                     "awaiting_count": 0,
                     "failed_count": 1,
                     "event_count": 0,
-                    "sent_count": sum(
-                        int(value["sent_count"]) for value in recovery_results
-                    ),
-                    "expired_count": sum(
-                        int(value["expired_count"]) for value in recovery_results
-                    ),
+                    "sent_count": 0,
+                    "expired_count": 0,
                     "positions": [],
                     "error": f"{type(exc).__name__}: {str(exc)[:160]}",
                     "completed_at": self._now().isoformat(),
@@ -2366,6 +2491,73 @@ class HoldingGroupMonitorService:
                     "notification_delivery": self._notification_delivery_snapshot(),
                 }
                 return self._publish_result(result)
+
+            requested_count = len(valid) + len(invalid)
+            try:
+                valid, admission = self._admit_positions(valid)
+            except ScreeningScopeAuthorizationError as exc:
+                # Mandatory holdings are atomic.  If they do not fit, do not
+                # silently drop one and do not touch any market-data provider.
+                self._runtime_ledger.prune_pending_notifications(set())
+                self._states.clear()
+                self._replace_admitted_identities(set())
+                return self._publish_result(
+                    {
+                        "schema": SCHEMA,
+                        "observed_at": observed_at.isoformat(),
+                        "status": "error",
+                        "reason_code": "HOLDING_MONITOR_SCOPE_EXCEEDED",
+                        "scope_authorized": False,
+                        "scope_limit": self._config.max_symbols,
+                        "large_scope_authorized": (
+                            self._config.large_scope_authorized
+                        ),
+                        "requested_count": requested_count,
+                        "mandatory_count": sum(
+                            row.get("is_holding") is True for row in valid
+                        ),
+                        "deferred_count": 0,
+                        "declared_count": 0,
+                        "monitored_count": 0,
+                        "covered_count": 0,
+                        "active_count": 0,
+                        "closed_count": 0,
+                        "awaiting_count": 0,
+                        "failed_count": 1,
+                        "event_count": 0,
+                        "sent_count": 0,
+                        "expired_count": 0,
+                        "positions": [],
+                        "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                        "completed_at": self._now().isoformat(),
+                        "duration_ms": round(
+                            (perf_counter() - started) * 1000,
+                            3,
+                        ),
+                        "notification_delivery": (
+                            self._notification_delivery_snapshot()
+                        ),
+                        "real_account_accessed": False,
+                        "real_order_transport_enabled": False,
+                        "automated_order_authorized": False,
+                        "live_status": "LIVE_DISABLED",
+                    }
+                )
+
+            desired = {(row["market"], row["code"]) for row in valid}
+            self._runtime_ledger.prune_pending_notifications(desired)
+            self._replace_admitted_identities(desired)
+            for identity in tuple(self._states):
+                if identity not in desired:
+                    self._states.pop(identity, None)
+            scope_fields = {
+                "scope_authorized": True,
+                "scope_limit": self._config.max_symbols,
+                "large_scope_authorized": self._config.large_scope_authorized,
+                "requested_count": requested_count,
+                "mandatory_count": len(admission.mandatory_codes),
+                "deferred_count": len(admission.deferred_signal_codes),
+            }
 
             with self._lock:
                 first_result_pending = self._last_result is None
@@ -2393,6 +2585,7 @@ class HoldingGroupMonitorService:
                     {
                         "schema": SCHEMA,
                         "observed_at": observed_at.isoformat(),
+                        **scope_fields,
                         "status": (
                             "degraded"
                             if bootstrap_failed
@@ -2428,11 +2621,6 @@ class HoldingGroupMonitorService:
             grouped: dict[str, list[dict[str, object]]] = {}
             for row in valid:
                 grouped.setdefault(row["market"], []).append(row)
-            desired = {(row["market"], row["code"]) for row in valid}
-            self._runtime_ledger.prune_pending_notifications(desired)
-            for identity in tuple(self._states):
-                if identity not in desired:
-                    self._states.pop(identity, None)
 
             market_results: list[dict[str, object]] = []
             for market in sorted(
@@ -2517,6 +2705,7 @@ class HoldingGroupMonitorService:
             result = {
                 "schema": SCHEMA,
                 "observed_at": observed_at.isoformat(),
+                **scope_fields,
                 "status": overall_status,
                 "reason_code": overall_reason,
                 "declared_count": len(positions),
@@ -2653,6 +2842,20 @@ class HoldingGroupMonitorService:
                 "notification_configured": notifier_configured,
                 "interval_seconds": self._config.interval_seconds,
                 "max_events_per_notification": self._config.max_events_per_notification,
+                "scope_limit": self._config.max_symbols,
+                "large_scope_authorized": self._config.large_scope_authorized,
+                "scope_authorized": False
+                if last is None
+                else last.get("scope_authorized", False),
+                "requested_count": 0
+                if last is None
+                else last.get("requested_count", 0),
+                "mandatory_count": 0
+                if last is None
+                else last.get("mandatory_count", 0),
+                "deferred_count": 0
+                if last is None
+                else last.get("deferred_count", 0),
                 "op_level": self._config.op_level,
                 "mid_level": self._config.mid_level,
                 "big_level": self._config.big_level,

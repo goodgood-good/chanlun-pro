@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 from dataclasses import dataclass, replace
@@ -141,6 +141,16 @@ from cl_app.services.realtime_quotes import (
     AShareInstrumentSessionStatusBatch,
     validated_instrument_session_status_batch,
 )
+from cl_app.services.trading_screening_scope import (
+    DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
+    DEFAULT_VALIDATION_COHORT_SIZE,
+    ScreeningScopeAuthorizationError,
+    admit_screening_universe,
+    configured_screening_allowlist,
+    project_configured_screening_codes,
+    require_configured_screening_codes,
+    validate_screening_scope_configuration,
+)
 from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_COMPOSITE_ADJUSTMENT,
     QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT,
@@ -254,6 +264,8 @@ COMPLETE_CLOSE_IDLE_REASON = "COMPLETE_CLOSE_SNAPSHOT_OUTSIDE_ACTIVE_WINDOW"
 FULL_COVERAGE_PAUSE_REASON = "OUTSIDE_FULL_COVERAGE_REFRESH_WINDOW"
 _CACHE_GENERATION_RETENTION = 3
 _CACHE_GENERATION_FILE = re.compile(r"^[0-9a-f]{64}\.json$")
+_CACHE_SCOPE_SIDECAR_SCHEMA = "chanlun-trading-screening-cache-scope-v1"
+_CACHE_SCOPE_SIDECAR_MAX_BYTES = 64 * 1024
 _LARGE_INCOMPLETE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 _DECISION_SOURCE_UNSPECIFIED = object()
 
@@ -1111,14 +1123,7 @@ def _current_five_minute_setup_requires_segment_monitor(
     signal: Mapping[str, object],
     observed_at: datetime,
 ) -> bool:
-    """Return whether a current 5m setup still belongs in the 1m lane.
-
-    The ten-active-minute notification window applies to each newly observed
-    event.  A 1m locator that arrives later has its own fresh event timestamp,
-    so the age of the parent 5m setup must not evict an otherwise-current setup
-    from precision monitoring.  Structural replacement, not elapsed time,
-    closes this queue membership.
-    """
+    """Return whether an execution-fresh 5m setup belongs in the 1m lane."""
 
     normalize_datetime(observed_at, "segment monitor observed_at")
     stage = lifecycle_stage_from_signal(signal)
@@ -1128,6 +1133,25 @@ def _current_five_minute_setup_requires_segment_monitor(
         # can prove that the structure was replaced; wall-clock age is not that
         # proof.  Only confirmed current rows enter the 1m lane below.
         return True
+    setup = signal.get("setup_5m")
+    raw_anchor = setup.get("anchor_at") if isinstance(setup, Mapping) else None
+    try:
+        anchor_at = (
+            datetime.fromisoformat(raw_anchor)
+            if isinstance(raw_anchor, str)
+            else raw_anchor
+        )
+        if not isinstance(anchor_at, datetime):
+            return False
+        if normalize_datetime(
+            observed_at,
+            "segment monitor observed_at",
+        ) > normalize_datetime(anchor_at, "5m setup anchor_at") + timedelta(
+            seconds=MAX_FIVE_MINUTE_SETUP_AGE_SECONDS
+        ):
+            return False
+    except (TypeError, ValueError):
+        return False
     return _is_current_selection_signal(signal)
 
 
@@ -1150,49 +1174,21 @@ def _one_minute_segment_requires_monitor(
     signal: Mapping[str, object],
     observed_at: datetime,
 ) -> bool:
-    """Return whether a current 5m signal still needs the realtime 1m lane.
+    """Return whether a buy setup still awaits its first exact 1m witness.
 
-    A first 1m segment occurrence is durable structural evidence, but an A-share
-    buy locator is executable for only its declared minute boundary.  Retaining
-    that evidence must therefore not permanently remove the 5m setup from the
-    1m queue: after the boundary expires (or is missing/malformed), the setup is
-    re-armed so a later same-side physical 1m interval-nesting point can replace
-    the old locator.  Sell evidence has no buy-entry boundary and remains
-    resolved here; held/watchlisted symbols continue through the mandatory
-    monitoring lane.
+    Once a segment-difference witness exists, its first jointly-known boundary
+    is immutable.  Expiry or missing execution metadata must not put the setup
+    back into discovery and let a later witness replace it.
     """
 
     # Optional discovery capacity is only useful for buy execution.  Sell
-    # locators matter when a symbol is actually held (or explicitly watched),
+    # sell witnesses matter when a symbol is actually held (or explicitly watched),
     # and those symbols already enter the independent mandatory lane.  A
-    # non-held sell without 1m evidence must not displace a buy locator.
+    # non-held sell without 1m evidence must not displace a pending buy setup.
     if _signal_side(signal) != "buy":
         return False
-    segment = signal.get("segment_difference_1m", signal.get("trigger_1m"))
-    if not isinstance(segment, Mapping):
-        return True
-    boundary = signal.get("entry_execution_boundary")
-    if not isinstance(boundary, Mapping):
-        return True
-    raw_valid_until = boundary.get("entry_valid_until")
-    try:
-        valid_until = (
-            datetime.fromisoformat(raw_valid_until)
-            if isinstance(raw_valid_until, str)
-            else raw_valid_until
-        )
-        if not isinstance(valid_until, datetime):
-            return True
-        normalized_valid_until = normalize_datetime(
-            valid_until,
-            "1m segment entry_valid_until",
-        )
-    except (TypeError, ValueError):
-        return True
-    return normalized_valid_until <= normalize_datetime(
-        observed_at,
-        "1m segment monitor observed_at",
-    )
+    segment = signal.get("segment_difference_1m")
+    return not isinstance(segment, Mapping)
 
 
 def _is_current_selection_signal(signal: Mapping[str, object]) -> bool:
@@ -2162,22 +2158,30 @@ class NotificationDispatcher(Protocol):
 class TradingScreeningConfig:
     refresh_interval_seconds: int = 60
     max_visible_symbols: int = 500
-    max_symbols_per_refresh: int = 32
+    max_symbols_per_refresh: int = DEFAULT_VALIDATION_COHORT_SIZE
     # This is an admission-list ceiling, not a promise to run every symbol.
     # The absolute per-round deadline remains the physical capacity guard.
-    max_monitor_symbols_per_refresh: int = 512
-    max_total_symbols_per_refresh: int = 32
+    max_monitor_symbols_per_refresh: int = DEFAULT_VALIDATION_COHORT_SIZE
+    max_total_symbols_per_refresh: int = DEFAULT_VALIDATION_COHORT_SIZE
     priority_monitoring_enabled: bool = False
-    full_coverage_refresh_enabled: bool = True
+    full_coverage_refresh_enabled: bool = False
     # 运维显式要求立即重建时，本进程可暂时绕过盘中全量窗口；一旦当前逻辑的
     # 完整快照发布成功，覆盖通道会自动恢复常规时段闸门。
     force_full_coverage_until_complete: bool = False
     priority_monitor_interval_seconds: int = 60
     priority_monitor_time_budget_seconds: float = 50.0
     candidate_monitor_time_budget_seconds: float = 50.0
-    max_five_minute_candidate_symbols_per_refresh: int = 512
-    max_thirty_minute_candidate_symbols_per_refresh: int = 96
-    supportive_discovery_max_sector_rank: int = 128
+    max_five_minute_candidate_symbols_per_refresh: int = (
+        DEFAULT_VALIDATION_COHORT_SIZE
+    )
+    max_thirty_minute_candidate_symbols_per_refresh: int = (
+        DEFAULT_VALIDATION_COHORT_SIZE
+    )
+    supportive_discovery_max_sector_rank: int = DEFAULT_VALIDATION_COHORT_SIZE
+    validation_cohort_size: int = DEFAULT_VALIDATION_COHORT_SIZE
+    max_admitted_universe_symbols: int = DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS
+    large_scope_authorized: bool = False
+    admitted_universe_codes: tuple[str, ...] = ()
     five_minute_candidate_target_seconds: int = 300
     thirty_minute_candidate_target_seconds: int = 1800
     incomplete_checkpoint_interval_seconds: int = 120
@@ -2236,6 +2240,61 @@ class TradingScreeningConfig:
             raise ValueError("max_structure_age_seconds must be positive")
         if not self.algorithm_id:
             raise ValueError("algorithm_id cannot be empty")
+        validate_screening_scope_configuration(
+            validation_cohort_size=self.validation_cohort_size,
+            max_admitted_universe_symbols=self.max_admitted_universe_symbols,
+            large_scope_authorized=self.large_scope_authorized,
+            full_coverage_enabled=self.full_coverage_refresh_enabled,
+            force_full_coverage_until_complete=(
+                self.force_full_coverage_until_complete
+            ),
+            per_refresh_limits={
+                "max_symbols_per_refresh": self.max_symbols_per_refresh,
+                "max_monitor_symbols_per_refresh": (
+                    self.max_monitor_symbols_per_refresh
+                ),
+                "max_total_symbols_per_refresh": self.max_total_symbols_per_refresh,
+                "max_five_minute_candidate_symbols_per_refresh": (
+                    self.max_five_minute_candidate_symbols_per_refresh
+                ),
+                "max_thirty_minute_candidate_symbols_per_refresh": (
+                    self.max_thirty_minute_candidate_symbols_per_refresh
+                ),
+            },
+        )
+        if (
+            not isinstance(self.admitted_universe_codes, tuple)
+            or len(self.admitted_universe_codes)
+            != len(set(self.admitted_universe_codes))
+            or any(
+                not isinstance(code, str)
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in self.admitted_universe_codes
+            )
+            or len(self.admitted_universe_codes)
+            > self.effective_monitor_universe_limit
+        ):
+            raise ValueError("admitted_universe_codes must be a unique bounded tuple")
+
+    @property
+    def effective_monitor_universe_limit(self) -> int:
+        """Return the explicitly authorized union limit for Web monitoring."""
+
+        return (
+            self.max_admitted_universe_symbols
+            if self.large_scope_authorized
+            else self.validation_cohort_size
+        )
+
+    @property
+    def screening_scope_mode(self) -> str:
+        """Return the user-visible operational scope, independent of cache state."""
+
+        if self.full_coverage_refresh_enabled:
+            return "FULL_MARKET"
+        if self.large_scope_authorized:
+            return "LARGE_SCOPE"
+        return "VALIDATION_COHORT"
 
     @property
     def effective_full_coverage_worker_count(self) -> int:
@@ -2260,6 +2319,63 @@ class TradingScreeningConfig:
         return 1
 
 
+def _configured_scope_allowlist(
+    config: TradingScreeningConfig,
+) -> frozenset[str] | None:
+    return configured_screening_allowlist(
+        scope_mode=config.screening_scope_mode,
+        admitted_codes=config.admitted_universe_codes,
+    )
+
+
+def _project_codes_to_configured_scope(
+    values: Sequence[str],
+    config: TradingScreeningConfig,
+) -> tuple[str, ...]:
+    return project_configured_screening_codes(
+        values,
+        scope_mode=config.screening_scope_mode,
+        admitted_codes=config.admitted_universe_codes,
+    )
+
+
+def _require_codes_in_configured_scope(
+    values: Sequence[str],
+    config: TradingScreeningConfig,
+    *,
+    subject: str,
+) -> tuple[str, ...]:
+    return require_configured_screening_codes(
+        values,
+        scope_mode=config.screening_scope_mode,
+        admitted_codes=config.admitted_universe_codes,
+        subject=subject,
+    )
+
+
+def _project_scan_plan_to_configured_scope(
+    plan: ScanPlan,
+    config: TradingScreeningConfig,
+) -> ScanPlan:
+    """Remove every optional planner subject outside the exact Web cohort."""
+
+    allowlist = _configured_scope_allowlist(config)
+    if allowlist is None:
+        return plan
+    symbols = tuple(code for code in plan.symbols if code in allowlist)
+    return ScanPlan(
+        sectors=plan.sectors,
+        symbols=symbols,
+        symbol_frequencies=tuple(
+            (code, frequencies)
+            for code, frequencies in plan.symbol_frequencies
+            if code in allowlist
+        ),
+        full_market_history_scan=False,
+        background_full_refresh_required=plan.background_full_refresh_required,
+    )
+
+
 def _initial_snapshot(
     config: TradingScreeningConfig,
     *,
@@ -2271,6 +2387,9 @@ def _initial_snapshot(
         "algorithm_id": config.algorithm_id,
         "structure_contract_id": config.structure_contract_id,
         "parameter_set_id": config.parameter_set_id,
+        "screening_scope_mode": config.screening_scope_mode,
+        "effective_monitor_universe_limit": config.effective_monitor_universe_limit,
+        "admitted_universe_codes": [],
         "decision_source_snapshot_id": decision_source_snapshot_id,
         "selection_research_revision": selection_research_revision,
         "available": False,
@@ -3734,7 +3853,8 @@ def _cache_is_valid(
     """校验外部或持久化快照的语义契约与内容身份。"""
 
     return bool(
-        _cache_contract_is_valid(
+        _restored_snapshot_scope_is_valid(value, config)
+        and _cache_contract_is_valid(
             value,
             config,
             decision_core_id,
@@ -3745,6 +3865,158 @@ def _cache_is_valid(
         and value.get("snapshot_content_sha256")
         == live_screening_snapshot_content_sha256(value)
     )
+
+
+def _restored_snapshot_scope_is_valid(
+    value: object,
+    config: TradingScreeningConfig,
+) -> bool:
+    """Prove a persisted snapshot belongs to the currently authorized scope.
+
+    Full-market mode deliberately preserves the historical cache semantics.  A
+    validation or explicitly bounded large-scope process may only restore a
+    snapshot whose complete code-bearing state (publication, coverage ledger
+    and retry queues) fits inside the current admission ceiling.  Refusing the
+    entire immutable snapshot avoids presenting a clipped archive as if it were
+    an authoritative publication.
+    """
+
+    if config.screening_scope_mode == "FULL_MARKET":
+        return True
+    ordered_codes = _restored_snapshot_scope_codes(value)
+    nested_member_codes = _restored_snapshot_nested_member_codes(value)
+    if ordered_codes is None or nested_member_codes is None:
+        return False
+    assert isinstance(value, Mapping)
+    raw_admitted_codes = value.get("admitted_universe_codes")
+    if (
+        value.get("screening_scope_mode") != config.screening_scope_mode
+        or value.get("effective_monitor_universe_limit")
+        != config.effective_monitor_universe_limit
+        or not isinstance(raw_admitted_codes, list)
+        or tuple(raw_admitted_codes) != ordered_codes
+        or len(set((*ordered_codes, *nested_member_codes)))
+        > config.effective_monitor_universe_limit
+        or (
+            config.admitted_universe_codes
+            and not set((*ordered_codes, *nested_member_codes)).issubset(
+                config.admitted_universe_codes
+            )
+        )
+    ):
+        return False
+    manifest = value.get("coverage_manifest")
+    if not isinstance(manifest, Mapping):
+        return False
+    raw_discovered_codes = manifest.get("discovered_codes")
+    if not isinstance(raw_discovered_codes, list):
+        return False
+    admitted = admit_screening_universe(
+        # Include code-bearing rejections and diagnostics as well as coverage
+        # subjects.  The exact producer list above prevents those nested rows
+        # from widening a bounded restore without appearing in its proof.
+        signal_codes=ordered_codes,
+        max_symbols=config.effective_monitor_universe_limit,
+        large_scope_authorized=config.large_scope_authorized,
+    )
+    return not admitted.deferred_signal_codes
+
+
+def _restored_snapshot_scope_codes(value: object) -> tuple[str, ...] | None:
+    """Return every strategy-subject identity carried by one snapshot."""
+
+    if not isinstance(value, Mapping):
+        return None
+    manifest = value.get("coverage_manifest")
+    signals = value.get("signals")
+    if not isinstance(manifest, Mapping) or not isinstance(signals, list):
+        return None
+
+    ordered_codes: list[str] = []
+    for field in (
+        "discovered_codes",
+        "completed_codes",
+        "excluded_codes",
+        "failed_codes",
+        "discarded_out_of_scope_retry_codes",
+    ):
+        raw_codes = manifest.get(field)
+        if not isinstance(raw_codes, list) or any(
+            not isinstance(code, str) or not code for code in raw_codes
+        ):
+            return None
+        ordered_codes.extend(raw_codes)
+    for field in (
+        "pending_frequencies",
+        "backoff_frequencies",
+        "deferred_frequencies",
+    ):
+        raw_frequency_map = manifest.get(field)
+        if not isinstance(raw_frequency_map, Mapping) or any(
+            not isinstance(code, str) or not code for code in raw_frequency_map
+        ):
+            return None
+        ordered_codes.extend(str(code) for code in raw_frequency_map)
+    for signal in signals:
+        if not isinstance(signal, Mapping):
+            return None
+        code = signal.get("code")
+        if not isinstance(code, str) or not code:
+            return None
+        ordered_codes.append(code)
+    for field in ("errors", "monitor_instrument_exclusions"):
+        rows = value.get(field)
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return None
+            ordered_codes.extend(_explicit_strategy_subject_codes(row))
+    return tuple(dict.fromkeys(ordered_codes))
+
+
+def _restored_snapshot_nested_member_codes(value: object) -> tuple[str, ...] | None:
+    """Return every sector/runtime member identity embedded in a snapshot."""
+
+    if not isinstance(value, Mapping):
+        return None
+    evidence = value.get("sector_strength_evidence")
+    if evidence is None:
+        return ()
+    if not isinstance(evidence, Mapping):
+        return None
+    sectors = evidence.get("sectors")
+    if not isinstance(sectors, list):
+        return None
+    codes: list[str] = []
+    for row in sectors:
+        if not isinstance(row, Mapping):
+            return None
+        members = row.get("member_symbols")
+        if not isinstance(members, list) or any(
+            not isinstance(code, str)
+            or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+            for code in members
+        ):
+            return None
+        codes.extend(members)
+    return tuple(dict.fromkeys(codes))
+
+
+def _explicit_strategy_subject_codes(value: object) -> tuple[str, ...]:
+    """Collect identities explicitly labelled as code/symbol in diagnostics."""
+
+    codes: list[str] = []
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if key in {"code", "symbol"} and isinstance(nested, str) and nested:
+                codes.append(nested)
+            else:
+                codes.extend(_explicit_strategy_subject_codes(nested))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            codes.extend(_explicit_strategy_subject_codes(nested))
+    return tuple(dict.fromkeys(codes))
 
 
 def _screening_review_readiness(
@@ -4450,6 +4722,118 @@ class TradingScreeningService:
                 return
         except (KeyError, TypeError, ValueError):
             return
+        if self._config.screening_scope_mode != "FULL_MARKET":
+            raw_scope_mode = payload.get("screening_scope_mode")
+            raw_scope_limit = payload.get("effective_monitor_universe_limit")
+            raw_admitted_codes = payload.get("admitted_universe_codes")
+            if (
+                raw_scope_mode != self._config.screening_scope_mode
+                or raw_scope_limit
+                != self._config.effective_monitor_universe_limit
+                or not isinstance(raw_admitted_codes, list)
+                or any(
+                    not isinstance(code, str) or not code
+                    for code in raw_admitted_codes
+                )
+                or len(raw_admitted_codes) != len(set(raw_admitted_codes))
+            ):
+                # Older compact files did not carry an immutable admission
+                # proof.  A bounded process must fail closed instead of treating
+                # the conclusions themselves as evidence of their own scope.
+                return
+            # Every code-bearing field participates in the proof.  In
+            # particular, older files may have an empty candidate universe but
+            # dozens of ``latest_documents``; checking only five/thirty-minute
+            # queues would restore those stale conclusions onto the page.
+            restored_signal_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *raw_five_universe,
+                        *raw_last_codes,
+                        *raw_last_five_codes,
+                        *raw_last_deferred_codes,
+                        *five_last_success_at,
+                        *code_observations,
+                        *(str(value) for value in raw_codes.values()),
+                        *candidate_symbol_exclusions,
+                        *(
+                            code
+                            for error in (*raw_last_errors, *raw_candidate_errors)
+                            for code in _explicit_strategy_subject_codes(error)
+                        ),
+                    )
+                )
+            )
+            restored_supportive_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *raw_thirty_universe,
+                        *raw_last_thirty_codes,
+                        *thirty_last_success_at,
+                    )
+                )
+            )
+            restored_recheck_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *raw_recheck_pending_codes,
+                        *raw_recheck_last_attempted_codes,
+                        *raw_recheck_last_deferred_codes,
+                        *(
+                            code
+                            for error in raw_recheck_last_errors
+                            for code in _explicit_strategy_subject_codes(error)
+                        ),
+                    )
+                )
+            )
+            restored_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *restored_signal_codes,
+                        *restored_supportive_codes,
+                        *restored_recheck_codes,
+                    )
+                )
+            )
+            configured_allowlist = _configured_scope_allowlist(self._config)
+            if (
+                set(restored_codes) != set(raw_admitted_codes)
+                or (
+                    configured_allowlist is not None
+                    and not set(restored_codes).issubset(configured_allowlist)
+                )
+            ):
+                return
+            with self._state_lock:
+                current_snapshot = self._snapshot
+            current_snapshot_codes = (
+                _restored_snapshot_scope_codes(current_snapshot)
+                if _restored_snapshot_scope_is_valid(
+                    current_snapshot,
+                    self._config,
+                )
+                else ()
+            )
+            restored_admission = admit_screening_universe(
+                signal_codes=(
+                    *(current_snapshot_codes or ()),
+                    *restored_signal_codes,
+                ),
+                supportive_codes=restored_supportive_codes,
+                recheck_codes=restored_recheck_codes,
+                max_symbols=self._config.effective_monitor_universe_limit,
+                large_scope_authorized=self._config.large_scope_authorized,
+            )
+            if (
+                restored_admission.deferred_signal_codes
+                or restored_admission.deferred_supportive_codes
+                or restored_admission.deferred_recheck_codes
+            ):
+                # A broad state file from a previous production run cannot
+                # silently repopulate a bounded validation process.  Ignore it
+                # rather than publishing a clipped, non-authoritative queue.
+                return
         if not set(five_last_success_at).issubset(set(raw_five_universe)) or not set(
             thirty_last_success_at
         ).issubset(set(raw_thirty_universe)):
@@ -4489,6 +4873,18 @@ class TradingScreeningService:
                 is not None
             }
             recheck_codes.update(raw_recheck_pending_codes)
+            recheck_codes = set(
+                _project_codes_to_configured_scope(
+                    tuple(sorted(recheck_codes)),
+                    self._config,
+                )
+            )
+            recheck_admission = admit_screening_universe(
+                recheck_codes=sorted(recheck_codes),
+                max_symbols=self._config.effective_monitor_universe_limit,
+                large_scope_authorized=self._config.large_scope_authorized,
+            )
+            recheck_codes = set(recheck_admission.recheck_codes)
             with self._background_lock:
                 self._decision_rule_recheck_source_snapshot_sha256 = str(
                     payload["content_sha256"]
@@ -4621,10 +5017,48 @@ class TradingScreeningService:
                 copy.deepcopy(value)
                 for value in self._decision_rule_recheck_last_errors
             )
+        admitted_universe_codes = tuple(
+            dict.fromkeys(
+                (
+                    *five_universe,
+                    *last_codes,
+                    *last_five_codes,
+                    *last_deferred_codes,
+                    *five_last_success_at,
+                    *code_observations,
+                    *signal_codes.values(),
+                    *(
+                        str(value["code"])
+                        for value in candidate_symbol_exclusions
+                    ),
+                    *(
+                        code
+                        for error in (*last_errors, *candidate_last_errors)
+                        for code in _explicit_strategy_subject_codes(error)
+                    ),
+                    *thirty_universe,
+                    *last_thirty_codes,
+                    *thirty_last_success_at,
+                    *recheck_pending_codes,
+                    *recheck_last_attempted_codes,
+                    *recheck_last_deferred_codes,
+                    *(
+                        code
+                        for error in recheck_last_errors
+                        for code in _explicit_strategy_subject_codes(error)
+                    ),
+                )
+            )
+        )
         payload: dict[str, object] = {
             "schema": PRIORITY_MONITOR_SCHEMA,
             "candidate_monitor_contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
             "screening_policy_id": _screening_policy_id(),
+            "screening_scope_mode": self._config.screening_scope_mode,
+            "effective_monitor_universe_limit": (
+                self._config.effective_monitor_universe_limit
+            ),
+            "admitted_universe_codes": list(admitted_universe_codes),
             "decision_core_id": self._decision_core_id,
             "decision_source_snapshot_id": self._decision_source_snapshot_id,
             "selection_research_revision": self._selection_research_revision,
@@ -5014,11 +5448,14 @@ class TradingScreeningService:
             "PRESELECTION_CONTINUITY",
         }:
             raise ValueError("frozen priority sector source mode is invalid")
-        continuity_codes = tuple(
-            code
-            for code in dict.fromkeys(preselection_continuity_codes)
-            if re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
-            and code not in excluded_codes
+        continuity_codes = _project_codes_to_configured_scope(
+            tuple(
+                code
+                for code in dict.fromkeys(preselection_continuity_codes)
+                if re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+                and code not in excluded_codes
+            ),
+            self._config,
         )
         if not force_startup_bootstrap and not self._priority_monitor_due(observed_at):
             return
@@ -5027,12 +5464,16 @@ class TradingScreeningService:
         candidate_lunch_catchup = _candidate_monitor_lunch_catchup_open(observed_at)
         monitor_session = observed_at.astimezone(CN).date()
         with self._background_lock:
+            configured_allowlist = _configured_scope_allowlist(self._config)
             active_candidate_symbol_exclusions = {
                 code: copy.deepcopy(value)
                 for code, value in self._candidate_monitor_symbol_exclusions.items()
                 if _candidate_monitor_symbol_exclusion_is_active(
                     value,
                     observed_at=observed_at,
+                )
+                and (
+                    configured_allowlist is None or code in configured_allowlist
                 )
             }
             # Epoch changes are the retry trigger.  Pruning here prevents a
@@ -5043,7 +5484,10 @@ class TradingScreeningService:
             )
             if self._candidate_monitor_suspended_session == monitor_session:
                 candidate_suspended_codes = set(
-                    self._candidate_monitor_current_session_suspended_codes
+                    _project_codes_to_configured_scope(
+                        self._candidate_monitor_current_session_suspended_codes,
+                        self._config,
+                    )
                 )
             else:
                 candidate_suspended_codes = set()
@@ -5186,19 +5630,22 @@ class TradingScreeningService:
             if row.ordinal <= self._config.supportive_discovery_max_sector_rank
             and row.assessment.regime == "supportive"
         }
-        supportive_eligible_codes = tuple(
-            code
-            for code, assessment in sorted(
-                routing.eligible_sector_by_code.items(),
-                key=lambda item: (
-                    live_supportive_sector_ordinals.get(
-                        item[1].sector_id,
-                        10**9,
+        supportive_eligible_codes = _project_codes_to_configured_scope(
+            tuple(
+                code
+                for code, assessment in sorted(
+                    routing.eligible_sector_by_code.items(),
+                    key=lambda item: (
+                        live_supportive_sector_ordinals.get(
+                            item[1].sector_id,
+                            10**9,
+                        ),
+                        item[0],
                     ),
-                    item[0],
-                ),
-            )
-            if assessment.sector_id in live_supportive_sector_ordinals
+                )
+                if assessment.sector_id in live_supportive_sector_ordinals
+            ),
+            self._config,
         )
         eligible_sector_codes = set(routing.eligible_sector_by_code)
 
@@ -5210,10 +5657,23 @@ class TradingScreeningService:
             self._market_data.holdings_scope(),
             "holdings_scope",
         )
-        mandatory_scope = tuple(dict.fromkeys((*holdings, *watchlist)))
+        mandatory_scope = _require_codes_in_configured_scope(
+            tuple(dict.fromkeys((*holdings, *watchlist))),
+            self._config,
+            subject="mandatory holdings/watchlist scope",
+        )
         mandatory_codes = tuple(
             code for code in mandatory_scope if code not in excluded_codes
         )
+        # Fail before the first realtime quote/status or structure request.  A
+        # large manually maintained holdings/watchlist scope must never turn a
+        # validation restart into an implicit broad-market run.
+        mandatory_admission = admit_screening_universe(
+            mandatory_codes=mandatory_codes,
+            max_symbols=self._config.effective_monitor_universe_limit,
+            large_scope_authorized=self._config.large_scope_authorized,
+        )
+        mandatory_codes = mandatory_admission.mandatory_codes
         mandatory_code_set = set(mandatory_codes)
         candidate_cadence_epoch_excluded_codes = {
             code
@@ -5345,19 +5805,40 @@ class TradingScreeningService:
             self._priority_monitor_instrument_status_probe_error = (
                 instrument_status_probe_error
             )
+        configured_allowlist = _configured_scope_allowlist(self._config)
         main_signal_documents = tuple(
-            row for row in previous.get("signals", ()) if isinstance(row, Mapping)
+            row
+            for row in previous.get("signals", ())
+            if isinstance(row, Mapping)
+            and (
+                configured_allowlist is None
+                or row.get("code") in configured_allowlist
+            )
         )
         with self._background_lock:
             monitor_signal_documents = tuple(
                 copy.deepcopy(row)
                 for row in self._priority_monitor_latest_documents.values()
+                if configured_allowlist is None
+                or row.get("code") in configured_allowlist
             )
-            monitor_code_observations = dict(self._priority_monitor_code_observations)
-            decision_rule_recheck_codes = tuple(
-                sorted(self._decision_rule_recheck_pending_codes)
+            monitor_code_observations = {
+                code: value
+                for code, value in self._priority_monitor_code_observations.items()
+                if configured_allowlist is None or code in configured_allowlist
+            }
+            decision_rule_recheck_codes = _project_codes_to_configured_scope(
+                tuple(sorted(self._decision_rule_recheck_pending_codes)),
+                self._config,
             )
-            previous_priority_codes = tuple(self._priority_monitor_last_codes)
+            if configured_allowlist is not None:
+                self._decision_rule_recheck_pending_codes.intersection_update(
+                    configured_allowlist
+                )
+            previous_priority_codes = _project_codes_to_configured_scope(
+                self._priority_monitor_last_codes,
+                self._config,
+            )
         decision_rule_recheck_code_set = set(decision_rule_recheck_codes)
         # Continuity identifies the bounded one-off recheck queue; it is not by
         # itself evidence that every archived code still belongs to the live 5m
@@ -5436,6 +5917,7 @@ class TradingScreeningService:
             * five_cadence_rounds,
             self._config.max_thirty_minute_candidate_symbols_per_refresh
             * thirty_cadence_rounds,
+            self._config.effective_monitor_universe_limit,
         )
         reserved_candidate_codes = set(monitorable_mandatory_codes)
         reserved_candidate_codes.update(
@@ -5456,9 +5938,21 @@ class TradingScreeningService:
             0,
             configured_candidate_universe_capacity - len(reserved_candidate_codes),
         )
-        supportive_codes = list(
-            eligible_supportive_codes[:supportive_admission_capacity]
+        universe_admission = admit_screening_universe(
+            mandatory_codes=monitorable_mandatory_codes,
+            signal_codes=signal_candidate_codes,
+            supportive_codes=(
+                eligible_supportive_codes[:supportive_admission_capacity]
+            ),
+            recheck_codes=decision_rule_recheck_codes,
+            max_symbols=self._config.effective_monitor_universe_limit,
+            large_scope_authorized=self._config.large_scope_authorized,
         )
+        monitorable_mandatory_codes = universe_admission.mandatory_codes
+        signal_candidate_codes = universe_admission.signal_codes
+        admitted_signal_code_set = set(signal_candidate_codes)
+        supportive_codes = list(universe_admission.supportive_codes)
+        decision_rule_recheck_codes = universe_admission.recheck_codes
         with self._background_lock:
             self._candidate_monitor_supportive_eligible_count = len(
                 eligible_supportive_codes
@@ -5479,10 +5973,7 @@ class TradingScreeningService:
         rearmed_segment_documents = tuple(
             row
             for row in pending_segment_documents
-            if isinstance(
-                row.get("segment_difference_1m", row.get("trigger_1m")),
-                Mapping,
-            )
+            if isinstance(row.get("segment_difference_1m"), Mapping)
         )
         current_pending_segment_documents = tuple(
             row
@@ -5499,6 +5990,11 @@ class TradingScreeningService:
                 )
             ),
             allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
+        )
+        immediate_signal_universe = tuple(
+            code
+            for code in immediate_signal_universe
+            if code in admitted_signal_code_set
         )
         rearmed_segment_universe = _priority_signal_candidate_codes(
             tuple(
@@ -5517,6 +6013,11 @@ class TradingScreeningService:
                 )
             ),
             allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
+        )
+        rearmed_segment_universe = tuple(
+            code
+            for code in rearmed_segment_universe
+            if code in admitted_signal_code_set
         )
         urgent_signal_universe = immediate_signal_universe
         urgent_signal_codes = _take_rotating_priority_batch(
@@ -6805,7 +7306,11 @@ class TradingScreeningService:
                 )
             error = {
                 "error_type": "priority_monitor_error",
-                "reason_code": "PRIORITY_MONITOR_FAILED",
+                "reason_code": (
+                    exc.reason_code
+                    if isinstance(exc, ScreeningScopeAuthorizationError)
+                    else "PRIORITY_MONITOR_FAILED"
+                ),
                 "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
             }
             self._record_priority_monitor_result(
@@ -6901,6 +7406,8 @@ class TradingScreeningService:
         return epoch_id == expected
 
     def _restore_coverage_state(self, snapshot: Mapping[str, object]) -> bool:
+        if not _restored_snapshot_scope_is_valid(snapshot, self._config):
+            return False
         manifest = snapshot.get("coverage_manifest")
         if not isinstance(manifest, Mapping):
             return False
@@ -7132,10 +7639,173 @@ class TradingScreeningService:
     def _cache_generation_directory(self) -> Path:
         return self._cache_path.with_name(f".{self._cache_path.name}.generations")
 
+    @staticmethod
+    def _cache_scope_sidecar_path(path: Path) -> Path:
+        return path.with_name(f"{path.name}.scope")
+
+    def _cache_scope_sidecar_document(
+        self,
+        path: Path,
+        payload: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        codes = _restored_snapshot_scope_codes(payload)
+        nested_member_codes = _restored_snapshot_nested_member_codes(payload)
+        raw_admitted_codes = payload.get("admitted_universe_codes")
+        if (
+            codes is None
+            or nested_member_codes is None
+            or payload.get("screening_scope_mode")
+            != self._config.screening_scope_mode
+            or payload.get("effective_monitor_universe_limit")
+            != self._config.effective_monitor_universe_limit
+            or not isinstance(raw_admitted_codes, list)
+            or tuple(raw_admitted_codes) != codes
+            or len(set((*codes, *nested_member_codes)))
+            > self._config.effective_monitor_universe_limit
+            or (
+                self._config.admitted_universe_codes
+                and not set((*codes, *nested_member_codes)).issubset(
+                    self._config.admitted_universe_codes
+                )
+            )
+        ):
+            return None
+        try:
+            payload_stat = path.stat()
+        except OSError:
+            return None
+        return {
+            "schema": _CACHE_SCOPE_SIDECAR_SCHEMA,
+            "screening_scope_mode": payload.get("screening_scope_mode"),
+            "effective_monitor_universe_limit": payload.get(
+                "effective_monitor_universe_limit"
+            ),
+            "strategy_subject_codes": list(codes),
+            "nested_member_codes": list(nested_member_codes),
+            "payload_name": path.name,
+            "payload_size_bytes": payload_stat.st_size,
+            "payload_mtime_ns": payload_stat.st_mtime_ns,
+            "snapshot_content_sha256": payload.get("snapshot_content_sha256"),
+        }
+
+    def _persist_cache_scope_sidecar(
+        self,
+        path: Path,
+        payload: Mapping[str, object],
+    ) -> bool:
+        """Persist the small admission proof after the payload is durable."""
+
+        if self._config.screening_scope_mode == "FULL_MARKET":
+            return True
+        sidecar = self._cache_scope_sidecar_path(path)
+        document = self._cache_scope_sidecar_document(path, payload)
+        if document is None:
+            sidecar.unlink(missing_ok=True)
+            return False
+        temporary = sidecar.with_name(
+            f".{sidecar.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump(
+                    document,
+                    handle,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, sidecar)
+        except OSError:
+            sidecar.unlink(missing_ok=True)
+            return False
+        finally:
+            temporary.unlink(missing_ok=True)
+        return True
+
+    def _cache_scope_sidecar_allows_payload(self, path: Path) -> bool:
+        """Admit a bounded cache without opening its potentially huge payload."""
+
+        if self._config.screening_scope_mode == "FULL_MARKET":
+            return True
+        sidecar = self._cache_scope_sidecar_path(path)
+        try:
+            if sidecar.stat().st_size > _CACHE_SCOPE_SIDECAR_MAX_BYTES:
+                return False
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            payload_stat = path.stat()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(document, Mapping):
+            return False
+        codes = document.get("strategy_subject_codes")
+        nested_member_codes = document.get("nested_member_codes")
+        if (
+            document.get("schema") != _CACHE_SCOPE_SIDECAR_SCHEMA
+            or document.get("screening_scope_mode")
+            != self._config.screening_scope_mode
+            or document.get("effective_monitor_universe_limit")
+            != self._config.effective_monitor_universe_limit
+            or document.get("payload_name") != path.name
+            or document.get("payload_size_bytes") != payload_stat.st_size
+            or document.get("payload_mtime_ns") != payload_stat.st_mtime_ns
+            or not isinstance(document.get("snapshot_content_sha256"), str)
+            or not isinstance(codes, list)
+            or not isinstance(nested_member_codes, list)
+            or any(
+                not isinstance(code, str)
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in codes
+            )
+            or any(
+                not isinstance(code, str)
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in nested_member_codes
+            )
+            or len(codes) != len(set(codes))
+            or len(nested_member_codes) != len(set(nested_member_codes))
+            or len(set((*codes, *nested_member_codes)))
+            > self._config.effective_monitor_universe_limit
+            or (
+                self._config.admitted_universe_codes
+                and not set((*codes, *nested_member_codes)).issubset(
+                    self._config.admitted_universe_codes
+                )
+            )
+        ):
+            return False
+        return True
+
+    def _cache_scope_sidecar_matches_loaded_payload(
+        self,
+        path: Path,
+        payload: Mapping[str, object],
+    ) -> bool:
+        if self._config.screening_scope_mode == "FULL_MARKET":
+            return True
+        try:
+            document = json.loads(
+                self._cache_scope_sidecar_path(path).read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return bool(
+            isinstance(document, Mapping)
+            and document.get("snapshot_content_sha256")
+            == payload.get("snapshot_content_sha256")
+        )
+
     def _valid_cache_from_path(self, path: Path) -> dict[str, object] | None:
+        if not self._cache_scope_sidecar_allows_payload(path):
+            return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, Mapping) or not self._cache_scope_sidecar_matches_loaded_payload(
+            path, value
+        ):
             return None
         # ``json.loads`` 已生成全新对象树；此处深拷贝超过 100 MiB 的已校验快照只会
         # 让启动内存翻倍，不会增加隔离性，因为返回树本身即服务私有的不可变发布。
@@ -7231,6 +7901,18 @@ class TradingScreeningService:
                 )
             )
         }
+        codes = set(
+            _project_codes_to_configured_scope(
+                tuple(sorted(codes)),
+                self._config,
+            )
+        )
+        recheck_admission = admit_screening_universe(
+            recheck_codes=sorted(codes),
+            max_symbols=self._config.effective_monitor_universe_limit,
+            large_scope_authorized=self._config.large_scope_authorized,
+        )
+        codes = set(recheck_admission.recheck_codes)
         with self._background_lock:
             self._decision_rule_recheck_source_snapshot_sha256 = source_sha256
             self._decision_rule_recheck_source_core_id = cached_core_id
@@ -7307,6 +7989,21 @@ class TradingScreeningService:
             or not self._coverage_epoch_identity_valid(snapshot)
         ):
             return False
+        try:
+            continuity_discovered_count = int(
+                audit.get("discovered_symbol_count", 0)
+            )
+        except (TypeError, ValueError):
+            return False
+        if (
+            continuity_discovered_count
+            > self._config.effective_monitor_universe_limit
+            and self._config.screening_scope_mode != "FULL_MARKET"
+        ):
+            # A complete production snapshot is not a bounded validation or
+            # large-scope cohort.  Do not use it to repopulate sector/supportive
+            # or recheck state after a source-only code change.
+            return False
         target = _preselection_target_session(snapshot, self._clock())
         if target.get("aligned") is not True:
             return False
@@ -7348,8 +8045,24 @@ class TradingScreeningService:
         raw_signals = snapshot.get("signals")
         if not isinstance(raw_signals, list):
             return False
+        configured_allowlist = _configured_scope_allowlist(self._config)
+        if configured_allowlist is not None:
+            sector_members = {
+                sector_id: tuple(
+                    code for code in members if code in configured_allowlist
+                )
+                for sector_id, members in sector_members.items()
+            }
         signal_documents = tuple(row for row in raw_signals if isinstance(row, Mapping))
-        signal_codes = _priority_signal_candidate_codes(signal_documents)
+        signal_admission = admit_screening_universe(
+            signal_codes=_project_codes_to_configured_scope(
+                _priority_signal_candidate_codes(signal_documents),
+                self._config,
+            ),
+            max_symbols=self._config.effective_monitor_universe_limit,
+            large_scope_authorized=self._config.large_scope_authorized,
+        )
+        signal_codes = signal_admission.signal_codes
         try:
             routing = _sector_member_routing(
                 assessments=sector_batch.assessments,
@@ -7411,8 +8124,16 @@ class TradingScreeningService:
                 return False
             self._decision_rule_recheck_source_snapshot_sha256 = continuity_source
             self._decision_rule_recheck_source_core_id = self._decision_core_id
+            recheck_admission = admit_screening_universe(
+                recheck_codes=_project_codes_to_configured_scope(
+                    self._preselection_continuity_signal_codes,
+                    self._config,
+                ),
+                max_symbols=self._config.effective_monitor_universe_limit,
+                large_scope_authorized=self._config.large_scope_authorized,
+            )
             self._decision_rule_recheck_pending_codes = set(
-                self._preselection_continuity_signal_codes
+                recheck_admission.recheck_codes
             )
             self._decision_rule_recheck_last_attempted_codes = ()
             self._decision_rule_recheck_last_deferred_codes = ()
@@ -7435,11 +8156,16 @@ class TradingScreeningService:
             self._preselection_continuity_sector_runtime_hydrated = False
         return active
 
-    @staticmethod
-    def _cache_document_from_path(path: Path) -> dict[str, object] | None:
+    def _cache_document_from_path(self, path: Path) -> dict[str, object] | None:
+        if not self._cache_scope_sidecar_allows_payload(path):
+            return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, Mapping) or not self._cache_scope_sidecar_matches_loaded_payload(
+            path, value
+        ):
             return None
         return value if isinstance(value, dict) else None
 
@@ -7476,6 +8202,13 @@ class TradingScreeningService:
         generations = self._generation_paths()
         self._cache_generation_count = len(generations)
         self._cache_recovered_from_generation = None
+        if not self._cache_scope_sidecar_allows_payload(self._cache_path):
+            if self._cache_path.exists():
+                self._quarantined_cache_reason = "CACHE_SCOPE_PROOF_MISSING_OR_INVALID"
+                return None
+            return self._recover_cache_or_preselection_from_generations(
+                generations, recover_current_cache=True
+            )
         try:
             current_value = json.loads(self._cache_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -7483,6 +8216,15 @@ class TradingScreeningService:
             # 才允许回退到不可变历史代。
             pass
         else:
+            if not isinstance(current_value, Mapping) or not (
+                self._cache_scope_sidecar_matches_loaded_payload(
+                    self._cache_path, current_value
+                )
+            ):
+                self._quarantined_cache_reason = (
+                    "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH"
+                )
+                return None
             if isinstance(current_value, dict):
                 current_manifest = current_value.get("coverage_manifest")
                 current_epoch_id = current_value.get("coverage_epoch_id")
@@ -7491,15 +8233,23 @@ class TradingScreeningService:
                     and current_value.get("snapshot_content_sha256")
                     == live_screening_snapshot_content_sha256(current_value)
                 )
-                current_contract_valid = _cache_contract_is_valid(
+                current_scope_valid = _restored_snapshot_scope_is_valid(
                     current_value,
                     self._config,
-                    self._decision_core_id,
-                    self._selection_research_revision,
-                    self._decision_source_snapshot_id,
+                )
+                current_contract_valid = bool(
+                    current_scope_valid
+                    and _cache_contract_is_valid(
+                        current_value,
+                        self._config,
+                        self._decision_core_id,
+                        self._selection_research_revision,
+                        self._decision_source_snapshot_id,
+                    )
                 )
                 recoverable_checkpoint_identity = bool(
-                    current_content_identity_valid
+                    current_scope_valid
+                    and current_content_identity_valid
                     and current_value.get("schema") == SCHEMA
                     and current_value.get("algorithm_id") == self._config.algorithm_id
                     and current_value.get("structure_contract_id")
@@ -7524,7 +8274,8 @@ class TradingScreeningService:
                     and current_manifest.get("coverage_epoch_id") == current_epoch_id
                 )
                 continuity_checkpoint_identity = bool(
-                    current_content_identity_valid
+                    current_scope_valid
+                    and current_content_identity_valid
                     and current_value.get("schema") == SCHEMA
                     and current_value.get("algorithm_id") == self._config.algorithm_id
                     and current_value.get("structure_contract_id")
@@ -7661,6 +8412,110 @@ class TradingScreeningService:
         with self._state_lock:
             return copy.deepcopy(self._snapshot)
 
+    def admitted_universe_codes(self) -> tuple[str, ...] | None:
+        """Return the bounded runtime subjects, or ``None`` for FULL_MARKET.
+
+        This is a read-only projection used by Web presentation and review
+        archives.  It never consults QMT and therefore cannot turn a page read
+        into discovery work.
+        """
+
+        if self._config.screening_scope_mode == "FULL_MARKET":
+            return None
+        if _configured_scope_allowlist(self._config) is not None:
+            # The configured cohort is the authorization boundary, not a
+            # snapshot of whichever lanes happen to be active this minute.
+            # Suspended, excluded, or not-yet-due symbols must not disappear
+            # from Web/cache admission merely because they consumed no work.
+            return self._config.admitted_universe_codes
+        with self._state_lock:
+            snapshot = self._snapshot
+            snapshot_codes = (
+                _restored_snapshot_scope_codes(snapshot)
+                if _restored_snapshot_scope_is_valid(snapshot, self._config)
+                else None
+            )
+        with self._background_lock:
+            priority_document_codes = tuple(
+                str(value["code"])
+                for value in self._priority_monitor_latest_documents.values()
+                if isinstance(value.get("code"), str) and value.get("code")
+            )
+            priority_state_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *priority_document_codes,
+                        *self._candidate_monitor_five_universe,
+                        *self._priority_monitor_last_codes,
+                        *self._candidate_monitor_last_five_codes,
+                        *self._candidate_monitor_last_deferred_codes,
+                        *self._candidate_monitor_five_last_success_at,
+                        *self._priority_monitor_code_observations,
+                        *self._priority_monitor_signal_codes.values(),
+                        *self._candidate_monitor_symbol_exclusions,
+                        *(
+                            code
+                            for error in (
+                                *self._priority_monitor_last_errors,
+                                *self._candidate_monitor_last_errors,
+                            )
+                            for code in _explicit_strategy_subject_codes(error)
+                        ),
+                    )
+                )
+            )
+            supportive_state_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *self._candidate_monitor_thirty_universe,
+                        *self._candidate_monitor_last_thirty_codes,
+                        *self._candidate_monitor_thirty_last_success_at,
+                    )
+                )
+            )
+            recheck_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *sorted(self._decision_rule_recheck_pending_codes),
+                        *self._decision_rule_recheck_last_attempted_codes,
+                        *self._decision_rule_recheck_last_deferred_codes,
+                        *(
+                            code
+                            for error in self._decision_rule_recheck_last_errors
+                            for code in _explicit_strategy_subject_codes(error)
+                        ),
+                    )
+                )
+            )
+        admission = admit_screening_universe(
+            signal_codes=(
+                *priority_state_codes,
+                *(snapshot_codes or ()),
+            ),
+            supportive_codes=supportive_state_codes,
+            recheck_codes=recheck_codes,
+            max_symbols=self._config.effective_monitor_universe_limit,
+            large_scope_authorized=self._config.large_scope_authorized,
+        )
+        return admission.admitted_codes
+
+    def admit_archive_universe_codes(
+        self,
+        mandatory_codes: Sequence[str],
+    ) -> tuple[str, ...] | None:
+        """Admit archive-owned positions/attention before optional subjects."""
+
+        if self._config.screening_scope_mode == "FULL_MARKET":
+            return None
+        current_codes = self.admitted_universe_codes() or ()
+        admission = admit_screening_universe(
+            mandatory_codes=mandatory_codes,
+            signal_codes=current_codes,
+            max_symbols=self._config.effective_monitor_universe_limit,
+            large_scope_authorized=self._config.large_scope_authorized,
+        )
+        return admission.admitted_codes
+
     def _load_presentation_cached_sector_snapshot(
         self,
         *,
@@ -7677,6 +8532,23 @@ class TradingScreeningService:
         )
         if not callable(cached_provider):
             return None
+        scope_configurer = getattr(
+            self._sector_catalog,
+            "configure_sector_cache_restore_scope",
+            None,
+        )
+        if callable(scope_configurer):
+            try:
+                scope_configurer(
+                    scope_mode=self._config.screening_scope_mode,
+                    max_symbols=self._config.effective_monitor_universe_limit,
+                    admitted_codes=(
+                        self._config.admitted_universe_codes
+                        or (self.admitted_universe_codes() or ())
+                    ),
+                )
+            except (TypeError, ValueError):
+                return None
         try:
             candidate = cached_provider(as_of=observed_at)
         except (OSError, TypeError, ValueError, RuntimeError):
@@ -7769,6 +8641,40 @@ class TradingScreeningService:
                 )
             )
             priority_revision = self._priority_monitor_presentation_revision
+        admitted_universe = self.admitted_universe_codes()
+        admitted_code_set = (
+            None if admitted_universe is None else set(admitted_universe)
+        )
+        if admitted_code_set is not None:
+            priority_documents = tuple(
+                value
+                for value in priority_documents
+                if value.get("code") in admitted_code_set
+            )
+            code_observations = {
+                code: value
+                for code, value in code_observations.items()
+                if code in admitted_code_set
+            }
+            candidate_symbol_exclusions = tuple(
+                value
+                for value in candidate_symbol_exclusions
+                if value.get("code") in admitted_code_set
+            )
+            priority_errors = tuple(
+                value
+                for value in priority_errors
+                if set(_explicit_strategy_subject_codes(value)).issubset(
+                    admitted_code_set
+                )
+            )
+            candidate_errors = tuple(
+                value
+                for value in candidate_errors
+                if set(_explicit_strategy_subject_codes(value)).issubset(
+                    admitted_code_set
+                )
+            )
         priority_max_age_seconds = max(
             180,
             self._config.priority_monitor_interval_seconds * 3,
@@ -7840,13 +8746,46 @@ class TradingScreeningService:
         )
         with self._state_lock:
             snapshot = self._snapshot
+            snapshot_scope_valid = _restored_snapshot_scope_is_valid(
+                snapshot,
+                self._config,
+            )
+            snapshot_scope_codes = (
+                _restored_snapshot_scope_codes(snapshot)
+                if snapshot_scope_valid
+                else None
+            )
+            if (
+                snapshot_scope_valid
+                and admitted_code_set is not None
+                and snapshot_scope_codes is not None
+                and not set(snapshot_scope_codes).issubset(admitted_code_set)
+            ):
+                snapshot_scope_valid = False
+            if not snapshot_scope_valid:
+                # Do not copy full-market status, evidence or progress into a
+                # bounded page projection.  Current compact monitor documents
+                # are overlaid below after the same admission intersection.
+                snapshot = _initial_snapshot(
+                    self._config,
+                    selection_research_revision=(
+                        self._selection_research_revision
+                    ),
+                    decision_source_snapshot_id=(
+                        self._decision_source_snapshot_id
+                    ),
+                )
+                snapshot_available = False
             source_sha256 = snapshot.get("snapshot_content_sha256")
-            validated_source_sha256 = self._validated_snapshot_sha256
+            validated_source_sha256 = (
+                self._validated_snapshot_sha256 if snapshot_scope_valid else None
+            )
             presentation_revision = (
                 f"{source_sha256}|{priority_revision}|live={priority_live}"
                 f"|fresh={sha256_json(tuple(sorted(fresh_code_observations)))}"
                 f"|sector_batch={id(presentation_sector_batch)}"
                 f"|validated={validated_source_sha256}"
+                f"|scope={sha256_json(admitted_universe)}"
             )
             if (
                 isinstance(source_sha256, str)
@@ -7862,6 +8801,19 @@ class TradingScreeningService:
             key: copy.deepcopy(value)
             for key, value in snapshot.items()
             if key != "signals"
+        }
+        document["screening_scope"] = {
+            "schema": "chanlun-screening-scope-v1",
+            "mode": self._config.screening_scope_mode,
+            "validation_cohort_size": self._config.validation_cohort_size,
+            "effective_monitor_universe_limit": (
+                self._config.effective_monitor_universe_limit
+            ),
+            "configured_max_admitted_universe_symbols": (
+                self._config.max_admitted_universe_symbols
+            ),
+            "large_scope_authorized": self._config.large_scope_authorized,
+            "full_coverage_enabled": self._config.full_coverage_refresh_enabled,
         }
         document_snapshot_authoritative = bool(
             document.get("available") is True
@@ -7947,7 +8899,12 @@ class TradingScreeningService:
             [
                 _presentation_signal_document(value)
                 for value in raw_signals
-                if isinstance(value, Mapping) and _is_current_selection_signal(value)
+                if isinstance(value, Mapping)
+                and _is_current_selection_signal(value)
+                and (
+                    admitted_code_set is None
+                    or value.get("code") in admitted_code_set
+                )
             ]
             if isinstance(raw_signals, (list, tuple))
             else []
@@ -8538,6 +9495,152 @@ class TradingScreeningService:
         with self._state_lock:
             snapshot = self._snapshot
             validated_snapshot_sha256 = self._validated_snapshot_sha256
+        admitted_universe = self.admitted_universe_codes()
+        if admitted_universe is not None:
+            admitted_code_set = set(admitted_universe)
+
+            def admitted_codes(values: Sequence[str]) -> tuple[str, ...]:
+                return tuple(code for code in values if code in admitted_code_set)
+
+            def admitted_errors(
+                values: Sequence[Mapping[str, object]],
+            ) -> tuple[dict[str, object], ...]:
+                return tuple(
+                    copy.deepcopy(dict(value))
+                    for value in values
+                    if set(_explicit_strategy_subject_codes(value)).issubset(
+                        admitted_code_set
+                    )
+                )
+
+            priority_monitor_last_codes = admitted_codes(priority_monitor_last_codes)
+            last_monitoring_errors = admitted_errors(last_monitoring_errors)
+            priority_monitor_current_session_zero_trade_codes = admitted_codes(
+                priority_monitor_current_session_zero_trade_codes
+            )
+            priority_monitor_current_session_suspended_codes = admitted_codes(
+                priority_monitor_current_session_suspended_codes
+            )
+            priority_monitor_zero_trade_quote_diagnostics = tuple(
+                value
+                for value in priority_monitor_zero_trade_quote_diagnostics
+                if set(_explicit_strategy_subject_codes(value)).issubset(
+                    admitted_code_set
+                )
+            )
+            priority_monitor_last_errors = admitted_errors(
+                priority_monitor_last_errors
+            )
+            candidate_monitor_last_errors = admitted_errors(
+                candidate_monitor_last_errors
+            )
+            candidate_monitor_symbol_exclusions = tuple(
+                value
+                for value in candidate_monitor_symbol_exclusions
+                if value.get("code") in admitted_code_set
+            )
+            candidate_monitor_five_universe = admitted_codes(
+                candidate_monitor_five_universe
+            )
+            candidate_monitor_thirty_universe = admitted_codes(
+                candidate_monitor_thirty_universe
+            )
+            candidate_monitor_five_last_success_at = {
+                code: value
+                for code, value in candidate_monitor_five_last_success_at.items()
+                if code in admitted_code_set
+            }
+            candidate_monitor_thirty_last_success_at = {
+                code: value
+                for code, value in candidate_monitor_thirty_last_success_at.items()
+                if code in admitted_code_set
+            }
+            candidate_monitor_last_five_codes = admitted_codes(
+                candidate_monitor_last_five_codes
+            )
+            candidate_monitor_last_thirty_codes = admitted_codes(
+                candidate_monitor_last_thirty_codes
+            )
+            candidate_monitor_last_deferred_codes = admitted_codes(
+                candidate_monitor_last_deferred_codes
+            )
+            candidate_monitor_current_session_suspended_codes = admitted_codes(
+                candidate_monitor_current_session_suspended_codes
+            )
+            decision_rule_recheck_pending_codes = admitted_codes(
+                decision_rule_recheck_pending_codes
+            )
+            decision_rule_recheck_last_attempted_codes = admitted_codes(
+                decision_rule_recheck_last_attempted_codes
+            )
+            decision_rule_recheck_last_deferred_codes = admitted_codes(
+                decision_rule_recheck_last_deferred_codes
+            )
+            decision_rule_recheck_last_errors = admitted_errors(
+                decision_rule_recheck_last_errors
+            )
+            preselection_continuity_signal_codes = admitted_codes(
+                preselection_continuity_signal_codes
+            )
+            priority_monitor_latest_signal_count = min(
+                priority_monitor_latest_signal_count,
+                len(admitted_universe),
+            )
+            priority_monitor_mandatory_count = min(
+                priority_monitor_mandatory_count,
+                len(admitted_universe),
+            )
+            priority_monitor_immediate_universe_count = min(
+                priority_monitor_immediate_universe_count,
+                len(admitted_universe),
+            )
+            priority_monitor_rearmed_segment_universe_count = min(
+                priority_monitor_rearmed_segment_universe_count,
+                len(admitted_universe),
+            )
+            priority_monitor_tracking_universe_count = min(
+                priority_monitor_tracking_universe_count,
+                len(admitted_universe),
+            )
+            priority_monitor_scheduled_count = min(
+                priority_monitor_scheduled_count,
+                len(admitted_universe),
+            )
+            candidate_monitor_supportive_eligible_count = min(
+                candidate_monitor_supportive_eligible_count,
+                len(admitted_universe),
+            )
+            candidate_monitor_supportive_admitted_count = min(
+                candidate_monitor_supportive_admitted_count,
+                len(admitted_universe),
+            )
+            preselection_continuity_supportive_code_count = min(
+                preselection_continuity_supportive_code_count,
+                len(admitted_universe),
+            )
+        snapshot_scope_valid = _restored_snapshot_scope_is_valid(
+            snapshot,
+            self._config,
+        )
+        snapshot_scope_codes = (
+            _restored_snapshot_scope_codes(snapshot)
+            if snapshot_scope_valid
+            else None
+        )
+        if (
+            snapshot_scope_valid
+            and admitted_universe is not None
+            and snapshot_scope_codes is not None
+            and not set(snapshot_scope_codes).issubset(set(admitted_universe))
+        ):
+            snapshot_scope_valid = False
+        if not snapshot_scope_valid:
+            snapshot = _initial_snapshot(
+                self._config,
+                selection_research_revision=self._selection_research_revision,
+                decision_source_snapshot_id=self._decision_source_snapshot_id,
+            )
+            validated_snapshot_sha256 = None
         scan_state = str(snapshot.get("scan_state") or "unknown")
         last_batch_state = str(snapshot.get("last_batch_state") or scan_state)
         snapshot_available = snapshot.get("available") is True
@@ -9607,6 +10710,15 @@ class TradingScreeningService:
             "refresh_suppression_reason": (
                 COMPLETE_CLOSE_IDLE_REASON if refresh_suppressed else None
             ),
+            "screening_scope_mode": self._config.screening_scope_mode,
+            "validation_cohort_size": self._config.validation_cohort_size,
+            "effective_monitor_universe_limit": (
+                self._config.effective_monitor_universe_limit
+            ),
+            "max_admitted_universe_symbols": (
+                self._config.max_admitted_universe_symbols
+            ),
+            "large_scope_authorized": self._config.large_scope_authorized,
             "full_coverage_refresh_enabled": full_coverage_refresh_enabled,
             "full_coverage_force_until_complete_enabled": (
                 self._config.force_full_coverage_until_complete
@@ -10348,9 +11460,13 @@ class TradingScreeningService:
                                 os.replace(generation_temporary, generation_path)
                             finally:
                                 generation_temporary.unlink(missing_ok=True)
+                        self._persist_cache_scope_sidecar(generation_path, payload)
                         generations = self._generation_paths()
                         for expired in generations[_CACHE_GENERATION_RETENTION:]:
                             expired.unlink(missing_ok=True)
+                            self._cache_scope_sidecar_path(expired).unlink(
+                                missing_ok=True
+                            )
                         self._cache_generation_count = min(
                             len(generations), _CACHE_GENERATION_RETENTION
                         )
@@ -10360,7 +11476,11 @@ class TradingScreeningService:
                         self._cache_generation_error = (
                             f"{type(exc).__name__}: {str(exc)[:160]}"
                         )
+                self._cache_scope_sidecar_path(self._cache_path).unlink(
+                    missing_ok=True
+                )
                 os.replace(temporary, self._cache_path)
+                self._persist_cache_scope_sidecar(self._cache_path, payload)
                 if not (
                     isinstance(manifest, Mapping) and manifest.get("complete") is True
                 ):
@@ -10535,6 +11655,12 @@ class TradingScreeningService:
         self,
         payload: dict[str, object],
     ) -> dict[str, object]:
+        scope_codes = _restored_snapshot_scope_codes(payload)
+        payload["screening_scope_mode"] = self._config.screening_scope_mode
+        payload["effective_monitor_universe_limit"] = (
+            self._config.effective_monitor_universe_limit
+        )
+        payload["admitted_universe_codes"] = list(scope_codes or ())
         payload["decision_source_snapshot_id"] = self._decision_source_snapshot_id
         payload["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
             payload
@@ -11056,6 +12182,17 @@ class TradingScreeningService:
     ) -> dict[str, object]:
         batch_started_perf = time.perf_counter()
         observed_at = normalize_datetime(self._clock(), "clock")
+        configured_allowlist = _configured_scope_allowlist(self._config)
+        if configured_allowlist is not None:
+            for frequencies in (
+                self._pending_frequencies,
+                self._backoff_frequencies,
+                self._deferred_frequencies,
+            ):
+                rejected = set(frequencies).difference(configured_allowlist)
+                self._coverage_cycle_discarded_retry_codes.update(rejected)
+                for code in rejected:
+                    frequencies.pop(code, None)
         if priority_only:
             force_startup_bootstrap = self._startup_priority_bootstrap_required()
             with self._background_lock:
@@ -11382,6 +12519,13 @@ class TradingScreeningService:
         else:
             all_members = dict(self._sector_catalog.members())
             self._coverage_cycle_sector_runtime_hydrated = True
+        if configured_allowlist is not None:
+            all_members = {
+                sector_id: tuple(
+                    code for code in members if code in configured_allowlist
+                )
+                for sector_id, members in all_members.items()
+            }
         self._record_background_heartbeat()
         routing = _sector_member_routing(
             assessments=sector_batch.assessments,
@@ -11407,19 +12551,35 @@ class TradingScreeningService:
             self._market_data.holdings_scope(),
             "holdings_scope",
         )
+        watchlist = _require_codes_in_configured_scope(
+            watchlist,
+            self._config,
+            subject="coverage active watchlist scope",
+        )
+        holdings = _require_codes_in_configured_scope(
+            holdings,
+            self._config,
+            subject="coverage holdings scope",
+        )
         selected_member_codes = set(selected_sector_by_code)
         triggered_member_codes = {
             code
             for code, assessment in selected_sector_by_code.items()
             if assessment.regime == "supportive"
         }
-        raw_previous_active_codes = {
-            str(row.get("code"))
-            for row in previous.get("signals", ())
-            if isinstance(row, Mapping)
-            and isinstance(row.get("code"), str)
-            and row.get("lifecycle_stage") not in {"closed", "invalidated"}
-        }
+        raw_previous_active_codes = set(
+            _project_codes_to_configured_scope(
+                tuple(
+                    str(row.get("code"))
+                    for row in previous.get("signals", ())
+                    if isinstance(row, Mapping)
+                    and isinstance(row.get("code"), str)
+                    and row.get("lifecycle_stage")
+                    not in {"closed", "invalidated"}
+                ),
+                self._config,
+            )
+        )
         previous_nonmember_codes = tuple(
             sorted(raw_previous_active_codes.difference(selected_member_codes))
         )
@@ -11701,6 +12861,7 @@ class TradingScreeningService:
                 structure_contract_id=self._config.structure_contract_id,
                 parameter_set_id=self._config.parameter_set_id,
             )
+            plan = _project_scan_plan_to_configured_scope(plan, self._config)
             if replacing_coverage_epoch:
                 # 覆盖身份变化会清空完成账本。增量计划可只返回变化 K 线和监听标的，
                 # 但该子集无法认证全新的完整板块清单；必须以同一冻结 d/30m/5m/1m
@@ -11720,6 +12881,7 @@ class TradingScreeningService:
                     full_market_history_scan=plan.full_market_history_scan,
                     background_full_refresh_required=True,
                 )
+                plan = _project_scan_plan_to_configured_scope(plan, self._config)
             # 即使板块合成截止点和目录版本未变，计划器仍可能发现真正的新代码；它属于
             # 发现任务而非同周期监听，必须进入常规可恢复覆盖队列。
             if monitoring_only_refresh and any(
@@ -11737,6 +12899,14 @@ class TradingScreeningService:
                 )
                 backoff = self._backoff_frequencies
                 self._backoff_frequencies = {}
+                if configured_allowlist is not None:
+                    rejected = set(backoff).difference(configured_allowlist)
+                    self._coverage_cycle_discarded_retry_codes.update(rejected)
+                    backoff = {
+                        code: frequencies
+                        for code, frequencies in backoff.items()
+                        if code in configured_allowlist
+                    }
                 if replacing_coverage_epoch:
                     discarded = set(backoff).difference(retry_scope)
                     self._coverage_cycle_discarded_retry_codes.update(discarded)
@@ -11753,6 +12923,14 @@ class TradingScreeningService:
                 if replacing_coverage_epoch:
                     deferred = self._deferred_frequencies
                     self._deferred_frequencies = {}
+                    if configured_allowlist is not None:
+                        rejected = set(deferred).difference(configured_allowlist)
+                        self._coverage_cycle_discarded_retry_codes.update(rejected)
+                        deferred = {
+                            code: frequencies
+                            for code, frequencies in deferred.items()
+                            if code in configured_allowlist
+                        }
                     discarded = set(deferred).difference(retry_scope)
                     self._coverage_cycle_discarded_retry_codes.update(discarded)
                     deferred = {

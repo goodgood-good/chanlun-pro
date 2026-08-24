@@ -237,7 +237,6 @@ def _trading_screening_snapshot(
 ) -> dict[str, object]:
     service = _trading_screening_service()
     try:
-        service.ensure_refresh()
         reference_provider = getattr(
             service,
             "presentation_snapshot_reference",
@@ -297,6 +296,17 @@ def _trading_screening_snapshot(
             "status": "disabled",
             "reasons": [],
         }
+    screening_scope = output.get("screening_scope")
+    if isinstance(screening_scope, Mapping):
+        runtime_health.setdefault("screening_scope_mode", screening_scope.get("mode"))
+        runtime_health.setdefault(
+            "validation_cohort_size",
+            screening_scope.get("validation_cohort_size"),
+        )
+        runtime_health.setdefault(
+            "effective_monitor_universe_limit",
+            screening_scope.get("effective_monitor_universe_limit"),
+        )
     runtime_health["snapshot_hash_coverage"] = (
         "EXCLUDED_OPERATIONAL_METADATA"
     )
@@ -341,7 +351,46 @@ def _realtime_review_snapshot() -> dict[str, object]:
     ):
         current_app.logger.error("realtime human review inbox contract invalid")
         return unavailable
-    return dict(payload)
+    # Cross-market events restored from the inbox are page-visible only after
+    # the holding monitor has proved the current admitted universe.  A-share
+    # review events use a separate authority and remain untouched here.
+    monitor = current_app.extensions.get("holding_group_monitor")
+    scope_provider = getattr(monitor, "admitted_identities", None)
+    try:
+        raw_scope = scope_provider() if callable(scope_provider) else ()
+        admitted = {
+            (str(market).strip().lower(), str(code).strip())
+            for market, code in raw_scope
+            if str(market).strip() and str(code).strip()
+        }
+    except Exception:
+        current_app.logger.exception("cross-market review scope unavailable")
+        admitted = set()
+    events = [
+        dict(event)
+        for event in payload["events"]
+        if isinstance(event, Mapping)
+        and (
+            event.get("source") != "CROSS_MARKET_ATTENTION_MONITOR"
+            or (
+                str(event.get("market") or "").strip().lower(),
+                str(event.get("code") or "").strip(),
+            )
+            in admitted
+        )
+    ]
+    output = dict(payload)
+    output["events"] = events
+    output["event_count"] = len(events)
+    output["pending_review_count"] = len(events)
+    delivery_counts = payload.get("delivery_counts")
+    output["delivery_counts"] = {
+        str(status): sum(event.get("delivery_status") == status for event in events)
+        for status in (
+            delivery_counts if isinstance(delivery_counts, Mapping) else ()
+        )
+    }
+    return output
 
 
 def _manual_attention_snapshot() -> dict[str, object]:
@@ -572,7 +621,7 @@ def _unavailable_us_monitor(reason_code: str) -> dict[str, object]:
         "schema": "chanlun-us-realtime-monitor",
         "source_schema": "chanlun-attention-group-monitor",
         "market": "us",
-        "market_scope": "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+        "market_scope": "ADMITTED_US_SYMBOLS_IN_GLOBAL_GROUPS",
         "decision_mode": "STRICT_STRUCTURE_OBSERVATION_ONLY",
         "auxiliary_only": True,
         "full_market_screening": False,
@@ -597,6 +646,10 @@ def _unavailable_us_monitor(reason_code: str) -> dict[str, object]:
         "closed_count": 0,
         "awaiting_count": 0,
         "failed_count": 0,
+        "scope_limit": 12,
+        "requested_count": 0,
+        "mandatory_count": 0,
+        "deferred_count": 0,
         "symbols": [],
         "notification_delivery": {},
         "research_only": True,
@@ -725,7 +778,7 @@ def _us_monitor_snapshot() -> dict[str, object]:
         "schema": "chanlun-us-realtime-monitor",
         "source_schema": "chanlun-attention-group-monitor",
         "market": "us",
-        "market_scope": "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+        "market_scope": "ADMITTED_US_SYMBOLS_IN_GLOBAL_GROUPS",
         "decision_mode": "STRICT_STRUCTURE_OBSERVATION_ONLY",
         "auxiliary_only": True,
         "full_market_screening": False,
@@ -750,6 +803,10 @@ def _us_monitor_snapshot() -> dict[str, object]:
         "closed_count": closed_count,
         "awaiting_count": awaiting_count,
         "failed_count": failed_count,
+        "scope_limit": health.get("scope_limit"),
+        "requested_count": health.get("requested_count", len(positions)),
+        "mandatory_count": health.get("mandatory_count", 0),
+        "deferred_count": health.get("deferred_count", 0),
         "symbols": positions,
         "notification_delivery": (
             dict(health["notification_delivery"])
@@ -981,7 +1038,6 @@ def _research_audit_snapshot() -> dict[str, object]:
 @decision_support_bp.get("/decision-support/early-screening")
 @login_required
 def early_screening():
-    _trading_screening_service().ensure_refresh()
     return _no_store_html("early_screening.html")
 
 

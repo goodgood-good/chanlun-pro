@@ -5,16 +5,26 @@ OnlineMarketDatas.get_cl_data 喂给缠论前须丢弃仍在进行(未收盘)的
 算出买卖点过早真实下单, 下一 tick 该 bar 反向则买点消失但仓已开(回测网测不到)。
 last_k_info(当前价, 止损用)保持实时末根不受影响。
 """
+
 import pandas as pd
 
-from chanlun.trader.online_market_datas import OnlineMarketDatas, _drop_unclosed_last_bar
+from chanlun.trader.online_market_datas import (
+    OnlineMarketDatas,
+    _drop_unclosed_last_bar,
+)
 
 
 def _df(dates):
-    return pd.DataFrame({
-        "date": [pd.Timestamp(d) for d in dates],
-        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
-    })
+    return pd.DataFrame(
+        {
+            "date": [pd.Timestamp(d) for d in dates],
+            "open": 1.0,
+            "high": 1.0,
+            "low": 1.0,
+            "close": 1.0,
+            "volume": 1.0,
+        }
+    )
 
 
 def test_drop_forming_last_bar_dropped():
@@ -30,7 +40,14 @@ def test_drop_forming_last_bar_dropped():
 
 def test_drop_closed_last_bar_kept():
     # 末根在过去 -> 已收盘 -> 保留
-    assert len(_drop_unclosed_last_bar(_df(["2020-01-01 09:30:00", "2020-01-01 09:35:00"]), "5m")) == 2
+    assert (
+        len(
+            _drop_unclosed_last_bar(
+                _df(["2020-01-01 09:30:00", "2020-01-01 09:35:00"]), "5m"
+            )
+        )
+        == 2
+    )
 
 
 def test_drop_daily_kept():
@@ -40,22 +57,33 @@ def test_drop_daily_kept():
 def test_drop_irregular_interval_kept():
     # 间隔 != 名义 5m(节假日跳空)且末根标签在过去(已收盘)-> 不裁剪, 防误删历史 bar。
     # 末根标签在未来(session 首根进行中)的裁剪见 test_drop_unclosed_session_first_bar.py。
-    assert len(_drop_unclosed_last_bar(_df(["2020-01-01 09:30:00", "2020-01-01 09:50:00"]), "5m")) == 2
+    assert (
+        len(
+            _drop_unclosed_last_bar(
+                _df(["2020-01-01 09:30:00", "2020-01-01 09:50:00"]), "5m"
+            )
+        )
+        == 2
+    )
 
 
 def test_single_forming_bar_is_dropped():
-    assert len(
-        _drop_unclosed_last_bar(
-            _df(["2099-01-01 09:35:00"]),
-            "5m",
-            as_of=pd.Timestamp("2099-01-01 09:37:00"),
+    assert (
+        len(
+            _drop_unclosed_last_bar(
+                _df(["2099-01-01 09:35:00"]),
+                "5m",
+                as_of=pd.Timestamp("2099-01-01 09:37:00"),
+            )
         )
-    ) == 0
+        == 0
+    )
 
 
 class _FakeEx:
-    def __init__(self, df):
+    def __init__(self, df, *, time_label="start"):
         self._df = df
+        self.kline_time_label = time_label
 
     def klines(self, code, frequency):
         return self._df
@@ -80,6 +108,22 @@ def test_last_k_info_keeps_live_bar():
     info = om.last_k_info("X")
     assert pd.Timestamp(info["date"]) == pd.Timestamp("2099-01-01 09:40:00")
 
+
+def test_closed_bars_expose_canonical_completion_labels():
+    raw = _df(["2020-01-01 09:30:00", "2020-01-01 09:35:00"])
+    start_labelled = _make_om(raw)
+    end_labelled = _make_om(_df(["2020-01-01 09:35:00", "2020-01-01 09:40:00"]))
+    end_labelled.ex.kline_time_label = "end"
+
+    assert tuple(start_labelled.closed_klines("X", "5m")["date"]) == tuple(
+        end_labelled.closed_klines("X", "5m")["date"]
+    )
+    assert (
+        start_labelled.closed_bar_as_of("X", "5m")
+        == pd.Timestamp("2020-01-01 09:40:00").to_pydatetime()
+    )
+
+
 def test_drop_forming_last_bar_dropped_seconds():
     # D9-#2: 秒级(10s)末根在未来 -> 仍在进行 -> 丢弃 (_freq_minutes 曾对秒级返 None 不裁剪,
     # 期货实盘 frequencys=["10s"] 会在未收盘 bar 上算缠论 -> 过早下单, D2-F4 被击穿)。
@@ -94,7 +138,14 @@ def test_drop_forming_last_bar_dropped_seconds():
 
 def test_drop_closed_last_bar_kept_seconds():
     # 秒级(30s)已收盘末根(过去)保留, 不误删。
-    assert len(_drop_unclosed_last_bar(_df(["2020-01-01 09:30:00", "2020-01-01 09:30:30"]), "30s")) == 2
+    assert (
+        len(
+            _drop_unclosed_last_bar(
+                _df(["2020-01-01 09:30:00", "2020-01-01 09:30:30"]), "30s"
+            )
+        )
+        == 2
+    )
 
 
 def test_freq_minutes_parses_seconds():

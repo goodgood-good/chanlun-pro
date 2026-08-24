@@ -1,8 +1,11 @@
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system.execution_policy import (
     TradingPolicy,
     evaluate_entry_policy,
@@ -25,21 +28,57 @@ from tests.trading_system.helpers import (
 )
 
 
+def _with_terminal_interval(point, *, market_start):
+    return replace(
+        point,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=point.recursive_level,
+            unit_id=f"segment:{point.source_frequency}:{point.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down" if point.side == "buy" else "up",
+            state="locked",
+            market_start=market_start,
+            market_end=point.anchor_at,
+            available_at=point.available_at,
+        ),
+    )
+
+
+def _strict_setup(point):
+    return _with_terminal_interval(
+        point,
+        market_start=point.anchor_at - timedelta(minutes=30),
+    )
+
+
+def _strict_witness(point):
+    return _with_terminal_interval(
+        point,
+        market_start=point.anchor_at - timedelta(minutes=1),
+    )
+
+
 def valid_entry_inputs(
     point_type: str,
     **point_overrides: object,
 ):
-    five_point = confirmed_point(
-        point_type,
-        frequency="5m",
-        **point_overrides,
+    five_point = _strict_setup(
+        confirmed_point(
+            point_type,
+            frequency="5m",
+            **point_overrides,
+        )
     )
     setup = build_setup(five_point, neutral_context("30m"), eligible_sector())
-    trigger = confirmed_point(
-        "1buy",
-        frequency="1m",
-        anchor=setup.price_low,
-        minutes_after=1,
+    trigger = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            anchor=setup.price_low,
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
     )
     lifecycle = advance_lifecycle(None, setup, trigger, as_of=AS_OF)
     return lifecycle, setup, trigger, ConflictDecision(False, (), (), ())
@@ -182,9 +221,18 @@ def test_geometric_five_minute_candidate_reports_pending_confirmation() -> None:
 
 
 def test_sell_exit_is_not_blocked_by_sector_state() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
+    five_sell = _strict_setup(
+        confirmed_point("2sell", frequency="5m", tower="formal", level=0)
+    )
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
-    one_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
+    one_sell = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
+    )
     lifecycle = advance_lifecycle(None, setup, one_sell, as_of=AS_OF)
 
     decision = evaluate_exit_policy(
@@ -199,8 +247,10 @@ def test_sell_exit_is_not_blocked_by_sector_state() -> None:
     assert decision.action == "exit_full"
 
 
-def test_default_sell_exit_requires_one_minute_precision_locator() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
+def test_default_sell_exit_requires_one_minute_nesting_witness() -> None:
+    five_sell = _strict_setup(
+        confirmed_point("2sell", frequency="5m", tower="formal", level=0)
+    )
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
     armed = advance_lifecycle(None, setup, None, as_of=AS_OF)
     without_segment = evaluate_exit_policy(
@@ -210,7 +260,14 @@ def test_default_sell_exit_requires_one_minute_precision_locator() -> None:
         held_tower="formal",
         held_level=0,
     )
-    one_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
+    one_sell = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
+    )
     triggered = advance_lifecycle(None, setup, one_sell, as_of=AS_OF)
     accepted = evaluate_exit_policy(
         triggered,
@@ -228,9 +285,18 @@ def test_default_sell_exit_requires_one_minute_precision_locator() -> None:
 
 
 def test_sell_without_reference_structure_requires_relation_review() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
+    five_sell = _strict_setup(
+        confirmed_point("2sell", frequency="5m", tower="formal", level=0)
+    )
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
-    one_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
+    one_sell = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
+    )
     lifecycle = advance_lifecycle(None, setup, one_sell, as_of=AS_OF)
 
     decision = evaluate_exit_policy(
@@ -248,22 +314,34 @@ def test_sell_without_reference_structure_requires_relation_review() -> None:
     )
 
 
-def test_legacy_one_minute_gate_rejects_invalid_segment_when_enabled() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
-    setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
-    third_sell = confirmed_point(
-        "3sell",
-        frequency="1m",
-        anchor=10.0,
-        stop=10.2,
-        center_zd=10.0,
-        center_zg=10.2,
-        variant="boundary_touch",
-        minutes_after=1,
+def test_precise_execution_gate_rejects_invalid_one_minute_segment() -> None:
+    five_sell = _strict_setup(
+        confirmed_point("2sell", frequency="5m", tower="formal", level=0)
     )
-    # 构造一条遭篡改的旧版段差生命周期，证明读取旧参数档案时执行层仍会
-    # 关闭失败，不能只依赖上游生命周期匹配器。
-    valid_first_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
+    setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
+    third_sell = _strict_witness(
+        confirmed_point(
+            "3sell",
+            frequency="1m",
+            anchor=10.0,
+            stop=10.2,
+            center_zd=10.0,
+            center_zg=10.2,
+            variant="boundary_touch",
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
+    )
+    # Tampering the lifecycle point ID must fail closed at the execution layer;
+    # the policy cannot rely only on the upstream lifecycle matcher.
+    valid_first_sell = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
+    )
     lifecycle = advance_lifecycle(None, setup, valid_first_sell, as_of=AS_OF)
     lifecycle = replace(lifecycle, trigger_point_id=third_sell.point_id)
 
@@ -273,7 +351,9 @@ def test_legacy_one_minute_gate_rejects_invalid_segment_when_enabled() -> None:
         third_sell,
         held_tower="formal",
         held_level=0,
-        policy=TradingPolicy(require_confirmed_one_minute=True),
+        policy=TradingPolicy(
+            require_one_minute_segment_difference_for_precise_execution=True
+        ),
     )
 
     assert decision.allowed is False
@@ -298,7 +378,7 @@ def test_environment_is_advisory_but_one_minute_gates_precise_execution() -> Non
         None,
         ConflictDecision(False, (), (), ()),
         TradingPolicy(
-            require_confirmed_one_minute=False,
+            require_one_minute_segment_difference_for_precise_execution=False,
             require_sector_eligibility=False,
             require_thirty_minute_context=False,
         ),
@@ -309,7 +389,7 @@ def test_environment_is_advisory_but_one_minute_gates_precise_execution() -> Non
     assert ablated.allowed is True
 
 
-def test_legacy_one_minute_exit_gate_remains_readable_for_old_archives() -> None:
+def test_sell_requires_one_minute_segment_for_precise_execution() -> None:
     five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=0)
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
     armed = advance_lifecycle(None, setup, None, as_of=AS_OF)
@@ -320,7 +400,9 @@ def test_legacy_one_minute_exit_gate_remains_readable_for_old_archives() -> None
         None,
         held_tower="formal",
         held_level=0,
-        policy=TradingPolicy(require_confirmed_one_minute=True),
+        policy=TradingPolicy(
+            require_one_minute_segment_difference_for_precise_execution=True
+        ),
     )
 
     assert decision.allowed is False

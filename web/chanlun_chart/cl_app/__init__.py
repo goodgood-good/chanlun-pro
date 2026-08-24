@@ -59,6 +59,12 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
     content_addressed_source_revision_from_build,
 )
 from .services.job_names import job_display_name
+from .services.trading_screening_scope import (
+    DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
+    DEFAULT_VALIDATION_COHORT_SIZE,
+    admit_screening_universe,
+    validate_screening_scope_configuration,
+)
 
 __all__ = ["create_app"]
 
@@ -138,9 +144,43 @@ def create_app(test_config=None, start_scheduler=False):
         MAX_FORM_PARTS=500,
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
+        SYMBOL_CATALOG_VALIDATION_CODES=os.environ.get(
+            "CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES",
+            "",
+        ).strip(),
+        SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED=(
+            os.environ.get(
+                "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED",
+                "0",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
         TRADING_SCREENING_SNAPSHOT_PATH=None,
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
+        TRADING_SCREENING_VALIDATION_COHORT_SIZE=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
+            )
+        ),
+        TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
+                str(DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS),
+            )
+        ),
+        TRADING_SCREENING_ALLOW_LARGE_SCOPE=(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE",
+                "0",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
         # 生产实时选股只发技术/手工买卖提醒，不读取正式研究账本。正式研究材料仍可在
         # 离线研究和回放入口使用，但不能成为生产监听的隐藏依赖。
         TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED=False,
@@ -175,19 +215,19 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                "512",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
             )
         ),
         TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
-                "96",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
             )
         ),
         TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
-                "128",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
             )
         ),
         TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
@@ -241,6 +281,22 @@ def create_app(test_config=None, start_scheduler=False):
                 str(max(2, min(8, (os.cpu_count() or 4) // 2))),
             )
         ),
+        HOLDING_GROUP_MONITOR_MAX_SYMBOLS=int(
+            os.environ.get(
+                "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
+            )
+        ),
+        # This gate is independent from A-share screening authorization.
+        HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED=(
+            os.environ.get(
+                "CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED",
+                "0",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
         ALERT_CHART_PUBLIC_BASE_URL=str(
             os.environ.get("CHANLUN_ALERT_CHART_PUBLIC_BASE_URL")
             or getattr(config, "ALERT_CHART_PUBLIC_BASE_URL", "")
@@ -263,16 +319,15 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
-                "64",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
             )
         ),
-        # 收盘后全市场覆盖按启动间隔限流为每分钟一批。常规发现通道应匹配 64 标的总预算；
-        # 若沿用数据类默认 32，会让三个结构进程在大部分间隔内空闲，并使下一交易日预选
-        # 发布时间大致翻倍。
+        # 修改与策略验证阶段每轮只处理固定小样本。全市场覆盖即使已显式授权，
+        # 仍沿用独立批次上限，不能从工作进程数量反推或放大处理范围。
         TRADING_SCREENING_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
-                "64",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
             )
         ),
         # Scheduling the full armed/triggered universe is cheap; the absolute
@@ -280,7 +335,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_PRIORITY_MAX_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
-                "512",
+                str(DEFAULT_VALIDATION_COHORT_SIZE),
             )
         ),
         TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
@@ -443,6 +498,51 @@ def create_app(test_config=None, start_scheduler=False):
         # 单元测试须显式启用不可变年度工件，以保留注入日历提供器的测试，并防止真实磁盘
         # 工件静默替换夹具证据。
         app.config["TRADING_SESSION_OFFICIAL_CALENDAR_PATH"] = None
+    # Scope authorization is validated before gateways, cache hydration or any
+    # possible market-data provider is constructed.  A stale shell/.env value
+    # therefore fails closed instead of beginning a broad run during startup.
+    validate_screening_scope_configuration(
+        validation_cohort_size=int(
+            app.config["TRADING_SCREENING_VALIDATION_COHORT_SIZE"]
+        ),
+        max_admitted_universe_symbols=int(
+            app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"]
+        ),
+        large_scope_authorized=bool(
+            app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"]
+        ),
+        full_coverage_enabled=bool(
+            app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"]
+        ),
+        force_full_coverage_until_complete=bool(
+            app.config["TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE"]
+        ),
+        per_refresh_limits={
+            "candidate_5m": int(
+                app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"]
+            ),
+            "candidate_30m": int(
+                app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"]
+            ),
+            "symbols_per_refresh": int(
+                app.config["TRADING_SCREENING_SYMBOLS_PER_REFRESH"]
+            ),
+            "total_symbols_per_refresh": int(
+                app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"]
+            ),
+            "priority_symbols": int(
+                app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"]
+            ),
+        },
+    )
+    # Validate the independent cross-market monitor bound before any gateway,
+    # cache hydration or scheduled market-data work can be constructed.
+    admit_screening_universe(
+        max_symbols=int(app.config["HOLDING_GROUP_MONITOR_MAX_SYMBOLS"]),
+        large_scope_authorized=bool(
+            app.config["HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED"]
+        ),
+    )
     if https_enabled:
         app.config["SESSION_COOKIE_SECURE"] = True
         app.config["REMEMBER_COOKIE_SECURE"] = True
@@ -545,6 +645,15 @@ def create_app(test_config=None, start_scheduler=False):
     from .services import constants as constants_service
     from .services import stock_list as stock_list_service
     from .services import readiness as readiness_service
+
+    # Install the independent identity-catalog admission before a preload
+    # thread, synchronous search fallback, or disk hydration can run.
+    symbol_catalog_scope = stock_list_service.configure_symbol_catalog(
+        validation_codes=app.config.get("SYMBOL_CATALOG_VALIDATION_CODES"),
+        full_catalog_authorized=app.config.get(
+            "SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED", False
+        ),
+    )
 
     configured_readiness_markets = app.config.get("READINESS_MARKETS", "a")
     if isinstance(configured_readiness_markets, str):
@@ -862,6 +971,16 @@ def create_app(test_config=None, start_scheduler=False):
                 "ready": bool(symbol_state.get("ready")),
                 "status": str(symbol_state.get("status") or "not_ready"),
                 "count": max(0, symbol_count),
+                "catalog_mode": str(
+                    symbol_state.get("catalog_mode")
+                    or stock_list_service.BOUNDED_VALIDATION_CATALOG
+                ),
+                "admitted_count": max(
+                    0, int(symbol_state.get("admitted_count", 0))
+                ),
+                "full_catalog_authorized": bool(
+                    symbol_state.get("full_catalog_authorized", False)
+                ),
                 "error": (
                     str(symbol_state.get("last_error"))[:200]
                     if symbol_state.get("last_error")
@@ -875,6 +994,9 @@ def create_app(test_config=None, start_scheduler=False):
                 "ready": False,
                 "status": "not_ready",
                 "count": 0,
+                "catalog_mode": stock_list_service.BOUNDED_VALIDATION_CATALOG,
+                "admitted_count": 0,
+                "full_catalog_authorized": False,
                 "error": "symbol_readiness_failed",
             }
 
@@ -1985,12 +2107,15 @@ def create_app(test_config=None, start_scheduler=False):
         return tuple(dict.fromkeys((*manually_declared, *virtual)))
 
     def _non_a_monitor_universe():
-        """每轮扫描都读取全局分组，使页面修改无需重启应用即可生效。
+        """Read only admitted non-A groups and bound every database query.
 
-        所有分组中的美股都会被监听；其他非 A 股市场在明确启用更广泛的选股契约前，
-        仍只监听持仓标的。
+        Holdings remain mandatory and are read with one overflow sentinel row.
+        Explicit priority groups are optional and only read far enough to fill
+        the remaining admission slots.  The monitor service still performs the
+        authoritative admission before any exchange or structure access.
         """
 
+        from chanlun.market import Market
         from chanlun.persistence.db import db
         from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP
 
@@ -1998,21 +2123,79 @@ def create_app(test_config=None, start_scheduler=False):
             app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP")
             or MANUAL_HOLDING_ZX_GROUP
         ).strip()
-        group_members: dict[str, list[dict[str, object]]] = {}
-        for group in db.zx_get_global_groups():
-            group_name = str(group.zx_group)
-            group_members[group_name] = [
+        configured_groups = app.config.get(
+            "TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS",
+            ("我的关注",),
+        )
+        if isinstance(configured_groups, str):
+            configured_groups = configured_groups.split(",")
+        optional_groups = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in configured_groups
+                if str(value).strip() and str(value).strip() != holding_group
+            )
+        )
+        max_symbols = app.config.get(
+            "HOLDING_GROUP_MONITOR_MAX_SYMBOLS",
+            DEFAULT_VALIDATION_COHORT_SIZE,
+        )
+        if type(max_symbols) is not int or max_symbols <= 0:
+            raise ValueError(
+                "HOLDING_GROUP_MONITOR_MAX_SYMBOLS must be a positive integer"
+            )
+
+        def serialize(rows):
+            return [
                 {
                     "market": str(stock.market),
                     "code": str(stock.stock_code),
                     "name": str(stock.stock_name or stock.stock_code),
                 }
-                for stock in db.zx_get_global_group_stocks(group_name)
+                for stock in rows
             ]
+
+        non_a_markets = tuple(
+            market.value for market in Market if market.value != Market.A.value
+        )
+        holding_rows = serialize(
+            db.zx_get_global_group_stocks(
+                holding_group,
+                limit=max_symbols + 1,
+                markets=non_a_markets,
+            )
+        )
+        group_members: dict[str, list[dict[str, object]]] = {
+            holding_group: holding_rows
+        }
+        admitted_identities = {
+            (str(row["market"]).strip().lower(), str(row["code"]).strip())
+            for row in holding_rows
+            if str(row["market"]).strip() and str(row["code"]).strip()
+        }
+        remaining = max(0, max_symbols - len(admitted_identities))
+        for group_name in optional_groups:
+            if remaining <= 0:
+                break
+            optional_rows = serialize(
+                db.zx_get_global_group_stocks(
+                    group_name,
+                    limit=remaining,
+                    markets=(Market.US.value,),
+                )
+            )
+            group_members[group_name] = optional_rows
+            admitted_identities.update(
+                (str(row["market"]).strip().lower(), str(row["code"]).strip())
+                for row in optional_rows
+                if str(row["market"]).strip() and str(row["code"]).strip()
+            )
+            remaining = max(0, max_symbols - len(admitted_identities))
+
         return build_non_a_monitor_universe(
             group_members,
             holding_group=holding_group,
-            expanded_watchlist_markets=frozenset({"us"}),
+            expanded_watchlist_markets=frozenset({Market.US.value}),
         )
 
     trading_screening_dingtalk_webhook = str(
@@ -2170,6 +2353,10 @@ def create_app(test_config=None, start_scheduler=False):
                     app.config["HOLDING_GROUP_MONITOR_START_DELAY_SECONDS"]
                 ),
                 max_workers=int(app.config["HOLDING_GROUP_MONITOR_WORKERS"]),
+                max_symbols=int(app.config["HOLDING_GROUP_MONITOR_MAX_SYMBOLS"]),
+                large_scope_authorized=bool(
+                    app.config["HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED"]
+                ),
                 op_level="5m",
                 mid_level="1m",
                 big_level="30m",
@@ -2235,6 +2422,35 @@ def create_app(test_config=None, start_scheduler=False):
                     else None
                 ),
                 sector_cache_revision=sector_cache_revision,
+                sector_cache_scope_mode=(
+                    "FULL_MARKET"
+                    if app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"]
+                    else (
+                        "LARGE_SCOPE"
+                        if app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"]
+                        else "VALIDATION_COHORT"
+                    )
+                ),
+                sector_cache_scope_limit=(
+                    None
+                    if app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"]
+                    else (
+                        int(
+                            app.config[
+                                "TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"
+                            ]
+                        )
+                        if app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"]
+                        else int(
+                            app.config[
+                                "TRADING_SCREENING_VALIDATION_COHORT_SIZE"
+                            ]
+                        )
+                    )
+                ),
+                sector_cache_admitted_codes=tuple(
+                    symbol_catalog_scope["admitted_codes"]
+                ),
                 worker_environment={"CHANLUN_BUILD_REVISION": build_revision},
                 structure_worker_count=int(
                     app.config["TRADING_SCREENING_STOCK_WORKERS"]
@@ -2441,7 +2657,7 @@ def create_app(test_config=None, start_scheduler=False):
             full_coverage_refresh_enabled=bool(
                 app.config.get(
                     "TRADING_SCREENING_FULL_COVERAGE_ENABLED",
-                    True,
+                    False,
                 )
             ),
             force_full_coverage_until_complete=bool(
@@ -2453,38 +2669,56 @@ def create_app(test_config=None, start_scheduler=False):
             max_five_minute_candidate_symbols_per_refresh=int(
                 app.config.get(
                     "TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                    512,
+                    DEFAULT_VALIDATION_COHORT_SIZE,
                 )
             ),
             max_thirty_minute_candidate_symbols_per_refresh=int(
                 app.config.get(
                     "TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
-                    96,
+                    DEFAULT_VALIDATION_COHORT_SIZE,
                 )
             ),
             supportive_discovery_max_sector_rank=int(
                 app.config.get(
                     "TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
-                    128,
+                    DEFAULT_VALIDATION_COHORT_SIZE,
                 )
             ),
             max_symbols_per_refresh=int(
                 app.config.get(
                     "TRADING_SCREENING_SYMBOLS_PER_REFRESH",
-                    64,
+                    DEFAULT_VALIDATION_COHORT_SIZE,
                 )
             ),
             max_monitor_symbols_per_refresh=int(
                 app.config.get(
                     "TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
-                    512,
+                    DEFAULT_VALIDATION_COHORT_SIZE,
                 )
             ),
             max_total_symbols_per_refresh=int(
                 app.config.get(
                     "TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
-                    16,
+                    DEFAULT_VALIDATION_COHORT_SIZE,
                 )
+            ),
+            validation_cohort_size=int(
+                app.config.get(
+                    "TRADING_SCREENING_VALIDATION_COHORT_SIZE",
+                    DEFAULT_VALIDATION_COHORT_SIZE,
+                )
+            ),
+            max_admitted_universe_symbols=int(
+                app.config.get(
+                    "TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
+                    DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
+                )
+            ),
+            large_scope_authorized=bool(
+                app.config.get("TRADING_SCREENING_ALLOW_LARGE_SCOPE", False)
+            ),
+            admitted_universe_codes=tuple(
+                symbol_catalog_scope.get("admitted_codes", ())
             ),
             priority_monitor_interval_seconds=int(
                 app.config.get(
@@ -2677,6 +2911,12 @@ def create_app(test_config=None, start_scheduler=False):
             # 禁用就绪或界面观测绝不能变成新虚拟意图的语义绕过。通用测试禁用依赖主机的
             # 监听，因此注入确定性无效观测而不启动 PowerShell，再由共享校验器关闭虚拟链。
             else lambda **_kwargs: {}
+        ),
+        candidate_scope_provider=(
+            decision_support_trading_screening.admitted_universe_codes
+        ),
+        candidate_scope_admission_provider=(
+            decision_support_trading_screening.admit_archive_universe_codes
         ),
     )
 

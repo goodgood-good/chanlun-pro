@@ -2678,6 +2678,7 @@ def review_priority(
     selection_sources: tuple[str, ...] = (),
     lifecycle_stage: str | None = None,
     monitor_only: bool = False,
+    five_minute_trade_signal_fresh: bool | None = None,
     parameters: HumanReviewScreeningParameters | None = None,
 ) -> int:
     """Return a stable review-urgency score, never a synthetic trade score.
@@ -2694,6 +2695,10 @@ def review_priority(
         raise ValueError("human review warning count is invalid")
     if side not in {None, "buy", "sell"}:
         raise ValueError("human review priority side is invalid")
+    if five_minute_trade_signal_fresh is not None and type(
+        five_minute_trade_signal_fresh
+    ) is not bool:
+        raise ValueError("five-minute review signal freshness is invalid")
     if any(not isinstance(value, str) or not value for value in selection_sources):
         raise ValueError("human review selection sources are invalid")
 
@@ -2708,11 +2713,18 @@ def review_priority(
         "HOLDING_MONITOR",
         "VIRTUAL_HOLDING_MONITOR",
     }
-    if actionable_sell_review and manual_attention_sources.intersection(
-        selection_sources
-    ):
+    manual_attention_sell_review = bool(
+        actionable_sell_review
+        and manual_attention_sources.intersection(selection_sources)
+    )
+    if manual_attention_sell_review:
+        # A held-position exit remains a risk-review lane even when the
+        # originating structure is no longer a newly discovered sell point.
+        # Its 90+ band is therefore independent of the immediate-signal band.
         effective_status = "MANUAL_ATTENTION_SELL_REVIEW"
-    elif actionable_sell_review:
+    elif actionable_sell_review and five_minute_trade_signal_fresh is True:
+        # Only a newly available formal 5m sell point may occupy the 80+ lane.
+        # A later 1m segment-difference witness must never revive this window.
         effective_status = "STRUCTURAL_SELL_REVIEW"
     elif position_status is not None:
         effective_status = position_status
@@ -3545,7 +3557,9 @@ class HumanReviewFeedback:
     nine_segment_upgrade_judgement: Literal["CONFIRMED", "REJECTED", "UNCERTAIN"] = (
         "UNCERTAIN"
     )
-    locator_judgement: Literal["CONFIRMED", "REJECTED", "UNCERTAIN"] = "UNCERTAIN"
+    segment_difference_judgement: Literal[
+        "CONFIRMED", "REJECTED", "UNCERTAIN"
+    ] = "UNCERTAIN"
     notes: str = ""
     request_id: str | None = None
     signal_lifecycle_id: str | None = None
@@ -3620,7 +3634,7 @@ class HumanReviewFeedback:
         for field in (
             "center_expansion_judgement",
             "nine_segment_upgrade_judgement",
-            "locator_judgement",
+            "segment_difference_judgement",
         ):
             if getattr(self, field) not in {
                 "CONFIRMED",

@@ -12,7 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 CLEANUP = ROOT / "ops" / "cleanup_local_generated_artifacts.ps1"
 RUNTIME_CLEANUP = ROOT / "ops" / "cleanup_legacy_runtime_state.ps1"
 HISTORICAL_BACKTEST = ROOT / "ops" / "run_historical_backtest.ps1"
-RESEARCH_SAMPLE = ROOT / "config" / "research_backtest_sample_48.txt"
+RESEARCH_SAMPLES = {
+    "smoke2": (ROOT / "config" / "research_backtest_smoke_2.txt", 2),
+    "validation12": (
+        ROOT / "config" / "research_backtest_validation_12.txt",
+        12,
+    ),
+}
 
 
 def _git(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -34,25 +40,71 @@ def test_generated_lesson_corpus_remains_ignored() -> None:
 
 def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
     source = HISTORICAL_BACKTEST.read_text(encoding="utf-8-sig")
-    symbols = tuple(
-        line.strip()
-        for line in RESEARCH_SAMPLE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    )
 
+    assert '[ValidateSet("smoke2", "validation12")]' in source
+    assert '[string]$Profile = "smoke2"' in source
+    assert '[ValidateSet("Extract", "Prefix", "Finalize", "All")]' in source
+    assert '[string]$Stage = "Extract"' in source
+    assert "[switch]$ConfirmLargeScope" in source
     assert "[switch]$FullMarket" in source
-    assert "RESEARCH_SAMPLE_48" in source
+    assert "if ($FullMarket -and -not $ConfirmLargeScope)" in source
     assert "FULL_MARKET_EXPLICIT" in source
-    assert 'if (-not $FullMarket)' in source
+    assert "RESEARCH_PROFILE_$($Profile.ToUpperInvariant())" in source
+    assert "if (-not $FullMarket)" in source
     assert '@("--codes", ($researchCodes -join ","))' in source
-    assert '$extractionArguments += "--full-market"' in source
-    assert '$finalizationArguments += "--reuse-sector-cache"' in source
+    assert '$extractionArguments += "--confirm-large-scope"' in source
+    assert (
+        "$extractionArguments += @(\n"
+        '                        "--full-market",\n'
+        '                        "--confirm-large-scope"\n'
+        "                    )"
+    ) in source
+    assert "$researchCodes.Count -gt 20 -and -not $ConfirmLargeScope" in source
+    assert (
+        "if ($researchCodes.Count -gt 20) {\n"
+        '                        $extractionArguments += "--confirm-large-scope"'
+    ) in source
+    assert '$Stage -in @("Extract", "Finalize", "All")' in source
+    assert '$Stage -in @("Prefix", "All")' in source
+    assert '$Stage -in @("Finalize", "All")' in source
+    assert '"--reuse-sector-cache",' in source
     assert '"--sector-workers", "$([Math]::Min($Workers, 3))"' in source
-    assert len(symbols) == len(set(symbols)) == 48
-    assert all(
-        symbol.startswith(("SH.", "SZ.", "BJ.")) and len(symbol) == 9
-        for symbol in symbols
+    assert '"--max-sector-count"' in source
+    assert '"--max-sector-closure"' in source
+    assert '"--confirm-large-sector-scope"' in source
+    assert "research_sample_smoke_2" in source
+    assert "research_sample_validation_12" in source
+    assert "full_market_explicit" in source
+    assert "pit_reference" in source
+    assert "fixed_year_2025_2026" not in source
+    assert "research48" not in source
+    assert "research_sample_48" not in source
+    assert "[switch]$GeneratePIT" in source
+    assert '$pitSnapshot = Join-Path $inputDirectory "pit_metadata.json"' in source
+    assert '"--codes-file", $researchCodesPath' in source
+    assert '"--membership-index", $MembershipIndex' in source
+    assert '@("--full-market", "--confirm-large-scope")' in source
+
+    samples: dict[str, tuple[str, ...]] = {}
+    for profile, (path, expected_count) in RESEARCH_SAMPLES.items():
+        symbols = tuple(
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        assert len(symbols) == len(set(symbols)) == expected_count
+        assert all(
+            symbol.startswith(("SH.", "SZ.", "BJ.")) and len(symbol) == 9
+            for symbol in symbols
+        )
+        samples[profile] = symbols
+
+    assert set(samples["smoke2"]).isdisjoint(samples["validation12"])
+    validation_contract = RESEARCH_SAMPLES["validation12"][0].read_text(
+        encoding="utf-8"
     )
+    assert "Pre-registered gate cohort" in validation_contract
+    assert "Never select by later" in validation_contract
 
 
 @pytest.mark.parametrize(
@@ -92,23 +144,31 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert '@{ path = ".omc"; category = "agent_session_artifact" }' in source
     assert "rootGeneratedLogPath" in source
     assert "active_app_logs" in source
+    assert "active_ops_logs" in source
     assert "[IO.FileShare]::None" in source
     assert ".cache\\chanlun_human_review_forward" in source
     assert ".cache\\chanlun_human_review" in source
+    assert ".cache\\chanlun_scheduler" in source
     assert ".cache\\chanlun_qmt_sector_ledger" in source
     assert 'Category "legacy_cache"' in source
     assert ".cache\\chanlun_v3_human_review_forward" in source
     assert ".cache\\chanlun_v31_csi300_broad_pool" in source
     assert ".cache\\historical_backtest_preflight_report_20260816" in source
-    assert "qmt_runtime_*.log" in source
-    assert "currentQmtLogName" in source
+    assert "qmt_runtime_\\d{4}-\\d{2}-\\d{2}" in source
+    assert '"historical_backtest.lock"' in source
+    assert "currentQmtLogName" not in source
     assert '"web_recovery_*"' in source
     assert '"web_watchdog_*"' in source
-    assert "$_.Name -ne $currentQmtLogName" in source
+    assert "research_sample_smoke_2" not in source
+    assert "research_sample_validation_12" not in source
+    assert '"pit_sector_composites"' not in source
+    assert '"pit_sectors"' not in source
+    assert '"pit_metadata.json"' not in source
     assert '-Filter "*.dmp"' in source
     assert '"server-*.stdout.log"' in source
     assert '"server-*.stderr.log"' in source
-    assert '-Filter "targeted_v*"' in source
+    assert '"targeted_v*"' in source
+    assert '"research_diagnostic_*"' in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="cleanup helper targets Windows")

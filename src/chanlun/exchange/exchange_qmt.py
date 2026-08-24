@@ -8,7 +8,12 @@ import pytz
 from tenacity import retry, stop_after_attempt, wait_random
 
 from chanlun import fun
-from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_frequency
+from chanlun.exchange.exchange import (
+    Exchange,
+    SINGLE_SYMBOL_STOCK_INFO,
+    Tick,
+    convert_stock_kline_frequency,
+)
 from chanlun.exchange.kline_precision import (
     normalize_kline_precision,
     resolve_structure_price_quantum,
@@ -36,6 +41,8 @@ class ExchangeQMT(Exchange):
     """QMT（xtquant）沪深 A 股行情适配器。"""
 
     kline_time_label = "end"
+    stock_info_query_scope = SINGLE_SYMBOL_STOCK_INFO
+    all_stocks_requires_explicit_authorization = True
     # 实时严格结构可以用显式 start_date 固定一代运行状态的左边界。调用方在
     # 这种模式下不再传 req_counts，避免“最新 N 根”每分钟左移并击穿增量前缀。
     supports_stable_incremental_window = True
@@ -121,7 +128,12 @@ class ExchangeQMT(Exchange):
     def support_frequencys(self):
         return self.frequency_map
 
-    def all_stocks(self):
+    def all_stocks(self, *, full_market_authorized: bool = False):
+        if full_market_authorized is not True:
+            raise PermissionError(
+                "QMT full-market catalog enumeration requires explicit authorization"
+            )
+
         # 双检锁防止并发线程同时进入构建临界区，已就绪后无锁直接返回。
         if len(self.g_all_stocks) > 0:
             return self.g_all_stocks
@@ -685,34 +697,6 @@ class ExchangeQMT(Exchange):
         for _c, _t in qmt_ticks.items():
             ticks[self.code_to_tdx(_c)] = Tick(
                 code=self.code_to_tdx(_c),
-                last=_t["lastPrice"],
-                buy1=_t["bidPrice"][0],
-                sell1=_t["askPrice"][0],
-                high=_t["high"],
-                low=_t["low"],
-                open=_t["open"],
-                volume=_t["volume"],
-                rate=(
-                    (_t["lastPrice"] - _t["lastClose"]) / _t["lastClose"] * 100
-                    if _t["lastClose"] != 0
-                    else 0
-                ),
-            )
-
-        return ticks
-
-    def all_ticks(self) -> Dict[str, Tick]:
-        ticks = {}
-        all_stocks = self.all_stocks()
-        all_codes = [_s["code"] for _s in all_stocks]
-        with _XTDATA_NATIVE_LOCK:
-            qmt_ticks = xtdata.get_full_tick(["SH", "SZ", "BJ"])
-        for _c, _t in qmt_ticks.items():
-            _tdx_code = self.code_to_tdx(_c)
-            if _tdx_code not in all_codes:
-                continue
-            ticks[_tdx_code] = Tick(
-                code=_tdx_code,
                 last=_t["lastPrice"],
                 buy1=_t["bidPrice"][0],
                 sell1=_t["askPrice"][0],

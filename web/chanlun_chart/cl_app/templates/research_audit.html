@@ -79,21 +79,29 @@
               <strong>{{ "已达门槛" if audit.sample_adequacy.passed else "未达门槛" }}</strong>
               <small>{{ audit.sample_adequacy.closed_trade_count }} / {{ audit.sample_adequacy.required_closed_trade_count }} 笔已平仓</small>
             </article>
-            <article>
-              <span>回测净收益</span>
-              <strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong>
-              <small>扣除报告内费用与滑点</small>
-            </article>
-            <article>
-              <span>回测最大回撤</span>
-              <strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong>
-              <small>验收上限 10%</small>
-            </article>
-            <article>
-              <span>回测 Calmar</span>
-              <strong>{% if audit.aggregate_out_of_sample.calmar is not none %}{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) }}{% else %}N/A{% endif %}</strong>
-              <small>验收下限 1.0；不足一年不计算</small>
-            </article>
+            {% if audit.pnl_generated %}
+              <article>
+                <span>回测净收益</span>
+                <strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong>
+                <small>扣除报告内费用与滑点</small>
+              </article>
+              <article>
+                <span>回测最大回撤</span>
+                <strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong>
+                <small>验收上限 10%</small>
+              </article>
+              <article>
+                <span>回测 Calmar</span>
+                <strong>{% if audit.aggregate_out_of_sample.calmar is not none %}{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) }}{% else %}N/A{% endif %}</strong>
+                <small>验收下限 1.0；不足一年不计算</small>
+              </article>
+            {% else %}
+              <article>
+                <span>回测收益</span>
+                <strong>未产生成交，收益不可评估</strong>
+                <small>全程无成交不能解释为策略收益 0%</small>
+              </article>
+            {% endif %}
           </div>
           <div class="ra-verdict-reasons">
             <strong>审计结论：{{ verdict_labels.get(audit.verdict.status, audit.verdict.status) }}</strong>
@@ -110,7 +118,7 @@
             <strong>证据不足，结果仅可用于研究</strong>
             <span>
               {% if audit.data_evidence.failures %}证据失败项：{{ audit.data_evidence.failures|join('、') }}。{% endif %}
-              当前收益数字不能描述为可靠、可复现的实盘收益。
+              {% if audit.pnl_generated %}当前收益数字不能描述为可靠、可复现的实盘收益。{% else %}当前尚无可用于收益评估的成交样本。{% endif %}
             </span>
           </section>
         {% endif %}
@@ -178,25 +186,32 @@
               <p>汇总统一可交易区间内的实际可成交回放；本方案不存在训练集或参数选择阶段。</p>
             </div>
           </div>
-          <div class="ra-metric-grid">
-            <article class="ra-metric-card"><span>净收益</span><strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong><small>已扣报告成本</small></article>
-            <article class="ra-metric-card"><span>最大回撤</span><strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong><small>最长 {{ audit.aggregate_out_of_sample.max_drawdown_duration_bars }} 根 K 线</small></article>
-            <article class="ra-metric-card"><span>Calmar</span><strong>{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) if audit.aggregate_out_of_sample.calmar is not none else 'N/A' }}</strong><small>收益 / 回撤</small></article>
-            <article class="ra-metric-card"><span>交易总成本</span><strong>{{ audit.aggregate_out_of_sample.total_cost }}</strong><small>成本 / 毛盈利：{{ audit.aggregate_out_of_sample.cost_to_gross_profit or 'N/A' }}</small></article>
-            <article class="ra-metric-card"><span>暴露比例</span><strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.exposure_ratio|float) * 100) }}</strong><small>资金处于持仓状态的比例</small></article>
-            {% if audit.aggregate_out_of_sample.annualized_return is not none %}
-              <article class="ra-metric-card"><span>年化收益</span><strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.annualized_return|float) * 100) }}</strong><small>自然跨度不少于 365 日才展示</small></article>
-            {% endif %}
-          </div>
-          {% if audit.bootstrap_intervals %}
-            <div class="ra-bootstrap-grid">
-              <div><span>净收益 95% 区间</span><strong>{{ audit.bootstrap_intervals.net_return.lower }} ～ {{ audit.bootstrap_intervals.net_return.upper }}</strong></div>
-              <div><span>单笔期望 95% 区间</span><strong>{{ audit.bootstrap_intervals.expectancy.lower }} ～ {{ audit.bootstrap_intervals.expectancy.upper }}</strong></div>
-              <div><span>最大回撤 95% 区间</span><strong>{{ audit.bootstrap_intervals.max_drawdown.lower }} ～ {{ audit.bootstrap_intervals.max_drawdown.upper }}</strong></div>
-              <div><span>重复 / 聚类</span><strong>{{ audit.bootstrap_intervals.repetitions }} / {{ audit.bootstrap_intervals.cluster_count }}</strong></div>
+          {% if audit.pnl_generated %}
+            <div class="ra-metric-grid">
+              <article class="ra-metric-card"><span>净收益</span><strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong><small>已扣报告成本</small></article>
+              <article class="ra-metric-card"><span>最大回撤</span><strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong><small>最长 {{ audit.aggregate_out_of_sample.max_drawdown_duration_bars }} 根 K 线</small></article>
+              <article class="ra-metric-card"><span>Calmar</span><strong>{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) if audit.aggregate_out_of_sample.calmar is not none else 'N/A' }}</strong><small>收益 / 回撤</small></article>
+              <article class="ra-metric-card"><span>交易总成本</span><strong>{{ audit.aggregate_out_of_sample.total_cost }}</strong><small>成本 / 毛盈利：{{ audit.aggregate_out_of_sample.cost_to_gross_profit or 'N/A' }}</small></article>
+              <article class="ra-metric-card"><span>暴露比例</span><strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.exposure_ratio|float) * 100) }}</strong><small>资金处于持仓状态的比例</small></article>
+              {% if audit.aggregate_out_of_sample.annualized_return is not none %}
+                <article class="ra-metric-card"><span>年化收益</span><strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.annualized_return|float) * 100) }}</strong><small>自然跨度不少于 365 日才展示</small></article>
+              {% endif %}
             </div>
+            {% if audit.bootstrap_intervals %}
+              <div class="ra-bootstrap-grid">
+                <div><span>净收益 95% 区间</span><strong>{{ audit.bootstrap_intervals.net_return.lower }} ～ {{ audit.bootstrap_intervals.net_return.upper }}</strong></div>
+                <div><span>单笔期望 95% 区间</span><strong>{{ audit.bootstrap_intervals.expectancy.lower }} ～ {{ audit.bootstrap_intervals.expectancy.upper }}</strong></div>
+                <div><span>最大回撤 95% 区间</span><strong>{{ audit.bootstrap_intervals.max_drawdown.lower }} ～ {{ audit.bootstrap_intervals.max_drawdown.upper }}</strong></div>
+                <div><span>重复 / 聚类</span><strong>{{ audit.bootstrap_intervals.repetitions }} / {{ audit.bootstrap_intervals.cluster_count }}</strong></div>
+              </div>
+            {% else %}
+              <p class="ra-subtext">没有已平仓交易，无法计算聚类 Bootstrap 不确定性区间。</p>
+            {% endif %}
           {% else %}
-            <p class="ra-subtext">没有已平仓交易，无法计算聚类 Bootstrap 不确定性区间。</p>
+            <section class="ra-notice ra-notice-warning" role="status">
+              <strong>未产生成交，收益不可评估</strong>
+              <span>已完成 {{ audit.universe.causal_evaluation_count }} 个因果评估时点，但没有成交；不会把全程现金的 0% 伪装成策略表现。</span>
+            </section>
           {% endif %}
         </section>
 
@@ -426,34 +441,6 @@
             </dl>
           {% else %}
             <p class="ra-empty-evidence">尚未找到可解析的近一年 PIT 历史元数据。</p>
-          {% endif %}
-        </section>
-
-        <section class="ra-section" aria-labelledby="ra-records-title">
-          <div class="ra-section-heading">
-            <div><p class="ra-section-index">03 · 审计记录</p><h2 id="ra-records-title">已归档的研究与审计记录</h2><p>仅列出白名单审计目录中的有效 JSON 记录；这些记录是过程证据，不等同于认证收益报告。</p></div>
-            <span class="ra-status ra-status-ok">{{ audit_status.audit_artifact_count }} 条</span>
-          </div>
-          {% if audit_status.audit_artifacts %}
-            <div class="ra-table-wrap">
-              <table class="ra-source-table">
-                <thead><tr><th>更新时间</th><th>记录</th><th>类别</th><th>格式</th><th>状态</th><th>文件哈希</th></tr></thead>
-                <tbody>
-                  {% for row in audit_status.audit_artifacts %}
-                    <tr>
-                      <td>{{ row.modified_at or '未知' }}</td>
-                      <td><strong>{{ row.name }}</strong><small><code>{{ row.relative_path }}</code></small></td>
-                      <td>{{ row.category }}</td>
-                      <td><code>{{ row.schema }}</code></td>
-                      <td>{{ row.status }}</td>
-                      <td><code>{{ row.file_sha256 or '无法校验' }}</code></td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          {% else %}
-            <p class="ra-empty-evidence">白名单目录中暂未发现可展示的审计记录。</p>
           {% endif %}
         </section>
 

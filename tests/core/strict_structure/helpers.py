@@ -55,19 +55,74 @@ def unit(
     )
 
 
-def valid_five_up_exit(
+def valid_up_center_lifecycle(
     unit_offset: int = 0,
     *,
     structural_level: int = 0,
     zd_tick: int = 105,
     zg_tick: int = 115,
+    return_low_tick: int | None = None,
 ) -> tuple[ConstituentUnit, ...]:
-    """Five consecutive physical segments: entry + core A/B/C + leave."""
+    """Return three core segments, an up departure, and its outside return."""
+
+    resolved_return_low = zg_tick + 5 if return_low_tick is None else return_low_tick
+    return (
+        unit(
+            unit_offset,
+            "down",
+            zg_tick + 5,
+            zd_tick - 5,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 1,
+            "up",
+            zd_tick - 5,
+            zg_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 2,
+            "down",
+            zg_tick,
+            zd_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 3,
+            "up",
+            zd_tick,
+            zg_tick + 15,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 4,
+            "down",
+            zg_tick + 15,
+            resolved_return_low,
+            structural_level=structural_level,
+        ),
+    )
+
+
+def valid_down_center_lifecycle(
+    unit_offset: int = 0,
+    *,
+    structural_level: int = 0,
+    zd_tick: int = 95,
+    zg_tick: int = 105,
+    return_high_tick: int | None = None,
+) -> tuple[ConstituentUnit, ...]:
+    """Return three core segments, a down departure, and its outside return."""
+
+    resolved_return_high = (
+        zd_tick - 5 if return_high_tick is None else return_high_tick
+    )
     return (
         unit(
             unit_offset,
             "up",
-            zd_tick - 15,
+            zd_tick - 5,
             zg_tick + 5,
             structural_level=structural_level,
         ),
@@ -75,13 +130,13 @@ def valid_five_up_exit(
             unit_offset + 1,
             "down",
             zg_tick + 5,
-            zd_tick - 5,
+            zd_tick,
             structural_level=structural_level,
         ),
         unit(
             unit_offset + 2,
             "up",
-            zd_tick - 5,
+            zd_tick,
             zg_tick,
             structural_level=structural_level,
         ),
@@ -89,14 +144,14 @@ def valid_five_up_exit(
             unit_offset + 3,
             "down",
             zg_tick,
-            zd_tick,
+            zd_tick - 15,
             structural_level=structural_level,
         ),
         unit(
             unit_offset + 4,
             "up",
-            zd_tick,
-            zg_tick + 15,
+            zd_tick - 15,
+            resolved_return_high,
             structural_level=structural_level,
         ),
     )
@@ -111,12 +166,12 @@ def valid_three_center_seed(
 ) -> tuple[ConstituentUnit, ...]:
     """Three connected units for explicit recursive trend-type tests."""
 
-    values = valid_five_up_exit(
+    values = valid_up_center_lifecycle(
         unit_offset,
         structural_level=structural_level,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
-    )[1:4]
+    )[:3]
     return tuple(
         replace(item, source_kind=SourceKind.TREND_TYPE)
         for item in values
@@ -131,18 +186,20 @@ def ongoing_center(
     zg_tick: int = 115,
     center_id: str | None = None,
 ) -> TrendCenter:
-    initial = valid_five_up_exit(
+    lifecycle = valid_up_center_lifecycle(
         unit_offset,
         structural_level=structural_level,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
     value = establish_center(
-        initial,
+        lifecycle[:3],
         structural_level,
         SourceKind.SEGMENT,
     )
     assert value is not None
+    value, event = advance_center(value, lifecycle[3])
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -162,15 +219,14 @@ def completed_up_center(
         zg_tick=zg_tick,
         center_id=center_id,
     )
-    resolved_return_low = zg_tick + 5 if return_low_tick is None else return_low_tick
-    ret = unit(
-        unit_offset + 5,
-        "down",
-        zg_tick + 15,
-        resolved_return_low,
+    lifecycle = valid_up_center_lifecycle(
+        unit_offset,
         structural_level=structural_level,
+        zd_tick=zd_tick,
+        zg_tick=zg_tick,
+        return_low_tick=return_low_tick,
     )
-    completed, event = advance_center(value, ret)
+    completed, event = advance_center(value, lifecycle[4])
     assert completed.state is CenterState.COMPLETED
     assert event.kind is CenterEventKind.COMPLETED_UP
     return completed
@@ -184,49 +240,20 @@ def ongoing_down_center(
     zg_tick: int = 105,
     center_id: str | None = None,
 ) -> TrendCenter:
-    initial = (
-        unit(
+    lifecycle = valid_down_center_lifecycle(
         unit_offset,
-        "down",
-        zg_tick + 15,
-        zd_tick - 5,
         structural_level=structural_level,
-        ),
-        unit(
-            unit_offset + 1,
-            "up",
-            zd_tick - 5,
-            zg_tick,
-            structural_level=structural_level,
-        ),
-        unit(
-            unit_offset + 2,
-            "down",
-            zg_tick,
-            zd_tick,
-            structural_level=structural_level,
-        ),
-        unit(
-            unit_offset + 3,
-            "up",
-            zd_tick,
-            zg_tick,
-            structural_level=structural_level,
-        ),
-        unit(
-            unit_offset + 4,
-            "down",
-            zg_tick,
-            zd_tick - 15,
-            structural_level=structural_level,
-        ),
+        zd_tick=zd_tick,
+        zg_tick=zg_tick,
     )
     value = establish_center(
-        initial,
+        lifecycle[:3],
         structural_level,
         SourceKind.SEGMENT,
     )
     assert value is not None
+    value, event = advance_center(value, lifecycle[3])
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -246,15 +273,14 @@ def completed_down_center(
         zg_tick=zg_tick,
         center_id=center_id,
     )
-    resolved_return_high = zd_tick - 5 if return_high_tick is None else return_high_tick
-    ret = unit(
-        unit_offset + 5,
-        "up",
-        zd_tick - 15,
-        resolved_return_high,
+    lifecycle = valid_down_center_lifecycle(
+        unit_offset,
         structural_level=structural_level,
+        zd_tick=zd_tick,
+        zg_tick=zg_tick,
+        return_high_tick=return_high_tick,
     )
-    completed, event = advance_center(value, ret)
+    completed, event = advance_center(value, lifecycle[4])
     assert completed.state is CenterState.COMPLETED
     assert event.kind is CenterEventKind.COMPLETED_DOWN
     return completed
@@ -285,9 +311,19 @@ def structure_for(*centers, completed_trends=()) -> StrictStructureResult:
                 by_id.setdefault(item.unit_id, item)
         for center_value in level_centers:
             for item in (
-                center_value.entry_unit,
-                *center_value.establishment_units,
+                *(
+                    ()
+                    if center_value.entry_unit is None
+                    else (center_value.entry_unit,)
+                ),
                 *center_value.body_units,
+                *center_value.failed_departure_units,
+                *center_value.supersession_bridge_units,
+                *(
+                    ()
+                    if center_value.pending_leave_unit is None
+                    else (center_value.pending_leave_unit,)
+                ),
                 *(
                     ()
                     if center_value.completion_leave_unit is None

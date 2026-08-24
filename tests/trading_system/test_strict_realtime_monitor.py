@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -8,6 +9,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system.models import (
     StructuralPoint,
     build_point_id,
@@ -30,6 +33,27 @@ from chanlun.exchange.price_basis import (
 
 CN = ZoneInfo("Asia/Shanghai")
 AT = datetime(2026, 8, 5, 10, 0, tzinfo=CN)
+
+
+def _with_terminal_interval(
+    point: StructuralPoint,
+    *,
+    market_start: datetime,
+) -> StructuralPoint:
+    return replace(
+        point,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=point.recursive_level,
+            unit_id=f"segment:{point.source_frequency}:{point.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down" if point.side == "buy" else "up",
+            state="locked",
+            market_start=market_start,
+            market_end=point.anchor_at,
+            available_at=point.available_at,
+        ),
+    )
 
 
 def _point(
@@ -156,6 +180,7 @@ class _StrictState:
     def mid_dir(self):
         return self._mid
 
+
 def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
     point = _point("3buy")
     state = _StrictState((point,))
@@ -216,9 +241,13 @@ def test_strict_collector_attaches_optional_one_minute_segment_difference() -> N
 def test_stage_stable_new_one_minute_segment_emits_a_distinct_enrichment() -> None:
     point = _point(
         "3buy",
-        anchor_at=AT - timedelta(hours=1),
-        confirmed_at=AT - timedelta(minutes=20),
-        available_at=AT - timedelta(minutes=20),
+        anchor_at=AT,
+        confirmed_at=AT,
+        available_at=AT,
+    )
+    point = _with_terminal_interval(
+        point,
+        market_start=AT - timedelta(minutes=30),
     )
     segment = _point(
         "1buy",
@@ -226,6 +255,10 @@ def test_stage_stable_new_one_minute_segment_emits_a_distinct_enrichment() -> No
         anchor_at=AT - timedelta(minutes=2),
         confirmed_at=AT - timedelta(minutes=1),
         available_at=AT,
+    )
+    segment = _with_terminal_interval(
+        segment,
+        market_start=AT - timedelta(minutes=3),
     )
     state = _StrictState(())
     state.new_segment_difference_updates = lambda: ((point, segment),)
@@ -284,9 +317,13 @@ def test_physical_monitor_reports_each_segment_occurrence_only_once(
 ) -> None:
     point = _point(
         "3buy",
-        anchor_at=AT - timedelta(hours=1),
-        confirmed_at=AT - timedelta(minutes=20),
-        available_at=AT - timedelta(minutes=20),
+        anchor_at=AT,
+        confirmed_at=AT,
+        available_at=AT,
+    )
+    point = _with_terminal_interval(
+        point,
+        market_start=AT - timedelta(minutes=30),
     )
     segment = _point(
         "1buy",
@@ -294,6 +331,10 @@ def test_physical_monitor_reports_each_segment_occurrence_only_once(
         anchor_at=AT - timedelta(minutes=2),
         confirmed_at=AT - timedelta(minutes=1),
         available_at=AT,
+    )
+    segment = _with_terminal_interval(
+        segment,
+        market_start=AT - timedelta(minutes=3),
     )
     segment_points: list[StructuralPoint] = []
     state = StrictPhysicalMonitorState(
@@ -344,7 +385,7 @@ def test_physical_monitor_reports_each_segment_occurrence_only_once(
     assert state.new_segment_difference_updates() == ()
 
 
-def test_physical_monitor_accepts_locator_older_than_parent_setup(
+def test_physical_monitor_accepts_nested_witness_known_before_parent_setup(
     monkeypatch,
 ) -> None:
     point = _point(
@@ -353,12 +394,20 @@ def test_physical_monitor_accepts_locator_older_than_parent_setup(
         confirmed_at=AT - timedelta(minutes=1),
         available_at=AT - timedelta(minutes=1),
     )
+    point = _with_terminal_interval(
+        point,
+        market_start=AT - timedelta(minutes=30),
+    )
     segment = _point(
         "1buy",
         frequency="1m",
         anchor_at=AT - timedelta(minutes=22),
         confirmed_at=AT - timedelta(minutes=21),
         available_at=AT - timedelta(minutes=20),
+    )
+    segment = _with_terminal_interval(
+        segment,
+        market_start=AT - timedelta(minutes=23),
     )
     segment_points: list[StructuralPoint] = []
     state = StrictPhysicalMonitorState(
@@ -398,12 +447,6 @@ def test_physical_monitor_accepts_locator_older_than_parent_setup(
         "current_five_minute_setup_points",
         lambda *_args, **_kwargs: (point,),
     )
-    monkeypatch.setattr(
-        monitor_module,
-        "match_one_minute_segment_difference_for_point",
-        lambda _point, candidates, **_kwargs: segment if candidates else None,
-    )
-
     state.refresh()
     segment_points.append(segment)
     state.refresh()
@@ -411,14 +454,18 @@ def test_physical_monitor_accepts_locator_older_than_parent_setup(
     assert state.new_segment_difference_updates() == ((point, segment),)
 
 
-def test_later_locator_on_same_parent_is_a_new_notification_occurrence(
+def test_later_nested_witness_does_not_replace_first_notification_boundary(
     monkeypatch,
 ) -> None:
     point = _point(
         "3buy",
-        anchor_at=AT - timedelta(hours=1),
-        confirmed_at=AT - timedelta(minutes=20),
-        available_at=AT - timedelta(minutes=20),
+        anchor_at=AT - timedelta(minutes=5),
+        confirmed_at=AT - timedelta(minutes=5),
+        available_at=AT - timedelta(minutes=5),
+    )
+    point = _with_terminal_interval(
+        point,
+        market_start=AT - timedelta(hours=1),
     )
     stale_segment = _point(
         "1buy",
@@ -427,12 +474,20 @@ def test_later_locator_on_same_parent_is_a_new_notification_occurrence(
         confirmed_at=AT - timedelta(minutes=21),
         available_at=AT - timedelta(minutes=20),
     )
+    stale_segment = _with_terminal_interval(
+        stale_segment,
+        market_start=AT - timedelta(minutes=23),
+    )
     fresh_segment = _point(
         "1buy",
         frequency="1m",
-        anchor_at=AT - timedelta(minutes=2),
+        anchor_at=AT - timedelta(minutes=6),
         confirmed_at=AT - timedelta(minutes=1),
         available_at=AT,
+    )
+    fresh_segment = _with_terminal_interval(
+        fresh_segment,
+        market_start=AT - timedelta(minutes=7),
     )
     segment_points: list[StructuralPoint] = [stale_segment]
     state = StrictPhysicalMonitorState(
@@ -472,26 +527,17 @@ def test_later_locator_on_same_parent_is_a_new_notification_occurrence(
         "current_five_minute_setup_points",
         lambda *_args, **_kwargs: (point,),
     )
-    monkeypatch.setattr(
-        monitor_module,
-        "match_one_minute_segment_difference_for_point",
-        lambda _point, candidates, **_kwargs: max(
-            candidates,
-            key=lambda candidate: candidate.available_at,
-            default=None,
-        ),
-    )
-
     state.refresh()
     assert state.new_segment_difference_updates() == ((point, stale_segment),)
 
     segment_points.append(fresh_segment)
     state.refresh()
 
-    assert state.new_segment_difference_updates() == ((point, fresh_segment),)
+    assert state.segment_difference_for_trade_point(point) == stale_segment
+    assert state.new_segment_difference_updates() == ()
 
 
-def test_physical_monitor_recovers_a_confirmed_segment_outside_current_tail(
+def test_physical_monitor_rejects_segment_outside_parent_terminal_interval(
     monkeypatch,
 ) -> None:
     point = _point(
@@ -500,14 +546,22 @@ def test_physical_monitor_recovers_a_confirmed_segment_outside_current_tail(
         confirmed_at=AT - timedelta(minutes=1),
         available_at=AT - timedelta(minutes=1),
     )
+    point = _with_terminal_interval(
+        point,
+        market_start=AT - timedelta(minutes=30),
+    )
     historical_segment = _point(
         "1buy",
         frequency="1m",
         anchor_at=AT - timedelta(minutes=3),
         confirmed_at=AT - timedelta(minutes=2),
-        # The structural anchor may sit outside the current tail, but an
-        # execution locator must become observable after the formal 5m setup.
+        # Its full terminal interval ends after the parent 5m terminal end,
+        # so timestamp/price proximity cannot make it a nesting witness.
         available_at=AT,
+    )
+    historical_segment = _with_terminal_interval(
+        historical_segment,
+        market_start=AT - timedelta(minutes=4),
     )
     state = StrictPhysicalMonitorState(
         "TSLA.US",
@@ -549,8 +603,8 @@ def test_physical_monitor_recovers_a_confirmed_segment_outside_current_tail(
 
     state.refresh()
 
-    assert state.segment_difference_for_trade_point(point) == historical_segment
-    assert state.new_segment_difference_updates() == ((point, historical_segment),)
+    assert state.segment_difference_for_trade_point(point) is None
+    assert state.new_segment_difference_updates() == ()
 
 
 def test_optional_one_minute_outage_does_not_block_five_minute_signal(
@@ -801,14 +855,17 @@ def test_chart_occurrence_resolution_rejects_ambiguous_evidence_revision(
         lambda *_args, **_kwargs: (rebuilt_a, rebuilt_b),
     )
 
-    assert state.confirmed_point_occurrence(
-        "3buy",
-        AT.isoformat(),
-        frequency="5m",
-        evidence_id=old.point_id,
-        recursive_level=0,
-        anchor_time=old.anchor_at.isoformat(),
-    ) is None
+    assert (
+        state.confirmed_point_occurrence(
+            "3buy",
+            AT.isoformat(),
+            frequency="5m",
+            evidence_id=old.point_id,
+            recursive_level=0,
+            anchor_time=old.anchor_at.isoformat(),
+        )
+        is None
+    )
 
 
 def test_strict_collector_keeps_buy_and_sell_facts_under_high_level_downtrend() -> None:
@@ -960,8 +1017,8 @@ def test_monitor_visible_price_uses_freshest_completed_feed() -> None:
         )
 
     state._runtime_by_frequency = {
-        "1m": runtime("1m", "2026-08-05T10:03:00+08:00", 100.3),
-        "5m": runtime("5m", "2026-08-05T10:00:00+08:00", 100.5),
+        "1m": runtime("1m", "2026-08-05T10:04:00+08:00", 100.3),
+        "5m": runtime("5m", "2026-08-05T10:05:00+08:00", 100.5),
     }
     state.segment_difference_ready = True
 
@@ -970,6 +1027,33 @@ def test_monitor_visible_price_uses_freshest_completed_feed() -> None:
     assert state.last_px == 100.5
     assert state.last_px_source == "latest_completed_5m_close"
     assert state.last_px_observed_at == datetime(2026, 8, 5, 10, 5, tzinfo=CN)
+
+
+def test_monitor_normalizes_start_labels_after_dropping_unclosed_tail() -> None:
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    frame = _frame(metadata=True)
+    frame["date"] = pd.to_datetime(
+        (
+            "2026-08-05 09:50:00+08:00",
+            "2026-08-05 09:55:00+08:00",
+            "2026-08-05 10:00:00+08:00",
+            "2026-08-05 10:05:00+08:00",
+        )
+    )
+
+    closed = state._closed_frame(
+        frame,
+        "5m",
+        as_of=datetime(2026, 8, 5, 10, 3, tzinfo=CN),
+    )
+
+    assert tuple(closed["date"]) == (
+        pd.Timestamp("2026-08-05 09:55:00+08:00"),
+        pd.Timestamp("2026-08-05 10:00:00+08:00"),
+    )
 
 
 def test_monitor_uses_frozen_observation_time_for_completed_prefix() -> None:
@@ -1211,7 +1295,9 @@ def test_monitor_runtime_uses_the_same_strict_profile_as_page_and_replay() -> No
     )
 
     config = runtime.cd.get_config()
-    assert config["strict_macd_source"] == "native_l0_causal_recursive"
+    assert config["strict_macd_source"] == (
+        "same-physical-source-native-all-recursive-levels"
+    )
     assert "screening_structure_scope" not in config
     assert "recursive_structure_scope" not in config
     assert config["stroke_rule"] == "strict-cl-k-distance"

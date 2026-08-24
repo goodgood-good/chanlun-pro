@@ -13,6 +13,12 @@ from chanlun.xuangu import strict_xuangu
 from chanlun.trader.online_market_datas import OnlineMarketDatas
 from tqdm.auto import tqdm
 
+from .services.trading_screening_scope import (
+    DEFAULT_VALIDATION_COHORT_SIZE,
+    admit_explicit_validation_codes,
+    parse_explicit_scope_limit,
+)
+
 log = fun.get_logger()
 
 # 选股运行配置
@@ -117,8 +123,9 @@ def process_xuangu_task(
     task_name: str,
     freqs: List[str],
     opt_types: List[str],
-    src_zx_group: str,
+    explicit_codes: List[str],
     target_zx_group: str,
+    scope_limit: int = DEFAULT_VALIDATION_COHORT_SIZE,
 ):
     """
     执行选股的任务
@@ -144,29 +151,12 @@ def process_xuangu_task(
         supported_frequencies = ex.support_frequencys()
         if any(value not in supported_frequencies for value in freqs):
             raise ValueError("选股周期不受当前市场支持")
-        run_codes = []
-        if src_zx_group == "all":
-            # 获取当前市场视图绑定的股票代码。
-            from .services.stock_list import _safe_all_stocks
-
-            run_codes = [_s["code"] for _s in _safe_all_stocks(ex)]
-            if market == "a":
-                run_codes = [
-                    _c
-                    for _c in run_codes
-                    if _c[0:5] in ["SZ.00", "SZ.30", "SH.60", "SH.68"]
-                ]
-            if market == "futures":
-                run_codes = [_c for _c in run_codes if _c[-2:] == "L8"]
-        else:
-            if src_zx_group not in zx.zx_names:
-                log.warning(
-                    f"process_xuangu_task unknown source group market={market} "
-                    f"group={src_zx_group}"
-                )
-                return False
-            run_codes = zx.zx_stocks(src_zx_group)
-            run_codes = [_s["code"] for _s in run_codes]
+        run_codes = list(
+            admit_explicit_validation_codes(
+                explicit_codes,
+                max_symbols=parse_explicit_scope_limit(scope_limit),
+            )
+        )
 
         tqdm.write(f"{market} {task_name} 选股任务开始，选股代码数量 {len(run_codes)}")
         # 先把命中结果写到中间 list，全部跑完后再 clear + 一次性写入，
@@ -244,8 +234,9 @@ class XuanguTasks(object):
         xuangu_task_name: str,
         freqs: List[str],
         opt_type: List[str],
-        src_zx_group: str,
+        explicit_codes: List[str],
         target_zx_group: str,
+        scope_limit: int = DEFAULT_VALIDATION_COHORT_SIZE,
     ):
         """
         执行选个股
@@ -264,6 +255,13 @@ class XuanguTasks(object):
         ):
             raise ValueError("选股方向必须是唯一的 long/short")
         freqs = list(normalized_frequencies)
+        scope_limit = parse_explicit_scope_limit(scope_limit)
+        explicit_codes = list(
+            admit_explicit_validation_codes(
+                explicit_codes,
+                max_symbols=scope_limit,
+            )
+        )
         if self.scheduler is None or not bool(getattr(self.scheduler, "running", False)):
             raise RuntimeError("scheduler is not running")
 
@@ -276,7 +274,10 @@ class XuanguTasks(object):
         # 在 JOB_EXECUTED 之后最后落定)也误判成"未结束"→ 任务永久锁死直到重启 web(审查 F2)。
         # 改为只拒绝真正占用中的状态(运行中/等待运行/已添加),终态/异常/已删一律放行重跑。
         _ACTIVE_XG_STATES = {"运行中", "等待运行", "已添加"}
-        task_name = f"{market}:{xuangu_task_configs[xuangu_task_name]['name']} {freqs} -> 【{target_zx_group}】"
+        task_name = (
+            f"{market}:{xuangu_task_configs[xuangu_task_name]['name']} {freqs} "
+            f"({len(explicit_codes)}只) -> 【{target_zx_group}】"
+        )
         task_lock = self.scheduler.my_task_lock
 
         with task_lock:
@@ -300,8 +301,9 @@ class XuanguTasks(object):
                         xuangu_task_name,
                         freqs,
                         opt_type,
-                        src_zx_group,
+                        explicit_codes,
                         target_zx_group,
+                        scope_limit,
                     ),
                     trigger="date",
                     next_run_time=datetime.datetime.now(),

@@ -178,9 +178,7 @@ def segment_difference_review_status(
     """Classify recorded 1m evidence without overstating its current validity."""
 
     if trigger is None:
-        raw_trigger = document.get("segment_difference_1m") or document.get(
-            "trigger_1m"
-        )
+        raw_trigger = document.get("segment_difference_1m")
         trigger = raw_trigger if isinstance(raw_trigger, Mapping) else {}
     if not trigger:
         return "absent"
@@ -221,9 +219,7 @@ def segment_difference_evidence_status(
     """
 
     if trigger is None:
-        raw_trigger = document.get("segment_difference_1m") or document.get(
-            "trigger_1m"
-        )
+        raw_trigger = document.get("segment_difference_1m")
         trigger = raw_trigger if isinstance(raw_trigger, Mapping) else {}
     return "present" if trigger else "absent"
 
@@ -234,16 +230,14 @@ def segment_difference_boundary_status(
     trigger: Mapping[str, object] | None = None,
     evaluated_at: object | None = None,
 ) -> str:
-    """Classify only the optional buy-entry locator boundary.
+    """Classify only the optional buy-side interval-nesting boundary.
 
     Sell-side segment evidence has no buy-entry boundary by construction, so
     it is ``not_applicable`` rather than silently being labelled ``current``.
     """
 
     if trigger is None:
-        raw_trigger = document.get("segment_difference_1m") or document.get(
-            "trigger_1m"
-        )
+        raw_trigger = document.get("segment_difference_1m")
         trigger = raw_trigger if isinstance(raw_trigger, Mapping) else {}
     if not trigger:
         return "absent"
@@ -251,13 +245,13 @@ def segment_difference_boundary_status(
     if side != "buy":
         return "not_applicable"
 
-    legacy = segment_difference_review_status(
+    review_status = segment_difference_review_status(
         document,
         trigger=trigger,
         evaluated_at=evaluated_at,
     )
-    if legacy in {"current", "expired", "unavailable", "unknown"}:
-        return legacy
+    if review_status in {"current", "expired", "unavailable", "unknown"}:
+        return review_status
     return "unknown"
 
 
@@ -385,7 +379,6 @@ def _normalize_event(
     raw: object,
     *,
     migrate_account_coupled_position: bool = False,
-    migrate_non_strict_segment: bool = False,
 ) -> dict[str, object]:
     """Fill the explicit time contract for records written before this schema.
 
@@ -509,51 +502,6 @@ def _normalize_event(
                 )
             )
     segment_present = normalized.get("segment_difference_present") is True
-    segment_recursive_level = normalized.get("segment_difference_recursive_level")
-    if (
-        migrate_non_strict_segment
-        and segment_present
-        and not is_one_minute_segment_level(
-            "1m",
-            segment_recursive_level,
-        )
-    ):
-        # Older builds incorrectly advertised physical 1m/L1 (effective 5m)
-        # as subordinate one-minute segment-difference evidence.  Preserve the
-        # original fact for audit, but remove it from the strict segment lane.
-        normalized["legacy_non_strict_segment_difference"] = {
-            key: normalized.get(key)
-            for key in (
-                "segment_difference_point_type",
-                "segment_difference_evidence_id",
-                "segment_difference_anchor_time",
-                "segment_difference_confirmed_at",
-                "segment_difference_available_at",
-                "segment_difference_recursive_level",
-                "segment_difference_divergence_kind",
-            )
-        }
-        normalized["legacy_semantics"] = (
-            "ONE_MINUTE_L1_EFFECTIVE_5M_NOT_STRICT_SEGMENT"
-        )
-        normalized.update(
-            {
-                "segment_difference_present": False,
-                "segment_difference_status": "absent",
-                "segment_difference_current": False,
-                "segment_difference_evidence_status": "absent",
-                "segment_difference_boundary_status": "absent",
-                "segment_difference_valid_until": None,
-                "segment_difference_point_type": None,
-                "segment_difference_evidence_id": None,
-                "segment_difference_anchor_time": None,
-                "segment_difference_confirmed_at": None,
-                "segment_difference_available_at": None,
-                "segment_difference_recursive_level": None,
-                "segment_difference_divergence_kind": None,
-            }
-        )
-        segment_present = False
     if "segment_difference_status" not in normalized:
         # Old inbox rows did not persist the execution boundary or its
         # decision reasons.  Their evidence remains visible for audit, but it
@@ -581,15 +529,6 @@ def _normalize_event(
     )
     normalized.setdefault("segment_difference_valid_until", None)
     normalized.setdefault("segment_difference_divergence_kind", None)
-    if (
-        normalized.get("source_frequency") == "1m"
-        and normalized.get("trigger_frequency") == "1m"
-    ):
-        # 旧通知只作为审计历史保留；不能迁移成或冒充当前 5 分钟正式信号。
-        normalized["legacy_semantics"] = (
-            "ONE_MINUTE_NOTIFICATION_BEFORE_5M_TRADE_CONTRACT"
-        )
-        normalized.setdefault("segment_difference_present", False)
     return normalized
 
 
@@ -734,7 +673,7 @@ def a_share_notification_event(
 
     setup = document.get("setup_5m")
     setup = setup if isinstance(setup, Mapping) else {}
-    trigger = document.get("segment_difference_1m") or document.get("trigger_1m")
+    trigger = document.get("segment_difference_1m")
     trigger = trigger if isinstance(trigger, Mapping) else {}
     if trigger and not is_one_minute_segment_level(
         "1m",
@@ -817,7 +756,7 @@ def a_share_notification_event(
         "side": side,
         "point_type": point_type,
         "source_frequency": "5m",
-        "trigger_frequency": None,
+        "trade_frequency": "5m",
         "segment_difference_frequency": "1m",
         "segment_difference_present": bool(trigger),
         "segment_difference_status": segment_status,
@@ -1043,7 +982,7 @@ def monitor_notification_event(
         "point_type": trigger_point_type,
         "trigger_point_type": None,
         "source_frequency": "5m",
-        "trigger_frequency": None,
+        "trade_frequency": "5m",
         "segment_difference_frequency": "1m",
         "segment_difference_present": segment_present,
         "segment_difference_status": segment_status,
@@ -1185,11 +1124,10 @@ class RealtimeReviewInbox:
             normalized = _normalize_event(
                 raw,
                 migrate_account_coupled_position=True,
-                migrate_non_strict_segment=True,
             )
             if normalized != raw:
                 self._load_requires_persist = True
-            if not self._valid_event(normalized, allow_legacy=True):
+            if not self._valid_event(normalized):
                 continue
             loaded[str(normalized["notification_id"])] = normalized
         if len(loaded) != len(raw_events):
@@ -1197,21 +1135,12 @@ class RealtimeReviewInbox:
         return loaded
 
     @staticmethod
-    def _valid_event(
-        raw: object,
-        *,
-        allow_legacy: bool = False,
-    ) -> bool:
+    def _valid_event(raw: object) -> bool:
         if not isinstance(raw, Mapping) or raw.get("schema") != EVENT_SCHEMA:
             return False
         notification_id = raw.get("notification_id")
         side = raw.get("side")
         point_type = raw.get("point_type")
-        legacy_one_minute = bool(
-            allow_legacy
-            and raw.get("source_frequency") == "1m"
-            and raw.get("trigger_frequency") == "1m"
-        )
         recursive_level = raw.get("recursive_level")
         if (
             not isinstance(notification_id, str)
@@ -1223,14 +1152,11 @@ class RealtimeReviewInbox:
             or point_type not in CANONICAL_POINT_TYPE_SET
             or side != ("buy" if str(point_type).endswith("buy") else "sell")
             or raw.get("source_frequency") != "5m"
-            and not legacy_one_minute
+            or raw.get("trade_frequency") != "5m"
             or raw.get("setup_lock_state") not in _SETUP_LOCK_STATES
             or (
-                not legacy_one_minute
-                and (
-                    type(recursive_level) is not int
-                    or not is_five_minute_trade_level("5m", recursive_level)
-                )
+                type(recursive_level) is not int
+                or not is_five_minute_trade_level("5m", recursive_level)
             )
             or not isinstance(raw.get("evidence_id"), str)
             or not str(raw.get("evidence_id") or "").strip()
@@ -1290,8 +1216,7 @@ class RealtimeReviewInbox:
         detected_at = parsed_times["detected_at"]
         if (
             available_at > detected_at
-            or not legacy_one_minute
-            and (
+            or (
                 anchor_at is not None
                 and anchor_at > confirmed_at
                 or confirmed_at > available_at
@@ -1326,14 +1251,8 @@ class RealtimeReviewInbox:
             "segment_difference_divergence_kind",
         )
         segment_valid_until = raw.get("segment_difference_valid_until")
-        if legacy_one_minute:
-            if segment_present or any(
-                raw.get(key) not in (None, "") for key in segment_fields
-            ):
-                return False
-            return True
         if (
-            raw.get("trigger_frequency") is not None
+            "trigger_frequency" in raw
             or raw.get("segment_difference_frequency") != "1m"
             or segment_status not in _SEGMENT_DIFFERENCE_STATUSES
             or not isinstance(segment_current, bool)

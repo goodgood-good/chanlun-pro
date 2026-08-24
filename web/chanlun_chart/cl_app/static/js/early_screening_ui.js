@@ -89,7 +89,7 @@
     disabled: "未启用",
     unavailable: "不可用",
     review_blocked: "复核受阻",
-    coverage_in_progress: "全市场扫描中",
+    coverage_in_progress: "当前范围扫描中",
     awaiting_runtime_verification: "等待运行验证",
     awaiting_first_run: "等待首次运行",
     warming: "覆盖暖机中",
@@ -417,7 +417,7 @@
     LEGACY_BUY_RESTRICTION_REQUIRES_REVIEW: "历史买入限制原因需重新核对",
     LEGACY_STRUCTURAL_RISK_INPUT_UNRESOLVED: "历史通知的结构价格或风险参数不完整",
     directional_points_expired: "方向性买卖点已超过当前有效窗口",
-    stock_one_minute_trigger_only: "个股1分钟数据用于区间套与精确执行定位",
+    stock_one_minute_segment_difference_only: "个股1分钟数据只用于区间套精确买卖位置确认",
     core_confirmed_point: "核心买卖点已达到操作确认",
     five_minute_geometric_point_formed: "旧版含义：5分钟离开/回抽几何已出现；仍未达到操作确认",
     five_minute_geometric_candidate_awaiting_confirmation: "5分钟仅出现非交易几何候选，尚未达到操作确认",
@@ -631,16 +631,12 @@
   function segmentDifferenceForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
     const canonical = safeSignal.segment_difference_1m;
-    if (
+    return (
       isRecord(canonical)
       && Object.keys(canonical).length
       && isStrictOneMinuteSegmentPoint(canonical)
-    ) return canonical;
-    const legacy = safeSignal.trigger_1m;
-    return isRecord(legacy)
-      && Object.keys(legacy).length
-      && isStrictOneMinuteSegmentPoint(legacy)
-      ? legacy
+    )
+      ? canonical
       : null;
   }
 
@@ -656,7 +652,7 @@
     const boundaryStatus = segmentDifferenceBoundaryStatusForSignal(signal);
     // Compatibility alias for consumers that still expect the old combined
     // status.  Sell-side evidence historically used "current" even though a
-    // buy-entry locator does not apply to it.
+    // A sell signal does not require a buy-side interval-nesting witness.
     return boundaryStatus === "not_applicable" ? "current" : boundaryStatus;
   }
 
@@ -726,12 +722,12 @@
     const profile = isRecord(safeSignal.execution_profile)
       ? safeSignal.execution_profile
       : {};
-    return precisionLocatorReadyForSignal(safeSignal, evaluatedAt)
+    return segmentDifferenceReadyForSignal(safeSignal, evaluatedAt)
       && profile.precise_execution_ready === true
       && (safeSignal.entry_allowed === true || safeSignal.exit_allowed === true);
   }
 
-  function precisionLocatorReadyForSignal(signal, evaluatedAt = new Date()) {
+  function segmentDifferenceReadyForSignal(signal, evaluatedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     const profile = isRecord(safeSignal.execution_profile)
       ? safeSignal.execution_profile
@@ -745,17 +741,17 @@
     return ["buy", "sell"].includes(side)
       && segmentDifferenceEvidenceStatusForSignal(safeSignal) === "present"
       && (side === "buy" ? boundaryStatus === "current" : boundaryStatus === "not_applicable")
-      && profile.precision_locator_ready === true;
+      && profile.segment_difference_ready === true;
   }
 
-  function currentPrecisionLocatorReadyForSignal(signal, evaluatedAt = new Date()) {
+  function currentSegmentDifferenceReadyForSignal(signal, evaluatedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     if (!isCurrentSelectionSignal(safeSignal)) return false;
-    return precisionLocatorReadyForSignal(safeSignal, evaluatedAt)
-      && precisionLocatorEvidenceCurrentForReview(safeSignal, evaluatedAt);
+    return segmentDifferenceReadyForSignal(safeSignal, evaluatedAt)
+      && segmentDifferenceEvidenceCurrentForReview(safeSignal, evaluatedAt);
   }
 
-  function precisionLocatorEvidenceCurrentForReview(signal, evaluatedAt = new Date()) {
+  function segmentDifferenceEvidenceCurrentForReview(signal, evaluatedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     const trigger = segmentDifferenceForSignal(safeSignal);
     const side = text(safeSignal.side || (trigger && trigger.side), "");
@@ -776,7 +772,7 @@
     const profile = isRecord(safeSignal.execution_profile)
       ? safeSignal.execution_profile
       : {};
-    return currentPrecisionLocatorReadyForSignal(safeSignal, evaluatedAt)
+    return currentSegmentDifferenceReadyForSignal(safeSignal, evaluatedAt)
       && profile.precise_execution_ready === true
       && (safeSignal.entry_allowed === true || safeSignal.exit_allowed === true);
   }
@@ -1093,7 +1089,7 @@
         .filter(isCurrentSelectionSignal)
         .filter((signal) => requestedSegmentState === "present"
           ? segmentDifferenceEvidenceStatusForSignal(signal) === "present"
-          : currentPrecisionLocatorReadyForSignal(signal));
+          : currentSegmentDifferenceReadyForSignal(signal));
       if (matchingSegments.length) {
         const buys = matchingSegments.filter((signal) => text(signal.side, "") === "buy").length;
         const sells = matchingSegments.filter((signal) => text(signal.side, "") === "sell").length;
@@ -1156,8 +1152,49 @@
     return `${code} 不在当前QMT板块触发与监控补充范围内。`;
   }
 
-  function scanCoverageText(audit, snapshot = null) {
+  function screeningScopeFacts(runtimeHealth, snapshot = null) {
+    const health = isRecord(runtimeHealth) ? runtimeHealth : {};
+    const safeSnapshot = isRecord(snapshot) ? snapshot : {};
+    const scope = isRecord(safeSnapshot.screening_scope)
+      ? safeSnapshot.screening_scope
+      : {};
+    const mode = text(health.screening_scope_mode || scope.mode, "UNKNOWN");
+    const cohort = Math.max(
+      0,
+      Number(health.validation_cohort_size || scope.validation_cohort_size) || 0,
+    );
+    const effectiveLimit = Math.max(
+      0,
+      Number(
+        health.effective_monitor_universe_limit
+        || scope.effective_monitor_universe_limit,
+      ) || 0,
+    );
+    return {
+      mode,
+      cohort,
+      effectiveLimit,
+      validation: mode === "VALIDATION_COHORT",
+    };
+  }
+
+  function screeningScopeLabel(runtimeHealth, snapshot = null) {
+    const scope = screeningScopeFacts(runtimeHealth, snapshot);
+    if (scope.validation) {
+      return `${scope.cohort || scope.effectiveLimit || 12}只小样本验证`;
+    }
+    if (scope.mode === "FULL_MARKET") return "显式全市场运行";
+    if (scope.mode === "LARGE_SCOPE") {
+      return `显式大范围运行 · 上限 ${scope.effectiveLimit || "待定"} 只`;
+    }
+    return "运行范围待确认";
+  }
+
+  function scanCoverageText(audit, snapshot = null, runtimeHealth = null) {
     const safeAudit = isRecord(audit) ? audit : {};
+    if (screeningScopeFacts(runtimeHealth, snapshot).validation) {
+      return `${screeningScopeLabel(runtimeHealth, snapshot)} · 当前验证范围固定`;
+    }
     const planned = Math.max(0, Number(safeAudit.planned_symbol_count) || 0);
     const completed = Math.max(0, Number(safeAudit.completed_symbol_count) || 0);
     const pending = Math.max(0, Number(safeAudit.pending_symbol_count) || 0);
@@ -1203,10 +1240,15 @@
         : `本批 ${completed}/${planned} · 全周期已覆盖`;
   }
 
-  function scanQualityText(snapshot) {
+  function scanQualityText(snapshot, runtimeHealth = null) {
     const safeSnapshot = isRecord(snapshot) ? snapshot : {};
     const audit = isRecord(safeSnapshot.scan_audit) ? safeSnapshot.scan_audit : {};
     const quality = isRecord(safeSnapshot.data_quality) ? safeSnapshot.data_quality : {};
+    if (screeningScopeFacts(runtimeHealth, safeSnapshot).validation) {
+      if (safeSnapshot.available !== true) return "小样本等待首次结果";
+      if (quality.stale === true) return "小样本结果已过期";
+      return quality.complete === true ? "小样本结果完整" : "小样本结果待复核";
+    }
     const pending = Math.max(0, Number(audit.pending_symbol_count) || 0);
     if (safeSnapshot.available !== true) return "等待首批";
     if (quality.stale === true) return "已过期";
@@ -1406,6 +1448,8 @@
 
   function dailyPreselectionText(runtimeHealth) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
+    const scope = screeningScopeFacts(health);
+    const scopeLabel = screeningScopeLabel(health);
     const status = text(health.daily_preselection_status, "unavailable");
     const reason = text(
       health.daily_preselection_reason_code,
@@ -1425,6 +1469,23 @@
       0,
       Number(health.daily_preselection_sell_candidate_count) || 0,
     );
+    if (scope.validation) {
+      if (health.daily_preselection_ready === true) {
+        return `${scopeLabel} · 当前验证名单已就绪`;
+      }
+      if (status === "target_session_stale") {
+        return `${scopeLabel} · 等待当前验证名单更新`;
+      }
+      if (["coverage_in_progress", "awaiting_first_snapshot"].includes(status)) {
+        return `${scopeLabel} · 正在准备当前小样本`;
+      }
+      if (status === "review_blocked") {
+        return reason === "HUMAN_REVIEW_MATERIALIZATION_FAILED"
+          ? `${scopeLabel} · 复核材料待重建`
+          : `${scopeLabel} · 名单待人工复核`;
+      }
+      return `${scopeLabel} · 尚未就绪，详情见运行诊断`;
+    }
     if (health.daily_preselection_ready === true) {
       return `已就绪 · 适用 ${target} · 买点 ${buys} / 卖点 ${sells} / 全部 ${candidates}`;
     }
@@ -1454,6 +1515,7 @@
 
   function dailyPreselectionDiagnosticsText(runtimeHealth) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
+    const scope = screeningScopeFacts(health);
     const status = text(health.daily_preselection_status, "unavailable");
     const reason = text(
       health.daily_preselection_reason_code,
@@ -1472,9 +1534,14 @@
       Number(health.daily_preselection_sell_candidate_count) || 0,
     );
     const parts = [
+      ...(scope.validation ? [screeningScopeLabel(health)] : []),
       `内部状态 ${statusLabel(status)}`,
       `原因 ${reasonLabel(reason)}`,
-      `结构线索 ${candidates}（买点 ${buys} / 卖点 ${sells}）`,
+      ...(
+        scope.validation
+          ? []
+          : [`结构线索 ${candidates}（买点 ${buys} / 卖点 ${sells}）`]
+      ),
     ];
     if (health.daily_preselection_target_session) {
       parts.push(`适用 ${text(health.daily_preselection_target_session)}`);
@@ -1561,6 +1628,7 @@
   function priorityMonitorDiagnosticsText(runtimeHealth, liveOverlay) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
     const overlay = isRecord(liveOverlay) ? liveOverlay : {};
+    const scope = screeningScopeFacts(health);
     const priorityStatus = text(health.priority_monitor_status, "unavailable");
     const priorityReasonCodes = Array.isArray(health.priority_monitor_reason_codes)
       ? health.priority_monitor_reason_codes
@@ -1610,7 +1678,9 @@
       `即时复查 ${statusLabel(priorityStatus)}（${priorityReasons}）· 最近 ${priorityCount} 只`,
       `5分钟候选轮换 ${statusLabel(candidateStatus)}（${candidateReasons}）· 当前 ${candidateCurrent}/${candidateUniverse} 只 · 缺失 ${candidateMissing} · 逾期 ${candidateOverdue}${candidateTarget ? ` · 目标 ${Math.round(candidateTarget / 60)} 分钟` : ""}`,
       `1分钟精确定位队列 待定位的当前5分钟候选 ${freshSegmentCount} 只 · 持续轮转直至结构被替换`,
-      "实时预警范围：人工关注、自选、已有信号和当前支持板块候选；全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警",
+      scope.validation
+        ? `实时预警范围：仅处理当前 ${scope.cohort || scope.effectiveLimit || 12} 只固定小样本`
+        : "实时预警范围：人工关注、自选、已有信号和当前支持板块候选；全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警",
       `结构变化 ${liveSignalCount} 条`,
       health.notification_operationally_verified === true
         ? `通知送达 已验证（${reasonLabel(text(delivery.reason_code, "DELIVERY_SUCCESS_PROVEN"))}）`
@@ -1624,16 +1694,16 @@
     return parts.join(" · ");
   }
 
-  function segmentScopeText(runtimeHealth, precisionLocatorCount) {
+  function segmentScopeText(runtimeHealth, segmentDifferenceCount) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
-    const locatorCount = Math.max(0, Number(precisionLocatorCount) || 0);
+    const witnessCount = Math.max(0, Number(segmentDifferenceCount) || 0);
     const freshCount = Math.max(
       0,
       Number(health.priority_monitor_immediate_universe_count) || 0,
     );
     const parts = [
-      locatorCount > 0
-        ? `当前 ${locatorCount} 个5分钟操作候选已完成1分钟区间套精确定位`
+      witnessCount > 0
+        ? `当前 ${witnessCount} 个5分钟操作候选已完成1分钟区间套段差见证`
         : "当前没有5分钟操作候选完成1分钟区间套精确定位",
     ];
     if (freshCount > 0) {
@@ -1962,7 +2032,7 @@
     const trigger = segmentDifferenceForSignal(safeSignal);
     const segmentEvidenceStatus = segmentDifferenceEvidenceStatusForSignal(safeSignal);
     const segmentBoundaryStatus = segmentDifferenceBoundaryStatusForSignal(safeSignal);
-    const locatorEvidenceCurrent = precisionLocatorEvidenceCurrentForReview(
+    const segmentDifferenceEvidenceCurrent = segmentDifferenceEvidenceCurrentForReview(
       safeSignal,
     );
     const setupKnown = Object.keys(setup).length > 0;
@@ -2034,7 +2104,7 @@
                   : segmentBoundaryStatus === "unavailable"
                     ? "历史区间套定位边界缺失"
                     : segmentBoundaryStatus === "not_applicable"
-                      ? locatorEvidenceCurrent
+                      ? segmentDifferenceEvidenceCurrent
                         ? "卖出区间套精确定位有效"
                         : "历史卖出区间套定位"
                       : "区间套定位边界待核对"
@@ -2042,10 +2112,10 @@
           tone: closed
             ? "blocked"
             : segmentEvidenceStatus === "present" && triggerKnown
-              ? locatorEvidenceCurrent ? "supportive" : "neutral"
+              ? segmentDifferenceEvidenceCurrent ? "supportive" : "neutral"
               : "neutral",
           summary: segmentEvidenceStatus === "present" && triggerKnown
-            ? locatorEvidenceCurrent
+            ? segmentDifferenceEvidenceCurrent
               ? `${recordedSegmentEvidence} · 1分钟区间套精确定位已确认`
               : `${recordedSegmentEvidence} · 1分钟历史区间套证据保留（不计入当前定位）`
                   : "5分钟信号已成立；等待1分钟区间套后才进入精确执行候选",
@@ -2055,7 +2125,7 @@
               : segmentBoundaryStatus === "expired"
                 ? `买入定位窗口有效至 ${segmentValidUntil}，现已过期；仅保留历史定位证据`
                 : segmentBoundaryStatus === "not_applicable"
-                  ? locatorEvidenceCurrent
+                  ? segmentDifferenceEvidenceCurrent
                     ? "卖出区间套精确位置有效；核对持有结构级别后人工复核"
                     : "卖出区间套仅保留为历史定位证据；不计入当前精确位置"
                   : "区间套证据保留，买入定位边界需人工核对"
@@ -2155,11 +2225,11 @@
           : segmentBoundaryStatus === "unavailable"
             ? "历史区间套定位边界缺失"
             : segmentBoundaryStatus === "not_applicable"
-              ? locatorEvidenceCurrent
+              ? segmentDifferenceEvidenceCurrent
                 ? "卖出区间套精确定位有效"
                 : "历史卖出区间套定位"
               : "区间套定位边界待核对";
-      triggerTone = locatorEvidenceCurrent ? "supportive" : "neutral";
+      triggerTone = segmentDifferenceEvidenceCurrent ? "supportive" : "neutral";
     }
 
     const setupEvidence = uniqueText(setup.evidence_codes);
@@ -2209,7 +2279,7 @@
         state: triggerState,
         tone: triggerTone,
         summary: triggerKnown && segmentEvidenceStatus === "present"
-          ? locatorEvidenceCurrent
+          ? segmentDifferenceEvidenceCurrent
             ? `${triggerPoint} · 1分钟区间套精确定位已确认`
             : `${triggerPoint} · 1分钟历史区间套证据保留（不计入当前定位）`
           : "尚未取得1分钟区间套（5分钟信号保留，精确执行未解锁）",
@@ -2219,7 +2289,7 @@
             : segmentBoundaryStatus === "expired"
               ? "买入定位窗口已过，仅保留历史区间套证据；不追价"
               : segmentBoundaryStatus === "not_applicable"
-                ? locatorEvidenceCurrent
+                ? segmentDifferenceEvidenceCurrent
                   ? "卖出区间套精确位置有效；核对持有结构级别后人工复核"
                   : "卖出区间套仅保留为历史定位证据；不计入当前精确位置"
                 : "区间套证据已保留；定位边界需人工核对"
@@ -2878,7 +2948,7 @@
       schema: "chanlun-us-realtime-monitor",
       source_schema: "chanlun-attention-group-monitor",
       market: "us",
-      market_scope: "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+      market_scope: "ADMITTED_US_SYMBOLS_IN_GLOBAL_GROUPS",
       decision_mode: "STRICT_STRUCTURE_OBSERVATION_ONLY",
       auxiliary_only: true,
       full_market_screening: false,
@@ -2910,7 +2980,7 @@
       safe.schema !== "chanlun-us-realtime-monitor"
       || safe.source_schema !== "chanlun-attention-group-monitor"
       || safe.market !== "us"
-      || safe.market_scope !== "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS"
+      || safe.market_scope !== "ADMITTED_US_SYMBOLS_IN_GLOBAL_GROUPS"
       || safe.decision_mode !== "STRICT_STRUCTURE_OBSERVATION_ONLY"
       || safe.auxiliary_only !== true
       || safe.full_market_screening !== false
@@ -3044,6 +3114,39 @@
     return activeElapsedSecondsForReview(safeSignal, startedRaw, endedRaw);
   }
 
+  function immediateFiveMinuteSignalFreshForReview(signal, observedAt) {
+    const safeSignal = isRecord(signal) ? signal : {};
+    const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
+    const started = new Date(setup.available_at);
+    const ended = new Date(
+      safeSignal.monitor_observed_at
+      || safeSignal.observed_at
+      || observedAt,
+    );
+    if (
+      !setup.available_at
+      || Number.isNaN(started.getTime())
+      || Number.isNaN(ended.getTime())
+      || ended < started
+    ) return false;
+    if (inferSignalMarket(safeSignal) !== "a") {
+      return ended.getTime() - started.getTime() <= 10 * 60 * 1000;
+    }
+    const session = shanghaiDateKey(started);
+    if (session !== shanghaiDateKey(ended)) return false;
+    const sessionCloses = [];
+    for (const openedAt of ["09:31:00", "13:01:00"]) {
+      const firstClose = new Date(`${session}T${openedAt}+08:00`).getTime();
+      for (let index = 0; index < 120; index += 1) {
+        sessionCloses.push(firstClose + index * 60 * 1000);
+      }
+    }
+    const tradingMinutes = sessionCloses.filter(
+      (closeAt) => started.getTime() < closeAt && closeAt <= ended.getTime(),
+    ).length;
+    return tradingMinutes <= 10;
+  }
+
   function signalCardLifecycleLabel(signal, observedAt = new Date()) {
     const safeSignal = isRecord(signal) ? signal : {};
     const stage = lifecycleStageForSignal(safeSignal);
@@ -3107,7 +3210,7 @@
       context_d: {},
       context_30m: {},
       setup_5m: {},
-      trigger_1m: null,
+      segment_difference_1m: null,
       structural_stop: null,
       risk_multiplier: null,
       entry_allowed: false,
@@ -3298,7 +3401,6 @@
         evidence_codes: ["realtime_notification_recorded"],
       },
       segment_difference_1m: segmentDifference,
-      trigger_1m: segmentDifference,
       structural_stop: event.invalidation_price,
       risk_multiplier: null,
       position_recommendation: isRecord(event.position_recommendation)
@@ -3605,7 +3707,7 @@
       const segmentEvidenceStatus = segmentDifferenceEvidenceStatusForSignal(signal);
       const segmentBoundaryStatus = segmentDifferenceBoundaryStatusForSignal(signal);
       if (segmentState === "present" && segmentEvidenceStatus !== "present") return false;
-      if (segmentState === "current" && !currentPrecisionLocatorReadyForSignal(signal)) return false;
+      if (segmentState === "current" && !currentSegmentDifferenceReadyForSignal(signal)) return false;
       if (
         segmentState === "historical"
         && (
@@ -3690,10 +3792,13 @@
       "HOLDING_MONITOR",
       "VIRTUAL_HOLDING_MONITOR",
     ].includes(source));
-    if (actionableSellReview) {
-      positionStatus = manualAttention
-        ? "MANUAL_ATTENTION_SELL_REVIEW"
-        : "STRUCTURAL_SELL_REVIEW";
+    if (actionableSellReview && manualAttention) {
+      positionStatus = "MANUAL_ATTENTION_SELL_REVIEW";
+    } else if (
+      actionableSellReview
+      && immediateFiveMinuteSignalFreshForReview(signal, observedAt)
+    ) {
+      positionStatus = "STRUCTURAL_SELL_REVIEW";
     }
     const band = REVIEW_PRIORITY_POSITION_BANDS[positionStatus];
     if (!band) return null;
@@ -3981,13 +4086,13 @@
     );
     const segmentEvidenceStatus = segmentDifferenceEvidenceStatusForSignal(signal);
     const segmentBoundaryStatus = segmentDifferenceBoundaryStatusForSignal(signal);
-    const locatorEvidenceCurrent = precisionLocatorEvidenceCurrentForReview(signal);
+    const segmentDifferenceEvidenceCurrent = segmentDifferenceEvidenceCurrentForReview(signal);
     const segmentBadge = segmentEvidenceStatus === "present" ? ({
       current: ["is-segment", "1m 区间套定位 · 买入位置有效"],
       expired: ["is-segment is-historical", "历史1m定位 · 买入窗口已过"],
       unavailable: ["is-segment is-historical", "历史1m定位 · 买入边界缺失"],
       unknown: ["is-segment is-historical", "1m 区间套定位 · 边界待核对"],
-      not_applicable: locatorEvidenceCurrent
+      not_applicable: segmentDifferenceEvidenceCurrent
         ? ["is-segment", "1m 区间套卖出定位 · 精确位置有效"]
         : ["is-segment is-historical", "历史1m卖出定位 · 仅供复核"],
     }[segmentBoundaryStatus]) : null;
@@ -4050,7 +4155,7 @@
           expired: "历史定位窗口已过",
           unavailable: "历史定位边界缺失",
           unknown: "区间套定位边界待核对",
-          not_applicable: locatorEvidenceCurrent
+          not_applicable: segmentDifferenceEvidenceCurrent
             ? "区间套卖出精确位置有效"
             : "历史卖出定位证据（不计入当前）",
         }[segmentBoundaryStatus] || "区间套定位证据已出现") : "等待1分钟区间套（精确执行未解锁）"}`;
@@ -4387,7 +4492,7 @@
     chartUrlsForSignal,
     completedWithoutSignalCount,
     currentPreciseExecutionReadyForSignal,
-    currentPrecisionLocatorReadyForSignal,
+    currentSegmentDifferenceReadyForSignal,
     dailyPreselectionDiagnosticsText,
     dailyPreselectionText,
     decisionSummaryForSignal,
@@ -4416,8 +4521,8 @@
     pointLabelForSignal,
     positionRecommendationLabel,
     positionRecommendationForSignal,
-    precisionLocatorEvidenceCurrentForReview,
-    precisionLocatorReadyForSignal,
+    segmentDifferenceEvidenceCurrentForReview,
+    segmentDifferenceReadyForSignal,
     preciseExecutionReadyForSignal,
     inferSignalMarket,
     realtimeNotificationSignal,
@@ -4443,6 +4548,8 @@
     scanCoverageText,
     scanQualityText,
     scanTimingText,
+    screeningScopeFacts,
+    screeningScopeLabel,
     sectorCoverageText,
     sectorEvidenceText,
     selectedSectorCount,

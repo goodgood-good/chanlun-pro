@@ -19,7 +19,7 @@ from longbridge.openapi import Config, QuoteContext, TradeContext, Market, Perio
 # 缠论软件开发工具包导入。
 from chanlun import fun
 from chanlun import config
-from chanlun.exchange import Exchange
+from chanlun.exchange import Exchange, SINGLE_SYMBOL_STOCK_INFO
 from chanlun.exchange.exchange import Tick
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
@@ -257,6 +257,8 @@ class ExchangeChangQiao(Exchange):
     """
     长桥交易所实现 - 高性能并发优化版
     """
+
+    stock_info_query_scope = SINGLE_SYMBOL_STOCK_INFO
 
     def __init__(self):
         # 这里只构建配置对象，不在构造时立刻连网。

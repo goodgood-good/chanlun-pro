@@ -2,7 +2,13 @@ import threading
 
 from chanlun import config
 from chanlun.market import Market
-from chanlun.exchange.exchange import Exchange
+from chanlun.exchange.exchange import (
+    Exchange,
+    SINGLE_SYMBOL_STOCK_INFO,
+    UnsafeStockInfoCapabilityError,
+    resolve_bounded_stock_info,
+    supports_bounded_stock_info,
+)
 
 # 进程级单例缓存，避免每次调用重新初始化（TDX/QMT 初始化耗时且有状态）
 g_exchange_obj = {}

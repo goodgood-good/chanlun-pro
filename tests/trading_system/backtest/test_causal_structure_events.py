@@ -75,7 +75,9 @@ def test_causal_structure_uses_the_single_strict_profile() -> None:
     config = state.get_config()
 
     assert config["stroke_rule"] == "strict-cl-k-distance"
-    assert config["strict_macd_source"] == "native_l0_causal_recursive"
+    assert config["strict_macd_source"] == (
+        "same-physical-source-native-all-recursive-levels"
+    )
     assert "recursive_structure_scope" not in config
     assert "screening_structure_scope" not in config
 

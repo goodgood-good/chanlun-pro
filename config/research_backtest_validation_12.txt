@@ -1,0 +1,15 @@
+# Pre-registered gate cohort: four deterministic hash picks per sector as of
+# 2025-07-24, salt chanlun-preregistered-gate12-v1. Never select by later
+# structure signals, trades, or returns. S23 steel, S49 non-bank, S75 petroleum.
+SZ.000932
+SZ.000923
+SH.600516
+SZ.001203
+SZ.000783
+SZ.000987
+SH.601377
+SH.601628
+SZ.002377
+SH.601808
+SZ.000698
+SH.600583

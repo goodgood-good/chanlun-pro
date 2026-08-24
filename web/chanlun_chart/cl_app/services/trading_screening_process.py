@@ -81,6 +81,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_WORKER = Path(__file__).with_name("trading_screening_native_worker.py")
 _SECTOR_CACHE_SCHEMA = "chanlun-native-sector-snapshot-cache"
 _SECTOR_CACHE_PAYLOAD_SCHEMA = "chanlun-native-sector-snapshot-cache-payload"
+_SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA = "chanlun-native-sector-cache-scope-v1"
+_SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES = 64 * 1024
 _SECTOR_SNAPSHOT_PRODUCER_SCHEMA = "chanlun-native-sector-snapshot-producer"
 _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID = (
     "priority-sector_candidate-sector-symbol-striped-v2"
@@ -1858,6 +1860,9 @@ class NativeTradingDataGatewayProcessProxy:
         process_config: NativeWorkerProcessConfig = NativeWorkerProcessConfig(),
         sector_cache_path: Path | None = None,
         sector_cache_revision: str | None = None,
+        sector_cache_scope_mode: str = "VALIDATION_COHORT",
+        sector_cache_scope_limit: int | None = 12,
+        sector_cache_admitted_codes: tuple[str, ...] = (),
         worker_environment: Mapping[str, str] | None = None,
         structure_worker_count: int = 1,
         expected_application_source_revision: str | None = None,
@@ -1879,6 +1884,28 @@ class NativeTradingDataGatewayProcessProxy:
             )
         if sector_cache_revision is not None and not sector_cache_revision.strip():
             raise ValueError("sector_cache_revision must be a non-empty string")
+        if sector_cache_scope_mode not in {
+            "FULL_MARKET",
+            "LARGE_SCOPE",
+            "VALIDATION_COHORT",
+        }:
+            raise ValueError("sector_cache_scope_mode is invalid")
+        if sector_cache_scope_mode != "FULL_MARKET" and (
+            type(sector_cache_scope_limit) is not int
+            or sector_cache_scope_limit <= 0
+        ):
+            raise ValueError("bounded sector cache scope requires a positive limit")
+        if (
+            not isinstance(sector_cache_admitted_codes, tuple)
+            or len(sector_cache_admitted_codes)
+            != len(set(sector_cache_admitted_codes))
+            or any(
+                not isinstance(code, str)
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in sector_cache_admitted_codes
+            )
+        ):
+            raise ValueError("sector_cache_admitted_codes must be a unique tuple")
         if type(structure_worker_count) is not int or structure_worker_count <= 0:
             raise ValueError("structure_worker_count must be a positive integer")
         if transport is not None and structure_worker_count != 1:
@@ -2002,6 +2029,9 @@ class NativeTradingDataGatewayProcessProxy:
         self._cache_lock = RLock()
         self._sector_cache_path = sector_cache_path
         self._sector_cache_revision = sector_cache_revision
+        self._sector_cache_scope_mode = sector_cache_scope_mode
+        self._sector_cache_scope_limit = sector_cache_scope_limit
+        self._sector_cache_admitted_codes = sector_cache_admitted_codes
         self._sector_cache_state = (
             "disabled" if sector_cache_path is None else "not_checked"
         )
@@ -2022,6 +2052,41 @@ class NativeTradingDataGatewayProcessProxy:
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         for transport in (self._transport, *self._structure_transports):
             transport.set_progress_callback(callback)
+
+    def configure_sector_cache_restore_scope(
+        self,
+        *,
+        scope_mode: str,
+        max_symbols: int,
+        admitted_codes: Sequence[str] = (),
+    ) -> None:
+        """Install Web admission before any sector payload restore is attempted."""
+
+        if scope_mode not in {
+            "FULL_MARKET",
+            "LARGE_SCOPE",
+            "VALIDATION_COHORT",
+        }:
+            raise ValueError("sector cache scope_mode is invalid")
+        if type(max_symbols) is not int or max_symbols <= 0:
+            raise ValueError("sector cache max_symbols must be positive")
+        admitted = tuple(admitted_codes)
+        if (
+            len(admitted) != len(set(admitted))
+            or any(
+                not isinstance(code, str)
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in admitted
+            )
+            or (scope_mode != "FULL_MARKET" and len(admitted) > max_symbols)
+        ):
+            raise ValueError("sector cache admitted_codes are invalid")
+        with self._cache_lock:
+            self._sector_cache_scope_mode = scope_mode
+            self._sector_cache_scope_limit = (
+                None if scope_mode == "FULL_MARKET" else max_symbols
+            )
+            self._sector_cache_admitted_codes = admitted
 
     def startup(self) -> None:
         """预启动主只读工作进程，结构分片保持惰性。
@@ -2294,6 +2359,156 @@ class NativeTradingDataGatewayProcessProxy:
             "payload": payload,
         }
 
+    @staticmethod
+    def _sector_cache_scope_sidecar_path(path: Path) -> Path:
+        return path.with_name(f"{path.name}.scope")
+
+    @staticmethod
+    def _sector_cache_strategy_subject_codes(
+        value: _SectorSnapshotComponents,
+    ) -> tuple[str, ...]:
+        candidates = [
+            *(code for members in value.members.values() for code in members),
+            *value.symbol_names,
+            *(bar.code for bar in value.changed_bars),
+        ]
+        return tuple(
+            dict.fromkeys(
+                code
+                for code in candidates
+                if isinstance(code, str)
+                and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+            )
+        )
+
+    def _sector_cache_scope_sidecar_document(
+        self,
+        value: _SectorSnapshotComponents,
+        document: Mapping[str, object],
+    ) -> dict[str, object]:
+        codes = self._sector_cache_strategy_subject_codes(value)
+        configured_limit = self._sector_cache_scope_limit
+        configured_codes = set(self._sector_cache_admitted_codes)
+        admitted = bool(
+            self._sector_cache_scope_mode == "FULL_MARKET"
+            or (
+                configured_limit is not None
+                and len(codes) <= configured_limit
+                and bool(configured_codes)
+                and set(codes).issubset(configured_codes)
+            )
+        )
+        try:
+            payload_stat = self._sector_cache_path.stat()  # type: ignore[union-attr]
+        except OSError:
+            payload_stat = None
+        return {
+            "schema": _SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA,
+            "scope_mode": (
+                self._sector_cache_scope_mode if admitted else "OVERSCOPE"
+            ),
+            "max_symbols": configured_limit,
+            "strategy_subject_codes": (
+                list(codes)
+                if admitted and self._sector_cache_scope_mode != "FULL_MARKET"
+                else []
+            ),
+            "strategy_subject_count": len(codes),
+            "source_revision": self._sector_cache_revision,
+            "payload_content_sha256": document.get("content_sha256"),
+            "payload_name": (
+                None if self._sector_cache_path is None else self._sector_cache_path.name
+            ),
+            "payload_size_bytes": (
+                None if payload_stat is None else payload_stat.st_size
+            ),
+            "payload_mtime_ns": (
+                None if payload_stat is None else payload_stat.st_mtime_ns
+            ),
+        }
+
+    def _sector_cache_scope_allows_payload(self, path: Path) -> bool:
+        """Reject broad/legacy cache files before reading their payload bytes."""
+
+        if self._sector_cache_scope_mode == "FULL_MARKET":
+            return True
+        sidecar = self._sector_cache_scope_sidecar_path(path)
+        try:
+            if sidecar.stat().st_size > _SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES:
+                return False
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            payload_stat = path.stat()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        codes = document.get("strategy_subject_codes") if isinstance(document, Mapping) else None
+        limit = self._sector_cache_scope_limit
+        return bool(
+            isinstance(document, Mapping)
+            and document.get("schema") == _SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA
+            and document.get("scope_mode") == self._sector_cache_scope_mode
+            and document.get("max_symbols") == limit
+            and document.get("source_revision") == self._sector_cache_revision
+            and document.get("payload_name") == path.name
+            and document.get("payload_size_bytes") == payload_stat.st_size
+            and document.get("payload_mtime_ns") == payload_stat.st_mtime_ns
+            and isinstance(codes, list)
+            and all(
+                isinstance(code, str)
+                and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+                for code in codes
+            )
+            and len(codes) == len(set(codes))
+            and limit is not None
+            and len(codes) <= limit
+            and document.get("strategy_subject_count") == len(codes)
+            and bool(self._sector_cache_admitted_codes)
+            and set(codes).issubset(self._sector_cache_admitted_codes)
+        )
+
+    def _sector_cache_scope_matches_loaded_payload(
+        self,
+        path: Path,
+        content_sha256: str,
+    ) -> bool:
+        if self._sector_cache_scope_mode == "FULL_MARKET":
+            return True
+        try:
+            document = json.loads(
+                self._sector_cache_scope_sidecar_path(path).read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return bool(
+            isinstance(document, Mapping)
+            and document.get("payload_content_sha256") == content_sha256
+        )
+
+    def _persist_sector_cache_scope_sidecar(
+        self,
+        path: Path,
+        value: _SectorSnapshotComponents,
+        document: Mapping[str, object],
+    ) -> None:
+        sidecar = self._sector_cache_scope_sidecar_path(path)
+        temporary = sidecar.with_name(f".{sidecar.name}.{uuid4().hex}.tmp")
+        proof = self._sector_cache_scope_sidecar_document(value, document)
+        try:
+            temporary.write_text(
+                json.dumps(
+                    proof,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary, sidecar)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _components_from_cache_document(
         self,
         document: object,
@@ -2413,11 +2628,26 @@ class NativeTradingDataGatewayProcessProxy:
         path = self._sector_cache_path
         if path is None:
             return None
+        if not self._sector_cache_scope_allows_payload(path):
+            self._set_sector_cache_status(
+                state="rejected",
+                reason="CACHE_SCOPE_PROOF_MISSING_OR_INVALID",
+                as_of=as_of,
+                content_sha256=None,
+            )
+            return None
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
             components, content_sha256, _cached_as_of = self._components_from_cache_document(
                 document, as_of
             )
+            if not self._sector_cache_scope_matches_loaded_payload(
+                path, content_sha256
+            ):
+                raise _SectorSnapshotCacheError(
+                    "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH",
+                    "sector cache scope proof belongs to another payload",
+                )
         except FileNotFoundError:
             self._set_sector_cache_status(
                 state="miss",
@@ -2466,6 +2696,14 @@ class NativeTradingDataGatewayProcessProxy:
         path = self._sector_cache_path
         if path is None:
             return None
+        if not self._sector_cache_scope_allows_payload(path):
+            self._set_sector_cache_status(
+                state="priority_rejected",
+                reason="CACHE_SCOPE_PROOF_MISSING_OR_INVALID",
+                as_of=observed_at,
+                content_sha256=None,
+            )
+            return None
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
             components, content_sha256, cached_as_of = (
@@ -2475,6 +2713,13 @@ class NativeTradingDataGatewayProcessProxy:
                     require_current_epoch=False,
                 )
             )
+            if not self._sector_cache_scope_matches_loaded_payload(
+                path, content_sha256
+            ):
+                raise _SectorSnapshotCacheError(
+                    "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH",
+                    "sector cache scope proof belongs to another payload",
+                )
         except FileNotFoundError:
             self._set_sector_cache_status(
                 state="priority_miss",
@@ -2540,7 +2785,9 @@ class NativeTradingDataGatewayProcessProxy:
                 ),
                 encoding="utf-8",
             )
+            self._sector_cache_scope_sidecar_path(path).unlink(missing_ok=True)
             os.replace(temporary, path)
+            self._persist_sector_cache_scope_sidecar(path, value, document)
         except (OSError, TypeError, ValueError) as exc:
             try:
                 temporary.unlink(missing_ok=True)
@@ -3523,6 +3770,11 @@ class NativeTradingDataGatewayProcessProxy:
                 "state": self._sector_cache_state,
                 "reason": self._sector_cache_reason,
                 "source_revision": self._sector_cache_revision,
+                "restore_scope_mode": self._sector_cache_scope_mode,
+                "restore_scope_limit": self._sector_cache_scope_limit,
+                "restore_admitted_code_count": len(
+                    self._sector_cache_admitted_codes
+                ),
                 "requested_as_of": _iso(self._sector_cache_requested_as_of),
                 "content_sha256": self._sector_cache_content_sha256,
             }

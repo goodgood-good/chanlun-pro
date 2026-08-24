@@ -186,7 +186,7 @@ DEFAULT_SECTOR_LEDGER = Path(
     ".cache/chanlun_qmt_sector_ledger/qmt_gics3_catalog_ledger.json"
 )
 DEFAULT_PIT = Path(
-    "audit/chanlun_trading_system_backtest/fixed_year_2025_2026/pit_metadata.json"
+    "audit/chanlun_trading_system_backtest/research_sample_validation_12/pit_metadata.json"
 )
 DEFAULT_HUMAN_PAPER_LEDGER = Path(
     ".cache/chanlun_human_review/paper_ledger.json"
@@ -1991,7 +1991,7 @@ def _settle_human_paper(
             "persistent_sell_five_percent_bar_volume_cap_enforced": True,
             "adverse_observed_bar_extreme_fill_price_enforced": True,
             "completed_bar_close_fill_timestamp_enforced": True,
-            "strategic_buy_one_locator_bar_ttl_enforced": True,
+            "strategic_buy_one_nesting_decision_ttl_enforced": True,
             "strategic_buy_causal_full_1m_window_prechecked": True,
             "full_session_240_bar_grid_required": True,
             "opening_auction_event_merged_into_0931": True,
@@ -2073,7 +2073,7 @@ def _settle_human_paper(
             "persistent_sell_five_percent_bar_volume_cap_enforced": True,
             "adverse_observed_bar_extreme_fill_price_enforced": True,
             "completed_bar_close_fill_timestamp_enforced": True,
-            "strategic_buy_one_locator_bar_ttl_enforced": True,
+            "strategic_buy_one_nesting_decision_ttl_enforced": True,
             "strategic_buy_causal_full_1m_window_prechecked": True,
             "full_session_240_bar_grid_required": True,
             "opening_auction_event_merged_into_0931": True,
@@ -2728,7 +2728,7 @@ def _settle_human_paper(
         "persistent_sell_five_percent_bar_volume_cap_enforced": True,
         "adverse_observed_bar_extreme_fill_price_enforced": True,
         "completed_bar_close_fill_timestamp_enforced": True,
-        "strategic_buy_one_locator_bar_ttl_enforced": True,
+        "strategic_buy_one_nesting_decision_ttl_enforced": True,
         "strategic_buy_causal_full_1m_window_prechecked": True,
         "full_session_240_bar_grid_required": True,
         "opening_auction_event_merged_into_0931": True,
@@ -4388,10 +4388,9 @@ def _evaluate(args: argparse.Namespace) -> int:
     evidence.update(pit_evidence)
     evidence["effective_pit_snapshot"] = str(pit_path)
     if pit_reason is not None:
-        evidence["pit_warning"] = pit_reason
-        evidence["pit_policy"] = (
-            "WARNING_ONLY_FOR_CURRENT_QMT_HUMAN_REVIEW_SCREENING"
-        )
+        evidence["pit_failure"] = pit_reason
+        evidence["pit_policy"] = "BLOCK_EVALUATION_UNTIL_CURRENT_PIT_IS_AVAILABLE"
+        reasons.append(pit_reason)
     evidence["reason_codes"] = tuple(dict.fromkeys(reasons))
     if reasons:
         _document, event, reused = _append(
@@ -4969,7 +4968,7 @@ def _status(args: argparse.Namespace) -> int:
                 "persistent_sell_five_percent_bar_volume_cap_enforced": True,
                 "adverse_observed_bar_extreme_fill_price_enforced": True,
                 "completed_bar_close_fill_timestamp_enforced": True,
-                "strategic_buy_one_locator_bar_ttl_enforced": True,
+                "strategic_buy_one_nesting_decision_ttl_enforced": True,
                 "strategic_buy_causal_full_1m_window_prechecked": True,
                 "full_session_240_bar_grid_required": True,
                 "opening_auction_event_merged_into_0931": True,

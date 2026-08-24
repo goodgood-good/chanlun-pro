@@ -5,7 +5,8 @@ stock_info() 类型标注 Union[Dict, None], 但实现 stock_detail["InstrumentN
 vendored SDK xtdata.get_instrument_detail 对未识别/退市代码确定性返回 None → None["InstrumentName"]
 抛 TypeError。两条默认 UI 路径无 try/except 兜底会 500: /a/bkgn_codes(bkgn.py:72 裸调 stock_info,
 codes 来自本地 JSON 快照, 任一成分股退市即整板块列表崩)与 /ai/analyse(ai_analyse.py:70)。
-同文件兄弟 all_stocks():150 已有 `if not stock_detail: continue` 防御, stock_info 漏做。
+同文件兄弟 all_stocks() 已有 `if not stock_detail: continue` 防御, stock_info 漏做；
+该全市场目录入口现还要求独立显式授权。
 修复=stock_info 加 `if not stock_detail: return None`, 兑现类型标注。
 """
 from chanlun.exchange import exchange_qmt

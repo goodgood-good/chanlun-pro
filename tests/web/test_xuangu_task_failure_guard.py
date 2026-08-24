@@ -42,9 +42,15 @@ def _patch_task_dependencies(monkeypatch, fake_zx):
     )
 
 
-def _run(src_group="src"):
+def _run(codes=None):
+    explicit_codes = ["SH.600000", "SZ.000001"] if codes is None else codes
     return xuangu_tasks.process_xuangu_task(
-        "a", "strict_class1_point", ["5m"], ["long"], src_group, "dst"
+        "a",
+        "strict_class1_point",
+        ["5m"],
+        ["long"],
+        explicit_codes,
+        "dst",
     )
 
 
@@ -104,11 +110,11 @@ def test_successful_evaluation_publishes_with_one_atomic_replace(monkeypatch):
     ]
 
 
-def test_unknown_source_group_does_not_replace_target_group(monkeypatch):
+def test_empty_explicit_scope_does_not_replace_target_group(monkeypatch):
     fake_zx = _FakeZiXuan()
     _patch_task_dependencies(monkeypatch, fake_zx)
 
-    assert _run(src_group="missing") is False
+    assert _run(codes=[]) is False
     assert fake_zx.replaced == []
 
 

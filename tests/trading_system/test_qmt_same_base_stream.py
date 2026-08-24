@@ -72,7 +72,7 @@ def test_multi_session_opening_normalizer_preserves_attrs_and_volume() -> None:
     assert normalized.attrs == source.attrs
 
 
-def test_opening_only_prefix_emits_no_fake_locator_bar_and_keeps_attrs() -> None:
+def test_opening_only_prefix_emits_no_fake_segment_bar_and_keeps_attrs() -> None:
     source = _native_session(date(2026, 7, 24)).iloc[:1].copy()
     source.attrs.update(_native_session(date(2026, 7, 24)).attrs)
 

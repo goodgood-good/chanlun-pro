@@ -264,7 +264,7 @@ def test_current_forward_contract_has_no_order_authority() -> None:
     assert contract.strategy_parameter_set_id == CURRENT_STRATEGY_PARAMETER_SET_ID
     assert contract.strategic_frequency == "30m"
     assert contract.tactical_frequency == "5m"
-    assert contract.locator_frequency == "1m"
+    assert contract.segment_difference_frequency == "1m"
     assert contract.technical_mode == "HUMAN_REVIEW_SCREENING"
     assert (
         contract.signal_alignment_parameter_set_id

@@ -9,12 +9,25 @@
 param(
     [switch]$PreflightOnly,
     [switch]$SkipWatchdog,
+    [switch]$OpenBrowser,
+    [switch]$EnableLargeScreeningScope,
+    [switch]$EnableLargeHoldingMonitorScope,
+    [switch]$EnableFullSymbolCatalog,
+    [switch]$EnableFullCoverage,
+    [switch]$ForceFullCoverageUntilComplete,
     [ValidateRange(30, 1800)]
     [int]$WebReadinessTimeoutSeconds = 1800
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy_common.ps1')
+
+if ($EnableFullCoverage -and -not $EnableLargeScreeningScope) {
+    throw '-EnableFullCoverage requires -EnableLargeScreeningScope'
+}
+if ($ForceFullCoverageUntilComplete -and -not $EnableFullCoverage) {
+    throw '-ForceFullCoverageUntilComplete requires -EnableFullCoverage'
+}
 
 # -------------------------------- 配置 ---------------------------------------
 $ProjectRoot  = Split-Path -Parent $PSScriptRoot
@@ -36,6 +49,15 @@ function Log([string]$msg) {
     $line = '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
     Write-Host $line
     Add-Content -LiteralPath $LogFile -Value $line
+}
+
+function Open-WebApplication([string]$Uri) {
+    try {
+        Start-Process -FilePath $Uri | Out-Null
+        Log ('browser launch requested: {0}' -f $Uri)
+    } catch {
+        Log ('WARNING: unable to open browser automatically: {0}' -f $_.Exception.Message)
+    }
 }
 
 function Get-DeploymentMutexName {
@@ -104,17 +126,37 @@ function Register-LimitedWebLaunchTask {
     param(
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [bool]$LargeScopeEnabled = $false,
+        [bool]$LargeHoldingMonitorScopeEnabled = $false,
+        [bool]$FullSymbolCatalogEnabled = $false,
+        [bool]$FullCoverageEnabled = $false,
+        [bool]$ForcedFullCoverageEnabled = $false
     )
 
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     if ([string]::IsNullOrWhiteSpace($currentUser)) {
         throw 'current interactive user identity is unavailable'
     }
-    $arguments = (
-        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass ' +
-        '-File "{0}" -WebReadinessTimeoutSeconds {1}'
-    ) -f $ScriptPath, $TimeoutSeconds
+    $argumentParts = @(
+        '-NoProfile',
+        '-WindowStyle Hidden',
+        '-ExecutionPolicy Bypass',
+        ('-File "{0}"' -f $ScriptPath),
+        ('-WebReadinessTimeoutSeconds {0}' -f $TimeoutSeconds)
+    )
+    if ($LargeScopeEnabled) { $argumentParts += '-EnableLargeScreeningScope' }
+    if ($LargeHoldingMonitorScopeEnabled) {
+        $argumentParts += '-EnableLargeHoldingMonitorScope'
+    }
+    if ($FullSymbolCatalogEnabled) {
+        $argumentParts += '-EnableFullSymbolCatalog'
+    }
+    if ($FullCoverageEnabled) { $argumentParts += '-EnableFullCoverage' }
+    if ($ForcedFullCoverageEnabled) {
+        $argumentParts += '-ForceFullCoverageUntilComplete'
+    }
+    $arguments = $argumentParts -join ' '
     $action = New-ScheduledTaskAction `
         -Execute 'powershell.exe' `
         -Argument $arguments
@@ -463,6 +505,69 @@ try {
     )
     Import-ProjectDotEnv -Path (Join-Path $ProjectRoot '.env') `
         -OverrideNames $deploymentManagedNames
+    # Identity-catalog enumeration is independent from strategy/full-coverage
+    # authorization.  A normal restart always restores the explicit 12-symbol
+    # cohort after .env import so stale process/user values cannot enumerate a
+    # whole exchange during cold start, periodic refresh, or search fallback.
+    [Environment]::SetEnvironmentVariable(
+        'CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES',
+        'SZ.000932,SZ.000923,SH.600516,SZ.001203,SZ.000783,SZ.000987,SH.601377,SH.601628,SZ.002377,SH.601808,SZ.000698,SH.600583',
+        'Process'
+    )
+    [Environment]::SetEnvironmentVariable(
+        'CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED',
+        $(if ($EnableFullSymbolCatalog) { '1' } else { '0' }),
+        'Process'
+    )
+    # A normal restart is always a validation restart.  Stale process, user or
+    # .env values cannot reactivate broad/full processing; operators must use
+    # the independent explicit switches above for this invocation.
+    if (-not $EnableLargeScreeningScope) {
+        $boundedScreeningNumericNames = @(
+            'CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE',
+            'CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS',
+            'CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS',
+            'CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK',
+            'CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH',
+            'CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH',
+            'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS'
+        )
+        foreach ($name in $boundedScreeningNumericNames) {
+            [Environment]::SetEnvironmentVariable($name, '12', 'Process')
+        }
+        [Environment]::SetEnvironmentVariable(
+            'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS',
+            '20',
+            'Process'
+        )
+    }
+    [Environment]::SetEnvironmentVariable(
+        'CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE',
+        $(if ($EnableLargeScreeningScope) { '1' } else { '0' }),
+        'Process'
+    )
+    [Environment]::SetEnvironmentVariable(
+        'CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED',
+        $(if ($EnableFullCoverage) { '1' } else { '0' }),
+        'Process'
+    )
+    [Environment]::SetEnvironmentVariable(
+        'CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE',
+        $(if ($ForceFullCoverageUntilComplete) { '1' } else { '0' }),
+        'Process'
+    )
+    if (-not $EnableLargeHoldingMonitorScope) {
+        [Environment]::SetEnvironmentVariable(
+            'CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS',
+            '12',
+            'Process'
+        )
+    }
+    [Environment]::SetEnvironmentVariable(
+        'CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED',
+        $(if ($EnableLargeHoldingMonitorScope) { '1' } else { '0' }),
+        'Process'
+    )
     Import-UserEnvironmentFallback -Names @(
         'LONGBRIDGE_APP_KEY',
         'LONGBRIDGE_APP_SECRET',
@@ -480,6 +585,27 @@ if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD)) {
     exit 1
 }
 Log ('project Python = {0}' -f $PythonExe)
+
+$largeScopeRequested = (
+    $EnableLargeScreeningScope -or
+    $EnableLargeHoldingMonitorScope -or
+    $EnableFullSymbolCatalog -or
+    $EnableFullCoverage -or
+    $ForceFullCoverageUntilComplete
+)
+if ($largeScopeRequested) {
+    $validationDirectory = Join-Path `
+        $ProjectRoot `
+        'audit\chanlun_trading_system_backtest\research_sample_validation_12'
+    & $PythonExe `
+        (Join-Path $ProjectRoot 'tools\verify_qmt_validation_gate.py') `
+        '--directory' $validationDirectory `
+        '--expected-symbol-count' '12'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Large-scope startup requires a current passed validation12 gate.'
+    }
+    Log 'current validation12 gate verified before large-scope startup'
+}
 
 $webPort = 9900
 if (-not [string]::IsNullOrWhiteSpace($env:CHANLUN_WEB_PORT)) {
@@ -500,6 +626,7 @@ if ($probeHost -eq '0.0.0.0' -or $probeHost -eq '::') { $probeHost = '127.0.0.1'
 if ($probeHost.Contains(':') -and -not $probeHost.StartsWith('[')) { $probeHost = "[$probeHost]" }
 $healthUri = "http://${probeHost}:$webPort/readyz?market=a"
 $liveUri = "http://${probeHost}:$webPort/livez"
+$webUri = "http://${probeHost}:$webPort/"
 
 try {
     $sourceRevision = Get-ApplicationSourceRevision -Root $ProjectRoot
@@ -668,7 +795,13 @@ if (Test-CurrentProcessElevated) {
         Register-LimitedWebLaunchTask `
             -TaskName $handoffTaskName `
             -ScriptPath $PSCommandPath `
-            -TimeoutSeconds $WebReadinessTimeoutSeconds
+            -TimeoutSeconds $WebReadinessTimeoutSeconds `
+            -LargeScopeEnabled $EnableLargeScreeningScope.IsPresent `
+            -LargeHoldingMonitorScopeEnabled `
+                $EnableLargeHoldingMonitorScope.IsPresent `
+            -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent `
+            -FullCoverageEnabled $EnableFullCoverage.IsPresent `
+            -ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent
     } catch {
         Abort-AfterWebStop -Reason (
             'failed to register limited-token Web launch handoff: {0}' -f `
@@ -758,6 +891,7 @@ if (Test-CurrentProcessElevated) {
             Log '===== web restart ABORTED ====='
             exit 1
         }
+        if ($OpenBrowser) { Open-WebApplication -Uri $webUri }
         Log '===== web restart DONE ====='
         exit 0
     } finally {
@@ -844,6 +978,7 @@ if (-not $SkipWatchdog) {
         -PassThru
     Log ('web watchdog launch requested PID={0}; duplicate launches exit safely' -f $watchdogProcess.Id)
 }
+if ($OpenBrowser) { Open-WebApplication -Uri $webUri }
 Log '===== web restart DONE ====='
 } finally {
     if ($null -ne $deploymentMutex) {

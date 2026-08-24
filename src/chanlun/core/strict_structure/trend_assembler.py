@@ -30,6 +30,7 @@ from chanlun.core.strict_structure.strength import (
 def _validate_center_references(
     centers, units, structural_level, oscillatory_ids=frozenset()
 ):
+    centers = tuple(centers)
     if not units:
         raise ValueError("center references require source units")
     source_kind = centers[0].source_kind
@@ -52,20 +53,56 @@ def _validate_center_references(
             raise ValueError("center price basis mismatch")
         try:
             body_indexes = tuple(index[item.unit_id] for item in center.body_units)
+            failed_indexes = tuple(
+                index[item.unit_id] for item in center.failed_departure_units
+            )
         except KeyError as exc:
             raise ValueError("center references a missing unit") from exc
-        entry_index = index.get(center.entry_unit.unit_id)
-        if entry_index is None or units[entry_index] != center.entry_unit:
-            raise ValueError("center references missing or changed entry evidence")
-        if entry_index + 1 != body_indexes[0]:
-            raise ValueError("external entry must immediately precede center body")
-        if body_indexes != tuple(range(body_indexes[0], body_indexes[-1] + 1)):
-            raise ValueError("center body must be a contiguous unit slice")
+        if center.entry_unit is None:
+            entry_index = None
+        else:
+            entry_index = index.get(center.entry_unit.unit_id)
+            if entry_index is None or units[entry_index] != center.entry_unit:
+                raise ValueError("center references missing or changed entry evidence")
+            if entry_index + 1 != body_indexes[0]:
+                raise ValueError("external entry must immediately precede center body")
         for offset, item in zip(body_indexes, center.body_units):
             if units[offset] != item:
                 raise ValueError("center unit evidence changed")
+        for offset, item in zip(failed_indexes, center.failed_departure_units):
+            if units[offset] != item:
+                raise ValueError("center failed departure evidence changed")
+        history_indexes = tuple(
+            sorted((*body_indexes, *failed_indexes))
+        )
+        if history_indexes != tuple(
+            range(history_indexes[0], history_indexes[-1] + 1)
+        ):
+            raise ValueError(
+                "center body and failed departures must own a contiguous history"
+            )
+        history_end_index = history_indexes[-1]
+        try:
+            bridge_indexes = tuple(
+                index[item.unit_id] for item in center.supersession_bridge_units
+            )
+        except KeyError as exc:
+            raise ValueError("center supersession bridge is missing") from exc
+        if bridge_indexes and bridge_indexes != tuple(
+            range(
+                history_end_index + 1,
+                history_end_index + 1 + len(bridge_indexes),
+            )
+        ):
+            raise ValueError("supersession bridge must follow center body")
+        for offset, item in zip(
+            bridge_indexes,
+            center.supersession_bridge_units,
+        ):
+            if units[offset] != item:
+                raise ValueError("center supersession bridge changed")
 
-        start = entry_index
+        start = body_indexes[0] if entry_index is None else entry_index
         if start <= previous_start:
             raise ValueError("centers must be strictly ordered in the unit stream")
         if (
@@ -82,7 +119,7 @@ def _validate_center_references(
             if leave is None or ret is None:
                 raise ValueError("completed center requires completion ownership")
             leave_index = index.get(leave.unit_id)
-            if leave_index != body_indexes[-1] + 1 or units[leave_index] != leave:
+            if leave_index != history_end_index + 1 or units[leave_index] != leave:
                 raise ValueError(
                     "external completion leave must immediately follow center body"
                 )
@@ -95,7 +132,7 @@ def _validate_center_references(
         elif center.pending_leave_unit is not None:
             leave = center.pending_leave_unit
             leave_index = index.get(leave.unit_id)
-            if leave_index != body_indexes[-1] + 1 or units[leave_index] != leave:
+            if leave_index != history_end_index + 1 or units[leave_index] != leave:
                 raise ValueError(
                     "external pending leave must immediately follow center body"
                 )
@@ -108,11 +145,29 @@ def _validate_center_references(
 
         previous_start = start
         previous_completion_leave_index = completion_leave_index
+    for position, center in enumerate(centers):
+        if center.state is not CenterState.SUPERSEDED:
+            continue
+        if position + 1 >= len(centers):
+            raise ValueError("superseded center is missing its successor")
+        successor = centers[position + 1]
+        if center.superseded_by_center_id != successor.center_id:
+            raise ValueError("superseded center references the wrong successor")
+        if center.superseded_at != successor.established_at:
+            raise ValueError("supersession must wait for successor establishment")
     return index
 
 
 def _constituent_units(group, units, index, group_start, *, end_index=None):
-    tail = group[-1].completion_leave_unit or group[-1].body_units[-1]
+    terminal = group[-1]
+    tail = terminal.completion_leave_unit
+    if tail is None and terminal.supersession_bridge_units:
+        tail = terminal.supersession_bridge_units[-1]
+    if tail is None:
+        tail = max(
+            (*terminal.body_units, *terminal.failed_departure_units),
+            key=lambda item: (item.market_start, item.market_end, item.unit_id),
+        )
     end = index[tail.unit_id] if end_index is None else end_index
     if end < group_start:
         raise ValueError("trend unit slice is inverted")
@@ -121,12 +176,20 @@ def _constituent_units(group, units, index, group_start, *, end_index=None):
 
 def _group_is_complete(group, constituent_units):
     return (
-        all(center.state is CenterState.COMPLETED for center in group)
+        all(center.structurally_closed for center in group)
         and all(
-            center.completion_leave_unit is not None
-            and center.completion_return_unit is not None
-            and center.completion_leave_unit.locked
-            and center.completion_return_unit.locked
+            (
+                center.state is CenterState.SUPERSEDED
+                and center.superseded_by_center_id is not None
+                and center.superseded_at is not None
+            )
+            or (
+                center.state is CenterState.COMPLETED
+                and center.completion_leave_unit is not None
+                and center.completion_return_unit is not None
+                and center.completion_leave_unit.locked
+                and center.completion_return_unit.locked
+            )
             for center in group
         )
         and bool(constituent_units)
@@ -143,7 +206,7 @@ def _group_is_divergence_complete(group, constituent_units, divergence):
         return False
     return (
         len(group) >= 1
-        and all(center.state is CenterState.COMPLETED for center in group[:-1])
+        and all(center.structurally_closed for center in group[:-1])
         and terminal_center.state is CenterState.DIVERGENCE_CLOSED
         and terminal_center.boundary_divergence_id == divergence.divergence_id
         and terminal_center.boundary_anchor_unit_id == divergence.signal_unit_id
@@ -165,7 +228,7 @@ def _direction(constituent_units):
 
 
 def _completion_times(group, constituent_units):
-    confirmations = tuple(center.completed_at for center in group)
+    confirmations = tuple(center.structural_closed_at for center in group)
     if any(value is None for value in confirmations):
         raise ValueError("complete group requires completion confirmations")
     confirmed_at = max(confirmations)
@@ -174,6 +237,27 @@ def _completion_times(group, constituent_units):
         + tuple(item.available_at for item in constituent_units)
     )
     return confirmed_at, available_at
+
+
+def _next_group_start(
+    terminal_center,
+    successor_center,
+    unit_index,
+):
+    """Return the first source unit owned by the successor trend group."""
+
+    terminal_return = terminal_center.completion_return_unit
+    if terminal_return is not None:
+        return unit_index[terminal_return.unit_id]
+    if (
+        terminal_center.state is CenterState.SUPERSEDED
+        and terminal_center.superseded_by_center_id == successor_center.center_id
+    ):
+        # The old core's third unit may be an optional comparison entry for
+        # the successor, but it must never be reused as a fabricated leave or
+        # as the successor trend's first constituent unit.
+        return unit_index[successor_center.body_units[0].unit_id]
+    raise ValueError("closed trend requires a causal successor boundary")
 
 
 def _build(
@@ -384,7 +468,10 @@ def assemble_trend_types(
         if group_start_unit_id is None
         else index.get(group_start_unit_id, -1)
     )
-    if not 0 <= group_start <= index[values[0].entry_unit.unit_id]:
+    first_center_start = index[values[0].body_units[0].unit_id]
+    if values[0].entry_unit is not None:
+        first_center_start = index[values[0].entry_unit.unit_id]
+    if not 0 <= group_start <= first_center_start:
         raise ValueError("trend group start must precede its first center")
     group_relation = None
     active_divergence_end = None
@@ -505,8 +592,8 @@ def assemble_trend_types(
             constituent_units,
         )
         record_complete(group, group_start)
-        if current.state is not CenterState.COMPLETED:
-            # 实时中枢仍可能被后续五段窗口替换。它可以开启形成中边界，但在自身
+        if not current.structurally_closed:
+            # 实时中枢仍可能被后续生命周期推进。它可以开启形成中边界，但在自身
             # 中枢身份完成之前，不能不可逆地锁定前一段走势。
             output.append(
                 _build(
@@ -518,12 +605,9 @@ def assemble_trend_types(
                     complete_available_at,
                 )
             )
-            terminal_return = group[-1].completion_return_unit
-            if terminal_return is None:
-                raise ValueError("complete trend requires terminal return")
-            # 前一中枢的完成回返是下一个五段中枢最早的来源单元；这样既保持递归
+            # 前一中枢的完成回返是下一个三段中枢最早的来源单元；这样既保持递归
             # 走势单元相邻，也不会重复使用上一离开段。
-            group_start = index[terminal_return.unit_id]
+            group_start = _next_group_start(group[-1], current, index)
             group = [current]
             group_relation = None
             continue
@@ -546,10 +630,7 @@ def assemble_trend_types(
                 boundary_available_at,
             )
         )
-        terminal_return = group[-1].completion_return_unit
-        if terminal_return is None:
-            raise ValueError("locked trend requires terminal completion return")
-        group_start = index[terminal_return.unit_id]
+        group_start = _next_group_start(group[-1], current, index)
         group = [current]
         group_relation = None
         record_complete(group, group_start)

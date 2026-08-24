@@ -6,6 +6,8 @@ import threading
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import cl_app.services.holding_group_monitor as monitor_module
 from cl_app.services.holding_group_monitor import (
     HoldingGroupMonitorConfig,
@@ -115,7 +117,7 @@ def _segment_sell_update(
         signal_time=segment_time,
         price=10.0,
         big_dir="down",
-        reason="strict_1m_segment_difference_enrichment",
+        reason="one_minute_exact_locator_enrichment",
         op_level="5m",
         mid_level="1m",
         big_level="30m",
@@ -188,6 +190,7 @@ def _service(
     clock=None,
     review_inbox=None,
     exchange_factory=None,
+    config: HoldingGroupMonitorConfig | None = None,
 ):
     notifier = notifier or _Notifier()
     exchange_calls: list[str] = []
@@ -209,7 +212,7 @@ def _service(
         state_factory=state_factory,
         event_collector=event_collector,
         clock=clock or (lambda: datetime(2026, 8, 4, 10, 1, tzinfo=CN)),
-        config=HoldingGroupMonitorConfig(max_workers=4),
+        config=config or HoldingGroupMonitorConfig(max_workers=4),
         review_inbox=review_inbox,
     )
     return service, notifier, exchange_calls
@@ -485,7 +488,8 @@ def test_recursive_us_notification_separates_every_event_time() -> None:
     assert "信号可用 2026-08-15 02:13:00" in line
     assert "监听发现 2026-08-15 02:14:05" in line
     assert "最近1分钟收盘价：581.250" in line
-    assert "1分钟区间套定位：一类买点（趋势背驰）（L0）" in line
+    assert "1分钟区间套定位：一类买点（趋势背驰）" in line
+    assert "区间套定位：一类买点（趋势背驰）（L0）" not in line
 
 
 def test_notification_labels_five_minute_price_fallback_honestly() -> None:
@@ -1181,7 +1185,7 @@ def test_failed_notification_outbox_survives_app_restart(tmp_path):
     assert "一类卖点" in restarted_notifier.messages[0][1][0]
 
 
-def test_outbox_is_not_erased_when_symbol_leaves_manual_holdings(tmp_path):
+def test_out_of_scope_pending_event_is_pruned_without_restore_or_delivery(tmp_path):
     positions = [{"market": "us", "code": "TSLA.US", "name": "特斯拉"}]
     service, notifier, _ = _service(
         tmp_path,
@@ -1194,9 +1198,9 @@ def test_outbox_is_not_erased_when_symbol_leaves_manual_holdings(tmp_path):
     result = service.run_once()
 
     assert result["declared_count"] == 0
-    assert result["sent_count"] == 1
+    assert result["sent_count"] == 0
     assert result["notification_delivery"]["pending_event_count"] == 0
-    assert len(notifier.messages) == 2
+    assert len(notifier.messages) == 1
 
 
 def test_pending_delivery_is_drained_even_after_market_closes(tmp_path):
@@ -1506,3 +1510,121 @@ def test_membership_change_can_pull_registered_job_forward(tmp_path):
     assert scheduler.modified[0][0] == "holding_group_realtime_monitor"
     assert scheduler.modified[0][1]["next_run_time"].tzinfo is not None
     assert scheduler.wake_count == 1
+
+
+def test_watchlist_overflow_is_deferred_inside_default_twelve_symbol_scope(
+    tmp_path,
+):
+    positions = [
+        {
+            "market": "us",
+            "code": f"TEST{index:02d}.US",
+            "name": f"测试{index:02d}",
+            "groups": ["我的关注"],
+            "is_holding": False,
+        }
+        for index in range(15)
+    ]
+    service, notifier, exchange_calls = _service(
+        tmp_path,
+        positions,
+        event_collector=lambda *_args, **_kwargs: [],
+    )
+
+    result = service.run_once()
+
+    assert result["scope_authorized"] is True
+    assert result["scope_limit"] == 12
+    assert result["requested_count"] == 15
+    assert result["mandatory_count"] == 0
+    assert result["deferred_count"] == 3
+    assert result["declared_count"] == 12
+    assert [row["code"] for row in result["positions"]] == [
+        f"TEST{index:02d}.US" for index in range(12)
+    ]
+    assert len(service._states) == 12
+    assert exchange_calls == ["us"]
+    assert notifier.messages == []
+
+
+def test_mandatory_overflow_fails_before_exchange_or_structure_access(tmp_path):
+    positions = [
+        {
+            "market": "us",
+            "code": f"HOLD{index:02d}.US",
+            "name": f"持仓{index:02d}",
+            "is_holding": True,
+        }
+        for index in range(13)
+    ]
+
+    def forbidden_collector(*_args, **_kwargs):
+        raise AssertionError("structure collector must not run")
+
+    service, notifier, exchange_calls = _service(
+        tmp_path,
+        positions,
+        event_collector=forbidden_collector,
+    )
+
+    result = service.run_once()
+
+    assert result["status"] == "error"
+    assert result["reason_code"] == "HOLDING_MONITOR_SCOPE_EXCEEDED"
+    assert result["scope_authorized"] is False
+    assert result["scope_limit"] == 12
+    assert result["requested_count"] == 13
+    assert result["mandatory_count"] == 13
+    assert result["positions"] == []
+    assert service._states == {}
+    assert exchange_calls == []
+    assert notifier.messages == []
+
+
+def test_more_than_twenty_holding_monitor_symbols_need_independent_authorization():
+    with pytest.raises(ValueError, match="explicit large-scope authorization"):
+        HoldingGroupMonitorConfig(max_symbols=21)
+
+    config = HoldingGroupMonitorConfig(
+        max_symbols=21,
+        large_scope_authorized=True,
+    )
+
+    assert config.max_symbols == 21
+    assert config.large_scope_authorized is True
+
+
+def test_restarted_monitor_drops_old_pending_symbol_outside_new_admission(tmp_path):
+    first, _failed_notifier, _ = _service(
+        tmp_path,
+        [{"market": "us", "code": "TSLA.US", "name": "特斯拉"}],
+        notifier=_Notifier([False]),
+    )
+    assert first.run_once()["notification_delivery"]["pending_event_count"] == 1
+
+    restarted_notifier = _Notifier()
+    restarted, restarted_notifier, exchange_calls = _service(
+        tmp_path,
+        [
+            {
+                "market": "us",
+                "code": "AAPL.US",
+                "name": "苹果",
+                "is_holding": False,
+            }
+        ],
+        notifier=restarted_notifier,
+        event_collector=lambda *_args, **_kwargs: [],
+    )
+    assert (
+        restarted.health_snapshot()["notification_delivery"]["pending_event_count"]
+        == 0
+    )
+
+    result = restarted.run_once()
+
+    assert result["notification_delivery"]["pending_event_count"] == 0
+    assert [row["code"] for row in result["positions"]] == ["AAPL.US"]
+    assert restarted_notifier.messages == []
+    assert exchange_calls == ["us"]
+    assert restarted._runtime_ledger.previous_direction("us", "TSLA.US") is None

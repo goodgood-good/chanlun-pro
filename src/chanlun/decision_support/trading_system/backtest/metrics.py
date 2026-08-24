@@ -296,7 +296,21 @@ def calculate_metrics(run: BacktestRun) -> PerformanceMetrics:
         else sum((trade.net_return for trade in trades), _ZERO)
         / Decimal(len(trades))
     )
-    total_cost = sum((trade.total_cost for trade in trades), _ZERO)
+    closed_trade_cost = sum((trade.total_cost for trade in trades), _ZERO)
+    filled_orders = tuple(fill for fill in run.fills if fill.filled)
+    if any(
+        fill.execution_price is None or fill.shares <= 0 or fill.fees < 0
+        for fill in filled_orders
+    ):
+        raise ValueError("filled order is missing executable cost evidence")
+    # Aggregate account metrics must include every completed fill, including an
+    # entry that remains open and is marked to market at the report boundary.
+    # Synthetic trade-only runs remain supported for isolated metric tests.
+    total_cost = (
+        sum((fill.fees for fill in filled_orders), _ZERO)
+        if run.fills
+        else closed_trade_cost
+    )
     gross_profit_before_costs = sum(
         (
             max(_ZERO, trade.net_pnl + trade.total_cost)
@@ -307,15 +321,25 @@ def calculate_metrics(run: BacktestRun) -> PerformanceMetrics:
     cost_to_gross_profit = (
         None
         if gross_profit_before_costs == 0
-        else total_cost / gross_profit_before_costs
+        else closed_trade_cost / gross_profit_before_costs
     )
-    turnover_cash = sum(
-        (
-            (trade.entry_price + trade.exit_price) * Decimal(trade.shares)
-            for trade in trades
-        ),
-        _ZERO,
-    )
+    if run.fills:
+        turnover_cash = sum(
+            (
+                fill.execution_price * Decimal(fill.shares)
+                for fill in filled_orders
+                if fill.execution_price is not None
+            ),
+            _ZERO,
+        )
+    else:
+        turnover_cash = sum(
+            (
+                (trade.entry_price + trade.exit_price) * Decimal(trade.shares)
+                for trade in trades
+            ),
+            _ZERO,
+        )
     turnover = turnover_cash / points[0].equity
     exposure_ratio = Decimal(
         sum(point.market_value > 0 for point in points)

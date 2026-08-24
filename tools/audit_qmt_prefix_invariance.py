@@ -53,11 +53,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--input-dir",
         type=Path,
-        default=Path(
-            "audit/chanlun_trading_system_backtest/fixed_year_2025_2026"
-        ),
+        required=True,
+        help="explicit sample extraction directory; no full-market default",
     )
-    result.add_argument("--workers", type=_positive_int, default=6)
+    result.add_argument("--workers", type=_positive_int, default=2)
     result.add_argument("--force", action="store_true")
     return result
 
@@ -154,8 +153,7 @@ def _prefix_master(
         listed_from=master.listed_from,
         listed_through=(
             master.listed_through
-            if master.listed_through is not None
-            and master.listed_through <= prefix_end
+            if master.listed_through is not None and master.listed_through <= prefix_end
             else None
         ),
     )
@@ -189,9 +187,7 @@ def _projection(
     daily_point_ids = {interval.point_id for interval in daily_visibility}
     return (
         tuple(
-            point
-            for point in facts.daily_points
-            if point.point_id in daily_point_ids
+            point for point in facts.daily_points if point.point_id in daily_point_ids
         ),
         daily_visibility,
         tuple(
@@ -201,7 +197,9 @@ def _projection(
         ),
         clipped_visibility(facts.thirty_point_visibility),
         tuple(
-            point for point in facts.five_points if point.available_at <= semantic_cutoff
+            point
+            for point in facts.five_points
+            if point.available_at <= semantic_cutoff
         ),
         clipped_visibility(facts.five_point_visibility),
         tuple(
@@ -213,9 +211,7 @@ def _projection(
             for row in facts.five_minute_warmup
             if row.observed_at <= semantic_cutoff
         ),
-        tuple(
-            row for row in facts.evaluations if row.observed_at <= semantic_cutoff
-        ),
+        tuple(row for row in facts.evaluations if row.observed_at <= semantic_cutoff),
     )
 
 
@@ -260,9 +256,7 @@ def _worker(request: Request) -> dict[str, object]:
         effective_start=full.effective_start,
         algorithm_revision=request.algorithm_revision,
         security_master=_prefix_master(full.security_master, prefix_end),
-        memberships=tuple(
-            row for row in full.memberships if row.known_at <= cutoff
-        ),
+        memberships=tuple(row for row in full.memberships if row.known_at <= cutoff),
         qmt_factors=tuple(
             row for row in full.factors if row.effective_on <= prefix_end
         ),
@@ -317,11 +311,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     symbols = manifest.get("symbols")
     if not all(isinstance(value, Mapping) for value in (request_info, symbols)):
         raise ValueError("extract manifest is malformed")
-    algorithm_revision, algorithm_hashes = _frozen_algorithm_entry(
-        manifest,
-        key="algorithm",
-        current_hashes=qmt_research_contract.algorithm_hashes(),
-    )
     fact_key = "fact_algorithm" if "fact_algorithm" in manifest else "algorithm"
     fact_current_hashes = (
         qmt_research_contract.fact_algorithm_hashes()
@@ -333,6 +322,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         key=fact_key,
         current_hashes=fact_current_hashes,
     )
+    prefix_algorithm_hashes = qmt_research_contract.prefix_algorithm_hashes()
+    prefix_algorithm_revision = _algorithm_revision(prefix_algorithm_hashes)
     warmup_start = date.fromisoformat(str(request_info["warmup_start"]))
     requests: list[Request] = []
     skipped_no_evaluations = 0
@@ -353,8 +344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     completed: dict[str, dict[str, object]] = {}
     pending: list[Request] = []
     for request in requests:
-        existing = None if args.force else _valid_existing(
-            Path(request.target), request
+        existing = (
+            None if args.force else _valid_existing(Path(request.target), request)
         )
         if existing is None:
             pending.append(request)
@@ -382,9 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     item["status"] != "passed"
                                     for item in completed.values()
                                 ),
-                                "seconds": round(
-                                    wall_time.perf_counter() - started, 1
-                                ),
+                                "seconds": round(wall_time.perf_counter() - started, 1),
                             },
                             ensure_ascii=False,
                         ),
@@ -396,8 +385,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = {
         "schema": AUDIT_SCHEMA,
         "generated_at": datetime.now().astimezone().isoformat(),
-        "status": "passed" if not failures and len(completed) == len(requests) else "failed",
-        "algorithm_revision": algorithm_revision,
+        "status": "passed"
+        if not failures and len(completed) == len(requests)
+        else "failed",
+        # ``algorithm_revision`` remains as a compatibility alias for readers
+        # of the earlier audit schema.  It now identifies this stage alone,
+        # rather than coupling Prefix to report/finalizer implementation.
+        "algorithm_revision": prefix_algorithm_revision,
+        "prefix_algorithm_revision": prefix_algorithm_revision,
         "fact_algorithm_revision": fact_algorithm_revision,
         "pit_snapshot_sha256": request_info["pit_snapshot_sha256"],
         "extract_manifest_sha256": _sha256(manifest_path),
@@ -406,14 +401,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "skipped_no_evaluation_symbol_count": skipped_no_evaluations,
         "failed_codes": failures,
         "checkpoint_tree_sha256": _semantic_hash(
-            tuple(
-                (code, completed[code]) for code in sorted(completed)
-            )
+            tuple((code, completed[code]) for code in sorted(completed))
         ),
     }
     output_path = directory / "prefix_invariance_audit.json"
-    if qmt_research_contract.algorithm_hashes() != algorithm_hashes:
-        raise RuntimeError("source code changed during prefix audit")
+    if qmt_research_contract.prefix_algorithm_hashes() != prefix_algorithm_hashes:
+        raise RuntimeError("prefix algorithm changed during prefix audit")
     current_fact_hashes = (
         qmt_research_contract.fact_algorithm_hashes()
         if fact_key == "fact_algorithm"

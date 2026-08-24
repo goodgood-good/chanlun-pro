@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from tools import supplement_qmt_history as subject
 
@@ -72,7 +73,7 @@ def test_failed_resume_record_is_retried(monkeypatch, tmp_path) -> None:
             "--end",
             "2026-07-24",
             "--codes",
-            "000001.SZ",
+            "SZ.000001",
             "--output",
             str(output),
         )
@@ -85,3 +86,56 @@ def test_failed_resume_record_is_retried(monkeypatch, tmp_path) -> None:
     assert payload["records"]["000001.SZ"]["rows"] == 1
     assert "error" not in payload["records"]["000001.SZ"]
 
+
+@pytest.mark.parametrize("raw", (None, "", "all", "*", "SH.600001,"))
+def test_bounded_codes_reject_empty_or_scope_aliases(raw) -> None:
+    with pytest.raises(ValueError, match="codes"):
+        subject._normalized_codes(raw)
+
+
+def test_scope_fails_before_xtquant_import(monkeypatch, tmp_path) -> None:
+    monkeypatch.delitem(__import__("sys").modules, "xtquant", raising=False)
+
+    with pytest.raises(ValueError, match="at least one"):
+        subject.main(
+            (
+                "--start",
+                "2025-07-24",
+                "--end",
+                "2026-07-24",
+                "--output",
+                str(tmp_path / "manifest.json"),
+            )
+        )
+    assert "xtquant" not in __import__("sys").modules
+
+    with pytest.raises(ValueError, match="also requires"):
+        subject.main(
+            (
+                "--start",
+                "2025-07-24",
+                "--end",
+                "2026-07-24",
+                "--full-market",
+                "--output",
+                str(tmp_path / "manifest.json"),
+            )
+        )
+    assert "xtquant" not in __import__("sys").modules
+
+
+def test_more_than_twenty_codes_requires_independent_confirmation(tmp_path) -> None:
+    codes = ",".join(f"SH.{600000 + offset:06d}" for offset in range(21))
+    with pytest.raises(ValueError, match="21 requested codes"):
+        subject.main(
+            (
+                "--start",
+                "2025-07-24",
+                "--end",
+                "2026-07-24",
+                "--codes",
+                codes,
+                "--output",
+                str(tmp_path / "manifest.json"),
+            )
+        )

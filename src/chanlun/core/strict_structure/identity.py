@@ -63,9 +63,7 @@ def build_center_id(
     price_basis_revision: str,
     structural_level: int,
     source_kind: str,
-    entry_unit_id: str,
     initial_unit_ids: tuple[str, ...],
-    establishment_unit_id: str | None,
     zd_tick: int,
     zg_tick: int,
 ) -> str:
@@ -76,9 +74,7 @@ def build_center_id(
         price_basis_revision,
         structural_level,
         source_kind,
-        entry_unit_id,
         tuple(initial_unit_ids),
-        establishment_unit_id,
         zd_tick,
         zg_tick,
     )

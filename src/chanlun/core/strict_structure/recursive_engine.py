@@ -211,9 +211,16 @@ def calculate_level_with_divergence_boundaries(
             centers_for_trends = tuple(
                 center
                 for index, center in enumerate(prefix_centers.centers)
-                if unit_index[center.entry_unit.unit_id] > last_boundary_index
+                if unit_index[
+                    (
+                        center.body_units[0].unit_id
+                        if center.entry_unit is None
+                        else center.entry_unit.unit_id
+                    )
+                ]
+                > last_boundary_index
                 and (
-                    center.state is CenterState.COMPLETED
+                    center.structurally_closed
                     or index == len(prefix_centers.centers) - 1
                 )
             )
@@ -262,9 +269,16 @@ def calculate_level_with_divergence_boundaries(
             centers_for_trends = tuple(
                 center
                 for index, center in enumerate(center_result.centers)
-                if unit_index[center.entry_unit.unit_id] > last_boundary_index
+                if unit_index[
+                    (
+                        center.body_units[0].unit_id
+                        if center.entry_unit is None
+                        else center.entry_unit.unit_id
+                    )
+                ]
+                > last_boundary_index
                 and (
-                    center.state is CenterState.COMPLETED
+                    center.structurally_closed
                     or index == len(center_result.centers) - 1
                 )
             )
@@ -408,13 +422,9 @@ class StrictRecursiveEngine:
         for level in range(self.max_levels):
             source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
-            # 第 0 层消耗不可变五段窗口：进入段 + 中间三段 + 离开段。更高级别保留
-            # 三段已完成低级别走势及其可审计的前一走势进入段。
-            minimum_units = (
-                center_seed_size(source_kind) + 1
-                if source_kind is SourceKind.TREND_TYPE
-                else 5
-            )
+            # 每一结构层都以三个连续、已完成同级单元的重叠建立中枢。前一单元
+            # 仅在存在时作为背驰进入腿，不再阻塞首个中枢成立。
+            minimum_units = center_seed_size(source_kind)
             if len(units) < minimum_units:
                 break
 

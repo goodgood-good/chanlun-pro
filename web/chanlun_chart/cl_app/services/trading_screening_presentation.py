@@ -193,13 +193,8 @@ def presentation_signal_document(
     effective_stage = lifecycle_stage_from_signal(signal)
     if effective_stage is not None:
         document["lifecycle_stage"] = effective_stage
-    raw_trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    raw_trigger = signal.get("segment_difference_1m")
     document["segment_difference_1m"] = (
-        None
-        if raw_trigger is None
-        else _presentation_fields(raw_trigger, _PRESENTATION_TRIGGER_FIELDS) or {}
-    )
-    document["trigger_1m"] = (
         None
         if raw_trigger is None
         else _presentation_fields(raw_trigger, _PRESENTATION_TRIGGER_FIELDS) or {}

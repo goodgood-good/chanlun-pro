@@ -139,7 +139,9 @@ def _trading_policy_document(policy: TradingPolicy) -> dict[str, object]:
 
     return {
         "require_confirmed_five_minute": policy.require_confirmed_five_minute,
-        "require_confirmed_one_minute": policy.require_confirmed_one_minute,
+        "require_one_minute_segment_difference_for_precise_execution": (
+            policy.require_one_minute_segment_difference_for_precise_execution
+        ),
         "require_sector_eligibility": policy.require_sector_eligibility,
         "require_thirty_minute_context": policy.require_thirty_minute_context,
         "minimum_tick": format(policy.minimum_tick, "f"),
@@ -171,13 +173,9 @@ class HumanAssistedDecisionContract:
     segment_difference_point_types: tuple[str, ...] = tuple(
         sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
     )
-    # 以下三个字段是旧档案的传输别名，不再代表当前职责命名。
+    # 以下两个字段仅保留高/交易周期业务标签。
     strategic_frequency: str = "30m"
     tactical_frequency: str = "5m"
-    locator_frequency: str = "1m"
-    locator_trigger_point_types: tuple[str, ...] = tuple(
-        sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
-    )
     physical_structure_frequencies: tuple[str, ...] = ("d", "30m", "5m", "1m")
     stroke_mode: str = STRICT_STROKE_MODE
     strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
@@ -201,7 +199,8 @@ class HumanAssistedDecisionContract:
             raise ValueError("human-assisted decision core schema changed")
         if (
             self.policy.require_confirmed_five_minute is not True
-            or self.policy.require_confirmed_one_minute is not True
+            or self.policy.require_one_minute_segment_difference_for_precise_execution
+            is not True
         ):
             raise ValueError(
                 "human-assisted production policy requires independent 5m trade "
@@ -217,13 +216,8 @@ class HumanAssistedDecisionContract:
         if (
             self.strategic_frequency,
             self.tactical_frequency,
-            self.locator_frequency,
-        ) != ("30m", "5m", "1m"):
+        ) != ("30m", "5m"):
             raise ValueError("human-assisted timeframe contract changed")
-        if self.locator_trigger_point_types != tuple(
-            sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
-        ):
-            raise ValueError("human-assisted legacy one-minute alias changed")
         if self.segment_difference_point_types != tuple(
             sorted(ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES)
         ):
@@ -271,8 +265,6 @@ class HumanAssistedDecisionContract:
             ),
             "strategic_frequency": self.strategic_frequency,
             "tactical_frequency": self.tactical_frequency,
-            "locator_frequency": self.locator_frequency,
-            "locator_trigger_point_types": list(self.locator_trigger_point_types),
             "physical_structure_frequencies": list(
                 self.physical_structure_frequencies
             ),
@@ -320,7 +312,7 @@ def validate_human_assisted_contract_document(
 
     bool_fields = (
         "require_confirmed_five_minute",
-        "require_confirmed_one_minute",
+        "require_one_minute_segment_difference_for_precise_execution",
         "require_sector_eligibility",
         "require_thirty_minute_context",
     )
@@ -353,11 +345,6 @@ def validate_human_assisted_contract_document(
         not isinstance(value, str) for value in physical_frequencies
     ):
         raise ValueError("human-assisted physical frequencies are invalid")
-    locator_trigger_point_types = document.get("locator_trigger_point_types")
-    if not isinstance(locator_trigger_point_types, list) or any(
-        not isinstance(value, str) for value in locator_trigger_point_types
-    ):
-        raise ValueError("human-assisted one-minute trigger types are invalid")
     segment_difference_point_types = document.get("segment_difference_point_types")
     if not isinstance(segment_difference_point_types, list) or any(
         not isinstance(value, str) for value in segment_difference_point_types
@@ -371,7 +358,6 @@ def validate_human_assisted_contract_document(
         "segment_difference_frequency",
         "strategic_frequency",
         "tactical_frequency",
-        "locator_frequency",
         "stroke_mode",
         "strict_base_profile_id",
         "strict_base_profile_revision",
@@ -407,8 +393,6 @@ def validate_human_assisted_contract_document(
         segment_difference_point_types=tuple(segment_difference_point_types),
         strategic_frequency=str(document["strategic_frequency"]),
         tactical_frequency=str(document["tactical_frequency"]),
-        locator_frequency=str(document["locator_frequency"]),
-        locator_trigger_point_types=tuple(locator_trigger_point_types),
         physical_structure_frequencies=tuple(physical_frequencies),
         stroke_mode=str(document["stroke_mode"]),
         strict_base_profile_id=str(document["strict_base_profile_id"]),
@@ -767,13 +751,13 @@ def validate_signal_decision_document(document: Mapping[str, object]) -> str:
             recommendation
         ):
             raise ValueError("human-assisted execution recommendation label changed")
-        locator_status = profile.get("precision_locator_status")
-        locator_ready = profile.get("precision_locator_ready")
+        segment_difference_status = profile.get("segment_difference_status")
+        segment_difference_ready = profile.get("segment_difference_ready")
         precise_execution_ready = profile.get("precise_execution_ready")
         if (
             profile.get("one_minute_required_for_trade_signal") is not False
             or profile.get("one_minute_required_for_precise_execution") is not True
-            or locator_status
+            or segment_difference_status
             not in {
                 "STRUCTURE_PENDING",
                 "WAITING_ONE_MINUTE",
@@ -781,25 +765,19 @@ def validate_signal_decision_document(document: Mapping[str, object]) -> str:
                 "BOUNDARY_EXPIRED",
                 "READY",
             }
-            or type(locator_ready) is not bool
-            or locator_ready is not (locator_status == "READY")
+            or type(segment_difference_ready) is not bool
+            or segment_difference_ready
+            is not (segment_difference_status == "READY")
             or type(precise_execution_ready) is not bool
             or precise_execution_ready
             is not bool(
-                locator_ready
+                segment_difference_ready
                 and (
                     document.get("entry_allowed") or document.get("exit_allowed")
                 )
             )
         ):
             raise ValueError("human-assisted 1m precise-execution contract changed")
-    if (
-        "trigger_1m" in document
-        and document.get("trigger_1m") != document.get("segment_difference_1m")
-    ):
-        raise ValueError(
-            "human-assisted signal 1m compatibility alias changed"
-        )
     expected = signal_decision_document_id(document)
     if document.get("decision_document_id") != expected:
         raise ValueError("human-assisted signal decision identity changed")
@@ -894,8 +872,6 @@ def serialize_evaluated_signal(
         "segment_difference_1m": (
             None if trigger is None else point_decision_document(trigger)
         ),
-        # 旧页面/旧归档读取别名；决策身份只绑定上面的规范字段。
-        "trigger_1m": None if trigger is None else point_decision_document(trigger),
         "entry_execution_boundary": (
             None if boundary is None else boundary.document()
         ),
@@ -1130,17 +1106,17 @@ def serialize_evaluated_signal(
             dict.fromkeys((*hard_reasons, *operational_buy_protections))
         )
     if not structure_confirmed:
-        precision_locator_status = "STRUCTURE_PENDING"
+        segment_difference_status = "STRUCTURE_PENDING"
     elif not segment_difference_present:
-        precision_locator_status = "WAITING_ONE_MINUTE"
+        segment_difference_status = "WAITING_ONE_MINUTE"
     elif (
         point.side != "buy"
         or not point.code.startswith(("SH.", "SZ.", "BJ."))
         or not item.physical_timeframe_recursive
     ):
-        precision_locator_status = "READY"
+        segment_difference_status = "READY"
     elif boundary is None:
-        precision_locator_status = (
+        segment_difference_status = (
             "BOUNDARY_EXPIRED"
             if "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in decision_reasons
             else "BOUNDARY_MISSING"
@@ -1149,23 +1125,21 @@ def serialize_evaluated_signal(
         "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in decision_reasons
         or boundary.entry_valid_until <= item.lifecycle.observed_at
     ):
-        precision_locator_status = "BOUNDARY_EXPIRED"
+        segment_difference_status = "BOUNDARY_EXPIRED"
     else:
-        precision_locator_status = "READY"
-    precision_locator_ready = precision_locator_status == "READY"
+        segment_difference_status = "READY"
+    segment_difference_ready = segment_difference_status == "READY"
     document["position_recommendation"] = position_recommendation_document
     document["execution_profile"] = {
         "structure_signal_confirmed": structure_confirmed,
-        # 兼容旧页面的只读别名；它不再参与 recommendation 或通知资格。
-        "execution_trigger_confirmed": segment_difference_present,
         "one_minute_role": "SEGMENT_DIFFERENCE_ONLY",
         "one_minute_required_for_trade_signal": False,
         "one_minute_required_for_precise_execution": True,
         "one_minute_segment_difference_present": segment_difference_present,
-        "precision_locator_status": precision_locator_status,
-        "precision_locator_ready": precision_locator_ready,
+        "segment_difference_status": segment_difference_status,
+        "segment_difference_ready": segment_difference_ready,
         "precise_execution_ready": bool(
-            precision_locator_ready
+            segment_difference_ready
             and (document["entry_allowed"] or document["exit_allowed"])
         ),
         "recommendation": recommendation,

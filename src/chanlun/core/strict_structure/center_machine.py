@@ -66,9 +66,11 @@ def close_center_at_divergence(
             )
         pending_leave = None
         completed_at = center.completed_at
-    evidence_units = (center.entry_unit, *center.body_units)
-    if center.establishment_unit is not None:
-        evidence_units = (*evidence_units, center.establishment_unit)
+    evidence_units = (
+        *(() if center.entry_unit is None else (center.entry_unit,)),
+        *center.body_units,
+        *center.failed_departure_units,
+    )
     available_at = max(
         divergence.available_at,
         signal.available_at,
@@ -203,22 +205,21 @@ def _is_leave_candidate(
 ) -> bool:
     """返回一个重叠单元是否最终收在任一核心边界之外。"""
 
-    return _outside_in_direction(item, center.zd_tick, center.zg_tick)
+    return _touches_core(
+        item,
+        center.zd_tick,
+        center.zg_tick,
+    ) and _outside_in_direction(item, center.zd_tick, center.zg_tick)
 
 
 def _seed_size(source_kind: SourceKind) -> int:
     """返回 ``establish_center`` 消耗的候选窗口宽度。
 
-    物理线段/笔中枢要求一个不可变五段窗口：进入段 + 中间三段核心 + 成熟段。
-    成熟段可以是外部离开段，也可以是首次延伸；递归中枢仍由三段已完成的
-    低级别走势类型构成。
+    中枢在每一种来源层级都由三个连续、已完成且具有有效重叠的同级单元建立。
+    第四个单元只推进延伸或离开观察；第五个外部回返只确认第三类生命周期。
     """
 
-    return (
-        center_seed_size(source_kind)
-        if SourceKind(source_kind) is SourceKind.TREND_TYPE
-        else 5
-    )
+    return center_seed_size(SourceKind(source_kind))
 
 
 def _event(
@@ -279,9 +280,7 @@ def _validate_seed_context(
 
 
 def _new_ongoing_center(
-    entry_unit: ConstituentUnit,
-    establishment_unit: ConstituentUnit | None,
-    establishment_leave_unit: ConstituentUnit | None,
+    entry_unit: ConstituentUnit | None,
     initial_units: tuple[ConstituentUnit, ...],
     extension_units: tuple[ConstituentUnit, ...],
     pending_leave: ConstituentUnit | None,
@@ -296,16 +295,12 @@ def _new_ongoing_center(
         price_basis_revision=price_basis_revision,
         structural_level=structural_level,
         source_kind=source_kind.value,
-        entry_unit_id=entry_unit.unit_id,
         initial_unit_ids=tuple(item.unit_id for item in initial_units),
-        establishment_unit_id=(
-            None if establishment_unit is None else establishment_unit.unit_id
-        ),
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
     body_units = initial_units + extension_units
-    maturity = establishment_unit or initial_units[-1]
+    maturity = initial_units[-1]
     return TrendCenter(
         center_id=center_id,
         structural_level=structural_level,
@@ -313,8 +308,6 @@ def _new_ongoing_center(
         price_basis_revision=price_basis_revision,
         state=CenterState.ONGOING,
         entry_unit=entry_unit,
-        establishment_unit=establishment_unit,
-        establishment_leave_unit=establishment_leave_unit,
         initial_units=initial_units,
         body_units=body_units,
         extension_units=extension_units,
@@ -346,9 +339,6 @@ def establish_center(
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
     width = _seed_size(source_kind)
-    if source_kind is not SourceKind.TREND_TYPE and entry_unit is not None:
-        values = (entry_unit,) + values
-        entry_unit = None
     if len(values) != width or not _alternates(values, oscillatory_ids):
         return None
     price_basis_revision = _validate_seed_context(
@@ -358,10 +348,8 @@ def establish_center(
     )
     if any(not item.locked for item in values):
         return None
-    if source_kind is SourceKind.TREND_TYPE:
-        seed_entry = entry_unit
-        if seed_entry is None:
-            return None
+    seed_entry = entry_unit
+    if seed_entry is not None:
         _validate_seed_context(
             (seed_entry,) + values,
             structural_level,
@@ -371,18 +359,9 @@ def establish_center(
             return None
         if _conflicting_pair(seed_entry, values[0], oscillatory_ids):
             return None
-        core_units = values
-        establishment_unit = None
-        initial_leave = None
-        extension_units = ()
-        evidence = (seed_entry,) + values
-    else:
-        seed_entry = values[0]
-        core_units = values[1:4]
-        establishment_unit = values[4]
-        initial_leave = None
-        extension_units = ()
-        evidence = values
+    core_units = values
+    extension_units = ()
+    evidence = values if seed_entry is None else (seed_entry,) + values
     zd_tick, zg_tick = _core(core_units)
     if (
         zd_tick > zg_tick
@@ -394,23 +373,11 @@ def establish_center(
         not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units
     ):
         return None
-    if source_kind is not SourceKind.TREND_TYPE and (
-        not _positive_overlap(seed_entry, zd_tick, zg_tick)
-        or not _positive_overlap(establishment_unit, zd_tick, zg_tick)
-    ):
-        return None
-    if source_kind is not SourceKind.TREND_TYPE:
-        if _outside_in_direction(establishment_unit, zd_tick, zg_tick):
-            initial_leave = establishment_unit
-        else:
-            extension_units = (establishment_unit,)
     return _new_ongoing_center(
         seed_entry,
-        establishment_unit,
-        initial_leave,
         core_units,
         extension_units,
-        initial_leave,
+        None,
         evidence,
         structural_level,
         source_kind,
@@ -433,9 +400,6 @@ def establish_center_preview(
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
     width = _seed_size(source_kind)
-    if source_kind is not SourceKind.TREND_TYPE and entry_unit is not None:
-        values = (entry_unit,) + values
-        entry_unit = None
     if len(values) != width or not _alternates(values, oscillatory_ids):
         return None
     price_basis_revision = _validate_seed_context(
@@ -443,10 +407,8 @@ def establish_center_preview(
         structural_level,
         source_kind,
     )
-    if source_kind is SourceKind.TREND_TYPE:
-        seed_entry = entry_unit
-        if seed_entry is None:
-            return None
+    seed_entry = entry_unit
+    if seed_entry is not None:
         _validate_seed_context(
             (seed_entry,) + values,
             structural_level,
@@ -454,18 +416,9 @@ def establish_center_preview(
         )
         if _conflicting_pair(seed_entry, values[0], oscillatory_ids):
             return None
-        core_units = values
-        establishment_unit = None
-        initial_leave = None
-        body_units = core_units
-        evidence = (seed_entry,) + values
-    else:
-        seed_entry = values[0]
-        core_units = values[1:4]
-        establishment_unit = values[4]
-        initial_leave = None
-        body_units = core_units
-        evidence = values
+    core_units = values
+    body_units = core_units
+    evidence = values if seed_entry is None else (seed_entry,) + values
     unlocked_seen = False
     for item in evidence:
         if not item.locked:
@@ -485,35 +438,17 @@ def establish_center_preview(
         not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units
     ):
         return None
-    if source_kind is not SourceKind.TREND_TYPE and (
-        not _positive_overlap(seed_entry, zd_tick, zg_tick)
-        or not _positive_overlap(establishment_unit, zd_tick, zg_tick)
-    ):
-        return None
-    if source_kind is not SourceKind.TREND_TYPE:
-        if _outside_in_direction(establishment_unit, zd_tick, zg_tick):
-            initial_leave = establishment_unit
-        else:
-            body_units = core_units + (establishment_unit,)
     return CenterPreview(
         structural_level=structural_level,
         source_kind=source_kind,
         price_basis_revision=price_basis_revision,
-        entry_unit_id=seed_entry.unit_id,
+        entry_unit_id=(None if seed_entry is None else seed_entry.unit_id),
         unit_ids=tuple(item.unit_id for item in body_units),
         state=CenterPreviewState.FORMING,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
         available_at=max(item.available_at for item in evidence),
-        pending_leave_unit_id=(
-            None if initial_leave is None else initial_leave.unit_id
-        ),
-        establishment_unit_id=(
-            None if establishment_unit is None else establishment_unit.unit_id
-        ),
-        establishment_leave_unit_id=(
-            None if initial_leave is None else initial_leave.unit_id
-        ),
+        pending_leave_unit_id=None,
     )
 
 
@@ -532,8 +467,15 @@ def _advance_center_preview_lifecycle(
     known = tuple(initial_units)
     by_id = {item.unit_id: item for item in known}
     try:
-        entry = by_id[preview.entry_unit_id]
+        entry = (
+            None
+            if preview.entry_unit_id is None
+            else by_id[preview.entry_unit_id]
+        )
         body = [by_id[item_id] for item_id in preview.unit_ids]
+        failed_departures = [
+            by_id[item_id] for item_id in preview.failed_departure_unit_ids
+        ]
         pending = (
             None
             if preview.pending_leave_unit_id is None
@@ -547,9 +489,18 @@ def _advance_center_preview_lifecycle(
         raise ValueError("preview lifecycle requires a positive core")
 
     available_at = max(
-        item.available_at for item in (entry, *body, *((pending,) if pending else ()))
+        item.available_at
+        for item in (
+            *((entry,) if entry is not None else ()),
+            *body,
+            *failed_departures,
+            *((pending,) if pending else ()),
+        )
     )
-    occupied_ids = {entry.unit_id, *(item.unit_id for item in body)}
+    occupied_ids = {item.unit_id for item in body}
+    occupied_ids.update(item.unit_id for item in failed_departures)
+    if entry is not None:
+        occupied_ids.add(entry.unit_id)
     if pending is not None:
         occupied_ids.add(pending.unit_id)
 
@@ -586,6 +537,9 @@ def _advance_center_preview_lifecycle(
                 return replace(
                     preview,
                     unit_ids=tuple(value.unit_id for value in body),
+                    failed_departure_unit_ids=tuple(
+                        value.unit_id for value in failed_departures
+                    ),
                     state=CenterPreviewState.COMPLETED,
                     available_at=available_at,
                     pending_leave_unit_id=None,
@@ -605,7 +559,7 @@ def _advance_center_preview_lifecycle(
             ):
                 # 回返越回核心时，旧离开立即失败。若同一回返最终越过另一侧边界，
                 # 它同时成为下一段外部离开，而不是被并入中枢本体。
-                body.append(pending)
+                failed_departures.append(pending)
                 if _outside_in_direction(
                     item,
                     preview.zd_tick,
@@ -619,22 +573,27 @@ def _advance_center_preview_lifecycle(
                 continue
             return None
 
-        if not _overlaps_core(
-            item,
-            preview.zd_tick,
-            preview.zg_tick,
-            preview.source_kind,
-        ):
-            return None
         if _outside_in_direction(item, preview.zd_tick, preview.zg_tick):
+            if not _touches_core(item, preview.zd_tick, preview.zg_tick):
+                return None
             pending = item
         else:
+            if not _overlaps_core(
+                item,
+                preview.zd_tick,
+                preview.zg_tick,
+                preview.source_kind,
+            ):
+                return None
             body.append(item)
         occupied_ids.add(item.unit_id)
 
     return replace(
         preview,
         unit_ids=tuple(value.unit_id for value in body),
+        failed_departure_unit_ids=tuple(
+            value.unit_id for value in failed_departures
+        ),
         available_at=available_at,
         pending_leave_unit_id=(None if pending is None else pending.unit_id),
     )
@@ -653,42 +612,47 @@ def _project_ongoing_center_preview(
     if not following or all(item.locked for item in following):
         return None
     known = (
-        (center.entry_unit,)
+        (() if center.entry_unit is None else (center.entry_unit,))
         + center.body_units
+        + center.failed_departure_units
         + (() if center.pending_leave_unit is None else (center.pending_leave_unit,))
     )
     preview = CenterPreview(
         structural_level=center.structural_level,
         source_kind=center.source_kind,
         price_basis_revision=center.price_basis_revision,
-        entry_unit_id=center.entry_unit.unit_id,
+        entry_unit_id=(
+            None if center.entry_unit is None else center.entry_unit.unit_id
+        ),
         unit_ids=tuple(item.unit_id for item in center.body_units),
         state=CenterPreviewState.FORMING,
         zd_tick=center.zd_tick,
         zg_tick=center.zg_tick,
         available_at=center.available_at,
+        failed_departure_unit_ids=tuple(
+            item.unit_id for item in center.failed_departure_units
+        ),
         pending_leave_unit_id=(
             None
             if center.pending_leave_unit is None
             else center.pending_leave_unit.unit_id
         ),
-        establishment_leave_unit_id=(
-            None
-            if center.establishment_leave_unit is None
-            else center.establishment_leave_unit.unit_id
-        ),
-        establishment_unit_id=(
-            None
-            if center.establishment_unit is None
-            else center.establishment_unit.unit_id
-        ),
     )
-    return _advance_center_preview_lifecycle(
-        preview,
-        known,
-        following,
-        oscillatory_ids,
-    )
+    try:
+        return _advance_center_preview_lifecycle(
+            preview,
+            known,
+            following,
+            oscillatory_ids,
+        )
+    except ValueError as exc:
+        if str(exc) != "preview transition must be connected and alternating":
+            raise
+        # The locked replay may have stopped at a geometry boundary before the
+        # live suffix.  In that case the suffix is not adjacent to this center
+        # and therefore cannot be projected as its lifecycle.  It remains
+        # eligible for an independently scanned preview above.
+        return None
 
 
 def _preview_matches_center_seed(
@@ -698,26 +662,10 @@ def _preview_matches_center_seed(
     """返回临时证据是否是该正式归属中枢的投影。"""
 
     seed_width = center_seed_size(center.source_kind)
-    active_seed = (
-        center.entry_unit.unit_id,
-        *(item.unit_id for item in center.initial_units[:seed_width]),
-        *(
-            ()
-            if center.source_kind is SourceKind.TREND_TYPE
-            or center.establishment_unit is None
-            else (center.establishment_unit.unit_id,)
-        ),
+    active_seed = tuple(
+        item.unit_id for item in center.initial_units[:seed_width]
     )
-    preview_seed = (
-        preview.entry_unit_id,
-        *preview.unit_ids[:seed_width],
-        *(
-            ()
-            if preview.source_kind is SourceKind.TREND_TYPE
-            or preview.establishment_unit_id is None
-            else (preview.establishment_unit_id,)
-        ),
-    )
+    preview_seed = preview.unit_ids[:seed_width]
     return active_seed == preview_seed
 
 
@@ -734,9 +682,11 @@ def _validate_transition_unit(
     if item.price_basis_revision != center.price_basis_revision:
         raise ValueError("transition price basis mismatch")
     occupied = {
-        center.entry_unit.unit_id,
-        *(value.unit_id for value in center.body_units),
+        value.unit_id
+        for value in (*center.body_units, *center.failed_departure_units)
     }
+    if center.entry_unit is not None:
+        occupied.add(center.entry_unit.unit_id)
     if center.pending_leave_unit is not None:
         occupied.add(center.pending_leave_unit.unit_id)
     if item.unit_id in occupied:
@@ -810,7 +760,7 @@ def _fold_failed_departure(
     center: TrendCenter,
     ret: ConstituentUnit,
 ) -> tuple[TrendCenter, CenterEvent]:
-    """折叠失败离开，并保留同一单元形成的反向离开。"""
+    """记录已证伪离开；只有真正回到核心的单元进入中枢本体。"""
 
     leave = center.pending_leave_unit
     if leave is None:
@@ -820,13 +770,15 @@ def _fold_failed_departure(
         center.zd_tick,
         center.zg_tick,
     )
-    folded_units = (leave,) if crossed_opposite_boundary else (leave, ret)
-    extension_units = center.extension_units + folded_units
+    failed_departures = center.failed_departure_units + (leave,)
+    returned_to_body = () if crossed_opposite_boundary else (ret,)
+    extension_units = center.extension_units + returned_to_body
     body_units = center.initial_units + extension_units
     updated = replace(
         center,
         body_units=body_units,
         extension_units=extension_units,
+        failed_departure_units=failed_departures,
         dd_tick=min(value.low_tick for value in body_units),
         gg_tick=max(value.high_tick for value in body_units),
         last_touch_market_time=body_units[-1].market_end,
@@ -888,13 +840,57 @@ def _complete_center(
     )
 
 
+def _supersede_center(
+    center: TrendCenter,
+    successor: TrendCenter,
+    bridge_units: tuple[ConstituentUnit, ...],
+) -> tuple[TrendCenter, CenterEvent]:
+    """Close a center only after a locked disjoint successor is established."""
+
+    if center.state is not CenterState.ONGOING:
+        raise ValueError("only an ongoing center can be superseded")
+    pending = center.pending_leave_unit
+    if pending is not None and (
+        not bridge_units or bridge_units[0] != pending
+    ):
+        raise ValueError(
+            "supersession must retain an unresolved departure as bridge context"
+        )
+    if not (
+        successor.zd_tick > center.zg_tick
+        or successor.zg_tick < center.zd_tick
+    ):
+        raise ValueError("successor center core must be outside the old core")
+    updated = replace(
+        center,
+        state=CenterState.SUPERSEDED,
+        pending_leave_unit=None,
+        superseded_by_center_id=successor.center_id,
+        superseded_at=successor.established_at,
+        supersession_bridge_units=bridge_units,
+        available_at=max(
+            center.available_at,
+            successor.available_at,
+            *(item.available_at for item in bridge_units),
+        ),
+    )
+    return updated, _event(
+        updated,
+        CenterEventKind.SUPERSEDED,
+        successor.established_market_time,
+        updated.available_at,
+    )
+
+
 def advance_center(
     center: TrendCenter,
     item: ConstituentUnit,
     oscillatory_ids: frozenset[str] = frozenset(),
 ) -> tuple[TrendCenter, CenterEvent]:
-    if center.state is CenterState.COMPLETED:
-        raise ValueError("completed center cannot transition")
+    if center.state is not CenterState.ONGOING:
+        if center.state is CenterState.COMPLETED:
+            raise ValueError("completed center cannot transition")
+        raise ValueError("closed center cannot transition")
     if not item.locked:
         raise ValueError("formal center transition must be locked")
     _validate_transition_unit(center, item, oscillatory_ids)
@@ -929,6 +925,10 @@ def advance_center(
             "return geometry is neither extension nor third-class completion"
         )
 
+    # 离开单元只需要从本体边界向外收盘；若恰从 ZD/ZG 起步，它与核心只有
+    # 零宽度接触，也仍是有效离开观察，而不是要求未来数据重选中枢。
+    if _is_leave_candidate(center, item):
+        return _watch_external_leave(center, item)
     if not _overlaps_core(
         item,
         center.zd_tick,
@@ -936,8 +936,6 @@ def advance_center(
         center.source_kind,
     ):
         raise ValueError("ongoing center unit must re-enter the core")
-    if _is_leave_candidate(center, item):
-        return _watch_external_leave(center, item)
     return _append_body_unit(center, item)
 
 
@@ -952,10 +950,7 @@ def forming_preview(
     values = tuple(candidate)
     source_kind = SourceKind(source_kind)
     maximum = _seed_size(source_kind)
-    if source_kind is not SourceKind.TREND_TYPE and entry_unit is not None:
-        values = (entry_unit,) + values
-        entry_unit = None
-    minimum = 1 if source_kind is SourceKind.TREND_TYPE else 2
+    minimum = 1
     if not minimum <= len(values) <= maximum or not _alternates(
         values, oscillatory_ids
     ):
@@ -965,12 +960,8 @@ def forming_preview(
         structural_level,
         source_kind,
     )
-    establishment_unit = None
-    establishment_leave = None
-    if source_kind is SourceKind.TREND_TYPE:
-        seed_entry = entry_unit
-        if seed_entry is None:
-            return None
+    seed_entry = entry_unit
+    if seed_entry is not None:
         _validate_seed_context(
             (seed_entry,) + values,
             structural_level,
@@ -978,17 +969,10 @@ def forming_preview(
         )
         if _conflicting_pair(seed_entry, values[0], oscillatory_ids):
             return None
-        body = values
-        core_ready = len(values) >= 3
-        pending_leave = None
-        evidence = (seed_entry,) + values
-    else:
-        seed_entry = values[0]
-        body = values[1:4]
-        core_ready = len(values) >= 4
-        establishment_unit = values[4] if len(values) == 5 else None
-        pending_leave = None
-        evidence = values
+    body = values
+    core_ready = len(values) >= 3
+    pending_leave = None
+    evidence = values if seed_entry is None else (seed_entry,) + values
 
     zd_tick = None
     zg_tick = None
@@ -1011,34 +995,11 @@ def forming_preview(
             not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in body
         ):
             return None
-        if source_kind is not SourceKind.TREND_TYPE:
-            if state is CenterPreviewState.TOUCH_ONLY:
-                if not _touches_core(seed_entry, zd_tick, zg_tick):
-                    return None
-                if establishment_unit is not None and not _touches_core(
-                    establishment_unit, zd_tick, zg_tick
-                ):
-                    return None
-            else:
-                if not _positive_overlap(seed_entry, zd_tick, zg_tick):
-                    return None
-                if establishment_unit is not None and not _positive_overlap(
-                    establishment_unit,
-                    zd_tick,
-                    zg_tick,
-                ):
-                    return None
-            if establishment_unit is not None:
-                if _outside_in_direction(establishment_unit, zd_tick, zg_tick):
-                    pending_leave = establishment_unit
-                    establishment_leave = establishment_unit
-                else:
-                    body = body + (establishment_unit,)
     return CenterPreview(
         structural_level=structural_level,
         source_kind=source_kind,
         price_basis_revision=price_basis_revision,
-        entry_unit_id=seed_entry.unit_id,
+        entry_unit_id=(None if seed_entry is None else seed_entry.unit_id),
         unit_ids=tuple(item.unit_id for item in body),
         state=state,
         zd_tick=zd_tick,
@@ -1046,16 +1007,6 @@ def forming_preview(
         available_at=max(item.available_at for item in evidence),
         pending_leave_unit_id=(
             None if pending_leave is None else pending_leave.unit_id
-        ),
-        establishment_unit_id=(
-            None
-            if source_kind is SourceKind.TREND_TYPE or establishment_unit is None
-            else establishment_unit.unit_id
-        ),
-        establishment_leave_unit_id=(
-            None
-            if source_kind is SourceKind.TREND_TYPE or establishment_leave is None
-            else establishment_leave.unit_id
         ),
     )
 
@@ -1102,16 +1053,13 @@ def _scanner_entry(
 ) -> ConstituentUnit | None:
     """返回扫描器种子所拥有的外部进入段。
 
-    递归种子从核心 A 段开始，其紧邻的前一同级别单元才是外部进入段，因此流中
-    第一个单元不能建立可完整审计的递归中枢。物理五角色种子的第一段已是进入段，
-    所以这里返回 ``None``。
+    三段中枢从核心 A 段开始。若流中存在紧邻的前一同级别单元，则把它保留为
+    可选的进入腿供背驰比较；首个中枢没有前序单元也照常成立。
     """
 
-    source_kind = SourceKind(source_kind)
-    if source_kind is not SourceKind.TREND_TYPE:
-        return None
     # ``calculate_centers`` 探测空尾部或尚未预热的尾部时也会调用本函数。此类
     # 尾部没有可审计外部进入段，应当不产生预览，而不是索引不存在的流单元。
+    SourceKind(source_kind)
     return values[start - 1] if 0 < start <= len(values) else None
 
 
@@ -1121,18 +1069,47 @@ def _next_scan_start_after_completion(
 ) -> int:
     """把已完成中枢的离开段作为下一进入段继续扫描。
 
-    物理五角色种子包含自身进入段，因此从完成回返之前一个单元开始。递归种子
-    从核心 A 段开始，并通过 ``_scanner_entry`` 获取前一离开段，所以正好从
-    完成回返处开始。
+    下一中枢从完成回返开始扫描，并把前一离开段作为可选进入腿。
     """
 
     if completion_return_offset <= 0:
         raise ValueError("completion return must follow a leave unit")
-    return (
-        completion_return_offset
-        if SourceKind(source_kind) is SourceKind.TREND_TYPE
-        else completion_return_offset - 1
-    )
+    SourceKind(source_kind)
+    return completion_return_offset
+
+
+def _first_disjoint_successor_seed(
+    values: tuple[ConstituentUnit, ...],
+    start: int,
+    center: TrendCenter,
+    structural_level: int,
+    source_kind: SourceKind,
+    oscillatory_ids: frozenset[str],
+) -> tuple[int, TrendCenter] | None:
+    """Find the earliest locked three-unit center outside ``center``.
+
+    The search begins at the first unit that cannot advance the old center.
+    It never reuses the old core's third unit as a departure.  Until three
+    successor units are locked, the old center therefore remains ongoing.
+    """
+
+    width = _seed_size(source_kind)
+    for candidate_start in range(start, len(values) - width + 1):
+        candidate = establish_center(
+            values[candidate_start : candidate_start + width],
+            structural_level,
+            source_kind,
+            oscillatory_ids,
+            entry_unit=_scanner_entry(values, candidate_start, source_kind),
+        )
+        if candidate is None:
+            continue
+        if (
+            candidate.zd_tick > center.zg_tick
+            or candidate.zg_tick < center.zd_tick
+        ):
+            return candidate_start, candidate
+    return None
 
 
 def _first_successor_preview(
@@ -1144,14 +1121,11 @@ def _first_successor_preview(
 ) -> CenterPreview | None:
     """返回预览完成后首个因果实时中枢。
 
-    物理中枢在外部进入段和中间三段核心出现后即变得“可见”。这里故意不要求
-    第五段：第五段用于把预览提升为正式中枢，而尚未完成的第四段已经可能闭合
-    一个正宽度核心。完整成立窗口仍必须经过 ``establish_center_preview``，
-    因而不能忽略已经观察到的无效第五段。
+    三个同级单元的候选核心一旦具备重叠就可见；锁定后直接提升为正式中枢。
     """
 
     width = _seed_size(source_kind)
-    minimum_ready = 3 if source_kind is SourceKind.TREND_TYPE else 4
+    minimum_ready = 3
     last_start = len(values) - minimum_ready
     for start in range(resume_from, last_start + 1):
         remaining = len(values) - start
@@ -1231,79 +1205,6 @@ def _successor_previews_after_completion(
         successors.append(successor)
         current = successor
     return tuple(successors)
-
-
-def _find_later_completed_candidate(
-    formal: tuple[ConstituentUnit, ...],
-    current_start: int,
-    structural_level: int,
-    source_kind: SourceKind,
-    *,
-    oscillatory_ids: frozenset[str] = frozenset(),
-    last_completion_offset: int | None = None,
-) -> tuple[int, int, TrendCenter, list[CenterEvent]] | None:
-    """查找当前前缀中首个已经完成的后续种子。
-
-    较宽的早期种子可能在几何上仍进行中，但其尾部较窄的三段核心已产生同侧离开
-    和外部首次回返。若等待更晚单元使宽种子失效，会让已完成中枢看似事后出现。
-    完成证据强于重叠的进行中种子，因此应立即选择首个后续已完成候选。
-    """
-
-    last_offset = (
-        len(formal) - 1
-        if last_completion_offset is None
-        else min(last_completion_offset, len(formal) - 1)
-    )
-    earliest = None
-    earliest_key = None
-    width = _seed_size(source_kind)
-    for start in range(current_start + 1, last_offset - width + 1):
-        # 三段种子需要后续生命周期证据才能完成。一旦更晚起点不可能早于当前
-        # 已发现的最早完成点，其后的起点也都不可能更早。
-        if earliest_key is not None and start + width >= earliest_key[0]:
-            break
-        candidate = establish_center(
-            formal[start : start + width],
-            structural_level,
-            source_kind,
-            oscillatory_ids,
-            entry_unit=_scanner_entry(formal, start, source_kind),
-        )
-        if candidate is None:
-            continue
-        candidate_events = [
-            _event(
-                candidate,
-                CenterEventKind.ESTABLISHED,
-                candidate.established_market_time,
-                candidate.available_at,
-                leave=candidate.pending_leave_unit,
-            )
-        ]
-        offset = start + width
-        while offset <= last_offset:
-            try:
-                candidate, event = advance_center(
-                    candidate, formal[offset], oscillatory_ids
-                )
-            except ValueError as exc:
-                if str(exc) not in _GEOMETRY_STOP_ERRORS:
-                    raise
-                break
-            candidate_events.append(event)
-            if candidate.state is CenterState.COMPLETED:
-                key = (offset, start)
-                if earliest_key is None or key < earliest_key:
-                    earliest_key = key
-                    earliest = (
-                        start,
-                        offset,
-                        candidate,
-                        candidate_events,
-                    )
-                break
-            offset += 1
-    return earliest
 
 
 def calculate_centers(
@@ -1410,7 +1311,8 @@ def calculate_centers(
                     not lifecycle_matches
                     or live.entry_unit != boundary_center.entry_unit
                     or live.body_units != boundary_center.body_units
-                    or live.establishment_unit != boundary_center.establishment_unit
+                    or live.failed_departure_units
+                    != boundary_center.failed_departure_units
                 ):
                     raise ValueError(
                         "hard boundary center changed during causal partition replay"
@@ -1420,7 +1322,7 @@ def calculate_centers(
                     if center.center_id == boundary_center.center_id
                     else center
                     for center in result.centers
-                    if center.state is CenterState.COMPLETED
+                    if center.structurally_closed
                     or center.center_id == boundary_center.center_id
                 )
             retained_ids = {center.center_id for center in retained}
@@ -1450,7 +1352,7 @@ def calculate_centers(
     centers: list[TrendCenter] = []
     events: list[CenterEvent] = []
     previews: list[CenterPreview] = []
-    i = 1 if source_kind is SourceKind.TREND_TYPE else 0
+    i = 0
     replay_from = 0
     while i + width - 1 < len(formal):
         center = establish_center(
@@ -1487,55 +1389,50 @@ def calculate_centers(
             )
         ]
         j = i + width
-        geometry_stopped = False
+        geometry_stop_at = None
+        successor_start = None
         while j < len(formal):
             try:
                 center, event = advance_center(center, formal[j], oscillatory_ids)
             except ValueError as exc:
                 if str(exc) not in _GEOMETRY_STOP_ERRORS:
                     raise
-                geometry_stopped = True
+                geometry_stop_at = j
                 break
             candidate_events.append(event)
             if center.state is CenterState.COMPLETED:
                 break
             j += 1
-        previous_leave = None if not centers else centers[-1].completion_leave_unit
-        owns_post_completion_tail = previous_leave is not None
-        # 三类点完成后，扫描器从已完成离开段恢复并向前滑动。该后缀中首个成熟的
-        # 五段种子是因果归属者，无论其进入段是离开段、完成回返还是更晚单元。
-        # 较窄内部种子不能仅因更早完成就替换它。
-        completed_later = (
-            None
-            if owns_post_completion_tail
-            else _find_later_completed_candidate(
+        if (
+            center.state is CenterState.ONGOING
+            and geometry_stop_at is not None
+        ):
+            successor_seed = _first_disjoint_successor_seed(
                 formal,
-                i,
+                geometry_stop_at,
+                center,
                 structural_level,
                 source_kind,
-                oscillatory_ids=oscillatory_ids,
-                last_completion_offset=(
-                    j
-                    if geometry_stopped or center.state is CenterState.COMPLETED
-                    else len(formal) - 1
-                ),
+                oscillatory_ids,
             )
-        )
-        if completed_later is not None and (
-            center.state is not CenterState.COMPLETED or completed_later[1] < j
-        ):
-            i, j, center, candidate_events = completed_later
-            geometry_stopped = False
-        if geometry_stopped:
-            # 该种子不能把下一同级别单元作为延伸或有效离开/回返生命周期使用。
-            # 向后滑动一个单元，让后续盘整窗口有机会成为中枢。
-            i += 1
-            continue
-        # 物理中枢只能由不可变五段成立窗口创建；递归走势类型中枢保留三段已完成
-        # 走势种子。
-        if not center.has_minimum_physical_roles:
-            replay_from = i
-            break
+            if successor_seed is not None:
+                successor_start, successor = successor_seed
+                bridge_units = (
+                    *(
+                        ()
+                        if center.pending_leave_unit is None
+                        else (center.pending_leave_unit,)
+                    ),
+                    *formal[geometry_stop_at:successor_start],
+                )
+                center, superseded_event = _supersede_center(
+                    center,
+                    successor,
+                    bridge_units,
+                )
+                candidate_events.append(superseded_event)
+        # 三段锁定后中枢身份已经成立，后续单元只能推进或停止其生命周期，不能
+        # 用更晚窗口追溯替换。几何停止时仍保留这个因果前缀快照。
         centers.append(center)
         events.extend(candidate_events)
         replay_from = i
@@ -1546,6 +1443,11 @@ def calculate_centers(
                 i + 1,
                 _next_scan_start_after_completion(j, source_kind),
             )
+            continue
+        if center.state is CenterState.SUPERSEDED:
+            if successor_start is None:
+                raise ValueError("superseded center requires a successor offset")
+            i = successor_start
             continue
         break
 
@@ -1569,7 +1471,7 @@ def calculate_centers(
         # 窗口，但绝不能回扫进已完成中枢。三类点之后，首个可行预览按与正式
         # 扫描器相同的因果规则拥有该后缀。
         first_live_start = max(
-            1 if source_kind is SourceKind.TREND_TYPE else 0,
+            0,
             locked_count - (width - 1),
             0 if post_completion_resume is None else post_completion_resume,
         )
@@ -1656,7 +1558,7 @@ def calculate_centers(
 
     if latest_live_preview is None:
         tail_start = max(
-            1 if source_kind is SourceKind.TREND_TYPE else 0,
+            0,
             len(values) - width,
             0 if post_completion_resume is None else post_completion_resume,
         )

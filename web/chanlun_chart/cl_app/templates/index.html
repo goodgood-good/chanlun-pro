@@ -670,17 +670,28 @@
                     </div>
                   </div>
                 </form>
+                <div style="display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-bottom: 6px;">
+                  <input type="text" id="symbols_prewarm_codes" class="layui-input layui-input-sm"
+                    autocomplete="off" aria-label="要缓存的显式标的代码"
+                    placeholder="显式代码，逗号/空格分隔" style="height: 28px;" />
+                  <select id="symbols_prewarm_scope_limit" aria-label="缓存标的数量上限"
+                    style="height: 28px; border: 1px solid #d2d2d2; border-radius: 2px;">
+                    <option value="12" selected>最多 12 只</option>
+                    <option value="20">最多 20 只</option>
+                  </select>
+                </div>
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
                   <div id="symbols_total_tip" style="font-size: 12px; color: #888;"></div>
-                  {# 预热当前市场全部标的的缠论数据，避免后续切换时等待 #}
+                  {# 只预热用户显式确认的小样本代码，不允许自动展开全市场 #}
                   <button type="button" id="symbols_prewarm_btn"
                     class="layui-btn layui-btn-xs layui-btn-primary layui-border-blue"
-                    title="为当前市场缓存 1 分钟、5 分钟、30 分钟与日线结构数据，减少后续切图等待"
+                    title="仅为上方显式代码缓存常用周期；默认最多 12 只，硬上限 20 只"
                     style="height: 22px; line-height: 20px; padding: 0 8px;">
                     <i class="layui-icon layui-icon-fire" style="font-size: 12px;"></i>
-                    <span id="symbols_prewarm_btn_text">缓存常用周期</span>
+                    <span id="symbols_prewarm_btn_text">缓存指定标的</span>
                   </button>
                 </div>
+                <p style="margin: 0 0 6px; font-size: 11px; color: #999;">提交前会显示代码数量确认；此入口不会缓存全市场。</p>
                 {# 预热进度条：默认隐藏，启动后展示 #}
                 <div id="symbols_prewarm_progress" style="display: none; margin-bottom: 6px; font-size: 12px;">
                   <div style="display: flex; justify-content: space-between; color: #555; margin-bottom: 2px;">
@@ -1263,6 +1274,7 @@
           init: function (panel) {
             var self = this;
             self.symbolsPanel = panel;
+            self.suggestCurrentCode();
 
             $('#symbols_prewarm_btn').on('click', function () {
               if (self.uiState === 'cancelling') return;
@@ -1283,11 +1295,49 @@
             this.pendingCancel = false;
             this.stopPolling();
             this.applyTaskToUI(null);
+            $('#symbols_prewarm_codes').val('');
+            this.suggestCurrentCode();
             this.fetchStatusOnce();
+          },
+          suggestCurrentCode: function () {
+            var $input = $('#symbols_prewarm_codes');
+            if (String($input.val() || '').trim()) return;
+            try {
+              if (window.Utils && typeof Utils.get_local_data === 'function') {
+                var currentCode = Utils.get_local_data(this.symbolsPanel.state.market + '_code');
+                if (currentCode) $input.val(currentCode);
+              }
+            } catch (_) { /* 本地偏好不可用时保持空输入，绝不回退到全市场 */ }
+          },
+          explicitCodes: function () {
+            var raw = String($('#symbols_prewarm_codes').val() || '');
+            var seen = Object.create(null);
+            return raw.split(/[\s,，;；]+/).filter(function (code) {
+              if (!code || seen[code]) return false;
+              seen[code] = true;
+              return true;
+            });
           },
           start: function () {
             var self = this;
             var market = self.symbolsPanel.state.market;
+            var explicitCodes = self.explicitCodes();
+            var scopeLimit = parseInt($('#symbols_prewarm_scope_limit').val() || '12', 10);
+            if (explicitCodes.length === 0) {
+              if (window.layer) layer.msg('请先填写要缓存的显式标的代码', { icon: 0, time: 2200 });
+              return false;
+            }
+            if (explicitCodes.length > scopeLimit || explicitCodes.length > 20) {
+              if (window.layer) {
+                layer.msg('当前最多允许 ' + Math.min(scopeLimit, 20) + ' 只，请缩小代码列表', { icon: 2, time: 2500 });
+              }
+              return false;
+            }
+            if (typeof window.confirm !== 'function' || !window.confirm(
+              '确认仅缓存这 ' + explicitCodes.length + ' 只显式标的？\n' + explicitCodes.join(', ')
+            )) {
+              return false;
+            }
             var actionGeneration = ++self.actionGeneration;
             self.pendingCancel = false;
             self.uiState = 'starting';
@@ -1296,7 +1346,12 @@
             AppRequest.ajax({
               url: '/symbols/prewarm',
               method: 'POST',
-              data: { market: market },
+              data: {
+                market: market,
+                codes: explicitCodes.join(','),
+                scope_limit: scopeLimit,
+                confirm_explicit_scope: '1'
+              },
               dataType: 'json',
               timeout: 10000
             }).done(function (res) {
@@ -1316,7 +1371,7 @@
                 if (window.layer) layer.msg((res && res.msg) || '缓存启动失败', { icon: 2, time: 2500 });
                 self.pendingCancel = false;
                 self.uiState = 'idle';
-                self.setBtnText('缓存常用周期', false);
+                self.setBtnText('缓存指定标的', false);
               }
             }).fail(function (xhr) {
               if (actionGeneration !== self.actionGeneration
@@ -1326,7 +1381,7 @@
               if (window.layer) layer.msg(msg, { icon: 2, time: 2500 });
               self.pendingCancel = false;
               self.uiState = 'idle';
-              self.setBtnText('缓存常用周期', false);              self.fetchStatusOnce();
+              self.setBtnText('缓存指定标的', false);              self.fetchStatusOnce();
 
             });
           },
@@ -1469,7 +1524,7 @@
             if (!task) {
               $progress.hide();
               this.uiState = 'idle';
-              this.setBtnText('缓存常用周期', false);
+              this.setBtnText('缓存指定标的', false);
               return;
             }
 
@@ -1484,17 +1539,17 @@
               barColor = '#1e9fff';
             } else if (status === 'finished') {
               this.uiState = 'done';
-              this.setBtnText('缓存常用周期', false);
+              this.setBtnText('缓存指定标的', false);
               label = '缓存完成';
               barColor = '#5fb878';
             } else if (status === 'cancelled') {
               this.uiState = 'done';
-              this.setBtnText('缓存常用周期', false);
+              this.setBtnText('缓存指定标的', false);
               label = '已停止缓存';
               barColor = '#ffb800';
             } else if (status === 'error') {
               this.uiState = 'done';
-              this.setBtnText('缓存常用周期', false);
+              this.setBtnText('缓存指定标的', false);
               label = '缓存失败：' + (task.error_msg || '原因未知');
               barColor = '#ff5722';
             } else {

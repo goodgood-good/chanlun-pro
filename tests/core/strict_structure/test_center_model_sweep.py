@@ -49,6 +49,7 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
 
     checked = 0
     completed_count = 0
+    opposite_rearmed_count = 0
     for first_direction in ("up", "down"):
         for steps in product((1, 4), repeat=8):
             values = _alternating_walk(first_direction, steps)
@@ -103,7 +104,14 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
                 assert len(center.core_units) == 3
                 assert center.body_units[:3] == center.core_units
                 assert center.entry_unit not in center.body_units
-                assert center.entry_unit.end_tick == center.core_units[0].start_tick
+                assert not set(center.failed_departure_units).intersection(
+                    center.body_units
+                )
+                if center.entry_unit is not None:
+                    assert (
+                        center.entry_unit.end_tick
+                        == center.core_units[0].start_tick
+                    )
                 if center.pending_leave_unit is not None:
                     assert center.pending_leave_unit not in center.body_units
                     assert (
@@ -117,6 +125,12 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
                 ret = center.completion_return_unit
                 assert leave is not None and ret is not None
                 assert leave not in center.body_units
+                if (
+                    center.failed_departure_units
+                    and center.failed_departure_units[-1].direction
+                    != center.completion_direction
+                ):
+                    opposite_rearmed_count += 1
                 if leave.direction == "up":
                     assert ret.direction == "down"
                     assert ret.low_tick >= center.zg_tick
@@ -128,6 +142,8 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
             completed_count += len(completed_ids)
 
     assert checked == 512
-    # Pin the exhaustive count so that either-direction departures and fifth-
-    # segment maturity cannot be weakened without an explicit contract change.
-    assert completed_count == 168
+    # Eight paths cross the opposite core boundary after disproving the first
+    # leave, re-arm that crossing return as the new pending leave, and then
+    # complete symmetrically.  Pin both the specific rule and the total count.
+    assert opposite_rearmed_count == 8
+    assert completed_count == 232

@@ -199,7 +199,7 @@ test('every chart-sidebar tool uses explicit purpose, action and empty-state cop
   for (const copy of [
     '点击行切换主图，右键可排序、标色或移出分组',
     '输入代码、名称或拼音，点击结果立即切换主图',
-    '缓存常用周期',
+    '缓存指定标的',
     '先选板块，再从成分股中切换主图',
     '仅 A 股市场提供板块数据',
   ]) {

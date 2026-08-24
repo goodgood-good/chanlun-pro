@@ -62,7 +62,7 @@ def test_confirmed_buy_without_one_minute_remains_visible_but_not_executable() -
     assert document["execution_profile"]["recommendation"] == (
         "WAITING_SEGMENT_DIFFERENCE"
     )
-    assert document["execution_profile"]["precision_locator_status"] == (
+    assert document["execution_profile"]["segment_difference_status"] == (
         "WAITING_ONE_MINUTE"
     )
     assert document["execution_profile"]["precise_execution_ready"] is False
@@ -88,8 +88,8 @@ def test_current_five_minute_buy_keeps_waiting_for_one_minute_after_eleven_minut
     assert document["position_recommendation"]["recommended_percent"] is None
     profile = document["execution_profile"]
     assert profile["recommendation"] == "WAITING_SEGMENT_DIFFERENCE"
-    assert profile["precision_locator_status"] == "WAITING_ONE_MINUTE"
-    assert profile["precision_locator_ready"] is False
+    assert profile["segment_difference_status"] == "WAITING_ONE_MINUTE"
+    assert profile["segment_difference_ready"] is False
     assert profile["precise_execution_ready"] is False
     assert profile["hard_block_reason_codes"] == []
     assert validate_signal_decision_document(document) == document[
@@ -112,7 +112,7 @@ def test_hard_block_does_not_turn_current_five_minute_setup_into_time_expiry() -
 
     profile = document["execution_profile"]
     assert profile["recommendation"] == "BLOCKED"
-    assert profile["precision_locator_status"] == "WAITING_ONE_MINUTE"
+    assert profile["segment_difference_status"] == "WAITING_ONE_MINUTE"
     assert "same_or_higher_structure_conflict" in profile["hard_block_reason_codes"]
     assert document["position_recommendation"]["reason_codes"] == [
         "HARD_BLOCKED_NO_TRADE"
@@ -141,10 +141,10 @@ def test_persisted_one_minute_boundary_reports_expired_at_current_bundle_time() 
     assert "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in expired_document[
         "decision_reasons"
     ]
-    assert expired_document["execution_profile"]["precision_locator_status"] == (
+    assert expired_document["execution_profile"]["segment_difference_status"] == (
         "BOUNDARY_EXPIRED"
     )
-    assert expired_document["execution_profile"]["precision_locator_ready"] is False
+    assert expired_document["execution_profile"]["segment_difference_ready"] is False
     assert expired_document["execution_profile"]["precise_execution_ready"] is False
     assert validate_signal_decision_document(expired_document) == expired_document[
         "decision_document_id"
@@ -477,24 +477,14 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
         "5m",
         "1m",
     )
-    assert first.contract.locator_trigger_point_types == (
-        "1buy",
-        "1sell",
-        "2buy",
-        "2sell",
-        "3buy",
-        "3sell",
-    )
     document = first.contract.document()
-    assert document["locator_trigger_point_types"] == [
-        "1buy",
-        "1sell",
-        "2buy",
-        "2sell",
-        "3buy",
-        "3sell",
-    ]
     assert document["policy"]["minimum_tick"] == "0.01"
+    assert (
+        document["policy"][
+            "require_one_minute_segment_difference_for_precise_execution"
+        ]
+        is True
+    )
     assert validate_human_assisted_contract_document(document) == (first.contract_id)
 
     stale_revision = first.contract.document()
@@ -508,7 +498,9 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
 
     with pytest.raises(ValueError, match="requires independent 5m trade"):
         HumanAssistedDecisionCore(
-            TradingPolicy(require_confirmed_one_minute=False)
+            TradingPolicy(
+                require_one_minute_segment_difference_for_precise_execution=False
+            )
         )
 
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
-from chanlun.decision_support.fingerprints import sha256_json
+from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingPointEvidenceFacts,
@@ -31,7 +32,9 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
     WarmupStructureLineageSnapshotSet,
     WarmupStructurePointLineageFacts,
     bind_warmup_structure_lineage_diagnostic,
+    capture_warmup_structure_lineage_snapshot,
 )
+from tests.trading_system.strict_helpers import strict_evidence_result, strict_point
 
 
 AS_OF = datetime.fromisoformat("2026-06-01T11:30:00+08:00")
@@ -429,3 +432,64 @@ def test_rehashed_structure_lineage_derived_tamper_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="malformed"):
         WarmupStructureLineageDiagnosticEnvelope.from_document(document)
+
+
+def test_capture_keeps_first_center_entry_absent_without_fabricating_a_line() -> None:
+    evidence = strict_evidence_result(
+        code=SYMBOL,
+        source_frequency=FREQUENCY,
+        confirmed_points=(strict_point("3buy"),),
+    )
+    center = evidence.structure.levels[0].center_result.centers[0]
+    assert center.entry_unit is None
+    point = evidence.confirmed_points[0]
+    anchor_at = normalize_datetime(point.anchor_at, "point_anchor_at")
+    available_at = normalize_datetime(point.available_at, "point_available_at")
+    mapping_point = RiskMappingPointEvidenceFacts(
+        point_id=RiskMappingPointEvidenceFacts.identity(
+            source_symbol=SYMBOL,
+            source_frequency=FREQUENCY,
+            center_id=center.center_id,
+            center_level_rank=center.structural_level,
+            point_type=point.point_type,
+            point_anchor_at=anchor_at,
+            point_available_at=available_at,
+        ),
+        source_symbol=SYMBOL,
+        source_frequency=FREQUENCY,
+        center_id=center.center_id,
+        center_level_rank=center.structural_level,
+        center_completed=True,
+        center_expanded=False,
+        point_type=point.point_type,
+        point_anchor_at=anchor_at,
+        point_available_at=available_at,
+        inside_active_top_interval=True,
+        highest_mapping_candidate=False,
+    )
+    bar = SimpleNamespace(
+        completed=True,
+        end_at=evidence.source_closed_at,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("1"),
+    )
+
+    snapshot = capture_warmup_structure_lineage_snapshot(
+        period="W",
+        source_symbol=SYMBOL,
+        source_frequency=FREQUENCY,
+        source_bars=(bar,),
+        state=SimpleNamespace(get_strict_evidence=lambda: evidence),
+        mapping_supply=_supply(mapping_point),
+    )
+
+    captured = snapshot.centers[0]
+    assert captured.entry_line_id is None
+    assert captured.start_at == center.body_start_market_time
+    assert captured.constituent_line_ids == tuple(
+        next(line.line_id for line in snapshot.lines if line.ordinal == ordinal)
+        for ordinal in range(len(center.body_units))
+    )

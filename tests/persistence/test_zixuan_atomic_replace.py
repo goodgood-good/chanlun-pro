@@ -156,6 +156,54 @@ def test_global_group_definitions_preserve_cross_market_members():
     assert db_obj.zx_add_global_group("新分组") is True
 
 
+def test_global_group_stock_query_filters_before_bounded_sql_limit():
+    db_obj = _isolated_db()
+    now = datetime.datetime.now()
+    with db_obj.Session() as session:
+        session.add_all(
+            [
+                TableByZixuan(
+                    market=market,
+                    zx_group="bounded",
+                    stock_code=code,
+                    stock_name=code,
+                    position=position,
+                    add_datetime=now,
+                    stock_color="",
+                    stock_memo="",
+                )
+                for market, code, position in (
+                    ("a", "SH.600000", 0),
+                    ("hk", "HK.00700", 0),
+                    ("us", "AAPL.US", 0),
+                    ("us", "MSFT.US", 1),
+                )
+            ]
+        )
+        session.commit()
+
+    assert len(db_obj.zx_get_global_group_stocks("bounded")) == 4
+    assert [
+        row.stock_code
+        for row in db_obj.zx_get_global_group_stocks(
+            "bounded",
+            limit=2,
+            markets=("us",),
+        )
+    ] == ["AAPL.US", "MSFT.US"]
+
+
+def test_global_group_stock_query_requires_exact_positive_limit():
+    db_obj = _isolated_db()
+
+    for invalid in (True, False, 1.0, "1"):
+        with pytest.raises(TypeError, match="exact integer"):
+            db_obj.zx_get_global_group_stocks("bounded", limit=invalid)
+    for invalid in (0, -1):
+        with pytest.raises(ValueError, match="positive"):
+            db_obj.zx_get_global_group_stocks("bounded", limit=invalid)
+
+
 def test_global_group_delete_removes_every_definition_and_member_atomically():
     db_obj = _isolated_db()
     now = datetime.datetime.now()

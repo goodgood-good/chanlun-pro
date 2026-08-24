@@ -1,35 +1,44 @@
-"""Entry/body/leave ownership must remain mutually exclusive."""
+"""Optional entry, center body, and departure ownership stay disjoint."""
 
 import pytest
 
 from chanlun.core.strict_structure.center_machine import advance_center, establish_center
 from chanlun.core.strict_structure.models import CenterEventKind, CenterState, SourceKind
-from tests.core.strict_structure.helpers import unit, valid_five_up_exit
+from tests.core.strict_structure.helpers import unit, valid_up_center_lifecycle
 
 
-def test_entry_and_leave_are_external_to_extended_segment_body() -> None:
-    values = valid_five_up_exit()
-    center = establish_center(values, 0, SourceKind.SEGMENT)
+def test_entry_and_departure_are_external_to_extended_center_body() -> None:
+    values = valid_up_center_lifecycle()
+    entry = unit(-1, "up", 90, values[0].start_tick)
+    center = establish_center(
+        values[:3],
+        0,
+        SourceKind.SEGMENT,
+        entry_unit=entry,
+    )
     assert center is not None
-    assert center.pending_leave_unit is values[4]
 
-    reentry = unit(5, "down", values[4].end_tick, 110)
-    center, event = advance_center(center, reentry)
+    leaving, watch = advance_center(center, values[3])
+    assert watch.kind is CenterEventKind.BREAKOUT_WATCH_UP
+    assert leaving.pending_leave_unit is values[3]
+
+    reentry = unit(4, "down", values[3].end_tick, 110)
+    extended, event = advance_center(leaving, reentry)
     assert event.kind is CenterEventKind.EXTENDED
 
-    leave = unit(6, "up", 110, 145)
-    leaving, event = advance_center(center, leave)
+    next_leave = unit(5, "up", reentry.end_tick, 145)
+    leaving_again, event = advance_center(extended, next_leave)
 
-    assert leaving.state is CenterState.ONGOING
-    assert leaving.entry_unit is values[0]
-    assert leaving.core_units == values[1:4]
-    assert leaving.initial_units == values[1:4]
-    assert leaving.body_units == values[1:4] + (values[4], reentry)
-    assert leaving.initial_exit_unit is values[4]
-    assert leaving.pending_leave_unit is leave
-    assert leaving.entry_unit not in leaving.body_units
-    assert leave not in leaving.body_units
-    assert leaving.entry_unit.direction == leave.direction
+    assert leaving_again.state is CenterState.ONGOING
+    assert leaving_again.entry_unit is entry
+    assert leaving_again.core_units == values[:3]
+    assert leaving_again.initial_units == values[:3]
+    assert leaving_again.body_units == values[:3] + (reentry,)
+    assert leaving_again.failed_departure_units == (values[3],)
+    assert leaving_again.pending_leave_unit is next_leave
+    assert entry not in leaving_again.body_units
+    assert values[3] not in leaving_again.body_units
+    assert next_leave not in leaving_again.body_units
     assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
 
 
@@ -41,10 +50,19 @@ def test_same_direction_successor_is_rejected_before_leave_classification() -> N
         unit(2, "up", 100, 115, source_kind=SourceKind.TREND_TYPE),
     )
     center = establish_center(
-        body, 0, SourceKind.TREND_TYPE, entry_unit=entry
+        body,
+        0,
+        SourceKind.TREND_TYPE,
+        entry_unit=entry,
     )
     assert center is not None
-    opposite = unit(3, "up", 115, 140, source_kind=SourceKind.TREND_TYPE)
+    same_direction = unit(
+        3,
+        "up",
+        115,
+        140,
+        source_kind=SourceKind.TREND_TYPE,
+    )
 
     with pytest.raises(ValueError, match="transition must alternate"):
-        advance_center(center, opposite)
+        advance_center(center, same_direction)

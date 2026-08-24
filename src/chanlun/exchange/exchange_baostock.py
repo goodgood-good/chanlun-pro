@@ -22,6 +22,7 @@ class ExchangeBaostock(Exchange):
     """
 
     g_all_stocks = []
+    stock_info_query_scope = SINGLE_SYMBOL_STOCK_INFO
 
     def __init__(self):
         bs.login()

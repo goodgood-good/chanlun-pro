@@ -1,4 +1,4 @@
-"""Five physical roles at L0 and three core trends plus external entry recursively."""
+"""Every recursive layer establishes a center from three completed units."""
 
 from decimal import Decimal
 
@@ -18,7 +18,7 @@ from chanlun.core.strict_structure.signals import StrictSignalEngine
 from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
     unit,
-    valid_five_up_exit,
+    valid_up_center_lifecycle,
 )
 
 
@@ -96,18 +96,58 @@ def test_three_locked_trends_establish_recursive_center() -> None:
     assert center.pending_leave_unit is None
 
 
-def test_level_zero_uses_five_segment_gate_and_middle_three_core() -> None:
-    values = valid_five_up_exit()
-
-    center = establish_center(
-        values[1:], 0, SourceKind.SEGMENT, entry_unit=values[0]
+def test_recursive_center_needs_only_three_completed_lower_trends() -> None:
+    trends = (
+        unit(
+            20,
+            "up",
+            120,
+            140,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            21,
+            "down",
+            140,
+            125,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            22,
+            "up",
+            125,
+            135,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
     )
+
+    center = establish_center(trends, 1, SourceKind.TREND_TYPE)
+
     assert center is not None
-    assert center.initial_units == values[1:4]
+    assert center.entry_unit is None
+    assert center.initial_units == trends
+    assert center.core_units == trends
+    assert center.pending_leave_unit is None
+
+
+def test_level_zero_uses_three_segment_core_and_separate_lifecycle() -> None:
+    values = valid_up_center_lifecycle()
+
+    center = establish_center(values[:3], 0, SourceKind.SEGMENT)
+    assert center is not None
+    assert center.initial_units == values[:3]
     assert center.extension_units == ()
-    assert center.initial_exit_unit is values[4]
-    assert center.establishment_units == values
-    assert center.entry_unit is values[0]
+    assert center.entry_unit is None
+
+    leaving, _watch = advance_center(center, values[3])
+    completed, _event = advance_center(leaving, values[4])
+
+    assert leaving.pending_leave_unit is values[3]
+    assert completed.completion_leave_unit is values[3]
+    assert completed.completion_return_unit is values[4]
 
 
 def test_recursive_center_completes_only_after_leave_and_return() -> None:

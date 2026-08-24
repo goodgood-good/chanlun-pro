@@ -210,16 +210,10 @@ def promote_structure_to_level_one(structure):
         centers[value.center_id] = replace(
             value,
             structural_level=1,
-            entry_unit=units[value.entry_unit.unit_id],
-            establishment_unit=(
+            entry_unit=(
                 None
-                if value.establishment_unit is None
-                else units[value.establishment_unit.unit_id]
-            ),
-            establishment_leave_unit=(
-                None
-                if value.establishment_leave_unit is None
-                else units[value.establishment_leave_unit.unit_id]
+                if value.entry_unit is None
+                else units[value.entry_unit.unit_id]
             ),
             initial_units=tuple(units[item.unit_id] for item in value.initial_units),
             body_units=tuple(units[item.unit_id] for item in value.body_units),
@@ -407,6 +401,103 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
     assert point.parent_point_id == lower.point_id
     assert "small_to_large_reversal" in point.evidence_codes
     assert point.related_point_ids == (lower.point_id,)
+
+
+def test_small_to_large_second_is_visible_before_lock_and_then_confirms():
+    base = strict_engine(direction="down")
+    parent = only_point(base.first_class_points())
+    anchor = parent.anchor_tick
+    signal = replace(
+        unit(
+            18,
+            "down",
+            anchor + 20,
+            anchor,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-live-signal",
+        child_ids=(parent.anchor_unit_id,),
+    )
+    rebound = replace(
+        unit(
+            19,
+            "up",
+            anchor,
+            anchor + 30,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-live-rebound",
+    )
+    locked_pullback = replace(
+        unit(
+            20,
+            "down",
+            anchor + 30,
+            anchor + 5,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-live-pullback",
+    )
+    live_pullback = replace(
+        locked_pullback,
+        confirmed_at=None,
+        locked=False,
+        formed_at=locked_pullback.market_end,
+    )
+
+    def level_one(pullback, *, locked_count):
+        return StrictLevelResult(
+            structural_level=1,
+            units=(signal, rebound, pullback),
+            center_result=CenterLevelResult(
+                structural_level=1,
+                price_basis_revision=TEST_PRICE_BASIS,
+                centers=(),
+                previews=(),
+                events=(),
+                locked_unit_count=locked_count,
+                replay_from=0,
+            ),
+            trend_types=(),
+            completed_trends=(),
+        )
+
+    live_structure = replace(
+        base.structure,
+        levels=(*base.structure.levels, level_one(live_pullback, locked_count=2)),
+    )
+    confirmed_structure = replace(
+        base.structure,
+        levels=(*base.structure.levels, level_one(locked_pullback, locked_count=3)),
+    )
+    live = only_point(
+        point
+        for point in engine_for(live_structure, base.strength).approaching_points(
+            live_pullback.available_at
+        )
+        if "small_to_large_reversal" in point.evidence_codes
+    )
+    confirmed = only_point(
+        point
+        for point in engine_for(
+            confirmed_structure,
+            base.strength,
+        ).confirmed_points()
+        if "small_to_large_reversal" in point.evidence_codes
+    )
+
+    assert live.point_type == confirmed.point_type == "2buy"
+    assert live.structural_level == confirmed.structural_level == 1
+    assert live.anchor_unit_id == confirmed.anchor_unit_id
+    assert live.parent_point_id == confirmed.parent_point_id == parent.point_id
+    assert live.small_to_large_carrier_unit_ids == (
+        confirmed.small_to_large_carrier_unit_ids
+    )
+    assert live.confirmed_at is None
+    assert live.missing_conditions == ("terminal_unit_locked",)
 
 
 def test_small_first_point_can_promote_across_multiple_levels():

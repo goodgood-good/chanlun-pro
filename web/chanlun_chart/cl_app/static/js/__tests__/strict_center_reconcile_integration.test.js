@@ -69,16 +69,15 @@ function center(revision = 1, overrides = {}) {
     structural_level: 0,
     source_kind: 'segment',
     state: 'ongoing',
-    tradable: true,
+    tradable: false,
     points: [
       { time: BASE + 100, price: 11 },
       { time: BASE + 500, price: 10 },
     ],
     entry_unit_id: 'u1',
     core_unit_ids: ['u2', 'u3', 'u4'],
-    initial_exit_unit_id: 'u5',
-    initial_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
-    body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
+    initial_unit_ids: ['u2', 'u3', 'u4'],
+    body_unit_ids: ['u2', 'u3', 'u4'],
     extension_unit_ids: [],
     pending_leave_unit_id: null,
     completion_leave_unit_id: null,
@@ -108,9 +107,8 @@ function centerPreview(overrides = {}) {
     core: { zd_tick: 1000, zg_tick: 1100, zd_price: 10, zg_price: 11 },
     entry_unit_id: 'u1',
     core_unit_ids: ['u2', 'u3', 'u4'],
-    initial_exit_unit_id: 'u5',
-    initial_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
-    body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
+    initial_unit_ids: ['u2', 'u3', 'u4'],
+    body_unit_ids: ['u2', 'u3', 'u4'],
     extension_unit_ids: [],
     pending_leave_unit_id: 'u5',
     completion_leave_unit_id: null,
@@ -958,9 +956,9 @@ test('boundary-sharing forming preview is hidden without active completion evide
       { time: BASE + 100, price: 10.2 },
       { time: BASE + 500, price: 9.8 },
     ],
-    initial_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
+    initial_unit_ids: ['u1', 'u2', 'u3'],
     body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8'],
-    extension_unit_ids: ['u6', 'u7', 'u8'],
+    extension_unit_ids: ['u4', 'u5', 'u6', 'u7', 'u8'],
   });
   const preview = centerPreview({
     points: [
@@ -969,9 +967,8 @@ test('boundary-sharing forming preview is hidden without active completion evide
     ],
     entry_unit_id: 'u8',
     core_unit_ids: ['u9', 'u10', 'u11'],
-    initial_exit_unit_id: 'u12',
-    initial_unit_ids: ['u8', 'u9', 'u10', 'u11', 'u12'],
-    body_unit_ids: ['u8', 'u9', 'u10', 'u11', 'u12'],
+    initial_unit_ids: ['u9', 'u10', 'u11'],
+    body_unit_ids: ['u9', 'u10', 'u11'],
   });
   const strict = snapshot({
     levels: [{
@@ -1004,9 +1001,8 @@ test('completed active preview permits one adjacent boundary-sharing preview', (
     ],
     entry_unit_id: 'u5',
     core_unit_ids: ['u6', 'u7', 'u8'],
-    initial_exit_unit_id: 'u9',
-    initial_unit_ids: ['u5', 'u6', 'u7', 'u8', 'u9'],
-    body_unit_ids: ['u5', 'u6', 'u7', 'u8', 'u9'],
+    initial_unit_ids: ['u6', 'u7', 'u8'],
+    body_unit_ids: ['u6', 'u7', 'u8'],
     available_at: BASE + 800,
   });
   const strict = snapshot({
@@ -1028,9 +1024,8 @@ test('disjoint forming preview is hidden while formal center remains unresolved'
   const preview = centerPreview({
     entry_unit_id: 'u6',
     core_unit_ids: ['u7', 'u8', 'u9'],
-    initial_exit_unit_id: 'u10',
-    initial_unit_ids: ['u6', 'u7', 'u8', 'u9', 'u10'],
-    body_unit_ids: ['u6', 'u7', 'u8', 'u9', 'u10'],
+    initial_unit_ids: ['u7', 'u8', 'u9'],
+    body_unit_ids: ['u7', 'u8', 'u9'],
   });
   const strict = snapshot({
     levels: [{
@@ -1082,7 +1077,7 @@ test('orphan sweep does not inspect TradingView-owned shapes outside debug mode'
   assert.equal(detailReads, 0);
 });
 
-test('confirmed fifth unit removes preview and creates a formal ongoing center', () => {
+test('locking the three-unit core replaces its preview with a formal ongoing center', () => {
   const { cm, calls } = manager('chart-manager-preview-confirmed');
   const previewSnapshot = snapshot({
     render_revision: 'sha256:render-preview',

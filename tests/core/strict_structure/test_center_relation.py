@@ -22,44 +22,37 @@ def relation_center(
     structural_level=0,
     source_kind=SourceKind.SEGMENT,
     price_basis_revision="test-raw",
+    complete=True,
 ):
-    initial = tuple(
+    lifecycle = tuple(
         replace(item, price_basis_revision=price_basis_revision)
         for item in (
             unit(
                 unit_offset,
-                "up",
-                dd - 10,
+                "down",
                 gg,
+                dd,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
             unit(
                 unit_offset + 1,
-                "down",
-                gg,
+                "up",
                 dd,
+                zg,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
             unit(
                 unit_offset + 2,
-                "up",
-                dd,
+                "down",
                 zg,
+                zd,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
             unit(
                 unit_offset + 3,
-                "down",
-                zg,
-                zd,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-            unit(
-                unit_offset + 4,
                 "up",
                 zd,
                 gg,
@@ -67,24 +60,30 @@ def relation_center(
                 source_kind=source_kind,
             ),
             unit(
-                unit_offset + 5,
+                unit_offset + 4,
                 "down",
                 gg,
-                zd,
+                zg,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
         )
     )
     value = establish_center(
-        initial[:5],
+        lifecycle[:3],
         structural_level,
         source_kind,
     )
     assert value is not None
-    value, _event = advance_center(value, initial[5])
+    assert value.entry_unit is None
     assert (value.zd_tick, value.zg_tick) == (zd, zg)
     assert (value.dd_tick, value.gg_tick) == (dd, gg)
+    if not complete:
+        return value
+    value, _watch = advance_center(value, lifecycle[3])
+    value, _completed = advance_center(value, lifecycle[4])
+    assert value.completion_leave_unit == lifecycle[3]
+    assert value.completion_return_unit == lifecycle[4]
     return value
 
 
@@ -124,16 +123,19 @@ def test_cores_touching_at_one_tick_are_upgrade():
 
 
 def test_extension_changes_envelope_revision_but_never_fixed_core_or_identity():
-    value = relation_center("a", 0, 100, 110, 90, 120)
-    leave = unit(6, "up", 100, 120)
+    value = relation_center("a", 0, 100, 110, 90, 120, complete=False)
+    leave = unit(3, "up", 100, 120)
     pending, _watch = advance_center(value, leave)
-    entered = replace(unit(7, "down", 120, 105), low_tick=80)
+    entered = replace(unit(4, "down", 120, 105), low_tick=80)
     updated, _event = advance_center(pending, entered)
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (100, 110)
     assert (updated.dd_tick, updated.gg_tick) == (80, 120)
-    # The failed external leave and its re-entry are folded into the body.
-    assert updated.body_revision == 4
+    # The failed external leave remains lifecycle history; only the re-entry
+    # extends the positive-overlap body.
+    assert updated.failed_departure_units == (leave,)
+    assert updated.extension_units == (entered,)
+    assert updated.body_revision == len(updated.extension_units)
 
 
 def test_relation_rejects_cross_basis_or_cross_level_centers():

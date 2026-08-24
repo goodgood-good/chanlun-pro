@@ -3504,7 +3504,8 @@ def test_evaluate_never_refreshes_pit_after_decision_close() -> None:
 
     assert "refresh_allowed" not in source
     assert "snapshot_qmt_pit_metadata.py" not in source
-    assert "WARNING_ONLY_FOR_CURRENT_QMT_HUMAN_REVIEW_SCREENING" in source
+    assert "BLOCK_EVALUATION_UNTIL_CURRENT_PIT_IS_AVAILABLE" in source
+    assert "reasons.append(pit_reason)" in source
 
 
 def test_status_exposes_sector_capture_receipt_audit(

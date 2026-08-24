@@ -22,7 +22,7 @@ from chanlun.core.kline_data_processor import KlineDataProcessor
 from chanlun.core.macd import MACD
 from chanlun.core.macd_htf import (
     CausalPartialHigherMACDCalculator,
-    level_plus_one_chain,
+    level_plus_one,
 )
 from chanlun.core.strict_structure.base_profile import (
     strict_base_config,
@@ -187,7 +187,7 @@ class CL(ICL):
     def process_validated_incremental_klines(self, klines: pd.DataFrame):
         """处理已由唯一选股运行时认证过历史前缀的完整行情帧。
 
-        该入口只省略各级高周期 MACD 对同一旧前缀的重复逐行比较；K 线、包含、笔、
+        该入口只省略图表高周期 MACD 对同一旧前缀的重复逐行比较；K 线、包含、笔、
         线段和严格结构仍走与 ``process_klines`` 完全相同的生产计算。调用方若发现
         滑窗或任意旧事实变化，必须丢弃本实例而不能使用此入口。
         """
@@ -228,42 +228,47 @@ class CL(ICL):
         *,
         validated_incremental_prefix: bool = False,
     ) -> None:
-        """更新前缀稳定的上一级 MACD 证据。"""
+        """更新仅供图表显示的首个高周期 MACD 覆盖层。
 
-        from chanlun.core.strict_structure.level_catalog import recursive_level_labels
+        严格结构强度不读取此序列。所有递归结构层均在本 ``CL`` 的原生 MACD
+        上按单元覆盖的精确来源 K 线区间测量；这里只保留现有图表消费者所需的
+        单层覆盖，避免把结构递归错误映射成固定物理周期链。
+        """
 
         fast = int(self.config["idx_macd_fast"])
         slow = int(self.config["idx_macd_slow"])
         signal = int(self.config["idx_macd_signal"])
-        max_levels = len(recursive_level_labels(self.frequency))
-        targets = level_plus_one_chain(self.frequency)[:max_levels]
+        target = level_plus_one(self.frequency)
         results: dict[int, dict] = {}
-        for level, target in enumerate(targets):
-            calc = self._strict_htf_macd_calculators.get(level)
-            if (
-                calc is None
-                or calc.frequency != self.frequency
-                or calc.higher != target
-                or calc.market != self.market
-                or calc.fast != fast
-                or calc.slow != slow
-                or calc.signal != signal
-            ):
-                calc = CausalPartialHigherMACDCalculator(
-                    self.frequency,
-                    self.market,
-                    fast=fast,
-                    slow=slow,
-                    signal=signal,
-                    target_frequency=target,
-                )
-                self._strict_htf_macd_calculators[level] = calc
-            value = calc.update(
-                self.kline_processor.klines,
-                validated_incremental_prefix=validated_incremental_prefix,
+        if target is None:
+            self._strict_htf_macd_by_level = results
+            self._strict_htf_macd_calculators.clear()
+            return
+        calc = self._strict_htf_macd_calculators.get(0)
+        if (
+            calc is None
+            or calc.frequency != self.frequency
+            or calc.higher != target
+            or calc.market != self.market
+            or calc.fast != fast
+            or calc.slow != slow
+            or calc.signal != signal
+        ):
+            calc = CausalPartialHigherMACDCalculator(
+                self.frequency,
+                self.market,
+                fast=fast,
+                slow=slow,
+                signal=signal,
+                target_frequency=target,
             )
-            if value is not None:
-                results[level] = {**value}
+        self._strict_htf_macd_calculators = {0: calc}
+        value = calc.update(
+            self.kline_processor.klines,
+            validated_incremental_prefix=validated_incremental_prefix,
+        )
+        if value is not None:
+            results[0] = {**value}
         self._strict_htf_macd_by_level = results
 
     def get_code(self) -> str:

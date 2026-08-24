@@ -152,7 +152,7 @@ def _stage(signal: Mapping[str, object] | None) -> str | None:
 def _recorded_segment(document: Mapping[str, object] | None) -> Mapping[str, object]:
     if not isinstance(document, Mapping):
         return {}
-    raw = document.get("segment_difference_1m") or document.get("trigger_1m")
+    raw = document.get("segment_difference_1m")
     return raw if isinstance(raw, Mapping) else {}
 
 
@@ -282,7 +282,7 @@ def _segment_occurrence_key(
     if new_stage != _SEGMENT_ENRICHED_STAGE:
         return None
     setup_key = _signal_semantic_key(signal)
-    trigger = _mapping(signal.get("segment_difference_1m") or signal.get("trigger_1m"))
+    trigger = _mapping(signal.get("segment_difference_1m"))
     trigger_type = str(trigger.get("point_type") or "")
     trigger_side = str(trigger.get("side") or "")
     trigger_frequency = str(trigger.get("source_frequency") or "")
@@ -328,29 +328,6 @@ def _segment_occurrence_event_id(key: tuple[str, ...]) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _legacy_trigger_occurrence_key(
-    signal: Mapping[str, object],
-) -> tuple[str, ...] | None:
-    """Return the pre-v2 identity solely for persisted-state migration."""
-
-    trigger = _mapping(signal.get("trigger_1m"))
-    trigger_type = str(trigger.get("point_type") or "")
-    trigger_time = str(
-        trigger.get("available_at")
-        or trigger.get("confirmed_at")
-        or trigger.get("anchor_at")
-        or ""
-    )
-    if not trigger_type or not trigger_time:
-        return None
-    setup = _mapping(signal.get("setup_5m"))
-    return (
-        str(signal.get("code") or ""),
-        str(signal.get("side") or setup.get("side") or ""),
-        f"{trigger_type}@{trigger_time}",
-    )
-
-
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
@@ -394,7 +371,7 @@ def _signal_time(signal: Mapping[str, object]) -> datetime | None:
 
 
 def _segment_time(signal: Mapping[str, object]) -> datetime | None:
-    trigger = _mapping(signal.get("segment_difference_1m") or signal.get("trigger_1m"))
+    trigger = _mapping(signal.get("segment_difference_1m"))
     return next(
         (
             parsed
@@ -541,7 +518,7 @@ def _notification_eligibility_reason(
     warmup = _mapping(signal.get("warmup"))
     if five_minute_warmup_converged(warmup) is not True:
         return "WARMUP_NOT_CONVERGED"
-    segment = _mapping(signal.get("segment_difference_1m") or signal.get("trigger_1m"))
+    segment = _mapping(signal.get("segment_difference_1m"))
     if new_stage == _SEGMENT_ENRICHED_STAGE and not segment:
         return "ONE_MINUTE_SEGMENT_EVIDENCE_MISSING"
     if segment and not is_one_minute_segment_difference_document(
@@ -1456,7 +1433,7 @@ def format_notification(
     execution_profile = _mapping(signal.get("execution_profile"))
     recommendation = str(execution_profile.get("recommendation") or "")
     setup = _mapping(signal.get("setup_5m"))
-    trigger = _mapping(signal.get("segment_difference_1m") or signal.get("trigger_1m"))
+    trigger = _mapping(signal.get("segment_difference_1m"))
     segment_evidence_status = segment_difference_evidence_status(
         signal,
         trigger=trigger,
@@ -1581,28 +1558,27 @@ def format_notification(
         if "recursive_level" in setup
         else signal.get("recursive_level")
     )
-    trigger_level = _recursive_level_text(trigger.get("recursive_level"))
     trigger_structure = (
-        (f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）已确认；精确买入位置仍有效")
+        (f"1分钟区间套定位：{trigger_evidence}已确认；精确买入位置仍有效")
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "current"
         else (
-            f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）历史证据保留；"
+            f"1分钟区间套定位：{trigger_evidence}历史证据保留；"
             "买入精确定位窗口已过"
         )
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "expired"
         else (
-            f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）历史证据保留；"
+            f"1分钟区间套定位：{trigger_evidence}历史证据保留；"
             "买入精确定位边界不可用"
         )
         if trigger.get("point_type")
         and segment_evidence_status == "present"
         and segment_boundary_status == "unavailable"
         else (
-            f"1分钟区间套定位：{trigger_evidence}（{trigger_level}）已确认；"
+            f"1分钟区间套定位：{trigger_evidence}已确认；"
             "卖出精确位置已确认"
         )
         if trigger.get("point_type")
@@ -2235,9 +2211,7 @@ class SignalNotificationDispatcher:
         reason: str | None = None,
     ) -> None:
         setup = _mapping(document.get("setup_5m"))
-        trigger = _mapping(
-            document.get("segment_difference_1m") or document.get("trigger_1m")
-        )
+        trigger = _mapping(document.get("segment_difference_1m"))
         raw_reasons = document.get("decision_reasons")
         reasons = (
             raw_reasons
@@ -2341,12 +2315,9 @@ class SignalNotificationDispatcher:
         document: Mapping[str, object],
     ) -> bool:
         occurrence = _trigger_occurrence_key(document, "triggered")
-        legacy_occurrence = _legacy_trigger_occurrence_key(document)
         return bool(
             occurrence is not None
             and _trigger_occurrence_event_id(occurrence) in self._delivered
-            or legacy_occurrence is not None
-            and _trigger_occurrence_event_id(legacy_occurrence) in self._delivered
         )
 
     def _delivered_segment_evidence_exists(
@@ -2457,21 +2428,6 @@ class SignalNotificationDispatcher:
                 if current_occurrence is not None:
                     pending_event_id = _trigger_occurrence_event_id(current_occurrence)
                     pending = self._pending_trigger_events.get(pending_event_id)
-                    if pending is None:
-                        legacy_occurrence = _legacy_trigger_occurrence_key(document)
-                        legacy_event_id = (
-                            _trigger_occurrence_event_id(legacy_occurrence)
-                            if legacy_occurrence is not None
-                            else None
-                        )
-                        if legacy_event_id is not None:
-                            pending = self._pending_trigger_events.pop(
-                                legacy_event_id,
-                                None,
-                            )
-                            if pending is not None:
-                                self._pending_trigger_events[pending_event_id] = pending
-                                dirty_state = True
                 segment_attached = _new_segment_attached(
                     previous_document,
                     document,
@@ -2809,7 +2765,6 @@ class SignalNotificationDispatcher:
                         setup = _mapping(notification_document.get("setup_5m"))
                         segment = _mapping(
                             notification_document.get("segment_difference_1m")
-                            or notification_document.get("trigger_1m")
                         )
                         chart_evidence = (
                             segment if new_stage == _SEGMENT_ENRICHED_STAGE else setup

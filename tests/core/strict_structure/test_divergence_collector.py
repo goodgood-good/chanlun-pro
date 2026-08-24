@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
-    establish_center,
+    calculate_centers,
 )
 from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
@@ -22,14 +22,15 @@ from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import (
     StrengthSnapshot,
 )
+from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
     ongoing_center,
     structure_for,
     unit,
-    valid_five_up_exit,
 )
 from tests.core.strict_structure.test_first_class_points import UP_VALUES
+from tests.core.strict_structure.test_trend_assembler import three_center_fixture
 
 
 def completed_consolidation_fixture(level=0):
@@ -152,29 +153,32 @@ def test_completed_center_without_formal_boundary_does_not_enter_ledger():
 
 
 def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
-    prefix = (
-        unit(0, "up", 80, 100),
-        unit(1, "down", 100, 90),
-    )
-    seed = valid_five_up_exit(2)
-    center = establish_center(seed, 0, SourceKind.SEGMENT)
-    assert center is not None
-    return_unit = unit(7, "down", 130, 120)
-    center, _event = advance_center(center, return_unit)
-    terminal = unit(8, "up", 120, 140)
-    values = (*prefix, *seed, return_unit, terminal)
+    values = three_center_fixture()[0][:10]
+    scanned = calculate_centers(values, 0, SourceKind.SEGMENT)
+    center = scanned.centers[1]
     provider = FixedStrength(
         {
-            ("u-0", "u-1", "u-2"): (10.0, 5.0, 4.0),
-            ("u-6", "u-7", "u-8"): (6.0, 3.0, 2.0),
+            ("u-1", "u-2", "u-3"): (10.0, 5.0, 4.0),
+            ("u-7", "u-8", "u-9"): (6.0, 3.0, 2.0),
         }
     )
-
-    center_result, assembly = calculate_level_with_divergence_boundaries(
+    assembly = assemble_trend_types(
+        (center,),
         values,
         0,
-        SourceKind.SEGMENT,
         strength=provider,
+        group_start_unit_id="u-1",
+    )
+    closed_center = assembly.current_trends[0].centers[0]
+    center_result = replace(
+        scanned,
+        centers=(closed_center,),
+        events=(),
+    )
+    completed = tuple(
+        trend
+        for trend in assembly.completed_trends
+        if trend.terminal_divergence is not None
     )
     structure = StrictStructureResult(
         schema="chanlun-structure",
@@ -185,7 +189,7 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
                 units=values,
                 center_result=center_result,
                 trend_types=assembly.current_trends,
-                completed_trends=assembly.completed_trends,
+                completed_trends=completed,
                 decomposition_boundaries=assembly.decomposition_boundaries,
             ),
         ),
@@ -195,8 +199,8 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
 
     assert item.kind == "consolidation"
     assert item.comparison_width == 3
-    assert item.compare_leg_unit_ids == ("u-0", "u-1", "u-2")
-    assert item.signal_leg_unit_ids == ("u-6", "u-7", "u-8")
+    assert item.compare_leg_unit_ids == ("u-1", "u-2", "u-3")
+    assert item.signal_leg_unit_ids == ("u-7", "u-8", "u-9")
 
 
 def test_completed_trend_emits_trend_divergence_at_recursive_level():

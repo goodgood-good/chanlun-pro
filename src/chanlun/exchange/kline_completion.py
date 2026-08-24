@@ -75,4 +75,39 @@ def drop_unclosed_last_bar(
     return frame if end == len(frame) else frame.iloc[:end]
 
 
-__all__ = ("drop_unclosed_last_bar", "frequency_to_minutes")
+def normalize_completed_bar_labels(
+    frame: pd.DataFrame,
+    frequency: str,
+    *,
+    time_label: str,
+) -> pd.DataFrame:
+    """Return minute bars on one canonical completed-bar timestamp axis.
+
+    Some providers label a bar by its opening boundary while QMT labels it by
+    its completed boundary.  Structure timestamps cross frequencies, so the
+    trading system must never mix the two conventions.  Callers first remove
+    any unclosed tail using the provider convention, then normalize retained
+    start labels to their completion time with this function.
+    """
+
+    if time_label not in {"start", "end"}:
+        raise ValueError("time_label must be start or end")
+    minutes = frequency_to_minutes(frequency)
+    if frame is None or len(frame) == 0 or minutes is None or time_label == "end":
+        return frame
+    if "date" not in frame.columns:
+        raise ValueError("bar frame requires a date column")
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    if dates.isna().any():
+        raise ValueError("bar timestamps must be valid datetimes")
+    normalized = frame.copy()
+    normalized["date"] = dates + pd.Timedelta(minutes=minutes)
+    normalized.attrs = dict(frame.attrs)
+    return normalized
+
+
+__all__ = (
+    "drop_unclosed_last_bar",
+    "frequency_to_minutes",
+    "normalize_completed_bar_labels",
+)

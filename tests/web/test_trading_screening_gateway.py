@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from chanlun.core.strict_structure.current_events import TerminalSegmentReference
-from chanlun.core.strict_structure.models import StrictPointStatus
+from chanlun.core.strict_structure.models import SourceKind, StrictPointStatus
 from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
 import chanlun.decision_support.trading_system.screening_runtime as screening_runtime_module
 from chanlun.exchange import qmt_screening_sector_source as qmt_sector_source
@@ -54,12 +54,46 @@ from chanlun.exchange.exchange import Tick
 NOW = datetime.fromisoformat("2026-07-20T10:02:00+08:00")
 
 
-def test_entry_boundary_uses_unadjusted_confirmation_high_not_anchor() -> None:
-    point = confirmed_point(
+def _exact_nesting_pair():
+    setup = confirmed_point("2buy")
+    setup = replace(
+        setup,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:5m:{setup.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=setup.anchor_at - timedelta(minutes=30),
+            market_end=setup.anchor_at,
+            available_at=setup.available_at,
+        ),
+    )
+    witness = confirmed_point(
         "1buy",
         frequency="1m",
         anchor=8.0,
     )
+    witness = replace(
+        witness,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id=f"segment:1m:{witness.point_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=witness.anchor_at - timedelta(minutes=1),
+            market_end=witness.anchor_at,
+            available_at=witness.available_at,
+        ),
+    )
+    return setup, witness
+
+
+def test_entry_boundary_uses_decision_bar_even_when_raw_frame_has_later_row() -> None:
+    setup, witness = _exact_nesting_pair()
     raw = _frame()
     raw.attrs.update(
         price_basis_provider="qmt",
@@ -68,44 +102,118 @@ def test_entry_boundary_uses_unadjusted_confirmation_high_not_anchor() -> None:
 
     boundaries = gateway_module._entry_execution_boundaries(
         code="SZ.000001",
-        points=(point,),
+        pairs=((setup, witness),),
+        decision_at=setup.available_at,
         raw_frame=raw,
     )
 
     assert len(boundaries) == 1
     boundary = boundaries[0]
     assert boundary.raw_high == Decimal("10.2")
-    assert boundary.raw_high != Decimal(str(point.structure_anchor_price))
-    assert boundary.confirmation_bar_closed_at == point.available_at
+    assert boundary.raw_high != Decimal(str(witness.structure_anchor_price))
+    assert boundary.confirmation_bar_closed_at == setup.available_at
+    assert boundary.setup_occurrence_id == (
+        gateway_module.structural_point_occurrence_id(setup)
+    )
     assert boundary.entry_valid_until == datetime.fromisoformat(
         "2026-07-20T10:01:00+08:00"
     )
     assert boundary.tick_data_used is False
 
 
-def test_entry_boundary_rejects_third_class_continuation_point() -> None:
-    point = confirmed_point(
-        "3buy",
-        frequency="1m",
-        anchor=9.8,
-        center_zd=9.0,
-        center_zg=9.8,
-        variant="boundary_touch",
-    )
-    raw = _frame()
-    raw.attrs.update(
-        price_basis_provider="qmt",
-        price_basis_adjustment="none",
+def test_entry_boundary_pair_requires_complete_terminal_interval_nesting() -> None:
+    setup, witness = _exact_nesting_pair()
+    outside = replace(
+        witness,
+        terminal_segment=replace(
+            witness.terminal_segment,
+            market_start=setup.terminal_segment.market_start - timedelta(minutes=5),
+        ),
     )
 
     assert (
-        gateway_module._entry_execution_boundaries(
-            code="SZ.000001",
-            points=(point,),
-            raw_frame=raw,
+        gateway_module._new_entry_boundary_pairs(
+            setup_points=(setup,),
+            witness_points=(outside,),
+            decision_at=setup.available_at,
         )
         == ()
     )
+
+
+def test_entry_pair_is_emitted_only_at_first_jointly_known_timestamp() -> None:
+    setup, template = _exact_nesting_pair()
+    early = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=-1,
+    )
+    early = replace(
+        early,
+        terminal_segment=replace(
+            template.terminal_segment,
+            unit_id=f"segment:1m:{early.point_id}",
+            market_start=early.anchor_at - timedelta(minutes=1),
+            market_end=early.anchor_at,
+            available_at=early.available_at,
+        ),
+    )
+    later = confirmed_point(
+        "2buy",
+        frequency="1m",
+        available_minutes_after=1,
+    )
+    later = replace(
+        later,
+        terminal_segment=replace(
+            template.terminal_segment,
+            unit_id=f"segment:1m:{later.point_id}",
+            market_start=later.anchor_at - timedelta(minutes=1),
+            market_end=later.anchor_at,
+            available_at=later.available_at,
+        ),
+    )
+
+    first = gateway_module._new_entry_boundary_pairs(
+        setup_points=(setup,),
+        witness_points=(early,),
+        decision_at=setup.available_at,
+    )
+    repeated = gateway_module._new_entry_boundary_pairs(
+        setup_points=(setup,),
+        witness_points=(early, later),
+        decision_at=later.available_at,
+    )
+
+    assert first == ((setup, early),)
+    assert repeated == ()
+
+
+def test_shared_witness_produces_distinct_tied_setup_occurrence_pairs() -> None:
+    first_setup, witness = _exact_nesting_pair()
+    second_setup = confirmed_point("1buy")
+    second_setup = replace(
+        second_setup,
+        terminal_segment=replace(
+            first_setup.terminal_segment,
+            unit_id=f"segment:5m:{second_setup.point_id}",
+            available_at=second_setup.available_at,
+        ),
+    )
+
+    pairs = gateway_module._new_entry_boundary_pairs(
+        setup_points=(first_setup, second_setup),
+        witness_points=(witness,),
+        decision_at=witness.available_at,
+    )
+
+    assert {
+        gateway_module.structural_point_occurrence_id(pair[0]) for pair in pairs
+    } == {
+        gateway_module.structural_point_occurrence_id(first_setup),
+        gateway_module.structural_point_occurrence_id(second_setup),
+    }
+    assert {pair[1].point_id for pair in pairs} == {witness.point_id}
 
 
 @pytest.mark.parametrize(
@@ -281,15 +389,10 @@ def test_five_minute_setup_ledger_keeps_latest_completed_and_unfinished_points(
     )
 
     assert [point.point_type for point in analysis.confirmed_points] == ["3buy"]
-    assert [point.point_type for point in analysis.setup_confirmed_points] == [
-        "3buy"
-    ]
+    assert [point.point_type for point in analysis.setup_confirmed_points] == ["3buy"]
     assert [point.point_type for point in analysis.provisional_points] == ["1buy"]
     assert analysis.provisional_points[0].terminal_segment is not None
-    assert (
-        analysis.provisional_points[0].terminal_segment.role
-        == "latest_unfinished"
-    )
+    assert analysis.provisional_points[0].terminal_segment.role == "latest_unfinished"
 
 
 def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
@@ -513,8 +616,9 @@ def test_warmup_requires_same_active_tail_under_shorter_left_history(
     assert result.warmup_difference_codes == ("WARMUP_DIRECTION_CHANGED",)
 
 
-def test_warmup_signature_keeps_an_old_anchor_when_it_is_still_latest_completed(
-) -> None:
+def test_warmup_signature_keeps_an_old_anchor_when_it_is_still_latest_completed() -> (
+    None
+):
     point = confirmed_point("3buy")
     point = replace(
         point,
@@ -657,9 +761,7 @@ def test_five_minute_warmup_still_blocks_trade_level_point_differences(
 
     assert result.warmup_converged is False
     assert result.warmup_reason_codes == ("WARMUP_TAIL_DIVERGED",)
-    assert result.warmup_difference_codes == (
-        "WARMUP_ACTIVE_POINT_LANES_CHANGED",
-    )
+    assert result.warmup_difference_codes == ("WARMUP_ACTIVE_POINT_LANES_CHANGED",)
     assert result.trade_level_warmup_converged is False
     assert result.trade_level_warmup_reason_codes == ("WARMUP_TAIL_DIVERGED",)
     assert result.trade_level_warmup_difference_codes == (
@@ -961,7 +1063,9 @@ class HistoricalOnlyOpeningAuctionAnalyzer(RecordingAnalyzer):
         )
 
 
-def test_native_gateway_builds_boundary_for_historical_only_segment_point() -> None:
+def test_native_one_minute_analysis_does_not_build_boundary_without_five_setup() -> (
+    None
+):
     exchange = OpeningAuctionExchange()
     analyzer = HistoricalOnlyOpeningAuctionAnalyzer()
     gateway = NativeTradingDataGateway(
@@ -987,18 +1091,11 @@ def test_native_gateway_builds_boundary_for_historical_only_segment_point() -> N
 
     assert analysis.confirmed_points == ()
     assert len(analysis.effective_segment_difference_points) == 1
-    [boundary] = analysis.entry_execution_boundaries
-    assert boundary.confirmation_bar_closed_at == datetime.fromisoformat(
-        "2026-07-20T10:01:00+08:00"
-    )
-    assert boundary.entry_valid_until == datetime.fromisoformat(
-        "2026-07-20T10:02:00+08:00"
-    )
-    assert len(exchange.calls) == 2
-    assert exchange.calls[1]["dividend_type"] == "none"
+    assert len(exchange.calls) == 1
+    assert exchange.calls[0]["dividend_type"] == "front_ratio"
 
 
-def test_native_gateway_merges_opening_event_for_structure_and_entry_boundary() -> None:
+def test_native_gateway_merges_opening_event_for_structure_analysis() -> None:
     """The page and replay must consume the same completed 240-bar 1m grid."""
 
     exchange = OpeningAuctionExchange()
@@ -1035,14 +1132,8 @@ def test_native_gateway_merges_opening_event_for_structure_and_entry_boundary() 
     assert first["volume"] == 300.0
     assert structure_frame.attrs["price_basis_adjustment"] == "front_ratio"
 
-    [boundary] = analysis.entry_execution_boundaries
-    assert boundary.confirmation_bar_closed_at == datetime.fromisoformat(
-        "2026-07-20T09:31:00+08:00"
-    )
-    assert boundary.raw_high == Decimal("10.4")
-    assert boundary.raw_volume == Decimal("300.0")
-    assert boundary.raw_price_basis_revision == "qmt-none-test"
-    assert len(exchange.calls) == 2
+    assert analysis.effective_segment_difference_points
+    assert len(exchange.calls) == 1
 
 
 class SparseOpeningAuctionExchange(OpeningAuctionExchange):
@@ -1081,12 +1172,8 @@ def test_native_gateway_keeps_serving_when_live_qmt_omits_0931() -> None:
         time(9, 33),
     )
     assert structure_frame.iloc[0]["volume"] == 100.0
-    [boundary] = analysis.entry_execution_boundaries
-    assert boundary.confirmation_bar_closed_at == datetime.fromisoformat(
-        "2026-07-20T09:31:00+08:00"
-    )
-    assert boundary.raw_volume == Decimal("100.0")
-    assert len(exchange.calls) == 2
+    assert analysis.effective_segment_difference_points
+    assert len(exchange.calls) == 1
 
 
 class InvalidNativeThirtyExchange:
@@ -1203,6 +1290,76 @@ def _gateway(
         ),
     )
     return gateway, analyzer, stock_exchange
+
+
+def test_structure_bundle_creates_boundary_from_exact_setup_witness_pair() -> None:
+    decision_at = datetime.fromisoformat("2026-07-20T10:01:00+08:00")
+    setup, witness = _exact_nesting_pair()
+    setup = replace(
+        setup,
+        available_at=decision_at,
+        terminal_segment=replace(
+            setup.terminal_segment,
+            available_at=decision_at,
+        ),
+    )
+
+    class ExactPairAnalyzer(RecordingAnalyzer):
+        def __call__(self, *, code, frequency, frame, as_of):
+            self.calls.append((code, frequency))
+            self.frames.append(frame.copy(deep=True))
+            if frequency == "5m":
+                return FrameStructureAnalysis(
+                    closed_at=as_of,
+                    direction="neutral",
+                    confirmed_points=(setup,),
+                    provisional_points=(),
+                    setup_confirmed_points=(setup,),
+                )
+            if frequency == "1m":
+                return FrameStructureAnalysis(
+                    closed_at=as_of,
+                    direction="neutral",
+                    confirmed_points=(witness,),
+                    provisional_points=(),
+                    segment_difference_points=(witness,),
+                )
+            return FrameStructureAnalysis(
+                closed_at=as_of,
+                direction="neutral",
+                confirmed_points=(),
+                provisional_points=(),
+            )
+
+    class ExactPairExchange(RecordingExchange):
+        def klines(self, code: str, frequency: str, *, args: dict[str, object]):
+            frame = super().klines(code, frequency, args=args)
+            if args.get("dividend_type") == "none":
+                frame.attrs.update(
+                    price_basis_provider="qmt",
+                    price_basis_adjustment="none",
+                )
+            return frame
+
+    gateway, _analyzer, _unused_exchange = _gateway(analyzer=ExactPairAnalyzer())
+    exchange = ExactPairExchange()
+    gateway._exchange_provider = lambda: exchange
+    sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
+
+    bundle = gateway.structure_bundle(
+        "SZ.000001",
+        as_of=decision_at + timedelta(seconds=30),
+        sector=sector,
+    )
+
+    [boundary] = bundle.entry_execution_boundaries
+    assert boundary.setup_occurrence_id == (
+        gateway_module.structural_point_occurrence_id(setup)
+    )
+    assert boundary.point_id == witness.point_id
+    assert boundary.confirmation_bar_closed_at == decision_at
+    assert boundary.raw_high == Decimal("10.3")
+    assert exchange.calls[-1][2]["dividend_type"] == "none"
 
 
 def test_realtime_incremental_refresh_falls_back_when_local_warmup_is_short() -> None:
@@ -1552,9 +1709,7 @@ def test_structure_bundle_uses_trade_level_warmup_for_five_minute_gate() -> None
                 provisional_points=(),
                 warmup_converged=False,
                 warmup_reason_codes=("WARMUP_TAIL_DIVERGED",),
-                warmup_difference_codes=(
-                    "WARMUP_ACTIVE_POINT_LANES_CHANGED",
-                ),
+                warmup_difference_codes=("WARMUP_ACTIVE_POINT_LANES_CHANGED",),
                 trade_level_warmup_converged=True,
                 trade_level_warmup_reason_codes=("WARMUP_TAIL_STABLE",),
             )
@@ -1567,11 +1722,13 @@ def test_structure_bundle_uses_trade_level_warmup_for_five_minute_gate() -> None
     bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
 
     assert bundle.warmup_converged is True
-    assert dict(
-        (frequency, converged)
-        for frequency, converged, _full_count, _suffix_count
-        in bundle.warmup_by_frequency
-    )["5m"] is True
+    assert (
+        dict(
+            (frequency, converged)
+            for frequency, converged, _full_count, _suffix_count in bundle.warmup_by_frequency
+        )["5m"]
+        is True
+    )
     assert "5M:WARMUP_TAIL_STABLE" in bundle.warmup_reason_codes
     assert "5M:WARMUP_TAIL_DIVERGED" not in bundle.warmup_reason_codes
     assert dict(bundle.warmup_difference_codes_by_frequency)["5m"] == ()
@@ -1598,9 +1755,7 @@ def test_structure_bundle_keeps_trade_level_warmup_divergence_blocking() -> None
                 provisional_points=(),
                 warmup_converged=False,
                 warmup_reason_codes=("WARMUP_TAIL_DIVERGED",),
-                warmup_difference_codes=(
-                    "WARMUP_ACTIVE_POINT_LANES_CHANGED",
-                ),
+                warmup_difference_codes=("WARMUP_ACTIVE_POINT_LANES_CHANGED",),
                 trade_level_warmup_converged=False,
                 trade_level_warmup_reason_codes=("WARMUP_TAIL_DIVERGED",),
                 trade_level_warmup_difference_codes=(
@@ -1608,19 +1763,19 @@ def test_structure_bundle_keeps_trade_level_warmup_divergence_blocking() -> None
                 ),
             )
 
-    gateway, _analyzer, _exchange = _gateway(
-        analyzer=TradeLevelDivergenceAnalyzer()
-    )
+    gateway, _analyzer, _exchange = _gateway(analyzer=TradeLevelDivergenceAnalyzer())
     [sector] = gateway.native_sector_assessments(as_of=NOW).assessments
 
     bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
 
     assert bundle.warmup_converged is False
-    assert dict(
-        (frequency, converged)
-        for frequency, converged, _full_count, _suffix_count
-        in bundle.warmup_by_frequency
-    )["5m"] is False
+    assert (
+        dict(
+            (frequency, converged)
+            for frequency, converged, _full_count, _suffix_count in bundle.warmup_by_frequency
+        )["5m"]
+        is False
+    )
     assert "5M:WARMUP_TAIL_DIVERGED" in bundle.warmup_reason_codes
     assert dict(bundle.warmup_difference_codes_by_frequency)["5m"] == (
         "WARMUP_ACTIVE_POINT_LANES_CHANGED",
@@ -1658,9 +1813,7 @@ def test_sell_only_structure_skips_entry_only_mwd_provider() -> None:
     assert bundle.higher_timeframe_gates.market.gate == "UNRESOLVED"
     assert bundle.higher_timeframe_gates.sector.gate == "UNRESOLVED"
     assert bundle.higher_timeframe_gates.symbol.gate == "UNRESOLVED"
-    expected_reason = (
-        "HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY"
-    )
+    expected_reason = "HIGHER_TIMEFRAME_ENTRY_GATE_NOT_APPLICABLE_TO_SELL_ONLY"
     assert bundle.higher_timeframe_gates.market.reason_codes == (expected_reason,)
     assert [point.point_type for point in bundle.five_points] == ["2sell"]
     counters = gateway.runtime_health_snapshot()["performance"]["counters"]
@@ -2315,15 +2468,15 @@ def test_candidate_disk_runtime_cache_survives_gateway_recreation(
 
     first_health = first.runtime_health_snapshot()
     assert first_health["disk_runtime_state_cache"]["entry_count"] == 1
-    assert first_health["disk_runtime_state_cache"][
-        "authenticated_before_deserialization"
-    ] is True
-    assert first_health["disk_runtime_state_cache"][
-        "application_source_revision_scoped"
-    ] is True
-    assert first_health["disk_runtime_state_cache"][
-        "web_lifecycle_scoped"
-    ] is False
+    assert (
+        first_health["disk_runtime_state_cache"]["authenticated_before_deserialization"]
+        is True
+    )
+    assert (
+        first_health["disk_runtime_state_cache"]["application_source_revision_scoped"]
+        is True
+    )
+    assert first_health["disk_runtime_state_cache"]["web_lifecycle_scoped"] is False
 
     restarted, _analyzer, _stock_exchange = _gateway()
     restarted._analyzer = gateway_module.analyze_native_frame_with_warmup
@@ -2400,9 +2553,7 @@ def test_candidate_disk_runtime_cache_rejects_other_source_revision(
     assert states.full.last_update_incremental is False
     health = restarted.runtime_health_snapshot()
     assert health["performance"]["counters"]["disk_runtime_cache_miss.5m"] == 1
-    assert health["disk_runtime_state_cache"]["counters"][
-        "validation_failure"
-    ] == 1
+    assert health["disk_runtime_state_cache"]["counters"]["validation_failure"] == 1
 
 
 def test_candidate_disk_runtime_cache_rejects_tampering_before_pickle(
@@ -2456,9 +2607,7 @@ def test_candidate_disk_runtime_cache_rejects_tampering_before_pickle(
     assert states.full.last_update_incremental is False
     health = restarted.runtime_health_snapshot()
     assert health["performance"]["counters"]["disk_runtime_cache_miss.5m"] == 1
-    assert health["disk_runtime_state_cache"]["counters"][
-        "validation_failure"
-    ] == 1
+    assert health["disk_runtime_state_cache"]["counters"]["validation_failure"] == 1
 
 
 def test_invalid_native_thirty_is_rebuilt_from_completed_same_source_five() -> None:
@@ -2587,7 +2736,9 @@ def test_native_gateway_monitor_scope_keeps_only_qmt_stock_and_etf() -> None:
     assert progress == []
 
 
-def test_native_gateway_honors_isolated_worker_etf_type_without_industry_block() -> None:
+def test_native_gateway_honors_isolated_worker_etf_type_without_industry_block() -> (
+    None
+):
     gateway, _analyzer, stock_exchange = _gateway()
     [stock_sector] = gateway.native_sector_assessments(as_of=NOW).assessments
 
@@ -2647,7 +2798,9 @@ def test_native_gateway_tick_probe_skips_qmt_when_market_is_closed() -> None:
     }
 
 
-def test_native_gateway_display_quotes_keep_last_snapshot_when_market_is_closed() -> None:
+def test_native_gateway_display_quotes_keep_last_snapshot_when_market_is_closed() -> (
+    None
+):
     gateway, _analyzer, stock_exchange = _gateway()
     calls: list[list[str]] = []
 
@@ -2728,9 +2881,7 @@ def test_native_gateway_status_requires_exact_same_session_instrument_fact() -> 
     def instrument_detail(native_code: str) -> dict[str, object]:
         calls.append(native_code)
         return {
-            "TradingDay": (
-                "20260720" if native_code == "513100.SH" else "20260717"
-            ),
+            "TradingDay": ("20260720" if native_code == "513100.SH" else "20260717"),
             "InstrumentStatus": 2,
             "IsTrading": False,
             "InstrumentName": "测试证券",

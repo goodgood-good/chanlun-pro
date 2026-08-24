@@ -44,6 +44,10 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SecurityMasterRecord,
     SectorMembershipChange,
     load_snapshot,
+    qmt_native_code,
+)
+from chanlun.decision_support.trading_system.backtest.pit_scope import (
+    validate_scope_proof,
 )
 from chanlun.decision_support.trading_system.sector_first_scope import (
     build_sector_first_scope,
@@ -62,9 +66,7 @@ DEFAULT_WARMUP_START = date(2025, 5, 1)
 DEFAULT_REQUESTED_START = date(2025, 7, 25)
 DEFAULT_EFFECTIVE_START = date(2025, 8, 1)
 DEFAULT_END = date(2026, 7, 24)
-DEFAULT_PIT_SNAPSHOT = Path(
-    "audit/chanlun_trading_system_backtest/fixed_year_2025_2026/pit_metadata.json"
-)
+LARGE_SCOPE_SYMBOL_LIMIT = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,23 +147,32 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--end", type=_parse_date, default=DEFAULT_END)
     result.add_argument("--workers", type=_positive_int, default=6)
-    result.add_argument("--limit", type=_positive_int)
-    result.add_argument("--codes", help="optional comma-separated normalized codes")
+    result.add_argument(
+        "--codes",
+        help="explicit comma-separated normalized codes for a bounded replay",
+    )
     result.add_argument(
         "--full-market",
         action="store_true",
         help="explicitly authorize processing the complete eligible market",
     )
     result.add_argument(
+        "--confirm-large-scope",
+        action="store_true",
+        help=(
+            "independently confirm an actual scope above 20 symbols; required "
+            "together with --full-market"
+        ),
+    )
+    result.add_argument(
         "--pit-snapshot",
         type=Path,
-        default=DEFAULT_PIT_SNAPSHOT,
-        help="immutable effective-dated QMT/CNInfo metadata snapshot",
+        help="explicit profile-scoped effective-dated QMT/CNInfo metadata snapshot",
     )
     result.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("audit/chanlun_trading_system_backtest/fixed_year_2025_2026"),
+        help="explicit output directory paired with the selected PIT profile",
     )
     result.add_argument("--force", action="store_true")
     return result
@@ -315,53 +326,164 @@ def _catalog_scope(
     *,
     requested_start: date,
     requested_end: date,
+    requested_codes: Sequence[str] | None = None,
 ) -> tuple[tuple[tuple[str, str], ...], dict[str, object]]:
     # 回测与实时选股共用同一个板块优先范围合同，不能在命令行中再构造另一套
     # 细节不同的个股优先股票池。
-    sector_first = build_sector_first_scope(
-        snapshot,
-        requested_start=requested_start,
-        requested_end=requested_end,
-    )
     index = PITMetadataIndex(snapshot)
-    selected = set(sector_first.selected_symbols)
+    if requested_codes is None:
+        sector_first = build_sector_first_scope(
+            snapshot,
+            requested_start=requested_start,
+            requested_end=requested_end,
+        )
+        selected = set(sector_first.selected_symbols)
+        selection_path = sector_first.selection_path
+        rejected_symbols = sector_first.rejected_symbols
+        intersecting_count = len(sector_first.symbols)
+        content_sha256 = sector_first.content_sha256
+        etf_proxy_role = sector_first.etf_proxy_role
+    else:
+        selected = set(requested_codes)
+        securities = {row.code: row for row in snapshot.securities}
+        missing = tuple(sorted(selected - set(securities)))
+        if missing:
+            raise ValueError(
+                "codes are outside the profile-scoped PIT snapshot: "
+                + ",".join(missing)
+            )
+        outside_replay = tuple(
+            sorted(
+                code
+                for code in selected
+                if securities[code].listed_from > requested_end
+                or (
+                    securities[code].listed_through is not None
+                    and securities[code].listed_through < requested_start
+                )
+            )
+        )
+        if outside_replay:
+            raise ValueError(
+                "codes do not intersect the requested replay range: "
+                + ",".join(outside_replay)
+            )
+        unclassified = tuple(
+            sorted(code for code in selected if not index.memberships_for(code))
+        )
+        if unclassified:
+            raise ValueError(
+                "codes have no point-in-time sector membership: "
+                + ",".join(unclassified)
+            )
+        selection_path = "BOUNDED_REQUESTED_CODES"
+        rejected_symbols = ()
+        intersecting_count = len(selected)
+        content_sha256 = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    sorted(selected),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        etf_proxy_role = "SEPARATE_COMPONENT_CONTROL_ONLY"
     scope = tuple(
         (
             row.code,
-            (
-                index.memberships_for(row.code)[0].sector_id
-                if index.memberships_for(row.code)
-                else "qmt-sw1:unclassified"
-            ),
+            index.memberships_for(row.code)[0].sector_id,
         )
         for row in snapshot.securities
         if row.code in selected
     )
     return tuple(sorted(scope)), {
-        "catalog_revision": "sha256:" + hashlib.sha256(
+        "catalog_revision": "sha256:"
+        + hashlib.sha256(
             repr(snapshot.qmt_sw1_sector_names).encode("utf-8")
         ).hexdigest(),
         "catalog_source": "qmt_sw1_with_cninfo_effective_dates",
         "catalog_sector_count": len(snapshot.qmt_sw1_sector_names),
         "eligible_sector_count": len(snapshot.qmt_sw1_sector_names),
         "membership_edge_count": len(snapshot.memberships),
-        "archived_intersecting_symbol_count": len(sector_first.symbols),
+        "archived_intersecting_symbol_count": intersecting_count,
         "unique_symbol_count": len(scope),
         "classified_symbol_count": len(scope),
-        "unclassified_symbol_count": len(sector_first.rejected_symbols),
+        "unclassified_symbol_count": len(rejected_symbols),
         "duplicate_membership_count": 0,
-        "selection_path": sector_first.selection_path,
+        "selection_path": selection_path,
         "selection_order": (
             "POINT_IN_TIME_SECTOR_TRIGGER",
             "POINT_IN_TIME_SECTOR_MEMBERS",
             "INDIVIDUAL_THREE_PROGRAM",
             UNIFIED_SIGNAL_ALIGNMENT_CONTRACT_ID,
         ),
-        "sector_first_scope_sha256": sector_first.content_sha256,
-        "etf_proxy_role": sector_first.etf_proxy_role,
+        "sector_first_scope_sha256": content_sha256,
+        "etf_proxy_role": etf_proxy_role,
         "pit_metadata_schema": snapshot.schema,
         "pit_source_hashes": dict(snapshot.source_hashes),
     }
+
+
+def _pit_scope_failures(
+    *,
+    path: Path,
+    snapshot: PITMetadataSnapshot,
+    replay_codes: Sequence[str],
+) -> tuple[str, ...]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ("pit_scope_proof_unreadable",)
+    if not isinstance(raw, Mapping):
+        return ("pit_scope_proof_malformed",)
+    audit = raw.get("audit")
+    scope = audit.get("scope") if isinstance(audit, Mapping) else None
+    if not isinstance(scope, Mapping):
+        return ("pit_scope_proof_missing",)
+    return validate_scope_proof(
+        snapshot=snapshot,
+        scope=scope,
+        replay_codes=replay_codes,
+    )
+
+
+def _validate_scope_authorization(
+    *,
+    full_market: bool,
+    confirm_large_scope: bool,
+    selected_count: int | None = None,
+) -> None:
+    if full_market and not confirm_large_scope:
+        raise ValueError("--full-market also requires --confirm-large-scope")
+    if (
+        selected_count is not None
+        and selected_count > LARGE_SCOPE_SYMBOL_LIMIT
+        and not confirm_large_scope
+    ):
+        raise ValueError(
+            f"actual scope contains {selected_count} symbols; "
+            "re-run with --confirm-large-scope"
+        )
+
+
+def _normalized_requested_codes(raw: str | None) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    if not raw.strip():
+        raise ValueError("--codes must contain at least one normalized stock code")
+    values = tuple(value.strip().upper() for value in raw.split(","))
+    if any(value in {"", "ALL", "*"} for value in values):
+        raise ValueError("--codes cannot contain empty/all/* scope selectors")
+    for code in values:
+        try:
+            qmt_native_code(code)
+        except ValueError as exc:
+            raise ValueError(
+                "--codes must use normalized MARKET.###### values: " + code
+            ) from exc
+    return tuple(sorted(set(values)))
 
 
 def _manifest(
@@ -389,8 +511,7 @@ def _manifest(
         "algorithm": {
             "revision": algorithm_revision,
             "hashes": [
-                {"path": path, "sha256": digest}
-                for path, digest in algorithm_hashes
+                {"path": path, "sha256": digest} for path, digest in algorithm_hashes
             ],
         },
         "fact_algorithm": {
@@ -421,9 +542,7 @@ def _manifest(
                 int(row.get("evaluation_count", 0)) > 0 for row in completed.values()
             ),
             "symbols_with_market_data": symbols_with_market_data,
-            "symbols_without_market_data": (
-                len(completed) - symbols_with_market_data
-            ),
+            "symbols_without_market_data": (len(completed) - symbols_with_market_data),
             "rows_by_frequency": {
                 frequency: sum(
                     int(dict(row.get("row_counts", {})).get(frequency, 0))
@@ -439,13 +558,28 @@ def _manifest(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    if args.full_market and (args.codes or args.limit is not None):
-        raise ValueError("--full-market cannot be combined with --codes or --limit")
-    if not args.full_market and not args.codes and args.limit is None:
+    if args.full_market and args.codes:
+        raise ValueError("--full-market cannot be combined with --codes")
+    if not args.full_market and not args.codes:
         raise ValueError(
-            "bounded research scope required: pass --codes/--limit, or explicitly "
+            "bounded research scope required: pass --codes, or explicitly "
             "authorize the complete universe with --full-market"
         )
+    _validate_scope_authorization(
+        full_market=args.full_market,
+        confirm_large_scope=args.confirm_large_scope,
+    )
+    requested = _normalized_requested_codes(args.codes)
+    if requested is not None:
+        _validate_scope_authorization(
+            full_market=False,
+            confirm_large_scope=args.confirm_large_scope,
+            selected_count=len(requested),
+        )
+    if args.pit_snapshot is None:
+        raise ValueError("explicit profile-scoped --pit-snapshot is required")
+    if args.output_dir is None:
+        raise ValueError("explicit profile-scoped --output-dir is required")
     if not args.warmup_start <= args.start <= args.effective_start <= args.end:
         raise ValueError("expected warmup_start <= start <= effective_start <= end")
     if args.workers > 16:
@@ -455,7 +589,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     fact_algorithm_hashes = qmt_research_contract.fact_algorithm_hashes()
     fact_algorithm_revision = _fact_algorithm_revision(fact_algorithm_hashes)
     output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     pit_snapshot_path = args.pit_snapshot.resolve()
     snapshot = load_snapshot(pit_snapshot_path)
     snapshot_index = PITMetadataIndex(snapshot)
@@ -465,24 +598,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         snapshot,
         requested_start=args.start,
         requested_end=args.end,
+        requested_codes=requested,
     )
     catalog_summary["pit_snapshot_sha256"] = _file_sha256(pit_snapshot_path)
-    if args.codes:
-        requested = {
-            value.strip().upper() for value in args.codes.split(",") if value.strip()
-        }
+    if requested is not None:
         known = {code for code, _sector_id in scope}
-        unknown = sorted(requested - known)
-        if unknown:
+        missing = tuple(sorted(set(requested) - known))
+        if missing:
             raise ValueError(
-                f"codes are outside eligible QMT GICS3 scope: {','.join(unknown)}"
+                "codes are outside the profile-scoped PIT snapshot: "
+                + ",".join(missing)
             )
-        scope = tuple(row for row in scope if row[0] in requested)
-    if args.limit is not None:
-        scope = scope[: args.limit]
+        scope = tuple(row for row in scope if row[0] in set(requested))
     if not scope:
         raise RuntimeError("fixed-year QMT scope is empty")
     selected = tuple(scope)
+    _validate_scope_authorization(
+        full_market=args.full_market,
+        confirm_large_scope=args.confirm_large_scope,
+        selected_count=len(selected),
+    )
+    scope_failures = _pit_scope_failures(
+        path=pit_snapshot_path,
+        snapshot=snapshot,
+        replay_codes=tuple(code for code, _sector_id in selected),
+    )
+    if scope_failures:
+        raise ValueError(
+            "PIT historical sector closure proof failed: " + ",".join(scope_failures)
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
     requests = {
         code: WorkerRequest(
             code=code,
@@ -539,9 +684,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     failures.pop(request.code, None)
                 except Exception as exc:
                     failures[request.code] = f"{type(exc).__name__}:{exc}"
-            # 每个标的已有各自完成落盘同步的事实检查点。每得到一个结果就完整重写清单，
-            # 复杂度会增长到 O(N²)，最终压过实际结构计算；重启时可直接发现更新的
-            # 单标的文件。
+                # 每个标的已有各自完成落盘同步的事实检查点。每得到一个结果就完整重写清单，
+                # 复杂度会增长到 O(N²)，最终压过实际结构计算；重启时可直接发现更新的
+                # 单标的文件。
                 publish = (
                     ordinal % 25 == 0
                     or ordinal == len(pending)

@@ -10,6 +10,13 @@ from pathlib import Path
 import re
 from typing import Any
 
+from chanlun.decision_support.trading_system.backtest.causality_gate_contract import (
+    CAUSALITY_GATE_PROVEN_CONTROLS,
+    CAUSALITY_GATE_PROVEN_CONTROL_SET,
+    CAUSALITY_GATE_SCHEMA,
+    CAUSALITY_GATE_STATUSES,
+    causality_gate_state_is_consistent,
+)
 from chanlun.decision_support.trading_system.backtest.report import (
     SCHEMA,
     STRATEGY_ID,
@@ -23,27 +30,10 @@ _ARTIFACT_PATH = _ARTIFACT_DIRECTORY / "certified_report.json"
 _CAUSALITY_GATE_PATH = _ARTIFACT_DIRECTORY / "causality_gate.json"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVIDENCE_GRADES = {"certified", "research_only", "invalid"}
-_CAUSAL_CONTROLS = {
-    "survivorship_free_effective_dated_security_master",
-    "decision_time_sw1_membership",
-    "ex_date_only_causal_price_basis",
-    "cash_and_share_corporate_action_accounting",
-    "closed_bar_strict_structure_witnesses",
-    "next_complete_minute_execution",
-    "observed_range_and_volume_fill_guard",
-    "delisted_security_zero_recovery",
-    "content_addressed_algorithm_data_and_checkpoints",
-}
-_HISTORICAL_DATASET_PATH = (
-    _ARTIFACT_DIRECTORY / "fixed_year_2025_2026"
-)
+_HISTORICAL_DATASET_PATH = _ARTIFACT_DIRECTORY / "research_sample_validation_12"
 _PIT_METADATA_NAME = "pit_metadata.json"
 _EXTRACT_MANIFEST_NAME = "extract_manifest.json"
 _REPLAY_HEARTBEAT_MAX_AGE_SECONDS = 10 * 60
-_AUDIT_CATALOG_DIRECTORIES = (
-    Path("audit/chanlun_live_integration"),
-)
-_AUDIT_CATALOG_LIMIT = 64
 
 
 class ResearchAuditUnavailable(RuntimeError):
@@ -129,42 +119,11 @@ def _load(path: Path) -> tuple[dict[str, Any], str]:
     return value, "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def _load_catalog_document(path: Path) -> tuple[dict[str, Any], str, str]:
-    """Read legacy audit records without weakening the formal-report parser.
-
-    Several archived diagnostic exports were written by PowerShell with an
-    explicit UTF-8 or UTF-16 byte-order mark.  They are valid historical JSON,
-    but the certified causality gate/report intentionally remains strict UTF-8
-    through :func:`_load`.
-    """
-
-    try:
-        raw = path.read_bytes()
-        if not raw or len(raw) > _MAX_JSON_BYTES:
-            raise ResearchAuditUnavailable("artifact_invalid_json")
-        if raw.startswith(b"\xef\xbb\xbf"):
-            encoding = "utf-8-sig"
-        elif raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-            encoding = "utf-16"
-        else:
-            encoding = "utf-8"
-        value = json.loads(
-            raw.decode(encoding),
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=_reject_constant,
-        )
-    except ResearchAuditUnavailable:
-        raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ResearchAuditUnavailable("artifact_invalid_json") from exc
-    if not isinstance(value, dict):
-        raise ResearchAuditUnavailable("artifact_invalid_schema")
-    return value, "sha256:" + hashlib.sha256(raw).hexdigest(), encoding
-
-
 def _modified_at(path: Path) -> str:
-    return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(
-        timespec="seconds"
+    return (
+        datetime.fromtimestamp(path.stat().st_mtime)
+        .astimezone()
+        .isoformat(timespec="seconds")
     )
 
 
@@ -180,79 +139,6 @@ def _safe_file(root: Path, candidate: Path) -> Path | None:
     except (OSError, RuntimeError, ValueError):
         return None
     return path
-
-
-def _audit_catalog(root: Path) -> list[dict[str, Any]]:
-    candidates: list[Path] = []
-    for relative_directory in _AUDIT_CATALOG_DIRECTORIES:
-        directory = root / relative_directory
-        try:
-            if directory.is_dir() and not directory.is_symlink():
-                candidates.extend(directory.glob("*.json"))
-        except OSError:
-            continue
-    audit_directory = root / "audit"
-    try:
-        if audit_directory.is_dir() and not audit_directory.is_symlink():
-            candidates.extend(audit_directory.glob("*.json"))
-    except OSError:
-        pass
-
-    rows: list[dict[str, Any]] = []
-    unique_paths: set[Path] = set()
-    for candidate in candidates:
-        path = _safe_file(root, candidate)
-        if path is None or path in unique_paths:
-            continue
-        unique_paths.add(path)
-        try:
-            size = path.stat().st_size
-            payload, file_sha256, encoding = _load_catalog_document(path)
-            schema = payload.get("schema")
-            status = payload.get("status")
-            rows.append(
-                {
-                    "name": path.stem,
-                    "relative_path": path.relative_to(root).as_posix(),
-                    "category": (
-                        "实时集成审计"
-                        if "chanlun_live_integration" in path.parts
-                        else "结构一致性审计"
-                    ),
-                    "schema": (
-                        str(schema)[:120]
-                        if isinstance(schema, str) and schema.strip()
-                        else "未声明"
-                    ),
-                    "status": (
-                        str(status)[:80]
-                        if isinstance(status, str) and status.strip()
-                        else "已归档"
-                    ),
-                    "valid_json": True,
-                    "encoding": encoding,
-                    "size_bytes": size,
-                    "modified_at": _modified_at(path),
-                    "file_sha256": file_sha256,
-                }
-            )
-        except (OSError, ResearchAuditUnavailable):
-            rows.append(
-                {
-                    "name": path.stem,
-                    "relative_path": path.relative_to(root).as_posix(),
-                    "category": "审计记录",
-                    "schema": "无法解析",
-                    "status": "格式无效",
-                    "valid_json": False,
-                    "encoding": None,
-                    "size_bytes": path.stat().st_size if path.exists() else 0,
-                    "modified_at": _modified_at(path) if path.exists() else None,
-                    "file_sha256": None,
-                }
-            )
-    rows.sort(key=lambda row: str(row.get("modified_at") or ""), reverse=True)
-    return rows[:_AUDIT_CATALOG_LIMIT]
 
 
 def _historical_dataset_status(root: Path) -> dict[str, Any] | None:
@@ -390,23 +276,18 @@ def _historical_replay_status(
     except (TypeError, ValueError):
         checkpoint_modified_at = None
     heartbeat_at = max(
-        value
-        for value in (modified_at, checkpoint_modified_at)
-        if value is not None
+        value for value in (modified_at, checkpoint_modified_at) if value is not None
     )
     heartbeat_source = (
         "symbol_checkpoint"
-        if checkpoint_modified_at is not None
-        and checkpoint_modified_at > modified_at
+        if checkpoint_modified_at is not None and checkpoint_modified_at > modified_at
         else "extract_manifest"
     )
     heartbeat_age = max(
         0.0,
         (datetime.now().astimezone() - heartbeat_at).total_seconds(),
     )
-    running = (
-        not complete and heartbeat_age <= _REPLAY_HEARTBEAT_MAX_AGE_SECONDS
-    )
+    running = not complete and heartbeat_age <= _REPLAY_HEARTBEAT_MAX_AGE_SECONDS
     status = (
         "complete"
         if complete
@@ -453,13 +334,12 @@ def build_research_audit_status_snapshot(
     """Expose existing historical evidence without presenting uncertified PnL.
 
     The certified report remains fail-closed.  This fallback only inventories
-    immutable source material and audit records, so a missing report no longer
+    immutable source material and replay state, so a missing report no longer
     turns the entire read-only page into an empty error card.
     """
     root_path = _root(root)
     gate_path = _safe_file(root_path, root_path / _CAUSALITY_GATE_PATH)
     report_path = _safe_file(root_path, root_path / _ARTIFACT_PATH)
-    catalog = _audit_catalog(root_path)
     dataset = _historical_dataset_status(root_path)
     replay = _historical_replay_status(
         root_path,
@@ -486,8 +366,6 @@ def build_research_audit_status_snapshot(
         },
         "historical_dataset": dataset,
         "historical_replay": replay,
-        "audit_artifacts": catalog,
-        "audit_artifact_count": len(catalog),
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
 
@@ -592,18 +470,12 @@ def _gate_details(
         checked_at = _text(payload.get("checked_at"), max_length=64)
         status = _text(payload.get("status"), max_length=32)
         pnl_generated = _boolean(payload.get("pnl_generated"))
-        algorithm_revision = _text(
-            payload.get("algorithm_revision"), max_length=80
-        )
+        algorithm_revision = _text(payload.get("algorithm_revision"), max_length=80)
         validated_symbol_fact_count = _integer(
             payload.get("validated_symbol_fact_count")
         )
-        validated_decision_count = _integer(
-            payload.get("validated_decision_count")
-        )
-        snapshot_hash = _text(
-            payload.get("pit_snapshot_sha256"), max_length=80
-        )
+        validated_decision_count = _integer(payload.get("validated_decision_count"))
+        snapshot_hash = _text(payload.get("pit_snapshot_sha256"), max_length=80)
         controls = [
             _text(value, max_length=100)
             for value in _sequence(payload.get("proven_controls"))
@@ -617,29 +489,23 @@ def _gate_details(
             seen_codes.add(code)
             failures.append(code)
         report_value = payload.get("report")
-        report = (
-            None
-            if report_value is None
-            else _text(report_value, max_length=1000)
-        )
+        report = None if report_value is None else _text(report_value, max_length=1000)
     except ResearchAuditUnavailable as exc:
         if exc.code == "causality_gate_invalid":
             raise
         raise ResearchAuditUnavailable("causality_gate_invalid") from exc
     if (
-        schema != "chanlun-backtest-causality-gate"
-        or status not in {"blocked", "passed"}
+        schema != CAUSALITY_GATE_SCHEMA
+        or status not in CAUSALITY_GATE_STATUSES
         or _HASH_RE.fullmatch(algorithm_revision) is None
         or _HASH_RE.fullmatch(snapshot_hash) is None
-        or set(controls) != _CAUSAL_CONTROLS
-        or len(controls) != len(_CAUSAL_CONTROLS)
-        or (
-            status == "blocked"
-            and (pnl_generated is not False or not failures or report is not None)
-        )
-        or (
-            status == "passed"
-            and (pnl_generated is not True or failures or report is None)
+        or set(controls) != CAUSALITY_GATE_PROVEN_CONTROL_SET
+        or len(controls) != len(CAUSALITY_GATE_PROVEN_CONTROLS)
+        or not causality_gate_state_is_consistent(
+            status=status,
+            pnl_generated=pnl_generated,
+            failures=failures,
+            report=report,
         )
     ):
         raise ResearchAuditUnavailable("causality_gate_invalid")
@@ -700,9 +566,7 @@ def _validate_report(
         raise ResearchAuditUnavailable("strategy_contract_invalid")
     if not verify_report_hash(payload):
         raise ResearchAuditUnavailable("artifact_hash_mismatch")
-    algorithm_hashes = _validate_algorithm_hashes(
-        payload.get("algorithm_hashes")
-    )
+    algorithm_hashes = _validate_algorithm_hashes(payload.get("algorithm_hashes"))
     if _algorithm_revision(algorithm_hashes) != gate["algorithm_revision"]:
         raise ResearchAuditUnavailable("strategy_contract_invalid")
     _text(payload.get("generated_at"), max_length=64)
@@ -714,24 +578,15 @@ def _validate_report(
     _effective, effective_start, effective_end = _date_range(
         payload.get("effective_range")
     )
-    if not (
-        requested_start <= effective_start <= effective_end == requested_end
-    ):
+    if not (requested_start <= effective_start <= effective_end == requested_end):
         raise ResearchAuditUnavailable("artifact_invalid_schema")
     universe = _mapping(payload.get("universe"))
-    if (
-        universe.get("catalog_source")
-        != "qmt_sw1_with_cninfo_effective_dates"
-    ):
+    if universe.get("catalog_source") != "qmt_sw1_with_cninfo_effective_dates":
         raise ResearchAuditUnavailable("strategy_contract_invalid")
     eligible_sectors = _integer(universe.get("eligible_sector_count"))
     selected_symbols = _integer(universe.get("selected_symbol_count"))
-    archived_symbols = _integer(
-        universe.get("archived_intersecting_symbol_count")
-    )
-    unclassified_symbols = _integer(
-        universe.get("unclassified_excluded_symbol_count")
-    )
+    archived_symbols = _integer(universe.get("archived_intersecting_symbol_count"))
+    unclassified_symbols = _integer(universe.get("unclassified_excluded_symbol_count"))
     corporate_actions = _integer(universe.get("corporate_action_count"))
     evaluation_count = _integer(universe.get("causal_evaluation_count"))
     if (
@@ -793,33 +648,8 @@ def _validate_report(
         "t_plus_one": True,
         "intraday_structural_stop": True,
     }
-    # 旧认证报告仍可只读展示，但新报告必须明确区分“5分钟正式信号”、
-    # “1分钟精确执行区间套”和“1分钟成交观察”，不能再把三者压成 trigger_frequency。
-    previous_current_expected_contract = {
-        key: value
-        for key, value in current_expected_contract.items()
-        if key != "segment_difference_required_for_precise_execution"
-    }
-    legacy_expected_contract = {
-        key: value
-        for key, value in current_expected_contract.items()
-        if key
-        not in {
-            "trade_frequency",
-            "segment_difference_frequency",
-            "segment_difference_required_for_trade_signal",
-            "segment_difference_required_for_precise_execution",
-            "execution_observation_frequency",
-        }
-    }
-    legacy_expected_contract["trigger_frequency"] = "1m"
-    if not any(
-        all(contract.get(key) == value for key, value in expected.items())
-        for expected in (
-            current_expected_contract,
-            previous_current_expected_contract,
-            legacy_expected_contract,
-        )
+    if "trigger_frequency" in contract or not all(
+        contract.get(key) == value for key, value in current_expected_contract.items()
     ):
         raise ResearchAuditUnavailable("strategy_contract_invalid")
 
@@ -827,16 +657,19 @@ def _validate_report(
     net_return = _decimal(metrics.get("net_return"))
     max_drawdown = _decimal(metrics.get("max_drawdown"))
     calmar = _decimal(metrics.get("calmar"), optional=True)
-    _decimal(metrics.get("annualized_return"), optional=True)
-    _decimal(metrics.get("sharpe"), optional=True)
-    _decimal(metrics.get("sortino"), optional=True)
+    annualized_return = _decimal(metrics.get("annualized_return"), optional=True)
+    sharpe = _decimal(metrics.get("sharpe"), optional=True)
+    sortino = _decimal(metrics.get("sortino"), optional=True)
+    exposure_ratio = _decimal(metrics.get("exposure_ratio"))
+    turnover = _decimal(metrics.get("turnover"))
+    total_cost = _decimal(metrics.get("total_cost"))
     _integer(metrics.get("max_drawdown_duration_bars"))
     _sequence(metrics.get("warnings"))
 
     adequacy = _mapping(payload.get("sample_adequacy"))
     sample_passed = _boolean(adequacy.get("passed"))
-    _integer(adequacy.get("closed_trade_count"))
-    _mapping(adequacy.get("point_counts"))
+    closed_trade_count = _integer(adequacy.get("closed_trade_count"))
+    point_counts = _mapping(adequacy.get("point_counts"))
     _sequence(adequacy.get("failures"))
 
     concentration = _mapping(payload.get("concentration"))
@@ -872,12 +705,30 @@ def _validate_report(
         "limitations",
     ):
         _sequence(payload.get(key))
-    _mapping(payload.get("point_type_metrics"))
+    point_type_metrics = _mapping(payload.get("point_type_metrics"))
     _mapping(payload.get("sector_year_liquidity_metrics"))
     _mapping(payload.get("parameter_robustness"))
     bootstrap = payload.get("bootstrap_intervals")
     if bootstrap is not None:
         _mapping(bootstrap)
+    if not gate["pnl_generated"]:
+        zero_metrics = (
+            net_return,
+            max_drawdown,
+            exposure_ratio,
+            turnover,
+            total_cost,
+        )
+        optional_metrics = (annualized_return, calmar, sharpe, sortino)
+        if (
+            any(value != 0 for value in zero_metrics)
+            or any(value not in (None, Decimal("0")) for value in optional_metrics)
+            or closed_trade_count != 0
+            or any(_integer(value) != 0 for value in point_counts.values())
+            or point_type_metrics
+            or bootstrap is not None
+        ):
+            raise ResearchAuditUnavailable("strategy_contract_invalid")
 
 
 def build_research_audit_snapshot(root: str | Path) -> dict[str, object]:
@@ -906,6 +757,7 @@ def build_research_audit_snapshot(root: str | Path) -> dict[str, object]:
     return {
         "schema": "research-audit-page",
         "source_kind": "certified_report",
+        "pnl_generated": gate["pnl_generated"],
         "strategy_id": STRATEGY_ID,
         "strategy_label": _text(payload.get("strategy_label"), max_length=120),
         "active_strategy_count": 1,
@@ -920,13 +772,12 @@ def build_research_audit_snapshot(root: str | Path) -> dict[str, object]:
         "data_evidence": evidence,
         "execution_contract": _mapping(payload.get("execution_contract")),
         "walk_forward_windows": _sequence(payload.get("walk_forward_windows")),
-        "aggregate_out_of_sample": _mapping(
-            payload.get("aggregate_out_of_sample")
-        ),
+        "aggregate_out_of_sample": _mapping(payload.get("aggregate_out_of_sample")),
         "point_type_metrics": point_type_metrics,
         "closed_trade_net_pnl": str(closed_trade_net_pnl),
-        "terminal_positions_marked_to_market": (
-            "terminal_open_positions_marked_to_market_not_same_bar_liquidated"
+        "terminal_positions_marked_to_market": bool(
+            gate["pnl_generated"]
+            and "terminal_open_positions_marked_to_market_not_same_bar_liquidated"
             in evidence_warnings
         ),
         "sector_year_liquidity_metrics": _mapping(
@@ -934,9 +785,7 @@ def build_research_audit_snapshot(root: str | Path) -> dict[str, object]:
         ),
         "bootstrap_intervals": payload.get("bootstrap_intervals"),
         "ablations": _sequence(payload.get("ablations")),
-        "parameter_robustness": _mapping(
-            payload.get("parameter_robustness")
-        ),
+        "parameter_robustness": _mapping(payload.get("parameter_robustness")),
         "benchmarks": _sequence(payload.get("benchmarks")),
         "concentration": _mapping(payload.get("concentration")),
         "sample_adequacy": _mapping(payload.get("sample_adequacy")),

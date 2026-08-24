@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from math import isfinite
 
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.models import (
     LifecycleStage,
@@ -87,6 +88,32 @@ def five_minute_setup_is_current(
     return observed_at <= five_minute_setup_expires_at(
         point,
         max_setup_age_seconds=max_setup_age_seconds,
+    )
+
+
+def five_minute_setup_is_executable(
+    point: StructuralPoint | ProvisionalCandidate,
+    *,
+    as_of: datetime,
+    max_setup_age_seconds: int = MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
+) -> bool:
+    """Return whether a visible 5m setup is still inside its order window.
+
+    Terminal lineage answers which completed/unfinished tail is current for
+    display and monitoring.  It must not silently turn that structural state
+    into a permanent trading opportunity.  Execution therefore always uses
+    the fixed, anchor-based expiry contract, independently of tail display.
+    """
+
+    observed_at = normalize_datetime(as_of, "as_of")
+    available_at = normalize_datetime(point.available_at, "setup available_at")
+    return (
+        available_at
+        <= observed_at
+        <= five_minute_setup_expires_at(
+            point,
+            max_setup_age_seconds=max_setup_age_seconds,
+        )
     )
 
 
@@ -183,9 +210,7 @@ def structural_point_occurrence_id(point: StructuralPoint) -> str:
             "recursive_level": point.recursive_level,
             "anchor_at": point.anchor_at.isoformat(timespec="seconds"),
             "structure_anchor_price": point.structure_anchor_price,
-            "structure_invalidation_price": (
-                point.structure_invalidation_price
-            ),
+            "structure_invalidation_price": (point.structure_invalidation_price),
             "center_zd": point.center_zd,
             "center_zg": point.center_zg,
             "center_ordinal": point.center_ordinal,
@@ -262,9 +287,7 @@ def current_five_minute_setup_points(
         ):
             continue
         certainty_lane = (
-            "provisional"
-            if isinstance(point, ProvisionalCandidate)
-            else "confirmed"
+            "provisional" if isinstance(point, ProvisionalCandidate) else "confirmed"
         )
         lane = (
             *five_minute_setup_family_lane(point),
@@ -279,13 +302,9 @@ def current_five_minute_setup_points(
             previous[1].append(point)
 
     retained = [
-        point
-        for _rank, lane_points in latest.values()
-        for point in lane_points
+        point for _rank, lane_points in latest.values() for point in lane_points
     ]
-    formed_frontier_by_lane: dict[
-        tuple[str, str, int, str, str], datetime
-    ] = {}
+    formed_frontier_by_lane: dict[tuple[str, str, int, str, str], datetime] = {}
     for point in retained:
         if not isinstance(point, ProvisionalCandidate):
             continue
@@ -315,8 +334,7 @@ def current_five_minute_setup_points(
             )
             is not None
             and point.anchor_at is not None
-            and formed_frontier
-            > normalize_datetime(point.anchor_at, "setup anchor_at")
+            and formed_frontier > normalize_datetime(point.anchor_at, "setup anchor_at")
         )
     ]
     return tuple(
@@ -342,8 +360,8 @@ def lifecycle_stage_from_signal(signal: Mapping[str, object]) -> str | None:
     return stage
 
 
-def is_one_minute_reversal_trigger(point: StructuralPoint) -> bool:
-    """判断正式点能否作为 1 分钟反转触发证据。
+def _is_one_minute_reversal_segment_difference(point: StructuralPoint) -> bool:
+    """判断正式点能否作为 1 分钟反转段差证据。
 
     一、二类点分别证明趋势背驰反转和回试确认；三类点只证明离开中枢后的延续，
     不能替代反转证据。实时决策与历史回放必须共同使用这一唯一判定入口。
@@ -383,12 +401,12 @@ def third_class_boundary_clearance(point: StructuralPoint) -> Decimal | None:
     return None
 
 
-def is_one_minute_continuation_trigger(
+def _is_one_minute_continuation_segment_difference(
     point: StructuralPoint,
     *,
     minimum_tick: Decimal | float | str = Decimal("0.01"),
 ) -> bool:
-    """判断正式三类点能否作为 1 分钟延续触发证据。
+    """判断正式三类点能否作为 1 分钟延续段差证据。
 
     严格结构对象已经冻结了中枢身份、序号以及首次回返几何；决策层在此额外
     拒绝仅触碰边界的形态，并要求回返锚点至少离开边界一个最小价格单位。
@@ -422,9 +440,12 @@ def is_one_minute_segment_difference(
 
     if point.point_type not in ONE_MINUTE_SEGMENT_DIFFERENCE_POINT_TYPES:
         return False
-    return is_one_minute_reversal_trigger(
+    return _is_one_minute_reversal_segment_difference(
         point
-    ) or is_one_minute_continuation_trigger(point, minimum_tick=minimum_tick)
+    ) or _is_one_minute_continuation_segment_difference(
+        point,
+        minimum_tick=minimum_tick,
+    )
 
 
 def is_one_minute_segment_difference_document(
@@ -473,31 +494,6 @@ def is_one_minute_segment_difference_document(
         return False
     clearance = center_zd - anchor if point_type == "3sell" else anchor - center_zg
     return clearance >= tick
-
-
-def is_one_minute_execution_trigger(
-    point: StructuralPoint,
-    *,
-    minimum_tick: Decimal | float | str = Decimal("0.01"),
-) -> bool:
-    """旧接口别名；1 分钟点现在只表示段差证据，不再触发 5 分钟信号。"""
-
-    return is_one_minute_segment_difference(point, minimum_tick=minimum_tick)
-
-
-def is_one_minute_execution_trigger_document(
-    point: Mapping[str, object],
-    *,
-    minimum_tick: Decimal | float | str = Decimal("0.01"),
-    expected_side: str | None = None,
-) -> bool:
-    """旧文档接口别名；保留用于读取既有档案。"""
-
-    return is_one_minute_segment_difference_document(
-        point,
-        minimum_tick=minimum_tick,
-        expected_side=expected_side,
-    )
 
 
 _TRANSITIONS: dict[LifecycleStage | None, set[LifecycleStage]] = {
@@ -564,17 +560,6 @@ def build_setup(
     )
 
 
-def _setup_price_range(point: StructuralPoint) -> tuple[float, float]:
-    prices = [
-        point.structure_invalidation_price,
-        point.structure_anchor_price,
-    ]
-    boundary = point.center_zg if point.side == "buy" else point.center_zd
-    if boundary is not None:
-        prices.append(boundary)
-    return min(prices), max(prices)
-
-
 def five_minute_segment_difference_window_start(
     setup_point: StructuralPoint,
 ) -> datetime:
@@ -582,9 +567,9 @@ def five_minute_segment_difference_window_start(
 
     A production 5m point is anchored at the *end* of its terminal segment.
     Lower-level evidence can exist while that segment is forming, so the audit
-    window starts at the segment's market start.  Executable matching below has
-    an additional causal gate: a 1m locator must become available no earlier
-    than the formal 5m setup itself.
+    window starts at the segment's market start.  Causal execution uses the
+    first timestamp at which both this outer interval and an exact nested 1m
+    interval are known; there is no second timing gate after setup formation.
     """
 
     if (
@@ -597,22 +582,76 @@ def five_minute_segment_difference_window_start(
     ):
         raise ValueError("segment difference window requires a confirmed 5m setup")
     reference = setup_point.terminal_segment
-    return normalize_datetime(
-        setup_point.anchor_at if reference is None else reference.market_start,
-        "segment difference window start",
+    if reference is None:
+        return normalize_datetime(
+            setup_point.anchor_at,
+            "segment difference window start",
+        )
+    return completed_bar_interval_start(
+        reference.market_start,
+        minutes=5,
+        field="segment difference window start",
     )
 
 
-def _segment_difference_matches_five_minute_point(
+def completed_bar_interval_start(
+    completed_at: datetime,
+    *,
+    minutes: int,
+    field: str,
+) -> datetime:
+    """Return the left edge of one end-labelled completed minute bar.
+
+    Trading-system structure timestamps are completed-bar labels.  Cross-
+    frequency containment therefore cannot compare the first 5m and 1m labels
+    directly: for example, the completed 5m bar labelled 09:55 covers the same
+    left boundary as the completed 1m bar labelled 09:51.  Projecting both
+    labels to their physical left edges preserves exact interval containment.
+    """
+
+    if type(minutes) is not int or minutes <= 0:
+        raise ValueError("completed bar duration must be a positive integer")
+    return normalize_datetime(completed_at, field) - timedelta(minutes=minutes)
+
+
+def _nesting_witness_matches_five_minute_point(
     setup_point: StructuralPoint,
     segment_point: StructuralPoint,
     *,
     as_of: datetime,
     minimum_tick: Decimal | float | str,
 ) -> bool:
+    """Return whether one exact 1m terminal segment nests inside the 5m one.
+
+    Point class, price and timestamp proximity are insufficient evidence of
+    interval nesting.  Both points must retain their terminal-segment lineage,
+    and the complete inner market interval must be contained by the complete
+    outer interval.  The inner point may have become available while the 5m
+    segment was still forming; causality only requires that both facts were
+    available by the decision timestamp.
+    """
+
     closed_at = normalize_datetime(as_of, "as_of")
-    window_start = five_minute_segment_difference_window_start(setup_point)
-    price_low, price_high = _setup_price_range(setup_point)
+    setup_reference = setup_point.terminal_segment
+    segment_reference = segment_point.terminal_segment
+    setup_interval_start = (
+        None
+        if setup_reference is None
+        else completed_bar_interval_start(
+            setup_reference.market_start,
+            minutes=5,
+            field="five minute terminal interval start",
+        )
+    )
+    segment_interval_start = (
+        None
+        if segment_reference is None
+        else completed_bar_interval_start(
+            segment_reference.market_start,
+            minutes=1,
+            field="one minute terminal interval start",
+        )
+    )
     return bool(
         setup_point.confirmed
         and is_five_minute_trade_level(
@@ -623,81 +662,34 @@ def _segment_difference_matches_five_minute_point(
             segment_point,
             minimum_tick=minimum_tick,
         )
+        and setup_reference is not None
+        and segment_reference is not None
+        and setup_reference.source_kind is SourceKind.SEGMENT
+        and segment_reference.source_kind is SourceKind.SEGMENT
         and segment_point.code == setup_point.code
         and segment_point.side == setup_point.side
         and segment_point.point_id != setup_point.point_id
         and segment_point.price_basis_revision == setup_point.price_basis_revision
         and segment_point.confirmed_at is not None
         and setup_point.available_at <= closed_at
-        and window_start <= segment_point.anchor_at
-        and setup_point.available_at <= segment_point.available_at <= closed_at
-        and price_low
-        <= segment_point.structure_anchor_price
-        <= price_high
+        and segment_point.available_at <= closed_at
+        and setup_interval_start <= segment_interval_start
+        and segment_reference.market_end <= setup_reference.market_end
     )
 
 
-def match_five_minute_setup_point(
-    trigger: StructuralPoint,
-    points: tuple[StructuralPoint, ...],
-    *,
-    as_of: datetime,
-    minimum_tick: Decimal | float | str = Decimal("0.01"),
-    max_setup_age_seconds: int = MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
-) -> StructuralPoint | None:
-    """为一个 1 分钟执行触发选择唯一、因果有效的 5 分钟设置。
-
-    跨市场实时监听没有 A 股板块对象，不能直接构造完整决策包；但它仍必须与
-    主决策核心共享同一套触发类型、价格区间、价格基准及时序约束。若多条设置
-    同时匹配，选择触发发生前最近确认的一条，避免同一触发重复通知。
-    """
-
-    if type(max_setup_age_seconds) is not int or max_setup_age_seconds <= 0:
-        raise ValueError("max_setup_age_seconds must be a positive integer")
-    closed_at = normalize_datetime(as_of, "as_of")
-    if trigger.available_at > closed_at or not is_one_minute_segment_difference(
-        trigger,
-        minimum_tick=minimum_tick,
-    ):
-        return None
-    opportunity_as_of = min(closed_at, trigger.available_at)
-    candidates = tuple(
-        point
-        for point in points
-        if five_minute_setup_is_current(
-            point,
-            as_of=opportunity_as_of,
-            max_setup_age_seconds=max_setup_age_seconds,
-        )
-        and _segment_difference_matches_five_minute_point(
-            point,
-            trigger,
-            as_of=closed_at,
-            minimum_tick=minimum_tick,
-        )
-    )
-    return max(
-        candidates,
-        key=lambda point: (
-            point.available_at,
-            point.recursive_level,
-            point.tower,
-            point.point_id,
-        ),
-        default=None,
-    )
-
-
-def match_one_minute_segment_difference(
+def match_one_minute_nesting_witness(
     setup: TradeSetup,
     points: tuple[StructuralPoint, ...],
     *,
     as_of: datetime,
     minimum_tick: Decimal | float | str = Decimal("0.01"),
 ) -> StructuralPoint | None:
+    """Return an exact 1m-in-5m nesting witness for a trade setup."""
+
     if not isinstance(setup.point, StructuralPoint) or not setup.point.confirmed:
         return None
-    return match_one_minute_segment_difference_for_point(
+    return match_one_minute_nesting_witness_for_point(
         setup.point,
         points,
         as_of=as_of,
@@ -705,18 +697,18 @@ def match_one_minute_segment_difference(
     )
 
 
-def match_one_minute_segment_difference_for_point(
+def match_one_minute_nesting_witness_for_point(
     setup_point: StructuralPoint,
     points: tuple[StructuralPoint, ...],
     *,
     as_of: datetime,
     minimum_tick: Decimal | float | str = Decimal("0.01"),
 ) -> StructuralPoint | None:
-    """为已确认的 5 分钟正式点选择最近的因果 1 分钟段差。
+    """为已确认的 5 分钟正式点选择首个因果区间套见证。
 
-    形成期间的低级别结构仍属于底层审计事实，但不能充当事后才确认的 5m
-    信号之执行定位器。这里只返回在正式 5m 点可用后出现的 1m 证据；它不
-    参与 5m 主信号是否成立的判断。
+    1m 见证可以在 5m 末端线段形成期间出现，但两者必须保留精确的末端线段
+    血缘，且完整 1m 线段区间必须包含在完整 5m 线段区间内。它不参与 5m
+    主信号是否成立的判断，也不构成信号确认后的第二套时序门槛。
     """
 
     if (
@@ -732,39 +724,22 @@ def match_one_minute_segment_difference_for_point(
     matches = tuple(
         point
         for point in points
-        if _segment_difference_matches_five_minute_point(
+        if _nesting_witness_matches_five_minute_point(
             setup_point,
             point,
             as_of=closed_at,
             minimum_tick=minimum_tick,
         )
     )
-    return max(
+    return min(
         matches,
         key=lambda point: (
-            point.available_at,
-            point.recursive_level,
-            point.tower,
+            max(setup_point.available_at, point.available_at),
+            -point.terminal_segment.market_end.timestamp(),
+            structural_point_occurrence_id(point),
             point.point_id,
         ),
         default=None,
-    )
-
-
-def match_one_minute_trigger(
-    setup: TradeSetup,
-    points: tuple[StructuralPoint, ...],
-    *,
-    as_of: datetime,
-    minimum_tick: Decimal | float | str = Decimal("0.01"),
-) -> StructuralPoint | None:
-    """旧接口别名；返回值现在是可选段差证据，不是正式信号触发器。"""
-
-    return match_one_minute_segment_difference(
-        setup,
-        points,
-        as_of=as_of,
-        minimum_tick=minimum_tick,
     )
 
 
@@ -809,7 +784,7 @@ def lifecycle_state_from_signal_document(
         setup_id = str(signal["setup_id"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("signal lifecycle identity is invalid") from exc
-    raw_trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    raw_trigger = signal.get("segment_difference_1m")
     if raw_trigger is None:
         trigger = None
     elif isinstance(raw_trigger, Mapping):
@@ -910,7 +885,7 @@ def advance_lifecycle(
     valid_trigger = (
         None
         if trigger is None
-        else match_one_minute_segment_difference(
+        else match_one_minute_nesting_witness(
             setup,
             (trigger,),
             as_of=observed_at,
@@ -925,12 +900,12 @@ def advance_lifecycle(
         and previous.stage in {"triggered", "executable", "active"}
         and not invalidated
     ):
-        if valid_trigger is None or previous.trigger_point_id == valid_trigger.point_id:
+        # The first exact nesting witness fixes the setup's execution boundary.
+        # A later witness is audit evidence only and cannot open another window.
+        if previous.trigger_point_id is not None:
             return previous
-        # The 5m signal identity and monotonic stage remain unchanged, while a
-        # later valid 1m occurrence may replace an expired locator.  Recording
-        # the new point and observation time keeps the lifecycle evidence
-        # consistent with the decision document and its new execution boundary.
+        if valid_trigger is None:
+            return previous
         return SignalLifecycle(
             signal_id=signal_id,
             setup_id=setup.setup_id,
@@ -961,9 +936,7 @@ def advance_lifecycle(
         setup_id=setup.setup_id,
         stage=target,
         observed_at=observed_at,
-        trigger_point_id=(
-            None if valid_trigger is None else valid_trigger.point_id
-        ),
+        trigger_point_id=(None if valid_trigger is None else valid_trigger.point_id),
         reason_codes=_reason_codes(target),
         actionable=target in {"triggered", "executable", "active"},
     )

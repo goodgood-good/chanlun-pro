@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -30,7 +30,7 @@ from chanlun.decision_support.trading_system.operation_level import (
 )
 from chanlun.decision_support.trading_system.lifecycle import (
     current_five_minute_setup_points,
-    match_one_minute_segment_difference_for_point,
+    match_one_minute_nesting_witness_for_point,
 )
 from chanlun.decision_support.trading_system.provisional import (
     extract_current_provisional_candidates,
@@ -61,7 +61,7 @@ from chanlun.decision_support.trading_system.structure_adapter import (
 from chanlun.exchange.price_basis import copy_price_basis_metadata
 from chanlun.exchange.kline_completion import (
     drop_unclosed_last_bar,
-    frequency_to_minutes,
+    normalize_completed_bar_labels,
 )
 
 
@@ -175,8 +175,7 @@ class StrictRealtimeMonitorEvent:
                     else "sell"
                 )
                 if (
-                    self.segment_difference_point_type
-                    not in CANONICAL_POINT_TYPE_SET
+                    self.segment_difference_point_type not in CANONICAL_POINT_TYPE_SET
                     or expected_segment_side != self.side
                     or not self.segment_difference_evidence_id
                     or type(self.segment_difference_recursive_level) is not int
@@ -199,15 +198,17 @@ class StrictRealtimeMonitorEvent:
                     and self.segment_difference_divergence_kind is not None
                 ):
                     raise ValueError("实时监听的 1 分钟段差证据不完整")
-            elif any(
-                (
-                    self.segment_difference_evidence_id,
-                    self.segment_difference_anchor_time,
-                    self.segment_difference_confirmed_time,
-                    self.segment_difference_available_time,
+            elif (
+                any(
+                    (
+                        self.segment_difference_evidence_id,
+                        self.segment_difference_anchor_time,
+                        self.segment_difference_confirmed_time,
+                        self.segment_difference_available_time,
+                    )
                 )
-            ) or self.segment_difference_divergence_kind is not None or (
-                self.segment_difference_recursive_level is not None
+                or self.segment_difference_divergence_kind is not None
+                or (self.segment_difference_recursive_level is not None)
             ):
                 raise ValueError("实时监听的 1 分钟段差字段互相矛盾")
             if self.signal_role == "TRADE_SIGNAL_5M":
@@ -366,6 +367,9 @@ class StrictPhysicalMonitorState:
         self.segment_difference_reason = "NOT_REFRESHED"
         self._runtime_by_frequency: dict[str, _FrequencyRuntime] = {}
         self._segment_difference_by_trade_point_id: dict[str, StructuralPoint] = {}
+        self._first_segment_difference_by_trade_point_id: dict[
+            str, StructuralPoint
+        ] = {}
         self._notified_segment_occurrences: set[tuple[str, ...]] = set()
         self._new_segment_difference_updates: tuple[
             tuple[StructuralPoint, StructuralPoint], ...
@@ -427,6 +431,11 @@ class StrictPhysicalMonitorState:
             time_label=self.kline_time_label,
             as_of=as_of,
         )
+        frame = normalize_completed_bar_labels(
+            frame,
+            frequency,
+            time_label=self.kline_time_label,
+        )
         if frame is None or frame.empty:
             raise ValueError(f"{frequency} has no completed kline")
         frame = frame.loc[:, list(required)].copy()
@@ -449,8 +458,7 @@ class StrictPhysicalMonitorState:
         frame.loc[:, numeric_columns] = numeric
         if (
             (frame[["open", "high", "low", "close"]] <= 0).any(axis=None)
-            or
-            (frame["high"] < frame[["open", "close", "low"]].max(axis=1)).any()
+            or (frame["high"] < frame[["open", "close", "low"]].max(axis=1)).any()
             or (frame["low"] > frame[["open", "close", "high"]].min(axis=1)).any()
             or (frame["volume"] < 0).any()
         ):
@@ -529,11 +537,6 @@ class StrictPhysicalMonitorState:
             )
             if completed_at is None:
                 continue
-            if raw_date is not None and self.kline_time_label == "start":
-                minutes = frequency_to_minutes(frequency)
-                if minutes is None:
-                    continue
-                completed_at += timedelta(minutes=float(minutes))
             price = float(last_kline.c)
             if not np.isfinite(price) or price <= 0:
                 continue
@@ -648,9 +651,7 @@ class StrictPhysicalMonitorState:
         candidate.source_frame = source_frame
         candidate.confirmed_points = None
         candidate.update_count = previous_update_count + 1
-        candidate.incremental_update_count = previous_incremental_count + int(
-            reusable
-        )
+        candidate.incremental_update_count = previous_incremental_count + int(reusable)
         candidate.rebuild_count = previous_rebuild_count + int(not reusable)
         candidate.last_update_incremental = reusable
         self._runtime_by_frequency[frequency] = candidate
@@ -676,9 +677,7 @@ class StrictPhysicalMonitorState:
             return None
         except Exception as exc:
             self.segment_difference_ready = False
-            self.segment_difference_reason = (
-                f"{type(exc).__name__}: {str(exc)[:200]}"
-            )
+            self.segment_difference_reason = f"{type(exc).__name__}: {str(exc)[:200]}"
             return None
         self.segment_difference_ready = True
         self.segment_difference_reason = "READY"
@@ -768,9 +767,7 @@ class StrictPhysicalMonitorState:
             as_of=observed_at,
         )
         points = tuple(
-            point
-            for point in current_setups
-            if isinstance(point, StructuralPoint)
+            point for point in current_setups if isinstance(point, StructuralPoint)
         )
         one_minute_points = (
             extract_one_minute_segment_difference_points(
@@ -782,18 +779,33 @@ class StrictPhysicalMonitorState:
             if mid is not None
             else ()
         )
-        self._segment_difference_by_trade_point_id = {
-            point.point_id: segment
-            for point in points
-            if (
-                segment := match_one_minute_segment_difference_for_point(
+        for point in points:
+            first_witness = self._first_segment_difference_by_trade_point_id.get(
+                point.point_id
+            )
+            if first_witness is None:
+                first_witness = match_one_minute_nesting_witness_for_point(
                     point,
                     one_minute_points,
                     as_of=observed_at,
                 )
-            )
-            is not None
-        }
+                if first_witness is not None:
+                    self._first_segment_difference_by_trade_point_id[point.point_id] = (
+                        first_witness
+                    )
+            else:
+                # The first jointly-known exact witness fixes this setup's
+                # execution boundary.  Later 1m intervals may be audited, but
+                # they cannot replace it or create another entry window.
+                first_witness = match_one_minute_nesting_witness_for_point(
+                    point,
+                    (first_witness,),
+                    as_of=observed_at,
+                )
+            if first_witness is not None:
+                self._segment_difference_by_trade_point_id[point.point_id] = (
+                    first_witness
+                )
         new_segment_updates: list[tuple[StructuralPoint, StructuralPoint]] = []
         for point in points:
             segment = self._segment_difference_by_trade_point_id.get(point.point_id)
@@ -805,8 +817,8 @@ class StrictPhysicalMonitorState:
             )
             if segment_occurrence in self._notified_segment_occurrences:
                 continue
-            # 5m 父结构由当前末端血缘决定，不按墙钟年龄过期；每个独立的 1m
-            # 区间套定位各通知一次。旧定位的执行边界失效后，后续新定位仍能重启。
+            # Each 5m setup publishes its first jointly-known exact nesting
+            # witness once.  Later evidence cannot move the boundary.
             self._notified_segment_occurrences.add(segment_occurrence)
             new_segment_updates.append((point, segment))
         self._new_segment_difference_updates = tuple(new_segment_updates)
@@ -931,8 +943,7 @@ class StrictPhysicalMonitorState:
             for point in points
             if point.point_type == point_type
             and point.recursive_level == recursive_level
-            and pd.Timestamp(point.anchor_at).tz_convert("UTC")
-            == target_anchor_utc
+            and pd.Timestamp(point.anchor_at).tz_convert("UTC") == target_anchor_utc
             and pd.Timestamp(point.available_at).tz_convert("UTC") == target_utc
         ]
         exact = [point for point in semantic_matches if point.point_id == evidence_id]
@@ -972,8 +983,10 @@ def _monitor_position_facts(
         recommendation=(
             "CAUTION"
             if big_dir == "neutral"
-            or side == "buy" and big_dir == "down"
-            or side == "sell" and big_dir == "up"
+            or side == "buy"
+            and big_dir == "down"
+            or side == "sell"
+            and big_dir == "up"
             else "READY"
         ),
         risk_multiplier={
@@ -981,9 +994,7 @@ def _monitor_position_facts(
             "2buy": "1.00",
             "3buy": "0.75",
         }.get(point_type, "0"),
-        context_risk_scale=(
-            "1.00" if side == "buy" and big_dir == "up" else "0.50"
-        ),
+        context_risk_scale=("1.00" if side == "buy" and big_dir == "up" else "0.50"),
         # 人工操作发生在当前可见价格，风险必须从该价格量到防守位；结构锚点
         # 独立传入，用于追价保护和审计，不能冒充当前价。
         entry_price=sizing_price,
@@ -1038,12 +1049,9 @@ def collect_strict_monitor_events(
             point_type = str(point.point_type)
             if side not in {"buy", "sell"}:
                 continue
-            if (
-                not point.confirmed
-                or not is_five_minute_trade_level(
-                    point.source_frequency,
-                    point.recursive_level,
-                )
+            if not point.confirmed or not is_five_minute_trade_level(
+                point.source_frequency,
+                point.recursive_level,
             ):
                 continue
             segment_resolver = getattr(
@@ -1051,11 +1059,7 @@ def collect_strict_monitor_events(
                 "segment_difference_for_trade_point",
                 None,
             )
-            segment = (
-                segment_resolver(point)
-                if callable(segment_resolver)
-                else None
-            )
+            segment = segment_resolver(point) if callable(segment_resolver) else None
             visible_price, position_recommendation = _monitor_position_facts(
                 state,
                 point,
@@ -1088,9 +1092,7 @@ def collect_strict_monitor_events(
                     ).isoformat(timespec="seconds")
                 ),
                 big_dir=big_dir,
-                reason=(
-                    f"strict_5m_{point_type}_trade_signal"
-                ),
+                reason=(f"strict_5m_{point_type}_trade_signal"),
                 op_level=op_level,
                 mid_level=mid_level,
                 big_level=big_level,
@@ -1100,9 +1102,7 @@ def collect_strict_monitor_events(
                 anchor_time=point.anchor_at.isoformat(timespec="seconds"),
                 confirmed_time=point.confirmed_at.isoformat(timespec="seconds"),
                 structure_anchor_price=float(point.structure_anchor_price),
-                structure_invalidation_price=float(
-                    point.structure_invalidation_price
-                ),
+                structure_invalidation_price=float(point.structure_invalidation_price),
                 position_recommendation=position_recommendation,
                 segment_difference_point_type=(
                     "" if segment is None else segment.point_type
@@ -1141,9 +1141,7 @@ def collect_strict_monitor_events(
             tuple(updates_provider()) if callable(updates_provider) else ()
         )
         newly_notified_point_ids = {
-            point.point_id
-            for point in points
-            if isinstance(point, StructuralPoint)
+            point.point_id for point in points if isinstance(point, StructuralPoint)
         }
         for raw_update in segment_updates:
             if (
@@ -1203,7 +1201,7 @@ def collect_strict_monitor_events(
                         ).isoformat(timespec="seconds")
                     ),
                     big_dir=big_dir,
-                    reason="strict_1m_segment_difference_enrichment",
+                    reason="one_minute_exact_locator_enrichment",
                     op_level=op_level,
                     mid_level=mid_level,
                     big_level=big_level,
@@ -1221,9 +1219,7 @@ def collect_strict_monitor_events(
                     setup_bs_type=point_type,
                     setup_evidence_id=point.point_id,
                     setup_recursive_level=point.recursive_level,
-                    setup_anchor_time=point.anchor_at.isoformat(
-                        timespec="seconds"
-                    ),
+                    setup_anchor_time=point.anchor_at.isoformat(timespec="seconds"),
                     setup_confirmed_time=point.confirmed_at.isoformat(
                         timespec="seconds"
                     ),

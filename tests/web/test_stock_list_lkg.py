@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from cl_app.services import stock_list
@@ -5,18 +7,37 @@ from cl_app.services import stock_list
 
 LKG = [{"code": "SZ.000001", "name": "Ping An", "type": "stock_cn"}]
 RAW = [{"code": "SH.600000", "name": "Pufa", "type": "stock_cn"}]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeExchange:
+    stock_info_query_scope = "SINGLE_SYMBOL_STOCK_INFO"
+
     def __init__(self, stocks=None, *, init_failed=False, error=None):
         self.stocks = stocks
         self.init_failed = init_failed
         self.error = error
+        self.all_stocks_calls = 0
+        self.stock_info_calls = []
 
     def all_stocks(self, _market=None):
+        self.all_stocks_calls += 1
         if self.error is not None:
             raise self.error
         return self.stocks
+
+    def stock_info(self, code):
+        self.stock_info_calls.append(code)
+        if self.error is not None:
+            raise self.error
+        return next(
+            (
+                stock
+                for stock in (self.stocks or ())
+                if stock.get("code") == code
+            ),
+            None,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +48,13 @@ def _reset_symbol_state():
     with stock_list._preload_handle_lock:
         previous_runtime_closed = stock_list._symbol_runtime_closed
         stock_list._symbol_runtime_closed = False
+    previous_mode, previous_codes, previous_full_authorized = (
+        stock_list._catalog_scope_snapshot("a")
+    )
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000", "SZ.000001"),
+        full_catalog_authorized=False,
+    )
     with stock_list._stock_cache_lock:
         stock_list.stock_cache.clear()
         getattr(stock_list, "_symbol_states", {}).clear()
@@ -36,6 +64,13 @@ def _reset_symbol_state():
         getattr(stock_list, "_symbol_states", {}).clear()
     with stock_list._preload_handle_lock:
         stock_list._symbol_runtime_closed = previous_runtime_closed
+    stock_list.configure_symbol_catalog(
+        validation_codes=previous_codes,
+        full_catalog_authorized=(
+            previous_mode == stock_list.FULL_IDENTITY_CATALOG
+            and previous_full_authorized
+        ),
+    )
 
 
 def test_empty_preload_refresh_preserves_lkg_and_marks_degraded(monkeypatch):
@@ -93,6 +128,9 @@ def test_empty_preload_without_lkg_is_not_ready(monkeypatch):
         "status": "degraded",
         "count": 0,
         "last_error": "empty symbol list",
+        "catalog_mode": stock_list.BOUNDED_VALIDATION_CATALOG,
+        "admitted_count": 2,
+        "full_catalog_authorized": False,
     }
 
 
@@ -111,10 +149,17 @@ def test_disk_restore_marks_symbols_ready(monkeypatch):
         "status": "ready",
         "count": 1,
         "last_error": None,
+        "catalog_mode": stock_list.BOUNDED_VALIDATION_CATALOG,
+        "admitted_count": 2,
+        "full_catalog_authorized": False,
     }
 
 
 def test_disk_warmed_first_round_does_not_open_exchange(monkeypatch):
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SZ.000001",),
+        full_catalog_authorized=False,
+    )
     with stock_list._stock_cache_lock:
         stock_list.stock_cache["a"] = list(LKG)
 
@@ -131,7 +176,248 @@ def test_disk_warmed_first_round_does_not_open_exchange(monkeypatch):
         "status": "ready",
         "count": 1,
         "last_error": None,
+        "catalog_mode": stock_list.BOUNDED_VALIDATION_CATALOG,
+        "admitted_count": 1,
+        "full_catalog_authorized": False,
     }
+
+
+def test_cold_validation_preload_never_enumerates_all_stocks(monkeypatch):
+    codes = stock_list.DEFAULT_VALIDATION_SYMBOL_CODES
+    fake = _FakeExchange(
+        [
+            {"code": code, "name": f"name-{index}", "type": "stock_cn"}
+            for index, code in enumerate(codes)
+        ]
+    )
+    stock_list.configure_symbol_catalog(
+        validation_codes=codes,
+        full_catalog_authorized=False,
+    )
+    monkeypatch.setattr(stock_list, "get_exchange", lambda _market: fake)
+    monkeypatch.setattr(stock_list, "_load_stocks_from_disk", lambda _market: None)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    stock_list._warm_cache_from_disk()
+    stock_list._preload_single_exchange("a")
+
+    assert fake.all_stocks_calls == 0
+    assert fake.stock_info_calls == list(codes)
+    assert len(fake.stock_info_calls) == 12
+    snapshot = stock_list.get_symbol_readiness("a")
+    assert snapshot["catalog_mode"] == stock_list.BOUNDED_VALIDATION_CATALOG
+    assert snapshot["admitted_count"] == 12
+    assert snapshot["count"] == 12
+
+
+def test_runtime_validation_symbols_match_preregistered_backtest_profile() -> None:
+    profile = ROOT / "config/research_backtest_validation_12.txt"
+    expected = tuple(
+        line.strip()
+        for line in profile.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    joined = ",".join(expected)
+
+    assert stock_list.DEFAULT_VALIDATION_SYMBOL_CODES == expected
+    assert joined in (ROOT / "ops/restart_web.ps1").read_text(encoding="utf-8-sig")
+    assert joined in (ROOT / "windows_run.bat").read_text(encoding="utf-8-sig")
+
+
+def test_preload_unknown_adapter_uses_code_without_stock_info(monkeypatch):
+    calls = {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
+
+    class _CatalogExpandingExchange:
+        def all_stocks(self):
+            calls["all_stocks"] += 1
+            return [{"code": "SH.600000", "name": "Pufa"}]
+
+        def stock_info(self, code):
+            calls["stock_info"] += 1
+            calls["basicinfo"] += 1
+            return next(
+                row for row in self.all_stocks() if row["code"] == code
+            )
+
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=False,
+    )
+    monkeypatch.setattr(
+        stock_list,
+        "get_exchange",
+        lambda _market: _CatalogExpandingExchange(),
+    )
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    stock_list._preload_single_exchange("a")
+
+    cached = stock_list._cached_symbols_or_empty("a")
+    assert [(row["code"], row["name"]) for row in cached] == [
+        ("SH.600000", "SH.600000")
+    ]
+    assert calls == {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
+
+
+def test_periodic_validation_refresh_stays_bounded(monkeypatch):
+    codes = ("SH.600000", "SZ.000001")
+    fake = _FakeExchange(
+        [
+            {"code": "SH.600000", "name": "Pufa", "type": "stock_cn"},
+            {"code": "SZ.000001", "name": "Ping An", "type": "stock_cn"},
+        ]
+    )
+    stock_list.configure_symbol_catalog(
+        validation_codes=codes,
+        full_catalog_authorized=False,
+    )
+    monkeypatch.setattr(stock_list, "get_exchange", lambda _market: fake)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    stock_list._preload_single_exchange("a")
+    first_round = tuple(fake.stock_info_calls)
+    fake.stock_info_calls.clear()
+    stock_list._preload_single_exchange("a")
+
+    assert fake.all_stocks_calls == 0
+    assert first_round == codes
+    assert tuple(fake.stock_info_calls) == codes
+    assert len(fake.stock_info_calls) <= 12
+
+
+def test_sync_fallback_stays_in_validation_catalog(monkeypatch):
+    code = "SH.600000"
+    fake = _FakeExchange(
+        [{"code": code, "name": "Pufa", "type": "stock_cn"}]
+    )
+    stock_list.configure_symbol_catalog(
+        validation_codes=(code,),
+        full_catalog_authorized=False,
+    )
+    monkeypatch.setattr(stock_list, "get_exchange", lambda _market: fake)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    result = stock_list.get_cached_processed_stocks(
+        "a", allow_sync_fallback=True
+    )
+
+    assert [row["code"] for row in result] == [code]
+    assert fake.all_stocks_calls == 0
+    assert fake.stock_info_calls == [code]
+
+
+def test_disk_restore_projects_legacy_catalog_to_admitted_codes(monkeypatch):
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=False,
+    )
+    monkeypatch.setattr(stock_list, "PRELOAD_EXCHANGES", ["a"])
+    monkeypatch.setattr(
+        stock_list,
+        "_load_stocks_from_disk",
+        lambda _market: [
+            {"code": "SH.600000", "name": "Pufa", "type": "stock_cn"},
+            {"code": "SZ.000001", "name": "out", "type": "stock_cn"},
+        ],
+    )
+    persisted = []
+    monkeypatch.setattr(
+        stock_list,
+        "_save_stocks_to_disk",
+        lambda _market, rows: persisted.extend(rows),
+    )
+
+    stock_list._warm_cache_from_disk()
+
+    assert [row["code"] for row in stock_list._cached_symbols_or_empty("a")] == [
+        "SH.600000"
+    ]
+    assert [row["code"] for row in persisted] == ["SH.600000"]
+    snapshot = stock_list.get_symbol_readiness("a")
+    assert snapshot["catalog_mode"] == stock_list.BOUNDED_VALIDATION_CATALOG
+    assert snapshot["admitted_count"] == 1
+
+
+def test_full_catalog_enumeration_requires_independent_authorization(monkeypatch):
+    fake = _FakeExchange(list(RAW))
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=True,
+    )
+    monkeypatch.setattr(stock_list, "get_exchange", lambda _market: fake)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    stock_list._preload_single_exchange("a")
+
+    assert fake.all_stocks_calls == 1
+    assert fake.stock_info_calls == []
+    snapshot = stock_list.get_symbol_readiness("a")
+    assert snapshot["catalog_mode"] == stock_list.FULL_IDENTITY_CATALOG
+    assert snapshot["full_catalog_authorized"] is True
+
+
+def test_full_catalog_qmt_capability_receives_exact_authorization():
+    calls = []
+
+    class _AuthorizationAwareExchange:
+        all_stocks_requires_explicit_authorization = True
+
+        def all_stocks(self, *, full_market_authorized=False):
+            calls.append(full_market_authorized)
+            return list(RAW)
+
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=True,
+    )
+
+    rows = stock_list._authorized_full_catalog_rows(
+        _AuthorizationAwareExchange(),
+        "a",
+    )
+
+    assert rows == RAW
+    assert calls == [True]
+
+
+def test_full_catalog_legacy_adapter_keeps_no_arg_contract():
+    calls = []
+
+    class _LegacyExchange:
+        def all_stocks(self):
+            calls.append(())
+            return list(RAW)
+
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=True,
+    )
+
+    rows = stock_list._authorized_full_catalog_rows(_LegacyExchange(), "a")
+
+    assert rows == RAW
+    assert calls == [()]
+
+
+def test_full_catalog_primitive_fails_closed_without_authorization():
+    fake = _FakeExchange(list(RAW))
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=False,
+    )
+
+    with pytest.raises(PermissionError, match="independently authorized"):
+        stock_list._authorized_full_catalog_rows(fake, "a")
+
+    assert fake.all_stocks_calls == 0
+
+
+def test_catalog_authorization_rejects_truthy_non_boolean_values():
+    with pytest.raises(TypeError, match="exact bool"):
+        stock_list.configure_symbol_catalog(
+            validation_codes=("SH.600000",),
+            full_catalog_authorized="0",
+        )
 
 
 def test_sync_empty_result_cannot_overwrite_concurrent_lkg(monkeypatch):
@@ -235,6 +521,9 @@ def test_disabled_preload_is_ready_without_symbol_cache(monkeypatch):
         "status": "disabled",
         "count": 0,
         "last_error": None,
+        "catalog_mode": stock_list.BOUNDED_VALIDATION_CATALOG,
+        "admitted_count": 2,
+        "full_catalog_authorized": False,
     }
 
 

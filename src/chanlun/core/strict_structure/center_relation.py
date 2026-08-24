@@ -18,6 +18,7 @@ def classify_center_relation(
         raise ValueError("centers must have distinct identities")
     shares_completion_boundary = (
         previous.completion_return_unit is not None
+        and current.entry_unit is not None
         and current.entry_unit.unit_id
         == previous.completion_return_unit.unit_id
     )

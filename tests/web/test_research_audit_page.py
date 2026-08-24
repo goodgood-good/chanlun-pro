@@ -12,6 +12,11 @@ from flask import Flask, jsonify
 from flask_login import LoginManager, UserMixin, login_user
 import pytest
 
+from chanlun.decision_support.fingerprints import canonical_json
+from chanlun.decision_support.trading_system.backtest.causality_gate_contract import (
+    CAUSALITY_GATE_PROVEN_CONTROLS,
+    CAUSALITY_GATE_SCHEMA,
+)
 from chanlun.decision_support.trading_system.backtest.data_audit import DataEvidence
 from chanlun.decision_support.trading_system.backtest.metrics import calculate_metrics
 from chanlun.decision_support.trading_system.backtest.portfolio import (
@@ -30,19 +35,10 @@ from cl_app.services.research_audit import (
     build_research_audit_snapshot,
 )
 from tests.trading_system.backtest.helpers import CN
+from tools import finalize_qmt_pit_fixed_year as pit_finalizer
 
 
-_CAUSAL_CONTROLS = [
-    "survivorship_free_effective_dated_security_master",
-    "decision_time_sw1_membership",
-    "ex_date_only_causal_price_basis",
-    "cash_and_share_corporate_action_accounting",
-    "closed_bar_strict_structure_witnesses",
-    "next_complete_minute_execution",
-    "observed_range_and_volume_fill_guard",
-    "delisted_security_zero_recovery",
-    "content_addressed_algorithm_data_and_checkpoints",
-]
+_CAUSAL_CONTROLS = list(CAUSALITY_GATE_PROVEN_CONTROLS)
 _DATA_SOURCE_HASHES = (
     ("pit_metadata_snapshot", "sha256:" + "1" * 64),
     ("qmt_extract_manifest", "sha256:" + "2" * 64),
@@ -72,9 +68,9 @@ def _report(include_walk_forward: bool = False) -> dict[str, object]:
             ),
             EquityPoint(
                 generated_at,
-                Decimal("101"),
+                Decimal("100"),
                 Decimal("0"),
-                Decimal("101"),
+                Decimal("100"),
                 Decimal("0"),
             ),
         ),
@@ -111,9 +107,7 @@ def _report(include_walk_forward: bool = False) -> dict[str, object]:
         evidence=DataEvidence(
             grade="research_only",
             failures=("historical_sector_membership_missing",),
-            warnings=(
-                "terminal_open_positions_marked_to_market_not_same_bar_liquidated",
-            ),
+            warnings=(),
             coverage=(("bar_status_coverage", Decimal("1")),),
         ),
         result=evaluation,
@@ -141,8 +135,7 @@ def _report(include_walk_forward: bool = False) -> dict[str, object]:
 
 def _algorithm_revision(report: dict[str, object]) -> str:
     hashes = tuple(
-        (str(row["source"]), str(row["sha256"]))
-        for row in report["algorithm_hashes"]
+        (str(row["source"]), str(row["sha256"])) for row in report["algorithm_hashes"]
     )
     encoded = json.dumps(
         hashes,
@@ -158,10 +151,10 @@ def _write_passed_gate(root: Path, report: dict[str, object]) -> None:
     (directory / "causality_gate.json").write_text(
         json.dumps(
             {
-                "schema": "chanlun-backtest-causality-gate",
+                "schema": CAUSALITY_GATE_SCHEMA,
                 "checked_at": "2026-07-25T12:00:00+08:00",
                 "status": "passed",
-                "pnl_generated": True,
+                "pnl_generated": False,
                 "algorithm_revision": _algorithm_revision(report),
                 "pit_snapshot_sha256": dict(_DATA_SOURCE_HASHES)[
                     "pit_metadata_snapshot"
@@ -228,6 +221,7 @@ def test_snapshot_exposes_only_formal_read_only_strategy(audit_root: Path) -> No
 
     assert snapshot["schema"] == "research-audit-page"
     assert snapshot["source_kind"] == "certified_report"
+    assert snapshot["pnl_generated"] is False
     assert snapshot["strategy_id"] == "chanlun_source_faithful"
     assert snapshot["active_strategy_count"] == 1
     assert snapshot["read_only"] is True
@@ -237,7 +231,57 @@ def test_snapshot_exposes_only_formal_read_only_strategy(audit_root: Path) -> No
     assert snapshot["verdict"]["live_ready"] is False
     assert snapshot["artifact"]["integrity_verified"] is True
     assert snapshot["closed_trade_net_pnl"] == "0"
-    assert snapshot["terminal_positions_marked_to_market"] is True
+    assert snapshot["terminal_positions_marked_to_market"] is False
+
+
+def test_zero_fill_passed_gate_written_by_finalizer_is_web_readable(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "audit/chanlun_trading_system_backtest"
+    directory.mkdir(parents=True)
+    report_path = directory / "certified_report.json"
+    report = _report()
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    pit_finalizer._write_gate(
+        path=directory / "causality_gate.json",
+        status="passed",
+        pnl_generated=False,
+        algorithm_revision=_algorithm_revision(report),
+        snapshot_hash=dict(_DATA_SOURCE_HASHES)["pit_metadata_snapshot"],
+        symbols=5201,
+        evaluations=4000,
+        failures=(),
+        report=report_path,
+    )
+
+    snapshot = build_research_audit_snapshot(tmp_path)
+    gate = json.loads((directory / "causality_gate.json").read_text(encoding="utf-8"))
+
+    assert snapshot["source_kind"] == "certified_report"
+    assert gate["schema"] == CAUSALITY_GATE_SCHEMA
+    assert gate["status"] == "passed"
+    assert gate["pnl_generated"] is False
+    assert gate["proven_controls"] == list(CAUSALITY_GATE_PROVEN_CONTROLS)
+
+
+def test_snapshot_rejects_nonzero_performance_when_gate_says_no_pnl(
+    audit_root: Path,
+) -> None:
+    path = audit_root / "audit/chanlun_trading_system_backtest/certified_report.json"
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["aggregate_out_of_sample"]["net_return"] = "0.01"
+    unhashed = {key: value for key, value in report.items() if key != "content_sha256"}
+    report["content_sha256"] = (
+        "sha256:" + hashlib.sha256(canonical_json(unhashed).encode("utf-8")).hexdigest()
+    )
+    path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ResearchAuditUnavailable, match="strategy_contract_invalid"):
+        build_research_audit_snapshot(audit_root)
 
 
 def test_snapshot_rejects_content_tampering(audit_root: Path) -> None:
@@ -278,6 +322,39 @@ def test_causality_gate_blocks_report(audit_root: Path) -> None:
     assert raised.value.code == "causality_gate_blocked"
     assert raised.value.details is not None
     assert raised.value.details["pnl_generated"] is False
+
+
+def test_causality_gate_rejects_blocked_state_that_claims_pnl(
+    audit_root: Path,
+) -> None:
+    gate = audit_root / "audit/chanlun_trading_system_backtest/causality_gate.json"
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload.update(
+        status="blocked",
+        pnl_generated=True,
+        failures=["causal_failure"],
+        report=None,
+    )
+    gate.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ResearchAuditUnavailable) as raised:
+        build_research_audit_snapshot(audit_root)
+
+    assert raised.value.code == "causality_gate_invalid"
+
+
+def test_causality_gate_rejects_incomplete_proven_controls(
+    audit_root: Path,
+) -> None:
+    gate = audit_root / "audit/chanlun_trading_system_backtest/causality_gate.json"
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload["proven_controls"] = payload["proven_controls"][:-1]
+    gate.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ResearchAuditUnavailable) as raised:
+        build_research_audit_snapshot(audit_root)
+
+    assert raised.value.code == "causality_gate_invalid"
 
 
 def test_page_explains_blocked_gate_generated_no_pnl(
@@ -332,9 +409,7 @@ def test_snapshot_reads_only_canonical_report(audit_root: Path) -> None:
     snapshot = build_research_audit_snapshot(audit_root)
 
     assert snapshot["strategy_id"] == "chanlun_source_faithful"
-    assert snapshot["artifact"]["relative_path"].endswith(
-        "/certified_report.json"
-    )
+    assert snapshot["artifact"]["relative_path"].endswith("/certified_report.json")
 
 
 def test_snapshot_accepts_unified_buy_point_contract(tmp_path: Path) -> None:
@@ -356,6 +431,36 @@ def test_snapshot_accepts_unified_buy_point_contract(tmp_path: Path) -> None:
     assert contract["segment_difference_required_for_trade_signal"] is False
 
 
+def test_snapshot_rejects_pre_segment_difference_execution_contract(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "audit/chanlun_trading_system_backtest/certified_report.json"
+    path.parent.mkdir(parents=True)
+    report = _report(True)
+    contract = report["execution_contract"]
+    for key in (
+        "trade_frequency",
+        "segment_difference_frequency",
+        "segment_difference_required_for_trade_signal",
+        "segment_difference_required_for_precise_execution",
+        "execution_observation_frequency",
+    ):
+        contract.pop(key)
+    contract["trigger_frequency"] = "1m"
+    unhashed = {key: value for key, value in report.items() if key != "content_sha256"}
+    report["content_sha256"] = (
+        "sha256:" + hashlib.sha256(canonical_json(unhashed).encode("utf-8")).hexdigest()
+    )
+    path.write_text(
+        json.dumps(report, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    _write_passed_gate(tmp_path, report)
+
+    with pytest.raises(ResearchAuditUnavailable, match="strategy_contract_invalid"):
+        build_research_audit_snapshot(tmp_path)
+
+
 def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) -> None:
     client = app.test_client()
     assert client.get("/decision-support/research-audit").status_code == 401
@@ -370,6 +475,7 @@ def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) ->
     assert page.headers["Cache-Control"] == "private, no-store"
     assert data.status_code == 200
     assert data.get_json()["data"]["active_strategy_count"] == 1
+    assert data.get_json()["data"]["pnl_generated"] is False
     assert "历史研究 / 审计成果" in html
     assert "chanlun_source_faithful" in html
     assert "未达到实盘标准" in html
@@ -379,7 +485,9 @@ def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) ->
     assert "一、二、三类买卖点独立" in html
     assert "一、二、三类统一" in html
     assert "5201 / 5227 个历史标的纳入" in html
-    assert "总收益包含期末未平仓持仓的盯市损益" in html
+    assert "未产生成交，收益不可评估" in html
+    assert "+0.00%" not in html
+    assert "总收益包含期末未平仓持仓的盯市损益" not in html
     assert "旧双轨" not in html
     assert "<form" not in html.lower()
 
@@ -407,6 +515,25 @@ def test_audit_page_leads_with_evidence_and_verdict(app: Flask) -> None:
     assert 'data-live-ready="false"' in html
 
 
+def test_page_distinguishes_generated_exact_zero_from_no_fill(
+    app: Flask,
+    audit_root: Path,
+) -> None:
+    gate_path = audit_root / "audit/chanlun_trading_system_backtest/causality_gate.json"
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    gate["pnl_generated"] = True
+    gate_path.write_text(json.dumps(gate, ensure_ascii=False), encoding="utf-8")
+    client = app.test_client()
+    assert client.get("/_test/login").status_code == 200
+
+    response = client.get("/decision-support/research-audit")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "+0.00%" in html
+    assert "未产生成交，收益不可评估" not in html
+
+
 def test_page_fails_closed_when_artifact_is_missing(
     app: Flask,
     audit_root: Path,
@@ -425,9 +552,7 @@ def test_page_fails_closed_when_artifact_is_missing(
 
     assert response.status_code == 200
     assert "artifact_unavailable" in response.get_data(as_text=True)
-    assert "历史资料可读取，正式回测结论尚不可用" in response.get_data(
-        as_text=True
-    )
+    assert "历史资料可读取，正式回测结论尚不可用" in response.get_data(as_text=True)
     assert data.status_code == 200
     assert data.get_json()["data"]["schema"] == "research-audit-status-page"
     assert data.get_json()["data"]["formal_report"]["available"] is False
@@ -438,7 +563,7 @@ def test_status_snapshot_inventory_exposes_real_material_without_pnl(
 ) -> None:
     dataset = (
         tmp_path
-        / "audit/chanlun_trading_system_backtest/fixed_year_2025_2026"
+        / "audit/chanlun_trading_system_backtest/research_sample_validation_12"
     )
     symbols = dataset / "symbols"
     symbols.mkdir(parents=True)
@@ -480,24 +605,6 @@ def test_status_snapshot_inventory_exposes_real_material_without_pnl(
     old_manifest_time = datetime.now().timestamp() - 20 * 60
     os.utime(manifest_path, (old_manifest_time, old_manifest_time))
     (symbols / "688132.SH.pkl").write_bytes(b"checkpoint")
-    live_audit = tmp_path / "audit/chanlun_live_integration"
-    live_audit.mkdir(parents=True)
-    (live_audit / "notification_delivery.json").write_text(
-        json.dumps(
-            {
-                "schema": "chanlun-notification-delivery-audit",
-                "status": "passed",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (live_audit / "utf8_bom.json").write_bytes(
-        json.dumps({"status": "complete"}).encode("utf-8-sig")
-    )
-    (live_audit / "utf16.json").write_bytes(
-        json.dumps({"status": "complete"}).encode("utf-16")
-    )
-
     snapshot = build_research_audit_status_snapshot(
         tmp_path,
         formal_error_code="causality_gate_unavailable",
@@ -513,21 +620,10 @@ def test_status_snapshot_inventory_exposes_real_material_without_pnl(
     assert snapshot["historical_replay"]["completed_symbol_count"] == 1
     assert snapshot["historical_replay"]["remaining_symbol_count"] == 1
     assert snapshot["historical_replay"]["completion_ratio"] == 0.5
-    assert snapshot["historical_replay"]["heartbeat_source"] == (
-        "symbol_checkpoint"
-    )
+    assert snapshot["historical_replay"]["heartbeat_source"] == ("symbol_checkpoint")
     assert snapshot["historical_replay"]["latest_checkpoint_modified_at"]
     assert snapshot["historical_replay"]["manifest_modified_at"]
-    assert snapshot["audit_artifact_count"] == 3
-    assert {row["status"] for row in snapshot["audit_artifacts"]} == {
-        "passed",
-        "complete",
-    }
-    assert {row["encoding"] for row in snapshot["audit_artifacts"]} == {
-        "utf-8",
-        "utf-8-sig",
-        "utf-16",
-    }
+    assert "audit_artifacts" not in snapshot
 
 
 def test_research_audit_styles_keep_dense_content_readable(app: Flask) -> None:

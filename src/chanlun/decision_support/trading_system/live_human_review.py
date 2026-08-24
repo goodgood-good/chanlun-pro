@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_completed_one_minute_prefix_closes,
     a_share_optional_entry_valid_until,
 )
 from chanlun.decision_support.trading_system.decision_source_provenance import (
@@ -28,6 +29,7 @@ from chanlun.decision_support.trading_system.human_assisted_decision import (
 )
 from chanlun.decision_support.trading_system.lifecycle import (
     STRUCTURE_INVALIDATED_REASON_CODE,
+    completed_bar_interval_start,
     is_one_minute_segment_difference_document,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
@@ -1158,7 +1160,7 @@ def _sector_context_is_consistent(
             and raw.get("hard_block") is False
             and raw.get("dominant_point_id") is None
             and raw.get("dominant_point_type") is None
-            and raw.get("reason_codes") == ["stock_one_minute_trigger_only"]
+            and raw.get("reason_codes") == ["stock_one_minute_segment_difference_only"]
         )
     return bool(
         raw.get("frequency") == frequency
@@ -1279,21 +1281,91 @@ def _point_document_is_causal(
     )
 
 
-def _one_minute_locator_follows_five_minute_setup(
+def _one_minute_nesting_witness_matches_five_minute_setup(
     setup: Mapping[str, object],
-    locator: Mapping[str, object],
+    nesting_witness: Mapping[str, object],
+    *,
+    decision_at: object,
 ) -> bool:
-    """Require execution evidence to be observable after the formal 5m setup."""
+    """Validate one causal, complete 1m-in-5m terminal-segment nesting witness.
+
+    The 1m segment may finish before the enclosing 5m setup becomes formal.  It
+    is actionable at the first decision timestamp where *both* documents are
+    known, provided the complete inner market interval is contained by the
+    complete outer interval.  Availability ordering between the two points is
+    therefore deliberately irrelevant.
+    """
 
     try:
+        jointly_known_at = datetime.fromisoformat(str(decision_at))
         setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
-        locator_available_at = datetime.fromisoformat(str(locator["available_at"]))
+        witness_available_at = datetime.fromisoformat(
+            str(nesting_witness["available_at"])
+        )
+        setup_anchor_at = datetime.fromisoformat(str(setup["anchor_at"]))
+        witness_anchor_at = datetime.fromisoformat(str(nesting_witness["anchor_at"]))
+        outer_start_at = datetime.fromisoformat(str(setup["terminal_segment_start_at"]))
+        outer_end_at = datetime.fromisoformat(str(setup["terminal_segment_end_at"]))
+        outer_available_at = datetime.fromisoformat(
+            str(setup["terminal_segment_available_at"])
+        )
+        inner_start_at = datetime.fromisoformat(
+            str(nesting_witness["terminal_segment_start_at"])
+        )
+        inner_end_at = datetime.fromisoformat(
+            str(nesting_witness["terminal_segment_end_at"])
+        )
+        inner_available_at = datetime.fromisoformat(
+            str(nesting_witness["terminal_segment_available_at"])
+        )
+        outer_interval_start = completed_bar_interval_start(
+            outer_start_at,
+            minutes=5,
+            field="five minute terminal interval start",
+        )
+        inner_interval_start = completed_bar_interval_start(
+            inner_start_at,
+            minutes=1,
+            field="one minute terminal interval start",
+        )
     except (KeyError, TypeError, ValueError):
         return False
+    timestamps = (
+        jointly_known_at,
+        setup_available_at,
+        witness_available_at,
+        setup_anchor_at,
+        witness_anchor_at,
+        outer_start_at,
+        outer_end_at,
+        outer_available_at,
+        inner_start_at,
+        inner_end_at,
+        inner_available_at,
+    )
     return bool(
-        setup_available_at.tzinfo is not None
-        and locator_available_at.tzinfo is not None
-        and setup_available_at <= locator_available_at
+        all(value.tzinfo is not None for value in timestamps)
+        and setup.get("source_frequency") == "5m"
+        and nesting_witness.get("source_frequency") == "1m"
+        and setup.get("terminal_segment_role") == "latest_completed"
+        and nesting_witness.get("terminal_segment_role") == "latest_completed"
+        and setup.get("terminal_segment_source_kind") == "segment"
+        and nesting_witness.get("terminal_segment_source_kind") == "segment"
+        and setup.get("terminal_segment_state") in {"formed", "locked"}
+        and nesting_witness.get("terminal_segment_state") in {"formed", "locked"}
+        and setup.get("terminal_segment_level") == setup.get("recursive_level")
+        and nesting_witness.get("terminal_segment_level")
+        == nesting_witness.get("recursive_level")
+        and setup.get("side") == nesting_witness.get("side")
+        and setup.get("point_id") != nesting_witness.get("point_id")
+        and setup.get("price_basis_revision")
+        == nesting_witness.get("price_basis_revision")
+        and outer_start_at <= outer_end_at == setup_anchor_at
+        and inner_start_at <= inner_end_at == witness_anchor_at
+        and outer_available_at <= setup_available_at <= jointly_known_at
+        and inner_available_at <= witness_available_at <= jointly_known_at
+        and outer_interval_start <= inner_interval_start
+        and inner_end_at <= outer_end_at
     )
 
 
@@ -1409,9 +1481,7 @@ def _warmup_execution_partition(
             ),
         )
     five_minute_rows = [
-        row
-        for row in rows
-        if isinstance(row, Mapping) and row.get("frequency") == "5m"
+        row for row in rows if isinstance(row, Mapping) and row.get("frequency") == "5m"
     ]
     if len(five_minute_rows) != 1:
         return None
@@ -2547,7 +2617,7 @@ def _separated_buy_decision_evidence_is_consistent(
 
     profile = signal.get("execution_profile")
     setup = signal.get("setup_5m")
-    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    segment_difference = signal.get("segment_difference_1m")
     sector = signal.get("sector")
     context = signal.get("context_30m")
     daily_context = signal.get("context_d")
@@ -2559,7 +2629,10 @@ def _separated_buy_decision_evidence_is_consistent(
             isinstance(value, Mapping)
             for value in (setup, sector, context, daily_context)
         )
-        or (trigger is not None and not isinstance(trigger, Mapping))
+        or (
+            segment_difference is not None
+            and not isinstance(segment_difference, Mapping)
+        )
         or decision_reasons is None
         or multiplier is None
     ):
@@ -2580,18 +2653,21 @@ def _separated_buy_decision_evidence_is_consistent(
     if formation_state is None:
         return False
     minimum_tick = _decision_decimal(policy.get("minimum_tick"))
-    trigger_confirmed = bool(
+    segment_difference_confirmed = bool(
         confirmed_point
-        and isinstance(trigger, Mapping)
+        and isinstance(segment_difference, Mapping)
         and minimum_tick is not None
         and is_one_minute_segment_difference_document(
-            trigger,
+            segment_difference,
             minimum_tick=minimum_tick,
             expected_side="buy",
         )
-        and _one_minute_locator_follows_five_minute_setup(setup, trigger)
-        and signal.get("lifecycle_stage")
-        in {"triggered", "executable", "active"}
+        and _one_minute_nesting_witness_matches_five_minute_setup(
+            setup,
+            segment_difference,
+            decision_at=signal.get("observed_at"),
+        )
+        and signal.get("lifecycle_stage") in {"triggered", "executable", "active"}
     )
     core_reasons: list[str] = []
     if policy.get("require_confirmed_five_minute") is True and not confirmed_point:
@@ -2604,9 +2680,10 @@ def _separated_buy_decision_evidence_is_consistent(
     if signal.get("lifecycle_stage") not in {"triggered", "executable", "active"}:
         core_reasons.append("lifecycle_not_actionable")
     if (
-        policy.get("require_confirmed_one_minute") is True
+        policy.get("require_one_minute_segment_difference_for_precise_execution")
+        is True
         and confirmed_point
-        and not trigger_confirmed
+        and not segment_difference_confirmed
     ):
         core_reasons.append("one_minute_not_confirmed")
     conflict = signal.get("conflict")
@@ -2702,19 +2779,19 @@ def _separated_buy_decision_evidence_is_consistent(
     advisory_reasons.extend(context_warmup_advisories)
     entry_boundary_reason: str | None = None
     if (
-        trigger_confirmed
+        segment_difference_confirmed
         and signal.get("physical_timeframe_recursive") is True
         and str(signal.get("code") or "").startswith(("SH.", "SZ.", "BJ."))
     ):
         raw_boundary = signal.get("entry_execution_boundary")
         if raw_boundary is None:
             try:
-                trigger_available_at = datetime.fromisoformat(
-                    str(trigger["available_at"])
+                segment_difference_available_at = datetime.fromisoformat(
+                    str(segment_difference["available_at"])
                 )
                 observed_at = datetime.fromisoformat(str(signal["observed_at"]))
                 inferred_valid_until = a_share_optional_entry_valid_until(
-                    trigger_available_at
+                    segment_difference_available_at
                 )
             except (KeyError, TypeError, ValueError):
                 return False
@@ -2833,7 +2910,7 @@ def _separated_buy_decision_evidence_is_consistent(
         recommendation = "BLOCKED"
     elif not confirmed_point:
         recommendation = unconfirmed_setup_recommendation(formation_state)
-    elif not trigger_confirmed:
+    elif not segment_difference_confirmed:
         recommendation = WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
     elif expected_advisories:
         recommendation = "CAUTION"
@@ -2867,38 +2944,34 @@ def _separated_buy_decision_evidence_is_consistent(
     if operational_buy_protections:
         recommendation = "BLOCKED"
         hard_profile_reasons = tuple(
-            dict.fromkeys(
-                (*hard_profile_reasons, *operational_buy_protections)
-            )
+            dict.fromkeys((*hard_profile_reasons, *operational_buy_protections))
         )
     expected_decision_reasons = tuple(
-        dict.fromkeys(
-            (*base_expected_decision_reasons, *operational_buy_protections)
-        )
+        dict.fromkeys((*base_expected_decision_reasons, *operational_buy_protections))
     )
     if not confirmed_point:
-        precision_locator_status = "STRUCTURE_PENDING"
-    elif not trigger_confirmed:
-        precision_locator_status = "WAITING_ONE_MINUTE"
+        segment_difference_status = "STRUCTURE_PENDING"
+    elif not segment_difference_confirmed:
+        segment_difference_status = "WAITING_ONE_MINUTE"
     elif entry_boundary_reason == "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED":
-        precision_locator_status = "BOUNDARY_EXPIRED"
+        segment_difference_status = "BOUNDARY_EXPIRED"
     elif entry_boundary_reason == "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING":
-        precision_locator_status = "BOUNDARY_MISSING"
+        segment_difference_status = "BOUNDARY_MISSING"
     else:
-        precision_locator_status = "READY"
-    precision_locator_ready = precision_locator_status == "READY"
+        segment_difference_status = "READY"
+    segment_difference_ready = segment_difference_status == "READY"
     return bool(
         profile.get("structure_signal_confirmed") is confirmed_point
-        and profile.get("execution_trigger_confirmed") is trigger_confirmed
         and profile.get("one_minute_role") == "SEGMENT_DIFFERENCE_ONLY"
         and profile.get("one_minute_required_for_trade_signal") is False
         and profile.get("one_minute_required_for_precise_execution") is True
-        and profile.get("one_minute_segment_difference_present") is trigger_confirmed
-        and profile.get("precision_locator_status") == precision_locator_status
-        and profile.get("precision_locator_ready") is precision_locator_ready
+        and profile.get("one_minute_segment_difference_present")
+        is segment_difference_confirmed
+        and profile.get("segment_difference_status") == segment_difference_status
+        and profile.get("segment_difference_ready") is segment_difference_ready
         and profile.get("precise_execution_ready")
         is bool(
-            precision_locator_ready
+            segment_difference_ready
             and not entry_reasons
             and not operational_buy_protections
         )
@@ -2944,7 +3017,7 @@ def _buy_decision_evidence_is_consistent(
             conflict_reasons=conflict_reasons,
         )
     setup = signal.get("setup_5m")
-    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    segment_difference = signal.get("segment_difference_1m")
     sector = signal.get("sector")
     context = signal.get("context_30m")
     daily_context = signal.get("context_d")
@@ -2955,7 +3028,10 @@ def _buy_decision_evidence_is_consistent(
             isinstance(value, Mapping)
             for value in (setup, sector, context, daily_context)
         )
-        or (trigger is not None and not isinstance(trigger, Mapping))
+        or (
+            segment_difference is not None
+            and not isinstance(segment_difference, Mapping)
+        )
         or decision_reasons is None
         or multiplier is None
     ):
@@ -2972,23 +3048,30 @@ def _buy_decision_evidence_is_consistent(
         side="buy",
     )
     minimum_tick = _decision_decimal(policy.get("minimum_tick"))
-    trigger_confirmed = bool(
+    segment_difference_confirmed = bool(
         confirmed_structural_point
-        and isinstance(trigger, Mapping)
+        and isinstance(segment_difference, Mapping)
         and minimum_tick is not None
         and is_one_minute_segment_difference_document(
-            trigger,
+            segment_difference,
             minimum_tick=minimum_tick,
             expected_side=str(setup.get("side")),
         )
-        and _one_minute_locator_follows_five_minute_setup(setup, trigger)
-        and signal.get("lifecycle_stage")
-        in {"triggered", "executable", "active"}
+        and _one_minute_nesting_witness_matches_five_minute_setup(
+            setup,
+            segment_difference,
+            decision_at=signal.get("observed_at"),
+        )
+        and signal.get("lifecycle_stage") in {"triggered", "executable", "active"}
     )
     entry_reasons: list[str] = []
     if policy.get("require_confirmed_five_minute") is True and not confirmed_buy:
         entry_reasons.append("five_minute_not_confirmed")
-    if policy.get("require_confirmed_one_minute") is True and not trigger_confirmed:
+    if (
+        policy.get("require_one_minute_segment_difference_for_precise_execution")
+        is True
+        and not segment_difference_confirmed
+    ):
         entry_reasons.append("one_minute_not_confirmed")
     if (
         policy.get("require_sector_eligibility") is True
@@ -3158,13 +3241,16 @@ def _displayed_decision_evidence_is_consistent(
     if isinstance(signal.get("execution_profile"), Mapping):
         profile = signal["execution_profile"]
         setup = signal.get("setup_5m")
-        trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+        segment_difference = signal.get("segment_difference_1m")
         sector = signal.get("sector")
         daily_context = signal.get("context_d")
         if not all(
             isinstance(value, Mapping)
             for value in (profile, setup, context, sector, daily_context)
-        ) or (trigger is not None and not isinstance(trigger, Mapping)):
+        ) or (
+            segment_difference is not None
+            and not isinstance(segment_difference, Mapping)
+        ):
             return False
         confirmed_sell = _confirmed_five_minute_operation_setup(
             setup,
@@ -3174,18 +3260,21 @@ def _displayed_decision_evidence_is_consistent(
         if formation_state is None:
             return False
         minimum_tick = _decision_decimal(policy.get("minimum_tick"))
-        trigger_confirmed = bool(
+        segment_difference_confirmed = bool(
             confirmed_sell
-            and isinstance(trigger, Mapping)
+            and isinstance(segment_difference, Mapping)
             and minimum_tick is not None
             and is_one_minute_segment_difference_document(
-                trigger,
+                segment_difference,
                 minimum_tick=minimum_tick,
                 expected_side="sell",
             )
-            and _one_minute_locator_follows_five_minute_setup(setup, trigger)
-            and signal.get("lifecycle_stage")
-            in {"triggered", "executable", "active"}
+            and _one_minute_nesting_witness_matches_five_minute_setup(
+                setup,
+                segment_difference,
+                decision_at=signal.get("observed_at"),
+            )
+            and signal.get("lifecycle_stage") in {"triggered", "executable", "active"}
         )
         exit_action = signal.get("exit_action")
         lifecycle_actionable = signal.get("lifecycle_stage") in {
@@ -3203,7 +3292,9 @@ def _displayed_decision_evidence_is_consistent(
         elif not lifecycle_actionable:
             exit_reasons = ("lifecycle_not_actionable",)
         elif (
-            policy.get("require_confirmed_one_minute") is True and not trigger_confirmed
+            policy.get("require_one_minute_segment_difference_for_precise_execution")
+            is True
+            and not segment_difference_confirmed
         ):
             exit_reasons = ("one_minute_sell_not_confirmed",)
         elif exit_action == "none":
@@ -3280,7 +3371,7 @@ def _displayed_decision_evidence_is_consistent(
             recommendation = "BLOCKED"
         elif not confirmed_sell:
             recommendation = unconfirmed_setup_recommendation(formation_state)
-        elif not trigger_confirmed:
+        elif not segment_difference_confirmed:
             recommendation = WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
         elif expected_profile_advisories:
             recommendation = "CAUTION"
@@ -3306,14 +3397,14 @@ def _displayed_decision_evidence_is_consistent(
             exit_action=str(exit_action),
             structure_anchor_price=setup.get("anchor_price"),
         ).document()
-        precision_locator_status = (
+        segment_difference_status = (
             "STRUCTURE_PENDING"
             if not confirmed_sell
             else "WAITING_ONE_MINUTE"
-            if not trigger_confirmed
+            if not segment_difference_confirmed
             else "READY"
         )
-        precision_locator_ready = precision_locator_status == "READY"
+        segment_difference_ready = segment_difference_status == "READY"
         return bool(
             signal.get("side") == "sell"
             and _decision_decimal(signal.get("risk_multiplier")) == Decimal("0")
@@ -3325,16 +3416,15 @@ def _displayed_decision_evidence_is_consistent(
             and not conflict_reasons
             and decision_reasons == expected_decision_reasons
             and profile.get("structure_signal_confirmed") is confirmed_sell
-            and profile.get("execution_trigger_confirmed") is trigger_confirmed
             and profile.get("one_minute_role") == "SEGMENT_DIFFERENCE_ONLY"
             and profile.get("one_minute_required_for_trade_signal") is False
             and profile.get("one_minute_required_for_precise_execution") is True
             and profile.get("one_minute_segment_difference_present")
-            is trigger_confirmed
-            and profile.get("precision_locator_status") == precision_locator_status
-            and profile.get("precision_locator_ready") is precision_locator_ready
+            is segment_difference_confirmed
+            and profile.get("segment_difference_status") == segment_difference_status
+            and profile.get("segment_difference_ready") is segment_difference_ready
             and profile.get("precise_execution_ready")
-            is bool(precision_locator_ready and exit_action != "none")
+            is bool(segment_difference_ready and exit_action != "none")
             and profile.get("recommendation") == recommendation
             and profile.get("recommendation_label")
             == execution_recommendation_label(recommendation)
@@ -3355,7 +3445,7 @@ def _displayed_decision_evidence_is_consistent(
         )
     multiplier = _decision_decimal(signal.get("risk_multiplier"))
     setup = signal.get("setup_5m")
-    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    segment_difference = signal.get("segment_difference_1m")
     if not isinstance(setup, Mapping):
         return False
     confirmed_sell = _confirmed_five_minute_operation_setup(
@@ -3363,17 +3453,20 @@ def _displayed_decision_evidence_is_consistent(
         side="sell",
     )
     minimum_tick = _decision_decimal(policy.get("minimum_tick"))
-    trigger_confirmed = bool(
-        isinstance(trigger, Mapping)
+    segment_difference_confirmed = bool(
+        isinstance(segment_difference, Mapping)
         and minimum_tick is not None
         and is_one_minute_segment_difference_document(
-            trigger,
+            segment_difference,
             minimum_tick=minimum_tick,
             expected_side="sell",
         )
-        and _one_minute_locator_follows_five_minute_setup(setup, trigger)
-        and signal.get("lifecycle_stage")
-        in {"triggered", "executable", "active"}
+        and _one_minute_nesting_witness_matches_five_minute_setup(
+            setup,
+            segment_difference,
+            decision_at=signal.get("observed_at"),
+        )
+        and signal.get("lifecycle_stage") in {"triggered", "executable", "active"}
     )
     exit_action = signal.get("exit_action")
     lifecycle_actionable = signal.get("lifecycle_stage") in {
@@ -3385,7 +3478,11 @@ def _displayed_decision_evidence_is_consistent(
         expected_sell_reasons = ("sell_not_confirmed",)
     elif not lifecycle_actionable:
         expected_sell_reasons = ("lifecycle_not_actionable",)
-    elif policy.get("require_confirmed_one_minute") is True and not trigger_confirmed:
+    elif (
+        policy.get("require_one_minute_segment_difference_for_precise_execution")
+        is True
+        and not segment_difference_confirmed
+    ):
         expected_sell_reasons = ("one_minute_sell_not_confirmed",)
     elif exit_action == "none":
         expected_sell_reasons = (SELL_STRUCTURE_RELATION_REQUIRED_REASON_CODE,)
@@ -3949,7 +4046,6 @@ def validate_live_review_snapshot(
         or decision_core.get("segment_difference_frequency") != "1m"
         or decision_core.get("strategic_frequency") != "30m"
         or decision_core.get("tactical_frequency") != "5m"
-        or decision_core.get("locator_frequency") != "1m"
         or decision_core.get("human_confirmation_required") is not True
         or decision_core.get("automated_order_authorized") is not False
         or decision_core.get("live_status") != "LIVE_DISABLED"
@@ -4033,13 +4129,7 @@ def validate_live_review_snapshot(
             else market_data_as_of
         )
         setup = raw.get("setup_5m")
-        if (
-            "segment_difference_1m" in raw
-            and "trigger_1m" in raw
-            and raw.get("segment_difference_1m") != raw.get("trigger_1m")
-        ):
-            raise ValueError("live screening signal timeframe provenance is invalid")
-        trigger = raw.get("segment_difference_1m", raw.get("trigger_1m"))
+        segment_difference = raw.get("segment_difference_1m")
         daily_context = raw.get("context_d")
         entry_boundary = _entry_boundary_from_document(
             raw.get("entry_execution_boundary")
@@ -4106,28 +4196,41 @@ def validate_live_review_snapshot(
             frequency="5m",
             evidence_cutoff=signal_evidence_cutoff,
         )
-        trigger_is_causal = trigger is None or _point_document_is_causal(
-            trigger,
-            frequency="1m",
-            evidence_cutoff=signal_evidence_cutoff,
+        segment_difference_is_causal = (
+            segment_difference is None
+            or _point_document_is_causal(
+                segment_difference,
+                frequency="1m",
+                evidence_cutoff=signal_evidence_cutoff,
+            )
         )
-        trigger_is_execution_point = bool(
-            trigger is None
-            or isinstance(trigger, Mapping)
+        segment_difference_is_execution_point = bool(
+            segment_difference is None
+            or isinstance(segment_difference, Mapping)
             and is_one_minute_segment_difference_document(
-                trigger,
+                segment_difference,
                 minimum_tick=decision_minimum_tick,
                 expected_side=str(raw.get("side")),
             )
         )
-        trigger_available_at = None
-        if isinstance(trigger, Mapping):
+        segment_difference_is_nesting_witness = bool(
+            segment_difference is None
+            or isinstance(setup, Mapping)
+            and isinstance(segment_difference, Mapping)
+            and _one_minute_nesting_witness_matches_five_minute_setup(
+                setup,
+                segment_difference,
+                decision_at=signal_evidence_cutoff,
+            )
+        )
+        segment_difference_available_at = None
+        if isinstance(segment_difference, Mapping):
             try:
-                trigger_available_at = datetime.fromisoformat(
-                    str(trigger["available_at"])
+                segment_difference_available_at = datetime.fromisoformat(
+                    str(segment_difference["available_at"])
                 )
             except (KeyError, TypeError, ValueError):
-                trigger_available_at = None
+                segment_difference_available_at = None
         raw_selection_sources = raw.get("selection_sources")
         selection_sources = (
             tuple(raw_selection_sources)
@@ -4231,25 +4334,30 @@ def validate_live_review_snapshot(
             or not reason_contract_valid
             or not diagnostic_contract_valid
             or not setup_is_causal
-            or (trigger is not None and not isinstance(trigger, Mapping))
-            or not trigger_is_causal
-            or not trigger_is_execution_point
+            or (
+                segment_difference is not None
+                and not isinstance(segment_difference, Mapping)
+            )
+            or not segment_difference_is_causal
+            or not segment_difference_is_execution_point
+            or not segment_difference_is_nesting_witness
             or raw.get("lifecycle_stage")
             not in (_LIFECYCLE_STAGES | _SNAPSHOT_AUDIT_STAGES)
-            or isinstance(trigger, Mapping)
+            or isinstance(segment_difference, Mapping)
             and (
-                trigger.get("side") != raw.get("side")
-                or trigger.get("point_id") == raw.get("point_id")
+                segment_difference.get("side") != raw.get("side")
+                or segment_difference.get("point_id") == raw.get("point_id")
             )
             or (
                 entry_boundary is not None
                 and (
-                    not isinstance(trigger, Mapping)
-                    or entry_boundary.point_id != trigger.get("point_id")
+                    not isinstance(segment_difference, Mapping)
+                    or entry_boundary.point_id != segment_difference.get("point_id")
                     or entry_boundary.symbol != raw.get("code")
                     or raw.get("side") != "buy"
-                    or trigger_available_at is None
-                    or entry_boundary.confirmation_bar_closed_at != trigger_available_at
+                    or segment_difference_available_at is None
+                    or entry_boundary.confirmation_bar_closed_at
+                    != segment_difference_available_at
                     or entry_boundary.confirmation_bar_closed_at
                     > signal_evidence_cutoff
                 )
@@ -4409,6 +4517,50 @@ def _alert_type(signal: Mapping[str, object]) -> str:
     raise ValueError("live screening signal side is invalid")
 
 
+_IMMEDIATE_SELL_REVIEW_TRADING_MINUTES = 10
+
+
+def _five_minute_trade_signal_is_fresh(
+    setup_available_at: datetime,
+    review_available_at: datetime,
+    *,
+    symbol: str,
+) -> bool:
+    """Return whether a formal 5m point is still in the immediate-review lane.
+
+    A-share age is counted on completed continuous-auction minutes, so the lunch
+    closure never consumes the ten-minute window.  The lane is deliberately
+    same-session only: an overnight structure remains reviewable, but it is no
+    longer presented as a newly discovered sell point.  Other markets retain a
+    simple elapsed-time fallback because this module has no authoritative
+    session grid for them.
+    """
+
+    available = normalize_datetime(
+        setup_available_at,
+        "setup_available_at",
+    )
+    reviewed = normalize_datetime(
+        review_available_at,
+        "review_available_at",
+    )
+    if reviewed < available:
+        return False
+    if symbol.startswith(("SH.", "SZ.", "BJ.")):
+        available = available.astimezone(ZoneInfo("Asia/Shanghai"))
+        reviewed = reviewed.astimezone(ZoneInfo("Asia/Shanghai"))
+        if available.date() != reviewed.date():
+            return False
+        trading_minutes = sum(
+            available < close_at <= reviewed
+            for close_at in a_share_completed_one_minute_prefix_closes(reviewed)
+        )
+        return trading_minutes <= _IMMEDIATE_SELL_REVIEW_TRADING_MINUTES
+    return (reviewed - available).total_seconds() <= (
+        _IMMEDIATE_SELL_REVIEW_TRADING_MINUTES * 60
+    )
+
+
 def live_signal_human_review_alert(
     signal: Mapping[str, object],
     *,
@@ -4442,15 +4594,25 @@ def live_signal_human_review_alert(
     warmup = signal.get("warmup")
     sector = signal.get("sector")
     setup = signal.get("setup_5m")
-    trigger = signal.get("segment_difference_1m", signal.get("trigger_1m"))
+    segment_difference = signal.get("segment_difference_1m")
     context = signal.get("context_30m")
     entry_boundary = _entry_boundary_from_document(
         signal.get("entry_execution_boundary")
     )
     if not all(
         isinstance(value, Mapping) for value in (risk, warmup, sector, setup, context)
-    ) or (trigger is not None and not isinstance(trigger, Mapping)):
+    ) or (
+        segment_difference is not None and not isinstance(segment_difference, Mapping)
+    ):
         raise ValueError("live screening review evidence is incomplete")
+    if isinstance(segment_difference, Mapping) and not (
+        _one_minute_nesting_witness_matches_five_minute_setup(
+            setup,
+            segment_difference,
+            decision_at=signal_at,
+        )
+    ):
+        raise ValueError("live screening segment difference nesting is invalid")
     market_gate = str(risk.get("market_gate") or "UNRESOLVED")
     sector_gate = str(risk.get("sector_gate") or "UNRESOLVED")
     symbol_gate = str(risk.get("symbol_gate") or "UNRESOLVED")
@@ -4526,8 +4688,8 @@ def live_signal_human_review_alert(
     )
     alert_type = _alert_type(signal)
     if entry_boundary is not None and (
-        not isinstance(trigger, Mapping)
-        or entry_boundary.point_id != trigger.get("point_id")
+        not isinstance(segment_difference, Mapping)
+        or entry_boundary.point_id != segment_difference.get("point_id")
         or entry_boundary.symbol != symbol
         or signal.get("side") != "buy"
     ):
@@ -4543,11 +4705,15 @@ def live_signal_human_review_alert(
                 "TRADE_SIGNAL_5M",
                 (
                     "SEGMENT_DIFFERENCE_1M_PRESENT"
-                    if trigger is not None
+                    if segment_difference is not None
                     else "SEGMENT_DIFFERENCE_1M_NOT_PRESENT_OPTIONAL"
                 ),
                 f"LIFECYCLE_{str(stage).upper()}",
-                *((f"EXECUTION_RECOMMENDATION_{recommendation}",) if recommendation else ()),
+                *(
+                    (f"EXECUTION_RECOMMENDATION_{recommendation}",)
+                    if recommendation
+                    else ()
+                ),
                 *(
                     (
                         "UNADJUSTED_1M_CONFIRMATION_BAR_BOUNDARY_PRESENT",
@@ -4565,7 +4731,11 @@ def live_signal_human_review_alert(
                     )
                 ),
                 *(f"SELECTION_SOURCE_{value}" for value in selection_sources),
-                *((MONITOR_ONLY_WARNING_CODE,) if signal.get("monitor_only") is True else ()),
+                *(
+                    (MONITOR_ONLY_WARNING_CODE,)
+                    if signal.get("monitor_only") is True
+                    else ()
+                ),
                 *(str(value) for value in signal.get("decision_reasons") or ()),
                 *(str(value) for value in risk.get("reason_codes") or ()),
                 *(str(value) for value in warmup.get("reason_codes") or ()),
@@ -4583,7 +4753,9 @@ def live_signal_human_review_alert(
             "source_snapshot_sha256": source_snapshot_sha256,
             "context_30m": dict(context),
             "trade_signal_5m": dict(setup),
-            "segment_difference_1m": None if trigger is None else dict(trigger),
+            "segment_difference_1m": (
+                None if segment_difference is None else dict(segment_difference)
+            ),
             "signal": dict(signal),
         }
     )
@@ -4618,6 +4790,15 @@ def live_signal_human_review_alert(
     position_recommendation = parse_position_recommendation_document(
         signal.get("position_recommendation")
     )
+    try:
+        setup_available_at = datetime.fromisoformat(str(setup["available_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("live screening setup availability time is invalid") from exc
+    five_minute_trade_signal_fresh = _five_minute_trade_signal_is_fresh(
+        setup_available_at,
+        review_available_at,
+        symbol=symbol,
+    )
     return HumanReviewAlert(
         symbol=symbol,
         alert_type=alert_type,  # type: ignore[arg-type]
@@ -4643,6 +4824,7 @@ def live_signal_human_review_alert(
             selection_sources=selection_sources,
             lifecycle_stage=str(stage),
             monitor_only=signal.get("monitor_only") is True,
+            five_minute_trade_signal_fresh=five_minute_trade_signal_fresh,
             parameters=parameters,
         ),
         # 这是 5 分钟正式买卖点的因果结构锚点，不是行情报价或成交承诺。
@@ -4793,7 +4975,6 @@ def live_human_review_document(
             # Compatibility aliases retained for previously archived reports.
             "strategic_frequency": "30m",
             "tactical_frequency": "5m",
-            "locator_frequency": "1m",
             "candidate_symbol_count": len({value.symbol for value in alerts}),
         },
         "screening_contract": _jsonable(parameters.document()),
@@ -4861,13 +5042,7 @@ def live_human_review_document(
                 "context_frequency": "30m",
                 "trade_frequency": "5m",
                 "segment_difference_frequency": (
-                    "1m"
-                    if signal.get(
-                        "segment_difference_1m",
-                        signal.get("trigger_1m"),
-                    )
-                    is not None
-                    else None
+                    "1m" if signal.get("segment_difference_1m") is not None else None
                 ),
                 "position_recommendation": signal.get("position_recommendation"),
                 "decision_reasons": list(signal.get("decision_reasons") or ()),

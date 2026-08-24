@@ -11,14 +11,17 @@
   - `/set_stock_zixuan`
 """
 
+import re
+
 from flask import Blueprint, Response, current_app, render_template, request
 from flask_login import login_required
 from werkzeug.utils import secure_filename
 
 from chanlun.market import Market
-from chanlun.exchange import get_exchange
+from chanlun.exchange import get_exchange, resolve_bounded_stock_info
 from chanlun.tools.log_util import LogUtil
 from chanlun.zixuan import ZiXuan
+from ..services.trading_screening_scope import admit_explicit_validation_codes
 
 
 zixuan_bp = Blueprint("zixuan", __name__)
@@ -27,7 +30,9 @@ zixuan_bp = Blueprint("zixuan", __name__)
 _MAX_IMPORT_FILE_BYTES = 1 * 1024 * 1024
 _MAX_IMPORT_REQUEST_BYTES = _MAX_IMPORT_FILE_BYTES + 64 * 1024
 _MAX_GROUP_NAME_LENGTH = 64
+_MAX_BOUNDED_IMPORT_SYMBOLS = 20
 _VALID_MARKETS = frozenset(market.value for market in Market)
+_NORMALIZED_A_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 
 
 def _notify_instrument_scope_changed(market: str) -> None:
@@ -65,31 +70,57 @@ def _normalize_group_name(value):
     return name
 
 
-def _build_stock_lookups(stocks):
-    exact = {}
-    aliases = {}
-    for stock in stocks:
-        if not isinstance(stock, dict):
-            continue
-        code = str(stock.get("code") or "").strip()
-        if not code:
-            continue
-        item = {"code": code, "name": str(stock.get("name") or code)}
-        exact[code] = item
-        alias = code.rsplit(".", 1)[-1]
-        previous = aliases.get(alias)
-        if previous is None and alias not in aliases:
-            aliases[alias] = item
-        elif previous is not None and previous["code"] != code:
-            aliases[alias] = None
-    return exact, aliases
+def _normalize_explicit_import_code(raw_code: str, market: str) -> str | None:
+    """Normalize one user-provided code without expanding a market catalog."""
+
+    code = str(raw_code or "").strip()
+    if not code:
+        return None
+    if market != "a":
+        return code
+    code = code.upper()
+    for source, target in (
+        ("SHSE.", "SH."),
+        ("SZSE.", "SZ."),
+        ("BJSE.", "BJ."),
+    ):
+        if code.startswith(source):
+            code = target + code[len(source) :]
+            break
+    if code.isdigit() and len(code) == 6:
+        if code[0] in {"5", "6", "9"}:
+            code = f"SH.{code}"
+        elif code[0] in {"0", "1", "2", "3"}:
+            code = f"SZ.{code}"
+        elif code[0] in {"4", "8"}:
+            code = f"BJ.{code}"
+    return code if _NORMALIZED_A_CODE.fullmatch(code) else None
 
 
-def _resolve_import_stock(raw_code, market, exact, aliases):
-    code = raw_code.strip()
-    if market == "a":
-        code = code.replace("SHSE.", "SH.").replace("SZSE.", "SZ.")
-    return exact.get(code) or aliases.get(code)
+def _parse_bounded_import_rows(content: str, market: str):
+    """Parse and admit explicit rows before any exchange/provider is opened."""
+
+    parsed = {}
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        import_infos = stripped.split(",", 1)
+        code = _normalize_explicit_import_code(import_infos[0], market)
+        if code is None:
+            LogUtil.warning(f"zixuan import skip invalid code: {stripped!r}")
+            continue
+        name = import_infos[1].strip() if len(import_infos) == 2 else ""
+        if code in parsed:
+            del parsed[code]
+        parsed[code] = name
+    if not parsed:
+        return ()
+    admitted = admit_explicit_validation_codes(
+        tuple(parsed),
+        max_symbols=_MAX_BOUNDED_IMPORT_SYMBOLS,
+    )
+    return tuple((code, parsed[code]) for code in admitted)
 
 
 @zixuan_bp.before_request
@@ -221,30 +252,43 @@ def opt_zixuan_import():
     except UnicodeDecodeError:
         return {"ok": False, "msg": "文件必须使用 UTF-8 编码"}, 400
 
+    try:
+        import_rows = _parse_bounded_import_rows(content, market)
+    except ValueError:
+        return {
+            "ok": False,
+            "msg": f"单次导入最多允许 {_MAX_BOUNDED_IMPORT_SYMBOLS} 个显式代码",
+        }, 400
+
     zx = ZiXuan(market)
     if zx_group not in {group["name"] for group in zx.zixuan_list}:
         return {"ok": False, "msg": "自选组不存在"}, 400
-    ex = get_exchange(Market(market))
-    from ..services.stock_list import _safe_all_stocks
-
-    exact, aliases = _build_stock_lookups(_safe_all_stocks(ex))
     imported = {}
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
+    ex = get_exchange(Market(market)) if import_rows else None
+    for code, imported_name in import_rows:
         try:
-            import_infos = stripped.split(",", 1)
-            resolved = _resolve_import_stock(import_infos[0], market, exact, aliases)
+            resolved = resolve_bounded_stock_info(
+                ex,
+                code,
+                fallback_name=imported_name,
+                allow_code_fallback=True,
+                fallback_when_missing=True,
+            )
             if resolved is None:
                 continue
-            code = resolved["code"]
-            name = import_infos[1].strip() if len(import_infos) == 2 else ""
-            if code in imported:
-                del imported[code]
-            imported[code] = {"code": code, "name": name or resolved["name"]}
+            resolved_name = str(resolved.get("name") or "").strip()
+            if not resolved_name:
+                continue
+            imported[code] = {
+                "code": code,
+                "name": imported_name or resolved_name,
+            }
         except (KeyError, TypeError, ValueError):
-            LogUtil.warning(f"zixuan import skip line: {stripped!r}")
+            LogUtil.warning(f"zixuan import skip code: {code!r}")
+        except Exception as exc:
+            LogUtil.warning(
+                f"zixuan import identity lookup failed code={code!r}: {exc}"
+            )
 
     if imported:
         existing = [

@@ -10,6 +10,7 @@ from chanlun.decision_support.trading_system.backtest.metrics import (
     clustered_bootstrap,
     sample_adequacy,
 )
+from chanlun.decision_support.trading_system.backtest.execution import FillDecision
 from chanlun.decision_support.trading_system.backtest.portfolio import (
     BacktestRun,
     BacktestTrade,
@@ -136,6 +137,49 @@ def test_cost_metrics_use_gross_profit_before_costs() -> None:
     assert metrics.total_cost == Decimal("4")
     assert metrics.cost_to_gross_profit == Decimal("0.4")
     assert metrics.profit_factor == Decimal("1.333333333333333333333333333")
+
+
+def test_account_cost_and_turnover_include_terminal_open_entry_fill() -> None:
+    closed = trade(0, net_pnl="8", net_return="0.08", total_cost="4")
+    fills = (
+        FillDecision(
+            order_id="entry:closed",
+            filled=True,
+            reason="filled",
+            filled_at=START,
+            execution_price=Decimal("10"),
+            shares=100,
+            fees=Decimal("2"),
+        ),
+        FillDecision(
+            order_id="exit:closed",
+            filled=True,
+            reason="filled",
+            filled_at=START + timedelta(hours=1),
+            execution_price=Decimal("10.10"),
+            shares=100,
+            fees=Decimal("2"),
+        ),
+        FillDecision(
+            order_id="entry:terminal-open",
+            filled=True,
+            reason="filled",
+            filled_at=START + timedelta(days=1),
+            execution_price=Decimal("5"),
+            shares=100,
+            fees=Decimal("3"),
+        ),
+    )
+    run = replace(
+        equity_run("1000", "1005", trades=(closed,)),
+        fills=fills,
+    )
+
+    metrics = calculate_metrics(run)
+
+    assert metrics.total_cost == Decimal("7")
+    assert metrics.turnover == Decimal("2.51")
+    assert metrics.cost_to_gross_profit == Decimal("0.3333333333333333333333333333")
 
 
 def test_point_type_summaries_remain_independent() -> None:

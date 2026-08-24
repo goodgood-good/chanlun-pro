@@ -52,7 +52,7 @@ def _superseded_forward_ledger() -> dict[str, object]:
         "selection_path": "SUPERSEDED_SECTOR_ONLY_PATH",
         "strategic_frequency": "30m",
         "tactical_frequency": "5m",
-        "locator_frequency": "1m",
+        "segment_difference_frequency": "1m",
         "initial_cash": "1000000",
         "slot_count": 5,
         "slot_fraction": "0.18",
@@ -547,6 +547,11 @@ def test_shared_health_gate_requires_close_coverage_and_archive() -> None:
                 "market_data_as_of": "2026-08-03T15:00:00+08:00",
                 "coverage_cycle_complete": True,
                 "pending_symbol_count": 0,
+                "screening_scope_mode": "VALIDATION_COHORT",
+                "effective_monitor_universe_limit": 12,
+                "discovered_symbol_count": 12,
+                "large_scope_authorized": False,
+                "full_coverage_refresh_enabled": False,
             },
             "forward_archive": {"ready": True, "reason_code": "READY"},
             "forward_delivery": {
@@ -573,6 +578,18 @@ def test_shared_health_gate_requires_close_coverage_and_archive() -> None:
     assert waiting["ready"] is False
     assert waiting["reason_code"] == "SCREENING_COVERAGE_PENDING"
     assert waiting["terminal"] is False
+
+    # A completed old full-market snapshot cannot authorize a subprocess while
+    # the current app is running the default twelve-symbol validation scope.
+    health["components"]["trading_screening"]["pending_symbol_count"] = 0
+    health["components"]["trading_screening"]["discovered_symbol_count"] = 5086
+    stale_full = evaluation_readiness_from_health(
+        health,
+        session=date(2026, 8, 3),
+        observed_at=observed_at,
+    )
+    assert stale_full["ready"] is False
+    assert stale_full["reason_code"] == "SCREENING_SCOPE_UNAUTHORIZED"
 
 
 def test_shared_health_gate_makes_missing_capture_terminal() -> None:

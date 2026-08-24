@@ -243,10 +243,10 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         assert app.extensions["metadata_warmup_thread"] is warmup_thread
         screening = app.extensions["decision_support_trading_screening"]
         assert screening._config.priority_monitoring_enabled is True
-        assert screening._config.max_five_minute_candidate_symbols_per_refresh == 512
-        assert screening._config.max_thirty_minute_candidate_symbols_per_refresh == 96
-        assert screening._config.max_symbols_per_refresh == 64
-        assert screening._config.max_total_symbols_per_refresh == 64
+        assert screening._config.max_five_minute_candidate_symbols_per_refresh == 12
+        assert screening._config.max_thirty_minute_candidate_symbols_per_refresh == 12
+        assert screening._config.max_symbols_per_refresh == 12
+        assert screening._config.max_total_symbols_per_refresh == 12
         assert screening._config.priority_monitor_interval_seconds == 60
         gateway = app.extensions["decision_support_trading_screening_gateway"]
         monkeypatch.setattr(

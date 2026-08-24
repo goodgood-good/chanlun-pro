@@ -97,7 +97,7 @@ def signal_document(stage: str) -> dict[str, object]:
             "available_at": "2026-08-15T10:00:00+08:00",
             "invalidation_price": "9.80",
         },
-        "trigger_1m": {
+        "segment_difference_1m": {
             "point_id": "trigger:outbox",
             "point_type": "1buy",
             "side": "buy",

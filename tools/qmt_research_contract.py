@@ -86,9 +86,7 @@ def _fact_algorithm_relative_paths() -> tuple[str, ...]:
             return
 
     pending = [
-        SOURCE_ROOT
-        / "chanlun/decision_support/trading_system/backtest/fixed_year.py",
-        PROJECT_ROOT / "tools/backtest_qmt_fixed_year.py",
+        SOURCE_ROOT / "chanlun/decision_support/trading_system/backtest/fixed_year.py",
     ]
     discovered: set[Path] = set()
     while pending:
@@ -128,10 +126,89 @@ def _hash_relative_paths(
     )
 
 
+def _hash_python_symbols(
+    relative_path: str,
+    symbol_names: Iterable[str],
+    *,
+    label: str,
+) -> tuple[str, str]:
+    """Hash exact top-level definitions without binding an unrelated CLI."""
+
+    path = PROJECT_ROOT / relative_path
+    source = path.read_text(encoding="utf-8-sig")
+    tree = ast.parse(source, filename=str(path))
+    requested = set(symbol_names)
+    fragments: dict[str, str] = {}
+    for node in tree.body:
+        name = getattr(node, "name", None)
+        if name in requested:
+            fragment = ast.get_source_segment(source, node)
+            if fragment is None:
+                raise ValueError(f"cannot fingerprint {relative_path}:{name}")
+            fragments[str(name)] = fragment
+    missing = requested.difference(fragments)
+    if missing:
+        raise ValueError(
+            f"missing fingerprint symbols in {relative_path}: "
+            + ",".join(sorted(missing))
+        )
+    payload = "\n\n".join(
+        f"# {name}\n{fragments[name]}" for name in sorted(fragments)
+    ).encode("utf-8")
+    return (
+        f"{relative_path}#{label}",
+        "sha256:" + hashlib.sha256(payload).hexdigest(),
+    )
+
+
 def fact_algorithm_hashes() -> tuple[tuple[str, str], ...]:
     """Hash only code that can alter an expensive per-symbol fact checkpoint."""
 
-    return _hash_relative_paths(_fact_algorithm_relative_paths())
+    return tuple(
+        sorted(
+            (
+                *_hash_relative_paths(_fact_algorithm_relative_paths()),
+                _hash_python_symbols(
+                    "tools/backtest_qmt_fixed_year.py",
+                    ("WorkerRequest", "_worker"),
+                    label="symbol_fact_worker",
+                ),
+            )
+        )
+    )
+
+
+def prefix_algorithm_hashes() -> tuple[tuple[str, str], ...]:
+    """Hash the symbol facts plus the independent prefix-audit implementation."""
+
+    return tuple(
+        sorted(
+            (
+                *fact_algorithm_hashes(),
+                *_hash_relative_paths(("tools/audit_qmt_prefix_invariance.py",)),
+            )
+        )
+    )
+
+
+def sector_composite_algorithm_hashes() -> tuple[tuple[str, str], ...]:
+    """Hash only code that can alter an all-member raw sector composite.
+
+    This boundary intentionally excludes symbol entry, portfolio, reporting,
+    and finalizer code.  Those stages may need to derive new assessments from
+    a composite, but they cannot change the underlying member-price composite.
+    """
+
+    return _hash_relative_paths(
+        (
+            "src/chanlun/decision_support/fingerprints.py",
+            "src/chanlun/decision_support/trading_system/backtest/models.py",
+            "src/chanlun/decision_support/trading_system/backtest/pit_metadata.py",
+            "src/chanlun/decision_support/trading_system/backtest/pit_sector.py",
+            "src/chanlun/decision_support/trading_system/backtest/qmt_local_cache.py",
+            "src/chanlun/exchange/price_basis.py",
+        )
+    )
 
 
 def algorithm_hashes() -> tuple[tuple[str, str], ...]:
@@ -153,13 +230,23 @@ def algorithm_hashes() -> tuple[tuple[str, str], ...]:
             "tools/qmt_research_contract.py",
             "tools/backtest_qmt_fixed_year.py",
             "tools/audit_qmt_prefix_invariance.py",
-            "tools/finalize_qmt_fixed_year.py",
             "tools/finalize_qmt_pit_fixed_year.py",
             "tools/snapshot_qmt_pit_metadata.py",
         }
     )
     relative_paths.update(_fact_algorithm_relative_paths())
-    return _hash_relative_paths(relative_paths)
+    return tuple(
+        sorted(
+            (
+                *_hash_relative_paths(relative_paths),
+                _hash_python_symbols(
+                    "tools/backtest_qmt_fixed_year.py",
+                    ("WorkerRequest", "_worker"),
+                    label="symbol_fact_worker",
+                ),
+            )
+        )
+    )
 
 
 def unavailable_ablations(reason: str) -> tuple[AblationResult, ...]:
@@ -255,6 +342,8 @@ __all__ = (
     "algorithm_hashes",
     "fact_algorithm_hashes",
     "load_selection_research_ledger",
+    "prefix_algorithm_hashes",
+    "sector_composite_algorithm_hashes",
     "unavailable_ablations",
     "unavailable_benchmarks",
     "write_report_atomic",

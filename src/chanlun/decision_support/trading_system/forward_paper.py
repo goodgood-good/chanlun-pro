@@ -1762,7 +1762,7 @@ class ForwardPaperContract:
     selection_path: str
     strategic_frequency: str
     tactical_frequency: str
-    locator_frequency: str
+    segment_difference_frequency: str
     initial_cash: str
     slot_count: int
     slot_fraction: str
@@ -1796,7 +1796,7 @@ class ForwardPaperContract:
             self.selection_path,
             self.strategic_frequency,
             self.tactical_frequency,
-            self.locator_frequency,
+            self.segment_difference_frequency,
         ) != (
             "INDIVIDUAL_THREE_PROGRAM",
             "30m",
@@ -1864,7 +1864,7 @@ def load_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperContract
         "selection_path": "INDIVIDUAL_THREE_PROGRAM",
         "strategic_frequency": "30m",
         "tactical_frequency": "5m",
-        "locator_frequency": "1m",
+        "segment_difference_frequency": "1m",
         "initial_cash": "1000000",
         "slot_count": 5,
         "slot_fraction": "0.18",
@@ -1903,7 +1903,9 @@ def load_forward_contract(parameter_snapshot_path: Path) -> ForwardPaperContract
         selection_path=str(payload["selection_path"]),
         strategic_frequency=str(payload["strategic_frequency"]),
         tactical_frequency=str(payload["tactical_frequency"]),
-        locator_frequency=str(payload["locator_frequency"]),
+        segment_difference_frequency=str(
+            payload["segment_difference_frequency"]
+        ),
         initial_cash=str(payload["initial_cash"]),
         slot_count=int(payload["slot_count"]),
         slot_fraction=str(payload["slot_fraction"]),

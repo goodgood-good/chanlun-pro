@@ -515,6 +515,7 @@ def test_strategic_buy_without_a_remaining_causal_minute_is_review_only() -> Non
 def test_strategic_buy_intent_retains_full_entry_boundary_attestation() -> None:
     boundary = EntryExecutionBoundary(
         symbol="SH.600000",
+        setup_occurrence_id="setup-occurrence:paper-ledger-test",
         point_id="sha256:" + "9" * 64,
         source_frequency="1m",
         confirmation_bar_closed_at=REVIEWED_AT,

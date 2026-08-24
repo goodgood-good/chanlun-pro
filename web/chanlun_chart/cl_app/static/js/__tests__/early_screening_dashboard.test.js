@@ -216,7 +216,7 @@ const snapshot = {
       sector: { sector_id: "qmt-gics3:bank", sector_name: "银行" },
       context_30m: { direction: "up", disposition: "supportive" },
       setup_5m: { point_type: "1buy", center_ordinal: null },
-      trigger_1m: null,
+      segment_difference_1m: null,
       structural_stop: "9.80",
       risk_multiplier: "0.50",
       entry_allowed: false,
@@ -243,7 +243,7 @@ const snapshot = {
       sector: { sector_id: "qmt-gics3:real-estate", sector_name: "房地产" },
       context_30m: { direction: "neutral", disposition: "neutral" },
       setup_5m: { point_type: "2buy", center_ordinal: null },
-      trigger_1m: {
+      segment_difference_1m: {
         point_type: "1buy",
         available_at: "2026-07-20T14:58:00+08:00",
       },
@@ -257,7 +257,7 @@ const snapshot = {
       exit_allowed: false,
       decision_reasons: [],
       execution_profile: {
-        precision_locator_ready: true,
+        segment_difference_ready: true,
         precise_execution_ready: true,
       },
       higher_timeframe_risk: currentHigherTimeframeRisk(),
@@ -473,7 +473,7 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(controllerSource, /priority_monitor_ready/);
   assert.match(controllerSource, /盘中实时预警通道尚未就绪/);
   assert.match(controllerSource, /优先预警正常，候选范围仍在准备/);
-  assert.match(controllerSource, /Ui\.segmentScopeText\(runtimeHealth, precisionLocatorCount\)/);
+  assert.match(controllerSource, /Ui\.segmentScopeText\(runtimeHealth, segmentDifferenceCount\)/);
   assert.match(controllerSource, /full_coverage_refresh_paused/);
   assert.match(controllerSource, /full_coverage_next_active_at/);
   assert.match(controllerSource, /全市场覆盖等待下一运行窗口/);
@@ -823,14 +823,14 @@ test("dashboard exposes and persists the optional one-minute segment-difference 
   assert.match(template, /不累计历史证据/);
   assert.match(controllerSource, /segmentState:\s*\["present", "current", "historical", "absent"\]\.includes\(saved\.segmentState\)/);
   assert.match(controllerSource, /segmentState:\s*state\.segmentState/);
-  assert.match(controllerSource, /Ui\.currentPrecisionLocatorReadyForSignal\(signal\)/);
+  assert.match(controllerSource, /Ui\.currentSegmentDifferenceReadyForSignal\(signal\)/);
   assert.match(controllerSource, /unifiedSignals\.filter\(Ui\.isCurrentSelectionSignal\)/);
   assert.match(controllerSource, /\[data-segment-state\]/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
   assert.match(controllerSource, /state\.segmentState = "current"/);
   assert.match(controllerSource, /state\.pointType = "all"/);
   assert.match(controllerSource, /data-screening-mode="live"/);
-  assert.match(controllerSource, /showCurrentSegments\.disabled = precisionLocatorCount === 0/);
+  assert.match(controllerSource, /showCurrentSegments\.disabled = segmentDifferenceCount === 0/);
   assert.match(controllerSource, /Ui\.currentPreciseExecutionReadyForSignal\(signal\)/);
   assert.match(controllerSource, /state\.segmentState === "current"/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
@@ -862,7 +862,7 @@ test("precise execution readiness is stricter than one-minute segment evidence",
       reason_codes: ["STRUCTURAL_RISK_BUDGET_SIZED"],
     },
     execution_profile: {
-      precision_locator_ready: true,
+      segment_difference_ready: true,
       precise_execution_ready: true,
     },
   };
@@ -870,8 +870,8 @@ test("precise execution readiness is stricter than one-minute segment evidence",
   const afterBoundary = new Date("2026-08-20T10:02:01+08:00");
 
   assert.equal(Ui.segmentDifferenceEvidenceStatusForSignal(base), "present");
-  assert.equal(Ui.precisionLocatorReadyForSignal(base, insideBoundary), true);
-  assert.equal(Ui.currentPrecisionLocatorReadyForSignal(base, insideBoundary), true);
+  assert.equal(Ui.segmentDifferenceReadyForSignal(base, insideBoundary), true);
+  assert.equal(Ui.currentSegmentDifferenceReadyForSignal(base, insideBoundary), true);
   assert.equal(Ui.currentPreciseExecutionReadyForSignal(base, insideBoundary), true);
   assert.equal(Ui.fiveMinuteTradeSignalConfirmedForSignal(base), true);
   assert.equal(
@@ -921,7 +921,6 @@ test("precise execution readiness is stricter than one-minute segment evidence",
     Ui.preciseExecutionReadyForSignal({
       ...base,
       segment_difference_1m: null,
-      trigger_1m: null,
     }, insideBoundary),
     false,
   );
@@ -1300,7 +1299,7 @@ test("normalizeUsMonitor isolates auxiliary contract failures and recomputes US 
     schema: "chanlun-us-realtime-monitor",
     source_schema: "chanlun-attention-group-monitor",
     market: "us",
-    market_scope: "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+    market_scope: "ADMITTED_US_SYMBOLS_IN_GLOBAL_GROUPS",
     decision_mode: "STRICT_STRUCTURE_OBSERVATION_ONLY",
     auxiliary_only: true,
     full_market_screening: false,
@@ -1339,7 +1338,7 @@ test("US monitor symbols share the signal queue and bypass only A-share sector f
     schema: "chanlun-us-realtime-monitor",
     source_schema: "chanlun-attention-group-monitor",
     market: "us",
-    market_scope: "ALL_US_SYMBOLS_IN_GLOBAL_GROUPS",
+    market_scope: "ADMITTED_US_SYMBOLS_IN_GLOBAL_GROUPS",
     decision_mode: "STRICT_STRUCTURE_OBSERVATION_ONLY",
     auxiliary_only: true,
     full_market_screening: false,
@@ -1407,8 +1406,10 @@ test("unmatched notification history stays in human review and cannot create a c
     name: "高通",
     side: "sell",
     point_type: "1sell",
-    source_frequency: "1m",
-    trigger_frequency: "1m",
+    source_frequency: "5m",
+    trade_frequency: "5m",
+    segment_difference_frequency: "1m",
+    segment_difference_present: false,
     signal_time: "2026-08-15T10:25:00-04:00",
     observed_at: "2026-08-15T10:25:00-04:00",
     recorded_at: "2026-08-15T22:26:00+08:00",
@@ -1664,7 +1665,7 @@ test("expired one-minute segment stays visible only as historical audit evidence
     side: "buy",
     point_type: "1buy",
     source_frequency: "5m",
-    trigger_frequency: null,
+    trade_frequency: "5m",
     segment_difference_frequency: "1m",
     segment_difference_present: true,
     segment_difference_status: "expired",
@@ -1849,31 +1850,31 @@ test("filters preserve independent point lifecycle sector and query choices", ()
     signal_id: "signal-segment-unavailable",
     decision_reasons: ["ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"],
   };
-  const currentSellLocator = {
+  const currentSellWitness = {
     ...currentSegment,
-    signal_id: "signal-sell-locator",
+    signal_id: "signal-sell-witness",
     point_type: "2sell",
     side: "sell",
-    trigger_1m: {
-      ...currentSegment.trigger_1m,
+    segment_difference_1m: {
+      ...currentSegment.segment_difference_1m,
       point_type: "2sell",
     },
     entry_allowed: false,
     exit_allowed: true,
   };
-  const historicalSellLocator = {
-    ...currentSellLocator,
-    signal_id: "signal-sell-locator-historical",
-    trigger_1m: {
-      ...currentSellLocator.trigger_1m,
+  const historicalSellWitness = {
+    ...currentSellWitness,
+    signal_id: "signal-sell-witness-historical",
+    segment_difference_1m: {
+      ...currentSellWitness.segment_difference_1m,
       available_at: "2026-07-20T14:40:00+08:00",
     },
   };
   const segmentSignals = [
     signals[0],
     currentSegment,
-    currentSellLocator,
-    historicalSellLocator,
+    currentSellWitness,
+    historicalSellWitness,
     expiredSegment,
     unavailableSegment,
   ];
@@ -1886,8 +1887,8 @@ test("filters preserve independent point lifecycle sector and query choices", ()
       .map((row) => row.signal_id),
     [
       "signal-2",
-      "signal-sell-locator",
-      "signal-sell-locator-historical",
+      "signal-sell-witness",
+      "signal-sell-witness-historical",
       "signal-segment-expired",
       "signal-segment-unavailable",
     ],
@@ -1895,25 +1896,25 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   assert.deepEqual(
     Ui.filterSignals(segmentSignals, { segmentState: "current" })
       .map((row) => row.signal_id),
-    ["signal-2", "signal-sell-locator", "signal-sell-locator-historical"],
+    ["signal-2", "signal-sell-witness", "signal-sell-witness-historical"],
   );
   assert.equal(
-    Ui.precisionLocatorReadyForSignal(
-      historicalSellLocator,
+    Ui.segmentDifferenceReadyForSignal(
+      historicalSellWitness,
       new Date("2026-07-20T14:58:30+08:00"),
     ),
     true,
   );
   assert.equal(
-    Ui.currentPrecisionLocatorReadyForSignal(
-      historicalSellLocator,
+    Ui.currentSegmentDifferenceReadyForSignal(
+      historicalSellWitness,
       new Date("2026-07-20T14:58:30+08:00"),
     ),
     true,
   );
   assert.deepEqual(
     (() => {
-      const period = Ui.periodPathForSignal(historicalSellLocator).find(
+      const period = Ui.periodPathForSignal(historicalSellWitness).find(
         (row) => row.frequency === "1m",
       );
       return [period.state, period.summary, period.boundary];
@@ -1937,7 +1938,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   const sameLevelRecursiveEvidence = {
     ...currentSegment,
     signal_id: "signal-1m-chart-l1",
-    trigger_1m: {
+    segment_difference_1m: {
       point_type: "1buy",
       source_frequency: "1m",
       recursive_level: 1,
@@ -2165,9 +2166,23 @@ test("confirmed sell review is urgent and manual attention adds account-free pri
   });
   const structuralSell = signal("structural-sell", ["QMT_SECTOR_ELIGIBLE_SCOPE"]);
   const manualAttention = signal("manual-attention", ["MANUAL_ATTENTION_MONITOR"]);
+  const staleStructuralSell = {
+    ...structuralSell,
+    signal_id: "stale-structural-sell",
+    segment_difference_1m: { available_at: "2026-08-21T09:31:00+08:00" },
+    observed_at: "2026-08-21T09:31:00+08:00",
+  };
+  const staleManualAttention = {
+    ...manualAttention,
+    signal_id: "stale-manual-attention",
+    observed_at: "2026-08-21T09:31:00+08:00",
+  };
 
   assert.ok(Ui.reviewPriorityForSignal(structuralSell) >= 80);
   assert.ok(Ui.reviewPriorityForSignal(manualAttention) >= 90);
+  assert.ok(Ui.reviewPriorityForSignal(staleStructuralSell) >= 40);
+  assert.ok(Ui.reviewPriorityForSignal(staleStructuralSell) <= 69);
+  assert.ok(Ui.reviewPriorityForSignal(staleManualAttention) >= 90);
   assert.deepEqual(
     Ui.sortSignalsForReview([structuralSell, manualAttention]).map((row) => row.signal_id),
     ["manual-attention", "structural-sell"],
@@ -2184,6 +2199,45 @@ test("confirmed sell review is urgent and manual attention adds account-free pri
     Ui.decisionSummaryForSignal(laterManualAttention).title,
     /5分钟二卖.*操作确认/,
   );
+});
+
+test("derived sell priority counts the formal 5m setup on same-session trading minutes", () => {
+  const Ui = loadUi();
+  const sell = (availableAt, observedAt) => ({
+    signal_id: `${availableAt}:${observedAt}`,
+    code: "SZ.000001",
+    market: "a",
+    point_type: "2sell",
+    side: "sell",
+    lifecycle_stage: "triggered",
+    setup_5m: { available_at: availableAt },
+    observed_at: observedAt,
+    execution_profile: { recommendation: "CAUTION", context_grade: "B" },
+    position_recommendation: { status: "CONDITIONAL", reason_codes: [] },
+    higher_timeframe_risk: {
+      market_gate: "UNRESOLVED",
+      sector_gate: "UNRESOLVED",
+      symbol_gate: "UNRESOLVED",
+    },
+    warmup: { converged: true },
+    selection_sources: ["QMT_SECTOR_ELIGIBLE_SCOPE"],
+  });
+  const lunchFresh = sell(
+    "2026-08-20T11:25:00+08:00",
+    "2026-08-20T13:05:00+08:00",
+  );
+  const elevenMinutesOld = sell(
+    "2026-08-20T10:00:00+08:00",
+    "2026-08-20T10:11:00+08:00",
+  );
+  const overnight = sell(
+    "2026-08-20T14:55:00+08:00",
+    "2026-08-21T09:31:00+08:00",
+  );
+
+  assert.ok(Ui.reviewPriorityForSignal(lunchFresh) >= 80);
+  assert.ok(Ui.reviewPriorityForSignal(elevenMinutesOld) <= 69);
+  assert.ok(Ui.reviewPriorityForSignal(overnight) <= 69);
 });
 
 test("signal discovery delay excludes only the same A-share lunch closure", () => {
@@ -2963,9 +3017,12 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
     "30m 向上/支撑/一买 · 5m 震荡/中性/无主导点",
   );
   assert.match(controllerSource, /Ui\.sectorCoverageText\(audit\)/);
-  assert.match(controllerSource, /Ui\.scanCoverageText\(audit, snapshot\)/);
+  assert.match(
+    controllerSource,
+    /Ui\.scanCoverageText\(audit, snapshot, runtimeHealth\)/,
+  );
   assert.match(controllerSource, /Ui\.emptySignalDetail\(state\.snapshot, state\.query,\s*\{/);
-  assert.match(controllerSource, /Ui\.scanQualityText\(snapshot\)/);
+  assert.match(controllerSource, /Ui\.scanQualityText\(snapshot, runtimeHealth\)/);
   assert.match(controllerSource, /Ui\.memberHistoryDiagnosticsText\(snapshot\)/);
   assert.match(controllerSource, /Ui\.scanTimingText\(audit\)/);
   assert.match(controllerSource, /后台正连续分析剩余/);
@@ -3296,7 +3353,7 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.equal(
     Ui.segmentScopeText({
     }, 3),
-    "当前 3 个5分钟操作候选已完成1分钟区间套精确定位 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
+    "当前 3 个5分钟操作候选已完成1分钟区间套段差见证 · 5分钟决定交易级别，1分钟只确定精确买卖位置",
   );
   assert.equal(
     Ui.priorityMonitorText({ priority_monitor_status: "not_due" }, {}),
@@ -3365,6 +3422,64 @@ test("operator status copy explains degraded state without exposing internal cod
     Ui.priorityMonitorText(deliveryUnverified, {}),
     /时效保障未就绪 · 尚无到期通知事件或成功送达记录.*通知已配置，送达尚未验证/,
   );
+});
+
+test("validation scope ignores stale full-coverage progress in operator copy", () => {
+  const Ui = loadUi();
+  const runtimeHealth = {
+    screening_scope_mode: "VALIDATION_COHORT",
+    validation_cohort_size: 12,
+    effective_monitor_universe_limit: 12,
+    full_coverage_refresh_enabled: false,
+    daily_preselection_ready: false,
+    daily_preselection_status: "coverage_in_progress",
+    daily_preselection_candidate_count: 1664,
+    full_coverage_next_active_at: "NEXT_SCAN",
+  };
+  const staleSnapshot = {
+    screening_scope: {
+      mode: "VALIDATION_COHORT",
+      validation_cohort_size: 12,
+      effective_monitor_universe_limit: 12,
+    },
+    scan_audit: {
+      discovered_symbol_count: 5103,
+      coverage_cycle_completed_symbol_count: 5086,
+      coverage_cycle_excluded_symbol_count: 0,
+      pending_symbol_count: 17,
+      coverage_cycle_complete: false,
+    },
+  };
+
+  assert.equal(
+    Ui.scanCoverageText(staleSnapshot.scan_audit, staleSnapshot, runtimeHealth),
+    "12只小样本验证 · 当前验证范围固定",
+  );
+  assert.equal(
+    Ui.scanQualityText({
+      ...staleSnapshot,
+      available: true,
+      data_quality: { complete: true, stale: false },
+    }, runtimeHealth),
+    "小样本结果完整",
+  );
+  assert.equal(
+    Ui.dailyPreselectionText(runtimeHealth),
+    "12只小样本验证 · 正在准备当前小样本",
+  );
+  for (const output of [
+    Ui.scanCoverageText(staleSnapshot.scan_audit, staleSnapshot, runtimeHealth),
+    Ui.dailyPreselectionText(runtimeHealth),
+    Ui.priorityMonitorDiagnosticsText(runtimeHealth, {}),
+  ]) {
+    assert.doesNotMatch(output, /5086|5103|1664|全市场|全量扫描|自动继续/);
+  }
+  assert.equal(Ui.statusLabel("coverage_in_progress"), "当前范围扫描中");
+  assert.match(
+    controllerSource,
+    /const cycleInProgress = !scopeFacts\.validation/,
+  );
+  assert.match(controllerSource, /if \(scopeFacts\.validation\)/);
 });
 
 test("signal cards keep current 5m structures current regardless of age", () => {
@@ -3509,7 +3624,7 @@ test("period path and evidence groups separate established missing blocking and 
       missing_conditions: ["terminal_line_confirmed"],
       invalidation_price: null,
     },
-    trigger_1m: null,
+    segment_difference_1m: null,
     decision_reasons: ["one_minute_not_confirmed", "lower_or_unrelated_structure_risk"],
   };
 
@@ -3570,7 +3685,7 @@ test("period path and evidence groups separate established missing blocking and 
 
   const withSegmentDifference = {
     ...signal,
-    trigger_1m: {
+    segment_difference_1m: {
       point_type: "1buy",
       recursive_level: 0,
       evidence_codes: [],
@@ -3730,11 +3845,13 @@ test("new execution profile keeps adverse context advisory and visible", () => {
       },
     },
     setup_5m: { ...snapshot.signals[1].setup_5m, status: "confirmed" },
-    trigger_1m: { ...snapshot.signals[1].trigger_1m, status: "confirmed" },
+    segment_difference_1m: {
+      ...snapshot.signals[1].segment_difference_1m,
+      status: "confirmed",
+    },
     decision_reasons: ["daily_structure_hostile", "SAME_PERIOD_CONTEXT_GRADE_C"],
     execution_profile: {
       structure_signal_confirmed: true,
-      execution_trigger_confirmed: true,
       recommendation: "CAUTION",
       recommendation_label: "结构已触发，环境逆风或证据需人工复核",
       hard_blocked: false,
