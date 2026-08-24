@@ -64,6 +64,14 @@ class _State:
     def big_dir(self) -> str:
         return self.direction
 
+    @staticmethod
+    def warmup_start_by_frequency() -> dict[str, str]:
+        return {
+            "30m": "2025-08-04T10:01:00+08:00",
+            "5m": "2026-04-06T10:01:00+08:00",
+            "1m": "2026-07-05T10:01:00+08:00",
+        }
+
 
 def _strict_sell(code: str, name: str, signal_time: str) -> MonitorEvent:
     return MonitorEvent(
@@ -819,6 +827,11 @@ def test_cross_market_alert_passes_symbol_aligned_chart_context(tmp_path):
     assert chart["point_type"] == "1sell"
     assert chart["signal_time"] == "2026-08-04 10:00:00"
     assert chart["observed_at"] == "2026-08-04T10:01:00+08:00"
+    assert chart["warmup_start_by_frequency"] == {
+        "30m": "2025-08-04T10:01:00+08:00",
+        "5m": "2026-04-06T10:01:00+08:00",
+        "1m": "2026-07-05T10:01:00+08:00",
+    }
     assert chart["evidence_required"] is True
     assert notifier.rich_messages[0][2]["delivery_priority"] == 0
     assert notifier.rich_messages[0][2]["require_evidence_match"] is True

@@ -33,6 +33,7 @@ def test_signed_store_is_immutable_and_rejects_bad_or_expired_url(
         clock=lambda: now,
     )
     url = store.publish(PNG, artifact_key="event:stable")
+    assert store.existing_url(artifact_key="event:stable") == url
     parsed = urlsplit(url)
     artifact_id = Path(parsed.path).stem
     query = parse_qs(parsed.query)
@@ -67,6 +68,7 @@ def test_signed_store_is_immutable_and_rejects_bad_or_expired_url(
         )
         is None
     )
+    assert expired.existing_url(artifact_key="event:stable") is None
 
 
 def test_public_route_requires_signature_and_returns_png(tmp_path: Path) -> None:
@@ -276,24 +278,25 @@ def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
         renderer=lambda charts: rendered.append(tuple(charts)) or PNG,
     )
 
-    images = service(
-        {
-            "charts": [
-                {
-                    "market": "us",
-                    "code": "TSLA.US",
-                    "name": "Tesla",
-                    "artifact_key": "strict-event",
-                    "point_type": "3buy",
-                    "signal_time": "2026-08-05T10:00:00-04:00",
-                    "evidence_id": "strict-point-id",
-                    "recursive_level": 1,
-                    "anchor_time": "2026-08-05T09:55:00-04:00",
-                    "evidence_required": True,
-                }
-            ]
-        }
-    )
+    context = {
+        "charts": [
+            {
+                "market": "us",
+                "code": "TSLA.US",
+                "name": "Tesla",
+                "artifact_key": "strict-event",
+                "observed_at": "2026-08-05T10:01:00-04:00",
+                "point_type": "3buy",
+                "signal_time": "2026-08-05T10:00:00-04:00",
+                "evidence_id": "strict-point-id",
+                "recursive_level": 1,
+                "anchor_time": "2026-08-05T09:55:00-04:00",
+                "evidence_required": True,
+            }
+        ]
+    }
+    images = service(context)
+    retried_images = service(context)
 
     assert browser_calls == []
     assert resolutions == [
@@ -312,7 +315,80 @@ def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
         "strict:1m",
     ]
     assert len(images) == 1
+    assert retried_images == images
+    assert len(rendered) == 1
+    assert len(resolutions) == 1
     assert "已核验5m3buy" in images[0]["alt"]
+
+
+def test_evidence_bound_alert_replays_producer_clock_and_warmup_prefix(
+    tmp_path: Path,
+) -> None:
+    store = SignedAlertChartStore(
+        root=tmp_path,
+        public_base_url="http://47.96.40.233:8890",
+        secret=b"0123456789abcdef0123456789abcdef",
+    )
+    created = []
+
+    class State:
+        warmup_ready = False
+
+        def __init__(self, code, exchange, **kwargs):
+            created.append((code, exchange, kwargs))
+
+        def refresh_chart_levels(self):
+            self.warmup_ready = True
+            return True
+
+        @staticmethod
+        def confirmed_point_occurrence(*_args, **_kwargs):
+            return object()
+
+        @staticmethod
+        def chart_data(frequency):
+            return f"strict:{frequency}"
+
+    observed_at = "2026-08-24T22:58:42+08:00"
+    starts = {
+        "30m": "2025-08-24T22:27:30+08:00",
+        "5m": "2026-04-26T22:27:30+08:00",
+        "1m": "2026-07-25T22:27:30+08:00",
+    }
+    service = AlertChartImageService(
+        store,
+        state_factory=State,
+        exchange_provider=lambda market: market.value,
+        renderer=lambda _charts: PNG,
+    )
+
+    images = service(
+        {
+            "charts": [
+                {
+                    "market": "us",
+                    "code": "QQQ.US",
+                    "name": "纳指ETF",
+                    "artifact_key": "qqq-event",
+                    "observed_at": observed_at,
+                    "warmup_start_by_frequency": starts,
+                    "point_type": "3sell",
+                    "signal_time": "2026-08-24T22:55:00+08:00",
+                    "evidence_id": "strict-point-id",
+                    "recursive_level": 0,
+                    "anchor_time": "2026-08-21T23:50:00+08:00",
+                    "evidence_required": True,
+                }
+            ]
+        }
+    )
+
+    assert len(images) == 1
+    assert len(created) == 1
+    assert created[0][0:2] == ("QQQ.US", "us")
+    kwargs = created[0][2]
+    assert kwargs["warmup_start_by_frequency"] == starts
+    assert kwargs["clock"]().isoformat() == observed_at
 
 
 def test_qcom_evidence_bound_chart_survives_internal_evidence_id_rebuild(
@@ -340,7 +416,7 @@ def test_qcom_evidence_bound_chart_survives_internal_evidence_id_rebuild(
     monkeypatch.setattr(state, "evidence", lambda _frequency: object())
     monkeypatch.setattr(
         monitor_module,
-        "extract_confirmed_points",
+        "extract_current_confirmed_points",
         lambda *_args, **_kwargs: (rebuilt_point,),
     )
 

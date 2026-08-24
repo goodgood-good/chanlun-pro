@@ -81,15 +81,51 @@ class SignedAlertChartStore:
             self.root / f"{artifact_id}.json",
         )
 
-    def publish(self, png: bytes, *, artifact_key: str) -> str:
-        if not isinstance(png, bytes) or not png.startswith(_PNG_HEADER):
-            raise ValueError("published chart must be PNG bytes")
+    @staticmethod
+    def _artifact_id(artifact_key: str) -> str:
         key = str(artifact_key or "").strip()
         if not key:
             raise ValueError("artifact_key is required")
-        artifact_id = hashlib.sha256(
+        return hashlib.sha256(
             f"chanlun-alert-chart\n{key}".encode("utf-8")
         ).hexdigest()
+
+    def _public_url(self, artifact_id: str, expires: int) -> str:
+        signature = self._signature(artifact_id, expires)
+        return (
+            f"{self.public_base_url}/public/alert-chart/{artifact_id}.png"
+            f"?expires={expires}&signature={signature}"
+        )
+
+    def existing_url(self, *, artifact_key: str) -> str | None:
+        """Return a still-valid immutable artifact without rebuilding its chart."""
+
+        artifact_id = self._artifact_id(artifact_key)
+        now = self._now()
+        with self._lock:
+            image_path, metadata_path = self._paths(artifact_id)
+            if not image_path.is_file() or not metadata_path.is_file():
+                return None
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                expires = int(metadata.get("expires", 0))
+                with image_path.open("rb") as stream:
+                    header = stream.read(len(_PNG_HEADER))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return None
+            if (
+                metadata.get("schema") != "chanlun-alert-chart-artifact"
+                or metadata.get("artifact_id") != artifact_id
+                or expires <= int(now.timestamp())
+                or header != _PNG_HEADER
+            ):
+                return None
+        return self._public_url(artifact_id, expires)
+
+    def publish(self, png: bytes, *, artifact_key: str) -> str:
+        if not isinstance(png, bytes) or not png.startswith(_PNG_HEADER):
+            raise ValueError("published chart must be PNG bytes")
+        artifact_id = self._artifact_id(artifact_key)
         now = self._now()
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -130,11 +166,7 @@ class SignedAlertChartStore:
             finally:
                 temporary_metadata.unlink(missing_ok=True)
 
-        signature = self._signature(artifact_id, expires)
-        return (
-            f"{self.public_base_url}/public/alert-chart/{artifact_id}.png"
-            f"?expires={expires}&signature={signature}"
-        )
+        return self._public_url(artifact_id, expires)
 
     def resolve(
         self,
@@ -251,7 +283,58 @@ class AlertChartImageService:
                         raise RuntimeError(
                             f"alert evidence identity incomplete for {market}:{code}"
                         )
-                    state = self._state(market, code)
+                    evidence_artifact_key = (
+                        f"{artifact_key}:strict-evidence-bound"
+                    )
+                    alt = (
+                        f"{name} {code} 30分钟/5分钟/1分钟结构图"
+                        f"（已核验{raw.get('frequency') or '5m'}"
+                        f"{point_type}：{signal_time}）"
+                    )
+                    existing_url = self.store.existing_url(
+                        artifact_key=evidence_artifact_key,
+                    )
+                    if existing_url is not None:
+                        output.append({"url": existing_url, "alt": alt})
+                        continue
+                    raw_starts = raw.get("warmup_start_by_frequency")
+                    if raw_starts is not None and not isinstance(
+                        raw_starts,
+                        Mapping,
+                    ):
+                        raise RuntimeError(
+                            f"alert warmup identity invalid for {market}:{code}"
+                        )
+                    raw_observed_at = str(raw.get("observed_at") or "").strip()
+                    if raw_starts or raw_observed_at:
+                        try:
+                            observed_at = datetime.fromisoformat(raw_observed_at)
+                        except ValueError as exc:
+                            raise RuntimeError(
+                                f"alert observation time invalid for {market}:{code}"
+                            ) from exc
+                        if (
+                            observed_at.tzinfo is None
+                            or observed_at.utcoffset() is None
+                        ):
+                            raise RuntimeError(
+                                f"alert observation time invalid for {market}:{code}"
+                            )
+                        exchange = self._exchange_provider(Market(market))
+                        state_options = {
+                            "op_level": "5m",
+                            "mid_level": "1m",
+                            "big_level": "30m",
+                            "clock": lambda fixed=observed_at: fixed,
+                        }
+                        if raw_starts:
+                            state_options["warmup_start_by_frequency"] = dict(
+                                raw_starts
+                            )
+                        state = self._state_factory(code, exchange, **state_options)
+                    else:
+                        # Legacy pending records did not persist their producer prefix.
+                        state = self._state(market, code)
                     refresh_chart_levels = getattr(
                         state,
                         "refresh_chart_levels",
@@ -296,16 +379,12 @@ class AlertChartImageService:
                     png = self._renderer(charts)
                     url = self.store.publish(
                         png,
-                        artifact_key=f"{artifact_key}:strict-evidence-bound",
+                        artifact_key=evidence_artifact_key,
                     )
                     output.append(
                         {
                             "url": url,
-                            "alt": (
-                                f"{name} {code} 30分钟/5分钟/1分钟结构图"
-                                f"（已核验{raw.get('frequency') or '5m'}"
-                                f"{point_type}：{signal_time}）"
-                            ),
+                            "alt": alt,
                         }
                     )
                     continue

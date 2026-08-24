@@ -57,7 +57,6 @@ from chanlun.decision_support.trading_system.screening_warmup import (
     SCREENING_WARMUP_REQUIRED_BARS,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
-    extract_confirmed_points,
     extract_current_confirmed_points,
     extract_one_minute_segment_difference_points,
 )
@@ -335,6 +334,7 @@ class StrictPhysicalMonitorState:
         big_level: str = "30m",
         mid_level: str | None = "1m",
         clock: Callable[[], datetime] | None = None,
+        warmup_start_by_frequency: Mapping[str, object] | None = None,
     ) -> None:
         if not code:
             raise ValueError("monitor code is required")
@@ -357,6 +357,23 @@ class StrictPhysicalMonitorState:
         self.mid_level = mid_level or ""
         self.big_level = big_level
         self._clock = clock or (lambda: datetime.now(CN))
+        if warmup_start_by_frequency is not None and not isinstance(
+            warmup_start_by_frequency,
+            Mapping,
+        ):
+            raise TypeError("warmup_start_by_frequency must be a mapping")
+        unexpected_frequencies = set(warmup_start_by_frequency or ()) - set(levels)
+        if unexpected_frequencies:
+            raise ValueError("warmup start contains an unsupported frequency")
+        self._warmup_start_by_frequency: dict[str, pd.Timestamp] = {}
+        for frequency, raw_start in (warmup_start_by_frequency or {}).items():
+            try:
+                start = pd.Timestamp(raw_start)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("warmup start must be a datetime") from exc
+            if pd.isna(start) or start.tzinfo is None:
+                raise ValueError("warmup start must be timezone-aware")
+            self._warmup_start_by_frequency[str(frequency)] = start.tz_convert(CN)
         self.last_op: pd.Timestamp | None = None
         self.last_mid: pd.Timestamp | None = None
         self.last_big: pd.Timestamp | None = None
@@ -399,9 +416,13 @@ class StrictPhysicalMonitorState:
         if last is None:
             warmup_days = self.WARMUP_DAYS_BY_FREQ.get(frequency)
             if warmup_days:
-                start = (pd.Timestamp(as_of) - pd.Timedelta(days=warmup_days)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                start_at = self._warmup_start_by_frequency.get(frequency)
+                if start_at is None:
+                    start_at = pd.Timestamp(as_of) - pd.Timedelta(days=warmup_days)
+                    self._warmup_start_by_frequency[frequency] = start_at
+                if start_at >= pd.Timestamp(as_of):
+                    raise ValueError("warmup start must be earlier than as_of")
+                start = start_at.strftime("%Y-%m-%d %H:%M:%S")
                 try:
                     return self.ex.klines(
                         self.code,
@@ -416,6 +437,14 @@ class StrictPhysicalMonitorState:
             return self.ex.klines(self.code, frequency, start_date=start)
         except TypeError:
             return self.ex.klines(self.code, frequency)
+
+    def warmup_start_by_frequency(self) -> dict[str, str]:
+        """Return the exact initial query boundaries needed to replay this state."""
+
+        return {
+            frequency: start.isoformat(timespec="seconds")
+            for frequency, start in sorted(self._warmup_start_by_frequency.items())
+        }
 
     def _closed_frame(
         self,
@@ -936,7 +965,16 @@ class StrictPhysicalMonitorState:
         now = self._now()
         target_datetime = target.to_pydatetime()
         as_of = max(now, target_datetime.astimezone(CN))
-        points = extract_confirmed_points(
+        # Notifications must resolve against the exact projection that emitted
+        # them: 5m uses the operational trade points (including a causally
+        # formed ``latest_completed`` point before its later audit lock), while
+        # 1m uses the independent segment-difference projection.
+        extractor = (
+            extract_one_minute_segment_difference_points
+            if frequency == "1m"
+            else extract_current_confirmed_points
+        )
+        points = extractor(
             evidence,
             code=self.code,
             source_frequency=frequency,

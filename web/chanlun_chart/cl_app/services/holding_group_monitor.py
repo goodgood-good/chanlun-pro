@@ -1890,6 +1890,10 @@ class HoldingGroupMonitorService:
                         == "SEGMENT_DIFFERENCE_1M"
                         else getattr(event, "op_level", "5m") or "5m"
                     ),
+                    "warmup_start_by_frequency": self._event_warmup_starts(
+                        market,
+                        str(getattr(event, "code", "")),
+                    ),
                     "evidence_required": bool(
                         str(getattr(event, "bs_type", ""))
                         and str(getattr(event, "signal_time", ""))
@@ -1910,6 +1914,29 @@ class HoldingGroupMonitorService:
             "transport_status": None,
             "transport_completed_at": None,
         }
+
+    def _event_warmup_starts(self, market: str, code: str) -> dict[str, str]:
+        """Persist the producer's exact query prefix with every chart request."""
+
+        state = self._states.get((str(market).strip().lower(), str(code).strip()))
+        provider = getattr(state, "warmup_start_by_frequency", None)
+        if not callable(provider):
+            return {}
+        raw = provider()
+        if not isinstance(raw, Mapping):
+            raise TypeError("monitor warmup starts must be a mapping")
+        allowed = {
+            self._config.op_level,
+            self._config.mid_level,
+            self._config.big_level,
+        }
+        output: dict[str, str] = {}
+        for frequency, value in raw.items():
+            frequency_text = str(frequency)
+            value_text = str(value or "").strip()
+            if frequency_text in allowed and value_text:
+                output[frequency_text] = value_text
+        return output
 
     def _publish_result(self, result: Mapping[str, object]) -> dict[str, object]:
         published = dict(result)

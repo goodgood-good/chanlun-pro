@@ -817,7 +817,7 @@ def test_chart_occurrence_resolution_uses_full_recursive_evidence_identity(
     monkeypatch.setattr(state, "evidence", lambda _frequency: object())
     monkeypatch.setattr(
         monitor_module,
-        "extract_confirmed_points",
+        "extract_current_confirmed_points",
         lambda *_args, **_kwargs: (lower, higher),
     )
 
@@ -833,6 +833,45 @@ def test_chart_occurrence_resolution_uses_full_recursive_evidence_identity(
     assert resolved == higher
 
 
+def test_chart_occurrence_resolution_uses_one_minute_segment_projection(
+    monkeypatch,
+) -> None:
+    segment = _point(
+        "3sell",
+        center_id="segment",
+        frequency="1m",
+    )
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    state.segment_difference_ready = True
+    monkeypatch.setattr(state, "evidence", lambda _frequency: object())
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_current_confirmed_points",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("1m chart identity must not use the 5m projection")
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_one_minute_segment_difference_points",
+        lambda *_args, **_kwargs: (segment,),
+    )
+
+    resolved = state.confirmed_point_occurrence(
+        "3sell",
+        AT.isoformat(),
+        frequency="1m",
+        evidence_id=segment.point_id,
+        recursive_level=0,
+        anchor_time=segment.anchor_at.isoformat(),
+    )
+
+    assert resolved == segment
+
+
 def test_chart_occurrence_resolution_accepts_one_semantic_evidence_revision(
     monkeypatch,
 ) -> None:
@@ -846,7 +885,7 @@ def test_chart_occurrence_resolution_accepts_one_semantic_evidence_revision(
     monkeypatch.setattr(state, "evidence", lambda _frequency: object())
     monkeypatch.setattr(
         monitor_module,
-        "extract_confirmed_points",
+        "extract_current_confirmed_points",
         lambda *_args, **_kwargs: (rebuilt,),
     )
 
@@ -875,7 +914,7 @@ def test_chart_occurrence_resolution_rejects_ambiguous_evidence_revision(
     monkeypatch.setattr(state, "evidence", lambda _frequency: object())
     monkeypatch.setattr(
         monitor_module,
-        "extract_confirmed_points",
+        "extract_current_confirmed_points",
         lambda *_args, **_kwargs: (rebuilt_a, rebuilt_b),
     )
 
@@ -1135,6 +1174,51 @@ def test_realtime_monitor_uses_the_shared_screening_warmup_floor() -> None:
         "5m": 960,
         "1m": 1440,
     }
+
+
+def test_monitor_freezes_and_exports_exact_initial_warmup_query_boundary() -> None:
+    calls = []
+
+    def klines(code, frequency, **kwargs):
+        calls.append((code, frequency, kwargs))
+        return "frame"
+
+    exchange = SimpleNamespace(
+        market="us",
+        kline_time_label="start",
+        klines=klines,
+    )
+    state = StrictPhysicalMonitorState("TSLA.US", exchange)
+
+    assert state._fetch_klines("5m", None, as_of=AT) == "frame"
+    assert (
+        state._fetch_klines(
+            "5m",
+            None,
+            as_of=AT + timedelta(minutes=31),
+        )
+        == "frame"
+    )
+
+    assert calls[0][2]["start_date"] == calls[1][2]["start_date"]
+    starts = state.warmup_start_by_frequency()
+    assert starts == {"5m": (AT - timedelta(days=120)).isoformat()}
+
+    replay_calls = []
+    replay = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(
+            market="us",
+            kline_time_label="start",
+            klines=lambda code, frequency, **kwargs: replay_calls.append(
+                (code, frequency, kwargs)
+            ),
+        ),
+        clock=lambda: AT + timedelta(minutes=31),
+        warmup_start_by_frequency=starts,
+    )
+    replay._fetch_klines("5m", None, as_of=AT + timedelta(minutes=31))
+    assert replay_calls[0][2]["start_date"] == calls[0][2]["start_date"]
 
 
 def test_realtime_monitor_has_no_fixed_wall_clock_signal_age_window() -> None:
