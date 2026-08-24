@@ -547,6 +547,33 @@ def test_watchdog_classifies_notification_failures_without_restart_loops(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
+def test_watchdog_does_not_restart_before_first_notification_delivery(
+    tmp_path: Path,
+) -> None:
+    readiness = _healthy_readiness_payload()
+    screening = readiness["components"]["trading_screening"]
+    screening["realtime_alert_ready"] = False
+    screening["realtime_alert_status"] = "notification_unverified"
+    screening["notification_delivery"].update(
+        {
+            "configured": True,
+            "operationally_verified": False,
+            "status": "awaiting_first_delivery",
+            "reason_code": "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED",
+            "outbox_worker_alive": True,
+        }
+    )
+
+    result, heartbeat = _run_watchdog_once(tmp_path, readiness)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert heartbeat["status"] == "operational_degraded"
+    assert heartbeat["recovery_recommended"] is False
+    assert "realtime_alert_notification_unverified" in heartbeat["detail"]
+    assert "realtime_alert_not_ready" not in heartbeat["detail"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
 def test_watchdog_recovery_returns_while_spawned_web_process_keeps_running(
     tmp_path: Path,
 ) -> None:

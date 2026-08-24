@@ -324,7 +324,13 @@ function Test-WebHealth {
         $screening.realtime_alert_ready -ne $true -and
         -not $notificationBlocksRealtimeAlert
     ) {
-        if (
+        if ($realtimeAlertStatus -eq 'notification_unverified') {
+            # Before the first real or drill delivery there may be no event to
+            # acknowledge.  Restarting cannot manufacture delivery proof and
+            # repeatedly discards the live screening rebuild, so retain this as
+            # an explicit operational state without recommending recovery.
+            $operationalFailures.Add('realtime_alert_notification_unverified')
+        } elseif (
             $realtimeAlertStatus -eq 'candidate_monitor_degraded' -and
             $screening.priority_monitor_ready -eq $true
         ) {
