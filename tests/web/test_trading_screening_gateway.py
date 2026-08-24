@@ -1527,6 +1527,142 @@ def test_serialized_one_minute_runtime_keeps_stable_window_after_l1_eviction(
     assert counters["structure_suffix_incremental.1m"] == 1
 
 
+def test_bounded_sector_assessment_limits_work_and_routing_without_clipping_context(
+) -> None:
+    frame_calls: list[dict[str, object]] = []
+    strength_calls: list[dict[str, object]] = []
+    analyzer = RecordingAnalyzer()
+    admitted = ("SZ.000001",)
+    bank_members = ("SZ.000001", "SH.600000")
+
+    def sector_frame_provider(**kwargs):
+        frame_calls.append(dict(kwargs))
+        return _qmt_sector_five_frame(
+            request_bars=kwargs["request_bars"],
+            member_count=len(kwargs["members"]),
+            as_of=kwargs["as_of"],
+        )
+
+    def strength_provider(**kwargs):
+        strength_calls.append(dict(kwargs))
+        return {
+            "qmt-gics3:bank": SectorStrengthEvidence(
+                sector_id="qmt-gics3:bank",
+                observed_at=NOW,
+                anchor_session=date(2026, 7, 1),
+                member_count=2,
+                strength=Decimal("7.5"),
+                rank=1,
+                source_revision="sha256:bounded-strength-test",
+                reason_codes=("EQUAL_WEIGHT_MEMBER_MA_CATEGORY_MEAN",),
+            )
+        }
+
+    gateway = NativeTradingDataGateway(
+        exchange_provider=RecordingExchange,
+        sector_provider=lambda: {
+            "source": gateway_module.QMT_GICS3_CATALOG_SOURCE,
+            "sectors": [
+                {
+                    "sector_id": "qmt-gics3:bank",
+                    "name": "Bank",
+                    "source_key": "GICS3Bank",
+                    "member_codes": list(bank_members),
+                },
+                {
+                    "sector_id": "qmt-gics3:technology",
+                    "name": "Technology",
+                    "source_key": "GICS3Technology",
+                    "member_codes": ["SH.600001", "SZ.000002"],
+                },
+            ],
+        },
+        sector_frame_provider=sector_frame_provider,
+        sector_strength_provider=strength_provider,
+        analyzer=analyzer,
+        config=NativeTradingGatewayConfig(
+            request_bars_by_frequency=(
+                ("d", 4),
+                ("30m", 4),
+                ("5m", 4),
+                ("1m", 4),
+            ),
+            minimum_bars_by_frequency=(
+                ("d", 2),
+                ("30m", 1),
+                ("5m", 2),
+                ("1m", 2),
+            ),
+            minimum_sector_members=1,
+        ),
+    )
+
+    batch = gateway.native_sector_assessments(
+        as_of=NOW,
+        admitted_codes=admitted,
+    )
+
+    assert batch.discovered_count == batch.completed_count == 1
+    assert tuple(row.sector_id for row in batch.assessments) == (
+        "qmt-gics3:bank",
+    )
+    assert {call["sector_id"] for call in frame_calls} == {"qmt-gics3:bank"}
+    assert len(frame_calls) == 2
+    assert all(call["members"] == tuple(sorted(bank_members)) for call in frame_calls)
+    assert len(strength_calls) == 1
+    assert strength_calls[0]["members_by_sector"] == {
+        "qmt-gics3:bank": tuple(sorted(bank_members)),
+    }
+    assert strength_calls[0]["as_of"] == datetime.fromisoformat(
+        "2026-07-20T10:00:00+08:00"
+    )
+    assert strength_calls[0]["membership_revision"] == batch.catalog_revision
+    assert analyzer.calls == [
+        ("qmt-gics3:bank", "30m"),
+        ("qmt-gics3:bank", "5m"),
+    ]
+    assert gateway.members() == {"qmt-gics3:bank": admitted}
+
+
+@pytest.mark.parametrize(
+    "admitted_codes",
+    (
+        pytest.param((), id="empty"),
+        pytest.param(("SZ.000001", "SZ.000001"), id="duplicate"),
+        pytest.param(("US.AAPL",), id="non-a-share"),
+        pytest.param(["SZ.000001"], id="not-an-exact-tuple"),
+    ),
+)
+def test_invalid_bounded_sector_admission_fails_before_provider_io(
+    admitted_codes: object,
+) -> None:
+    provider_calls: list[str] = []
+
+    def forbidden_provider(label: str):
+        provider_calls.append(label)
+        raise AssertionError(f"invalid admission reached {label} provider")
+
+    gateway = NativeTradingDataGateway(
+        exchange_provider=lambda: forbidden_provider("exchange"),
+        sector_provider=lambda: forbidden_provider("sector"),
+        sector_frame_provider=lambda **_kwargs: forbidden_provider("sector frame"),
+        sector_strength_provider=lambda **_kwargs: forbidden_provider(
+            "sector strength"
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="admitted_codes must be a unique non-empty A-share tuple",
+    ):
+        gateway.native_sector_assessments(
+            as_of=NOW,
+            admitted_codes=admitted_codes,  # type: ignore[arg-type]
+        )
+
+    assert provider_calls == []
+
+
 def test_native_gateway_attaches_horizontal_strength_and_rank() -> None:
     calls = []
 

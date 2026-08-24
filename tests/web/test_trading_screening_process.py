@@ -829,6 +829,16 @@ def test_process_proxy_default_sector_cache_scope_is_fail_closed() -> None:
     assert proxy._sector_cache_admitted_codes == ()  # noqa: SLF001
 
 
+def test_process_proxy_rejects_admitted_codes_above_bounded_limit() -> None:
+    with pytest.raises(ValueError, match="exceed the bounded limit"):
+        NativeTradingDataGatewayProcessProxy(
+            transport=_InstrumentScopeTransport(),  # type: ignore[arg-type]
+            sector_cache_scope_mode="VALIDATION_COHORT",
+            sector_cache_scope_limit=1,
+            sector_cache_admitted_codes=("SH.600000", "SZ.000001"),
+        )
+
+
 class _RealtimeTickTransport:
     def __init__(self, result: object) -> None:
         self.result = result
@@ -1094,7 +1104,8 @@ def test_process_proxy_preserves_canonical_history_preparation_contract() -> Non
     )
     transport = _HistoryPreparationTransport()
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=transport
+        transport=transport,
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     result = proxy.prepare_local_history(
@@ -1188,7 +1199,8 @@ def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
     )
     transport = _BundleTransport(bundle)
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=transport
+        transport=transport,
+        sector_cache_scope_mode="FULL_MARKET",
     )
     proxy.restore_authenticated_sector_members(
         members={sector.sector_id: ("SH.600000",)},
@@ -1424,6 +1436,7 @@ class _AtomicGateway:
     def __init__(self, *, as_of: datetime) -> None:
         self.as_of = as_of
         self.calls: list[str] = []
+        self.admitted_scope_calls: list[tuple[str, ...] | None] = []
         self.assessment = SectorAssessment(
             sector_id="TDX.880301",
             sector_name="煤炭",
@@ -1434,9 +1447,10 @@ class _AtomicGateway:
             reason_codes=("test_eligible",),
         )
 
-    def native_sector_assessments(self, *, as_of):
+    def native_sector_assessments(self, *, as_of, admitted_codes=None):
         assert as_of == self.as_of
         self.calls.append("assessments")
+        self.admitted_scope_calls.append(admitted_codes)
         return SectorAssessmentBatch(
             assessments=(self.assessment,),
             discovered_count=1,
@@ -1494,11 +1508,36 @@ def test_worker_builds_one_atomic_sector_snapshot() -> None:
         "members",
         "changed_bars",
     ]
-    with pytest.raises(ValueError, match="requires exactly as_of"):
+    assert gateway.admitted_scope_calls == [None]
+
+    scoped_gateway = _AtomicGateway(as_of=as_of)
+    admitted = ("SH.600000",)
+    dispatch_gateway_request(
+        scoped_gateway,
+        method="sector_snapshot",
+        kwargs={"as_of": as_of, "admitted_codes": admitted},
+    )
+    assert scoped_gateway.admitted_scope_calls == [admitted]
+
+    with pytest.raises(ValueError, match="admitted_codes are invalid"):
+        dispatch_gateway_request(
+            gateway,
+            method="sector_snapshot",
+            kwargs={"as_of": as_of, "admitted_codes": None},
+        )
+
+    with pytest.raises(ValueError, match="requires as_of"):
         dispatch_gateway_request(
             gateway,
             method="sector_snapshot",
             kwargs={"as_of": as_of, "unexpected": True},
+        )
+
+    with pytest.raises(ValueError, match="method is not allowed"):
+        dispatch_gateway_request(
+            gateway,
+            method="native_sector_assessments",
+            kwargs={"as_of": as_of},
         )
 
     calendar = dispatch_gateway_request(
@@ -1541,7 +1580,11 @@ class _AtomicTransport:
         self.available = False
 
 
-def _atomic_snapshot(as_of: datetime) -> dict[str, object]:
+def _atomic_snapshot(
+    as_of: datetime,
+    *,
+    admitted_codes: tuple[str, ...] | None = None,
+) -> dict[str, object]:
     assessment = SectorAssessment(
         sector_id="TDX.880301",
         sector_name="煤炭",
@@ -1553,6 +1596,7 @@ def _atomic_snapshot(as_of: datetime) -> dict[str, object]:
     )
     return {
         "schema": "chanlun-native-sector-snapshot",
+        "admitted_codes": admitted_codes,
         "assessments": SectorAssessmentBatch(
             assessments=(assessment,),
             discovered_count=1,
@@ -1819,7 +1863,10 @@ def test_proxy_calendar_readiness_never_waits_behind_busy_native_screening() -> 
 def test_proxy_keeps_atomic_sector_dependencies_after_worker_restart() -> None:
     as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
     transport = _AtomicTransport(_atomic_snapshot(as_of))
-    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
 
     batch = proxy.native_sector_assessments(as_of=as_of)
     transport.available = False
@@ -1831,11 +1878,84 @@ def test_proxy_keeps_atomic_sector_dependencies_after_worker_restart() -> None:
     assert transport.calls == [("sector_snapshot", {"as_of": as_of})]
 
 
+def test_bounded_proxy_passes_exact_admitted_codes_to_sector_worker() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    admitted = ("SH.600000",)
+    transport = _AtomicTransport(
+        _atomic_snapshot(as_of, admitted_codes=admitted)
+    )
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=admitted,
+    )
+
+    proxy.native_sector_assessments(as_of=as_of, admitted_codes=admitted)
+
+    assert transport.calls == [
+        (
+            "sector_snapshot",
+            {"as_of": as_of, "admitted_codes": admitted},
+        )
+    ]
+
+
+def test_bounded_proxy_without_exact_admitted_codes_fails_before_worker_io() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    transport = _AtomicTransport(_atomic_snapshot(as_of))
+    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+
+    with pytest.raises(
+        NativeScreeningWorkerProtocolError,
+        match="requires exact admitted codes",
+    ):
+        proxy.native_sector_assessments(as_of=as_of)
+
+    assert transport.calls == []
+
+
+def test_bounded_proxy_rejects_worker_admission_identity_mismatch() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    admitted = ("SH.600000",)
+    transport = _AtomicTransport(_atomic_snapshot(as_of))
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=admitted,
+    )
+
+    with pytest.raises(
+        NativeScreeningWorkerProtocolError,
+        match="admission identity mismatch",
+    ):
+        proxy.native_sector_assessments(
+            as_of=as_of,
+            admitted_codes=admitted,
+        )
+
+    assert transport.calls == [
+        (
+            "sector_snapshot",
+            {"as_of": as_of, "admitted_codes": admitted},
+        )
+    ]
+    with pytest.raises(
+        NativeScreeningWorkerUnavailable,
+        match="has not been captured",
+    ):
+        proxy.members()
+
+
 def test_atomic_sector_snapshot_never_occupies_reserved_priority_worker() -> None:
     as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
     priority = _AtomicTransport(_atomic_snapshot(as_of))
     candidate = _AtomicTransport(_atomic_snapshot(as_of))
-    proxy = NativeTradingDataGatewayProcessProxy(transport=priority)  # type: ignore[arg-type]
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=priority,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
     proxy._structure_transports = (priority, candidate)  # type: ignore[assignment]  # noqa: SLF001
 
     batch = proxy.native_sector_assessments(as_of=as_of)
@@ -1864,7 +1984,10 @@ def test_candidate_lane_uses_free_shard_during_atomic_sector_snapshot() -> None:
     priority = _AtomicTransport(_atomic_snapshot(as_of))
     sector = BlockingAtomicTransport(_atomic_snapshot(as_of))
     available = _AtomicTransport(_atomic_snapshot(as_of))
-    proxy = NativeTradingDataGatewayProcessProxy(transport=priority)  # type: ignore[arg-type]
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=priority,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
     proxy._structure_transports = (  # type: ignore[assignment]  # noqa: SLF001
         priority,
         sector,
@@ -1878,6 +2001,20 @@ def test_candidate_lane_uses_free_shard_during_atomic_sector_snapshot() -> None:
 
     thread.start()
     assert sector.started.wait(timeout=5)
+    priority_cache_result: list[object] = []
+    priority_cache_done = Event()
+
+    def read_priority_cache() -> None:
+        priority_cache_result.append(
+            proxy.cached_sector_snapshot_for_priority(as_of=as_of)
+        )
+        priority_cache_done.set()
+
+    priority_cache_thread = Thread(target=read_priority_cache, daemon=True)
+    priority_cache_thread.start()
+    assert priority_cache_done.wait(timeout=5)
+    priority_cache_thread.join(timeout=5)
+    assert priority_cache_result == [None]
     assert proxy._structure_transports_for_lane("candidate") == (available,)  # noqa: SLF001
     assert proxy._structure_transport(  # noqa: SLF001
         "SH.600000",
@@ -1892,6 +2029,74 @@ def test_candidate_lane_uses_free_shard_during_atomic_sector_snapshot() -> None:
         sector,
         available,
     )
+
+
+def test_inflight_atomic_sector_snapshot_cannot_reinstall_previous_scope() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    first_admitted = ("SH.600000",)
+
+    class BlockingAtomicTransport(_AtomicTransport):
+        def __init__(self, snapshot: dict[str, object]) -> None:
+            super().__init__(snapshot)
+            self.started = Event()
+            self.release = Event()
+
+        def request(self, method: str, **kwargs: object) -> object:
+            self.calls.append((method, kwargs))
+            assert method == "sector_snapshot"
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            return self.snapshot
+
+    transport = BlockingAtomicTransport(
+        _atomic_snapshot(as_of, admitted_codes=first_admitted)
+    )
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=first_admitted,
+    )
+    failures: list[Exception] = []
+
+    def rebuild_old_scope() -> None:
+        try:
+            proxy.native_sector_assessments(
+                as_of=as_of,
+                admitted_codes=first_admitted,
+            )
+        except Exception as exc:  # noqa: BLE001 - inspect the thread boundary
+            failures.append(exc)
+
+    rebuild_thread = Thread(target=rebuild_old_scope, daemon=True)
+    rebuild_thread.start()
+    assert transport.started.wait(timeout=5)
+
+    scope_change_done = Event()
+
+    def change_scope() -> None:
+        proxy.configure_sector_cache_restore_scope(
+            scope_mode="VALIDATION_COHORT",
+            max_symbols=12,
+            admitted_codes=("SZ.000001",),
+        )
+        scope_change_done.set()
+
+    scope_thread = Thread(target=change_scope, daemon=True)
+    scope_thread.start()
+    assert scope_change_done.wait(timeout=5)
+    scope_thread.join(timeout=5)
+    transport.release.set()
+    rebuild_thread.join(timeout=5)
+
+    assert not rebuild_thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], NativeScreeningWorkerProtocolError)
+    assert "scope changed during native rebuild" in str(failures[0])
+    with pytest.raises(NativeScreeningWorkerUnavailable):
+        proxy.members()
+    assert proxy._changed_bars == ()  # noqa: SLF001
+    assert proxy._symbol_names == {}  # noqa: SLF001
 
 
 def test_sector_batch_cache_roundtrips_hierarchy_relations() -> None:
@@ -1935,7 +2140,19 @@ def test_sector_batch_cache_roundtrips_hierarchy_relations() -> None:
 def test_proxy_restores_authenticated_member_routing_without_worker_call() -> None:
     as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
     transport = _AtomicTransport(_atomic_snapshot(as_of))
-    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    admitted = ("SH.600000",)
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=admitted,
+    )
+    stale_bar = BarKey("SH.600000", "5m", as_of)
+    proxy._changed_bars = (stale_bar,)  # noqa: SLF001
+    proxy._emitted_bar_ids = {  # noqa: SLF001
+        (stale_bar.code, stale_bar.frequency, stale_bar.closed_at)
+    }
+    proxy._symbol_names = {"SH.600000": "stale name"}  # noqa: SLF001
 
     proxy.restore_authenticated_sector_members(
         members={"TDX.880301": ("SH.600000",)},
@@ -1949,6 +2166,64 @@ def test_proxy_restores_authenticated_member_routing_without_worker_call() -> No
     assert cache["state"] == "restored_from_screening_snapshot"
     assert cache["requested_as_of"] == as_of.isoformat()
     assert str(cache["content_sha256"]).startswith("sha256:")
+    assert proxy._changed_bars == ()  # noqa: SLF001
+    assert proxy._emitted_bar_ids == set()  # noqa: SLF001
+    assert proxy._symbol_names == {}  # noqa: SLF001
+
+
+def test_bounded_proxy_rejects_restored_members_outside_configured_scope() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_atomic_snapshot(as_of)),
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
+    )
+
+    with pytest.raises(
+        NativeScreeningWorkerProtocolError,
+        match="escaped configured admission",
+    ):
+        proxy.restore_authenticated_sector_members(
+            members={"TDX.880301": ("SH.600000", "SH.600001")},
+            as_of=as_of,
+            catalog_revision="sha256:" + "7" * 64,
+        )
+
+    with pytest.raises(NativeScreeningWorkerUnavailable):
+        proxy.members()
+
+
+def test_proxy_scope_change_clears_installed_sector_runtime_facts() -> None:
+    as_of = datetime(2026, 7, 29, 10, 35, tzinfo=ZoneInfo("Asia/Shanghai"))
+    first_admitted = ("SH.600000",)
+    snapshot = _atomic_snapshot(as_of, admitted_codes=first_admitted)
+    snapshot["symbol_names"] = {"SH.600000": "old cohort"}
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(snapshot),
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=first_admitted,
+    )
+    proxy.native_sector_assessments(
+        as_of=as_of,
+        admitted_codes=first_admitted,
+    )
+    assert proxy.members() == {"TDX.880301": first_admitted}
+    assert proxy._changed_bars  # noqa: SLF001
+    assert proxy._symbol_names == {"SH.600000": "old cohort"}  # noqa: SLF001
+
+    proxy.configure_sector_cache_restore_scope(
+        scope_mode="VALIDATION_COHORT",
+        max_symbols=12,
+        admitted_codes=("SZ.000001",),
+    )
+
+    with pytest.raises(NativeScreeningWorkerUnavailable):
+        proxy.members()
+    assert proxy._changed_bars == ()  # noqa: SLF001
+    assert proxy._emitted_bar_ids == set()  # noqa: SLF001
+    assert proxy._symbol_names == {}  # noqa: SLF001
 
 
 def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
@@ -2034,15 +2309,18 @@ def test_bounded_sector_cache_rejects_replaced_payload_before_read(
 ) -> None:
     as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     cache_path = tmp_path / "sector-snapshot.json"
+    admitted = ("SH.600000",)
     first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=_AtomicTransport(_atomic_snapshot(as_of)),
+        transport=_AtomicTransport(
+            _atomic_snapshot(as_of, admitted_codes=admitted)
+        ),
         sector_cache_path=cache_path,
         sector_cache_revision="head.tree.bounded",
         sector_cache_scope_mode="VALIDATION_COHORT",
         sector_cache_scope_limit=12,
-        sector_cache_admitted_codes=("SH.600000",),
+        sector_cache_admitted_codes=admitted,
     )
-    first.native_sector_assessments(as_of=as_of)
+    first.native_sector_assessments(as_of=as_of, admitted_codes=admitted)
     assert first._sector_cache_scope_sidecar_path(cache_path).is_file()
     cache_path.write_text("{replacement-invalidates-the-small-proof", encoding="utf-8")
 
@@ -2066,12 +2344,13 @@ def test_bounded_sector_cache_rejects_replaced_payload_before_read(
     assert second.cached_sector_snapshot_for_priority(as_of=as_of) is None
 
 
-def test_bounded_sector_writer_marks_mixed_member_scope_oversize(
+def test_bounded_sector_worker_response_cannot_escape_admitted_scope(
     tmp_path: Path,
 ) -> None:
     as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     cache_path = tmp_path / "sector-snapshot.json"
-    snapshot = _atomic_snapshot(as_of)
+    admitted = ("SH.600000",)
+    snapshot = _atomic_snapshot(as_of, admitted_codes=admitted)
     snapshot["members"] = {"TDX.880301": ("SH.600000", "SH.600001")}
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
         transport=_AtomicTransport(snapshot),
@@ -2079,16 +2358,170 @@ def test_bounded_sector_writer_marks_mixed_member_scope_oversize(
         sector_cache_revision="head.tree.mixed",
         sector_cache_scope_mode="VALIDATION_COHORT",
         sector_cache_scope_limit=12,
-        sector_cache_admitted_codes=("SH.600000",),
+        sector_cache_admitted_codes=admitted,
     )
 
-    proxy.native_sector_assessments(as_of=as_of)
+    with pytest.raises(
+        NativeScreeningWorkerProtocolError,
+        match="escaped its exact admitted scope",
+    ):
+        proxy.native_sector_assessments(as_of=as_of, admitted_codes=admitted)
 
+    assert not cache_path.exists()
+    assert not proxy._sector_cache_scope_sidecar_path(cache_path).exists()
+    with pytest.raises(
+        NativeScreeningWorkerUnavailable,
+        match="has not been captured",
+    ):
+        proxy.members()
+
+
+def test_bounded_sector_cache_is_bound_to_the_exact_configured_cohort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    first_admitted = ("SH.600000", "SH.600001")
+    first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(
+            _atomic_snapshot(as_of, admitted_codes=first_admitted)
+        ),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.exact-cohort",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=first_admitted,
+    )
+    first.native_sector_assessments(
+        as_of=as_of,
+        admitted_codes=first_admitted,
+    )
+
+    second = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_atomic_snapshot(as_of)),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.exact-cohort",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000", "SH.600002"),
+    )
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == cache_path:
+            raise AssertionError("different cohort opened the cached payload")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    assert second.cached_sector_snapshot_for_priority(as_of=as_of) is None
+    health = second.health_snapshot()["sector_snapshot_cache"]
+    assert health["state"] == "priority_rejected"
+    assert health["reason"] == "CACHE_SCOPE_PROOF_MISSING_OR_INVALID"
+
+
+def test_bounded_cache_recomputes_payload_subjects_against_sidecar(
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    admitted = ("SH.600000", "SH.600001")
+    first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(
+            _atomic_snapshot(as_of, admitted_codes=admitted)
+        ),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.payload-subject-proof",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=admitted,
+    )
+    first.native_sector_assessments(
+        as_of=as_of,
+        admitted_codes=admitted,
+    )
+
+    document = json.loads(cache_path.read_text(encoding="utf-8"))
+    document["payload"]["snapshot"]["members"]["TDX.880301"].append(
+        "SH.600001"
+    )
+    document["content_sha256"] = sha256_json(document["payload"])
+    cache_path.write_text(json.dumps(document), encoding="utf-8")
+    payload_stat = cache_path.stat()
+    sidecar_path = first._sector_cache_scope_sidecar_path(cache_path)
+    proof = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    proof["payload_content_sha256"] = document["content_sha256"]
+    proof["payload_size_bytes"] = payload_stat.st_size
+    proof["payload_mtime_ns"] = payload_stat.st_mtime_ns
+    sidecar_path.write_text(json.dumps(proof), encoding="utf-8")
+
+    second = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(
+            _atomic_snapshot(as_of, admitted_codes=admitted)
+        ),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.payload-subject-proof",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=admitted,
+    )
+
+    assert second.cached_sector_snapshot_for_priority(as_of=as_of) is None
+    health = second.health_snapshot()["sector_snapshot_cache"]
+    assert health["state"] == "priority_rejected"
+    assert health["reason"] == "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH"
+
+
+def test_full_market_mode_never_reuses_a_bounded_sector_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    admitted = ("SH.600000",)
+    bounded = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(
+            _atomic_snapshot(as_of, admitted_codes=admitted)
+        ),
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.shared-scope-path",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=admitted,
+    )
+    bounded.native_sector_assessments(
+        as_of=as_of,
+        admitted_codes=admitted,
+    )
+
+    full_transport = _AtomicTransport(_atomic_snapshot(as_of))
+    full = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=full_transport,
+        sector_cache_path=cache_path,
+        sector_cache_revision="head.tree.shared-scope-path",
+        sector_cache_scope_mode="FULL_MARKET",
+    )
+
+    original_read_text = Path.read_text
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path == cache_path:
+            raise AssertionError("full-market mode opened a bounded payload")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    assert full.cached_sector_snapshot_for_priority(as_of=as_of) is None
+    monkeypatch.setattr(Path, "read_text", original_read_text)
+
+    full.native_sector_assessments(as_of=as_of)
+
+    assert full_transport.calls == [("sector_snapshot", {"as_of": as_of})]
     proof = json.loads(
-        proxy._sector_cache_scope_sidecar_path(cache_path).read_text(encoding="utf-8")
+        full._sector_cache_scope_sidecar_path(cache_path).read_text(encoding="utf-8")
     )
-    assert proof["scope_mode"] == "OVERSCOPE"
-    assert proof["strategy_subject_count"] == 2
+    assert proof["scope_mode"] == "FULL_MARKET"
+    assert proof["requested_admitted_codes"] is None
 
 
 @pytest.mark.parametrize(
@@ -2362,7 +2795,8 @@ def test_proxy_rejects_live_sector_snapshot_with_future_bar() -> None:
         ),
     )
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=_AtomicTransport(snapshot)
+        transport=_AtomicTransport(snapshot),
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     with pytest.raises(NativeScreeningWorkerProtocolError, match="causality"):
@@ -2374,7 +2808,8 @@ def test_proxy_rejects_atomic_snapshot_that_claims_account_access() -> None:
     snapshot = _atomic_snapshot(as_of)
     snapshot["real_account_access"] = True
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=_AtomicTransport(snapshot)
+        transport=_AtomicTransport(snapshot),
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     with pytest.raises(NativeScreeningWorkerProtocolError, match="safety boundary"):
@@ -2386,7 +2821,8 @@ def test_proxy_rejects_atomic_snapshot_that_claims_tick_data() -> None:
     snapshot = _atomic_snapshot(as_of)
     snapshot["tick_data_used"] = True
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=_AtomicTransport(snapshot)
+        transport=_AtomicTransport(snapshot),
+        sector_cache_scope_mode="FULL_MARKET",
     )
 
     with pytest.raises(NativeScreeningWorkerProtocolError, match="safety boundary"):

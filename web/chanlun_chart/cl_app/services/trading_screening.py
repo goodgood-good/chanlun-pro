@@ -264,7 +264,9 @@ COMPLETE_CLOSE_IDLE_REASON = "COMPLETE_CLOSE_SNAPSHOT_OUTSIDE_ACTIVE_WINDOW"
 FULL_COVERAGE_PAUSE_REASON = "OUTSIDE_FULL_COVERAGE_REFRESH_WINDOW"
 _CACHE_GENERATION_RETENTION = 3
 _CACHE_GENERATION_FILE = re.compile(r"^[0-9a-f]{64}\.json$")
-_CACHE_SCOPE_SIDECAR_SCHEMA = "chanlun-trading-screening-cache-scope-v1"
+_CACHE_SCOPE_SIDECAR_SCHEMA = (
+    "chanlun-trading-screening-cache-scope-v2-exact-cohort"
+)
 _CACHE_SCOPE_SIDECAR_MAX_BYTES = 64 * 1024
 _LARGE_INCOMPLETE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 _DECISION_SOURCE_UNSPECIFIED = object()
@@ -2141,6 +2143,7 @@ class SectorCatalogGateway(Protocol):
         self,
         *,
         as_of: datetime,
+        admitted_codes: tuple[str, ...] | None = None,
     ) -> SectorAssessmentBatch: ...
 
     def members(self) -> Mapping[str, tuple[str, ...]]: ...
@@ -2326,6 +2329,31 @@ def _configured_scope_allowlist(
         scope_mode=config.screening_scope_mode,
         admitted_codes=config.admitted_universe_codes,
     )
+
+
+def _configured_validation_cohort_codes(
+    config: TradingScreeningConfig,
+) -> tuple[str, ...]:
+    """Return the exact cohort that may build a bounded validation snapshot."""
+
+    if config.screening_scope_mode != "VALIDATION_COHORT":
+        return ()
+    if _configured_scope_allowlist(config) is None:
+        return ()
+    return config.admitted_universe_codes
+
+
+def _configured_sector_assessment_codes(
+    config: TradingScreeningConfig,
+) -> tuple[str, ...] | None:
+    """Bind every bounded native sector request to its exact admission list."""
+
+    if config.screening_scope_mode == "FULL_MARKET":
+        return None
+    # The exact empty tuple is retained for low-level/test configurations.  Real
+    # native gateways reject it before provider I/O, rather than interpreting a
+    # missing keyword as permission to enumerate the full market.
+    return config.admitted_universe_codes
 
 
 def _project_codes_to_configured_scope(
@@ -2770,6 +2798,61 @@ def _sector_exclusion_from_document(
     return exclusion
 
 
+def _snapshot_sector_routing_allowlist(
+    snapshot: Mapping[str, object],
+    *,
+    manifest: Mapping[str, object],
+) -> frozenset[str] | None:
+    """Return exact bounded routing subjects, excluding analysis-only peers."""
+
+    scope_mode = snapshot.get("screening_scope_mode")
+    raw_limit = snapshot.get("effective_monitor_universe_limit")
+    raw_admitted = snapshot.get("admitted_universe_codes")
+    raw_configured_admitted = snapshot.get("configured_admitted_codes")
+    if scope_mode is None and raw_limit is None and raw_admitted is None:
+        return None
+    if (
+        scope_mode
+        not in {"FULL_MARKET", "LARGE_SCOPE", "VALIDATION_COHORT"}
+        or type(raw_limit) is not int
+        or raw_limit <= 0
+        or not isinstance(raw_admitted, list)
+        or any(
+            not isinstance(code, str)
+            or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+            for code in raw_admitted
+        )
+        or len(raw_admitted) != len(set(raw_admitted))
+    ):
+        raise ValueError("cached coverage routing admission is invalid")
+    if scope_mode == "FULL_MARKET":
+        return None
+    discovered = manifest.get("discovered_codes")
+    admitted = frozenset(raw_admitted)
+    if (
+        len(admitted) > raw_limit
+        or not isinstance(discovered, list)
+        or any(not isinstance(code, str) for code in discovered)
+        or not set(discovered).issubset(admitted)
+        or (
+            raw_configured_admitted not in (None, [])
+            and (
+                not isinstance(raw_configured_admitted, list)
+                or any(
+                    not isinstance(code, str)
+                    or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                    for code in raw_configured_admitted
+                )
+                or len(raw_configured_admitted)
+                != len(set(raw_configured_admitted))
+                or frozenset(raw_configured_admitted) != admitted
+            )
+        )
+    ):
+        raise ValueError("cached coverage routing admission is invalid")
+    return admitted
+
+
 def _coverage_sector_state_from_snapshot(
     snapshot: Mapping[str, object],
 ) -> tuple[SectorAssessmentBatch, dict[str, tuple[str, ...]] | None]:
@@ -2793,6 +2876,10 @@ def _coverage_sector_state_from_snapshot(
         or not isinstance(manifest, Mapping)
     ):
         raise ValueError("cached coverage sector state is unavailable")
+    routing_allowlist = _snapshot_sector_routing_allowlist(
+        snapshot,
+        manifest=manifest,
+    )
     restored = [_sector_assessment_from_document(value) for value in raw_sectors]
     assessments = tuple(
         sorted(
@@ -2905,6 +2992,23 @@ def _coverage_sector_state_from_snapshot(
             str(row["sector_id"]): tuple(str(code) for code in row["member_symbols"])
             for row in evidence_document["sectors"]
         }
+        if routing_allowlist is not None:
+            admitted_members = {
+                sector_id: tuple(
+                    code for code in codes if code in routing_allowlist
+                )
+                for sector_id, codes in members.items()
+            }
+            discovered = frozenset(manifest["discovered_codes"])
+            if any(
+                code not in discovered
+                for codes in admitted_members.values()
+                for code in codes
+            ):
+                raise ValueError(
+                    "cached sector routing membership escaped coverage discovery"
+                )
+            members = admitted_members
         if set(members) != {assessment.sector_id for assessment in assessments}:
             raise ValueError("cached sector membership coverage is invalid")
     return batch, members
@@ -3875,10 +3979,11 @@ def _restored_snapshot_scope_is_valid(
 
     Full-market mode deliberately preserves the historical cache semantics.  A
     validation or explicitly bounded large-scope process may only restore a
-    snapshot whose complete code-bearing state (publication, coverage ledger
-    and retry queues) fits inside the current admission ceiling.  Refusing the
-    entire immutable snapshot avoids presenting a clipped archive as if it were
-    an authoritative publication.
+    snapshot whose complete strategy/routing state (publication, coverage
+    ledger and retry queues) fits inside the current admission ceiling.  The
+    complete sector-strength peer basket remains analysis context and is
+    independently hashed, but cannot widen stock routing.  Refusing the entire
+    immutable snapshot avoids presenting a clipped archive as authoritative.
     """
 
     if config.screening_scope_mode == "FULL_MARKET":
@@ -3889,19 +3994,16 @@ def _restored_snapshot_scope_is_valid(
         return False
     assert isinstance(value, Mapping)
     raw_admitted_codes = value.get("admitted_universe_codes")
+    raw_configured_admitted_codes = value.get("configured_admitted_codes")
     if (
         value.get("screening_scope_mode") != config.screening_scope_mode
         or value.get("effective_monitor_universe_limit")
         != config.effective_monitor_universe_limit
-        or not isinstance(raw_admitted_codes, list)
-        or tuple(raw_admitted_codes) != ordered_codes
-        or len(set((*ordered_codes, *nested_member_codes)))
-        > config.effective_monitor_universe_limit
-        or (
-            config.admitted_universe_codes
-            and not set((*ordered_codes, *nested_member_codes)).issubset(
-                config.admitted_universe_codes
-            )
+        or not _bounded_snapshot_admission_is_valid(
+            raw_admitted_codes,
+            raw_configured_admitted_codes=raw_configured_admitted_codes,
+            strategy_subject_codes=ordered_codes,
+            config=config,
         )
     ):
         return False
@@ -3920,6 +4022,48 @@ def _restored_snapshot_scope_is_valid(
         large_scope_authorized=config.large_scope_authorized,
     )
     return not admitted.deferred_signal_codes
+
+
+def _bounded_snapshot_admission_is_valid(
+    raw_admitted_codes: object,
+    *,
+    raw_configured_admitted_codes: object,
+    strategy_subject_codes: tuple[str, ...],
+    config: TradingScreeningConfig,
+) -> bool:
+    """Bind a bounded snapshot to one exact configured cohort identity."""
+
+    if (
+        not isinstance(raw_admitted_codes, list)
+        or any(
+            not isinstance(code, str)
+            or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+            for code in raw_admitted_codes
+        )
+        or len(raw_admitted_codes) != len(set(raw_admitted_codes))
+        or len(raw_admitted_codes) > config.effective_monitor_universe_limit
+        or not set(strategy_subject_codes).issubset(raw_admitted_codes)
+    ):
+        return False
+    configured = frozenset(config.admitted_universe_codes)
+    admitted = frozenset(raw_admitted_codes)
+    if configured:
+        return bool(
+            isinstance(raw_configured_admitted_codes, list)
+            and all(
+                isinstance(code, str)
+                and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+                for code in raw_configured_admitted_codes
+            )
+            and len(raw_configured_admitted_codes)
+            == len(set(raw_configured_admitted_codes))
+            and frozenset(raw_configured_admitted_codes) == configured
+            and admitted == configured
+        )
+    return bool(
+        raw_configured_admitted_codes in (None, [])
+        and admitted == frozenset(strategy_subject_codes)
+    )
 
 
 def _restored_snapshot_scope_codes(value: object) -> tuple[str, ...] | None:
@@ -4410,6 +4554,19 @@ class TradingScreeningService:
         )
         if callable(progress_registrar):
             progress_registrar(self._record_native_progress)
+
+    def _native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+    ) -> SectorAssessmentBatch:
+        admitted_codes = _configured_sector_assessment_codes(self._config)
+        if admitted_codes is None:
+            return self._sector_catalog.native_sector_assessments(as_of=as_of)
+        return self._sector_catalog.native_sector_assessments(
+            as_of=as_of,
+            admitted_codes=admitted_codes,
+        )
 
     @staticmethod
     def _cached_as_of(snapshot: Mapping[str, object]) -> datetime | None:
@@ -5545,9 +5702,7 @@ class TradingScreeningService:
             else:
                 # 仅保留给不具备只读缓存接口的进程内测试/嵌入式网关。正式隔离代理
                 # 必然走上方分支，盘中不会调用原生板块生产器。
-                sector_batch = self._sector_catalog.native_sector_assessments(
-                    as_of=observed_at
-                )
+                sector_batch = self._native_sector_assessments(as_of=observed_at)
                 all_members = dict(self._sector_catalog.members())
                 sector_source_mode = "CURRENT_NATIVE"
                 sector_as_of = self._sector_market_data_as_of(
@@ -7651,6 +7806,7 @@ class TradingScreeningService:
         codes = _restored_snapshot_scope_codes(payload)
         nested_member_codes = _restored_snapshot_nested_member_codes(payload)
         raw_admitted_codes = payload.get("admitted_universe_codes")
+        raw_configured_admitted_codes = payload.get("configured_admitted_codes")
         if (
             codes is None
             or nested_member_codes is None
@@ -7658,15 +7814,13 @@ class TradingScreeningService:
             != self._config.screening_scope_mode
             or payload.get("effective_monitor_universe_limit")
             != self._config.effective_monitor_universe_limit
-            or not isinstance(raw_admitted_codes, list)
-            or tuple(raw_admitted_codes) != codes
-            or len(set((*codes, *nested_member_codes)))
-            > self._config.effective_monitor_universe_limit
-            or (
-                self._config.admitted_universe_codes
-                and not set((*codes, *nested_member_codes)).issubset(
-                    self._config.admitted_universe_codes
-                )
+            or not _bounded_snapshot_admission_is_valid(
+                raw_admitted_codes,
+                raw_configured_admitted_codes=(
+                    raw_configured_admitted_codes
+                ),
+                strategy_subject_codes=codes,
+                config=self._config,
             )
         ):
             return None
@@ -7680,8 +7834,15 @@ class TradingScreeningService:
             "effective_monitor_universe_limit": payload.get(
                 "effective_monitor_universe_limit"
             ),
+            "configured_admitted_codes": list(
+                self._config.admitted_universe_codes
+            ),
+            "snapshot_admitted_codes": list(raw_admitted_codes),
             "strategy_subject_codes": list(codes),
-            "nested_member_codes": list(nested_member_codes),
+            "analysis_context_member_count": len(nested_member_codes),
+            "analysis_context_member_codes_sha256": sha256_json(
+                nested_member_codes
+            ),
             "payload_name": path.name,
             "payload_size_bytes": payload_stat.st_size,
             "payload_mtime_ns": payload_stat.st_mtime_ns,
@@ -7740,7 +7901,10 @@ class TradingScreeningService:
         if not isinstance(document, Mapping):
             return False
         codes = document.get("strategy_subject_codes")
-        nested_member_codes = document.get("nested_member_codes")
+        raw_admitted_codes = document.get("snapshot_admitted_codes")
+        raw_configured_admitted_codes = document.get(
+            "configured_admitted_codes"
+        )
         if (
             document.get("schema") != _CACHE_SCOPE_SIDECAR_SCHEMA
             or document.get("screening_scope_mode")
@@ -7752,26 +7916,27 @@ class TradingScreeningService:
             or document.get("payload_mtime_ns") != payload_stat.st_mtime_ns
             or not isinstance(document.get("snapshot_content_sha256"), str)
             or not isinstance(codes, list)
-            or not isinstance(nested_member_codes, list)
+            or type(document.get("analysis_context_member_count")) is not int
+            or document.get("analysis_context_member_count", -1) < 0
+            or not isinstance(
+                document.get("analysis_context_member_codes_sha256"), str
+            )
+            or not str(
+                document.get("analysis_context_member_codes_sha256")
+            ).startswith("sha256:")
             or any(
                 not isinstance(code, str)
                 or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
                 for code in codes
             )
-            or any(
-                not isinstance(code, str)
-                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
-                for code in nested_member_codes
-            )
             or len(codes) != len(set(codes))
-            or len(nested_member_codes) != len(set(nested_member_codes))
-            or len(set((*codes, *nested_member_codes)))
-            > self._config.effective_monitor_universe_limit
-            or (
-                self._config.admitted_universe_codes
-                and not set((*codes, *nested_member_codes)).issubset(
-                    self._config.admitted_universe_codes
-                )
+            or not _bounded_snapshot_admission_is_valid(
+                raw_admitted_codes,
+                raw_configured_admitted_codes=(
+                    raw_configured_admitted_codes
+                ),
+                strategy_subject_codes=tuple(codes),
+                config=self._config,
             )
         ):
             return False
@@ -7790,10 +7955,25 @@ class TradingScreeningService:
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
+        nested_member_codes = _restored_snapshot_nested_member_codes(payload)
         return bool(
             isinstance(document, Mapping)
+            and nested_member_codes is not None
             and document.get("snapshot_content_sha256")
             == payload.get("snapshot_content_sha256")
+            and document.get("snapshot_admitted_codes")
+            == payload.get("admitted_universe_codes")
+            and isinstance(document.get("configured_admitted_codes"), list)
+            and all(
+                isinstance(code, str)
+                for code in document["configured_admitted_codes"]
+            )
+            and frozenset(document["configured_admitted_codes"])
+            == frozenset(self._config.admitted_universe_codes)
+            and document.get("analysis_context_member_count")
+            == len(nested_member_codes)
+            and document.get("analysis_context_member_codes_sha256")
+            == sha256_json(nested_member_codes)
         )
 
     def _valid_cache_from_path(self, path: Path) -> dict[str, object] | None:
@@ -11043,6 +11223,11 @@ class TradingScreeningService:
         snapshot: Mapping[str, object],
         observed_at: datetime,
     ) -> bool:
+        # A fixed validation cohort is already the complete authorized universe.
+        # Let it build a first snapshot immediately; this path remains impossible
+        # without a non-empty exact allowlist and never enables full-market mode.
+        if _configured_validation_cohort_codes(self._config):
+            return True
         if not self._config.full_coverage_refresh_enabled:
             return False
         forced = self._forced_full_coverage_active(
@@ -11660,7 +11845,15 @@ class TradingScreeningService:
         payload["effective_monitor_universe_limit"] = (
             self._config.effective_monitor_universe_limit
         )
-        payload["admitted_universe_codes"] = list(scope_codes or ())
+        payload["configured_admitted_codes"] = list(
+            self._config.admitted_universe_codes
+        )
+        payload["admitted_universe_codes"] = list(
+            self._config.admitted_universe_codes
+            if self._config.screening_scope_mode != "FULL_MARKET"
+            and self._config.admitted_universe_codes
+            else (scope_codes or ())
+        )
         payload["decision_source_snapshot_id"] = self._decision_source_snapshot_id
         payload["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
             payload
@@ -12404,7 +12597,7 @@ class TradingScreeningService:
                     except RuntimeError:
                         # 通用传输必须按冻结覆盖时刻恢复，而非重启墙钟时刻。板块缓存
                         # 以因果 5m 周期为键；使用 ``observed_at`` 会错误拒绝生成本周期的缓存。
-                        hydrated_batch = self._sector_catalog.native_sector_assessments(
+                        hydrated_batch = self._native_sector_assessments(
                             as_of=self._coverage_cycle_started_at
                         )
                         runtime_sector_members = dict(self._sector_catalog.members())
@@ -12420,7 +12613,7 @@ class TradingScreeningService:
                 sector_batch = (
                     hydrated_batch
                     if hydrated_batch is not None
-                    else self._sector_catalog.native_sector_assessments(as_of=as_of)
+                    else self._native_sector_assessments(as_of=as_of)
                 )
             sector_scan_duration_ms = round(
                 (time.perf_counter() - sector_started_perf) * 1000,
@@ -12433,7 +12626,7 @@ class TradingScreeningService:
                 else observed_at
             )
             sector_started_perf = time.perf_counter()
-            sector_batch = self._sector_catalog.native_sector_assessments(as_of=as_of)
+            sector_batch = self._native_sector_assessments(as_of=as_of)
             sector_scan_duration_ms = round(
                 (time.perf_counter() - sector_started_perf) * 1000,
                 2,
@@ -12868,9 +13061,15 @@ class TradingScreeningService:
                 # 结构输入重新纳入所有当前合格板块成员及显式监听标的。这是覆盖修复，
                 # 不是参数或信号变化。
                 full_scope = set(priority_codes).union(plan.symbols)
-                full_scope.update(
-                    member for members in sector_members.values() for member in members
-                )
+                validation_codes = _configured_validation_cohort_codes(self._config)
+                if validation_codes:
+                    full_scope.update(validation_codes)
+                else:
+                    full_scope.update(
+                        member
+                        for members in sector_members.values()
+                        for member in members
+                    )
                 plan = ScanPlan(
                     sectors=tuple(sorted(set(plan.sectors).union(sector_members))),
                     symbols=tuple(sorted(full_scope)),

@@ -1474,6 +1474,79 @@ def _daily_strength_arguments() -> dict[str, object]:
     }
 
 
+def test_daily_strength_memory_cache_is_scoped_to_normalized_membership(
+    monkeypatch,
+) -> None:
+    fake = DailyFakeXtdata()
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    actual_builder = subject.build_horizontal_sector_strength_batch
+    builder_cohorts: list[tuple[tuple[str, tuple[str, ...]], ...]] = []
+
+    def recording_builder(**kwargs):
+        builder_cohorts.append(
+            tuple(
+                (
+                    sector_id,
+                    tuple(member.symbol for member in members),
+                )
+                for sector_id, members in kwargs["members_by_sector"].items()
+            )
+        )
+        return actual_builder(**kwargs)
+
+    monkeypatch.setattr(
+        subject,
+        "build_horizontal_sector_strength_batch",
+        recording_builder,
+    )
+    source = QmtSectorStrengthSource()
+    shared = {
+        "as_of": AS_OF,
+        "membership_revision": "sha256:" + "f" * 64,
+    }
+
+    wide = source.strengths(
+        members_by_sector={
+            "qmt-gics3:second": ("SZ.000001",),
+            "qmt-gics3:first": ("SH.600001", "SH.600000"),
+        },
+        **shared,
+    )
+    calls_after_wide = fake.market_calls
+    narrow = source.strengths(
+        members_by_sector={
+            "qmt-gics3:first": ("SH.600000", "SH.600001"),
+        },
+        **shared,
+    )
+
+    assert fake.market_calls > calls_after_wide
+    assert tuple(wide) == ("qmt-gics3:first", "qmt-gics3:second")
+    assert tuple(narrow) == ("qmt-gics3:first",)
+    # Horizontal rank is cohort-relative, so the rank builder must receive
+    # only the exact normalized sector/member subset for each cache identity.
+    assert builder_cohorts == [
+        (
+            ("qmt-gics3:first", ("SH.600000", "SH.600001")),
+            ("qmt-gics3:second", ("SZ.000001",)),
+        ),
+        (("qmt-gics3:first", ("SH.600000", "SH.600001")),),
+    ]
+
+    calls_after_narrow = fake.market_calls
+    reordered_narrow = source.strengths(
+        members_by_sector={
+            "qmt-gics3:first": ("SH.600001", "SH.600000"),
+        },
+        **shared,
+    )
+
+    assert reordered_narrow is narrow
+    assert fake.market_calls == calls_after_narrow
+    assert len(builder_cohorts) == 2
+
+
 class ShortDailyHistoryXtdata(DailyFakeXtdata):
     def __init__(self, *, internal_gap: bool = False) -> None:
         required = AS_OF.date() - timedelta(days=1)

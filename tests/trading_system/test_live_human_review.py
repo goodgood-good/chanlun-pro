@@ -1001,6 +1001,75 @@ def test_live_snapshot_requires_every_eligible_sector_member_in_coverage() -> No
         validate_live_review_snapshot(snapshot)
 
 
+@pytest.mark.parametrize("scope_mode", ("VALIDATION_COHORT", "LARGE_SCOPE"))
+def test_bounded_review_requires_only_admitted_strength_peers(
+    scope_mode: str,
+) -> None:
+    snapshot = live_snapshot()
+    discovered = list(snapshot["coverage_manifest"]["discovered_codes"])
+    snapshot.update(
+        {
+            "screening_scope_mode": scope_mode,
+            "effective_monitor_universe_limit": 12,
+            "admitted_universe_codes": discovered,
+        }
+    )
+    sector_id = str(snapshot["sectors"][0]["sector_id"])
+    _attach_strength_evidence(
+        snapshot,
+        additional_members={sector_id: ("SZ.000002",)},
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    _review_at, signals = validate_live_review_snapshot(snapshot)
+
+    assert signals
+    assert "SZ.000002" not in discovered
+
+
+def test_bounded_review_requires_every_admitted_strength_peer_in_coverage() -> None:
+    snapshot = live_snapshot()
+    discovered = list(snapshot["coverage_manifest"]["discovered_codes"])
+    admitted_peer = "SZ.000002"
+    snapshot.update(
+        {
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "effective_monitor_universe_limit": 12,
+            "admitted_universe_codes": [*discovered, admitted_peer],
+        }
+    )
+    sector_id = str(snapshot["sectors"][0]["sector_id"])
+    _attach_strength_evidence(
+        snapshot,
+        additional_members={sector_id: (admitted_peer,)},
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    with pytest.raises(ValueError, match="eligible sector member coverage"):
+        validate_live_review_snapshot(snapshot)
+
+
+def test_bounded_review_rejects_discovered_code_outside_admission() -> None:
+    snapshot = live_snapshot()
+    snapshot.update(
+        {
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "effective_monitor_universe_limit": 12,
+            "admitted_universe_codes": ["SH.600000"],
+        }
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    with pytest.raises(ValueError, match="scope admission"):
+        validate_live_review_snapshot(snapshot)
+
+
 def test_live_snapshot_rejects_self_attested_sector_strength_source_hash() -> None:
     """A replacement SHA cannot override the batch recomputation evidence."""
 

@@ -237,6 +237,7 @@ class RecordingMarketData:
 class RecordingSectorCatalog:
     def __init__(self, batch: SectorAssessmentBatch | None = None) -> None:
         self.assessment_calls: list[datetime] = []
+        self.admitted_scope_calls: list[tuple[str, ...] | None] = []
         self.member_calls = 0
         self.batch = batch or SectorAssessmentBatch(
             assessments=(eligible_sector(),),
@@ -246,10 +247,18 @@ class RecordingSectorCatalog:
             errors=(),
         )
 
-    def native_sector_assessments(self, *, as_of: datetime):
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+        admitted_codes: tuple[str, ...] | None = None,
+    ):
         calls = getattr(self, "assessment_calls", None)
         if calls is not None:
             calls.append(as_of)
+        scope_calls = getattr(self, "admitted_scope_calls", None)
+        if scope_calls is not None:
+            scope_calls.append(admitted_codes)
         return self.batch
 
     def members(self):
@@ -311,8 +320,16 @@ class HydratingEvidenceSectorCatalog(EvidenceSectorCatalog):
         self.hydrated = False
         self.restore_calls: list[tuple[datetime, str]] = []
 
-    def native_sector_assessments(self, *, as_of: datetime):
-        batch = super().native_sector_assessments(as_of=as_of)
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+        admitted_codes: tuple[str, ...] | None = None,
+    ):
+        batch = super().native_sector_assessments(
+            as_of=as_of,
+            admitted_codes=admitted_codes,
+        )
         self.hydrated = True
         return batch
 
@@ -1963,6 +1980,34 @@ def test_startup_sector_cache_receives_exact_bounded_admission_before_restore(
     ]
 
 
+def test_new_validation_epoch_scans_the_complete_exact_cohort(
+    tmp_path: Path,
+) -> None:
+    admitted = ("SZ.000001", "SZ.000002", "SZ.000003")
+    market = RecordingMarketData()
+    planner = RecordingPlanner((admitted[0],))
+    catalog = RecordingSectorCatalog()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=planner,
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(admitted_universe_codes=admitted),
+    )
+
+    snapshot = service.refresh_now()
+
+    assert planner.calls == 1
+    assert catalog.admitted_scope_calls == [admitted]
+    assert market.bundle_codes == list(admitted)
+    assert snapshot["coverage_manifest"]["discovered_codes"] == list(admitted)
+    assert snapshot["coverage_manifest"]["completed_codes"] == list(admitted)
+    assert snapshot["scan_audit"]["planned_symbol_count"] == len(admitted)
+
+
 def test_cache_from_previous_partial_member_policy_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -2516,7 +2561,13 @@ def test_disabled_full_coverage_priority_monitor_never_builds_sector_snapshot(
             return ("SZ.000001",)
 
     class NoRebuildCatalog(RecordingSectorCatalog):
-        def native_sector_assessments(self, *, as_of: datetime):
+        def native_sector_assessments(
+            self,
+            *,
+            as_of: datetime,
+            admitted_codes=None,
+        ):
+            del admitted_codes
             raise AssertionError(f"盘中不得重建板块快照：{as_of.isoformat()}")
 
     market = WatchlistMarket()
@@ -2578,7 +2629,13 @@ def test_stale_priority_sector_cache_preserves_members_but_blocks_buy_scope(
                 content_sha256="sha256:" + "7" * 64,
             )
 
-        def native_sector_assessments(self, *, as_of: datetime):
+        def native_sector_assessments(
+            self,
+            *,
+            as_of: datetime,
+            admitted_codes=None,
+        ):
+            del admitted_codes
             raise AssertionError(f"盘中不得重建板块快照：{as_of.isoformat()}")
 
     market = RecordingMarketData()
@@ -4119,8 +4176,13 @@ def test_runtime_symbol_failure_retries_after_paced_refresh_in_same_epoch(
 
 
 class FailingSectorCatalog(RecordingSectorCatalog):
-    def native_sector_assessments(self, *, as_of: datetime):
-        del as_of
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+        admitted_codes=None,
+    ):
+        del as_of, admitted_codes
         raise RuntimeError("native sector feed unavailable")
 
 
@@ -4168,10 +4230,18 @@ def test_refresh_failure_retains_an_existing_complete_snapshot(
             super().__init__()
             self.fail = False
 
-        def native_sector_assessments(self, *, as_of: datetime):
+        def native_sector_assessments(
+            self,
+            *,
+            as_of: datetime,
+            admitted_codes=None,
+        ):
             if self.fail:
                 raise RuntimeError("same-epoch sector transport failure")
-            return super().native_sector_assessments(as_of=as_of)
+            return super().native_sector_assessments(
+                as_of=as_of,
+                admitted_codes=admitted_codes,
+            )
 
     cache_path = tmp_path / "snapshot.json"
     catalog = ToggleFailingSectorCatalog()
@@ -10349,9 +10419,17 @@ def test_coverage_throughput_excludes_one_time_sector_initialization(
     )
 
     class SlowInitialSectorCatalog(MultiMemberSectorCatalog):
-        def native_sector_assessments(self, *, as_of: datetime):
+        def native_sector_assessments(
+            self,
+            *,
+            as_of: datetime,
+            admitted_codes=None,
+        ):
             performance_clock.advance(600)
-            return super().native_sector_assessments(as_of=as_of)
+            return super().native_sector_assessments(
+                as_of=as_of,
+                admitted_codes=admitted_codes,
+            )
 
     class TimedMarketData(RecordingMarketData):
         def structure_bundle(self, code: str, **kwargs) -> SymbolStructureBundle:
@@ -10985,6 +11063,55 @@ def test_full_coverage_window_continues_across_weekend_until_preopen(
     observed_at: datetime,
 ) -> None:
     assert _full_coverage_refresh_window_open(observed_at) is True
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_mode", "expected_open"),
+    (
+        (
+            TradingScreeningConfig(
+                admitted_universe_codes=("SZ.000001", "SH.600000"),
+            ),
+            "VALIDATION_COHORT",
+            True,
+        ),
+        (TradingScreeningConfig(), "VALIDATION_COHORT", False),
+        (
+            TradingScreeningConfig(
+                large_scope_authorized=True,
+                admitted_universe_codes=("SZ.000001", "SH.600000"),
+            ),
+            "LARGE_SCOPE",
+            False,
+        ),
+    ),
+)
+def test_only_exact_nonempty_validation_cohort_opens_bounded_coverage_gate(
+    tmp_path: Path,
+    config: TradingScreeningConfig,
+    expected_mode: str,
+    expected_open: bool,
+) -> None:
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / f"{expected_mode}-{expected_open}.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=config,
+    )
+
+    assert config.screening_scope_mode == expected_mode
+    assert (
+        service._full_coverage_execution_window_open(
+            service.snapshot(),
+            observed_at,
+        )
+        is expected_open
+    )
 
 
 def test_priority_monitor_delay_is_measured_start_to_start() -> None:
@@ -11754,6 +11881,40 @@ def test_background_loop_keeps_full_lane_open_after_2300(
     assert calls == [(False, False)]
 
 
+def test_validation_cohort_background_loop_runs_bounded_coverage_lane_intraday(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=60,
+            admitted_universe_codes=("SZ.000001", "SZ.000002"),
+        ),
+    )
+    calls: list[tuple[bool, bool]] = []
+    stop = threading.Event()
+
+    monkeypatch.setattr(service, "_needs_refresh", lambda: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        stop.set()
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+    service._background_loop(stop, threading.Event())
+
+    assert calls == [(False, False)]
+
+
 def test_disabled_full_coverage_never_runs_full_lane_inside_active_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -12243,8 +12404,13 @@ class MixedSectorCatalog:
             sector_name="未入选行业",
         )
 
-    def native_sector_assessments(self, *, as_of: datetime):
-        del as_of
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+        admitted_codes=None,
+    ):
+        del as_of, admitted_codes
         return SectorAssessmentBatch(
             assessments=(eligible_sector(), self.blocked),
             discovered_count=2,

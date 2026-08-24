@@ -2712,7 +2712,14 @@ class QmtSectorStrengthSource:
             tuple[date, date], tuple[date, ...]
         ] = {}
         self._cache: dict[
-            tuple[date, bool, str, date | None], SectorStrengthBatch
+            tuple[
+                date,
+                bool,
+                str,
+                date | None,
+                tuple[tuple[str, tuple[str, ...]], ...],
+            ],
+            SectorStrengthBatch,
         ] = {}
 
     @staticmethod
@@ -3545,11 +3552,17 @@ class QmtSectorStrengthSource:
     ) -> Mapping[str, SectorStrengthEvidence]:
         observed = normalize_datetime(as_of, "as_of")
         required_session = _latest_completed_qmt_daily_session(observed)
+        member_scope_identity = tuple(
+            (sector_id, tuple(sorted(set(members))))
+            for sector_id, members in sorted(members_by_sector.items())
+        )
+        normalized_members_by_sector = dict(member_scope_identity)
         cache_key = (
             observed.date(),
             self._after_daily_close(observed),
             membership_revision,
             required_session,
+            member_scope_identity,
         )
         with self._lock:
             cached = self._cache.get(cache_key)
@@ -3559,7 +3572,7 @@ class QmtSectorStrengthSource:
             sorted(
                 {self._benchmark_symbol}.union(
                     code
-                    for members in members_by_sector.values()
+                    for members in normalized_members_by_sector.values()
                     for code in members
                 )
             )
@@ -3577,7 +3590,7 @@ class QmtSectorStrengthSource:
         current_bars = {} if bars is None else bars
         member_symbols = frozenset(
             code
-            for members in members_by_sector.values()
+            for members in normalized_members_by_sector.values()
             for code in members
         )
         status_facts = self._load_status_facts(
@@ -3714,7 +3727,7 @@ class QmtSectorStrengthSource:
             ),
         )
         histories: dict[str, tuple[SectorMemberHistory, ...]] = {}
-        for sector_id, members in sorted(members_by_sector.items()):
+        for sector_id, members in normalized_members_by_sector.items():
             rows: list[SectorMemberHistory] = []
             for symbol in members:
                 daily = bars.get(symbol, ())

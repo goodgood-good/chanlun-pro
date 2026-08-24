@@ -81,8 +81,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_WORKER = Path(__file__).with_name("trading_screening_native_worker.py")
 _SECTOR_CACHE_SCHEMA = "chanlun-native-sector-snapshot-cache"
 _SECTOR_CACHE_PAYLOAD_SCHEMA = "chanlun-native-sector-snapshot-cache-payload"
-_SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA = "chanlun-native-sector-cache-scope-v1"
-_SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES = 64 * 1024
+_SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA = (
+    "chanlun-native-sector-cache-scope-v2-exact-request"
+)
+_SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES = 256 * 1024
 _SECTOR_SNAPSHOT_PRODUCER_SCHEMA = "chanlun-native-sector-snapshot-producer"
 _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID = (
     "priority-sector_candidate-sector-symbol-striped-v2"
@@ -683,6 +685,7 @@ def _cleanup_stale_runtime_state_cache_roots(
 
 @dataclass(frozen=True, slots=True)
 class _SectorSnapshotComponents:
+    admitted_codes: tuple[str, ...] | None
     batch: SectorAssessmentBatch
     members: dict[str, tuple[str, ...]]
     changed_bars: tuple[BarKey, ...]
@@ -1906,6 +1909,20 @@ class NativeTradingDataGatewayProcessProxy:
             )
         ):
             raise ValueError("sector_cache_admitted_codes must be a unique tuple")
+        if (
+            sector_cache_scope_mode != "FULL_MARKET"
+            and sector_cache_scope_limit is not None
+            and len(sector_cache_admitted_codes) > sector_cache_scope_limit
+        ):
+            raise ValueError("sector_cache_admitted_codes exceed the bounded limit")
+        if (
+            sector_cache_path is not None
+            and sector_cache_scope_mode != "FULL_MARKET"
+            and not sector_cache_admitted_codes
+        ):
+            raise ValueError(
+                "bounded sector cache requires exact admitted codes"
+            )
         if type(structure_worker_count) is not int or structure_worker_count <= 0:
             raise ValueError("structure_worker_count must be a positive integer")
         if transport is not None and structure_worker_count != 1:
@@ -2027,11 +2044,22 @@ class NativeTradingDataGatewayProcessProxy:
                 )
         self._structure_transports = tuple(structure_transports)
         self._cache_lock = RLock()
+        self._sector_scope_lock = RLock()
+        self._sector_snapshot_build_lock = Lock()
+        self._sector_scope_epoch = 0
         self._sector_cache_path = sector_cache_path
         self._sector_cache_revision = sector_cache_revision
         self._sector_cache_scope_mode = sector_cache_scope_mode
-        self._sector_cache_scope_limit = sector_cache_scope_limit
-        self._sector_cache_admitted_codes = sector_cache_admitted_codes
+        self._sector_cache_scope_limit = (
+            None
+            if sector_cache_scope_mode == "FULL_MARKET"
+            else sector_cache_scope_limit
+        )
+        self._sector_cache_admitted_codes = (
+            ()
+            if sector_cache_scope_mode == "FULL_MARKET"
+            else sector_cache_admitted_codes
+        )
         self._sector_cache_state = (
             "disabled" if sector_cache_path is None else "not_checked"
         )
@@ -2081,12 +2109,26 @@ class NativeTradingDataGatewayProcessProxy:
             or (scope_mode != "FULL_MARKET" and len(admitted) > max_symbols)
         ):
             raise ValueError("sector cache admitted_codes are invalid")
-        with self._cache_lock:
-            self._sector_cache_scope_mode = scope_mode
-            self._sector_cache_scope_limit = (
-                None if scope_mode == "FULL_MARKET" else max_symbols
+        new_scope_limit = None if scope_mode == "FULL_MARKET" else max_symbols
+        new_admitted = () if scope_mode == "FULL_MARKET" else admitted
+        with self._sector_scope_lock, self._cache_lock:
+            scope_changed = (
+                self._sector_cache_scope_mode != scope_mode
+                or self._sector_cache_scope_limit != new_scope_limit
+                or self._sector_cache_admitted_codes != new_admitted
             )
-            self._sector_cache_admitted_codes = admitted
+            self._sector_cache_scope_mode = scope_mode
+            self._sector_cache_scope_limit = new_scope_limit
+            self._sector_cache_admitted_codes = new_admitted
+            if scope_changed:
+                self._sector_scope_epoch += 1
+                # Routing and presentation facts belong to the old admission
+                # identity. They must not survive even a bounded-to-bounded
+                # cohort change while a restore call is racing this update.
+                self._sector_members = None
+                self._changed_bars = ()
+                self._emitted_bar_ids.clear()
+                self._symbol_names.clear()
 
     def startup(self) -> None:
         """预启动主只读工作进程，结构分片保持惰性。
@@ -2184,31 +2226,84 @@ class NativeTradingDataGatewayProcessProxy:
             return f"{affinity_key}|symbol:{code}"
         return affinity_key
 
-    def native_sector_assessments(self, *, as_of: datetime) -> SectorAssessmentBatch:
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+        admitted_codes: tuple[str, ...] | None = None,
+    ) -> SectorAssessmentBatch:
         observed_at = normalize_datetime(as_of, "as_of")
-        cached = self._load_sector_snapshot_cache(observed_at)
-        if cached is not None:
-            self._install_sector_snapshot(cached)
-            return cached.batch
+        # Serialize native sector builds without holding the admission lock across
+        # the potentially multi-minute worker IPC.  Priority cache reads retain a
+        # short scope lock and can therefore continue serving 1m reviews.
+        with self._sector_snapshot_build_lock:
+            with self._sector_scope_lock:
+                if self._sector_cache_scope_mode == "FULL_MARKET":
+                    if admitted_codes is not None:
+                        raise NativeScreeningWorkerProtocolError(
+                            "full-market sector snapshot cannot carry admitted codes"
+                        )
+                    expected_admitted_codes: tuple[str, ...] | None = None
+                else:
+                    expected_admitted_codes = self._sector_cache_admitted_codes
+                    if not expected_admitted_codes:
+                        raise NativeScreeningWorkerProtocolError(
+                            "bounded sector snapshot requires exact admitted codes"
+                        )
+                    if admitted_codes != expected_admitted_codes:
+                        raise NativeScreeningWorkerProtocolError(
+                            "bounded sector snapshot admission differs from configured scope"
+                        )
+                scope_identity = (
+                    self._sector_scope_epoch,
+                    self._sector_cache_scope_mode,
+                    self._sector_cache_scope_limit,
+                    self._sector_cache_admitted_codes,
+                )
+                cached = self._load_sector_snapshot_cache(observed_at)
+                if cached is not None:
+                    self._install_sector_snapshot(cached)
+                    return cached.batch
 
-        # 行业快照可能持续数分钟。生产多分片配置必须把它放到普通候选分片，第一
-        # 个结构进程永久留给实时优先标的；否则盘中显式重建会让 1m/5m 监听整段过期。
-        # 单分片测试和嵌入式配置仍自然回退到唯一进程。
-        sector_transport = self._structure_transports_for_lane("candidate")[0]
-        self._sector_snapshot_in_flight.set()
-        try:
-            value = sector_transport.request("sector_snapshot", as_of=as_of)
-        finally:
-            self._sector_snapshot_in_flight.clear()
-        components = self._validated_atomic_snapshot(value, observed_at)
-        self._install_sector_snapshot(components)
-        self._persist_sector_snapshot_cache(components, observed_at)
-        return components.batch
+                # 行业快照可能持续数分钟。生产多分片配置必须把它放到普通候选分片，第一
+                # 个结构进程永久留给实时优先标的；否则盘中显式重建会让 1m/5m 监听整段过期。
+                # 单分片测试和嵌入式配置仍自然回退到唯一进程。
+                sector_transport = self._structure_transports_for_lane("candidate")[0]
+                request_kwargs: dict[str, object] = {"as_of": as_of}
+                if expected_admitted_codes is not None:
+                    request_kwargs["admitted_codes"] = expected_admitted_codes
+                self._sector_snapshot_in_flight.set()
+            try:
+                value = sector_transport.request("sector_snapshot", **request_kwargs)
+            finally:
+                self._sector_snapshot_in_flight.clear()
+
+            with self._sector_scope_lock:
+                current_scope_identity = (
+                    self._sector_scope_epoch,
+                    self._sector_cache_scope_mode,
+                    self._sector_cache_scope_limit,
+                    self._sector_cache_admitted_codes,
+                )
+                if current_scope_identity != scope_identity:
+                    raise NativeScreeningWorkerProtocolError(
+                        "sector snapshot scope changed during native rebuild"
+                    )
+                components = self._validated_atomic_snapshot(
+                    value,
+                    observed_at,
+                    expected_admitted_codes=expected_admitted_codes,
+                )
+                self._install_sector_snapshot(components)
+                self._persist_sector_snapshot_cache(components, observed_at)
+                return components.batch
 
     def _validated_atomic_snapshot(
         self,
         value: object,
         as_of: datetime,
+        *,
+        expected_admitted_codes: tuple[str, ...] | None,
     ) -> _SectorSnapshotComponents:
         if not isinstance(value, Mapping) or (
             value.get("schema") != "chanlun-native-sector-snapshot"
@@ -2222,6 +2317,11 @@ class NativeTradingDataGatewayProcessProxy:
         ):
             raise NativeScreeningWorkerProtocolError(
                 "atomic sector snapshot crossed the read-only safety boundary"
+            )
+        raw_admitted_codes = value.get("admitted_codes")
+        if raw_admitted_codes != expected_admitted_codes:
+            raise NativeScreeningWorkerProtocolError(
+                "atomic sector snapshot admission identity mismatch"
             )
         batch = value.get("assessments")
         members = self._validated_members(value.get("members"))
@@ -2239,10 +2339,15 @@ class NativeTradingDataGatewayProcessProxy:
         ):
             raise NativeScreeningWorkerProtocolError("invalid sector symbol names")
         components = _SectorSnapshotComponents(
+            admitted_codes=expected_admitted_codes,
             batch=batch,
             members=members,
             changed_bars=bars,
             symbol_names=dict(names),
+        )
+        self._validate_sector_snapshot_scope(
+            components,
+            expected_admitted_codes=expected_admitted_codes,
         )
         try:
             self._validate_sector_snapshot_causality(components, as_of)
@@ -2251,6 +2356,29 @@ class NativeTradingDataGatewayProcessProxy:
                 f"atomic sector snapshot violates causality: {exc}"
             ) from exc
         return components
+
+    def _validate_sector_snapshot_scope(
+        self,
+        value: _SectorSnapshotComponents,
+        *,
+        expected_admitted_codes: tuple[str, ...] | None,
+    ) -> None:
+        if value.admitted_codes != expected_admitted_codes:
+            raise NativeScreeningWorkerProtocolError(
+                "atomic sector snapshot admission identity mismatch"
+            )
+        if expected_admitted_codes is None:
+            return
+        subject_codes = set(self._sector_cache_strategy_subject_codes(value))
+        limit = self._sector_cache_scope_limit
+        if (
+            limit is None
+            or len(subject_codes) > limit
+            or not subject_codes.issubset(expected_admitted_codes)
+        ):
+            raise NativeScreeningWorkerProtocolError(
+                "bounded atomic sector snapshot escaped its exact admitted scope"
+            )
 
     def _install_sector_snapshot(self, value: _SectorSnapshotComponents) -> None:
         with self._cache_lock:
@@ -2335,6 +2463,11 @@ class NativeTradingDataGatewayProcessProxy:
             raise ValueError("sector snapshot cache is disabled")
         snapshot = {
             "schema": "chanlun-native-sector-snapshot",
+            "admitted_codes": (
+                None
+                if value.admitted_codes is None
+                else list(value.admitted_codes)
+            ),
             "assessments": _batch_cache_document(value.batch),
             "members": {
                 key: list(items) for key, items in sorted(value.members.items())
@@ -2390,12 +2523,17 @@ class NativeTradingDataGatewayProcessProxy:
         configured_limit = self._sector_cache_scope_limit
         configured_codes = set(self._sector_cache_admitted_codes)
         admitted = bool(
-            self._sector_cache_scope_mode == "FULL_MARKET"
+            (
+                self._sector_cache_scope_mode == "FULL_MARKET"
+                and value.admitted_codes is None
+            )
             or (
-                configured_limit is not None
+                self._sector_cache_scope_mode != "FULL_MARKET"
+                and configured_limit is not None
                 and len(codes) <= configured_limit
                 and bool(configured_codes)
                 and set(codes).issubset(configured_codes)
+                and value.admitted_codes == self._sector_cache_admitted_codes
             )
         )
         try:
@@ -2408,12 +2546,18 @@ class NativeTradingDataGatewayProcessProxy:
                 self._sector_cache_scope_mode if admitted else "OVERSCOPE"
             ),
             "max_symbols": configured_limit,
-            "strategy_subject_codes": (
-                list(codes)
-                if admitted and self._sector_cache_scope_mode != "FULL_MARKET"
+            "strategy_subject_codes": list(codes) if admitted else [],
+            "strategy_subject_count": len(codes),
+            "configured_admitted_codes": (
+                list(self._sector_cache_admitted_codes)
+                if self._sector_cache_scope_mode != "FULL_MARKET"
                 else []
             ),
-            "strategy_subject_count": len(codes),
+            "requested_admitted_codes": (
+                None
+                if value.admitted_codes is None
+                else list(value.admitted_codes)
+            ),
             "source_revision": self._sector_cache_revision,
             "payload_content_sha256": document.get("content_sha256"),
             "payload_name": (
@@ -2430,8 +2574,6 @@ class NativeTradingDataGatewayProcessProxy:
     def _sector_cache_scope_allows_payload(self, path: Path) -> bool:
         """Reject broad/legacy cache files before reading their payload bytes."""
 
-        if self._sector_cache_scope_mode == "FULL_MARKET":
-            return True
         sidecar = self._sector_cache_scope_sidecar_path(path)
         try:
             if sidecar.stat().st_size > _SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES:
@@ -2440,9 +2582,18 @@ class NativeTradingDataGatewayProcessProxy:
             payload_stat = path.stat()
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
-        codes = document.get("strategy_subject_codes") if isinstance(document, Mapping) else None
+        codes = (
+            document.get("strategy_subject_codes")
+            if isinstance(document, Mapping)
+            else None
+        )
+        configured_codes = (
+            document.get("configured_admitted_codes")
+            if isinstance(document, Mapping)
+            else None
+        )
         limit = self._sector_cache_scope_limit
-        return bool(
+        common_valid = bool(
             isinstance(document, Mapping)
             and document.get("schema") == _SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA
             and document.get("scope_mode") == self._sector_cache_scope_mode
@@ -2458,20 +2609,32 @@ class NativeTradingDataGatewayProcessProxy:
                 for code in codes
             )
             and len(codes) == len(set(codes))
-            and limit is not None
-            and len(codes) <= limit
             and document.get("strategy_subject_count") == len(codes)
+            and configured_codes == list(self._sector_cache_admitted_codes)
+        )
+        if not common_valid:
+            return False
+        if self._sector_cache_scope_mode == "FULL_MARKET":
+            return bool(
+                limit is None
+                and configured_codes == []
+                and document.get("requested_admitted_codes") is None
+            )
+        return bool(
+            limit is not None
+            and len(codes) <= limit
             and bool(self._sector_cache_admitted_codes)
             and set(codes).issubset(self._sector_cache_admitted_codes)
+            and document.get("requested_admitted_codes")
+            == list(self._sector_cache_admitted_codes)
         )
 
     def _sector_cache_scope_matches_loaded_payload(
         self,
         path: Path,
         content_sha256: str,
+        value: _SectorSnapshotComponents,
     ) -> bool:
-        if self._sector_cache_scope_mode == "FULL_MARKET":
-            return True
         try:
             document = json.loads(
                 self._sector_cache_scope_sidecar_path(path).read_text(
@@ -2480,9 +2643,26 @@ class NativeTradingDataGatewayProcessProxy:
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
+        expected_admitted_codes = (
+            None
+            if self._sector_cache_scope_mode == "FULL_MARKET"
+            else self._sector_cache_admitted_codes
+        )
         return bool(
             isinstance(document, Mapping)
             and document.get("payload_content_sha256") == content_sha256
+            and document.get("scope_mode") == self._sector_cache_scope_mode
+            and document.get("configured_admitted_codes")
+            == list(self._sector_cache_admitted_codes)
+            and document.get("requested_admitted_codes")
+            == (
+                None
+                if expected_admitted_codes is None
+                else list(expected_admitted_codes)
+            )
+            and value.admitted_codes == expected_admitted_codes
+            and document.get("strategy_subject_codes")
+            == list(self._sector_cache_strategy_subject_codes(value))
         )
 
     def _persist_sector_cache_scope_sidecar(
@@ -2575,6 +2755,15 @@ class NativeTradingDataGatewayProcessProxy:
             )
         try:
             members = self._validated_members(snapshot.get("members"))
+            raw_admitted_codes = snapshot.get("admitted_codes")
+            cached_admitted_codes = (
+                None
+                if raw_admitted_codes is None
+                else _cache_strings(
+                    raw_admitted_codes,
+                    "cached sector admitted_codes",
+                )
+            )
             raw_names = _cache_mapping(
                 snapshot.get("symbol_names"), "cached sector symbol names"
             )
@@ -2585,6 +2774,7 @@ class NativeTradingDataGatewayProcessProxy:
                 for code, name in raw_names.items()
             }
             components = _SectorSnapshotComponents(
+                admitted_codes=cached_admitted_codes,
                 batch=_batch_from_cache(snapshot.get("assessments")),
                 members=members,
                 changed_bars=tuple(
@@ -2601,6 +2791,14 @@ class NativeTradingDataGatewayProcessProxy:
             # 快照内的每项事实都必须在它自己声明的请求时刻已经可见。使用当前较晚
             # 的墙上时钟校验会让被重写为未来行情的旧缓存蒙混过关。
             self._validate_sector_snapshot_causality(components, cached_as_of)
+            self._validate_sector_snapshot_scope(
+                components,
+                expected_admitted_codes=(
+                    None
+                    if self._sector_cache_scope_mode == "FULL_MARKET"
+                    else self._sector_cache_admitted_codes
+                ),
+            )
         except _SectorSnapshotCacheError:
             raise
         except (NativeScreeningWorkerProtocolError, TypeError, ValueError) as exc:
@@ -2642,7 +2840,9 @@ class NativeTradingDataGatewayProcessProxy:
                 document, as_of
             )
             if not self._sector_cache_scope_matches_loaded_payload(
-                path, content_sha256
+                path,
+                content_sha256,
+                components,
             ):
                 raise _SectorSnapshotCacheError(
                     "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH",
@@ -2685,6 +2885,14 @@ class NativeTradingDataGatewayProcessProxy:
         *,
         as_of: datetime,
     ) -> CachedSectorSnapshot | None:
+        with self._sector_scope_lock:
+            return self._cached_sector_snapshot_for_priority_locked(as_of=as_of)
+
+    def _cached_sector_snapshot_for_priority_locked(
+        self,
+        *,
+        as_of: datetime,
+    ) -> CachedSectorSnapshot | None:
         """只读取最近一次已完成板块快照，绝不调用原生板块计算。
 
         盘中优先通道需要先服务 1m 买卖点。即便磁盘快照属于较早行情周期，也可用来
@@ -2714,7 +2922,9 @@ class NativeTradingDataGatewayProcessProxy:
                 )
             )
             if not self._sector_cache_scope_matches_loaded_payload(
-                path, content_sha256
+                path,
+                content_sha256,
+                components,
             ):
                 raise _SectorSnapshotCacheError(
                     "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH",
@@ -2853,18 +3063,39 @@ class NativeTradingDataGatewayProcessProxy:
             raise NativeScreeningWorkerProtocolError(
                 "restored sector membership must be canonical"
             )
-        attestation = sha256_json(
-            {
-                "schema": "chanlun-restored-sector-member-routing",
-                "as_of": observed_at.isoformat(),
-                "catalog_revision": catalog_revision,
-                "members": {
-                    key: list(values) for key, values in sorted(validated.items())
-                },
-            }
-        )
-        with self._cache_lock:
+        with self._sector_scope_lock, self._cache_lock:
+            if self._sector_cache_scope_mode != "FULL_MARKET":
+                admitted = frozenset(self._sector_cache_admitted_codes)
+                restored_codes = {
+                    code for values in validated.values() for code in values
+                }
+                limit = self._sector_cache_scope_limit
+                if (
+                    not admitted
+                    or limit is None
+                    or len(restored_codes) > limit
+                    or not restored_codes.issubset(admitted)
+                ):
+                    raise NativeScreeningWorkerProtocolError(
+                        "restored sector membership escaped configured admission"
+                    )
+            attestation = sha256_json(
+                {
+                    "schema": "chanlun-restored-sector-member-routing",
+                    "as_of": observed_at.isoformat(),
+                    "catalog_revision": catalog_revision,
+                    "members": {
+                        key: list(values)
+                        for key, values in sorted(validated.items())
+                    },
+                }
+            )
             self._sector_members = dict(validated)
+            # A restored routing attestation starts a fresh local fact epoch,
+            # even when the configured cohort itself did not change.
+            self._changed_bars = ()
+            self._emitted_bar_ids.clear()
+            self._symbol_names.clear()
             self._sector_cache_state = "restored_from_screening_snapshot"
             self._sector_cache_reason = None
             self._sector_cache_requested_as_of = observed_at

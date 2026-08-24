@@ -627,6 +627,48 @@ def _canonical_code_list(raw: object, field: str) -> list[str]:
     return raw
 
 
+def _validated_review_scope_admission(
+    payload: Mapping[str, object],
+    *,
+    discovered_codes: list[str],
+) -> tuple[str, frozenset[str]]:
+    """Return the authenticated stock-routing boundary for review.
+
+    Sector-strength evidence may intentionally retain complete peer baskets so
+    its horizontal rank remains real. Those analysis peers are not routing
+    subjects in a bounded run; only the separately attested admitted universe
+    may appear in stock coverage or signals. Legacy snapshots without any scope
+    envelope retain the historical full-peer requirement.
+    """
+
+    scope_mode = payload.get("screening_scope_mode")
+    raw_limit = payload.get("effective_monitor_universe_limit")
+    raw_admitted = payload.get("admitted_universe_codes")
+    if scope_mode is None and raw_limit is None and raw_admitted is None:
+        return "FULL_MARKET", frozenset()
+    if (
+        scope_mode
+        not in {"FULL_MARKET", "LARGE_SCOPE", "VALIDATION_COHORT"}
+        or type(raw_limit) is not int
+        or raw_limit <= 0
+        or not isinstance(raw_admitted, list)
+        or any(
+            not isinstance(code, str)
+            or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+            for code in raw_admitted
+        )
+        or len(raw_admitted) != len(set(raw_admitted))
+    ):
+        raise ValueError("live screening scope admission is invalid")
+    admitted = frozenset(raw_admitted)
+    if scope_mode != "FULL_MARKET" and (
+        len(admitted) > raw_limit
+        or not set(discovered_codes).issubset(admitted)
+    ):
+        raise ValueError("live screening scope admission is invalid")
+    return str(scope_mode), admitted
+
+
 def _frequency_code_set(raw: object, field: str) -> set[str]:
     if not isinstance(raw, Mapping):
         raise ValueError(f"live screening {field} is malformed")
@@ -4088,12 +4130,18 @@ def validate_live_review_snapshot(
     discovered_codes = manifest.get("discovered_codes")
     if not isinstance(discovered_codes, list):  # 由覆盖范围解析器保护
         raise ValueError("live screening eligible sector member coverage is invalid")
+    scope_mode, admitted_codes = _validated_review_scope_admission(
+        payload,
+        discovered_codes=discovered_codes,
+    )
     required_sector_members = {
         symbol
         for sector_id, document in sector_documents.items()
         if document.get("eligible") is True
         for symbol in sector_members.get(sector_id, frozenset())
     }
+    if scope_mode != "FULL_MARKET":
+        required_sector_members.intersection_update(admitted_codes)
     missing_sector_members = required_sector_members.difference(discovered_codes)
     if missing_sector_members:
         # ``universe_revision`` 用于认证服务声明的标的范围。

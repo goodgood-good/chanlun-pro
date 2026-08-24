@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -11,7 +12,9 @@ from chanlun.decision_support.trading_system.incremental_scan import ScanPlan
 from cl_app.services.trading_screening import (
     TradingScreeningConfig,
     TradingScreeningService,
+    _coverage_sector_state_from_snapshot,
     _project_scan_plan_to_configured_scope,
+    _restored_snapshot_scope_is_valid,
 )
 from cl_app.services.trading_screening_scope import (
     DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
@@ -25,6 +28,13 @@ from cl_app.services.trading_screening_scope import (
     project_configured_screening_codes,
     require_configured_screening_codes,
     validate_screening_scope_configuration,
+)
+from chanlun.decision_support.trading_system.live_human_review import (
+    live_screening_snapshot_content_sha256,
+)
+from tests.trading_system.test_live_human_review import (
+    _attach_strength_evidence,
+    live_snapshot,
 )
 
 
@@ -236,6 +246,161 @@ def test_configured_allowlist_does_not_shrink_when_runtime_lanes_are_empty(
     assert service._candidate_monitor_five_universe == ()
     assert service._priority_monitor_last_codes == ()
     assert service.admitted_universe_codes() == admitted
+
+
+def test_bounded_snapshot_keeps_full_strength_peers_out_of_routing_and_scope(
+    tmp_path,
+) -> None:
+    snapshot = live_snapshot()
+    admitted = tuple(snapshot["coverage_manifest"]["discovered_codes"])
+    sector_id = str(snapshot["sectors"][0]["sector_id"])
+    analysis_peer = "SZ.000002"
+    snapshot.update(
+        {
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "effective_monitor_universe_limit": 12,
+            "configured_admitted_codes": list(admitted),
+            "admitted_universe_codes": list(admitted),
+        }
+    )
+    _attach_strength_evidence(
+        snapshot,
+        additional_members={sector_id: (analysis_peer,)},
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+    config = TradingScreeningConfig(admitted_universe_codes=admitted)
+
+    assert _restored_snapshot_scope_is_valid(snapshot, config)
+    batch, routing_members = _coverage_sector_state_from_snapshot(snapshot)
+
+    assert routing_members == {sector_id: admitted}
+    assert batch.strength_evidence is not None
+    [evidence_row] = batch.strength_evidence.evidence_document()["sectors"]
+    assert analysis_peer in evidence_row["member_symbols"]
+
+    cache_path = tmp_path / "snapshot.json"
+    service = TradingScreeningService(
+        market_data=object(),
+        sector_catalog=object(),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=lambda **_kwargs: ScanPlan((), (), (), False, False),
+        cache_path=cache_path,
+        clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
+        notifier=None,
+        config=config,
+    )
+    cache_path.write_text("{}", encoding="utf-8")
+    proof = service._cache_scope_sidecar_document(cache_path, snapshot)
+    assert proof is not None
+    assert "nested_member_codes" not in proof
+    assert proof["analysis_context_member_count"] > len(admitted)
+    assert str(proof["analysis_context_member_codes_sha256"]).startswith("sha256:")
+    service._cache_scope_sidecar_path(cache_path).write_text(
+        json.dumps(proof),
+        encoding="utf-8",
+    )
+    assert service._cache_scope_sidecar_allows_payload(cache_path)
+
+
+def test_bounded_snapshot_rejects_admitted_strength_peer_missing_from_discovery(
+) -> None:
+    snapshot = live_snapshot()
+    discovered = tuple(snapshot["coverage_manifest"]["discovered_codes"])
+    admitted_peer = next(code for code in _codes(900, 4) if code not in discovered)
+    admitted = (*discovered, admitted_peer)
+    sector_id = str(snapshot["sectors"][0]["sector_id"])
+    snapshot.update(
+        {
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "effective_monitor_universe_limit": 12,
+            "configured_admitted_codes": list(admitted),
+            "admitted_universe_codes": list(admitted),
+        }
+    )
+    _attach_strength_evidence(
+        snapshot,
+        additional_members={sector_id: (admitted_peer,)},
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    assert _restored_snapshot_scope_is_valid(
+        snapshot,
+        TradingScreeningConfig(admitted_universe_codes=admitted),
+    )
+    with pytest.raises(ValueError, match="escaped coverage discovery"):
+        _coverage_sector_state_from_snapshot(snapshot)
+
+
+def test_bounded_cache_rejects_snapshot_from_a_different_configured_cohort(
+    tmp_path,
+) -> None:
+    snapshot = live_snapshot()
+    strategy_codes = tuple(snapshot["coverage_manifest"]["discovered_codes"])
+    extras = tuple(code for code in _codes(950, 8) if code not in strategy_codes)
+    old_admitted = (*strategy_codes, *extras[:2])
+    new_admitted = (*old_admitted, *extras[2:4])
+    snapshot.update(
+        {
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "effective_monitor_universe_limit": 12,
+            # Persisted order is not an identity dimension; the exact cohort
+            # set is, and strategy subjects only need to be a subset of it.
+            "configured_admitted_codes": list(reversed(old_admitted)),
+            "admitted_universe_codes": list(reversed(old_admitted)),
+        }
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+    old_config = TradingScreeningConfig(
+        admitted_universe_codes=old_admitted,
+    )
+    new_config = TradingScreeningConfig(
+        admitted_universe_codes=new_admitted,
+    )
+
+    assert _restored_snapshot_scope_is_valid(snapshot, old_config)
+    assert not _restored_snapshot_scope_is_valid(snapshot, new_config)
+
+    cache_path = tmp_path / "snapshot.json"
+    old_service = TradingScreeningService(
+        market_data=object(),
+        sector_catalog=object(),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=lambda **_kwargs: ScanPlan((), (), (), False, False),
+        cache_path=cache_path,
+        clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
+        notifier=None,
+        config=old_config,
+    )
+    new_service = TradingScreeningService(
+        market_data=object(),
+        sector_catalog=object(),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=lambda **_kwargs: ScanPlan((), (), (), False, False),
+        cache_path=cache_path,
+        clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
+        notifier=None,
+        config=new_config,
+    )
+    cache_path.write_text("{}", encoding="utf-8")
+    proof = old_service._cache_scope_sidecar_document(cache_path, snapshot)
+    assert proof is not None
+    old_service._cache_scope_sidecar_path(cache_path).write_text(
+        json.dumps(proof),
+        encoding="utf-8",
+    )
+
+    assert old_service._cache_scope_sidecar_allows_payload(cache_path)
+    assert old_service._cache_scope_sidecar_matches_loaded_payload(
+        cache_path,
+        snapshot,
+    )
+    assert not new_service._cache_scope_sidecar_allows_payload(cache_path)
 
 
 def test_scan_plan_is_projected_to_exact_bounded_allowlist_but_full_market_is_unchanged(

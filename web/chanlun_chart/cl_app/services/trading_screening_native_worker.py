@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from multiprocessing.connection import Client, Connection
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Protocol
 
@@ -25,7 +26,12 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
 
 
 class _Gateway(Protocol):
-    def native_sector_assessments(self, *, as_of: object) -> object: ...
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: object,
+        admitted_codes: tuple[str, ...] | None = None,
+    ) -> object: ...
 
     def members(self) -> object: ...
 
@@ -158,13 +164,38 @@ def dispatch_gateway_request(
     """严格按只读选股白名单分派请求。"""
 
     if method == "sector_snapshot":
-        if set(kwargs) != {"as_of"}:
-            raise ValueError("sector_snapshot requires exactly as_of")
-        assessments = gateway.native_sector_assessments(as_of=kwargs.get("as_of"))
+        if set(kwargs) not in ({"as_of"}, {"as_of", "admitted_codes"}):
+            raise ValueError(
+                "sector_snapshot requires as_of and optional admitted_codes"
+            )
+        admitted_codes_supplied = "admitted_codes" in kwargs
+        admitted_codes = kwargs.get("admitted_codes")
+        if admitted_codes_supplied and (
+            type(admitted_codes) is not tuple
+            or not admitted_codes
+            or len(admitted_codes) != len(set(admitted_codes))
+            or any(
+                type(code) is not str
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in admitted_codes
+            )
+        ):
+            raise ValueError("sector_snapshot admitted_codes are invalid")
+        assessments = (
+            gateway.native_sector_assessments(as_of=kwargs.get("as_of"))
+            if not admitted_codes_supplied
+            else gateway.native_sector_assessments(
+                as_of=kwargs.get("as_of"),
+                admitted_codes=admitted_codes,
+            )
+        )
         members = gateway.members()
         changed_bars = gateway.changed_bars(None)
         return {
             "schema": "chanlun-native-sector-snapshot",
+            "admitted_codes": (
+                admitted_codes if admitted_codes_supplied else None
+            ),
             "assessments": assessments,
             "members": members,
             "changed_bars": changed_bars,
@@ -175,8 +206,6 @@ def dispatch_gateway_request(
             "real_account_access": False,
             "real_order_transport": False,
         }
-    if method == "native_sector_assessments":
-        return gateway.native_sector_assessments(as_of=kwargs.get("as_of"))
     if method == "members":
         if kwargs:
             raise ValueError("members accepts no arguments")

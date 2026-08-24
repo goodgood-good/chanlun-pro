@@ -2921,8 +2921,23 @@ class NativeTradingDataGateway:
         self,
         *,
         as_of: datetime,
+        admitted_codes: tuple[str, ...] | None = None,
     ) -> SectorAssessmentBatch:
         observed_at = normalize_datetime(as_of, "as_of")
+        if admitted_codes is not None and (
+            type(admitted_codes) is not tuple
+            or not admitted_codes
+            or len(admitted_codes) != len(set(admitted_codes))
+            or any(
+                type(code) is not str
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in admitted_codes
+            )
+        ):
+            raise ValueError("admitted_codes must be a unique non-empty A-share tuple")
+        admitted_code_set = (
+            None if admitted_codes is None else frozenset(admitted_codes)
+        )
         self._report_progress()
         raw = self._sector_provider()
         self._report_progress()
@@ -2956,6 +2971,7 @@ class NativeTradingDataGateway:
         discovered_count = 0
         completed_count = 0
         members_by_sector: dict[str, tuple[str, ...]] = {}
+        analysis_members_by_sector: dict[str, tuple[str, ...]] = {}
         latest_bars: dict[tuple[str, str], datetime] = {}
         parent_relations: list[tuple[str, str]] = []
         seen: set[str] = set()
@@ -2998,7 +3014,7 @@ class NativeTradingDataGateway:
                 or not isinstance(raw_members, Sequence)
             ):
                 continue
-            members = tuple(
+            analysis_members = tuple(
                 sorted(
                     {
                         (value if value in universe_codes else digits[value])
@@ -3008,17 +3024,26 @@ class NativeTradingDataGateway:
                     }
                 )
             )
+            if admitted_code_set is not None:
+                members = tuple(
+                    code for code in analysis_members if code in admitted_code_set
+                )
+                if not members:
+                    continue
+            else:
+                members = analysis_members
             catalog_member_count = _catalog_member_count(raw_members)
             seen.add(sector_id)
             discovered_count += 1
             members_by_sector[sector_id] = members
+            analysis_members_by_sector[sector_id] = analysis_members
             if (
                 hierarchy_catalog
                 and taxonomy_level == "GICS4"
                 and isinstance(parent_sector_id, str)
             ):
                 parent_relations.append((sector_id, parent_sector_id))
-            if len(members) < self._config.minimum_sector_members:
+            if len(analysis_members) < self._config.minimum_sector_members:
                 if catalog_member_count == 0:
                     detail_code = "sector_catalog_members_missing"
                 elif catalog_member_count < self._config.minimum_sector_members:
@@ -3031,12 +3056,12 @@ class NativeTradingDataGateway:
                     reason_code="sector_member_coverage_insufficient",
                     reason=(
                         f"catalog_members={catalog_member_count}; "
-                        f"universe_members={len(members)}; "
+                        f"universe_members={len(analysis_members)}; "
                         f"required={self._config.minimum_sector_members}"
                     ),
                     detail_code=detail_code,
                     catalog_member_count=catalog_member_count,
-                    universe_member_count=len(members),
+                    universe_member_count=len(analysis_members),
                     required_member_count=self._config.minimum_sector_members,
                 )
                 exclusions.append(exclusion)
@@ -3049,7 +3074,7 @@ class NativeTradingDataGateway:
                         regime="hostile",
                         rank_components=(),
                         reason_codes=(exclusion.reason_code, detail_code),
-                        strength_member_count=len(members),
+                        strength_member_count=len(analysis_members),
                         strength_reason_codes=(
                             "SECTOR_STRENGTH_MEMBER_COVERAGE_INSUFFICIENT",
                             detail_code.upper(),
@@ -3079,7 +3104,7 @@ class NativeTradingDataGateway:
                     raw_sector_frame = self._sector_frame_provider(
                         sector_id=sector_id,
                         sector_name=sector_name.strip(),
-                        members=members,
+                        members=analysis_members,
                         frequency=provider_frequency,
                         as_of=observed_at,
                         request_bars=provider_request_bars,
@@ -3206,7 +3231,7 @@ class NativeTradingDataGateway:
                     default=observed_at,
                 )
                 strengths = self._sector_strength_provider(
-                    members_by_sector=members_by_sector,
+                    members_by_sector=analysis_members_by_sector,
                     as_of=strength_decision_time,
                     membership_revision=catalog_revision,
                 )
