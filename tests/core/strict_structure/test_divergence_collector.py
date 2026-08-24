@@ -33,6 +33,16 @@ from tests.core.strict_structure.test_first_class_points import UP_VALUES
 from tests.core.strict_structure.test_trend_assembler import three_center_fixture
 
 
+RECURSIVE_TREND_VALUES = UP_VALUES[:-6] + (
+    ("down", 155, 138),
+    ("up", 138, 145),
+    ("down", 145, 138),
+    ("up", 138, 170),
+    ("down", 170, 150),
+    ("up", 150, 175),
+)
+
+
 def completed_consolidation_fixture(level=0):
     value = ongoing_center(structural_level=level)
     assert value.pending_leave_unit is not None
@@ -47,8 +57,8 @@ def completed_consolidation_fixture(level=0):
     return structure_for(value), value.entry_unit, later
 
 
-def completed_trend_fixture(level=0, *, decayed=True):
-    source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
+def completed_trend_fixture(level=1, *, decayed=True):
+    source_kind = SourceKind.TREND_TYPE
     values = tuple(
         unit(
             index,
@@ -58,7 +68,7 @@ def completed_trend_fixture(level=0, *, decayed=True):
             structural_level=level,
             source_kind=source_kind,
         )
-        for index, (direction, start, end) in enumerate(UP_VALUES)
+        for index, (direction, start, end) in enumerate(RECURSIVE_TREND_VALUES)
     )
     strength = FixedStrength(
         {
@@ -153,13 +163,13 @@ def test_completed_center_without_formal_boundary_does_not_enter_ledger():
 
 
 def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
-    values = three_center_fixture()[0][:10]
+    values = three_center_fixture()[0][:11]
     scanned = calculate_centers(values, 0, SourceKind.SEGMENT)
     center = scanned.centers[1]
     provider = FixedStrength(
         {
-            ("u-1", "u-2", "u-3"): (10.0, 5.0, 4.0),
-            ("u-7", "u-8", "u-9"): (6.0, 3.0, 2.0),
+            ("u-2", "u-3", "u-4"): (10.0, 5.0, 4.0),
+            ("u-8", "u-9", "u-10"): (6.0, 3.0, 2.0),
         }
     )
     assembly = assemble_trend_types(
@@ -167,7 +177,7 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
         values,
         0,
         strength=provider,
-        group_start_unit_id="u-1",
+        group_start_unit_id="u-2",
     )
     closed_center = assembly.current_trends[0].centers[0]
     center_result = replace(
@@ -199,8 +209,8 @@ def test_consolidation_uses_matching_three_unit_entry_and_departure_legs():
 
     assert item.kind == "consolidation"
     assert item.comparison_width == 3
-    assert item.compare_leg_unit_ids == ("u-1", "u-2", "u-3")
-    assert item.signal_leg_unit_ids == ("u-7", "u-8", "u-9")
+    assert item.compare_leg_unit_ids == ("u-2", "u-3", "u-4")
+    assert item.signal_leg_unit_ids == ("u-8", "u-9", "u-10")
 
 
 def test_completed_trend_emits_trend_divergence_at_recursive_level():

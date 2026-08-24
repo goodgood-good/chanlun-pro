@@ -516,7 +516,7 @@ function strictItemEnabled(cfg, item) {
     ) {
         return config.center_all === true && config[`center_L${level}`] !== false;
     }
-    if (item.render_kind === 'strict_trend') {
+    if (item.render_kind === 'strict_trend' || item.render_kind === 'pending_movement') {
         return config.trend_all !== false && config[`trend_L${level}`] !== false;
     }
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
@@ -529,6 +529,95 @@ function strictItemEnabled(cfg, item) {
             && config[`divergence_${item.kind}_L${level}`] !== false;
     }
     return false;
+}
+
+function strictStringArray(value) {
+    return Array.isArray(value)
+        && value.every((item) => typeof item === 'string' && item.length > 0);
+}
+
+function strictSameIds(left, right) {
+    return left.length === right.length
+        && left.every((item, index) => item === right[index]);
+}
+
+function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
+    if (
+        !item || item.schema !== 'chanlun-chart-center'
+        || item.structural_level !== level
+        || !['segment', 'stroke_observation', 'trend_type'].includes(item.source_kind)
+        || !strictStringArray(item.core_unit_ids)
+        || item.core_unit_ids.length !== 3
+        || new Set(item.core_unit_ids).size !== 3
+        || item.core_component_count !== 3
+        || !strictStringArray(item.initial_unit_ids)
+        || !strictSameIds(item.initial_unit_ids, item.core_unit_ids)
+        || !strictStringArray(item.establishment_segment_ids)
+    ) throw new Error('strict center core contract is invalid');
+
+    if (item.source_kind === 'trend_type') {
+        if (
+            item.establishment_leave_unit_id !== null
+            || item.initial_exit_unit_id !== null
+            || item.minimum_lifecycle_role_count !== 3
+            || item.lifecycle_role_count < 3
+            || item.establishment_component_count !== 3
+            || item.overlap_component_count < 3
+            || !strictSameIds(item.establishment_segment_ids, item.core_unit_ids)
+        ) throw new Error('recursive center contract is invalid');
+        return;
+    }
+
+    const entryId = item.entry_unit_id;
+    const leaveId = item.establishment_leave_unit_id;
+    const partial = allowPartialPhysical === true
+        && item.render_kind === 'center_preview'
+        && item.state === 'forming'
+        && leaveId === null;
+    if (
+        typeof entryId !== 'string' || !entryId
+        || (!partial && (typeof leaveId !== 'string' || !leaveId))
+        || (partial && item.initial_exit_unit_id !== null)
+        || (!partial && item.initial_exit_unit_id !== leaveId)
+        || item.minimum_lifecycle_role_count !== 5
+    ) throw new Error('physical center entry/leave contract is invalid');
+    const expected = [entryId, ...item.core_unit_ids];
+    if (!partial) expected.push(leaveId);
+    if (
+        new Set(expected).size !== expected.length
+        || !strictSameIds(item.establishment_segment_ids, expected)
+        || item.establishment_component_count !== expected.length
+        || item.overlap_component_count < expected.length
+        || item.lifecycle_role_count < expected.length
+    ) throw new Error('physical center five-role overlap contract is invalid');
+}
+
+function validatePendingMovementRenderContract(item, level, formalIds, pendingIds) {
+    if (
+        !item || item.schema !== 'chanlun-chart-pending-movement'
+        || item.render_kind !== 'pending_movement'
+        || item.structural_level !== level
+        || item.state !== 'pending'
+        || item.classification !== 'unresolved'
+        || !['entire_stream', 'prefix', 'bridge', 'suffix'].includes(item.role)
+        || !['up', 'down'].includes(item.direction)
+        || item.geometric_direction !== item.direction
+        || item.semantic_direction !== null
+        || item.direction_status !== 'pending'
+        || item.formal_direction_confirmed !== false
+        || item.tradable !== false
+        || item.recursive_eligible !== false
+        || item.divergence_eligible !== false
+        || !strictStringArray(item.constituent_unit_ids)
+        || item.constituent_unit_ids.length === 0
+        || new Set(item.constituent_unit_ids).size !== item.constituent_unit_ids.length
+    ) throw new Error('pending movement contract is invalid');
+    for (const unitId of item.constituent_unit_ids) {
+        if (formalIds.has(unitId) || pendingIds.has(unitId)) {
+            throw new Error('formal and pending movement ownership overlaps');
+        }
+        pendingIds.add(unitId);
+    }
 }
 
 // resolution 归一为存储 key 后缀:去空白转小写(1D/1d 同一份),空/未知回退哨兵 '_'。
@@ -3200,6 +3289,13 @@ class ChartManager {
                 groups.get(scope).push(item);
             }
         };
+        for (const observation of snapshot.stroke_center_observations) {
+            if (observation?.render_kind !== 'center_observation'
+                || observation?.source_kind !== 'stroke_observation') {
+                throw new Error('strict stroke center observation is invalid');
+            }
+            validateStrictCenterRenderContract(observation, 0, false);
+        }
         add(snapshot.stroke_center_observations);
         for (const level of snapshot.levels) {
             if (
@@ -3220,11 +3316,33 @@ class ChartManager {
             ) throw new Error('strict level formal direction is invalid');
             const requiredCollections = [
                 'centers', 'center_previews', 'center_projections',
-                'current_trends', 'completed_trend_snapshots',
+                'current_trends', 'pending_movements', 'completed_trend_snapshots',
                 'confirmed_points', 'approaching_points', 'divergences',
             ];
             if (requiredCollections.some((field) => !Array.isArray(level[field]))) {
                 throw new Error('strict level collections are invalid');
+            }
+            const expectedSourceKind = level.structural_level === 0 ? 'segment' : 'trend_type';
+            for (const item of level.centers) {
+                if (item?.render_kind !== 'formal_center'
+                    || item?.source_kind !== expectedSourceKind) {
+                    throw new Error('strict formal center source is invalid');
+                }
+                validateStrictCenterRenderContract(item, level.structural_level, false);
+            }
+            for (const item of level.center_previews) {
+                if (item?.render_kind !== 'center_preview'
+                    || item?.source_kind !== expectedSourceKind) {
+                    throw new Error('strict center preview source is invalid');
+                }
+                validateStrictCenterRenderContract(item, level.structural_level, true);
+            }
+            for (const item of level.center_projections) {
+                if (item?.render_kind !== 'center_projection'
+                    || item?.source_kind !== expectedSourceKind) {
+                    throw new Error('strict center projection source is invalid');
+                }
+                validateStrictCenterRenderContract(item, level.structural_level, false);
             }
             for (const trend of level.current_trends.concat(level.completed_trend_snapshots)) {
                 if (
@@ -3238,6 +3356,22 @@ class ChartManager {
                     || trend.formal_direction_confirmed !== (trend.direction_status === 'formal')
                     || !Array.isArray(trend.direction_reason_codes)
                 ) throw new Error('strict trend direction qualification is invalid');
+            }
+            const formalUnitIds = new Set();
+            for (const trend of level.current_trends) {
+                if (!strictStringArray(trend.constituent_unit_ids)) {
+                    throw new Error('strict trend source units are invalid');
+                }
+                for (const unitId of trend.constituent_unit_ids) formalUnitIds.add(unitId);
+            }
+            const pendingUnitIds = new Set();
+            for (const item of level.pending_movements) {
+                validatePendingMovementRenderContract(
+                    item,
+                    level.structural_level,
+                    formalUnitIds,
+                    pendingUnitIds,
+                );
             }
             for (const [field, renderKind, status] of [
                 ['confirmed_points', 'point_confirmed', 'confirmed'],
@@ -3333,6 +3467,7 @@ class ChartManager {
             add(acceptedPreviews);
             if (!hasPreview) add(level.center_projections);
             add(level.current_trends);
+            add(level.pending_movements);
             // completed_trend_snapshots 是只读审计证据，不创建默认图形。
             add(level.confirmed_points, level.label);
             add(level.approaching_points, level.label);
@@ -3394,6 +3529,16 @@ class ChartManager {
                 color: levelColor,
                 linewidth: style.linewidth,
                 overrides: { transparency: style.transparency },
+            });
+        }
+        if (item.render_kind === 'pending_movement') {
+            return ChartUtils.createLineShape(this.chart, {
+                ...item,
+                linestyle: CHART_CONFIG.LINE_STYLES.DOTTED,
+            }, {
+                color: levelColor,
+                linewidth: 1,
+                overrides: { transparency: 82 },
             });
         }
         if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {

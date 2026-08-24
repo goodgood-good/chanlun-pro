@@ -43,12 +43,12 @@ UP_VALUES = (
     ("up", 120, 150),
     ("down", 150, 135),
     ("up", 135, 155),
-    ("down", 155, 138),
-    ("up", 138, 145),
-    ("down", 145, 138),
-    ("up", 138, 170),
-    ("down", 170, 150),
-    ("up", 150, 175),
+    ("down", 155, 151),
+    ("up", 151, 154),
+    ("down", 154, 152),
+    ("up", 152, 170),
+    ("down", 170, 160),
+    ("up", 160, 175),
 )
 
 EXTENDED_UP_VALUES = (
@@ -137,12 +137,12 @@ class StrengthTable:
 def divergent_strength(direction, *, extended=False):
     if direction == "up":
         values = {
-            ("u-8", "u-9", "u-10"): (100, 5, 2),
+            ("u-10", "u-11", "u-12"): (100, 5, 2),
             ("u-16", "u-17", "u-18"): (80, 3, 1),
         }
     else:
         values = {
-            ("u-8", "u-9", "u-10"): (100, -5, -2),
+            ("u-10", "u-11", "u-12"): (100, -5, -2),
             ("u-16", "u-17", "u-18"): (80, -3, -1),
         }
     return StrengthTable(values)
@@ -174,10 +174,10 @@ def consolidation_structure(
 ):
     """Isolate the second scanned center as a later consolidation movement.
 
-    The stream's first center has no external entry leg.  The second center
-    does: u-4/u-5/u-6 enter it, u-7/u-8/u-9 are its three-unit core, and
-    u-10/u-11/u-12 form the completed departure comparison leg.  Selecting
-    that causally later center avoids fabricating an entry before stream start.
+    Both physical centers have all five establishment roles.  For the selected
+    second center, u-6 is the physical entry, u-7/u-8/u-9 are the middle core,
+    and u-10 is the establishment leave.  The completed movement u-4/u-5/u-6
+    and departure movement u-10/u-11/u-12 are the divergence comparison legs.
     """
 
     end = 15 if include_second_class_tail else 13
@@ -480,7 +480,7 @@ def test_trend_comparison_uses_equal_three_unit_entry_and_departure_legs():
         make_units(UP_VALUES, "up"),
         width=entry.width,
     )
-    assert tuple(item.unit_id for item in entry.units) == ("u-8", "u-9", "u-10")
+    assert tuple(item.unit_id for item in entry.units) == ("u-10", "u-11", "u-12")
     assert departure is not None
     assert tuple(item.unit_id for item in departure.units) == (
         "u-16",

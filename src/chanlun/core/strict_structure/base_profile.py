@@ -23,11 +23,15 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     # 线段采用特征序列，并明确处理缺口。
     "segment_rule": "feature-sequence",
     "segment_gap_rule": "second-feature-sequence-fractal",
-    # 每一级别都由三个连续、已完成且具有有效重叠的同级单元建立中枢。
-    # 可选进入腿仅供背驰比较；之后的离开与首次回返属于三类点生命周期。
-    "center_seed_rule": "three-completed-same-level-units-overlap",
+    # 物理层中枢固定为进入段 + 中间三段核心 + 独立离开段，五段均须与
+    # 中间三段冻结出的价格核心形成正宽度重叠。递归层仍由三个已完成的
+    # 低级别走势类型构造，不把物理线段直接冒充高一级走势。
+    "center_seed_rule": (
+        "physical-entry-middle-three-core-independent-leave-five-overlap;"
+        "recursive-three-completed-trend-types"
+    ),
     "center_lifecycle_rule": "external-departure-first-outside-return-third-class",
-    "center_scan_rule": "three-unit-seed-causal-lifecycle-owner",
+    "center_scan_rule": "five-role-physical-seed-causal-lifecycle-owner",
     # 背驰的进入段与离开段必须同宽。若进入段是同级别连续的“进入—反向—
     # 再进入”三段，则离开段也比较三段；进入三段的第一段必须与中枢闭区间
     # 完全不重叠。面积、柱峰值和 DIF 极值任一衰减即可确认力度衰减。

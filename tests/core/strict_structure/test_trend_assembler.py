@@ -7,6 +7,7 @@ from chanlun.core.strict_structure.center_machine import (
 )
 from chanlun.core.strict_structure.identity import build_trend_id
 from chanlun.core.strict_structure.models import (
+    CenterEvidence,
     CenterState,
     SourceKind,
     TrendKind,
@@ -21,36 +22,41 @@ from chanlun.core.strict_structure.strength import (
     center_entry_comparison_leg,
 )
 from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
-from tests.core.strict_structure.helpers import ongoing_center, unit
+from tests.core.strict_structure.helpers import (
+    ongoing_center,
+    unit,
+    valid_five_up_exit,
+)
 
 
 def three_center_fixture():
-    """Three explicit 3-core/leave/return lifecycles.
+    """Three explicit physical entry/ABC/leave/return lifecycles.
 
     The first two centers are separated upward; the third overlaps the second
     and therefore locks the preceding up-trend at an upgrade boundary.  Each
-    center owns exactly three core units, followed by a departure and its
-    first outside return.  Consecutive centers share only that return as the
-    next core's first unit.
+    center owns an external entry, exactly three middle core units, an
+    establishment leave, and its first outside return.  Consecutive centers
+    share the preceding leave as entry and the return as the first core unit.
     """
 
     values = (
-        # Center 1: core u-0..u-2, leave u-3, return u-4.
-        unit(0, "down", 120, 90),
-        unit(1, "up", 90, 110),
-        unit(2, "down", 110, 100),
-        unit(3, "up", 100, 140),
-        # Center 2: core u-4..u-6, leave u-7, return u-8.
-        unit(4, "down", 140, 125),
-        unit(5, "up", 125, 135),
-        unit(6, "down", 135, 130),
-        unit(7, "up", 130, 160),
-        # Center 3: core u-8..u-10, leave u-11, return u-12.
-        unit(8, "down", 160, 135),
-        unit(9, "up", 135, 170),
-        unit(10, "down", 170, 140),
-        unit(11, "up", 140, 180),
-        unit(12, "down", 180, 165),
+        # Center 1: entry u-0, core u-1..u-3, leave u-4, return u-5.
+        unit(0, "up", 90, 120),
+        unit(1, "down", 120, 90),
+        unit(2, "up", 90, 110),
+        unit(3, "down", 110, 100),
+        unit(4, "up", 100, 140),
+        # Center 2: entry u-4, core u-5..u-7, leave u-8, return u-9.
+        unit(5, "down", 140, 125),
+        unit(6, "up", 125, 135),
+        unit(7, "down", 135, 130),
+        unit(8, "up", 130, 160),
+        # Center 3: entry u-8, core u-9..u-11, leave u-12, return u-13.
+        unit(9, "down", 160, 135),
+        unit(10, "up", 135, 170),
+        unit(11, "down", 170, 140),
+        unit(12, "up", 140, 180),
+        unit(13, "down", 180, 165),
     )
     centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
     assert len(centers) == 3
@@ -105,25 +111,25 @@ def test_locked_trend_requires_structurally_closed_center():
 
 def test_single_completed_center_owns_body_and_excludes_completion_return():
     values, first, _second, _third = three_center_fixture()
-    result = assemble_trend_types((first,), values[:5], 0)
+    result = assemble_trend_types((first,), values[:6], 0)
     trend = result.current_trends[0]
     assert trend.state is TrendState.COMPLETE
     assert trend.kind is TrendKind.CONSOLIDATION
-    assert trend.constituent_units == values[:4]
-    assert first.body_units == values[:3]
+    assert trend.constituent_units == values[:5]
+    assert first.body_units == values[1:4]
     assert trend.terminal_unit is first.completion_leave_unit
     assert first.completion_return_unit not in trend.constituent_units
 
 
 def test_two_separated_centers_form_complete_uptrend_with_internal_return():
     values, first, second, _third = three_center_fixture()
-    result = assemble_trend_types((first, second), values[:9], 0)
+    result = assemble_trend_types((first, second), values[:10], 0)
     trend = result.current_trends[0]
     assert trend.state is TrendState.COMPLETE
     assert trend.kind is TrendKind.TREND
     assert trend.direction == "up"
     assert trend.centers == (first, second)
-    assert trend.constituent_units == values[:8]
+    assert trend.constituent_units == values[:9]
     assert first.completion_return_unit in trend.constituent_units
     assert second.completion_return_unit not in trend.constituent_units
     assert trend.terminal_unit is second.completion_leave_unit
@@ -136,24 +142,24 @@ def test_upgrade_boundary_locks_previous_trend_and_starts_at_completion_return()
     locked, tail = result.current_trends
     assert locked.state is TrendState.LOCKED
     assert locked.centers == (first, second)
-    assert locked.constituent_units == values[:8]
+    assert locked.constituent_units == values[:9]
     assert locked.terminal_unit is second.completion_leave_unit
     assert tail.state is TrendState.COMPLETE
     assert tail.centers == (third,)
-    assert tail.constituent_units == values[8:12]
+    assert tail.constituent_units == values[9:13]
     assert tail.constituent_units[0] is second.completion_return_unit
     assert third.completion_return_unit not in tail.constituent_units
 
 
 def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
     values, first, second, _third = three_center_fixture()
-    ongoing_centers = calculate_centers(values[:12], 0, SourceKind.SEGMENT).centers
+    ongoing_centers = calculate_centers(values[:13], 0, SourceKind.SEGMENT).centers
     assert len(ongoing_centers) == 3
     ongoing_third = ongoing_centers[-1]
 
     result = assemble_trend_types(
         (first, second, ongoing_third),
-        values[:12],
+        values[:13],
         0,
     )
 
@@ -167,7 +173,7 @@ def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
 
 def test_non_center_bridge_units_are_preserved_exactly_once():
     values, first, second, _third = three_center_fixture()
-    trend = assemble_trend_types((first, second), values[:9], 0).current_trends[0]
+    trend = assemble_trend_types((first, second), values[:10], 0).current_trends[0]
     shared_return = first.completion_return_unit
     assert shared_return is not None
     assert shared_return in trend.constituent_units
@@ -178,7 +184,7 @@ def test_non_center_bridge_units_are_preserved_exactly_once():
 
 def test_trend_assembler_keeps_return_and_bridge_exactly_once_between_centers():
     values, first, second, _third = three_center_fixture()
-    values = values[:9]
+    values = values[:10]
     centers = (first, second)
 
     result = assemble_trend_types(centers, values, 0)
@@ -237,18 +243,40 @@ def test_ongoing_center_produces_forming_trend_without_confirmation():
     assert result.completed_trends == ()
 
 
+def test_failed_establishment_leave_remains_in_trend_and_center_evidence():
+    establishment = valid_five_up_exit()
+    values = (
+        *establishment,
+        unit(5, "down", establishment[4].end_tick, 110),
+    )
+    center_result = calculate_centers(values, 0, SourceKind.SEGMENT)
+    center = center_result.centers[0]
+    assembly = assemble_trend_types(center_result.centers, values, 0)
+    trend = assembly.current_trends[0]
+    evidence = CenterEvidence.from_center(center)
+    failed_id = establishment[4].unit_id
+
+    assert trend.constituent_units == values
+    assert tuple(item.unit_id for item in trend.constituent_units).count(
+        failed_id
+    ) == 1
+    assert evidence.failed_departure_unit_ids == (failed_id,)
+    assert assembly.completed_trends == ()
+    assert assembly.pending_movements == ()
+
+
 def test_center_reference_validation_rejects_missing_or_changed_evidence():
     values, first, _second, _third = three_center_fixture()
     with pytest.raises(ValueError, match="completion return"):
-        assemble_trend_types((first,), values[:4], 0)
-    changed = values[:3] + (replace(values[3], unit_id="changed"),) + values[4:5]
+        assemble_trend_types((first,), values[:5], 0)
+    changed = values[:4] + (replace(values[4], unit_id="changed"),) + values[5:6]
     with pytest.raises(ValueError, match="completion leave"):
         assemble_trend_types((first,), changed, 0)
 
 
 def test_forming_and_complete_trends_cannot_become_recursive_units():
     values, first, _second, _third = three_center_fixture()
-    complete = assemble_trend_types((first,), values[:5], 0).current_trends[0]
+    complete = assemble_trend_types((first,), values[:6], 0).current_trends[0]
     forming = _trend_for(ongoing_center(), state=TrendState.FORMING)
     for trend in (complete, forming):
         with pytest.raises(ValueError, match="only locked trend types can recurse"):
@@ -272,7 +300,7 @@ def test_locked_trend_becomes_next_level_unit_with_owned_children():
 
 def test_trend_identity_cannot_be_detached_from_its_evidence():
     values, first, _second, _third = three_center_fixture()
-    trend = assemble_trend_types((first,), values[:5], 0).current_trends[0]
+    trend = assemble_trend_types((first,), values[:6], 0).current_trends[0]
     with pytest.raises(ValueError, match="immutable trend evidence"):
         replace(trend, trend_id="forged-trend-id")
 
@@ -281,8 +309,8 @@ class BoundaryStrength:
     def snapshot(self, value):
         key = tuple(value.child_ids) if len(value.child_ids) == 3 else value.unit_id
         area, peak, dif = {
-            ("u-1", "u-2", "u-3"): (100, 5, 2),
-            ("u-7", "u-8", "u-9"): (50, 6, 3),
+            ("u-2", "u-3", "u-4"): (100, 5, 2),
+            ("u-8", "u-9", "u-10"): (50, 6, 3),
         }[key]
         return StrengthSnapshot(
             unit_id=value.unit_id,
@@ -313,19 +341,19 @@ def test_three_unit_entry_waits_for_matching_three_unit_departure_boundary():
     assert locked.centers[-1].center_id == second.center_id
     assert locked.centers[-1].state is CenterState.DIVERGENCE_CLOSED
     assert locked.centers[-1].pending_leave_unit is None
-    assert locked.centers[-1].completion_leave_unit is values[7]
-    assert locked.centers[-1].completion_return_unit is values[8]
-    assert locked.terminal_unit is values[9]
+    assert locked.centers[-1].completion_leave_unit is values[8]
+    assert locked.centers[-1].completion_return_unit is values[9]
+    assert locked.terminal_unit is values[10]
     assert locked.terminal_divergence is boundary.divergence
-    assert boundary.anchor_at == values[9].market_end
-    assert boundary.anchor_unit_id == values[9].unit_id
-    assert boundary.divergence.compare_unit_id == values[3].unit_id
+    assert boundary.anchor_at == values[10].market_end
+    assert boundary.anchor_unit_id == values[10].unit_id
+    assert boundary.divergence.compare_unit_id == values[4].unit_id
     assert boundary.divergence.signal_unit_id == boundary.anchor_unit_id
     assert boundary.divergence.compare_leg_unit_ids == tuple(
-        item.unit_id for item in values[1:4]
+        item.unit_id for item in values[2:5]
     )
     assert boundary.divergence.signal_leg_unit_ids == tuple(
-        item.unit_id for item in values[7:10]
+        item.unit_id for item in values[8:11]
     )
     assert boundary.divergence.comparison_width == 3
     assert boundary.divergence.histogram_area_decayed is True
@@ -346,17 +374,17 @@ def test_three_unit_entry_selects_matching_complete_departure_leg():
     assert entry is not None
     leg = center_departure_comparison_leg(second, values, width=entry.width)
 
-    assert tuple(item.unit_id for item in entry.units) == ("u-1", "u-2", "u-3")
+    assert tuple(item.unit_id for item in entry.units) == ("u-2", "u-3", "u-4")
     assert leg is not None
-    assert tuple(item.unit_id for item in leg.units) == ("u-7", "u-8", "u-9")
-    assert leg.terminal_unit is values[9]
+    assert tuple(item.unit_id for item in leg.units) == ("u-8", "u-9", "u-10")
+    assert leg.terminal_unit is values[10]
 
-    prefix_centers = calculate_centers(values[:8], 0, SourceKind.SEGMENT).centers
+    prefix_centers = calculate_centers(values[:9], 0, SourceKind.SEGMENT).centers
     assert prefix_centers[-1].state is CenterState.ONGOING
-    assert prefix_centers[-1].pending_leave_unit is values[7]
+    assert prefix_centers[-1].pending_leave_unit is values[8]
     assert (
         center_departure_comparison_leg(
-            prefix_centers[-1], values[:8], width=entry.width
+            prefix_centers[-1], values[:9], width=entry.width
         )
         is None
     )
@@ -397,18 +425,18 @@ def test_entry_first_leg_touching_center_falls_back_to_one_unit_comparison():
 
 def test_three_unit_divergence_boundary_appears_only_when_terminal_locks():
     values, _first, _second, _third = three_center_fixture()
-    before_centers = calculate_centers(values[:9], 0, SourceKind.SEGMENT).centers
-    signal_centers = calculate_centers(values[:10], 0, SourceKind.SEGMENT).centers
+    before_centers = calculate_centers(values[:10], 0, SourceKind.SEGMENT).centers
+    signal_centers = calculate_centers(values[:11], 0, SourceKind.SEGMENT).centers
 
     before = assemble_trend_types(
         before_centers,
-        values[:9],
+        values[:10],
         0,
         strength=BoundaryStrength(),
     )
     at_signal = assemble_trend_types(
         signal_centers,
-        values[:10],
+        values[:11],
         0,
         strength=BoundaryStrength(),
     )
@@ -418,22 +446,22 @@ def test_three_unit_divergence_boundary_appears_only_when_terminal_locks():
     assert len(at_signal.decomposition_boundaries) == 1
     boundary = at_signal.decomposition_boundaries[0]
     locked = at_signal.current_trends[-1]
-    assert boundary.anchor_unit_id == "u-9"
+    assert boundary.anchor_unit_id == "u-10"
     assert locked.state is TrendState.LOCKED
     assert locked.centers[-1].state is CenterState.DIVERGENCE_CLOSED
-    assert locked.centers[-1].completion_leave_unit is values[7]
-    assert locked.centers[-1].completion_return_unit is values[8]
+    assert locked.centers[-1].completion_leave_unit is values[8]
+    assert locked.centers[-1].completion_return_unit is values[9]
     assert boundary.terminal_center_id == locked.centers[-1].center_id
 
 
 def test_superseded_prior_center_does_not_confirm_divergence_boundary() -> None:
     values, _first, _second, _third = three_center_fixture()
     first, terminal = calculate_centers(
-        values[:10],
+        values[:11],
         0,
         SourceKind.SEGMENT,
     ).centers
-    bridge = values[3]
+    bridge = values[4]
     superseded = replace(
         first,
         state=CenterState.SUPERSEDED,
@@ -452,7 +480,7 @@ def test_superseded_prior_center_does_not_confirm_divergence_boundary() -> None:
 
     result = assemble_trend_types(
         (superseded, terminal),
-        values[:10],
+        values[:11],
         0,
         strength=BoundaryStrength(),
     )
@@ -467,12 +495,12 @@ def test_superseded_prior_center_does_not_confirm_divergence_boundary() -> None:
 def test_unlocked_terminal_divergence_leg_remains_a_forming_trend() -> None:
     values, _first, _second, _third = three_center_fixture()
     unlocked_values = (
-        *values[:9],
+        *values[:10],
         replace(
-            values[9],
+            values[10],
             locked=False,
             confirmed_at=None,
-            formed_at=values[9].available_at,
+            formed_at=values[10].available_at,
         ),
     )
     centers = calculate_centers(
@@ -496,8 +524,8 @@ class PeakDifOnlyDecayStrength:
     def snapshot(self, value):
         key = tuple(value.child_ids) if len(value.child_ids) == 3 else value.unit_id
         area, peak, dif = {
-            ("u-1", "u-2", "u-3"): (100, 5, 2),
-            ("u-7", "u-8", "u-9"): (110, 3, 1),
+            ("u-2", "u-3", "u-4"): (100, 5, 2),
+            ("u-8", "u-9", "u-10"): (110, 3, 1),
         }[key]
         return StrengthSnapshot(
             unit_id=value.unit_id,
@@ -512,11 +540,11 @@ class PeakDifOnlyDecayStrength:
 
 def test_peak_or_dif_decay_can_confirm_without_histogram_area_decay():
     values, _first, _second, _third = three_center_fixture()
-    centers = calculate_centers(values[:10], 0, SourceKind.SEGMENT).centers
+    centers = calculate_centers(values[:11], 0, SourceKind.SEGMENT).centers
 
     result = assemble_trend_types(
         centers,
-        values[:10],
+        values[:11],
         0,
         strength=PeakDifOnlyDecayStrength(),
     )
@@ -566,7 +594,7 @@ def test_boundary_replay_keeps_centers_and_locked_trends_on_one_side():
     assert latest is not None
     level = latest.levels[0]
     assert tuple(item.anchor_unit_id for item in level.decomposition_boundaries) == (
-        "u-9",
+        "u-10",
     )
     locked = tuple(trend for trend in level.trend_types if trend.locked)
     assert all(
@@ -619,7 +647,7 @@ def test_raw_departure_without_whole_trend_new_extreme_is_not_trend_boundary():
         (item.direction, item.start_tick, item.end_tick)
         for item in three_center_fixture()[0]
     )
-    prefix = replace(unit(0, "up", 80, 120), high_tick=200)
+    prefix = unit(0, "down", 200, 90)
     tail = tuple(
         unit(index + 1, direction, start, end)
         for index, (direction, start, end) in enumerate(specs)

@@ -75,6 +75,14 @@ function center(revision = 1, overrides = {}) {
       { time: BASE + 500, price: 10 },
     ],
     entry_unit_id: 'u1',
+    establishment_leave_unit_id: 'u5',
+    initial_exit_unit_id: 'u5',
+    lifecycle_role_count: 5,
+    minimum_lifecycle_role_count: 5,
+    core_component_count: 3,
+    overlap_component_count: 5,
+    establishment_component_count: 5,
+    establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
     core_unit_ids: ['u2', 'u3', 'u4'],
     initial_unit_ids: ['u2', 'u3', 'u4'],
     body_unit_ids: ['u2', 'u3', 'u4'],
@@ -106,6 +114,14 @@ function centerPreview(overrides = {}) {
     ],
     core: { zd_tick: 1000, zg_tick: 1100, zd_price: 10, zg_price: 11 },
     entry_unit_id: 'u1',
+    establishment_leave_unit_id: 'u5',
+    initial_exit_unit_id: 'u5',
+    lifecycle_role_count: 5,
+    minimum_lifecycle_role_count: 5,
+    core_component_count: 3,
+    overlap_component_count: 5,
+    establishment_component_count: 5,
+    establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
     core_unit_ids: ['u2', 'u3', 'u4'],
     initial_unit_ids: ['u2', 'u3', 'u4'],
     body_unit_ids: ['u2', 'u3', 'u4'],
@@ -136,6 +152,19 @@ function centerProjection(overrides = {}) {
       { time: BASE + 600, price: 10 },
     ],
     source_center_render_id: 'center-1@1@ongoing',
+    entry_unit_id: 'u1',
+    establishment_leave_unit_id: 'u5',
+    initial_exit_unit_id: 'u5',
+    lifecycle_role_count: 5,
+    minimum_lifecycle_role_count: 5,
+    core_component_count: 3,
+    overlap_component_count: 5,
+    establishment_component_count: 5,
+    establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
+    core_unit_ids: ['u2', 'u3', 'u4'],
+    initial_unit_ids: ['u2', 'u3', 'u4'],
+    body_unit_ids: ['u2', 'u3', 'u4'],
+    extension_unit_ids: [],
     available_at: BASE + 500,
     ...overrides,
   };
@@ -173,6 +202,41 @@ function divergence(kind = 'trend', overrides = {}) {
   };
 }
 
+function pendingMovement(overrides = {}) {
+  return {
+    schema: 'chanlun-chart-pending-movement',
+    render_kind: 'pending_movement',
+    partition_id: 'sha256:pending-entire-stream',
+    render_id: 'sha256:pending-entire-stream',
+    structural_level: 0,
+    source_kind: 'segment',
+    price_basis_revision: 'raw-test',
+    state: 'pending',
+    classification: 'unresolved',
+    role: 'entire_stream',
+    direction: 'up',
+    geometric_direction: 'up',
+    semantic_direction: null,
+    direction_status: 'pending',
+    formal_direction_confirmed: false,
+    tradable: false,
+    recursive_eligible: false,
+    divergence_eligible: false,
+    left_trend_id: null,
+    right_trend_id: null,
+    left_boundary_unit_id: null,
+    right_boundary_unit_id: null,
+    points: [
+      { time: BASE + 100, price: 10 },
+      { time: BASE + 500, price: 10.8 },
+    ],
+    constituent_unit_ids: ['u6', 'u7'],
+    confirmed_at: null,
+    available_at: BASE + 500,
+    ...overrides,
+  };
+}
+
 function snapshot(overrides = {}) {
   const value = {
     schema: 'chanlun-chart-structure',
@@ -202,6 +266,7 @@ function snapshot(overrides = {}) {
       center_previews: [],
       center_projections: [],
       current_trends: [],
+      pending_movements: [],
       completed_trend_snapshots: [],
       confirmed_points: [],
       approaching_points: [],
@@ -707,6 +772,7 @@ test('daily strict center renders on calendar coordinates without retry deletion
       center_previews: [],
       center_projections: [],
       current_trends: [],
+      pending_movements: [],
       completed_trend_snapshots: [],
       confirmed_points: [],
       approaching_points: [],
@@ -956,7 +1022,6 @@ test('boundary-sharing forming preview is hidden without active completion evide
       { time: BASE + 100, price: 10.2 },
       { time: BASE + 500, price: 9.8 },
     ],
-    initial_unit_ids: ['u1', 'u2', 'u3'],
     body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8'],
     extension_unit_ids: ['u4', 'u5', 'u6', 'u7', 'u8'],
   });
@@ -966,6 +1031,10 @@ test('boundary-sharing forming preview is hidden without active completion evide
       { time: BASE + 700, price: 10.8 },
     ],
     entry_unit_id: 'u8',
+    establishment_leave_unit_id: 'u12',
+    initial_exit_unit_id: 'u12',
+    establishment_segment_ids: ['u8', 'u9', 'u10', 'u11', 'u12'],
+    pending_leave_unit_id: 'u12',
     core_unit_ids: ['u9', 'u10', 'u11'],
     initial_unit_ids: ['u9', 'u10', 'u11'],
     body_unit_ids: ['u9', 'u10', 'u11'],
@@ -1000,6 +1069,10 @@ test('completed active preview permits one adjacent boundary-sharing preview', (
       { time: BASE + 800, price: 10.8 },
     ],
     entry_unit_id: 'u5',
+    establishment_leave_unit_id: 'u9',
+    initial_exit_unit_id: 'u9',
+    establishment_segment_ids: ['u5', 'u6', 'u7', 'u8', 'u9'],
+    pending_leave_unit_id: 'u9',
     core_unit_ids: ['u6', 'u7', 'u8'],
     initial_unit_ids: ['u6', 'u7', 'u8'],
     body_unit_ids: ['u6', 'u7', 'u8'],
@@ -1023,6 +1096,10 @@ test('disjoint forming preview is hidden while formal center remains unresolved'
   const { cm } = manager('chart-manager-disjoint-preview');
   const preview = centerPreview({
     entry_unit_id: 'u6',
+    establishment_leave_unit_id: 'u10',
+    initial_exit_unit_id: 'u10',
+    establishment_segment_ids: ['u6', 'u7', 'u8', 'u9', 'u10'],
+    pending_leave_unit_id: 'u10',
     core_unit_ids: ['u7', 'u8', 'u9'],
     initial_unit_ids: ['u7', 'u8', 'u9'],
     body_unit_ids: ['u7', 'u8', 'u9'],
@@ -1077,7 +1154,7 @@ test('orphan sweep does not inspect TradingView-owned shapes outside debug mode'
   assert.equal(detailReads, 0);
 });
 
-test('locking the three-unit core replaces its preview with a formal ongoing center', () => {
+test('locking the five-role center replaces its preview with a formal ongoing center', () => {
   const { cm, calls } = manager('chart-manager-preview-confirmed');
   const previewSnapshot = snapshot({
     render_revision: 'sha256:render-preview',
@@ -1103,6 +1180,24 @@ test('locking the three-unit core replaces its preview with a formal ongoing cen
   assert.equal(calls.create.length, 2);
   assert.deepEqual(calls.remove, [previewShapeId]);
   assert.equal(calls.create[1].options.overrides.linestyle, 2);
+});
+
+test('unresolved movement renders as a faint dotted non-tradable trend partition', () => {
+  const { cm, calls } = manager('chart-manager-pending-movement');
+  const strict = snapshot({
+    levels: [{
+      ...snapshot().levels[0],
+      centers: [],
+      pending_movements: [pendingMovement()],
+    }],
+  });
+
+  cm._drawStrictStructure(chartData('replace', strict), '5');
+
+  assert.equal(calls.create.length, 1);
+  assert.equal(calls.create[0].options.shape, 'trend_line');
+  assert.equal(calls.create[0].options.overrides.linestyle, 1);
+  assert.equal(calls.create[0].options.overrides.transparency, 82);
 });
 
 test('stroke observation is dashed only while ongoing and solid when completed', () => {

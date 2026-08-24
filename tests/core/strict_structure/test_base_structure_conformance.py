@@ -157,13 +157,14 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert config["strict_macd_area"] == "same_sign_magnitude"
     assert config["strict_macd_decay_rule"] == "area-or-peak-or-dif"
     assert config["center_seed_rule"] == (
-        "three-completed-same-level-units-overlap"
+        "physical-entry-middle-three-core-independent-leave-five-overlap;"
+        "recursive-three-completed-trend-types"
     )
     assert config["center_lifecycle_rule"] == (
         "external-departure-first-outside-return-third-class"
     )
     assert config["center_scan_rule"] == (
-        "three-unit-seed-causal-lifecycle-owner"
+        "five-role-physical-seed-causal-lifecycle-owner"
     )
     assert config["trend_divergence_rule"] == (
         "entry-width-matched-one-or-three-price-extreme-any-macd-decay"

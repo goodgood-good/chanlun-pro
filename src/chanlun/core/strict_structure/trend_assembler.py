@@ -15,6 +15,8 @@ from chanlun.core.strict_structure.models import (
     CenterRelation,
     CenterState,
     DecompositionBoundaryEvidence,
+    PendingMovementPartition,
+    PendingMovementRole,
     TrendAssemblyResult,
     TrendKind,
     TrendState,
@@ -164,8 +166,22 @@ def _constituent_units(group, units, index, group_start, *, end_index=None):
     if tail is None and terminal.supersession_bridge_units:
         tail = terminal.supersession_bridge_units[-1]
     if tail is None:
+        # A physical center's independent establishment leave is part of the
+        # immutable evidence that makes the formal center (and therefore its
+        # containing TrendType) exist.  Formal ownership must include it even
+        # while the center is still ongoing; only later, unconfirmed tail
+        # units remain available to a pending movement partition.
+        establishment_leave = terminal.establishment_leave_unit
         tail = max(
-            (*terminal.body_units, *terminal.failed_departure_units),
+            (
+                *terminal.body_units,
+                *terminal.failed_departure_units,
+                *(
+                    ()
+                    if establishment_leave is None
+                    else (establishment_leave,)
+                ),
+            ),
             key=lambda item: (item.market_start, item.market_end, item.unit_id),
         )
     end = index[tail.unit_id] if end_index is None else end_index
@@ -225,6 +241,148 @@ def _direction(constituent_units):
     if end != start:
         return "up" if end > start else "down"
     return constituent_units[-1].direction
+
+
+def partition_pending_movements(
+    current_trends,
+    units,
+    structural_level: int,
+) -> tuple[PendingMovementPartition, ...]:
+    """把未被当前正式走势拥有的单元切成连续、独占的待定分区。
+
+    正式走势始终优先拥有其 ``constituent_units``。待定分区只取得剩余单元；
+    相邻正式走势通过 trend/unit 引用表达边界，不复用边界单元。
+    """
+
+    trends = tuple(current_trends)
+    values = tuple(units)
+    if type(structural_level) is not int or structural_level < 0:
+        raise ValueError("pending movement structural_level must be non-negative")
+    if not values:
+        if trends:
+            raise ValueError("formal trends require source units")
+        return ()
+    if len({item.unit_id for item in values}) != len(values):
+        raise ValueError("pending movement source unit ids must be unique")
+    source_kind = values[0].source_kind
+    price_basis_revision = values[0].price_basis_revision
+    if any(
+        item.structural_level != structural_level
+        or item.source_kind is not source_kind
+        or item.price_basis_revision != price_basis_revision
+        for item in values
+    ):
+        raise ValueError("pending movement source unit context mismatch")
+    for previous, current in zip(values, values[1:]):
+        if previous.end_tick != current.start_tick:
+            raise ValueError("pending movement source units must connect")
+        if current.market_start < previous.market_end:
+            raise ValueError("pending movement source intervals must not overlap")
+
+    positions = {item.unit_id: offset for offset, item in enumerate(values)}
+    owners: list[str | None] = [None] * len(values)
+    trend_by_id = {}
+    for trend in trends:
+        previous = trend_by_id.setdefault(trend.trend_id, trend)
+        if previous != trend:
+            raise ValueError("current trend id maps to conflicting evidence")
+        if (
+            trend.structural_level != structural_level
+            or trend.price_basis_revision != price_basis_revision
+            or trend.constituent_units[0].source_kind is not source_kind
+        ):
+            raise ValueError("pending movement formal trend context mismatch")
+        try:
+            offsets = tuple(positions[item.unit_id] for item in trend.constituent_units)
+        except KeyError as exc:
+            raise ValueError("formal trend unit is absent from source stream") from exc
+        if offsets != tuple(range(offsets[0], offsets[0] + len(offsets))):
+            raise ValueError("formal trend must own one contiguous source slice")
+        if tuple(values[offset] for offset in offsets) != trend.constituent_units:
+            raise ValueError("formal trend source evidence changed")
+        for offset in offsets:
+            if owners[offset] is not None:
+                raise ValueError("current formal trends cannot share source units")
+            owners[offset] = trend.trend_id
+
+    output = []
+    start = 0
+    while start < len(values):
+        if owners[start] is not None:
+            start += 1
+            continue
+        end = start + 1
+        while end < len(values) and owners[end] is None:
+            end += 1
+        constituent_units = values[start:end]
+        left_trend_id = owners[start - 1] if start > 0 else None
+        right_trend_id = owners[end] if end < len(values) else None
+        left_boundary_unit_id = (
+            values[start - 1].unit_id if left_trend_id is not None else None
+        )
+        right_boundary_unit_id = (
+            values[end].unit_id if right_trend_id is not None else None
+        )
+        role = (
+            PendingMovementRole.ENTIRE_STREAM
+            if left_trend_id is None and right_trend_id is None
+            else PendingMovementRole.PREFIX
+            if left_trend_id is None
+            else PendingMovementRole.SUFFIX
+            if right_trend_id is None
+            else PendingMovementRole.BRIDGE
+        )
+        adjacent_trends = tuple(
+            trend_by_id[item]
+            for item in (left_trend_id, right_trend_id)
+            if item is not None
+        )
+        availability = tuple(
+            item.available_at for item in constituent_units
+        ) + tuple(trend.available_at for trend in adjacent_trends)
+        available_at = max(availability)
+        direction = _direction(constituent_units)
+        output.append(
+            PendingMovementPartition(
+                partition_id=(
+                    "sha256:"
+                    + stable_structure_id(
+                        "chanlun-pending-movement",
+                        price_basis_revision,
+                        structural_level,
+                        source_kind.value,
+                        role.value,
+                        tuple(item.unit_id for item in constituent_units),
+                        left_trend_id,
+                        right_trend_id,
+                        left_boundary_unit_id,
+                        right_boundary_unit_id,
+                    )
+                ),
+                structural_level=structural_level,
+                source_kind=source_kind,
+                price_basis_revision=price_basis_revision,
+                role=role,
+                direction=direction,
+                constituent_units=constituent_units,
+                left_trend_id=left_trend_id,
+                right_trend_id=right_trend_id,
+                left_boundary_unit_id=left_boundary_unit_id,
+                right_boundary_unit_id=right_boundary_unit_id,
+                available_at=available_at,
+            )
+        )
+        start = end
+
+    formal_ids = {
+        item.unit_id for trend in trends for item in trend.constituent_units
+    }
+    pending_ids = {
+        item.unit_id for partition in output for item in partition.constituent_units
+    }
+    if formal_ids & pending_ids or formal_ids | pending_ids != set(positions):
+        raise ValueError("formal and pending movement ownership must cover units once")
+    return tuple(output)
 
 
 def _completion_times(group, constituent_units):
@@ -456,7 +614,15 @@ def assemble_trend_types(
     values = tuple(centers)
     source_units = tuple(units)
     if not values:
-        return TrendAssemblyResult(current_trends=(), completed_trends=())
+        return TrendAssemblyResult(
+            current_trends=(),
+            completed_trends=(),
+            pending_movements=partition_pending_movements(
+                (),
+                source_units,
+                structural_level,
+            ),
+        )
     index = _validate_center_references(
         values, source_units, structural_level, oscillatory_ids
     )
@@ -609,8 +775,8 @@ def assemble_trend_types(
                     complete_available_at,
                 )
             )
-            # 前一中枢的完成回返是下一个三段中枢最早的来源单元；这样既保持递归
-            # 走势单元相邻，也不会重复使用上一离开段。
+            # 前一中枢的完成回返是下一来源特定成立窗口最早可拥有的单元；这样既
+            # 保持同级走势单元相邻，也不会重复使用上一离开段。
             group_start = _next_group_start(group[-1], current, index)
             group = [current]
             group_relation = None
@@ -700,8 +866,9 @@ def assemble_trend_types(
             )
         )
         record_complete(group, group_start)
+    current_trends = tuple(output)
     return TrendAssemblyResult(
-        current_trends=tuple(output),
+        current_trends=current_trends,
         completed_trends=tuple(
             sorted(
                 completed.values(),
@@ -713,5 +880,10 @@ def assemble_trend_types(
                 boundaries.values(),
                 key=lambda item: (item.available_at, item.boundary_id),
             )
+        ),
+        pending_movements=partition_pending_movements(
+            current_trends,
+            source_units,
+            structural_level,
         ),
     )

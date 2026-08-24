@@ -47,7 +47,7 @@ INVALID_THEN_LATER_VALUES = WEAK_VALUES + (
 def strengths(direction, *, weak=False, invalid=False):
     if direction == "up":
         values = {
-            ("u-8", "u-9", "u-10"): (120, 6, 3),
+            ("u-10", "u-11", "u-12"): (120, 6, 3),
             ("u-16", "u-17", "u-18"): (100, 5, 2),
         }
         if weak:
@@ -56,7 +56,7 @@ def strengths(direction, *, weak=False, invalid=False):
             values.update({"u-18": (120, 6, 3), "u-20": (130, 7, 4)})
     else:
         values = {
-            ("u-8", "u-9", "u-10"): (120, -6, -3),
+            ("u-10", "u-11", "u-12"): (120, -6, -3),
             ("u-16", "u-17", "u-18"): (100, -5, -2),
         }
         if weak:

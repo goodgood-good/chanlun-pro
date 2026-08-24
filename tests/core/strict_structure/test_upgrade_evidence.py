@@ -29,9 +29,17 @@ def nine_touch_center(*, structural_level: int = 0):
         if structural_level == 0
         else SourceKind.TREND_TYPE
     )
+    entry = unit(
+        0,
+        "up",
+        80,
+        120,
+        structural_level=structural_level,
+        source_kind=source_kind,
+    )
     core = (
         unit(
-            0,
+            1,
             "down",
             120,
             100,
@@ -39,7 +47,7 @@ def nine_touch_center(*, structural_level: int = 0):
             source_kind=source_kind,
         ),
         unit(
-            1,
+            2,
             "up",
             100,
             115,
@@ -47,7 +55,7 @@ def nine_touch_center(*, structural_level: int = 0):
             source_kind=source_kind,
         ),
         unit(
-            2,
+            3,
             "down",
             115,
             105,
@@ -55,42 +63,53 @@ def nine_touch_center(*, structural_level: int = 0):
             source_kind=source_kind,
         ),
     )
-    center = establish_center(core, structural_level, source_kind)
-    assert center is not None
-    assert center.entry_unit is None
-    center, _ = advance_center(
-        center,
-        unit(
-            3,
-            "up",
-            105,
-            130,
-            structural_level=structural_level,
-            source_kind=source_kind,
-        ),
+    establishment_leave = unit(
+        4,
+        "up",
+        105,
+        130,
+        structural_level=structural_level,
+        source_kind=source_kind,
     )
-    # The fourth unit departs.  The fifth crosses back into the core, so the
+    if source_kind is SourceKind.SEGMENT:
+        center = establish_center(
+            (entry, *core, establishment_leave),
+            structural_level,
+            source_kind,
+        )
+    else:
+        center = establish_center(
+            core,
+            structural_level,
+            source_kind,
+            entry_unit=entry,
+        )
+        assert center is not None
+        center, _ = advance_center(center, establishment_leave)
+    assert center is not None
+    assert center.entry_unit is entry
+    # The establishment leave departs.  The next unit crosses back into the core, so the
     # failed departure stays in external history while the return enters the
     # body.  Five more touching units then produce nine genuine body units.
     additions = (
         unit(
-            4,
+            5,
             "down",
             130,
             110,
-            structural_level=structural_level,
-            source_kind=source_kind,
-        ),
-        unit(
-            5,
-            "up",
-            110,
-            114,
             structural_level=structural_level,
             source_kind=source_kind,
         ),
         unit(
             6,
+            "up",
+            110,
+            114,
+            structural_level=structural_level,
+            source_kind=source_kind,
+        ),
+        unit(
+            7,
             "down",
             114,
             106,
@@ -98,7 +117,7 @@ def nine_touch_center(*, structural_level: int = 0):
             source_kind=source_kind,
         ),
         unit(
-            7,
+            8,
             "up",
             106,
             114,
@@ -106,7 +125,7 @@ def nine_touch_center(*, structural_level: int = 0):
             source_kind=source_kind,
         ),
         unit(
-            8,
+            9,
             "down",
             114,
             110,
@@ -114,7 +133,7 @@ def nine_touch_center(*, structural_level: int = 0):
             source_kind=source_kind,
         ),
         unit(
-            9,
+            10,
             "up",
             110,
             114,
@@ -127,7 +146,7 @@ def nine_touch_center(*, structural_level: int = 0):
     completed, _ = advance_center(
         center,
         unit(
-            10,
+            11,
             "down",
             114,
             90,
@@ -138,7 +157,7 @@ def nine_touch_center(*, structural_level: int = 0):
     completed, _ = advance_center(
         completed,
         unit(
-            11,
+            12,
             "up",
             90,
             100,
@@ -149,7 +168,7 @@ def nine_touch_center(*, structural_level: int = 0):
     assert completed.completion_leave_unit is not None
     assert completed.completion_return_unit is not None
     assert tuple(item.unit_id for item in completed.failed_departure_units) == (
-        "u-3",
+        "u-4",
     )
     assert len(completed.body_units) == 9
     return completed

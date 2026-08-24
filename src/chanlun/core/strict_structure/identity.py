@@ -63,18 +63,42 @@ def build_center_id(
     price_basis_revision: str,
     structural_level: int,
     source_kind: str,
+    entry_unit_id: str | None,
     initial_unit_ids: tuple[str, ...],
+    establishment_leave_unit_id: str | None,
     zd_tick: int,
     zg_tick: int,
 ) -> str:
     """返回正式中枢种子的不可变身份。"""
 
+    normalized_source_kind = getattr(source_kind, "value", source_kind)
+    if normalized_source_kind == "trend_type":
+        # A recursive center is established by exactly three completed
+        # lower-level trend types. A known preceding trend is only scan
+        # context, so it must never make the identity prefix-dependent.
+        entry_unit_id = None
+        establishment_leave_unit_id = None
+    elif normalized_source_kind in {"segment", "stroke_observation"}:
+        # A physical center is the five-role fact: entry + core A/B/C + the
+        # independent establishment leave. Never hash a partial physical seed.
+        if not entry_unit_id or not establishment_leave_unit_id:
+            raise ValueError(
+                "physical center identity requires entry and establishment leave"
+            )
+    if len(initial_unit_ids) != 3 or any(
+        not isinstance(unit_id, str) or not unit_id
+        for unit_id in initial_unit_ids
+    ):
+        raise ValueError("center identity requires exactly three core unit ids")
+
     return stable_structure_id(
         "chanlun-center",
         price_basis_revision,
         structural_level,
-        source_kind,
+        normalized_source_kind,
+        entry_unit_id,
         tuple(initial_unit_ids),
+        establishment_leave_unit_id,
         zd_tick,
         zg_tick,
     )

@@ -49,7 +49,6 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
 
     checked = 0
     completed_count = 0
-    opposite_rearmed_count = 0
     for first_direction in ("up", "down"):
         for steps in product((1, 4), repeat=8):
             values = _alternating_walk(first_direction, steps)
@@ -66,7 +65,7 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
 
             final_by_id = {center.center_id: center for center in final.centers}
             assert len(final_by_id) == len(final.centers)
-            for prefix_end in range(3, len(values) + 1):
+            for prefix_end in range(5, len(values) + 1):
                 prefix = calculate_centers(
                     values[:prefix_end],
                     0,
@@ -103,15 +102,17 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
             for center in final.centers:
                 assert len(center.core_units) == 3
                 assert center.body_units[:3] == center.core_units
+                assert center.entry_unit is not None
+                assert center.establishment_leave_unit is not None
+                assert len(center.establishment_units) == 5
                 assert center.entry_unit not in center.body_units
                 assert not set(center.failed_departure_units).intersection(
                     center.body_units
                 )
-                if center.entry_unit is not None:
-                    assert (
-                        center.entry_unit.end_tick
-                        == center.core_units[0].start_tick
-                    )
+                assert (
+                    center.entry_unit.end_tick
+                    == center.core_units[0].start_tick
+                )
                 if center.pending_leave_unit is not None:
                     assert center.pending_leave_unit not in center.body_units
                     assert (
@@ -125,12 +126,6 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
                 ret = center.completion_return_unit
                 assert leave is not None and ret is not None
                 assert leave not in center.body_units
-                if (
-                    center.failed_departure_units
-                    and center.failed_departure_units[-1].direction
-                    != center.completion_direction
-                ):
-                    opposite_rearmed_count += 1
                 if leave.direction == "up":
                     assert ret.direction == "down"
                     assert ret.low_tick >= center.zg_tick
@@ -142,8 +137,7 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
             completed_count += len(completed_ids)
 
     assert checked == 512
-    # Eight paths cross the opposite core boundary after disproving the first
-    # leave, re-arm that crossing return as the new pending leave, and then
-    # complete symmetrically.  Pin both the specific rule and the total count.
-    assert opposite_rearmed_count == 8
-    assert completed_count == 232
+    # The five-role gate deliberately removes the former three-role centers.
+    # Dedicated transition tests cover failed-leave re-arming; this sweep pins
+    # the bounded population produced by the stricter establishment rule.
+    assert completed_count == 168

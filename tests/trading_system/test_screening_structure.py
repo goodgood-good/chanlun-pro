@@ -87,6 +87,7 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         available_at=NOW,
         completion_leave_unit_id=units[4].unit_id,
         completion_return_unit_id=units[5].unit_id,
+        establishment_leave_unit_id=units[4].unit_id,
     )
     center_result = CenterLevelResult(
         structural_level=0,

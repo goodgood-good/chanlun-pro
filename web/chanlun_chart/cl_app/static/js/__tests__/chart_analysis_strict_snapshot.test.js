@@ -31,6 +31,14 @@ function center(overrides = {}) {
     core: { zd_tick: 1000, zg_tick: 1060, zd_price: 10.0, zg_price: 10.6 },
     envelope: { dd_tick: 980, gg_tick: 1090, dd_price: 9.8, gg_price: 10.9 },
     entry_unit_id: 'u1',
+    establishment_leave_unit_id: 'u5',
+    initial_exit_unit_id: 'u5',
+    lifecycle_role_count: 5,
+    minimum_lifecycle_role_count: 5,
+    core_component_count: 3,
+    overlap_component_count: 5,
+    establishment_component_count: 5,
+    establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
     core_unit_ids: ['u2', 'u3', 'u4'],
     initial_unit_ids: ['u2', 'u3', 'u4'],
     body_unit_ids: ['u2', 'u3', 'u4'],
@@ -103,6 +111,41 @@ function divergence(kind, structuralLevel = 0, overrides = {}) {
     },
     tradable: true,
     points: [{ time: 1700000300, price: kind === 'trend' ? 10.2 : 10.8 }],
+    ...overrides,
+  };
+}
+
+function pendingMovement(overrides = {}) {
+  return {
+    schema: 'chanlun-chart-pending-movement',
+    render_kind: 'pending_movement',
+    partition_id: 'sha256:pending-l0-suffix',
+    render_id: 'sha256:pending-l0-suffix',
+    structural_level: 0,
+    source_kind: 'segment',
+    price_basis_revision: 'price-test',
+    state: 'pending',
+    classification: 'unresolved',
+    role: 'suffix',
+    direction: 'up',
+    geometric_direction: 'up',
+    semantic_direction: null,
+    direction_status: 'pending',
+    formal_direction_confirmed: false,
+    tradable: false,
+    recursive_eligible: false,
+    divergence_eligible: false,
+    left_trend_id: 'trend-l0-current',
+    right_trend_id: null,
+    left_boundary_unit_id: 'u6',
+    right_boundary_unit_id: null,
+    points: [
+      { time: 1700000300, price_tick: 1100, price: 11.0 },
+      { time: CLOSED_AT, price_tick: 1140, price: 11.4 },
+    ],
+    constituent_unit_ids: ['u7', 'u8'],
+    confirmed_at: null,
+    available_at: CLOSED_AT,
     ...overrides,
   };
 }
@@ -243,6 +286,7 @@ function snapshot(overrides = {}) {
         confirmed_at: null,
         available_at: CLOSED_AT,
       }],
+      pending_movements: [],
       completed_trend_snapshots: [],
       confirmed_points: [
         point('1buy', 'confirmed'),
@@ -310,24 +354,45 @@ test('strict snapshot supplies centers and signals through one contract', () => 
   assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
 });
 
-test('three-unit center keeps an absent entry absent in the analysis summary', () => {
+test('physical center without its entering role is rejected as stale invalid evidence', () => {
   const base = snapshot();
   const strict = snapshot({
     levels: [{
       ...base.levels[0],
-      centers: [center({ entry_unit_id: null, entering_segment: null })],
+      centers: [center({
+        entry_unit_id: null,
+        entering_segment: null,
+        establishment_segment_ids: ['u2', 'u3', 'u4', 'u5'],
+        establishment_component_count: 4,
+        overlap_component_count: 4,
+        lifecycle_role_count: 4,
+      })],
     }],
   });
 
   const summary = Analysis.summarizeChartData(barsResult(strict), context);
-  const item = summary.formalCenters[0];
 
-  assert.equal(item.entryUnitId, null);
-  assert.equal(item.enteringSegment, null);
-  assert.equal(Object.hasOwn(item, 'establishmentUnitId'), false);
-  assert.equal(Object.hasOwn(item, 'initialExitUnitId'), false);
-  assert.deepEqual(item.coreUnitIds, ['u2', 'u3', 'u4']);
-  assert.deepEqual(item.initialUnitIds, ['u2', 'u3', 'u4']);
+  assert.equal(summary.state, 'syncing');
+  assert.match(summary.statusDetail, /进入段和独立离开段/);
+  assert.deepEqual(summary.formalCenters, []);
+});
+
+test('pending movement remains separate from formal trend ownership', () => {
+  const base = snapshot();
+  const strict = snapshot({
+    levels: [{
+      ...base.levels[0],
+      pending_movements: [pendingMovement()],
+    }],
+  });
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+
+  assert.equal(summary.state, 'ready');
+  assert.equal(summary.pendingMovements.length, 1);
+  assert.equal(summary.pendingMovements[0].classification, 'unresolved');
+  assert.equal(summary.pendingMovements[0].tradable, false);
+  assert.deepEqual(summary.pendingMovements[0].constituentUnitIds, ['u7', 'u8']);
 });
 
 test('operational confirmation remains confirmed while disclosing the pending audit lock', () => {

@@ -4,16 +4,28 @@
   "frequency": "1m",
   "points": [
     {
-      "anchor_at": "2025-07-02T03:04:00+00:00",
-      "available_at": "2025-07-07T05:49:00+00:00",
-      "center_id": "69ad49dacc09dae5c712fc872913318460702b852c4d99b64657e67153ba5a8c",
-      "center_ordinal": 1,
-      "confirmed_at": "2025-07-07T05:49:00+00:00",
+      "anchor_at": "2025-06-27T01:59:00+00:00",
+      "available_at": "2025-07-04T02:08:00+00:00",
+      "center_id": "d47aa174949623e80d15a7da9ba2ad733e7380bf05879480233dd77184050e27",
+      "center_ordinal": null,
+      "confirmed_at": "2025-07-04T02:08:00+00:00",
       "level": 0,
-      "point_id": "71d535a899552500152076590e968e5aa17b173b3b286e1bded65b73a26f5ab2",
-      "point_type": "3buy",
-      "strength_source": null,
+      "point_id": "b519ad81e682ba1eadd3e9ccd499e564093ba48c088c256dc8380e3b3423179c",
+      "point_type": "1sell",
+      "strength_source": "macd",
       "variant": "standard"
+    },
+    {
+      "anchor_at": "2025-07-02T01:51:00+00:00",
+      "available_at": "2025-07-04T06:43:00+00:00",
+      "center_id": "d47aa174949623e80d15a7da9ba2ad733e7380bf05879480233dd77184050e27",
+      "center_ordinal": null,
+      "confirmed_at": "2025-07-04T06:43:00+00:00",
+      "level": 0,
+      "point_id": "09b37274118ecd3935c9f8b3b23bbf9523544112c329f04b3539a22b045d295f",
+      "point_type": "2sell",
+      "strength_source": "macd",
+      "variant": "weak_divergence"
     }
   ],
   "price_basis_revision": "test-raw",

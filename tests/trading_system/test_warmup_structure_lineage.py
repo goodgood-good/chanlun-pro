@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from chanlun.decision_support.trading_system.warmup_convergence import (
 )
 from chanlun.decision_support.trading_system.warmup_structure_lineage import (
     WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID,
+    WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_SCHEMA,
     WarmupStructureCenterFacts,
     WarmupStructureLineFacts,
     WarmupStructureLineageDiagnosticEnvelope,
@@ -52,8 +54,8 @@ def _line(
     start = as_of - timedelta(days=180 - offset * 4)
     end = start + timedelta(days=3)
     direction = "up" if offset % 2 == 0 else "down"
-    start_value = Decimal(100 + offset)
-    end_value = start_value + (Decimal("5") if direction == "up" else Decimal("-5"))
+    start_value = Decimal("80") if direction == "up" else Decimal("120")
+    end_value = Decimal("120") if direction == "up" else Decimal("80")
     locked = end + timedelta(days=1)
     identity = WarmupStructureLineFacts.identity(
         source_symbol=SYMBOL,
@@ -64,6 +66,8 @@ def _line(
         end_at=end,
         start_value=start_value,
         end_value=end_value,
+        low_value=min(start_value, end_value),
+        high_value=max(start_value, end_value),
         locked_at=locked,
         completed=True,
     )
@@ -76,6 +80,8 @@ def _line(
         end_at=end,
         start_value=start_value,
         end_value=end_value,
+        low_value=min(start_value, end_value),
+        high_value=max(start_value, end_value),
         locked_at=locked,
         completed=True,
     )
@@ -87,6 +93,7 @@ def _center(
     direction: str,
     entry: WarmupStructureLineFacts,
     constituents: tuple[WarmupStructureLineFacts, ...],
+    establishment_leave: WarmupStructureLineFacts,
 ) -> WarmupStructureCenterFacts:
     center_id = stable_structure_id(
         "test-strict-center",
@@ -94,6 +101,7 @@ def _center(
         index,
         entry.line_id,
         tuple(value.line_id for value in constituents),
+        establishment_leave.line_id,
         direction,
     )
     return WarmupStructureCenterFacts(
@@ -102,8 +110,8 @@ def _center(
         level_rank=0,
         center_index=index,
         direction=direction,
-        start_at=entry.start_at,
-        end_at=constituents[-1].end_at,
+        start_at=constituents[0].start_at,
+        end_at=establishment_leave.end_at,
         core_low=Decimal("90"),
         core_high=Decimal("110"),
         range_low=Decimal("80"),
@@ -112,6 +120,13 @@ def _center(
         real=True,
         expanded=False,
         entry_line_id=entry.line_id,
+        core_line_ids=tuple(value.line_id for value in constituents[:3]),
+        establishment_leave_line_id=establishment_leave.line_id,
+        establishment_line_ids=(
+            entry.line_id,
+            *(value.line_id for value in constituents[:3]),
+            establishment_leave.line_id,
+        ),
         constituent_line_ids=tuple(value.line_id for value in constituents),
     )
 
@@ -200,9 +215,7 @@ def _semantic(
                     center.center_id if period == "W" and center is not None else None
                 ),
                 mapping_candidate_ids=(
-                    (center.center_id,)
-                    if period == "W" and center is not None
-                    else ()
+                    (center.center_id,) if period == "W" and center is not None else ()
                 ),
                 blocker_codes=(
                     ("NO_COMPLETED_LOWER_1SELL_2SELL_CENTER_IN_TOP_FRACTAL",)
@@ -255,8 +268,7 @@ def lineage_envelope(
         _line(ordinal=index, offset=index, as_of=as_of) for index in range(3)
     )
     common_prefix = tuple(
-        _line(ordinal=index, offset=index + 3, as_of=as_of)
-        for index in range(9)
+        _line(ordinal=index, offset=index + 3, as_of=as_of) for index in range(9)
     )
     # Stable line identities deliberately exclude prefix-local ordinals.
     common_reference = tuple(
@@ -269,6 +281,8 @@ def lineage_envelope(
             end_at=value.end_at,
             start_value=value.start_value,
             end_value=value.end_value,
+            low_value=value.low_value,
+            high_value=value.high_value,
             locked_at=value.locked_at,
             completed=value.completed,
         )
@@ -279,17 +293,19 @@ def lineage_envelope(
         index=3,
         direction="down",
         entry=common_prefix[0],
-        constituents=common_prefix[:8],
+        constituents=common_prefix[1:4],
+        establishment_leave=common_prefix[4],
     )
     reference_center = _center(
         index=5,
         direction="up",
-        entry=common_reference[0],
-        constituents=common_reference[1:9],
+        entry=common_reference[1],
+        constituents=common_reference[2:5],
+        establishment_leave=common_reference[5],
     )
     prefix_point = _point(
         center=prefix_center,
-        trigger=common_prefix[8],
+        trigger=common_prefix[4],
         point_type="1sell",
         highest=True,
     )
@@ -318,9 +334,7 @@ def lineage_envelope(
         parameter_set_id=parameter_set_id,
         observations=observations,
     )
-    envelope = bind_warmup_convergence_diagnostic(
-        envelope, snapshots=semantic_values
-    )
+    envelope = bind_warmup_convergence_diagnostic(envelope, snapshots=semantic_values)
     envelope = bind_warmup_mapping_supply_diagnostic(
         envelope,
         snapshots=(
@@ -340,7 +354,7 @@ def lineage_envelope(
         lines=common_prefix,
         center=prefix_center,
         point=prefix_point,
-        trigger=common_prefix[8],
+        trigger=common_prefix[4],
     )
     reference_snapshot = _snapshot(
         bar_count=744,
@@ -381,8 +395,8 @@ def test_structure_lineage_explains_sell_trigger_absorption() -> None:
     role = comparison["delta"]["point_trigger_role_changes"][0]
     assert role["same_core_interval"] is True
     assert role["one_line_phase_shift"] is True
-    assert role["shared_constituent_line_count"] == 7
-    assert role["union_constituent_line_count"] == 9
+    assert role["shared_constituent_line_count"] == 2
+    assert role["union_constituent_line_count"] == 4
     assert role["prefix_trigger_role"] == "AFTER_CENTER"
     assert role["reference_trigger_role"] == "CENTER_CONSTITUENT"
 
@@ -411,7 +425,9 @@ def test_structure_lineage_round_trip_preserves_prior_hashes() -> None:
     )
     assert envelope.document() == without_lineage.document()
     assert envelope.content_sha256 == without_lineage.content_sha256
-    assert envelope.diagnostic.content_sha256 == without_lineage.diagnostic.content_sha256
+    assert (
+        envelope.diagnostic.content_sha256 == without_lineage.diagnostic.content_sha256
+    )
     assert (
         envelope.mapping_supply_diagnostic.content_sha256
         == without_lineage.mapping_supply_diagnostic.content_sha256
@@ -434,14 +450,16 @@ def test_rehashed_structure_lineage_derived_tamper_is_rejected() -> None:
         WarmupStructureLineageDiagnosticEnvelope.from_document(document)
 
 
-def test_capture_keeps_first_center_entry_absent_without_fabricating_a_line() -> None:
+def test_capture_records_physical_center_five_role_establishment() -> None:
     evidence = strict_evidence_result(
         code=SYMBOL,
         source_frequency=FREQUENCY,
         confirmed_points=(strict_point("3buy"),),
     )
     center = evidence.structure.levels[0].center_result.centers[0]
-    assert center.entry_unit is None
+    assert center.entry_unit is not None
+    assert center.establishment_leave_unit is not None
+    assert center.has_minimum_physical_roles
     point = evidence.confirmed_points[0]
     anchor_at = normalize_datetime(point.anchor_at, "point_anchor_at")
     available_at = normalize_datetime(point.available_at, "point_available_at")
@@ -487,9 +505,106 @@ def test_capture_keeps_first_center_entry_absent_without_fabricating_a_line() ->
     )
 
     captured = snapshot.centers[0]
-    assert captured.entry_line_id is None
+    source_units = tuple(
+        unit
+        for level in evidence.structure.levels
+        for unit in level.units
+        if unit.source_kind is center.source_kind
+    )
+    captured_lines = tuple(
+        sorted(
+            (
+                line
+                for line in snapshot.lines
+                if line.source_kind == captured.source_kind
+            ),
+            key=lambda line: line.ordinal,
+        )
+    )
+    line_id_by_unit_id = {
+        unit.unit_id: captured_lines[ordinal].line_id
+        for ordinal, unit in enumerate(source_units)
+    }
+    assert captured.entry_line_id == line_id_by_unit_id[center.entry_unit.unit_id]
+    assert captured.core_line_ids == tuple(
+        line_id_by_unit_id[unit.unit_id] for unit in center.core_units
+    )
+    assert (
+        captured.establishment_leave_line_id
+        == line_id_by_unit_id[center.establishment_leave_unit.unit_id]
+    )
+    assert captured.establishment_line_ids == (
+        captured.entry_line_id,
+        *captured.core_line_ids,
+        captured.establishment_leave_line_id,
+    )
+    assert len(set(captured.establishment_line_ids)) == 5
     assert captured.start_at == center.body_start_market_time
     assert captured.constituent_line_ids == tuple(
-        next(line.line_id for line in snapshot.lines if line.ordinal == ordinal)
-        for ordinal in range(len(center.body_units))
+        line_id_by_unit_id[unit.unit_id] for unit in center.body_units
     )
+
+
+def test_v1_structure_lineage_schema_and_center_document_are_rejected() -> None:
+    envelope = lineage_envelope()
+    diagnostic = envelope.structure_lineage_diagnostic
+    assert diagnostic is not None
+    document = deepcopy(diagnostic.document())
+    assert document["schema"] == WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_SCHEMA
+    old_schema = deepcopy(document)
+    old_schema["schema"] = "chanlun-warmup-structure-lineage-diagnostic"
+    with pytest.raises(ValueError, match="malformed"):
+        WarmupStructureLineageDiagnosticEnvelope.from_document(old_schema)
+
+    center = document["comparisons"][0]["prefix_snapshot"]["centers"][0]
+    for field in (
+        "core_line_ids",
+        "core_line_count",
+        "establishment_leave_line_id",
+        "establishment_line_ids",
+        "establishment_line_count",
+        "physical_five_role_validated",
+    ):
+        center.pop(field)
+
+    with pytest.raises(ValueError, match="malformed"):
+        WarmupStructureLineageDiagnosticEnvelope.from_document(document)
+
+
+def test_center_fact_contract_distinguishes_physical_and_recursive_sources() -> None:
+    envelope = lineage_envelope()
+    diagnostic = envelope.structure_lineage_diagnostic
+    assert diagnostic is not None
+    prefix_snapshot = diagnostic.comparisons[0].prefix_snapshot
+    assert prefix_snapshot is not None
+    physical = prefix_snapshot.centers[0]
+    stroke = replace(physical, source_kind="STROKE_OBSERVATION")
+
+    assert stroke.document()["physical_five_role_validated"] is True
+    assert WarmupStructureCenterFacts.from_document(stroke.document()) == stroke
+
+    recursive = replace(
+        physical,
+        source_kind="TREND_TYPE",
+        entry_line_id=None,
+        establishment_leave_line_id=None,
+        establishment_line_ids=physical.core_line_ids,
+    )
+    assert recursive.document()["physical_five_role_validated"] is None
+    assert len(recursive.establishment_line_ids) == 3
+
+    touching_recursive = replace(
+        recursive,
+        core_low=Decimal("100"),
+        core_high=Decimal("100"),
+    )
+    assert (
+        WarmupStructureCenterFacts.from_document(touching_recursive.document())
+        == touching_recursive
+    )
+    with pytest.raises(ValueError, match="price intervals"):
+        replace(
+            physical,
+            core_low=Decimal("100"),
+            core_high=Decimal("100"),
+        )

@@ -215,11 +215,16 @@ def _is_leave_candidate(
 def _seed_size(source_kind: SourceKind) -> int:
     """返回 ``establish_center`` 消耗的候选窗口宽度。
 
-    中枢在每一种来源层级都由三个连续、已完成且具有有效重叠的同级单元建立。
-    第四个单元只推进延伸或离开观察；第五个外部回返只确认第三类生命周期。
+    物理线段/笔中枢使用五角色窗口：进入段 + 中间三段核心 + 独立离开段。
+    五段都必须与冻结核心正宽重叠。递归中枢仍由三个已完成的低级别走势
+    类型构成，不能把物理线段直接冒充高一级走势。
     """
 
-    return center_seed_size(SourceKind(source_kind))
+    return (
+        center_seed_size(source_kind)
+        if SourceKind(source_kind) is SourceKind.TREND_TYPE
+        else 5
+    )
 
 
 def _event(
@@ -281,6 +286,7 @@ def _validate_seed_context(
 
 def _new_ongoing_center(
     entry_unit: ConstituentUnit | None,
+    establishment_leave_unit: ConstituentUnit | None,
     initial_units: tuple[ConstituentUnit, ...],
     extension_units: tuple[ConstituentUnit, ...],
     pending_leave: ConstituentUnit | None,
@@ -295,12 +301,18 @@ def _new_ongoing_center(
         price_basis_revision=price_basis_revision,
         structural_level=structural_level,
         source_kind=source_kind.value,
+        entry_unit_id=(None if entry_unit is None else entry_unit.unit_id),
         initial_unit_ids=tuple(item.unit_id for item in initial_units),
+        establishment_leave_unit_id=(
+            None
+            if establishment_leave_unit is None
+            else establishment_leave_unit.unit_id
+        ),
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
     body_units = initial_units + extension_units
-    maturity = initial_units[-1]
+    maturity = establishment_leave_unit or initial_units[-1]
     return TrendCenter(
         center_id=center_id,
         structural_level=structural_level,
@@ -308,6 +320,7 @@ def _new_ongoing_center(
         price_basis_revision=price_basis_revision,
         state=CenterState.ONGOING,
         entry_unit=entry_unit,
+        establishment_leave_unit=establishment_leave_unit,
         initial_units=initial_units,
         body_units=body_units,
         extension_units=extension_units,
@@ -339,6 +352,9 @@ def establish_center(
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
     width = _seed_size(source_kind)
+    if source_kind is not SourceKind.TREND_TYPE and entry_unit is not None:
+        values = (entry_unit,) + values
+        entry_unit = None
     if len(values) != width or not _alternates(values, oscillatory_ids):
         return None
     price_basis_revision = _validate_seed_context(
@@ -348,8 +364,17 @@ def establish_center(
     )
     if any(not item.locked for item in values):
         return None
-    seed_entry = entry_unit
-    if seed_entry is not None:
+    if source_kind is SourceKind.TREND_TYPE:
+        seed_entry = entry_unit
+        establishment_leave = None
+        core_units = values
+        evidence = values if seed_entry is None else (seed_entry,) + values
+    else:
+        seed_entry = values[0]
+        core_units = values[1:4]
+        establishment_leave = values[4]
+        evidence = values
+    if source_kind is SourceKind.TREND_TYPE and seed_entry is not None:
         _validate_seed_context(
             (seed_entry,) + values,
             structural_level,
@@ -359,9 +384,7 @@ def establish_center(
             return None
         if _conflicting_pair(seed_entry, values[0], oscillatory_ids):
             return None
-    core_units = values
     extension_units = ()
-    evidence = values if seed_entry is None else (seed_entry,) + values
     zd_tick, zg_tick = _core(core_units)
     if (
         zd_tick > zg_tick
@@ -373,11 +396,19 @@ def establish_center(
         not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units
     ):
         return None
+    if source_kind is not SourceKind.TREND_TYPE:
+        if (
+            not _positive_overlap(seed_entry, zd_tick, zg_tick)
+            or not _positive_overlap(establishment_leave, zd_tick, zg_tick)
+            or not _outside_in_direction(establishment_leave, zd_tick, zg_tick)
+        ):
+            return None
     return _new_ongoing_center(
         seed_entry,
+        establishment_leave,
         core_units,
         extension_units,
-        None,
+        establishment_leave,
         evidence,
         structural_level,
         source_kind,
@@ -400,6 +431,9 @@ def establish_center_preview(
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
     width = _seed_size(source_kind)
+    if source_kind is not SourceKind.TREND_TYPE and entry_unit is not None:
+        values = (entry_unit,) + values
+        entry_unit = None
     if len(values) != width or not _alternates(values, oscillatory_ids):
         return None
     price_basis_revision = _validate_seed_context(
@@ -407,8 +441,19 @@ def establish_center_preview(
         structural_level,
         source_kind,
     )
-    seed_entry = entry_unit
-    if seed_entry is not None:
+    if source_kind is SourceKind.TREND_TYPE:
+        seed_entry = entry_unit
+        establishment_leave = None
+        core_units = values
+        body_units = core_units
+        evidence = values if seed_entry is None else (seed_entry,) + values
+    else:
+        seed_entry = values[0]
+        core_units = values[1:4]
+        establishment_leave = values[4]
+        body_units = core_units
+        evidence = values
+    if source_kind is SourceKind.TREND_TYPE and seed_entry is not None:
         _validate_seed_context(
             (seed_entry,) + values,
             structural_level,
@@ -416,9 +461,6 @@ def establish_center_preview(
         )
         if _conflicting_pair(seed_entry, values[0], oscillatory_ids):
             return None
-    core_units = values
-    body_units = core_units
-    evidence = values if seed_entry is None else (seed_entry,) + values
     unlocked_seen = False
     for item in evidence:
         if not item.locked:
@@ -438,6 +480,13 @@ def establish_center_preview(
         not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units
     ):
         return None
+    if source_kind is not SourceKind.TREND_TYPE:
+        if (
+            not _positive_overlap(seed_entry, zd_tick, zg_tick)
+            or not _positive_overlap(establishment_leave, zd_tick, zg_tick)
+            or not _outside_in_direction(establishment_leave, zd_tick, zg_tick)
+        ):
+            return None
     return CenterPreview(
         structural_level=structural_level,
         source_kind=source_kind,
@@ -448,7 +497,16 @@ def establish_center_preview(
         zd_tick=zd_tick,
         zg_tick=zg_tick,
         available_at=max(item.available_at for item in evidence),
-        pending_leave_unit_id=None,
+        pending_leave_unit_id=(
+            None
+            if establishment_leave is None
+            else establishment_leave.unit_id
+        ),
+        establishment_leave_unit_id=(
+            None
+            if establishment_leave is None
+            else establishment_leave.unit_id
+        ),
     )
 
 
@@ -637,6 +695,11 @@ def _project_ongoing_center_preview(
             if center.pending_leave_unit is None
             else center.pending_leave_unit.unit_id
         ),
+        establishment_leave_unit_id=(
+            None
+            if center.establishment_leave_unit is None
+            else center.establishment_leave_unit.unit_id
+        ),
     )
     try:
         return _advance_center_preview_lifecycle(
@@ -662,10 +725,18 @@ def _preview_matches_center_seed(
     """返回临时证据是否是该正式归属中枢的投影。"""
 
     seed_width = center_seed_size(center.source_kind)
-    active_seed = tuple(
-        item.unit_id for item in center.initial_units[:seed_width]
+    active_seed = (
+        center.entry_unit.unit_id if center.entry_unit is not None else None,
+        *(item.unit_id for item in center.initial_units[:seed_width]),
+        center.establishment_leave_unit.unit_id
+        if center.establishment_leave_unit is not None
+        else None,
     )
-    preview_seed = preview.unit_ids[:seed_width]
+    preview_seed = (
+        preview.entry_unit_id,
+        *preview.unit_ids[:seed_width],
+        preview.establishment_leave_unit_id,
+    )
     return active_seed == preview_seed
 
 
@@ -950,7 +1021,10 @@ def forming_preview(
     values = tuple(candidate)
     source_kind = SourceKind(source_kind)
     maximum = _seed_size(source_kind)
-    minimum = 1
+    if source_kind is not SourceKind.TREND_TYPE and entry_unit is not None:
+        values = (entry_unit,) + values
+        entry_unit = None
+    minimum = 1 if source_kind is SourceKind.TREND_TYPE else 2
     if not minimum <= len(values) <= maximum or not _alternates(
         values, oscillatory_ids
     ):
@@ -960,8 +1034,19 @@ def forming_preview(
         structural_level,
         source_kind,
     )
-    seed_entry = entry_unit
-    if seed_entry is not None:
+    establishment_leave = None
+    if source_kind is SourceKind.TREND_TYPE:
+        seed_entry = entry_unit
+        body = values
+        core_ready = len(values) >= 3
+        evidence = values if seed_entry is None else (seed_entry,) + values
+    else:
+        seed_entry = values[0]
+        body = values[1:4]
+        core_ready = len(values) >= 4
+        establishment_leave = values[4] if len(values) == 5 else None
+        evidence = values
+    if source_kind is SourceKind.TREND_TYPE and seed_entry is not None:
         _validate_seed_context(
             (seed_entry,) + values,
             structural_level,
@@ -969,10 +1054,7 @@ def forming_preview(
         )
         if _conflicting_pair(seed_entry, values[0], oscillatory_ids):
             return None
-    body = values
-    core_ready = len(values) >= 3
     pending_leave = None
-    evidence = values if seed_entry is None else (seed_entry,) + values
 
     zd_tick = None
     zg_tick = None
@@ -995,6 +1077,27 @@ def forming_preview(
             not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in body
         ):
             return None
+        if source_kind is not SourceKind.TREND_TYPE:
+            if state is CenterPreviewState.TOUCH_ONLY:
+                if not _touches_core(seed_entry, zd_tick, zg_tick):
+                    return None
+                if establishment_leave is not None and not _touches_core(
+                    establishment_leave, zd_tick, zg_tick
+                ):
+                    return None
+            else:
+                if not _positive_overlap(seed_entry, zd_tick, zg_tick):
+                    return None
+                if establishment_leave is not None and not _positive_overlap(
+                    establishment_leave, zd_tick, zg_tick
+                ):
+                    return None
+            if establishment_leave is not None:
+                if not _outside_in_direction(
+                    establishment_leave, zd_tick, zg_tick
+                ):
+                    return None
+                pending_leave = establishment_leave
     return CenterPreview(
         structural_level=structural_level,
         source_kind=source_kind,
@@ -1007,6 +1110,11 @@ def forming_preview(
         available_at=max(item.available_at for item in evidence),
         pending_leave_unit_id=(
             None if pending_leave is None else pending_leave.unit_id
+        ),
+        establishment_leave_unit_id=(
+            None
+            if establishment_leave is None
+            else establishment_leave.unit_id
         ),
     )
 
@@ -1053,13 +1161,14 @@ def _scanner_entry(
 ) -> ConstituentUnit | None:
     """返回扫描器种子所拥有的外部进入段。
 
-    三段中枢从核心 A 段开始。若流中存在紧邻的前一同级别单元，则把它保留为
-    可选的进入腿供背驰比较；首个中枢没有前序单元也照常成立。
+    物理五角色窗口自身已经包含进入段，因此返回 ``None``。递归中枢从三个
+    已完成走势类型的核心开始，紧邻前一走势保留为外部进入证据，但不进入身份。
     """
 
     # ``calculate_centers`` 探测空尾部或尚未预热的尾部时也会调用本函数。此类
     # 尾部没有可审计外部进入段，应当不产生预览，而不是索引不存在的流单元。
-    SourceKind(source_kind)
+    if SourceKind(source_kind) is not SourceKind.TREND_TYPE:
+        return None
     return values[start - 1] if 0 < start <= len(values) else None
 
 
@@ -1069,13 +1178,17 @@ def _next_scan_start_after_completion(
 ) -> int:
     """把已完成中枢的离开段作为下一进入段继续扫描。
 
-    下一中枢从完成回返开始扫描，并把前一离开段作为可选进入腿。
+    物理种子从完成离开段重新作为下一进入段开始；递归种子从完成回返开始，
+    并由扫描器取前一走势作为进入证据。
     """
 
     if completion_return_offset <= 0:
         raise ValueError("completion return must follow a leave unit")
-    SourceKind(source_kind)
-    return completion_return_offset
+    return (
+        completion_return_offset
+        if SourceKind(source_kind) is SourceKind.TREND_TYPE
+        else completion_return_offset - 1
+    )
 
 
 def _first_disjoint_successor_seed(
@@ -1086,11 +1199,10 @@ def _first_disjoint_successor_seed(
     source_kind: SourceKind,
     oscillatory_ids: frozenset[str],
 ) -> tuple[int, TrendCenter] | None:
-    """Find the earliest locked three-unit center outside ``center``.
+    """查找旧中枢之外最早锁定的来源特定成立窗口。
 
-    The search begins at the first unit that cannot advance the old center.
-    It never reuses the old core's third unit as a departure.  Until three
-    successor units are locked, the old center therefore remains ongoing.
+    搜索从首个无法推进旧中枢的单元开始，不把旧核心末段伪造成离开段。
+    物理五角色或递归三走势尚未全部锁定前，旧中枢继续保持进行中。
     """
 
     width = _seed_size(source_kind)
@@ -1125,7 +1237,7 @@ def _first_successor_preview(
     """
 
     width = _seed_size(source_kind)
-    minimum_ready = 3
+    minimum_ready = 3 if source_kind is SourceKind.TREND_TYPE else 4
     last_start = len(values) - minimum_ready
     for start in range(resume_from, last_start + 1):
         remaining = len(values) - start
@@ -1431,8 +1543,9 @@ def calculate_centers(
                     bridge_units,
                 )
                 candidate_events.append(superseded_event)
-        # 三段锁定后中枢身份已经成立，后续单元只能推进或停止其生命周期，不能
-        # 用更晚窗口追溯替换。几何停止时仍保留这个因果前缀快照。
+        # 来源特定的成立窗口锁定后（物理层五角色、递归层三走势），中枢身份
+        # 已经成立；后续单元只能推进或停止生命周期，不能用更晚窗口追溯替换。
+        # 几何停止时仍保留这个因果前缀快照。
         centers.append(center)
         events.extend(candidate_events)
         replay_from = i

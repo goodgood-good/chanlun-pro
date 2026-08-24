@@ -211,6 +211,16 @@ test('divergence identity uses its stable divergence id', () => {
   );
 });
 
+test('pending movement identity uses its stable partition id', () => {
+  assert.equal(
+    Reconcile.logicalKey({
+      render_kind: 'pending_movement',
+      partition_id: 'sha256:pending-1',
+    }),
+    'pending_movement:sha256:pending-1',
+  );
+});
+
 test('forming center preview identity uses its stable preview id', () => {
   assert.equal(
     Reconcile.logicalKey({

@@ -269,7 +269,7 @@ def test_consolidation_net_displacement_is_never_published_as_direction():
 
 
 def test_direction_change_without_first_or_second_point_stays_neutral():
-    structure = _structure(seed=13, count=140)
+    structure = _structure(seed=42, count=60)
     trend_types = structure.levels[0].trend_types
     current = trend_types[-1]
     previous = next(
@@ -286,7 +286,7 @@ def test_direction_change_without_first_or_second_point_stays_neutral():
 
 
 def test_direction_change_with_first_point_is_published_and_auditable():
-    structure = _structure(seed=13, count=140)
+    structure = _structure(seed=42, count=60)
     support = _first_class_reversal_support(structure)
     state = resolve_formal_direction(_bundle(structure, (support,)))
 
@@ -299,7 +299,7 @@ def test_direction_change_with_first_point_is_published_and_auditable():
 
 
 def test_formal_direction_uses_center_relation_not_net_displacement():
-    structure = _structure(seed=107, count=60)
+    structure = _structure(seed=778, count=30)
     level = structure.levels[0]
     current = level.trend_types[-1]
     assert current.direction == "up"
@@ -317,7 +317,7 @@ def test_formal_direction_uses_center_relation_not_net_displacement():
 
 
 def test_level_direction_and_global_direction_share_one_resolver():
-    evidence = _bundle(_structure(seed=13, count=140))
+    evidence = _bundle(_structure(seed=42, count=60))
 
     assert resolve_level_formal_direction(evidence, 0) == resolve_formal_direction(
         evidence
@@ -325,7 +325,7 @@ def test_level_direction_and_global_direction_share_one_resolver():
 
 
 def test_component_direction_matches_full_revision_hashed_evidence():
-    structure = _structure(seed=13, count=140)
+    structure = _structure(seed=42, count=60)
     evidence = _bundle(structure, (_first_class_reversal_support(structure),))
 
     assert resolve_formal_direction_from_components(
@@ -336,7 +336,7 @@ def test_component_direction_matches_full_revision_hashed_evidence():
 
 
 def test_semantic_direction_is_independent_from_endpoint_displacement():
-    structure = _structure(seed=107, count=60)
+    structure = _structure(seed=778, count=30)
     current = structure.levels[0].trend_types[-1]
 
     assert current.direction == "up"

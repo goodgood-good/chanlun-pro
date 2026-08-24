@@ -105,6 +105,54 @@ def valid_up_center_lifecycle(
     )
 
 
+def valid_five_up_exit(
+    unit_offset: int = 0,
+    *,
+    structural_level: int = 0,
+    zd_tick: int = 105,
+    zg_tick: int = 115,
+) -> tuple[ConstituentUnit, ...]:
+    """进入段 + 中间三段核心 + 独立向上离开段。"""
+
+    return (
+        unit(
+            unit_offset,
+            "up",
+            zd_tick - 15,
+            zg_tick + 5,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 1,
+            "down",
+            zg_tick + 5,
+            zd_tick - 5,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 2,
+            "up",
+            zd_tick - 5,
+            zg_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 3,
+            "down",
+            zg_tick,
+            zd_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 4,
+            "up",
+            zd_tick,
+            zg_tick + 15,
+            structural_level=structural_level,
+        ),
+    )
+
+
 def valid_down_center_lifecycle(
     unit_offset: int = 0,
     *,
@@ -186,20 +234,14 @@ def ongoing_center(
     zg_tick: int = 115,
     center_id: str | None = None,
 ) -> TrendCenter:
-    lifecycle = valid_up_center_lifecycle(
+    lifecycle = valid_five_up_exit(
         unit_offset,
         structural_level=structural_level,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
-    value = establish_center(
-        lifecycle[:3],
-        structural_level,
-        SourceKind.SEGMENT,
-    )
+    value = establish_center(lifecycle, structural_level, SourceKind.SEGMENT)
     assert value is not None
-    value, event = advance_center(value, lifecycle[3])
-    assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -219,14 +261,15 @@ def completed_up_center(
         zg_tick=zg_tick,
         center_id=center_id,
     )
-    lifecycle = valid_up_center_lifecycle(
-        unit_offset,
+    resolved_return_low = zg_tick + 5 if return_low_tick is None else return_low_tick
+    ret = unit(
+        unit_offset + 5,
+        "down",
+        zg_tick + 15,
+        resolved_return_low,
         structural_level=structural_level,
-        zd_tick=zd_tick,
-        zg_tick=zg_tick,
-        return_low_tick=return_low_tick,
     )
-    completed, event = advance_center(value, lifecycle[4])
+    completed, event = advance_center(value, ret)
     assert completed.state is CenterState.COMPLETED
     assert event.kind is CenterEventKind.COMPLETED_UP
     return completed
@@ -240,20 +283,45 @@ def ongoing_down_center(
     zg_tick: int = 105,
     center_id: str | None = None,
 ) -> TrendCenter:
-    lifecycle = valid_down_center_lifecycle(
-        unit_offset,
-        structural_level=structural_level,
-        zd_tick=zd_tick,
-        zg_tick=zg_tick,
+    lifecycle = (
+        unit(
+            unit_offset,
+            "down",
+            zg_tick + 15,
+            zd_tick - 5,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 1,
+            "up",
+            zd_tick - 5,
+            zg_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 2,
+            "down",
+            zg_tick,
+            zd_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 3,
+            "up",
+            zd_tick,
+            zg_tick,
+            structural_level=structural_level,
+        ),
+        unit(
+            unit_offset + 4,
+            "down",
+            zg_tick,
+            zd_tick - 15,
+            structural_level=structural_level,
+        ),
     )
-    value = establish_center(
-        lifecycle[:3],
-        structural_level,
-        SourceKind.SEGMENT,
-    )
+    value = establish_center(lifecycle, structural_level, SourceKind.SEGMENT)
     assert value is not None
-    value, event = advance_center(value, lifecycle[3])
-    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -273,14 +341,15 @@ def completed_down_center(
         zg_tick=zg_tick,
         center_id=center_id,
     )
-    lifecycle = valid_down_center_lifecycle(
-        unit_offset,
+    resolved_return_high = zd_tick - 5 if return_high_tick is None else return_high_tick
+    ret = unit(
+        unit_offset + 5,
+        "up",
+        zd_tick - 15,
+        resolved_return_high,
         structural_level=structural_level,
-        zd_tick=zd_tick,
-        zg_tick=zg_tick,
-        return_high_tick=return_high_tick,
     )
-    completed, event = advance_center(value, lifecycle[4])
+    completed, event = advance_center(value, ret)
     assert completed.state is CenterState.COMPLETED
     assert event.kind is CenterEventKind.COMPLETED_DOWN
     return completed

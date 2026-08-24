@@ -773,6 +773,7 @@
       formalDirectionReasonCodes: [],
       trends: [],
       completedTrends: [],
+      pendingMovements: [],
       formalCenters: [],
       centerPreviews: [],
       centerProjections: [],
@@ -804,6 +805,95 @@
       return sourceClose;
     }
     return toSeconds(bars[bars.length - 1] && bars[bars.length - 1].time);
+  }
+
+  function strictStringArray(value) {
+    return Array.isArray(value)
+      && value.every((item) => typeof item === 'string' && item.length > 0);
+  }
+
+  function strictSameIds(left, right) {
+    return left.length === right.length
+      && left.every((item, index) => item === right[index]);
+  }
+
+  function validateStrictCenterContract(item, level, allowPartialPhysical) {
+    if (!item || item.schema !== 'chanlun-chart-center'
+      || item.structural_level !== level
+      || !['segment', 'stroke_observation', 'trend_type'].includes(item.source_kind)
+      || !strictStringArray(item.core_unit_ids)
+      || item.core_unit_ids.length !== 3
+      || new Set(item.core_unit_ids).size !== 3
+      || item.core_component_count !== 3
+      || !strictStringArray(item.initial_unit_ids)
+      || !strictSameIds(item.initial_unit_ids, item.core_unit_ids)
+      || !strictStringArray(item.establishment_segment_ids)) {
+      throw new Error('严格中枢核心契约无效');
+    }
+    const recursive = item.source_kind === 'trend_type';
+    if (recursive) {
+      if (item.establishment_leave_unit_id !== null
+        || item.initial_exit_unit_id !== null
+        || item.minimum_lifecycle_role_count !== 3
+        || item.lifecycle_role_count < 3
+        || item.establishment_component_count !== 3
+        || item.overlap_component_count < 3
+        || !strictSameIds(item.establishment_segment_ids, item.core_unit_ids)) {
+        throw new Error('递归中枢三走势契约无效');
+      }
+      return;
+    }
+
+    const entryId = item.entry_unit_id;
+    const leaveId = item.establishment_leave_unit_id;
+    const partial = allowPartialPhysical === true
+      && item.render_kind === 'center_preview'
+      && item.state === 'forming'
+      && leaveId === null;
+    if (typeof entryId !== 'string' || entryId.length === 0
+      || (!partial && (typeof leaveId !== 'string' || leaveId.length === 0))
+      || (partial && item.initial_exit_unit_id !== null)
+      || (!partial && item.initial_exit_unit_id !== leaveId)
+      || item.minimum_lifecycle_role_count !== 5) {
+      throw new Error('物理中枢必须具备进入段和独立离开段');
+    }
+    const expected = [entryId, ...item.core_unit_ids];
+    if (!partial) expected.push(leaveId);
+    if (new Set(expected).size !== expected.length
+      || !strictSameIds(item.establishment_segment_ids, expected)
+      || item.establishment_component_count !== expected.length
+      || item.overlap_component_count < expected.length
+      || item.lifecycle_role_count < expected.length) {
+      throw new Error('物理中枢必须由五个正宽重叠角色建立');
+    }
+  }
+
+  function validatePendingMovementContract(item, level, formalUnitIds, ownedUnitIds) {
+    if (!item || item.schema !== 'chanlun-chart-pending-movement'
+      || item.render_kind !== 'pending_movement'
+      || item.structural_level !== level
+      || item.state !== 'pending'
+      || item.classification !== 'unresolved'
+      || !['entire_stream', 'prefix', 'bridge', 'suffix'].includes(item.role)
+      || !['up', 'down'].includes(item.direction)
+      || item.geometric_direction !== item.direction
+      || item.semantic_direction !== null
+      || item.direction_status !== 'pending'
+      || item.formal_direction_confirmed !== false
+      || item.tradable !== false
+      || item.recursive_eligible !== false
+      || item.divergence_eligible !== false
+      || !strictStringArray(item.constituent_unit_ids)
+      || item.constituent_unit_ids.length === 0
+      || new Set(item.constituent_unit_ids).size !== item.constituent_unit_ids.length) {
+      throw new Error('待定走势分区契约无效');
+    }
+    item.constituent_unit_ids.forEach((unitId) => {
+      if (formalUnitIds.has(unitId) || ownedUnitIds.has(unitId)) {
+        throw new Error('正式走势与待定走势不得重复拥有同一单元');
+      }
+      ownedUnitIds.add(unitId);
+    });
   }
 
   function validateStrictSnapshot(snapshot, source, options, validationOptions) {
@@ -844,6 +934,13 @@
         && !Number.isInteger(formalDirection.structural_level))) {
       throw new Error('严格结构正式方向证据无效');
     }
+    snapshot.stroke_center_observations.forEach((item) => {
+      if (!item || item.render_kind !== 'center_observation'
+        || item.source_kind !== 'stroke_observation') {
+        throw new Error('严格笔中枢观察契约无效');
+      }
+      validateStrictCenterContract(item, 0, false);
+    });
 
     const expectedFrequency = strictFrequencyFromResolution(options.resolution);
     if (snapshot.display_frequency !== expectedFrequency
@@ -883,9 +980,32 @@
       }
       [
         'centers', 'center_previews', 'center_projections', 'current_trends',
-        'completed_trend_snapshots', 'confirmed_points', 'approaching_points', 'divergences',
+        'pending_movements', 'completed_trend_snapshots',
+        'confirmed_points', 'approaching_points', 'divergences',
       ].forEach((field) => {
         if (!Array.isArray(level[field])) throw new Error(`严格结构级别集合无效：${field}`);
+      });
+      const expectedSourceKind = level.structural_level === 0 ? 'segment' : 'trend_type';
+      level.centers.forEach((item) => {
+        if (!item || item.render_kind !== 'formal_center'
+          || item.source_kind !== expectedSourceKind) {
+          throw new Error('严格正式中枢来源契约无效');
+        }
+        validateStrictCenterContract(item, level.structural_level, false);
+      });
+      level.center_previews.forEach((item) => {
+        if (!item || item.render_kind !== 'center_preview'
+          || item.source_kind !== expectedSourceKind) {
+          throw new Error('严格中枢预览来源契约无效');
+        }
+        validateStrictCenterContract(item, level.structural_level, true);
+      });
+      level.center_projections.forEach((item) => {
+        if (!item || item.render_kind !== 'center_projection'
+          || item.source_kind !== expectedSourceKind) {
+          throw new Error('严格中枢投影来源契约无效');
+        }
+        validateStrictCenterContract(item, level.structural_level, false);
       });
       level.current_trends.concat(level.completed_trend_snapshots).forEach((trend) => {
         if (!trend || trend.render_kind !== 'strict_trend'
@@ -899,6 +1019,22 @@
           || !Array.isArray(trend.direction_reason_codes)) {
           throw new Error('严格走势方向资格字段无效');
         }
+      });
+      const formalUnitIds = new Set();
+      level.current_trends.forEach((trend) => {
+        if (!strictStringArray(trend.constituent_unit_ids)) {
+          throw new Error('严格走势来源单元契约无效');
+        }
+        trend.constituent_unit_ids.forEach((unitId) => formalUnitIds.add(unitId));
+      });
+      const pendingUnitIds = new Set();
+      level.pending_movements.forEach((item) => {
+        validatePendingMovementContract(
+          item,
+          level.structural_level,
+          formalUnitIds,
+          pendingUnitIds,
+        );
       });
       [
         ['confirmed_points', 'point_confirmed', 'confirmed'],
@@ -958,6 +1094,14 @@
       availableAt: toSeconds(item.available_at),
       completedAt: toSeconds(item.completed_at),
       entryUnitId: item.entry_unit_id || null,
+      establishmentLeaveUnitId: item.establishment_leave_unit_id || null,
+      initialExitUnitId: item.initial_exit_unit_id || null,
+      minimumLifecycleRoleCount: numeric(item.minimum_lifecycle_role_count),
+      lifecycleRoleCount: numeric(item.lifecycle_role_count),
+      overlapComponentCount: numeric(item.overlap_component_count),
+      establishmentSegmentIds: Array.isArray(item.establishment_segment_ids)
+        ? item.establishment_segment_ids.slice()
+        : [],
       coreUnitIds: Array.isArray(item.core_unit_ids) ? item.core_unit_ids.slice() : [],
       initialUnitIds: Array.isArray(item.initial_unit_ids) ? item.initial_unit_ids.slice() : [],
       bodyUnitIds: Array.isArray(item.body_unit_ids) ? item.body_unit_ids.slice() : [],
@@ -1016,6 +1160,26 @@
       centerIds: Array.isArray(item.center_ids) ? item.center_ids.slice() : [],
       confirmedAt: toSeconds(item.confirmed_at),
       availableAt: toSeconds(item.available_at),
+    };
+  }
+
+  function summarizePendingMovement(item) {
+    return {
+      partitionId: item.partition_id,
+      renderId: item.render_id,
+      structuralLevel: item.structural_level,
+      sourceKind: item.source_kind,
+      state: item.state,
+      classification: item.classification,
+      role: item.role,
+      direction: item.direction,
+      constituentUnitIds: item.constituent_unit_ids.slice(),
+      leftTrendId: item.left_trend_id || null,
+      rightTrendId: item.right_trend_id || null,
+      availableAt: toSeconds(item.available_at),
+      tradable: false,
+      recursiveEligible: false,
+      divergenceEligible: false,
     };
   }
 
@@ -1127,6 +1291,7 @@
     const centerProjections = [];
     const trends = [];
     const completedTrends = [];
+    const pendingMovements = [];
     const rawConfirmedPoints = [];
     const rawApproachingPoints = [];
     const rawDivergences = [];
@@ -1151,6 +1316,9 @@
       });
       level.current_trends.forEach((item) => trends.push(summarizeStrictTrend(item)));
       level.completed_trend_snapshots.forEach((item) => completedTrends.push(summarizeStrictTrend(item)));
+      level.pending_movements.forEach((item) => {
+        pendingMovements.push(summarizePendingMovement(item));
+      });
       level.confirmed_points.forEach((item) => {
         rawConfirmedPoints.push(item);
         const pointType = String(item.point_type || '').toLowerCase();
@@ -1254,6 +1422,7 @@
       formalDirectionReasonCodes: formalDirection.reason_codes.slice(),
       trends,
       completedTrends,
+      pendingMovements,
       formalCenters,
       centerPreviews,
       centerProjections,

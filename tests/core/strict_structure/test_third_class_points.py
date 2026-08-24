@@ -147,6 +147,10 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
             structural_level=formal.structural_level,
             source_kind=SourceKind.STROKE_OBSERVATION.value,
             initial_unit_ids=tuple(item.unit_id for item in formal.initial_units),
+            entry_unit_id=formal.entry_unit.unit_id,
+            establishment_leave_unit_id=(
+                formal.establishment_leave_unit.unit_id
+            ),
             zd_tick=formal.zd_tick,
             zg_tick=formal.zg_tick,
         ),
@@ -160,6 +164,9 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
             converted[item.unit_id] for item in formal.initial_units
         ),
         body_units=tuple(converted[item.unit_id] for item in formal.body_units),
+        establishment_leave_unit=converted[
+            formal.establishment_leave_unit.unit_id
+        ],
         extension_units=tuple(
             converted[item.unit_id] for item in formal.extension_units
         ),

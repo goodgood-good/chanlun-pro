@@ -40,6 +40,8 @@
       identifier = item.center_id;
     } else if (kind === "strict_trend") {
       identifier = item.trend_id;
+    } else if (kind === "pending_movement") {
+      identifier = item.partition_id;
     } else if (
       kind === "point_confirmed" ||
       kind === "point_approaching"

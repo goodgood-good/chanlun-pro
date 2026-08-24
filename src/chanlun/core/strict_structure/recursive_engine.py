@@ -14,7 +14,10 @@ from chanlun.core.strict_structure.models import (
     TrendAssemblyResult,
     center_seed_size,
 )
-from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
+from chanlun.core.strict_structure.trend_assembler import (
+    assemble_trend_types,
+    partition_pending_movements,
+)
 from chanlun.core.strict_structure.unit_adapter import build_recursive_unit_stream
 
 
@@ -309,8 +312,9 @@ def calculate_level_with_divergence_boundaries(
                 "trend_id",
                 "completed trend",
             )
+            current_trends = tuple(merged_current.values())
             return center_result, TrendAssemblyResult(
-                current_trends=tuple(merged_current.values()),
+                current_trends=current_trends,
                 completed_trends=tuple(
                     sorted(
                         merged_completed.values(),
@@ -325,6 +329,11 @@ def calculate_level_with_divergence_boundaries(
                             boundary.boundary_id,
                         ),
                     )
+                ),
+                pending_movements=partition_pending_movements(
+                    current_trends,
+                    values,
+                    structural_level,
                 ),
             )
 
@@ -422,9 +431,13 @@ class StrictRecursiveEngine:
         for level in range(self.max_levels):
             source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
-            # 每一结构层都以三个连续、已完成同级单元的重叠建立中枢。前一单元
-            # 仅在存在时作为背驰进入腿，不再阻塞首个中枢成立。
-            minimum_units = center_seed_size(source_kind)
+            # 物理层至少需要进入 + 中间三段核心 + 独立离开五个角色；更高层
+            # 仍由三个已完成低级别走势类型递归，不能混用物理线段门槛。
+            minimum_units = (
+                center_seed_size(source_kind)
+                if source_kind is SourceKind.TREND_TYPE
+                else 5
+            )
             if len(units) < minimum_units:
                 break
 

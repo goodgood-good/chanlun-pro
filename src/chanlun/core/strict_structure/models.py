@@ -84,6 +84,15 @@ class TrendState(str, Enum):
     LOCKED = "locked"
 
 
+class PendingMovementRole(str, Enum):
+    """待定走势在当前正式走势账本中的独占位置。"""
+
+    ENTIRE_STREAM = "entire_stream"
+    PREFIX = "prefix"
+    BRIDGE = "bridge"
+    SUFFIX = "suffix"
+
+
 class StrictPointStatus(str, Enum):
     APPROACHING = "approaching"
     CONFIRMED = "confirmed"
@@ -215,6 +224,7 @@ class TrendCenter:
     price_basis_revision: str
     state: CenterState
     entry_unit: ConstituentUnit | None
+    establishment_leave_unit: ConstituentUnit | None
     initial_units: tuple[ConstituentUnit, ...]
     body_units: tuple[ConstituentUnit, ...]
     extension_units: tuple[ConstituentUnit, ...]
@@ -295,6 +305,29 @@ class TrendCenter:
             if self.entry_unit in self.body_units:
                 raise ValueError("external entry must not enter center body")
 
+        establishment_leave = self.establishment_leave_unit
+        if self.source_kind is SourceKind.TREND_TYPE:
+            if establishment_leave is not None:
+                raise ValueError(
+                    "recursive trend-type center has no physical establishment leave"
+                )
+        else:
+            if self.entry_unit is None:
+                raise ValueError("physical center requires an external entry unit")
+            if establishment_leave is None:
+                raise ValueError("physical center requires an external leave unit")
+            if (
+                establishment_leave.structural_level != self.structural_level
+                or establishment_leave.source_kind is not self.source_kind
+            ):
+                raise ValueError("establishment leave level/source mismatch")
+            if establishment_leave.price_basis_revision != self.price_basis_revision:
+                raise ValueError("establishment leave price basis mismatch")
+            if not establishment_leave.locked:
+                raise ValueError("formal establishment leave must be locked")
+            if establishment_leave in self.body_units:
+                raise ValueError("establishment leave must stay outside center body")
+
         expected_zd = max(item.low_tick for item in self.core_units)
         expected_zg = min(item.high_tick for item in self.core_units)
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
@@ -314,6 +347,33 @@ class TrendCenter:
             raise ValueError(
                 "each center body unit must overlap the frozen center core"
             )
+        if self.source_kind is not SourceKind.TREND_TYPE:
+            if self.entry_unit is None:  # guarded above; keeps narrowing explicit
+                raise ValueError("physical center entry is missing")
+            if not self._overlaps_core(self.entry_unit):
+                raise ValueError("entry unit must positively overlap center core")
+            if establishment_leave is None:  # guarded above
+                raise ValueError("physical center leave is missing")
+            if not self._overlaps_core(establishment_leave):
+                raise ValueError(
+                    "establishment leave must positively overlap center core"
+                )
+            if not self._outside_in_direction(establishment_leave):
+                raise ValueError(
+                    "establishment leave endpoint must be outside center core"
+                )
+            establishment_ids = tuple(
+                item.unit_id
+                for item in (
+                    self.entry_unit,
+                    *self.initial_units,
+                    establishment_leave,
+                )
+            )
+            if len(establishment_ids) != 5 or len(set(establishment_ids)) != 5:
+                raise ValueError(
+                    "physical center requires five unique establishment roles"
+                )
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
         if any(
@@ -331,7 +391,13 @@ class TrendCenter:
 
         if self.body_start_market_time != self.body_units[0].market_start:
             raise ValueError("body start time must equal first body unit")
-        maturity_unit = self.initial_units[-1]
+        maturity_unit = (
+            self.initial_units[-1]
+            if self.source_kind is SourceKind.TREND_TYPE
+            else self.establishment_leave_unit
+        )
+        if maturity_unit is None:
+            raise ValueError("physical center maturity evidence is missing")
         if self.established_market_time != maturity_unit.market_end:
             raise ValueError(
                 "established market time must equal final initial body unit end"
@@ -350,6 +416,11 @@ class TrendCenter:
             (() if self.entry_unit is None else (self.entry_unit,))
             + self.body_units
             + self.failed_departure_units
+            + (
+                ()
+                if self.establishment_leave_unit is None
+                else (self.establishment_leave_unit,)
+            )
         )
         if self.available_at < max(item.available_at for item in center_evidence):
             raise ValueError("center availability must cover body evidence")
@@ -357,6 +428,7 @@ class TrendCenter:
             raise ValueError("body_revision must equal extension unit count")
 
         for terminal in (
+            self.establishment_leave_unit,
             *self.failed_departure_units,
             self.pending_leave_unit,
             self.completion_leave_unit,
@@ -391,6 +463,10 @@ class TrendCenter:
             pending = self.pending_leave_unit
             if pending is None:
                 return
+            if self.available_at < pending.available_at:
+                raise ValueError(
+                    "center availability must cover pending leave evidence"
+                )
             if pending in self.body_units:
                 raise ValueError("pending leave must stay outside center body")
             if not pending.locked:
@@ -551,6 +627,32 @@ class TrendCenter:
             else:
                 validate_completion()
 
+        if establishment_leave is not None:
+            lifecycle_owners = (
+                *self.failed_departure_units,
+                *self.supersession_bridge_units,
+                *(
+                    ()
+                    if self.pending_leave_unit is None
+                    else (self.pending_leave_unit,)
+                ),
+                *(
+                    ()
+                    if self.completion_leave_unit is None
+                    else (self.completion_leave_unit,)
+                ),
+            )
+            establishment_owners = tuple(
+                item
+                for item in lifecycle_owners
+                if item.unit_id == establishment_leave.unit_id
+            )
+            if establishment_owners != (establishment_leave,):
+                raise ValueError(
+                    "physical establishment leave must belong to exactly one "
+                    "lifecycle role"
+                )
+
         transition_units = (
             *self.body_units,
             *self.failed_departure_units,
@@ -628,7 +730,7 @@ class TrendCenter:
                 else "center transition"
             )
             if (
-                self.source_kind is SourceKind.SEGMENT
+                self.source_kind is not SourceKind.TREND_TYPE
                 and previous.direction == current.direction
             ):
                 raise ValueError(f"{pair_label} directions must alternate")
@@ -651,7 +753,15 @@ class TrendCenter:
             price_basis_revision=self.price_basis_revision,
             structural_level=self.structural_level,
             source_kind=self.source_kind.value,
+            entry_unit_id=(
+                None if self.entry_unit is None else self.entry_unit.unit_id
+            ),
             initial_unit_ids=tuple(item.unit_id for item in self.initial_units),
+            establishment_leave_unit_id=(
+                None
+                if self.establishment_leave_unit is None
+                else self.establishment_leave_unit.unit_id
+            ),
             zd_tick=self.zd_tick,
             zg_tick=self.zg_tick,
         )
@@ -727,13 +837,27 @@ class TrendCenter:
     def maturity_unit(self) -> ConstituentUnit:
         """返回锁定后使中枢正式成立的不可变单元。"""
 
-        return self.initial_units[-1]
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return self.initial_units[-1]
+        if self.establishment_leave_unit is None:  # guarded by __post_init__
+            raise ValueError("physical center maturity evidence is missing")
+        return self.establishment_leave_unit
+
+    @property
+    def initial_exit_unit(self) -> ConstituentUnit | None:
+        """返回使物理中枢正式成立的独立离开段。"""
+
+        return self.establishment_leave_unit
 
     @property
     def establishment_units(self) -> tuple[ConstituentUnit, ...]:
         """返回用于建立该中枢的精确来源窗口。"""
 
-        return self.initial_units
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return self.initial_units
+        if self.entry_unit is None or self.establishment_leave_unit is None:
+            return ()
+        return (self.entry_unit, *self.initial_units, self.establishment_leave_unit)
 
     @property
     def lifecycle_leave_unit(self) -> ConstituentUnit | None:
@@ -768,9 +892,33 @@ class TrendCenter:
         历史；真正回到核心的回返单元才进入 ``extension_units``。
         """
 
-        return len(self.body_units) + len(self.failed_departure_units) + (
-            1 if self.lifecycle_leave_unit is not None else 0
+        roles = (
+            *((self.entry_unit,) if self.entry_unit is not None else ()),
+            *self.body_units,
+            *self.failed_departure_units,
+            *(
+                ()
+                if self.establishment_leave_unit is None
+                else (self.establishment_leave_unit,)
+            ),
+            *(
+                ()
+                if self.lifecycle_leave_unit is None
+                else (self.lifecycle_leave_unit,)
+            ),
         )
+        return len({item.unit_id for item in roles})
+
+    @property
+    def has_minimum_physical_roles(self) -> bool:
+        """物理中枢必须具备进入、三段核心和独立离开五个角色。"""
+
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return True
+        establishment_ids = tuple(
+            item.unit_id for item in self.establishment_units
+        )
+        return len(establishment_ids) == 5 and len(set(establishment_ids)) == 5
 
     @property
     def completion_direction(self) -> Direction | None:
@@ -831,6 +979,7 @@ class CenterPreview:
     pending_leave_unit_id: str | None = None
     completion_leave_unit_id: str | None = None
     completion_return_unit_id: str | None = None
+    establishment_leave_unit_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
@@ -927,6 +1076,21 @@ class CenterPreview:
         external_ids = (*self.failed_departure_unit_ids, *lifecycle_ids)
         if self.entry_unit_id is not None and self.entry_unit_id in external_ids:
             raise ValueError("preview entry and lifecycle units must be distinct")
+        if self.source_kind is SourceKind.TREND_TYPE:
+            if self.establishment_leave_unit_id is not None:
+                raise ValueError(
+                    "trend-type preview has no physical establishment leave"
+                )
+        elif self.establishment_leave_unit_id is not None:
+            if self.entry_unit_id is None:
+                raise ValueError("physical preview leave requires an entry")
+            if self.establishment_leave_unit_id not in (
+                *self.failed_departure_unit_ids,
+                *lifecycle_ids,
+            ):
+                raise ValueError(
+                    "physical preview establishment leave must own leave lifecycle"
+                )
     @property
     def formal_center_id(self) -> str | None:
         """返回该预览锁定后将采用的正式中枢身份。
@@ -936,13 +1100,30 @@ class CenterPreview:
         精确中枢血缘，而不需要由选股层重新拼装另一套身份。
         """
 
-        if self.zd_tick is None or self.zg_tick is None:
+        if (
+            self.zd_tick is None
+            or self.zg_tick is None
+            or self.state is CenterPreviewState.TOUCH_ONLY
+        ):
+            return None
+        if (
+            self.zd_tick > self.zg_tick
+            if self.source_kind is SourceKind.TREND_TYPE
+            else self.zd_tick >= self.zg_tick
+        ):
+            return None
+        if self.source_kind is not SourceKind.TREND_TYPE and (
+            self.entry_unit_id is None
+            or self.establishment_leave_unit_id is None
+        ):
             return None
         return build_center_id(
             price_basis_revision=self.price_basis_revision,
             structural_level=self.structural_level,
             source_kind=self.source_kind.value,
+            entry_unit_id=self.entry_unit_id,
             initial_unit_ids=self.unit_ids[: center_seed_size(self.source_kind)],
+            establishment_leave_unit_id=self.establishment_leave_unit_id,
             zd_tick=self.zd_tick,
             zg_tick=self.zg_tick,
         )
@@ -975,6 +1156,7 @@ class CenterEvidence:
     gg_tick: int
     initial_unit_ids: tuple[str, ...]
     entry_unit_id: str | None
+    establishment_leave_unit_id: str | None
     core_unit_ids: tuple[str, str, str]
     body_unit_ids: tuple[str, ...]
     extension_unit_ids: tuple[str, ...]
@@ -1012,6 +1194,11 @@ class CenterEvidence:
             initial_unit_ids=tuple(item.unit_id for item in center.initial_units),
             entry_unit_id=(
                 None if center.entry_unit is None else center.entry_unit.unit_id
+            ),
+            establishment_leave_unit_id=(
+                None
+                if center.establishment_leave_unit is None
+                else center.establishment_leave_unit.unit_id
             ),
             core_unit_ids=tuple(item.unit_id for item in center.core_units),
             body_unit_ids=tuple(item.unit_id for item in center.body_units),
@@ -1121,14 +1308,30 @@ class CenterLevelResult:
             return
 
         active = ongoing[0]
-        active_seed = tuple(item.unit_id for item in active.initial_units)
         seed_width = center_seed_size(active.source_kind)
-        forming_seed = forming[0].unit_ids[:seed_width]
+        active_seed = (
+            None if active.entry_unit is None else active.entry_unit.unit_id,
+            *(item.unit_id for item in active.initial_units[:seed_width]),
+            (
+                None
+                if active.establishment_leave_unit is None
+                else active.establishment_leave_unit.unit_id
+            ),
+        )
+        forming_seed = (
+            forming[0].entry_unit_id,
+            *forming[0].unit_ids[:seed_width],
+            forming[0].establishment_leave_unit_id,
+        )
         if forming_seed == active_seed:
             return
         active_completion_observed = any(
             preview.state is CenterPreviewState.COMPLETED
-            and preview.unit_ids[:seed_width]
+            and (
+                preview.entry_unit_id,
+                *preview.unit_ids[:seed_width],
+                preview.establishment_leave_unit_id,
+            )
             == active_seed
             for preview in self.previews
         )
@@ -1476,10 +1679,161 @@ class TrendType:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingMovementPartition:
+    """尚不足以定型为正式 ``TrendType`` 的连续同级别走势分区。
+
+    待定分区只负责把未被当前正式走势拥有的单元显式列账。它没有中枢，不能
+    递归、交易或参与背驰；相邻正式走势通过边界引用连接，绝不共享来源单元。
+    """
+
+    partition_id: str
+    structural_level: int
+    source_kind: SourceKind
+    price_basis_revision: str
+    role: PendingMovementRole
+    direction: Direction
+    constituent_units: tuple[ConstituentUnit, ...]
+    left_trend_id: str | None
+    right_trend_id: str | None
+    left_boundary_unit_id: str | None
+    right_boundary_unit_id: str | None
+    available_at: datetime
+    state: Literal["pending"] = "pending"
+    classification: Literal["unresolved"] = "unresolved"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
+        object.__setattr__(self, "role", PendingMovementRole(self.role))
+        object.__setattr__(self, "constituent_units", tuple(self.constituent_units))
+        if not self.partition_id:
+            raise ValueError("pending movement partition_id is required")
+        if type(self.structural_level) is not int or self.structural_level < 0:
+            raise ValueError("pending movement structural_level must be non-negative")
+        if not self.price_basis_revision or not self.price_basis_revision.strip():
+            raise ValueError("pending movement price basis is required")
+        if self.state != "pending" or self.classification != "unresolved":
+            raise ValueError("pending movement must remain unresolved")
+        if self.direction not in ("up", "down"):
+            raise ValueError("pending movement direction must be up or down")
+        if not self.constituent_units:
+            raise ValueError("pending movement requires constituent units")
+        if len({item.unit_id for item in self.constituent_units}) != len(
+            self.constituent_units
+        ):
+            raise ValueError("pending movement constituent units must be unique")
+        if any(
+            item.structural_level != self.structural_level
+            or item.source_kind is not self.source_kind
+            or item.price_basis_revision != self.price_basis_revision
+            for item in self.constituent_units
+        ):
+            raise ValueError("pending movement unit context mismatch")
+        for previous, current in zip(
+            self.constituent_units,
+            self.constituent_units[1:],
+        ):
+            if previous.end_tick != current.start_tick:
+                raise ValueError("pending movement units must connect")
+            if current.market_start < previous.market_end:
+                raise ValueError("pending movement unit intervals must not overlap")
+        first = self.constituent_units[0]
+        last = self.constituent_units[-1]
+        expected_direction = (
+            "up"
+            if last.end_tick > first.start_tick
+            else "down"
+            if last.end_tick < first.start_tick
+            else last.direction
+        )
+        if self.direction != expected_direction:
+            raise ValueError("pending movement direction must match its endpoints")
+
+        boundary_shape = (
+            self.left_trend_id,
+            self.right_trend_id,
+            self.left_boundary_unit_id,
+            self.right_boundary_unit_id,
+        )
+        expected_boundary_shape = {
+            PendingMovementRole.ENTIRE_STREAM: (None, None, None, None),
+            PendingMovementRole.PREFIX: (
+                None,
+                self.right_trend_id,
+                None,
+                self.right_boundary_unit_id,
+            ),
+            PendingMovementRole.BRIDGE: boundary_shape,
+            PendingMovementRole.SUFFIX: (
+                self.left_trend_id,
+                None,
+                self.left_boundary_unit_id,
+                None,
+            ),
+        }[self.role]
+        if boundary_shape != expected_boundary_shape:
+            raise ValueError("pending movement boundary shape does not match its role")
+        if self.role is PendingMovementRole.PREFIX and (
+            self.right_trend_id is None or self.right_boundary_unit_id is None
+        ):
+            raise ValueError("pending prefix requires a right formal boundary")
+        if self.role is PendingMovementRole.BRIDGE and any(
+            value is None for value in boundary_shape
+        ):
+            raise ValueError("pending bridge requires two formal boundaries")
+        if self.role is PendingMovementRole.BRIDGE and (
+            self.left_trend_id == self.right_trend_id
+            or self.left_boundary_unit_id == self.right_boundary_unit_id
+        ):
+            raise ValueError("pending bridge requires two distinct formal boundaries")
+        if self.role is PendingMovementRole.SUFFIX and (
+            self.left_trend_id is None or self.left_boundary_unit_id is None
+        ):
+            raise ValueError("pending suffix requires a left formal boundary")
+        constituent_ids = {item.unit_id for item in self.constituent_units}
+        if any(
+            item in constituent_ids
+            for item in (self.left_boundary_unit_id, self.right_boundary_unit_id)
+            if item is not None
+        ):
+            raise ValueError("pending movement cannot share formal boundary units")
+        if self.available_at < max(
+            item.available_at for item in self.constituent_units
+        ):
+            raise ValueError("pending movement availability must cover its units")
+        expected_id = "sha256:" + stable_structure_id(
+            "chanlun-pending-movement",
+            self.price_basis_revision,
+            self.structural_level,
+            self.source_kind.value,
+            self.role.value,
+            tuple(item.unit_id for item in self.constituent_units),
+            self.left_trend_id,
+            self.right_trend_id,
+            self.left_boundary_unit_id,
+            self.right_boundary_unit_id,
+        )
+        if self.partition_id != expected_id:
+            raise ValueError("pending movement id must match its immutable evidence")
+
+    @property
+    def tradable(self) -> bool:
+        return False
+
+    @property
+    def recursive_eligible(self) -> bool:
+        return False
+
+    @property
+    def divergence_eligible(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
 class TrendAssemblyResult:
     current_trends: tuple[TrendType, ...]
     completed_trends: tuple[TrendType, ...]
     decomposition_boundaries: tuple[DecompositionBoundaryEvidence, ...] = ()
+    pending_movements: tuple[PendingMovementPartition, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "current_trends", tuple(self.current_trends))
@@ -1489,6 +1843,7 @@ class TrendAssemblyResult:
             "decomposition_boundaries",
             tuple(self.decomposition_boundaries),
         )
+        object.__setattr__(self, "pending_movements", tuple(self.pending_movements))
         if any(
             trend.state is not TrendState.COMPLETE for trend in self.completed_trends
         ):
@@ -1539,6 +1894,71 @@ class TrendAssemblyResult:
                 raise ValueError(
                     "decomposition boundary must preserve its exact terminal trend"
                 )
+        pending_ids = tuple(
+            item.partition_id for item in self.pending_movements
+        )
+        if len(set(pending_ids)) != len(pending_ids):
+            raise ValueError("pending movement partitions must be unique")
+        pending_unit_ids: set[str] = set()
+        formal_unit_ids = {
+            item.unit_id
+            for trend in self.current_trends
+            for item in trend.constituent_units
+        }
+        for pending in self.pending_movements:
+            if pending.left_trend_id not in current_ids | {None} or (
+                pending.right_trend_id not in current_ids | {None}
+            ):
+                raise ValueError(
+                    "pending movement boundary must reference a current trend"
+                )
+            first_pending = pending.constituent_units[0]
+            last_pending = pending.constituent_units[-1]
+            adjacent_trends = []
+            if pending.left_trend_id is not None:
+                left_trend = current_by_id[pending.left_trend_id]
+                adjacent_trends.append(left_trend)
+                left_boundary = left_trend.constituent_units[-1]
+                if pending.left_boundary_unit_id != left_boundary.unit_id:
+                    raise ValueError(
+                        "pending movement left boundary does not match its trend"
+                    )
+                if (
+                    left_boundary.end_tick != first_pending.start_tick
+                    or first_pending.market_start < left_boundary.market_end
+                ):
+                    raise ValueError(
+                        "pending movement does not connect to its left boundary"
+                    )
+            if pending.right_trend_id is not None:
+                right_trend = current_by_id[pending.right_trend_id]
+                adjacent_trends.append(right_trend)
+                right_boundary = right_trend.constituent_units[0]
+                if pending.right_boundary_unit_id != right_boundary.unit_id:
+                    raise ValueError(
+                        "pending movement right boundary does not match its trend"
+                    )
+                if (
+                    last_pending.end_tick != right_boundary.start_tick
+                    or right_boundary.market_start < last_pending.market_end
+                ):
+                    raise ValueError(
+                        "pending movement does not connect to its right boundary"
+                    )
+            if adjacent_trends and pending.available_at < max(
+                trend.available_at for trend in adjacent_trends
+            ):
+                raise ValueError(
+                    "pending movement availability must cover formal boundaries"
+                )
+            unit_ids = {item.unit_id for item in pending.constituent_units}
+            if unit_ids & formal_unit_ids:
+                raise ValueError(
+                    "formal trends and pending movements cannot share units"
+                )
+            if unit_ids & pending_unit_ids:
+                raise ValueError("pending movement partitions cannot share units")
+            pending_unit_ids.update(unit_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1782,6 +2202,21 @@ class StrictLevelResult:
             raise ValueError(
                 "divergence-closed centers and decomposition boundaries must match"
             )
+
+    @property
+    def pending_movements(self) -> tuple[PendingMovementPartition, ...]:
+        """返回未被当前正式走势独占的连续待定分区。"""
+
+        # 延迟导入避免模型与走势装配器在模块加载阶段形成循环依赖。
+        from chanlun.core.strict_structure.trend_assembler import (
+            partition_pending_movements,
+        )
+
+        return partition_pending_movements(
+            self.trend_types,
+            self.units,
+            self.structural_level,
+        )
 
 
 @dataclass(frozen=True, slots=True)

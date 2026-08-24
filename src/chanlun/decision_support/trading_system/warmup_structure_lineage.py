@@ -31,16 +31,19 @@ if TYPE_CHECKING:
 
 
 WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_SCHEMA = (
-    "chanlun-warmup-structure-lineage-diagnostic"
+    "chanlun-warmup-structure-lineage-diagnostic-v2"
 )
 WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     {
         "schema": WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_SCHEMA,
-        "binding": (
-            "warmup-envelope-semantic-and-mapping-supply-content-sha256"
-        ),
+        "binding": ("warmup-envelope-semantic-and-mapping-supply-content-sha256"),
         "comparison": "changed-prefix-period-vs-longest-left-history-prefix",
         "structure_source": "strict-recursive-evidence",
+        "physical_center_establishment": (
+            "entry-three-core-establishment-leave-five-role-v1"
+        ),
+        "physical_center_sources": ("segment", "stroke_observation"),
+        "recursive_center_establishment": "three-completed-trend-types-v1",
         "derived_facts": (
             "common-line-suffix",
             "center-partition-delta",
@@ -52,8 +55,12 @@ WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     }
 )
 
-StructureLineKind = Literal["SEGMENT", "TREND_TYPE"]
-_LINE_KINDS: tuple[StructureLineKind, ...] = ("SEGMENT", "TREND_TYPE")
+StructureLineKind = Literal["SEGMENT", "STROKE_OBSERVATION", "TREND_TYPE"]
+_LINE_KINDS: tuple[StructureLineKind, ...] = (
+    "SEGMENT",
+    "STROKE_OBSERVATION",
+    "TREND_TYPE",
+)
 _PERIODS = ("M", "W", "D")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _STRICT_STRUCTURE_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -96,6 +103,8 @@ class WarmupStructureLineFacts:
     end_at: datetime
     start_value: Decimal
     end_value: Decimal
+    low_value: Decimal
+    high_value: Decimal
     locked_at: datetime | None
     completed: bool
 
@@ -110,12 +119,14 @@ class WarmupStructureLineFacts:
         end_at: datetime,
         start_value: Decimal,
         end_value: Decimal,
+        low_value: Decimal,
+        high_value: Decimal,
         locked_at: datetime | None,
         completed: bool,
     ) -> str:
         return sha256_json(
             {
-                "schema": "chanlun-warmup-strict-structure-unit-identity",
+                "schema": "chanlun-warmup-strict-structure-unit-identity-v2",
                 "source_symbol": source_symbol,
                 "source_frequency": source_frequency,
                 "source_kind": source_kind,
@@ -124,6 +135,8 @@ class WarmupStructureLineFacts:
                 "end_at": end_at,
                 "start_value": _decimal_text(start_value),
                 "end_value": _decimal_text(end_value),
+                "low_value": _decimal_text(low_value),
+                "high_value": _decimal_text(high_value),
                 "locked_at": locked_at,
                 "completed": completed,
             }
@@ -143,10 +156,12 @@ class WarmupStructureLineFacts:
             raise ValueError("structure line interval is invalid")
         object.__setattr__(self, "start_at", start)
         object.__setattr__(self, "end_at", end)
-        object.__setattr__(
-            self, "start_value", _decimal(self.start_value, "start_value")
-        )
-        object.__setattr__(self, "end_value", _decimal(self.end_value, "end_value"))
+        for name in ("start_value", "end_value", "low_value", "high_value"):
+            object.__setattr__(self, name, _decimal(getattr(self, name), name))
+        if self.low_value > min(
+            self.start_value, self.end_value
+        ) or self.high_value < max(self.start_value, self.end_value):
+            raise ValueError("structure line price range is inconsistent")
         locked = self.locked_at
         if locked is not None:
             locked = normalize_datetime(locked, "line_locked_at")
@@ -166,6 +181,8 @@ class WarmupStructureLineFacts:
             end_at=self.end_at,
             start_value=self.start_value,
             end_value=self.end_value,
+            low_value=self.low_value,
+            high_value=self.high_value,
             locked_at=self.locked_at,
             completed=self.completed,
         )
@@ -182,6 +199,8 @@ class WarmupStructureLineFacts:
             "end_at": self.end_at.isoformat(),
             "start_value": _decimal_text(self.start_value),
             "end_value": _decimal_text(self.end_value),
+            "low_value": _decimal_text(self.low_value),
+            "high_value": _decimal_text(self.high_value),
             "locked_at": (
                 None if self.locked_at is None else self.locked_at.isoformat()
             ),
@@ -202,6 +221,8 @@ class WarmupStructureLineFacts:
                 end_at=datetime.fromisoformat(str(raw["end_at"])),
                 start_value=_decimal(raw["start_value"], "start_value"),
                 end_value=_decimal(raw["end_value"], "end_value"),
+                low_value=_decimal(raw["low_value"], "low_value"),
+                high_value=_decimal(raw["high_value"], "high_value"),
                 locked_at=(
                     None
                     if raw["locked_at"] is None
@@ -233,6 +254,9 @@ class WarmupStructureCenterFacts:
     real: bool
     expanded: bool
     entry_line_id: str | None
+    core_line_ids: tuple[str, ...]
+    establishment_leave_line_id: str | None
+    establishment_line_ids: tuple[str, ...]
     constituent_line_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -253,21 +277,78 @@ class WarmupStructureCenterFacts:
         object.__setattr__(self, "end_at", end)
         for name in ("core_low", "core_high", "range_low", "range_high"):
             object.__setattr__(self, name, _decimal(getattr(self, name), name))
+        invalid_core = (
+            self.core_low > self.core_high
+            if self.source_kind == "TREND_TYPE"
+            else self.core_low >= self.core_high
+        )
         if (
             self.range_low > self.core_low
-            or self.core_low >= self.core_high
+            or invalid_core
             or self.core_high > self.range_high
         ):
             raise ValueError("center price intervals are inconsistent")
-        if any(type(value) is not bool for value in (self.completed, self.real, self.expanded)):
+        if any(
+            type(value) is not bool
+            for value in (self.completed, self.real, self.expanded)
+        ):
             raise ValueError("center flags must be exact booleans")
         if self.entry_line_id is not None:
             _require_sha256(self.entry_line_id, "entry_line_id")
+        core = tuple(self.core_line_ids)
+        if len(core) != 3 or len(core) != len(set(core)):
+            raise ValueError("center core must reference exactly three unique lines")
+        for value in core:
+            _require_sha256(value, "core_line_id")
+        if self.establishment_leave_line_id is not None:
+            _require_sha256(
+                self.establishment_leave_line_id,
+                "establishment_leave_line_id",
+            )
+        establishment = tuple(self.establishment_line_ids)
+        for value in establishment:
+            _require_sha256(value, "establishment_line_id")
         values = tuple(self.constituent_line_ids)
         if not values or len(values) != len(set(values)):
             raise ValueError("center constituent line identities are invalid")
         for value in values:
             _require_sha256(value, "constituent_line_id")
+        if not set(core).issubset(values):
+            raise ValueError("center core lines must belong to the center body")
+        if self.entry_line_id is not None and self.entry_line_id in values:
+            raise ValueError("center entry must stay outside the center body")
+        if (
+            self.establishment_leave_line_id is not None
+            and self.establishment_leave_line_id in values
+        ):
+            raise ValueError(
+                "center establishment leave must stay outside the center body"
+            )
+        if self.source_kind != "TREND_TYPE":
+            if self.entry_line_id is None or self.establishment_leave_line_id is None:
+                raise ValueError(
+                    "physical center requires entry and establishment leave lines"
+                )
+            expected = (
+                self.entry_line_id,
+                *core,
+                self.establishment_leave_line_id,
+            )
+            if establishment != expected or len(set(establishment)) != 5:
+                raise ValueError(
+                    "physical center establishment must contain five unique roles"
+                )
+        else:
+            if self.establishment_leave_line_id is not None:
+                raise ValueError(
+                    "recursive center cannot carry a physical establishment leave"
+                )
+            if establishment != core:
+                raise ValueError(
+                    "recursive center establishment must equal its three core lines"
+                )
+        object.__setattr__(self, "core_line_ids", core)
+        object.__setattr__(self, "establishment_line_ids", establishment)
         object.__setattr__(self, "constituent_line_ids", values)
 
     def document(self) -> dict[str, object]:
@@ -291,6 +372,14 @@ class WarmupStructureCenterFacts:
             "real": self.real,
             "expanded": self.expanded,
             "entry_line_id": self.entry_line_id,
+            "core_line_ids": list(self.core_line_ids),
+            "core_line_count": len(self.core_line_ids),
+            "establishment_leave_line_id": self.establishment_leave_line_id,
+            "establishment_line_ids": list(self.establishment_line_ids),
+            "establishment_line_count": len(self.establishment_line_ids),
+            "physical_five_role_validated": (
+                True if self.source_kind != "TREND_TYPE" else None
+            ),
             "constituent_line_ids": list(self.constituent_line_ids),
             "constituent_line_count": len(self.constituent_line_ids),
         }
@@ -300,12 +389,16 @@ class WarmupStructureCenterFacts:
         try:
             core = raw["core_interval"]
             envelope = raw["range_interval"]
+            core_lines = raw["core_line_ids"]
+            establishment_lines = raw["establishment_line_ids"]
             lines = raw["constituent_line_ids"]
             if (
                 not isinstance(core, list)
                 or len(core) != 2
                 or not isinstance(envelope, list)
                 or len(envelope) != 2
+                or not isinstance(core_lines, list)
+                or not isinstance(establishment_lines, list)
                 or not isinstance(lines, list)
                 or type(raw["level_rank"]) is not int
                 or type(raw["center_index"]) is not int
@@ -320,9 +413,7 @@ class WarmupStructureCenterFacts:
                 source_kind=str(raw["source_kind"]),  # type: ignore[arg-type]
                 level_rank=raw["level_rank"],  # type: ignore[arg-type]
                 center_index=raw["center_index"],  # type: ignore[arg-type]
-                direction=(
-                    None if raw["direction"] is None else str(raw["direction"])
-                ),
+                direction=(None if raw["direction"] is None else str(raw["direction"])),
                 start_at=datetime.fromisoformat(str(raw["start_at"])),
                 end_at=datetime.fromisoformat(str(raw["end_at"])),
                 core_low=_decimal(core[0], "core_low"),
@@ -333,16 +424,31 @@ class WarmupStructureCenterFacts:
                 real=raw["real"],  # type: ignore[arg-type]
                 expanded=raw["expanded"],  # type: ignore[arg-type]
                 entry_line_id=(
+                    None if raw["entry_line_id"] is None else str(raw["entry_line_id"])
+                ),
+                core_line_ids=tuple(str(value) for value in core_lines),
+                establishment_leave_line_id=(
                     None
-                    if raw["entry_line_id"] is None
-                    else str(raw["entry_line_id"])
+                    if raw["establishment_leave_line_id"] is None
+                    else str(raw["establishment_leave_line_id"])
+                ),
+                establishment_line_ids=tuple(
+                    str(value) for value in establishment_lines
                 ),
                 constituent_line_ids=tuple(str(value) for value in lines),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("structure center facts are malformed") from exc
-        if raw.get("constituent_line_count") != len(result.constituent_line_ids):
-            raise ValueError("center constituent line count changed")
+        for count_name, expected in (
+            ("core_line_count", len(result.core_line_ids)),
+            (
+                "establishment_line_count",
+                len(result.establishment_line_ids),
+            ),
+            ("constituent_line_count", len(result.constituent_line_ids)),
+        ):
+            if raw.get(count_name) != expected:
+                raise ValueError(f"center {count_name} changed")
         if dict(raw) != result.document():
             raise ValueError("structure center facts are non-canonical")
         return result
@@ -415,7 +521,9 @@ class WarmupStructureLineageSnapshot:
         lines = tuple(self.lines)
         centers = tuple(self.centers)
         points = tuple(self.points)
-        line_keys = tuple((_LINE_KINDS.index(row.source_kind), row.ordinal) for row in lines)
+        line_keys = tuple(
+            (_LINE_KINDS.index(row.source_kind), row.ordinal) for row in lines
+        )
         if line_keys != tuple(sorted(set(line_keys))):
             raise ValueError("structure lineage lines are not uniquely ordered")
         line_ids = {row.line_id for row in lines}
@@ -434,12 +542,66 @@ class WarmupStructureLineageSnapshot:
         center_ids = {row.center_id for row in centers}
         if len(center_ids) != len(centers):
             raise ValueError("structure lineage center identities are duplicated")
+        lines_by_id = {row.line_id: row for row in lines}
         for row in centers:
-            referenced = set(row.constituent_line_ids)
+            referenced = set(
+                (
+                    *row.constituent_line_ids,
+                    *row.core_line_ids,
+                    *row.establishment_line_ids,
+                )
+            )
             if row.entry_line_id is not None:
                 referenced.add(row.entry_line_id)
+            if row.establishment_leave_line_id is not None:
+                referenced.add(row.establishment_leave_line_id)
             if not referenced.issubset(line_ids):
                 raise ValueError("center references an unrecorded structure line")
+            if any(
+                lines_by_id[value].source_kind != row.source_kind
+                for value in referenced
+            ):
+                raise ValueError("center references a different structure line kind")
+            establishment_lines = tuple(
+                lines_by_id[value] for value in row.establishment_line_ids
+            )
+            if any(not value.completed for value in establishment_lines):
+                raise ValueError("center establishment roles must be completed lines")
+            if any(
+                current.start_at < previous.end_at
+                or current.start_value != previous.end_value
+                or (
+                    row.source_kind != "TREND_TYPE"
+                    and current.direction == previous.direction
+                )
+                for previous, current in zip(
+                    establishment_lines,
+                    establishment_lines[1:],
+                )
+            ):
+                raise ValueError(
+                    "center establishment roles must form one alternating connected sequence"
+                )
+            strict_overlap = row.source_kind != "TREND_TYPE"
+            for line in establishment_lines:
+                left = max(line.low_value, row.core_low)
+                right = min(line.high_value, row.core_high)
+                invalid_overlap = left >= right if strict_overlap else left > right
+                if invalid_overlap:
+                    raise ValueError(
+                        "center establishment role does not overlap the core"
+                    )
+            if row.source_kind != "TREND_TYPE":
+                leave = establishment_lines[-1]
+                outside = (
+                    leave.end_value > row.core_high
+                    if leave.direction == "up"
+                    else leave.end_value < row.core_low
+                )
+                if not outside:
+                    raise ValueError(
+                        "physical establishment leave does not exit the core"
+                    )
         point_ids = tuple(row.point.point_id for row in points)
         if point_ids != tuple(sorted(set(point_ids))):
             raise ValueError("structure lineage points are not uniquely ordered")
@@ -471,9 +633,7 @@ class WarmupStructureLineageSnapshot:
         }
 
     @classmethod
-    def from_document(
-        cls, raw: Mapping[str, object]
-    ) -> WarmupStructureLineageSnapshot:
+    def from_document(cls, raw: Mapping[str, object]) -> WarmupStructureLineageSnapshot:
         try:
             raw_lines = raw["lines"]
             raw_centers = raw["centers"]
@@ -512,7 +672,12 @@ class WarmupStructureLineageSnapshot:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("structure lineage snapshot is malformed") from exc
         document = result.document()
-        for name in ("line_count", "completed_line_count", "center_count", "point_count"):
+        for name in (
+            "line_count",
+            "completed_line_count",
+            "center_count",
+            "point_count",
+        ):
             if raw.get(name) != document[name]:
                 raise ValueError(f"structure lineage snapshot {name} changed")
         if dict(raw) != document:
@@ -543,7 +708,9 @@ class WarmupStructureLineageSnapshotSet:
         return dict(self.periods)[period]
 
 
-def _line_sequences(snapshot: WarmupStructureLineageSnapshot, kind: str) -> tuple[str, ...]:
+def _line_sequences(
+    snapshot: WarmupStructureLineageSnapshot, kind: str
+) -> tuple[str, ...]:
     return tuple(value.line_id for value in snapshot.lines if value.source_kind == kind)
 
 
@@ -574,13 +741,13 @@ def _line_sequence_delta(
                 "common_suffix_line_ids": list(common),
                 "common_suffix_line_count": len(common),
                 "completed_common_suffix_line_count": sum(
-                    prefix_lines[value].completed
-                    and reference_lines[value].completed
+                    prefix_lines[value].completed and reference_lines[value].completed
                     for value in common
                 ),
                 "prefix_leading_line_count": len(left) - len(common),
                 "reference_leading_line_count": len(right) - len(common),
-                "prefix_is_reference_suffix": bool(left) and left == right[-len(left):],
+                "prefix_is_reference_suffix": bool(left)
+                and left == right[-len(left) :],
             }
         )
     return output
@@ -655,8 +822,7 @@ def _point_role_changes(
         )
         one_line_phase_shift = bool(
             peer is not None
-            and len(center.constituent_line_ids)
-            == len(peer.constituent_line_ids)
+            and len(center.constituent_line_ids) == len(peer.constituent_line_ids)
             and shared + 1 == len(center.constituent_line_ids)
             and union == len(center.constituent_line_ids) + 1
         )
@@ -707,13 +873,14 @@ def _structure_lineage_delta_document(
         codes.append("LOWER_LINE_COMMON_SUFFIX_IDENTICAL")
     if any(value["prefix_is_reference_suffix"] for value in line_sequences):
         codes.append("SHORTER_LINE_SEQUENCE_IS_REFERENCE_SUFFIX")
-    if lost and gained and any(
-        int(value["shared_constituent_line_count"]) > 0 for value in roles
+    if (
+        lost
+        and gained
+        and any(int(value["shared_constituent_line_count"]) > 0 for value in roles)
     ):
         codes.append("CENTER_PARTITION_CHANGED_WITH_IDENTICAL_COMMON_LINES")
     if any(
-        value["same_core_interval"] and value["one_line_phase_shift"]
-        for value in roles
+        value["same_core_interval"] and value["one_line_phase_shift"] for value in roles
     ):
         codes.append("CENTER_CORE_RETAINED_WITH_ONE_LINE_PHASE_SHIFT")
     if any(
@@ -773,11 +940,11 @@ class WarmupStructureLineageComparison:
             "period": self.period,
             "prefix_bar_count": self.prefix_bar_count,
             "reference_bar_count": self.reference_bar_count,
-            "mapping_supply_comparison_sha256": (
-                self.mapping_supply_comparison_sha256
-            ),
+            "mapping_supply_comparison_sha256": (self.mapping_supply_comparison_sha256),
             "prefix_snapshot": (
-                None if self.prefix_snapshot is None else self.prefix_snapshot.document()
+                None
+                if self.prefix_snapshot is None
+                else self.prefix_snapshot.document()
             ),
             "reference_snapshot": (
                 None
@@ -861,7 +1028,9 @@ class WarmupStructureLineageDiagnosticEnvelope:
         }:
             raise ValueError("structure lineage diagnostic status is invalid")
         values = tuple(self.comparisons)
-        keys = tuple((value.prefix_bar_count, _PERIODS.index(value.period)) for value in values)
+        keys = tuple(
+            (value.prefix_bar_count, _PERIODS.index(value.period)) for value in values
+        )
         if keys != tuple(sorted(set(keys))):
             raise ValueError("structure lineage comparisons are not uniquely ordered")
         object.__setattr__(self, "comparisons", values)
@@ -872,7 +1041,9 @@ class WarmupStructureLineageDiagnosticEnvelope:
             or self.active_gate_unchanged is not True
             or self.live_status != "LIVE_DISABLED"
         ):
-            raise ValueError("structure lineage diagnostic safety contract is immutable")
+            raise ValueError(
+                "structure lineage diagnostic safety contract is immutable"
+            )
 
     def _stable_document(self) -> dict[str, object]:
         return {
@@ -925,16 +1096,14 @@ class WarmupStructureLineageDiagnosticEnvelope:
             for value in supply.comparisons
         }
         actual = {
-            (value.prefix_bar_count, value.period): value
-            for value in self.comparisons
+            (value.prefix_bar_count, value.period): value for value in self.comparisons
         }
         if set(expected) != set(actual):
             raise ValueError("structure lineage comparison coverage changed")
         for key, comparison in actual.items():
             supply_comparison = expected[key]
             if (
-                comparison.reference_bar_count
-                != supply_comparison.reference_bar_count
+                comparison.reference_bar_count != supply_comparison.reference_bar_count
                 or comparison.mapping_supply_comparison_sha256
                 != sha256_json(supply_comparison.document())
             ):
@@ -1003,6 +1172,8 @@ def _strict_line_facts(
     )
     start_value = price_quantum * unit.start_tick
     end_value = price_quantum * unit.end_tick
+    low_value = price_quantum * unit.low_tick
+    high_value = price_quantum * unit.high_tick
     completed = bool(unit.locked)
     identity = WarmupStructureLineFacts.identity(
         source_symbol=source_symbol,
@@ -1013,6 +1184,8 @@ def _strict_line_facts(
         end_at=end_at,
         start_value=start_value,
         end_value=end_value,
+        low_value=low_value,
+        high_value=high_value,
         locked_at=locked,
         completed=completed,
     )
@@ -1025,6 +1198,8 @@ def _strict_line_facts(
         end_at=end_at,
         start_value=start_value,
         end_value=end_value,
+        low_value=low_value,
+        high_value=high_value,
         locked_at=locked,
         completed=completed,
     )
@@ -1057,8 +1232,7 @@ def capture_warmup_structure_lineage_snapshot(
         value
         for value in source_bars
         if bool(value.completed)
-        and normalize_datetime(value.end_at, "source_bar_end")
-        <= evidence_closed_at
+        and normalize_datetime(value.end_at, "source_bar_end") <= evidence_closed_at
     )
     if not visible:
         raise ValueError("structure lineage source bars are empty")
@@ -1075,8 +1249,9 @@ def capture_warmup_structure_lineage_snapshot(
     )
 
     quantum = evidence.structure_price_quantum
-    strict_kind = {
+    strict_kind: dict[SourceKind, StructureLineKind] = {
         SourceKind.SEGMENT: "SEGMENT",
+        SourceKind.STROKE_OBSERVATION: "STROKE_OBSERVATION",
         SourceKind.TREND_TYPE: "TREND_TYPE",
     }
     lines: list[WarmupStructureLineFacts] = []
@@ -1127,6 +1302,29 @@ def capture_warmup_structure_lineage_snapshot(
             )
             if center.entry_unit is not None and entry is None:
                 raise ValueError("strict center entry unit was not captured")
+            core_lines = tuple(
+                line_by_unit_id.get(value.unit_id) for value in center.core_units
+            )
+            if len(core_lines) != 3 or any(value is None for value in core_lines):
+                raise ValueError("strict center core units were not captured")
+            establishment_leave = (
+                None
+                if center.establishment_leave_unit is None
+                else line_by_unit_id.get(center.establishment_leave_unit.unit_id)
+            )
+            if (
+                center.establishment_leave_unit is not None
+                and establishment_leave is None
+            ):
+                raise ValueError(
+                    "strict center establishment leave unit was not captured"
+                )
+            establishment_lines = tuple(
+                line_by_unit_id.get(value.unit_id)
+                for value in center.establishment_units
+            )
+            if any(value is None for value in establishment_lines):
+                raise ValueError("strict center establishment role was not captured")
             fact = WarmupStructureCenterFacts(
                 center_id=center.center_id,
                 source_kind=kind,
@@ -1156,6 +1354,15 @@ def capture_warmup_structure_lineage_snapshot(
                 real=bool(center.tradable),
                 expanded=center.center_id in expanded_center_ids,
                 entry_line_id=None if entry is None else entry.line_id,
+                core_line_ids=tuple(
+                    value.line_id for value in core_lines if value is not None
+                ),
+                establishment_leave_line_id=(
+                    None if establishment_leave is None else establishment_leave.line_id
+                ),
+                establishment_line_ids=tuple(
+                    value.line_id for value in establishment_lines if value is not None
+                ),
                 constituent_line_ids=constituents,
             )
             centers.append(fact)

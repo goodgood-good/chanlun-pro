@@ -29,14 +29,22 @@ def relation_center(
         for item in (
             unit(
                 unit_offset,
-                "down",
+                "up",
+                dd - 10,
                 gg,
-                dd,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
             unit(
                 unit_offset + 1,
+                "down",
+                gg,
+                dd,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+            unit(
+                unit_offset + 2,
                 "up",
                 dd,
                 zg,
@@ -44,7 +52,7 @@ def relation_center(
                 source_kind=source_kind,
             ),
             unit(
-                unit_offset + 2,
+                unit_offset + 3,
                 "down",
                 zg,
                 zd,
@@ -52,7 +60,7 @@ def relation_center(
                 source_kind=source_kind,
             ),
             unit(
-                unit_offset + 3,
+                unit_offset + 4,
                 "up",
                 zd,
                 gg,
@@ -60,7 +68,7 @@ def relation_center(
                 source_kind=source_kind,
             ),
             unit(
-                unit_offset + 4,
+                unit_offset + 5,
                 "down",
                 gg,
                 zg,
@@ -70,20 +78,19 @@ def relation_center(
         )
     )
     value = establish_center(
-        lifecycle[:3],
+        lifecycle[:5],
         structural_level,
         source_kind,
     )
     assert value is not None
-    assert value.entry_unit is None
+    assert value.entry_unit is lifecycle[0]
     assert (value.zd_tick, value.zg_tick) == (zd, zg)
     assert (value.dd_tick, value.gg_tick) == (dd, gg)
     if not complete:
         return value
-    value, _watch = advance_center(value, lifecycle[3])
-    value, _completed = advance_center(value, lifecycle[4])
-    assert value.completion_leave_unit == lifecycle[3]
-    assert value.completion_return_unit == lifecycle[4]
+    value, _completed = advance_center(value, lifecycle[5])
+    assert value.completion_leave_unit == lifecycle[4]
+    assert value.completion_return_unit == lifecycle[5]
     return value
 
 
@@ -124,10 +131,10 @@ def test_cores_touching_at_one_tick_are_upgrade():
 
 def test_extension_changes_envelope_revision_but_never_fixed_core_or_identity():
     value = relation_center("a", 0, 100, 110, 90, 120, complete=False)
-    leave = unit(3, "up", 100, 120)
-    pending, _watch = advance_center(value, leave)
-    entered = replace(unit(4, "down", 120, 105), low_tick=80)
-    updated, _event = advance_center(pending, entered)
+    leave = value.establishment_leave_unit
+    assert leave is not None
+    entered = replace(unit(5, "down", 120, 105), low_tick=80)
+    updated, _event = advance_center(value, entered)
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (100, 110)
     assert (updated.dd_tick, updated.gg_tick) == (80, 120)

@@ -260,6 +260,8 @@ chanlun-pro/
 7. **走势类型** `zslx_calculator` / `zslx_branch`
 8. **递归多级别 / 区间套** `recursive_branch` / `recursive_calculator` / `interval_nest` / `xiaozhuanda_branch`（小转大）
 
+严格生产链中的物理中枢采用固定五角色成立门槛：进入段、连续三段冻结价格核心、独立离开段；五段都必须与核心形成正宽重叠，且离开段终点必须越出核心。三段或四段只能作为不可交易预览。更高递归层仍由三个已完成的低级别走势类型建立中枢；未被正式走势拥有的连续单元单独记为待定走势，不参与交易、递归或背驰判断。
+
 入口 `cl.py`（`CL` 类），类型定义在 `cl_interface.py` 与 `core/types/`。算法附有大量单测与「全量 == 增量」对拍守护网（见 `tests/core`）。
 
 ---

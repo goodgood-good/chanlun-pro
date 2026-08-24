@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
@@ -109,6 +110,26 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert completed.completion_leave_unit is leave
     assert completed.completion_return_unit is ret
     assert completion.kind is CenterEventKind.COMPLETED_UP
+
+
+def test_pending_leave_availability_cannot_be_hidden_by_older_snapshot_time():
+    value = _ongoing_up_center()
+    entered = unit(5, "down", 130, 110)
+    extended, _event = advance_center(value, entered)
+    late = extended.available_at + timedelta(days=1)
+    leave = replace(
+        unit(6, "up", 110, 135),
+        confirmed_at=late,
+        available_at=late,
+    )
+    pending, _watch = advance_center(extended, leave)
+
+    assert pending.available_at == late
+    with pytest.raises(
+        ValueError,
+        match="center availability must cover pending leave evidence",
+    ):
+        replace(pending, available_at=extended.available_at)
 
 
 def test_opposite_down_crossing_reuses_return_as_new_leave():

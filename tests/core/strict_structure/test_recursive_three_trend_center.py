@@ -1,11 +1,13 @@
 """Every recursive layer establishes a center from three completed units."""
 
+from dataclasses import replace
 from decimal import Decimal
 
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     calculate_centers,
     establish_center,
+    establish_center_preview,
 )
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
@@ -18,7 +20,7 @@ from chanlun.core.strict_structure.signals import StrictSignalEngine
 from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
     unit,
-    valid_up_center_lifecycle,
+    valid_five_up_exit,
 )
 
 
@@ -133,21 +135,127 @@ def test_recursive_center_needs_only_three_completed_lower_trends() -> None:
     assert center.pending_leave_unit is None
 
 
-def test_level_zero_uses_three_segment_core_and_separate_lifecycle() -> None:
-    values = valid_up_center_lifecycle()
+def test_recursive_touching_trends_form_closed_interval_center() -> None:
+    values = (
+        unit(
+            30,
+            "up",
+            90,
+            110,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            31,
+            "up",
+            110,
+            120,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            32,
+            "down",
+            120,
+            110,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+    )
 
-    center = establish_center(values[:3], 0, SourceKind.SEGMENT)
+    result = calculate_centers(
+        values,
+        1,
+        SourceKind.TREND_TYPE,
+        oscillatory_ids=frozenset({values[1].unit_id}),
+    )
+
+    assert len(result.centers) == 1
+    assert result.centers[0].initial_units == values
+    assert (result.centers[0].zd_tick, result.centers[0].zg_tick) == (110, 110)
+
+
+def test_recursive_center_identity_ignores_optional_prefix_entry() -> None:
+    values = _trend_units()
+    core = values[1:4]
+
+    without_entry = establish_center(core, 1, SourceKind.TREND_TYPE)
+    with_entry = establish_center(
+        core,
+        1,
+        SourceKind.TREND_TYPE,
+        entry_unit=values[0],
+    )
+
+    assert without_entry is not None and with_entry is not None
+    assert without_entry.entry_unit is None
+    assert with_entry.entry_unit is values[0]
+    assert with_entry.center_id == without_entry.center_id
+    reconstructed = replace(without_entry, entry_unit=values[0])
+    assert reconstructed.entry_unit is values[0]
+    assert reconstructed.center_id == without_entry.center_id
+
+
+def test_recursive_scan_keeps_core_identity_after_leading_prefix_is_added() -> None:
+    values = _trend_units()
+    core = values[1:4]
+    non_center_prefix = replace(
+        values[0],
+        start_tick=119,
+        end_tick=120,
+        low_tick=119,
+        high_tick=120,
+    )
+
+    without_prefix = calculate_centers(core, 1, SourceKind.TREND_TYPE)
+    with_prefix = calculate_centers(
+        (non_center_prefix, *core),
+        1,
+        SourceKind.TREND_TYPE,
+    )
+
+    assert len(without_prefix.centers) == len(with_prefix.centers) == 1
+    assert without_prefix.centers[0].entry_unit is None
+    assert with_prefix.centers[0].entry_unit is non_center_prefix
+    assert with_prefix.centers[0].center_id == without_prefix.centers[0].center_id
+
+
+def test_recursive_preview_identity_ignores_optional_prefix_entry() -> None:
+    values = _trend_units()
+    core = values[1:3] + (
+        replace(values[3], locked=False, confirmed_at=None),
+    )
+
+    without_entry = establish_center_preview(core, 1, SourceKind.TREND_TYPE)
+    with_entry = establish_center_preview(
+        core,
+        1,
+        SourceKind.TREND_TYPE,
+        entry_unit=values[0],
+    )
+
+    assert without_entry is not None and with_entry is not None
+    assert without_entry.entry_unit_id is None
+    assert with_entry.entry_unit_id == values[0].unit_id
+    assert with_entry.formal_center_id == without_entry.formal_center_id
+
+
+def test_level_zero_uses_five_physical_roles_and_middle_three_core() -> None:
+    values = valid_five_up_exit()
+
+    center = establish_center(values, 0, SourceKind.SEGMENT)
     assert center is not None
-    assert center.initial_units == values[:3]
+    assert center.initial_units == values[1:4]
     assert center.extension_units == ()
-    assert center.entry_unit is None
+    assert center.entry_unit is values[0]
+    assert center.establishment_leave_unit is values[4]
+    assert center.pending_leave_unit is values[4]
 
-    leaving, _watch = advance_center(center, values[3])
-    completed, _event = advance_center(leaving, values[4])
+    outside_return = unit(5, "down", values[4].end_tick, 120)
+    completed, _event = advance_center(center, outside_return)
 
-    assert leaving.pending_leave_unit is values[3]
-    assert completed.completion_leave_unit is values[3]
-    assert completed.completion_return_unit is values[4]
+    assert completed.completion_leave_unit is values[4]
+    assert completed.completion_return_unit is outside_return
 
 
 def test_recursive_center_completes_only_after_leave_and_return() -> None:

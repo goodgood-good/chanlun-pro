@@ -33,14 +33,21 @@ from chanlun.core.cl import CL
 from chanlun.core.strict_structure.evidence_assembler import (
     StrictEvidenceAssembler,
 )
+from chanlun.core.strict_structure.center_machine import (
+    advance_center,
+    establish_center,
+)
 from chanlun.core.strict_structure.formal_state import (
     current_formal_direction,
     current_formal_direction_from_components,
 )
+from chanlun.core.strict_structure.identity import build_center_id
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
+    CenterState,
     ConstituentUnit,
     SourceKind,
+    TrendKind,
     TrendType,
 )
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
@@ -214,8 +221,11 @@ def _buy_segment_difference_boundary_times(
 
 
 BASE_FRAME_COLUMNS = FRAME_COLUMNS[:7]
-FACT_SCHEMA = "chanlun-fixed-year-symbol-facts-v12"
+FACT_SCHEMA = "chanlun-fixed-year-symbol-facts-v14"
 SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts-v2"
+CAUSAL_CENTER_COMPLETION_CONTRACT = (
+    "chanlun-causal-center-completion-v3-lifecycle-replay"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,21 +285,14 @@ class FiveMinuteWarmupFact:
                 for point in points
             ):
                 raise ValueError("production execution point is invalid")
-        if any(
-            point.available_at != observed for point in self.production_one_points
-        ):
+        if any(point.available_at != observed for point in self.production_one_points):
             raise ValueError("production current 1m point must become available now")
         if (
-            self.one_minute_bar_count
-            < SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
+            self.one_minute_bar_count < SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
             and self.production_one_points
         ):
             raise ValueError("production current 1m point lacks minimum history")
-        codes = {
-            point.code
-            for _frequency, points in point_groups
-            for point in points
-        }
+        codes = {point.code for _frequency, points in point_groups for point in points}
         if len(codes) > 1:
             raise ValueError("production execution points mix symbols")
         object.__setattr__(self, "observed_at", observed)
@@ -405,10 +408,9 @@ class SymbolResearchFacts:
         if times != tuple(sorted(set(times))):
             raise ValueError("evaluation facts must be unique and chronological")
         warmup_times = tuple(row.observed_at for row in self.five_minute_warmup)
-        if (
-            warmup_times != tuple(sorted(set(warmup_times)))
-            or not set(warmup_times).issubset(times)
-        ):
+        if warmup_times != tuple(sorted(set(warmup_times))) or not set(
+            warmup_times
+        ).issubset(times):
             raise ValueError("5m warmup facts must match unique evaluation times")
         boundary_times = _buy_segment_difference_boundary_times(
             self.five_points,
@@ -429,8 +431,7 @@ class SymbolResearchFacts:
             if any(interval.point_id not in point_ids for interval in visibility):
                 raise ValueError(f"{frequency} visibility references an unknown point")
             interval_order = tuple(
-                (interval.visible_from, interval.point_id)
-                for interval in visibility
+                (interval.visible_from, interval.point_id) for interval in visibility
             )
             if interval_order != tuple(sorted(interval_order)):
                 raise ValueError(
@@ -518,7 +519,9 @@ class SectorResearchFacts:
                 for candidate in self.thirty_points
                 if candidate.point_id == point_id
             )
-            if any(interval.visible_from < point.available_at for interval in intervals):
+            if any(
+                interval.visible_from < point.available_at for interval in intervals
+            ):
                 raise ValueError("sector point cannot be visible before availability")
             ordered = tuple(
                 sorted(intervals, key=lambda interval: interval.visible_from)
@@ -591,8 +594,7 @@ def load_qmt_frame(
     if start > end:
         raise ValueError("start_at cannot follow end_at")
     if _history_bars_before_start is not None and (
-        type(_history_bars_before_start) is not int
-        or _history_bars_before_start <= 0
+        type(_history_bars_before_start) is not int or _history_bars_before_start <= 0
     ):
         raise ValueError("history bars before start must be a positive integer")
     if _local_five_snapshot is not None and _history_bars_before_start is not None:
@@ -639,9 +641,7 @@ def load_qmt_frame(
         }
         if frequency != "30m":
             reader_arguments["frequency"] = frequency
-            reader_arguments["history_bars_before_start"] = (
-                _history_bars_before_start
-            )
+            reader_arguments["history_bars_before_start"] = _history_bars_before_start
         frame, local_audit = reader(**reader_arguments)  # type: ignore[arg-type]
         if not frame.empty:
             frame.attrs.update(
@@ -890,12 +890,17 @@ class CausalCenterCompletionFact:
     center_id: str
     source_frequency: str
     structural_level: int
+    source_kind: SourceKind
     price_basis_revision: str
     body_revision: int
     available_at: datetime
     completed_at: datetime
     zd_tick: int
     zg_tick: int
+    entry_unit_id: str | None
+    core_unit_ids: tuple[str, ...]
+    establishment_leave_unit_id: str | None
+    establishment_unit_ids: tuple[str, ...]
     leave_unit_id: str
     leave_direction: str
     leave_market_start: datetime
@@ -914,6 +919,7 @@ class CausalCenterCompletionFact:
     return_end_tick: int
     return_low_tick: int
     return_high_tick: int
+    contract: str = CAUSAL_CENTER_COMPLETION_CONTRACT
 
     def __post_init__(self) -> None:
         for field in (
@@ -929,14 +935,99 @@ class CausalCenterCompletionFact:
             object.__setattr__(
                 self, field, normalize_datetime(getattr(self, field), field)
             )
-        if not self.center_id or not self.price_basis_revision:
+        object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
+        if (
+            not self.center_id
+            or not self.source_frequency
+            or not self.price_basis_revision
+        ):
             raise ValueError("causal center identity is required")
+        if self.contract != CAUSAL_CENTER_COMPLETION_CONTRACT:
+            raise ValueError("causal center completion contract changed")
+        if not self.leave_unit_id or not self.return_unit_id:
+            raise ValueError("causal center completion unit ids are required")
         if self.structural_level < 0 or self.body_revision < 0:
             raise ValueError("causal center revisions and levels cannot be negative")
-        # 唯一策略契约用闭区间交集 ``ZD <= ZG`` 定义中枢，因此一跳或相等中枢属于有效
-        # 因果证据，不能只在历史账本消失而仍出现在页面和实时链路。
-        if self.zd_tick > self.zg_tick:
+        # Recursive centers retain their inclusive three-trend overlap. Physical
+        # segment/stroke centers require a strictly positive five-role overlap.
+        if self.zd_tick > self.zg_tick or (
+            self.source_kind is not SourceKind.TREND_TYPE
+            and self.zd_tick == self.zg_tick
+        ):
             raise ValueError("causal center core must be a non-empty interval")
+        core = tuple(self.core_unit_ids)
+        establishment = tuple(self.establishment_unit_ids)
+        if len(core) != 3 or len(core) != len(set(core)):
+            raise ValueError(
+                "causal center core must reference exactly three unique units"
+            )
+        role_ids = (
+            *(() if self.entry_unit_id is None else (self.entry_unit_id,)),
+            *core,
+            *(
+                ()
+                if self.establishment_leave_unit_id is None
+                else (self.establishment_leave_unit_id,)
+            ),
+        )
+        if any(not isinstance(value, str) or not value for value in role_ids):
+            raise ValueError("causal center establishment unit id is invalid")
+        if self.source_kind is SourceKind.TREND_TYPE:
+            if self.establishment_leave_unit_id is not None:
+                raise ValueError(
+                    "recursive causal center cannot carry a physical leave role"
+                )
+            if self.entry_unit_id is not None and self.entry_unit_id in core:
+                raise ValueError(
+                    "recursive causal center entry must stay outside its core"
+                )
+            if establishment != core:
+                raise ValueError(
+                    "recursive causal center establishment must equal its core"
+                )
+        else:
+            if self.entry_unit_id is None or self.establishment_leave_unit_id is None:
+                raise ValueError(
+                    "physical causal center requires entry and establishment leave"
+                )
+            if establishment != role_ids or len(set(establishment)) != 5:
+                raise ValueError(
+                    "physical causal center requires five unique establishment roles"
+                )
+        expected_center_id = build_center_id(
+            price_basis_revision=self.price_basis_revision,
+            structural_level=self.structural_level,
+            source_kind=self.source_kind.value,
+            entry_unit_id=(
+                None
+                if self.source_kind is SourceKind.TREND_TYPE
+                else self.entry_unit_id
+            ),
+            initial_unit_ids=core,
+            establishment_leave_unit_id=(
+                None
+                if self.source_kind is SourceKind.TREND_TYPE
+                else self.establishment_leave_unit_id
+            ),
+            zd_tick=self.zd_tick,
+            zg_tick=self.zg_tick,
+        )
+        if self.center_id != expected_center_id:
+            raise ValueError(
+                "causal center id does not match its immutable establishment roles"
+            )
+        establishment_id_set = set(establishment)
+        if self.return_unit_id in establishment_id_set:
+            raise ValueError("causal center return must be outside establishment roles")
+        if (
+            self.leave_unit_id in establishment_id_set
+            and self.leave_unit_id != self.establishment_leave_unit_id
+        ):
+            raise ValueError(
+                "causal completion leave can reuse only the establishment leave"
+            )
+        object.__setattr__(self, "core_unit_ids", core)
+        object.__setattr__(self, "establishment_unit_ids", establishment)
         if self.leave_direction != "up" or self.return_direction != "down":
             # 严格策略只消费向上三买完成几何；通用账本保持关闭失败，可防止卖侧中枢
             # 被误认成入场证据。
@@ -1039,6 +1130,271 @@ class CausalStructureEventLedger:
         unit_ids = {item.unit_id for item in self.completed_units}
         if any(unit_id not in unit_ids for _point_id, unit_id in anchors):
             raise ValueError("causal point anchor references an unknown unit")
+        units_by_key = {
+            (item.unit_id, item.structural_level): item for item in self.completed_units
+        }
+        for center in self.center_completions:
+            external_entry_ids = (
+                ()
+                if center.entry_unit_id is None
+                or center.entry_unit_id in center.establishment_unit_ids
+                else (center.entry_unit_id,)
+            )
+            referenced_ids = (
+                *external_entry_ids,
+                *center.establishment_unit_ids,
+                center.leave_unit_id,
+                center.return_unit_id,
+            )
+            try:
+                referenced_units = tuple(
+                    units_by_key[(unit_id, center.structural_level)]
+                    for unit_id in referenced_ids
+                )
+            except KeyError as exc:
+                raise ValueError(
+                    "causal center references an unknown completed unit"
+                ) from exc
+            if any(
+                unit.source_kind is not center.source_kind
+                or unit.price_basis_revision != center.price_basis_revision
+                or not unit.locked
+                or unit.available_at > center.available_at
+                for unit in referenced_units
+            ):
+                raise ValueError("causal center establishment evidence is incompatible")
+            establishment_start = len(external_entry_ids)
+            establishment_count = len(center.establishment_unit_ids)
+            establishment_units = referenced_units[
+                establishment_start : establishment_start + establishment_count
+            ]
+            core_units = tuple(
+                units_by_key[(unit_id, center.structural_level)]
+                for unit_id in center.core_unit_ids
+            )
+            expected_zd = max(unit.low_tick for unit in core_units)
+            expected_zg = min(unit.high_tick for unit in core_units)
+            if (center.zd_tick, center.zg_tick) != (expected_zd, expected_zg):
+                raise ValueError(
+                    "causal center core does not match its three core units"
+                )
+            strict_overlap = center.source_kind is not SourceKind.TREND_TYPE
+            for unit in establishment_units:
+                left = max(unit.low_tick, center.zd_tick)
+                right = min(unit.high_tick, center.zg_tick)
+                invalid_overlap = left >= right if strict_overlap else left > right
+                if invalid_overlap:
+                    raise ValueError("causal center establishment role misses the core")
+            if strict_overlap:
+                for previous, current in zip(
+                    establishment_units,
+                    establishment_units[1:],
+                ):
+                    if (
+                        previous.direction == current.direction
+                        or previous.end_tick != current.start_tick
+                        or current.market_start < previous.market_end
+                    ):
+                        raise ValueError(
+                            "physical causal center roles are not one sequence"
+                        )
+                establishment_leave = establishment_units[-1]
+                outside = (
+                    establishment_leave.end_tick > center.zg_tick
+                    if establishment_leave.direction == "up"
+                    else establishment_leave.end_tick < center.zd_tick
+                )
+                if not outside:
+                    raise ValueError(
+                        "physical causal center establishment leave stays in core"
+                    )
+            context_units = tuple(
+                sorted(
+                    (
+                        unit
+                        for unit in self.completed_units
+                        if unit.structural_level == center.structural_level
+                        and unit.source_kind is center.source_kind
+                        and unit.price_basis_revision == center.price_basis_revision
+                        and unit.available_at <= center.available_at
+                    ),
+                    key=lambda unit: (
+                        unit.market_start,
+                        unit.market_end,
+                        unit.unit_id,
+                    ),
+                )
+            )
+            context_positions = {
+                unit.unit_id: offset for offset, unit in enumerate(context_units)
+            }
+            seed_units = (*referenced_units[:establishment_start], *establishment_units)
+            seed_offsets = tuple(
+                context_positions[unit.unit_id] for unit in seed_units
+            )
+            if seed_offsets != tuple(
+                range(seed_offsets[0], seed_offsets[0] + len(seed_offsets))
+            ):
+                raise ValueError(
+                    "causal center establishment is not one source slice"
+                )
+            leave = referenced_units[-2]
+            ret = referenced_units[-1]
+            leave_signature = (
+                leave.unit_id,
+                leave.direction,
+                leave.market_start,
+                leave.market_end,
+                leave.available_at,
+                leave.start_tick,
+                leave.end_tick,
+                leave.low_tick,
+                leave.high_tick,
+            )
+            stored_leave_signature = (
+                center.leave_unit_id,
+                center.leave_direction,
+                center.leave_market_start,
+                center.leave_market_end,
+                center.leave_available_at,
+                center.leave_start_tick,
+                center.leave_end_tick,
+                center.leave_low_tick,
+                center.leave_high_tick,
+            )
+            return_signature = (
+                ret.unit_id,
+                ret.direction,
+                ret.market_start,
+                ret.market_end,
+                ret.available_at,
+                ret.start_tick,
+                ret.end_tick,
+                ret.low_tick,
+                ret.high_tick,
+            )
+            stored_return_signature = (
+                center.return_unit_id,
+                center.return_direction,
+                center.return_market_start,
+                center.return_market_end,
+                center.return_available_at,
+                center.return_start_tick,
+                center.return_end_tick,
+                center.return_low_tick,
+                center.return_high_tick,
+            )
+            if (
+                leave_signature != stored_leave_signature
+                or return_signature != stored_return_signature
+                or center.completed_at != ret.confirmed_at
+            ):
+                raise ValueError(
+                    "causal center completion geometry changed from its unit ledger"
+                )
+            leave_overlap_left = max(leave.low_tick, center.zd_tick)
+            leave_overlap_right = min(leave.high_tick, center.zg_tick)
+            # Lifecycle leaves may start exactly on ZD/ZG.  Physical center
+            # establishment still requires positive overlap above, but the
+            # later departure watcher deliberately uses closed-interval touch.
+            leave_misses_core = leave_overlap_left > leave_overlap_right
+            if (
+                leave_misses_core
+                or leave.end_tick <= center.zg_tick
+                or ret.direction == leave.direction
+                or ret.start_tick != leave.end_tick
+                or ret.market_start < leave.market_end
+                or ret.low_tick < center.zg_tick
+            ):
+                raise ValueError(
+                    "causal center completion is not an outside up-leave/down-return"
+                )
+            seed_end_offset = seed_offsets[-1]
+            leave_offset = context_positions[leave.unit_id]
+            return_offset = context_positions[ret.unit_id]
+            if leave_offset < seed_end_offset or return_offset != leave_offset + 1:
+                raise ValueError(
+                    "causal center completion is not one lifecycle source slice"
+                )
+            relevant_oscillatory_ids = frozenset(
+                trend.trend_id
+                for trend in self.completed_trends
+                if trend.kind is TrendKind.CONSOLIDATION
+                and trend.available_at <= center.available_at
+                and trend.structural_level + 1 == center.structural_level
+                and trend.price_basis_revision == center.price_basis_revision
+                and trend.trend_id in context_positions
+            )
+            try:
+                replayed = (
+                    establish_center(
+                        establishment_units,
+                        center.structural_level,
+                        center.source_kind,
+                        relevant_oscillatory_ids,
+                        entry_unit=(
+                            referenced_units[0] if external_entry_ids else None
+                        ),
+                    )
+                    if center.source_kind is SourceKind.TREND_TYPE
+                    else establish_center(
+                        establishment_units,
+                        center.structural_level,
+                        center.source_kind,
+                        relevant_oscillatory_ids,
+                    )
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "causal center establishment cannot be replayed"
+                ) from exc
+            if replayed is None or replayed.center_id != center.center_id:
+                raise ValueError(
+                    "causal center establishment cannot be replayed"
+                )
+            lifecycle_units = context_units[
+                seed_end_offset + 1 : return_offset + 1
+            ]
+            for lifecycle_unit in lifecycle_units:
+                try:
+                    replayed, _event = advance_center(
+                        replayed,
+                        lifecycle_unit,
+                        relevant_oscillatory_ids,
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "causal center lifecycle cannot be replayed"
+                    ) from exc
+                if replayed.state is CenterState.COMPLETED:
+                    actual_leave = replayed.completion_leave_unit
+                    actual_return = replayed.completion_return_unit
+                    if (
+                        actual_leave is None
+                        or actual_return is None
+                        or actual_leave.unit_id != center.leave_unit_id
+                        or actual_return.unit_id != center.return_unit_id
+                    ):
+                        raise ValueError(
+                            "causal center completion must use its first outside return"
+                        )
+                    break
+            if (
+                replayed.state is not CenterState.COMPLETED
+                or replayed.completion_leave_unit != leave
+                or replayed.completion_return_unit != ret
+            ):
+                raise ValueError(
+                    "causal center completion cannot be reproduced from its source slice"
+                )
+            if replayed.body_revision != center.body_revision:
+                raise ValueError(
+                    "causal center body revision changed during lifecycle replay"
+                )
+            if replayed.available_at > center.available_at:
+                raise ValueError(
+                    "causal center completion uses evidence not yet available"
+                )
         visibility_order = tuple(
             (item.visible_from, item.point_id) for item in self.point_visibility
         )
@@ -1248,9 +1604,7 @@ def _causal_confirmed_structure_events(
     unit_ledger: dict[tuple[str, int], ConstituentUnit] = {}
     center_ledger: dict[tuple[str, int], CausalCenterCompletionFact] = {}
     production_occurrences_by_end: dict[int, frozenset[str] | None] = {}
-    frame_dates = tuple(
-        pd.Timestamp(value).to_pydatetime() for value in frame["date"]
-    )
+    frame_dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
     next_segment_start: int | None = None
     # Several Bis may become locked at the same completed-bar timestamp.  That
     # close is one externally observable production snapshot, so replay only
@@ -1288,10 +1642,7 @@ def _causal_confirmed_structure_events(
             segment.locked_at = checkpoint
             segment.done = True
             following_start = int(segment.end_line.index) + 1
-            if (
-                next_segment_start is not None
-                and following_start <= next_segment_start
-            ):
+            if next_segment_start is not None and following_start <= next_segment_start:
                 raise RuntimeError("causal segment replay did not advance")
             frozen_segments.append(segment)
             next_segment_start = following_start
@@ -1328,6 +1679,10 @@ def _causal_confirmed_structure_events(
             for center in level.center_result.centers:
                 leave = center.completion_leave_unit
                 ret = center.completion_return_unit
+                entry = center.entry_unit
+                establishment_leave = center.establishment_leave_unit
+                core_units = center.core_units
+                establishment_units = center.establishment_units
                 if (
                     center.completed_at is None
                     or leave is None
@@ -1342,12 +1697,23 @@ def _causal_confirmed_structure_events(
                     center_id=center.center_id,
                     source_frequency=frequency,
                     structural_level=center.structural_level,
+                    source_kind=center.source_kind,
                     price_basis_revision=center.price_basis_revision,
                     body_revision=center.body_revision,
                     available_at=max(center.available_at, checkpoint),
                     completed_at=center.completed_at,
                     zd_tick=center.zd_tick,
                     zg_tick=center.zg_tick,
+                    entry_unit_id=(None if entry is None else entry.unit_id),
+                    core_unit_ids=tuple(unit.unit_id for unit in core_units),
+                    establishment_leave_unit_id=(
+                        None
+                        if establishment_leave is None
+                        else establishment_leave.unit_id
+                    ),
+                    establishment_unit_ids=tuple(
+                        unit.unit_id for unit in establishment_units
+                    ),
                     leave_unit_id=leave.unit_id,
                     leave_direction=leave.direction,
                     leave_market_start=leave.market_start,
@@ -1440,9 +1806,7 @@ def _causal_confirmed_structure_events(
             # Forming-tail previews are always rejected by the shared adapter,
             # so constructing them at every locked-Bi checkpoint is pure waste.
             approaching_points=(
-                live_assembler.approaching_points()
-                if needs_geometry_projection
-                else ()
+                live_assembler.approaching_points() if needs_geometry_projection else ()
             ),
             code=code,
             source_frequency=frequency,
@@ -1524,9 +1888,7 @@ def _causal_confirmed_structure_events(
                 if _operation_point_identity_signature(
                     point_ledger[point_id]
                 ) != _operation_point_identity_signature(point):
-                    raise ValueError(
-                        "causal point semantics changed across prefixes"
-                    )
+                    raise ValueError("causal point semantics changed across prefixes")
             if point_id not in active_point_starts:
                 visibility_floor = checkpoint_visibility_floor(checkpoint)
                 stored_point = point_ledger[point_id]
@@ -1796,9 +2158,7 @@ def _causal_one_minute_events_by_windows(
                 visible_until = end
             if visible_until is not None and visible_until <= interval.visible_from:
                 continue
-            point_visibility.append(
-                replace(interval, visible_until=visible_until)
-            )
+            point_visibility.append(replace(interval, visible_until=visible_until))
     visibility_by_id: dict[str, list[PointVisibilityInterval]] = {}
     for interval in sorted(
         point_visibility,
@@ -1824,9 +2184,7 @@ def _causal_one_minute_events_by_windows(
             ),
         )
     merged_visibility = [
-        interval
-        for intervals in visibility_by_id.values()
-        for interval in intervals
+        interval for intervals in visibility_by_id.values() for interval in intervals
     ]
     visible_point_ids = {interval.point_id for interval in merged_visibility}
     return tuple(
@@ -1950,7 +2308,7 @@ def sparse_evaluation_times(
                 end,
             )
             end_exclusive = raw_end_exclusive and (
-                raw_active_end is not None and raw_active_end <= end
+                raw_active_end is not None and raw_active_end == active_end
             )
             if (
                 active_end < start
@@ -1967,9 +2325,7 @@ def sparse_evaluation_times(
                 continue
             first_bar = one_dates[position]
             if first_bar > end or (
-                first_bar >= active_end
-                if end_exclusive
-                else first_bar > active_end
+                first_bar >= active_end if end_exclusive else first_bar > active_end
             ):
                 continue
             output.add(first_bar)
@@ -1988,9 +2344,7 @@ def sparse_evaluation_times(
                     and first_bar <= jointly_known_at <= end
                     and jointly_known_at in one_dates
                     and jointly_known_at <= active_end
-                    and not (
-                    end_exclusive and jointly_known_at >= active_end
-                    )
+                    and not (end_exclusive and jointly_known_at >= active_end)
                 ):
                     output.add(jointly_known_at)
             for observed_at in thirty_dates:
@@ -2244,7 +2598,9 @@ class _HistoricalQmtFrameExchange:
         try:
             source = self._frames[(code, frequency)]
         except KeyError as exc:
-            raise ValueError(f"historical QMT frame is unavailable: {code}/{frequency}") from exc
+            raise ValueError(
+                f"historical QMT frame is unavailable: {code}/{frequency}"
+            ) from exc
         dates = pd.to_datetime(source["date"], errors="raise")
         if dates.dt.tz is None:
             raise ValueError("historical QMT frame must be timezone-aware")
@@ -2448,9 +2804,7 @@ def _five_minute_warmup_facts(
                     converged,
                     full_count,
                     len(suffix),
-                    "WARMUP_TAIL_STABLE"
-                    if converged
-                    else "WARMUP_TAIL_DIVERGED",
+                    "WARMUP_TAIL_STABLE" if converged else "WARMUP_TAIL_DIVERGED",
                     () if converged else ("WARMUP_OTHER_SEMANTIC_CHANGED",),
                     full_points,
                 )
@@ -2471,8 +2825,8 @@ def _five_minute_warmup_facts(
         one_count = one_end - one_start
         production_one_points: tuple[StructuralPoint, ...] = ()
         if one_count >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]:
-            one_prefix = one_minute_frame.iloc[one_start:one_end].copy().reset_index(
-                drop=True
+            one_prefix = (
+                one_minute_frame.iloc[one_start:one_end].copy().reset_index(drop=True)
             )
             copy_price_basis_metadata(one_minute_frame, one_prefix)
             one_evidence = screening_evidence_from_frame(
@@ -2578,10 +2932,7 @@ def sector_facts_from_frame(
             for interval in visibility
             if interval.contains(observed_at)
         }
-        current = tuple(
-            points_by_id[point_id]
-            for point_id in sorted(current_ids)
-        )
+        current = tuple(points_by_id[point_id] for point_id in sorted(current_ids))
         thirty = classify_context(
             frequency="30m",
             current_direction=direction,
@@ -2684,8 +3035,7 @@ def build_symbol_bundle(
         return tuple(
             point
             for point in points
-            if point.available_at <= observed_at
-            and point.source_frequency == frequency
+            if point.available_at <= observed_at and point.source_frequency == frequency
         )
 
     def current_at(points, frequency, visibility):
@@ -2699,9 +3049,7 @@ def build_symbol_bundle(
         }
         return tuple(point for point in visible if point.point_id in current_ids)
 
-    warmup_by_time = {
-        row.observed_at: row for row in facts.five_minute_warmup
-    }
+    warmup_by_time = {row.observed_at: row for row in facts.five_minute_warmup}
     warmup = warmup_by_time.get(observed_at)
     if (
         warmup is not None
@@ -2744,12 +3092,9 @@ def build_symbol_bundle(
         )
     )
     one_history_ready = (
-        evaluation.one_minute_bar_count
-        >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
+        evaluation.one_minute_bar_count >= SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
     )
-    audit_one = (
-        tradable(facts.one_points, "1m") if one_history_ready else ()
-    )
+    audit_one = tradable(facts.one_points, "1m") if one_history_ready else ()
     production_one = (
         warmup.production_one_points
         if warmup is not None
@@ -3527,10 +3872,7 @@ def build_symbol_facts(
         interval.point_id
         for interval in operation_point_visibility
         if interval.visible_from <= end_at
-        and (
-            interval.visible_until is None
-            or interval.visible_until > effective_at
-        )
+        and (interval.visible_until is None or interval.visible_until > effective_at)
     }
     relevant_setups = tuple(
         setup
@@ -3735,9 +4077,7 @@ def build_symbol_facts(
         one_point_visibility=one_point_visibility,
         five_minute_warmup=five_minute_warmup,
         direction_unavailable_count=(
-            unavailable
-            + thirty_history_unavailable
-            + len(daily_unavailable_times)
+            unavailable + thirty_history_unavailable + len(daily_unavailable_times)
         ),
         security_master=security_master,
         memberships=membership_rows,
@@ -3746,6 +4086,8 @@ def build_symbol_facts(
 
 
 __all__ = (
+    "CAUSAL_CENTER_COMPLETION_CONTRACT",
+    "CausalCenterCompletionFact",
     "CausalStructureEventLedger",
     "FACT_SCHEMA",
     "FACT_FREQUENCIES",

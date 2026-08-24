@@ -403,6 +403,83 @@ def test_terminal_lineage_does_not_resurrect_expired_execution_setup() -> None:
     )
 
 
+def test_future_visibility_end_does_not_exclude_inclusive_setup_expiry() -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "3sell",
+            anchor=9.8,
+            stop=10.2,
+            center_zd=9.9,
+            center_zg=10.1,
+        )
+    )
+    expires_at = fixed_year.five_minute_setup_expires_at(setup)
+    future_visibility_end = expires_at + timedelta(days=1)
+    requested_end = future_visibility_end + timedelta(days=1)
+    closes = (setup.available_at, expires_at)
+
+    open_prefix = sparse_evaluation_times(
+        five_points=(setup,),
+        one_points=(),
+        thirty_closes=(expires_at,),
+        one_closes=closes,
+        effective_start=setup.available_at,
+        requested_end=expires_at,
+        five_point_visibility=(
+            PointVisibilityInterval(setup.point_id, setup.available_at),
+        ),
+    )
+    future_closed_full = sparse_evaluation_times(
+        five_points=(setup,),
+        one_points=(),
+        thirty_closes=(expires_at,),
+        one_closes=closes,
+        effective_start=setup.available_at,
+        requested_end=requested_end,
+        five_point_visibility=(
+            PointVisibilityInterval(
+                setup.point_id,
+                setup.available_at,
+                future_visibility_end,
+            ),
+        ),
+    )
+
+    assert open_prefix == (setup.available_at, expires_at)
+    assert future_closed_full == open_prefix
+
+
+def test_visibility_replacement_at_setup_expiry_remains_half_open() -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "3sell",
+            anchor=9.8,
+            stop=10.2,
+            center_zd=9.9,
+            center_zg=10.1,
+        )
+    )
+    expires_at = fixed_year.five_minute_setup_expires_at(setup)
+
+    observed = sparse_evaluation_times(
+        five_points=(setup,),
+        one_points=(),
+        thirty_closes=(expires_at,),
+        one_closes=(setup.available_at, expires_at),
+        effective_start=setup.available_at,
+        requested_end=expires_at + timedelta(days=1),
+        five_point_visibility=(
+            PointVisibilityInterval(
+                setup.point_id,
+                setup.available_at,
+                expires_at,
+            ),
+        ),
+    )
+
+    assert observed == (setup.available_at,)
+
+
 def test_segment_difference_uses_interval_not_legacy_setup_price_band() -> None:
     setup = _strict_setup(
         confirmed_point(
