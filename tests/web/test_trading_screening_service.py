@@ -1941,6 +1941,89 @@ def test_explicit_full_market_cache_keeps_direct_payload_restore_behavior(
     assert payload_reads == 1
 
 
+def test_full_market_restart_rejects_bounded_generation_and_continuity(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    bounded = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    bounded_snapshot = bounded.refresh_now()
+    generation_directory = tmp_path / ".snapshot.json.generations"
+    generation_paths = tuple(generation_directory.glob("*.json"))
+
+    assert bounded_snapshot["screening_scope_mode"] == "VALIDATION_COHORT"
+    assert len(generation_paths) == 1
+    assert bounded._cache_scope_sidecar_path(generation_paths[0]).is_file()
+    cache_path.unlink()
+    bounded._cache_scope_sidecar_path(cache_path).unlink()
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            full_coverage_refresh_enabled=True,
+            large_scope_authorized=True,
+        ),
+    )
+
+    assert restarted.snapshot()["scan_state"] == "not_started"
+    health = restarted.health_snapshot()
+    assert health["cache_recovered_from_generation"] is None
+    assert health["preselection_continuity_active"] is False
+
+
+def test_full_market_restart_restores_full_market_generation(tmp_path: Path) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    config = TradingScreeningConfig(
+        priority_monitoring_enabled=True,
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+    expected = service.refresh_now()
+    cache_path.unlink()
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+
+    assert (
+        restarted.snapshot()["snapshot_content_sha256"]
+        == expected["snapshot_content_sha256"]
+    )
+    assert restarted.health_snapshot()["cache_recovered_from_generation"]
+
+
 def test_startup_sector_cache_receives_exact_bounded_admission_before_restore(
     tmp_path: Path,
 ) -> None:
@@ -2158,7 +2241,11 @@ def test_previous_close_preselection_continuity_keeps_current_notifications_live
         cache_path=cache_path,
         clock=lambda: AS_OF,
         notifier=None,
-        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            full_coverage_refresh_enabled=True,
+            large_scope_authorized=True,
+        ),
     )
     published = first.refresh_now()
     assert published["scan_state"] == "complete"

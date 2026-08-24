@@ -304,6 +304,49 @@ def test_bounded_snapshot_keeps_full_strength_peers_out_of_routing_and_scope(
     assert service._cache_scope_sidecar_allows_payload(cache_path)
 
 
+def test_full_market_restore_rejects_validation_snapshot() -> None:
+    snapshot = live_snapshot()
+    admitted = tuple(snapshot["coverage_manifest"]["discovered_codes"])
+    snapshot.update(
+        {
+            "screening_scope_mode": "VALIDATION_COHORT",
+            "effective_monitor_universe_limit": 12,
+            "configured_admitted_codes": list(admitted),
+            "admitted_universe_codes": list(admitted),
+        }
+    )
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+    full_config = TradingScreeningConfig(
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+
+    assert not _restored_snapshot_scope_is_valid(snapshot, full_config)
+
+
+def test_full_market_restore_requires_exact_strategy_subject_identity() -> None:
+    snapshot = live_snapshot()
+    strategy_codes = tuple(snapshot["coverage_manifest"]["discovered_codes"])
+    snapshot.update(
+        {
+            "screening_scope_mode": "FULL_MARKET",
+            "effective_monitor_universe_limit": 20,
+            "configured_admitted_codes": [],
+            "admitted_universe_codes": list(strategy_codes),
+        }
+    )
+    full_config = TradingScreeningConfig(
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+
+    assert _restored_snapshot_scope_is_valid(snapshot, full_config)
+    snapshot["admitted_universe_codes"] = list(strategy_codes[:-1])
+    assert not _restored_snapshot_scope_is_valid(snapshot, full_config)
+
+
 def test_bounded_snapshot_rejects_admitted_strength_peer_missing_from_discovery(
 ) -> None:
     snapshot = live_snapshot()

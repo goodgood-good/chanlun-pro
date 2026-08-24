@@ -4064,29 +4064,44 @@ def _restored_snapshot_scope_is_valid(
 ) -> bool:
     """Prove a persisted snapshot belongs to the currently authorized scope.
 
-    Full-market mode deliberately preserves the historical cache semantics.  A
-    validation or explicitly bounded large-scope process may only restore a
-    snapshot whose complete strategy/routing state (publication, coverage
-    ledger and retry queues) fits inside the current admission ceiling.  The
-    complete sector-strength peer basket remains analysis context and is
-    independently hashed, but cannot widen stock routing.  Refusing the entire
-    immutable snapshot avoids presenting a clipped archive as authoritative.
+    Every restore, including a full-market restore, must retain the scope that
+    produced the immutable snapshot.  A validation or explicitly bounded
+    large-scope process may only restore a snapshot whose complete
+    strategy/routing state (publication, coverage ledger and retry queues) fits
+    inside the current admission ceiling.  The complete sector-strength peer
+    basket remains analysis context and is independently hashed, but cannot
+    widen stock routing.  Refusing the entire immutable snapshot avoids
+    presenting a clipped archive as authoritative full-market coverage.
     """
 
-    if config.screening_scope_mode == "FULL_MARKET":
-        return True
-    ordered_codes = _restored_snapshot_scope_codes(value)
-    nested_member_codes = _restored_snapshot_nested_member_codes(value)
-    if ordered_codes is None or nested_member_codes is None:
-        return False
-    assert isinstance(value, Mapping)
-    raw_admitted_codes = value.get("admitted_universe_codes")
-    raw_configured_admitted_codes = value.get("configured_admitted_codes")
     if (
-        value.get("screening_scope_mode") != config.screening_scope_mode
+        not isinstance(value, Mapping)
+        or value.get("screening_scope_mode") != config.screening_scope_mode
         or value.get("effective_monitor_universe_limit")
         != config.effective_monitor_universe_limit
-        or not _bounded_snapshot_admission_is_valid(
+    ):
+        return False
+    ordered_codes = _restored_snapshot_scope_codes(value)
+    if ordered_codes is None:
+        return False
+    raw_admitted_codes = value.get("admitted_universe_codes")
+    raw_configured_admitted_codes = value.get("configured_admitted_codes")
+    if config.screening_scope_mode == "FULL_MARKET":
+        return bool(
+            isinstance(raw_admitted_codes, list)
+            and all(
+                isinstance(code, str)
+                and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+                for code in raw_admitted_codes
+            )
+            and len(raw_admitted_codes) == len(set(raw_admitted_codes))
+            and frozenset(raw_admitted_codes) == frozenset(ordered_codes)
+        )
+    nested_member_codes = _restored_snapshot_nested_member_codes(value)
+    if nested_member_codes is None:
+        return False
+    if (
+        not _bounded_snapshot_admission_is_valid(
             raw_admitted_codes,
             raw_configured_admitted_codes=raw_configured_admitted_codes,
             strategy_subject_codes=ordered_codes,
@@ -7960,6 +7975,10 @@ class TradingScreeningService:
         """Persist the small admission proof after the payload is durable."""
 
         if self._config.screening_scope_mode == "FULL_MARKET":
+            # A sidecar is an exact bounded-admission proof.  Full snapshots are
+            # authenticated by their payload scope and must never retain a stale
+            # validation proof beside a content-addressed generation.
+            self._cache_scope_sidecar_path(path).unlink(missing_ok=True)
             return True
         sidecar = self._cache_scope_sidecar_path(path)
         document = self._cache_scope_sidecar_document(path, payload)
@@ -7992,7 +8011,10 @@ class TradingScreeningService:
         """Admit a bounded cache without opening its potentially huge payload."""
 
         if self._config.screening_scope_mode == "FULL_MARKET":
-            return True
+            # Full writers deliberately do not create bounded scope sidecars.
+            # Their presence proves this path came from another scope, so reject
+            # it before reading a potentially huge validation payload.
+            return not self._cache_scope_sidecar_path(path).exists()
         sidecar = self._cache_scope_sidecar_path(path)
         try:
             if sidecar.stat().st_size > _CACHE_SCOPE_SIDECAR_MAX_BYTES:
@@ -8051,7 +8073,11 @@ class TradingScreeningService:
         payload: Mapping[str, object],
     ) -> bool:
         if self._config.screening_scope_mode == "FULL_MARKET":
-            return True
+            # Detailed payload scope and contract validation happens immediately
+            # after decoding.  Keep this boundary limited to proving that no
+            # bounded-admission sidecar was attached to the full payload so a
+            # malformed full document retains the precise contract error class.
+            return not self._cache_scope_sidecar_path(path).exists()
         try:
             document = json.loads(
                 self._cache_scope_sidecar_path(path).read_text(encoding="utf-8")

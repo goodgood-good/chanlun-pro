@@ -182,6 +182,37 @@ def test_disk_warmed_first_round_does_not_open_exchange(monkeypatch):
     }
 
 
+def test_full_catalog_first_round_replaces_bounded_disk_warm_cache(monkeypatch):
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SZ.000001",),
+        full_catalog_authorized=True,
+    )
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = list(LKG)
+    fake = _FakeExchange(list(RAW))
+    monkeypatch.setattr(stock_list, "get_exchange", lambda _market: fake)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    stock_list._preload_single_exchange("a", skip_if_disk_warm=True)
+
+    assert fake.all_stocks_calls == 1
+    assert fake.stock_info_calls == []
+    assert [
+        (row["code"], row["name"], row["type"])
+        for row in stock_list._cached_symbols_or_empty("a")
+    ] == [("SH.600000", "Pufa", "stock_cn")]
+    assert stock_list.get_symbol_readiness("a") == {
+        "market": "a",
+        "ready": True,
+        "status": "ready",
+        "count": 1,
+        "last_error": None,
+        "catalog_mode": stock_list.FULL_IDENTITY_CATALOG,
+        "admitted_count": 1,
+        "full_catalog_authorized": True,
+    }
+
+
 def test_cold_validation_preload_never_enumerates_all_stocks(monkeypatch):
     codes = stock_list.DEFAULT_VALIDATION_SYMBOL_CODES
     fake = _FakeExchange(

@@ -651,8 +651,8 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
             if isinstance(row, dict)
         }
         cache_covers_scope = bool(cached) and (
-            catalog_mode == FULL_IDENTITY_CATALOG
-            or set(admitted_codes).issubset(cached_codes)
+            catalog_mode == BOUNDED_VALIDATION_CATALOG
+            and set(admitted_codes).issubset(cached_codes)
         )
         if cache_covers_scope:
             _mark_symbol_ready(exchange)
