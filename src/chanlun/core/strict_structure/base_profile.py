@@ -36,11 +36,14 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     # 再进入”三段，则离开段也比较三段；进入三段的第一段必须与中枢闭区间
     # 完全不重叠。面积、柱峰值和 DIF 极值任一衰减即可确认力度衰减。
     "trend_divergence_rule": (
-        "entry-width-matched-one-or-three-price-extreme-any-macd-decay"
+        "entry-width-matched-one-or-three-price-extreme-any-macd-decay;"
+        "single-unit-exit-three-segment-nonextending-reversal-confirmation"
     ),
-    # 趋势背驰和盘整背驰都在确认时固化同级别边界，边界之后重新划分中枢。
+    # 趋势背驰和盘整背驰都在确认时固化同级别边界，边界之后重新划分中枢；
+    # 尚未形成正式中枢的长区间按三段反转证据切成连续走势，不能被后来的中枢吞并。
     "decomposition_rule": (
-        "trend-or-consolidation-divergence-terminal-prefix-partition"
+        "trend-or-consolidation-divergence-terminal-prefix-partition;"
+        "centerless-three-segment-reversal-movement-partition"
     ),
     "first_class_rule": "trend-or-consolidation-divergence-reversal",
     # 小级别一类点可以跨级结束高一级走势。高一级二类点与普通二类点使用

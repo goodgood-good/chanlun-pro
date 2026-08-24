@@ -402,13 +402,12 @@ def center_departure_comparison_leg(
         or not _is_contiguous_three_leg(candidate)
     ):
         return None
-    terminal_extends = (
-        terminal.high_tick > max(leave.high_tick, ret.high_tick)
-        if terminal.direction == "up"
-        else terminal.low_tick < min(leave.low_tick, ret.low_tick)
-    )
-    if not terminal_extends:
-        return None
+    # A three-unit departure is one comparison leg.  Its price extreme belongs
+    # to the whole ``leave -> return -> terminal`` interval, not necessarily to
+    # the terminal unit by itself.  Requiring the terminal unit to extend the
+    # first leave incorrectly rejects the common second-test shape (a higher
+    # low after a downward leave, or a lower high after an upward leave).
+    # ``compare_comparison_legs`` validates the aggregate leg extreme below.
     return _comparison_leg(candidate)
 
 
@@ -451,13 +450,17 @@ def compare_terminal_trend_divergence(
     unit_index = {item.unit_id: index for index, item in enumerate(source_units)}
     start_index = unit_index.get(trend_start_unit_id)
     terminal_index = unit_index.get(terminal.unit_id)
+    signal_start_index = unit_index.get(later.units[0].unit_id)
     if start_index is None or terminal_index is None or start_index >= terminal_index:
         raise ValueError("trend divergence span is missing from source units")
-    prior_units = source_units[start_index:terminal_index]
+    if signal_start_index is None or signal_start_index <= start_index:
+        raise ValueError("trend divergence signal leg is missing its prior span")
+    prior_units = source_units[start_index:signal_start_index]
+    signal = later.measurement_unit
     makes_trend_extreme = (
-        terminal.high_tick > max(item.high_tick for item in prior_units)
+        signal.high_tick > max(item.high_tick for item in prior_units)
         if terminal.direction == "up"
-        else terminal.low_tick < min(item.low_tick for item in prior_units)
+        else signal.low_tick < min(item.low_tick for item in prior_units)
     )
     if not makes_trend_extreme:
         evidence = replace(evidence, price_extreme_confirmed=False)

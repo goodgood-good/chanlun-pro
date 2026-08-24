@@ -112,11 +112,11 @@ def build_trend_id(
     constituent_unit_ids: tuple[str, ...],
     direction: str,
     terminal_divergence_id: str | None = None,
+    completion_witness_unit_ids: tuple[str, ...] = (),
 ) -> str:
     """返回同一走势不同状态快照共享的不可变身份。"""
 
-    return stable_structure_id(
-        "chanlun-trend",
+    parts = (
         price_basis_revision,
         structural_level,
         tuple(center_ids),
@@ -124,6 +124,12 @@ def build_trend_id(
         direction,
         terminal_divergence_id,
     )
+    # Preserve existing identities when no geometric confirmation is present.
+    # A non-empty witness is immutable evidence and therefore participates in
+    # the identity of the resolved movement.
+    if completion_witness_unit_ids:
+        parts = (*parts, "geometric-completion", tuple(completion_witness_unit_ids))
+    return stable_structure_id("chanlun-trend", *parts)
 
 
 def _canonical_revision_value(value: Any) -> Any:

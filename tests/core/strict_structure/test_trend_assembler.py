@@ -15,7 +15,10 @@ from chanlun.core.strict_structure.models import (
     TrendType,
 )
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
-from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
+from chanlun.core.strict_structure.trend_assembler import (
+    _geometric_movement_slices,
+    assemble_trend_types,
+)
 from chanlun.core.strict_structure.strength import (
     StrengthSnapshot,
     center_departure_comparison_leg,
@@ -62,6 +65,135 @@ def three_center_fixture():
     assert len(centers) == 3
     first, second, third = centers
     return values, first, second, third
+
+
+def sh513100_manual_tail_fixture():
+    """Normalized L0 segment tail covered by the saved SH.513100 drawings."""
+
+    specs = (
+        ("up", 1667, 1841),
+        ("down", 1841, 1788),
+        ("up", 1788, 1912),
+        ("down", 1912, 1875),
+        ("up", 1875, 2126),
+        ("down", 2126, 2026),
+        ("up", 2026, 2270),
+        ("down", 2270, 2150),
+        ("up", 2150, 2386),
+        ("down", 2386, 2318),
+        ("up", 2318, 2577),
+        ("down", 2577, 2113),
+        ("up", 2113, 2203),
+        ("down", 2203, 2092),
+        ("up", 2092, 2383),
+        ("down", 2383, 2240),
+        ("up", 2240, 2311),
+        ("down", 2311, 2133),
+        ("up", 2133, 2232),
+        ("down", 2232, 2140),
+        ("up", 2140, 2189),
+        ("down", 2189, 2136),
+        ("up", 2136, 2192),
+        ("down", 2192, 2035),
+        ("up", 2035, 2292),
+        ("down", 2292, 2203),
+        ("up", 2203, 2274),
+        ("down", 2274, 2166),
+    )
+    values = tuple(unit(index, *spec) for index, spec in enumerate(specs))
+    return tuple(
+        value
+        if index < 23
+        else replace(
+            value,
+            locked=False,
+            confirmed_at=None,
+            formed_at=value.available_at,
+        )
+        for index, value in enumerate(values)
+    )
+
+
+def test_sh513100_manual_5m_tail_is_partitioned_at_saved_boundaries() -> None:
+    values = sh513100_manual_tail_fixture()
+
+    slices = _geometric_movement_slices(values, 0)
+    assert tuple(
+        (
+            values.index(movement[0]),
+            values.index(movement[-1]),
+            tuple(values.index(item) for item in witness),
+        )
+        for movement, witness in slices
+    ) == (
+        (0, 10, (11, 12, 13)),
+        (11, 13, (14, 15, 16)),
+        (14, 16, (17, 18, 19)),
+        (17, 23, (24, 25, 26)),
+    )
+
+    centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
+    result = assemble_trend_types(centers, values, 0)
+    assert tuple(
+        (values.index(trend.constituent_units[0]), values.index(trend.terminal_unit))
+        for trend in result.current_trends
+    ) == ((0, 10), (11, 13), (14, 16), (17, 23))
+    assert tuple(trend.state for trend in result.current_trends) == (
+        TrendState.LOCKED,
+        TrendState.LOCKED,
+        TrendState.LOCKED,
+        TrendState.FORMING,
+    )
+    assert tuple(len(trend.centers) for trend in result.current_trends) == (0, 0, 0, 1)
+    assert result.pending_movements[0].constituent_units == values[24:]
+
+    locked_ids = set()
+    for size in range(6, len(values) + 1):
+        prefix = values[:size]
+        prefix_centers = calculate_centers(
+            prefix,
+            0,
+            SourceKind.SEGMENT,
+        ).centers
+        prefix_result = assemble_trend_types(prefix_centers, prefix, 0)
+        current_locked_ids = {
+            trend.trend_id
+            for trend in prefix_result.current_trends
+            if trend.state is TrendState.LOCKED
+        }
+        assert locked_ids.issubset(current_locked_ids)
+        locked_ids.update(current_locked_ids)
+
+
+def test_geometric_successor_locks_completed_predecessor_without_chain_gap() -> None:
+    points = (100, 122, 91, 115, 111, 120, 85, 103, 94, 128, 107, 120, 100, 115, 105)
+    values = tuple(
+        unit(
+            index,
+            "up" if index % 2 == 0 else "down",
+            points[index],
+            points[index + 1],
+        )
+        for index in range(len(points) - 1)
+    )
+
+    structure = StrictRecursiveEngine(max_levels=1).calculate(values)
+    trends = structure.levels[0].trend_types
+
+    assert tuple(trend.state for trend in trends) == (
+        TrendState.LOCKED,
+        TrendState.LOCKED,
+        TrendState.FORMING,
+    )
+    assert tuple(
+        (values.index(trend.constituent_units[0]), values.index(trend.terminal_unit))
+        for trend in trends
+    ) == ((0, 5), (6, 8), (9, 13))
+    assert all(
+        previous.end_tick == current.start_tick
+        and previous.market_end <= current.market_start
+        for previous, current in zip(trends, trends[1:])
+    )
 
 
 def _trend_for(center, *, state, constituent_units=None):
@@ -367,6 +499,28 @@ def test_three_unit_entry_waits_for_matching_three_unit_departure_boundary():
     )
 
 
+def test_three_unit_departure_uses_the_whole_leg_extreme() -> None:
+    values, first, second, _third = three_center_fixture()
+    # u-8 makes the signal leg's new high; u-10 is the weaker second test that
+    # anchors the reversal.  The terminal unit therefore need not exceed u-8.
+    weaker_terminal = replace(values[10], end_tick=155, high_tick=155)
+    source = (*values[:10], weaker_terminal)
+
+    result = assemble_trend_types(
+        (first, second),
+        source,
+        0,
+        strength=BoundaryStrength(),
+    )
+
+    assert len(result.decomposition_boundaries) == 1
+    boundary = result.decomposition_boundaries[0]
+    assert boundary.anchor_unit_id == weaker_terminal.unit_id
+    assert boundary.divergence.signal_leg_unit_ids == ("u-8", "u-9", "u-10")
+    assert weaker_terminal.high_tick < source[8].high_tick
+    assert boundary.divergence.price_extreme_confirmed is True
+
+
 def test_three_unit_entry_selects_matching_complete_departure_leg():
     values, _first, second, _third = three_center_fixture()
 
@@ -421,6 +575,73 @@ def test_entry_first_leg_touching_center_falls_back_to_one_unit_comparison():
     assert departure is not None
     assert departure.width == 1
     assert departure.units == (values[10],)
+
+
+def test_one_unit_consolidation_exit_waits_for_non_extending_reversal() -> None:
+    base_specs = (
+        ("up", 90, 120),
+        ("down", 120, 100),
+        ("up", 100, 115),
+        ("down", 115, 105),
+        ("up", 105, 130),
+        ("down", 130, 110),
+        ("up", 110, 140),
+        ("down", 140, 125),
+        ("up", 125, 145),
+        ("down", 145, 130),
+        ("up", 130, 150),
+    )
+    base = tuple(unit(index, *spec) for index, spec in enumerate(base_specs))
+    center = calculate_centers(base, 0, SourceKind.SEGMENT).centers[-1]
+
+    class OneUnitDecayStrength:
+        def snapshot(self, value):
+            area, peak, dif = {
+                "u-6": (100, 5, 2),
+                "u-10": (50, 3, 1),
+            }[value.unit_id]
+            return StrengthSnapshot(
+                unit_id=value.unit_id,
+                direction=value.direction,
+                histogram_area=area,
+                histogram_peak=peak,
+                dif_extreme=dif,
+                source="macd",
+                available_at=value.available_at,
+            )
+
+    extending = (
+        *base,
+        unit(11, "down", 150, 140),
+        unit(12, "up", 140, 160),
+        unit(13, "down", 160, 145),
+    )
+    rejected = assemble_trend_types(
+        (center,),
+        extending,
+        0,
+        strength=OneUnitDecayStrength(),
+        group_start_unit_id="u-6",
+    )
+    assert rejected.decomposition_boundaries == ()
+
+    confirmed = (
+        *base,
+        unit(11, "down", 150, 140),
+        unit(12, "up", 140, 148),
+        unit(13, "down", 148, 142),
+    )
+    accepted = assemble_trend_types(
+        (center,),
+        confirmed,
+        0,
+        strength=OneUnitDecayStrength(),
+        group_start_unit_id="u-6",
+    )
+    assert len(accepted.decomposition_boundaries) == 1
+    boundary = accepted.decomposition_boundaries[0]
+    assert boundary.anchor_unit_id == "u-10"
+    assert boundary.available_at == confirmed[-1].available_at
 
 
 def test_three_unit_divergence_boundary_appears_only_when_terminal_locks():

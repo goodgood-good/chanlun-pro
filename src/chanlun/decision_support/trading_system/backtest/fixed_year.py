@@ -1603,6 +1603,15 @@ def _causal_confirmed_structure_events(
     trend_ledger: dict[str, TrendType] = {}
     unit_ledger: dict[tuple[str, int], ConstituentUnit] = {}
     center_ledger: dict[tuple[str, int], CausalCenterCompletionFact] = {}
+
+    def store_unit(unit: ConstituentUnit) -> None:
+        """Keep the first live geometry until its immutable audit lock arrives."""
+
+        key = (unit.unit_id, unit.structural_level)
+        previous = unit_ledger.get(key)
+        if previous is None or (unit.locked and not previous.locked):
+            unit_ledger[key] = unit
+
     production_occurrences_by_end: dict[int, frozenset[str] | None] = {}
     frame_dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
     next_segment_start: int | None = None
@@ -1672,10 +1681,7 @@ def _causal_confirmed_structure_events(
                     unit,
                     available_at=max(unit.available_at, checkpoint),
                 )
-                unit_ledger.setdefault(
-                    (first_seen_unit.unit_id, first_seen_unit.structural_level),
-                    first_seen_unit,
-                )
+                store_unit(first_seen_unit)
             for center in level.center_result.centers:
                 leave = center.completion_leave_unit
                 ret = center.completion_return_unit
@@ -1847,12 +1853,11 @@ def _causal_confirmed_structure_events(
                 raise ValueError(
                     "operational point anchor is not a completed live unit"
                 )
-            unit_ledger.setdefault(
-                (anchor_unit.unit_id, anchor_unit.structural_level),
+            store_unit(
                 replace(
                     anchor_unit,
                     available_at=max(anchor_unit.available_at, checkpoint),
-                ),
+                )
             )
             first_observation = point_id not in point_ledger
             if first_observation:

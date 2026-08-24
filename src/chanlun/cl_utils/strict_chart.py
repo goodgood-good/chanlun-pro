@@ -1002,6 +1002,9 @@ def strict_trend_to_chart_dict(
         "range": {"low_tick": trend.low_tick, "high_tick": trend.high_tick},
         "center_ids": [center.center_id for center in trend.centers],
         "constituent_unit_ids": [unit.unit_id for unit in trend.constituent_units],
+        "completion_witness_unit_ids": [
+            unit.unit_id for unit in trend.completion_witness_units
+        ],
         "confirmed_at": _optional_epoch(trend.confirmed_at),
         "available_at": aware_datetime_to_epoch_seconds(trend.available_at),
     }

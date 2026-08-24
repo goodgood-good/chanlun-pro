@@ -167,10 +167,12 @@ def test_strict_base_profile_contains_only_current_production_rules():
         "five-role-physical-seed-causal-lifecycle-owner"
     )
     assert config["trend_divergence_rule"] == (
-        "entry-width-matched-one-or-three-price-extreme-any-macd-decay"
+        "entry-width-matched-one-or-three-price-extreme-any-macd-decay;"
+        "single-unit-exit-three-segment-nonextending-reversal-confirmation"
     )
     assert config["decomposition_rule"] == (
-        "trend-or-consolidation-divergence-terminal-prefix-partition"
+        "trend-or-consolidation-divergence-terminal-prefix-partition;"
+        "centerless-three-segment-reversal-movement-partition"
     )
     assert config["first_class_rule"] == (
         "trend-or-consolidation-divergence-reversal"

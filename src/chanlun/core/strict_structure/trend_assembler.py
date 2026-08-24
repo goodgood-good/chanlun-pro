@@ -17,6 +17,7 @@ from chanlun.core.strict_structure.models import (
     DecompositionBoundaryEvidence,
     PendingMovementPartition,
     PendingMovementRole,
+    SourceKind,
     TrendAssemblyResult,
     TrendKind,
     TrendState,
@@ -243,6 +244,95 @@ def _direction(constituent_units):
     return constituent_units[-1].direction
 
 
+def _reversal_witness_after(source_units, terminal_index, *, locked_only):
+    terminal = source_units[terminal_index]
+    witness = source_units[terminal_index + 1 : terminal_index + 4]
+    if len(witness) != 3 or (
+        locked_only and any(not item.locked for item in witness)
+    ):
+        return None
+    first, middle, third = witness
+    opposite = "down" if terminal.direction == "up" else "up"
+    if (
+        first.direction != opposite
+        or middle.direction != terminal.direction
+        or third.direction != opposite
+    ):
+        return None
+    if max(first.low_tick, third.low_tick) >= min(
+        first.high_tick,
+        third.high_tick,
+    ):
+        return None
+    extends = (
+        middle.high_tick > terminal.high_tick
+        if terminal.direction == "up"
+        else middle.low_tick < terminal.low_tick
+    )
+    return None if extends else witness
+
+
+def _single_unit_reversal_witness(source_units, index, signal):
+    """Return the locked three-unit reversal that confirms a one-unit exit.
+
+    A one-unit consolidation departure only records the first directional
+    extreme. It is not a stable movement boundary until the following
+    ``opposite -> same -> opposite`` sequence overlaps on its two outside
+    units and the middle unit fails to extend that extreme. A three-unit
+    departure already contains this second-test shape and needs no extra
+    witness.
+    """
+
+    signal_index = index.get(signal.unit_id)
+    if signal_index is None:
+        raise ValueError("single-unit departure signal is missing from source units")
+    return _reversal_witness_after(
+        source_units,
+        signal_index,
+        locked_only=True,
+    )
+
+
+def _geometric_movement_slices(source_units, start_index):
+    """Partition an alternating segment suffix at confirmed reversal shapes."""
+
+    values = tuple(source_units)
+    if not 0 <= start_index < len(values):
+        raise ValueError("geometric movement start is outside source units")
+    output = []
+    movement_start = start_index
+    while movement_start + 5 < len(values):
+        found = None
+        for terminal_index in range(movement_start + 2, len(values) - 3, 2):
+            if values[terminal_index].direction != values[movement_start].direction:
+                raise ValueError("geometric movement requires alternating segments")
+            start_tick = values[movement_start].start_tick
+            end_tick = values[terminal_index].end_tick
+            moves_in_segment_direction = (
+                end_tick > start_tick
+                if values[movement_start].direction == "up"
+                else end_tick < start_tick
+            )
+            if not moves_in_segment_direction:
+                continue
+            witness = _reversal_witness_after(
+                values,
+                terminal_index,
+                locked_only=False,
+            )
+            if witness is not None:
+                found = (
+                    values[movement_start : terminal_index + 1],
+                    witness,
+                )
+                break
+        if found is None:
+            break
+        output.append(found)
+        movement_start += len(found[0])
+    return tuple(output)
+
+
 def partition_pending_movements(
     current_trends,
     units,
@@ -426,6 +516,7 @@ def _build(
     confirmed_at,
     available_at,
     terminal_divergence=None,
+    completion_witness_units=(),
 ):
     all_units = tuple(constituent_units)
     start = all_units[0]
@@ -444,6 +535,9 @@ def _build(
                 if terminal_divergence is None
                 else terminal_divergence.divergence_id
             ),
+            completion_witness_unit_ids=tuple(
+                item.unit_id for item in completion_witness_units
+            ),
         ),
         structural_level=structural_level,
         price_basis_revision=start.price_basis_revision,
@@ -461,7 +555,147 @@ def _build(
         confirmed_at=confirmed_at,
         available_at=available_at,
         terminal_divergence=terminal_divergence,
+        completion_witness_units=tuple(completion_witness_units),
     )
+
+
+def _refine_forming_segment_tail(
+    output,
+    completed,
+    source_units,
+    index,
+    structural_level,
+):
+    """Separate resolved centerless movements before the active tail center.
+
+    A late center must not absorb several already-confirmed alternating
+    movements merely because no earlier formal five-role center existed.
+    Every geometrically completed lead-in movement that ends immediately
+    before the center is an independent same-level movement type.
+    """
+
+    if (
+        not output
+        or not source_units
+        or source_units[0].source_kind is not SourceKind.SEGMENT
+    ):
+        return
+    tail = output[-1]
+    if (
+        tail.state is not TrendState.FORMING
+        or tail.terminal_divergence is not None
+        or len(tail.centers) != 1
+    ):
+        return
+    center = tail.centers[0]
+    center_start_unit = (
+        center.body_units[0] if center.entry_unit is None else center.entry_unit
+    )
+    movement_start = index[tail.constituent_units[0].unit_id]
+    center_start = index[center_start_unit.unit_id]
+    if center_start - movement_start < 3:
+        return
+
+    slices = _geometric_movement_slices(source_units, movement_start)
+    prefix_slices = tuple(
+        item
+        for item in slices
+        if index[item[0][-1].unit_id] < center_start
+    )
+    if (
+        not prefix_slices
+        or index[prefix_slices[-1][0][-1].unit_id] != center_start - 1
+        or any(
+            not unit.locked
+            for movement, witness in prefix_slices
+            for unit in (*movement, *witness)
+        )
+    ):
+        return
+
+    refined = []
+    for movement, witness in prefix_slices:
+        confirmations = tuple(
+            item.confirmed_at for item in (*movement, *witness)
+        )
+        if any(value is None for value in confirmations):
+            raise ValueError("locked geometric movement requires confirmations")
+        confirmed_at = max(confirmations)
+        available_at = max(item.available_at for item in (*movement, *witness))
+        complete = _build(
+            (),
+            movement,
+            structural_level,
+            TrendState.COMPLETE,
+            confirmed_at,
+            available_at,
+            completion_witness_units=witness,
+        )
+        locked = _build(
+            (),
+            movement,
+            structural_level,
+            TrendState.LOCKED,
+            confirmed_at,
+            available_at,
+            completion_witness_units=witness,
+        )
+        previous = completed.setdefault(complete.trend_id, complete)
+        if previous != complete:
+            raise ValueError("geometric movement identity collision")
+        refined.append(locked)
+
+    # The first locked geometric movement is itself a causal successor
+    # boundary.  Any earlier COMPLETE trend in the current partition must be
+    # locked at that boundary as well; otherwise a later LOCKED trend would
+    # jump over an unlocked predecessor and the recursive stream would no
+    # longer be one continuous same-level chain.
+    first_locked = refined[0]
+    if first_locked.confirmed_at is None:
+        raise ValueError("locked geometric movement requires confirmation")
+    for offset, trend in enumerate(output[:-1]):
+        if trend.state is not TrendState.COMPLETE:
+            continue
+        if trend.confirmed_at is None:
+            raise ValueError("completed trend requires confirmation")
+        output[offset] = replace(
+            trend,
+            state=TrendState.LOCKED,
+            confirmed_at=max(trend.confirmed_at, first_locked.confirmed_at),
+            available_at=max(trend.available_at, first_locked.available_at),
+        )
+
+    original_end = index[tail.constituent_units[-1].unit_id]
+    center_slice = next(
+        (
+            item
+            for item in slices
+            if index[item[0][0].unit_id] == center_start
+            and index[item[0][-1].unit_id] >= original_end
+        ),
+        None,
+    )
+    if center_slice is None:
+        center_units = source_units[center_start : original_end + 1]
+        center_witness = ()
+    else:
+        center_units, center_witness = center_slice
+    available_at = max(
+        center.available_at,
+        *(item.available_at for item in (*center_units, *center_witness)),
+    )
+    refined.append(
+        _build(
+            (center,),
+            center_units,
+            structural_level,
+            TrendState.FORMING,
+            None,
+            available_at,
+            completion_witness_units=center_witness,
+        )
+    )
+    output[-1:] = refined
 
 
 def _confirmed_divergence_boundary(
@@ -510,6 +744,27 @@ def _confirmed_divergence_boundary(
     divergence, signal = compared
     if not divergence.is_divergent:
         return None
+    if len(group) == 1 and divergence.comparison_width == 1:
+        reversal_witness = _single_unit_reversal_witness(
+            source_units,
+            index,
+            signal,
+        )
+        if reversal_witness is None:
+            return None
+        witness_confirmations = tuple(
+            item.confirmed_at for item in reversal_witness
+        )
+        if any(value is None for value in witness_confirmations):
+            raise ValueError("locked reversal witness requires confirmations")
+        divergence = replace(
+            divergence,
+            confirmed_at=max(divergence.confirmed_at, *witness_confirmations),
+            available_at=max(
+                divergence.available_at,
+                *(item.available_at for item in reversal_witness),
+            ),
+        )
     # 一个较窄的中枢可能只在后续回返单元到来后，才取代此前更宽的进行中中枢。
     # 若再使用更早离开单元上的单段背驰关闭它，就会把“后来才知道的中枢几何”
     # 倒写到过去，且在硬边界分区中无法因果重放。此类比较只是不成立，不是整只
@@ -866,6 +1121,13 @@ def assemble_trend_types(
             )
         )
         record_complete(group, group_start)
+    _refine_forming_segment_tail(
+        output,
+        completed,
+        source_units,
+        index,
+        structural_level,
+    )
     current_trends = tuple(output)
     return TrendAssemblyResult(
         current_trends=current_trends,

@@ -1363,12 +1363,20 @@ class TrendType:
     # 已确认的同级别趋势背驰或盘整背驰，都可以在后续中枢关系变化出现前结束
     # 当前走势。该字段保持可选，以便表达仅由几何关系完成的走势快照。
     terminal_divergence: DivergenceEvidence | None = None
+    # 几何走势的终点由其后的“反向/同向/反向”三段确认。确认段不归左侧
+    # 走势所有，但必须作为不可变证据保留，避免回测把未来确认时间写回终点。
+    completion_witness_units: tuple[ConstituentUnit, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", TrendKind(self.kind))
         object.__setattr__(self, "state", TrendState(self.state))
         object.__setattr__(self, "centers", tuple(self.centers))
         object.__setattr__(self, "constituent_units", tuple(self.constituent_units))
+        object.__setattr__(
+            self,
+            "completion_witness_units",
+            tuple(self.completion_witness_units),
+        )
 
         if not self.trend_id:
             raise ValueError("trend_id is required")
@@ -1385,8 +1393,6 @@ class TrendType:
             and self.confirmed_at is None
         ):
             raise ValueError("completed trend requires confirmed_at")
-        if not self.centers:
-            raise ValueError("trend type requires at least one center")
         if not self.constituent_units:
             raise ValueError("trend type requires constituent units")
 
@@ -1395,11 +1401,14 @@ class TrendType:
             for item in self.constituent_units
         ) or any(
             center.structural_level != self.structural_level for center in self.centers
+        ) or any(
+            item.structural_level != self.structural_level
+            for item in self.completion_witness_units
         ):
             raise ValueError("trend level must match all evidence")
         source_kinds = {item.source_kind for item in self.constituent_units} | {
             center.source_kind for center in self.centers
-        }
+        } | {item.source_kind for item in self.completion_witness_units}
         if len(source_kinds) != 1:
             raise ValueError("trend source must match all evidence")
         if any(
@@ -1408,6 +1417,9 @@ class TrendType:
         ) or any(
             center.price_basis_revision != self.price_basis_revision
             for center in self.centers
+        ) or any(
+            item.price_basis_revision != self.price_basis_revision
+            for item in self.completion_witness_units
         ):
             raise ValueError("trend cannot cross price basis")
         if len({item.unit_id for item in self.constituent_units}) != len(
@@ -1416,11 +1428,22 @@ class TrendType:
             raise ValueError("constituent units must be unique")
         if len({center.center_id for center in self.centers}) != len(self.centers):
             raise ValueError("trend centers must be unique")
+        witness_ids = tuple(item.unit_id for item in self.completion_witness_units)
+        if len(set(witness_ids)) != len(witness_ids):
+            raise ValueError("trend completion witness units must be unique")
+        if set(witness_ids) & {
+            item.unit_id for item in self.constituent_units
+        }:
+            raise ValueError("trend completion witness cannot own constituent units")
 
-        if self.kind is TrendKind.CONSOLIDATION and len(self.centers) != 1:
-            raise ValueError("consolidation must contain exactly one center")
+        if self.kind is TrendKind.CONSOLIDATION and len(self.centers) not in (0, 1):
+            raise ValueError("consolidation must contain at most one center")
         if self.kind is TrendKind.TREND and len(self.centers) < 2:
             raise ValueError("trend must contain at least two centers")
+        if not self.centers and not self.completion_witness_units:
+            raise ValueError("centerless movement requires geometric confirmation")
+        if self.terminal_divergence is not None and self.completion_witness_units:
+            raise ValueError("divergence and geometric completion are exclusive")
 
         segment_sourced = all(
             item.source_kind is SourceKind.SEGMENT for item in self.constituent_units
@@ -1457,6 +1480,42 @@ class TrendType:
             not item.locked for item in self.constituent_units
         ):
             raise ValueError("completed trend requires locked constituent units")
+        if self.state in (TrendState.COMPLETE, TrendState.LOCKED) and any(
+            not item.locked for item in self.completion_witness_units
+        ):
+            raise ValueError("completed trend requires locked completion witnesses")
+
+        if self.completion_witness_units:
+            if len(self.completion_witness_units) != 3:
+                raise ValueError("geometric completion requires exactly three witnesses")
+            terminal = self.constituent_units[-1]
+            first_witness, middle_witness, last_witness = (
+                self.completion_witness_units
+            )
+            opposite = "down" if terminal.direction == "up" else "up"
+            if (
+                terminal.direction != self.direction
+                or first_witness.direction != opposite
+                or middle_witness.direction != terminal.direction
+                or last_witness.direction != opposite
+                or max(first_witness.low_tick, last_witness.low_tick)
+                >= min(first_witness.high_tick, last_witness.high_tick)
+            ):
+                raise ValueError("invalid geometric completion witness shape")
+            extends = (
+                middle_witness.high_tick > terminal.high_tick
+                if terminal.direction == "up"
+                else middle_witness.low_tick < terminal.low_tick
+            )
+            if extends:
+                raise ValueError("geometric witness cannot extend the terminal extreme")
+            witness_chain = (terminal, *self.completion_witness_units)
+            for previous, current in zip(witness_chain, witness_chain[1:]):
+                if (
+                    previous.end_tick != current.start_tick
+                    or current.market_start < previous.market_end
+                ):
+                    raise ValueError("geometric completion witness must follow terminal")
 
         constituent_ids = {item.unit_id for item in self.constituent_units}
         for center in self.centers:
@@ -1479,19 +1538,26 @@ class TrendType:
                 and center.completion_return_unit.unit_id not in constituent_ids
             ):
                 raise ValueError("internal completion return must remain in trend")
-        terminal_leave = self.centers[-1].completion_leave_unit
-        terminal_return = self.centers[-1].completion_return_unit
+        terminal_leave = (
+            None if not self.centers else self.centers[-1].completion_leave_unit
+        )
+        terminal_return = (
+            None if not self.centers else self.centers[-1].completion_return_unit
+        )
         if self.terminal_divergence is None:
-            if (
-                terminal_return is not None
-                and terminal_return.unit_id in constituent_ids
-            ):
-                raise ValueError("terminal completion return belongs to the next trend")
-            if (
-                terminal_leave is not None
-                and self.constituent_units[-1] != terminal_leave
-            ):
-                raise ValueError("terminal unit must be the final leave unit")
+            if self.centers:
+                if (
+                    terminal_return is not None
+                    and terminal_return.unit_id in constituent_ids
+                ):
+                    raise ValueError(
+                        "terminal completion return belongs to the next trend"
+                    )
+                if (
+                    terminal_leave is not None
+                    and self.constituent_units[-1] != terminal_leave
+                ):
+                    raise ValueError("terminal unit must be the final leave unit")
         else:
             divergence = self.terminal_divergence
             expected_divergence_kind = (
@@ -1553,7 +1619,6 @@ class TrendType:
                 )
 
             compare_first_outside = True
-            signal_terminal_extends = True
             if divergence.comparison_width == 3:
                 compare_first = compare_leg[0]
                 compare_first_outside = (
@@ -1561,22 +1626,20 @@ class TrendType:
                     if divergence.direction == "up"
                     else compare_first.low_tick > terminal_center.zg_tick
                 )
-                signal_terminal_extends = (
-                    signal_leg[-1].high_tick
-                    > max(item.high_tick for item in signal_leg[:-1])
-                    if divergence.direction == "up"
-                    else signal_leg[-1].low_tick
-                    < min(item.low_tick for item in signal_leg[:-1])
-                )
             expected_anchor = (
                 terminal.high_tick if self.direction == "up" else terminal.low_tick
             )
-            makes_whole_trend_extreme = (
-                terminal.high_tick
-                > max(item.high_tick for item in self.constituent_units[:-1])
+            signal_start = unit_offsets[signal_leg[0].unit_id]
+            prior_units = self.constituent_units[:signal_start]
+            signal_extreme = (
+                max(item.high_tick for item in signal_leg)
                 if self.direction == "up"
-                else terminal.low_tick
-                < min(item.low_tick for item in self.constituent_units[:-1])
+                else min(item.low_tick for item in signal_leg)
+            )
+            makes_whole_trend_extreme = bool(prior_units) and (
+                signal_extreme > max(item.high_tick for item in prior_units)
+                if self.direction == "up"
+                else signal_extreme < min(item.low_tick for item in prior_units)
             )
             if terminal_center.entry_unit is None:
                 raise ValueError(
@@ -1594,7 +1657,6 @@ class TrendType:
                 or not directional_leg(compare_leg)
                 or not directional_leg(signal_leg)
                 or not compare_first_outside
-                or not signal_terminal_extends
                 or not makes_whole_trend_extreme
                 or terminal.market_end != divergence.anchor_at
                 or expected_anchor != divergence.anchor_tick
@@ -1642,11 +1704,31 @@ class TrendType:
             and self.confirmed_at < max(completion_times)
         ):
             raise ValueError("trend confirmation must cover center completion")
+        witness_confirmations = tuple(
+            item.confirmed_at
+            for item in self.completion_witness_units
+            if item.confirmed_at is not None
+        )
+        if (
+            self.state in (TrendState.COMPLETE, TrendState.LOCKED)
+            and len(witness_confirmations) != len(self.completion_witness_units)
+        ):
+            raise ValueError("completed trend witnesses require confirmations")
+        if (
+            self.confirmed_at is not None
+            and witness_confirmations
+            and self.confirmed_at < max(witness_confirmations)
+        ):
+            raise ValueError("trend confirmation must cover geometric witnesses")
         if self.confirmed_at is not None and self.available_at < self.confirmed_at:
             raise ValueError("available_at must not precede confirmed_at")
         evidence_availability = tuple(
             item.available_at for item in self.constituent_units
-        ) + tuple(center.available_at for center in self.centers)
+        ) + tuple(
+            center.available_at for center in self.centers
+        ) + tuple(
+            item.available_at for item in self.completion_witness_units
+        )
         if self.available_at < max(evidence_availability):
             raise ValueError("trend availability must cover all evidence")
 
@@ -1660,6 +1742,9 @@ class TrendType:
                 None
                 if self.terminal_divergence is None
                 else self.terminal_divergence.divergence_id
+            ),
+            completion_witness_unit_ids=tuple(
+                item.unit_id for item in self.completion_witness_units
             ),
         )
         if self.trend_id != expected_trend_id:
@@ -1682,8 +1767,9 @@ class TrendType:
 class PendingMovementPartition:
     """尚不足以定型为正式 ``TrendType`` 的连续同级别走势分区。
 
-    待定分区只负责把未被当前正式走势拥有的单元显式列账。它没有中枢，不能
-    递归、交易或参与背驰；相邻正式走势通过边界引用连接，绝不共享来源单元。
+    待定分区只负责把未被当前正式走势拥有、且尚无三段反转完成证据的单元
+    显式列账。它不能递归、交易或参与背驰；相邻正式走势通过边界引用连接，
+    绝不共享来源单元。
     """
 
     partition_id: str
@@ -2138,7 +2224,10 @@ class StrictLevelResult:
         for trend in (*self.trend_types, *self.completed_trends):
             if any(
                 units_by_id.get(unit.unit_id) != unit
-                for unit in trend.constituent_units
+                for unit in (
+                    *trend.constituent_units,
+                    *trend.completion_witness_units,
+                )
             ) or any(
                 centers_by_id.get(center.center_id) != center
                 for center in trend.centers
