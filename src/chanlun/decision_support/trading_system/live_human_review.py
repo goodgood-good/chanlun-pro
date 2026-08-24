@@ -3995,6 +3995,85 @@ def _validated_sector_documents(
     return sectors
 
 
+def _serialized_five_minute_setup_identity(
+    signal: Mapping[str, object],
+    setup: Mapping[str, object],
+) -> str | None:
+    """Rebuild the exact point identity consumed by ``build_setup``.
+
+    Provisional setup identities are their candidate IDs. Confirmed points use
+    the stable physical-occurrence identity instead of the reconstruction-local
+    ``point_id``. The live document already carries every field in that
+    occurrence projection, so review validation can reproduce the engine's
+    identity without trusting the declared setup or lifecycle hashes.
+    """
+
+    point_id = setup.get("point_id")
+    status = setup.get("status")
+    if not isinstance(point_id, str):
+        return None
+    if status == "provisional":
+        return point_id
+    if status != "confirmed":
+        return None
+    required_fields = (
+        "price_basis_revision",
+        "source_frequency",
+        "point_type",
+        "side",
+        "variant",
+        "tower",
+        "recursive_level",
+        "anchor_at",
+        "anchor_price",
+        "invalidation_price",
+        "center_zd",
+        "center_zg",
+        "center_ordinal",
+        "divergence_kind",
+    )
+    if any(name not in setup for name in required_fields):
+        return None
+    code = signal.get("code")
+    if (
+        not isinstance(code, str)
+        or not isinstance(setup.get("price_basis_revision"), str)
+        or not isinstance(setup.get("source_frequency"), str)
+        or not isinstance(setup.get("point_type"), str)
+        or not isinstance(setup.get("side"), str)
+        or not isinstance(setup.get("tower"), str)
+        or type(setup.get("recursive_level")) is not int
+    ):
+        return None
+    try:
+        anchor_at = normalize_datetime(
+            datetime.fromisoformat(str(setup["anchor_at"])),
+            "five-minute setup anchor_at",
+        )
+        return sha256_json(
+            {
+                "schema": "chanlun-structural-point-occurrence-v3",
+                "code": code,
+                "price_basis_revision": setup["price_basis_revision"],
+                "source_frequency": setup["source_frequency"],
+                "point_type": setup["point_type"],
+                "side": setup["side"],
+                "variant": setup["variant"],
+                "tower": setup["tower"],
+                "recursive_level": setup["recursive_level"],
+                "anchor_at": anchor_at.isoformat(timespec="seconds"),
+                "structure_anchor_price": setup["anchor_price"],
+                "structure_invalidation_price": setup["invalidation_price"],
+                "center_zd": setup["center_zd"],
+                "center_zg": setup["center_zg"],
+                "center_ordinal": setup["center_ordinal"],
+                "divergence_kind": setup["divergence_kind"],
+            }
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def validate_live_review_snapshot(
     payload: Mapping[str, object],
     *,
@@ -4330,13 +4409,13 @@ def validate_live_review_snapshot(
                 sector_document_consistent = signal_sector_id == "unclassified"
         signal_identity_consistent = False
         if isinstance(setup, Mapping) and isinstance(signal_sector, Mapping):
-            setup_point_id = setup.get("point_id")
+            setup_occurrence_id = _serialized_five_minute_setup_identity(raw, setup)
             sector_id = signal_sector.get("sector_id")
-            if isinstance(setup_point_id, str) and isinstance(sector_id, str):
+            if isinstance(setup_occurrence_id, str) and isinstance(sector_id, str):
                 expected_setup_id = sha256_json(
                     {
                         "schema": "chanlun-trade-setup",
-                        "point_id": setup_point_id,
+                        "point_id": setup_occurrence_id,
                         "sector_id": sector_id,
                         "sector_required": raw.get("selection_path")
                         == "INDIVIDUAL_THREE_PROGRAM",
@@ -4350,7 +4429,7 @@ def validate_live_review_snapshot(
                     }
                 )
                 signal_identity_consistent = bool(
-                    raw.get("point_id") == setup_point_id
+                    raw.get("point_id") == setup.get("point_id")
                     and raw.get("point_type") == setup.get("point_type")
                     and raw.get("side") == setup.get("side")
                     and raw.get("tower") == setup.get("tower")

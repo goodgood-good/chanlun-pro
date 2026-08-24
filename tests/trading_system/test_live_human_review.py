@@ -31,6 +31,9 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     QmtSectorSameBaseCoverageEvidence,
     sector_native_daily_research_bridge_contract,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    structural_point_occurrence_id,
+)
 from chanlun.decision_support.trading_system.models import (
     EntryExecutionBoundary,
     StructuralPoint,
@@ -477,14 +480,24 @@ def _decisions(*, fresh_sell: bool = False):
         opposite_points=(),
         entry_execution_boundaries=(),
     )
-    return core, (
-        *core.decision_documents(buy_bundle),
-        *core.decision_documents(sell_bundle),
+    setup_identities = {
+        point.point_id: structural_point_occurrence_id(point)
+        for bundle in (buy_bundle, sell_bundle)
+        for point in bundle.five_points
+        if isinstance(point, StructuralPoint)
+    }
+    return (
+        core,
+        (
+            *core.decision_documents(buy_bundle),
+            *core.decision_documents(sell_bundle),
+        ),
+        setup_identities,
     )
 
 
 def live_snapshot(*, fresh_sell: bool = False) -> dict[str, object]:
-    core, signals = _decisions(fresh_sell=fresh_sell)
+    core, signals, setup_identities = _decisions(fresh_sell=fresh_sell)
     as_of = deterministic_bundle().as_of
     contexts = {
         frequency: {
@@ -634,7 +647,7 @@ def live_snapshot(*, fresh_sell: bool = False) -> dict[str, object]:
         signal["setup_id"] = sha256_json(
             {
                 "schema": "chanlun-trade-setup",
-                "point_id": signal["setup_5m"]["point_id"],
+                "point_id": setup_identities[signal["setup_5m"]["point_id"]],
                 "sector_id": sector_document["sector_id"],
                 "sector_required": True,
             }
@@ -1247,6 +1260,25 @@ def test_live_snapshot_recomputes_setup_and_signal_lifecycle_ids() -> None:
 
     with pytest.raises(ValueError, match="timeframe provenance is invalid"):
         validate_live_review_snapshot(snapshot)
+
+
+def test_live_snapshot_accepts_engine_structural_occurrence_setup_identity() -> None:
+    snapshot = live_snapshot()
+    signal = snapshot["signals"][0]
+    setup = signal["setup_5m"]
+    legacy_point_id_setup = sha256_json(
+        {
+            "schema": "chanlun-trade-setup",
+            "point_id": setup["point_id"],
+            "sector_id": signal["sector"]["sector_id"],
+            "sector_required": True,
+        }
+    )
+
+    assert setup["status"] == "confirmed"
+    assert signal["setup_id"] != legacy_point_id_setup
+    _review_at, signals = validate_live_review_snapshot(snapshot)
+    assert len(signals) == 2
 
 
 @pytest.mark.parametrize(
