@@ -2105,6 +2105,10 @@ def test_structure_bundle_skips_mwd_read_when_decision_output_is_provably_empty(
     assert calls == []
     assert bundle.higher_timeframe_gates is None
     assert bundle.enforce_higher_timeframe_entry_gate is True
+    assert tuple(row[0] for row in bundle.warmup_by_frequency) == ("5m",)
+    assert bundle.analysis_closed_at_by_frequency == (
+        ("5m", NOW - timedelta(minutes=1)),
+    )
     assert HumanAssistedDecisionCore().evaluate_symbol(bundle) == ()
 
 

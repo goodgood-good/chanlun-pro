@@ -4120,6 +4120,11 @@ class NativeTradingDataGateway:
             ),
             warmup_reason_codes=warmup_reasons,
             warmup_by_frequency=warmup_by_frequency,
+            analysis_closed_at_by_frequency=tuple(
+                (frequency, analyses[frequency].closed_at)
+                for frequency in ("d", "30m", "5m", "1m")
+                if frequency in analyses
+            ),
             warmup_difference_codes_by_frequency=(
                 warmup_difference_codes_by_frequency
             ),

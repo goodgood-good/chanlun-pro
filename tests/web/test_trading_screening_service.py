@@ -104,7 +104,9 @@ from cl_app.services.trading_screening import (
     _priority_monitor_session_open,
     _current_session_zero_trade_codes,
     _structure_bundle_is_current,
+    _structure_bundle_is_current_for_intraday_evidence,
     _structure_bundle_is_current_for_zero_trade_session,
+    _structure_bundle_is_current_for_zero_trade_intraday_evidence,
     _take_rotating_priority_batch,
     _take_rule_recheck_batch,
     _take_due_candidate_batch,
@@ -3380,6 +3382,208 @@ def test_five_minute_candidate_freshness_respects_session_break_bar_boundary() -
     )
 
 
+def test_full_scan_freshness_uses_independent_materialized_frequency_times(
+    tmp_path: Path,
+) -> None:
+    lunch_observed_at = datetime(2026, 7, 20, 13, 3, 39, tzinfo=AS_OF.tzinfo)
+    lunch_close = datetime(2026, 7, 20, 11, 30, tzinfo=AS_OF.tzinfo)
+    afternoon_observed_at = datetime(2026, 7, 20, 13, 6, tzinfo=AS_OF.tzinfo)
+    afternoon_close = datetime(2026, 7, 20, 13, 5, tzinfo=AS_OF.tzinfo)
+
+    class LunchBoundaryMarketData(RecordingMarketData):
+        def __init__(
+            self,
+            closed_at_by_frequency: tuple[tuple[str, datetime], ...],
+        ) -> None:
+            super().__init__()
+            self.closed_at_by_frequency = closed_at_by_frequency
+
+        def structure_bundle(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            bundle = super().structure_bundle(
+                code,
+                as_of=as_of,
+                sector=sector,
+                frequencies=frequencies,
+            )
+            return replace(
+                bundle,
+                as_of=max(closed_at for _frequency, closed_at in self.closed_at_by_frequency),
+                warmup_by_frequency=tuple(
+                    (frequency, True, 100, 100)
+                    for frequency, _closed_at in self.closed_at_by_frequency
+                ),
+                analysis_closed_at_by_frequency=self.closed_at_by_frequency,
+            )
+
+    def refresh(
+        closed_at_by_frequency: tuple[tuple[str, datetime], ...],
+        cache_name: str,
+        *,
+        observed_at: datetime,
+    ) -> tuple[dict[str, object], LunchBoundaryMarketData]:
+        market = LunchBoundaryMarketData(closed_at_by_frequency)
+        service = TradingScreeningService(
+            market_data=market,
+            sector_catalog=RecordingSectorCatalog(),
+            engine=RecordingEngine(),
+            scan_planner=RecordingPlanner(),
+            cache_path=tmp_path / cache_name,
+            clock=lambda: observed_at,
+            notifier=None,
+            config=TradingScreeningConfig(
+                max_structure_age_seconds=60,
+                priority_monitoring_enabled=False,
+            ),
+        )
+        return service.refresh_now(), market
+
+    five_only, five_market = refresh(
+        (("5m", lunch_close),),
+        "five-only.json",
+        observed_at=lunch_observed_at,
+    )
+    stale_precision, precision_market = refresh(
+        (("5m", lunch_close), ("1m", lunch_close)),
+        "stale-precision.json",
+        observed_at=lunch_observed_at,
+    )
+    stale_trade, _stale_trade_market = refresh(
+        (("5m", lunch_close), ("1m", afternoon_close)),
+        "stale-trade.json",
+        observed_at=afternoon_observed_at,
+    )
+    stale_precision_only, _stale_precision_only_market = refresh(
+        (("5m", afternoon_close), ("1m", lunch_close)),
+        "stale-precision-only.json",
+        observed_at=afternoon_observed_at,
+    )
+
+    assert five_market.bundle_frequency_requests == [
+        ("SZ.000001", ("1m", "5m", "30m", "d"))
+    ]
+    assert precision_market.bundle_frequency_requests == [
+        ("SZ.000001", ("1m", "5m", "30m", "d"))
+    ]
+    assert five_only["scan_audit"]["completed_symbol_count"] == 1
+    assert five_only["scan_audit"]["stock_failure_counts"] == {}
+    for stale in (stale_precision, stale_trade, stale_precision_only):
+        assert stale["scan_audit"]["completed_symbol_count"] == 0
+        assert stale["scan_audit"]["stock_failure_counts"] == {
+            "STRUCTURE_BUNDLE_STALE": 1
+        }
+
+
+def test_intraday_freshness_rejects_future_or_ambiguous_legacy_bundle_time() -> None:
+    observed_at = datetime(2026, 7, 20, 13, 6, tzinfo=AS_OF.tzinfo)
+    five_close = datetime(2026, 7, 20, 13, 5, tzinfo=AS_OF.tzinfo)
+    base = SymbolStructureBundle(
+        code="SZ.000001",
+        as_of=five_close,
+        sector=eligible_sector(),
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+        warmup_by_frequency=(("5m", True, 100, 100),),
+    )
+
+    assert _structure_bundle_is_current_for_intraday_evidence(
+        base,
+        observed_at=observed_at,
+        max_age_seconds=60,
+        requested_frequencies=("5m",),
+    )
+    assert not _structure_bundle_is_current_for_intraday_evidence(
+        replace(
+            base,
+            as_of=observed_at + timedelta(minutes=4),
+            analysis_closed_at_by_frequency=(("5m", five_close),),
+        ),
+        observed_at=observed_at,
+        max_age_seconds=60,
+        requested_frequencies=("5m",),
+    )
+    assert not _structure_bundle_is_current_for_intraday_evidence(
+        replace(
+            base,
+            warmup_by_frequency=(
+                ("5m", True, 100, 100),
+                ("1m", True, 100, 100),
+            ),
+        ),
+        observed_at=observed_at,
+        max_age_seconds=60,
+        requested_frequencies=("5m", "1m"),
+    )
+
+
+def test_priority_lunch_freshness_accepts_a_materialized_five_minute_empty_branch(
+    tmp_path: Path,
+) -> None:
+    observed_at = [datetime(2026, 7, 20, 11, 30, tzinfo=AS_OF.tzinfo)]
+    lunch_close = observed_at[0]
+
+    class LunchPriorityMarketData(RecordingMarketData):
+        def active_watchlist(self) -> tuple[str, ...]:
+            return ("SZ.000001",)
+
+        def structure_bundle(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            bundle = super().structure_bundle(
+                code,
+                as_of=as_of,
+                sector=sector,
+                frequencies=frequencies,
+            )
+            return replace(
+                bundle,
+                as_of=lunch_close,
+                warmup_by_frequency=(("5m", True, 100, 100),),
+                analysis_closed_at_by_frequency=(("5m", lunch_close),),
+            )
+
+    market = LunchPriorityMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at[0],
+        notifier=None,
+        config=TradingScreeningConfig(
+            max_structure_age_seconds=60,
+            priority_monitoring_enabled=True,
+            priority_monitor_interval_seconds=60,
+        ),
+    )
+
+    first = service.refresh_now()
+    first_request_count = len(market.bundle_frequency_requests)
+    observed_at[0] = datetime(2026, 7, 20, 13, 3, 39, tzinfo=AS_OF.tzinfo)
+    service.refresh_now(priority_only=True)
+
+    assert first["scan_audit"]["completed_symbol_count"] == 1
+    assert market.bundle_frequency_requests[first_request_count:] == [
+        ("SZ.000001", ("30m", "5m", "1m"))
+    ]
+    assert service.health_snapshot()["priority_monitor_last_error_count"] == 0
+
+
 def test_zero_trade_session_freshness_accepts_only_previous_scheduled_close() -> None:
     observed_at = datetime(2026, 7, 27, 10, 0, tzinfo=AS_OF.tzinfo)
 
@@ -3392,6 +3596,55 @@ def test_zero_trade_session_freshness_accepts_only_previous_scheduled_close() ->
         observed_at=observed_at,
         bundle_as_of=datetime(2026, 7, 23, 15, 0, tzinfo=AS_OF.tzinfo),
         max_age_seconds=3600,
+    )
+
+
+def test_zero_trade_session_freshness_checks_each_materialized_intraday_time() -> None:
+    observed_at = datetime(2026, 7, 27, 10, 0, tzinfo=AS_OF.tzinfo)
+    previous_close = datetime(2026, 7, 24, 15, 0, tzinfo=AS_OF.tzinfo)
+    older_close = datetime(2026, 7, 23, 15, 0, tzinfo=AS_OF.tzinfo)
+    base = SymbolStructureBundle(
+        code="SZ.000001",
+        as_of=previous_close,
+        sector=eligible_sector(),
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+        warmup_by_frequency=(
+            ("5m", True, 100, 100),
+            ("1m", True, 100, 100),
+        ),
+        analysis_closed_at_by_frequency=(
+            ("5m", previous_close),
+            ("1m", previous_close),
+        ),
+    )
+
+    assert _structure_bundle_is_current_for_zero_trade_intraday_evidence(
+        base,
+        observed_at=observed_at,
+        max_age_seconds=60,
+        requested_frequencies=("5m", "1m"),
+    )
+    assert not _structure_bundle_is_current_for_zero_trade_intraday_evidence(
+        replace(
+            base,
+            analysis_closed_at_by_frequency=(
+                ("5m", previous_close),
+                ("1m", older_close),
+            ),
+        ),
+        observed_at=observed_at,
+        max_age_seconds=60,
+        requested_frequencies=("5m", "1m"),
+    )
+    assert not _structure_bundle_is_current_for_zero_trade_intraday_evidence(
+        replace(base, as_of=observed_at + timedelta(minutes=1)),
+        observed_at=observed_at,
+        max_age_seconds=60,
+        requested_frequencies=("5m", "1m"),
     )
 
 

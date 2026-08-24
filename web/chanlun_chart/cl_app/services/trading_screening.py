@@ -885,6 +885,70 @@ def _structure_bundle_is_current(
     return reference - bundle <= timedelta(seconds=max_age_seconds)
 
 
+def _structure_bundle_intraday_freshness_evidence(
+    bundle: SymbolStructureBundle,
+    *,
+    requested_frequencies: Sequence[str],
+) -> tuple[tuple[str, datetime], ...] | None:
+    """Return independent 5m trade and optional 1m precision timestamps.
+
+    A full coverage plan requests 1m up front, but the native gateway correctly
+    skips that precision-only lane when there is no current 5m setup.  Treating
+    the request itself as proof of a 1m result makes a valid 5m-only bundle look
+    stale around session boundaries.  Conversely, a fresh 1m result must never
+    hide a stale 5m trade-level result, so native bundles expose both timestamps
+    and both are checked independently.  The scalar bundle timestamp remains a
+    fail-closed compatibility path for synthetic and legacy providers.
+    """
+
+    materialized = {
+        frequency for frequency, _converged, _full, _suffix in bundle.warmup_by_frequency
+    }
+    closed_at_by_frequency = dict(bundle.analysis_closed_at_by_frequency)
+    if closed_at_by_frequency:
+        materialized.update(closed_at_by_frequency)
+        if "5m" not in materialized:
+            return None
+        required = tuple(
+            frequency for frequency in ("5m", "1m") if frequency in materialized
+        )
+        if any(frequency not in closed_at_by_frequency for frequency in required):
+            return None
+        return tuple(
+            (frequency, closed_at_by_frequency[frequency]) for frequency in required
+        )
+    if materialized:
+        if materialized != {"5m"}:
+            return None
+        return (("5m", bundle.as_of),)
+    frequency = "1m" if "1m" in requested_frequencies else "5m"
+    return ((frequency, bundle.as_of),)
+
+
+def _structure_bundle_is_current_for_intraday_evidence(
+    bundle: SymbolStructureBundle,
+    *,
+    observed_at: datetime,
+    max_age_seconds: int,
+    requested_frequencies: Sequence[str],
+) -> bool:
+    if bundle.as_of > normalize_datetime(observed_at, "observed_at"):
+        return False
+    evidence = _structure_bundle_intraday_freshness_evidence(
+        bundle,
+        requested_frequencies=requested_frequencies,
+    )
+    return evidence is not None and all(
+        _structure_bundle_is_current(
+            observed_at=observed_at,
+            bundle_as_of=closed_at,
+            max_age_seconds=max_age_seconds,
+            expected_frequency=frequency,
+        )
+        for frequency, closed_at in evidence
+    )
+
+
 def _structure_bundle_is_current_for_zero_trade_session(
     *,
     observed_at: datetime,
@@ -921,6 +985,29 @@ def _structure_bundle_is_current_for_zero_trade_session(
         observed_at=previous_close,
         bundle_as_of=bundle,
         max_age_seconds=max_age_seconds,
+    )
+
+
+def _structure_bundle_is_current_for_zero_trade_intraday_evidence(
+    bundle: SymbolStructureBundle,
+    *,
+    observed_at: datetime,
+    max_age_seconds: int,
+    requested_frequencies: Sequence[str],
+) -> bool:
+    if bundle.as_of > normalize_datetime(observed_at, "observed_at"):
+        return False
+    evidence = _structure_bundle_intraday_freshness_evidence(
+        bundle,
+        requested_frequencies=requested_frequencies,
+    )
+    return evidence is not None and all(
+        _structure_bundle_is_current_for_zero_trade_session(
+            observed_at=observed_at,
+            bundle_as_of=closed_at,
+            max_age_seconds=max_age_seconds,
+        )
+        for _frequency, closed_at in evidence
     )
 
 
@@ -6499,20 +6586,19 @@ class TradingScreeningService:
                     previous_lifecycles=previous_lifecycles,
                     previous_trigger_points=previous_triggers,
                 )
-                bundle_is_current = _structure_bundle_is_current(
+                bundle_is_current = _structure_bundle_is_current_for_intraday_evidence(
+                    bundle,
                     observed_at=observed_at,
-                    bundle_as_of=bundle.as_of,
                     max_age_seconds=self._config.max_structure_age_seconds,
-                    expected_frequency=(
-                        "1m" if "1m" in frequencies_by_code[code] else "5m"
-                    ),
+                    requested_frequencies=requested_frequencies,
                 )
                 if not bundle_is_current and code in current_session_no_bar_codes:
                     bundle_is_current = (
-                        _structure_bundle_is_current_for_zero_trade_session(
+                        _structure_bundle_is_current_for_zero_trade_intraday_evidence(
+                            bundle,
                             observed_at=observed_at,
-                            bundle_as_of=bundle.as_of,
                             max_age_seconds=self._config.max_structure_age_seconds,
+                            requested_frequencies=requested_frequencies,
                         )
                     )
                 if not bundle_is_current:
@@ -13308,11 +13394,12 @@ class TradingScreeningService:
                 if code in suspended_codes:
                     raise ValueError("current_session_suspended")
                 selection_sources = selection_sources_for(code)
+                requested_frequencies = batch_frequencies.get(code, ())
                 bundle = self._structure_bundle_with_causal_risk(
                     code,
                     as_of=as_of,
                     sector=sector,
-                    frequencies=batch_frequencies.get(code, ()),
+                    frequencies=requested_frequencies,
                     risk_evidence_cutoff=(
                         self._coverage_market_data_as_of or market_data_as_of
                     ),
@@ -13341,10 +13428,11 @@ class TradingScreeningService:
                     previous_lifecycles=previous_lifecycles,
                     previous_trigger_points=previous_triggers,
                 )
-                if not _structure_bundle_is_current(
+                if not _structure_bundle_is_current_for_intraday_evidence(
+                    bundle,
                     observed_at=as_of,
-                    bundle_as_of=bundle.as_of,
                     max_age_seconds=self._config.max_structure_age_seconds,
+                    requested_frequencies=requested_frequencies,
                 ):
                     raise ValueError("structure_bundle_stale")
                 evaluated = self._engine.evaluate_symbol(bundle)

@@ -99,9 +99,39 @@ class SymbolStructureBundle:
     thirty_technical_context: SamePeriodTechnicalContext | None = None
     previous_lifecycles: tuple[SignalLifecycle, ...] = ()
     previous_trigger_points: tuple[StructuralPoint, ...] = ()
+    analysis_closed_at_by_frequency: tuple[tuple[str, datetime], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of", normalize_datetime(self.as_of, "as_of"))
+        normalized_analysis_closed_at = tuple(
+            (
+                frequency,
+                normalize_datetime(closed_at, f"{frequency} analysis closed_at"),
+            )
+            for frequency, closed_at in self.analysis_closed_at_by_frequency
+        )
+        object.__setattr__(
+            self,
+            "analysis_closed_at_by_frequency",
+            normalized_analysis_closed_at,
+        )
+        analysis_frequencies = tuple(
+            frequency for frequency, _closed_at in normalized_analysis_closed_at
+        )
+        if (
+            len(analysis_frequencies) != len(set(analysis_frequencies))
+            or analysis_frequencies
+            != tuple(
+                frequency
+                for frequency in SCREENING_WARMUP_FREQUENCIES
+                if frequency in analysis_frequencies
+            )
+            or any(
+                closed_at > self.as_of
+                for _frequency, closed_at in normalized_analysis_closed_at
+            )
+        ):
+            raise ValueError("analysis closed_at frequencies are invalid")
         if not isinstance(self.code, str) or not self.code.strip():
             raise ValueError("结构包标的不能为空")
         if self.latest_price is not None and (
