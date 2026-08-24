@@ -39,6 +39,7 @@ def _with_terminal_interval(
     point: StructuralPoint,
     *,
     market_start: datetime,
+    state: str = "locked",
 ) -> StructuralPoint:
     return replace(
         point,
@@ -48,7 +49,7 @@ def _with_terminal_interval(
             unit_id=f"segment:{point.source_frequency}:{point.point_id}",
             source_kind=SourceKind.SEGMENT,
             direction="down" if point.side == "buy" else "up",
-            state="locked",
+            state=state,
             market_start=market_start,
             market_end=point.anchor_at,
             available_at=point.available_at,
@@ -210,6 +211,29 @@ def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
     assert event.signal_time == AT.isoformat(timespec="seconds")
     assert event.price == 123.45
     assert event.structure_anchor_price == 100.0
+
+
+def test_strict_collector_preserves_pending_and_locked_setup_audit_state() -> None:
+    pending = _with_terminal_interval(
+        _point("3sell"),
+        market_start=AT - timedelta(minutes=30),
+        state="formed",
+    )
+    locked = _with_terminal_interval(
+        _point("1sell", center_id="locked-center"),
+        market_start=AT - timedelta(minutes=25),
+    )
+
+    events = collect_strict_monitor_events(
+        {"TSLA.US": _StrictState((pending, locked))},
+        names={"TSLA.US": "Tesla"},
+        holdings=set(),
+    )
+
+    assert {event.bs_type: event.setup_lock_state for event in events} == {
+        "1sell": "locked",
+        "3sell": "pending",
+    }
 
 
 def test_strict_collector_attaches_optional_one_minute_segment_difference() -> None:

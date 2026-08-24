@@ -19,6 +19,9 @@ from chanlun import fun
 from chanlun.core.cl import CL
 from chanlun.core.strict_structure.formal_state import current_formal_direction
 from chanlun.core.strict_structure.models import StrictEvidenceResult
+from chanlun.decision_support.trading_system.five_minute_setup_state import (
+    setup_state_for_point,
+)
 from chanlun.decision_support.trading_system.models import (
     CANONICAL_POINT_TYPE_SET,
     POINT_REVIEW_ORDER,
@@ -126,6 +129,7 @@ class StrictRealtimeMonitorEvent:
     price_source: str = "latest_completed_1m_close"
     price_observed_at: str = ""
     signal_role: str = "TRADE_SIGNAL_5M"
+    setup_lock_state: str = "unknown"
     position_recommendation: dict[str, object] | None = None
     setup_bs_type: str = ""
     setup_evidence_id: str = ""
@@ -143,6 +147,8 @@ class StrictRealtimeMonitorEvent:
 
     def __post_init__(self) -> None:
         if self.side in {"buy", "sell"}:
+            if self.setup_lock_state not in {"pending", "locked", "unknown"}:
+                raise ValueError("实时监听的 5 分钟审计锁状态无效")
             if self.bs_type not in CANONICAL_POINT_TYPE_SET:
                 raise ValueError("实时监听事件只能使用统一六类买卖点")
             expected_side = "buy" if self.bs_type.endswith("buy") else "sell"
@@ -1103,6 +1109,7 @@ def collect_strict_monitor_events(
                 confirmed_time=point.confirmed_at.isoformat(timespec="seconds"),
                 structure_anchor_price=float(point.structure_anchor_price),
                 structure_invalidation_price=float(point.structure_invalidation_price),
+                setup_lock_state=setup_state_for_point(point).lock_state,
                 position_recommendation=position_recommendation,
                 segment_difference_point_type=(
                     "" if segment is None else segment.point_type
@@ -1215,6 +1222,7 @@ def collect_strict_monitor_events(
                         point.structure_invalidation_price
                     ),
                     signal_role="SEGMENT_DIFFERENCE_1M",
+                    setup_lock_state=setup_state_for_point(point).lock_state,
                     position_recommendation=position_recommendation,
                     setup_bs_type=point_type,
                     setup_evidence_id=point.point_id,

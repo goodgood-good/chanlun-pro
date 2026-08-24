@@ -7659,13 +7659,13 @@ def test_realtime_alert_requires_successful_delivery_proof(tmp_path: Path) -> No
         engine=RecordingEngine(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
+        clock=lambda: AS_OF.replace(hour=14, minute=59),
         notifier=UnverifiedNotifier(),
         config=TradingScreeningConfig(priority_monitoring_enabled=True),
     )
     service._priority_monitor_runtime_verified = True
-    service._priority_monitor_last_at = AS_OF
-    service._candidate_monitor_started_at = AS_OF
+    service._priority_monitor_last_at = AS_OF.replace(hour=14, minute=59)
+    service._candidate_monitor_started_at = AS_OF.replace(hour=14, minute=59)
 
     health = service.health_snapshot()
 
@@ -7677,6 +7677,40 @@ def test_realtime_alert_requires_successful_delivery_proof(tmp_path: Path) -> No
     assert health["realtime_alert_reason_code"] == (
         "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED"
     )
+
+
+def test_realtime_alert_without_due_event_is_not_degraded_after_close(
+    tmp_path: Path,
+) -> None:
+    class AwaitingFirstDeliveryNotifier:
+        def health_snapshot(self) -> dict[str, object]:
+            return {
+                "configured": True,
+                "operationally_verified": False,
+                "status": "awaiting_first_delivery",
+                "reason_code": "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED",
+                "delivered_event_count": 0,
+            }
+
+    closed_sunday = AS_OF + timedelta(days=6)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: closed_sunday,
+        notifier=AwaitingFirstDeliveryNotifier(),
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+
+    health = service.health_snapshot()
+
+    assert health["priority_monitor_session_open"] is False
+    assert health["notification_operationally_verified"] is False
+    assert health["realtime_alert_ready"] is True
+    assert health["realtime_alert_status"] == "not_due"
+    assert health["realtime_alert_reason_code"] == "NON_TRADING_SESSION_NOT_DUE"
 
 
 def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(

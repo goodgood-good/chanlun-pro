@@ -10546,6 +10546,18 @@ class TradingScreeningService:
                 if notification_delivery is not None
                 else "REALTIME_NOTIFICATION_DELIVERY_DEGRADED"
             )
+        elif (
+            not priority_monitor_session_open
+            and notification_delivery is not None
+            and notification_delivery.get("status") == "awaiting_first_delivery"
+            and notification_delivery.get("reason_code")
+            == "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED"
+        ):
+            # 休市期间没有到期事件可用于证明首次送达。此状态不是当前告警
+            # 时效故障；通知器配置和后台 worker 仍由独立字段完整暴露。
+            realtime_alert_ready = True
+            realtime_alert_status = "not_due"
+            realtime_alert_reason_code = "NON_TRADING_SESSION_NOT_DUE"
         elif not notification_delivery_verified:
             # “已创建通知器对象”不能冒充“已有成功送达证据”。在首次真实或演练
             # 送达完成前，识别链仍可继续运行，但总预警状态必须明确为尚未验证。

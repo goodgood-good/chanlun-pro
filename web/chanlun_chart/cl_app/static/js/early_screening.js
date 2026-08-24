@@ -321,11 +321,15 @@
       );
       setText(
         "es-priority-monitor-status",
-        Ui.priorityMonitorText(runtimeHealth, liveOverlay),
+        Ui.priorityMonitorText(runtimeHealth, liveOverlay, snapshot.us_monitor),
       );
       setText(
         "es-priority-monitor-diagnostic",
-        Ui.priorityMonitorDiagnosticsText(runtimeHealth, liveOverlay),
+        Ui.priorityMonitorDiagnosticsText(
+          runtimeHealth,
+          liveOverlay,
+          snapshot.us_monitor,
+        ),
       );
       setText(
         "es-snapshot-diagnostic",
@@ -544,6 +548,10 @@
         && Array.isArray(snapshot.realtime_notifications.events)
         ? snapshot.realtime_notifications.events.filter((row) => row && row.market === "us")
         : [];
+      const delivery = monitor.notification_delivery
+        && typeof monitor.notification_delivery === "object"
+        ? monitor.notification_delivery
+        : {};
       const active = symbols.filter((row) => row.status === "monitoring").length;
       const other = symbols.length - active;
       setText("es-us-monitor-count", symbols.length);
@@ -576,10 +584,18 @@
           `${Ui.reasonLabel(monitor.reason_code || "US_MONITOR_UNAVAILABLE")} · 系统将自动重试`,
         );
       } else if (monitor.ready === true) {
+        const delivered = Math.max(
+          0,
+          Number(delivery.delivered_event_count) || 0,
+        );
         setMonitorHealth(
           "ready",
-          "运行正常",
-          "最近一轮已完成；结构通知统一进入线索和人工复核队列。",
+          delivery.operationally_verified === true
+            ? "运行正常 · 通知已验证"
+            : "运行正常 · 等待首个通知事件",
+          delivery.operationally_verified === true
+            ? `最近一轮已完成；已成功送达 ${delivered} 条，结构通知同时保留在人工复核队列。`
+            : "最近一轮已完成；尚无到期通知事件，结构事件会先保留在人工复核队列。",
         );
       } else if (monitor.status === "warming_up") {
         setMonitorHealth(

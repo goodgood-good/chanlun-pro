@@ -140,6 +140,8 @@ def test_cross_market_projection_preserves_us_identity_and_source_frequency():
             confirmed_time="2026-08-15T10:20:00-04:00",
             detected_time="2026-08-15T10:25:35-04:00",
             price=145.2,
+            price_source="realtime_tick",
+            price_observed_at="2026-08-15T10:25:35-04:00",
             big_dir="down",
             mid_dir="down",
             op_level="5m",
@@ -153,6 +155,7 @@ def test_cross_market_projection_preserves_us_identity_and_source_frequency():
             setup_anchor_time="2026-08-15T10:15:00-04:00",
             setup_confirmed_time="2026-08-15T10:20:00-04:00",
             setup_available_time="2026-08-15T10:20:00-04:00",
+            setup_lock_state="pending",
             structure_anchor_price=144.8,
             is_holding=True,
             delivery_identity="delivery:qcom:1sell",
@@ -175,14 +178,15 @@ def test_cross_market_projection_preserves_us_identity_and_source_frequency():
     assert event["delivery_status"] == "delivered"
     assert event["current_price"] == 145.2
     assert event["reference_price"] == 144.8
-    assert event["current_price_source"] == "latest_completed_1m_close"
+    assert event["current_price_source"] == "realtime_tick"
+    assert event["current_price_at"] == "2026-08-15T22:25:35+08:00"
     assert event["signal_qualification"] == (
         "confirmed_5m_trade_signal_with_optional_1m_segment"
     )
     assert event["evidence_id"] == "point:qcom:5m:3sell"
     assert event["structure_anchor_time"] == "2026-08-15T22:15:00+08:00"
     assert event["structure_confirmed_at"] == "2026-08-15T22:20:00+08:00"
-    assert event["setup_lock_state"] == "unknown"
+    assert event["setup_lock_state"] == "pending"
     assert event["signal_available_at"] == "2026-08-15T22:20:00+08:00"
     assert event["detected_at"] == "2026-08-15T22:25:35+08:00"
     assert event["delivered_at"] == recorded_at.isoformat()

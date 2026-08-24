@@ -818,6 +818,9 @@ def a_share_notification_event(
             document.get("current_price_source"),
             "latest_completed_1m_close",
         ),
+        "current_price_at": _optional_aware_iso(
+            document.get("current_price_at")
+        ),
         "signal_qualification": "30m_context_5m_trade_signal_1m_segment_optional",
         "position_recommendation": position_recommendation,
         "reference_price": setup.get("anchor_price")
@@ -1052,6 +1055,9 @@ def monitor_notification_event(
         "current_price_source": _text(
             getattr(event, "price_source", None),
             "latest_completed_1m_close",
+        ),
+        "current_price_at": _optional_aware_iso(
+            getattr(event, "price_observed_at", None)
         ),
         "signal_qualification": (
             "confirmed_5m_trade_signal_with_new_1m_segment_enrichment"

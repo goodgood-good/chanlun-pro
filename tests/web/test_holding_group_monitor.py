@@ -454,6 +454,7 @@ def test_recursive_us_notification_separates_every_event_time() -> None:
         recursive_level=0,
         anchor_time="2026-08-12T01:15:00+08:00",
         confirmed_time="2026-08-14T22:45:00+08:00",
+        setup_lock_state="pending",
         position_recommendation=build_position_recommendation(
             side="buy",
             recommendation="READY",
@@ -490,6 +491,7 @@ def test_recursive_us_notification_separates_every_event_time() -> None:
     assert "最近1分钟收盘价：581.250" in line
     assert "1分钟区间套定位：一类买点（趋势背驰）" in line
     assert "区间套定位：一类买点（趋势背驰）（L0）" not in line
+    assert "末端线段审计锁待完成；后续K线仍须持续复核" in line
 
 
 def test_notification_labels_five_minute_price_fallback_honestly() -> None:
@@ -614,6 +616,7 @@ def test_us_notification_uses_realtime_tick_as_current_price(tmp_path):
     [event] = inbox.snapshot()["events"]
     assert event["current_price"] == 145.67
     assert event["current_price_source"] == "realtime_tick"
+    assert event["current_price_at"] == "2026-08-04T10:01:00+08:00"
 
 
 def test_cross_market_quote_failure_keeps_buy_alert_but_fails_closed_ratio(

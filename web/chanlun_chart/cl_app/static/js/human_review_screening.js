@@ -417,6 +417,8 @@
       confidence: "MEDIUM",
       review_available_at: notificationTime,
       current_price: event.current_price,
+      current_price_source: event.current_price_source,
+      current_price_at: event.current_price_at || null,
       position_recommendation: positionRecommendation,
       reference_price: event.reference_price,
       entry_price_cap: null,
@@ -489,6 +491,22 @@
     if (status === "failed") return "投递更新时间";
     if (status === "expired") return "过期记录时间";
     return "通知记录时间";
+  }
+
+  function realtimeNotificationPriceText(candidate) {
+    const safe = candidate && typeof candidate === "object" ? candidate : {};
+    const price = text(safe.current_price, "暂不可用");
+    if (safe.current_price_source === "realtime_tick" && safe.current_price_at) {
+      return `通知时当前价 ${price}（获取 ${fullDateTimeText(safe.current_price_at)}）`;
+    }
+    const sourceLabel = {
+      latest_completed_1m_close: "最近1分钟收盘价",
+      latest_completed_5m_close: "最近5分钟收盘价",
+      latest_completed_bar_close: "最近已完成K线收盘价",
+    }[safe.current_price_source];
+    return sourceLabel
+      ? `${sourceLabel} ${price}`
+      : `通知记录价 ${price}`;
   }
 
   function realtimeNotificationSetupLockLabel(candidate) {
@@ -1899,12 +1917,12 @@
         ? {
           label: candidate.sector_name,
           tag: candidate.market === "us" ? "美股无板块筛选" : "实时通知",
-          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`,
+          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · ${realtimeNotificationPriceText(candidate)}`,
           factIds: [],
         }
         : sectorNameDisclosure(candidate);
       sector.textContent = candidate.realtime_notification === true
-        ? `${sectorName.label} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`
+        ? `${sectorName.label} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · ${realtimeNotificationPriceText(candidate)}`
         : `${sectorName.label} · ${timeText(candidate.review_available_at)}`;
       const tags = document.createElement("span");
       tags.className = "hr-candidate-card__tags";
@@ -2012,7 +2030,7 @@
         ? {
           label: candidate.sector_name,
           tag: candidate.market === "us" ? "美股无板块筛选" : "实时通知",
-          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`,
+          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · ${realtimeNotificationPriceText(candidate)}`,
           factIds: [],
         }
         : sectorNameDisclosure(candidate);
@@ -2061,7 +2079,7 @@
       setNodeText(
         "[data-decision-detail]",
         realtime
-          ? `结构达到操作确认于 ${fullDateTimeText(candidate.realtime_notification_confirmed_time)}；${realtimeNotificationSetupLockLabel(candidate)}。信号可用于 ${fullDateTimeText(candidate.realtime_notification_available_time)}，监听发现于 ${fullDateTimeText(candidate.realtime_notification_detected_at)}，${realtimeNotificationTimeLabel(candidate)}为 ${fullDateTimeText(candidate.review_available_at)}；通知记录价 ${text(candidate.current_price, "暂不可用")}。这里打开当前实时图表，不会产生订单。`
+          ? `结构达到操作确认于 ${fullDateTimeText(candidate.realtime_notification_confirmed_time)}；${realtimeNotificationSetupLockLabel(candidate)}。信号可用于 ${fullDateTimeText(candidate.realtime_notification_available_time)}，监听发现于 ${fullDateTimeText(candidate.realtime_notification_detected_at)}，${realtimeNotificationTimeLabel(candidate)}为 ${fullDateTimeText(candidate.review_available_at)}；${realtimeNotificationPriceText(candidate)}。这里打开当前实时图表，不会产生订单。`
           : `图表已锁定在 ${timeText(candidate.review_available_at)}，不会产生订单。`,
       );
       const decision = chartWorkspace.querySelector("[data-decision-card]");
@@ -2069,7 +2087,7 @@
 
       const periods = realtime ? {
         "30m": ["人工核对", `发生时大级别方向 ${text(candidate.big_direction, "未知")}`, "当前图表会继续更新"],
-        "5m": [candidate.realtime_notification_setup_lock_state === "locked" ? "操作确认·末端已封存" : "操作确认", `通知来源 ${text(candidate.realtime_notification_source_frequency)}；${realtimeNotificationSetupLockLabel(candidate)}`, `通知记录价 ${text(candidate.current_price, "暂不可用")}`],
+        "5m": [candidate.realtime_notification_setup_lock_state === "locked" ? "操作确认·末端已封存" : "操作确认", `通知来源 ${text(candidate.realtime_notification_source_frequency)}；${realtimeNotificationSetupLockLabel(candidate)}`, realtimeNotificationPriceText(candidate)],
         "1m": realtimeNotificationSegmentPeriod(candidate),
       } : {
         "30m": ["环境核对", "确认走势方向与风险环境", `可见至 ${timeText(candidate.review_available_at)}`],
@@ -2097,7 +2115,7 @@
           ? `实时通知身份已保留：${text(candidate.candidate_id)}`
           : `候选报告与参数身份已验证：${text(candidate.candidate_id)}`,
         realtime
-          ? `通知记录价：${text(candidate.current_price, "暂不可用")}`
+          ? realtimeNotificationPriceText(candidate)
           : `结构锚点价：${text(candidate.reference_price)}`,
         ...(realtime ? [
           `结构锚点：${fullDateTimeText(candidate.realtime_notification_anchor_time)}`,
@@ -2261,7 +2279,7 @@
         ? {
           label: candidate.sector_name,
           tag: candidate.market === "us" ? "美股无板块筛选" : "实时通知",
-          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · 通知记录价 ${text(candidate.current_price, "暂不可用")}`,
+          line: `${candidate.sector_name} · ${realtimeNotificationTimeLabel(candidate)} ${fullDateTimeText(candidate.review_available_at)} · ${realtimeNotificationPriceText(candidate)}`,
           factIds: [],
         }
         : sectorNameDisclosure(candidate);
@@ -2504,6 +2522,7 @@
       paperReasonLabel,
       positionRecommendationLabel,
       realtimeNotificationCandidate,
+      realtimeNotificationPriceText,
       realtimeNotificationSegmentPeriod,
       realtimeNotificationSetupLockLabel,
       realtimeNotificationTimeLabel,

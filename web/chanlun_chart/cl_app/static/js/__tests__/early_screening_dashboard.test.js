@@ -489,7 +489,10 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(uiSource, /daily_preselection_target_session/);
   assert.match(uiSource, /daily_preselection_expected_session/);
   assert.match(controllerSource, /Ui\.dailyPreselectionText\(runtimeHealth\)/);
-  assert.match(controllerSource, /Ui\.priorityMonitorText\(runtimeHealth, liveOverlay\)/);
+  assert.match(
+    controllerSource,
+    /Ui\.priorityMonitorText\(runtimeHealth, liveOverlay, snapshot\.us_monitor\)/,
+  );
   assert.match(template, /旧线段、失效、结束及旧版迁移状态均不进入当前列表/);
 });
 
@@ -1426,6 +1429,8 @@ test("unmatched notification history stays in human review and cannot create a c
     recursive_level: 0,
     anchor_time: "2026-08-15T10:24:00-04:00",
     current_price: 145.26,
+    current_price_source: "realtime_tick",
+    current_price_at: "2026-08-15T10:25:35-04:00",
     reference_price: 145.2,
     invalidation_price: null,
     big_direction: "down",
@@ -1489,6 +1494,15 @@ test("unmatched notification history stays in human review and cannot create a c
   assert.equal(reviewWithInbox.review_queue[0].candidate_kind, "realtime_notification");
   assert.equal(reviewWithInbox.review_queue[0].market, "us");
   assert.equal(reviewWithInbox.review_queue[0].current_price, 145.26);
+  assert.equal(reviewWithInbox.review_queue[0].current_price_source, "realtime_tick");
+  assert.equal(
+    reviewWithInbox.review_queue[0].current_price_at,
+    event.current_price_at,
+  );
+  assert.match(
+    HumanUi.realtimeNotificationPriceText(reviewWithInbox.review_queue[0]),
+    /2026-08-15 22:25:35/,
+  );
   assert.equal(
     reviewWithInbox.review_queue[0].entry_confirmation_bar_closed_at,
     event.structure_confirmed_at,
@@ -1585,6 +1599,8 @@ test("notification history may annotate only the same still-current structure", 
     evidence_id: "",
     recursive_level: 0,
     current_price: 8.12,
+    current_price_source: "realtime_tick",
+    current_price_at: current.observed_at,
     chart_urls: { ...current.chart_urls },
     review_required: true,
     automated_action_authorized: false,
@@ -1613,6 +1629,9 @@ test("notification history may annotate only the same still-current structure", 
   assert.equal(currentRow.realtime_notification, true);
   assert.equal(currentRow.synthetic_notification_projection, undefined);
   assert.equal(currentRow.notification_current_price, 8.12);
+  assert.equal(currentRow.notification_current_price_source, "realtime_tick");
+  assert.equal(currentRow.notification_current_price_at, current.observed_at);
+  assert.match(Ui.realtimeNotificationPriceText(currentRow), /2026-/);
 
   const invalidated = Ui.normalizeSnapshot({
     ...snapshot,
@@ -3301,7 +3320,7 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.doesNotMatch(monitorSummary, /verified|READY/);
   assert.match(
     Ui.priorityMonitorDiagnosticsText(monitorHealth, { signal_count: 0 }),
-    /总预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的当前5分钟候选 3 只 · 持续轮转直至结构被替换.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*通知送达 已验证（已有成功送达证明）/,
+    /A股实时预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的当前5分钟候选 3 只 · 持续轮转直至结构被替换.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*A股通知送达 已验证（已有成功送达证明）/,
   );
   const preparingSectorScope = {
     ...monitorHealth,
@@ -3421,6 +3440,28 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.match(
     Ui.priorityMonitorText(deliveryUnverified, {}),
     /时效保障未就绪 · 尚无到期通知事件或成功送达记录.*通知已配置，送达尚未验证/,
+  );
+  const verifiedAuxiliary = {
+    available: true,
+    notification_configured: true,
+    notification_delivery: {
+      operationally_verified: true,
+      status: "verified",
+      reason_code: "DELIVERY_SUCCESS_PROVEN",
+      delivered_event_count: 1,
+    },
+  };
+  assert.match(
+    Ui.priorityMonitorText(deliveryUnverified, {}, verifiedAuxiliary),
+    /通知已配置，送达尚未验证 · 跨市场通知送达已验证（1 条）/,
+  );
+  assert.match(
+    Ui.priorityMonitorDiagnosticsText(
+      deliveryUnverified,
+      {},
+      verifiedAuxiliary,
+    ),
+    /A股通知已配置但送达未验证.*跨市场通知送达 已验证（1 条；已有成功送达证明）/,
   );
 });
 

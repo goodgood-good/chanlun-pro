@@ -1189,6 +1189,21 @@ def _notification_line(
             f"依据：{op_level}{point_label}（L{recursive_level}）｜"
             f"{big_level}{big_dir}｜{segment_text}"
         )
+        setup_lock_state = str(
+            getattr(event, "setup_lock_state", "unknown") or "unknown"
+        )
+        if setup_lock_state == "locked":
+            parts.append("结构状态：5分钟操作确认已完成｜末端线段审计锁已完成")
+        elif setup_lock_state == "pending":
+            parts.append(
+                "结构状态：5分钟操作确认已完成｜末端线段审计锁待完成；"
+                "后续K线仍须持续复核"
+            )
+        else:
+            parts.append(
+                "结构状态：5分钟操作确认已记录｜末端线段审计锁状态未保存；"
+                "必须结合当前图表复核"
+            )
     else:
         parts.append(
             f"时间：结构确认 {_render_notification_time(confirmed_time)}｜"

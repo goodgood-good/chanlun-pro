@@ -1446,6 +1446,31 @@
     return "通知记录时间";
   }
 
+  function realtimeNotificationPriceText(value) {
+    const safe = isRecord(value) ? value : {};
+    const price = text(
+      safe.notification_current_price ?? safe.current_price,
+      "暂不可用",
+    );
+    const source = text(
+      safe.notification_current_price_source ?? safe.current_price_source,
+      "",
+    );
+    const observedAt = safe.notification_current_price_at
+      || safe.current_price_at;
+    if (source === "realtime_tick" && observedAt) {
+      return `通知时当前价 ${price}（获取 ${fullDateTimeText(observedAt)}）`;
+    }
+    const sourceLabel = {
+      latest_completed_1m_close: "最近1分钟收盘价",
+      latest_completed_5m_close: "最近5分钟收盘价",
+      latest_completed_bar_close: "最近已完成K线收盘价",
+    }[source];
+    return sourceLabel
+      ? `${sourceLabel} ${price}`
+      : `通知记录价 ${price}`;
+  }
+
   function dailyPreselectionText(runtimeHealth) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
     const scope = screeningScopeFacts(health);
@@ -1552,7 +1577,39 @@
     return parts.join(" · ");
   }
 
-  function priorityMonitorText(runtimeHealth, liveOverlay) {
+  function notificationDeliveryText(runtimeHealth, auxiliaryMonitor) {
+    const health = isRecord(runtimeHealth) ? runtimeHealth : {};
+    const primary = health.notification_operationally_verified === true
+      ? "通知送达已验证"
+      : health.notification_dispatcher_configured === true
+        ? "通知已配置，送达尚未验证"
+        : "仅页面提醒";
+    const auxiliary = isRecord(auxiliaryMonitor) ? auxiliaryMonitor : {};
+    const auxiliaryDelivery = isRecord(auxiliary.notification_delivery)
+      ? auxiliary.notification_delivery
+      : {};
+    if (
+      auxiliary.available !== true
+      && auxiliary.notification_configured !== true
+      && Object.keys(auxiliaryDelivery).length === 0
+    ) return primary;
+    const delivered = Math.max(
+      0,
+      Number(auxiliaryDelivery.delivered_event_count) || 0,
+    );
+    const auxiliaryText = auxiliaryDelivery.operationally_verified === true
+      ? `跨市场通知送达已验证${delivered ? `（${delivered} 条）` : ""}`
+      : ["degraded", "unavailable"].includes(
+        text(auxiliaryDelivery.status, ""),
+      )
+        ? `跨市场通知异常（${reasonLabel(text(auxiliaryDelivery.reason_code, "NOTIFICATION_HEALTH_UNAVAILABLE"))}）`
+        : auxiliary.notification_configured === true
+          ? "跨市场通知已配置，等待首个事件"
+          : "跨市场仅页面提醒";
+    return `${primary} · ${auxiliaryText}`;
+  }
+
+  function priorityMonitorText(runtimeHealth, liveOverlay, auxiliaryMonitor) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
     const overlay = isRecord(liveOverlay) ? liveOverlay : {};
     const priorityStatus = text(health.priority_monitor_status, "unavailable");
@@ -1576,11 +1633,7 @@
     const signalText = liveSignalCount
       ? `${liveSignalCount} 条新结构变化`
       : "暂无新结构变化";
-    const deliveryText = health.notification_operationally_verified === true
-      ? "通知送达已验证"
-      : health.notification_dispatcher_configured === true
-        ? "通知已配置，送达尚未验证"
-        : "仅页面提醒";
+    const deliveryText = notificationDeliveryText(health, auxiliaryMonitor);
     if (
       alertStatus === "ready"
       && priorityStatus === "verified"
@@ -1625,7 +1678,7 @@
     return `时效保障未就绪 · ${alertReason} · ${scopeText} · 5分钟候选 ${candidateCurrent}/${candidateUniverse} 只 · ${deliveryText}`;
   }
 
-  function priorityMonitorDiagnosticsText(runtimeHealth, liveOverlay) {
+  function priorityMonitorDiagnosticsText(runtimeHealth, liveOverlay, auxiliaryMonitor) {
     const health = isRecord(runtimeHealth) ? runtimeHealth : {};
     const overlay = isRecord(liveOverlay) ? liveOverlay : {};
     const scope = screeningScopeFacts(health);
@@ -1674,7 +1727,7 @@
       ? health.notification_delivery
       : {};
     const parts = [
-      `总预警 ${statusLabel(text(health.realtime_alert_status, "unavailable"))}（${reasonLabel(text(health.realtime_alert_reason_code, "PRIORITY_MONITOR_UNAVAILABLE"))}）`,
+      `A股实时预警 ${statusLabel(text(health.realtime_alert_status, "unavailable"))}（${reasonLabel(text(health.realtime_alert_reason_code, "PRIORITY_MONITOR_UNAVAILABLE"))}）`,
       `即时复查 ${statusLabel(priorityStatus)}（${priorityReasons}）· 最近 ${priorityCount} 只`,
       `5分钟候选轮换 ${statusLabel(candidateStatus)}（${candidateReasons}）· 当前 ${candidateCurrent}/${candidateUniverse} 只 · 缺失 ${candidateMissing} · 逾期 ${candidateOverdue}${candidateTarget ? ` · 目标 ${Math.round(candidateTarget / 60)} 分钟` : ""}`,
       `1分钟精确定位队列 待定位的当前5分钟候选 ${freshSegmentCount} 只 · 持续轮转直至结构被替换`,
@@ -1683,11 +1736,32 @@
         : "实时预警范围：人工关注、自选、已有信号和当前支持板块候选；全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警",
       `结构变化 ${liveSignalCount} 条`,
       health.notification_operationally_verified === true
-        ? `通知送达 已验证（${reasonLabel(text(delivery.reason_code, "DELIVERY_SUCCESS_PROVEN"))}）`
+        ? `A股通知送达 已验证（${reasonLabel(text(delivery.reason_code, "DELIVERY_SUCCESS_PROVEN"))}）`
         : health.notification_dispatcher_configured === true
-          ? `通知已配置但送达未验证（${reasonLabel(text(delivery.reason_code, "REALTIME_NOTIFICATION_DELIVERY_UNVERIFIED"))}）`
-          : "仅页面提醒，未配置主动通知",
+          ? `A股通知已配置但送达未验证（${reasonLabel(text(delivery.reason_code, "REALTIME_NOTIFICATION_DELIVERY_UNVERIFIED"))}）`
+          : "A股仅页面提醒，未配置主动通知",
     ];
+    const auxiliary = isRecord(auxiliaryMonitor) ? auxiliaryMonitor : {};
+    const auxiliaryDelivery = isRecord(auxiliary.notification_delivery)
+      ? auxiliary.notification_delivery
+      : {};
+    if (
+      auxiliary.available === true
+      || auxiliary.notification_configured === true
+      || Object.keys(auxiliaryDelivery).length > 0
+    ) {
+      const delivered = Math.max(
+        0,
+        Number(auxiliaryDelivery.delivered_event_count) || 0,
+      );
+      parts.push(
+        auxiliaryDelivery.operationally_verified === true
+          ? `跨市场通知送达 已验证（${delivered} 条；${reasonLabel(text(auxiliaryDelivery.reason_code, "DELIVERY_SUCCESS_PROVEN"))}）`
+          : auxiliary.notification_configured === true
+            ? `跨市场通知已配置但送达未验证（${reasonLabel(text(auxiliaryDelivery.reason_code, "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED"))}）`
+            : "跨市场仅页面提醒，未配置主动通知",
+      );
+    }
     if (health.priority_monitor_last_at) {
       parts.push(`最近运行 ${timeText(health.priority_monitor_last_at)}`);
     }
@@ -2061,7 +2135,7 @@
       const point = POINT_LABELS[safeSignal.point_type]
         || (safeSignal.side === "sell" ? "退出结构" : "结构提示");
       const notificationEvidence = [
-        `实时通知已留存 · ${realtimeNotificationTimeLabel(safeSignal)} ${fullDateTimeText(realtimeNotificationDisplayTime(safeSignal))} · 通知记录价 ${text(safeSignal.notification_current_price, "暂不可用")}`,
+        `实时通知已留存 · ${realtimeNotificationTimeLabel(safeSignal)} ${fullDateTimeText(realtimeNotificationDisplayTime(safeSignal))} · ${realtimeNotificationPriceText(safeSignal)}`,
         `结构锚点 ${fullDateTimeText(safeSignal.notification_structure_anchor_time)} · 操作确认 ${fullDateTimeText(safeSignal.notification_structure_confirmed_at)} · 信号可用 ${fullDateTimeText(safeSignal.notification_signal_available_at)}`,
         `监听发现 ${fullDateTimeText(safeSignal.notification_detected_at)} · 递归层级 L${Number(safeSignal.recursive_level) || 0}`,
       ];
@@ -3440,6 +3514,8 @@
       notification_delivered_at: event.delivered_at || null,
       notification_signal_time: event.signal_available_at || event.signal_time,
       notification_current_price: event.current_price,
+      notification_current_price_source: event.current_price_source,
+      notification_current_price_at: event.current_price_at || null,
       notification_reference_price: event.reference_price,
       notification_source_frequency: sourceFrequency,
       notification_trigger_frequency: null,
@@ -3543,6 +3619,8 @@
           notification_delivered_at: event.delivered_at || null,
           notification_signal_time: event.signal_available_at || event.signal_time,
           notification_current_price: event.current_price,
+          notification_current_price_source: event.current_price_source,
+          notification_current_price_at: event.current_price_at || null,
           notification_reference_price: event.reference_price,
           position_recommendation: isRecord(event.position_recommendation)
             ? { ...event.position_recommendation }
@@ -4147,7 +4225,7 @@
       ? text(executionProfile.context_grade_label, "环境待判定")
       : "";
     evidence.textContent = signal.realtime_notification === true
-      ? `${text(sector.sector_name, "实时通知")} · ${realtimeNotificationTimeLabel(signal)} ${fullDateTimeText(realtimeNotificationDisplayTime(signal))} · 通知记录价 ${text(signal.notification_current_price, "暂不可用")} · 已进入人工复核`
+      ? `${text(sector.sector_name, "实时通知")} · ${realtimeNotificationTimeLabel(signal)} ${fullDateTimeText(realtimeNotificationDisplayTime(signal))} · ${realtimeNotificationPriceText(signal)} · 已进入人工复核`
       : signal.us_monitor_projection === true
         ? `${text(sector.sector_name)} · ${monitorStatusLabels[signal.us_monitor_status] || "监听状态待核对"} · 不受 A 股板块筛选`
         : `${text(sector.sector_name, "未分类")} · ${contextGrade ? `${contextGrade} · ` : ""}日线 ${dispositionLabel(signal.context_d)} · 30m ${dispositionLabel(signal.context_30m)} · 5m ${text(fiveMinutePeriod && fiveMinutePeriod.state, "未知")} · 1m ${segmentEvidenceStatus === "present" ? ({
@@ -4527,6 +4605,7 @@
     inferSignalMarket,
     realtimeNotificationSignal,
     realtimeNotificationDisplayTime,
+    realtimeNotificationPriceText,
     realtimeNotificationTimeLabel,
     reviewPriorityForSignal,
     signalAgeSecondsForReview,
