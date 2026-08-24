@@ -218,6 +218,38 @@ if (Test-Path -LiteralPath $rootGeneratedLogPath) {
     }
 }
 
+# Retired launchers wrote directly beside ``app.py`` before operational logs
+# moved under ``ops\logs``.  Keep an exclusive-access guard in case an older
+# deployment is still attached, but otherwise remove these historical files.
+$legacyWebLogRoot = Join-Path $repositoryRoot "web\chanlun_chart"
+if (Test-Path -LiteralPath $legacyWebLogRoot) {
+    $legacyWebLogs = @(
+        Get-ChildItem -LiteralPath $legacyWebLogRoot -File -Force `
+            -Filter "_restart_*.log" -ErrorAction SilentlyContinue
+    )
+    foreach ($target in $legacyWebLogs) {
+        $exclusiveHandle = $null
+        try {
+            $exclusiveHandle = [IO.File]::Open(
+                $target.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None
+            )
+        } catch [IO.IOException] {
+            $activeRootAppLogs.Add($target.FullName)
+            continue
+        } finally {
+            if ($null -ne $exclusiveHandle) {
+                $exclusiveHandle.Dispose()
+            }
+        }
+        Add-CleanupCandidate `
+            -LiteralPath $target.FullName `
+            -Category "generated_log"
+    }
+}
+
 $logRoot = Join-Path $repositoryRoot "ops\logs"
 $activeOpsLogs = [System.Collections.Generic.List[string]]::new()
 if (Test-Path -LiteralPath $logRoot) {

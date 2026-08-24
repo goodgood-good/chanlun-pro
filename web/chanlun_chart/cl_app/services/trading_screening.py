@@ -4014,9 +4014,9 @@ def _restored_snapshot_scope_is_valid(
     if not isinstance(raw_discovered_codes, list):
         return False
     admitted = admit_screening_universe(
-        # Include code-bearing rejections and diagnostics as well as coverage
-        # subjects.  The exact producer list above prevents those nested rows
-        # from widening a bounded restore without appearing in its proof.
+        # Include code-bearing strategy failures as well as coverage subjects.
+        # Monitor exclusions are authenticated diagnostic-only records and are
+        # deliberately excluded from routing/admission identity.
         signal_codes=ordered_codes,
         max_symbols=config.effective_monitor_universe_limit,
         large_scope_authorized=config.large_scope_authorized,
@@ -4108,14 +4108,31 @@ def _restored_snapshot_scope_codes(value: object) -> tuple[str, ...] | None:
         if not isinstance(code, str) or not code:
             return None
         ordered_codes.append(code)
-    for field in ("errors", "monitor_instrument_exclusions"):
-        rows = value.get(field)
-        if not isinstance(rows, list):
+    errors = value.get("errors")
+    if not isinstance(errors, list):
+        return None
+    for row in errors:
+        if not isinstance(row, Mapping):
             return None
-        for row in rows:
-            if not isinstance(row, Mapping):
-                return None
-            ordered_codes.extend(_explicit_strategy_subject_codes(row))
+        ordered_codes.extend(_explicit_strategy_subject_codes(row))
+
+    # Monitor exclusions describe instruments that were rejected before any
+    # strategy structure request.  Their contract is diagnostic-only and is
+    # content-hash authenticated separately; treating those codes as strategy
+    # subjects makes a valid exact cohort appear to escape merely because an
+    # unrelated watchlist contains an index or unresolved instrument.
+    monitor_exclusions = value.get("monitor_instrument_exclusions")
+    if not isinstance(monitor_exclusions, list):
+        return None
+    for row in monitor_exclusions:
+        code = row.get("code") if isinstance(row, Mapping) else None
+        if (
+            not isinstance(row, Mapping)
+            or row.get("diagnostic_only") is not True
+            or not isinstance(code, str)
+            or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+        ):
+            return None
     return tuple(dict.fromkeys(ordered_codes))
 
 

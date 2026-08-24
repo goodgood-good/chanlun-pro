@@ -12531,14 +12531,18 @@ def test_nontradable_watchlist_exclusion_is_visible_but_not_discovered(
             return tuple(code for code in codes if code != "SH.000001")
 
     market = RejectedIndexMarket()
+    cache_path = tmp_path / "snapshot.json"
     service = TradingScreeningService(
         market_data=market,
         sector_catalog=RecordingSectorCatalog(),
         engine=RecordingEngine(),
         scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
+        cache_path=cache_path,
         clock=lambda: AS_OF,
         notifier=None,
+        config=TradingScreeningConfig(
+            admitted_universe_codes=("SZ.000001",),
+        ),
     )
 
     payload = service.refresh_now()
@@ -12563,6 +12567,9 @@ def test_nontradable_watchlist_exclusion_is_visible_but_not_discovered(
     ]
     assert payload["scan_audit"]["monitor_instrument_exclusion_count"] == 1
     assert "SH.000001" not in payload["coverage_manifest"]["discovered_codes"]
+    assert payload["admitted_universe_codes"] == ["SZ.000001"]
+    assert service.health_snapshot()["snapshot_available"] is True
+    assert cache_path.with_name(f"{cache_path.name}.scope").is_file()
 
 
 def test_unresolved_qmt_monitor_type_is_explicit_and_fail_closed(
