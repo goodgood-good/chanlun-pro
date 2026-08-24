@@ -426,6 +426,44 @@ def test_three_unit_divergence_boundary_appears_only_when_terminal_locks():
     assert boundary.terminal_center_id == locked.centers[-1].center_id
 
 
+def test_superseded_prior_center_does_not_confirm_divergence_boundary() -> None:
+    values, _first, _second, _third = three_center_fixture()
+    first, terminal = calculate_centers(
+        values[:10],
+        0,
+        SourceKind.SEGMENT,
+    ).centers
+    bridge = values[3]
+    superseded = replace(
+        first,
+        state=CenterState.SUPERSEDED,
+        completion_leave_unit=None,
+        completion_return_unit=None,
+        completed_at=None,
+        superseded_by_center_id=terminal.center_id,
+        superseded_at=terminal.established_at,
+        supersession_bridge_units=(bridge,),
+        available_at=max(
+            first.available_at,
+            terminal.established_at,
+            bridge.available_at,
+        ),
+    )
+
+    result = assemble_trend_types(
+        (superseded, terminal),
+        values[:10],
+        0,
+        strength=BoundaryStrength(),
+    )
+
+    assert result.decomposition_boundaries == ()
+    (trend,) = result.current_trends
+    assert trend.state is TrendState.COMPLETE
+    assert trend.centers == (superseded, terminal)
+    assert trend.terminal_divergence is None
+
+
 def test_unlocked_terminal_divergence_leg_remains_a_forming_trend() -> None:
     values, _first, _second, _third = three_center_fixture()
     unlocked_values = (

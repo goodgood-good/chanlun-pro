@@ -380,7 +380,11 @@ def _confirmed_divergence_boundary(
         return None
     prior_completions = tuple(center.completed_at for center in closed_group[:-1])
     if any(value is None for value in prior_completions):
-        raise ValueError("divergence trend requires completed prior centers")
+        # A superseded prior center is structurally closed but deliberately has
+        # no fabricated third-class completion.  That is a valid live prefix,
+        # not corrupt evidence; it simply cannot confirm a formal divergence
+        # trend at this boundary yet.
+        return None
     confirmed_at = max(
         *prior_completions,
         signal.confirmed_at,
