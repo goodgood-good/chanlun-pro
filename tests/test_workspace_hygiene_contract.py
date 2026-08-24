@@ -143,9 +143,13 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert '@{ path = "tmp"; category = "temporary_artifact" }' in source
     assert '@{ path = ".omc"; category = "agent_session_artifact" }' in source
     assert "rootGeneratedLogPath" in source
+    assert "appGeneratedLogPath" in source
+    assert '"web\\chanlun_chart\\logs"' in source
     assert "active_app_logs" in source
     assert "active_ops_logs" in source
     assert "[IO.FileShare]::None" in source
+    assert "Get-LockedCleanupCandidateFiles" in source
+    assert "Refusing cleanup because candidate files are active" in source
     assert ".cache\\chanlun_human_review_forward" in source
     assert ".cache\\chanlun_human_review" in source
     assert ".cache\\chanlun_scheduler" in source
@@ -163,6 +167,13 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert "research_sample_validation_12" not in source
     assert '"pit_sector_composites"' not in source
     assert '"pit_sectors"' not in source
+
+    runtime_cleanup = (ROOT / "ops/cleanup_legacy_runtime_state.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Get-LockedCleanupCandidateFiles" in runtime_cleanup
+    assert "Refusing cleanup because candidate files are active" in runtime_cleanup
+    assert "[IO.FileShare]::None" in runtime_cleanup
     assert '"pit_metadata.json"' not in source
     assert '-Filter "*.dmp"' in source
     assert '"server-*.stdout.log"' in source

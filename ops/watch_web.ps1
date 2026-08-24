@@ -19,6 +19,11 @@ param(
     [int]$RestartCooldownSeconds = 60,
     [ValidateSet('a')]
     [string]$ReadinessMarket = 'a',
+    [switch]$EnableLargeScreeningScope,
+    [switch]$EnableLargeHoldingMonitorScope,
+    [switch]$EnableFullSymbolCatalog,
+    [switch]$EnableFullCoverage,
+    [switch]$ForceFullCoverageUntilComplete,
     [switch]$Once
 )
 
@@ -412,6 +417,21 @@ function Invoke-WebRecovery {
         '-WebReadinessTimeoutSeconds',
         '1800'
     )
+    if ($EnableLargeScreeningScope) {
+        $arguments += '-EnableLargeScreeningScope'
+    }
+    if ($EnableLargeHoldingMonitorScope) {
+        $arguments += '-EnableLargeHoldingMonitorScope'
+    }
+    if ($EnableFullSymbolCatalog) {
+        $arguments += '-EnableFullSymbolCatalog'
+    }
+    if ($EnableFullCoverage) {
+        $arguments += '-EnableFullCoverage'
+    }
+    if ($ForceFullCoverageUntilComplete) {
+        $arguments += '-ForceFullCoverageUntilComplete'
+    }
     $restartProcess = Start-Process `
         -FilePath 'powershell.exe' `
         -ArgumentList $arguments `

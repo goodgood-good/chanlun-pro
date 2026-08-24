@@ -971,6 +971,21 @@ if (-not $SkipWatchdog) {
         '-WebPort',
         [string]$webPort
     )
+    if ($EnableLargeScreeningScope) {
+        $watchdogArguments += '-EnableLargeScreeningScope'
+    }
+    if ($EnableLargeHoldingMonitorScope) {
+        $watchdogArguments += '-EnableLargeHoldingMonitorScope'
+    }
+    if ($EnableFullSymbolCatalog) {
+        $watchdogArguments += '-EnableFullSymbolCatalog'
+    }
+    if ($EnableFullCoverage) {
+        $watchdogArguments += '-EnableFullCoverage'
+    }
+    if ($ForceFullCoverageUntilComplete) {
+        $watchdogArguments += '-ForceFullCoverageUntilComplete'
+    }
     $watchdogProcess = Start-Process `
         -FilePath 'powershell.exe' `
         -ArgumentList $watchdogArguments `

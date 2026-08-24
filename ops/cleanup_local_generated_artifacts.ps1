@@ -68,6 +68,45 @@ function Add-CleanupCandidate {
     })
 }
 
+function Get-LockedCleanupCandidateFiles {
+    param([Parameter(Mandatory = $true)][object[]]$Targets)
+
+    $locked = [System.Collections.Generic.List[string]]::new()
+    foreach ($target in $Targets) {
+        if (-not (Test-Path -LiteralPath $target.path)) {
+            continue
+        }
+        $files = if ($target.directory) {
+            @(
+                Get-ChildItem -LiteralPath $target.path -File -Force -Recurse `
+                    -ErrorAction SilentlyContinue
+            )
+        } else {
+            @(Get-Item -LiteralPath $target.path -Force)
+        }
+        foreach ($file in $files) {
+            $exclusiveHandle = $null
+            try {
+                $exclusiveHandle = [IO.File]::Open(
+                    $file.FullName,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::ReadWrite,
+                    [IO.FileShare]::None
+                )
+            } catch [IO.FileNotFoundException] {
+                continue
+            } catch {
+                $locked.Add($file.FullName)
+            } finally {
+                if ($null -ne $exclusiveHandle) {
+                    $exclusiveHandle.Dispose()
+                }
+            }
+        }
+    }
+    return @($locked)
+}
+
 $fixedTargets = @(
     @{ path = ".playwright-cli"; category = "browser_debug" },
     @{ path = ".pytest_cache"; category = "test_cache" },
@@ -218,6 +257,40 @@ if (Test-Path -LiteralPath $rootGeneratedLogPath) {
     }
 }
 
+# Flask's rotating file handler writes beside the Web application.  This is a
+# separate generated-log root from the repository-level operational log and
+# was missed by the original cleanup contract.  Apply the same exclusive-file
+# guard to every file so an active handler is preserved while rotated and
+# historical logs remain safely removable.
+$appGeneratedLogPath = Join-Path $repositoryRoot "web\chanlun_chart\logs"
+if (Test-Path -LiteralPath $appGeneratedLogPath) {
+    $appGeneratedLogs = @(
+        Get-ChildItem -LiteralPath $appGeneratedLogPath -File -Force `
+            -ErrorAction SilentlyContinue
+    )
+    foreach ($target in $appGeneratedLogs) {
+        $exclusiveHandle = $null
+        try {
+            $exclusiveHandle = [IO.File]::Open(
+                $target.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None
+            )
+        } catch [IO.IOException] {
+            $activeRootAppLogs.Add($target.FullName)
+            continue
+        } finally {
+            if ($null -ne $exclusiveHandle) {
+                $exclusiveHandle.Dispose()
+            }
+        }
+        Add-CleanupCandidate `
+            -LiteralPath $target.FullName `
+            -Category "generated_log"
+    }
+}
+
 # Retired launchers wrote directly beside ``app.py`` before operational logs
 # moved under ``ops\logs``.  Keep an exclusive-access guard in case an older
 # deployment is still attached, but otherwise remove these historical files.
@@ -314,6 +387,15 @@ foreach ($target in $orderedCandidates) {
 }
 
 if ($Execute) {
+    $lockedCandidateFiles = @(
+        Get-LockedCleanupCandidateFiles -Targets $orderedCandidates
+    )
+    if ($lockedCandidateFiles.Count -gt 0) {
+        throw (
+            "Refusing cleanup because candidate files are active: {0}" -f `
+                ($lockedCandidateFiles -join ", ")
+        )
+    }
     foreach ($target in $orderedCandidates) {
         if (-not (Test-Path -LiteralPath $target.path)) {
             continue

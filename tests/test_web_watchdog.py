@@ -27,6 +27,16 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     assert "if (-not $SkipWatchdog)" in restart
     assert "ops\\watch_web.ps1" in restart
     assert "-SkipWatchdog" in watchdog
+    for switch in (
+        "EnableLargeScreeningScope",
+        "EnableLargeHoldingMonitorScope",
+        "EnableFullSymbolCatalog",
+        "EnableFullCoverage",
+        "ForceFullCoverageUntilComplete",
+    ):
+        assert f"[switch]${switch}" in watchdog
+        assert f"$watchdogArguments += '-{switch}'" in restart
+        assert f"$arguments += '-{switch}'" in watchdog
     assert "watchdog.lock" in watchdog
     assert "[IO.FileShare]::None" in watchdog
     assert "$restartProcess = Start-Process" in watchdog

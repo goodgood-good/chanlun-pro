@@ -48,6 +48,45 @@ function Get-TreeBytes {
     return $sum
 }
 
+function Get-LockedCleanupCandidateFiles {
+    param([Parameter(Mandatory = $true)][object[]]$Targets)
+
+    $locked = [System.Collections.Generic.List[string]]::new()
+    foreach ($target in $Targets) {
+        if (-not (Test-Path -LiteralPath $target.path)) {
+            continue
+        }
+        $files = if ($target.directory) {
+            @(
+                Get-ChildItem -LiteralPath $target.path -File -Force -Recurse `
+                    -ErrorAction SilentlyContinue
+            )
+        } else {
+            @(Get-Item -LiteralPath $target.path -Force)
+        }
+        foreach ($file in $files) {
+            $exclusiveHandle = $null
+            try {
+                $exclusiveHandle = [IO.File]::Open(
+                    $file.FullName,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::ReadWrite,
+                    [IO.FileShare]::None
+                )
+            } catch [IO.FileNotFoundException] {
+                continue
+            } catch {
+                $locked.Add($file.FullName)
+            } finally {
+                if ($null -ne $exclusiveHandle) {
+                    $exclusiveHandle.Dispose()
+                }
+            }
+        }
+    }
+    return @($locked)
+}
+
 $retiredDirectoryNames = @(
     "cache",
     "cache_pkl",
@@ -102,6 +141,15 @@ foreach ($target in $ordered) {
     $totalBytes += [int64]$target.bytes
 }
 if ($Execute) {
+    $lockedCandidateFiles = @(
+        Get-LockedCleanupCandidateFiles -Targets $ordered
+    )
+    if ($lockedCandidateFiles.Count -gt 0) {
+        throw (
+            "Refusing cleanup because candidate files are active: {0}" -f `
+                ($lockedCandidateFiles -join ", ")
+        )
+    }
     foreach ($target in $ordered) {
         if (-not (Test-Path -LiteralPath $target.path)) {
             continue
