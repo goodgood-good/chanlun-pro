@@ -309,20 +309,20 @@ def _write_fact_payload(path: Path, payload: Mapping[str, object]) -> None:
         "content_sha256": sha256_json(payload),
         "payload": dict(payload),
     }
-    encoded = json.dumps(
-        document,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(
         f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
     )
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as handle:
-            handle.write(encoded)
+            json.dump(
+                document,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)

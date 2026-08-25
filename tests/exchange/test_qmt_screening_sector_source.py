@@ -30,6 +30,38 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 AS_OF = datetime(2026, 7, 23, 10, 30, tzinfo=SHANGHAI)
 
 
+def test_qmt_fact_payload_streaming_write_preserves_exact_document(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "facts" / "daily.json"
+    payload = {
+        "schema": "daily-facts-v1",
+        "revision": "sha256:" + "a" * 64,
+        "symbols": {
+            "SH.600000": [["2026-08-25", 10.1, 10.2, "中文"]],
+            "SZ.000001": [["2026-08-25", 11.1, 11.2, None]],
+        },
+    }
+    document = {
+        "schema": subject._FACT_CACHE_ENVELOPE_SCHEMA,
+        "content_sha256": sha256_json(payload),
+        "payload": payload,
+    }
+    expected = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+    subject._write_fact_payload(path, payload)
+
+    assert path.read_bytes() == expected
+    assert subject._read_fact_payload(path) == payload
+    assert tuple(path.parent.glob("*.tmp")) == ()
+
+
 def test_qmt_fact_ast_identity_isolates_independent_fact_families() -> None:
     original = """
 SHARED = 1
