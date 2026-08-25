@@ -55,10 +55,17 @@ def _wait_attempt(attempt, stop_event, timeout):
 
 
 def _wait_for_late_attempt(attempt, stop_event, retry_seconds):
-    delay = max(0.01, float(retry_seconds))
+    # ``retry_seconds`` controls the delay before a *new* dependency attempt.
+    # It must not also delay observing the current attempt after its owner
+    # timeout.  A quote call that finishes at 5.1s used to stay invisible for
+    # the whole 30s retry interval, making /readyz look down for ~35s.  Poll the
+    # attempt completion event at a short bounded cadence while still allowing
+    # shutdown to interrupt promptly.
+    poll_seconds = min(0.05, max(0.01, float(retry_seconds)))
     while not attempt["done"].is_set():
-        if stop_event.wait(delay):
+        if stop_event.is_set():
             return False
+        attempt["done"].wait(poll_seconds)
     return True
 
 

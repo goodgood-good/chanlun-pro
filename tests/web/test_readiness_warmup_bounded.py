@@ -72,6 +72,42 @@ def test_ticks_warmup_retries_empty_result_then_records_success():
     assert handle.is_alive() is False
 
 
+def test_late_tick_success_is_observed_before_the_retry_interval():
+    registry = ReadinessRegistry()
+    calls = []
+    release = threading.Event()
+
+    def probe(_market):
+        calls.append(time.monotonic())
+        if len(calls) == 1:
+            assert release.wait(timeout=1)
+        return [{"code": "SH.000001"}]
+
+    handle = start_ticks_warmup(
+        registry,
+        probe,
+        market="a",
+        retry_seconds=0.5,
+        attempt_timeout=0.02,
+    )
+    try:
+        assert _wait_until(
+            lambda: registry.ticks_snapshot("a")["status"] == "error",
+            timeout=0.2,
+        )
+        release.set()
+        assert _wait_until(
+            lambda: registry.ticks_snapshot("a")["status"] == "ok",
+            timeout=0.3,
+        )
+        assert len(calls) == 1
+    finally:
+        release.set()
+        handle.stop()
+        handle.join(timeout=0.5)
+    assert handle.is_alive() is False
+
+
 def test_tick_success_becomes_stale_without_a_fresh_probe():
     now = [0.0]
     registry = ReadinessRegistry(
