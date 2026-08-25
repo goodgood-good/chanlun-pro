@@ -105,6 +105,61 @@ def _safe_int(value, default=0):
         return default
 
 
+_CN_UTC_OFFSET = datetime.timezone(datetime.timedelta(hours=8))
+_A_SHARE_REALTIME_POLL_WINDOWS = (
+    # Keep a publication grace after each close so the final completed bar can
+    # still arrive, while stale browser tabs cannot query through lunch/night.
+    (9 * 60 + 30, 11 * 60 + 40),
+    (13 * 60, 15 * 60 + 10),
+)
+_REALTIME_POLL_NEAR_NOW_SECONDS = 10 * 60
+
+
+def _should_suppress_realtime_history_poll(
+    *,
+    market,
+    first_data_request,
+    countback,
+    requested_to,
+    observed_at,
+    force_refresh=False,
+    review_locked=False,
+):
+    """Identify only the bounded current-bar poll emitted by DataPulse.
+
+    Every uncertain shape fails open: historical pagination, first loads,
+    forced recovery, review locks, and non-A markets must keep their existing
+    behavior. This server guard also protects deployments from browser tabs
+    that still execute an older datafeed bundle after an application restart.
+    """
+
+    if str(market or "").strip().lower() != "a":
+        return False
+    if str(first_data_request or "").strip().lower() != "false":
+        return False
+    if force_refresh or review_locked:
+        return False
+
+    parsed_countback = _safe_int(countback, default=-1)
+    parsed_to = _safe_int(requested_to, default=-1)
+    if not 1 <= parsed_countback <= 2 or parsed_to <= 0:
+        return False
+    if not isinstance(observed_at, datetime.datetime) or observed_at.tzinfo is None:
+        return False
+    if abs(parsed_to - int(observed_at.timestamp())) > _REALTIME_POLL_NEAR_NOW_SECONDS:
+        return False
+
+    local = observed_at.astimezone(_CN_UTC_OFFSET)
+    if local.weekday() >= 5:
+        return True
+    minute_of_day = local.hour * 60 + local.minute
+    due = any(
+        start <= minute_of_day <= end
+        for start, end in _A_SHARE_REALTIME_POLL_WINDOWS
+    )
+    return not due
+
+
 def _normalize_unix_ts(value, default=0):
     ts = _safe_int(value, default)
     if ts > 10**12:
@@ -587,11 +642,6 @@ def tv_history():
                 "%Y-%m-%d %H:%M:%S"
             )
 
-        LogUtil.info(
-            f"[tv_history] >>> {symbol} {resolution} first={firstDataRequest} "
-            f"from={_fmt_ts(_from)} to={_fmt_ts(_to)}"
-        )
-
         if not symbol or not resolution:
             return {"s": "no_data"}
         if _from < 0 and _to < 0:
@@ -610,6 +660,25 @@ def tv_history():
         if frequency is None:
             LogUtil.warning(f"[tv_history] Unsupported resolution: {resolution}")
             return {"s": "no_data"}
+        if _should_suppress_realtime_history_poll(
+            market=market,
+            first_data_request=firstDataRequest,
+            countback=args.get("countback"),
+            requested_to=_to,
+            observed_at=datetime.datetime.now(datetime.timezone.utc),
+            force_refresh=force_refresh,
+            review_locked=_review_lock is not None,
+        ):
+            LogUtil.debug(
+                f"[tv_history] suppressed off-session realtime poll "
+                f"{symbol} {resolution} to={_fmt_ts(_to)}"
+            )
+            return {"s": "no_data"}
+
+        LogUtil.info(
+            f"[tv_history] >>> {symbol} {resolution} first={firstDataRequest} "
+            f"from={_fmt_ts(_from)} to={_fmt_ts(_to)}"
+        )
         # 后端闸门:frequency 必须在该 market 实际支持的周期内(= 前端 supported_resolutions 的来源)。
         # 前端已按此过滤, 但手构请求(curl/改 URL)可绕过——传入 market 不支持的周期(如季线 q 对 cq
         # 美股/港股、qmt A股), 会落到各 exchange 不一致的处理(cq 返回空 / qmt·binance frequency_map
