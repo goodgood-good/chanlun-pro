@@ -1298,7 +1298,19 @@ def _priority_monitor_continuation_document(
         validate_signal_decision_document(signal)
         decision = signal_decision_projection(signal)
         decision_schema = decision.pop("schema")
+        decision_risk = decision.pop("higher_timeframe_risk")
         document.update(copy.deepcopy(decision))
+        presentation_risk = document.get("higher_timeframe_risk")
+        if not isinstance(presentation_risk, Mapping):
+            raise TypeError("priority monitor presentation risk is invalid")
+        # ``signal_decision_projection`` intentionally keeps only fields that
+        # participate in the immutable decision hash. Replacing the complete
+        # presentation risk mapping with it discards authenticated sector-source
+        # provenance and makes the browser reject the whole live overlay.
+        document["higher_timeframe_risk"] = {
+            **copy.deepcopy(presentation_risk),
+            **copy.deepcopy(decision_risk),
+        }
         document["decision_document_schema"] = decision_schema
         document["decision_document_id"] = copy.deepcopy(
             signal["decision_document_id"]

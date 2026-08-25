@@ -6001,6 +6001,66 @@ def test_snapshot_authenticates_sector_native_daily_research_cap(
     )
 
 
+def test_priority_monitor_continuation_preserves_sector_source_provenance(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=SectorNativeDailyResearchMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    [signal] = service.refresh_now()["signals"]
+
+    continuation = (
+        trading_screening_subject._priority_monitor_continuation_document(signal)
+    )
+    presentation_risk = trading_screening_subject._presentation_signal_document(
+        signal
+    )["higher_timeframe_risk"]
+    continuation_risk = continuation["higher_timeframe_risk"]
+    sector_source_fields = (
+        "sector_higher_timeframe_source_mode",
+        "sector_strict_same_5m_warmup_evidence",
+        "sector_strict_same_5m_source_coverage_evidence",
+        "sector_research_bridge_parameter_set_id",
+    )
+
+    assert {
+        field: continuation_risk[field] for field in sector_source_fields
+    } == {field: presentation_risk[field] for field in sector_source_fields}
+    assert (
+        trading_screening_subject.validate_signal_decision_document(continuation)
+        == signal["decision_document_id"]
+    )
+    assert continuation["monitor_continuation"] is True
+    assert continuation["presentation_projection"] is False
+
+    code = str(signal["code"])
+    service._record_priority_monitor_result(
+        observed_at=AS_OF,
+        codes=(),
+        errors=(),
+        documents=(signal,),
+        successful_codes=(code,),
+        lanes_by_code={
+            code: trading_screening_subject.CANDIDATE_MONITOR_LANE_5M,
+        },
+        five_universe=(code,),
+        thirty_universe=(),
+        five_codes=(code,),
+        successful_five_codes=(code,),
+    )
+    [live_overlay] = service.presentation_snapshot()["signals"]
+    overlay_risk = live_overlay["higher_timeframe_risk"]
+    assert {field: overlay_risk[field] for field in sector_source_fields} == {
+        field: presentation_risk[field] for field in sector_source_fields
+    }
+
+
 def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     cache_path = tmp_path / "snapshot.json"
     first_service = TradingScreeningService(
