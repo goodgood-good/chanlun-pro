@@ -76,14 +76,10 @@ def _combined_unit(
     last = group[-1]
     direction = first.direction
     child_ids = tuple(
-        leaf_id
-        for item in group
-        for leaf_id in _combination_leaves(item)
+        leaf_id for item in group for leaf_id in _combination_leaves(item)
     )
     inherited_protected = {
-        leaf_id
-        for item in group
-        for leaf_id in item.protected_after_ids
+        leaf_id for item in group for leaf_id in item.protected_after_ids
     }
     explicit_protected = set()
     for item in group:
@@ -133,10 +129,9 @@ def combine_same_level_trends(
 ) -> SameLevelDecompositionResult:
     """在递归构建中枢前应用同级别结合律。
 
-    按结合律，连续同向的有向走势类型属于同一走势。盘整在此作为无方向连接件，
-    故意不参与合并，使 ``趋势 + 盘整 + 趋势`` 和 ``盘整 + 盘整`` 仍保持可观察
-    分解。已确认背驰边界属于固定同级别账本；若高一级结合载体必须合并相邻
-    同向走势，``SameLevelCombination`` 会保留每条受保护子边界而不抹去来源。
+    按结合律，连续同向的走势类型属于同一走势。盘整同样由首尾端点确定方向，
+    不能作为同向走势之间的无方向连接件。``oscillatory_ids`` 只为读取旧回放调用
+    保留，不再改变方向判定。``SameLevelCombination`` 会保留受保护子边界来源。
 
     输出具有确定性和前缀因果性：只合并已锁定的来源走势类型，组合结果不会早于
     最晚子单元可用；其 ``child_ids`` 保留回放与审计所需的完整单层来源。
@@ -162,16 +157,9 @@ def combine_same_level_trends(
     index = 0
     while index < len(values):
         current = values[index]
-        if current.unit_id in oscillatory:
-            output.append(current)
-            index += 1
-            continue
-
         end = index + 1
         while end < len(values):
             candidate = values[end]
-            if candidate.unit_id in oscillatory:
-                break
             if candidate.direction != current.direction:
                 break
             end += 1
@@ -193,9 +181,9 @@ def combine_same_level_trends(
         index = end
 
     result_units = tuple(output)
-    result_oscillatory = frozenset(
-        item.unit_id for item in result_units if item.unit_id in oscillatory
-    )
+    # Consolidation is a movement classification, not a directionless bridge.
+    # All same-direction runs have already been combined above.
+    result_oscillatory = frozenset()
     validate_unit_sequence(
         result_units,
         result_units[0].structural_level,

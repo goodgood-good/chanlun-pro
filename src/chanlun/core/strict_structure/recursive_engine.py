@@ -11,12 +11,12 @@ from chanlun.core.strict_structure.models import (
     SourceKind,
     StrictLevelResult,
     StrictStructureResult,
-    TrendAssemblyResult,
     center_seed_size,
 )
 from chanlun.core.strict_structure.trend_assembler import (
+    IncompatibleDecompositionBoundaryError,
     assemble_trend_types,
-    partition_pending_movements,
+    normalize_trend_assembly,
 )
 from chanlun.core.strict_structure.unit_adapter import build_recursive_unit_stream
 
@@ -39,9 +39,7 @@ def _calculate_centers_with_prefix_cache(
     values = tuple(units)
     # 未锁定观察尾部的 available_at 会随决策时点变化，绝不缓存。边界扫描传入的
     # 正式前缀全部锁定，其 unit_id 在同一 UnitLockRegistry 内已证明不可变。
-    cacheable = center_prefix_cache is not None and all(
-        item.locked for item in values
-    )
+    cacheable = center_prefix_cache is not None and all(item.locked for item in values)
     if not cacheable:
         return calculate_centers(
             values,
@@ -95,6 +93,7 @@ def _assemble_trends_with_prefix_cache(
     *,
     strength,
     group_start_unit_id: str | None = None,
+    ignored_boundary_anchor_ids: frozenset[str] = frozenset(),
     center_prefix_cache: OrderedDict | None = None,
 ):
     """复用锁定前缀的走势装配；尾部或无强度路径继续直接计算。"""
@@ -113,6 +112,7 @@ def _assemble_trends_with_prefix_cache(
             structural_level,
             oscillatory_ids,
             strength=strength,
+            ignored_boundary_anchor_ids=ignored_boundary_anchor_ids,
             group_start_unit_id=group_start_unit_id,
         )
     key = (
@@ -130,6 +130,7 @@ def _assemble_trends_with_prefix_cache(
         center_values,
         oscillatory_ids,
         group_start_unit_id,
+        ignored_boundary_anchor_ids,
     )
     cached = center_prefix_cache.pop(key, None)
     if cached is not None:
@@ -141,6 +142,7 @@ def _assemble_trends_with_prefix_cache(
         structural_level,
         oscillatory_ids,
         strength=strength,
+        ignored_boundary_anchor_ids=ignored_boundary_anchor_ids,
         group_start_unit_id=group_start_unit_id,
     )
     center_prefix_cache[key] = result
@@ -177,6 +179,7 @@ def calculate_level_with_divergence_boundaries(
             oscillatory_ids,
         )
     accepted: frozenset[str] = frozenset()
+    rejected: frozenset[str] = frozenset()
     closed_centers = {}
     frozen_current = {}
     frozen_completed = {}
@@ -198,6 +201,7 @@ def calculate_level_with_divergence_boundaries(
 
     for _pass in range(len(values) + 1):
         discovered = None
+        restart_after_rejection = False
         # 离开段之后可能折叠回中枢本体。通过重放锁定前缀，使首个已确认背驰在
         # 批量、增量和重启计算中始终保持为不可变边界。
         for prefix_end in range(last_boundary_index + 1, locked_count):
@@ -227,19 +231,27 @@ def calculate_level_with_divergence_boundaries(
                     or index == len(prefix_centers.centers) - 1
                 )
             )
-            suffix = _assemble_trends_with_prefix_cache(
-                centers_for_trends,
-                prefix,
-                structural_level,
-                oscillatory_ids,
-                strength=strength,
-                group_start_unit_id=(
-                    None
-                    if last_boundary_index < 0
-                    else values[last_boundary_index + 1].unit_id
-                ),
-                center_prefix_cache=center_prefix_cache,
-            )
+            try:
+                suffix = _assemble_trends_with_prefix_cache(
+                    centers_for_trends,
+                    prefix,
+                    structural_level,
+                    oscillatory_ids,
+                    strength=strength,
+                    ignored_boundary_anchor_ids=rejected.intersection(
+                        item.unit_id for item in prefix
+                    ),
+                    group_start_unit_id=(
+                        None
+                        if last_boundary_index < 0
+                        else values[last_boundary_index + 1].unit_id
+                    ),
+                    center_prefix_cache=center_prefix_cache,
+                )
+            except IncompatibleDecompositionBoundaryError as exc:
+                rejected = rejected | {exc.anchor_unit_id}
+                restart_after_rejection = True
+                break
             candidates = tuple(
                 boundary
                 for boundary in suffix.decomposition_boundaries
@@ -258,6 +270,9 @@ def calculate_level_with_divergence_boundaries(
                     suffix,
                 )
                 break
+
+        if restart_after_rejection:
+            continue
 
         if discovered is None:
             center_result = _calculate_centers_with_prefix_cache(
@@ -285,19 +300,25 @@ def calculate_level_with_divergence_boundaries(
                     or index == len(center_result.centers) - 1
                 )
             )
-            suffix = _assemble_trends_with_prefix_cache(
-                centers_for_trends,
-                values,
-                structural_level,
-                oscillatory_ids,
-                strength=strength,
-                group_start_unit_id=(
-                    None
-                    if last_boundary_index < 0 or last_boundary_index + 1 >= len(values)
-                    else values[last_boundary_index + 1].unit_id
-                ),
-                center_prefix_cache=center_prefix_cache,
-            )
+            try:
+                suffix = _assemble_trends_with_prefix_cache(
+                    centers_for_trends,
+                    values,
+                    structural_level,
+                    oscillatory_ids,
+                    strength=strength,
+                    ignored_boundary_anchor_ids=rejected,
+                    group_start_unit_id=(
+                        None
+                        if last_boundary_index < 0
+                        or last_boundary_index + 1 >= len(values)
+                        else values[last_boundary_index + 1].unit_id
+                    ),
+                    center_prefix_cache=center_prefix_cache,
+                )
+            except IncompatibleDecompositionBoundaryError as exc:
+                rejected = rejected | {exc.anchor_unit_id}
+                continue
             merged_current = dict(frozen_current)
             merge_unique(
                 merged_current,
@@ -313,7 +334,7 @@ def calculate_level_with_divergence_boundaries(
                 "completed trend",
             )
             current_trends = tuple(merged_current.values())
-            return center_result, TrendAssemblyResult(
+            normalized = normalize_trend_assembly(
                 current_trends=current_trends,
                 completed_trends=tuple(
                     sorted(
@@ -330,12 +351,10 @@ def calculate_level_with_divergence_boundaries(
                         ),
                     )
                 ),
-                pending_movements=partition_pending_movements(
-                    current_trends,
-                    values,
-                    structural_level,
-                ),
+                source_units=values,
+                structural_level=structural_level,
             )
+            return center_result, normalized
 
         candidate, suffix = discovered
         current_ids = [trend.trend_id for trend in suffix.current_trends]
@@ -343,6 +362,32 @@ def calculate_level_with_divergence_boundaries(
             boundary_trend_index = current_ids.index(candidate.left_trend_id)
         except ValueError as exc:
             raise ValueError("boundary trend is missing from suffix assembly") from exc
+
+        # A divergence is allowed to end a movement only when the resulting
+        # same-level ledger still connects up/down/up/down.  In particular, a
+        # second same-direction divergence after an immutable boundary remains
+        # observable evidence but cannot become another decomposition boundary.
+        if frozen_current:
+            try:
+                normalize_trend_assembly(
+                    current_trends=tuple(
+                        (
+                            *frozen_current.values(),
+                            *suffix.current_trends[: boundary_trend_index + 1],
+                        )
+                    ),
+                    completed_trends=tuple(
+                        (*frozen_completed.values(), *suffix.completed_trends)
+                    ),
+                    decomposition_boundaries=tuple(
+                        (*frozen_boundaries.values(), candidate)
+                    ),
+                    source_units=values[: unit_index[candidate.anchor_unit_id] + 1],
+                    structural_level=structural_level,
+                )
+            except IncompatibleDecompositionBoundaryError as exc:
+                rejected = rejected | {exc.anchor_unit_id}
+                continue
         merge_unique(
             frozen_current,
             suffix.current_trends[: boundary_trend_index + 1],
@@ -425,8 +470,8 @@ class StrictRecursiveEngine:
             raise ValueError("empty strict recursion requires price basis")
 
         levels = []
-        # 线段层恒为空集：盘整只在走势类型层存在，因此 level 0 的行为与严格
-        # 交替完全等价，本改动不触及线段与 level-0 线段中枢。
+        # Legacy replay metadata is retained as an empty value only.  Every
+        # physical and recursive level now follows the same strict alternation.
         oscillatory_ids: frozenset[str] = frozenset()
         for level in range(self.max_levels):
             source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE

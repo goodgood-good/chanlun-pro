@@ -269,13 +269,11 @@ def test_consolidation_net_displacement_is_never_published_as_direction():
 
 
 def test_direction_change_without_first_or_second_point_stays_neutral():
-    structure = _structure(seed=42, count=60)
+    structure = _structure(seed=31, count=40)
     trend_types = structure.levels[0].trend_types
     current = trend_types[-1]
     previous = next(
-        trend
-        for trend in reversed(trend_types[:-1])
-        if trend.kind is TrendKind.TREND
+        trend for trend in reversed(trend_types[:-1]) if trend.kind is TrendKind.TREND
     )
     assert semantic_trend_direction(previous) == "down"
     assert semantic_trend_direction(current) == "up"
@@ -286,7 +284,7 @@ def test_direction_change_without_first_or_second_point_stays_neutral():
 
 
 def test_direction_change_with_first_point_is_published_and_auditable():
-    structure = _structure(seed=42, count=60)
+    structure = _structure(seed=31, count=40)
     support = _first_class_reversal_support(structure)
     state = resolve_formal_direction(_bundle(structure, (support,)))
 
@@ -325,7 +323,7 @@ def test_level_direction_and_global_direction_share_one_resolver():
 
 
 def test_component_direction_matches_full_revision_hashed_evidence():
-    structure = _structure(seed=42, count=60)
+    structure = _structure(seed=31, count=40)
     evidence = _bundle(structure, (_first_class_reversal_support(structure),))
 
     assert resolve_formal_direction_from_components(

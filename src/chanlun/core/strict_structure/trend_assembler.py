@@ -30,6 +30,31 @@ from chanlun.core.strict_structure.strength import (
 )
 
 
+class IncompatibleDecompositionBoundaryError(ValueError):
+    """A divergence cannot close the canonical alternating movement."""
+
+    def __init__(self, message: str, anchor_unit_id: str) -> None:
+        super().__init__(message)
+        self.anchor_unit_id = anchor_unit_id
+
+
+def _classify_trend_kind(group) -> TrendKind:
+    """Classify a center sequence by its actual same-direction relation."""
+
+    centers = tuple(group)
+    if len(centers) < 2:
+        return TrendKind.CONSOLIDATION
+    relations = tuple(
+        classify_center_relation(previous, current)
+        for previous, current in zip(centers, centers[1:])
+    )
+    if all(relation is CenterRelation.UP_TREND for relation in relations) or all(
+        relation is CenterRelation.DOWN_TREND for relation in relations
+    ):
+        return TrendKind.TREND
+    return TrendKind.CONSOLIDATION
+
+
 def _validate_center_references(
     centers, units, structural_level, oscillatory_ids=frozenset()
 ):
@@ -75,12 +100,8 @@ def _validate_center_references(
         for offset, item in zip(failed_indexes, center.failed_departure_units):
             if units[offset] != item:
                 raise ValueError("center failed departure evidence changed")
-        history_indexes = tuple(
-            sorted((*body_indexes, *failed_indexes))
-        )
-        if history_indexes != tuple(
-            range(history_indexes[0], history_indexes[-1] + 1)
-        ):
+        history_indexes = tuple(sorted((*body_indexes, *failed_indexes)))
+        if history_indexes != tuple(range(history_indexes[0], history_indexes[-1] + 1)):
             raise ValueError(
                 "center body and failed departures must own a contiguous history"
             )
@@ -177,11 +198,7 @@ def _constituent_units(group, units, index, group_start, *, end_index=None):
             (
                 *terminal.body_units,
                 *terminal.failed_departure_units,
-                *(
-                    ()
-                    if establishment_leave is None
-                    else (establishment_leave,)
-                ),
+                *(() if establishment_leave is None else (establishment_leave,)),
             ),
             key=lambda item: (item.market_start, item.market_end, item.unit_id),
         )
@@ -247,9 +264,7 @@ def _direction(constituent_units):
 def _reversal_witness_after(source_units, terminal_index, *, locked_only):
     terminal = source_units[terminal_index]
     witness = source_units[terminal_index + 1 : terminal_index + 4]
-    if len(witness) != 3 or (
-        locked_only and any(not item.locked for item in witness)
-    ):
+    if len(witness) != 3 or (locked_only and any(not item.locked for item in witness)):
         return None
     first, middle, third = witness
     opposite = "down" if terminal.direction == "up" else "up"
@@ -427,9 +442,9 @@ def partition_pending_movements(
             for item in (left_trend_id, right_trend_id)
             if item is not None
         )
-        availability = tuple(
-            item.available_at for item in constituent_units
-        ) + tuple(trend.available_at for trend in adjacent_trends)
+        availability = tuple(item.available_at for item in constituent_units) + tuple(
+            trend.available_at for trend in adjacent_trends
+        )
         available_at = max(availability)
         direction = _direction(constituent_units)
         output.append(
@@ -464,9 +479,7 @@ def partition_pending_movements(
         )
         start = end
 
-    formal_ids = {
-        item.unit_id for trend in trends for item in trend.constituent_units
-    }
+    formal_ids = {item.unit_id for trend in trends for item in trend.constituent_units}
     pending_ids = {
         item.unit_id for partition in output for item in partition.constituent_units
     }
@@ -522,7 +535,7 @@ def _build(
     start = all_units[0]
     tail = all_units[-1]
     direction = _direction(all_units)
-    kind = TrendKind.TREND if len(group) >= 2 else TrendKind.CONSOLIDATION
+    kind = _classify_trend_kind(group)
     return TrendType(
         trend_id=build_trend_id(
             price_basis_revision=start.price_basis_revision,
@@ -556,6 +569,257 @@ def _build(
         available_at=available_at,
         terminal_divergence=terminal_divergence,
         completion_witness_units=tuple(completion_witness_units),
+    )
+
+
+def _merge_trend_group(trends) -> TrendType:
+    """Combine a contiguous same-level group into one canonical movement."""
+
+    values = tuple(trends)
+    if not values:
+        raise ValueError("cannot merge an empty trend group")
+    if len(values) == 1:
+        return values[0]
+    first = values[0]
+    last = values[-1]
+    for previous, current in zip(values, values[1:]):
+        if (
+            previous.structural_level != current.structural_level
+            or previous.price_basis_revision != current.price_basis_revision
+        ):
+            raise ValueError("merged trends must share one structural context")
+        if (
+            previous.end_tick != current.start_tick
+            or current.market_start < previous.market_end
+        ):
+            raise ValueError("merged trends must form one connected chain")
+
+    constituent_units = tuple(
+        unit for trend in values for unit in trend.constituent_units
+    )
+    if len({unit.unit_id for unit in constituent_units}) != len(constituent_units):
+        raise ValueError("merged trends cannot reuse constituent units")
+    centers = tuple(center for trend in values for center in trend.centers)
+    if len({center.center_id for center in centers}) != len(centers):
+        raise ValueError("merged trends cannot reuse centers")
+    merged_kind = _classify_trend_kind(centers)
+    if (
+        last.terminal_divergence is not None
+        and last.terminal_divergence.kind != merged_kind.value
+    ):
+        raise IncompatibleDecompositionBoundaryError(
+            "terminal divergence kind does not match merged movement",
+            last.terminal_divergence.signal_unit_id,
+        )
+
+    confirmed_at = None
+    if last.state is not TrendState.FORMING:
+        confirmations = tuple(
+            trend.confirmed_at for trend in values if trend.confirmed_at is not None
+        )
+        if not confirmations:
+            raise ValueError("completed merged trend requires confirmation")
+        confirmed_at = max(confirmations)
+    return _build(
+        centers,
+        constituent_units,
+        first.structural_level,
+        last.state,
+        confirmed_at,
+        max(trend.available_at for trend in values),
+        terminal_divergence=last.terminal_divergence,
+        completion_witness_units=last.completion_witness_units,
+    )
+
+
+def _rebind_decomposition_boundary(
+    boundary: DecompositionBoundaryEvidence,
+    trend: TrendType,
+) -> DecompositionBoundaryEvidence:
+    """Bind terminal divergence evidence to a left-extended movement."""
+
+    divergence = boundary.divergence
+    if (
+        trend.state is not TrendState.LOCKED
+        or trend.terminal_divergence != divergence
+        or trend.centers[-1].center_id != boundary.terminal_center_id
+        or trend.terminal_unit.unit_id != boundary.anchor_unit_id
+        or trend.market_end != boundary.anchor_at
+    ):
+        raise IncompatibleDecompositionBoundaryError(
+            "decomposition boundary cannot bind to merged trend",
+            boundary.anchor_unit_id,
+        )
+    return replace(
+        boundary,
+        boundary_id=stable_structure_id(
+            "chanlun-decomposition-boundary",
+            divergence.price_basis_revision,
+            "same_level",
+            boundary.boundary_kind,
+            divergence.structural_level,
+            divergence.source_kind.value,
+            trend.trend_id,
+            boundary.terminal_center_id,
+            divergence.divergence_id,
+        ),
+        left_trend_id=trend.trend_id,
+    )
+
+
+def normalize_trend_assembly(
+    current_trends,
+    completed_trends,
+    decomposition_boundaries,
+    source_units,
+    structural_level: int,
+) -> TrendAssemblyResult:
+    """Publish only a connected up/down/up/down same-level movement chain.
+
+    Soft boundaries between equal endpoint directions are combined.  A locked
+    divergence boundary is immutable: units to its right remain pending until
+    their combined endpoint direction is the required opposite direction.
+    """
+
+    raw_trends = tuple(current_trends)
+    raw_completed = tuple(completed_trends)
+    raw_boundaries = tuple(decomposition_boundaries)
+    boundary_by_trend = {
+        boundary.left_trend_id: boundary for boundary in raw_boundaries
+    }
+    if len(boundary_by_trend) != len(raw_boundaries):
+        raise ValueError("a trend cannot own multiple decomposition boundaries")
+
+    # Each item is [raw trend group, canonical trend, rebound boundary].
+    emitted: list[list[object]] = []
+    pending_group: list[TrendType] = []
+
+    def group_boundary(group: tuple[TrendType, ...]):
+        internal = tuple(
+            trend.trend_id
+            for trend in group[:-1]
+            if trend.trend_id in boundary_by_trend
+        )
+        if internal:
+            boundary = boundary_by_trend[internal[0]]
+            raise IncompatibleDecompositionBoundaryError(
+                "decomposition boundary cannot be hidden inside a movement",
+                boundary.anchor_unit_id,
+            )
+        return boundary_by_trend.get(group[-1].trend_id)
+
+    def emit(group_values: list[TrendType], trend: TrendType) -> None:
+        group = tuple(group_values)
+        boundary = group_boundary(group)
+        rebound = (
+            None
+            if boundary is None
+            else _rebind_decomposition_boundary(boundary, trend)
+        )
+        emitted.append([group, trend, rebound])
+
+    for raw_trend in raw_trends:
+        pending_group.append(raw_trend)
+        while pending_group:
+            candidate = _merge_trend_group(tuple(pending_group))
+            if not emitted:
+                emit(pending_group, candidate)
+                pending_group = []
+                break
+
+            previous = emitted[-1][1]
+            if not isinstance(previous, TrendType):
+                raise TypeError("invalid canonical trend accumulator")
+            if candidate.direction != previous.direction:
+                emit(pending_group, candidate)
+                pending_group = []
+                break
+
+            previous_boundary = emitted[-1][2]
+            if previous_boundary is not None:
+                if any(trend.trend_id in boundary_by_trend for trend in pending_group):
+                    boundary = next(
+                        boundary_by_trend[trend.trend_id]
+                        for trend in pending_group
+                        if trend.trend_id in boundary_by_trend
+                    )
+                    raise IncompatibleDecompositionBoundaryError(
+                        "same-direction successor cannot close a decomposition boundary",
+                        boundary.anchor_unit_id,
+                    )
+                # Do not manufacture another same-direction movement after an
+                # immutable divergence boundary.  The accumulated suffix stays
+                # unresolved and will be exposed by partition_pending_movements.
+                break
+
+            previous_group = emitted.pop()[0]
+            if not isinstance(previous_group, tuple):
+                raise TypeError("invalid canonical trend group")
+            pending_group = [*previous_group, *pending_group]
+
+    if pending_group and any(
+        trend.trend_id in boundary_by_trend for trend in pending_group
+    ):
+        boundary = next(
+            boundary_by_trend[trend.trend_id]
+            for trend in pending_group
+            if trend.trend_id in boundary_by_trend
+        )
+        raise IncompatibleDecompositionBoundaryError(
+            "unresolved same-direction suffix cannot own a decomposition boundary",
+            boundary.anchor_unit_id,
+        )
+
+    canonical_trends = tuple(item[1] for item in emitted)
+    canonical_boundaries = tuple(
+        sorted(
+            (item[2] for item in emitted if item[2] is not None),
+            key=lambda boundary: (boundary.available_at, boundary.boundary_id),
+        )
+    )
+
+    # Completed snapshots are causal prefixes.  Retain only snapshots that are
+    # prefixes of a currently valid canonical movement, then ensure every
+    # complete canonical movement has one immutable COMPLETE snapshot.
+    canonical_unit_ids = tuple(
+        tuple(unit.unit_id for unit in trend.constituent_units)
+        for trend in canonical_trends
+    )
+
+    def compatible_snapshot(snapshot: TrendType) -> bool:
+        snapshot_ids = tuple(unit.unit_id for unit in snapshot.constituent_units)
+        return any(
+            snapshot.direction == trend.direction
+            and len(snapshot_ids) <= len(unit_ids)
+            and unit_ids[: len(snapshot_ids)] == snapshot_ids
+            for trend, unit_ids in zip(canonical_trends, canonical_unit_ids)
+        )
+
+    canonical_completed = {
+        trend.trend_id: trend for trend in raw_completed if compatible_snapshot(trend)
+    }
+    for trend in canonical_trends:
+        if not trend.complete or trend.trend_id in canonical_completed:
+            continue
+        canonical_completed[trend.trend_id] = replace(
+            trend,
+            state=TrendState.COMPLETE,
+        )
+
+    return TrendAssemblyResult(
+        current_trends=canonical_trends,
+        completed_trends=tuple(
+            sorted(
+                canonical_completed.values(),
+                key=lambda trend: (trend.available_at, trend.trend_id),
+            )
+        ),
+        decomposition_boundaries=canonical_boundaries,
+        pending_movements=partition_pending_movements(
+            canonical_trends,
+            tuple(source_units),
+            structural_level,
+        ),
     )
 
 
@@ -598,9 +862,7 @@ def _refine_forming_segment_tail(
 
     slices = _geometric_movement_slices(source_units, movement_start)
     prefix_slices = tuple(
-        item
-        for item in slices
-        if index[item[0][-1].unit_id] < center_start
+        item for item in slices if index[item[0][-1].unit_id] < center_start
     )
     if (
         not prefix_slices
@@ -615,9 +877,7 @@ def _refine_forming_segment_tail(
 
     refined = []
     for movement, witness in prefix_slices:
-        confirmations = tuple(
-            item.confirmed_at for item in (*movement, *witness)
-        )
+        confirmations = tuple(item.confirmed_at for item in (*movement, *witness))
         if any(value is None for value in confirmations):
             raise ValueError("locked geometric movement requires confirmations")
         confirmed_at = max(confirmations)
@@ -711,7 +971,8 @@ def _confirmed_divergence_boundary(
     if strength is None or not group:
         return None
     try:
-        if len(group) >= 2:
+        group_kind = _classify_trend_kind(group)
+        if group_kind is TrendKind.TREND:
             compared = compare_terminal_trend_divergence(
                 group,
                 source_units,
@@ -731,9 +992,7 @@ def _confirmed_divergence_boundary(
                 units_by_id = {item.unit_id: item for item in source_units}
                 signal = units_by_id.get(divergence.signal_unit_id)
                 if signal is None:
-                    raise ValueError(
-                        "盘整背驰的离开段末端不在同级别单元序列中"
-                    )
+                    raise ValueError("盘整背驰的离开段末端不在同级别单元序列中")
                 compared = (divergence, signal)
     except (FormalDivergenceUnavailable, MacdStrengthUnavailable, KeyError):
         # 稀疏回放或测试强度表可能只保存目标趋势的 MACD 切片；缺失的单中枢
@@ -752,9 +1011,7 @@ def _confirmed_divergence_boundary(
         )
         if reversal_witness is None:
             return None
-        witness_confirmations = tuple(
-            item.confirmed_at for item in reversal_witness
-        )
+        witness_confirmations = tuple(item.confirmed_at for item in reversal_witness)
         if any(value is None for value in witness_confirmations):
             raise ValueError("locked reversal witness requires confirmations")
         divergence = replace(
@@ -889,9 +1146,7 @@ def assemble_trend_types(
     boundaries = {}
     group = [values[0]]
     group_start = (
-        0
-        if group_start_unit_id is None
-        else index.get(group_start_unit_id, -1)
+        0 if group_start_unit_id is None else index.get(group_start_unit_id, -1)
     )
     first_center_start = index[values[0].body_units[0].unit_id]
     if values[0].entry_unit is not None:
@@ -1128,9 +1383,8 @@ def assemble_trend_types(
         index,
         structural_level,
     )
-    current_trends = tuple(output)
-    return TrendAssemblyResult(
-        current_trends=current_trends,
+    return normalize_trend_assembly(
+        current_trends=tuple(output),
         completed_trends=tuple(
             sorted(
                 completed.values(),
@@ -1143,9 +1397,6 @@ def assemble_trend_types(
                 key=lambda item: (item.available_at, item.boundary_id),
             )
         ),
-        pending_movements=partition_pending_movements(
-            current_trends,
-            source_units,
-            structural_level,
-        ),
+        source_units=source_units,
+        structural_level=structural_level,
     )

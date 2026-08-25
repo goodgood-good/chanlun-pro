@@ -525,9 +525,7 @@ class TrendCenter:
             or bool(self.supersession_bridge_units)
         )
         if self.state is not CenterState.SUPERSEDED and has_supersession:
-            raise ValueError(
-                "only a superseded center may carry successor evidence"
-            )
+            raise ValueError("only a superseded center may carry successor evidence")
 
         if self.state is CenterState.ONGOING:
             if (
@@ -575,9 +573,7 @@ class TrendCenter:
                     "superseded center requires a distinct successor and close time"
                 )
             if self.superseded_at < self.established_at:
-                raise ValueError(
-                    "superseded_at cannot precede center establishment"
-                )
+                raise ValueError("superseded_at cannot precede center establishment")
             if self.available_at < self.superseded_at:
                 raise ValueError(
                     "superseded center availability must cover successor evidence"
@@ -598,9 +594,7 @@ class TrendCenter:
                 raise ValueError(
                     "supersession bridge must stay outside body and failed history"
                 )
-            if bridge and self.available_at < max(
-                item.available_at for item in bridge
-            ):
+            if bridge and self.available_at < max(item.available_at for item in bridge):
                 raise ValueError(
                     "superseded center availability must cover bridge evidence"
                 )
@@ -657,11 +651,7 @@ class TrendCenter:
             *self.body_units,
             *self.failed_departure_units,
             *self.supersession_bridge_units,
-            *(
-                ()
-                if self.pending_leave_unit is None
-                else (self.pending_leave_unit,)
-            ),
+            *(() if self.pending_leave_unit is None else (self.pending_leave_unit,)),
             *(
                 ()
                 if self.completion_leave_unit is None
@@ -676,9 +666,8 @@ class TrendCenter:
         transition_ids = tuple(item.unit_id for item in transition_units)
         if len(transition_ids) != len(set(transition_ids)):
             raise ValueError("center transition ownership must be unique")
-        if (
-            self.entry_unit is not None
-            and self.entry_unit.unit_id in set(transition_ids)
+        if self.entry_unit is not None and self.entry_unit.unit_id in set(
+            transition_ids
         ):
             raise ValueError("center entry must stay outside transition ownership")
         ordered_transitions = tuple(
@@ -695,25 +684,19 @@ class TrendCenter:
         failed_ids = {item.unit_id for item in self.failed_departure_units}
         bridge_ids = {item.unit_id for item in self.supersession_bridge_units}
         if (
-            tuple(
-                item for item in ordered_transitions if item.unit_id in body_ids
-            )
+            tuple(item for item in ordered_transitions if item.unit_id in body_ids)
             != self.body_units
         ):
             raise ValueError("center body order conflicts with physical transitions")
         if (
-            tuple(
-                item for item in ordered_transitions if item.unit_id in failed_ids
-            )
+            tuple(item for item in ordered_transitions if item.unit_id in failed_ids)
             != self.failed_departure_units
         ):
             raise ValueError(
                 "failed departure order conflicts with physical transitions"
             )
         if (
-            tuple(
-                item for item in ordered_transitions if item.unit_id in bridge_ids
-            )
+            tuple(item for item in ordered_transitions if item.unit_id in bridge_ids)
             != self.supersession_bridge_units
         ):
             raise ValueError(
@@ -915,9 +898,7 @@ class TrendCenter:
 
         if self.source_kind is SourceKind.TREND_TYPE:
             return True
-        establishment_ids = tuple(
-            item.unit_id for item in self.establishment_units
-        )
+        establishment_ids = tuple(item.unit_id for item in self.establishment_units)
         return len(establishment_ids) == 5 and len(set(establishment_ids)) == 5
 
     @property
@@ -1091,6 +1072,7 @@ class CenterPreview:
                 raise ValueError(
                     "physical preview establishment leave must own leave lifecycle"
                 )
+
     @property
     def formal_center_id(self) -> str | None:
         """返回该预览锁定后将采用的正式中枢身份。
@@ -1113,8 +1095,7 @@ class CenterPreview:
         ):
             return None
         if self.source_kind is not SourceKind.TREND_TYPE and (
-            self.entry_unit_id is None
-            or self.establishment_leave_unit_id is None
+            self.entry_unit_id is None or self.establishment_leave_unit_id is None
         ):
             return None
         return build_center_id(
@@ -1266,9 +1247,7 @@ class CenterLevelResult:
                     "superseded center must reference the immediate successor"
                 )
             if center.superseded_at != successor.established_at:
-                raise ValueError(
-                    "supersession time must equal successor establishment"
-                )
+                raise ValueError("supersession time must equal successor establishment")
             boundary_unit = (
                 center.supersession_bridge_units[-1]
                 if center.supersession_bridge_units
@@ -1283,8 +1262,7 @@ class CenterLevelResult:
             if successor.body_units[0].market_start < boundary_unit.market_end:
                 raise ValueError("supersession boundary intervals must not overlap")
             cores_overlap = not (
-                successor.zd_tick > center.zg_tick
-                or successor.zg_tick < center.zd_tick
+                successor.zd_tick > center.zg_tick or successor.zg_tick < center.zd_tick
             )
             if cores_overlap:
                 raise ValueError(
@@ -1396,30 +1374,41 @@ class TrendType:
         if not self.constituent_units:
             raise ValueError("trend type requires constituent units")
 
-        if any(
-            item.structural_level != self.structural_level
-            for item in self.constituent_units
-        ) or any(
-            center.structural_level != self.structural_level for center in self.centers
-        ) or any(
-            item.structural_level != self.structural_level
-            for item in self.completion_witness_units
+        if (
+            any(
+                item.structural_level != self.structural_level
+                for item in self.constituent_units
+            )
+            or any(
+                center.structural_level != self.structural_level
+                for center in self.centers
+            )
+            or any(
+                item.structural_level != self.structural_level
+                for item in self.completion_witness_units
+            )
         ):
             raise ValueError("trend level must match all evidence")
-        source_kinds = {item.source_kind for item in self.constituent_units} | {
-            center.source_kind for center in self.centers
-        } | {item.source_kind for item in self.completion_witness_units}
+        source_kinds = (
+            {item.source_kind for item in self.constituent_units}
+            | {center.source_kind for center in self.centers}
+            | {item.source_kind for item in self.completion_witness_units}
+        )
         if len(source_kinds) != 1:
             raise ValueError("trend source must match all evidence")
-        if any(
-            item.price_basis_revision != self.price_basis_revision
-            for item in self.constituent_units
-        ) or any(
-            center.price_basis_revision != self.price_basis_revision
-            for center in self.centers
-        ) or any(
-            item.price_basis_revision != self.price_basis_revision
-            for item in self.completion_witness_units
+        if (
+            any(
+                item.price_basis_revision != self.price_basis_revision
+                for item in self.constituent_units
+            )
+            or any(
+                center.price_basis_revision != self.price_basis_revision
+                for center in self.centers
+            )
+            or any(
+                item.price_basis_revision != self.price_basis_revision
+                for item in self.completion_witness_units
+            )
         ):
             raise ValueError("trend cannot cross price basis")
         if len({item.unit_id for item in self.constituent_units}) != len(
@@ -1431,13 +1420,9 @@ class TrendType:
         witness_ids = tuple(item.unit_id for item in self.completion_witness_units)
         if len(set(witness_ids)) != len(witness_ids):
             raise ValueError("trend completion witness units must be unique")
-        if set(witness_ids) & {
-            item.unit_id for item in self.constituent_units
-        }:
+        if set(witness_ids) & {item.unit_id for item in self.constituent_units}:
             raise ValueError("trend completion witness cannot own constituent units")
 
-        if self.kind is TrendKind.CONSOLIDATION and len(self.centers) not in (0, 1):
-            raise ValueError("consolidation must contain at most one center")
         if self.kind is TrendKind.TREND and len(self.centers) < 2:
             raise ValueError("trend must contain at least two centers")
         if not self.centers and not self.completion_witness_units:
@@ -1445,16 +1430,13 @@ class TrendType:
         if self.terminal_divergence is not None and self.completion_witness_units:
             raise ValueError("divergence and geometric completion are exclusive")
 
-        segment_sourced = all(
-            item.source_kind is SourceKind.SEGMENT for item in self.constituent_units
-        )
         for previous, current in zip(
             self.constituent_units,
             self.constituent_units[1:],
         ):
-            # 同上：只有线段构成的走势类型才强制交替；走势类型构成的高层走势
-            # 允许盘整夹在两段同向趋势之间。
-            if segment_sourced and previous.direction == current.direction:
+            # Every recursive layer consumes the same connected alternating
+            # movement contract; consolidation never disables direction.
+            if previous.direction == current.direction:
                 raise ValueError("trend constituent directions must alternate")
             if previous.end_tick != current.start_tick:
                 raise ValueError("trend constituent prices must connect")
@@ -1468,9 +1450,7 @@ class TrendType:
                         "completed trend requires structurally closed centers"
                     )
             elif (
-                any(
-                    not center.structurally_closed for center in self.centers[:-1]
-                )
+                any(not center.structurally_closed for center in self.centers[:-1])
                 or self.centers[-1].state is not CenterState.DIVERGENCE_CLOSED
             ):
                 raise ValueError(
@@ -1487,11 +1467,11 @@ class TrendType:
 
         if self.completion_witness_units:
             if len(self.completion_witness_units) != 3:
-                raise ValueError("geometric completion requires exactly three witnesses")
+                raise ValueError(
+                    "geometric completion requires exactly three witnesses"
+                )
             terminal = self.constituent_units[-1]
-            first_witness, middle_witness, last_witness = (
-                self.completion_witness_units
-            )
+            first_witness, middle_witness, last_witness = self.completion_witness_units
             opposite = "down" if terminal.direction == "up" else "up"
             if (
                 terminal.direction != self.direction
@@ -1515,7 +1495,9 @@ class TrendType:
                     previous.end_tick != current.start_tick
                     or current.market_start < previous.market_end
                 ):
-                    raise ValueError("geometric completion witness must follow terminal")
+                    raise ValueError(
+                        "geometric completion witness must follow terminal"
+                    )
 
         constituent_ids = {item.unit_id for item in self.constituent_units}
         for center in self.centers:
@@ -1529,9 +1511,7 @@ class TrendType:
                 if item.unit_id not in constituent_ids
             )
             if missing:
-                raise ValueError(
-                    "trend must contain every center body and bridge unit"
-                )
+                raise ValueError("trend must contain every center body and bridge unit")
         for center in self.centers[:-1]:
             if (
                 center.completion_return_unit is not None
@@ -1561,9 +1541,7 @@ class TrendType:
         else:
             divergence = self.terminal_divergence
             expected_divergence_kind = (
-                "trend"
-                if self.kind is TrendKind.TREND
-                else "consolidation"
+                "trend" if self.kind is TrendKind.TREND else "consolidation"
             )
             if (
                 self.state not in (TrendState.COMPLETE, TrendState.LOCKED)
@@ -1580,10 +1558,8 @@ class TrendType:
             terminal = self.constituent_units[-1]
             if (
                 leave is None
-                or terminal_center.boundary_divergence_id
-                != divergence.divergence_id
-                or terminal_center.boundary_anchor_unit_id
-                != divergence.signal_unit_id
+                or terminal_center.boundary_divergence_id != divergence.divergence_id
+                or terminal_center.boundary_anchor_unit_id != divergence.signal_unit_id
             ):
                 raise ValueError(
                     "divergence-locked trend must preserve its boundary center"
@@ -1709,10 +1685,9 @@ class TrendType:
             for item in self.completion_witness_units
             if item.confirmed_at is not None
         )
-        if (
-            self.state in (TrendState.COMPLETE, TrendState.LOCKED)
-            and len(witness_confirmations) != len(self.completion_witness_units)
-        ):
+        if self.state in (TrendState.COMPLETE, TrendState.LOCKED) and len(
+            witness_confirmations
+        ) != len(self.completion_witness_units):
             raise ValueError("completed trend witnesses require confirmations")
         if (
             self.confirmed_at is not None
@@ -1722,12 +1697,10 @@ class TrendType:
             raise ValueError("trend confirmation must cover geometric witnesses")
         if self.confirmed_at is not None and self.available_at < self.confirmed_at:
             raise ValueError("available_at must not precede confirmed_at")
-        evidence_availability = tuple(
-            item.available_at for item in self.constituent_units
-        ) + tuple(
-            center.available_at for center in self.centers
-        ) + tuple(
-            item.available_at for item in self.completion_witness_units
+        evidence_availability = (
+            tuple(item.available_at for item in self.constituent_units)
+            + tuple(center.available_at for center in self.centers)
+            + tuple(item.available_at for item in self.completion_witness_units)
         )
         if self.available_at < max(evidence_availability):
             raise ValueError("trend availability must cover all evidence")
@@ -1965,6 +1938,17 @@ class TrendAssemblyResult:
         if len({item.boundary_id for item in boundaries}) != len(boundaries):
             raise ValueError("decomposition boundaries must be unique")
         current_ids = {trend.trend_id for trend in self.current_trends}
+        for previous, current in zip(
+            self.current_trends,
+            self.current_trends[1:],
+        ):
+            if previous.direction == current.direction:
+                raise ValueError("current trend directions must alternate")
+            if (
+                previous.end_tick != current.start_tick
+                or current.market_start < previous.market_end
+            ):
+                raise ValueError("current trends must form one connected chain")
         if any(item.left_trend_id not in current_ids for item in boundaries):
             raise ValueError("decomposition boundary must reference a current trend")
         current_by_id = {trend.trend_id: trend for trend in self.current_trends}
@@ -1980,9 +1964,7 @@ class TrendAssemblyResult:
                 raise ValueError(
                     "decomposition boundary must preserve its exact terminal trend"
                 )
-        pending_ids = tuple(
-            item.partition_id for item in self.pending_movements
-        )
+        pending_ids = tuple(item.partition_id for item in self.pending_movements)
         if len(set(pending_ids)) != len(pending_ids):
             raise ValueError("pending movement partitions must be unique")
         pending_unit_ids: set[str] = set()
@@ -2112,15 +2094,15 @@ class StrictLevelResult:
         ):
             raise ValueError("level result boundary trend is missing")
         trend_by_id = {trend.trend_id: trend for trend in self.trend_types}
-        locked_trends = tuple(
-            trend for trend in self.trend_types if trend.state is TrendState.LOCKED
-        )
-        for previous, current in zip(locked_trends, locked_trends[1:]):
+        for previous, current in zip(self.trend_types, self.trend_types[1:]):
             if (
-                previous.end_tick != current.start_tick
+                previous.direction == current.direction
+                or previous.end_tick != current.start_tick
                 or current.market_start < previous.market_end
             ):
-                raise ValueError("locked same-level trends must form one causal chain")
+                raise ValueError(
+                    "same-level trends must form one alternating causal chain"
+                )
         unit_index = {unit.unit_id: index for index, unit in enumerate(self.units)}
         if len(unit_index) != len(self.units):
             raise ValueError("strict level unit ids must be unique")
@@ -2175,11 +2157,7 @@ class StrictLevelResult:
                 raise ValueError("center evidence is not closed over level units")
         for preview in self.center_result.previews:
             referenced = (
-                *(
-                    ()
-                    if preview.entry_unit_id is None
-                    else (preview.entry_unit_id,)
-                ),
+                *(() if preview.entry_unit_id is None else (preview.entry_unit_id,)),
                 *preview.unit_ids,
                 *preview.failed_departure_unit_ids,
                 *(
@@ -2527,8 +2505,7 @@ class StrictEvidenceResult:
         actual_approaching_thirds = {
             point.point_id: point
             for point in self.approaching_points
-            if point.point_type in {"3buy", "3sell"}
-            and point.structural_level > 0
+            if point.point_type in {"3buy", "3sell"} and point.structural_level > 0
         }
         if actual_approaching_thirds != expected_approaching_thirds:
             missing = tuple(
@@ -2580,10 +2557,9 @@ class StrictEvidenceResult:
                 raise ValueError("approaching second-class parent is unresolved")
             is_small_to_large = "small_to_large_reversal" in point.evidence_codes
             if is_small_to_large:
-                if (
-                    parent.structural_level >= point.structural_level
-                    or tuple(point.related_point_ids) != (parent.point_id,)
-                ):
+                if parent.structural_level >= point.structural_level or tuple(
+                    point.related_point_ids
+                ) != (parent.point_id,):
                     raise ValueError(
                         "approaching small-to-large evidence graph is incomplete"
                     )
@@ -2828,9 +2804,7 @@ class StrictEvidenceResult:
                 ready(signal) and ready(rebound) and not pullback.locked
             )
         else:
-            carrier_locks_valid = (
-                signal.locked and rebound.locked and pullback.locked
-            )
+            carrier_locks_valid = signal.locked and rebound.locked and pullback.locked
         if (
             not carrier_locks_valid
             or signal.direction != expected_signal
@@ -3054,6 +3028,7 @@ class DivergenceEvidence:
             )
         )
 
+
 @dataclass(frozen=True, slots=True)
 class DecompositionBoundaryEvidence:
     """固定同级别划分所使用的因果已确认边界。"""
@@ -3242,9 +3217,7 @@ class StrictPointEvidence:
             or self.divergence.kind not in {"trend", "consolidation"}
             or not self.divergence.is_divergent
         ):
-            raise ValueError(
-                "一类买卖点必须来自正式趋势背驰或盘整背驰"
-            )
+            raise ValueError("一类买卖点必须来自正式趋势背驰或盘整背驰")
         if self.point_type in {"2buy", "2sell"}:
             if self.variant not in {
                 StrictPointVariant.STRICT,
@@ -3319,9 +3292,7 @@ class StrictPointEvidence:
                 )
                 or self.anchor_unit_id != self.small_to_large_carrier_unit_ids[-1]
             ):
-                raise ValueError(
-                    "小转大二类点必须保留完整的离开、反向、再离开三段载体"
-                )
+                raise ValueError("小转大二类点必须保留完整的离开、反向、再离开三段载体")
         elif self.small_to_large_carrier_unit_ids:
             raise ValueError(
                 "ordinary point cannot carry small-to-large structural evidence"

@@ -7,7 +7,6 @@ from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     ConstituentUnit,
     SourceKind,
-    TrendKind,
     TrendState,
     TrendType,
 )
@@ -116,11 +115,7 @@ def line_to_unit(
         start_tick,
         end_tick,
     )
-    confirmed_at = (
-        registry.confirmed_at(unit_id, locked_at)
-        if locked
-        else None
-    )
+    confirmed_at = registry.confirmed_at(unit_id, locked_at) if locked else None
     available_at = confirmed_at if locked else (formed_at or max(as_of, market_end))
     return ConstituentUnit(
         unit_id=unit_id,
@@ -183,9 +178,7 @@ def trend_type_to_unit(trend: TrendType) -> ConstituentUnit:
         confirmed_at=trend.confirmed_at,
         available_at=trend.available_at,
         locked=True,
-        child_ids=tuple(
-            item.unit_id for item in trend.constituent_units
-        ),
+        child_ids=tuple(item.unit_id for item in trend.constituent_units),
         forming=False,
         formed_at=trend.confirmed_at,
     )
@@ -213,11 +206,7 @@ def trend_type_to_observation_unit(trend: TrendType) -> ConstituentUnit:
         locked=False,
         child_ids=tuple(item.unit_id for item in trend.constituent_units),
         forming=trend.state is TrendState.FORMING,
-        formed_at=(
-            trend.confirmed_at
-            if trend.state is TrendState.COMPLETE
-            else None
-        ),
+        formed_at=(trend.confirmed_at if trend.state is TrendState.COMPLETE else None),
     )
 
 
@@ -246,28 +235,21 @@ def build_recursive_unit_stream(
         trend for trend in trends if trend.state is not TrendState.LOCKED
     )
     locked_units = tuple(trend_type_to_unit(trend) for trend in locked)
-    locked_oscillatory = frozenset(
-        trend.trend_id for trend in locked if trend.kind is TrendKind.CONSOLIDATION
-    )
     decomposition = combine_same_level_trends(
         locked_units,
-        locked_oscillatory,
+        frozenset(),
         protected_after_ids,
     )
     output = list(decomposition.units)
-    oscillatory = set(decomposition.oscillatory_ids)
 
     for trend in observations:
         candidate = trend_type_to_observation_unit(trend)
-        candidate_oscillatory = set(oscillatory)
-        if trend.kind is TrendKind.CONSOLIDATION:
-            candidate_oscillatory.add(candidate.unit_id)
         try:
             validate_unit_sequence(
                 tuple((*output, candidate)),
                 candidate.structural_level,
                 SourceKind.TREND_TYPE,
-                frozenset(candidate_oscillatory),
+                frozenset(),
             )
         except ValueError as exc:
             if str(exc) == "unit directions must alternate":
@@ -276,8 +258,7 @@ def build_recursive_unit_stream(
                 break
             raise
         output.append(candidate)
-        oscillatory = candidate_oscillatory
-    return tuple(output), frozenset(oscillatory)
+    return tuple(output), frozenset()
 
 
 __all__ = (

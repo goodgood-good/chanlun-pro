@@ -106,17 +106,15 @@ def _conflicting_pair(
 
     线段永远有方向，相邻线段必然一上一下，所以线段层保持严格交替。
 
-    走势类型层不同：盘整没有方向，不参与交替判定；但两段有向
-    趋势若直接相邻且同向，不能作为两个独立走势单元递归。原文的结合律
-    并非取消方向约束，而是要求先把这种同向相邻走势合并成一个走势，
-    再做同级别分解。
-
-    因此 ``oscillatory_ids`` 只豁免真正的盘整连接件；其余直接相邻单元仍必须
-    方向相反。线段层恒传空集，故与原严格交替完全等价。
+    走势类型也由相接端点决定方向；盘整是走势分类，不是无方向连接件。
+    相邻同向走势必须先按结合律合并成一个走势，再做同级别递归。
+    ``oscillatory_ids`` 只为旧回放接口兼容保留，不再豁免方向约束。
     """
 
-    if previous.unit_id in oscillatory_ids or current.unit_id in oscillatory_ids:
-        return False
+    # Every formal movement has an endpoint direction, including a
+    # consolidation.  The argument remains for replay/API compatibility only;
+    # it must never exempt a movement from strict up/down alternation.
+    del oscillatory_ids
     return previous.direction == current.direction
 
 
@@ -498,14 +496,10 @@ def establish_center_preview(
         zg_tick=zg_tick,
         available_at=max(item.available_at for item in evidence),
         pending_leave_unit_id=(
-            None
-            if establishment_leave is None
-            else establishment_leave.unit_id
+            None if establishment_leave is None else establishment_leave.unit_id
         ),
         establishment_leave_unit_id=(
-            None
-            if establishment_leave is None
-            else establishment_leave.unit_id
+            None if establishment_leave is None else establishment_leave.unit_id
         ),
     )
 
@@ -525,11 +519,7 @@ def _advance_center_preview_lifecycle(
     known = tuple(initial_units)
     by_id = {item.unit_id: item for item in known}
     try:
-        entry = (
-            None
-            if preview.entry_unit_id is None
-            else by_id[preview.entry_unit_id]
-        )
+        entry = None if preview.entry_unit_id is None else by_id[preview.entry_unit_id]
         body = [by_id[item_id] for item_id in preview.unit_ids]
         failed_departures = [
             by_id[item_id] for item_id in preview.failed_departure_unit_ids
@@ -649,9 +639,7 @@ def _advance_center_preview_lifecycle(
     return replace(
         preview,
         unit_ids=tuple(value.unit_id for value in body),
-        failed_departure_unit_ids=tuple(
-            value.unit_id for value in failed_departures
-        ),
+        failed_departure_unit_ids=tuple(value.unit_id for value in failed_departures),
         available_at=available_at,
         pending_leave_unit_id=(None if pending is None else pending.unit_id),
     )
@@ -753,8 +741,7 @@ def _validate_transition_unit(
     if item.price_basis_revision != center.price_basis_revision:
         raise ValueError("transition price basis mismatch")
     occupied = {
-        value.unit_id
-        for value in (*center.body_units, *center.failed_departure_units)
+        value.unit_id for value in (*center.body_units, *center.failed_departure_units)
     }
     if center.entry_unit is not None:
         occupied.add(center.entry_unit.unit_id)
@@ -921,16 +908,11 @@ def _supersede_center(
     if center.state is not CenterState.ONGOING:
         raise ValueError("only an ongoing center can be superseded")
     pending = center.pending_leave_unit
-    if pending is not None and (
-        not bridge_units or bridge_units[0] != pending
-    ):
+    if pending is not None and (not bridge_units or bridge_units[0] != pending):
         raise ValueError(
             "supersession must retain an unresolved departure as bridge context"
         )
-    if not (
-        successor.zd_tick > center.zg_tick
-        or successor.zg_tick < center.zd_tick
-    ):
+    if not (successor.zd_tick > center.zg_tick or successor.zg_tick < center.zd_tick):
         raise ValueError("successor center core must be outside the old core")
     updated = replace(
         center,
@@ -1093,9 +1075,7 @@ def forming_preview(
                 ):
                     return None
             if establishment_leave is not None:
-                if not _outside_in_direction(
-                    establishment_leave, zd_tick, zg_tick
-                ):
+                if not _outside_in_direction(establishment_leave, zd_tick, zg_tick):
                     return None
                 pending_leave = establishment_leave
     return CenterPreview(
@@ -1112,9 +1092,7 @@ def forming_preview(
             None if pending_leave is None else pending_leave.unit_id
         ),
         establishment_leave_unit_id=(
-            None
-            if establishment_leave is None
-            else establishment_leave.unit_id
+            None if establishment_leave is None else establishment_leave.unit_id
         ),
     )
 
@@ -1216,10 +1194,7 @@ def _first_disjoint_successor_seed(
         )
         if candidate is None:
             continue
-        if (
-            candidate.zd_tick > center.zg_tick
-            or candidate.zg_tick < center.zd_tick
-        ):
+        if candidate.zd_tick > center.zg_tick or candidate.zg_tick < center.zd_tick:
             return candidate_start, candidate
     return None
 
@@ -1515,10 +1490,7 @@ def calculate_centers(
             if center.state is CenterState.COMPLETED:
                 break
             j += 1
-        if (
-            center.state is CenterState.ONGOING
-            and geometry_stop_at is not None
-        ):
+        if center.state is CenterState.ONGOING and geometry_stop_at is not None:
             successor_seed = _first_disjoint_successor_seed(
                 formal,
                 geometry_stop_at,

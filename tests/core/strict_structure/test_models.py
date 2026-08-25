@@ -12,7 +12,6 @@ from chanlun.core.strict_structure.center_machine import (
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvidence,
-    CenterEventKind,
     ConstituentUnit,
     SourceKind,
 )
@@ -100,9 +99,7 @@ def test_constituent_unit_normalizes_enum_and_child_ids_to_immutable_values():
 
 
 def test_stable_structure_id_is_deterministic_and_namespaced():
-    first = stable_structure_id(
-        "unit", SourceKind.SEGMENT, BASE, ("a", 1), "test-raw"
-    )
+    first = stable_structure_id("unit", SourceKind.SEGMENT, BASE, ("a", 1), "test-raw")
     second = stable_structure_id("unit", "segment", BASE, ("a", 1), "test-raw")
     assert first == second
     assert first != stable_structure_id(
@@ -142,7 +139,7 @@ def test_ongoing_center_pending_leave_must_stay_external_to_body():
         replace(value, pending_leave_unit=value.body_units[-1])
 
 
-def test_recursive_trend_center_can_depart_opposite_its_entry_direction():
+def test_recursive_trend_center_rejects_non_alternating_departure():
     seed = tuple(
         replace(item, source_kind=SourceKind.TREND_TYPE)
         for item in valid_three_center_seed()
@@ -163,15 +160,12 @@ def test_recursive_trend_center_can_depart_opposite_its_entry_direction():
         source_kind=SourceKind.TREND_TYPE,
     )
 
-    departed, event = advance_center(
-        value,
-        downward_leave,
-        frozenset({seed[-1].unit_id}),
-    )
-
-    assert departed.pending_leave_unit is downward_leave
-    assert departed.extension_units == ()
-    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
+    with pytest.raises(ValueError, match="center transition must alternate"):
+        advance_center(
+            value,
+            downward_leave,
+            frozenset({seed[-1].unit_id}),
+        )
 
 
 def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():

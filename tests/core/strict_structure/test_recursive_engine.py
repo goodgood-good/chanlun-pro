@@ -44,7 +44,7 @@ def _recursive_depth_fixture():
     price = 100
     direction = "up"
     values = []
-    for index in range(60):
+    for index in range(103):
         step = generator.randint(3, 45)
         end = price + step if direction == "up" else max(1, price - step)
         values.append(unit(index, direction, price, end))
@@ -57,14 +57,14 @@ def _superseded_then_completed_center():
     return tuple(
         replace(item, source_kind=SourceKind.TREND_TYPE, structural_level=1)
         for item in (
-        unit(0, "up", 100, 130),
-        unit(1, "down", 130, 110),
-        unit(2, "up", 110, 150),
-        unit(3, "down", 150, 140),
-        unit(4, "up", 140, 160),
-        unit(5, "down", 160, 145),
-        unit(6, "up", 145, 170),
-        unit(7, "down", 170, 155),
+            unit(0, "up", 100, 130),
+            unit(1, "down", 130, 110),
+            unit(2, "up", 110, 150),
+            unit(3, "down", 150, 140),
+            unit(4, "up", 140, 160),
+            unit(5, "down", 160, 145),
+            unit(6, "up", 145, 170),
+            unit(7, "down", 170, 155),
         )
     )
 
@@ -73,13 +73,13 @@ def _sliding_superseded_center():
     return tuple(
         replace(item, source_kind=SourceKind.TREND_TYPE, structural_level=1)
         for item in (
-        unit(0, "up", 100, 130),
-        unit(1, "down", 130, 110),
-        unit(2, "up", 110, 150),
-        unit(3, "down", 150, 140),
-        unit(4, "up", 140, 200),
-        unit(5, "down", 200, 180),
-        unit(6, "up", 180, 190),
+            unit(0, "up", 100, 130),
+            unit(1, "down", 130, 110),
+            unit(2, "up", 110, 150),
+            unit(3, "down", 150, 140),
+            unit(4, "up", 140, 200),
+            unit(5, "down", 200, 180),
+            unit(6, "up", 180, 190),
         )
     )
 
@@ -118,9 +118,7 @@ def _recursive_trend_structure(values):
 
 
 def test_five_locked_physical_roles_form_level_zero_with_schema() -> None:
-    result = StrictRecursiveEngine(max_levels=4).calculate(
-        valid_five_up_exit()
-    )
+    result = StrictRecursiveEngine(max_levels=4).calculate(valid_five_up_exit())
 
     assert result.schema == "chanlun-structure"
     assert len(result.levels) == 1
@@ -133,17 +131,13 @@ def test_five_locked_physical_roles_form_level_zero_with_schema() -> None:
 
 
 def test_fewer_than_five_physical_roles_do_not_expose_structure_level() -> None:
-    result = StrictRecursiveEngine(max_levels=8).calculate(
-        valid_five_up_exit()[:4]
-    )
+    result = StrictRecursiveEngine(max_levels=8).calculate(valid_five_up_exit()[:4])
 
     assert result.levels == ()
 
 
 def test_forming_trend_does_not_recurse_as_locked_higher_level_input() -> None:
-    result = StrictRecursiveEngine(max_levels=8).calculate(
-        valid_five_up_exit()
-    )
+    result = StrictRecursiveEngine(max_levels=8).calculate(valid_five_up_exit())
 
     assert len(result.levels) == 1
     level = result.levels[0]
@@ -154,9 +148,7 @@ def test_forming_trend_does_not_recurse_as_locked_higher_level_input() -> None:
 
 def test_unlocked_fifth_role_is_preview_without_a_formal_physical_center() -> None:
     values = valid_five_up_exit()
-    values = values[:4] + (
-        replace(values[4], locked=False, confirmed_at=None),
-    )
+    values = values[:4] + (replace(values[4], locked=False, confirmed_at=None),)
 
     result = StrictRecursiveEngine(max_levels=8).calculate(values)
 
@@ -169,9 +161,7 @@ def test_unlocked_fifth_role_is_preview_without_a_formal_physical_center() -> No
 
 def test_recursion_rejects_mixed_price_basis() -> None:
     values = valid_five_up_exit()
-    mixed = values[:-1] + (
-        replace(values[-1], price_basis_revision="another-basis"),
-    )
+    mixed = values[:-1] + (replace(values[-1], price_basis_revision="another-basis"),)
 
     with pytest.raises(ValueError, match="cannot cross price basis"):
         StrictRecursiveEngine().calculate(mixed)
@@ -230,25 +220,27 @@ def test_superseded_center_closes_trend_without_third_class_evidence() -> None:
     assert level.trend_types[0].centers == (first,)
     assert level.trend_types[1].centers == (second,)
     assert center_consolidation_comparison_legs(first, level.units) is None
-    assert StrictSignalEngine(
-        structure=result,
-        price_quantum=Decimal("0.01"),
-    ).third_class_points() == ()
+    assert (
+        StrictSignalEngine(
+            structure=result,
+            price_quantum=Decimal("0.01"),
+        ).third_class_points()
+        == ()
+    )
 
 
 def test_supersession_bridge_keeps_recursive_trend_units_connected() -> None:
-    result = _recursive_trend_structure(
-        _sliding_superseded_center()
-    )
+    result = _recursive_trend_structure(_sliding_superseded_center())
     level = result.levels[1]
     first, successor = level.center_result.centers
-    left, right = level.trend_types
+    assert len(level.trend_types) == 1
+    (trend,) = level.trend_types
 
     assert first.supersession_bridge_units == (level.units[3],)
     assert successor.entry_unit is level.units[3]
-    assert left.constituent_units == level.units[:4]
-    assert right.constituent_units == level.units[4:7]
-    assert left.end_tick == right.start_tick
+    assert trend.state is TrendState.FORMING
+    assert trend.centers == (first, successor)
+    assert trend.constituent_units == level.units
 
 
 def test_real_fourth_and_fifth_units_complete_only_the_successor_center() -> None:
@@ -264,10 +256,12 @@ def test_real_fourth_and_fifth_units_complete_only_the_successor_center() -> Non
     assert second.state is CenterState.COMPLETED
     assert second.completion_leave_unit is values[6]
     assert second.completion_return_unit is values[7]
-    assert [trend.state for trend in level.trend_types] == [
-        TrendState.LOCKED,
-        TrendState.COMPLETE,
-    ]
+    assert len(level.trend_types) == 1
+    (trend,) = level.trend_types
+    assert trend.state is TrendState.COMPLETE
+    assert trend.centers == (first, second)
+    assert trend.constituent_units == values[:7]
+    assert level.pending_movements[0].constituent_units == values[7:]
     upgrade = collect_recursive_upgrade_evidence(result)
     assert len(upgrade) == 1
     assert upgrade[0].kind is UpgradeEvidenceKind.CENTER_EXPANSION
@@ -275,22 +269,18 @@ def test_real_fourth_and_fifth_units_complete_only_the_successor_center() -> Non
 
 
 def test_completed_physical_centers_with_full_roles_are_owned_by_trends() -> None:
-    result = StrictRecursiveEngine(max_levels=1).calculate(
-        _two_completed_centers()
-    )
+    result = StrictRecursiveEngine(max_levels=1).calculate(_two_completed_centers())
     level = result.levels[0]
 
     assert len(level.center_result.centers) == 2
     assert all(
-        center.state is CenterState.COMPLETED
-        for center in level.center_result.centers
+        center.state is CenterState.COMPLETED for center in level.center_result.centers
     )
     owned_centers = tuple(
         center for trend in level.trend_types for center in trend.centers
     )
     assert owned_centers == level.center_result.centers
     assert all(
-        center.entry_unit is not None
-        and center.establishment_leave_unit is not None
+        center.entry_unit is not None and center.establishment_leave_unit is not None
         for center in level.center_result.centers
     )

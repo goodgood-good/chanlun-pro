@@ -3,6 +3,8 @@
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
+
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     calculate_centers,
@@ -135,7 +137,7 @@ def test_recursive_center_needs_only_three_completed_lower_trends() -> None:
     assert center.pending_leave_unit is None
 
 
-def test_recursive_touching_trends_form_closed_interval_center() -> None:
+def test_recursive_touching_same_direction_trends_require_combination() -> None:
     values = (
         unit(
             30,
@@ -163,16 +165,13 @@ def test_recursive_touching_trends_form_closed_interval_center() -> None:
         ),
     )
 
-    result = calculate_centers(
-        values,
-        1,
-        SourceKind.TREND_TYPE,
-        oscillatory_ids=frozenset({values[1].unit_id}),
-    )
-
-    assert len(result.centers) == 1
-    assert result.centers[0].initial_units == values
-    assert (result.centers[0].zd_tick, result.centers[0].zg_tick) == (110, 110)
+    with pytest.raises(ValueError, match="unit directions must alternate"):
+        calculate_centers(
+            values,
+            1,
+            SourceKind.TREND_TYPE,
+            oscillatory_ids=frozenset({values[1].unit_id}),
+        )
 
 
 def test_recursive_center_identity_ignores_optional_prefix_entry() -> None:
@@ -222,9 +221,7 @@ def test_recursive_scan_keeps_core_identity_after_leading_prefix_is_added() -> N
 
 def test_recursive_preview_identity_ignores_optional_prefix_entry() -> None:
     values = _trend_units()
-    core = values[1:3] + (
-        replace(values[3], locked=False, confirmed_at=None),
-    )
+    core = values[1:3] + (replace(values[3], locked=False, confirmed_at=None),)
 
     without_entry = establish_center_preview(core, 1, SourceKind.TREND_TYPE)
     with_entry = establish_center_preview(

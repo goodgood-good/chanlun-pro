@@ -267,23 +267,22 @@ def test_two_separated_centers_form_complete_uptrend_with_internal_return():
     assert trend.terminal_unit is second.completion_leave_unit
 
 
-def test_upgrade_boundary_locks_previous_trend_and_starts_at_completion_return():
+def test_same_direction_upgrade_boundary_is_combined_into_one_movement():
     values, first, second, third = three_center_fixture()
     result = assemble_trend_types((first, second, third), values, 0)
-    assert len(result.current_trends) == 2
-    locked, tail = result.current_trends
-    assert locked.state is TrendState.LOCKED
-    assert locked.centers == (first, second)
-    assert locked.constituent_units == values[:9]
-    assert locked.terminal_unit is second.completion_leave_unit
-    assert tail.state is TrendState.COMPLETE
-    assert tail.centers == (third,)
-    assert tail.constituent_units == values[9:13]
-    assert tail.constituent_units[0] is second.completion_return_unit
-    assert third.completion_return_unit not in tail.constituent_units
+    assert len(result.current_trends) == 1
+    (trend,) = result.current_trends
+    assert trend.direction == "up"
+    assert trend.kind is TrendKind.CONSOLIDATION
+    assert trend.state is TrendState.COMPLETE
+    assert trend.centers == (first, second, third)
+    assert trend.constituent_units == values[:13]
+    assert second.completion_return_unit in trend.constituent_units
+    assert third.completion_return_unit not in trend.constituent_units
+    assert result.pending_movements[0].constituent_units == values[13:]
 
 
-def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
+def test_same_direction_ongoing_center_extends_forming_movement():
     values, first, second, _third = three_center_fixture()
     ongoing_centers = calculate_centers(values[:13], 0, SourceKind.SEGMENT).centers
     assert len(ongoing_centers) == 3
@@ -295,11 +294,16 @@ def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
         0,
     )
 
-    stable, forming = result.current_trends
-    assert stable.state is TrendState.COMPLETE
-    assert stable.centers == (first, second)
+    assert len(result.current_trends) == 1
+    (forming,) = result.current_trends
+    assert forming.direction == "up"
     assert forming.state is TrendState.FORMING
-    assert forming.centers == (ongoing_third,)
+    assert forming.centers == (first, second, ongoing_third)
+    assert forming.constituent_units == values[:13]
+    assert any(
+        trend.state is TrendState.COMPLETE and trend.centers == (first, second)
+        for trend in result.completed_trends
+    )
     assert not any(trend.state is TrendState.LOCKED for trend in result.current_trends)
 
 
@@ -353,12 +357,13 @@ def test_trend_assembler_accepts_leave_shared_as_next_center_entry():
 
     assert len(centers) == 2
     assert centers[1].entry_unit is centers[0].completion_leave_unit
-    assert len(result.current_trends) == 2
-    first_ids = [item.unit_id for item in result.current_trends[0].constituent_units]
-    second_ids = [item.unit_id for item in result.current_trends[1].constituent_units]
-    assert first_ids == [item.unit_id for item in values[:5]]
-    assert second_ids == [item.unit_id for item in values[5:9]]
-    assert (first_ids + second_ids).count(values[4].unit_id) == 1
+    assert len(result.current_trends) == 1
+    (trend,) = result.current_trends
+    trend_ids = [item.unit_id for item in trend.constituent_units]
+    assert trend.direction == "up"
+    assert trend_ids == [item.unit_id for item in values[:9]]
+    assert trend_ids.count(values[4].unit_id) == 1
+    assert result.pending_movements[0].constituent_units == values[9:]
 
 
 def test_ongoing_center_produces_forming_trend_without_confirmation():
@@ -389,9 +394,7 @@ def test_failed_establishment_leave_remains_in_trend_and_center_evidence():
     failed_id = establishment[4].unit_id
 
     assert trend.constituent_units == values
-    assert tuple(item.unit_id for item in trend.constituent_units).count(
-        failed_id
-    ) == 1
+    assert tuple(item.unit_id for item in trend.constituent_units).count(failed_id) == 1
     assert evidence.failed_departure_unit_ids == (failed_id,)
     assert assembly.completed_trends == ()
     assert assembly.pending_movements == ()
@@ -416,12 +419,10 @@ def test_forming_and_complete_trends_cannot_become_recursive_units():
 
 
 def test_locked_trend_becomes_next_level_unit_with_owned_children():
-    values, first, second, third = three_center_fixture()
-    locked = assemble_trend_types(
-        (first, second, third),
-        values,
-        0,
-    ).current_trends[0]
+    values = sh513100_manual_tail_fixture()
+    centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
+    locked = assemble_trend_types(centers, values, 0).current_trends[0]
+    assert locked.state is TrendState.LOCKED
     item = trend_type_to_unit(locked)
     assert item.structural_level == 1
     assert item.source_kind is SourceKind.TREND_TYPE
@@ -835,8 +836,9 @@ def test_boundary_replay_keeps_centers_and_locked_trends_on_one_side():
         assert boundary.divergence.comparison_width == 3
         assert terminal_center.pending_leave_unit is None
         assert terminal_center.completion_leave_unit is not None
-        assert terminal_center.completion_leave_unit.unit_id == (
-            boundary.divergence.signal_leg_unit_ids[0]
+        assert (
+            terminal_center.completion_leave_unit.unit_id
+            == (boundary.divergence.signal_leg_unit_ids[0])
         )
         assert terminal_center.boundary_anchor_unit_id == boundary.anchor_unit_id
         assert terminal_center.boundary_divergence_id == (
@@ -895,9 +897,7 @@ def test_raw_departure_without_whole_trend_new_extreme_is_not_trend_boundary():
     assert departure.terminal_unit.high_tick > entry.terminal_unit.high_tick
     assert departure.terminal_unit.high_tick < prefix.high_tick
     assert result.decomposition_boundaries == ()
-    assert all(
-        trend.terminal_divergence is None for trend in result.current_trends
-    )
+    assert all(trend.terminal_divergence is None for trend in result.current_trends)
 
 
 def test_terminal_extreme_uses_exact_group_start_before_first_center_entry():
