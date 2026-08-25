@@ -627,6 +627,30 @@ test('strict analysis rejects old point aliases instead of relabeling them', () 
   assert.match(summary.statusDetail, /买卖点契约无效/);
 });
 
+test('strict analysis rejects reordered or same-direction current movements', () => {
+  const strict = snapshot();
+  const first = strict.levels[0].current_trends[0];
+  strict.levels[0].current_trends = [
+    first,
+    {
+      ...first,
+      trend_id: 'trend-l0-reordered',
+      render_id: 'trend-l0-reordered@locked',
+      points: [
+        { ...first.points[1] },
+        { time: first.points[1].time + 300, price_tick: 1150, price: 11.5 },
+      ],
+      constituent_unit_ids: ['u7', 'u8', 'u9'],
+    },
+  ];
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+
+  assert.equal(summary.state, 'syncing');
+  assert.equal(summary.trends.length, 0);
+  assert.match(summary.statusDetail, /上下交替的因果连接链/);
+});
+
 test('unavailable or context-mismatched strict data reports synchronization failure', () => {
   const unavailable = Analysis.summarizeChartData({
     bars: [{ time: CLOSED_AT * 1000, close: 11 }],

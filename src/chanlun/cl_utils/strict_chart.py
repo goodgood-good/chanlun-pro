@@ -1405,6 +1405,38 @@ def _sorted_payloads(values: Iterable[dict[str, object]], id_name: str) -> list:
     )
 
 
+def _ordered_current_trend_payloads(
+    values: Iterable[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Preserve the model's connected causal movement order.
+
+    ``available_at`` is evidence visibility time, not a market-order key.  Two
+    adjacent movements can become available together; sorting that tie by the
+    stable trend id can reverse them and manufacture a same-direction or
+    disconnected chart chain.
+    """
+
+    payloads = list(values)
+    for previous, current in zip(payloads, payloads[1:]):
+        previous_points = previous.get("points")
+        current_points = current.get("points")
+        if (
+            previous.get("direction") == current.get("direction")
+            or not isinstance(previous_points, list)
+            or not previous_points
+            or not isinstance(current_points, list)
+            or not current_points
+            or previous_points[-1].get("price_tick")
+            != current_points[0].get("price_tick")
+            or int(current_points[0].get("time", 0))
+            < int(previous_points[-1].get("time", 0))
+        ):
+            raise ValueError(
+                "serialized current trends must preserve one alternating causal chain"
+            )
+    return payloads
+
+
 def _revision(namespace: str, *parts: object) -> str:
     return "sha256:" + stable_structure_id(namespace, *parts)
 
@@ -1580,15 +1612,14 @@ def build_strict_structure_snapshot(
             ),
             "center_id",
         )
-        current_payloads = _sorted_payloads(
+        current_payloads = _ordered_current_trend_payloads(
             (
                 strict_trend_to_chart_dict(
                     trend,
                     formal_direction=level_formal_direction,
                 )
                 for trend in current_trends
-            ),
-            "trend_id",
+            )
         )
         pending_payloads = _sorted_payloads(
             (

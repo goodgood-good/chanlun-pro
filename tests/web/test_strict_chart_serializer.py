@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from chanlun.cl_utils.strict_chart import (
+    _ordered_current_trend_payloads,
     active_center_projection_to_chart_dict,
     aware_datetime_to_epoch_seconds,
     build_strict_structure_snapshot,
@@ -61,6 +62,29 @@ CN = ZoneInfo("Asia/Shanghai")
 BASE = datetime(2026, 7, 20, 9, 30, tzinfo=CN)
 PRICE_BASIS = "test-raw"
 QUANTUM = Decimal("0.01")
+
+
+def test_current_trend_payload_order_is_causal_not_id_sorted() -> None:
+    first = {
+        "trend_id": "z-earlier-market-movement",
+        "available_at": 200,
+        "direction": "down",
+        "points": [
+            {"time": 100, "price_tick": 120},
+            {"time": 150, "price_tick": 100},
+        ],
+    }
+    second = {
+        "trend_id": "a-later-market-movement",
+        "available_at": 200,
+        "direction": "up",
+        "points": [
+            {"time": 150, "price_tick": 100},
+            {"time": 190, "price_tick": 130},
+        ],
+    }
+
+    assert _ordered_current_trend_payloads((first, second)) == [first, second]
 
 
 def _unit(

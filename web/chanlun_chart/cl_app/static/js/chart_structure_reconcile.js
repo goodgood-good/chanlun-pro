@@ -150,10 +150,27 @@
     return bounds.to >= range.from && bounds.from <= range.to;
   }
 
+  function requiresExactTimeAnchors(item) {
+    return item && (
+      item.render_kind === "strict_trend" ||
+      item.render_kind === "pending_movement"
+    );
+  }
+
   function clipToLoadedRange(item, loadedRange) {
     const loaded = requireRange(loadedRange, "loadedRange");
     const bounds = sourceBounds(item);
     if (bounds.to < loaded.from || bounds.from > loaded.to) return null;
+    // A movement line is evidence between two exact market extrema.  Moving an
+    // unloaded endpoint to the first/last visible bar while retaining its price
+    // changes the slope and breaks the connected up/down movement chain.  Keep
+    // the line hidden until TradingView has loaded both real anchor bars.
+    if (
+      requiresExactTimeAnchors(item) &&
+      (bounds.from < loaded.from || bounds.to > loaded.to)
+    ) {
+      return null;
+    }
     const points = item.points.map((point) => ({ ...point }));
     if (points.length === 1) {
       if (points[0].time < loaded.from || points[0].time > loaded.to) {
@@ -263,8 +280,11 @@
       if (planned.has(key)) throw new Error(`duplicate incoming key: ${key}`);
       if (!intersects(sourceItem, visible)) continue;
       if (drawable === null) continue;
-      // 不修改不可变的严格证据，只把 TradingView 绘图副本裁剪到当前画面的
-      // 真实 K 线；否则画面外锚点会在创建后被吸附，无法通过精确校验。
+      // Rectangles may be cropped to the drawable viewport without changing
+      // their price bounds.  Movement lines are different: their two extrema
+      // must retain exact time/price anchors.  If either anchor is outside the
+      // current real-bar viewport, wait for a later pan/zoom reconcile instead
+      // of creating a line that TradingView silently snaps to another bar.
       const renderItem = clipToLoadedRange(sourceItem, drawable);
       if (renderItem === null) continue;
       planned.set(key, {

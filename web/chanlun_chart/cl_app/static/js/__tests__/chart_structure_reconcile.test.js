@@ -18,6 +18,22 @@ function strictCenter(overrides = {}) {
   };
 }
 
+function strictTrend(overrides = {}) {
+  return {
+    render_kind: 'strict_trend',
+    trend_id: 'trend-1',
+    render_id: 'trend-1@locked',
+    structural_level: 0,
+    state: 'locked',
+    direction: 'down',
+    points: [
+      { time: 100, price: 11 },
+      { time: 500, price: 9 },
+    ],
+    ...overrides,
+  };
+}
+
 function chartContext(chartInstanceId, interval = '5m') {
   return {
     chartInstanceId,
@@ -115,6 +131,45 @@ test('right unloaded boundary clips only the render copy', () => {
   const clipped = Reconcile.clipToLoadedRange(item, { from: 50, to: 400 });
   assert.deepEqual(clipped.points.map((point) => point.time), [100, 400]);
   assert.deepEqual(item.points.map((point) => point.time), [100, 500]);
+});
+
+test('strict movement lines never move an unloaded market anchor', () => {
+  const item = strictTrend();
+
+  assert.equal(
+    Reconcile.clipToLoadedRange(item, { from: 200, to: 600 }),
+    null,
+  );
+  assert.deepEqual(item.points, [
+    { time: 100, price: 11 },
+    { time: 500, price: 9 },
+  ]);
+});
+
+test('fully visible strict movement keeps both exact anchors', () => {
+  const item = strictTrend();
+  const plan = Reconcile.planReconcile(
+    [],
+    [item],
+    { from: 50, to: 600, barTimes: [50, 100, 200, 300, 400, 500, 600] },
+    { from: 50, to: 600 },
+  );
+
+  assert.equal(plan.createItems.length, 1);
+  assert.deepEqual(plan.createItems[0].points, item.points);
+});
+
+test('crossing strict movement waits until both anchors enter the real-bar viewport', () => {
+  const item = strictTrend();
+  const plan = Reconcile.planReconcile(
+    [],
+    [item],
+    { from: 50, to: 600, barTimes: [50, 100, 200, 300, 400, 500, 600] },
+    { from: 200, to: 450 },
+  );
+
+  assert.deepEqual(plan.createItems, []);
+  assert.deepEqual(plan.desiredItems, []);
 });
 
 test('body revision replaces exactly one prior entity', () => {

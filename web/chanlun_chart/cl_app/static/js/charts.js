@@ -3357,6 +3357,23 @@ class ChartManager {
                     || !Array.isArray(trend.direction_reason_codes)
                 ) throw new Error('strict trend direction qualification is invalid');
             }
+            for (let index = 1; index < level.current_trends.length; index += 1) {
+                const previous = level.current_trends[index - 1];
+                const current = level.current_trends[index];
+                const previousTail = previous.points?.[previous.points.length - 1];
+                const currentHead = current.points?.[0];
+                if (
+                    previous.direction === current.direction
+                    || !Number.isInteger(previousTail?.price_tick)
+                    || !Number.isInteger(currentHead?.price_tick)
+                    || previousTail.price_tick !== currentHead.price_tick
+                    || !Number.isInteger(previousTail?.time)
+                    || !Number.isInteger(currentHead?.time)
+                    || currentHead.time < previousTail.time
+                ) {
+                    throw new Error('strict current trends must form an alternating causal chain');
+                }
+            }
             const formalUnitIds = new Set();
             for (const trend of level.current_trends) {
                 if (!strictStringArray(trend.constituent_unit_ids)) {

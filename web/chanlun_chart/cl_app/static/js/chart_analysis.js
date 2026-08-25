@@ -1020,6 +1020,23 @@
           throw new Error('严格走势方向资格字段无效');
         }
       });
+      for (let index = 1; index < level.current_trends.length; index += 1) {
+        const previous = level.current_trends[index - 1];
+        const current = level.current_trends[index];
+        const previousTail = previous.points?.[previous.points.length - 1];
+        const currentHead = current.points?.[0];
+        if (
+          previous.direction === current.direction
+          || !Number.isInteger(previousTail?.price_tick)
+          || !Number.isInteger(currentHead?.price_tick)
+          || previousTail.price_tick !== currentHead.price_tick
+          || !Number.isInteger(previousTail?.time)
+          || !Number.isInteger(currentHead?.time)
+          || currentHead.time < previousTail.time
+        ) {
+          throw new Error('严格当前走势必须保持上下交替的因果连接链');
+        }
+      }
       const formalUnitIds = new Set();
       level.current_trends.forEach((trend) => {
         if (!strictStringArray(trend.constituent_unit_ids)) {
