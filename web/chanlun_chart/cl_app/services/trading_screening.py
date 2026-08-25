@@ -7205,9 +7205,19 @@ class TradingScreeningService:
                     phase_budget_seconds / 10,
                 )
                 if previous_wave_elapsed_seconds is not None:
+                    # The 1m locator owns the first 50 seconds of a 60-second
+                    # SLA and every in-flight native request still carries the
+                    # same absolute deadline.  Admit its final partial wave
+                    # whenever the immediately preceding warm wave proved it
+                    # can fit; the remaining ten seconds are the publication
+                    # reserve.  Ordinary candidates keep the wider variance
+                    # guard because they have no right to consume that reserve.
+                    wave_guard_multiplier = (
+                        1.0 if phase == "priority_1m" else 1.25
+                    )
                     admission_guard_seconds = max(
                         admission_guard_seconds,
-                        previous_wave_elapsed_seconds * 1.25,
+                        previous_wave_elapsed_seconds * wave_guard_multiplier,
                     )
                 if admission_deadline_perf is not None and (
                     time.perf_counter() >= admission_deadline_perf

@@ -9413,6 +9413,82 @@ def test_optional_segment_deadline_miss_is_visible_and_fails_closed(
     assert health["priority_monitor_ready"] is False
 
 
+def test_priority_locator_admits_final_wave_proven_to_fit_before_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codes = ("SZ.000001", "SZ.000002", "SZ.000003")
+
+    class MonotonicClock:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+        def perf_counter(self) -> float:
+            return self.value
+
+        def advance(self, seconds: float) -> None:
+            self.value += seconds
+
+    monotonic = MonotonicClock()
+
+    class FinalWaveMarket(RecordingMarketData):
+        def priority_structure_bundle_with_risk_cutoff_until(
+            self,
+            code: str,
+            *,
+            deadline_monotonic: float,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            assert deadline_monotonic == pytest.approx(0.95)
+            monotonic.advance(0.3)
+            return super().structure_bundle_with_risk_cutoff(code, **kwargs)
+
+    monkeypatch.setattr(trading_screening_subject, "time", monotonic)
+    market = FinalWaveMarket()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(codes),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            max_monitor_symbols_per_refresh=3,
+            priority_monitor_time_budget_seconds=0.95,
+            admitted_universe_codes=codes,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": f"triggered-{code}",
+                "code": code,
+                "point_type": "1buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "anchor_at": AS_OF.isoformat(),
+                    "available_at": AS_OF.isoformat(),
+                    "confirmed_at": AS_OF.isoformat(),
+                },
+            }
+            for code in codes
+        ]
+    }
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    health = service.health_snapshot()
+    assert market.bundle_codes == list(codes)
+    assert health["priority_monitor_locator_last_scheduled_count"] == 3
+    assert health["priority_monitor_locator_last_attempted_count"] == 3
+    assert health["priority_monitor_locator_last_completed_count"] == 3
+    assert health["priority_monitor_locator_deferred_codes"] == []
+    assert health["priority_monitor_locator_runtime_verified"] is True
+
+
 def test_closed_session_bounded_bootstrap_is_not_reported_as_degraded(
     tmp_path: Path,
 ) -> None:
