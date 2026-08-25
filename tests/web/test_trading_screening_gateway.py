@@ -1527,6 +1527,85 @@ def test_serialized_one_minute_runtime_keeps_stable_window_after_l1_eviction(
     assert counters["structure_suffix_incremental.1m"] == 1
 
 
+def test_disk_backed_five_minute_runtime_keeps_stable_window_without_memory_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_DIR",
+        str(tmp_path / "runtime-state-cache"),
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_KEY",
+        "ab" * 32,
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_IDENTITY",
+        "a" * 40 + ".tree." + "b" * 24,
+    )
+    monkeypatch.setenv(
+        "CHANLUN_SCREENING_WORKER_RUNTIME_CACHE_SCOPE",
+        "application_source_revision",
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 8, "5m": 1},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY",
+        {"1m": 4, "5m": 4},
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "_SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY",
+        {"1m": 16 * 1024 * 1024, "5m": 16 * 1024 * 1024},
+    )
+    exchange = StableIncrementalWindowExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    first_at = datetime.fromisoformat("2026-07-20T09:50:00+08:00")
+    second_at = datetime.fromisoformat("2026-07-20T09:55:00+08:00")
+
+    for code in ("SZ.000001", "SZ.000002"):
+        gateway._load_analysis(
+            exchange=exchange,
+            code=code,
+            analysis_code=code,
+            frequency="5m",
+            as_of=first_at,
+            fast_incremental_refresh=True,
+        )
+    exchange.visible_count = 5
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=second_at,
+        fast_incremental_refresh=True,
+    )
+
+    assert exchange.calls[-1]["start_date"] == "2026-07-20 09:35:00"
+    health = gateway.runtime_health_snapshot()
+    assert health["serialized_runtime_state_capacities"]["5m"] == 0
+    assert health["serialized_runtime_state_entries"]["5m"] == 0
+    assert health["serialized_runtime_state_bytes"]["5m"] == 0
+    assert health["disk_runtime_state_cache"]["entry_count"] == 2
+    counters = health["performance"]["counters"]
+    assert counters["disk_runtime_cache_hit.5m"] == 1
+    assert counters["disk_runtime_cache_miss.5m"] == 2
+    assert counters["serialized_runtime_memory_copy_skipped.5m"] == 2
+    assert counters["structure_full_incremental.5m"] == 1
+    assert counters["structure_suffix_incremental.5m"] == 1
+
+
 def test_bounded_sector_assessment_limits_work_and_routing_without_clipping_context(
 ) -> None:
     frame_calls: list[dict[str, object]] = []
@@ -2608,6 +2687,15 @@ def test_candidate_disk_runtime_cache_survives_gateway_recreation(
 
     first_health = first.runtime_health_snapshot()
     assert first_health["disk_runtime_state_cache"]["entry_count"] == 1
+    assert first_health["serialized_runtime_state_capacities"]["5m"] == 0
+    assert first_health["serialized_runtime_state_entries"]["5m"] == 0
+    assert first_health["serialized_runtime_state_bytes"]["5m"] == 0
+    assert (
+        first_health["performance"]["counters"][
+            "serialized_runtime_memory_copy_skipped.5m"
+        ]
+        == 1
+    )
     assert (
         first_health["disk_runtime_state_cache"]["authenticated_before_deserialization"]
         is True

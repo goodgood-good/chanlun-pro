@@ -585,6 +585,13 @@ class _AuthenticatedRuntimeStateDiskCache:
                 int((perf_counter() - started) * 1000),
             )
 
+    def contains(self, *, code: str, frequency: str) -> bool:
+        if frequency != "5m":
+            return False
+        path = self._path(code=code, frequency=frequency)
+        with self._lock:
+            return path in self._entries
+
     def load(
         self,
         *,
@@ -1906,16 +1913,28 @@ class NativeTradingDataGateway:
             frequency: OrderedDict()
             for frequency in _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
         }
+        self._disk_runtime_state_cache = (
+            _AuthenticatedRuntimeStateDiskCache.from_environment()
+        )
+        self._serialized_runtime_cache_capacities = dict(
+            _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+        )
+        self._serialized_runtime_cache_max_bytes = dict(
+            _SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY
+        )
+        # 候选 5m 运行态已经由认证磁盘层完整承接。继续在同一进程里保留相同的
+        # 压缩 payload 只会重复占用数百 MiB，并不会增加可恢复覆盖面。磁盘恢复会在
+        # 请求行情前预热回 L1，因此仍能使用稳定左边界做增量读取。
+        if self._disk_runtime_state_cache is not None:
+            self._serialized_runtime_cache_capacities["5m"] = 0
+            self._serialized_runtime_cache_max_bytes["5m"] = 0
         self._serialized_runtime_states_by_frequency: dict[
             str, dict[str, _SerializedWarmupRuntimeStates]
         ] = {
             frequency: {}
-            for frequency in _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+            for frequency in self._serialized_runtime_cache_capacities
         }
         self._serialized_runtime_state_bytes_by_frequency: Counter[str] = Counter()
-        self._disk_runtime_state_cache = (
-            _AuthenticatedRuntimeStateDiskCache.from_environment()
-        )
         # 批量补数只证明某个精确观察时刻的本地 QMT 基础流可读；结构判断仍走
         # ``_load_analysis`` 的唯一严格入口。本表仅用于跳过重复下载，读取或校验
         # 失败时会立即退回逐只下载，不能把补数成功误当成结构成功。
@@ -2019,13 +2038,14 @@ class NativeTradingDataGateway:
         frequency: str,
         states: _WarmupRuntimeStates,
     ) -> None:
-        """把 L1 淘汰态压缩进有界、稳定准入的进程内二级缓存。"""
+        """把 L1 淘汰态压缩到磁盘层，并按需保留有界的进程内副本。"""
 
-        capacity = _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY.get(frequency, 0)
-        max_bytes = _SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY.get(
-            frequency, 0
+        capacity = self._serialized_runtime_cache_capacities.get(frequency, 0)
+        max_bytes = self._serialized_runtime_cache_max_bytes.get(frequency, 0)
+        disk_backed = (
+            self._disk_runtime_state_cache is not None and frequency == "5m"
         )
-        if capacity <= 0 or max_bytes <= 0:
+        if not disk_backed and (capacity <= 0 or max_bytes <= 0):
             return
         started = perf_counter()
         try:
@@ -2040,12 +2060,18 @@ class NativeTradingDataGateway:
                 retained_frame_count=states.full.retained_frame_count,
                 admission_rank=self._serialized_runtime_admission_rank(code),
             )
-            if self._disk_runtime_state_cache is not None and frequency == "5m":
+            if disk_backed:
+                assert self._disk_runtime_state_cache is not None
                 self._disk_runtime_state_cache.store(
                     code=code,
                     frequency=frequency,
                     cached=cached,
                 )
+            if capacity <= 0 or max_bytes <= 0:
+                self._record_performance_event(
+                    f"serialized_runtime_memory_copy_skipped.{frequency}"
+                )
+                return
             if cached.byte_size > max_bytes:
                 self._record_performance_event(
                     f"serialized_runtime_oversized.{frequency}"
@@ -2091,6 +2117,29 @@ class NativeTradingDataGateway:
                 f"serialized_runtime_store.{frequency}",
                 perf_counter() - started,
             )
+
+    def _restore_disk_runtime_states(
+        self,
+        *,
+        code: str,
+        frequency: str,
+    ) -> _WarmupRuntimeStates | None:
+        if self._disk_runtime_state_cache is None or frequency != "5m":
+            return None
+        serialized = self._disk_runtime_state_cache.load(
+            code=code,
+            frequency=frequency,
+        )
+        self._record_performance_event(
+            f"disk_runtime_cache_{'hit' if serialized is not None else 'miss'}.{frequency}"
+        )
+        if serialized is None:
+            return None
+        return self._restore_serialized_runtime_states(
+            code=code,
+            frequency=frequency,
+            cached=serialized,
+        )
 
     def _analyze_frame(
         self,
@@ -2144,24 +2193,16 @@ class NativeTradingDataGateway:
                     self._serialized_runtime_state_bytes_by_frequency[frequency] -= (
                         serialized.byte_size
                     )
-        if (
-            states is None
-            and serialized is None
-            and self._disk_runtime_state_cache is not None
-            and frequency == "5m"
-        ):
-            serialized = self._disk_runtime_state_cache.load(
-                code=code,
-                frequency=frequency,
-            )
-            self._record_performance_event(
-                f"disk_runtime_cache_{'hit' if serialized is not None else 'miss'}.{frequency}"
-            )
         if states is None and serialized is not None:
             states = self._restore_serialized_runtime_states(
                 code=code,
                 frequency=frequency,
                 cached=serialized,
+            )
+        if states is None and serialized is None:
+            states = self._restore_disk_runtime_states(
+                code=code,
+                frequency=frequency,
             )
         runtime_state_hit = states is not None
         with self._lock:
@@ -2242,20 +2283,53 @@ class NativeTradingDataGateway:
                 if serialized_cache is None
                 else serialized_cache.get(code)
             )
-            retained_count = (
-                states.full.retained_frame_count
-                if states is not None
-                else 0
-                if serialized is None
-                else serialized.retained_frame_count
+        disk_state_available = (
+            self._disk_runtime_state_cache is not None
+            and self._disk_runtime_state_cache.contains(
+                code=code,
+                frequency=frequency,
             )
-            retained_start = (
-                states.full.retained_frame_start
-                if states is not None
-                else None
-                if serialized is None
-                else serialized.retained_frame_start
+        )
+        if states is None and serialized is None and disk_state_available:
+            restored = self._restore_disk_runtime_states(
+                code=code,
+                frequency=frequency,
             )
+            if restored is not None:
+                evicted: list[tuple[str, _WarmupRuntimeStates]] = []
+                with self._lock:
+                    cache = self._runtime_states_by_frequency[frequency]
+                    existing = cache.get(code)
+                    if existing is None:
+                        cache[code] = restored
+                        states = restored
+                        while (
+                            len(cache)
+                            > _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY[frequency]
+                        ):
+                            evicted.append(cache.popitem(last=False))
+                    else:
+                        states = existing
+                for evicted_code, evicted_states in evicted:
+                    self._store_serialized_runtime_states(
+                        code=evicted_code,
+                        frequency=frequency,
+                        states=evicted_states,
+                    )
+        retained_count = (
+            states.full.retained_frame_count
+            if states is not None
+            else 0
+            if serialized is None
+            else serialized.retained_frame_count
+        )
+        retained_start = (
+            states.full.retained_frame_start
+            if states is not None
+            else None
+            if serialized is None
+            else serialized.retained_frame_start
+        )
         if (
             retained_start is None
             or retained_count <= 0
@@ -2316,18 +2390,16 @@ class NativeTradingDataGateway:
                     )
                 },
                 "serialized_runtime_state_capacities": dict(
-                    _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
+                    self._serialized_runtime_cache_capacities
                 ),
                 "serialized_runtime_state_bytes": {
                     frequency: int(
                         self._serialized_runtime_state_bytes_by_frequency[frequency]
                     )
-                    for frequency in (
-                        _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY
-                    )
+                    for frequency in self._serialized_runtime_cache_capacities
                 },
                 "serialized_runtime_state_max_bytes": dict(
-                    _SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY
+                    self._serialized_runtime_cache_max_bytes
                 ),
                 "disk_runtime_state_cache": (
                     {
