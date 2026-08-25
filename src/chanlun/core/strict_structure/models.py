@@ -2051,6 +2051,104 @@ class TrendAssemblyResult:
             pending_unit_ids.update(unit_ids)
 
 
+def _historical_divergence_center_is_causal_prefix(
+    snapshot: TrendCenter,
+    current: TrendCenter,
+    units_by_id: dict[str, ConstituentUnit],
+) -> bool:
+    """Prove an absorbed divergence center remains valid historical evidence.
+
+    Removing a formerly terminal same-direction boundary replays the live
+    center lifecycle.  Its old pending departure can then become either the
+    physical completion leave or the next failed departure before a later
+    completion.  The immutable divergence event must remain in the COMPLETE
+    trend ledger, while the current center exposes that later lifecycle.
+    """
+
+    if (
+        snapshot.state is not CenterState.DIVERGENCE_CLOSED
+        or snapshot.center_id != current.center_id
+        or (
+            snapshot.structural_level,
+            snapshot.source_kind,
+            snapshot.price_basis_revision,
+            snapshot.entry_unit,
+            snapshot.establishment_leave_unit,
+            snapshot.initial_units,
+            snapshot.zd_tick,
+            snapshot.zg_tick,
+            snapshot.body_start_market_time,
+            snapshot.established_market_time,
+            snapshot.established_at,
+        )
+        != (
+            current.structural_level,
+            current.source_kind,
+            current.price_basis_revision,
+            current.entry_unit,
+            current.establishment_leave_unit,
+            current.initial_units,
+            current.zd_tick,
+            current.zg_tick,
+            current.body_start_market_time,
+            current.established_market_time,
+            current.established_at,
+        )
+        or current.body_units[: len(snapshot.body_units)] != snapshot.body_units
+        or current.extension_units[: len(snapshot.extension_units)]
+        != snapshot.extension_units
+        or current.failed_departure_units[: len(snapshot.failed_departure_units)]
+        != snapshot.failed_departure_units
+    ):
+        return False
+
+    snapshot_evidence = (
+        *(() if snapshot.entry_unit is None else (snapshot.entry_unit,)),
+        *snapshot.establishment_units,
+        *snapshot.body_units,
+        *snapshot.failed_departure_units,
+        *(
+            ()
+            if snapshot.pending_leave_unit is None
+            else (snapshot.pending_leave_unit,)
+        ),
+        *(
+            ()
+            if snapshot.completion_leave_unit is None
+            else (snapshot.completion_leave_unit,)
+        ),
+        *(
+            ()
+            if snapshot.completion_return_unit is None
+            else (snapshot.completion_return_unit,)
+        ),
+    )
+    if any(
+        units_by_id.get(unit.unit_id) != unit for unit in snapshot_evidence
+    ):
+        return False
+
+    if snapshot.completion_leave_unit is not None:
+        return bool(
+            current.completion_leave_unit == snapshot.completion_leave_unit
+            and current.completion_return_unit == snapshot.completion_return_unit
+            and current.completed_at == snapshot.completed_at
+        )
+
+    pending = snapshot.pending_leave_unit
+    if pending is None or snapshot.boundary_anchor_unit_id != pending.unit_id:
+        return False
+    next_failed_offset = len(snapshot.failed_departure_units)
+    return bool(
+        current.pending_leave_unit == pending
+        or current.completion_leave_unit == pending
+        or (
+            len(current.failed_departure_units) > next_failed_offset
+            and current.failed_departure_units[next_failed_offset] == pending
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StrictLevelResult:
     structural_level: int
@@ -2231,6 +2329,12 @@ class StrictLevelResult:
                 return True
             if not historical or current is None:
                 return False
+            if _historical_divergence_center_is_causal_prefix(
+                center,
+                current,
+                units_by_id,
+            ):
+                return True
             if (
                 center.state is CenterState.DIVERGENCE_CLOSED
                 and current.state is CenterState.COMPLETED

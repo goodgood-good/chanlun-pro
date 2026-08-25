@@ -12,8 +12,10 @@ from chanlun.core.strict_structure.center_machine import (
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvidence,
+    CenterState,
     ConstituentUnit,
     SourceKind,
+    _historical_divergence_center_is_causal_prefix,
 )
 from tests.core.strict_structure.helpers import (
     BASE,
@@ -317,3 +319,70 @@ def test_center_evidence_preserves_external_roles_and_excludes_return():
     assert evidence.completion_return_unit_id not in evidence.body_unit_ids
     assert evidence.completed_at == value.completed_at
     assert evidence.tradable is True
+
+
+def test_absorbed_divergence_snapshot_accepts_earlier_physical_completion():
+    pending = ongoing_center()
+    completed = completed_up_center()
+    snapshot = replace(
+        pending,
+        state=CenterState.DIVERGENCE_CLOSED,
+        available_at=completed.available_at + timedelta(minutes=5),
+        boundary_divergence_id="absorbed-divergence",
+        boundary_anchor_unit_id=pending.pending_leave_unit.unit_id,
+    )
+    units = {
+        item.unit_id: item
+        for item in (
+            completed.entry_unit,
+            *completed.body_units,
+            completed.completion_leave_unit,
+            completed.completion_return_unit,
+        )
+        if item is not None
+    }
+
+    assert _historical_divergence_center_is_causal_prefix(
+        snapshot,
+        completed,
+        units,
+    )
+
+
+def test_absorbed_divergence_departure_can_become_failed_before_completion():
+    pending = ongoing_center()
+    first_return = unit(
+        5,
+        "down",
+        pending.pending_leave_unit.end_tick,
+        110,
+    )
+    extended, _ = advance_center(pending, first_return)
+    later_leave = unit(6, "up", first_return.end_tick, 135)
+    leaving, _ = advance_center(extended, later_leave)
+    later_return = unit(7, "down", later_leave.end_tick, 120)
+    completed, _ = advance_center(leaving, later_return)
+    snapshot = replace(
+        pending,
+        state=CenterState.DIVERGENCE_CLOSED,
+        boundary_divergence_id="absorbed-divergence",
+        boundary_anchor_unit_id=pending.pending_leave_unit.unit_id,
+    )
+    units = {
+        item.unit_id: item
+        for item in (
+            completed.entry_unit,
+            *completed.body_units,
+            *completed.failed_departure_units,
+            completed.completion_leave_unit,
+            completed.completion_return_unit,
+        )
+        if item is not None
+    }
+
+    assert completed.failed_departure_units == (pending.pending_leave_unit,)
+    assert _historical_divergence_center_is_causal_prefix(
+        snapshot,
+        completed,
+        units,
+    )
