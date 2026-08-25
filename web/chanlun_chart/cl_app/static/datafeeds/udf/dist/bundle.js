@@ -776,6 +776,37 @@
     }
 
     const REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS = 60;
+    const A_SHARE_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
+    const A_SHARE_REALTIME_WINDOWS = [
+        // Poll through a short publication grace after each close so the final bar
+        // can arrive without keeping every open chart busy throughout lunch/night.
+        [9 * 60 + 30, 11 * 60 + 40],
+        [13 * 60, 15 * 60 + 10],
+    ];
+    function _symbolMarket(symbolInfo) {
+        const exchange = String(symbolInfo.exchange || '').trim().toLowerCase();
+        if (exchange) {
+            return exchange;
+        }
+        const ticker = String(symbolInfo.ticker || symbolInfo.name || '');
+        const separator = ticker.indexOf(':');
+        return separator > 0 ? ticker.slice(0, separator).trim().toLowerCase() : '';
+    }
+    function _realtimePollingDue(symbolInfo, nowMs) {
+        // Only suppress the market whose exact civil-time contract is proven here.
+        // Unknown/cross-market symbols fail open so an optimization can never make
+        // their live charts stale.
+        if (_symbolMarket(symbolInfo) !== 'a') {
+            return true;
+        }
+        const shanghai = new Date(nowMs + A_SHARE_UTC_OFFSET_MS);
+        const weekday = shanghai.getUTCDay();
+        if (weekday === 0 || weekday === 6) {
+            return false;
+        }
+        const minuteOfDay = shanghai.getUTCHours() * 60 + shanghai.getUTCMinutes();
+        return A_SHARE_REALTIME_WINDOWS.some(([start, end]) => (minuteOfDay >= start && minuteOfDay <= end));
+    }
     class DataPulseProvider {
         constructor(historyProvider, updateFrequency) {
             this._subscribers = {};
@@ -861,6 +892,9 @@
         }
         _updateDataForSubscriber(listenerGuid) {
             const subscriptionRecord = this._subscribers[listenerGuid];
+            if (!subscriptionRecord || !_realtimePollingDue(subscriptionRecord.symbolInfo, Date.now())) {
+                return Promise.resolve();
+            }
             const rangeEndTime = parseInt((Date.now() / 1000).toString())
                 + REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS;
             // BEWARE: please note we really need 2 bars, not the only last one
