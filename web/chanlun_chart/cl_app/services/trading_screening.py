@@ -2430,7 +2430,7 @@ class TradingScreeningConfig:
     # 完整快照发布成功，覆盖通道会自动恢复常规时段闸门。
     force_full_coverage_until_complete: bool = False
     priority_monitor_interval_seconds: int = 60
-    priority_monitor_time_budget_seconds: float = 50.0
+    priority_monitor_time_budget_seconds: float = 55.0
     candidate_monitor_time_budget_seconds: float = 50.0
     max_five_minute_candidate_symbols_per_refresh: int = (
         DEFAULT_VALIDATION_COHORT_SIZE
@@ -7205,11 +7205,11 @@ class TradingScreeningService:
                     phase_budget_seconds / 10,
                 )
                 if previous_wave_elapsed_seconds is not None:
-                    # The 1m locator owns the first 50 seconds of a 60-second
+                    # The 1m locator owns the first 55 seconds of a 60-second
                     # SLA and every in-flight native request still carries the
                     # same absolute deadline.  Admit its final partial wave
                     # whenever the immediately preceding warm wave proved it
-                    # can fit; the remaining ten seconds are the publication
+                    # can fit; the remaining five seconds are the publication
                     # reserve.  Ordinary candidates keep the wider variance
                     # guard because they have no right to consume that reserve.
                     wave_guard_multiplier = (
