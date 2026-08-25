@@ -41,6 +41,7 @@ from chanlun.decision_support.trading_system.human_assisted_decision import (
     apply_formal_selection_scope as _apply_selection_scope,
     sector_decision_document,
     serialize_evaluated_signal,
+    signal_decision_projection,
     validate_signal_decision_document,
 )
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
@@ -216,7 +217,7 @@ PRIORITY_MONITOR_AFTERNOON_END = datetime_time(15, 1)
 PRIORITY_MONITOR_BAR_READY_OFFSET_SECONDS = 2
 # 买入区间套边界只保留到下一根合法 1m K 线，任何多轮轮转都无法满足它。
 ONE_MINUTE_LOCATOR_SLA_SECONDS = 60
-PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor"
+PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor-v2-continuation"
 CANDIDATE_MONITOR_CONTRACT_ID = (
     "bar-cadence-live-candidate-monitor-v4-epoch-symbol-exclusions"
 )
@@ -1259,6 +1260,59 @@ def _signal_side(signal: Mapping[str, object]) -> str | None:
     return None
 
 
+_MONITOR_CONTINUATION_FALLBACK_FIELDS = (
+    "decision_document_schema",
+    "decision_core_id",
+    "decision_document_id",
+    "setup_id",
+    "point_id",
+    "tower",
+    "recursive_level",
+    "structure_scope",
+    "structure_frequencies",
+    "stroke_mode",
+    "recursive_structure_used",
+    "physical_timeframe_recursive",
+    "setup_5m",
+    "segment_difference_1m",
+    "entry_execution_boundary",
+)
+
+
+def _priority_monitor_continuation_document(
+    signal: Mapping[str, object],
+) -> dict[str, object]:
+    """Return bounded state that can safely drive the next monitor decision.
+
+    The browser projection intentionally omits immutable setup/lifecycle identity
+    and exact 5m/1m occurrence timestamps.  Reusing that projection as internal
+    state therefore drops confirmed setups from the 1m locator lane and breaks
+    cross-session segment-enrichment notifications.  A canonical decision
+    projection is still compact, but retains every field covered by the decision
+    hash.  Minimal fixtures and bounded legacy imports use the explicit fallback
+    fields below without weakening production decision-document validation.
+    """
+
+    document = _presentation_signal_document(signal)
+    if signal.get("decision_document_schema") is not None:
+        validate_signal_decision_document(signal)
+        decision = signal_decision_projection(signal)
+        decision_schema = decision.pop("schema")
+        document.update(copy.deepcopy(decision))
+        document["decision_document_schema"] = decision_schema
+        document["decision_document_id"] = copy.deepcopy(
+            signal["decision_document_id"]
+        )
+    else:
+        for field in _MONITOR_CONTINUATION_FALLBACK_FIELDS:
+            if field in signal:
+                document[field] = copy.deepcopy(signal[field])
+    document["monitor_continuation"] = True
+    document["presentation_projection"] = False
+    document["full_audit_evidence_embedded"] = False
+    return document
+
+
 def _one_minute_segment_requires_monitor(
     signal: Mapping[str, object],
     observed_at: datetime,
@@ -1570,6 +1624,57 @@ def _take_rotating_priority_batch(
             code for code in candidates if code in previous_set
         )
     return candidates[:max_symbols]
+
+
+def _rotating_signal_candidate_admission_order(
+    universe: tuple[str, ...],
+    *,
+    pinned_codes: tuple[str, ...],
+    previous_universe: tuple[str, ...],
+    last_success_at: Mapping[str, datetime],
+) -> tuple[str, ...]:
+    """Pin confirmed setups and fairly advance the lower-priority overflow.
+
+    The admitted candidate window is intentionally bounded by physical 5m
+    capacity.  Previously it always took the lexicographically first approaching
+    rows, so an overflow tail could never be observed.  Keep an incomplete prior
+    window until every retained row has one successful observation; after that,
+    advance from its tail.  Confirmed/current setups remain ahead of this
+    discovery rotation on every pass.
+    """
+
+    candidates = tuple(dict.fromkeys(universe))
+    if not candidates:
+        return ()
+    candidate_set = set(candidates)
+    pinned_set = set(pinned_codes).intersection(candidate_set)
+    pinned = tuple(code for code in candidates if code in pinned_set)
+    optional = tuple(code for code in candidates if code not in pinned_set)
+    if not optional:
+        return pinned
+
+    optional_set = set(optional)
+    previous_optional = tuple(
+        code
+        for code in dict.fromkeys(previous_universe)
+        if code in optional_set
+    )
+    if not previous_optional:
+        return pinned + optional
+
+    previous_incomplete = any(
+        code not in last_success_at for code in previous_optional
+    )
+    tail_index = optional.index(previous_optional[-1])
+    after_tail = optional[tail_index + 1 :] + optional[: tail_index + 1]
+    if previous_incomplete:
+        retained = set(previous_optional)
+        optional = previous_optional + tuple(
+            code for code in after_tail if code not in retained
+        )
+    else:
+        optional = after_tail
+    return pinned + optional
 
 
 def _take_rule_recheck_batch(
@@ -4456,7 +4561,6 @@ class TradingScreeningService:
         self._priority_monitor_last_errors: tuple[dict[str, object], ...] = ()
         self._priority_monitor_mandatory_count = 0
         self._priority_monitor_immediate_universe_count = 0
-        self._priority_monitor_rearmed_segment_universe_count = 0
         self._priority_monitor_tracking_universe_count = 0
         self._priority_monitor_scheduled_count = 0
         self._priority_monitor_configured_rotation_seconds: int | None = None
@@ -4481,9 +4585,14 @@ class TradingScreeningService:
         self._candidate_monitor_last_five_codes: tuple[str, ...] = ()
         self._candidate_monitor_last_thirty_codes: tuple[str, ...] = ()
         self._candidate_monitor_last_deferred_codes: tuple[str, ...] = ()
+        self._candidate_monitor_signal_pool_count = 0
+        self._candidate_monitor_signal_admitted_count = 0
+        self._candidate_monitor_signal_deferred_count = 0
         self._candidate_monitor_supportive_eligible_count = 0
         self._candidate_monitor_supportive_admitted_count = 0
         self._candidate_monitor_supportive_capacity = 0
+        self._priority_monitor_immediate_pool_count = 0
+        self._priority_monitor_immediate_deferred_count = 0
         self._candidate_monitor_suspended_session: date | None = None
         self._candidate_monitor_current_session_suspended_codes: tuple[str, ...] = ()
         self._candidate_monitor_suspension_probe_status = "not_observed"
@@ -4782,10 +4891,11 @@ class TradingScreeningService:
             or not isinstance(value.get("code"), str)
             or not value.get("code")
             or not isinstance(value.get("lifecycle_stage"), str)
-            # 实时状态保存的是页面精简投影，按契约不会重复携带审计字段
-            # ``decision_core_id``。顶层身份和内容哈希共同约束全部子文档；
-            # 这里继续严格确认每条记录确实属于统一的精简投影契约。
-            or value.get("presentation_projection") is not True
+            # Continuation rows retain exact decision/scheduling identity but
+            # exclude audit-only evidence.  Browser projections are forbidden
+            # here because they cannot safely drive the next monitor decision.
+            or value.get("monitor_continuation") is not True
+            or value.get("presentation_projection") is not False
             or value.get("full_audit_evidence_embedded") is not False
             or value.get("observation_lane")
             not in _CANDIDATE_MONITOR_PRESENTATION_LANES.values()
@@ -4799,6 +4909,12 @@ class TradingScreeningService:
             str(value["signal_id"]): copy.deepcopy(dict(value))
             for value in raw_documents
         }
+        try:
+            for document in latest_documents.values():
+                if document.get("decision_document_schema") is not None:
+                    validate_signal_decision_document(document)
+        except (KeyError, TypeError, ValueError):
+            return
         if len(latest_documents) != len(raw_documents) or any(
             signal_id not in raw_stages
             or raw_stages[signal_id] != document.get("lifecycle_stage")
@@ -5536,7 +5652,7 @@ class TradingScreeningService:
         if documents is not None:
             compact_documents = tuple(
                 {
-                    **_presentation_signal_document(document),
+                    **_priority_monitor_continuation_document(document),
                     "observation_lane": _CANDIDATE_MONITOR_PRESENTATION_LANES[
                         lane_map[str(document["code"])]
                     ],
@@ -6113,6 +6229,13 @@ class TradingScreeningService:
                 self._priority_monitor_last_codes,
                 self._config,
             )
+            previous_candidate_five_universe = _project_codes_to_configured_scope(
+                self._candidate_monitor_five_universe,
+                self._config,
+            )
+            candidate_five_last_success_at = dict(
+                self._candidate_monitor_five_last_success_at
+            )
         decision_rule_recheck_code_set = set(decision_rule_recheck_codes)
         # Continuity identifies the bounded one-off recheck queue; it is not by
         # itself evidence that every archived code still belongs to the live 5m
@@ -6168,6 +6291,36 @@ class TradingScreeningService:
             recurring_signal_documents,
             excluded_codes=excluded_codes,
         )
+        signal_candidate_codes = tuple(
+            code
+            for code in signal_candidate_codes
+            if code not in current_session_suspended_codes
+            and code not in candidate_suspended_codes
+            and code not in candidate_cadence_epoch_excluded_codes
+        )
+        pinned_signal_candidate_codes = _priority_signal_candidate_codes(
+            tuple(
+                row
+                for row in recurring_signal_documents
+                if lifecycle_stage_from_signal(row)
+                in _ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES
+            ),
+            excluded_codes=frozenset(
+                (
+                    *excluded_codes,
+                    *current_session_suspended_codes,
+                    *candidate_suspended_codes,
+                    *candidate_cadence_epoch_excluded_codes,
+                )
+            ),
+        )
+        signal_candidate_codes = _rotating_signal_candidate_admission_order(
+            signal_candidate_codes,
+            pinned_codes=pinned_signal_candidate_codes,
+            previous_universe=previous_candidate_five_universe,
+            last_success_at=candidate_five_last_success_at,
+        )
+        signal_candidate_pool_count = len(signal_candidate_codes)
         five_cadence_rounds = max(
             1,
             (
@@ -6233,21 +6386,29 @@ class TradingScreeningService:
             )
             self._candidate_monitor_supportive_admitted_count = len(supportive_codes)
             self._candidate_monitor_supportive_capacity = supportive_admission_capacity
-        # 尚未取得 1 分钟区间套、或已有买入定位边界已经失效的 5 分钟正式
-        # 信号都进入分钟级精确定位通道。后者必须重新武装，否则一条持久化的
-        # 旧段差会让同一有效 5m 设置永远错过后续 1m 精确点。卖点和仍在有效
-        # 边界内的买点不重复占用可选容量；持仓与自选仍由 mandatory_codes
-        # 保持实时监听。
+            self._candidate_monitor_signal_pool_count = signal_candidate_pool_count
+            self._candidate_monitor_signal_admitted_count = len(signal_candidate_codes)
+            self._candidate_monitor_signal_deferred_count = len(
+                universe_admission.deferred_signal_codes
+            )
+            self._priority_monitor_immediate_pool_count = len(
+                pinned_signal_candidate_codes
+            )
+            self._priority_monitor_immediate_deferred_count = len(
+                set(pinned_signal_candidate_codes).difference(
+                    admitted_signal_code_set,
+                )
+            )
+        # A confirmed 5m buy setup enters the exact 1m locator lane until its
+        # first causal segment-difference witness is attached.  That witness is
+        # immutable; an expired execution boundary must not silently replace it
+        # with a later occurrence.  Holdings and explicit watchlist symbols keep
+        # their independent mandatory 1m observation lane.
         pending_segment_documents = tuple(
             row
             for row in current_signal_documents
             if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
             and _one_minute_segment_requires_monitor(row, observed_at)
-        )
-        rearmed_segment_documents = tuple(
-            row
-            for row in pending_segment_documents
-            if isinstance(row.get("segment_difference_1m"), Mapping)
         )
         current_pending_segment_documents = tuple(
             row
@@ -6268,29 +6429,6 @@ class TradingScreeningService:
         immediate_signal_universe = tuple(
             code
             for code in immediate_signal_universe
-            if code in admitted_signal_code_set
-        )
-        rearmed_segment_universe = _priority_signal_candidate_codes(
-            tuple(
-                row
-                for row in rearmed_segment_documents
-                if _current_five_minute_setup_requires_segment_monitor(
-                    row,
-                    observed_at,
-                )
-            ),
-            excluded_codes=frozenset(
-                (
-                    *excluded_codes,
-                    *mandatory_scope,
-                    *candidate_locator_epoch_excluded_codes,
-                )
-            ),
-            allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
-        )
-        rearmed_segment_universe = tuple(
-            code
-            for code in rearmed_segment_universe
             if code in admitted_signal_code_set
         )
         urgent_signal_universe = immediate_signal_universe
@@ -6345,9 +6483,6 @@ class TradingScreeningService:
             self._priority_monitor_mandatory_count = len(mandatory_codes)
             self._priority_monitor_immediate_universe_count = len(
                 immediate_signal_universe
-            )
-            self._priority_monitor_rearmed_segment_universe_count = len(
-                rearmed_segment_universe
             )
             self._priority_monitor_tracking_universe_count = len(urgent_signal_universe)
             self._priority_monitor_scheduled_count = len(minute_codes)
@@ -9657,9 +9792,6 @@ class TradingScreeningService:
             priority_monitor_immediate_universe_count = (
                 self._priority_monitor_immediate_universe_count
             )
-            priority_monitor_rearmed_segment_universe_count = (
-                self._priority_monitor_rearmed_segment_universe_count
-            )
             priority_monitor_tracking_universe_count = (
                 self._priority_monitor_tracking_universe_count
             )
@@ -9713,6 +9845,15 @@ class TradingScreeningService:
             candidate_monitor_last_deferred_codes = tuple(
                 self._candidate_monitor_last_deferred_codes
             )
+            candidate_monitor_signal_pool_count = (
+                self._candidate_monitor_signal_pool_count
+            )
+            candidate_monitor_signal_admitted_count = (
+                self._candidate_monitor_signal_admitted_count
+            )
+            candidate_monitor_signal_deferred_count = (
+                self._candidate_monitor_signal_deferred_count
+            )
             candidate_monitor_supportive_eligible_count = (
                 self._candidate_monitor_supportive_eligible_count
             )
@@ -9721,6 +9862,12 @@ class TradingScreeningService:
             )
             candidate_monitor_supportive_capacity = (
                 self._candidate_monitor_supportive_capacity
+            )
+            priority_monitor_immediate_pool_count = (
+                self._priority_monitor_immediate_pool_count
+            )
+            priority_monitor_immediate_deferred_count = (
+                self._priority_monitor_immediate_deferred_count
             )
             candidate_monitor_suspended_session = (
                 self._candidate_monitor_suspended_session
@@ -9901,10 +10048,6 @@ class TradingScreeningService:
             )
             priority_monitor_immediate_universe_count = min(
                 priority_monitor_immediate_universe_count,
-                len(admitted_universe),
-            )
-            priority_monitor_rearmed_segment_universe_count = min(
-                priority_monitor_rearmed_segment_universe_count,
                 len(admitted_universe),
             )
             priority_monitor_tracking_universe_count = min(
@@ -10800,9 +10943,6 @@ class TradingScreeningService:
             "priority_monitor_immediate_universe_count": (
                 priority_monitor_immediate_universe_count
             ),
-            "priority_monitor_rearmed_segment_universe_count": (
-                priority_monitor_rearmed_segment_universe_count
-            ),
             "priority_monitor_tracking_universe_count": (
                 priority_monitor_tracking_universe_count
             ),
@@ -10946,6 +11086,18 @@ class TradingScreeningService:
             "candidate_monitor_supportive_discovery_max_sector_rank": (
                 self._config.supportive_discovery_max_sector_rank
             ),
+            "candidate_monitor_signal_pool_count": (
+                candidate_monitor_signal_pool_count
+            ),
+            "candidate_monitor_signal_admitted_count": (
+                candidate_monitor_signal_admitted_count
+            ),
+            "candidate_monitor_signal_deferred_count": (
+                candidate_monitor_signal_deferred_count
+            ),
+            "candidate_monitor_signal_rotation_active": bool(
+                candidate_monitor_signal_deferred_count
+            ),
             "candidate_monitor_supportive_eligible_count": (
                 candidate_monitor_supportive_eligible_count
             ),
@@ -10964,6 +11116,12 @@ class TradingScreeningService:
             ),
             "priority_monitor_bar_ready_offset_seconds": (
                 PRIORITY_MONITOR_BAR_READY_OFFSET_SECONDS
+            ),
+            "priority_monitor_immediate_pool_count": (
+                priority_monitor_immediate_pool_count
+            ),
+            "priority_monitor_immediate_deferred_count": (
+                priority_monitor_immediate_deferred_count
             ),
             "candidate_monitor_last_deferred_count": len(
                 candidate_monitor_last_deferred_codes

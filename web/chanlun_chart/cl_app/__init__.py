@@ -60,6 +60,7 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
 )
 from .services.job_names import job_display_name
 from .services.trading_screening_scope import (
+    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS,
     DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
     DEFAULT_VALIDATION_COHORT_SIZE,
     admit_screening_universe,
@@ -124,6 +125,12 @@ def create_app(test_config=None, start_scheduler=False):
         "yes",
         "on",
     }
+    large_screening_scope_enabled = (
+        os.environ.get("CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE", "0")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
     app.config.from_mapping(
         WEB_HOST=get_web_host(),
         VALIDATE_WEB_SECURITY=True,
@@ -169,18 +176,14 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
-                str(DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS),
+                str(
+                    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS
+                    if large_screening_scope_enabled
+                    else DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS
+                ),
             )
         ),
-        TRADING_SCREENING_ALLOW_LARGE_SCOPE=(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE",
-                "0",
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        ),
+        TRADING_SCREENING_ALLOW_LARGE_SCOPE=large_screening_scope_enabled,
         # 生产实时选股只发技术/手工买卖提醒，不读取正式研究账本。正式研究材料仍可在
         # 离线研究和回放入口使用，但不能成为生产监听的隐藏依赖。
         TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED=False,

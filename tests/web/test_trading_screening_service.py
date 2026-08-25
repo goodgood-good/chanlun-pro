@@ -102,6 +102,7 @@ from cl_app.services.trading_screening import (
     _priority_monitor_delay_seconds,
     _priority_monitor_compute_window_open,
     _priority_monitor_session_open,
+    _rotating_signal_candidate_admission_order,
     _current_session_zero_trade_codes,
     _structure_bundle_is_current,
     _structure_bundle_is_current_for_intraday_evidence,
@@ -6474,10 +6475,10 @@ def test_restarted_priority_monitor_requires_immediate_runtime_verification(
     ]
 
 
-def test_restarted_priority_monitor_restores_compact_signal_documents(
+def test_restarted_priority_monitor_restores_continuation_signal_documents(
     tmp_path: Path,
 ) -> None:
-    """精简实时信号不重复携带核心身份，但必须随顶层契约跨重启恢复。"""
+    """精简实时状态保留决策身份，并与纯页面投影隔离后跨重启恢复。"""
 
     cache_path = tmp_path / "snapshot.json"
     observed_at = AS_OF.replace(hour=14, minute=58)
@@ -6523,8 +6524,8 @@ def test_restarted_priority_monitor_restores_compact_signal_documents(
     state_path = tmp_path / "trading_priority_monitor_state.json"
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
     [persisted_document] = persisted["latest_documents"]
-    assert "decision_core_id" not in persisted_document
-    assert persisted_document["presentation_projection"] is True
+    assert persisted_document["monitor_continuation"] is True
+    assert persisted_document["presentation_projection"] is False
     assert persisted_document["full_audit_evidence_embedded"] is False
 
     restarted = TradingScreeningService(
@@ -6551,10 +6552,165 @@ def test_restarted_priority_monitor_restores_compact_signal_documents(
     }
     assert set(restarted._priority_monitor_latest_documents) == {signal_id}
     restored = restarted._priority_monitor_latest_documents[signal_id]
+    assert restored["monitor_continuation"] is True
+    assert restored["presentation_projection"] is False
     assert restored["observation_lane"] == "PRIORITY_CURRENT_1M"
     assert restored["monitor_observed_at"] == observed_at.isoformat()
     assert restored["realtime_observation"] is True
     assert restarted._priority_monitor_runtime_verified is False
+
+
+def test_priority_monitor_continuation_survives_preopen_restart_and_notifies_locator(
+    tmp_path: Path,
+) -> None:
+    code = "SZ.000001"
+    preopen_at = AS_OF + timedelta(hours=17, minutes=45)
+    open_at = AS_OF + timedelta(hours=18, minutes=31)
+
+    class CrossSessionLocatorMarket(RecordingMarketData):
+        def structure_bundle(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            self.bundle_frequency_requests.append((code, tuple(frequencies)))
+            self.bundle_codes.append(code)
+            setup = _current_terminal_point(
+                confirmed_point("2buy", code=code, minutes_after=295)
+            )
+            trigger = (
+                None
+                if as_of < open_at
+                else _current_terminal_point(
+                    confirmed_point(
+                        "1buy",
+                        code=code,
+                        frequency="1m",
+                        minutes_after=294,
+                        available_minutes_after=1117,
+                    ),
+                    terminal_minutes=1,
+                )
+            )
+            boundaries = (
+                ()
+                if trigger is None
+                else (
+                    EntryExecutionBoundary(
+                        symbol=code,
+                        setup_occurrence_id=structural_point_occurrence_id(setup),
+                        point_id=trigger.point_id,
+                        source_frequency="1m",
+                        confirmation_bar_closed_at=trigger.available_at,
+                        raw_open=Decimal("9.95"),
+                        raw_high=Decimal("10.05"),
+                        raw_low=Decimal("9.90"),
+                        raw_close=Decimal("10.00"),
+                        raw_volume=Decimal("10000"),
+                        entry_valid_until=a_share_optional_entry_valid_until(
+                            trigger.available_at
+                        ),
+                        raw_price_basis_revision="test-raw",
+                    ),
+                )
+            )
+            return SymbolStructureBundle(
+                code=code,
+                as_of=as_of,
+                sector=sector,
+                thirty_direction="neutral",
+                thirty_points=(),
+                five_points=(setup,),
+                one_points=(() if trigger is None else (trigger,)),
+                opposite_points=(),
+                warmup_converged=True,
+                physical_timeframe_recursive=True,
+                entry_execution_boundaries=boundaries,
+            )
+
+    cache_path = tmp_path / "snapshot.json"
+    clock = [AS_OF]
+    first_market = CrossSessionLocatorMarket()
+    config = TradingScreeningConfig(
+        max_symbols_per_refresh=1,
+        priority_monitoring_enabled=True,
+        max_five_minute_candidate_symbols_per_refresh=1,
+        max_thirty_minute_candidate_symbols_per_refresh=1,
+        admitted_universe_codes=(code,),
+    )
+    first = TradingScreeningService(
+        market_data=first_market,
+        sector_catalog=MultiMemberSectorCatalog((code,)),
+        engine=HumanAssistedDecisionCore(formal_selection_required=False),
+        scan_planner=RecordingPlanner((code,)),
+        cache_path=cache_path,
+        clock=lambda: clock[0],
+        notifier=None,
+        config=config,
+    )
+    snapshot = first.refresh_now()
+    [original] = snapshot["signals"]
+    assert original["lifecycle_stage"] == "triggered"
+    assert original["segment_difference_1m"] is None
+
+    clock[0] = preopen_at
+    first._run_priority_monitor(previous=snapshot, observed_at=preopen_at)
+    [continuation] = first._priority_monitor_latest_documents.values()
+    assert continuation["monitor_continuation"] is True
+    assert continuation["decision_core_id"] == first._decision_core_id
+    assert continuation["setup_id"] == original["setup_id"]
+    assert continuation["setup_5m"]["anchor_at"] == original["setup_5m"]["anchor_at"]
+    assert continuation["setup_5m"]["source_frequency"] == "5m"
+    assert continuation["setup_5m"]["recursive_level"] == 0
+
+    class RecordingSender:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, list[str]]] = []
+
+        def send(self, title, lines) -> bool:
+            self.messages.append((title, list(lines)))
+            return True
+
+    sender = RecordingSender()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "notification_state.json",
+        clock=lambda: open_at,
+    )
+    restarted_market = CrossSessionLocatorMarket()
+    restarted = TradingScreeningService(
+        market_data=restarted_market,
+        sector_catalog=MultiMemberSectorCatalog((code,)),
+        engine=HumanAssistedDecisionCore(formal_selection_required=False),
+        scan_planner=RecordingPlanner((code,)),
+        cache_path=cache_path,
+        clock=lambda: open_at,
+        notifier=dispatcher,
+        config=config,
+    )
+    assert restarted._priority_monitor_latest_documents
+
+    restarted._run_priority_monitor(previous=snapshot, observed_at=open_at)
+
+    assert any(
+        requested_code == code and "1m" in frequencies
+        for requested_code, frequencies in restarted_market.bundle_frequency_requests
+    )
+    assert restarted.health_snapshot()["priority_monitor_immediate_universe_count"] == 1
+    assert len(sender.messages) == 1, (
+        json.dumps(dispatcher.health_snapshot(), ensure_ascii=False, indent=2),
+        json.dumps(
+            restarted._priority_monitor_latest_documents,
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    visible = restarted.presentation_snapshot()["signals"]
+    assert visible and visible[0]["presentation_projection"] is True
+    assert "decision_core_id" not in visible[0]
 
 
 def test_previous_core_priority_state_seeds_codes_without_restoring_conclusions(
@@ -9154,6 +9310,27 @@ def test_priority_signal_candidates_treat_buy_and_sell_symmetrically() -> None:
     assert urgent == ("BUY_EXECUTABLE", "SELL_ONLY", "BUY_ARMED")
 
 
+def test_signal_candidate_admission_pins_current_setups_and_rotates_completed_window() -> None:
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    universe = ("ACTIVE", "A", "B", "C", "D")
+
+    incomplete = _rotating_signal_candidate_admission_order(
+        universe,
+        pinned_codes=("ACTIVE",),
+        previous_universe=("ACTIVE", "A", "B"),
+        last_success_at={"A": observed_at},
+    )
+    completed = _rotating_signal_candidate_admission_order(
+        universe,
+        pinned_codes=("ACTIVE",),
+        previous_universe=("ACTIVE", "A", "B"),
+        last_success_at={"A": observed_at, "B": observed_at},
+    )
+
+    assert incomplete == ("ACTIVE", "A", "B", "C", "D")
+    assert completed == ("ACTIVE", "C", "D", "A", "B")
+
+
 def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(
     tmp_path: Path,
 ) -> None:
@@ -9260,7 +9437,7 @@ def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(
     health = service.health_snapshot()
     assert health["candidate_monitor_five_minute"]["universe_count"] == 5
     assert health["priority_monitor_immediate_universe_count"] == 2
-    assert health["priority_monitor_rearmed_segment_universe_count"] == 0
+    assert "priority_monitor_rearmed_segment_universe_count" not in health
     assert "priority_monitor_expired_segment_universe_count" not in health
     assert "priority_monitor_segment_difference_universe_count" not in health
     assert health["priority_monitor_scheduled_count"] == 2
@@ -9309,6 +9486,12 @@ def test_validation_scope_caps_old_snapshot_locator_universe(
     assert health["screening_scope_mode"] == "VALIDATION_COHORT"
     assert health["effective_monitor_universe_limit"] == 12
     assert health["priority_monitor_immediate_universe_count"] == 12
+    assert health["priority_monitor_immediate_pool_count"] == 34
+    assert health["priority_monitor_immediate_deferred_count"] == 22
+    assert health["candidate_monitor_signal_pool_count"] == 34
+    assert health["candidate_monitor_signal_admitted_count"] == 12
+    assert health["candidate_monitor_signal_deferred_count"] == 22
+    assert health["candidate_monitor_signal_rotation_active"] is True
     assert health["candidate_monitor_five_minute"]["universe_count"] == 12
     assert {
         code for code, _frequencies in market.bundle_frequency_requests

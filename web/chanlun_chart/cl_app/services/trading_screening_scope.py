@@ -14,6 +14,10 @@ import re
 
 DEFAULT_VALIDATION_COHORT_SIZE = 12
 DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS = 20
+# Twelve 5m observations per minute can sustain exactly sixty symbols across
+# one five-minute cadence.  Large-scope monitoring defaults to that physical
+# capacity; full-market daily coverage remains an independent background job.
+DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS = 60
 LARGE_SCOPE_THRESHOLD = 20
 
 
@@ -317,6 +321,7 @@ def validate_screening_scope_configuration(
 
 
 __all__ = (
+    "DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS",
     "DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS",
     "DEFAULT_VALIDATION_COHORT_SIZE",
     "LARGE_SCOPE_THRESHOLD",

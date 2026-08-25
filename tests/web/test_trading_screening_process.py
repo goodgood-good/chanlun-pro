@@ -3035,6 +3035,34 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     )
 
 
+def test_app_large_scope_defaults_to_sustainable_five_minute_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE", "1")
+    monkeypatch.setenv("CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED", "0")
+    monkeypatch.setenv(
+        "CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
+        "0",
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
+        raising=False,
+    )
+
+    app = create_app(
+        start_scheduler=False,
+        test_config={
+            "TESTING": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "WTF_CSRF_ENABLED": False,
+            "TRADING_SCREENING_BACKGROUND_ENABLED": False,
+        },
+    )
+
+    assert app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"] is True
+    assert app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"] == 60
+
+
 def test_structure_worker_pool_uses_sticky_symbol_routing_inside_each_lane() -> None:
     transport = _BundleTransport(
         SymbolStructureBundle(

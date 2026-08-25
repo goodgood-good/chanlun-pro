@@ -17,6 +17,7 @@ from cl_app.services.trading_screening import (
     _restored_snapshot_scope_is_valid,
 )
 from cl_app.services.trading_screening_scope import (
+    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS,
     DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
     DEFAULT_VALIDATION_COHORT_SIZE,
     ScreeningScopeAuthorizationError,
@@ -45,6 +46,7 @@ def _codes(start: int, count: int) -> tuple[str, ...]:
 def test_validation_defaults_are_small_with_an_independent_safety_ceiling() -> None:
     assert DEFAULT_VALIDATION_COHORT_SIZE == 12
     assert DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS == 20
+    assert DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS == 60
 
 
 def test_admission_caps_deduplicated_union_and_reports_optional_overflow() -> None:
