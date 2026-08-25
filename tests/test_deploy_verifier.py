@@ -401,6 +401,25 @@ def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
     )
 
 
+def test_restart_replaces_watchdog_with_current_scope_after_deploy_verification():
+    restart = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
+
+    watchdog_gate = restart.index("if (-not $SkipWatchdog) {")
+    watchdog_body = restart[watchdog_gate:]
+    stop_at = watchdog_body.index("Stop-Process `")
+    launch_at = watchdog_body.index("$watchdogProcess = Start-Process `")
+
+    assert stop_at < launch_at
+    assert "$watchdogScriptToken = '-File {0}' -f $watchdogScript" in watchdog_body
+    assert "$watchdogRootToken = '-ProjectRoot {0}' -f $ProjectRoot" in watchdog_body
+    assert "$watchdogPortToken = '-WebPort {0}' -f $webPort" in watchdog_body
+    assert "Get-CimInstance Win32_Process" in watchdog_body
+    assert "$_.ProcessId -ne $PID" in watchdog_body
+    assert "-ErrorAction Stop" in watchdog_body[stop_at:launch_at]
+    assert "-WindowStyle Hidden" in watchdog_body[launch_at:]
+    assert "with current deployment scope" in watchdog_body[launch_at:]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
 def test_deploy_verifier_rejects_unattested_explicit_revision():
     result = subprocess.run(

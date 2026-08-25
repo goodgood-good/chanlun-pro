@@ -971,6 +971,45 @@ if ($verifyExit -ne 0) {
     exit 1
 }
 if (-not $SkipWatchdog) {
+    # A watchdog is part of the deployed configuration, not merely a duplicate
+    # background process.  Reusing one from an earlier bounded/full-scope launch
+    # would silently restore stale flags after the next crash.  Replace only the
+    # exact watchdog for this project root and port while the deployment mutex is
+    # held; watchdogs for other worktrees or ports remain untouched.
+    $watchdogScriptToken = '-File {0}' -f $watchdogScript
+    $watchdogRootToken = '-ProjectRoot {0}' -f $ProjectRoot
+    $watchdogPortToken = '-WebPort {0}' -f $webPort
+    $existingWatchdogs = @(
+        Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+            Where-Object {
+                if ([string]::IsNullOrWhiteSpace($_.CommandLine)) {
+                    return $false
+                }
+                $unquotedCommandLine = $_.CommandLine.Replace('"', '')
+                return (
+                    $_.ProcessId -ne $PID -and
+                    $unquotedCommandLine.IndexOf(
+                        $watchdogScriptToken,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -ge 0 -and
+                    $unquotedCommandLine.IndexOf(
+                        $watchdogRootToken,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -ge 0 -and
+                    $unquotedCommandLine.IndexOf(
+                        $watchdogPortToken,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -ge 0
+                )
+            }
+    )
+    foreach ($existingWatchdog in $existingWatchdogs) {
+        Stop-Process `
+            -Id $existingWatchdog.ProcessId `
+            -Force `
+            -ErrorAction Stop
+        Log ('stopped superseded web watchdog PID={0}' -f $existingWatchdog.ProcessId)
+    }
     $watchdogArguments = @(
         '-NoProfile',
         '-ExecutionPolicy',
@@ -1002,7 +1041,7 @@ if (-not $SkipWatchdog) {
         -ArgumentList $watchdogArguments `
         -WindowStyle Hidden `
         -PassThru
-    Log ('web watchdog launch requested PID={0}; duplicate launches exit safely' -f $watchdogProcess.Id)
+    Log ('web watchdog launched PID={0} with current deployment scope' -f $watchdogProcess.Id)
 }
 if ($OpenBrowser) { Open-WebApplication -Uri $webUri }
 Log '===== web restart DONE ====='
