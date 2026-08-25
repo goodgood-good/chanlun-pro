@@ -199,6 +199,8 @@ def calculate_level_with_divergence_boundaries(
         """Keep the first causal COMPLETE snapshot seen during prefix replay."""
 
         for item in items:
+            if item.trend_id in historical_completed:
+                continue
             snapshot = (
                 item
                 if item.available_at >= observed_at
