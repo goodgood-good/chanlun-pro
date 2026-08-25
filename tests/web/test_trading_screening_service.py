@@ -9135,6 +9135,59 @@ def test_optional_segment_rotation_beyond_locator_sla_is_capacity_failure(
     assert health["priority_monitor_ready"] is False
 
 
+def test_large_scope_priority_wave_covers_48_current_locators(
+    tmp_path: Path,
+) -> None:
+    codes = tuple(f"SZ.{index:06d}" for index in range(1, 49))
+    market = RecordingMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(codes),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            large_scope_authorized=True,
+            max_monitor_symbols_per_refresh=48,
+            max_admitted_universe_symbols=60,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": f"triggered-{code}",
+                "code": code,
+                "side": "buy",
+                "point_type": "1buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "anchor_at": AS_OF.isoformat(),
+                    "available_at": AS_OF.isoformat(),
+                    "confirmed_at": AS_OF.isoformat(),
+                },
+            }
+            for code in codes
+        ]
+    }
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    health = service.health_snapshot()
+    assert market.bundle_codes == list(codes)
+    assert health["priority_monitor_locator_pool_count"] == 48
+    assert health["priority_monitor_locator_admission_deferred_count"] == 0
+    assert health["priority_monitor_immediate_universe_count"] == 48
+    assert health["priority_monitor_scheduled_count"] == 48
+    assert health["priority_monitor_configured_rotation_seconds"] == 60
+    assert health["priority_monitor_locator_capacity_sufficient"] is True
+    assert health["priority_monitor_locator_runtime_verified"] is True
+    assert health["priority_monitor_ready"] is True
+
+
 def test_optional_segment_deadline_miss_is_visible_and_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -9446,6 +9499,27 @@ def test_signal_candidate_admission_pins_current_setups_and_rotates_completed_wi
     assert completed == ("ACTIVE", "C", "D", "A", "B")
 
 
+def test_signal_candidate_admission_rotates_completed_pinned_overflow() -> None:
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    universe = ("PIN_A", "PIN_B", "PIN_C", "PIN_D", "DISCOVERY")
+
+    incomplete = _rotating_signal_candidate_admission_order(
+        universe,
+        pinned_codes=("PIN_A", "PIN_B", "PIN_C", "PIN_D"),
+        previous_universe=("PIN_A", "PIN_B"),
+        last_success_at={"PIN_A": observed_at},
+    )
+    completed = _rotating_signal_candidate_admission_order(
+        universe,
+        pinned_codes=("PIN_A", "PIN_B", "PIN_C", "PIN_D"),
+        previous_universe=("PIN_A", "PIN_B"),
+        last_success_at={"PIN_A": observed_at, "PIN_B": observed_at},
+    )
+
+    assert incomplete == ("PIN_A", "PIN_B", "PIN_C", "PIN_D", "DISCOVERY")
+    assert completed == ("PIN_C", "PIN_D", "PIN_A", "PIN_B", "DISCOVERY")
+
+
 def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(
     tmp_path: Path,
 ) -> None:
@@ -9603,6 +9677,14 @@ def test_validation_scope_caps_old_snapshot_locator_universe(
     assert health["priority_monitor_immediate_universe_count"] == 12
     assert health["priority_monitor_immediate_pool_count"] == 34
     assert health["priority_monitor_immediate_deferred_count"] == 22
+    assert health["priority_monitor_locator_pool_count"] == 34
+    assert health["priority_monitor_locator_admission_deferred_count"] == 22
+    assert health["priority_monitor_locator_capacity_sufficient"] is False
+    assert health["priority_monitor_locator_deferred_codes"] == list(codes[12:])
+    assert health["priority_monitor_last_failure_reason_counts"] == {
+        "ONE_MINUTE_LOCATOR_ADMISSION_CAPACITY_INSUFFICIENT": 1,
+    }
+    assert health["priority_monitor_ready"] is False
     assert health["candidate_monitor_signal_pool_count"] == 34
     assert health["candidate_monitor_signal_admitted_count"] == 12
     assert health["candidate_monitor_signal_deferred_count"] == 22

@@ -1714,31 +1714,33 @@ def _rotating_signal_candidate_admission_order(
     pinned_set = set(pinned_codes).intersection(candidate_set)
     pinned = tuple(code for code in candidates if code in pinned_set)
     optional = tuple(code for code in candidates if code not in pinned_set)
-    if not optional:
-        return pinned
 
-    optional_set = set(optional)
-    previous_optional = tuple(
-        code
-        for code in dict.fromkeys(previous_universe)
-        if code in optional_set
-    )
-    if not previous_optional:
-        return pinned + optional
-
-    previous_incomplete = any(
-        code not in last_success_at for code in previous_optional
-    )
-    tail_index = optional.index(previous_optional[-1])
-    after_tail = optional[tail_index + 1 :] + optional[: tail_index + 1]
-    if previous_incomplete:
-        retained = set(previous_optional)
-        optional = previous_optional + tuple(
+    def rotate_completed_window(values: tuple[str, ...]) -> tuple[str, ...]:
+        value_set = set(values)
+        previous_values = tuple(
+            code
+            for code in dict.fromkeys(previous_universe)
+            if code in value_set
+        )
+        if not values or not previous_values:
+            return values
+        previous_incomplete = any(
+            code not in last_success_at for code in previous_values
+        )
+        tail_index = values.index(previous_values[-1])
+        after_tail = values[tail_index + 1 :] + values[: tail_index + 1]
+        if not previous_incomplete:
+            return after_tail
+        retained = set(previous_values)
+        return previous_values + tuple(
             code for code in after_tail if code not in retained
         )
-    else:
-        optional = after_tail
-    return pinned + optional
+
+    # Pinned setups always remain ahead of discovery rows, but a physical
+    # admission ceiling can still be smaller than the pinned set.  Rotate a
+    # fully observed pinned wave as well, otherwise its lexicographic tail is
+    # permanently starved exactly when locator capacity is already degraded.
+    return rotate_completed_window(pinned) + rotate_completed_window(optional)
 
 
 def _take_rule_recheck_batch(
@@ -4657,6 +4659,8 @@ class TradingScreeningService:
         self._candidate_monitor_supportive_capacity = 0
         self._priority_monitor_immediate_pool_count = 0
         self._priority_monitor_immediate_deferred_count = 0
+        self._priority_monitor_locator_pool_count = 0
+        self._priority_monitor_locator_admission_deferred_count = 0
         self._candidate_monitor_suspended_session: date | None = None
         self._candidate_monitor_current_session_suspended_codes: tuple[str, ...] = ()
         self._candidate_monitor_suspension_probe_status = "not_observed"
@@ -6474,17 +6478,15 @@ class TradingScreeningService:
             if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
             and _one_minute_segment_requires_monitor(row, observed_at)
         )
-        current_pending_segment_documents = tuple(
-            row
-            for row in pending_segment_documents
-            if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
-        )
-        immediate_signal_universe = _priority_signal_candidate_codes(
-            current_pending_segment_documents,
+        locator_signal_pool = _priority_signal_candidate_codes(
+            pending_segment_documents,
             excluded_codes=frozenset(
                 (
                     *excluded_codes,
                     *mandatory_scope,
+                    *current_session_suspended_codes,
+                    *candidate_suspended_codes,
+                    *candidate_cadence_epoch_excluded_codes,
                     *candidate_locator_epoch_excluded_codes,
                 )
             ),
@@ -6492,8 +6494,13 @@ class TradingScreeningService:
         )
         immediate_signal_universe = tuple(
             code
-            for code in immediate_signal_universe
+            for code in locator_signal_pool
             if code in admitted_signal_code_set
+        )
+        locator_admission_deferred_codes = tuple(
+            code
+            for code in locator_signal_pool
+            if code not in admitted_signal_code_set
         )
         urgent_signal_universe = immediate_signal_universe
         urgent_signal_codes = _take_rotating_priority_batch(
@@ -6552,6 +6559,10 @@ class TradingScreeningService:
             self._priority_monitor_scheduled_count = len(minute_codes)
             self._priority_monitor_configured_rotation_seconds = (
                 configured_rotation_seconds
+            )
+            self._priority_monitor_locator_pool_count = len(locator_signal_pool)
+            self._priority_monitor_locator_admission_deferred_count = len(
+                locator_admission_deferred_codes
             )
         # 持仓、自选和当前仍有效的买卖点候选始终排在最前；冻结的支持性板块成员也必须进入
         # 5 分钟发现轮转。只在 30 分钟通道观察它们会让刚形成的正式 5m 点晚于通知
@@ -6868,6 +6879,21 @@ class TradingScreeningService:
                         f"mandatory={len(mandatory_codes)} "
                         f"rotation_seconds={configured_rotation_seconds}"
                     ),
+                }
+            )
+        if realtime_notification_eligible and locator_admission_deferred_codes:
+            priority_preparation_errors.append(
+                {
+                    "error_type": "priority_monitor_locator_admission_error",
+                    "reason_code": (
+                        "ONE_MINUTE_LOCATOR_ADMISSION_CAPACITY_INSUFFICIENT"
+                    ),
+                    "reason": (
+                        f"locator_pool={len(locator_signal_pool)} "
+                        f"admitted={len(immediate_signal_universe)} "
+                        f"deferred={len(locator_admission_deferred_codes)}"
+                    ),
+                    "deferred_codes": list(locator_admission_deferred_codes),
                 }
             )
         history_preparer = getattr(self._market_data, "prepare_local_history", None)
@@ -7680,6 +7706,7 @@ class TradingScreeningService:
         locator_runtime_verified = bool(
             minute_codes
             and attempted_minute_code_set == minute_code_set
+            and not locator_admission_deferred_codes
             and not configured_locator_deferred_codes
             and not deadline_locator_deferred_codes
             and not deferred_mandatory_codes
@@ -9939,6 +9966,12 @@ class TradingScreeningService:
             priority_monitor_immediate_deferred_count = (
                 self._priority_monitor_immediate_deferred_count
             )
+            priority_monitor_locator_pool_count = (
+                self._priority_monitor_locator_pool_count
+            )
+            priority_monitor_locator_admission_deferred_count = (
+                self._priority_monitor_locator_admission_deferred_count
+            )
             candidate_monitor_suspended_session = (
                 self._candidate_monitor_suspended_session
             )
@@ -10498,6 +10531,7 @@ class TradingScreeningService:
                 for error in priority_monitor_last_errors
                 if error.get("reason_code")
                 in {
+                    "ONE_MINUTE_LOCATOR_ADMISSION_CAPACITY_INSUFFICIENT",
                     "ONE_MINUTE_LOCATOR_CONFIGURED_CAPACITY_INSUFFICIENT",
                     "ONE_MINUTE_LOCATOR_TIME_BUDGET_EXHAUSTED",
                 }
@@ -11022,9 +11056,16 @@ class TradingScreeningService:
             ),
             "priority_monitor_locator_sla_seconds": ONE_MINUTE_LOCATOR_SLA_SECONDS,
             "priority_monitor_locator_capacity_sufficient": bool(
-                priority_monitor_configured_rotation_seconds is not None
+                priority_monitor_locator_admission_deferred_count == 0
+                and priority_monitor_configured_rotation_seconds is not None
                 and priority_monitor_configured_rotation_seconds
                 <= ONE_MINUTE_LOCATOR_SLA_SECONDS
+            ),
+            "priority_monitor_locator_pool_count": (
+                priority_monitor_locator_pool_count
+            ),
+            "priority_monitor_locator_admission_deferred_count": (
+                priority_monitor_locator_admission_deferred_count
             ),
             "priority_monitor_locator_runtime_verified": (
                 priority_monitor_locator_runtime_verified

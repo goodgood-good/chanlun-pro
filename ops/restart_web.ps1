@@ -37,6 +37,7 @@ $AppScript    = Join-Path $AppDir 'app.py'
 $verifyScript = Join-Path $ProjectRoot 'ops\verify_deploy.ps1'
 $watchdogScript = Join-Path $ProjectRoot 'ops\watch_web.ps1'
 $PreflightTimeoutSec = 30
+$LargeScopePriorityMaxSymbols = 48
 $LogDir       = Join-Path $PSScriptRoot 'logs'
 # ----------------------------------------------------------------------------
 
@@ -538,6 +539,16 @@ try {
         [Environment]::SetEnvironmentVariable(
             'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS',
             '20',
+            'Process'
+        )
+    } else {
+        # Full-market discovery remains cadence-bounded, while every currently
+        # confirmed 5m setup must fit the one-minute locator admission wave.
+        # Production measurements keep 48 symbols well inside the 50-second
+        # hard deadline; the runtime still fails closed on an actual overrun.
+        [Environment]::SetEnvironmentVariable(
+            'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS',
+            [string]$LargeScopePriorityMaxSymbols,
             'Process'
         )
     }
