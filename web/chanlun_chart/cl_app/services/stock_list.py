@@ -129,6 +129,10 @@ _async_refresh_in_flight: set = set()
 _async_refresh_lock = threading.Lock()
 # 各市场独立保存刷新状态，并共用缓存锁，使缓存内容与就绪快照能够被原子观测。
 _symbol_states = {}
+# 磁盘缓存的来源与新鲜度只作为“首轮是否可跳过重复刷新”的证据，不参与
+# 运行权限判定。旧缓存仍可作为 LKG 恢复，但缺少当前元数据时绝不会冒充
+# 刚生成的全量目录。
+_disk_cache_metadata = {}
 _preload_attempts = {}
 _preload_attempts_lock = threading.Lock()
 _preload_handle_lock = threading.Lock()
@@ -412,6 +416,8 @@ def _stocks_cache_file(exchange: str) -> str:
 def _load_stocks_from_disk(exchange: str):
     """从落盘文件读取 raw stocks 列表；任何错误返回 None，调用方走原路径。"""
     path = _stocks_cache_file(exchange)
+    with _stock_cache_lock:
+        _disk_cache_metadata.pop(exchange, None)
     try:
         if not os.path.isfile(path):
             return None
@@ -434,6 +440,30 @@ def _load_stocks_from_disk(exchange: str):
         stocks = data.get("stocks")
         if not isinstance(stocks, list) or not stocks:
             return None
+        declared_count = data.get("count")
+        updated_at = data.get("updated_at")
+        catalog_mode = data.get("catalog_mode")
+        scope_codes = data.get("scope_codes")
+        metadata_verified = (
+            type(declared_count) is int
+            and declared_count == len(stocks)
+            and type(updated_at) is int
+            and updated_at > 0
+            and catalog_mode in {
+                BOUNDED_VALIDATION_CATALOG,
+                FULL_IDENTITY_CATALOG,
+            }
+            and isinstance(scope_codes, list)
+            and all(type(code) is str and code for code in scope_codes)
+        )
+        with _stock_cache_lock:
+            _disk_cache_metadata[exchange] = {
+                "verified": metadata_verified,
+                "catalog_mode": catalog_mode,
+                "updated_at": updated_at if type(updated_at) is int else 0,
+                "count": declared_count if type(declared_count) is int else 0,
+                "scope_codes": tuple(scope_codes) if isinstance(scope_codes, list) else (),
+            }
         return stocks
     except Exception as e:
         LogUtil.warning(f"[stocks_cache] 读 {path} 失败: {e}")
@@ -450,11 +480,19 @@ def _save_stocks_to_disk(exchange: str, raw_stocks) -> None:
     if not raw_stocks:
         return
     path = _stocks_cache_file(exchange)
+    catalog_mode, admitted_codes, _authorized = _catalog_scope_snapshot(exchange)
+    updated_at = int(time.time())
     payload = {
         "schema": _STOCKS_CACHE_SCHEMA,
         "market": exchange,
-        "updated_at": int(time.time()),
+        "updated_at": updated_at,
         "count": len(raw_stocks),
+        "catalog_mode": catalog_mode,
+        "scope_codes": (
+            list(admitted_codes)
+            if catalog_mode == BOUNDED_VALIDATION_CATALOG
+            else []
+        ),
         "stocks": [
             {
                 "code": s.get("code", ""),
@@ -479,6 +517,18 @@ def _save_stocks_to_disk(exchange: str, raw_stocks) -> None:
             tmp_path = tf.name
         os.replace(tmp_path, path)
         tmp_path = None  # 已替换成功，无需清理
+        with _stock_cache_lock:
+            _disk_cache_metadata[exchange] = {
+                "verified": True,
+                "catalog_mode": catalog_mode,
+                "updated_at": updated_at,
+                "count": len(raw_stocks),
+                "scope_codes": (
+                    tuple(admitted_codes)
+                    if catalog_mode == BOUNDED_VALIDATION_CATALOG
+                    else ()
+                ),
+            }
     except Exception as e:
         LogUtil.warning(f"[stocks_cache] 写 {path} 失败: {e}")
         if tmp_path and os.path.isfile(tmp_path):
@@ -568,6 +618,34 @@ def _process_stock_list(all_stocks):
     return processed_list
 
 
+def _recent_full_disk_cache_covers_scope(exchange: str, cached) -> bool:
+    """Return whether a disk-restored full catalog can skip one startup refresh.
+
+    Runtime full-catalog authorization remains mandatory and is never restored
+    from disk.  The cache must additionally carry current provenance, an exact
+    row count, and a timestamp no older than one refresh interval.  Periodic
+    rounds still refresh normally because this gate is used only when
+    ``skip_if_disk_warm`` is true.
+    """
+
+    if not cached:
+        return False
+    with _stock_cache_lock:
+        metadata = dict(_disk_cache_metadata.get(exchange) or {})
+    if (
+        metadata.get("verified") is not True
+        or metadata.get("catalog_mode") != FULL_IDENTITY_CATALOG
+        or metadata.get("count") != len(cached)
+    ):
+        return False
+    updated_at = metadata.get("updated_at")
+    if type(updated_at) is not int or updated_at <= 0:
+        return False
+    age_seconds = time.time() - updated_at
+    freshness_seconds = max(60.0, float(PRELOAD_INTERVAL_SECONDS))
+    return -60.0 <= age_seconds <= freshness_seconds
+
+
 def _bounded_stock_info_rows(ex, exchange: str, admitted_codes: tuple[str, ...]):
     """Resolve only explicitly admitted identities, never a market catalog."""
 
@@ -650,14 +728,22 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
             for row in (cached or ())
             if isinstance(row, dict)
         }
-        cache_covers_scope = bool(cached) and (
+        bounded_cache_covers_scope = bool(cached) and (
             catalog_mode == BOUNDED_VALIDATION_CATALOG
             and set(admitted_codes).issubset(cached_codes)
         )
+        full_cache_covers_scope = (
+            catalog_mode == FULL_IDENTITY_CATALOG
+            and full_catalog_authorized
+            and _recent_full_disk_cache_covers_scope(exchange, cached)
+        )
+        cache_covers_scope = bounded_cache_covers_scope or full_cache_covers_scope
         if cache_covers_scope:
             _mark_symbol_ready(exchange)
+            cache_kind = "近期全量目录" if full_cache_covers_scope else "准入目录"
             LogUtil.info(
-                f"市场 {exchange} 已由磁盘恢复 {len(cached)} 条，跳过本轮预加载，"
+                f"市场 {exchange} 已由磁盘恢复{cache_kind} {len(cached)} 条，"
+                f"跳过本轮预加载，"
                 f"下一轮按 PRELOAD_INTERVAL_SECONDS 定时刷新"
             )
             return

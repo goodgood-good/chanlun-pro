@@ -58,10 +58,12 @@ def _reset_symbol_state():
     with stock_list._stock_cache_lock:
         stock_list.stock_cache.clear()
         getattr(stock_list, "_symbol_states", {}).clear()
+        getattr(stock_list, "_disk_cache_metadata", {}).clear()
     yield
     with stock_list._stock_cache_lock:
         stock_list.stock_cache.clear()
         getattr(stock_list, "_symbol_states", {}).clear()
+        getattr(stock_list, "_disk_cache_metadata", {}).clear()
     with stock_list._preload_handle_lock:
         stock_list._symbol_runtime_closed = previous_runtime_closed
     stock_list.configure_symbol_catalog(
@@ -211,6 +213,66 @@ def test_full_catalog_first_round_replaces_bounded_disk_warm_cache(monkeypatch):
         "admitted_count": 1,
         "full_catalog_authorized": True,
     }
+
+
+def test_recent_verified_full_catalog_disk_cache_skips_first_refresh(
+    tmp_path, monkeypatch
+):
+    cache_file = tmp_path / "a.json"
+    monkeypatch.setattr(
+        stock_list, "_stocks_cache_file", lambda _market: str(cache_file)
+    )
+    monkeypatch.setattr(stock_list, "PRELOAD_EXCHANGES", ["a"])
+    monkeypatch.setattr(stock_list.time, "time", lambda: 10_000)
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=True,
+    )
+    stock_list._save_stocks_to_disk("a", list(RAW))
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache.clear()
+        stock_list._disk_cache_metadata.clear()
+
+    stock_list._warm_cache_from_disk()
+
+    def fail_if_exchange_is_opened(_market):
+        raise AssertionError("recent verified full cache must skip startup enumeration")
+
+    monkeypatch.setattr(stock_list, "get_exchange", fail_if_exchange_is_opened)
+    stock_list._preload_single_exchange("a", skip_if_disk_warm=True)
+
+    assert [
+        row["code"] for row in stock_list._cached_symbols_or_empty("a")
+    ] == ["SH.600000"]
+    assert stock_list.get_symbol_readiness("a")["status"] == "ready"
+
+
+def test_stale_verified_full_catalog_disk_cache_refreshes(monkeypatch):
+    stock_list.configure_symbol_catalog(
+        validation_codes=("SH.600000",),
+        full_catalog_authorized=True,
+    )
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = stock_list._process_stock_list(list(RAW))
+        stock_list._disk_cache_metadata["a"] = {
+            "verified": True,
+            "catalog_mode": stock_list.FULL_IDENTITY_CATALOG,
+            "updated_at": 1_000,
+            "count": len(RAW),
+            "scope_codes": (),
+        }
+    monkeypatch.setattr(
+        stock_list.time,
+        "time",
+        lambda: 1_000 + stock_list.PRELOAD_INTERVAL_SECONDS + 1,
+    )
+    fake = _FakeExchange(list(RAW))
+    monkeypatch.setattr(stock_list, "get_exchange", lambda _market: fake)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *_args: None)
+
+    stock_list._preload_single_exchange("a", skip_if_disk_warm=True)
+
+    assert fake.all_stocks_calls == 1
 
 
 def test_cold_validation_preload_never_enumerates_all_stocks(monkeypatch):

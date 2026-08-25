@@ -7,7 +7,9 @@ from cl_app.services import stock_list
 
 def test_disk_cache_preserves_stock_type_under_current_schema(tmp_path, monkeypatch):
     cache_file = tmp_path / "a_stocks.json"
-    monkeypatch.setattr(stock_list, "_stocks_cache_file", lambda _market: str(cache_file))
+    monkeypatch.setattr(
+        stock_list, "_stocks_cache_file", lambda _market: str(cache_file)
+    )
 
     stock_list._save_stocks_to_disk(
         "a",
@@ -19,4 +21,9 @@ def test_disk_cache_preserves_stock_type_under_current_schema(tmp_path, monkeypa
 
     payload = json.loads(cache_file.read_text(encoding="utf-8"))
     assert payload["schema"] == "chanlun-stock-list-cache"
+    assert payload["catalog_mode"] in {
+        stock_list.BOUNDED_VALIDATION_CATALOG,
+        stock_list.FULL_IDENTITY_CATALOG,
+    }
+    assert isinstance(payload["scope_codes"], list)
     assert [stock["type"] for stock in payload["stocks"]] == ["etf_cn", "stock_cn"]
