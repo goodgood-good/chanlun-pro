@@ -16,8 +16,10 @@ from chanlun.core.strict_structure.models import (
 )
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from chanlun.core.strict_structure.trend_assembler import (
+    _build,
     _geometric_movement_slices,
     assemble_trend_types,
+    normalize_trend_assembly,
 )
 from chanlun.core.strict_structure.strength import (
     StrengthSnapshot,
@@ -282,6 +284,57 @@ def test_same_direction_upgrade_boundary_is_combined_into_one_movement():
     assert result.pending_movements[0].constituent_units == values[13:]
 
 
+def test_same_direction_merge_absorbs_completion_return_as_internal_unit():
+    values, first, _second, _third = three_center_fixture()
+    source_units = (
+        *values[:6],
+        unit(6, "up", 125, 150),
+        unit(7, "down", 150, 135),
+        unit(8, "up", 135, 160),
+        unit(9, "down", 160, 145),
+        unit(10, "up", 145, 155),
+        unit(11, "down", 155, 150),
+    )
+    prefix_units = source_units[:5]
+    prefix = _build(
+        (first,),
+        prefix_units,
+        0,
+        TrendState.LOCKED,
+        first.completed_at,
+        max(first.available_at, *(item.available_at for item in prefix_units)),
+    )
+    successor_units = source_units[5:9]
+    successor_witness = source_units[9:12]
+    successor_confirmation = max(
+        item.confirmed_at for item in (*successor_units, *successor_witness)
+    )
+    successor = _build(
+        (),
+        successor_units,
+        0,
+        TrendState.LOCKED,
+        successor_confirmation,
+        max(item.available_at for item in (*successor_units, *successor_witness)),
+        completion_witness_units=successor_witness,
+    )
+
+    result = normalize_trend_assembly(
+        current_trends=(prefix, successor),
+        completed_trends=(),
+        decomposition_boundaries=(),
+        source_units=source_units,
+        structural_level=0,
+    )
+
+    assert len(result.current_trends) == 1
+    (merged,) = result.current_trends
+    assert merged.direction == "up"
+    assert merged.centers == (first,)
+    assert first.completion_return_unit in merged.constituent_units
+    assert merged.terminal_unit is source_units[8]
+
+
 def test_same_direction_ongoing_center_extends_forming_movement():
     values, first, second, _third = three_center_fixture()
     ongoing_centers = calculate_centers(values[:13], 0, SourceKind.SEGMENT).centers
@@ -454,6 +507,59 @@ class BoundaryStrength:
             source="macd",
             available_at=value.available_at,
         )
+
+
+def test_hard_boundary_keeps_same_direction_combined_suffix_pending():
+    values, first, second, _third = three_center_fixture()
+    boundary_result = assemble_trend_types(
+        (first, second),
+        values[:11],
+        0,
+        strength=BoundaryStrength(),
+    )
+    (boundary_trend,) = boundary_result.current_trends
+    (boundary,) = boundary_result.decomposition_boundaries
+    suffix_units = (
+        unit(11, "down", 170, 150),
+        unit(12, "up", 150, 180),
+        unit(13, "down", 180, 160),
+        unit(14, "up", 160, 190),
+        unit(15, "down", 190, 170),
+        unit(16, "up", 170, 185),
+        unit(17, "down", 185, 175),
+        unit(18, "up", 175, 200),
+        unit(19, "down", 200, 180),
+        unit(20, "up", 180, 195),
+        unit(21, "down", 195, 185),
+        unit(22, "up", 185, 192),
+    )
+
+    def geometric_trend(constituents, witnesses):
+        confirmation = max(item.confirmed_at for item in (*constituents, *witnesses))
+        return _build(
+            (),
+            constituents,
+            0,
+            TrendState.LOCKED,
+            confirmation,
+            max(item.available_at for item in (*constituents, *witnesses)),
+            completion_witness_units=witnesses,
+        )
+
+    local_up = geometric_trend(suffix_units[:4], suffix_units[4:7])
+    local_down = geometric_trend(suffix_units[4:9], suffix_units[9:12])
+    result = normalize_trend_assembly(
+        current_trends=(boundary_trend, local_up, local_down),
+        completed_trends=(),
+        decomposition_boundaries=(boundary,),
+        source_units=(*values[:11], *suffix_units),
+        structural_level=0,
+    )
+
+    assert result.current_trends == (boundary_trend,)
+    assert result.decomposition_boundaries == (boundary,)
+    assert len(result.pending_movements) == 1
+    assert result.pending_movements[0].constituent_units == suffix_units
 
 
 def test_three_unit_entry_waits_for_matching_three_unit_departure_boundary():

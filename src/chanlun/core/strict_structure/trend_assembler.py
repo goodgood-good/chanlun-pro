@@ -620,16 +620,30 @@ def _merge_trend_group(trends) -> TrendType:
         if not confirmations:
             raise ValueError("completed merged trend requires confirmation")
         confirmed_at = max(confirmations)
-    return _build(
-        centers,
-        constituent_units,
-        first.structural_level,
-        last.state,
-        confirmed_at,
-        max(trend.available_at for trend in values),
-        terminal_divergence=last.terminal_divergence,
-        completion_witness_units=last.completion_witness_units,
-    )
+    try:
+        return _build(
+            centers,
+            constituent_units,
+            first.structural_level,
+            last.state,
+            confirmed_at,
+            max(trend.available_at for trend in values),
+            terminal_divergence=last.terminal_divergence,
+            completion_witness_units=last.completion_witness_units,
+        )
+    except ValueError as exc:
+        if last.terminal_divergence is None:
+            raise
+        # The divergence was valid for the local raw group, but a soft
+        # same-direction boundary has now extended that group to the left.
+        # Direction, kind and whole-movement extreme requirements must all be
+        # re-proven for the canonical movement.  If any of those immutable
+        # evidence contracts fail, reject this candidate boundary and replay
+        # without it; it cannot split the alternating movement ledger.
+        raise IncompatibleDecompositionBoundaryError(
+            "terminal divergence is incompatible with merged movement",
+            last.terminal_divergence.signal_unit_id,
+        ) from exc
 
 
 def _rebind_decomposition_boundary(
@@ -721,21 +735,47 @@ def normalize_trend_assembly(
     for raw_trend in raw_trends:
         pending_group.append(raw_trend)
         while pending_group:
+            previous = None if not emitted else emitted[-1][1]
+            if previous is not None and not isinstance(previous, TrendType):
+                raise TypeError("invalid canonical trend accumulator")
+            previous_boundary = None if not emitted else emitted[-1][2]
+            pending_direction = _direction(
+                tuple(
+                    unit for trend in pending_group for unit in trend.constituent_units
+                )
+            )
+            if (
+                previous is not None
+                and previous_boundary is not None
+                and pending_direction == previous.direction
+            ):
+                if any(trend.trend_id in boundary_by_trend for trend in pending_group):
+                    boundary = next(
+                        boundary_by_trend[trend.trend_id]
+                        for trend in pending_group
+                        if trend.trend_id in boundary_by_trend
+                    )
+                    raise IncompatibleDecompositionBoundaryError(
+                        "same-direction successor cannot close a decomposition boundary",
+                        boundary.anchor_unit_id,
+                    )
+                # The suffix has not reversed the immutable boundary movement
+                # yet.  Do not try to promote its local completion witness to
+                # whole-movement evidence; keep every unit pending and retry as
+                # later raw movements extend the endpoint.
+                break
+
             candidate = _merge_trend_group(tuple(pending_group))
-            if not emitted:
+            if previous is None:
                 emit(pending_group, candidate)
                 pending_group = []
                 break
 
-            previous = emitted[-1][1]
-            if not isinstance(previous, TrendType):
-                raise TypeError("invalid canonical trend accumulator")
             if candidate.direction != previous.direction:
                 emit(pending_group, candidate)
                 pending_group = []
                 break
 
-            previous_boundary = emitted[-1][2]
             if previous_boundary is not None:
                 if any(trend.trend_id in boundary_by_trend for trend in pending_group):
                     boundary = next(

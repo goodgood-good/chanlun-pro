@@ -1526,14 +1526,20 @@ class TrendType:
         )
         if self.terminal_divergence is None:
             if self.centers:
-                if (
+                terminal_return_is_internal = (
                     terminal_return is not None
                     and terminal_return.unit_id in constituent_ids
-                ):
-                    raise ValueError(
-                        "terminal completion return belongs to the next trend"
-                    )
-                if (
+                )
+                if terminal_return_is_internal:
+                    # A soft same-direction boundary is removed by canonical
+                    # normalization.  Its completion return then becomes the
+                    # first internal unit of the absorbed continuation rather
+                    # than the start of a second formal movement.
+                    if self.constituent_units[-1] == terminal_return:
+                        raise ValueError(
+                            "internal completion return cannot terminate trend"
+                        )
+                elif (
                     terminal_leave is not None
                     and self.constituent_units[-1] != terminal_leave
                 ):
