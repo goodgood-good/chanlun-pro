@@ -3087,6 +3087,8 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         )
     worker_pool = gateway.health_snapshot()["structure_worker_pool"]
     assert worker_pool["priority_reserved_worker_count"] == 1
+    assert worker_pool["priority_burst_worker_count"] == expected_workers
+    assert worker_pool["priority_phase_exclusive"] is True
     assert worker_pool["candidate_worker_count"] == max(1, expected_workers - 1)
     assert worker_pool["candidate_released_worker_count"] == max(
         1, expected_workers - 1
@@ -3283,6 +3285,20 @@ def test_structure_worker_pool_co_locates_classified_sector_symbols() -> None:
         first,
         work_lane="priority",
     ) == first
+    priority_burst_keys = tuple(
+        gateway._lane_structure_affinity_key(  # noqa: SLF001
+            f"SH.{600000 + index:06d}",
+            first,
+            work_lane="priority_burst",
+        )
+        for index in range(16)
+    )
+    assert len(set(priority_burst_keys)) == len(priority_burst_keys)
+    assert gateway._structure_transports_for_lane("priority_burst") == workers  # noqa: SLF001
+    assert {
+        id(gateway._structure_transport(key, lane="priority_burst"))  # noqa: SLF001
+        for key in priority_burst_keys
+    } == {id(worker) for worker in workers}
     candidate_keys = tuple(
         gateway._lane_structure_affinity_key(  # noqa: SLF001
             f"SH.{600000 + index:06d}",
@@ -3299,7 +3315,7 @@ def test_structure_worker_pool_co_locates_classified_sector_symbols() -> None:
     gateway._structure_transports = (transport,)  # type: ignore[assignment]  # noqa: SLF001
     assert gateway.health_snapshot()["structure_worker_pool"][
         "affinity_contract_id"
-    ] == "priority-sector_candidate-sector-symbol-striped-v2"
+    ] == "priority-burst-symbol_candidate-sector-symbol-striped-v3"
 
 
 def test_direct_app_launch_uses_content_addressed_revision_for_worker_caches(

@@ -1956,7 +1956,7 @@ def _priority_affinity_striped_codes(
     *,
     sector_by_code: Mapping[str, SectorAssessment],
     worker_count: int,
-    candidate_symbol_striping: bool = False,
+    symbol_striping: bool = False,
 ) -> tuple[str, ...]:
     """Fill each urgent-monitor wave from distinct native worker shards.
 
@@ -1977,10 +1977,10 @@ def _priority_affinity_striped_codes(
             if sector is not None and sector.sector_id != "unclassified"
             else f"symbol:{code}"
         )
-        if candidate_symbol_striping and affinity_key.startswith("sector:"):
-            # Candidate workers each cache the same bounded sector composite.
-            # Add stable symbol entropy so one large supportive sector cannot
-            # pin an entire 5m batch to one process while the other sits idle.
+        if symbol_striping and affinity_key.startswith("sector:"):
+            # Live workers each cache the same bounded sector composite. Add
+            # stable symbol entropy so one large supportive sector cannot pin
+            # an entire priority/candidate wave to one process.
             affinity_key = f"{affinity_key}|symbol:{code}"
         buckets[_affinity_worker_slot(affinity_key, worker_count)].append(code)
     return tuple(
@@ -2575,9 +2575,9 @@ class TradingScreeningConfig:
 
     @property
     def effective_priority_worker_count(self) -> int:
-        """为精确执行所需的 1m 区间套保留一个独立分片。"""
+        """让精确执行所需的 1m 区间套优先使用全部结构分片。"""
 
-        return 1
+        return self.stock_worker_count
 
 
 def _configured_scope_allowlist(
@@ -6524,11 +6524,13 @@ class TradingScreeningService:
                             monitorable_mandatory_codes,
                             sector_by_code=sector_by_code,
                             worker_count=priority_worker_count,
+                            symbol_striping=True,
                         ),
                         *_priority_affinity_striped_codes(
                             selected_immediate_codes,
                             sector_by_code=sector_by_code,
                             worker_count=priority_worker_count,
+                            symbol_striping=True,
                         ),
                     )
                 )
@@ -7210,7 +7212,7 @@ class TradingScreeningService:
                 if admission_deadline_perf is not None and (
                     time.perf_counter() >= admission_deadline_perf
                     or (
-                        attempted
+                        (attempted or phase != "priority_1m")
                         and admission_deadline_perf - time.perf_counter()
                         <= admission_guard_seconds
                     )
@@ -7296,7 +7298,7 @@ class TradingScreeningService:
             ),
             sector_by_code=sector_by_code,
             worker_count=self._config.effective_candidate_worker_count,
-            candidate_symbol_striping=True,
+            symbol_striping=True,
         )
         regular_candidate_code_set = (
             set(regular_five_codes) | set(thirty_codes)
@@ -7307,51 +7309,30 @@ class TradingScreeningService:
         # 低频轮换按结构工作进程数分波，只在本分钟预算内接纳新波次。达到绝对
         # 截止点时只回收对应隔离分片；其余代码保持到期并在下一轮继续，且绝不能
         # 被记成已观察。上方物理波次上限确保一次性规则积压不会常态触碰该边界。
-        # Candidate preparation happens after sector routing, suspension probes,
-        # cadence selection and other priority-only work.  Charging that setup
-        # time to the candidate lane can leave the workers with only a fraction
-        # of their configured budget and repeatedly abort their first cold
-        # request.  Start the lane budget at admission time; the phase loop still
-        # refuses new waves at this deadline, while an already admitted native
-        # request has its own bounded execution deadline in the process gateway.
-        candidate_deadline_perf = (
+        # 精确 1m 区间套先独占全部结构分片，完成并发布后，普通 5m/30m 候选
+        # 才能使用非保留分片。两个阶段共用本轮绝对截止点，不能因串行化把下一次
+        # 一分钟监听推迟到第二个预算窗口；候选只使用优先阶段留下的安全余量。
+        attempted_minute_codes = evaluate_phase(
+            minute_codes,
+            phase="priority_1m",
+            admission_deadline_perf=priority_deadline_perf,
+        )
+        publish_completed_minute_results()
+        candidate_budget_deadline_perf = (
             time.perf_counter()
             + self._config.candidate_monitor_time_budget_seconds
         )
-        # 1m 与普通候选始终绑定到互不重叠的原生分片并行。优先分片保留其 1m
-        # 递归状态直至下一轮，避免候选大工作集污染缓存并触发回收后的冷重建。
-        if candidate_codes and minute_codes:
-            with ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="TradingCandidateCoordinator",
-            ) as coordinator:
-                candidate_future = coordinator.submit(
-                    evaluate_phase,
-                    candidate_codes,
-                    phase="candidate_cadence",
-                    admission_deadline_perf=candidate_deadline_perf,
-                )
-                attempted_minute_codes = evaluate_phase(
-                    minute_codes,
-                    phase="priority_1m",
-                    admission_deadline_perf=priority_deadline_perf,
-                )
-                publish_completed_minute_results()
-                attempted_candidate_codes = candidate_future.result()
-                publish_completed_candidate_results()
-        else:
-            attempted_minute_codes = evaluate_phase(
-                minute_codes,
-                phase="priority_1m",
-                admission_deadline_perf=priority_deadline_perf,
-            )
-            publish_completed_minute_results()
-            attempted_candidate_codes = evaluate_phase(
-                candidate_codes,
-                phase="candidate_cadence",
-                admission_deadline_perf=candidate_deadline_perf,
-            )
-            publish_completed_candidate_results()
+        candidate_deadline_perf = (
+            min(priority_deadline_perf, candidate_budget_deadline_perf)
+            if minute_codes
+            else candidate_budget_deadline_perf
+        )
+        attempted_candidate_codes = evaluate_phase(
+            candidate_codes,
+            phase="candidate_cadence",
+            admission_deadline_perf=candidate_deadline_perf,
+        )
+        publish_completed_candidate_results()
         attempted_minute_code_set = set(attempted_minute_codes)
         configured_locator_deferred_codes = tuple(
             code

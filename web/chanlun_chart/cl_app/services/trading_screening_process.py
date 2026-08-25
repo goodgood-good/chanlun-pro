@@ -87,7 +87,7 @@ _SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA = (
 _SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES = 256 * 1024
 _SECTOR_SNAPSHOT_PRODUCER_SCHEMA = "chanlun-native-sector-snapshot-producer"
 _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID = (
-    "priority-sector_candidate-sector-symbol-striped-v2"
+    "priority-burst-symbol_candidate-sector-symbol-striped-v3"
 )
 _DISPLAY_QUOTE_LOCK_WAIT_SECONDS = 2.0
 # The candidate phase deadline is an admission boundary, not a safe deadline
@@ -2143,17 +2143,23 @@ class NativeTradingDataGatewayProcessProxy:
         self,
         lane: str,
     ) -> tuple[NativeWorkerProcessTransport, ...]:
-        """返回互不争抢的盘中优先和普通候选工作进程集合。"""
+        """返回盘中控制、精确定位突发和普通候选工作进程集合。"""
 
         if lane == "priority":
+            # 轻量逐笔和停牌探针始终使用保留分片；这些调用发生在结构波次前，
+            # 不会与后续精确定位结构计算争抢同一传输锁。
             return (
                 self._structure_transports[:1]
                 if len(self._structure_transports) > 1
                 else self._structure_transports
             )
+        if lane == "priority_burst":
+            # 精确 1m 区间套拥有本轮最高优先级。服务层保证该波次结束后才会
+            # 接纳普通候选，因此可临时借用全部结构分片而不发生跨通道争抢。
+            return self._structure_transports
         if lane in {"candidate", "candidate_overflow"}:
-            # 只有一个分片时保持兼容；生产的三分片配置把第一个永久留给 1m，
-            # 其余分片并行服务正式 5m 候选。
+            # 只有一个分片时保持兼容；多分片配置把第一个永久从普通候选中保留，
+            # 其余分片并行服务正式 5m 候选。精确定位阶段可在候选开始前借用全部分片。
             candidates = (
                 self._structure_transports[1:]
                 if len(self._structure_transports) > 1
@@ -2211,18 +2217,20 @@ class NativeTradingDataGatewayProcessProxy:
         *,
         work_lane: str,
     ) -> str:
-        """Keep priority/coverage locality while balancing live candidates.
+        """Keep coverage locality while balancing live burst/candidate work.
 
-        Candidate workers can each retain the same bounded sector composite, so
-        stable symbol entropy prevents a large supportive sector from pinning a
-        whole cadence batch to one process.  The symbol suffix is deterministic;
-        each code therefore keeps its worker-local strict structure state across
-        later rounds instead of bouncing between shards.
+        Structure workers can each retain the same bounded sector composite, so
+        stable symbol entropy prevents one large supportive sector from pinning
+        a whole urgent or cadence batch to one process. The suffix is
+        deterministic; each code therefore keeps its worker-local strict state
+        across later rounds instead of bouncing between shards.
         """
 
-        if work_lane in {"candidate", "candidate_overflow"} and affinity_key.startswith(
-            "sector:"
-        ):
+        if work_lane in {
+            "priority_burst",
+            "candidate",
+            "candidate_overflow",
+        } and affinity_key.startswith("sector:"):
             return f"{affinity_key}|symbol:{code}"
         return affinity_key
 
@@ -3731,7 +3739,7 @@ class NativeTradingDataGatewayProcessProxy:
                 risk_evidence_cutoff,
                 "risk_evidence_cutoff",
             ),
-            work_lane="priority",
+            work_lane="priority_burst",
         )
 
     def candidate_structure_bundle_with_risk_cutoff(
@@ -3780,7 +3788,7 @@ class NativeTradingDataGatewayProcessProxy:
                     "risk_evidence_cutoff",
                 ),
                 deadline_monotonic=deadline_monotonic,
-                work_lane="priority",
+                work_lane="priority_burst",
             )
         except NativeScreeningWorkerDeadlineExceeded as exc:
             raise NativePriorityScreeningWorkerDeadlineExceeded(str(exc)) from exc
@@ -3970,11 +3978,13 @@ class NativeTradingDataGatewayProcessProxy:
             "affinity_contract_id": _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID,
             "configured_worker_count": len(worker_health),
             "priority_reserved_worker_count": 1 if worker_health else 0,
+            "priority_burst_worker_count": len(worker_health),
+            "priority_phase_exclusive": True,
             "candidate_worker_count": (
                 max(1, len(worker_health) - 1) if worker_health else 0
             ),
             # Kept for health-schema compatibility. Candidate work is never
-            # released onto priority shards during a live monitor round.
+            # released onto the reserved shard during a live monitor round.
             "candidate_released_worker_count": (
                 max(1, len(worker_health) - 1) if worker_health else 0
             ),

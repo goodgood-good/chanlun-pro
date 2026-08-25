@@ -647,7 +647,7 @@ def test_candidate_scan_order_stripes_one_large_sector_by_symbol() -> None:
         codes,
         sector_by_code={code: sector for code in codes},
         worker_count=worker_count,
-        candidate_symbol_striping=True,
+        symbol_striping=True,
     )
 
     assert [
@@ -7138,11 +7138,11 @@ def test_candidate_batch_groups_by_sector_without_changing_due_membership() -> N
     assert set(grouped) == set(codes)
 
 
-def test_formal_five_minute_lane_owns_all_non_priority_workers() -> None:
+def test_priority_burst_uses_all_workers_before_formal_five_minute_lane() -> None:
     production = TradingScreeningConfig(stock_worker_count=3)
     single_worker = TradingScreeningConfig(stock_worker_count=1)
 
-    assert production.effective_priority_worker_count == 1
+    assert production.effective_priority_worker_count == 3
     assert production.effective_candidate_worker_count == 2
     assert single_worker.effective_priority_worker_count == 1
     assert single_worker.effective_candidate_worker_count == 1
@@ -8238,7 +8238,7 @@ def test_cold_five_minute_batch_coalesces_missing_thirty_minute_context(
     assert health["candidate_monitor_thirty_minute"]["current_count"] == 2
 
 
-def test_priority_and_candidate_phases_use_isolated_resources_concurrently(
+def test_priority_phase_finishes_before_candidate_phase_uses_remaining_budget(
     tmp_path: Path,
 ) -> None:
     symbols = ("SZ.000001", "SZ.000002", "SZ.000003", "SZ.000004")
@@ -8286,7 +8286,7 @@ def test_priority_and_candidate_phases_use_isolated_resources_concurrently(
         ) -> SymbolStructureBundle:
             assert deadline_monotonic > time.perf_counter()
             events.append(("evaluate_priority", code))
-            priority_observed_candidate.append(candidate_started.wait(timeout=0.5))
+            priority_observed_candidate.append(candidate_started.is_set())
             return RecordingMarketData.structure_bundle_with_risk_cutoff(
                 self, code, **kwargs
             )
@@ -8373,14 +8373,19 @@ def test_priority_and_candidate_phases_use_isolated_resources_concurrently(
         ]
     }
     # 让 1m 优先标的在 5m/30m 节奏上尚未到期；跨过五个调度间隔后，
-    # 其余三只候选会形成多个波次，但始终留在独立候选分片。
+    # 其余三只候选会形成多个波次，但只能在优先波次发布后开始。
     service._candidate_monitor_five_last_success_at = {symbols[0]: AS_OF}
     service._candidate_monitor_thirty_last_success_at = {symbols[0]: AS_OF}
     service._priority_monitor_last_at = AS_OF - timedelta(minutes=5)
 
     service._run_priority_monitor(previous=previous, observed_at=AS_OF)
 
-    assert priority_observed_candidate == [True]
+    assert priority_observed_candidate == [False]
+    assert events.index(("evaluate_priority", symbols[0])) < next(
+        index
+        for index, event in enumerate(events)
+        if event[0] == "prepare_candidate"
+    )
     assert set(events) == {
         (
             "prepare_priority",
@@ -8471,6 +8476,94 @@ def test_candidate_time_budget_defers_unstarted_codes_without_marking_success(
     )
     assert restarted._candidate_monitor_last_deferred_codes == ()
     assert restarted._decision_rule_recheck_last_deferred_codes == codes[1:]
+
+
+def test_candidate_phase_cannot_open_a_second_budget_after_priority_deadline(
+    tmp_path: Path,
+) -> None:
+    codes = ("SZ.000001", "SZ.000002")
+
+    class SharedDeadlineMarket(RecordingMarketData):
+        def priority_structure_bundle_with_risk_cutoff_until(
+            self,
+            code: str,
+            *,
+            deadline_monotonic: float,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            del deadline_monotonic
+            time.sleep(0.07)
+            return super().structure_bundle_with_risk_cutoff(code, **kwargs)
+
+        def candidate_structure_bundle_with_risk_cutoff_until(
+            self,
+            code: str,
+            *,
+            deadline_monotonic: float,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            raise AssertionError(
+                f"候选 {code} 不得在 1m 已耗尽本轮截止时间后启动"
+            )
+
+    market = SharedDeadlineMarket()
+    catalog = MultiMemberSectorCatalog(codes)
+    catalog.batch = SectorAssessmentBatch(
+        assessments=(replace(eligible_sector(), regime="supportive"),),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            priority_monitor_time_budget_seconds=0.05,
+            candidate_monitor_time_budget_seconds=1.0,
+            max_monitor_symbols_per_refresh=2,
+            max_five_minute_candidate_symbols_per_refresh=2,
+            admitted_universe_codes=codes,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": "triggered-buy",
+                "code": codes[0],
+                "point_type": "1buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "anchor_at": AS_OF.isoformat(),
+                    "available_at": AS_OF.isoformat(),
+                    "confirmed_at": AS_OF.isoformat(),
+                },
+            },
+            {
+                "signal_id": "formed-buy",
+                "code": codes[1],
+                "point_type": "2buy",
+                "lifecycle_stage": "formed",
+            },
+        ]
+    }
+    service._candidate_monitor_five_last_success_at = {codes[0]: AS_OF}
+    service._candidate_monitor_thirty_last_success_at = {codes[0]: AS_OF}
+    service._priority_monitor_last_at = AS_OF - timedelta(minutes=5)
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    assert market.bundle_codes == [codes[0]]
+    assert service.health_snapshot()["candidate_monitor_last_deferred_codes"] == [
+        codes[1]
+    ]
 
 
 def test_candidate_budget_starts_when_candidate_lane_is_admitted(
@@ -9186,6 +9279,77 @@ def test_large_scope_priority_wave_covers_48_current_locators(
     assert health["priority_monitor_locator_capacity_sufficient"] is True
     assert health["priority_monitor_locator_runtime_verified"] is True
     assert health["priority_monitor_ready"] is True
+
+
+def test_priority_locator_wave_uses_all_configured_workers(
+    tmp_path: Path,
+) -> None:
+    codes = tuple(f"SZ.{index:06d}" for index in range(1, 9))
+
+    class ConcurrentPriorityMarket(RecordingMarketData):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def priority_structure_bundle_with_risk_cutoff_until(
+            self,
+            code: str,
+            *,
+            deadline_monotonic: float,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            assert deadline_monotonic > time.perf_counter()
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.04)
+                return super().structure_bundle_with_risk_cutoff(code, **kwargs)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    market = ConcurrentPriorityMarket()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(codes),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=4,
+            max_monitor_symbols_per_refresh=len(codes),
+            admitted_universe_codes=codes,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": f"triggered-{code}",
+                "code": code,
+                "side": "buy",
+                "point_type": "1buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "anchor_at": AS_OF.isoformat(),
+                    "available_at": AS_OF.isoformat(),
+                    "confirmed_at": AS_OF.isoformat(),
+                },
+            }
+            for code in codes
+        ]
+    }
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    assert market.max_active == 4
+    assert set(market.bundle_codes) == set(codes)
+    assert service.health_snapshot()["priority_monitor_locator_runtime_verified"] is True
 
 
 def test_optional_segment_deadline_miss_is_visible_and_fails_closed(
