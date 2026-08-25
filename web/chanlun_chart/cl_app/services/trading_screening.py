@@ -4466,12 +4466,22 @@ def _restored_snapshot_nested_member_codes(value: object) -> tuple[str, ...] | N
 
 
 def _explicit_strategy_subject_codes(value: object) -> tuple[str, ...]:
-    """Collect identities explicitly labelled as code/symbol in diagnostics."""
+    """Collect only A-share subjects explicitly labelled in diagnostics.
+
+    Sector diagnostics also expose source identifiers such as ``GICS3...``
+    through fields named ``code``.  Those identifiers describe the failing
+    catalog source, not a routable strategy subject, and must never widen the
+    persisted stock-scope identity.
+    """
 
     codes: list[str] = []
     if isinstance(value, Mapping):
         for key, nested in value.items():
-            if key in {"code", "symbol"} and isinstance(nested, str) and nested:
+            if (
+                key in {"code", "symbol"}
+                and isinstance(nested, str)
+                and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", nested) is not None
+            ):
                 codes.append(nested)
             else:
                 codes.extend(_explicit_strategy_subject_codes(nested))

@@ -1943,6 +1943,43 @@ def test_explicit_full_market_cache_keeps_direct_payload_restore_behavior(
     assert payload_reads == 1
 
 
+def test_full_market_snapshot_scope_ignores_sector_source_error_codes(
+    tmp_path: Path,
+) -> None:
+    config = TradingScreeningConfig(
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+    payload = service.snapshot()
+    payload["coverage_manifest"]["discovered_codes"] = ["SZ.000001"]
+    payload["errors"] = [
+        {
+            "phase": "sector_analysis",
+            "code": "GICS3sector-source-key",
+            "reason_code": "sector_catalog_failed",
+            "details": {"symbol": "SH.600000"},
+        }
+    ]
+
+    service._finalize_snapshot_identity(payload)
+
+    assert payload["admitted_universe_codes"] == ["SZ.000001", "SH.600000"]
+    assert trading_screening_subject._restored_snapshot_scope_is_valid(
+        payload,
+        config,
+    )
+
+
 def test_full_market_restart_rejects_bounded_generation_and_continuity(
     tmp_path: Path,
 ) -> None:
