@@ -48,6 +48,7 @@ _SOURCE_FILES = (
     "web/chanlun_chart/cl_app/services/trading_screening_gateway.py",
     "web/chanlun_chart/cl_app/services/trading_screening_native_worker.py",
     "web/chanlun_chart/cl_app/services/trading_screening_process.py",
+    "web/chanlun_chart/cl_app/services/trading_screening_runtime_policy.py",
 )
 FORWARD_PIPELINE_TOOL_PATHS = (
     "tools/audit_qmt_warmup_convergence.py",

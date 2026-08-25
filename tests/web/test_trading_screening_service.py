@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -2228,6 +2229,137 @@ def test_cache_from_previous_decision_source_is_recomputed_not_reused(
     assert recovery_health["full_coverage_auto_recovery_reason"] is None
 
 
+def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    market = ActionableMarketData()
+    first = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(formal_selection_required=False),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    published = first.refresh_now()
+    current_source_id = first._decision_source_snapshot_id
+    assert current_source_id == (
+        "sha256:7827bd74e2d369d9f84744c9a088a6cf2162a2f323b5a356fdcb9bd9d80a5209"
+    )
+    legacy_source_id = (
+        "sha256:363824d1d15ab9b95a5f1918d53f2d5f9f98c160a3c6b7e51f4e4390bb1264ac"
+    )
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    persisted["decision_source_snapshot_id"] = legacy_source_id
+    persisted.pop("decision_source_snapshot", None)
+    persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        persisted
+    )
+    legacy_snapshot_sha256 = persisted["snapshot_content_sha256"]
+    cache_path.write_text(json.dumps(persisted), encoding="utf-8")
+    first._persist_cache_scope_sidecar(cache_path, persisted)
+    current_generations = first._generation_paths()
+    assert len(current_generations) == 1
+    for generation in current_generations:
+        first._cache_scope_sidecar_path(generation).unlink(missing_ok=True)
+        generation.unlink()
+    legacy_generation = first._cache_generation_directory() / (
+        legacy_snapshot_sha256.removeprefix("sha256:") + ".json"
+    )
+    legacy_generation.write_text(json.dumps(persisted), encoding="utf-8")
+    first._persist_cache_scope_sidecar(legacy_generation, persisted)
+
+    restarted_market = RecordingMarketData()
+    restarted = TradingScreeningService(
+        market_data=restarted_market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(formal_selection_required=False),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    restored = restarted.snapshot()
+    health = restarted.health_snapshot()
+    assert restarted_market.bundle_codes == []
+    assert restored["available"] is True
+    assert restored["scan_state"] == "complete"
+    assert restored["signals"] == published["signals"]
+    assert restored["decision_source_snapshot_id"] == current_source_id
+    assert restored["snapshot_content_sha256"] != legacy_snapshot_sha256
+    assert health["cache_decision_source_migrated_from"] == legacy_source_id
+    assert health["cache_decision_source_migration_persist_error"] is None
+    on_disk = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert on_disk["decision_source_snapshot_id"] == current_source_id
+    assert on_disk["snapshot_content_sha256"] == restored["snapshot_content_sha256"]
+    assert not legacy_generation.exists()
+    current_generations = restarted._generation_paths()
+    assert len(current_generations) == 1
+    assert current_generations[0].stem == restored[
+        "snapshot_content_sha256"
+    ].removeprefix("sha256:")
+
+    # A physically missing main pointer must be able to recover the same
+    # reviewed transition from the immutable generation instead of launching
+    # a market-wide rebuild.
+    for generation in current_generations:
+        restarted._cache_scope_sidecar_path(generation).unlink(missing_ok=True)
+        generation.unlink()
+    legacy_generation.write_text(json.dumps(persisted), encoding="utf-8")
+    restarted._persist_cache_scope_sidecar(legacy_generation, persisted)
+    restarted._cache_scope_sidecar_path(cache_path).unlink(missing_ok=True)
+    cache_path.unlink()
+    generation_market = RecordingMarketData()
+    recovered_from_generation = TradingScreeningService(
+        market_data=generation_market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(formal_selection_required=False),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    generation_snapshot = recovered_from_generation.snapshot()
+    generation_health = recovered_from_generation.health_snapshot()
+    assert generation_market.bundle_codes == []
+    assert generation_snapshot["available"] is True
+    assert generation_snapshot["decision_source_snapshot_id"] == current_source_id
+    assert generation_health["cache_recovered_from_generation"] == str(
+        legacy_generation
+    )
+    assert generation_health["cache_decision_source_migrated_from"] == legacy_source_id
+
+
+def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=ActionableMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(formal_selection_required=False),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    legacy = service.refresh_now()
+    legacy["decision_source_snapshot_id"] = (
+        "sha256:363824d1d15ab9b95a5f1918d53f2d5f9f98c160a3c6b7e51f4e4390bb1264ac"
+    )
+    legacy.pop("decision_source_snapshot", None)
+    legacy["scan_state"] = "in_progress"
+    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        legacy
+    )
+    original = copy.deepcopy(legacy)
+
+    assert service._operationally_migrated_cache(legacy) is None
+    assert legacy == original
+
+
 def test_previous_close_preselection_continuity_keeps_current_notifications_live(
     tmp_path: Path,
 ) -> None:
@@ -2253,7 +2385,22 @@ def test_previous_close_preselection_continuity_keeps_current_notifications_live
     assert {row["code"] for row in published["signals"]} == set(symbols)
 
     persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-    persisted["decision_source_snapshot_id"] = "sha256:" + "9" * 64
+    previous_source = persisted["decision_source_snapshot"]
+    changed_source = next(
+        row
+        for row in previous_source["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    changed_source["sha256"] = "sha256:" + "9" * 64
+    previous_source["aggregate_sha256"] = sha256_json(
+        {
+            "schema": previous_source["schema"],
+            "files": previous_source["files"],
+        }
+    )
+    persisted["decision_source_snapshot_id"] = previous_source[
+        "aggregate_sha256"
+    ]
     persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         persisted
     )
@@ -8564,6 +8711,85 @@ def test_candidate_phase_cannot_open_a_second_budget_after_priority_deadline(
     assert service.health_snapshot()["candidate_monitor_last_deferred_codes"] == [
         codes[1]
     ]
+
+
+def test_closed_startup_candidate_catchup_uses_its_independent_budget(
+    tmp_path: Path,
+) -> None:
+    closed_at = AS_OF.replace(year=2026, month=8, day=16, hour=10, minute=0)
+    codes = ("SZ.000001", "SZ.000002")
+
+    class ClosedStartupMarket(RecordingMarketData):
+        def priority_structure_bundle_with_risk_cutoff_until(
+            self,
+            code: str,
+            *,
+            deadline_monotonic: float,
+            **kwargs,
+        ) -> SymbolStructureBundle:
+            del deadline_monotonic
+            time.sleep(0.07)
+            return super().structure_bundle_with_risk_cutoff(code, **kwargs)
+
+    market = ClosedStartupMarket()
+    catalog = MultiMemberSectorCatalog(codes)
+    catalog.batch = SectorAssessmentBatch(
+        assessments=(replace(eligible_sector(), regime="supportive"),),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: closed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            priority_monitor_time_budget_seconds=0.05,
+            candidate_monitor_time_budget_seconds=1.0,
+            max_monitor_symbols_per_refresh=2,
+            max_five_minute_candidate_symbols_per_refresh=2,
+            admitted_universe_codes=codes,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": "triggered-buy",
+                "code": codes[0],
+                "point_type": "1buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "anchor_at": closed_at.isoformat(),
+                    "available_at": closed_at.isoformat(),
+                    "confirmed_at": closed_at.isoformat(),
+                },
+            },
+            {
+                "signal_id": "formed-buy",
+                "code": codes[1],
+                "point_type": "2buy",
+                "lifecycle_stage": "formed",
+            },
+        ]
+    }
+    service._candidate_monitor_five_last_success_at = {codes[0]: closed_at}
+    service._candidate_monitor_thirty_last_success_at = {codes[0]: closed_at}
+
+    service._run_priority_monitor(
+        previous=previous,
+        observed_at=closed_at,
+        force_startup_bootstrap=True,
+    )
+
+    assert market.bundle_codes == list(codes)
+    assert service.health_snapshot()["candidate_monitor_last_deferred_codes"] == []
 
 
 def test_candidate_budget_starts_when_candidate_lane_is_admitted(

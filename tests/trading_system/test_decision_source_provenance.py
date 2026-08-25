@@ -115,6 +115,14 @@ def test_full_integration_snapshot_still_binds_forward_adapters() -> None:
     )
     assert "web/chanlun_chart/cl_app/services/trading_screening.py" in paths
     assert (
+        "web/chanlun_chart/cl_app/services/trading_screening_runtime_policy.py"
+        in paths
+    )
+    assert (
+        "web/chanlun_chart/cl_app/services/trading_screening_source_migrations.py"
+        not in paths
+    )
+    assert (
         "web/chanlun_chart/cl_app/services/trading_screening_presentation.py"
         not in paths
     )

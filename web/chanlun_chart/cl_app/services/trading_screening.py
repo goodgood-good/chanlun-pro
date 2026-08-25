@@ -34,7 +34,7 @@ from chanlun.decision_support.trading_system.engine import (
 )
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     current_decision_source_snapshot,
-    decision_source_snapshot_id,
+    decision_source_snapshot_id as calculate_decision_source_snapshot_id,
 )
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     HumanAssistedDecisionCore,
@@ -178,6 +178,12 @@ from cl_app.services.trading_screening_gateway import (
 from cl_app.services.trading_screening_presentation import (
     presentation_signal_document as _presentation_signal_document,
 )
+from cl_app.services.trading_screening_runtime_policy import (
+    candidate_monitor_deadline_perf,
+)
+from cl_app.services.trading_screening_source_migrations import (
+    orchestration_source_migration_allowed,
+)
 from cl_app.services.live_review_runtime_contract import (
     validate_live_review_snapshot,
 )
@@ -274,11 +280,19 @@ _DECISION_SOURCE_UNSPECIFIED = object()
 
 
 @lru_cache(maxsize=4)
-def _current_review_decision_source_id(project_root: str) -> str:
-    """为当前仓库冻结一次应用进程实现身份。"""
+def _current_review_decision_source(
+    project_root: str,
+) -> tuple[dict[str, object], str]:
+    """为当前仓库冻结一次应用进程实现身份和可比较清单。"""
 
     snapshot = current_decision_source_snapshot(Path(project_root))
-    return decision_source_snapshot_id(snapshot)
+    snapshot_id = calculate_decision_source_snapshot_id(snapshot)
+    json_native_snapshot = json.loads(
+        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    )
+    if not isinstance(json_native_snapshot, dict):
+        raise TypeError("decision source snapshot must serialize to an object")
+    return json_native_snapshot, snapshot_id
 
 
 @lru_cache(maxsize=32)
@@ -4150,6 +4164,19 @@ def _cache_contract_is_valid(
             and value.get("decision_source_snapshot_id") == decision_source_snapshot_id
         )
     )
+    embedded_decision_source = (
+        value.get("decision_source_snapshot")
+        if isinstance(value, Mapping)
+        else None
+    )
+    try:
+        embedded_decision_source_valid = bool(
+            embedded_decision_source is None
+            or calculate_decision_source_snapshot_id(embedded_decision_source)
+            == value.get("decision_source_snapshot_id")
+        )
+    except (TypeError, ValueError):
+        embedded_decision_source_valid = False
     return bool(
         isinstance(value, Mapping)
         and value.get("schema") == SCHEMA
@@ -4160,6 +4187,7 @@ def _cache_contract_is_valid(
         and value.get("no_order_execution") is True
         and value.get("decision_core_id") == decision_core_id
         and decision_source_current
+        and embedded_decision_source_valid
         and value.get("selection_research_revision") == selection_research_revision
         and value.get("screening_policy") == _screening_policy_document()
         and value.get("screening_policy_id") == _screening_policy_id()
@@ -4557,12 +4585,15 @@ class TradingScreeningService:
         self._selection_research_revision = sha256_json(
             selection_research_ledger_document(self._selection_research)
         )
+        self._decision_source_snapshot: dict[str, object] | None = None
         self._decision_source_snapshot_id: str | None = None
         try:
             project_root = Path(__file__).resolve().parents[4]
-            self._decision_source_snapshot_id = _current_review_decision_source_id(
+            decision_source, decision_source_id = _current_review_decision_source(
                 str(project_root)
             )
+            self._decision_source_snapshot = copy.deepcopy(decision_source)
+            self._decision_source_snapshot_id = decision_source_id
         except (OSError, RuntimeError, TypeError, ValueError):
             # 缺少实现身份时不能恢复持久化决策结论；服务仍可从空状态重算。
             self._decision_source_snapshot_id = None
@@ -4581,6 +4612,9 @@ class TradingScreeningService:
         self._cache_recovered_from_generation: str | None = None
         self._cache_generation_count = 0
         self._cache_generation_error: str | None = None
+        self._cache_decision_source_migrated_from: str | None = None
+        self._cache_decision_source_migrated_snapshot_sha256_from: str | None = None
+        self._cache_decision_source_migration_persist_error: str | None = None
         self._last_incomplete_checkpoint_at: datetime | None = None
         self._state_lock = RLock()
         self._scan_lock = Lock()
@@ -4798,6 +4832,10 @@ class TradingScreeningService:
         self._snapshot["decision_source_snapshot_id"] = (
             self._decision_source_snapshot_id
         )
+        if self._decision_source_snapshot is not None:
+            self._snapshot["decision_source_snapshot"] = copy.deepcopy(
+                self._decision_source_snapshot
+            )
         self._snapshot["selection_research_revision"] = (
             self._selection_research_revision
         )
@@ -4850,6 +4888,39 @@ class TradingScreeningService:
         )
         if callable(progress_registrar):
             progress_registrar(self._record_native_progress)
+        if self._cache_decision_source_migrated_from is not None:
+            try:
+                self._persist_atomic(self._snapshot, cache_valid=True)
+            except (OSError, TypeError, ValueError) as exc:
+                # The authenticated snapshot remains usable in this process;
+                # expose persistence failure so the next restart cannot make
+                # the migration appear durable when it was not.
+                self._cache_decision_source_migration_persist_error = (
+                    f"{type(exc).__name__}: {str(exc)[:160]}"
+                )
+            else:
+                legacy_sha256 = (
+                    self._cache_decision_source_migrated_snapshot_sha256_from
+                )
+                current_sha256 = self._snapshot.get("snapshot_content_sha256")
+                if (
+                    isinstance(legacy_sha256, str)
+                    and legacy_sha256.startswith("sha256:")
+                    and legacy_sha256 != current_sha256
+                ):
+                    legacy_path = self._cache_generation_directory() / (
+                        legacy_sha256.removeprefix("sha256:") + ".json"
+                    )
+                    try:
+                        legacy_path.unlink(missing_ok=True)
+                        self._cache_scope_sidecar_path(legacy_path).unlink(
+                            missing_ok=True
+                        )
+                        self._cache_generation_count = len(self._generation_paths())
+                    except OSError as exc:
+                        self._cache_generation_error = (
+                            f"{type(exc).__name__}: {str(exc)[:160]}"
+                        )
 
     def _native_sector_assessments(
         self,
@@ -7332,10 +7403,12 @@ class TradingScreeningService:
             time.perf_counter()
             + self._config.candidate_monitor_time_budget_seconds
         )
-        candidate_deadline_perf = (
-            min(priority_deadline_perf, candidate_budget_deadline_perf)
-            if minute_codes
-            else candidate_budget_deadline_perf
+        candidate_deadline_perf = candidate_monitor_deadline_perf(
+            priority_deadline_perf=priority_deadline_perf,
+            candidate_budget_deadline_perf=candidate_budget_deadline_perf,
+            minute_codes_present=bool(minute_codes),
+            force_startup_bootstrap=force_startup_bootstrap,
+            compute_window_open=_priority_monitor_compute_window_open(observed_at),
         )
         attempted_candidate_codes = evaluate_phase(
             candidate_codes,
@@ -8328,6 +8401,75 @@ class TradingScreeningService:
             == sha256_json(nested_member_codes)
         )
 
+    def _operationally_migrated_cache(
+        self,
+        value: dict[str, object],
+    ) -> dict[str, object] | None:
+        """Retag one exact orchestration-only source transition without a scan."""
+
+        cached_source_id = value.get("decision_source_snapshot_id")
+        current_source_id = self._decision_source_snapshot_id
+        cached_snapshot_sha256 = value.get("snapshot_content_sha256")
+        manifest = value.get("coverage_manifest")
+        audit = value.get("scan_audit")
+        data_quality = value.get("data_quality")
+        if (
+            not orchestration_source_migration_allowed(
+                cached_decision_source_snapshot_id=cached_source_id,
+                current_decision_source_snapshot_id=current_source_id,
+                cached_decision_source_snapshot=value.get(
+                    "decision_source_snapshot"
+                ),
+                current_decision_source_snapshot=self._decision_source_snapshot,
+            )
+            or value.get("available") is not True
+            or value.get("scan_state") != "complete"
+            or value.get("full_coverage_state") != "complete"
+            or not isinstance(manifest, Mapping)
+            or manifest.get("complete") is not True
+            or not isinstance(audit, Mapping)
+            or audit.get("coverage_cycle_complete") is not True
+            or not isinstance(data_quality, Mapping)
+            or data_quality.get("complete") is not True
+            or not _cache_is_valid(
+                value,
+                self._config,
+                self._decision_core_id,
+                self._selection_research_revision,
+            )
+            or not self._coverage_epoch_identity_valid(value)
+            or not isinstance(current_source_id, str)
+        ):
+            return None
+        # Do not mutate the authenticated legacy document until the replacement
+        # has passed the complete current contract.  A failed migration must
+        # remain distinguishable from a current-source cache corruption.
+        migrated = dict(value)
+        migrated["decision_source_snapshot_id"] = current_source_id
+        migrated["decision_source_snapshot"] = copy.deepcopy(
+            self._decision_source_snapshot
+        )
+        migrated["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+            migrated
+        )
+        if not _cache_is_valid(
+            migrated,
+            self._config,
+            self._decision_core_id,
+            self._selection_research_revision,
+            current_source_id,
+        ):
+            return None
+        self._cache_decision_source_migrated_from = str(cached_source_id)
+        self._cache_decision_source_migrated_snapshot_sha256_from = (
+            str(cached_snapshot_sha256)
+            if isinstance(cached_snapshot_sha256, str)
+            else None
+        )
+        self._quarantined_cache_decision_core_id = None
+        self._quarantined_cache_reason = None
+        return migrated
+
     def _valid_cache_from_path(self, path: Path) -> dict[str, object] | None:
         if not self._cache_scope_sidecar_allows_payload(path):
             return None
@@ -8341,18 +8483,17 @@ class TradingScreeningService:
             return None
         # ``json.loads`` 已生成全新对象树；此处深拷贝超过 100 MiB 的已校验快照只会
         # 让启动内存翻倍，不会增加隔离性，因为返回树本身即服务私有的不可变发布。
-        return (
-            value
-            if isinstance(value, dict)
-            and _cache_is_valid(
-                value,
-                self._config,
-                self._decision_core_id,
-                self._selection_research_revision,
-                self._decision_source_snapshot_id,
-            )
-            else None
-        )
+        if not isinstance(value, dict):
+            return None
+        if _cache_is_valid(
+            value,
+            self._config,
+            self._decision_core_id,
+            self._selection_research_revision,
+            self._decision_source_snapshot_id,
+        ):
+            return value
+        return self._operationally_migrated_cache(value)
 
     def _generation_paths(self) -> tuple[Path, ...]:
         directory = self._cache_generation_directory()
@@ -8712,17 +8853,24 @@ class TradingScreeningService:
             candidate = self._cache_document_from_path(path)
             if candidate is None:
                 continue
-            if recover_current_cache and _cache_is_valid(
-                candidate,
-                self._config,
-                self._decision_core_id,
-                self._selection_research_revision,
-                self._decision_source_snapshot_id,
-            ):
+            recovered = None
+            if recover_current_cache:
+                recovered = (
+                    candidate
+                    if _cache_is_valid(
+                        candidate,
+                        self._config,
+                        self._decision_core_id,
+                        self._selection_research_revision,
+                        self._decision_source_snapshot_id,
+                    )
+                    else self._operationally_migrated_cache(candidate)
+                )
+            if recovered is not None:
                 if continuity_installed:
                     self._clear_preselection_continuity()
                 self._cache_recovered_from_generation = str(path)
-                return candidate
+                return recovered
             if not continuity_installed:
                 continuity_installed = self._install_preselection_continuity(
                     candidate,
@@ -8758,6 +8906,9 @@ class TradingScreeningService:
                 )
                 return None
             if isinstance(current_value, dict):
+                migrated_value = self._operationally_migrated_cache(current_value)
+                if migrated_value is not None:
+                    return migrated_value
                 current_manifest = current_value.get("coverage_manifest")
                 current_epoch_id = current_value.get("coverage_epoch_id")
                 current_content_identity_valid = bool(
@@ -10881,6 +11032,15 @@ class TradingScreeningService:
             "cache_recovered_from_generation": (self._cache_recovered_from_generation),
             "cache_generation_count": self._cache_generation_count,
             "cache_generation_error": self._cache_generation_error,
+            "cache_decision_source_migrated_from": (
+                self._cache_decision_source_migrated_from
+            ),
+            "cache_decision_source_migrated_snapshot_sha256_from": (
+                self._cache_decision_source_migrated_snapshot_sha256_from
+            ),
+            "cache_decision_source_migration_persist_error": (
+                self._cache_decision_source_migration_persist_error
+            ),
             "incomplete_checkpoint_interval_seconds": (
                 self._config.incomplete_checkpoint_interval_seconds
             ),
@@ -12256,6 +12416,10 @@ class TradingScreeningService:
             else (scope_codes or ())
         )
         payload["decision_source_snapshot_id"] = self._decision_source_snapshot_id
+        if self._decision_source_snapshot is not None:
+            payload["decision_source_snapshot"] = copy.deepcopy(
+                self._decision_source_snapshot
+            )
         payload["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
             payload
         )
