@@ -2273,6 +2273,64 @@ def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
     assert cache_health["content_sha256"] == document["content_sha256"]
 
 
+def test_full_market_sector_cache_identity_survives_json_key_sorting(
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    revision = "head.tree.canonical-subject-identity"
+    snapshot = _atomic_snapshot(as_of)
+    snapshot["members"] = {
+        "sector-z": ("SZ.000001", "SH.600000"),
+        "TDX.880301": ("BJ.430001",),
+        "SH.688001": (),
+        "sector-a": ("SH.600001", "SZ.000001"),
+    }
+    snapshot["symbol_names"] = {"SZ.300001": "test symbol"}
+    snapshot["changed_bars"] = (BarKey("SH.688001", "5m", as_of),)
+    first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(snapshot),
+        sector_cache_path=cache_path,
+        sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
+    expected = first.native_sector_assessments(as_of=as_of)
+    proof = json.loads(
+        first._sector_cache_scope_sidecar_path(cache_path).read_text(  # noqa: SLF001
+            encoding="utf-8"
+        )
+    )
+
+    assert proof["strategy_subject_codes"] == [
+        "BJ.430001",
+        "SH.600000",
+        "SH.600001",
+        "SH.688001",
+        "SZ.000001",
+        "SZ.300001",
+    ]
+    # Earlier writers retained the worker's insertion order.  The order is not
+    # semantic; the exact unique stock set must remain sufficient for restore.
+    proof["strategy_subject_codes"].reverse()
+    first._sector_cache_scope_sidecar_path(cache_path).write_text(  # noqa: SLF001
+        json.dumps(proof),
+        encoding="utf-8",
+    )
+
+    unavailable = _AtomicTransport(_atomic_snapshot(as_of))
+    unavailable.available = False
+    second = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=unavailable,
+        sector_cache_path=cache_path,
+        sector_cache_revision=revision,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
+
+    assert second.native_sector_assessments(as_of=as_of) == expected
+    assert unavailable.calls == []
+    assert second.health_snapshot()["sector_snapshot_cache"]["state"] == "hit"
+
+
 def test_bounded_sector_cache_rejects_legacy_payload_before_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

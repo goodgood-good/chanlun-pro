@@ -2505,12 +2505,17 @@ class NativeTradingDataGatewayProcessProxy:
             *value.symbol_names,
             *(bar.code for bar in value.changed_bars),
         ]
+        # The cache payload is serialized with sorted mapping keys.  Canonicalize
+        # the subject identity independently of the worker's sector insertion
+        # order so a cache can validate after the JSON round trip that wrote it.
         return tuple(
-            dict.fromkeys(
-                code
-                for code in candidates
-                if isinstance(code, str)
-                and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+            sorted(
+                {
+                    code
+                    for code in candidates
+                    if isinstance(code, str)
+                    and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+                }
             )
         )
 
@@ -2648,6 +2653,11 @@ class NativeTradingDataGatewayProcessProxy:
             if self._sector_cache_scope_mode == "FULL_MARKET"
             else self._sector_cache_admitted_codes
         )
+        sidecar_codes = (
+            document.get("strategy_subject_codes")
+            if isinstance(document, Mapping)
+            else None
+        )
         return bool(
             isinstance(document, Mapping)
             and document.get("payload_content_sha256") == content_sha256
@@ -2661,8 +2671,11 @@ class NativeTradingDataGatewayProcessProxy:
                 else list(expected_admitted_codes)
             )
             and value.admitted_codes == expected_admitted_codes
-            and document.get("strategy_subject_codes")
-            == list(self._sector_cache_strategy_subject_codes(value))
+            and isinstance(sidecar_codes, list)
+            and all(isinstance(code, str) for code in sidecar_codes)
+            and len(sidecar_codes) == len(set(sidecar_codes))
+            and tuple(sorted(sidecar_codes))
+            == self._sector_cache_strategy_subject_codes(value)
         )
 
     def _persist_sector_cache_scope_sidecar(
