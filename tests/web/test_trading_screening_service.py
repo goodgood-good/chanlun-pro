@@ -6953,6 +6953,61 @@ def test_candidate_scheduler_covers_a_five_minute_universe_once_per_cadence() ->
     assert set(last_success_at) == set(universe)
 
 
+def test_candidate_scheduler_drains_lumpy_deadline_before_capacity_gap() -> None:
+    universe = tuple(f"SZ.{value:06d}" for value in range(1, 21))
+    observed_at = AS_OF.replace(hour=10, minute=0, second=2, microsecond=0)
+    last_success_at = {
+        code: observed_at - timedelta(seconds=239) for code in universe
+    }
+
+    # All twenty rows have the same deadline.  Only twelve fit in the next
+    # physical wave, so eight must use otherwise-idle capacity now even though
+    # their nominal five-minute target has not arrived yet.
+    first = _take_due_candidate_batch(
+        universe,
+        last_success_at=last_success_at,
+        observed_at=observed_at,
+        target_seconds=300,
+        monitor_interval_seconds=60,
+        max_symbols=12,
+        execution_grace_seconds=50,
+        previous_monitor_at=observed_at - timedelta(seconds=60),
+    )
+    assert first == universe[:8]
+    last_success_at.update({code: observed_at for code in first})
+
+    next_observed_at = observed_at + timedelta(seconds=60)
+    second = _take_due_candidate_batch(
+        universe,
+        last_success_at=last_success_at,
+        observed_at=next_observed_at,
+        target_seconds=300,
+        monitor_interval_seconds=60,
+        max_symbols=12,
+        execution_grace_seconds=50,
+        previous_monitor_at=observed_at,
+    )
+    assert second == universe[8:]
+
+
+def test_candidate_scheduler_admits_one_second_cadence_jitter() -> None:
+    code = "SZ.000001"
+    observed_at = AS_OF.replace(hour=10, minute=0, second=2, microsecond=0)
+
+    batch = _take_due_candidate_batch(
+        (code,),
+        last_success_at={code: observed_at - timedelta(seconds=299)},
+        observed_at=observed_at,
+        target_seconds=300,
+        monitor_interval_seconds=60,
+        max_symbols=12,
+        execution_grace_seconds=50,
+        previous_monitor_at=observed_at - timedelta(seconds=60),
+    )
+
+    assert batch == (code,)
+
+
 def test_candidate_cadence_is_independent_from_transport_retry_ttl() -> None:
     valid = TradingScreeningConfig(
         five_minute_candidate_target_seconds=570,

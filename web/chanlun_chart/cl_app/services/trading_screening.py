@@ -1523,6 +1523,7 @@ def _take_due_candidate_batch(
     target_seconds: int,
     monitor_interval_seconds: int,
     max_symbols: int,
+    execution_grace_seconds: float = 0.0,
     excluded_codes: frozenset[str] = frozenset(),
     previous_monitor_at: datetime | None = None,
 ) -> tuple[str, ...]:
@@ -1536,7 +1537,14 @@ def _take_due_candidate_batch(
 
     if target_seconds <= 0 or monitor_interval_seconds <= 0 or max_symbols <= 0:
         raise ValueError("candidate cadence limits must be positive")
+    if (
+        isinstance(execution_grace_seconds, bool)
+        or not isinstance(execution_grace_seconds, (int, float))
+        or execution_grace_seconds < 0
+    ):
+        raise ValueError("candidate execution grace must be non-negative")
     observed = normalize_datetime(observed_at, "observed_at")
+    maximum_age_seconds = target_seconds + float(execution_grace_seconds)
     values = tuple(
         code for code in dict.fromkeys(universe) if code not in excluded_codes
     )
@@ -1561,25 +1569,69 @@ def _take_due_candidate_batch(
     # ``universe`` 已由生命周期紧迫度排序。未观察标的以及同一轮完成的标的会有
     # 完全相同的时间键；此时必须保留该业务顺序，不能再按股票代码重排，否则冷启动
     # 和容量退化时会把已触发/已形成信号随机淹没在普通候选中。
-    due: list[tuple[bool, datetime, int, str]] = []
-    minimum = datetime.min.replace(tzinfo=observed.tzinfo)
+    # Preserve lifecycle urgency for missing/equal-time rows, while otherwise
+    # scheduling by earliest observation deadline. Looking only for
+    # ``age >= target`` loses a row whenever consecutive minute rounds differ
+    # by a second (for example 14:55:03 -> 15:00:02). It also wastes spare
+    # capacity before a lumpy deadline group becomes impossible to drain. For
+    # every deadline prefix, admit exactly the rows that cannot fit into the
+    # remaining future physical waves.
+    missing: list[tuple[int, str]] = []
+    observed_rows: list[tuple[datetime, int, str, float, bool]] = []
     for priority_index, code in enumerate(values):
         last_at = last_success_at.get(code)
         if last_at is None:
-            due.append((False, minimum, priority_index, code))
+            missing.append((priority_index, code))
             continue
         last = normalize_datetime(last_at, f"{code} candidate last_success_at")
-        if (
-            observed < last
-            or _candidate_trading_elapsed_seconds(
+        clock_invalid = observed < last
+        observed_rows.append(
+            (
                 last,
-                observed,
+                priority_index,
+                code,
+                _candidate_trading_elapsed_seconds(last, observed),
+                clock_invalid,
             )
-            >= target_seconds
-        ):
-            due.append((True, last, priority_index, code))
-    due.sort()
-    return tuple(value[3] for value in due[: min(max_symbols, planned)])
+        )
+    observed_rows.sort(key=lambda value: (value[0], value[1]))
+
+    hard_due_count = sum(
+        1
+        for _last, _index, _code, age_seconds, clock_invalid in observed_rows
+        if clock_invalid or age_seconds >= target_seconds
+    )
+    deadline_required_count = 0
+    for ordinal, (_last, _index, _code, age_seconds, clock_invalid) in enumerate(
+        observed_rows,
+        start=1,
+    ):
+        remaining_seconds = (
+            -1.0 if clock_invalid else maximum_age_seconds - age_seconds
+        )
+        future_round_count = max(
+            0,
+            int(max(0.0, remaining_seconds) // monitor_interval_seconds),
+        )
+        deadline_required_count = max(
+            deadline_required_count,
+            ordinal - future_round_count * max_symbols,
+        )
+
+    required_count = min(
+        max_symbols,
+        max(
+            min(len(missing), planned),
+            hard_due_count,
+            deadline_required_count,
+        ),
+    )
+    if required_count <= 0:
+        return ()
+    ordered_codes = tuple(code for _index, code in missing) + tuple(
+        code for _last, _index, code, _age, _invalid in observed_rows
+    )
+    return ordered_codes[:required_count]
 
 
 def _group_candidate_batch_by_sector(
@@ -6543,6 +6595,9 @@ class TradingScreeningService:
             target_seconds=self._config.five_minute_candidate_target_seconds,
             monitor_interval_seconds=self._config.priority_monitor_interval_seconds,
             max_symbols=(self._config.max_five_minute_candidate_symbols_per_refresh),
+            execution_grace_seconds=(
+                self._config.candidate_monitor_time_budget_seconds
+            ),
             excluded_codes=excluded_codes,
             previous_monitor_at=previous_monitor_at,
         )
@@ -6568,6 +6623,9 @@ class TradingScreeningService:
             target_seconds=self._config.thirty_minute_candidate_target_seconds,
             monitor_interval_seconds=self._config.priority_monitor_interval_seconds,
             max_symbols=(self._config.max_thirty_minute_candidate_symbols_per_refresh),
+            execution_grace_seconds=(
+                self._config.candidate_monitor_time_budget_seconds
+            ),
             excluded_codes=excluded_codes,
             previous_monitor_at=previous_monitor_at,
         )
