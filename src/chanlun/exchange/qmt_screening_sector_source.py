@@ -103,6 +103,8 @@ _QMT_TRADING_CALENDAR_LOOKBACK_DAYS = 1460
 # 紧邻重读，同时给 24k 根 5m 基础帧、结构计算副本和 QMT RPC 留出明确余量。
 _QMT_SECTOR_COMPOSITE_MEMORY_CACHE_CAPACITY = 8
 _QMT_SECTOR_CALENDAR_GRID_CACHE_CAPACITY = 8
+_QMT_SECTOR_COMPOSITE_INCREMENTAL_OVERLAP_BARS = 8
+_QMT_SECTOR_COMPOSITE_INCREMENTAL_MAX_NEW_BARS = 48
 _DAILY_FIELDS = ("time", "open", "high", "low", "close", "volume")
 _FACT_CACHE_ENVELOPE_SCHEMA = "chanlun-qmt-sector-fact-cache-envelope"
 _COMPOSITE_FACT_SCHEMA = "chanlun-qmt-sector-composite-facts"
@@ -1529,6 +1531,147 @@ def _member_ratios(
     return None if result.empty else result
 
 
+def _grouped_composite_ratios(
+    raw: Mapping[str, object],
+    *,
+    composite_members: tuple[str, ...],
+    factor_events_by_code: Mapping[
+        str, tuple[QmtCausalFactorEvent, ...]
+    ],
+    frequency: str,
+    observed_at: datetime,
+    minimum_member_count: int,
+    required_member_count: int,
+) -> pd.DataFrame | None:
+    """Build per-close median ratios without choosing a price anchor."""
+
+    native_codes = tuple(_qmt_code(code) for code in composite_members)
+    member_frames: list[pd.DataFrame] = []
+    for member_index, (normalized_code, native_code) in enumerate(
+        zip(composite_members, native_codes, strict=True)
+    ):
+        ratios = _member_ratios(
+            raw,
+            native_code,
+            normalized_code=normalized_code,
+            factor_events=factor_events_by_code[normalized_code],
+            frequency=frequency,
+            not_after=observed_at,
+        )
+        if ratios is None:
+            continue
+        ratios.insert(0, "member_bit", 1 << member_index)
+        member_frames.append(ratios)
+    if len(member_frames) < minimum_member_count:
+        return None
+    facts = pd.concat(member_frames, ignore_index=True)
+    grouped = facts.groupby("date", sort=True).agg(
+        member_count=("member_bit", "size"),
+        member_mask=("member_bit", "sum"),
+        open_ratio=("open_ratio", "median"),
+        high_ratio=("high_ratio", "median"),
+        low_ratio=("low_ratio", "median"),
+        close_ratio=("close_ratio", "median"),
+    )
+    return grouped[grouped["member_count"] >= required_member_count]
+
+
+def _composite_rows_from_grouped_ratios(
+    grouped: pd.DataFrame,
+    *,
+    sector_id: str,
+    starting_close: float,
+) -> pd.DataFrame:
+    """Materialize composite OHLC rows from an authenticated price anchor."""
+
+    if grouped.empty:
+        return pd.DataFrame()
+    close_ratios = grouped["close_ratio"].to_numpy(
+        dtype=np.float64,
+        copy=False,
+    )
+    close_values = np.multiply.accumulate(
+        np.concatenate((np.array([starting_close]), close_ratios))
+    )[1:]
+    previous_closes = np.concatenate(
+        (np.array([starting_close]), close_values[:-1])
+    )
+    open_values = previous_closes * grouped["open_ratio"].to_numpy(
+        dtype=np.float64,
+        copy=False,
+    )
+    high_values = np.maximum.reduce(
+        (
+            previous_closes
+            * grouped["high_ratio"].to_numpy(
+                dtype=np.float64,
+                copy=False,
+            ),
+            open_values,
+            close_values,
+        )
+    )
+    low_values = np.minimum.reduce(
+        (
+            previous_closes
+            * grouped["low_ratio"].to_numpy(
+                dtype=np.float64,
+                copy=False,
+            ),
+            open_values,
+            close_values,
+        )
+    )
+    return pd.DataFrame(
+        {
+            "code": sector_id,
+            "date": grouped.index.to_numpy(),
+            "open": open_values,
+            "high": high_values,
+            "low": low_values,
+            "close": close_values,
+            "volume": grouped["member_count"].to_numpy(dtype=np.float64),
+            "member_mask": grouped["member_mask"].to_numpy(dtype=np.int64),
+        }
+    ).reset_index(drop=True)
+
+
+def _composite_rows_match(
+    actual: pd.DataFrame,
+    rebuilt: pd.DataFrame,
+    *,
+    expected_closes: tuple[datetime, ...],
+) -> bool:
+    if len(actual) != len(rebuilt) or len(actual) != len(expected_closes):
+        return False
+    rebuilt_closes = tuple(
+        normalize_datetime(
+            pd.Timestamp(value).to_pydatetime(),
+            "incremental sector rebuilt close",
+        )
+        for value in rebuilt["date"]
+    )
+    price_columns = ["open", "high", "low", "close"]
+    return bool(
+        tuple(actual["code"]) == tuple(rebuilt["code"])
+        and rebuilt_closes == expected_closes
+        and np.allclose(
+            actual.loc[:, price_columns].to_numpy(dtype=np.float64),
+            rebuilt.loc[:, price_columns].to_numpy(dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        and np.array_equal(
+            actual["volume"].to_numpy(dtype=np.int64),
+            rebuilt["volume"].to_numpy(dtype=np.int64),
+        )
+        and np.array_equal(
+            actual["member_mask"].to_numpy(dtype=np.int64),
+            rebuilt["member_mask"].to_numpy(dtype=np.int64),
+        )
+    )
+
+
 class QmtSectorCompositeSource:
     """Build deterministic equal-weight median sector bars from QMT members."""
 
@@ -1583,6 +1726,13 @@ class QmtSectorCompositeSource:
         self._factor_cache: dict[
             tuple[date, str], tuple[QmtCausalFactorEvent, ...]
         ] = {}
+        self._fact_cache_counters = {
+            "exact_hits": 0,
+            "incremental_attempts": 0,
+            "incremental_hits": 0,
+            "incremental_fallbacks": 0,
+            "full_rebuilds": 0,
+        }
 
     def _remember_frame(
         self,
@@ -1608,7 +1758,12 @@ class QmtSectorCompositeSource:
                     _QMT_SECTOR_CALENDAR_GRID_CACHE_CAPACITY
                 ),
                 "calendar_lookback_days": _QMT_TRADING_CALENDAR_LOOKBACK_DAYS,
+                "fact_cache_counters": dict(self._fact_cache_counters),
             }
+
+    def _record_fact_cache_event(self, name: str) -> None:
+        with self._lock:
+            self._fact_cache_counters[name] += 1
 
     def _report_progress(self) -> None:
         self._progress_callback()
@@ -1655,6 +1810,8 @@ class QmtSectorCompositeSource:
         frequency: str,
         request_bars: int,
         expected_closed_at: datetime,
+        calendar_grid_started_at: datetime,
+        calendar_grid_bar_count: int,
         calendar_grid_revision: str,
         factor_revision: str,
     ) -> dict[str, object]:
@@ -1667,6 +1824,8 @@ class QmtSectorCompositeSource:
             "frequency": frequency,
             "request_bars": request_bars,
             "expected_closed_at": expected_closed_at.isoformat(),
+            "calendar_grid_started_at": calendar_grid_started_at.isoformat(),
+            "calendar_grid_bar_count": calendar_grid_bar_count,
             "calendar_grid_contract": (
                 QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT
             ),
@@ -1817,11 +1976,7 @@ class QmtSectorCompositeSource:
         expected_closed_at: datetime,
         expected_closes: tuple[datetime, ...],
     ) -> pd.DataFrame | None:
-        if path is None:
-            return None
-        self._report_progress()
-        payload = _read_fact_payload(path)
-        self._report_progress()
+        payload = self._load_fact_payload(path)
         if payload is None:
             return None
         return self._frame_from_fact_payload(
@@ -1831,6 +1986,107 @@ class QmtSectorCompositeSource:
             expected_closed_at=expected_closed_at,
             expected_closes=expected_closes,
         )
+
+    def _load_fact_payload(
+        self,
+        path: Path | None,
+    ) -> Mapping[str, object] | None:
+        if path is None:
+            return None
+        self._report_progress()
+        payload = _read_fact_payload(path)
+        self._report_progress()
+        return payload
+
+    @staticmethod
+    def _prior_fact_frame_from_payload(
+        payload: Mapping[str, object],
+        *,
+        identity: Mapping[str, object],
+        observed_at: datetime,
+        expected_closes: tuple[datetime, ...],
+    ) -> tuple[pd.DataFrame, int] | None:
+        """Authenticate a complete same-day calendar prefix for extension."""
+
+        dynamic_fields = frozenset(
+            {
+                "expected_closed_at",
+                "calendar_grid_started_at",
+                "calendar_grid_bar_count",
+                "calendar_grid_revision",
+            }
+        )
+        if any(
+            payload.get(key) != value
+            for key, value in identity.items()
+            if key not in dynamic_fields
+        ):
+            return None
+        try:
+            prior_closed_at = normalize_datetime(
+                datetime.fromisoformat(str(payload.get("expected_closed_at"))),
+                "prior sector fact expected_closed_at",
+            )
+            current_closed_at = normalize_datetime(
+                datetime.fromisoformat(str(identity["expected_closed_at"])),
+                "current sector fact expected_closed_at",
+            )
+        except (TypeError, ValueError):
+            return None
+        if (
+            identity.get("frequency") != "5m"
+            or prior_closed_at >= current_closed_at
+            or prior_closed_at.date() != current_closed_at.date()
+            or current_closed_at != expected_closes[-1]
+        ):
+            return None
+        try:
+            prior_grid_index = expected_closes.index(prior_closed_at)
+        except ValueError:
+            return None
+        prior_expected_closes = expected_closes[: prior_grid_index + 1]
+        prior_grid_count = payload.get("calendar_grid_bar_count")
+        if (
+            type(prior_grid_count) is not int
+            or prior_grid_count != len(prior_expected_closes)
+            or payload.get("calendar_grid_started_at")
+            != prior_expected_closes[0].isoformat()
+            or payload.get("calendar_grid_revision")
+            != sha256_json(
+                {
+                    "schema": "chanlun-qmt-sector-calendar-grid",
+                    "frequency": identity["frequency"],
+                    "expected_closes": prior_expected_closes,
+                }
+            )
+        ):
+            return None
+        prior_identity = dict(identity)
+        for field in dynamic_fields:
+            prior_identity[field] = payload.get(field)
+        frame = QmtSectorCompositeSource._frame_from_fact_payload(
+            payload,
+            identity=prior_identity,
+            observed_at=observed_at,
+            expected_closed_at=prior_closed_at,
+            expected_closes=prior_expected_closes,
+        )
+        new_bar_count = len(expected_closes) - len(prior_expected_closes)
+        suffix_start_index = (
+            0
+            if frame is None
+            else len(prior_expected_closes) - len(frame)
+        )
+        if (
+            frame is None
+            or len(frame) < 2
+            or suffix_start_index <= 0
+            or not 0 < new_bar_count
+            <= _QMT_SECTOR_COMPOSITE_INCREMENTAL_MAX_NEW_BARS
+            or len(frame) + new_bar_count > int(identity["request_bars"])
+        ):
+            return None
+        return frame, prior_grid_index
 
     def _persist_fact_frame(
         self,
@@ -2025,6 +2281,252 @@ class QmtSectorCompositeSource:
                 self._attempted_members.setdefault(frequency, set()).update(
                     completed_attempts
                 )
+
+    def _read_grouped_composite_ratios(
+        self,
+        *,
+        composite_members: tuple[str, ...],
+        factor_events_by_code: Mapping[
+            str, tuple[QmtCausalFactorEvent, ...]
+        ],
+        frequency: str,
+        observed_at: datetime,
+        end_at: datetime,
+        count: int,
+    ) -> pd.DataFrame | None:
+        native_codes = tuple(_qmt_code(code) for code in composite_members)
+        self._report_progress()
+        with _XTDATA_NATIVE_LOCK:
+            raw = xtdata.get_market_data(
+                field_list=list(_FIELDS),
+                stock_list=list(native_codes),
+                period=frequency,
+                start_time="",
+                end_time=end_at.strftime("%Y%m%d%H%M%S"),
+                count=count,
+                dividend_type="none",
+                fill_data=False,
+            )
+        self._report_progress()
+        if not isinstance(raw, Mapping):
+            return None
+        required_member_count = _composite_required_member_count(
+            len(composite_members),
+            minimum_member_count=self._minimum_member_count,
+            minimum_bar_coverage=self._minimum_bar_coverage,
+        )
+        return _grouped_composite_ratios(
+            raw,
+            composite_members=composite_members,
+            factor_events_by_code=factor_events_by_code,
+            frequency=frequency,
+            observed_at=observed_at,
+            minimum_member_count=self._minimum_member_count,
+            required_member_count=required_member_count,
+        )
+
+    def _incrementally_extend_fact_frame(
+        self,
+        *,
+        previous: pd.DataFrame,
+        prior_grid_index: int,
+        sector_id: str,
+        composite_members: tuple[str, ...],
+        factor_events_by_code: Mapping[
+            str, tuple[QmtCausalFactorEvent, ...]
+        ],
+        factor_revision: str,
+        frequency: str,
+        observed_at: datetime,
+        expected_closes: tuple[datetime, ...],
+        request_bars: int,
+    ) -> pd.DataFrame | None:
+        """Extend a proven complete calendar prefix after overlap validation."""
+
+        new_closes = expected_closes[prior_grid_index + 1 :]
+        overlap_count = min(
+            _QMT_SECTOR_COMPOSITE_INCREMENTAL_OVERLAP_BARS,
+            len(previous) - 1,
+        )
+        if (
+            frequency != "5m"
+            or not new_closes
+            or overlap_count <= 0
+            or len(previous) + len(new_closes) > request_bars
+        ):
+            return None
+        anchor_count = min(
+            _QMT_SECTOR_COMPOSITE_INCREMENTAL_OVERLAP_BARS,
+            len(previous),
+        )
+        anchor_actual = previous.iloc[:anchor_count].reset_index(drop=True)
+        anchor_closes = tuple(
+            normalize_datetime(
+                pd.Timestamp(value).to_pydatetime(),
+                "incremental sector anchor close",
+            )
+            for value in anchor_actual["date"]
+        )
+        try:
+            anchor_grid_index = expected_closes.index(anchor_closes[0])
+        except ValueError:
+            return None
+        if (
+            anchor_grid_index <= 0
+            or anchor_closes
+            != expected_closes[
+                anchor_grid_index : anchor_grid_index + anchor_count
+            ]
+        ):
+            return None
+        anchor_grouped = self._read_grouped_composite_ratios(
+            composite_members=composite_members,
+            factor_events_by_code=factor_events_by_code,
+            frequency=frequency,
+            observed_at=observed_at,
+            end_at=anchor_closes[-1],
+            count=anchor_count + 32,
+        )
+        if anchor_grouped is None or anchor_grouped.empty:
+            return None
+        anchor_available_closes = {
+            normalize_datetime(
+                pd.Timestamp(value).to_pydatetime(),
+                "incremental sector anchor grouped close",
+            )
+            for value in anchor_grouped.index
+        }
+        if (
+            expected_closes[anchor_grid_index - 1]
+            in anchor_available_closes
+            or any(
+                value not in anchor_available_closes
+                for value in anchor_closes
+            )
+        ):
+            return None
+        rebuilt_anchor = _composite_rows_from_grouped_ratios(
+            anchor_grouped.loc[list(anchor_closes)],
+            sector_id=sector_id,
+            starting_close=1000.0,
+        )
+        if not _composite_rows_match(
+            anchor_actual,
+            rebuilt_anchor,
+            expected_closes=anchor_closes,
+        ):
+            return None
+        tail_history_bars = len(new_closes) + overlap_count + 1
+        self._prepare_history(
+            members=composite_members,
+            as_of=observed_at,
+            expected_closes=expected_closes,
+            required_bars=tail_history_bars,
+            frequency=frequency,
+        )
+        grouped = self._read_grouped_composite_ratios(
+            composite_members=composite_members,
+            factor_events_by_code=factor_events_by_code,
+            frequency=frequency,
+            observed_at=observed_at,
+            end_at=observed_at,
+            count=tail_history_bars + 32,
+        )
+        if grouped is None or grouped.empty:
+            return None
+        available_closes = {
+            normalize_datetime(
+                pd.Timestamp(value).to_pydatetime(),
+                "incremental sector grouped close",
+            )
+            for value in grouped.index
+        }
+        prior_tail = previous.iloc[-(overlap_count + 1) :].reset_index(
+            drop=True
+        )
+        verification_closes = tuple(
+            normalize_datetime(
+                pd.Timestamp(value).to_pydatetime(),
+                "incremental sector verification close",
+            )
+            for value in prior_tail["date"].iloc[1:]
+        )
+        required_closes = (*verification_closes, *new_closes)
+        if any(value not in available_closes for value in required_closes):
+            return None
+        verification_grouped = grouped.loc[list(verification_closes)]
+        rebuilt_tail = _composite_rows_from_grouped_ratios(
+            verification_grouped,
+            sector_id=sector_id,
+            starting_close=float(prior_tail["close"].iloc[0]),
+        )
+        actual_tail = prior_tail.iloc[1:].reset_index(drop=True)
+        if not _composite_rows_match(
+            actual_tail,
+            rebuilt_tail,
+            expected_closes=verification_closes,
+        ):
+            return None
+        appended = _composite_rows_from_grouped_ratios(
+            grouped.loc[list(new_closes)],
+            sector_id=sector_id,
+            starting_close=float(previous["close"].iloc[-1]),
+        )
+        columns = [
+            "code",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "member_mask",
+        ]
+        result = pd.concat(
+            (previous.loc[:, columns], appended.loc[:, columns]),
+            ignore_index=True,
+        )
+        result_dates = tuple(
+            normalize_datetime(
+                pd.Timestamp(value).to_pydatetime(),
+                "incremental sector result close",
+            )
+            for value in result["date"]
+        )
+        if (
+            len(result) > request_bars
+            or result_dates != expected_closes[-len(result) :]
+        ):
+            return None
+        metadata = build_causal_sector_price_basis_metadata(
+            provider=QMT_GICS3_COMPOSITE_PROVIDER,
+            market="a",
+            code=(
+                f"{sector_id}:"
+                + str(previous.attrs["sector_membership_revision"]).removeprefix(
+                    "sha256:"
+                )
+            ),
+            adjustment=QMT_GICS3_COMPOSITE_ADJUSTMENT,
+            structure_price_quantum=_COMPOSITE_QUANTUM,
+            factor_revision=factor_revision,
+        )
+        result = attach_price_basis_metadata(result, metadata)
+        return _attach_composite_provenance(
+            result,
+            sector_id=sector_id,
+            membership_revision=str(
+                previous.attrs["sector_membership_revision"]
+            ),
+            members=tuple(previous.attrs["sector_members"]),
+            composite_members=tuple(
+                previous.attrs["sector_composite_members"]
+            ),
+            minimum_member_count=self._minimum_member_count,
+            minimum_bar_coverage=self._minimum_bar_coverage,
+            maximum_composite_members=self._maximum_composite_members,
+            factor_revision=factor_revision,
+        )
 
     @staticmethod
     def _session_closes(
@@ -2326,15 +2828,22 @@ class QmtSectorCompositeSource:
                     frequency=frequency,
                     request_bars=request_bars,
                     expected_closed_at=expected_closed_at,
+                    calendar_grid_started_at=expected_closes[0],
+                    calendar_grid_bar_count=len(expected_closes),
                     calendar_grid_revision=calendar_grid_revision,
                     factor_revision=factor_revision,
                 )
             )
-            persisted = (
+            fact_payload = (
                 None
                 if fact_identity is None
-                else self._load_fact_frame(
-                    path=fact_path,
+                else self._load_fact_payload(fact_path)
+            )
+            persisted = (
+                None
+                if fact_identity is None or fact_payload is None
+                else self._frame_from_fact_payload(
+                    fact_payload,
                     identity=fact_identity,
                     observed_at=observed_at,
                     expected_closed_at=expected_closed_at,
@@ -2342,6 +2851,7 @@ class QmtSectorCompositeSource:
                 )
             )
             if persisted is not None:
+                self._record_fact_cache_event("exact_hits")
                 with self._lock:
                     self._remember_frame(
                         cache_key,
@@ -2352,6 +2862,56 @@ class QmtSectorCompositeSource:
                         ),
                     )
                 return _copy_frame(persisted)
+            prior_fact = (
+                None
+                if fact_identity is None or fact_payload is None
+                else self._prior_fact_frame_from_payload(
+                    fact_payload,
+                    identity=fact_identity,
+                    observed_at=observed_at,
+                    expected_closes=expected_closes,
+                )
+            )
+            if prior_fact is not None:
+                self._record_fact_cache_event("incremental_attempts")
+            extended = (
+                None
+                if prior_fact is None
+                else self._incrementally_extend_fact_frame(
+                    previous=prior_fact[0],
+                    prior_grid_index=prior_fact[1],
+                    sector_id=sector_id,
+                    composite_members=composite_members,
+                    factor_events_by_code=factor_events_by_code,
+                    factor_revision=factor_revision,
+                    frequency=frequency,
+                    observed_at=observed_at,
+                    expected_closes=expected_closes,
+                    request_bars=request_bars,
+                )
+            )
+            if extended is not None:
+                self._record_fact_cache_event("incremental_hits")
+                if fact_identity is not None:
+                    self._persist_fact_frame(
+                        path=fact_path,
+                        identity=fact_identity,
+                        frame=extended,
+                    )
+                with self._lock:
+                    self._remember_frame(
+                        cache_key,
+                        (
+                            bucket,
+                            membership_revision,
+                            _copy_frame(extended),
+                        ),
+                    )
+                return _copy_frame(extended)
+            if prior_fact is not None:
+                self._record_fact_cache_event("incremental_fallbacks")
+            if fact_identity is not None:
+                self._record_fact_cache_event("full_rebuilds")
             base_frequency = "1d" if frequency == "1d" else "5m"
             base_expected_closes = (
                 expected_closes

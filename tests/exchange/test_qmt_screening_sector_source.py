@@ -1055,6 +1055,226 @@ def test_qmt_component_fact_cache_survives_a_new_source_instance(
     assert fake.market_calls > calls_after_revision_miss
 
 
+def test_qmt_component_fact_cache_incrementally_extends_complete_day_prefix(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class CompleteSessionXtdata(FakeXtdata):
+        def __init__(self) -> None:
+            super().__init__()
+            self.full_field_counts: list[int] = []
+            self.corrected_at: datetime | None = None
+            self.missing_at: datetime | None = None
+
+        def get_trading_dates(self, market, start_time, end_time, count):
+            assert market == "SH"
+            assert count == -1
+            return [
+                int(
+                    datetime.combine(
+                        self.market_end.date(),
+                        datetime.min.time(),
+                        tzinfo=SHANGHAI,
+                    ).timestamp()
+                    * 1000
+                )
+            ]
+
+        def get_market_data(self, **kwargs):
+            self.market_calls += 1
+            codes = tuple(kwargs["stock_list"])
+            self.market_stock_lists.append(codes)
+            if kwargs["field_list"] != ["time"]:
+                self.full_field_counts.append(kwargs["count"])
+            available_end = (
+                self.latest_probe_end
+                if kwargs["field_list"] == ["time"]
+                else self.market_end
+            )
+            requested_end = datetime.strptime(
+                kwargs["end_time"], "%Y%m%d%H%M%S"
+            ).replace(tzinfo=SHANGHAI)
+            market_end = min(available_end, requested_end)
+            calendar_closes = tuple(
+                value
+                for value in QmtSectorCompositeSource._session_closes(
+                    market_end.date(), "5m"
+                )
+                if value <= market_end
+            )
+            session_closes = tuple(
+                value
+                for value in calendar_closes
+                if value != self.missing_at
+            )
+            selected = session_closes[-kwargs["count"] :]
+            native_times = [
+                int(value.timestamp() * 1000) for value in selected
+            ]
+            absolute_indexes = [
+                calendar_closes.index(value) for value in selected
+            ]
+            columns = tuple(range(len(selected)))
+            fields: dict[str, pd.DataFrame] = {}
+            for field in ("time", "open", "high", "low", "close", "volume"):
+                rows = []
+                for member_index, _code in enumerate(codes):
+                    base = 10.0 + member_index
+                    if field == "time":
+                        rows.append(native_times)
+                        continue
+                    values = []
+                    for bar_index in absolute_indexes:
+                        corrected = (
+                            self.corrected_at == calendar_closes[bar_index]
+                        )
+                        close = (
+                            base
+                            * (1.0 + bar_index * 0.001)
+                            * (1.01 if corrected else 1.0)
+                        )
+                        values.append(
+                            {
+                                "open": close * 0.999,
+                                "high": close * 1.002,
+                                "low": close * 0.998,
+                                "close": close,
+                                "volume": 1000.0 + bar_index,
+                            }[field]
+                        )
+                    rows.append(values)
+                fields[field] = pd.DataFrame(
+                    rows,
+                    index=codes,
+                    columns=columns,
+                )
+            return fields
+
+    fake = CompleteSessionXtdata()
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    members = tuple(f"SH.6000{index:02d}" for index in range(8))
+    revision = "sha256:" + "c" * 64
+    options = {
+        "minimum_member_count": 8,
+        "fact_cache_directory": tmp_path,
+        "fact_cache_revision": revision,
+    }
+    arguments = {
+        "sector_id": "qmt-gics3:incremental-prefix",
+        "sector_name": "Incremental Prefix",
+        "members": members,
+        "frequency": "5m",
+        "request_bars": 100,
+    }
+
+    first = QmtSectorCompositeSource(**options).frame(
+        **arguments,
+        as_of=AS_OF,
+    )
+    assert len(first) == 11
+    assert fake.full_field_counts[-1] == 132
+
+    next_close = AS_OF + timedelta(minutes=5)
+    fake.market_end = next_close
+    fake.latest_probe_end = next_close
+    counts_before_incremental = len(fake.full_field_counts)
+    incremental_source = QmtSectorCompositeSource(**options)
+    incremental = incremental_source.frame(
+        **arguments,
+        as_of=next_close,
+    )
+    incremental_counts = fake.full_field_counts[counts_before_incremental:]
+    incremental_count = fake.full_field_counts[-1]
+    fresh = QmtSectorCompositeSource(minimum_member_count=8).frame(
+        **arguments,
+        as_of=next_close,
+    )
+
+    assert incremental_counts == [40, 42]
+    assert incremental_count == 42
+    assert fake.full_field_counts[-1] == 132
+    pd.testing.assert_frame_equal(incremental, fresh, check_exact=True)
+    assert incremental.attrs == fresh.attrs
+    assert incremental_source.cache_health_snapshot()[
+        "fact_cache_counters"
+    ] == {
+        "exact_hits": 0,
+        "incremental_attempts": 1,
+        "incremental_hits": 1,
+        "incremental_fallbacks": 0,
+        "full_rebuilds": 0,
+    }
+
+    # A corrected closed bar inside the verification overlap must reject the
+    # cheap append and transparently fall back to the full authenticated path.
+    fake.market_end = AS_OF
+    fake.latest_probe_end = AS_OF
+    QmtSectorCompositeSource(**options).frame(**arguments, as_of=AS_OF)
+    fake.corrected_at = AS_OF - timedelta(minutes=5)
+    fake.market_end = next_close
+    fake.latest_probe_end = next_close
+    counts_before_recovery = len(fake.full_field_counts)
+    recovery_source = QmtSectorCompositeSource(**options)
+    recovered = recovery_source.frame(
+        **arguments,
+        as_of=next_close,
+    )
+    recovery_counts = fake.full_field_counts[counts_before_recovery:]
+    corrected_fresh = QmtSectorCompositeSource(
+        minimum_member_count=8
+    ).frame(**arguments, as_of=next_close)
+
+    assert recovery_counts == [40, 42, 132]
+    pd.testing.assert_frame_equal(recovered, corrected_fresh, check_exact=True)
+    assert recovered.attrs == corrected_fresh.attrs
+    assert recovery_source.cache_health_snapshot()[
+        "fact_cache_counters"
+    ] == {
+        "exact_hits": 0,
+        "incremental_attempts": 1,
+        "incremental_hits": 0,
+        "incremental_fallbacks": 1,
+        "full_rebuilds": 1,
+    }
+
+    # Production histories may begin at a long-lived coverage gap rather than
+    # at the calendar's first bar. Proving that boundary is still absent keeps
+    # the incremental price anchor identical to a fresh full recomputation.
+    fake.corrected_at = None
+    fake.missing_at = AS_OF.replace(hour=9, minute=55)
+    fake.market_end = AS_OF
+    fake.latest_probe_end = AS_OF
+    gap_options = {
+        **options,
+        "fact_cache_directory": tmp_path / "gap",
+    }
+    gap_first = QmtSectorCompositeSource(**gap_options).frame(
+        **arguments,
+        as_of=AS_OF,
+    )
+    assert gap_first["date"].iloc[0].to_pydatetime() == AS_OF.replace(
+        hour=10,
+        minute=0,
+    )
+    fake.market_end = next_close
+    fake.latest_probe_end = next_close
+    counts_before_gap = len(fake.full_field_counts)
+    gap_incremental = QmtSectorCompositeSource(**gap_options).frame(
+        **arguments,
+        as_of=next_close,
+    )
+    gap_counts = fake.full_field_counts[counts_before_gap:]
+    gap_fresh = QmtSectorCompositeSource(minimum_member_count=8).frame(
+        **arguments,
+        as_of=next_close,
+    )
+
+    assert gap_counts == [39, 40]
+    pd.testing.assert_frame_equal(gap_incremental, gap_fresh, check_exact=True)
+    assert gap_incremental.attrs == gap_fresh.attrs
+
+
 def test_qmt_component_fact_cache_invalidates_on_factor_revision(
     monkeypatch,
     tmp_path: Path,
