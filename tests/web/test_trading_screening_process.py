@@ -3315,7 +3315,171 @@ def test_structure_worker_pool_co_locates_classified_sector_symbols() -> None:
     gateway._structure_transports = (transport,)  # type: ignore[assignment]  # noqa: SLF001
     assert gateway.health_snapshot()["structure_worker_pool"][
         "affinity_contract_id"
-    ] == "priority-burst-symbol_candidate-sector-symbol-striped-v3"
+    ] == "coverage-sector-minimal-move-balanced-v4"
+
+
+def test_coverage_sector_affinity_balances_only_the_minimum_whole_sectors() -> None:
+    worker_count = 4
+    sector_ids_by_slot: dict[int, list[str]] = {
+        index: [] for index in range(worker_count)
+    }
+    suffix = 0
+    required_per_slot = (1, 1, 5, 1)
+    while any(
+        len(sector_ids_by_slot[index]) < required_per_slot[index]
+        for index in range(worker_count)
+    ):
+        sector_id = f"qmt-gics4:coverage-balance-{suffix}"
+        slot = screening_process_subject._structure_worker_affinity_slot(  # noqa: SLF001
+            f"sector:{sector_id}",
+            worker_count,
+        )
+        if len(sector_ids_by_slot[slot]) < required_per_slot[slot]:
+            sector_ids_by_slot[slot].append(sector_id)
+        suffix += 1
+
+    weights_by_slot = {
+        0: (1031,),
+        1: (1243,),
+        2: (1402, 411, 54, 6, 3),
+        3: (952,),
+    }
+    members: dict[str, tuple[str, ...]] = {}
+    next_code = 100000
+    for slot in range(worker_count):
+        for sector_id, weight in zip(
+            sector_ids_by_slot[slot],
+            weights_by_slot[slot],
+        ):
+            members[sector_id] = tuple(
+                f"SH.{next_code + index:06d}" for index in range(weight)
+            )
+            next_code += weight
+
+    plan = screening_process_subject._balanced_coverage_sector_affinity(  # noqa: SLF001
+        members,
+        worker_count=worker_count,
+    )
+    reversed_plan = screening_process_subject._balanced_coverage_sector_affinity(  # noqa: SLF001
+        dict(reversed(tuple(members.items()))),
+        worker_count=worker_count,
+    )
+
+    assert plan.default_worker_loads == (1031, 1243, 1876, 952)
+    assert max(plan.balanced_worker_loads) <= plan.target_max_load == 1404
+    assert plan.moved_symbol_count == 474
+    assert plan.moved_sector_count == 4
+    assert plan.worker_by_sector == reversed_plan.worker_by_sector
+    assert sum(plan.balanced_worker_loads) == 5102
+
+
+def test_configured_coverage_affinity_overrides_only_coverage_sector_routes() -> None:
+    sector = SectorAssessment(
+        sector_id="qmt-gics4:test",
+        sector_name="test",
+        eligible=True,
+        hard_block=False,
+        regime="neutral",
+        rank_components=(),
+        reason_codes=("test",),
+    )
+    bundle = SymbolStructureBundle(
+        code="SH.600000",
+        as_of=datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai")),
+        sector=sector,
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+    )
+    transport = _BundleTransport(bundle)
+    gateway = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    workers = tuple(_BundleTransport(bundle) for _index in range(4))
+    gateway._structure_transports = workers  # type: ignore[assignment]  # noqa: SLF001
+    sector_ids: list[str] = []
+    suffix = 0
+    while len(sector_ids) < 8:
+        sector_id = f"qmt-gics4:configured-balance-{suffix}"
+        if (
+            screening_process_subject._structure_worker_affinity_slot(  # noqa: SLF001
+                f"sector:{sector_id}",
+                len(workers),
+            )
+            == 2
+        ):
+            sector_ids.append(sector_id)
+        suffix += 1
+    members: dict[str, tuple[str, ...]] = {}
+    next_code = 600000
+    for index, sector_id in enumerate(sector_ids):
+        weight = 12 if index == 0 else 1
+        members[sector_id] = tuple(
+            f"SH.{next_code + offset:06d}" for offset in range(weight)
+        )
+        next_code += weight
+
+    audit = gateway.configure_coverage_sector_affinity(
+        members_by_sector=members,
+    )
+    moved_sector = next(
+        sector_id
+        for sector_id in sector_ids
+        if gateway._coverage_sector_affinity_plan.worker_by_sector[sector_id] != 2  # noqa: SLF001
+    )
+    coverage_worker = gateway._structure_transport(  # noqa: SLF001
+        f"sector:{moved_sector}",
+        lane="coverage",
+    )
+    candidate_worker = gateway._structure_transport(  # noqa: SLF001
+        f"sector:{moved_sector}",
+        lane="candidate",
+    )
+    gateway._sector_members = dict(members)  # noqa: SLF001
+    gateway._install_sector_snapshot(  # noqa: SLF001
+        screening_process_subject._SectorSnapshotComponents(  # noqa: SLF001
+            admitted_codes=None,
+            batch=SectorAssessmentBatch(
+                assessments=(),
+                discovered_count=0,
+                completed_count=0,
+                failure_counts=(),
+                errors=(),
+            ),
+            members=dict(members),
+            changed_bars=(),
+            symbol_names={},
+        )
+    )
+
+    assert audit["moved_sector_count"] > 0
+    assert coverage_worker is not workers[2]
+    assert candidate_worker in workers[1:]
+    assert gateway.health_snapshot()["structure_worker_pool"][
+        "coverage_sector_affinity"
+    ] == audit
+
+    changed_members = dict(members)
+    changed_members[moved_sector] = changed_members[moved_sector][:-1]
+    gateway._install_sector_snapshot(  # noqa: SLF001
+        screening_process_subject._SectorSnapshotComponents(  # noqa: SLF001
+            admitted_codes=None,
+            batch=SectorAssessmentBatch(
+                assessments=(),
+                discovered_count=0,
+                completed_count=0,
+                failure_counts=(),
+                errors=(),
+            ),
+            members=changed_members,
+            changed_bars=(),
+            symbol_names={},
+        )
+    )
+
+    assert gateway.health_snapshot()["structure_worker_pool"][
+        "coverage_sector_affinity"
+    ]["configured"] is False
 
 
 def test_direct_app_launch_uses_content_addressed_revision_for_worker_caches(

@@ -13311,6 +13311,17 @@ class TradingScreeningService:
         selected_sector_by_code = dict(routing.eligible_sector_by_code)
         ranked_scan_codes = routing.ranked_scan_codes
         sector_audit.update(routing.audit)
+        configure_coverage_affinity = getattr(
+            self._sector_catalog,
+            "configure_coverage_sector_affinity",
+            None,
+        )
+        if callable(configure_coverage_affinity):
+            affinity_audit = configure_coverage_affinity(
+                members_by_sector=sector_members,
+            )
+            if isinstance(affinity_audit, Mapping):
+                sector_audit["coverage_sector_affinity"] = dict(affinity_audit)
         watchlist, rejected_watchlist = _validated_monitor_instrument_scope(
             self._market_data.active_watchlist_scope(),
             "active_watchlist_scope",

@@ -289,6 +289,21 @@ class MultiMemberSectorCatalog(RecordingSectorCatalog):
         )
 
 
+class AffinityRecordingSectorCatalog(MultiMemberSectorCatalog):
+    def __init__(self, symbols: tuple[str, ...]) -> None:
+        super().__init__(symbols)
+        self.affinity_calls: list[dict[str, tuple[str, ...]]] = []
+
+    def configure_coverage_sector_affinity(self, *, members_by_sector):
+        captured = dict(members_by_sector)
+        self.affinity_calls.append(captured)
+        return {
+            "schema": "test-coverage-sector-affinity",
+            "configured": True,
+            "symbol_count": sum(len(values) for values in captured.values()),
+        }
+
+
 class EvidenceSectorCatalog(RecordingSectorCatalog):
     def __init__(
         self,
@@ -745,9 +760,10 @@ def test_stock_structure_requests_use_configured_parallel_workers(
 ) -> None:
     symbols = tuple(f"SZ.{index:06d}" for index in range(1, 7))
     market = ConcurrentRecordingMarketData()
+    sector_catalog = AffinityRecordingSectorCatalog(symbols)
     service = TradingScreeningService(
         market_data=market,
-        sector_catalog=MultiMemberSectorCatalog(symbols),
+        sector_catalog=sector_catalog,
         engine=HumanAssistedDecisionCore(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=tmp_path / "snapshot.json",
@@ -766,6 +782,14 @@ def test_stock_structure_requests_use_configured_parallel_workers(
     assert set(market.bundle_codes) == set(symbols)
     assert payload["scan_audit"]["completed_symbol_count"] == len(symbols)
     assert payload["scan_audit"]["stock_worker_count"] == 3
+    assert sector_catalog.affinity_calls == [
+        {eligible_sector().sector_id: symbols}
+    ]
+    assert payload["scan_audit"]["coverage_sector_affinity"] == {
+        "schema": "test-coverage-sector-affinity",
+        "configured": True,
+        "symbol_count": len(symbols),
+    }
 
 
 def test_full_coverage_reserves_one_qmt_worker_for_realtime_services(

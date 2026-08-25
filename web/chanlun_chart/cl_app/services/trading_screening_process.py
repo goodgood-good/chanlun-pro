@@ -87,8 +87,10 @@ _SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA = (
 _SECTOR_CACHE_SCOPE_SIDECAR_MAX_BYTES = 256 * 1024
 _SECTOR_SNAPSHOT_PRODUCER_SCHEMA = "chanlun-native-sector-snapshot-producer"
 _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID = (
-    "priority-burst-symbol_candidate-sector-symbol-striped-v3"
+    "coverage-sector-minimal-move-balanced-v4"
 )
+_COVERAGE_AFFINITY_TARGET_NUMERATOR = 11
+_COVERAGE_AFFINITY_TARGET_DENOMINATOR = 10
 _DISPLAY_QUOTE_LOCK_WAIT_SECONDS = 2.0
 # The candidate phase deadline is an admission boundary, not a safe deadline
 # for destroying a process that is already rebuilding one symbol.  A newly
@@ -681,6 +683,161 @@ def _cleanup_stale_runtime_state_cache_roots(
         if has_live_owner:
             continue
         shutil.rmtree(resolved, ignore_errors=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _CoverageSectorAffinityPlan:
+    worker_by_sector: dict[str, int]
+    default_worker_loads: tuple[int, ...]
+    balanced_worker_loads: tuple[int, ...]
+    target_max_load: int
+    moved_sector_count: int
+    moved_symbol_count: int
+    sector_count: int
+    symbol_count: int
+
+    def audit_document(self) -> dict[str, object]:
+        return {
+            "schema": "chanlun-coverage-sector-affinity-plan-v1",
+            "contract_id": _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID,
+            "configured": bool(self.worker_by_sector),
+            "worker_count": len(self.balanced_worker_loads),
+            "sector_count": self.sector_count,
+            "symbol_count": self.symbol_count,
+            "target_max_load": self.target_max_load,
+            "default_worker_loads": list(self.default_worker_loads),
+            "balanced_worker_loads": list(self.balanced_worker_loads),
+            "moved_sector_count": self.moved_sector_count,
+            "moved_symbol_count": self.moved_symbol_count,
+        }
+
+
+def _structure_worker_affinity_slot(affinity_key: str, worker_count: int) -> int:
+    if not isinstance(affinity_key, str) or not affinity_key:
+        raise ValueError("structure worker affinity key is required")
+    if type(worker_count) is not int or worker_count <= 0:
+        raise ValueError("structure worker count must be positive")
+    digest = hashlib.sha256(affinity_key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % worker_count
+
+
+def _balanced_coverage_sector_affinity(
+    members_by_sector: Mapping[str, Sequence[str]],
+    *,
+    worker_count: int,
+) -> _CoverageSectorAffinityPlan:
+    """Rebalance only the few sectors responsible for a coverage tail.
+
+    The normal hash assignment remains the preferred location so persistent
+    symbol runtime states stay on the worker that already owns them. A sector
+    moves only while doing so lowers the maximum shard load, and rebalancing
+    stops once every shard is within ten percent of the ideal average. Entire
+    sectors move together, preserving the shared sector-frame locality.
+    """
+
+    if not isinstance(members_by_sector, Mapping):
+        raise TypeError("coverage sector members must be a mapping")
+    if type(worker_count) is not int or worker_count <= 0:
+        raise ValueError("coverage worker_count must be positive")
+    weights: dict[str, int] = {}
+    observed_codes: set[str] = set()
+    for sector_id, raw_members in sorted(members_by_sector.items()):
+        if not isinstance(sector_id, str) or not sector_id:
+            raise ValueError("coverage sector id is required")
+        if isinstance(raw_members, (str, bytes)) or not isinstance(
+            raw_members, Sequence
+        ):
+            raise TypeError("coverage sector members must be a sequence")
+        members = tuple(raw_members)
+        if (
+            len(members) != len(set(members))
+            or any(
+                not isinstance(code, str)
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in members
+            )
+        ):
+            raise ValueError("coverage sector members are invalid")
+        if observed_codes.intersection(members):
+            raise ValueError("coverage symbols must belong to one effective sector")
+        observed_codes.update(members)
+        if members:
+            weights[sector_id] = len(members)
+
+    worker_by_sector = {
+        sector_id: _structure_worker_affinity_slot(
+            f"sector:{sector_id}",
+            worker_count,
+        )
+        for sector_id in weights
+    }
+    loads = [0] * worker_count
+    for sector_id, weight in weights.items():
+        loads[worker_by_sector[sector_id]] += weight
+    default_loads = tuple(loads)
+    total_symbols = sum(loads)
+    target_max_load = (
+        0
+        if total_symbols == 0
+        else max(
+            max(weights.values(), default=0),
+            (
+                total_symbols * _COVERAGE_AFFINITY_TARGET_NUMERATOR
+                + worker_count * _COVERAGE_AFFINITY_TARGET_DENOMINATOR
+                - 1
+            )
+            // (worker_count * _COVERAGE_AFFINITY_TARGET_DENOMINATOR),
+        )
+    )
+    moved_sectors: set[str] = set()
+    while loads and max(loads) > target_max_load:
+        source = max(range(worker_count), key=lambda index: (loads[index], -index))
+        excess = loads[source] - target_max_load
+        current_max = max(loads)
+        best_key: tuple[object, ...] | None = None
+        best_move: tuple[str, int, list[int]] | None = None
+        for sector_id in sorted(weights):
+            if sector_id in moved_sectors or worker_by_sector[sector_id] != source:
+                continue
+            weight = weights[sector_id]
+            for destination in sorted(
+                (index for index in range(worker_count) if index != source),
+                key=lambda index: (loads[index], index),
+            ):
+                candidate_loads = list(loads)
+                candidate_loads[source] -= weight
+                candidate_loads[destination] += weight
+                candidate_max = max(candidate_loads)
+                if candidate_max >= current_max:
+                    continue
+                key: tuple[object, ...] = (
+                    0 if candidate_loads[destination] <= target_max_load else 1,
+                    abs(weight - excess),
+                    weight,
+                    candidate_max,
+                    candidate_max - min(candidate_loads),
+                    sector_id,
+                    destination,
+                )
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_move = (sector_id, destination, candidate_loads)
+        if best_move is None:
+            break
+        sector_id, destination, loads = best_move
+        worker_by_sector[sector_id] = destination
+        moved_sectors.add(sector_id)
+
+    return _CoverageSectorAffinityPlan(
+        worker_by_sector=worker_by_sector,
+        default_worker_loads=default_loads,
+        balanced_worker_loads=tuple(loads),
+        target_max_load=target_max_load,
+        moved_sector_count=len(moved_sectors),
+        moved_symbol_count=sum(weights[value] for value in moved_sectors),
+        sector_count=len(weights),
+        symbol_count=total_symbols,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2067,6 +2224,10 @@ class NativeTradingDataGatewayProcessProxy:
         self._sector_cache_requested_as_of: datetime | None = None
         self._sector_cache_content_sha256: str | None = None
         self._sector_members: dict[str, tuple[str, ...]] | None = None
+        self._coverage_sector_affinity_plan = _balanced_coverage_sector_affinity(
+            {},
+            worker_count=len(self._structure_transports),
+        )
         self._changed_bars: tuple[BarKey, ...] = ()
         self._emitted_bar_ids: set[tuple[str, str, datetime]] = set()
         self._symbol_names: dict[str, str] = {}
@@ -2126,6 +2287,12 @@ class NativeTradingDataGatewayProcessProxy:
                 # identity. They must not survive even a bounded-to-bounded
                 # cohort change while a restore call is racing this update.
                 self._sector_members = None
+                self._coverage_sector_affinity_plan = (
+                    _balanced_coverage_sector_affinity(
+                        {},
+                        worker_count=len(self._structure_transports),
+                    )
+                )
                 self._changed_bars = ()
                 self._emitted_bar_ids.clear()
                 self._symbol_names.clear()
@@ -2138,6 +2305,21 @@ class NativeTradingDataGatewayProcessProxy:
         """
 
         self._transport.startup()
+
+    def configure_coverage_sector_affinity(
+        self,
+        *,
+        members_by_sector: Mapping[str, Sequence[str]],
+    ) -> dict[str, object]:
+        """Install an exact, minimally moved whole-sector coverage plan."""
+
+        plan = _balanced_coverage_sector_affinity(
+            members_by_sector,
+            worker_count=len(self._structure_transports),
+        )
+        with self._cache_lock:
+            self._coverage_sector_affinity_plan = plan
+        return plan.audit_document()
 
     def _structure_transports_for_lane(
         self,
@@ -2187,8 +2369,17 @@ class NativeTradingDataGatewayProcessProxy:
         # 所有通道都做确定性分片。同一亲和组若在相邻分钟被轮询到不同进程，进程内的
         # 行情、严格 CL 状态和高周期事实缓存都会失效，等价于反复冷启动。
         # 通道本身仍决定可使用的进程集合，因此普通候选不会占用 1m 优先保留分片。
-        digest = hashlib.sha256(affinity_key.encode("utf-8")).digest()
-        index = int.from_bytes(digest[:8], "big") % len(transports)
+        if lane == "coverage" and affinity_key.startswith("sector:"):
+            sector_id = affinity_key.removeprefix("sector:")
+            with self._cache_lock:
+                configured_index = (
+                    self._coverage_sector_affinity_plan.worker_by_sector.get(
+                        sector_id
+                    )
+                )
+            if configured_index is not None:
+                return transports[configured_index]
+        index = _structure_worker_affinity_slot(affinity_key, len(transports))
         return transports[index]
 
     @staticmethod
@@ -2390,7 +2581,15 @@ class NativeTradingDataGatewayProcessProxy:
 
     def _install_sector_snapshot(self, value: _SectorSnapshotComponents) -> None:
         with self._cache_lock:
+            members_changed = self._sector_members != value.members
             self._sector_members = dict(value.members)
+            if members_changed:
+                self._coverage_sector_affinity_plan = (
+                    _balanced_coverage_sector_affinity(
+                        {},
+                        worker_count=len(self._structure_transports),
+                    )
+                )
             self._changed_bars = tuple(value.changed_bars)
             self._symbol_names = dict(value.symbol_names)
 
@@ -3111,7 +3310,15 @@ class NativeTradingDataGatewayProcessProxy:
                     },
                 }
             )
+            members_changed = self._sector_members != validated
             self._sector_members = dict(validated)
+            if members_changed:
+                self._coverage_sector_affinity_plan = (
+                    _balanced_coverage_sector_affinity(
+                        {},
+                        worker_count=len(self._structure_transports),
+                    )
+                )
             # A restored routing attestation starts a fresh local fact epoch,
             # even when the configured cohort itself did not change.
             self._changed_bars = ()
@@ -3965,6 +4172,10 @@ class NativeTradingDataGatewayProcessProxy:
 
     def health_snapshot(self) -> dict[str, object]:
         result = self._transport.health_snapshot()
+        with self._cache_lock:
+            coverage_affinity = (
+                self._coverage_sector_affinity_plan.audit_document()
+            )
         worker_health = tuple(
             transport.health_snapshot() for transport in self._structure_transports
         )
@@ -3976,6 +4187,7 @@ class NativeTradingDataGatewayProcessProxy:
         }
         result["structure_worker_pool"] = {
             "affinity_contract_id": _STRUCTURE_WORKER_AFFINITY_CONTRACT_ID,
+            "coverage_sector_affinity": coverage_affinity,
             "configured_worker_count": len(worker_health),
             "priority_reserved_worker_count": 1 if worker_health else 0,
             "priority_burst_worker_count": len(worker_health),
