@@ -689,13 +689,14 @@ test('_maybeWidenDefaultView: 旧视窗完全落在已加载历史外时回到�
   assert.deepEqual(applied[0], { from: earliest, to: latest });
 });
 
-test('_maybeWidenDefaultView: 30 分钟与日线使用扩展后的默认时间跨度', () => {
+test('_maybeWidenDefaultView: 5 分钟正式走势、30 分钟与日线使用扩展跨度', () => {
   const { ChartManager, sb } = loadChartManager();
   const latest = 1_784_691_000;
   const day = 86_400;
   sb.setTimeout = (callback) => { callback(); return 0; };
 
   for (const { interval, spanDays } of [
+    { interval: '5', spanDays: 90 },
     { interval: '30', spanDays: 90 },
     { interval: '1D', spanDays: 800 },
   ]) {

@@ -121,7 +121,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v2');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -132,11 +132,44 @@ test('only the current display schema is accepted', () => {
   );
 });
 
+test('production defaults show only formal centers and alternating movements', () => {
+  const { api } = loadClConfigApi();
+  const config = api.normalize(null, '5');
+
+  assert.equal(config.fx, false);
+  assert.equal(config.bi, false);
+  assert.equal(config.xd, false);
+  assert.equal(config.center_observation, false);
+  assert.equal(config.center_all, true);
+  assert.equal(config.center_provisional, false);
+  assert.equal(config.trend_all, true);
+  assert.equal(config.pending_movement, false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'formal_center', structural_level: 0,
+  }), true);
+  assert.equal(api.enabled(config, {
+    render_kind: 'center_preview', structural_level: 0,
+  }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'center_projection', structural_level: 0,
+  }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'strict_trend', structural_level: 0,
+  }), true);
+  assert.equal(api.enabled(config, {
+    render_kind: 'pending_movement', structural_level: 0,
+  }), false);
+});
+
 test('stored non-current or malformed configuration is removed', () => {
   const { api, store } = loadClConfigApi();
   const key = 'cl_show_config_cm1_5';
 
   store.set(key, JSON.stringify({ ...api.DEFAULT, schema: "unsupported", fx: false }));
+  assert.equal(api.load('cm1', '5'), null);
+  assert.equal(store.has(key), false);
+
+  store.set(key, JSON.stringify({ ...api.DEFAULT, schema: 'chanlun-chart-config' }));
   assert.equal(api.load('cm1', '5'), null);
   assert.equal(store.has(key), false);
 

@@ -3,13 +3,17 @@
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    schema: "chanlun-chart-config",
-    fx: true,
-    bi: true,
-    xd: true,
-    center_observation: true,
+    schema: "chanlun-chart-config-v2",
+    // 首屏只展示可审计的正式结构。分型、笔、线段仍可在显示设置中
+    // 随时打开，但不再用数百个基础图形遮住正式走势与中枢。
+    fx: false,
+    bi: false,
+    xd: false,
+    center_observation: false,
     center_all: true,
-    trend_all: false,
+    center_provisional: false,
+    trend_all: true,
+    pending_movement: false,
     point_all: true,
     point_1buy: true,
     point_2buy: true,
@@ -482,7 +486,8 @@ function normalizeClShowConfig(config, interval) {
     const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
     const output = Object.assign({}, CL_SHOW_DEFAULT);
     for (const key of [
-        'fx', 'bi', 'xd', 'center_observation', 'center_all', 'trend_all',
+        'fx', 'bi', 'xd', 'center_observation', 'center_all',
+        'center_provisional', 'trend_all', 'pending_movement',
         'point_all', 'point_1buy', 'point_2buy', 'point_3buy',
         'point_1sell', 'point_2sell', 'point_3sell', 'divergence_all',
     ]) {
@@ -509,15 +514,21 @@ function strictItemEnabled(cfg, item) {
     const config = cfg || {};
     const level = item.structural_level;
     if (item.render_kind === 'center_observation') return config.center_observation === true;
-    if (
-        item.render_kind === 'formal_center'
-        || item.render_kind === 'center_preview'
-        || item.render_kind === 'center_projection'
-    ) {
+    if (item.render_kind === 'formal_center') {
         return config.center_all === true && config[`center_L${level}`] !== false;
     }
-    if (item.render_kind === 'strict_trend' || item.render_kind === 'pending_movement') {
+    if (item.render_kind === 'center_preview' || item.render_kind === 'center_projection') {
+        return config.center_all === true
+            && config.center_provisional === true
+            && config[`center_L${level}`] !== false;
+    }
+    if (item.render_kind === 'strict_trend') {
         return config.trend_all !== false && config[`trend_L${level}`] !== false;
+    }
+    if (item.render_kind === 'pending_movement') {
+        return config.trend_all !== false
+            && config.pending_movement === true
+            && config[`trend_L${level}`] !== false;
     }
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
         return config.point_all !== false
@@ -2175,6 +2186,7 @@ class ChartManager {
 
                         ${_grpTitle('中枢控制', '严格递归结构')}
                         ${_cbRow('center_all', '中枢总开关')}
+                        ${_cbRow('center_provisional', '形成中 / 投影（非正式）', false)}
                         <div style="padding-left:14px;display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
                             ${_centerLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
@@ -2183,7 +2195,8 @@ class ChartManager {
                         </div>
 
                         ${_grpTitle('走势类型', '由当前 K 线递归产生')}
-                        ${_cbRow('trend_all', '走势类型总开关', false)}
+                        ${_cbRow('trend_all', '走势类型总开关')}
+                        ${_cbRow('pending_movement', '待定尾段（非正式）', false)}
                         <div style="padding-left:14px;display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
                             ${_trendLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
@@ -2270,7 +2283,8 @@ class ChartManager {
                 });
 
                 const keys = [
-                    'fx', 'bi', 'xd', 'center_observation', 'center_all', 'trend_all',
+                    'fx', 'bi', 'xd', 'center_observation', 'center_all',
+                    'center_provisional', 'trend_all', 'pending_movement',
                     'point_all', 'divergence_all',
                     ..._centerLevels.map((item) => item.key),
                     ..._trendLevels.map((item) => item.key),
@@ -2884,9 +2898,11 @@ class ChartManager {
             // 各周期默认视窗跨度(日历天);跨度按天数,外汇 24h 连续→根数多,A股有夜盘缺口→根数少,均显示充足缠论。
             // 白名单只列分钟~月线;未列出的周期(秒线10S/30S、季线3M、年线12M等)直接跳过不拉宽——
             // 否则 6 天 fallback 对秒线会触发拉数万根、对季/年线又过窄;且这些周期 TV 默认视窗本就够宽。
-            // 30m / 日线扩大为原来的 2 倍：默认约显示 3 个月 / 2.2 年，
-            // 同时与后端扩展后的 2 年 / 6 年历史上限留出继续向左浏览的空间。
-            const SPAN_DAYS = { '1': 2, '2': 3, '3': 3, '5': 6, '10': 8, '15': 12, '30': 90, '60': 90, '120': 120, '180': 150, '240': 200, '1D': 800, '2D': 700, '1W': 1825, '1M': 5475 };
+            // 5m 是正式交易结构级别，6 天视窗通常容不下一条完整走势，导致严格线
+            // 因端点在画面外而全部隐藏。默认展开到 90 天；正式结构优先配置会同时
+            // 关闭高密度分型/笔/线段，因此不会把扩大视窗转化为数百个绘图实体。
+            // 30m / 日线继续保留约 3 个月 / 2.2 年的审阅跨度。
+            const SPAN_DAYS = { '1': 2, '2': 3, '3': 3, '5': 90, '10': 8, '15': 12, '30': 90, '60': 90, '120': 120, '180': 150, '240': 200, '1D': 800, '2D': 700, '1W': 1825, '1M': 5475 };
             const days = SPAN_DAYS[si.interval];
             if (!days) return;   // 周期不在白名单(秒/季/年等)→保持 TV 默认视窗
             const span = days * 86400;

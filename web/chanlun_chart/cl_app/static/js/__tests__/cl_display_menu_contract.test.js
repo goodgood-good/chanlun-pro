@@ -101,6 +101,8 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
     '笔中枢',
     '中枢总开关',
     '走势类型总开关',
+    '形成中 / 投影（非正式）',
+    '待定尾段（非正式）',
     '买卖点总开关',
     '背驰总开关',
     '盘整背驰',
@@ -120,6 +122,8 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
   }
   assert.equal(source.includes('严格递归中枢总开关'), false);
   assert.ok(source.includes("_cbRow('center_all', '中枢总开关')"));
+  assert.ok(source.includes("_cbRow('center_provisional', '形成中 / 投影（非正式）', false)"));
+  assert.ok(source.includes("_cbRow('pending_movement', '待定尾段（非正式）', false)"));
   assert.ok(source.includes('const _pointLevels = _displayLevels.map'));
   assert.ok(source.includes('..._pointLevels.map((item) => item.key)'));
 });

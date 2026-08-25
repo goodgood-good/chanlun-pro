@@ -339,7 +339,12 @@ function manager(instanceId = 'chart-manager-1') {
   cm._scheduleVerifyRebuild = () => {};
   // Reconciliation mechanics are exercised with the opt-in formal layer on;
   // product defaults are covered by cl_show_config_per_resolution.test.js.
-  cm.cl_show_config = { center_all: true };
+  cm.cl_show_config = {
+    center_all: true,
+    center_provisional: true,
+    trend_all: true,
+    pending_movement: true,
+  };
   cm.chart = {
     createMultipointShape(points, options) {
       const id = `${instanceId}-shape-${nextId++}`;
