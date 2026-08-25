@@ -368,17 +368,17 @@ def create_app(test_config=None, start_scheduler=False):
                 "1536",
             )
         ),
-        # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多三个结构进程，
-        # 另有一个独立控制进程专供逐笔、日历与轻量分类，总原生子进程上限仍为四。
+        # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多四个结构进程，
+        # 另有一个独立控制进程专供逐笔、日历与轻量分类，总原生子进程上限为五。
         TRADING_SCREENING_STOCK_WORKERS=int(
             min(
-                3,
+                4,
                 max(
                     1,
                     int(
                         os.environ.get(
                             "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
-                            str(min(3, max(1, (os.cpu_count() or 4) // 4))),
+                            str(min(4, max(1, (os.cpu_count() or 4) // 4))),
                         )
                     ),
                 ),
@@ -387,7 +387,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_FULL_COVERAGE_WORKERS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_WORKERS",
-                "3",
+                "4",
             )
         ),
         FORWARD_SCHEDULER_MONITOR_ENABLED=True,
