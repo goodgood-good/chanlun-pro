@@ -62,6 +62,106 @@ def test_qmt_fact_payload_streaming_write_preserves_exact_document(
     assert tuple(path.parent.glob("*.tmp")) == ()
 
 
+def test_qmt_daily_fact_domain_stream_preserves_exact_document(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "facts" / "daily-domain.json"
+    known_at = datetime(2026, 8, 25, 15, 0, tzinfo=SHANGHAI)
+    bar = subject.DailyMarketBar(
+        session=date(2026, 8, 25),
+        open=Decimal("10.10"),
+        high=Decimal("10.30"),
+        low=Decimal("10.00"),
+        close=Decimal("10.20"),
+        volume=Decimal("123456"),
+        known_at=known_at,
+    )
+    bars = {
+        "SH.600000": (bar,),
+        "SZ.000001": (bar,),
+    }
+    metadata = {
+        "schema": subject._DAILY_FACT_SCHEMA,
+        "producer_revision": "sha256:" + "b" * 64,
+        "symbols": ["SH.600000", "SZ.000001"],
+        "required_daily_session": "2026-08-25",
+        "incomplete_symbols": [],
+    }
+    row = [
+        "2026-08-25",
+        "10.10",
+        "10.30",
+        "10.00",
+        "10.20",
+        "123456",
+        known_at.isoformat(),
+        True,
+    ]
+    payload = {
+        **metadata,
+        "bars": {
+            "SH.600000": [row],
+            "SZ.000001": [row],
+        },
+    }
+    document = {
+        "schema": subject._FACT_CACHE_ENVELOPE_SCHEMA,
+        "content_sha256": sha256_json(payload),
+        "payload": payload,
+    }
+    expected = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+    subject._write_daily_fact_payload(path, metadata, bars)
+
+    assert path.read_bytes() == expected
+    assert subject._read_fact_payload(path) == payload
+    assert tuple(path.parent.glob("*.tmp")) == ()
+
+
+def test_qmt_daily_fact_domain_stream_failure_preserves_published_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily.json"
+    path.write_text("published", encoding="utf-8")
+    known_at = datetime(2026, 8, 25, 15, 0, tzinfo=SHANGHAI)
+    bars = {
+        "SH.600000": (
+            subject.DailyMarketBar(
+                session=date(2026, 8, 25),
+                open=Decimal("10.10"),
+                high=Decimal("10.30"),
+                low=Decimal("10.00"),
+                close=Decimal("10.20"),
+                volume=Decimal("123456"),
+                known_at=known_at,
+            ),
+        )
+    }
+    metadata = {
+        "symbols": ["SH.600000"],
+        "required_daily_session": "2026-08-25",
+    }
+
+    def broken_payload(*_args, **_kwargs):
+        yield '{"partial":'
+        raise OSError("simulated streaming failure")
+
+    monkeypatch.setattr(subject, "_iter_daily_fact_json", broken_payload)
+
+    with pytest.raises(OSError, match="simulated streaming failure"):
+        subject._write_daily_fact_payload(path, metadata, bars)
+
+    assert path.read_text(encoding="utf-8") == "published"
+    assert tuple(tmp_path.glob("*.tmp")) == ()
+
+
 def test_qmt_fact_ast_identity_isolates_independent_fact_families() -> None:
     original = """
 SHARED = 1

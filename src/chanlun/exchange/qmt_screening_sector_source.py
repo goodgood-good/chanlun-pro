@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import hashlib
@@ -22,7 +22,11 @@ import numpy as np
 import pandas as pd
 from xtquant import xtdata
 
-from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
+from chanlun.decision_support.fingerprints import (
+    canonical_json,
+    normalize_datetime,
+    sha256_json,
+)
 from chanlun.decision_support.trading_system.sector_strength import (
     SectorStrengthBatch,
     SectorStrengthEvidence,
@@ -113,6 +117,7 @@ _MEMBER_STATUS_FACT_SCHEMA = "chanlun-qmt-sector-member-status-facts"
 _MEMBER_LISTING_FACT_SCHEMA = "chanlun-qmt-sector-member-listing-facts"
 _FACT_PRODUCER_SCHEMA = "chanlun-qmt-sector-fact-producer"
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FACT_STREAM_BUFFER_CHARACTERS = 64 * 1024
 
 
 def _producer_ast_manifest(
@@ -331,6 +336,170 @@ def _write_fact_payload(path: Path, payload: Mapping[str, object]) -> None:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _daily_bar_fact_row(value: DailyMarketBar) -> tuple[object, ...]:
+    return (
+        value.session.isoformat(),
+        str(value.open),
+        str(value.high),
+        str(value.low),
+        str(value.close),
+        str(value.volume),
+        value.known_at.isoformat(),
+        value.completed,
+    )
+
+
+def _iter_daily_bars_canonical_json(
+    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+) -> Iterator[str]:
+    yield '{"$map":['
+    symbol_separator = ""
+    for symbol in sorted(bars):
+        yield symbol_separator
+        yield f"[{_compact_json(symbol)},"
+        yield '{"$sequence":['
+        row_separator = ""
+        for value in bars[symbol]:
+            row = _daily_bar_fact_row(value)
+            encoded = ",".join(_compact_json(item) for item in row)
+            yield f'{row_separator}{{"$sequence":[{encoded}]}}'
+            row_separator = ","
+        yield "]}]"
+        symbol_separator = ","
+    yield "]}"
+
+
+def _iter_daily_fact_canonical_json(
+    payload: Mapping[str, object],
+    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+) -> Iterator[str]:
+    yield '{"$map":['
+    separator = ""
+    for key in sorted({*payload, "bars"}):
+        yield separator
+        yield f"[{_compact_json(key)},"
+        if key == "bars":
+            yield from _iter_daily_bars_canonical_json(bars)
+        else:
+            yield canonical_json(payload[key])
+        yield "]"
+        separator = ","
+    yield "]}"
+
+
+def _sha256_text_chunks(chunks: Iterable[str]) -> str:
+    digest = hashlib.sha256()
+    buffered: list[str] = []
+    buffered_characters = 0
+    for chunk in chunks:
+        buffered.append(chunk)
+        buffered_characters += len(chunk)
+        if buffered_characters >= _FACT_STREAM_BUFFER_CHARACTERS:
+            digest.update("".join(buffered).encode("utf-8"))
+            buffered.clear()
+            buffered_characters = 0
+    if buffered:
+        digest.update("".join(buffered).encode("utf-8"))
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _iter_daily_bars_json(
+    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+) -> Iterator[str]:
+    yield "{"
+    symbol_separator = ""
+    for symbol in sorted(bars):
+        yield f"{symbol_separator}{_compact_json(symbol)}:["
+        row_separator = ""
+        for value in bars[symbol]:
+            yield f"{row_separator}{_compact_json(_daily_bar_fact_row(value))}"
+            row_separator = ","
+        yield "]"
+        symbol_separator = ","
+    yield "}"
+
+
+def _iter_daily_fact_json(
+    payload: Mapping[str, object],
+    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+) -> Iterator[str]:
+    yield "{"
+    separator = ""
+    for key in sorted({*payload, "bars"}):
+        yield f"{separator}{_compact_json(key)}:"
+        if key == "bars":
+            yield from _iter_daily_bars_json(bars)
+        else:
+            yield _compact_json(payload[key])
+        separator = ","
+    yield "}"
+
+
+def _write_text_chunks_atomically(path: Path, chunks: Iterable[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            buffered: list[str] = []
+            buffered_characters = 0
+            for chunk in chunks:
+                buffered.append(chunk)
+                buffered_characters += len(chunk)
+                if buffered_characters >= _FACT_STREAM_BUFFER_CHARACTERS:
+                    handle.write("".join(buffered))
+                    buffered.clear()
+                    buffered_characters = 0
+            if buffered:
+                handle.write("".join(buffered))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_daily_fact_payload(
+    path: Path,
+    payload: Mapping[str, object],
+    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+) -> None:
+    """Publish daily facts without materializing a second full JSON row tree."""
+
+    if "bars" in payload:
+        raise ValueError("daily fact payload metadata cannot contain bars")
+    content_sha256 = _sha256_text_chunks(
+        _iter_daily_fact_canonical_json(payload, bars)
+    )
+
+    def document_chunks() -> Iterator[str]:
+        # This is the exact order produced by ``sort_keys=True`` for the
+        # authenticated three-field envelope.
+        yield '{"content_sha256":'
+        yield _compact_json(content_sha256)
+        yield ',"payload":'
+        yield from _iter_daily_fact_json(payload, bars)
+        yield ',"schema":'
+        yield _compact_json(_FACT_CACHE_ENVELOPE_SCHEMA)
+        yield "}"
+
+    _write_text_chunks_atomically(path, document_chunks())
 
 
 def _qmt_calendar_date(value: object) -> date:
@@ -4014,22 +4183,6 @@ class QmtSectorStrengthSource:
         # 但每个请求标的至少必须有一条事实。
         if set(bars) != set(symbols) or any(not bars[symbol] for symbol in symbols):
             return
-        document = {
-            symbol: [
-                [
-                    value.session.isoformat(),
-                    str(value.open),
-                    str(value.high),
-                    str(value.low),
-                    str(value.close),
-                    str(value.volume),
-                    value.known_at.isoformat(),
-                    value.completed,
-                ]
-                for value in bars[symbol]
-            ]
-            for symbol in symbols
-        }
         required_session = date.fromisoformat(
             str(identity["required_daily_session"])
         )
@@ -4040,13 +4193,13 @@ class QmtSectorStrengthSource:
         )
         self._progress_callback()
         try:
-            _write_fact_payload(
+            _write_daily_fact_payload(
                 self._fact_cache_path,
                 {
                     **identity,
                     "incomplete_symbols": list(incomplete),
-                    "bars": document,
                 },
+                bars,
             )
         except OSError:
             pass
