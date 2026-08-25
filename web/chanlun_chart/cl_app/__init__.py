@@ -245,7 +245,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS=float(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
-                "50",
+                "55",
             )
         ),
         # 低频候选必须在下一次 1m 监听到期前停止接纳新任务；剩余标的下一轮继续。
@@ -2654,7 +2654,7 @@ def create_app(test_config=None, start_scheduler=False):
             priority_monitor_time_budget_seconds=float(
                 app.config.get(
                     "TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
-                    50.0,
+                    55.0,
                 )
             ),
             full_coverage_refresh_enabled=bool(

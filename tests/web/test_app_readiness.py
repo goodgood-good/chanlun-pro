@@ -83,6 +83,12 @@ def test_livez_and_healthz_have_distinct_compatible_contracts(app):
     assert health.get_json()["revision"] == "test-revision"
 
 
+def test_priority_locator_budget_preserves_five_second_publish_reserve(app):
+    assert app.config["TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS"] == 55.0
+    screening = app.extensions["decision_support_trading_screening"]
+    assert screening._config.priority_monitor_time_budget_seconds == 55.0
+
+
 def test_disabled_scheduler_monitor_cannot_bypass_virtual_paper_gate(app):
     service = app.extensions["decision_support_human_review"]
 
