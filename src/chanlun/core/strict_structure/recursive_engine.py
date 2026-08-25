@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import replace
 
 from chanlun.core.strict_structure.center_machine import (
     calculate_centers,
@@ -184,6 +185,7 @@ def calculate_level_with_divergence_boundaries(
     frozen_current = {}
     frozen_completed = {}
     frozen_boundaries = {}
+    historical_completed = {}
     last_boundary_index = -1
 
     def merge_unique(target, items, identifier, label):
@@ -192,6 +194,17 @@ def calculate_level_with_divergence_boundaries(
             previous = target.setdefault(item_id, item)
             if previous != item:
                 raise ValueError(f"{label} id maps to conflicting evidence")
+
+    def record_historical_completed(items, observed_at) -> None:
+        """Keep the first causal COMPLETE snapshot seen during prefix replay."""
+
+        for item in items:
+            snapshot = (
+                item
+                if item.available_at >= observed_at
+                else replace(item, available_at=observed_at)
+            )
+            historical_completed.setdefault(snapshot.trend_id, snapshot)
 
     locked_count = 0
     for item in values:
@@ -252,6 +265,10 @@ def calculate_level_with_divergence_boundaries(
                 rejected = rejected | {exc.anchor_unit_id}
                 restart_after_rejection = True
                 break
+            record_historical_completed(
+                suffix.completed_trends,
+                prefix[-1].available_at,
+            )
             candidates = tuple(
                 boundary
                 for boundary in suffix.decomposition_boundaries
@@ -354,7 +371,17 @@ def calculate_level_with_divergence_boundaries(
                 source_units=values,
                 structural_level=structural_level,
             )
-            return center_result, normalized
+            for trend in normalized.completed_trends:
+                historical_completed.setdefault(trend.trend_id, trend)
+            return center_result, replace(
+                normalized,
+                completed_trends=tuple(
+                    sorted(
+                        historical_completed.values(),
+                        key=lambda trend: (trend.available_at, trend.trend_id),
+                    )
+                ),
+            )
 
         candidate, suffix = discovered
         current_ids = [trend.trend_id for trend in suffix.current_trends]

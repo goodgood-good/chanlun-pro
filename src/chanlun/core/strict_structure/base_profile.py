@@ -43,7 +43,8 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     # 尚未形成正式中枢的长区间按三段反转证据切成连续走势，不能被后来的中枢吞并。
     "decomposition_rule": (
         "trend-or-consolidation-divergence-terminal-prefix-partition;"
-        "centerless-three-segment-reversal-movement-partition"
+        "centerless-three-segment-reversal-prefix-and-tail-movement-partition;"
+        "causal-completion-ledger-current-recomposition-and-tail-extension"
     ),
     "first_class_rule": "trend-or-consolidation-divergence-reversal",
     # 小级别一类点可以跨级结束高一级走势。高一级二类点与普通二类点使用

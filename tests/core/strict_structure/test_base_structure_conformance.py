@@ -172,7 +172,8 @@ def test_strict_base_profile_contains_only_current_production_rules():
     )
     assert config["decomposition_rule"] == (
         "trend-or-consolidation-divergence-terminal-prefix-partition;"
-        "centerless-three-segment-reversal-movement-partition"
+        "centerless-three-segment-reversal-prefix-and-tail-movement-partition;"
+        "causal-completion-ledger-current-recomposition-and-tail-extension"
     )
     assert config["first_class_rule"] == (
         "trend-or-consolidation-divergence-reversal"

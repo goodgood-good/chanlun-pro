@@ -9,6 +9,7 @@ from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     PendingMovementRole,
     SourceKind,
+    TrendState,
 )
 from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from tests.core.strict_structure.helpers import unit, valid_five_up_exit
@@ -66,6 +67,37 @@ def test_centerless_stream_is_one_non_formal_pending_movement() -> None:
     assert pending.tradable is False
     assert pending.recursive_eligible is False
     assert pending.divergence_eligible is False
+
+
+def test_centerless_stream_promotes_confirmed_reversal_prefix() -> None:
+    values = (
+        unit(0, "down", 170, 150),
+        unit(1, "up", 150, 180),
+        unit(2, "down", 180, 160),
+        unit(3, "up", 160, 190),
+        unit(4, "down", 190, 170),
+        unit(5, "up", 170, 185),
+        unit(6, "down", 185, 175),
+        unit(7, "up", 175, 200),
+        unit(8, "down", 200, 180),
+        unit(9, "up", 180, 195),
+        unit(10, "down", 195, 185),
+        unit(11, "up", 185, 192),
+    )
+
+    result = assemble_trend_types((), values, 0)
+
+    assert tuple(item.direction for item in result.current_trends) == (
+        "down",
+        "up",
+    )
+    assert all(item.state is TrendState.LOCKED for item in result.current_trends)
+    assert result.current_trends[0].constituent_units == values[:3]
+    assert result.current_trends[1].constituent_units == values[3:8]
+    assert len(result.completed_trends) == 2
+    assert len(result.pending_movements) == 1
+    assert result.pending_movements[0].role is PendingMovementRole.SUFFIX
+    assert result.pending_movements[0].constituent_units == values[8:]
 
 
 def test_single_unit_pending_movement_uses_its_own_availability() -> None:

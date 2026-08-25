@@ -255,6 +255,55 @@ def test_single_completed_center_owns_body_and_excludes_completion_return():
     assert first.completion_return_unit not in trend.constituent_units
 
 
+def test_completed_center_promotes_confirmed_centerless_tail_movements():
+    values, first, _second, _third = three_center_fixture()
+    source = (
+        *values[:6],
+        unit(6, "up", 125, 155),
+        unit(7, "down", 155, 130),
+        unit(8, "up", 130, 160),
+        unit(9, "down", 160, 145),
+        unit(10, "up", 145, 155),
+        unit(11, "down", 155, 135),
+        unit(12, "up", 135, 150),
+        unit(13, "down", 150, 140),
+    )
+
+    result = assemble_trend_types((first,), source, 0)
+
+    assert tuple(item.direction for item in result.current_trends) == (
+        "up",
+        "down",
+        "up",
+    )
+    assert all(item.state is TrendState.LOCKED for item in result.current_trends)
+    assert result.current_trends[0].centers == (first,)
+    assert result.current_trends[1].constituent_units == source[5:8]
+    assert result.current_trends[2].constituent_units == source[8:11]
+    assert len(result.pending_movements) == 1
+    assert result.pending_movements[0].constituent_units == source[11:]
+
+
+def test_completed_movement_absorbs_unresolved_same_direction_tail() -> None:
+    values, first, _second, _third = three_center_fixture()
+    source = (
+        *values[:6],
+        unit(6, "up", 125, 155),
+        unit(7, "down", 155, 145),
+    )
+
+    result = assemble_trend_types((first,), source, 0)
+
+    assert len(result.current_trends) == 1
+    (current,) = result.current_trends
+    assert current.direction == "up"
+    assert current.state is TrendState.FORMING
+    assert current.constituent_units == source
+    assert current.centers == (first,)
+    assert result.completed_trends
+    assert result.pending_movements == ()
+
+
 def test_two_separated_centers_form_complete_uptrend_with_internal_return():
     values, first, second, _third = three_center_fixture()
     result = assemble_trend_types((first, second), values[:10], 0)
@@ -509,7 +558,7 @@ class BoundaryStrength:
         )
 
 
-def test_hard_boundary_keeps_same_direction_combined_suffix_pending():
+def test_same_direction_continuation_recomposes_current_chain_and_preserves_snapshot():
     values, first, second, _third = three_center_fixture()
     boundary_result = assemble_trend_types(
         (first, second),
@@ -550,16 +599,23 @@ def test_hard_boundary_keeps_same_direction_combined_suffix_pending():
     local_down = geometric_trend(suffix_units[4:9], suffix_units[9:12])
     result = normalize_trend_assembly(
         current_trends=(boundary_trend, local_up, local_down),
-        completed_trends=(),
+        completed_trends=boundary_result.completed_trends,
         decomposition_boundaries=(boundary,),
         source_units=(*values[:11], *suffix_units),
         structural_level=0,
     )
 
-    assert result.current_trends == (boundary_trend,)
-    assert result.decomposition_boundaries == (boundary,)
+    assert tuple(item.direction for item in result.current_trends) == ("up", "down")
+    recomposed, successor = result.current_trends
+    assert recomposed.constituent_units == (
+        *boundary_trend.constituent_units,
+        *suffix_units[:4],
+    )
+    assert successor == local_down
+    assert result.decomposition_boundaries == ()
+    assert boundary_result.completed_trends[0] in result.completed_trends
     assert len(result.pending_movements) == 1
-    assert result.pending_movements[0].constituent_units == suffix_units
+    assert result.pending_movements[0].constituent_units == suffix_units[9:]
 
 
 def test_three_unit_entry_waits_for_matching_three_unit_departure_boundary():

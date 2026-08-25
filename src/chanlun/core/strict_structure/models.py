@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -1443,14 +1443,30 @@ class TrendType:
             if current.market_start < previous.market_end:
                 raise ValueError("trend constituent intervals must not overlap")
 
+        constituent_ids = {item.unit_id for item in self.constituent_units}
+        terminal_unit_id = self.constituent_units[-1].unit_id
+
+        def closed_inside_current_movement(center: TrendCenter) -> bool:
+            return center.structurally_closed or (
+                center.state is CenterState.DIVERGENCE_CLOSED
+                and center.boundary_anchor_unit_id in constituent_ids
+                and center.boundary_anchor_unit_id != terminal_unit_id
+            )
+
         if self.state in (TrendState.COMPLETE, TrendState.LOCKED):
             if self.terminal_divergence is None:
-                if any(not center.structurally_closed for center in self.centers):
+                if any(
+                    not closed_inside_current_movement(center)
+                    for center in self.centers
+                ):
                     raise ValueError(
                         "completed trend requires structurally closed centers"
                     )
             elif (
-                any(not center.structurally_closed for center in self.centers[:-1])
+                any(
+                    not closed_inside_current_movement(center)
+                    for center in self.centers[:-1]
+                )
                 or self.centers[-1].state is not CenterState.DIVERGENCE_CLOSED
             ):
                 raise ValueError(
@@ -2205,7 +2221,101 @@ class StrictLevelResult:
                 for unit_id in (event.leave_unit_id, event.return_unit_id)
             ):
                 raise ValueError("center event references missing formal evidence")
-        for trend in (*self.trend_types, *self.completed_trends):
+        def is_current_center_or_completed_snapshot(
+            center: TrendCenter,
+            *,
+            historical: bool,
+        ) -> bool:
+            current = centers_by_id.get(center.center_id)
+            if current == center:
+                return True
+            if not historical or current is None:
+                return False
+            if (
+                center.state is CenterState.DIVERGENCE_CLOSED
+                and current.state is CenterState.COMPLETED
+            ):
+                if center.completion_leave_unit is not None:
+                    if center.available_at < current.available_at:
+                        return False
+                    restored_current = replace(
+                        center,
+                        state=CenterState.COMPLETED,
+                        available_at=current.available_at,
+                        boundary_divergence_id=None,
+                        boundary_anchor_unit_id=None,
+                    )
+                    return restored_current == current
+                pending = center.pending_leave_unit
+                if (
+                    pending is None
+                    or center.boundary_anchor_unit_id != pending.unit_id
+                    or current.completion_leave_unit != pending
+                    or current.completion_return_unit is None
+                    or current.available_at < center.available_at
+                ):
+                    return False
+                restored_current = replace(
+                    center,
+                    state=CenterState.COMPLETED,
+                    pending_leave_unit=None,
+                    completion_leave_unit=current.completion_leave_unit,
+                    completion_return_unit=current.completion_return_unit,
+                    completed_at=current.completed_at,
+                    available_at=current.available_at,
+                    boundary_divergence_id=None,
+                    boundary_anchor_unit_id=None,
+                )
+                return restored_current == current
+            if (
+                center.state is not CenterState.COMPLETED
+                or current.state is not CenterState.DIVERGENCE_CLOSED
+                or current.available_at < center.available_at
+            ):
+                return False
+            # A later divergence boundary may overlay an already completed
+            # center without changing any physical lifecycle evidence.  The
+            # append-only COMPLETE trend ledger must keep the exact earlier
+            # center snapshot, while the live center ledger exposes the
+            # boundary overlay.  No other historical/current mismatch is
+            # accepted here.
+            if current.completion_leave_unit is not None:
+                restored = replace(
+                    current,
+                    state=CenterState.COMPLETED,
+                    available_at=center.available_at,
+                    boundary_divergence_id=None,
+                    boundary_anchor_unit_id=None,
+                )
+                return restored == center
+            pending = current.pending_leave_unit
+            completion_return = center.completion_return_unit
+            if (
+                pending is None
+                or current.boundary_anchor_unit_id != pending.unit_id
+                or center.completion_leave_unit != pending
+                or completion_return is None
+                or units_by_id.get(completion_return.unit_id) != completion_return
+            ):
+                return False
+            # A one-leg divergence can later become the preferred current
+            # boundary even though an earlier prefix had already observed the
+            # same leave plus its outside return as a completed center.  Keep
+            # that earlier physical completion in the historical ledger.
+            restored = replace(
+                current,
+                state=CenterState.COMPLETED,
+                pending_leave_unit=None,
+                completion_leave_unit=center.completion_leave_unit,
+                completion_return_unit=completion_return,
+                completed_at=center.completed_at,
+                available_at=center.available_at,
+                boundary_divergence_id=None,
+                boundary_anchor_unit_id=None,
+            )
+            return restored == center
+
+        for trend in self.trend_types:
             if any(
                 units_by_id.get(unit.unit_id) != unit
                 for unit in (
@@ -2213,10 +2323,30 @@ class StrictLevelResult:
                     *trend.completion_witness_units,
                 )
             ) or any(
-                centers_by_id.get(center.center_id) != center
+                not is_current_center_or_completed_snapshot(
+                    center,
+                    historical=False,
+                )
                 for center in trend.centers
             ):
                 raise ValueError("trend evidence is not closed over its strict level")
+        for trend in self.completed_trends:
+            if any(
+                units_by_id.get(unit.unit_id) != unit
+                for unit in (
+                    *trend.constituent_units,
+                    *trend.completion_witness_units,
+                )
+            ) or any(
+                not is_current_center_or_completed_snapshot(
+                    center,
+                    historical=True,
+                )
+                for center in trend.centers
+            ):
+                raise ValueError(
+                    "completed trend evidence is not closed over its strict level"
+                )
         for boundary in self.decomposition_boundaries:
             trend = trend_by_id[boundary.left_trend_id]
             if (
@@ -2271,9 +2401,32 @@ class StrictLevelResult:
             for center in self.center_result.centers
             if center.state is CenterState.DIVERGENCE_CLOSED
         }
-        if boundary_center_ids != closed_center_ids:
+        if not boundary_center_ids.issubset(closed_center_ids):
             raise ValueError(
-                "divergence-closed centers and decomposition boundaries must match"
+                "decomposition boundaries require divergence-closed centers"
+            )
+        absorbed_center_ids = closed_center_ids - boundary_center_ids
+        snapshot_center_ids = {
+            trend.centers[-1].center_id
+            for trend in self.completed_trends
+            if trend.terminal_divergence is not None
+            and trend.centers
+            and trend.centers[-1].boundary_divergence_id
+            == trend.terminal_divergence.divergence_id
+        }
+        internal_current_center_ids = {
+            center.center_id
+            for trend in self.trend_types
+            for center in trend.centers
+            if center.state is CenterState.DIVERGENCE_CLOSED
+            and center.boundary_anchor_unit_id != trend.terminal_unit.unit_id
+        }
+        if not absorbed_center_ids.issubset(
+            snapshot_center_ids & internal_current_center_ids
+        ):
+            raise ValueError(
+                "absorbed divergence centers require an immutable snapshot "
+                "and an internal current owner"
             )
 
     @property

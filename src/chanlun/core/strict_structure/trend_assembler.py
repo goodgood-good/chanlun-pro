@@ -348,6 +348,89 @@ def _geometric_movement_slices(source_units, start_index):
     return tuple(output)
 
 
+def _append_confirmed_geometric_segment_suffix(
+    output,
+    completed,
+    source_units,
+    index,
+    structural_level,
+):
+    """Promote every confirmed centerless tail movement before pending data.
+
+    ``_refine_forming_segment_tail`` protects a center that appears late in a
+    long segment stream, but a stream with no later center used to bypass that
+    path entirely.  Its already-confirmed reversal movements were therefore
+    left in one unbounded pending suffix.  Apply the same three-segment causal
+    reversal rule to the uncovered physical tail, stopping at the first slice
+    that still contains unlocked evidence.
+    """
+
+    if (
+        not source_units
+        or source_units[0].source_kind is not SourceKind.SEGMENT
+        or (output and output[-1].state is TrendState.FORMING)
+    ):
+        return
+    start = (
+        0
+        if not output
+        else index[output[-1].terminal_unit.unit_id] + 1
+    )
+    if start >= len(source_units):
+        return
+
+    locked_movements = []
+    for movement, witness in _geometric_movement_slices(source_units, start):
+        evidence = (*movement, *witness)
+        if any(not item.locked for item in evidence):
+            break
+        confirmations = tuple(item.confirmed_at for item in evidence)
+        if any(value is None for value in confirmations):
+            raise ValueError("locked geometric movement requires confirmations")
+        confirmed_at = max(confirmations)
+        available_at = max(item.available_at for item in evidence)
+        complete = _build(
+            (),
+            movement,
+            structural_level,
+            TrendState.COMPLETE,
+            confirmed_at,
+            available_at,
+            completion_witness_units=witness,
+        )
+        locked = _build(
+            (),
+            movement,
+            structural_level,
+            TrendState.LOCKED,
+            confirmed_at,
+            available_at,
+            completion_witness_units=witness,
+        )
+        previous = completed.setdefault(complete.trend_id, complete)
+        if previous != complete:
+            raise ValueError("geometric movement identity collision")
+        locked_movements.append(locked)
+
+    if not locked_movements:
+        return
+    first_locked = locked_movements[0]
+    if first_locked.confirmed_at is None:
+        raise ValueError("locked geometric movement requires confirmation")
+    for offset, trend in enumerate(output):
+        if trend.state is not TrendState.COMPLETE:
+            continue
+        if trend.confirmed_at is None:
+            raise ValueError("completed trend requires confirmation")
+        output[offset] = replace(
+            trend,
+            state=TrendState.LOCKED,
+            confirmed_at=max(trend.confirmed_at, first_locked.confirmed_at),
+            available_at=max(trend.available_at, first_locked.available_at),
+        )
+    output.extend(locked_movements)
+
+
 def partition_pending_movements(
     current_trends,
     units,
@@ -572,6 +655,48 @@ def _build(
     )
 
 
+def _canonical_complete_snapshot(trend: TrendType) -> TrendType:
+    """Rebuild the first causal COMPLETE view of a current movement.
+
+    Locking a movement later may raise its current ``confirmed_at`` and
+    ``available_at`` without changing its structural identity.  Completed
+    snapshots must retain the earlier lifecycle/witness availability so a new
+    later boundary cannot reorder the historical event ledger.
+    """
+
+    if trend.terminal_divergence is not None:
+        return replace(trend, state=TrendState.COMPLETE)
+    confirmations = []
+    for center in trend.centers:
+        closed_at = center.structural_closed_at
+        if closed_at is None and center.state is CenterState.DIVERGENCE_CLOSED:
+            closed_at = center.completed_at or center.available_at
+        if closed_at is None:
+            raise ValueError("complete snapshot requires closed center evidence")
+        confirmations.append(closed_at)
+    for witness in trend.completion_witness_units:
+        if witness.confirmed_at is None:
+            raise ValueError("complete snapshot witness requires confirmation")
+        confirmations.append(witness.confirmed_at)
+    if not confirmations:
+        raise ValueError("complete snapshot requires completion evidence")
+    confirmed_at = max(confirmations)
+    available_at = max(
+        *(center.available_at for center in trend.centers),
+        *(item.available_at for item in trend.constituent_units),
+        *(item.available_at for item in trend.completion_witness_units),
+    )
+    return _build(
+        trend.centers,
+        trend.constituent_units,
+        trend.structural_level,
+        TrendState.COMPLETE,
+        confirmed_at,
+        available_at,
+        completion_witness_units=trend.completion_witness_units,
+    )
+
+
 def _merge_trend_group(trends) -> TrendType:
     """Combine a contiguous same-level group into one canonical movement."""
 
@@ -681,6 +806,62 @@ def _rebind_decomposition_boundary(
     )
 
 
+def _extend_terminal_same_direction_suffix(
+    trends,
+    boundaries,
+    source_units,
+    structural_level,
+):
+    """Keep a current movement attached to its unresolved same-way tail.
+
+    The immutable COMPLETE snapshot still records when the earlier lifecycle
+    first finished.  Until an opposite formal successor exists, however, a
+    connected suffix whose endpoint remains in the same direction is the live
+    extension of that current movement rather than a second hidden movement.
+    """
+
+    current = tuple(trends)
+    if not current:
+        return current
+    terminal = current[-1]
+    if not terminal.centers or terminal.terminal_divergence is not None or any(
+        boundary.left_trend_id == terminal.trend_id for boundary in boundaries
+    ):
+        return current
+    pending = partition_pending_movements(
+        current,
+        tuple(source_units),
+        structural_level,
+    )
+    suffixes = tuple(
+        item
+        for item in pending
+        if item.role is PendingMovementRole.SUFFIX
+        and item.left_trend_id == terminal.trend_id
+        and item.right_trend_id is None
+    )
+    if (
+        len(suffixes) != 1
+        or suffixes[0].direction != terminal.direction
+        or len(suffixes[0].constituent_units) < 3
+    ):
+        return current
+    suffix = suffixes[0]
+    merged_units = (*terminal.constituent_units, *suffix.constituent_units)
+    extended = _build(
+        terminal.centers,
+        merged_units,
+        structural_level,
+        TrendState.FORMING,
+        None,
+        max(
+            terminal.available_at,
+            *(item.available_at for item in suffix.constituent_units),
+        ),
+    )
+    return (*current[:-1], extended)
+
+
 def normalize_trend_assembly(
     current_trends,
     completed_trends,
@@ -690,9 +871,10 @@ def normalize_trend_assembly(
 ) -> TrendAssemblyResult:
     """Publish only a connected up/down/up/down same-level movement chain.
 
-    Soft boundaries between equal endpoint directions are combined.  A locked
-    divergence boundary is immutable: units to its right remain pending until
-    their combined endpoint direction is the required opposite direction.
+    Adjacent movements with equal endpoint directions are combined.  A
+    divergence completion remains immutable in ``completed_trends`` for causal
+    replay, while a later confirmed same-direction continuation recomposes the
+    current movement instead of leaving an ever-growing pending suffix.
     """
 
     raw_trends = tuple(current_trends)
@@ -709,17 +891,10 @@ def normalize_trend_assembly(
     pending_group: list[TrendType] = []
 
     def group_boundary(group: tuple[TrendType, ...]):
-        internal = tuple(
-            trend.trend_id
-            for trend in group[:-1]
-            if trend.trend_id in boundary_by_trend
-        )
-        if internal:
-            boundary = boundary_by_trend[internal[0]]
-            raise IncompatibleDecompositionBoundaryError(
-                "decomposition boundary cannot be hidden inside a movement",
-                boundary.anchor_unit_id,
-            )
+        # A formerly terminal divergence can become internal after a confirmed
+        # same-direction continuation.  Its COMPLETE snapshot is retained
+        # below; only a boundary owned by the recomposed terminal trend remains
+        # part of the current decomposition.
         return boundary_by_trend.get(group[-1].trend_id)
 
     def emit(group_values: list[TrendType], trend: TrendType) -> None:
@@ -738,31 +913,14 @@ def normalize_trend_assembly(
             previous = None if not emitted else emitted[-1][1]
             if previous is not None and not isinstance(previous, TrendType):
                 raise TypeError("invalid canonical trend accumulator")
-            previous_boundary = None if not emitted else emitted[-1][2]
-            pending_direction = _direction(
-                tuple(
-                    unit for trend in pending_group for unit in trend.constituent_units
-                )
-            )
-            if (
-                previous is not None
-                and previous_boundary is not None
-                and pending_direction == previous.direction
+            pending_head = pending_group[0]
+            if previous is not None and (
+                pending_head.market_start < previous.market_end
+                or pending_head.start_tick != previous.end_tick
             ):
-                if any(trend.trend_id in boundary_by_trend for trend in pending_group):
-                    boundary = next(
-                        boundary_by_trend[trend.trend_id]
-                        for trend in pending_group
-                        if trend.trend_id in boundary_by_trend
-                    )
-                    raise IncompatibleDecompositionBoundaryError(
-                        "same-direction successor cannot close a decomposition boundary",
-                        boundary.anchor_unit_id,
-                    )
-                # The suffix has not reversed the immutable boundary movement
-                # yet.  Do not try to promote its local completion witness to
-                # whole-movement evidence; keep every unit pending and retry as
-                # later raw movements extend the endpoint.
+                # Prefix snapshots may overlap a later divergence-locked
+                # movement.  They remain audit evidence, never candidates for
+                # a second current movement or a same-direction merge.
                 break
 
             candidate = _merge_trend_group(tuple(pending_group))
@@ -776,26 +934,29 @@ def normalize_trend_assembly(
                 pending_group = []
                 break
 
-            if previous_boundary is not None:
-                if any(trend.trend_id in boundary_by_trend for trend in pending_group):
-                    boundary = next(
-                        boundary_by_trend[trend.trend_id]
-                        for trend in pending_group
-                        if trend.trend_id in boundary_by_trend
-                    )
-                    raise IncompatibleDecompositionBoundaryError(
-                        "same-direction successor cannot close a decomposition boundary",
-                        boundary.anchor_unit_id,
-                    )
-                # Do not manufacture another same-direction movement after an
-                # immutable divergence boundary.  The accumulated suffix stays
-                # unresolved and will be exposed by partition_pending_movements.
+            if (
+                previous.end_tick != candidate.start_tick
+                or candidate.market_start < previous.market_end
+            ):
+                # Unowned bridge units still separate these raw movements.
+                # They cannot be collapsed merely because their endpoint
+                # directions happen to match.
                 break
 
-            previous_group = emitted.pop()[0]
+            previous_group = emitted[-1][0]
             if not isinstance(previous_group, tuple):
                 raise TypeError("invalid canonical trend group")
-            pending_group = [*previous_group, *pending_group]
+            combined_group = [*previous_group, *pending_group]
+            try:
+                _merge_trend_group(tuple(combined_group))
+            except ValueError:
+                # Both source movements are valid on their own, but their
+                # completion or divergence proof may be invalid after a
+                # same-direction merge.  Keep the suffix unresolved rather
+                # than publishing corrupted recomposed evidence.
+                break
+            emitted.pop()
+            pending_group = combined_group
 
     if pending_group and any(
         trend.trend_id in boundary_by_trend for trend in pending_group
@@ -817,16 +978,24 @@ def normalize_trend_assembly(
             key=lambda boundary: (boundary.available_at, boundary.boundary_id),
         )
     )
+    canonical_trends = _extend_terminal_same_direction_suffix(
+        canonical_trends,
+        canonical_boundaries,
+        tuple(source_units),
+        structural_level,
+    )
 
-    # Completed snapshots are causal prefixes.  Retain only snapshots that are
-    # prefixes of a currently valid canonical movement, then ensure every
-    # complete canonical movement has one immutable COMPLETE snapshot.
+    # Retain current-prefix snapshots plus every divergence completion.  The
+    # latter remains an immutable causal event even after a same-direction
+    # continuation absorbs its former boundary from the current partition.
     canonical_unit_ids = tuple(
         tuple(unit.unit_id for unit in trend.constituent_units)
         for trend in canonical_trends
     )
 
     def compatible_snapshot(snapshot: TrendType) -> bool:
+        if snapshot.terminal_divergence is not None:
+            return True
         snapshot_ids = tuple(unit.unit_id for unit in snapshot.constituent_units)
         return any(
             snapshot.direction == trend.direction
@@ -839,12 +1008,12 @@ def normalize_trend_assembly(
         trend.trend_id: trend for trend in raw_completed if compatible_snapshot(trend)
     }
     for trend in canonical_trends:
-        if not trend.complete or trend.trend_id in canonical_completed:
+        if not trend.complete:
             continue
-        canonical_completed[trend.trend_id] = replace(
-            trend,
-            state=TrendState.COMPLETE,
-        )
+        snapshot = _canonical_complete_snapshot(trend)
+        previous = canonical_completed.get(trend.trend_id)
+        if previous is None or snapshot.available_at < previous.available_at:
+            canonical_completed[trend.trend_id] = snapshot
 
     return TrendAssemblyResult(
         current_trends=canonical_trends,
@@ -1166,14 +1335,27 @@ def assemble_trend_types(
     values = tuple(centers)
     source_units = tuple(units)
     if not values:
-        return TrendAssemblyResult(
-            current_trends=(),
-            completed_trends=(),
-            pending_movements=partition_pending_movements(
-                (),
-                source_units,
-                structural_level,
+        output = []
+        completed = {}
+        index = {item.unit_id: offset for offset, item in enumerate(source_units)}
+        _append_confirmed_geometric_segment_suffix(
+            output,
+            completed,
+            source_units,
+            index,
+            structural_level,
+        )
+        return normalize_trend_assembly(
+            current_trends=tuple(output),
+            completed_trends=tuple(
+                sorted(
+                    completed.values(),
+                    key=lambda trend: (trend.available_at, trend.trend_id),
+                )
             ),
+            decomposition_boundaries=(),
+            source_units=source_units,
+            structural_level=structural_level,
         )
     index = _validate_center_references(
         values, source_units, structural_level, oscillatory_ids
@@ -1417,6 +1599,13 @@ def assemble_trend_types(
         )
         record_complete(group, group_start)
     _refine_forming_segment_tail(
+        output,
+        completed,
+        source_units,
+        index,
+        structural_level,
+    )
+    _append_confirmed_geometric_segment_suffix(
         output,
         completed,
         source_units,
