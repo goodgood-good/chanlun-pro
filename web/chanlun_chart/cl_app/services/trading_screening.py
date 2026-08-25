@@ -7332,13 +7332,9 @@ class TradingScreeningService:
             time.perf_counter()
             + self._config.candidate_monitor_time_budget_seconds
         )
-        closed_startup_candidate_catchup = bool(
-            force_startup_bootstrap
-            and not _priority_monitor_compute_window_open(observed_at)
-        )
         candidate_deadline_perf = (
             min(priority_deadline_perf, candidate_budget_deadline_perf)
-            if minute_codes and not closed_startup_candidate_catchup
+            if minute_codes
             else candidate_budget_deadline_perf
         )
         attempted_candidate_codes = evaluate_phase(
