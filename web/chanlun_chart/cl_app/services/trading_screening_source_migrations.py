@@ -9,14 +9,6 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
 )
 
 
-_ORCHESTRATION_ONLY_SOURCE_MIGRATIONS = frozenset(
-    {
-        (
-            "sha256:363824d1d15ab9b95a5f1918d53f2d5f9f98c160a3c6b7e51f4e4390bb1264ac",
-            "sha256:7827bd74e2d369d9f84744c9a088a6cf2162a2f323b5a356fdcb9bd9d80a5209",
-        ),
-    }
-)
 _ORCHESTRATION_ONLY_SOURCE_PATHS = frozenset(
     {
         "web/chanlun_chart/cl_app/services/trading_screening_runtime_policy.py",
@@ -31,18 +23,13 @@ def orchestration_source_migration_allowed(
     cached_decision_source_snapshot: object = None,
     current_decision_source_snapshot: object = None,
 ) -> bool:
-    """Authorize reviewed legacy or manifest-proven operational changes."""
+    """Authorize an authenticated runtime-policy-only source transition."""
 
     if not isinstance(cached_decision_source_snapshot_id, str) or not isinstance(
         current_decision_source_snapshot_id,
         str,
     ):
         return False
-    if (
-        cached_decision_source_snapshot_id,
-        current_decision_source_snapshot_id,
-    ) in _ORCHESTRATION_ONLY_SOURCE_MIGRATIONS:
-        return True
     if not isinstance(cached_decision_source_snapshot, Mapping) or not isinstance(
         current_decision_source_snapshot,
         Mapping,

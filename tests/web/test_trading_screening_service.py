@@ -2229,6 +2229,23 @@ def test_cache_from_previous_decision_source_is_recomputed_not_reused(
     assert recovery_health["full_coverage_auto_recovery_reason"] is None
 
 
+def _previous_runtime_policy_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    runtime_row = next(
+        row
+        for row in previous["files"]
+        if row["path"]
+        == "web/chanlun_chart/cl_app/services/trading_screening_runtime_policy.py"
+    )
+    runtime_row["sha256"] = "sha256:" + "1" * 64
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
 def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -2245,15 +2262,14 @@ def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
     )
     published = first.refresh_now()
     current_source_id = first._decision_source_snapshot_id
-    assert current_source_id == (
-        "sha256:7827bd74e2d369d9f84744c9a088a6cf2162a2f323b5a356fdcb9bd9d80a5209"
-    )
-    legacy_source_id = (
-        "sha256:363824d1d15ab9b95a5f1918d53f2d5f9f98c160a3c6b7e51f4e4390bb1264ac"
-    )
+    assert isinstance(current_source_id, str)
     persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-    persisted["decision_source_snapshot_id"] = legacy_source_id
-    persisted.pop("decision_source_snapshot", None)
+    previous_source = _previous_runtime_policy_source_snapshot(
+        persisted["decision_source_snapshot"]
+    )
+    previous_source_id = previous_source["aggregate_sha256"]
+    persisted["decision_source_snapshot_id"] = previous_source_id
+    persisted["decision_source_snapshot"] = previous_source
     persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         persisted
     )
@@ -2290,7 +2306,7 @@ def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
     assert restored["signals"] == published["signals"]
     assert restored["decision_source_snapshot_id"] == current_source_id
     assert restored["snapshot_content_sha256"] != legacy_snapshot_sha256
-    assert health["cache_decision_source_migrated_from"] == legacy_source_id
+    assert health["cache_decision_source_migrated_from"] == previous_source_id
     assert health["cache_decision_source_migration_persist_error"] is None
     on_disk = json.loads(cache_path.read_text(encoding="utf-8"))
     assert on_disk["decision_source_snapshot_id"] == current_source_id
@@ -2330,7 +2346,10 @@ def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
     assert generation_health["cache_recovered_from_generation"] == str(
         legacy_generation
     )
-    assert generation_health["cache_decision_source_migrated_from"] == legacy_source_id
+    assert (
+        generation_health["cache_decision_source_migrated_from"]
+        == previous_source_id
+    )
 
 
 def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
@@ -2346,10 +2365,11 @@ def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
         notifier=None,
     )
     legacy = service.refresh_now()
-    legacy["decision_source_snapshot_id"] = (
-        "sha256:363824d1d15ab9b95a5f1918d53f2d5f9f98c160a3c6b7e51f4e4390bb1264ac"
+    previous_source = _previous_runtime_policy_source_snapshot(
+        legacy["decision_source_snapshot"]
     )
-    legacy.pop("decision_source_snapshot", None)
+    legacy["decision_source_snapshot_id"] = previous_source["aggregate_sha256"]
+    legacy["decision_source_snapshot"] = previous_source
     legacy["scan_state"] = "in_progress"
     legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         legacy
