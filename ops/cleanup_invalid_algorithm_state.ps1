@@ -2,6 +2,7 @@
 param(
     [switch]$Execute,
     [switch]$PreserveValidationGate,
+    [switch]$PurgeInvalidSectorDailyFacts,
     [string]$RuntimeRoot = "D:\chanlun_pro",
     [string]$RepositoryRoot = ""
 )
@@ -89,6 +90,11 @@ $runtimeRelativeTargets = @(
     "monitor\realtime_review_inbox.json",
     "cache\last_chart_state.json"
 )
+if ($PurgeInvalidSectorDailyFacts) {
+    $runtimeRelativeTargets += (
+        "decision_support\trading_screening_sector_daily_facts.json"
+    )
+}
 $repositoryRelativeTargets = @(
     "audit\chanlun_trading_system_backtest\research_sample_smoke_2",
     ".cache\chanlun_scheduler",
@@ -178,10 +184,14 @@ $preserved = @(
     "$($roots[0])\klines",
     "$($roots[0])\xdxr",
     "$($roots[0])\decision_support\trading_screening_sector_frame_facts",
-    "$($roots[0])\decision_support\trading_screening_sector_daily_facts.json",
     "$($roots[1])\audit\chanlun_trading_system_backtest\pit_reference",
     "$($roots[1])\.cache\chanlun_qmt_sector_ledger"
 )
+if (-not $PurgeInvalidSectorDailyFacts) {
+    $preserved += (
+        "$($roots[0])\decision_support\trading_screening_sector_daily_facts.json"
+    )
+}
 if ($PreserveValidationGate) {
     $preserved += (
         "$($roots[1])\audit\chanlun_trading_system_backtest\research_sample_validation_12"
