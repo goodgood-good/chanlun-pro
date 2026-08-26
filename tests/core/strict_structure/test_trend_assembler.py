@@ -243,6 +243,40 @@ def test_recursive_open_history_center_keeps_opposite_prefix_pending() -> None:
     )
 
 
+def test_recursive_ongoing_center_keeps_both_opposite_edges_pending() -> None:
+    specs = (
+        ("up", 831, 1062),
+        ("down", 1062, 705),
+        ("up", 705, 825),
+    )
+    values = tuple(
+        replace(
+            unit(
+                index,
+                *spec,
+                structural_level=1,
+                source_kind=SourceKind.TREND_TYPE,
+            ),
+            low_tick=700,
+            high_tick=1100,
+        )
+        for index, spec in enumerate(specs)
+    )
+
+    centers = calculate_centers(values, 1, SourceKind.TREND_TYPE).centers
+    assert len(centers) == 1
+    assert centers[0].entry_unit is None
+    assert centers[0].state is CenterState.ONGOING
+
+    result = assemble_trend_types(centers, values, 1)
+
+    assert _movement_ranges(result, values) == ((1, 1, "down"),)
+    assert _pending_ranges(result, values) == (
+        (0, 0, "up"),
+        (2, 2, "up"),
+    )
+
+
 def test_sh513100_manual_5m_tail_is_partitioned_at_saved_boundaries() -> None:
     values = sh513100_manual_tail_fixture()
 

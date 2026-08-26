@@ -1561,17 +1561,15 @@ class TrendType:
                     if item.unit_id not in constituent_ids
                 )
                 # Recursive input can begin inside its first center because no
-                # predecessor trend exists in the finite history window.  Only
-                # the single opposite source unit moved to the pending prefix
-                # may remain outside that first center's formal movement.
+                # predecessor trend exists in the finite history window.  The
+                # single opposite source unit moved to the pending prefix may
+                # remain outside that first center's formal movement.
                 recursive_open_history_head_is_external = (
                     center.source_kind is SourceKind.TREND_TYPE
                     and center_offset == 0
                     and center.entry_unit is None
                     and first_offset > 0
                     and len(external_head) == 1
-                    and tuple(item.unit_id for item in external_head)
-                    == missing_transition_ids
                     and first.direction == self.direction
                     and external_head[-1].direction != self.direction
                     and external_head[-1].end_tick == first.start_tick
@@ -1588,16 +1586,32 @@ class TrendType:
                     and center.completion_return_unit is None
                     and terminal_offset >= 0
                     and len(external_tail) == 1
-                    and tuple(item.unit_id for item in external_tail)
-                    == missing_transition_ids
                     and terminal.direction == self.direction
                     and external_tail[0].direction != self.direction
                     and terminal.end_tick == external_tail[0].start_tick
                     and external_tail[0].market_start >= terminal.market_end
                 )
+                # A finite recursive window can expose both boundaries at
+                # once: the first ongoing center may be ``opposite / movement
+                # / opposite``.  In that case the middle same-direction unit
+                # is the only formal movement, while the two edge units belong
+                # to the pending prefix and live suffix respectively.  Permit
+                # exactly the independently proven edge units and no missing
+                # internal center evidence.
+                permitted_external_ids = tuple(
+                    item.unit_id
+                    for item in (
+                        *(
+                            external_head
+                            if recursive_open_history_head_is_external
+                            else ()
+                        ),
+                        *(external_tail if live_tail_is_external else ()),
+                    )
+                )
                 active_edge_is_external = (
-                    recursive_open_history_head_is_external
-                    or live_tail_is_external
+                    bool(permitted_external_ids)
+                    and permitted_external_ids == missing_transition_ids
                 )
             if missing and not active_edge_is_external:
                 raise ValueError("trend must contain every center body and bridge unit")
