@@ -16,6 +16,8 @@ function loadZiXuan(customNodes, options) {
   let currentMarket = 'a';
   let currentCode = 'sh.000001';
   let nowMs = 1_000_000;
+  let visibilityState = options.visibilityState === 'hidden' ? 'hidden' : 'visible';
+  const visibilityListeners = new Set();
   const watchStatus = { text: '', state: '' };
 
   class FakeDate extends Date {
@@ -126,8 +128,15 @@ function loadZiXuan(customNodes, options) {
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
     document: {
+      get visibilityState() { return visibilityState; },
       createElement,
       createTextNode(text) { return { textContent: String(text) }; },
+      addEventListener(type, callback) {
+        if (type === 'visibilitychange') visibilityListeners.add(callback);
+      },
+      removeEventListener(type, callback) {
+        if (type === 'visibilitychange') visibilityListeners.delete(callback);
+      },
     },
     Utils: {
       get_market() { return currentMarket; },
@@ -173,7 +182,12 @@ function loadZiXuan(customNodes, options) {
     replacements: () => replacements,
     dropdownData: () => dropdownData,
     watchStatus: () => ({ ...watchStatus }),
+    visibilityListenerCount: () => visibilityListeners.size,
     setIdentity(market, code) { currentMarket = market; currentCode = code; },
+    setVisibility(nextState) {
+      visibilityState = nextState === 'hidden' ? 'hidden' : 'visible';
+      for (const callback of [...visibilityListeners]) callback({ type: 'visibilitychange' });
+    },
     fireLatestTimer() {
       const timer = [...timers].reverse().find((item) => !item.cleared && !item.fired);
       assert.ok(timer, 'expected an active timeout');
@@ -198,6 +212,63 @@ test('decision-support embedded charts never start auxiliary watchlist work', ()
   assert.equal(h.ajaxCalls.length, 0);
   assert.equal(h.timers.length, 0);
   assert.equal(h.intervalCalls.length, 0);
+  assert.equal(h.visibilityListenerCount(), 0);
+});
+
+test('a page loaded while hidden waits for visibility before requesting quotes', () => {
+  const h = loadZiXuan(undefined, { visibilityState: 'hidden' });
+
+  assert.equal(h.visibilityListenerCount(), 1);
+  assert.equal(h.ZiXuan.stocks_update_rate(), false);
+  assert.equal(h.ajaxCalls.length, 0);
+
+  h.setVisibility('visible');
+  assert.equal(h.ajaxCalls.length, 1, 'becoming visible should refresh immediately');
+});
+
+test('visibility pauses scheduled polling and resumes it immediately', () => {
+  const h = loadZiXuan();
+  h.ZiXuan.stocks_update_rate();
+  completeSuccess(h.ajaxCalls[0], { ok: true, market_state: 'open', ticks: [] });
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].cleared, false);
+
+  h.setVisibility('hidden');
+  assert.equal(h.timers[0].cleared, true, 'hidden pages must cancel the next poll');
+  h.setVisibility('visible');
+  assert.equal(h.ajaxCalls.length, 2, 'foreground pages should refresh without waiting 3 seconds');
+});
+
+test('restoring during a stale in-flight request resumes exactly once after completion', () => {
+  const h = loadZiXuan();
+  h.ZiXuan.stocks_update_rate();
+  const staleCall = h.ajaxCalls[0];
+
+  h.setVisibility('hidden');
+  h.setVisibility('visible');
+  assert.equal(h.ajaxCalls.length, 1, 'restore must not overlap the in-flight request');
+
+  completeSuccess(staleCall, { ok: true, market_state: 'open', ticks: [] });
+  assert.deepEqual(h.timers.map((timer) => timer.delay), [0]);
+  h.fireLatestTimer();
+  assert.equal(h.ajaxCalls.length, 2, 'the completed stale generation should trigger one refresh');
+});
+
+test('late hidden-page completions cannot restart polling and collapse remains authoritative', () => {
+  const h = loadZiXuan();
+  h.ZiXuan.stocks_update_rate();
+  const inFlight = h.ajaxCalls[0];
+
+  h.setVisibility('hidden');
+  completeSuccess(inFlight, { ok: true, market_state: 'open', ticks: [] });
+  assert.equal(h.timers.length, 0);
+
+  h.ZiXuan.set_rate_polling_active(false);
+  h.setVisibility('visible');
+  assert.equal(h.ajaxCalls.length, 1, 'a collapsed panel must stay paused after tab restore');
+
+  h.ZiXuan.set_rate_polling_active(true);
+  assert.equal(h.ajaxCalls.length, 2, 'expanding a visible panel should refresh immediately');
 });
 
 function failRequest(call, retryAfterSeconds) {

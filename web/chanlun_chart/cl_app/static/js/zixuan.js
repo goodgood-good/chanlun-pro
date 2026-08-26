@@ -3,11 +3,18 @@ var ZiXuan = (function () {
     return window.__CHANLUN_EMBEDDED_CHART !== true;
   }
 
+  function pageIsVisible() {
+    if (typeof document === "undefined") return true;
+    return document.visibilityState !== "hidden";
+  }
+
   var zx_group = "我的关注";
   var timeout_update_rates = null;
   var update_request_in_flight = false;
   var update_poll_generation = 0;
-  var rate_polling_active = auxiliaryUiEnabled();
+  // The accordion records user intent; only a visible standalone page performs I/O.
+  var rate_polling_requested = auxiliaryUiEnabled();
+  var rate_polling_active = rate_polling_requested && pageIsVisible();
   var UPDATE_NORMAL_DELAY_MS = 3000;
   var UPDATE_CLOSED_DELAY_MS = 300000;
   var UPDATE_RETRY_DELAYS_MS = [6000, 12000, 24000, 30000];
@@ -30,6 +37,7 @@ var ZiXuan = (function () {
   var stockTableHandlersBound = false;
   var groupUiBound = false;
   var refreshUiBound = false;
+  var visibilityLifecycleBound = false;
   var createGroupRequestInFlight = false;
 
   function appAjax(options) {
@@ -58,6 +66,30 @@ var ZiXuan = (function () {
     update_poll_generation += 1;
     marketRetryState = {};
     marketClosedUntil = {};
+  }
+
+  function syncRatePollingState() {
+    var nextActive =
+      auxiliaryUiEnabled() && rate_polling_requested && pageIsVisible();
+    if (nextActive === rate_polling_active) return nextActive;
+
+    rate_polling_active = nextActive;
+    if (!nextActive) {
+      stop_timer();
+      return false;
+    }
+
+    ZiXuan.stocks_update_rate(update_poll_generation);
+    return true;
+  }
+
+  function bindVisibilityLifecycle() {
+    if (!auxiliaryUiEnabled() || visibilityLifecycleBound) return false;
+    if (typeof document === "undefined"
+        || typeof document.addEventListener !== "function") return false;
+    visibilityLifecycleBound = true;
+    document.addEventListener("visibilitychange", syncRatePollingState);
+    return true;
   }
 
   function marketLabel(market) {
@@ -292,6 +324,8 @@ var ZiXuan = (function () {
       });
   }
 
+  bindVisibilityLifecycle();
+
   return {
     zx_group: zx_group,
     set_group_creator_open: setGroupCreatorOpen,
@@ -441,20 +475,13 @@ var ZiXuan = (function () {
     },
     set_rate_polling_active: function (is_active) {
       if (!auxiliaryUiEnabled()) {
+        rate_polling_requested = false;
         rate_polling_active = false;
         stop_timer();
         return false;
       }
-      var next_active = is_active === true;
-      if (next_active === rate_polling_active) return;
-
-      rate_polling_active = next_active;
-      if (!next_active) {
-        stop_timer();
-        return;
-      }
-
-      ZiXuan.stocks_update_rate(update_poll_generation);
+      rate_polling_requested = is_active === true;
+      return syncRatePollingState();
     },
 
     // 手动刷新只刷新行情，不重建表格。重建会先把全部现价替换成占位符，
