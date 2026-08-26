@@ -5756,6 +5756,17 @@ def test_presentation_snapshot_compacts_audit_only_evidence(
         visible_signal["setup_5m"]["actionable"]
         == (full_signal["setup_5m"]["actionable"])
     )
+    for field in (
+        "point_id",
+        "point_type",
+        "side",
+        "source_frequency",
+        "recursive_level",
+        "anchor_at",
+        "confirmed_at",
+        "available_at",
+    ):
+        assert visible_signal["setup_5m"][field] == full_signal["setup_5m"][field]
     assert visible_signal["warmup"]["converged"] == (full_signal["warmup"]["converged"])
     assert "decision_core_id" not in visible_signal
     full_size = len(json.dumps(full, ensure_ascii=False))
@@ -5798,6 +5809,65 @@ def test_presentation_snapshot_excludes_invalidated_rows_from_current_selection(
     assert presentation["signals"] == []
     assert presentation["counts_by_stage"] == {}
     assert all(count == 0 for count in presentation["counts_by_point_type"].values())
+
+
+def test_presentation_projection_preserves_structure_occurrence_identity() -> None:
+    setup_available_at = AS_OF.replace(hour=10, minute=5).isoformat()
+    trigger_available_at = AS_OF.replace(hour=10, minute=6).isoformat()
+    projected = trading_screening_subject._presentation_signal_document(
+        {
+            "signal_id": "sha256:" + "1" * 64,
+            "code": "SZ.000001",
+            "point_type": "1buy",
+            "side": "buy",
+            "lifecycle_stage": "triggered",
+            "setup_5m": {
+                "status": "confirmed",
+                "point_id": "setup-point",
+                "point_type": "1buy",
+                "side": "buy",
+                "source_frequency": "5m",
+                "recursive_level": 0,
+                "anchor_at": setup_available_at,
+                "confirmed_at": setup_available_at,
+                "available_at": setup_available_at,
+                "evidence_codes": [],
+                "missing_conditions": [],
+            },
+            "segment_difference_1m": {
+                "status": "confirmed",
+                "point_id": "segment-point",
+                "point_type": "1buy",
+                "side": "buy",
+                "source_frequency": "1m",
+                "recursive_level": 0,
+                "anchor_at": trigger_available_at,
+                "confirmed_at": trigger_available_at,
+                "available_at": trigger_available_at,
+                "divergence_kind": "trend",
+                "evidence_codes": ["strict_segment_difference"],
+                "missing_conditions": [],
+            },
+        }
+    )
+
+    assert projected["setup_5m"]["point_id"] == "setup-point"
+    assert projected["setup_5m"]["source_frequency"] == "5m"
+    assert projected["setup_5m"]["available_at"] == setup_available_at
+    assert projected["segment_difference_1m"] == {
+        "point_id": "segment-point",
+        "status": "confirmed",
+        "point_type": "1buy",
+        "side": "buy",
+        "source_frequency": "1m",
+        "recursive_level": 0,
+        "anchor_at": trigger_available_at,
+        "confirmed_at": trigger_available_at,
+        "available_at": trigger_available_at,
+        "divergence_kind": "trend",
+        "evidence_codes": ["strict_segment_difference"],
+        "missing_conditions": [],
+    }
 
 
 def test_current_selection_rejects_terminal_lineage_stage_contradictions() -> None:

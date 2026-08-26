@@ -1658,9 +1658,11 @@
       "UNCLASSIFIED_SECTOR_FAIL_CLOSED",
     ].includes(sectorSourceMode);
     const liveSignalCount = Math.max(0, Number(overlay.signal_count) || 0);
+    // priority_live_overlay.signal_count 是当前进入 1m 精确定位通道的
+    // 5m 结构数量，不是本轮新增买卖点或新增通知数量。
     const signalText = liveSignalCount
-      ? `${liveSignalCount} 条新结构变化`
-      : "暂无新结构变化";
+      ? `1分钟通道跟踪 ${liveSignalCount} 条5m结构`
+      : "1分钟通道暂无结构跟踪";
     const deliveryText = notificationDeliveryText(health, auxiliaryMonitor);
     if (
       alertStatus === "ready_idle"
@@ -1768,7 +1770,7 @@
       scope.validation
         ? `实时预警范围：仅处理当前 ${scope.cohort || scope.effectiveLimit || 12} 只固定小样本`
         : "实时预警范围：人工关注、自选、已有信号和当前支持板块候选；全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警",
-      `结构变化 ${liveSignalCount} 条`,
+      `1分钟通道当前结构 ${liveSignalCount} 条（非新增通知计数）`,
       health.notification_operationally_verified === true
         ? `A股通知送达 已验证（${reasonLabel(text(delivery.reason_code, "DELIVERY_SUCCESS_PROVEN"))}）`
         : health.notification_dispatcher_configured === true
@@ -3264,16 +3266,47 @@
   function signalCardTimeText(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
     const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
-    const signalAt = setup.available_at
-      || setup.confirmed_at
-      || safeSignal.signal_available_at
-      || safeSignal.notification_signal_available_at
-      || safeSignal.notification_signal_time
-      || safeSignal.realtime_notification_signal_time
-      || safeSignal.signal_time;
-    if (signalAt) return `5m信号 ${timeText(signalAt)}`;
+    const monitorAt = safeSignal.monitor_observed_at;
+    const appendDistinctTime = (parts, label, value) => {
+      if (!value) return;
+      const rendered = timeText(value);
+      if (!parts.some((part) => part.endsWith(` ${rendered}`))) {
+        parts.push(`${label} ${rendered}`);
+      }
+    };
+    if (setup.status === "provisional") {
+      const anchorAt = setup.anchor_at || setup.terminal_segment_end_at;
+      const candidateAt = setup.available_at || setup.terminal_segment_available_at;
+      const parts = [];
+      if (anchorAt) {
+        parts.push(`${setup.formation_state === "geometry_ready" ? "5m候选结构" : "5m候选锚点"} ${timeText(anchorAt)}`);
+      }
+      appendDistinctTime(
+        parts,
+        setup.formation_state === "geometry_ready" ? "几何可用" : "数据截止",
+        candidateAt,
+      );
+      appendDistinctTime(parts, "复查", monitorAt);
+      if (parts.length) return parts.join(" · ");
+    }
+    const signalAt = setup.status === "confirmed"
+      ? setup.available_at || setup.confirmed_at
+      : setup.available_at
+        || setup.confirmed_at
+        || safeSignal.signal_available_at
+        || safeSignal.notification_signal_available_at
+        || safeSignal.notification_signal_time
+        || safeSignal.realtime_notification_signal_time
+        || safeSignal.signal_time;
+    if (signalAt) {
+      const parts = [`5m信号 ${timeText(signalAt)}`];
+      appendDistinctTime(parts, "复查", monitorAt);
+      return parts.join(" · ");
+    }
     if (setup.terminal_segment_end_at) {
-      return `5m结构 ${timeText(setup.terminal_segment_end_at)}`;
+      const parts = [`5m结构 ${timeText(setup.terminal_segment_end_at)}`];
+      appendDistinctTime(parts, "复查", monitorAt);
+      return parts.join(" · ");
     }
     return `最近复查 ${timeText(safeSignal.monitor_observed_at || safeSignal.observed_at)}`;
   }

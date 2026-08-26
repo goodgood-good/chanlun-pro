@@ -3399,12 +3399,16 @@ test("operator status copy explains degraded state without exposing internal cod
   const monitorSummary = Ui.priorityMonitorText(monitorHealth, { signal_count: 0 });
   assert.equal(
     monitorSummary,
-    "正常 · 范围：人工关注/自选/已有信号/支持板块 · 5分钟候选 42/42 只 · 暂无新结构变化 · 通知送达已验证",
+    "正常 · 范围：人工关注/自选/已有信号/支持板块 · 5分钟候选 42/42 只 · 1分钟通道暂无结构跟踪 · 通知送达已验证",
   );
   assert.doesNotMatch(monitorSummary, /verified|READY/);
   assert.match(
+    Ui.priorityMonitorText(monitorHealth, { signal_count: 2 }),
+    /1分钟通道跟踪 2 条5m结构/,
+  );
+  assert.match(
     Ui.priorityMonitorDiagnosticsText(monitorHealth, { signal_count: 0 }),
-    /A股实时预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的当前5分钟候选 3 只 · 持续轮转直至结构被替换.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*A股通知送达 已验证（已有成功送达证明）/,
+    /A股实时预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的当前5分钟候选 3 只 · 持续轮转直至结构被替换.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*1分钟通道当前结构 0 条（非新增通知计数）.*A股通知送达 已验证（已有成功送达证明）/,
   );
   const idleMonitor = {
     ...monitorHealth,
@@ -3442,7 +3446,7 @@ test("operator status copy explains degraded state without exposing internal cod
   };
   assert.equal(
     Ui.priorityMonitorText(preparingSectorScope, { signal_count: 0 }),
-    "优先通道正常 · 支持板块范围准备中 · 当前已核验：人工关注/自选/已有信号 · 5分钟候选 1/1 只 · 暂无新结构变化 · 通知送达已验证",
+    "优先通道正常 · 支持板块范围准备中 · 当前已核验：人工关注/自选/已有信号 · 5分钟候选 1/1 只 · 1分钟通道暂无结构跟踪 · 通知送达已验证",
   );
   const continuityScope = {
     ...monitorHealth,
@@ -3469,7 +3473,7 @@ test("operator status copy explains degraded state without exposing internal cod
   };
   assert.equal(
     Ui.priorityMonitorText(warmingSectorScope, { signal_count: 0 }),
-    "优先通道正常 · 5分钟候选覆盖暖机中 · 当前已核验：人工关注/自选/新鲜已有信号 · 支持板块范围准备中 · 5分钟候选 7/7 只 · 暂无新结构变化 · 通知送达已验证",
+    "优先通道正常 · 5分钟候选覆盖暖机中 · 当前已核验：人工关注/自选/新鲜已有信号 · 支持板块范围准备中 · 5分钟候选 7/7 只 · 1分钟通道暂无结构跟踪 · 通知送达已验证",
   );
   assert.equal(
     Ui.segmentScopeText({
@@ -3533,7 +3537,7 @@ test("operator status copy explains degraded state without exposing internal cod
   };
   assert.equal(
     Ui.priorityMonitorText(capacityBlocked, {}),
-    "优先通道正常 · 5分钟候选监听容量不足 · 当前优先复查：人工关注/自选/新鲜已有信号 · 5分钟候选 1200/2500 只 · 暂无新结构变化 · 通知送达已验证",
+    "优先通道正常 · 5分钟候选监听容量不足 · 当前优先复查：人工关注/自选/新鲜已有信号 · 5分钟候选 1200/2500 只 · 1分钟通道暂无结构跟踪 · 通知送达已验证",
   );
 
   const deliveryUnverified = {
@@ -3667,6 +3671,40 @@ test("signal cards keep current 5m structures current regardless of age", () => 
   assert.equal(
     Ui.signalCardTimeText({ setup_5m: { available_at: "SIGNAL_AT" }, observed_at: "LATEST" }),
     "5m信号 SIGNAL_AT",
+  );
+  assert.equal(
+    Ui.signalCardTimeText({
+      setup_5m: {
+        status: "confirmed",
+        available_at: "SIGNAL_AT",
+      },
+      monitor_observed_at: "LATEST",
+    }),
+    "5m信号 SIGNAL_AT · 复查 LATEST",
+  );
+  assert.equal(
+    Ui.signalCardTimeText({
+      setup_5m: {
+        status: "provisional",
+        formation_state: "forming",
+        anchor_at: "ANCHOR_AT",
+        available_at: "DATA_AT",
+      },
+      observed_at: "FIRST_SEEN_AT",
+      monitor_observed_at: "LATEST",
+    }),
+    "5m候选锚点 ANCHOR_AT · 数据截止 DATA_AT · 复查 LATEST",
+  );
+  assert.equal(
+    Ui.signalCardTimeText({
+      setup_5m: {
+        status: "provisional",
+        formation_state: "geometry_ready",
+        terminal_segment_end_at: "STRUCTURE_AT",
+        terminal_segment_available_at: "GEOMETRY_AT",
+      },
+    }),
+    "5m候选结构 STRUCTURE_AT · 几何可用 GEOMETRY_AT",
   );
   assert.equal(
     Ui.signalCardTimeText({ setup_5m: { terminal_segment_end_at: "STRUCTURE_AT" }, observed_at: "LATEST" }),
