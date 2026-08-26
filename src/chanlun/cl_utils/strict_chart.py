@@ -956,6 +956,14 @@ def strict_trend_to_chart_dict(
     ):
         raise TypeError("正式方向必须是 FormalDirectionState")
     terminal_id = trend.terminal_unit.unit_id
+    first_unit_direction = trend.constituent_units[0].direction
+    terminal_unit_direction = trend.constituent_units[-1].direction
+    constituent_unit_count = len(trend.constituent_units)
+    direction_aligned = (
+        first_unit_direction == trend.direction
+        and terminal_unit_direction == trend.direction
+        and constituent_unit_count % 2 == 1
+    )
     direction_status = _trend_direction_status(trend, formal_direction)
     is_formal_target = (
         formal_direction is not None
@@ -1002,6 +1010,10 @@ def strict_trend_to_chart_dict(
         "range": {"low_tick": trend.low_tick, "high_tick": trend.high_tick},
         "center_ids": [center.center_id for center in trend.centers],
         "constituent_unit_ids": [unit.unit_id for unit in trend.constituent_units],
+        "constituent_unit_count": constituent_unit_count,
+        "first_unit_direction": first_unit_direction,
+        "terminal_unit_direction": terminal_unit_direction,
+        "direction_aligned": direction_aligned,
         "completion_witness_unit_ids": [
             unit.unit_id for unit in trend.completion_witness_units
         ],

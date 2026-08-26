@@ -48,6 +48,7 @@ def _row(code: str, *, pending: bool = False) -> dict[str, object]:
             "unit_count": 9,
             "center_count": 1,
             "physical_center_role_violation_count": 0,
+            "movement_direction_alignment_violation_count": 0,
             "formal_trend_count": 1,
             "centerless_trend_count": 0,
             "pending_partition_count": int(pending),
@@ -59,6 +60,7 @@ def _row(code: str, *, pending: bool = False) -> dict[str, object]:
                     "state": "locked",
                     "completion_basis": "center_lifecycle",
                     "center_count": 1,
+                    "direction_aligned": True,
                 }
             ],
             "pending_movements": (
@@ -129,6 +131,7 @@ def test_full_universe_document_retains_every_symbol_and_aggregates_partitions()
         "total_level_zero_units": 18,
         "total_centers": 2,
         "physical_center_role_violation_count": 0,
+        "movement_direction_alignment_violation_count": 0,
         "total_formal_trends": 2,
         "total_centerless_trends": 0,
         "total_pending_partitions": 1,

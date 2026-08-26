@@ -179,6 +179,13 @@ def summarize_level_zero(level: object) -> dict[str, object]:
     for trend in trends:
         owned_indices = _indices(trend.constituent_units, unit_index)
         witness_indices = _indices(trend.completion_witness_units, unit_index)
+        first_unit_direction = trend.constituent_units[0].direction
+        terminal_unit_direction = trend.constituent_units[-1].direction
+        direction_aligned = (
+            first_unit_direction == trend.direction
+            and terminal_unit_direction == trend.direction
+            and len(owned_indices) % 2 == 1
+        )
         owners.update(unit.unit_id for unit in trend.constituent_units)
         divergence = trend.terminal_divergence
         completion_basis = (
@@ -199,6 +206,10 @@ def summarize_level_zero(level: object) -> dict[str, object]:
                 "unit_start_index": min(owned_indices),
                 "unit_end_index": max(owned_indices),
                 "unit_count": len(owned_indices),
+                "first_unit_direction": first_unit_direction,
+                "terminal_unit_direction": terminal_unit_direction,
+                "constituent_unit_count_is_odd": len(owned_indices) % 2 == 1,
+                "direction_aligned": direction_aligned,
                 "constituent_unit_indices": owned_indices,
                 "center_count": len(trend.centers),
                 "center_ids": [center.center_id for center in trend.centers],
@@ -316,6 +327,9 @@ def summarize_level_zero(level: object) -> dict[str, object]:
         "forming_unit_count": sum(bool(unit.forming) for unit in units),
         "center_count": len(center_rows),
         "physical_center_role_violation_count": physical_role_violations,
+        "movement_direction_alignment_violation_count": sum(
+            not bool(row["direction_aligned"]) for row in trend_rows
+        ),
         "formal_trend_count": len(trend_rows),
         "completed_trend_snapshot_count": len(getattr(level, "completed_trends")),
         "boundary_count": len(boundaries),
@@ -451,6 +465,10 @@ def _aggregate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "physical_center_role_violation_count": sum(
             int(level["physical_center_role_violation_count"]) for level in levels
         ),
+        "movement_direction_alignment_violation_count": sum(
+            int(level["movement_direction_alignment_violation_count"])
+            for level in levels
+        ),
         "total_formal_trends": len(trend_rows),
         "total_centerless_trends": sum(
             not trend["center_count"] for trend in trend_rows
@@ -525,6 +543,7 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
         "unit_count",
         "center_count",
         "formal_trend_count",
+        "movement_direction_alignment_violation_count",
         "centerless_trend_count",
         "pending_partition_count",
         "pending_unit_count",
@@ -548,6 +567,9 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
                     "unit_count": level.get("unit_count"),
                     "center_count": level.get("center_count"),
                     "formal_trend_count": level.get("formal_trend_count"),
+                    "movement_direction_alignment_violation_count": level.get(
+                        "movement_direction_alignment_violation_count"
+                    ),
                     "centerless_trend_count": level.get("centerless_trend_count"),
                     "pending_partition_count": level.get("pending_partition_count"),
                     "pending_unit_count": level.get("pending_unit_count"),

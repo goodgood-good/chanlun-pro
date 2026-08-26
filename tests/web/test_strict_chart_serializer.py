@@ -998,6 +998,10 @@ def test_trend_and_point_serializers_preserve_strict_identity() -> None:
     assert trend["direction_status"] == "consolidation"
     assert trend["formal_direction_confirmed"] is False
     assert trend["direction_reason_codes"] == []
+    assert trend["constituent_unit_count"] == len(source_trend.constituent_units)
+    assert trend["first_unit_direction"] == source_trend.direction
+    assert trend["terminal_unit_direction"] == source_trend.direction
+    assert trend["direction_aligned"] is True
     assert point["point_id"] == source_point.point_id
     assert point["point_type"] == "3buy"
     assert point["status"] == "confirmed"

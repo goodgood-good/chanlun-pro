@@ -116,6 +116,133 @@ def sh513100_manual_tail_fixture():
     )
 
 
+def _movement_ranges(result, values):
+    return tuple(
+        (
+            values.index(trend.constituent_units[0]),
+            values.index(trend.constituent_units[-1]),
+            trend.direction,
+        )
+        for trend in result.current_trends
+    )
+
+
+def _pending_ranges(result, values):
+    return tuple(
+        (
+            values.index(pending.constituent_units[0]),
+            values.index(pending.constituent_units[-1]),
+            pending.direction,
+        )
+        for pending in result.pending_movements
+    )
+
+
+def test_sh513100_open_history_prefix_stays_pending_before_first_up_movement() -> None:
+    specs = (
+        ("down", 1705, 1666),
+        ("up", 1666, 1800),
+        ("down", 1800, 1769),
+        ("up", 1769, 1865),
+        ("down", 1865, 1802),
+        ("up", 1802, 1840),
+        ("down", 1840, 1809),
+        ("up", 1809, 2001),
+        ("down", 2001, 1880),
+    )
+    values = tuple(unit(index, *spec) for index, spec in enumerate(specs))
+
+    centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
+    result = assemble_trend_types(centers, values, 0)
+
+    assert _movement_ranges(result, values) == ((1, 7, "up"),)
+    assert _pending_ranges(result, values) == (
+        (0, 0, "down"),
+        (8, 8, "down"),
+    )
+
+
+def test_opposite_completion_leave_moves_to_successor_movement() -> None:
+    specs = (
+        ("up", 529, 660),
+        ("down", 660, 600),
+        ("up", 600, 621),
+        ("down", 621, 584),
+        ("up", 584, 629),
+        ("down", 629, 596),
+        ("up", 596, 635),
+        ("down", 635, 561),
+        ("up", 561, 577),
+        ("down", 577, 538),
+        ("up", 538, 590),
+        ("down", 590, 565),
+        ("up", 565, 602),
+        ("down", 602, 525),
+        ("up", 525, 540),
+    )
+    values = tuple(unit(index, *spec) for index, spec in enumerate(specs))
+
+    centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
+    result = assemble_trend_types(centers, values, 0)
+
+    assert _movement_ranges(result, values) == (
+        (0, 6, "up"),
+        (7, 13, "down"),
+    )
+    assert _pending_ranges(result, values) == ((14, 14, "up"),)
+
+
+def test_ongoing_center_keeps_opposite_live_tail_pending() -> None:
+    specs = (
+        ("up", 2580, 2725),
+        ("down", 2725, 2545),
+        ("up", 2545, 2888),
+        ("down", 2888, 2723),
+        ("up", 2723, 2942),
+        ("down", 2942, 2723),
+        ("up", 2723, 2821),
+    )
+    values = tuple(unit(index, *spec) for index, spec in enumerate(specs))
+
+    centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
+    result = assemble_trend_types(centers, values, 0)
+
+    assert _movement_ranges(result, values) == ((0, 4, "up"),)
+    assert _pending_ranges(result, values) == ((5, 6, "down"),)
+
+
+def test_recursive_open_history_center_keeps_opposite_prefix_pending() -> None:
+    specs = (
+        ("down", 143525, 136395),
+        ("up", 136395, 140592),
+        ("down", 140592, 135991),
+        ("up", 135991, 144572),
+        ("down", 144572, 117234),
+    )
+    values = tuple(
+        unit(
+            index,
+            *spec,
+            structural_level=1,
+            source_kind=SourceKind.TREND_TYPE,
+        )
+        for index, spec in enumerate(specs)
+    )
+
+    centers = calculate_centers(values, 1, SourceKind.TREND_TYPE).centers
+    assert len(centers) == 1
+    assert centers[0].entry_unit is None
+    assert centers[0].state is CenterState.ONGOING
+
+    result = assemble_trend_types(centers, values, 1)
+
+    assert _movement_ranges(result, values) == ((1, 3, "up"),)
+    assert _pending_ranges(result, values) == (
+        (0, 0, "down"),
+        (4, 4, "down"),
+    )
+
+
 def test_sh513100_manual_5m_tail_is_partitioned_at_saved_boundaries() -> None:
     values = sh513100_manual_tail_fixture()
 
@@ -190,7 +317,10 @@ def test_geometric_successor_locks_completed_predecessor_without_chain_gap() -> 
     assert tuple(
         (values.index(trend.constituent_units[0]), values.index(trend.terminal_unit))
         for trend in trends
-    ) == ((0, 5), (6, 8), (9, 13))
+    ) == ((1, 5), (6, 8), (9, 13))
+    assert tuple(
+        pending.constituent_units for pending in structure.levels[0].pending_movements
+    ) == ((values[0],),)
     assert all(
         previous.end_tick == current.start_tick
         and previous.market_end <= current.market_start
@@ -284,7 +414,7 @@ def test_completed_center_promotes_confirmed_centerless_tail_movements():
     assert result.pending_movements[0].constituent_units == source[11:]
 
 
-def test_completed_movement_absorbs_unresolved_same_direction_tail() -> None:
+def test_completed_movement_absorbs_tail_through_last_same_direction_leg() -> None:
     values, first, _second, _third = three_center_fixture()
     source = (
         *values[:6],
@@ -298,10 +428,12 @@ def test_completed_movement_absorbs_unresolved_same_direction_tail() -> None:
     (current,) = result.current_trends
     assert current.direction == "up"
     assert current.state is TrendState.FORMING
-    assert current.constituent_units == source
+    assert current.constituent_units == source[:-1]
     assert current.centers == (first,)
     assert result.completed_trends
-    assert result.pending_movements == ()
+    assert tuple(
+        pending.constituent_units for pending in result.pending_movements
+    ) == ((source[-1],),)
 
 
 def test_two_separated_centers_form_complete_uptrend_with_internal_return():
@@ -495,11 +627,13 @@ def test_failed_establishment_leave_remains_in_trend_and_center_evidence():
     evidence = CenterEvidence.from_center(center)
     failed_id = establishment[4].unit_id
 
-    assert trend.constituent_units == values
+    assert trend.constituent_units == values[:-1]
     assert tuple(item.unit_id for item in trend.constituent_units).count(failed_id) == 1
     assert evidence.failed_departure_unit_ids == (failed_id,)
     assert assembly.completed_trends == ()
-    assert assembly.pending_movements == ()
+    assert tuple(
+        pending.constituent_units for pending in assembly.pending_movements
+    ) == ((values[-1],),)
 
 
 def test_center_reference_validation_rejects_missing_or_changed_evidence():

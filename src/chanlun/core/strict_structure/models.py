@@ -1516,7 +1516,8 @@ class TrendType:
                     )
 
         constituent_ids = {item.unit_id for item in self.constituent_units}
-        for center in self.centers:
+        terminal = self.constituent_units[-1]
+        for center_offset, center in enumerate(self.centers):
             missing = tuple(
                 item
                 for item in (
@@ -1526,7 +1527,79 @@ class TrendType:
                 )
                 if item.unit_id not in constituent_ids
             )
+            active_edge_is_external = False
             if missing:
+                transitions = tuple(
+                    sorted(
+                        (
+                            *center.body_units,
+                            *center.failed_departure_units,
+                            *center.supersession_bridge_units,
+                        ),
+                        key=lambda item: (
+                            item.market_start,
+                            item.market_end,
+                            item.unit_id,
+                        ),
+                    )
+                )
+                transition_ids = tuple(item.unit_id for item in transitions)
+                first = self.constituent_units[0]
+                try:
+                    first_offset = transition_ids.index(first.unit_id)
+                except ValueError:
+                    first_offset = -1
+                try:
+                    terminal_offset = transition_ids.index(terminal.unit_id)
+                except ValueError:
+                    terminal_offset = -1
+                external_head = transitions[:first_offset]
+                external_tail = transitions[terminal_offset + 1 :]
+                missing_transition_ids = tuple(
+                    item.unit_id
+                    for item in transitions
+                    if item.unit_id not in constituent_ids
+                )
+                # Recursive input can begin inside its first center because no
+                # predecessor trend exists in the finite history window.  Only
+                # the single opposite source unit moved to the pending prefix
+                # may remain outside that first center's formal movement.
+                recursive_open_history_head_is_external = (
+                    center.source_kind is SourceKind.TREND_TYPE
+                    and center_offset == 0
+                    and center.entry_unit is None
+                    and first_offset > 0
+                    and len(external_head) == 1
+                    and tuple(item.unit_id for item in external_head)
+                    == missing_transition_ids
+                    and first.direction == self.direction
+                    and external_head[-1].direction != self.direction
+                    and external_head[-1].end_tick == first.start_tick
+                    and external_head[-1].market_end <= first.market_start
+                )
+                # At the live edge an ongoing center can already own the first
+                # opposite reversal leg.  It remains pending until another leg
+                # confirms a new movement, but the center evidence stays linked.
+                live_tail_is_external = (
+                    self.state is TrendState.FORMING
+                    and center_offset == len(self.centers) - 1
+                    and center.state is CenterState.ONGOING
+                    and center.completion_leave_unit is None
+                    and center.completion_return_unit is None
+                    and terminal_offset >= 0
+                    and len(external_tail) == 1
+                    and tuple(item.unit_id for item in external_tail)
+                    == missing_transition_ids
+                    and terminal.direction == self.direction
+                    and external_tail[0].direction != self.direction
+                    and terminal.end_tick == external_tail[0].start_tick
+                    and external_tail[0].market_start >= terminal.market_end
+                )
+                active_edge_is_external = (
+                    recursive_open_history_head_is_external
+                    or live_tail_is_external
+                )
+            if missing and not active_edge_is_external:
                 raise ValueError("trend must contain every center body and bridge unit")
         for center in self.centers[:-1]:
             if (
@@ -1555,11 +1628,16 @@ class TrendType:
                         raise ValueError(
                             "internal completion return cannot terminate trend"
                         )
-                elif (
-                    terminal_leave is not None
-                    and self.constituent_units[-1] != terminal_leave
-                ):
-                    raise ValueError("terminal unit must be the final leave unit")
+                elif terminal_leave is not None and terminal != terminal_leave:
+                    external_reversal_leave = (
+                        terminal_leave.unit_id not in constituent_ids
+                        and terminal_leave.direction != self.direction
+                        and terminal.direction == self.direction
+                        and terminal.end_tick == terminal_leave.start_tick
+                        and terminal_leave.market_start >= terminal.market_end
+                    )
+                    if not external_reversal_leave:
+                        raise ValueError("terminal unit must be the final leave unit")
         else:
             divergence = self.terminal_divergence
             expected_divergence_kind = (
@@ -1960,6 +2038,15 @@ class TrendAssemblyResult:
         if len({item.boundary_id for item in boundaries}) != len(boundaries):
             raise ValueError("decomposition boundaries must be unique")
         current_ids = {trend.trend_id for trend in self.current_trends}
+        for trend in self.current_trends:
+            if (
+                trend.constituent_units[0].direction != trend.direction
+                or trend.constituent_units[-1].direction != trend.direction
+                or len(trend.constituent_units) % 2 != 1
+            ):
+                raise ValueError(
+                    "current trends must begin and end in their own direction"
+                )
         for previous, current in zip(
             self.current_trends,
             self.current_trends[1:],

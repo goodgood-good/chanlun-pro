@@ -3501,6 +3501,11 @@ class ChartManager {
                     ].includes(trend.direction_status)
                     || trend.formal_direction_confirmed !== (trend.direction_status === 'formal')
                     || !Array.isArray(trend.direction_reason_codes)
+                    || !['up', 'down'].includes(trend.first_unit_direction)
+                    || !['up', 'down'].includes(trend.terminal_unit_direction)
+                    || !Number.isInteger(trend.constituent_unit_count)
+                    || trend.constituent_unit_count <= 0
+                    || typeof trend.direction_aligned !== 'boolean'
                 ) throw new Error('strict trend direction qualification is invalid');
             }
             for (let index = 1; index < level.current_trends.length; index += 1) {
@@ -3522,8 +3527,15 @@ class ChartManager {
             }
             const formalUnitIds = new Set();
             for (const trend of level.current_trends) {
-                if (!strictStringArray(trend.constituent_unit_ids)) {
-                    throw new Error('strict trend source units are invalid');
+                if (
+                    !strictStringArray(trend.constituent_unit_ids)
+                    || trend.constituent_unit_ids.length !== trend.constituent_unit_count
+                    || trend.constituent_unit_count % 2 !== 1
+                    || trend.first_unit_direction !== trend.direction
+                    || trend.terminal_unit_direction !== trend.direction
+                    || trend.direction_aligned !== true
+                ) {
+                    throw new Error('strict trend source direction is invalid');
                 }
                 for (const unitId of trend.constituent_unit_ids) formalUnitIds.add(unitId);
             }

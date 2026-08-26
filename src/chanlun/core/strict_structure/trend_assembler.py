@@ -847,7 +847,18 @@ def _extend_terminal_same_direction_suffix(
     ):
         return current
     suffix = suffixes[0]
-    merged_units = (*terminal.constituent_units, *suffix.constituent_units)
+    extension_units = tuple(suffix.constituent_units)
+    # A same-way unresolved suffix can finish on the first leg of a possible
+    # reversal.  That opposite terminal leg is not part of the current
+    # movement: keeping it would draw an ``up`` movement to a down-segment
+    # endpoint (or vice versa) and move the turning point away from the real
+    # segment extreme.  Absorb only through the latest unit whose direction
+    # still agrees with the movement; the remaining leg stays pending.
+    while extension_units and extension_units[-1].direction != terminal.direction:
+        extension_units = extension_units[:-1]
+    if not extension_units:
+        return current
+    merged_units = (*terminal.constituent_units, *extension_units)
     extended = _build(
         terminal.centers,
         merged_units,
@@ -856,10 +867,118 @@ def _extend_terminal_same_direction_suffix(
         None,
         max(
             terminal.available_at,
-            *(item.available_at for item in suffix.constituent_units),
+            *(item.available_at for item in extension_units),
         ),
     )
     return (*current[:-1], extended)
+
+
+def _align_movement_boundaries(
+    trends,
+    boundaries,
+    source_units,
+    structural_level: int,
+):
+    """Align every formal movement to same-direction source-unit extrema.
+
+    A formal up/down movement must start and finish on an up/down source unit
+    respectively.  Center lifecycle boundaries can otherwise assign the
+    opposite departure segment to the movement on its left, producing an
+    even-length slice whose rendered endpoint is not a turning extreme.
+
+    The source ledger is already connected and alternating, so a malformed
+    internal boundary is corrected by transferring exactly one boundary unit
+    from the left movement to the right movement.  At the open history edge,
+    an opposite leading unit remains a pending prefix; at the live edge, an
+    opposite trailing unit remains a pending suffix.
+    """
+
+    values = tuple(trends)
+    units = tuple(source_units)
+    if not values:
+        return (), tuple(boundaries)
+    unit_index = {unit.unit_id: offset for offset, unit in enumerate(units)}
+    if len(unit_index) != len(units):
+        raise ValueError("movement alignment requires unique source units")
+
+    old_ranges = tuple(
+        (
+            unit_index[trend.constituent_units[0].unit_id],
+            unit_index[trend.constituent_units[-1].unit_id],
+        )
+        for trend in values
+    )
+    starts: list[int] = []
+    for offset, (trend, (old_start, _old_end)) in enumerate(
+        zip(values, old_ranges)
+    ):
+        if units[old_start].direction == trend.direction:
+            starts.append(old_start)
+            continue
+        # The first source unit is an open-history prefix and cannot be moved
+        # into an unknown predecessor.  Internal boundaries instead transfer
+        # the opposite terminal unit from the left movement to its successor.
+        starts.append(old_start + 1 if offset == 0 else old_start - 1)
+
+    ends = [starts[offset + 1] - 1 for offset in range(len(starts) - 1)]
+    final_end = old_ranges[-1][1]
+    if units[final_end].direction != values[-1].direction:
+        final_end -= 1
+    ends.append(final_end)
+
+    rebound_by_trend = {
+        boundary.left_trend_id: boundary for boundary in tuple(boundaries)
+    }
+    aligned: list[TrendType] = []
+    aligned_boundaries: list[DecompositionBoundaryEvidence] = []
+    for trend, start, end in zip(values, starts, ends):
+        if not 0 <= start <= end < len(units):
+            raise ValueError("movement alignment produced an empty unit slice")
+        constituent_units = units[start : end + 1]
+        if (
+            constituent_units[0].direction != trend.direction
+            or constituent_units[-1].direction != trend.direction
+            or len(constituent_units) % 2 != 1
+        ):
+            raise ValueError(
+                "formal movement must begin and end in its own direction"
+            )
+        if _direction(constituent_units) != trend.direction:
+            raise ValueError("movement boundary alignment changed endpoint direction")
+        try:
+            rebuilt = _build(
+                trend.centers,
+                constituent_units,
+                structural_level,
+                trend.state,
+                trend.confirmed_at,
+                max(
+                    trend.available_at,
+                    *(item.available_at for item in constituent_units),
+                ),
+                terminal_divergence=trend.terminal_divergence,
+                completion_witness_units=trend.completion_witness_units,
+            )
+        except ValueError as exc:
+            if trend.terminal_divergence is None:
+                raise
+            raise IncompatibleDecompositionBoundaryError(
+                "divergence boundary is incompatible with aligned movement",
+                trend.terminal_divergence.signal_unit_id,
+            ) from exc
+        aligned.append(rebuilt)
+        boundary = rebound_by_trend.get(trend.trend_id)
+        if boundary is not None:
+            aligned_boundaries.append(
+                _rebind_decomposition_boundary(boundary, rebuilt)
+            )
+
+    return tuple(aligned), tuple(
+        sorted(
+            aligned_boundaries,
+            key=lambda boundary: (boundary.available_at, boundary.boundary_id),
+        )
+    )
 
 
 def normalize_trend_assembly(
@@ -977,6 +1096,12 @@ def normalize_trend_assembly(
             (item[2] for item in emitted if item[2] is not None),
             key=lambda boundary: (boundary.available_at, boundary.boundary_id),
         )
+    )
+    canonical_trends, canonical_boundaries = _align_movement_boundaries(
+        canonical_trends,
+        canonical_boundaries,
+        tuple(source_units),
+        structural_level,
     )
     canonical_trends = _extend_terminal_same_direction_suffix(
         canonical_trends,
