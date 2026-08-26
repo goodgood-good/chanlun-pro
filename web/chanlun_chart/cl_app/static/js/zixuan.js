@@ -581,7 +581,17 @@ var ZiXuan = (function () {
         var allClosed = stateValues.length > 0 && stateValues.every(function (state) {
           return state === "closed";
         });
-        setWatchStatus(allClosed ? "全部市场休市 · 低频检查" : "跨市场行情更新中", allClosed ? "closed" : "live");
+        var allDeferred = stateValues.length > 0 && stateValues.every(function (state) {
+          return state === "deferred";
+        });
+        setWatchStatus(
+          allClosed
+            ? "全部市场休市 · 低频检查"
+            : allDeferred
+              ? "共享行情请求合并中 · 保留最近报价"
+              : "跨市场行情更新中",
+          allClosed ? "closed" : allDeferred ? "loading" : "live"
+        );
         schedule_rate_update(
           allClosed ? UPDATE_CLOSED_DELAY_MS : UPDATE_NORMAL_DELAY_MS,
           request_generation
@@ -619,6 +629,19 @@ var ZiXuan = (function () {
               !Array.isArray(response.ticks)
             ) {
               failBatch();
+              return;
+            }
+            if (response.quote_state === "deferred") {
+              // Another tab/request is already reading this provider. The
+              // server shares that real result when it completes; preserve the
+              // last rendered quote instead of reporting a provider failure.
+              delete marketRetryState[batch.market];
+              marketStates[batch.market] = "deferred";
+              setMarketQuoteState(
+                batch.market,
+                "deferred",
+                marketLabel(batch.market) + "共享行情请求合并中，保留最近报价"
+              );
               return;
             }
             recordMarketSuccess(batch.market, response.market_state);

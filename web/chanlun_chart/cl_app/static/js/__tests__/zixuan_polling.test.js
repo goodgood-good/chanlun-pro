@@ -431,6 +431,30 @@ test('server retry hint extends the shared-provider retry delay', () => {
   assert.equal(h.watchStatus().state, 'error');
 });
 
+test('a coalesced external quote probe preserves prices without reporting failure', () => {
+  const nodes = [{ market: 'currency_spot', code: 'BTC/USDT' }];
+  const h = loadZiXuan(nodes);
+  h.ZiXuan.stocks_update_rate();
+
+  completeSuccess(h.ajaxCalls[0], {
+    ok: true,
+    quote_state: 'deferred',
+    retry_after_seconds: 5,
+    market_state: 'unknown',
+    now_trading: null,
+    ticks: [],
+    error: null,
+  });
+
+  assert.equal(h.replacements(), 0);
+  assert.equal(nodes[0].quoteState, 'deferred');
+  assert.deepEqual(h.watchStatus(), {
+    text: '共享行情请求合并中 · 保留最近报价',
+    state: 'loading',
+  });
+  assert.deepEqual(h.timers.map((timer) => timer.delay), [3000]);
+});
+
 test('open success resets the error backoff to six seconds', () => {
   const h = loadZiXuan();
   h.ZiXuan.stocks_update_rate();

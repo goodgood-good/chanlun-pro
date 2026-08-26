@@ -25,6 +25,8 @@ _MAX_TICK_CODES = 500
 
 _VALID_MARKETS = {m.value for m in Market}
 _EXTERNAL_TICK_BACKOFF_EXTENSION = "external_market_tick_backoff"
+_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS = 2.0
+_EXTERNAL_TICK_COALESCE_WAIT_SECONDS = 1.0
 
 
 def _error_response(
@@ -58,6 +60,41 @@ def _success_response(now_trading, ticks):
         "market_state": market_state,
         "now_trading": normalized_now_trading,
         "ticks": ticks,
+        "error": None,
+    }
+
+
+def _shared_success_response(shared, requested_codes):
+    payload = dict(shared.payload)
+    requested = set(requested_codes)
+    ticks = payload.get("ticks")
+    if isinstance(ticks, list):
+        filtered_ticks = [
+            tick
+            for tick in ticks
+            if isinstance(tick, dict) and tick.get("code") in requested
+        ]
+        # A larger cached batch may have omitted one requested symbol while
+        # still succeeding for its other symbols. Do not turn that omission
+        # into a false successful response for a narrower request.
+        if requested and not filtered_ticks and payload.get("market_state") != "closed":
+            return None
+        payload["ticks"] = filtered_ticks
+    else:
+        return None
+    payload["quote_state"] = "shared"
+    payload["quote_age_seconds"] = round(float(shared.age_seconds), 3)
+    return payload
+
+
+def _deferred_response(retry_after_seconds: int):
+    return {
+        "ok": True,
+        "quote_state": "deferred",
+        "retry_after_seconds": max(1, int(retry_after_seconds)),
+        "market_state": "unknown",
+        "now_trading": None,
+        "ticks": [],
         "error": None,
     }
 
@@ -97,23 +134,56 @@ def ticks():
         return _error_response("code_must_be_string", "each code must be a string.", 400)
 
     external_backoff = None
+    external_probe_id = None
     if market != Market.A.value and codes:
         external_backoff = _external_tick_backoff()
+        shared = external_backoff.recent_success(
+            market,
+            codes,
+            max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS,
+        )
+        if shared is not None:
+            shared_response = _shared_success_response(shared, codes)
+            if shared_response is not None:
+                return shared_response
         permit = external_backoff.acquire(market)
         if not permit.allowed:
-            readiness = current_app.extensions.get("readiness")
-            if readiness is not None:
-                readiness.record_ticks_failure(
+            if permit.reason_code == "PROVIDER_PROBE_IN_FLIGHT":
+                shared = external_backoff.wait_for_success(
                     market,
-                    "service_unavailable",
-                    "Tick provider retry is temporarily deferred.",
+                    codes,
+                    not_before=permit.probe_started_at,
+                    timeout_seconds=_EXTERNAL_TICK_COALESCE_WAIT_SECONDS,
+                    max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS,
                 )
-            return _error_response(
-                "service_unavailable",
-                "Tick service is temporarily unavailable.",
-                503,
-                retry_after_seconds=permit.retry_after_seconds,
-            )
+                if shared is not None:
+                    shared_response = _shared_success_response(shared, codes)
+                    if shared_response is not None:
+                        return shared_response
+                # The first request may have completed with another code set or
+                # failed while this request waited. Re-check once so this call
+                # either fetches its missing codes or inherits the real backoff.
+                permit = external_backoff.acquire(market)
+                if (
+                    not permit.allowed
+                    and permit.reason_code == "PROVIDER_PROBE_IN_FLIGHT"
+                ):
+                    return _deferred_response(permit.retry_after_seconds)
+            if not permit.allowed:
+                readiness = current_app.extensions.get("readiness")
+                if readiness is not None:
+                    readiness.record_ticks_failure(
+                        market,
+                        "service_unavailable",
+                        "Tick provider retry is temporarily deferred.",
+                    )
+                return _error_response(
+                    "service_unavailable",
+                    "Tick service is temporarily unavailable.",
+                    503,
+                    retry_after_seconds=permit.retry_after_seconds,
+                )
+        external_probe_id = permit.probe_id
 
     try:
         isolated_batch = (
@@ -169,18 +239,28 @@ def ticks():
                     "empty_result",
                     "Tick service returned no usable data.",
                 )
-        if external_backoff is not None:
-            # A provider response, including a valid empty/closed result,
-            # proves transport recovery. Empty-open handling remains the
-            # separate data-quality contract below.
-            external_backoff.record_success(market)
         if codes and not res_ticks and not market_closed:
+            if external_backoff is not None:
+                # The provider answered, so failure backoff can close, but an
+                # unusable open-market batch must not enter the shared cache.
+                external_backoff.record_success(
+                    market,
+                    probe_id=external_probe_id,
+                )
             return _error_response(
                 "empty_result",
                 "Tick service returned no usable data.",
                 503,
             )
-        return _success_response(now_trading, res_ticks)
+        response_payload = _success_response(now_trading, res_ticks)
+        if external_backoff is not None:
+            external_backoff.record_success(
+                market,
+                probe_id=external_probe_id,
+                requested_codes=codes,
+                response_payload=response_payload,
+            )
+        return response_payload
     except Exception:
         # 完整堆栈仅写日志，避免直接暴露给前端调用方。
         readiness = current_app.extensions.get("readiness")
@@ -193,7 +273,8 @@ def ticks():
         retry_after_seconds = None
         if external_backoff is not None:
             retry_after_seconds = external_backoff.record_failure(
-                market
+                market,
+                probe_id=external_probe_id,
             ).retry_after_seconds
         LogUtil.exception(f"/ticks failed market={market} codes_len={len(codes)}")
         return _error_response(

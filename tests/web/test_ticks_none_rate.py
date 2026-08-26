@@ -5,9 +5,11 @@ redis / currency=binance 的 ccxt percentage 缺省)使 float(None) 抛 TypeErro
 {now_trading:False, ticks:[]}, 前端收到 now_trading:false 会 stop_timer 停轮询。修复=
 逐标的隔离 + `float(_t.rate or 0)`, 镜像 /tv/quotes(tv.py:637)。
 """
+import concurrent.futures
 import json
 import pathlib
 import sys
+import threading
 
 _root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_root / "src"))
@@ -306,6 +308,172 @@ def test_external_tick_failures_open_one_shared_market_backoff(
     assert recovered.get_json()["ticks"] == [
         {"code": "AAPL.US", "price": 201.25, "rate": 1.75}
     ]
+
+
+def test_external_tick_inflight_probe_is_deferred_without_a_false_503(
+    client,
+    monkeypatch,
+):
+    backoff = ExternalMarketTickBackoff(clock=lambda: 100.0)
+    assert backoff.acquire("currency_spot").allowed is True
+    client.application.extensions["external_market_tick_backoff"] = backoff
+    monkeypatch.setattr(other_mod, "_EXTERNAL_TICK_COALESCE_WAIT_SECONDS", 0)
+    monkeypatch.setattr(
+        other_mod,
+        "get_exchange",
+        lambda _market: pytest.fail("a coalesced request must not call the provider"),
+    )
+
+    response = client.post(
+        "/ticks",
+        data={"market": "currency_spot", "codes": json.dumps(["BTC/USDT"])},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": True,
+        "quote_state": "deferred",
+        "retry_after_seconds": 5,
+        "market_state": "unknown",
+        "now_trading": None,
+        "ticks": [],
+        "error": None,
+    }
+    assert client.application.extensions["readiness"].ticks_snapshot(
+        "currency_spot"
+    )["status"] == "unknown"
+
+
+def test_external_tick_recent_success_is_shared_without_another_provider_call(
+    client,
+    monkeypatch,
+):
+    backoff = ExternalMarketTickBackoff(clock=lambda: 100.0)
+    backoff.record_success(
+        "currency_spot",
+        requested_codes=("BTC/USDT",),
+        response_payload={
+            "ok": True,
+            "market_state": "open",
+            "now_trading": True,
+            "ticks": [{"code": "BTC/USDT", "price": 65432.1, "rate": 1.2}],
+            "error": None,
+        },
+    )
+    client.application.extensions["external_market_tick_backoff"] = backoff
+    monkeypatch.setattr(
+        other_mod,
+        "get_exchange",
+        lambda _market: pytest.fail("a recent shared result must skip the provider"),
+    )
+
+    response = client.post(
+        "/ticks",
+        data={"market": "currency_spot", "codes": json.dumps(["BTC/USDT"])},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": True,
+        "quote_state": "shared",
+        "quote_age_seconds": 0.0,
+        "market_state": "open",
+        "now_trading": True,
+        "ticks": [{"code": "BTC/USDT", "price": 65432.1, "rate": 1.2}],
+        "error": None,
+    }
+
+
+def test_concurrent_external_tick_requests_share_one_real_provider_result(
+    client,
+    monkeypatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+    call_lock = threading.Lock()
+    provider_calls = 0
+    client.application.extensions["external_market_tick_backoff"] = (
+        ExternalMarketTickBackoff()
+    )
+
+    class _SlowExchange:
+        def ticks(self, _codes):
+            nonlocal provider_calls
+            with call_lock:
+                provider_calls += 1
+            started.set()
+            assert release.wait(2)
+            return {"BTC/USDT": _tick("BTC/USDT", 65432.1, 1.2)}
+
+        def now_trading(self, _market=None):
+            return True
+
+    monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _SlowExchange())
+
+    def request_ticks():
+        with client.application.test_client() as thread_client:
+            response = thread_client.post(
+                "/ticks",
+                data={
+                    "market": "currency_spot",
+                    "codes": json.dumps(["BTC/USDT"]),
+                },
+            )
+            return response.status_code, response.get_json()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(request_ticks)
+        assert started.wait(1)
+        second = pool.submit(request_ticks)
+        release.set()
+        results = [first.result(timeout=3), second.result(timeout=3)]
+
+    assert provider_calls == 1
+    assert [status for status, _payload in results] == [200, 200]
+    assert all(payload["ticks"] == [
+        {"code": "BTC/USDT", "price": 65432.1, "rate": 1.2}
+    ] for _status, payload in results)
+    assert sorted(
+        payload.get("quote_state", "direct") for _status, payload in results
+    ) == ["direct", "shared"]
+
+
+def test_external_tick_partial_cache_does_not_claim_a_missing_code(
+    client,
+    monkeypatch,
+):
+    backoff = ExternalMarketTickBackoff(clock=lambda: 100.0)
+    backoff.record_success(
+        "currency_spot",
+        requested_codes=("BTC/USDT", "ETH/USDT"),
+        response_payload={
+            "ok": True,
+            "market_state": "open",
+            "now_trading": True,
+            "ticks": [{"code": "BTC/USDT", "price": 65432.1, "rate": 1.2}],
+            "error": None,
+        },
+    )
+    client.application.extensions["external_market_tick_backoff"] = backoff
+    calls = []
+
+    def exchange(_market):
+        calls.append(_market)
+        return _FakeEx({"ETH/USDT": _tick("ETH/USDT", 4321.0, -0.5)})
+
+    monkeypatch.setattr(other_mod, "get_exchange", exchange)
+
+    response = client.post(
+        "/ticks",
+        data={"market": "currency_spot", "codes": json.dumps(["ETH/USDT"])},
+    )
+
+    assert len(calls) == 1
+    assert response.status_code == 200
+    assert response.get_json()["ticks"] == [
+        {"code": "ETH/USDT", "price": 4321.0, "rate": -0.5}
+    ]
+    assert "quote_state" not in response.get_json()
 
 
 def test_a_share_ticks_bypass_external_market_backoff(client, monkeypatch):
