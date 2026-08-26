@@ -297,13 +297,14 @@ def test_operations_default_to_readiness_probe():
     assert "if ($OpenBrowser) { Open-WebApplication -Uri $webUri }" in restart
     assert "ops\\restart_web.ps1" in windows_run
     assert "-OpenBrowser" in windows_run
-    for scope_flag in (
-        "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED",
-        "CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE",
-        "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
-        "CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
+    for scope_switch in (
+        "-EnableLargeScreeningScope",
+        "-EnableLargeHoldingMonitorScope",
+        "-EnableFullSymbolCatalog",
+        "-EnableFullCoverage",
+        "-ForceFullCoverageUntilComplete",
     ):
-        assert f'set "{scope_flag}=0"' in windows_run
+        assert scope_switch in windows_run
     assert "web\\chanlun_chart\\app.py" not in windows_run
     assert "poetry run python" not in windows_run
 
@@ -347,18 +348,15 @@ def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
     assert "[switch]$EnableFullSymbolCatalog" in restart
     assert "$EnableFullSymbolCatalog.IsPresent" in restart
     assert "-FullSymbolCatalogEnabled" in restart
-    assert (
-        'set "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED=0"'
-        in windows_run
-    )
-    assert 'set "CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES=' in windows_run
+    assert "-EnableFullSymbolCatalog" in windows_run
+    assert 'set "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED=' not in windows_run
     assert (
         "[Environment]::SetEnvironmentVariable($name, '12', 'Process')"
         in reset_body
     )
     for name in numeric_scope_names:
         assert f"'{name}'" in reset_body
-        assert f'set "{name}=12"' in windows_run
+        assert f'set "{name}=' not in windows_run
     assert (
         "'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS'"
         in reset_body
@@ -369,10 +367,7 @@ def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
         "'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS'" in reset_body
         and "[string]$LargeScopePriorityMaxSymbols" in reset_body
     )
-    assert (
-        'set "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=20"'
-        in windows_run
-    )
+    assert 'set "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=' not in windows_run
 
     holding_gate = restart.index(
         "if (-not $EnableLargeHoldingMonitorScope) {", dotenv_call
@@ -394,11 +389,8 @@ def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
         "-ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent"
         in restart
     )
-    assert 'set "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS=12"' in windows_run
-    assert (
-        'set "CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED=0"'
-        in windows_run
-    )
+    assert 'set "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS=' not in windows_run
+    assert "-EnableLargeHoldingMonitorScope" in windows_run
 
 
 def test_restart_replaces_watchdog_with_current_scope_after_deploy_verification():

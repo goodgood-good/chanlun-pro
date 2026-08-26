@@ -1270,9 +1270,43 @@
         warmupParts.push(`上下文/1m差异 ${contextOnlySensitive}只`);
       }
     }
+    const decisionOutcomeCounts = isRecord(
+      safeAudit.stock_decision_outcome_counts,
+    ) ? safeAudit.stock_decision_outcome_counts : {};
+    const emittedFiveMinute = Math.max(
+      0,
+      Number(decisionOutcomeCounts.CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED) || 0,
+    );
+    const noCurrentFiveMinutePoint = Math.max(
+      0,
+      Number(decisionOutcomeCounts.NO_CURRENT_5M_STRUCTURAL_POINT) || 0,
+    );
+    const noCurrentExecutableFiveMinutePoint = Math.max(
+      0,
+      Number(
+        decisionOutcomeCounts.NO_CURRENT_EXECUTABLE_5M_STRUCTURAL_POINT,
+      ) || 0,
+    );
+    const decisionOutcomeParts = [];
+    if (
+      emittedFiveMinute
+      || noCurrentFiveMinutePoint
+      || noCurrentExecutableFiveMinutePoint
+    ) {
+      decisionOutcomeParts.push(`当前5m严格信号 ${emittedFiveMinute}只`);
+      if (noCurrentFiveMinutePoint) {
+        decisionOutcomeParts.push(`无当前5m严格点 ${noCurrentFiveMinutePoint}只`);
+      }
+      if (noCurrentExecutableFiveMinutePoint) {
+        decisionOutcomeParts.push(
+          `有5m点但当前不可执行 ${noCurrentExecutableFiveMinutePoint}只`,
+        );
+      }
+    }
     if (screeningScopeFacts(runtimeHealth, snapshot).validation) {
       return [
         `${screeningScopeLabel(runtimeHealth, snapshot)} · 当前验证范围固定`,
+        ...decisionOutcomeParts,
         ...warmupParts,
       ].join(" · ");
     }
@@ -1303,7 +1337,10 @@
         Number(safeAudit.coverage_cycle_failed_symbol_count) || 0,
       );
       const parts = [`全周期已分析 ${analyzed}/${discovered}`];
-      const withoutSignal = completedWithoutSignalCount(snapshot);
+      if (decisionOutcomeParts.length) parts.push(...decisionOutcomeParts);
+      const withoutSignal = decisionOutcomeParts.length
+        ? null
+        : completedWithoutSignalCount(snapshot);
       if (withoutSignal !== null && withoutSignal > 0) {
         parts.push(`已分析无当前结构信号 ${withoutSignal}`);
       }
@@ -1427,16 +1464,31 @@
     const failed = hasFailed
       ? Math.max(0, Number(safeAudit.sector_failed_count) || 0)
       : Math.max(0, discovered - completed - excluded);
-    const providedRatio = Number(safeAudit.sector_completion_ratio);
+    const rawResolutionRatio = safeAudit.sector_resolution_ratio;
+    const rawCompletionRatio = safeAudit.sector_completion_ratio;
+    const providedResolutionRatio = (
+      rawResolutionRatio === null
+      || rawResolutionRatio === undefined
+      || rawResolutionRatio === ""
+    ) ? Number.NaN : Number(rawResolutionRatio);
+    const providedCompletionRatio = (
+      rawCompletionRatio === null
+      || rawCompletionRatio === undefined
+      || rawCompletionRatio === ""
+    ) ? Number.NaN : Number(rawCompletionRatio);
+    const resolved = Math.min(discovered, completed + excluded);
+    const providedRatio = Number.isFinite(providedResolutionRatio)
+      ? providedResolutionRatio
+      : providedCompletionRatio;
     const ratio = Number.isFinite(providedRatio)
       ? Math.min(1, Math.max(0, providedRatio))
-      : discovered > 0 ? Math.min(1, completed / discovered) : 0;
+      : discovered > 0 ? Math.min(1, resolved / discovered) : 0;
     const percentage = new Intl.NumberFormat("zh-CN", {
       style: "percent",
       maximumFractionDigits: 1,
     }).format(ratio);
     const exclusionText = hasExcluded ? ` · 资格排除 ${excluded}` : "";
-    return `发现 ${discovered} · 完成 ${completed}${exclusionText} · 失败 ${failed} · 成功率 ${percentage}`;
+    return `发现 ${discovered} · 完成 ${completed}${exclusionText} · 失败 ${failed} · 解析完成率 ${percentage}`;
   }
 
   function selectedSectorCount(snapshot) {

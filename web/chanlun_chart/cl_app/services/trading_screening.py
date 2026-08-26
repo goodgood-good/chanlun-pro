@@ -2692,6 +2692,16 @@ def _project_scan_plan_to_configured_scope(
 
 
 _WARMUP_AUDIT_CONTRACT_ID = "chanlun-screening-warmup-audit-v1"
+_STOCK_DECISION_OUTCOME_CONTRACT_ID = (
+    "chanlun-screening-stock-decision-outcome-v1"
+)
+_STOCK_DECISION_OUTCOMES = frozenset(
+    {
+        "CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED",
+        "NO_CURRENT_EXECUTABLE_5M_STRUCTURAL_POINT",
+        "NO_CURRENT_5M_STRUCTURAL_POINT",
+    }
+)
 
 
 def _symbol_warmup_audit_document(
@@ -2856,6 +2866,77 @@ def _restored_warmup_diagnostics(
     return restored
 
 
+def _symbol_stock_decision_outcome(
+    bundle: SymbolStructureBundle,
+    evaluated: Sequence[EvaluatedSignal],
+) -> str:
+    """Classify one completed stock scan without inventing a rejected signal.
+
+    The production decision core emits one reviewable result for every current,
+    executable 5m setup.  A zero-signal snapshot previously discarded the only
+    useful distinction: whether strict 5m structure was absent, or a 5m point
+    existed but the evaluator did not emit it.  1m is deliberately not named as
+    a rejection here because it only locates an already-valid 5m setup.
+    """
+
+    if evaluated:
+        return "CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED"
+    if bundle.five_points:
+        # The canonical evaluator emits one row for every current executable
+        # 5m point.  Therefore an empty result with historical/provisional
+        # points means that none survives the current/executable lifecycle
+        # window; it is not a publication or 1m rejection.
+        return "NO_CURRENT_EXECUTABLE_5M_STRUCTURAL_POINT"
+    return "NO_CURRENT_5M_STRUCTURAL_POINT"
+
+
+def _stock_decision_outcome_audit_document(
+    outcomes: Mapping[str, str],
+) -> dict[str, object]:
+    normalized = {
+        code: outcomes[code]
+        for code in sorted(outcomes)
+        if outcomes[code] in _STOCK_DECISION_OUTCOMES
+    }
+    counts: dict[str, int] = {}
+    for outcome in normalized.values():
+        counts[outcome] = counts.get(outcome, 0) + 1
+    return {
+        "stock_decision_outcome_contract_id": (
+            _STOCK_DECISION_OUTCOME_CONTRACT_ID
+        ),
+        "stock_decision_outcome_counts": dict(sorted(counts.items())),
+        # A compact code -> outcome ledger remains small even for full-market
+        # coverage and lets a later batch/restart restore exact aggregate counts.
+        "stock_decision_outcomes": normalized,
+    }
+
+
+def _restored_stock_decision_outcomes(
+    audit: Mapping[str, object],
+    *,
+    completed_codes: set[str],
+) -> dict[str, str]:
+    """Restore only authenticated outcome rows for completed scan subjects."""
+
+    if (
+        audit.get("stock_decision_outcome_contract_id")
+        != _STOCK_DECISION_OUTCOME_CONTRACT_ID
+    ):
+        return {}
+    raw = audit.get("stock_decision_outcomes")
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        code: outcome
+        for code, outcome in raw.items()
+        if isinstance(code, str)
+        and code in completed_codes
+        and isinstance(outcome, str)
+        and outcome in _STOCK_DECISION_OUTCOMES
+    }
+
+
 def _initial_snapshot(
     config: TradingScreeningConfig,
     *,
@@ -2949,6 +3030,7 @@ def _initial_snapshot(
             "stock_exclusion_counts": {},
             "monitor_instrument_exclusion_count": 0,
             **_warmup_audit_document({}),
+            **_stock_decision_outcome_audit_document({}),
         },
         "data_quality": {
             "complete": False,
@@ -4949,6 +5031,7 @@ class TradingScreeningService:
         self._coverage_cycle_warmup_diagnostics: dict[
             str, dict[str, object]
         ] = {}
+        self._coverage_cycle_stock_decision_outcomes: dict[str, str] = {}
         self._coverage_sector_restore_error: str | None = None
         self._coverage_cycle_full_market_history_scan = False
         self._coverage_cycle_background_refresh_required = False
@@ -8436,8 +8519,15 @@ class TradingScreeningService:
                     completed_codes=self._coverage_cycle_completed_codes,
                 )
             )
+            self._coverage_cycle_stock_decision_outcomes = (
+                _restored_stock_decision_outcomes(
+                    audit,
+                    completed_codes=self._coverage_cycle_completed_codes,
+                )
+            )
         else:
             self._coverage_cycle_warmup_diagnostics = {}
+            self._coverage_cycle_stock_decision_outcomes = {}
         if stock_errors:
             self._record_cycle_errors(stock_errors)
         return True
@@ -11953,6 +12043,12 @@ class TradingScreeningService:
                 "coverage_cycle_estimated_remaining_seconds"
             ),
             "stock_exclusion_counts": scan_audit.get("stock_exclusion_counts", {}),
+            "stock_decision_outcome_contract_id": scan_audit.get(
+                "stock_decision_outcome_contract_id"
+            ),
+            "stock_decision_outcome_counts": scan_audit.get(
+                "stock_decision_outcome_counts", {}
+            ),
             "warmup_audit_contract_id": scan_audit.get(
                 "warmup_audit_contract_id"
             ),
@@ -13179,6 +13275,7 @@ class TradingScreeningService:
         self._coverage_cycle_discarded_retry_codes.clear()
         self._coverage_cycle_errors.clear()
         self._coverage_cycle_warmup_diagnostics.clear()
+        self._coverage_cycle_stock_decision_outcomes.clear()
         self._coverage_cycle_full_market_history_scan = False
         self._coverage_cycle_background_refresh_required = False
         with self._background_lock:
@@ -14358,6 +14455,9 @@ class TradingScreeningService:
                         self._coverage_cycle_warmup_diagnostics[code] = (
                             warmup_diagnostic
                         )
+                    self._coverage_cycle_stock_decision_outcomes[code] = (
+                        _symbol_stock_decision_outcome(bundle, evaluated)
+                    )
                 for item in evaluated:
                     previous_stage = None
                     previous_row = previous_signals.get(item.lifecycle.signal_id)
@@ -14381,6 +14481,7 @@ class TradingScreeningService:
             else:
                 if not monitoring_only_refresh:
                     self._coverage_cycle_warmup_diagnostics.pop(code, None)
+                    self._coverage_cycle_stock_decision_outcomes.pop(code, None)
                 error = _stock_analysis_error_document(code, exc)
                 if _is_coverage_exclusion(error):
                     exclusions.append(_stock_analysis_exclusion_document(error))
@@ -14484,6 +14585,11 @@ class TradingScreeningService:
             )
         warmup_audit = _warmup_audit_document(
             self._coverage_cycle_warmup_diagnostics
+        )
+        stock_decision_outcome_audit = (
+            _stock_decision_outcome_audit_document(
+                self._coverage_cycle_stock_decision_outcomes
+            )
         )
         # 在批次完成闸门前先分类失败。若把低完成率批次整体重新入队，排序靠前的一簇
         # 确定性行情拒绝会垄断每次刷新，使冻结计划中后续有效标的永远无法访问。
@@ -14714,6 +14820,7 @@ class TradingScreeningService:
             scan_audit.update(
                 {
                     **warmup_audit,
+                    **stock_decision_outcome_audit,
                     "planned_symbol_count": planned_count,
                     "completed_symbol_count": completed,
                     "completion_ratio": str(completion),
@@ -14945,6 +15052,7 @@ class TradingScreeningService:
             "scan_audit": {
                 **sector_audit,
                 **warmup_audit,
+                **stock_decision_outcome_audit,
                 "planned_symbol_count": planned_count,
                 "discovered_symbol_count": len(self._coverage_cycle_discovered_codes),
                 "completed_symbol_count": completed,

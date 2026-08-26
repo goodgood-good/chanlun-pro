@@ -3046,8 +3046,9 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
       sector_completed_count: 7,
       sector_failed_count: 3,
       sector_completion_ratio: "0.7",
+      sector_resolution_ratio: null,
     }),
-    "发现 10 · 完成 7 · 失败 3 · 成功率 70%",
+    "发现 10 · 完成 7 · 失败 3 · 解析完成率 70%",
   );
   assert.equal(
     Ui.sectorCoverageText({
@@ -3058,7 +3059,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
       sector_completion_ratio: "0.8484848484848484848484848485",
       sector_resolution_ratio: "1",
     }),
-    "发现 66 · 完成 56 · 资格排除 10 · 失败 0 · 成功率 84.8%",
+    "发现 66 · 完成 56 · 资格排除 10 · 失败 0 · 解析完成率 100%",
   );
   assert.equal(
     Ui.selectedSectorCount({
@@ -3652,6 +3653,10 @@ test("validation scope ignores stale full-coverage progress in operator copy", (
       warmup_context_only_sensitive_symbol_count: 1,
       trade_level_warmup_unconverged_symbol_count: 1,
       trade_level_warmup_fail_closed_symbol_count: 1,
+      stock_decision_outcome_counts: {
+        CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED: 1,
+        NO_CURRENT_5M_STRUCTURAL_POINT: 11,
+      },
     },
   };
   assert.equal(
@@ -3660,7 +3665,7 @@ test("validation scope ignores stale full-coverage progress in operator copy", (
       warmupAuditSnapshot,
       runtimeHealth,
     ),
-    "12只小样本验证 · 当前验证范围固定 · 历史边界敏感 2只 · 5m未收敛 1只，已失败关闭 · 上下文/1m差异 1只",
+    "12只小样本验证 · 当前验证范围固定 · 当前5m严格信号 1只 · 无当前5m严格点 11只 · 历史边界敏感 2只 · 5m未收敛 1只，已失败关闭 · 上下文/1m差异 1只",
   );
   assert.equal(
     Ui.scanQualityText({

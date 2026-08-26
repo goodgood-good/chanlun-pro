@@ -132,6 +132,41 @@ from cl_app.services.trading_screening_gateway import (
 )
 
 
+def test_stock_decision_outcome_uses_current_executable_five_minute_contract() -> None:
+    decision_at = AS_OF + timedelta(days=5)
+    historical = SymbolStructureBundle(
+        code="SZ.000001",
+        as_of=decision_at,
+        sector=eligible_sector(),
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(confirmed_point("1buy"),),
+        one_points=(),
+        opposite_points=(),
+    )
+    current = replace(
+        historical,
+        five_points=(
+            confirmed_point("1buy", minutes_after=(5 * 24 * 60) + 295),
+        ),
+    )
+    engine = HumanAssistedDecisionCore(formal_selection_required=False)
+
+    historical_evaluated = engine.evaluate_symbol(historical)
+    current_evaluated = engine.evaluate_symbol(current)
+
+    assert historical_evaluated == ()
+    assert trading_screening_subject._symbol_stock_decision_outcome(
+        historical,
+        historical_evaluated,
+    ) == "NO_CURRENT_EXECUTABLE_5M_STRUCTURAL_POINT"
+    assert current_evaluated
+    assert trading_screening_subject._symbol_stock_decision_outcome(
+        current,
+        current_evaluated,
+    ) == "CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED"
+
+
 def _current_terminal_point(point, *, terminal_minutes: int = 30):
     """Attach the exact production lineage required by formal live alerts."""
 
@@ -844,6 +879,16 @@ def test_no_signal_scan_keeps_warmup_fail_closed_audit(
         "1m:WARMUP_ACTIVE_POINT_LANES_CHANGED": 1,
         "5m:WARMUP_ACTIVE_POINT_LANES_CHANGED": 1,
     }
+    assert audit["stock_decision_outcome_contract_id"] == (
+        "chanlun-screening-stock-decision-outcome-v1"
+    )
+    assert audit["stock_decision_outcome_counts"] == {
+        "NO_CURRENT_5M_STRUCTURAL_POINT": 2,
+    }
+    assert audit["stock_decision_outcomes"] == {
+        "SH.601808": "NO_CURRENT_5M_STRUCTURAL_POINT",
+        "SZ.000698": "NO_CURRENT_5M_STRUCTURAL_POINT",
+    }
     assert [row["code"] for row in audit["warmup_sensitive_symbols"]] == [
         "SH.601808",
         "SZ.000698",
@@ -853,6 +898,9 @@ def test_no_signal_scan_keeps_warmup_fail_closed_audit(
         service.health_snapshot()["trade_level_warmup_fail_closed_symbol_count"]
         == 1
     )
+    assert service.health_snapshot()["stock_decision_outcome_counts"] == {
+        "NO_CURRENT_5M_STRUCTURAL_POINT": 2,
+    }
     restarted = TradingScreeningService(
         market_data=WarmupAuditMarketData(),
         sector_catalog=MultiMemberSectorCatalog(symbols),
@@ -864,6 +912,10 @@ def test_no_signal_scan_keeps_warmup_fail_closed_audit(
         config=config,
     )
     assert set(restarted._coverage_cycle_warmup_diagnostics) == set(symbols)
+    assert restarted._coverage_cycle_stock_decision_outcomes == {
+        "SH.601808": "NO_CURRENT_5M_STRUCTURAL_POINT",
+        "SZ.000698": "NO_CURRENT_5M_STRUCTURAL_POINT",
+    }
     assert restarted.snapshot()["scan_audit"]["warmup_sensitive_symbol_count"] == 2
 
 

@@ -314,7 +314,9 @@ def test_runtime_validation_symbols_match_preregistered_backtest_profile() -> No
 
     assert stock_list.DEFAULT_VALIDATION_SYMBOL_CODES == expected
     assert joined in (ROOT / "ops/restart_web.ps1").read_text(encoding="utf-8-sig")
-    assert joined in (ROOT / "windows_run.bat").read_text(encoding="utf-8-sig")
+    production_launcher = (ROOT / "windows_run.bat").read_text(encoding="utf-8-sig")
+    assert "-EnableFullSymbolCatalog" in production_launcher
+    assert joined not in production_launcher
 
 
 def test_preload_unknown_adapter_uses_code_without_stock_info(monkeypatch):
