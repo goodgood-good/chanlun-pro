@@ -225,7 +225,7 @@ PRIORITY_MONITOR_BAR_READY_OFFSET_SECONDS = 2
 ONE_MINUTE_LOCATOR_SLA_SECONDS = 60
 PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor-v2-continuation"
 CANDIDATE_MONITOR_CONTRACT_ID = (
-    "bar-cadence-live-candidate-monitor-v4-epoch-symbol-exclusions"
+    "bar-cadence-live-candidate-monitor-v5-validation-liveness"
 )
 CANDIDATE_MONITOR_SYMBOL_EXCLUSION_SCHEMA = (
     "chanlun-candidate-monitor-symbol-exclusion"
@@ -4716,6 +4716,9 @@ class TradingScreeningService:
         self._candidate_monitor_supportive_eligible_count = 0
         self._candidate_monitor_supportive_admitted_count = 0
         self._candidate_monitor_supportive_capacity = 0
+        self._candidate_monitor_validation_probe_pool_count = 0
+        self._candidate_monitor_validation_probe_admitted_count = 0
+        self._candidate_monitor_validation_probe_deferred_count = 0
         self._priority_monitor_immediate_pool_count = 0
         self._priority_monitor_immediate_deferred_count = 0
         self._priority_monitor_locator_pool_count = 0
@@ -6529,6 +6532,25 @@ class TradingScreeningService:
             0,
             configured_candidate_universe_capacity - len(reserved_candidate_codes),
         )
+        validation_probe_reserved_codes = set(reserved_candidate_codes)
+        validation_probe_reserved_codes.update(eligible_supportive_codes)
+        validation_probe_reserved_codes.update(decision_rule_recheck_codes)
+        # A fixed validation cohort is not useful when the current frozen sector
+        # snapshot happens to contain no supportive regime: the former 0/0 lane
+        # reported perfect coverage while never exercising current 5m data.  Use
+        # only otherwise-idle bounded slots to keep the explicitly admitted
+        # cohort live.  The ordinary sector assessment still reaches the decision
+        # engine, so neutral/hostile sectors cannot manufacture a buy; 1m remains
+        # reserved for an actual current 5m setup.
+        validation_probe_pool = tuple(
+            code
+            for code in _configured_validation_cohort_codes(self._config)
+            if code not in excluded_codes
+            and code not in current_session_suspended_codes
+            and code not in candidate_suspended_codes
+            and code not in candidate_cadence_epoch_excluded_codes
+            and code not in validation_probe_reserved_codes
+        )
         universe_admission = admit_screening_universe(
             mandatory_codes=monitorable_mandatory_codes,
             signal_codes=signal_candidate_codes,
@@ -6536,6 +6558,7 @@ class TradingScreeningService:
                 eligible_supportive_codes[:supportive_admission_capacity]
             ),
             recheck_codes=decision_rule_recheck_codes,
+            validation_codes=validation_probe_pool,
             max_symbols=self._config.effective_monitor_universe_limit,
             large_scope_authorized=self._config.large_scope_authorized,
         )
@@ -6544,6 +6567,7 @@ class TradingScreeningService:
         admitted_signal_code_set = set(signal_candidate_codes)
         supportive_codes = list(universe_admission.supportive_codes)
         decision_rule_recheck_codes = universe_admission.recheck_codes
+        validation_probe_codes = universe_admission.validation_codes
         with self._background_lock:
             self._candidate_monitor_supportive_eligible_count = len(
                 eligible_supportive_codes
@@ -6554,6 +6578,15 @@ class TradingScreeningService:
             self._candidate_monitor_signal_admitted_count = len(signal_candidate_codes)
             self._candidate_monitor_signal_deferred_count = len(
                 universe_admission.deferred_signal_codes
+            )
+            self._candidate_monitor_validation_probe_pool_count = len(
+                validation_probe_pool
+            )
+            self._candidate_monitor_validation_probe_admitted_count = len(
+                validation_probe_codes
+            )
+            self._candidate_monitor_validation_probe_deferred_count = len(
+                universe_admission.deferred_validation_codes
             )
             self._priority_monitor_immediate_pool_count = len(
                 pinned_signal_candidate_codes
@@ -6663,7 +6696,8 @@ class TradingScreeningService:
                 locator_admission_deferred_codes
             )
         # 持仓、自选和当前仍有效的买卖点候选始终排在最前；冻结的支持性板块成员也必须进入
-        # 5 分钟发现轮转。只在 30 分钟通道观察它们会让刚形成的正式 5m 点晚于通知
+        # 5 分钟发现轮转。验证模式再使用剩余槽位持续观察精确准入的小样本，避免修改阶段
+        # 出现 0/0 的真空验证。只在 30 分钟通道观察它们会让刚形成的正式 5m 点晚于通知
         # 新鲜窗口才被发现。候选调度仍受独立时间预算和硬容量约束，容量不足会在
         # health 中失败关闭，不能静默退回半小时发现。
         regular_five_universe = tuple(
@@ -6673,6 +6707,7 @@ class TradingScreeningService:
                     *monitorable_mandatory_codes,
                     *signal_candidate_codes,
                     *supportive_codes,
+                    *validation_probe_codes,
                 )
             )
             if code not in excluded_codes
@@ -10127,6 +10162,15 @@ class TradingScreeningService:
             candidate_monitor_supportive_capacity = (
                 self._candidate_monitor_supportive_capacity
             )
+            candidate_monitor_validation_probe_pool_count = (
+                self._candidate_monitor_validation_probe_pool_count
+            )
+            candidate_monitor_validation_probe_admitted_count = (
+                self._candidate_monitor_validation_probe_admitted_count
+            )
+            candidate_monitor_validation_probe_deferred_count = (
+                self._candidate_monitor_validation_probe_deferred_count
+            )
             priority_monitor_immediate_pool_count = (
                 self._priority_monitor_immediate_pool_count
             )
@@ -10897,6 +10941,17 @@ class TradingScreeningService:
                 "CANDIDATE_MONITOR_OBSERVED_CAPACITY_INSUFFICIENT"
             )
         elif (
+            not candidate_monitor_five_universe
+            and not candidate_monitor_thirty_universe
+        ):
+            # An empty denominator has no cadence to verify.  It is operationally
+            # healthy but idle, not evidence that the live 5m/1m path is active.
+            candidate_monitor_status = "idle_no_candidates"
+            candidate_monitor_ready = True
+            candidate_monitor_reason_codes.append(
+                "CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE"
+            )
+        elif (
             five_candidate_coverage["ready"] is True
             and thirty_candidate_coverage["ready"] is True
         ):
@@ -10994,6 +11049,10 @@ class TradingScreeningService:
                 if priority_monitor_reason_codes
                 else "PRIORITY_MONITOR_DEGRADED"
             )
+        elif candidate_monitor_status == "idle_no_candidates":
+            realtime_alert_ready = True
+            realtime_alert_status = "ready_idle"
+            realtime_alert_reason_code = "CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE"
         elif not candidate_monitor_ready and candidate_monitor_status != "warming":
             # 立即持仓/自选复查正常，并不证明支持板块候选的 5m 轮换满足时效。
             # 总预警状态同时约束两条监听车道，避免页面在候选容量不足或逾期时
@@ -11399,6 +11458,22 @@ class TradingScreeningService:
             "candidate_monitor_supportive_capacity": (
                 candidate_monitor_supportive_capacity
             ),
+            "candidate_monitor_validation_probe_pool_count": (
+                candidate_monitor_validation_probe_pool_count
+            ),
+            "candidate_monitor_validation_probe_admitted_count": (
+                candidate_monitor_validation_probe_admitted_count
+            ),
+            "candidate_monitor_validation_probe_deferred_count": (
+                candidate_monitor_validation_probe_deferred_count
+            ),
+            "candidate_monitor_active": bool(
+                priority_monitor_session_open
+                and (
+                    candidate_monitor_five_universe
+                    or candidate_monitor_thirty_universe
+                )
+            ),
             "candidate_notification_streaming_enabled": True,
             "candidate_notification_publish_batch_size": (
                 CANDIDATE_NOTIFICATION_PUBLISH_BATCH_SIZE
@@ -11427,7 +11502,9 @@ class TradingScreeningService:
             "candidate_monitor_five_minute": {
                 **five_candidate_coverage,
                 "scope": (
-                    "OWNED_WATCHED_EXISTING_AND_SUPPORTIVE_SECTOR_DISCOVERY"
+                    "OWNED_WATCHED_EXISTING_SUPPORTIVE_AND_VALIDATION_COHORT"
+                    if candidate_monitor_validation_probe_admitted_count
+                    else "OWNED_WATCHED_EXISTING_AND_SUPPORTIVE_SECTOR_DISCOVERY"
                 ),
                 "required_symbols_per_refresh": five_required_per_refresh,
                 "max_symbols_per_refresh": (
@@ -11439,7 +11516,11 @@ class TradingScreeningService:
             },
             "candidate_monitor_thirty_minute": {
                 **thirty_candidate_coverage,
-                "scope": "SUPPORTIVE_SECTOR_DISCOVERY_AND_EXISTING_CANDIDATES",
+                "scope": (
+                    "EXISTING_SUPPORTIVE_AND_VALIDATION_COHORT"
+                    if candidate_monitor_validation_probe_admitted_count
+                    else "SUPPORTIVE_SECTOR_DISCOVERY_AND_EXISTING_CANDIDATES"
+                ),
                 "required_symbols_per_refresh": thirty_required_per_refresh,
                 "max_symbols_per_refresh": (
                     self._config.max_thirty_minute_candidate_symbols_per_refresh
@@ -11470,6 +11551,14 @@ class TradingScreeningService:
                 else None
             ),
             "realtime_alert_ready": realtime_alert_ready,
+            "realtime_alert_active": bool(
+                realtime_alert_ready
+                and priority_monitor_session_open
+                and (
+                    candidate_monitor_five_universe
+                    or candidate_monitor_thirty_universe
+                )
+            ),
             "realtime_alert_status": realtime_alert_status,
             "realtime_alert_reason_code": realtime_alert_reason_code,
             "realtime_alert_delivery_mode": (

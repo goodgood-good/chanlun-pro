@@ -71,6 +71,39 @@ def test_admission_caps_deduplicated_union_and_reports_optional_overflow() -> No
     assert admission.deferred_recheck_codes == rechecks[1:]
 
 
+def test_validation_probes_use_only_capacity_left_by_real_monitor_tiers() -> None:
+    mandatory = _codes(1, 1)
+    signals = _codes(10, 1)
+    supportive = _codes(20, 1)
+    rechecks = _codes(30, 1)
+    validation = (*mandatory, *signals, *supportive, *rechecks, *_codes(40, 4))
+
+    admission = admit_screening_universe(
+        mandatory_codes=mandatory,
+        signal_codes=signals,
+        supportive_codes=supportive,
+        recheck_codes=rechecks,
+        validation_codes=validation,
+        max_symbols=6,
+    )
+
+    assert admission.admitted_codes == (
+        *mandatory,
+        *signals,
+        *supportive,
+        *rechecks,
+        *_codes(40, 2),
+    )
+    assert admission.validation_codes == (
+        *mandatory,
+        *signals,
+        *supportive,
+        *rechecks,
+        *_codes(40, 2),
+    )
+    assert admission.deferred_validation_codes == _codes(42, 2)
+
+
 def test_oversized_mandatory_scope_fails_before_optional_admission() -> None:
     with pytest.raises(
         ScreeningScopeAuthorizationError,

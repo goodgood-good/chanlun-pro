@@ -42,9 +42,11 @@ class ScreeningUniverseAdmission:
     signal_codes: tuple[str, ...]
     supportive_codes: tuple[str, ...]
     recheck_codes: tuple[str, ...]
+    validation_codes: tuple[str, ...]
     deferred_signal_codes: tuple[str, ...]
     deferred_supportive_codes: tuple[str, ...]
     deferred_recheck_codes: tuple[str, ...]
+    deferred_validation_codes: tuple[str, ...]
     admitted_codes: tuple[str, ...]
 
 
@@ -195,14 +197,17 @@ def admit_screening_universe(
     signal_codes: Iterable[str] = (),
     supportive_codes: Iterable[str] = (),
     recheck_codes: Iterable[str] = (),
+    validation_codes: Iterable[str] = (),
     max_symbols: int = DEFAULT_VALIDATION_COHORT_SIZE,
     large_scope_authorized: bool = False,
 ) -> ScreeningUniverseAdmission:
     """Admit one deduplicated Web monitor universe without exceeding its limit.
 
     Mandatory holdings/watchlist symbols are never silently dropped.  Optional
-    signal, supportive-sector and rule-recheck tiers are admitted in that order;
-    overflow remains explicitly deferred for a later authorized run.
+    signal, supportive-sector and rule-recheck tiers are admitted in that order.
+    Validation probes are last: they use only otherwise-idle bounded capacity and
+    can never displace a real holding, signal, supportive member or migration
+    recheck. Overflow remains explicitly deferred for a later authorized run.
     """
 
     if isinstance(max_symbols, bool) or not isinstance(max_symbols, int):
@@ -247,14 +252,17 @@ def admit_screening_universe(
     admitted_signals, deferred_signals = admit_optional(signal_codes)
     admitted_supportive, deferred_supportive = admit_optional(supportive_codes)
     admitted_rechecks, deferred_rechecks = admit_optional(recheck_codes)
+    admitted_validation, deferred_validation = admit_optional(validation_codes)
     return ScreeningUniverseAdmission(
         mandatory_codes=mandatory,
         signal_codes=admitted_signals,
         supportive_codes=admitted_supportive,
         recheck_codes=admitted_rechecks,
+        validation_codes=admitted_validation,
         deferred_signal_codes=deferred_signals,
         deferred_supportive_codes=deferred_supportive,
         deferred_recheck_codes=deferred_rechecks,
+        deferred_validation_codes=deferred_validation,
         admitted_codes=tuple(admitted),
     )
 

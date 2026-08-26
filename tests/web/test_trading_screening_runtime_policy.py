@@ -127,17 +127,17 @@ def test_manifest_migration_allows_only_exact_reviewed_shard_transition() -> Non
     )
 
 
-def test_manifest_migration_allows_exact_candidate_cadence_transition() -> None:
+def test_manifest_migration_allows_exact_validation_liveness_transition() -> None:
     current = current_decision_source_snapshot()
     cached = copy.deepcopy(current)
     path = "web/chanlun_chart/cl_app/services/trading_screening.py"
     current_row = next(row for row in current["files"] if row["path"] == path)
     cached_row = next(row for row in cached["files"] if row["path"] == path)
     assert current_row["sha256"] == (
-        "sha256:ec204210c310ca0ca1f87057e1b41b13648062be48910b9b116a2c607a524434"
+        "sha256:6a1d8dd8fbf3b80794fb7f8e16f721cc73faf4119430a8c07e968adf2af233fa"
     )
     cached_row["sha256"] = (
-        "sha256:745fbf8abdc2864c06b2467f08d9fcda49f101385aaa7adc8e4cdc635e62e0c7"
+        "sha256:ec204210c310ca0ca1f87057e1b41b13648062be48910b9b116a2c607a524434"
     )
     cached["aggregate_sha256"] = sha256_json(
         {"schema": cached["schema"], "files": cached["files"]}

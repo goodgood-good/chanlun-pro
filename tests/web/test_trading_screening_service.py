@@ -6567,7 +6567,7 @@ def test_priority_monitor_uses_current_bars_while_coverage_epoch_stays_frozen(
     assert priority_state["last_at"] == observed_at[0].isoformat()
     assert priority_state["last_codes"] == [symbols[0]]
     assert priority_state["candidate_monitor_contract_id"] == (
-        "bar-cadence-live-candidate-monitor-v4-epoch-symbol-exclusions"
+        "bar-cadence-live-candidate-monitor-v5-validation-liveness"
     )
     assert priority_state["screening_policy_id"] == second["screening_policy_id"]
     assert priority_state["decision_core_id"] == service._decision_core_id
@@ -8363,6 +8363,115 @@ def test_realtime_alert_without_due_event_is_not_degraded_after_close(
     assert health["realtime_alert_reason_code"] == "NON_TRADING_SESSION_NOT_DUE"
 
 
+def test_validation_cohort_uses_idle_capacity_for_live_five_minute_probes(
+    tmp_path: Path,
+) -> None:
+    symbols = tuple(f"SZ.{value:06d}" for value in range(1, 4))
+    observed_at = [AS_OF.replace(hour=14, minute=56, second=0, microsecond=0)]
+    market = RecordingMarketData()
+    engine = RecordingEngine()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(symbols),
+        engine=engine,
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at[0],
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            admitted_universe_codes=symbols,
+        ),
+    )
+
+    for _ in symbols:
+        service._run_priority_monitor(
+            previous=service.snapshot(),
+            observed_at=observed_at[0],
+        )
+        observed_at[0] += timedelta(minutes=1)
+
+    assert market.bundle_codes == list(symbols)
+    assert {
+        code: set(frequencies)
+        for code, frequencies in market.bundle_frequency_requests
+    } == {
+        code: {"5m", "30m"} for code in symbols
+    }
+    assert all(
+        bundle.selection_sources == ("QMT_SECTOR_ELIGIBLE_SCOPE",)
+        for bundle in engine.bundles
+    )
+    health = service.health_snapshot()
+    assert health["candidate_monitor_validation_probe_pool_count"] == len(symbols)
+    assert health["candidate_monitor_validation_probe_admitted_count"] == len(
+        symbols
+    )
+    assert health["candidate_monitor_validation_probe_deferred_count"] == 0
+    assert health["candidate_monitor_active"] is True
+    assert health["candidate_monitor_status"] == "verified"
+    assert health["candidate_monitor_five_minute"]["universe_count"] == len(symbols)
+    assert health["candidate_monitor_five_minute"]["scope"] == (
+        "OWNED_WATCHED_EXISTING_SUPPORTIVE_AND_VALIDATION_COHORT"
+    )
+    assert health["priority_monitor_locator_pool_count"] == 0
+    assert health["priority_monitor_locator_runtime_status"] == "not_required"
+
+
+def test_large_scope_without_candidates_is_explicitly_idle_not_vacuously_verified(
+    tmp_path: Path,
+) -> None:
+    class VerifiedNotifier:
+        def health_snapshot(self) -> dict[str, object]:
+            return {
+                "configured": True,
+                "operationally_verified": True,
+                "status": "verified",
+                "reason_code": "DELIVERY_SUCCESS_PROVEN",
+                "delivered_event_count": 1,
+            }
+
+    symbols = tuple(f"SZ.{value:06d}" for value in range(1, 4))
+    observed_at = AS_OF.replace(hour=14, minute=58, second=0, microsecond=0)
+    market = RecordingMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(symbols),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=VerifiedNotifier(),
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            large_scope_authorized=True,
+            admitted_universe_codes=symbols,
+        ),
+    )
+
+    service._run_priority_monitor(
+        previous=service.snapshot(),
+        observed_at=observed_at,
+    )
+
+    assert market.bundle_codes == []
+    health = service.health_snapshot()
+    assert health["candidate_monitor_validation_probe_pool_count"] == 0
+    assert health["candidate_monitor_active"] is False
+    assert health["candidate_monitor_ready"] is True
+    assert health["candidate_monitor_status"] == "idle_no_candidates"
+    assert health["candidate_monitor_reason_codes"] == [
+        "CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE"
+    ]
+    assert health["candidate_monitor_five_minute"]["coverage_ratio"] == "1"
+    assert health["realtime_alert_ready"] is True
+    assert health["realtime_alert_active"] is False
+    assert health["realtime_alert_status"] == "ready_idle"
+    assert health["realtime_alert_reason_code"] == (
+        "CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE"
+    )
+
+
 def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
     tmp_path: Path,
 ) -> None:
@@ -9601,7 +9710,7 @@ def test_deterministic_candidate_rejection_is_epoch_scoped_not_lane_failure(
     assert health["candidate_monitor_symbol_exclusion_reason_counts"] == {
         "KLINE_MINIMUM_HISTORY_NOT_MET": 1
     }
-    assert health["candidate_monitor_status"] == "verified"
+    assert health["candidate_monitor_status"] == "idle_no_candidates"
     assert health["candidate_monitor_ready"] is True
     assert health["candidate_monitor_observed_capacity_sufficient"] is True
     with service._state_lock:

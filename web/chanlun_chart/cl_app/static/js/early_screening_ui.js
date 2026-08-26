@@ -106,6 +106,8 @@
     awaiting_first_run: "等待首次运行",
     warming: "覆盖暖机中",
     catching_up: "午间补齐中",
+    idle_no_candidates: "暂无合格监听对象",
+    ready_idle: "就绪但当前空闲",
     capacity_insufficient: "监听容量不足",
     cadence_overdue: "监听节奏逾期",
     degraded: "运行降级",
@@ -464,6 +466,7 @@
     CANDIDATE_MONITOR_OBSERVED_CAPACITY_INSUFFICIENT: "最近一轮实际容量未覆盖全部实时候选",
     CANDIDATE_MONITOR_CADENCE_OVERDUE: "部分实时候选已超过目标复查周期",
     CANDIDATE_MONITOR_WARMING: "实时候选仍在完成首轮覆盖",
+    CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE: "当前没有通过板块门控、已有信号或人工关注范围进入实时监听的标的",
     CANDIDATE_MONITOR_DEGRADED: "候选轮换通道未满足时效要求",
     PRIORITY_MONITOR_DEGRADED: "人工关注、自选和已有信号即时复查通道异常",
     PRIORITY_MONITOR_RUNTIME_UNVERIFIED: "即时复查通道尚未完成本进程验证",
@@ -1646,6 +1649,12 @@
       ? `${liveSignalCount} 条新结构变化`
       : "暂无新结构变化";
     const deliveryText = notificationDeliveryText(health, auxiliaryMonitor);
+    if (
+      alertStatus === "ready_idle"
+      || candidateStatus === "idle_no_candidates"
+    ) {
+      return `就绪但当前空闲 · 当前没有符合板块门控、已有5分钟信号或人工关注范围的监听对象 · 5分钟候选 ${candidateCurrent}/${candidateUniverse} 只 · 1分钟定位不会提前启动 · ${deliveryText}`;
+    }
     if (
       alertStatus === "ready"
       && priorityStatus === "verified"

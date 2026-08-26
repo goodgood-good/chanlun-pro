@@ -203,6 +203,8 @@
         && runtimeHealth.priority_monitor_ready !== true;
       const candidateMonitorWarning = runtimeHealth.priority_monitor_session_open === true
         && runtimeHealth.candidate_monitor_ready !== true;
+      const candidateMonitorIdle = runtimeHealth.priority_monitor_session_open === true
+        && runtimeHealth.candidate_monitor_status === "idle_no_candidates";
       const realtimeAlertWarning = runtimeHealth.priority_monitor_session_open === true
         && runtimeHealth.realtime_alert_ready !== true;
       const priorityMonitorReasons = Array.isArray(runtimeHealth.priority_monitor_reason_codes)
@@ -227,6 +229,8 @@
             ? `固定小样本的分钟级优先复查尚未就绪：${priorityMonitorReasons}`
             : candidateMonitorWarning
               ? `固定小样本的5分钟候选仍在准备：${candidateMonitorReasons}`
+              : candidateMonitorIdle
+                ? "固定小样本当前没有实际监听对象；不会用 0/0 冒充已覆盖，也不会提前启动1分钟定位"
               : realtimeAlertWarning
                 ? `固定小样本可查看；通知状态：${Ui.reasonLabel(runtimeHealth.realtime_alert_reason_code)}`
                 : "代码修改阶段只处理固定验证范围，不读取旧扫描剩余队列。";
@@ -258,6 +262,12 @@
           "warning",
           "实时通知保障尚未就绪",
           Ui.reasonLabel(runtimeHealth.realtime_alert_reason_code),
+        );
+      } else if (candidateMonitorIdle) {
+        setStatus(
+          "ready",
+          "实时监听就绪但当前空闲",
+          "当前没有通过板块门控、已有5分钟信号或人工关注范围进入监听的标的；不会产生通知，1分钟定位也不会提前启动",
         );
       } else if (
         (snapshot.scan_state === "complete" || snapshot.scan_state === "in_progress") &&

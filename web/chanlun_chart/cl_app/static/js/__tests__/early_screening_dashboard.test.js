@@ -3387,6 +3387,31 @@ test("operator status copy explains degraded state without exposing internal cod
     Ui.priorityMonitorDiagnosticsText(monitorHealth, { signal_count: 0 }),
     /A股实时预警 已就绪（已就绪）.*即时复查 已验证（已就绪）· 最近 13 只.*5分钟候选轮换 已验证（节奏覆盖已验证）· 当前 42\/42 只.*1分钟精确定位队列 待定位的当前5分钟候选 3 只 · 持续轮转直至结构被替换.*全市场覆盖用于选股归档，不承诺每只股票5分钟实时预警.*A股通知送达 已验证（已有成功送达证明）/,
   );
+  const idleMonitor = {
+    ...monitorHealth,
+    candidate_monitor_status: "idle_no_candidates",
+    candidate_monitor_reason_codes: [
+      "CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE",
+    ],
+    candidate_monitor_five_minute: {
+      universe_count: 0,
+      current_count: 0,
+      missing_count: 0,
+      overdue_count: 0,
+      target_seconds: 300,
+    },
+    priority_monitor_immediate_universe_count: 0,
+    realtime_alert_status: "ready_idle",
+    realtime_alert_reason_code: "CANDIDATE_MONITOR_NO_ELIGIBLE_UNIVERSE",
+  };
+  assert.equal(
+    Ui.priorityMonitorText(idleMonitor, { signal_count: 0 }),
+    "就绪但当前空闲 · 当前没有符合板块门控、已有5分钟信号或人工关注范围的监听对象 · 5分钟候选 0/0 只 · 1分钟定位不会提前启动 · 通知送达已验证",
+  );
+  assert.match(
+    Ui.priorityMonitorDiagnosticsText(idleMonitor, { signal_count: 0 }),
+    /A股实时预警 就绪但当前空闲（当前没有通过板块门控、已有信号或人工关注范围进入实时监听的标的）.*5分钟候选轮换 暂无合格监听对象（当前没有通过板块门控、已有信号或人工关注范围进入实时监听的标的）· 当前 0\/0 只/,
+  );
   const preparingSectorScope = {
     ...monitorHealth,
     priority_monitor_sector_source_mode: "STALE_CACHED_SECTOR_SNAPSHOT_FAIL_CLOSED",
@@ -3586,6 +3611,7 @@ test("validation scope ignores stale full-coverage progress in operator copy", (
     /const cycleInProgress = !scopeFacts\.validation/,
   );
   assert.match(controllerSource, /if \(scopeFacts\.validation\)/);
+  assert.match(controllerSource, /不会用 0\/0 冒充已覆盖/);
 });
 
 test("signal cards keep current 5m structures current regardless of age", () => {
