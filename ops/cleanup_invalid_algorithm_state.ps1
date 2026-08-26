@@ -24,9 +24,17 @@ function Get-TreeBytes {
     if (-not $item.PSIsContainer) {
         return [int64]$item.Length
     }
-    $measurement = Get-ChildItem -LiteralPath $LiteralPath -File -Force -Recurse `
-        -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
-    return [int64]$(if ($null -eq $measurement.Sum) { 0 } else { $measurement.Sum })
+    $files = @(
+        Get-ChildItem -LiteralPath $LiteralPath -File -Force -Recurse `
+            -ErrorAction SilentlyContinue
+    )
+    if ($files.Count -eq 0) {
+        return [int64]0
+    }
+    $measurement = $files | Measure-Object -Property Length -Sum
+    return [int64]$(
+        if ($null -eq $measurement.Sum) { 0 } else { $measurement.Sum }
+    )
 }
 
 function Resolve-BoundedTarget {
