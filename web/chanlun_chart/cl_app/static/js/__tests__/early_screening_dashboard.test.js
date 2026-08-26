@@ -3642,6 +3642,24 @@ test("validation scope ignores stale full-coverage progress in operator copy", (
     Ui.scanCoverageText(staleSnapshot.scan_audit, staleSnapshot, runtimeHealth),
     "12只小样本验证 · 当前验证范围固定",
   );
+  const warmupAuditSnapshot = {
+    ...staleSnapshot,
+    scan_audit: {
+      ...staleSnapshot.scan_audit,
+      warmup_sensitive_symbol_count: 2,
+      warmup_context_only_sensitive_symbol_count: 1,
+      trade_level_warmup_unconverged_symbol_count: 1,
+      trade_level_warmup_fail_closed_symbol_count: 1,
+    },
+  };
+  assert.equal(
+    Ui.scanCoverageText(
+      warmupAuditSnapshot.scan_audit,
+      warmupAuditSnapshot,
+      runtimeHealth,
+    ),
+    "12只小样本验证 · 当前验证范围固定 · 历史边界敏感 2只 · 5m未收敛 1只，已失败关闭 · 上下文/1m差异 1只",
+  );
   assert.equal(
     Ui.scanQualityText({
       ...staleSnapshot,

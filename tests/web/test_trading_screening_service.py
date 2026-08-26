@@ -755,6 +755,118 @@ class SequencedPlanner:
         )
 
 
+def test_no_signal_scan_keeps_warmup_fail_closed_audit(
+    tmp_path: Path,
+) -> None:
+    symbols = ("SH.601808", "SZ.000698")
+
+    class WarmupAuditMarketData(RecordingMarketData):
+        def structure_bundle(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            base = super().structure_bundle(
+                code,
+                as_of=as_of,
+                sector=sector,
+                frequencies=frequencies,
+            )
+            divergent_frequency = "1m" if code == "SH.601808" else "5m"
+            warmup_rows = tuple(
+                (
+                    frequency,
+                    frequency != divergent_frequency,
+                    1200 if frequency != "d" else 600,
+                    800 if frequency != "d" else 400,
+                )
+                for frequency in ("d", "30m", "5m", "1m")
+            )
+            reason_codes = tuple(
+                f"{frequency.upper()}:"
+                + (
+                    "WARMUP_TAIL_DIVERGED"
+                    if frequency == divergent_frequency
+                    else "WARMUP_TAIL_STABLE"
+                )
+                for frequency in ("d", "30m", "5m", "1m")
+            )
+            differences = tuple(
+                (
+                    frequency,
+                    ("WARMUP_ACTIVE_POINT_LANES_CHANGED",)
+                    if frequency == divergent_frequency
+                    else (),
+                )
+                for frequency in ("d", "30m", "5m", "1m")
+            )
+            return replace(
+                base,
+                warmup_converged=False,
+                warmup_reason_codes=reason_codes,
+                warmup_by_frequency=warmup_rows,
+                warmup_difference_codes_by_frequency=differences,
+                enforce_warmup_entry_gate=True,
+                analysis_closed_at_by_frequency=tuple(
+                    (frequency, as_of)
+                    for frequency in ("d", "30m", "5m", "1m")
+                ),
+            )
+
+    config = TradingScreeningConfig(
+        max_symbols_per_refresh=len(symbols),
+        stock_worker_count=1,
+    )
+    cache_path = tmp_path / "snapshot.json"
+    service = TradingScreeningService(
+        market_data=WarmupAuditMarketData(),
+        sector_catalog=MultiMemberSectorCatalog(symbols),
+        engine=RecordingEngine(),
+        scan_planner=SequencedPlanner((symbols,)),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+
+    payload = service.refresh_now()
+    audit = payload["scan_audit"]
+
+    assert payload["signals"] == []
+    assert audit["warmup_sensitive_symbol_count"] == 2
+    assert audit["warmup_context_only_sensitive_symbol_count"] == 1
+    assert audit["trade_level_warmup_unconverged_symbol_count"] == 1
+    assert audit["trade_level_warmup_fail_closed_symbol_count"] == 1
+    assert audit["warmup_difference_reason_counts"] == {
+        "1m:WARMUP_ACTIVE_POINT_LANES_CHANGED": 1,
+        "5m:WARMUP_ACTIVE_POINT_LANES_CHANGED": 1,
+    }
+    assert [row["code"] for row in audit["warmup_sensitive_symbols"]] == [
+        "SH.601808",
+        "SZ.000698",
+    ]
+    assert service.health_snapshot()["warmup_sensitive_symbol_count"] == 2
+    assert (
+        service.health_snapshot()["trade_level_warmup_fail_closed_symbol_count"]
+        == 1
+    )
+    restarted = TradingScreeningService(
+        market_data=WarmupAuditMarketData(),
+        sector_catalog=MultiMemberSectorCatalog(symbols),
+        engine=RecordingEngine(),
+        scan_planner=SequencedPlanner(((),)),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+    assert set(restarted._coverage_cycle_warmup_diagnostics) == set(symbols)
+    assert restarted.snapshot()["scan_audit"]["warmup_sensitive_symbol_count"] == 2
+
+
 def test_stock_structure_requests_use_configured_parallel_workers(
     tmp_path: Path,
 ) -> None:

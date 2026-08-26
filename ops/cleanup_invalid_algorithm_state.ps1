@@ -51,10 +51,16 @@ function Resolve-BoundedTarget {
 
 $runtimeRelativeTargets = @(
     "decision_support\trading_screening_runtime_state_cache",
+    "decision_support\.trading_screening_snapshot.json.generations",
     "decision_support\trading_screening_snapshot.json",
     "decision_support\trading_screening_snapshot.json.lock",
+    "decision_support\trading_screening_snapshot.json.scope",
     "decision_support\trading_priority_monitor_state.json",
     "decision_support\trading_priority_monitor_state.json.lock",
+    "decision_support\trading_notification_outbox.json",
+    "decision_support\trading_notification_outbox.json.tmp",
+    "decision_support\trading_notification_state.json",
+    "decision_support\trading_notification_state.json.tmp",
     "decision_support\trading_screening_sector_snapshot.json",
     "decision_support\trading_screening_sector_snapshot.json.scope",
     "decision_support\trading_screening_native_worker.log",
@@ -63,7 +69,9 @@ $runtimeRelativeTargets = @(
     "decision_support\trading_screening_native_worker.structure-3.log",
     "decision_support\trading_screening_native_worker.structure-4.log",
     "chart_cache",
+    "monitor\dingtalk_outbound_dedupe.json",
     "monitor\holding_group_runtime.json",
+    "monitor\realtime_review_inbox.json",
     "cache\last_chart_state.json"
 )
 $repositoryRelativeTargets = @(

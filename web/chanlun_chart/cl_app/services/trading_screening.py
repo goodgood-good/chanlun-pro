@@ -2691,6 +2691,171 @@ def _project_scan_plan_to_configured_scope(
     )
 
 
+_WARMUP_AUDIT_CONTRACT_ID = "chanlun-screening-warmup-audit-v1"
+
+
+def _symbol_warmup_audit_document(
+    bundle: SymbolStructureBundle,
+) -> dict[str, object] | None:
+    """Keep warmup evidence even when the decision engine emits no signal.
+
+    A short prefix can manufacture a current structural point which disappears
+    with the full history.  The entry gate correctly rejects that point, but a
+    signal-only snapshot used to discard the reason for the rejection.  This
+    compact document makes the fail-closed decision independently auditable.
+    """
+
+    differences = dict(bundle.warmup_difference_codes_by_frequency)
+    sensitive_rows: list[dict[str, object]] = []
+    five_minute_converged: bool | None = None
+    for frequency, converged, full_count, suffix_count in bundle.warmup_by_frequency:
+        if frequency == "5m":
+            five_minute_converged = converged
+        if converged:
+            continue
+        sensitive_rows.append(
+            {
+                "frequency": frequency,
+                "full_bar_count": full_count,
+                "suffix_bar_count": suffix_count,
+                "difference_codes": list(differences.get(frequency, ())),
+            }
+        )
+    if not sensitive_rows and bundle.warmup_converged:
+        return None
+    if five_minute_converged is None:
+        # Legacy/synthetic bundles without per-frequency rows must retain the
+        # same fail-closed fallback as the decision engine.
+        five_minute_converged = bundle.warmup_converged
+    trade_level_fail_closed = bool(
+        bundle.enforce_warmup_entry_gate and not five_minute_converged
+    )
+    return {
+        "code": bundle.code,
+        "aggregate_converged": bundle.warmup_converged,
+        "trade_level_5m_converged": five_minute_converged,
+        "trade_level_fail_closed": trade_level_fail_closed,
+        "context_only": bool(sensitive_rows and five_minute_converged),
+        "reason_codes": list(bundle.warmup_reason_codes),
+        "sensitive_frequencies": sensitive_rows,
+    }
+
+
+def _warmup_audit_document(
+    diagnostics: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    rows = [copy.deepcopy(dict(diagnostics[code])) for code in sorted(diagnostics)]
+    difference_counts: dict[str, int] = {}
+    for row in rows:
+        frequency_rows = row.get("sensitive_frequencies")
+        if not isinstance(frequency_rows, list):
+            continue
+        for frequency_row in frequency_rows:
+            if not isinstance(frequency_row, Mapping):
+                continue
+            frequency = frequency_row.get("frequency")
+            difference_codes = frequency_row.get("difference_codes")
+            if not isinstance(frequency, str) or not isinstance(difference_codes, list):
+                continue
+            for difference_code in difference_codes:
+                if not isinstance(difference_code, str):
+                    continue
+                key = f"{frequency}:{difference_code}"
+                difference_counts[key] = difference_counts.get(key, 0) + 1
+    trade_level_unconverged_count = sum(
+        row.get("trade_level_5m_converged") is False for row in rows
+    )
+    return {
+        "warmup_audit_contract_id": _WARMUP_AUDIT_CONTRACT_ID,
+        "warmup_sensitive_symbol_count": len(rows),
+        "warmup_context_only_sensitive_symbol_count": sum(
+            row.get("context_only") is True for row in rows
+        ),
+        "trade_level_warmup_unconverged_symbol_count": (
+            trade_level_unconverged_count
+        ),
+        "trade_level_warmup_fail_closed_symbol_count": sum(
+            row.get("trade_level_fail_closed") is True for row in rows
+        ),
+        "warmup_difference_reason_counts": dict(sorted(difference_counts.items())),
+        "warmup_sensitive_symbols": rows,
+    }
+
+
+def _restored_warmup_diagnostics(
+    audit: Mapping[str, object],
+    *,
+    completed_codes: set[str],
+) -> dict[str, dict[str, object]]:
+    """Restore only authenticated, completed-symbol warmup audit rows."""
+
+    if audit.get("warmup_audit_contract_id") != _WARMUP_AUDIT_CONTRACT_ID:
+        return {}
+    raw_rows = audit.get("warmup_sensitive_symbols")
+    if not isinstance(raw_rows, list):
+        return {}
+    restored: dict[str, dict[str, object]] = {}
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, Mapping):
+            continue
+        code = raw_row.get("code")
+        frequency_rows = raw_row.get("sensitive_frequencies")
+        reason_codes = raw_row.get("reason_codes")
+        if (
+            not isinstance(code, str)
+            or code not in completed_codes
+            or not isinstance(frequency_rows, list)
+            or not isinstance(reason_codes, list)
+            or any(not isinstance(reason, str) for reason in reason_codes)
+            or type(raw_row.get("aggregate_converged")) is not bool
+            or type(raw_row.get("trade_level_5m_converged")) is not bool
+            or type(raw_row.get("trade_level_fail_closed")) is not bool
+            or type(raw_row.get("context_only")) is not bool
+        ):
+            continue
+        normalized_frequency_rows: list[dict[str, object]] = []
+        valid = True
+        for frequency_row in frequency_rows:
+            if not isinstance(frequency_row, Mapping):
+                valid = False
+                break
+            frequency = frequency_row.get("frequency")
+            full_count = frequency_row.get("full_bar_count")
+            suffix_count = frequency_row.get("suffix_bar_count")
+            difference_codes = frequency_row.get("difference_codes")
+            if (
+                frequency not in SCREENING_STRUCTURE_FREQUENCIES
+                or type(full_count) is not int
+                or full_count < 0
+                or type(suffix_count) is not int
+                or suffix_count < 0
+                or not isinstance(difference_codes, list)
+                or any(not isinstance(value, str) for value in difference_codes)
+            ):
+                valid = False
+                break
+            normalized_frequency_rows.append(
+                {
+                    "frequency": frequency,
+                    "full_bar_count": full_count,
+                    "suffix_bar_count": suffix_count,
+                    "difference_codes": list(difference_codes),
+                }
+            )
+        if not valid:
+            continue
+        restored[code] = {
+            "code": code,
+            "aggregate_converged": raw_row["aggregate_converged"],
+            "trade_level_5m_converged": raw_row["trade_level_5m_converged"],
+            "trade_level_fail_closed": raw_row["trade_level_fail_closed"],
+            "context_only": raw_row["context_only"],
+            "reason_codes": list(reason_codes),
+            "sensitive_frequencies": normalized_frequency_rows,
+        }
+    return restored
+
+
 def _initial_snapshot(
     config: TradingScreeningConfig,
     *,
@@ -2783,6 +2948,7 @@ def _initial_snapshot(
             "stock_failure_counts": {},
             "stock_exclusion_counts": {},
             "monitor_instrument_exclusion_count": 0,
+            **_warmup_audit_document({}),
         },
         "data_quality": {
             "complete": False,
@@ -4780,6 +4946,9 @@ class TradingScreeningService:
         self._coverage_cycle_exclusions: dict[str, dict[str, object]] = {}
         self._coverage_cycle_discarded_retry_codes: set[str] = set()
         self._coverage_cycle_errors: dict[str, dict[str, object]] = {}
+        self._coverage_cycle_warmup_diagnostics: dict[
+            str, dict[str, object]
+        ] = {}
         self._coverage_sector_restore_error: str | None = None
         self._coverage_cycle_full_market_history_scan = False
         self._coverage_cycle_background_refresh_required = False
@@ -8261,6 +8430,14 @@ class TradingScreeningService:
             self._coverage_cycle_background_refresh_required = bool(
                 audit.get("background_full_refresh_required")
             )
+            self._coverage_cycle_warmup_diagnostics = (
+                _restored_warmup_diagnostics(
+                    audit,
+                    completed_codes=self._coverage_cycle_completed_codes,
+                )
+            )
+        else:
+            self._coverage_cycle_warmup_diagnostics = {}
         if stock_errors:
             self._record_cycle_errors(stock_errors)
         return True
@@ -11776,6 +11953,27 @@ class TradingScreeningService:
                 "coverage_cycle_estimated_remaining_seconds"
             ),
             "stock_exclusion_counts": scan_audit.get("stock_exclusion_counts", {}),
+            "warmup_audit_contract_id": scan_audit.get(
+                "warmup_audit_contract_id"
+            ),
+            "warmup_sensitive_symbol_count": scan_audit.get(
+                "warmup_sensitive_symbol_count", 0
+            ),
+            "warmup_context_only_sensitive_symbol_count": scan_audit.get(
+                "warmup_context_only_sensitive_symbol_count", 0
+            ),
+            "trade_level_warmup_unconverged_symbol_count": scan_audit.get(
+                "trade_level_warmup_unconverged_symbol_count", 0
+            ),
+            "trade_level_warmup_fail_closed_symbol_count": scan_audit.get(
+                "trade_level_warmup_fail_closed_symbol_count", 0
+            ),
+            "warmup_difference_reason_counts": scan_audit.get(
+                "warmup_difference_reason_counts", {}
+            ),
+            "warmup_sensitive_symbols": scan_audit.get(
+                "warmup_sensitive_symbols", []
+            ),
             "coverage_excluded_codes": coverage_manifest.get("excluded_codes", []),
             "coverage_exclusions": coverage_manifest.get("exclusions", []),
             "superseded_coverage_epoch_id": coverage_manifest.get(
@@ -12980,6 +13178,7 @@ class TradingScreeningService:
         self._coverage_cycle_exclusions.clear()
         self._coverage_cycle_discarded_retry_codes.clear()
         self._coverage_cycle_errors.clear()
+        self._coverage_cycle_warmup_diagnostics.clear()
         self._coverage_cycle_full_market_history_scan = False
         self._coverage_cycle_background_refresh_required = False
         with self._background_lock:
@@ -14151,6 +14350,14 @@ class TradingScreeningService:
             code, bundle, evaluated, symbol_name, exc = result
             if exc is None:
                 assert isinstance(bundle, SymbolStructureBundle)
+                if not monitoring_only_refresh:
+                    warmup_diagnostic = _symbol_warmup_audit_document(bundle)
+                    if warmup_diagnostic is None:
+                        self._coverage_cycle_warmup_diagnostics.pop(code, None)
+                    else:
+                        self._coverage_cycle_warmup_diagnostics[code] = (
+                            warmup_diagnostic
+                        )
                 for item in evaluated:
                     previous_stage = None
                     previous_row = previous_signals.get(item.lifecycle.signal_id)
@@ -14172,6 +14379,8 @@ class TradingScreeningService:
                 completed += 1
                 completed_codes.add(code)
             else:
+                if not monitoring_only_refresh:
+                    self._coverage_cycle_warmup_diagnostics.pop(code, None)
                 error = _stock_analysis_error_document(code, exc)
                 if _is_coverage_exclusion(error):
                     exclusions.append(_stock_analysis_exclusion_document(error))
@@ -14273,6 +14482,9 @@ class TradingScreeningService:
             stock_exclusion_counts[reason_code] = (
                 stock_exclusion_counts.get(reason_code, 0) + 1
             )
+        warmup_audit = _warmup_audit_document(
+            self._coverage_cycle_warmup_diagnostics
+        )
         # 在批次完成闸门前先分类失败。若把低完成率批次整体重新入队，排序靠前的一簇
         # 确定性行情拒绝会垄断每次刷新，使冻结计划中后续有效标的永远无法访问。
         # 确定性失败在本行情周期内终止，传输失败进入按节奏退避队列；二者都完整记录
@@ -14501,6 +14713,7 @@ class TradingScreeningService:
             scan_audit.update(sector_audit)
             scan_audit.update(
                 {
+                    **warmup_audit,
                     "planned_symbol_count": planned_count,
                     "completed_symbol_count": completed,
                     "completion_ratio": str(completion),
@@ -14731,6 +14944,7 @@ class TradingScreeningService:
             "risk_limits": _risk_limits_document(self._risk_limits),
             "scan_audit": {
                 **sector_audit,
+                **warmup_audit,
                 "planned_symbol_count": planned_count,
                 "discovered_symbol_count": len(self._coverage_cycle_discovered_codes),
                 "completed_symbol_count": completed,

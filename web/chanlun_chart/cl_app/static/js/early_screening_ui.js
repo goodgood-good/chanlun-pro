@@ -1240,8 +1240,41 @@
 
   function scanCoverageText(audit, snapshot = null, runtimeHealth = null) {
     const safeAudit = isRecord(audit) ? audit : {};
+    const warmupSensitive = Math.max(
+      0,
+      Number(safeAudit.warmup_sensitive_symbol_count) || 0,
+    );
+    const tradeLevelUnconverged = Math.max(
+      0,
+      Number(safeAudit.trade_level_warmup_unconverged_symbol_count) || 0,
+    );
+    const tradeLevelFailClosed = Math.max(
+      0,
+      Number(safeAudit.trade_level_warmup_fail_closed_symbol_count) || 0,
+    );
+    const contextOnlySensitive = Math.max(
+      0,
+      Number(safeAudit.warmup_context_only_sensitive_symbol_count) || 0,
+    );
+    const warmupParts = [];
+    if (warmupSensitive > 0) {
+      warmupParts.push(`历史边界敏感 ${warmupSensitive}只`);
+      if (tradeLevelUnconverged > 0) {
+        warmupParts.push(
+          tradeLevelFailClosed === tradeLevelUnconverged
+            ? `5m未收敛 ${tradeLevelUnconverged}只，已失败关闭`
+            : `5m未收敛 ${tradeLevelUnconverged}只，其中 ${tradeLevelFailClosed}只已失败关闭`,
+        );
+      }
+      if (contextOnlySensitive > 0) {
+        warmupParts.push(`上下文/1m差异 ${contextOnlySensitive}只`);
+      }
+    }
     if (screeningScopeFacts(runtimeHealth, snapshot).validation) {
-      return `${screeningScopeLabel(runtimeHealth, snapshot)} · 当前验证范围固定`;
+      return [
+        `${screeningScopeLabel(runtimeHealth, snapshot)} · 当前验证范围固定`,
+        ...warmupParts,
+      ].join(" · ");
     }
     const planned = Math.max(0, Number(safeAudit.planned_symbol_count) || 0);
     const completed = Math.max(0, Number(safeAudit.completed_symbol_count) || 0);
@@ -1274,6 +1307,7 @@
       if (withoutSignal !== null && withoutSignal > 0) {
         parts.push(`已分析无当前结构信号 ${withoutSignal}`);
       }
+      parts.push(...warmupParts);
       if (excluded) parts.push(`历史不足排除 ${excluded}`);
       if (failed) parts.push(`失败 ${failed}`);
       if (pending) parts.push(`待分析 ${pending}`);
