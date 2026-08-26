@@ -1,5 +1,6 @@
 """QMT A 股分钟线回看窗口回归测试。"""
 
+from contextlib import contextmanager
 from datetime import datetime
 
 from chanlun.exchange.exchange_qmt import ExchangeQMT
@@ -75,3 +76,71 @@ def test_qmt_batch_prewarm_reports_partial_chunk_failure(monkeypatch):
     assert result["failed_by_base"] == {
         "1m": ("SZ.000001", "SZ.000002")
     }
+
+
+def test_qmt_single_symbol_download_holds_shared_process_lane(monkeypatch):
+    ex = ExchangeQMT()
+    events: list[str] = []
+
+    @contextmanager
+    def shared_download_lane():
+        events.append("shared_enter")
+        try:
+            yield
+        finally:
+            events.append("shared_exit")
+
+    def download(**_kwargs):
+        events.append("download")
+
+    def read(**_kwargs):
+        events.append("read")
+        return {}
+
+    monkeypatch.setattr(
+        exchange_qmt,
+        "_xtdata_download_interprocess_lock",
+        shared_download_lane,
+    )
+    monkeypatch.setattr(exchange_qmt.xtdata, "download_history_data", download)
+    monkeypatch.setattr(exchange_qmt.xtdata, "get_market_data", read)
+
+    frame = ex.klines("SZ.000001", "5m", args={"req_counts": 10})
+
+    assert frame.empty
+    assert events == ["shared_enter", "download", "read", "shared_exit"]
+
+
+def test_qmt_local_only_read_does_not_take_shared_download_lane(monkeypatch):
+    ex = ExchangeQMT()
+
+    @contextmanager
+    def forbidden_download_lane():
+        raise AssertionError("read-only QMT history must remain process-parallel")
+        yield
+
+    monkeypatch.setattr(
+        exchange_qmt,
+        "_xtdata_download_interprocess_lock",
+        forbidden_download_lane,
+    )
+    monkeypatch.setattr(
+        exchange_qmt.xtdata,
+        "download_history_data",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("skip_download must not mutate QMT history")
+        ),
+    )
+    monkeypatch.setattr(
+        exchange_qmt.xtdata,
+        "get_market_data",
+        lambda **_kwargs: {},
+    )
+
+    frame = ex.klines(
+        "SZ.000001",
+        "5m",
+        args={"req_counts": 10, "skip_download": True},
+    )
+
+    assert frame.empty

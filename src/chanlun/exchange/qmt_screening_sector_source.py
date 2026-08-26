@@ -53,7 +53,10 @@ from chanlun.decision_support.trading_system.selection import (
 from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
-from chanlun.exchange.exchange_qmt import _XTDATA_NATIVE_LOCK
+from chanlun.exchange.exchange_qmt import (
+    _XTDATA_NATIVE_LOCK,
+    _xtdata_download_interprocess_lock,
+)
 from chanlun.exchange.price_basis import (
     QMT_STRUCTURE_DIVIDEND_TYPE,
     attach_price_basis_metadata,
@@ -2441,7 +2444,7 @@ class QmtSectorCompositeSource:
         for code in pending:
             try:
                 self._report_progress()
-                with _XTDATA_NATIVE_LOCK:
+                with _xtdata_download_interprocess_lock(), _XTDATA_NATIVE_LOCK:
                     native_code = native_by_member[code]
                     repair_left_history = native_code in shallow
                     xtdata.download_history_data(
@@ -4365,7 +4368,7 @@ class QmtSectorStrengthSource:
             # thousands of single-symbol downloads.
             try:
                 self._progress_callback()
-                with _XTDATA_NATIVE_LOCK:
+                with _xtdata_download_interprocess_lock(), _XTDATA_NATIVE_LOCK:
                     xtdata.download_history_data2(
                         list(native),
                         "1d",

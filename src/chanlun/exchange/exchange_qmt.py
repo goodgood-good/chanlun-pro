@@ -1,6 +1,11 @@
 import datetime
+import hashlib
+import os
+import tempfile
 import threading
 from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from typing import Dict, List, Union
 from datetime import timedelta
 import pandas as pd
@@ -8,6 +13,10 @@ import pytz
 from tenacity import retry, stop_after_attempt, wait_random
 
 from chanlun import fun
+from chanlun.decision_support.trading_system.file_lock import (
+    InterprocessLockTimeout,
+    interprocess_file_lock,
+)
 from chanlun.exchange.exchange import (
     Exchange,
     SINGLE_SYMBOL_STOCK_INFO,
@@ -35,6 +44,47 @@ from xtquant import xtdata
 # Python 层无法 try/except 捕获。这里用进程级全局可重入锁把所有对 xtdata 的调用
 # 串行化，作为防御性兜底，避免多线程并发触发崩溃。
 _XTDATA_NATIVE_LOCK = threading.RLock()
+
+# Every native worker is a separate Python process, while all of them talk to
+# the same MiniQMT service and write the same local history directory.  A
+# ``threading.RLock`` therefore cannot protect download_history_data* across
+# structure shards.  Production evidence showed concurrent calls returning
+# successfully while most target files remained one session behind.  Serialize
+# only the mutating download lane across processes; read-only QMT calls retain
+# their existing parallelism.
+_QMT_DOWNLOAD_INTERPROCESS_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def _qmt_download_interprocess_lock_path() -> Path:
+    configured_data = os.environ.get("CHANLUN_QMT_LOCAL_DATA_DIR", "").strip()
+    identity = (
+        os.path.normcase(
+            os.path.abspath(os.path.expanduser(configured_data))
+        )
+        if configured_data
+        else "default-qmt-endpoint"
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return (
+        Path(tempfile.gettempdir())
+        / "chanlun-pro-qmt-locks"
+        / f"history-download-{digest}.lock"
+    )
+
+
+@contextmanager
+def _xtdata_download_interprocess_lock():
+    try:
+        with interprocess_file_lock(
+            _qmt_download_interprocess_lock_path(),
+            timeout_seconds=_QMT_DOWNLOAD_INTERPROCESS_LOCK_TIMEOUT_SECONDS,
+            poll_seconds=0.01,
+        ):
+            yield
+    except InterprocessLockTimeout as exc:
+        raise TimeoutError(
+            "timed out waiting for the shared QMT history download lane"
+        ) from exc
 
 
 class ExchangeQMT(Exchange):
@@ -283,7 +333,7 @@ class ExchangeQMT(Exchange):
         安全:
         - xtquant 线程不安全 → 全程持 _XTDATA_NATIVE_LOCK 串行(与 klines 同锁)。
         - 分块 chunk_size + incrementally=True 控制单次 payload,降低 BSON 0xC0000409 风险。
-        - download_history_data2 阻塞至下完才返回,故返回后 get_market_data 可直接读到。
+        - 所有工作进程共享下载写锁；返回值只代表调用完成，后续读取仍须校验本地事实。
         - 单块异常吞掉(warning):该块标的逐只 download 仍能兜底(不传 skip_download 时)。
         - cancel_check() 返回 True 尽快中止。
         """
@@ -361,7 +411,7 @@ class ExchangeQMT(Exchange):
                     }
                 chunk_pairs = code_pairs[i : i + chunk_size]
                 chunk = [qmt_code for _code, qmt_code in chunk_pairs]
-                with _XTDATA_NATIVE_LOCK:
+                with _xtdata_download_interprocess_lock(), _XTDATA_NATIVE_LOCK:
                     try:
                         xtdata.download_history_data2(
                             chunk,
@@ -520,7 +570,12 @@ class ExchangeQMT(Exchange):
             ).strftime("%Y%m%d")
             download_query_start = max(query_start, recent_start)
         price_basis_factors = None
-        with _XTDATA_NATIVE_LOCK:
+        download_guard = (
+            nullcontext()
+            if _skip_dl
+            else _xtdata_download_interprocess_lock()
+        )
+        with download_guard, _XTDATA_NATIVE_LOCK:
             try:
                 if not _skip_dl:
                     xtdata.download_history_data(

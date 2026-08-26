@@ -14401,6 +14401,28 @@ class TradingScreeningService:
                     ),
                     work_lane=coverage_work_lane,
                 )
+                if not _structure_bundle_is_current_for_intraday_evidence(
+                    bundle,
+                    observed_at=as_of,
+                    max_age_seconds=self._config.max_structure_age_seconds,
+                    requested_frequencies=requested_frequencies,
+                ):
+                    # MiniQMT can acknowledge a history refresh before a
+                    # competing worker's write has produced a current local
+                    # frame.  The exchange layer now serializes that mutating
+                    # lane across processes; retain one exact-symbol retry as a
+                    # bounded transport recovery.  A second stale result still
+                    # fails closed below and never triggers a batch/full scan.
+                    bundle = self._structure_bundle_with_causal_risk(
+                        code,
+                        as_of=as_of,
+                        sector=sector,
+                        frequencies=requested_frequencies,
+                        risk_evidence_cutoff=(
+                            self._coverage_market_data_as_of or market_data_as_of
+                        ),
+                        work_lane=coverage_work_lane,
+                    )
                 bundle = replace(
                     bundle,
                     selection_sources=selection_sources,

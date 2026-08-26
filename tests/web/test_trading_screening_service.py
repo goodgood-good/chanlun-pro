@@ -3949,7 +3949,8 @@ def test_full_scan_freshness_uses_independent_materialized_frequency_times(
         ("SZ.000001", ("1m", "5m", "30m", "d"))
     ]
     assert precision_market.bundle_frequency_requests == [
-        ("SZ.000001", ("1m", "5m", "30m", "d"))
+        ("SZ.000001", ("1m", "5m", "30m", "d")),
+        ("SZ.000001", ("1m", "5m", "30m", "d")),
     ]
     assert five_only["scan_audit"]["completed_symbol_count"] == 1
     assert five_only["scan_audit"]["stock_failure_counts"] == {}
@@ -4190,6 +4191,75 @@ def test_stale_structure_data_fails_closed(tmp_path: Path) -> None:
         "stale": True,
         "failure_codes": ["scan_completion_below_threshold"],
     }
+
+
+def test_transient_stale_structure_retries_only_the_exact_symbol(
+    tmp_path: Path,
+) -> None:
+    symbols = ("SZ.000001", "SZ.000002")
+
+    class StaleOnceMarketData(RecordingMarketData):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts_by_code: dict[str, int] = {}
+
+        def structure_bundle(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            attempt = self.attempts_by_code.get(code, 0) + 1
+            self.attempts_by_code[code] = attempt
+            effective_as_of = (
+                as_of - timedelta(hours=2)
+                if code == symbols[0] and attempt == 1
+                else as_of
+            )
+            return super().structure_bundle(
+                code,
+                as_of=effective_as_of,
+                sector=sector,
+                frequencies=frequencies,
+            )
+
+    def planner(**_kwargs) -> ScanPlan:
+        return ScanPlan(
+            sectors=(eligible_sector().sector_id,),
+            symbols=symbols,
+            symbol_frequencies=tuple(
+                (code, ("1m", "5m", "30m")) for code in symbols
+            ),
+            full_market_history_scan=False,
+            background_full_refresh_required=False,
+        )
+
+    market = StaleOnceMarketData()
+    engine = RecordingEngine()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(symbols),
+        engine=engine,
+        scan_planner=planner,
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            max_structure_age_seconds=60,
+            priority_monitoring_enabled=False,
+            stock_worker_count=1,
+        ),
+    )
+
+    payload = service.refresh_now()
+
+    assert market.bundle_codes == ["SZ.000001", "SZ.000001", "SZ.000002"]
+    assert market.attempts_by_code == {"SZ.000001": 2, "SZ.000002": 1}
+    assert engine.codes == ["SZ.000001", "SZ.000002"]
+    assert payload["scan_audit"]["completed_symbol_count"] == 2
+    assert payload["scan_audit"]["stock_failure_counts"] == {}
 
 
 class PartiallyFailingMarketData(RecordingMarketData):
