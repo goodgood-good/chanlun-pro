@@ -3351,6 +3351,25 @@ test("operator status copy explains degraded state without exposing internal cod
     }),
     "已就绪 · 适用 2026-08-05 · 买点 17 / 卖点 11 / 全部 28",
   );
+  const intradayValidationHealth = {
+    screening_scope_mode: "VALIDATION_COHORT",
+    validation_cohort_size: 12,
+    effective_monitor_universe_limit: 12,
+    daily_preselection_ready: false,
+    daily_preselection_status: "target_session_stale",
+    daily_preselection_reason_code: "PRESELECTION_CLOSE_CUTOFF_INCOMPLETE",
+    daily_preselection_market_data_as_of: "2026-08-26T11:30:00+08:00",
+    snapshot_available: true,
+    validation_snapshot_priority_only: true,
+  };
+  assert.equal(
+    Ui.dailyPreselectionText(intradayValidationHealth),
+    "12只小样本验证 · 盘中快照可用，15:05 后更新收盘候选",
+  );
+  assert.match(
+    Ui.dailyPreselectionDiagnosticsText(intradayValidationHealth),
+    /原因 盘中尚未形成完整收盘候选快照.*盘中调度 仅运行5分钟候选与按需1分钟定位，归档扫描等待15:05/,
+  );
 
   const monitorHealth = {
     priority_monitor_status: "verified",

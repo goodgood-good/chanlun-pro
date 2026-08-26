@@ -462,6 +462,7 @@
     five_minute_geometry_candidate_awaiting_confirmation: "5分钟仅为几何候选，尚未达到操作确认",
     CANDIDATE_MONITOR_ERRORS: "候选轮换最近一轮存在计算错误",
     CANDIDATE_MONITOR_RUNTIME_UNVERIFIED: "候选轮换尚未完成本进程验证",
+    PRESELECTION_CLOSE_CUTOFF_INCOMPLETE: "盘中尚未形成完整收盘候选快照",
     CANDIDATE_MONITOR_CONFIGURED_CAPACITY_INSUFFICIENT: "配置容量不足以在目标周期覆盖全部实时候选",
     CANDIDATE_MONITOR_OBSERVED_CAPACITY_INSUFFICIENT: "最近一轮实际容量未覆盖全部实时候选",
     CANDIDATE_MONITOR_CADENCE_OVERDUE: "部分实时候选已超过目标复查周期",
@@ -1514,6 +1515,12 @@
         return `${scopeLabel} · 当前验证名单已就绪`;
       }
       if (status === "target_session_stale") {
+        if (
+          reason === "PRESELECTION_CLOSE_CUTOFF_INCOMPLETE"
+          && health.snapshot_available === true
+        ) {
+          return `${scopeLabel} · 盘中快照可用，15:05 后更新收盘候选`;
+        }
         return `${scopeLabel} · 等待当前验证名单更新`;
       }
       if (["coverage_in_progress", "awaiting_first_snapshot"].includes(status)) {
@@ -1588,6 +1595,12 @@
     }
     if (health.daily_preselection_market_data_as_of) {
       parts.push(`数据截止 ${timeText(health.daily_preselection_market_data_as_of)}`);
+    }
+    if (
+      scope.validation
+      && health.validation_snapshot_priority_only === true
+    ) {
+      parts.push("盘中调度 仅运行5分钟候选与按需1分钟定位，归档扫描等待15:05");
     }
     return parts.join(" · ");
   }

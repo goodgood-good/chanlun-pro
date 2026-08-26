@@ -10655,6 +10655,12 @@ class TradingScreeningService:
                 and not continuity_defers_full_coverage
             )
         )
+        validation_snapshot_priority_only = (
+            self._validation_snapshot_uses_priority_only(snapshot, observed_at)
+        )
+        coverage_execution_window_open = (
+            self._full_coverage_execution_window_open(snapshot, observed_at)
+        )
         monitoring_failure_codes = sorted(
             {
                 str(error["code"])
@@ -11570,6 +11576,10 @@ class TradingScreeningService:
             "refresh_suppression_reason": (
                 COMPLETE_CLOSE_IDLE_REASON if refresh_suppressed else None
             ),
+            "coverage_execution_window_open": coverage_execution_window_open,
+            "validation_snapshot_priority_only": (
+                validation_snapshot_priority_only
+            ),
             "screening_scope_mode": self._config.screening_scope_mode,
             "validation_cohort_size": self._config.validation_cohort_size,
             "effective_monitor_universe_limit": (
@@ -11904,10 +11914,17 @@ class TradingScreeningService:
         observed_at: datetime,
     ) -> bool:
         # A fixed validation cohort is already the complete authorized universe.
-        # Let it build a first snapshot immediately; this path remains impossible
-        # without a non-empty exact allowlist and never enables full-market mode.
+        # Let it build a first snapshot immediately, then leave intraday updates
+        # to the dedicated 5m/1m lane.  Keeping the archival lane open after a
+        # complete pre-close snapshot made a previous signal enter the main scan
+        # every minute, temporarily shrinking the live cohort and recalculating
+        # an unchanged frozen decision cutoff.  The close/pre-open phase gates
+        # below still reopen the bounded archive when a new decision point is due.
         if _configured_validation_cohort_codes(self._config):
-            return True
+            return not self._validation_snapshot_uses_priority_only(
+                snapshot,
+                observed_at,
+            )
         if not self._config.full_coverage_refresh_enabled:
             return False
         forced = self._forced_full_coverage_active(
@@ -11919,6 +11936,83 @@ class TradingScreeningService:
             observed_at
         )
         return bool(forced or (scheduled and not continuity_deferred))
+
+    def _validation_snapshot_uses_priority_only(
+        self,
+        snapshot: Mapping[str, object],
+        observed_at: datetime,
+    ) -> bool:
+        """Keep a complete bounded snapshot immutable between archive phases."""
+
+        if not _configured_validation_cohort_codes(self._config):
+            return False
+        if self._pending_frequencies or self._backoff_frequencies:
+            return False
+        manifest = snapshot.get("coverage_manifest")
+        audit = snapshot.get("scan_audit")
+        quality = snapshot.get("data_quality")
+        if (
+            snapshot.get("available") is not True
+            or snapshot.get("scan_state") != "complete"
+            or not isinstance(manifest, Mapping)
+            or manifest.get("complete") is not True
+            or not isinstance(audit, Mapping)
+            or audit.get("coverage_cycle_complete") is not True
+            or self._pending_symbol_count(snapshot) != 0
+            or self._immediate_pending_symbol_count(snapshot) != 0
+            or self._backoff_retry_symbol_count(snapshot) != 0
+            or not isinstance(quality, Mapping)
+            or quality.get("complete") is not True
+        ):
+            return False
+        with self._state_lock:
+            validated_snapshot_sha256 = self._validated_snapshot_sha256
+        if (
+            not isinstance(snapshot.get("snapshot_content_sha256"), str)
+            or snapshot.get("snapshot_content_sha256")
+            != validated_snapshot_sha256
+        ):
+            return False
+
+        local_now = normalize_datetime(observed_at, "observed_at").astimezone(CN)
+        raw_cutoff = snapshot.get("market_data_as_of")
+        if not isinstance(raw_cutoff, str):
+            return False
+        try:
+            cutoff = normalize_datetime(
+                datetime.fromisoformat(raw_cutoff),
+                "market_data_as_of",
+            ).astimezone(CN)
+        except ValueError:
+            return False
+        current_is_trading, _calendar_source = _scheduled_trading_day(
+            local_now.date(),
+            observed_at=local_now,
+        )
+        if (
+            current_is_trading
+            and cutoff.date() == local_now.date()
+            and cutoff.time() < MARKET_CLOSE_CUTOFF
+            and local_now.time() < POST_CLOSE_PRESELECTION_START
+        ):
+            # This snapshot is valid as the bounded intraday page baseline, but
+            # cannot become a next-session preselection.  Re-running its frozen
+            # archive does not change that fact; current candidate observations
+            # remain live through the independent priority lane until 15:05.
+            return True
+
+        with self._background_lock:
+            phase_refresh_at = (
+                self._background_last_result_at
+                if self._background_last_error is None
+                else None
+            )
+        return _complete_close_snapshot_can_idle(
+            snapshot,
+            local_now,
+            review_boundary_ready=True,
+            phase_refresh_at=phase_refresh_at,
+        )
 
     @staticmethod
     def _pending_symbol_count(snapshot: Mapping[str, object]) -> int:

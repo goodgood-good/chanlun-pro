@@ -12675,6 +12675,90 @@ def test_only_exact_nonempty_validation_cohort_opens_bounded_coverage_gate(
     )
 
 
+def test_complete_intraday_validation_snapshot_routes_only_realtime_lane_until_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [AS_OF.replace(hour=10, minute=0)]
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: now[0],
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=60,
+            priority_monitoring_enabled=True,
+            admitted_universe_codes=("SZ.000001",),
+        ),
+    )
+
+    snapshot = service.refresh_now()
+
+    assert snapshot["available"] is True
+    assert snapshot["scan_state"] == "complete"
+    assert snapshot["market_data_as_of"] == now[0].isoformat()
+    assert service._validation_snapshot_uses_priority_only(snapshot, now[0]) is True
+    assert service._full_coverage_execution_window_open(snapshot, now[0]) is False
+    health = service.health_snapshot()
+    assert health["validation_snapshot_priority_only"] is True
+    assert health["coverage_execution_window_open"] is False
+
+    calls: list[tuple[bool, bool]] = []
+    stop = threading.Event()
+    monkeypatch.setattr(service, "_needs_refresh", lambda: False)
+    monkeypatch.setattr(service, "_priority_monitor_due", lambda _at: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        stop.set()
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+    service._background_loop(stop, threading.Event())
+
+    assert calls == [(False, True)]
+
+    now[0] = now[0].replace(hour=15, minute=5)
+    assert service._validation_snapshot_uses_priority_only(snapshot, now[0]) is False
+    assert service._full_coverage_execution_window_open(snapshot, now[0]) is True
+
+
+def test_complete_validation_close_snapshot_runs_each_archive_phase_once(
+    tmp_path: Path,
+) -> None:
+    now = [AS_OF]
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: now[0],
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=60,
+            admitted_universe_codes=("SZ.000001",),
+        ),
+    )
+    snapshot = service.refresh_now()
+
+    now[0] = AS_OF.replace(hour=15, minute=5)
+    assert service._validation_snapshot_uses_priority_only(snapshot, now[0]) is False
+    with service._background_lock:
+        service._background_last_result_at = now[0]
+        service._background_last_error = None
+    assert service._validation_snapshot_uses_priority_only(snapshot, now[0]) is True
+
+    now[0] = (AS_OF + timedelta(days=1)).replace(hour=8, minute=45)
+    assert service._validation_snapshot_uses_priority_only(snapshot, now[0]) is False
+    with service._background_lock:
+        service._background_last_result_at = now[0]
+    assert service._validation_snapshot_uses_priority_only(snapshot, now[0]) is True
+
+
 def test_priority_monitor_delay_is_measured_start_to_start() -> None:
     started_at = datetime(2026, 7, 20, 10, 0, 2, tzinfo=AS_OF.tzinfo)
     assert (
