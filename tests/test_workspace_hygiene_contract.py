@@ -187,6 +187,12 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     )
     assert "[switch]$PreserveValidationGate" in invalid_algorithm_cleanup
     assert "if (-not $PreserveValidationGate)" in invalid_algorithm_cleanup
+    for stale_runtime_target in (
+        '"cache\\symbols"',
+        '"monitor\\dingtalk_chart_images"',
+        '"decision_support\\trading_screening_sector_member_status_facts"',
+    ):
+        assert stale_runtime_target in invalid_algorithm_cleanup
     assert (
         '"audit\\chanlun_trading_system_backtest\\research_sample_validation_12"'
         in invalid_algorithm_cleanup
