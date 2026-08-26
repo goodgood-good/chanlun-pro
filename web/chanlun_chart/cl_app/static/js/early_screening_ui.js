@@ -6,6 +6,18 @@
   if (root) root.TradingScreeningUi = api;
 })(typeof globalThis === "object" ? globalThis : this, function createTradingScreeningUi() {
   const SCHEMA = "chanlun-trading-screening";
+  const SIGNAL_CATALOG_TRANSPORT = "signal-catalog-v1";
+  const SIGNAL_CATALOG_SCHEMA = "chanlun-early-signals-signal-catalog-v1";
+  const SIGNAL_CATALOG_FIELDS = [
+    "execution_profile",
+    "higher_timeframe_risk",
+    "position_recommendation",
+    "sector",
+    "context_30m",
+    "context_d",
+    "decision_reasons",
+    "warmup",
+  ];
   const SECTOR_SAME_BASE_SOURCE_MODE = "PAGE_PARITY_SAME_5M_BASE";
   const SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_MODE =
     "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH";
@@ -3631,10 +3643,65 @@
     return rows;
   }
 
+  function expandSignalCatalogTransport(value) {
+    if (value.signal_transport === undefined && value.signal_catalog === undefined) {
+      return value;
+    }
+    const catalog = isRecord(value.signal_catalog) ? value.signal_catalog : null;
+    const fields = catalog && Array.isArray(catalog.fields) ? catalog.fields : [];
+    const values = catalog && isRecord(catalog.values) ? catalog.values : null;
+    if (
+      value.signal_transport !== SIGNAL_CATALOG_TRANSPORT
+      || !catalog
+      || catalog.schema !== SIGNAL_CATALOG_SCHEMA
+      || fields.length !== SIGNAL_CATALOG_FIELDS.length
+      || fields.some((field, index) => field !== SIGNAL_CATALOG_FIELDS[index])
+      || !values
+      || SIGNAL_CATALOG_FIELDS.some((field) => !Array.isArray(values[field]))
+    ) {
+      throw new Error("snapshot_signal_catalog_invalid");
+    }
+    const expandRows = (rows) => {
+      if (!Array.isArray(rows)) throw new Error("snapshot_signal_catalog_invalid");
+      return rows.map((source) => {
+        if (!isRecord(source) || !Array.isArray(source.signal_catalog_refs)) {
+          throw new Error("snapshot_signal_catalog_invalid");
+        }
+        const references = source.signal_catalog_refs;
+        if (references.length !== SIGNAL_CATALOG_FIELDS.length) {
+          throw new Error("snapshot_signal_catalog_invalid");
+        }
+        const row = { ...source };
+        delete row.signal_catalog_refs;
+        SIGNAL_CATALOG_FIELDS.forEach((field, index) => {
+          const reference = references[index];
+          if (
+            !Number.isSafeInteger(reference)
+            || reference < 0
+            || reference >= values[field].length
+          ) {
+            throw new Error("snapshot_signal_catalog_invalid");
+          }
+          row[field] = values[field][reference];
+        });
+        return row;
+      });
+    };
+    const output = {
+      ...value,
+      signals: expandRows(value.signals),
+      manual_attention_signals: expandRows(value.manual_attention_signals || []),
+    };
+    delete output.signal_catalog;
+    delete output.signal_transport;
+    return output;
+  }
+
   function normalizeSnapshot(value) {
     if (!isRecord(value) || value.schema !== SCHEMA) {
       throw new Error("snapshot_schema_invalid");
     }
+    value = expandSignalCatalogTransport(value);
     if (
       value.sector_first !== true
       || value.read_only !== true

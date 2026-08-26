@@ -44,6 +44,10 @@ test("live and review requests are bounded and the review queue polls while visi
   assert.match(controllerSource, /new AbortController\(\)/);
   assert.match(controllerSource, /signal:\s*controller\.signal/);
   assert.match(controllerSource, /snapshot_request_timeout/);
+  assert.match(controllerSource, /cache:\s*"no-cache"/);
+  assert.doesNotMatch(controllerSource, /cache:\s*"no-store"/);
+  assert.match(controllerSource, /response\.status === 304 \? null/);
+  assert.match(controllerSource, /snapshot_not_modified_without_state/);
   assert.match(controllerSource, /for \(let attempt = 0; attempt < 2;/);
   assert.match(controllerSource, /response\.status === 401/);
   assert.match(controllerSource, /snapshot_authentication_required/);
@@ -1034,6 +1038,54 @@ test("normalizeSnapshot accepts only the new read-only schema", () => {
   assert.throws(
     () => Ui.normalizeSnapshot({ ...snapshot, no_order_execution: false }),
     /snapshot_boundary_invalid/,
+  );
+});
+
+test("normalizeSnapshot expands the compact shared signal catalog", () => {
+  const Ui = loadUi();
+  const fields = [
+    "execution_profile",
+    "higher_timeframe_risk",
+    "position_recommendation",
+    "sector",
+    "context_30m",
+    "context_d",
+    "decision_reasons",
+    "warmup",
+  ];
+  const source = snapshot.signals[0];
+  const compactSignal = { ...source };
+  const values = {};
+  fields.forEach((field) => {
+    values[field] = [source[field] === undefined ? null : source[field]];
+    delete compactSignal[field];
+  });
+  compactSignal.signal_catalog_refs = fields.map(() => 0);
+  const wireSnapshot = {
+    ...snapshot,
+    signals: [compactSignal],
+    signal_transport: "signal-catalog-v1",
+    signal_catalog: {
+      schema: "chanlun-early-signals-signal-catalog-v1",
+      fields,
+      values,
+    },
+  };
+
+  const normalized = Ui.normalizeSnapshot(wireSnapshot);
+
+  assert.equal(normalized.signals.length, 1);
+  assert.deepEqual(normalized.signals[0].higher_timeframe_risk, source.higher_timeframe_risk);
+  assert.deepEqual(normalized.signals[0].sector, source.sector);
+  assert.equal(normalized.signal_catalog, undefined);
+  assert.equal(normalized.signal_transport, undefined);
+  assert.equal(normalized.signals[0].signal_catalog_refs, undefined);
+  assert.throws(
+    () => Ui.normalizeSnapshot({
+      ...wireSnapshot,
+      signals: [{ ...compactSignal, signal_catalog_refs: [999, ...fields.slice(1).map(() => 0)] }],
+    }),
+    /snapshot_signal_catalog_invalid/,
   );
 });
 

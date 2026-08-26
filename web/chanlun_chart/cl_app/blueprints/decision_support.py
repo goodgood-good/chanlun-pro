@@ -42,6 +42,75 @@ _JSON_GZIP_MIN_BYTES = 32 * 1024
 _JSON_GZIP_CACHE_CAPACITY = 3
 _JSON_GZIP_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _JSON_GZIP_CACHE_LOCK = RLock()
+_EARLY_SIGNALS_CATALOG_TRANSPORT = "signal-catalog-v1"
+_EARLY_SIGNALS_CATALOG_SCHEMA = "chanlun-early-signals-signal-catalog-v1"
+_EARLY_SIGNALS_CATALOG_FIELDS = (
+    "execution_profile",
+    "higher_timeframe_risk",
+    "position_recommendation",
+    "sector",
+    "context_30m",
+    "context_d",
+    "decision_reasons",
+    "warmup",
+)
+_EARLY_SIGNALS_COMPACT_OMITTED_FIELDS = frozenset(
+    {
+        "admitted_universe_codes",
+        "decision_source_snapshot",
+        "sector_exclusions",
+        "sector_parent_relations",
+        "sector_strength_evidence",
+    }
+)
+_EARLY_SIGNALS_VOLATILE_HEALTH_FIELDS = frozenset(
+    {
+        "heartbeat_age_seconds",
+        "heartbeat_at",
+        "priority_monitor_age_seconds",
+        "refresh_elapsed_seconds",
+    }
+)
+_EARLY_SIGNALS_NATIVE_HEALTH_FIELDS = (
+    "schema",
+    "required",
+    "ready",
+    "status",
+    "reasons",
+    "worker_alive",
+    "isolated_process",
+    "loopback_authenticated",
+    "application_source_revision_match",
+    "expected_application_source_revision",
+    "worker_application_source_revision",
+    "minimum_market_data_frequency",
+    "tick_data_used",
+    "real_account_access",
+    "real_order_transport",
+    "failure_count",
+    "last_error",
+    "last_remote_error",
+    "restart_count",
+    "recycle_count",
+    "last_recycle_reason",
+    "market_data_probe",
+    "sector_snapshot_cache",
+)
+_EARLY_SIGNALS_WORKER_POOL_HEALTH_FIELDS = (
+    "affinity_contract_id",
+    "application_source_revision_consistent",
+    "candidate_disk_runtime_cache_enabled",
+    "candidate_released_worker_count",
+    "candidate_worker_count",
+    "configured_worker_count",
+    "coverage_sector_affinity",
+    "lane_isolation_active",
+    "priority_burst_worker_count",
+    "priority_reserved_worker_count",
+    "ready_worker_count",
+    "running_application_source_revisions",
+    "running_worker_count",
+)
 _CURRENT_SELECTION_LIFECYCLE_STAGES = frozenset(
     {
         "observed",
@@ -80,6 +149,15 @@ def _no_store(response):
     return response
 
 
+def _private_revalidate(response, cache_revision: str):
+    response.headers["Cache-Control"] = "private, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Content-Revision"] = cache_revision
+    response.set_etag(cache_revision, weak=True)
+    return response
+
+
 def _large_json_response(
     payload: object,
     *,
@@ -88,6 +166,13 @@ def _large_json_response(
     """为大型轮询响应做标准 HTTP 压缩，同时保留测试和旧客户端兼容性。"""
 
     accepted = request.accept_encodings.best_match(("gzip", "identity"))
+    if (
+        cache_revision is not None
+        and request.if_none_match.contains_weak(cache_revision)
+    ):
+        response = make_response("", 304)
+        response.vary.add("Accept-Encoding")
+        return _private_revalidate(response, cache_revision)
     if accepted == "gzip" and cache_revision is not None:
         with _JSON_GZIP_CACHE_LOCK:
             compressed = _JSON_GZIP_CACHE.pop(cache_revision, None)
@@ -97,9 +182,8 @@ def _large_json_response(
             response = make_response(compressed)
             response.mimetype = "application/json"
             response.headers["Content-Encoding"] = "gzip"
-            response.headers["X-Content-Revision"] = cache_revision
             response.vary.add("Accept-Encoding")
-            return _no_store(response)
+            return _private_revalidate(response, cache_revision)
 
     response = make_response(payload)
     response.vary.add("Accept-Encoding")
@@ -116,15 +200,104 @@ def _large_json_response(
                         _JSON_GZIP_CACHE[cache_revision] = compressed
                         while len(_JSON_GZIP_CACHE) > _JSON_GZIP_CACHE_CAPACITY:
                             _JSON_GZIP_CACHE.popitem(last=False)
-    if cache_revision is not None:
-        response.headers["X-Content-Revision"] = cache_revision
-    return _no_store(response)
+    if cache_revision is None:
+        return _no_store(response)
+    return _private_revalidate(response, cache_revision)
+
+
+def _runtime_health_http_revision(value: object) -> object:
+    """忽略只会随请求跳动、但不改变页面健康结论的诊断计数。"""
+
+    if not isinstance(value, Mapping):
+        return value
+    output = dict(value)
+    for field in _EARLY_SIGNALS_VOLATILE_HEALTH_FIELDS:
+        output.pop(field, None)
+    for field in (
+        "candidate_monitor_five_minute",
+        "candidate_monitor_thirty_minute",
+    ):
+        lane = output.get(field)
+        if isinstance(lane, Mapping):
+            compact_lane = dict(lane)
+            compact_lane.pop("oldest_observation_age_seconds", None)
+            output[field] = compact_lane
+    native_gateway = output.get("native_gateway")
+    if isinstance(native_gateway, Mapping):
+        compact_gateway = {
+            field: native_gateway[field]
+            for field in _EARLY_SIGNALS_NATIVE_HEALTH_FIELDS
+            if field in native_gateway
+        }
+        worker_pool = native_gateway.get("structure_worker_pool")
+        if isinstance(worker_pool, Mapping):
+            compact_gateway["structure_worker_pool"] = {
+                field: worker_pool[field]
+                for field in _EARLY_SIGNALS_WORKER_POOL_HEALTH_FIELDS
+                if field in worker_pool
+            }
+        output["native_gateway"] = compact_gateway
+    return output
+
+
+def _compact_early_signals_transport(
+    data: Mapping[str, object],
+) -> dict[str, object]:
+    """去掉页面未读取的审计正文，并把重复的信号证据编成共享目录。"""
+
+    output = {
+        key: value
+        for key, value in data.items()
+        if key not in _EARLY_SIGNALS_COMPACT_OMITTED_FIELDS
+    }
+    catalogs: dict[str, list[object]] = {
+        field: [] for field in _EARLY_SIGNALS_CATALOG_FIELDS
+    }
+    catalog_indexes: dict[str, dict[str, int]] = {
+        field: {} for field in _EARLY_SIGNALS_CATALOG_FIELDS
+    }
+
+    def compact_rows(value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        rows: list[object] = []
+        for source in value:
+            if not isinstance(source, Mapping):
+                rows.append(source)
+                continue
+            row = dict(source)
+            references: list[int] = []
+            for field in _EARLY_SIGNALS_CATALOG_FIELDS:
+                field_value = row.pop(field, None)
+                fingerprint = sha256_json(field_value)
+                index = catalog_indexes[field].get(fingerprint)
+                if index is None:
+                    index = len(catalogs[field])
+                    catalog_indexes[field][fingerprint] = index
+                    catalogs[field].append(field_value)
+                references.append(index)
+            row["signal_catalog_refs"] = references
+            rows.append(row)
+        return rows
+
+    output["signals"] = compact_rows(output.get("signals"))
+    output["manual_attention_signals"] = compact_rows(
+        output.get("manual_attention_signals")
+    )
+    output["signal_catalog"] = {
+        "schema": _EARLY_SIGNALS_CATALOG_SCHEMA,
+        "fields": list(_EARLY_SIGNALS_CATALOG_FIELDS),
+        "values": catalogs,
+    }
+    output["signal_transport"] = _EARLY_SIGNALS_CATALOG_TRANSPORT
+    return output
 
 
 def _early_signals_response_revision(
     data: Mapping[str, object],
     *,
     scope: str,
+    transport: str,
 ) -> str | None:
     """用小型动态文档与页面版本组成压缩缓存键，避免重哈希整棵信号树。"""
 
@@ -137,7 +310,10 @@ def _early_signals_response_revision(
                 "schema": "chanlun-early-signals-http-revision",
                 "presentation_revision": presentation_revision,
                 "scope": scope,
-                "runtime_health": data.get("runtime_health"),
+                "transport": transport,
+                "runtime_health": _runtime_health_http_revision(
+                    data.get("runtime_health")
+                ),
                 "manual_attention": data.get("manual_attention"),
                 "us_monitor": data.get("us_monitor"),
                 "realtime_notifications": data.get("realtime_notifications"),
@@ -1048,10 +1224,27 @@ def early_signals():
     scope = str(request.args.get("scope") or "all-qualified").strip().lower()
     if scope not in {"sector-trigger", "all-qualified"}:
         scope = "all-qualified"
+    transport = str(request.args.get("transport") or "full").strip().lower()
+    if transport not in {"full", _EARLY_SIGNALS_CATALOG_TRANSPORT}:
+        raise DecisionSupportError("trading_screening_transport_invalid", 400)
     data = _trading_screening_snapshot(scope=scope)
+    cache_revision = _early_signals_response_revision(
+        data,
+        scope=scope,
+        transport=transport,
+    )
+    if (
+        cache_revision is not None
+        and request.if_none_match.contains_weak(cache_revision)
+    ):
+        # 目录化本身也需要遍历所有当前候选。先用轻量语义版本短路，304 路径不再
+        # 为浏览器已经持有的相同快照重建两百多万字节的传输文档。
+        return _large_json_response(None, cache_revision=cache_revision)
+    if transport == _EARLY_SIGNALS_CATALOG_TRANSPORT:
+        data = _compact_early_signals_transport(data)
     return _large_json_response(
         _ok(data),
-        cache_revision=_early_signals_response_revision(data, scope=scope),
+        cache_revision=cache_revision,
     )
 
 

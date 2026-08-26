@@ -269,6 +269,205 @@ def test_early_signals_reuses_gzip_bytes_for_the_same_content_revision(
     assert compression_calls == 1
 
 
+def test_early_signals_revalidates_semantically_unchanged_runtime_health(
+    app: Flask,
+    logged_in_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = app.extensions["decision_support_trading_screening"]
+    original_snapshot = service.snapshot
+    health_snapshots = iter(
+        (
+            {
+                "ready": True,
+                "status": "ready",
+                "worker_alive": True,
+                "reasons": [],
+                "heartbeat_at": "2026-08-26T10:49:21.570134+08:00",
+                "heartbeat_age_seconds": 0.07,
+                "priority_monitor_age_seconds": 79.63,
+                "refresh_elapsed_seconds": 19.63,
+                "candidate_monitor_five_minute": {
+                    "status": "verified",
+                    "oldest_observation_age_seconds": 259.63,
+                },
+                "candidate_monitor_thirty_minute": {
+                    "status": "verified",
+                    "oldest_observation_age_seconds": 1819.63,
+                },
+                "native_gateway": {
+                    "ready": True,
+                    "status": "ready",
+                    "completed_request_count": 469,
+                    "total_completed_request_count": 469,
+                    "last_progress_at": "2026-08-26T10:49:17+08:00",
+                    "last_response_at": "2026-08-26T10:49:17+08:00",
+                },
+            },
+            {
+                "ready": True,
+                "status": "ready",
+                "worker_alive": True,
+                "reasons": [],
+                "heartbeat_at": "2026-08-26T10:49:21.776230+08:00",
+                "heartbeat_age_seconds": 0.23,
+                "priority_monitor_age_seconds": 79.99,
+                "refresh_elapsed_seconds": 19.99,
+                "candidate_monitor_five_minute": {
+                    "status": "verified",
+                    "oldest_observation_age_seconds": 259.99,
+                },
+                "candidate_monitor_thirty_minute": {
+                    "status": "verified",
+                    "oldest_observation_age_seconds": 1820.0,
+                },
+                "native_gateway": {
+                    "ready": True,
+                    "status": "ready",
+                    "completed_request_count": 471,
+                    "total_completed_request_count": 471,
+                    "last_progress_at": "2026-08-26T10:49:21+08:00",
+                    "last_response_at": "2026-08-26T10:49:21+08:00",
+                },
+            },
+            {
+                "ready": False,
+                "status": "not_ready",
+                "worker_alive": False,
+                "reasons": ["screening_worker_not_alive"],
+            },
+        )
+    )
+
+    def versioned_snapshot() -> dict[str, object]:
+        payload = original_snapshot()
+        payload["presentation_revision"] = "sha256:stable-presentation"
+        return payload
+
+    service.snapshot = versioned_snapshot
+    service.health_snapshot = lambda: next(health_snapshots)
+    original_compact = decision_support_module._compact_early_signals_transport
+    compact_calls = 0
+
+    def recording_compact(data):
+        nonlocal compact_calls
+        compact_calls += 1
+        return original_compact(data)
+
+    monkeypatch.setattr(
+        decision_support_module,
+        "_compact_early_signals_transport",
+        recording_compact,
+    )
+    endpoint = "/decision-support/early-signals?transport=signal-catalog-v1"
+
+    first = logged_in_client.get(endpoint)
+    etag = first.headers["ETag"]
+    unchanged = logged_in_client.get(
+        endpoint,
+        headers={"If-None-Match": etag},
+    )
+    changed = logged_in_client.get(
+        endpoint,
+        headers={"If-None-Match": etag},
+    )
+
+    assert first.status_code == 200
+    assert first.headers["Cache-Control"] == (
+        "private, no-cache, must-revalidate"
+    )
+    assert etag.startswith('W/"sha256:')
+    assert unchanged.status_code == 304
+    assert unchanged.get_data() == b""
+    assert unchanged.headers["ETag"] == etag
+    assert changed.status_code == 200
+    assert changed.headers["ETag"] != etag
+    assert changed.get_json()["data"]["runtime_health"]["ready"] is False
+    assert compact_calls == 2
+
+
+def test_early_signals_catalog_transport_deduplicates_browser_only_evidence(
+    app: Flask,
+    logged_in_client,
+) -> None:
+    service = app.extensions["decision_support_trading_screening"]
+    original_snapshot = service.snapshot
+    shared_fields = {
+        "execution_profile": {"recommendation": "WAITING_STRUCTURE"},
+        "higher_timeframe_risk": {
+            "market_gate": "GREEN",
+            "sector_gate": "GREEN",
+            "symbol_gate": "GREEN",
+        },
+        "position_recommendation": {"status": "NOT_ACTIONABLE"},
+        "sector": {"sector_id": "qmt:test", "sector_name": "测试板块"},
+        "context_30m": {"direction": "up"},
+        "context_d": {"direction": "up"},
+        "decision_reasons": ["waiting_structure"],
+        "warmup": {"converged": True},
+    }
+
+    def snapshot_with_repeated_evidence() -> dict[str, object]:
+        payload = original_snapshot()
+        payload["presentation_revision"] = "sha256:catalog-test"
+        payload["sector_strength_evidence"] = {"blob": "x" * 4096}
+        payload["admitted_universe_codes"] = ["SZ.000001", "SZ.000002"]
+        payload["decision_source_snapshot"] = {"blob": "audit-only"}
+        payload["sector_exclusions"] = [{"sector_id": "excluded"}]
+        payload["sector_parent_relations"] = [{"sector_id": "child"}]
+        payload["signals"] = [
+            {
+                "signal_id": f"signal-{index}",
+                "code": f"SZ.{index:06d}",
+                "point_type": "1buy",
+                "lifecycle_stage": "observed",
+                "selection_sources": ["QMT_SECTOR_TRIGGER"],
+                **shared_fields,
+            }
+            for index in (1, 2)
+        ]
+        return payload
+
+    service.snapshot = snapshot_with_repeated_evidence
+
+    full = logged_in_client.get("/decision-support/early-signals")
+    compact = logged_in_client.get(
+        "/decision-support/early-signals?transport=signal-catalog-v1"
+    )
+    invalid = logged_in_client.get(
+        "/decision-support/early-signals?transport=unknown"
+    )
+    full_data = full.get_json()["data"]
+    compact_data = compact.get_json()["data"]
+
+    assert full.status_code == compact.status_code == 200
+    assert invalid.status_code == 400
+    assert compact.headers["Cache-Control"] == (
+        "private, no-cache, must-revalidate"
+    )
+    assert compact_data["signal_transport"] == "signal-catalog-v1"
+    assert compact_data["signal_catalog"]["schema"] == (
+        "chanlun-early-signals-signal-catalog-v1"
+    )
+    assert compact_data["signals"][0]["signal_catalog_refs"] == (
+        compact_data["signals"][1]["signal_catalog_refs"]
+    )
+    for field in shared_fields:
+        assert field in full_data["signals"][0]
+        assert field not in compact_data["signals"][0]
+        assert len(compact_data["signal_catalog"]["values"][field]) == 1
+    for field in (
+        "sector_strength_evidence",
+        "admitted_universe_codes",
+        "decision_source_snapshot",
+        "sector_exclusions",
+        "sector_parent_relations",
+    ):
+        assert field in full_data
+        assert field not in compact_data
+    assert len(compact.get_data()) < len(full.get_data())
+
+
 def test_early_signals_projects_only_us_auxiliary_monitor_positions(
     app: Flask,
     logged_in_client,

@@ -86,7 +86,10 @@
       );
       try {
         const response = await fetch(endpoint, { ...options, signal: controller.signal });
-        return { response, payload: await response.json() };
+        return {
+          response,
+          payload: response.status === 304 ? null : await response.json(),
+        };
       } catch (error) {
         if (error && error.name === "AbortError") {
           throw new Error("snapshot_request_timeout");
@@ -917,12 +920,13 @@
       try {
         const endpoint = new URL(root.dataset.endpoint, window.location.href);
         endpoint.searchParams.set("scope", requestedScope);
+        endpoint.searchParams.set("transport", "signal-catalog-v1");
         let response = null;
         let payload = null;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           try {
             ({ response, payload } = await requestJson(endpoint.toString(), {
-              cache: "no-store",
+              cache: "no-cache",
               credentials: "same-origin",
               headers: { Accept: "application/json" },
             }));
@@ -935,6 +939,13 @@
           }
           if (response.status === 401) {
             throw new Error("snapshot_authentication_required");
+          }
+          if (response.status === 304) {
+            if (
+              state.snapshot
+              && state.snapshot.presentation_scope === requestedScope
+            ) return true;
+            throw new Error("snapshot_not_modified_without_state");
           }
           if (response.ok && payload && payload.ok === true) break;
           const recoverable = response.status === 408
