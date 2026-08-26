@@ -223,6 +223,59 @@ def _formal_structure_payload(structure) -> dict:
     }
 
 
+def _build_strict_evidence_revision_uncached(
+    symbol: str,
+    source_frequency: str,
+    price_basis_revision: str,
+    strict_config_revision: str,
+    structure,
+    confirmed_points: tuple,
+    divergences: tuple,
+) -> str:
+    payload = _canonical_revision_value(
+        {
+            "schema": "chanlun-strict-evidence",
+            "symbol": symbol,
+            "source_frequency": source_frequency,
+            "price_basis_revision": price_basis_revision,
+            "strict_config_revision": strict_config_revision,
+            "structure": _formal_structure_payload(structure),
+            "confirmed_points": confirmed_points,
+            "divergences": divergences,
+        }
+    )
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _build_strict_evidence_revision_cached(
+    symbol: str,
+    source_frequency: str,
+    price_basis_revision: str,
+    strict_config_revision: str,
+    structure,
+    confirmed_points: tuple,
+    divergences: tuple,
+) -> str:
+    """Reuse only the immediately repeated immutable evidence revision."""
+
+    return _build_strict_evidence_revision_uncached(
+        symbol,
+        source_frequency,
+        price_basis_revision,
+        strict_config_revision,
+        structure,
+        confirmed_points,
+        divergences,
+    )
+
+
 def build_strict_evidence_revision(
     *,
     symbol: str,
@@ -262,22 +315,21 @@ def build_strict_evidence_revision(
     structure_levels = {level.structural_level for level in structure.levels}
     if any(item.structural_level not in structure_levels for item in divergence_items):
         raise ValueError("strict evidence divergence level is unavailable")
-    payload = _canonical_revision_value(
-        {
-            "schema": "chanlun-strict-evidence",
-            "symbol": symbol,
-            "source_frequency": source_frequency,
-            "price_basis_revision": price_basis_revision,
-            "strict_config_revision": strict_config_revision,
-            "structure": _formal_structure_payload(structure),
-            "confirmed_points": points,
-            "divergences": divergence_items,
-        }
+    # Evidence assembly and the frozen result validator calculate this exact
+    # revision back-to-back.  Keep the validation above on every call, but
+    # retain only that immediate immutable result so the second call avoids a
+    # full recursive canonicalization without accumulating large structures.
+    cache_key = (
+        symbol,
+        source_frequency,
+        price_basis_revision,
+        strict_config_revision,
+        structure,
+        points,
+        divergence_items,
     )
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+    try:
+        hash(cache_key)
+    except TypeError:
+        return _build_strict_evidence_revision_uncached(*cache_key)
+    return _build_strict_evidence_revision_cached(*cache_key)

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 
+from chanlun.core.strict_structure import identity as strict_identity
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.divergence import collect_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
@@ -161,6 +162,52 @@ def test_evidence_revision_excludes_approaching_only_changes():
     assert build_strict_evidence_revision(**before.formal_inputs) == (
         build_strict_evidence_revision(**after.formal_inputs)
     )
+
+
+def test_evidence_revision_reuses_only_immediately_repeated_immutable_input(
+    monkeypatch,
+):
+    bundle = evidence_bundle(structure=empty_structure(with_level=True))
+    inputs = dict(bundle.formal_inputs)
+    cache = strict_identity._build_strict_evidence_revision_cached
+    cache.cache_clear()
+    uncached = strict_identity._build_strict_evidence_revision_uncached
+    call_count = 0
+
+    def counted_uncached(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return uncached(*args, **kwargs)
+
+    monkeypatch.setattr(
+        strict_identity,
+        "_build_strict_evidence_revision_uncached",
+        counted_uncached,
+    )
+    try:
+        first = build_strict_evidence_revision(**inputs)
+        second = build_strict_evidence_revision(**inputs)
+        assert first == second == bundle.structure_revision
+        assert call_count == 1
+        assert cache.cache_info().maxsize == 1
+    finally:
+        cache.cache_clear()
+
+
+def test_evidence_revision_preserves_unhashable_structure_fallback():
+    bundle = evidence_bundle(structure=empty_structure(with_level=True))
+
+    class UnhashableStructureView:
+        __hash__ = None
+
+        def __init__(self, structure):
+            self.schema = structure.schema
+            self.price_basis_revision = structure.price_basis_revision
+            self.levels = structure.levels
+
+    inputs = dict(bundle.formal_inputs)
+    inputs["structure"] = UnhashableStructureView(bundle.structure)
+    assert build_strict_evidence_revision(**inputs) == bundle.structure_revision
 
 
 def test_atomic_bundle_rejects_independent_divergence():
