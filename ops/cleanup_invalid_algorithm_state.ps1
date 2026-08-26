@@ -95,16 +95,12 @@ $runtimeRelativeTargets = @(
     "monitor\realtime_review_inbox.json",
     "cache\last_chart_state.json"
 )
-$currentScreeningStateTargets = @(
-    "decision_support\trading_screening_runtime_state_cache",
-    "decision_support\.trading_screening_snapshot.json.generations",
-    "decision_support\trading_screening_snapshot.json",
-    "decision_support\trading_screening_snapshot.json.lock",
-    "decision_support\trading_screening_snapshot.json.scope",
-    "decision_support\trading_screening_sector_snapshot.json",
-    "decision_support\trading_screening_sector_snapshot.json.scope",
-    "decision_support\trading_screening_sector_member_status_facts"
-)
+# A running application may reopen any of these paths immediately after the
+# lock probe.  PreserveCurrentScreeningState therefore protects the whole live
+# runtime surface, not only the large snapshot files.  The bounded pruning
+# below still adds obsolete immutable generations and dead owner markers as
+# explicit cleanup targets.
+$currentScreeningStateTargets = @($runtimeRelativeTargets)
 if ($PreserveCurrentScreeningState) {
     $runtimeRelativeTargets = @(
         $runtimeRelativeTargets | Where-Object {
@@ -214,6 +210,18 @@ $repositoryRelativeTargets = @(
     ".cache\center_trend_probe_smoke2.json",
     ".cache\center_trend_probe_validation30.json"
 )
+if ($PreserveCurrentScreeningState) {
+    $activeRepositoryRuntimeTargets = @(
+        ".cache\chanlun_scheduler",
+        ".cache\chanlun_web_watchdog",
+        ".cache\chanlun_human_review_forward\forward_paper_ledger.json.lock"
+    )
+    $repositoryRelativeTargets = @(
+        $repositoryRelativeTargets | Where-Object {
+            $_ -notin $activeRepositoryRuntimeTargets
+        }
+    )
+}
 if (-not $PreserveValidationGate) {
     $repositoryRelativeTargets += (
         "audit\chanlun_trading_system_backtest\research_sample_validation_12"
