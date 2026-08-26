@@ -12607,6 +12607,113 @@ def test_background_loop_runs_due_priority_lane_when_coverage_is_idle(
     assert calls == [(False, True)]
 
 
+@pytest.mark.parametrize(
+    ("hour", "minute", "full_coverage_enabled"),
+    ((10, 0, False), (18, 30, True)),
+)
+def test_background_due_priority_waits_for_running_priority_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hour: int,
+    minute: int,
+    full_coverage_enabled: bool,
+) -> None:
+    observed_at = AS_OF.replace(hour=hour, minute=minute)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=60,
+            full_coverage_refresh_enabled=full_coverage_enabled,
+            large_scope_authorized=full_coverage_enabled,
+            priority_monitoring_enabled=True,
+        ),
+    )
+    calls: list[tuple[bool, bool]] = []
+    waits: list[float] = []
+    stop = threading.Event()
+
+    class StopAfterWait:
+        def clear(self) -> None:
+            return None
+
+        def wait(self, timeout: float) -> bool:
+            waits.append(timeout)
+            stop.set()
+            return True
+
+    monkeypatch.setattr(service, "_needs_refresh", lambda: False)
+    monkeypatch.setattr(service, "_priority_monitor_due", lambda _at: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        stop.set()
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+    assert service._priority_scan_lock.acquire(blocking=False) is True
+    try:
+        service._background_loop(stop, StopAfterWait())
+    finally:
+        service._priority_scan_lock.release()
+
+    assert calls == []
+    assert waits == [1.0]
+    assert service.health_snapshot()["refresh_attempt_count"] == 0
+
+
+def test_background_due_priority_backs_off_if_lock_is_lost_after_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=60,
+            full_coverage_refresh_enabled=False,
+            priority_monitoring_enabled=True,
+        ),
+    )
+    calls: list[tuple[bool, bool]] = []
+    waits: list[float] = []
+    stop = threading.Event()
+
+    class StopAfterWait:
+        def clear(self) -> None:
+            return None
+
+        def wait(self, timeout: float) -> bool:
+            waits.append(timeout)
+            stop.set()
+            return True
+
+    monkeypatch.setattr(service, "_needs_refresh", lambda: False)
+    monkeypatch.setattr(service, "_priority_monitor_due", lambda _at: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+    service._background_loop(stop, StopAfterWait())
+
+    assert calls == [(False, True)]
+    assert waits == [1.0]
+    assert service.health_snapshot()["refresh_attempt_count"] == 1
+
+
 def test_background_lunch_catchup_keeps_start_to_start_cadence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

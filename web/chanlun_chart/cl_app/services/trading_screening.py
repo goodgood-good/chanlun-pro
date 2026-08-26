@@ -11876,7 +11876,7 @@ class TradingScreeningService:
                 # 当前核心复核显式关注/持仓，页面和通知通道即可获得一份不含旧结论的
                 # 快速观测；有认证过渡预选时，完整覆盖延后到非交易关键窗口。
                 if coverage_window_open and self._startup_priority_bootstrap_required():
-                    if self._scan_lock.locked():
+                    if self._priority_scan_lock.locked():
                         wake.wait(timeout=1.0)
                         continue
                     self._record_background_refresh_start()
@@ -11902,14 +11902,22 @@ class TradingScreeningService:
                     or self._needs_refresh()
                     or forced_full_coverage_active
                 ):
-                    if self._scan_lock.locked():
+                    priority_only = not coverage_window_open
+                    refresh_lock = (
+                        self._priority_scan_lock if priority_only else self._scan_lock
+                    )
+                    if refresh_lock.locked():
                         wake.wait(timeout=1.0)
                         continue
+                    priority_last_before = None
+                    if priority_only:
+                        with self._background_lock:
+                            priority_last_before = self._priority_monitor_last_at
                     self._record_background_refresh_start()
                     try:
                         refreshed = self.refresh_now(
                             copy_result=False,
-                            priority_only=not coverage_window_open,
+                            priority_only=priority_only,
                         )
                     except Exception as exc:
                         # 持久化与通知失败不属于刷新错误快照；保留工作线程存活，
@@ -11945,6 +11953,12 @@ class TradingScreeningService:
                             ),
                         )
                         if delay <= 0:
+                            if priority_last_at == priority_last_before:
+                                # The exact refresh lock can still be won by a
+                                # native-progress worker after the check above.
+                                # Bound that narrow contention race only when
+                                # the priority observation did not advance.
+                                wake.wait(timeout=1.0)
                             continue
                         wake.wait(
                             timeout=min(

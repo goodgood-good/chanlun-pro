@@ -19,6 +19,13 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
     {
         (
             (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:743704a5116f4dfac1530ae38dd1c9f491f5d56c8e21296322f717ff4a81141b",
+                "sha256:745fbf8abdc2864c06b2467f08d9fcda49f101385aaa7adc8e4cdc635e62e0c7",
+            ),
+        ),
+        (
+            (
                 "src/chanlun/decision_support/trading_system/live_human_review.py",
                 "sha256:b554ac6c931cea904e0660dff27fe57537adddd9cd25f2cf4cc3285464966f03",
                 "sha256:4e4ace9302d304a00373e01e659bb097677f8f3c9db5dfeb6bc57836215e8b84",

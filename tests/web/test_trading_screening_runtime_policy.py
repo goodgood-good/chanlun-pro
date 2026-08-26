@@ -127,6 +127,36 @@ def test_manifest_migration_allows_only_exact_reviewed_shard_transition() -> Non
     )
 
 
+def test_manifest_migration_allows_exact_priority_lock_transition() -> None:
+    current = current_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    path = "web/chanlun_chart/cl_app/services/trading_screening.py"
+    current_row = next(row for row in current["files"] if row["path"] == path)
+    cached_row = next(row for row in cached["files"] if row["path"] == path)
+    assert current_row["sha256"] == (
+        "sha256:745fbf8abdc2864c06b2467f08d9fcda49f101385aaa7adc8e4cdc635e62e0c7"
+    )
+    cached_row["sha256"] = (
+        "sha256:743704a5116f4dfac1530ae38dd1c9f491f5d56c8e21296322f717ff4a81141b"
+    )
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
 def test_manifest_migration_allows_exact_review_auditor_transition() -> None:
     current = current_decision_source_snapshot()
     cached = copy.deepcopy(current)
