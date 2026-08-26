@@ -3,6 +3,7 @@
 (function startTradingScreeningController() {
   const POLL_INTERVAL_MS = 60_000;
   const SNAPSHOT_REQUEST_TIMEOUT_MS = 20_000;
+  const SNAPSHOT_RECOVERY_RETRY_MS = 750;
   const STORAGE_KEY = "chanlun:trading-screening:view";
   // The current-only contract invalidates every persisted pre-migration view.
   // Earlier versions could retain a narrow point/stage/scope filter and make
@@ -94,6 +95,18 @@
       } finally {
         window.clearTimeout(timeout);
       }
+    }
+
+    async function waitForSnapshotRetry(response) {
+      const retryAfter = Number(
+        response && response.headers
+          ? response.headers.get("Retry-After")
+          : Number.NaN,
+      );
+      const delay = Number.isFinite(retryAfter) && retryAfter >= 0
+        ? Math.min(2_000, Math.max(250, retryAfter * 1_000))
+        : SNAPSHOT_RECOVERY_RETRY_MS;
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
     }
 
     function readView() {
@@ -904,12 +917,38 @@
       try {
         const endpoint = new URL(root.dataset.endpoint, window.location.href);
         endpoint.searchParams.set("scope", requestedScope);
-        const { response, payload } = await requestJson(endpoint.toString(), {
-          cache: "no-store",
-          credentials: "same-origin",
-          headers: { Accept: "application/json" },
-        });
-        if (!response.ok || !payload || payload.ok !== true) throw new Error("snapshot_request_failed");
+        let response = null;
+        let payload = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            ({ response, payload } = await requestJson(endpoint.toString(), {
+              cache: "no-store",
+              credentials: "same-origin",
+              headers: { Accept: "application/json" },
+            }));
+          } catch (error) {
+            if (attempt === 0) {
+              await waitForSnapshotRetry(null);
+              continue;
+            }
+            throw error;
+          }
+          if (response.status === 401) {
+            throw new Error("snapshot_authentication_required");
+          }
+          if (response.ok && payload && payload.ok === true) break;
+          const recoverable = response.status === 408
+            || response.status === 429
+            || response.status >= 500;
+          if (attempt === 0 && recoverable) {
+            await waitForSnapshotRetry(response);
+            continue;
+          }
+          throw new Error("snapshot_request_failed");
+        }
+        if (!response || !response.ok || !payload || payload.ok !== true) {
+          throw new Error("snapshot_request_failed");
+        }
         const nextSnapshot = Ui.normalizeSnapshot(payload.data);
         if (nextSnapshot.presentation_scope !== requestedScope) {
           throw new Error("snapshot_scope_mismatch");
@@ -918,11 +957,19 @@
         render();
         return true;
       } catch (error) {
-        setStatus(
-          "error",
-          "实时快照暂不可用",
-          state.snapshot ? "保留当前页面数据，下一轮继续重试" : "未展示未经验证或边界不完整的数据",
-        );
+        if (error && error.message === "snapshot_authentication_required") {
+          setStatus(
+            "warning",
+            "登录状态已失效",
+            "请重新登录后返回本页面；当前快照不会被未认证响应覆盖",
+          );
+        } else {
+          setStatus(
+            "error",
+            "实时快照暂不可用",
+            state.snapshot ? "已自动重试并保留当前页面数据，下一轮继续恢复" : "已自动重试；未展示未经验证或边界不完整的数据",
+          );
+        }
         console.error(
           "trading_screening_snapshot_failed",
           error && error.name ? error.name : "Error",

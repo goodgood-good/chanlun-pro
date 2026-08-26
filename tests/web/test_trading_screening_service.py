@@ -7339,6 +7339,70 @@ def test_candidate_scheduler_preserves_lifecycle_priority_for_equal_due_times() 
     assert batch == universe[:2]
 
 
+def test_candidate_scheduler_does_not_starve_due_rows_behind_rotated_cold_rows() -> None:
+    observed_at = AS_OF.replace(hour=10, minute=0, second=2, microsecond=0)
+    cold = tuple(f"COLD_{value:02d}" for value in range(31))
+    due = tuple(f"DUE_{value:02d}" for value in range(4))
+    fresh = tuple(f"FRESH_{value:02d}" for value in range(25))
+    universe = cold + due + fresh
+    last_success_at = {
+        **{code: observed_at - timedelta(seconds=301) for code in due},
+        **{code: observed_at for code in fresh},
+    }
+
+    batch = _take_due_candidate_batch(
+        universe,
+        last_success_at=last_success_at,
+        observed_at=observed_at,
+        target_seconds=300,
+        monitor_interval_seconds=60,
+        max_symbols=12,
+        execution_grace_seconds=50,
+        previous_monitor_at=observed_at - timedelta(seconds=60),
+    )
+
+    # A large discovery-window rotation must not consume the whole physical
+    # wave before retained current setups whose cadence is already due.
+    assert batch == due + cold[:8]
+
+
+def test_candidate_scheduler_rotated_window_stays_inside_execution_grace() -> None:
+    started_at = AS_OF.replace(hour=10, minute=0, second=2, microsecond=0)
+    cold = tuple(f"COLD_{value:02d}" for value in range(31))
+    retained = tuple(f"RETAINED_{value:02d}" for value in range(29))
+    universe = cold + retained
+    last_success_at = {
+        code: started_at - timedelta(minutes=max(0, 4 - index // 6))
+        for index, code in enumerate(retained)
+    }
+
+    for minute in range(6):
+        observed_at = started_at + timedelta(minutes=minute)
+        batch = _take_due_candidate_batch(
+            universe,
+            last_success_at=last_success_at,
+            observed_at=observed_at,
+            target_seconds=300,
+            monitor_interval_seconds=60,
+            max_symbols=12,
+            execution_grace_seconds=50,
+            previous_monitor_at=(
+                None if minute == 0 else observed_at - timedelta(minutes=1)
+            ),
+        )
+        last_success_at.update({code: observed_at for code in batch})
+        coverage = trading_screening_subject._candidate_lane_coverage(
+            universe,
+            last_success_at=last_success_at,
+            observed_at=observed_at,
+            target_seconds=300,
+            execution_grace_seconds=50,
+        )
+        assert coverage["overdue_count"] == 0
+
+    assert set(cold) <= set(last_success_at)
+
+
 def test_candidate_batch_groups_by_sector_without_changing_due_membership() -> None:
     sector_a = replace(eligible_sector(), sector_id="qmt-gics3:a")
     sector_b = replace(eligible_sector(), sector_id="qmt-gics3:b")
@@ -7427,6 +7491,93 @@ def test_new_candidate_scope_is_warming_instead_of_inheriting_service_age(
     assert health["candidate_monitor_reason_codes"] == ["CANDIDATE_MONITOR_WARMING"]
     assert health["candidate_monitor_five_minute"]["missing_count"] == 1
     assert health["candidate_monitor_thirty_minute"]["missing_count"] == 1
+
+
+def test_candidate_warmup_does_not_degrade_completed_batch_notifications(
+    tmp_path: Path,
+) -> None:
+    class VerifiedNotifier:
+        def health_snapshot(self) -> dict[str, object]:
+            return {
+                "configured": True,
+                "operationally_verified": True,
+                "status": "verified",
+                "reason_code": "DELIVERY_SUCCESS_PROVEN",
+                "delivered_event_count": 1,
+            }
+
+    observed_at = AS_OF.replace(hour=14, minute=58)
+    code = "SZ.000001"
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=VerifiedNotifier(),
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    service._priority_monitor_runtime_verified = True
+    service._priority_monitor_last_at = observed_at
+    service._candidate_monitor_started_at = observed_at
+    service._candidate_monitor_five_universe = (code,)
+    service._candidate_monitor_thirty_universe = (code,)
+
+    health = service.health_snapshot()
+
+    assert health["candidate_monitor_ready"] is False
+    assert health["candidate_monitor_status"] == "warming"
+    assert health["candidate_monitor_reason_codes"] == ["CANDIDATE_MONITOR_WARMING"]
+    assert health["realtime_alert_ready"] is True
+    assert health["realtime_alert_status"] == "ready"
+    assert health["realtime_alert_reason_code"] == "READY"
+
+
+def test_candidate_cadence_overdue_still_degrades_realtime_alert(
+    tmp_path: Path,
+) -> None:
+    class VerifiedNotifier:
+        def health_snapshot(self) -> dict[str, object]:
+            return {
+                "configured": True,
+                "operationally_verified": True,
+                "status": "verified",
+                "reason_code": "DELIVERY_SUCCESS_PROVEN",
+                "delivered_event_count": 1,
+            }
+
+    observed_at = AS_OF.replace(hour=14, minute=58, second=0, microsecond=0)
+    code = "SZ.000001"
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=VerifiedNotifier(),
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    service._priority_monitor_runtime_verified = True
+    service._priority_monitor_last_at = observed_at
+    service._candidate_monitor_started_at = observed_at - timedelta(minutes=10)
+    service._candidate_monitor_five_universe = (code,)
+    service._candidate_monitor_thirty_universe = (code,)
+    service._candidate_monitor_five_last_success_at = {
+        code: observed_at - timedelta(seconds=351)
+    }
+    service._candidate_monitor_thirty_last_success_at = {code: observed_at}
+
+    health = service.health_snapshot()
+
+    assert health["candidate_monitor_ready"] is False
+    assert health["candidate_monitor_status"] == "cadence_overdue"
+    assert health["realtime_alert_ready"] is False
+    assert health["realtime_alert_status"] == "candidate_monitor_degraded"
+    assert health["realtime_alert_reason_code"] == (
+        "CANDIDATE_MONITOR_CADENCE_OVERDUE"
+    )
 
 
 def test_deferred_candidate_with_fresh_observation_does_not_claim_capacity_failure(

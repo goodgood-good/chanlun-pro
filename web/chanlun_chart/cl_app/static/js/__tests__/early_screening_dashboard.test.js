@@ -40,9 +40,14 @@ const dashboardCss = fs.readFileSync(path.resolve(__dirname, "../../css/early_sc
 
 test("live and review requests are bounded and the review queue polls while visible", () => {
   assert.match(controllerSource, /SNAPSHOT_REQUEST_TIMEOUT_MS\s*=\s*20_000/);
+  assert.match(controllerSource, /SNAPSHOT_RECOVERY_RETRY_MS\s*=\s*750/);
   assert.match(controllerSource, /new AbortController\(\)/);
   assert.match(controllerSource, /signal:\s*controller\.signal/);
   assert.match(controllerSource, /snapshot_request_timeout/);
+  assert.match(controllerSource, /for \(let attempt = 0; attempt < 2;/);
+  assert.match(controllerSource, /response\.status === 401/);
+  assert.match(controllerSource, /snapshot_authentication_required/);
+  assert.match(controllerSource, /await waitForSnapshotRetry\(response\)/);
   assert.match(humanReviewSource, /REQUEST_TIMEOUT_MS\s*=\s*30_000/);
   assert.match(humanReviewSource, /new AbortController\(\)/);
   assert.match(humanReviewSource, /signal:\s*controller\.signal/);

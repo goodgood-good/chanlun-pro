@@ -1632,20 +1632,35 @@ def _take_due_candidate_batch(
             ordinal - future_round_count * max_symbols,
         )
 
-    required_count = min(
+    # Newly admitted discovery rows have no prior observation timestamp, but
+    # that must not let them displace retained rows whose physical cadence is
+    # already due.  The admission window can rotate dozens of cold rows at
+    # once; putting every cold row first starves pinned/current setups until
+    # they become overdue even though the configured lane has enough capacity.
+    # Reserve the deadline-critical observed prefix first, then spend the
+    # remainder of the normally planned wave on cold rows. This keeps cold-start
+    # lifecycle order without sacrificing an existing symbol's bar-cadence SLA
+    # or refreshing already-current observed rows merely to fill the hard cap.
+    required_observed_count = min(
         max_symbols,
-        max(
-            min(len(missing), planned),
-            hard_due_count,
-            deadline_required_count,
-        ),
+        max(hard_due_count, deadline_required_count),
     )
-    if required_count <= 0:
+    desired_count = (
+        min(max_symbols, max(planned, required_observed_count))
+        if missing
+        else required_observed_count
+    )
+    if desired_count <= 0:
         return ()
-    ordered_codes = tuple(code for _index, code in missing) + tuple(
-        code for _last, _index, code, _age, _invalid in observed_rows
+    required_observed = tuple(
+        code
+        for _last, _index, code, _age, _invalid in observed_rows[
+            :required_observed_count
+        ]
     )
-    return ordered_codes[:required_count]
+    remaining_capacity = desired_count - len(required_observed)
+    selected_missing = tuple(code for _index, code in missing[:remaining_capacity])
+    return required_observed + selected_missing
 
 
 def _group_candidate_batch_by_sector(
@@ -10979,7 +10994,7 @@ class TradingScreeningService:
                 if priority_monitor_reason_codes
                 else "PRIORITY_MONITOR_DEGRADED"
             )
-        elif not candidate_monitor_ready:
+        elif not candidate_monitor_ready and candidate_monitor_status != "warming":
             # 立即持仓/自选复查正常，并不证明支持板块候选的 5m 轮换满足时效。
             # 总预警状态同时约束两条监听车道，避免页面在候选容量不足或逾期时
             # 仍显示“正常”。
@@ -10991,6 +11006,11 @@ class TradingScreeningService:
                 else "CANDIDATE_MONITOR_DEGRADED"
             )
         else:
+            # A bounded discovery window is expected to contain newly admitted
+            # rows after rotation. With no error, capacity deficit or overdue
+            # observation, already completed batches continue through the
+            # durable streaming notification path; warm-up remains visible in
+            # the candidate fields but is not a global alert outage.
             realtime_alert_ready = True
             realtime_alert_status = "ready"
             realtime_alert_reason_code = "READY"
