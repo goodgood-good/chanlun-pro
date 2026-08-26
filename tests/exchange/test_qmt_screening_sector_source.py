@@ -1787,6 +1787,11 @@ def test_daily_read_uses_memory_bounded_chunks_and_inner_progress(
     bars = source._read_daily(symbols, as_of=AS_OF)
 
     assert len(bars) == len(symbols)
+    assert all(
+        isinstance(value, subject.CompletedDailyClose)
+        for rows in bars.values()
+        for value in rows
+    )
     assert fake.request_sizes == [64, 64, 2]
     # Each native request has before/after callbacks, every eight converted
     # symbols reports progress, and every released response reports once more.
@@ -1823,11 +1828,7 @@ def test_daily_fact_decode_consumes_rows_and_reports_bounded_progress(
             symbol: [
                 [
                     required.isoformat(),
-                    "10.0",
-                    "10.2",
-                    "9.9",
                     "10.1",
-                    "1000",
                     known_at.isoformat(),
                     True,
                 ]
@@ -1844,6 +1845,11 @@ def test_daily_fact_decode_consumes_rows_and_reports_bounded_progress(
 
     assert decoded is not None
     assert len(decoded) == 33
+    assert all(
+        isinstance(value, subject.CompletedDailyClose)
+        for rows in decoded.values()
+        for value in rows
+    )
     assert payload["bars"] == {}
     assert len(progress) == 2
     assert decoded[symbols[0]][0].session is decoded[symbols[1]][0].session
@@ -1874,6 +1880,15 @@ def test_daily_strength_normalization_is_future_scale_invariant() -> None:
 
     assert first == future_scaled
     assert first[-1].close == Decimal("1.000000000000")
+    compact = subject._normalize_equal_ratio_daily_closes(
+        bars(Decimal("1")),
+        sessions={},
+        known_at_by_session={},
+    )
+    assert tuple(value.close for value in compact) == tuple(
+        value.close for value in first
+    )
+    assert all(isinstance(value, subject.CompletedDailyClose) for value in compact)
 
 
 def test_daily_strength_evidence_is_stable_under_future_equal_ratio_scale(
@@ -2221,6 +2236,9 @@ def test_qmt_daily_fact_cache_recomputes_strength_with_current_code(
         fact_cache_revision=revision,
     ).strengths(**_daily_strength_arguments())
     calls_after_first = fake.market_calls
+    persisted = json.loads(path.read_text(encoding="utf-8"))["payload"]["bars"]
+    assert {len(row) for row in persisted["SH.000300"]} == {8}
+    assert {len(row) for row in persisted["SH.600000"]} == {4}
     second = QmtSectorStrengthSource(
         fact_cache_path=path,
         fact_cache_revision=revision,
@@ -2682,7 +2700,7 @@ def test_qmt_daily_fact_cache_fails_closed_on_identity_and_causality(
         fact_cache_revision=revision,
     ).strengths(**arguments)
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["payload"]["bars"]["SH.600000"][-1][6] = (
+    document["payload"]["bars"]["SH.600000"][-1][2] = (
         AS_OF + timedelta(days=1)
     ).isoformat()
     document["content_sha256"] = sha256_json(document["payload"])

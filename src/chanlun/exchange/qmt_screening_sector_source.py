@@ -83,6 +83,10 @@ QMT_CURRENT_A_SHARE_SECTOR = "沪深京A股"
 QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT = (
     "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION"
 )
+
+
+_DailyStrengthBar = DailyMarketBar | CompletedDailyClose
+_DailyStrengthHistory = tuple[_DailyStrengthBar, ...]
 QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE = QMT_STRUCTURE_DIVIDEND_TYPE
 QMT_SECTOR_STRENGTH_ADJUSTMENT = (
     "front-ratio-terminal-close-normalized"
@@ -351,7 +355,14 @@ def _compact_json(value: object) -> str:
     )
 
 
-def _daily_bar_fact_row(value: DailyMarketBar) -> tuple[object, ...]:
+def _daily_bar_fact_row(value: _DailyStrengthBar) -> tuple[object, ...]:
+    if isinstance(value, CompletedDailyClose):
+        return (
+            value.session.isoformat(),
+            str(value.close),
+            value.known_at.isoformat(),
+            value.completed,
+        )
     return (
         value.session.isoformat(),
         str(value.open),
@@ -365,7 +376,7 @@ def _daily_bar_fact_row(value: DailyMarketBar) -> tuple[object, ...]:
 
 
 def _iter_daily_bars_canonical_json(
-    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+    bars: Mapping[str, _DailyStrengthHistory],
 ) -> Iterator[str]:
     yield '{"$map":['
     symbol_separator = ""
@@ -386,7 +397,7 @@ def _iter_daily_bars_canonical_json(
 
 def _iter_daily_fact_canonical_json(
     payload: Mapping[str, object],
-    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+    bars: Mapping[str, _DailyStrengthHistory],
 ) -> Iterator[str]:
     yield '{"$map":['
     separator = ""
@@ -419,7 +430,7 @@ def _sha256_text_chunks(chunks: Iterable[str]) -> str:
 
 
 def _iter_daily_bars_json(
-    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+    bars: Mapping[str, _DailyStrengthHistory],
 ) -> Iterator[str]:
     yield "{"
     symbol_separator = ""
@@ -436,7 +447,7 @@ def _iter_daily_bars_json(
 
 def _iter_daily_fact_json(
     payload: Mapping[str, object],
-    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+    bars: Mapping[str, _DailyStrengthHistory],
 ) -> Iterator[str]:
     yield "{"
     separator = ""
@@ -481,7 +492,7 @@ def _write_text_chunks_atomically(path: Path, chunks: Iterable[str]) -> None:
 def _write_daily_fact_payload(
     path: Path,
     payload: Mapping[str, object],
-    bars: Mapping[str, tuple[DailyMarketBar, ...]],
+    bars: Mapping[str, _DailyStrengthHistory],
 ) -> None:
     """Publish daily facts without materializing a second full JSON row tree."""
 
@@ -3386,6 +3397,44 @@ def _normalize_equal_ratio_daily_bars(
     )
 
 
+def _normalize_equal_ratio_daily_closes(
+    rows: tuple[DailyMarketBar, ...],
+    *,
+    sessions: dict[date, date],
+    known_at_by_session: dict[date, datetime],
+) -> tuple[CompletedDailyClose, ...]:
+    """Keep only the member fields consumed by horizontal strength.
+
+    Member OHLC and volume are validated by ``_daily_rows`` but never enter
+    the equal-weight close-vs-SMA rule.  Retaining five Decimals per member bar
+    made the full GICS hierarchy exceed the isolated worker's memory boundary.
+    The broad benchmark still uses ``_normalize_equal_ratio_daily_bars`` and
+    therefore keeps complete OHLCV for its bottom-fractal anchor.
+    """
+
+    if not rows:
+        return ()
+    scale = rows[-1].close
+    if not scale.is_finite() or scale <= 0:
+        raise ValueError("daily strength normalization scale must be positive")
+    quantum = Decimal("0.000000000001")
+    output: list[CompletedDailyClose] = []
+    for value in rows:
+        session = sessions.setdefault(value.session, value.session)
+        known_at = known_at_by_session.setdefault(session, value.known_at)
+        if known_at != value.known_at:
+            raise ValueError("daily strength session publication time drifted")
+        output.append(
+            CompletedDailyClose(
+                session=session,
+                close=(value.close / scale).quantize(quantum),
+                known_at=known_at,
+                completed=value.completed,
+            )
+        )
+    return tuple(output)
+
+
 class QmtSectorStrengthSource:
     """Daily all-member horizontal strength source for the live sector scan.
 
@@ -3460,7 +3509,7 @@ class QmtSectorStrengthSource:
 
     def _benchmark_cutoff_complete(
         self,
-        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        bars: Mapping[str, _DailyStrengthHistory],
         *,
         required_session: date | None,
     ) -> bool:
@@ -3481,7 +3530,7 @@ class QmtSectorStrengthSource:
 
     @staticmethod
     def _bundle_cutoff_complete(
-        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        bars: Mapping[str, _DailyStrengthHistory],
         *,
         symbols: tuple[str, ...],
         required_session: date | None,
@@ -3509,7 +3558,7 @@ class QmtSectorStrengthSource:
 
     @staticmethod
     def _incomplete_symbols(
-        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        bars: Mapping[str, _DailyStrengthHistory],
         *,
         symbols: tuple[str, ...],
         required_session: date | None,
@@ -3753,7 +3802,7 @@ class QmtSectorStrengthSource:
 
     def _new_listing_history_complete(
         self,
-        bars: tuple[DailyMarketBar, ...],
+        bars: _DailyStrengthHistory,
         *,
         listed_on: date | None,
         required_session: date | None,
@@ -4033,13 +4082,19 @@ class QmtSectorStrengthSource:
             "request_bars": self._request_bars,
             "symbols": list(symbols),
             "membership_revision": membership_revision,
-            "bar_fields": [
+            "benchmark_bar_fields": [
                 "session",
                 "open",
                 "high",
                 "low",
                 "close",
                 "volume",
+                "known_at",
+                "completed",
+            ],
+            "member_bar_fields": [
+                "session",
+                "close",
                 "known_at",
                 "completed",
             ],
@@ -4061,7 +4116,7 @@ class QmtSectorStrengthSource:
         *,
         identity: Mapping[str, object],
         observed: datetime,
-    ) -> dict[str, tuple[DailyMarketBar, ...]] | None:
+    ) -> dict[str, _DailyStrengthHistory] | None:
         if any(payload.get(key) != value for key, value in identity.items()):
             return None
         raw_bars = payload.get("bars")
@@ -4073,7 +4128,7 @@ class QmtSectorStrengthSource:
         if set(raw_bars) != set(symbols):
             return None
         expected_incomplete = payload.get("incomplete_symbols")
-        result: dict[str, tuple[DailyMarketBar, ...]] = {}
+        result: dict[str, _DailyStrengthHistory] = {}
         sessions_by_text: dict[str, date] = {}
         known_at_by_session: dict[date, datetime] = {}
         try:
@@ -4090,21 +4145,17 @@ class QmtSectorStrengthSource:
                     return None
                 if len(raw_rows) > int(identity["request_bars"]):
                     return None
-                rows: list[DailyMarketBar] = []
+                benchmark_rows = symbol == self._benchmark_symbol
+                rows: list[_DailyStrengthBar] = []
                 sessions: list[date] = []
                 for index, value in enumerate(raw_rows):
-                    if type(value) is not list or len(value) != 8:
+                    expected_width = 8 if benchmark_rows else 4
+                    if type(value) is not list or len(value) != expected_width:
                         return None
-                    (
-                        raw_session,
-                        raw_open,
-                        raw_high,
-                        raw_low,
-                        raw_close,
-                        raw_volume,
-                        raw_known_at,
-                        raw_completed,
-                    ) = value
+                    raw_session = value[0]
+                    raw_close = value[4] if benchmark_rows else value[1]
+                    raw_known_at = value[6] if benchmark_rows else value[2]
+                    raw_completed = value[7] if benchmark_rows else value[3]
                     session_text = str(raw_session)
                     session = sessions_by_text.get(session_text)
                     if session is None:
@@ -4128,28 +4179,41 @@ class QmtSectorStrengthSource:
                         or known_at > observed
                     ):
                         return None
-                    decimals = dict(
-                        zip(
-                            ("open", "high", "low", "close", "volume"),
-                            (
-                                Decimal(str(raw_open)),
-                                Decimal(str(raw_high)),
-                                Decimal(str(raw_low)),
-                                Decimal(str(raw_close)),
-                                Decimal(str(raw_volume)),
-                            ),
+                    if benchmark_rows:
+                        decimals = dict(
+                            zip(
+                                ("open", "high", "low", "close", "volume"),
+                                (
+                                    Decimal(str(value[1])),
+                                    Decimal(str(value[2])),
+                                    Decimal(str(value[3])),
+                                    Decimal(str(raw_close)),
+                                    Decimal(str(value[5])),
+                                ),
+                            )
                         )
-                    )
-                    if any(not value.is_finite() for value in decimals.values()):
-                        return None
-                    rows.append(
-                        DailyMarketBar(
+                        if any(
+                            not decimal.is_finite()
+                            for decimal in decimals.values()
+                        ):
+                            return None
+                        bar: _DailyStrengthBar = DailyMarketBar(
                             session=session,
                             known_at=expected_known_at,
                             completed=True,
                             **decimals,
                         )
-                    )
+                    else:
+                        close = Decimal(str(raw_close))
+                        if not close.is_finite():
+                            return None
+                        bar = CompletedDailyClose(
+                            session=session,
+                            close=close,
+                            known_at=expected_known_at,
+                            completed=True,
+                        )
+                    rows.append(bar)
                     sessions.append(session)
                 if (
                     sessions != sorted(sessions)
@@ -4179,7 +4243,7 @@ class QmtSectorStrengthSource:
         *,
         identity: Mapping[str, object] | None,
         observed: datetime,
-    ) -> dict[str, tuple[DailyMarketBar, ...]] | None:
+    ) -> dict[str, _DailyStrengthHistory] | None:
         if self._fact_cache_path is None or identity is None:
             return None
         self._progress_callback()
@@ -4197,7 +4261,7 @@ class QmtSectorStrengthSource:
         self,
         *,
         identity: Mapping[str, object] | None,
-        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        bars: Mapping[str, _DailyStrengthHistory],
     ) -> None:
         if self._fact_cache_path is None or identity is None:
             return
@@ -4234,8 +4298,10 @@ class QmtSectorStrengthSource:
         symbols: tuple[str, ...],
         *,
         as_of: datetime,
-    ) -> dict[str, tuple[DailyMarketBar, ...]]:
-        output: dict[str, tuple[DailyMarketBar, ...]] = {}
+    ) -> dict[str, _DailyStrengthHistory]:
+        output: dict[str, _DailyStrengthHistory] = {}
+        shared_sessions: dict[date, date] = {}
+        shared_known_at: dict[date, datetime] = {}
         for start in range(0, len(symbols), self._request_chunk_size):
             chunk = symbols[start : start + self._request_chunk_size]
             native = tuple(_qmt_code(value) for value in chunk)
@@ -4259,8 +4325,15 @@ class QmtSectorStrengthSource:
                 zip(chunk, native, strict=True),
                 start=1,
             ):
-                rows = _normalize_equal_ratio_daily_bars(
-                    _daily_rows(raw, native_code, not_after=as_of)
+                raw_rows = _daily_rows(raw, native_code, not_after=as_of)
+                rows: _DailyStrengthHistory = (
+                    _normalize_equal_ratio_daily_bars(raw_rows)
+                    if symbol == self._benchmark_symbol
+                    else _normalize_equal_ratio_daily_closes(
+                        raw_rows,
+                        sessions=shared_sessions,
+                        known_at_by_session=shared_known_at,
+                    )
                 )
                 if rows:
                     output[symbol] = rows
@@ -4306,7 +4379,7 @@ class QmtSectorStrengthSource:
         as_of: datetime,
         required_session: date | None,
         force_refresh: bool = False,
-    ) -> dict[str, tuple[DailyMarketBar, ...]]:
+    ) -> dict[str, _DailyStrengthHistory]:
         # Completed local QMT daily bars are already exact evidence for the
         # decision cutoff. Read and validate them before any network refresh;
         # only missing/stale symbols are downloaded and read again.
@@ -4553,10 +4626,14 @@ class QmtSectorStrengthSource:
                     else "UNEXPLAINED_GAP"
                 ),
                 closes=tuple(
-                    CompletedDailyClose(
-                        session=value.session,
-                        close=value.close,
-                        known_at=value.known_at,
+                    (
+                        value
+                        if isinstance(value, CompletedDailyClose)
+                        else CompletedDailyClose(
+                            session=value.session,
+                            close=value.close,
+                            known_at=value.known_at,
+                        )
                     )
                     for value in daily
                 ),
