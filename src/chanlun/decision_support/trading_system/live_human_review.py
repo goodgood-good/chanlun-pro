@@ -4199,6 +4199,16 @@ def validate_live_review_snapshot(
         payload,
         review_at=review_at,
     )
+    # ``review_at`` is the frozen market-decision cutoff (for example 15:00),
+    # while the cross-sector ranking becomes reviewable only when its
+    # authenticated batch has actually been produced.  The latter timestamp is
+    # part of the hashed strength evidence and is therefore stable across idle
+    # refreshes.  Using the market cutoff as ``review_available_at`` makes every
+    # normal post-close ranking appear to come from the future and blocks the
+    # whole notification/review projection.
+    sector_ranking_observed_at = datetime.fromisoformat(
+        str(strength_evidence.evidence_document()["decision_time"])
+    )
     sector_members = _authenticated_sector_members(strength_evidence)
     sector_documents = _validated_sector_documents(
         payload,
@@ -4520,12 +4530,10 @@ def validate_live_review_snapshot(
             )
             live_signal_human_review_alert(
                 signal,
-                review_available_at=review_at,
+                review_available_at=sector_ranking_observed_at,
                 source_snapshot_sha256=str(payload["snapshot_content_sha256"]),
                 sector_ranking_document=sector_documents.get(str(sector_id)),
-                sector_ranking_observed_at=datetime.fromisoformat(
-                    str(strength_evidence.evidence_document()["decision_time"])
-                ),
+                sector_ranking_observed_at=sector_ranking_observed_at,
                 sector_strength_evidence_revision=(
                     str(payload["sector_strength_evidence_revision"])
                     if isinstance(
@@ -5038,7 +5046,7 @@ def live_human_review_document(
             (
                 live_signal_human_review_alert(
                     signal,
-                    review_available_at=review_at,
+                    review_available_at=ranking_observed_at,
                     source_snapshot_sha256=source_snapshot_sha256,
                     sector_ranking_document=ranking_documents.get(
                         str(

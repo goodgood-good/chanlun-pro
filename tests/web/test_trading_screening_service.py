@@ -117,6 +117,7 @@ from cl_app.services.trading_screening_scope import (
     ScreeningScopeAuthorizationError,
 )
 from cl_app.services.trading_screening_source_migrations import (
+    orchestration_source_migration_allowed,
     suspension_evidence_recheck_source_migration_allowed,
 )
 from cl_app.services.realtime_quotes import (
@@ -2494,6 +2495,61 @@ def _previous_suspension_evidence_source_snapshot(
         {"schema": previous["schema"], "files": previous["files"]}
     )
     return previous
+
+
+def _previous_review_availability_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    review_row = next(
+        row
+        for row in previous["files"]
+        if row["path"]
+        == "src/chanlun/decision_support/trading_system/live_human_review.py"
+    )
+    assert review_row["sha256"] == (
+        "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"
+    )
+    review_row["sha256"] = (
+        "sha256:4e4ace9302d304a00373e01e659bb097677f8f3c9db5dfeb6bc57836215e8b84"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
+def test_review_availability_source_migration_reuses_decision_snapshot(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    current = service._decision_source_snapshot
+    current_id = service._decision_source_snapshot_id
+    assert isinstance(current, dict)
+    assert isinstance(current_id, str)
+    previous = _previous_review_availability_source_snapshot(current)
+    previous_id = previous["aggregate_sha256"]
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_id,
+        current_decision_source_snapshot_id=current_id,
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
+    )
+    assert not suspension_evidence_recheck_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_id,
+        current_decision_source_snapshot_id=current_id,
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
+    )
 
 
 def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(

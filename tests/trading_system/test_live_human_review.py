@@ -325,6 +325,7 @@ def _attach_strength_evidence(
     *,
     include_signal_members: bool = True,
     additional_members: dict[str, tuple[str, ...]] | None = None,
+    decision_time: datetime | None = None,
 ) -> None:
     as_of = deterministic_bundle().as_of
     sector_ids = tuple(sorted(str(value["sector_id"]) for value in snapshot["sectors"]))
@@ -340,7 +341,7 @@ def _attach_strength_evidence(
     for sector_id, members in (additional_members or {}).items():
         signal_members.setdefault(sector_id, set()).update(members)
     batch = build_horizontal_sector_strength_batch(
-        decision_time=as_of,
+        decision_time=as_of if decision_time is None else decision_time,
         benchmark_symbol="SH.000300",
         benchmark_daily=(),
         members_by_sector={
@@ -826,6 +827,31 @@ def test_monitor_instrument_exclusion_contract_accepts_canonical_diagnostic() ->
         deterministic_bundle().as_of
     )
     validate_live_review_snapshot(snapshot)
+
+
+def test_postclose_review_uses_authenticated_ranking_availability_time() -> None:
+    snapshot = live_snapshot()
+    market_cutoff = deterministic_bundle().as_of
+    ranking_available_at = market_cutoff + timedelta(hours=5)
+    snapshot["scanned_at"] = ranking_available_at.isoformat()
+    _attach_strength_evidence(snapshot, decision_time=ranking_available_at)
+    snapshot["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        snapshot
+    )
+
+    decision_at, _signals = validate_live_review_snapshot(snapshot)
+    report = live_human_review_document(
+        live_snapshot=snapshot,
+        source_snapshot_sha256=str(snapshot["snapshot_content_sha256"]),
+        session=market_cutoff.date(),
+    )
+
+    assert decision_at == market_cutoff
+    assert report["sample"]["market_data_as_of"] == market_cutoff.isoformat()
+    assert report["review_queue"]
+    assert {
+        row["review_available_at"] for row in report["review_queue"]
+    } == {ranking_available_at.isoformat()}
 
 
 def test_monitor_instrument_exclusion_contract_preserves_unresolved_type() -> None:
