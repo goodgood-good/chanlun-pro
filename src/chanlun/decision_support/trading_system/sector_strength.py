@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping as MappingABC
+from collections.abc import Callable, Iterator, Mapping as MappingABC
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -178,6 +178,7 @@ def _build_horizontal_sector_strength(
     benchmark_daily: Sequence[DailyMarketBar],
     members_by_sector: Mapping[str, tuple[SectorMemberHistory, ...]],
     membership_revision: str,
+    progress_callback: Callable[[], None] | None = None,
 ) -> tuple[dict[str, SectorStrengthEvidence], dict[str, object]]:
     """Rank sectors by equal-weight member MA categories from one anchor.
 
@@ -312,6 +313,8 @@ def _build_horizontal_sector_strength(
             # 临时正值用于满足不可变快照；跨行业排名会在下方根据所有已解析值统一分配。
             rank=1,
         )
+        if progress_callback is not None:
+            progress_callback()
     ordered = sorted(
         (value for value in provisional.values() if value.resolved),
         key=lambda value: (-value.strength, value.sector_id),
@@ -386,6 +389,8 @@ def _build_horizontal_sector_strength(
                 "source_revision": source_revision,
             }
         )
+        if progress_callback is not None:
+            progress_callback()
     evidence_base["anchor_reason_codes"] = []
     evidence_base["sectors"] = audit_rows
     return output, evidence_base
@@ -672,6 +677,7 @@ def build_horizontal_sector_strength_batch(
     benchmark_daily: Sequence[DailyMarketBar],
     members_by_sector: Mapping[str, tuple[SectorMemberHistory, ...]],
     membership_revision: str,
+    progress_callback: Callable[[], None] | None = None,
 ) -> SectorStrengthBatch:
     output, evidence = _build_horizontal_sector_strength(
         decision_time=decision_time,
@@ -679,6 +685,7 @@ def build_horizontal_sector_strength_batch(
         benchmark_daily=benchmark_daily,
         members_by_sector=members_by_sector,
         membership_revision=membership_revision,
+        progress_callback=progress_callback,
     )
     return SectorStrengthBatch(
         strengths=tuple(output[key] for key in sorted(output)),

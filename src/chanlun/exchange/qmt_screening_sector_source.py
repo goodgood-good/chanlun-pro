@@ -4052,8 +4052,8 @@ class QmtSectorStrengthSource:
             "real_order_transport": False,
         }
 
-    @staticmethod
     def _daily_bars_from_payload(
+        self,
         payload: Mapping[str, object],
         *,
         identity: Mapping[str, object],
@@ -4069,10 +4069,20 @@ class QmtSectorStrengthSource:
         symbols = tuple(identity["symbols"])
         if set(raw_bars) != set(symbols):
             return None
+        expected_incomplete = payload.get("incomplete_symbols")
         result: dict[str, tuple[DailyMarketBar, ...]] = {}
+        sessions_by_text: dict[str, date] = {}
+        known_at_by_session: dict[date, datetime] = {}
         try:
-            for symbol in symbols:
-                raw_rows = raw_bars[symbol]
+            for ordinal, symbol in enumerate(symbols, start=1):
+                # ``json.loads`` builds a large row tree.  Consume each symbol
+                # as it is converted so raw strings/lists do not coexist with
+                # the complete typed market-bar graph at the memory peak.
+                raw_rows = (
+                    raw_bars.pop(symbol)
+                    if isinstance(raw_bars, dict)
+                    else raw_bars[symbol]
+                )
                 if not isinstance(raw_rows, list) or not raw_rows:
                     return None
                 if len(raw_rows) > int(identity["request_bars"]):
@@ -4092,16 +4102,23 @@ class QmtSectorStrengthSource:
                         raw_known_at,
                         raw_completed,
                     ) = value
-                    session = date.fromisoformat(str(raw_session))
+                    session_text = str(raw_session)
+                    session = sessions_by_text.get(session_text)
+                    if session is None:
+                        session = date.fromisoformat(session_text)
+                        sessions_by_text[session_text] = session
                     known_at = normalize_datetime(
                         datetime.fromisoformat(str(raw_known_at)),
                         f"bars.{symbol}[{index}].known_at",
                     )
-                    expected_known_at = datetime.combine(
-                        session,
-                        time(15, 0),
-                        tzinfo=_SHANGHAI,
-                    )
+                    expected_known_at = known_at_by_session.get(session)
+                    if expected_known_at is None:
+                        expected_known_at = datetime.combine(
+                            session,
+                            time(15, 0),
+                            tzinfo=_SHANGHAI,
+                        )
+                        known_at_by_session[session] = expected_known_at
                     if (
                         raw_completed is not True
                         or known_at != expected_known_at
@@ -4125,7 +4142,7 @@ class QmtSectorStrengthSource:
                     rows.append(
                         DailyMarketBar(
                             session=session,
-                            known_at=known_at,
+                            known_at=expected_known_at,
                             completed=True,
                             **decimals,
                         )
@@ -4137,8 +4154,11 @@ class QmtSectorStrengthSource:
                 ):
                     return None
                 result[symbol] = tuple(rows)
+                if ordinal % 32 == 0:
+                    self._progress_callback()
         except (ArithmeticError, TypeError, ValueError):
             return None
+        self._progress_callback()
         required_session = date.fromisoformat(
             str(identity["required_daily_session"])
         )
@@ -4147,7 +4167,7 @@ class QmtSectorStrengthSource:
             symbols=symbols,
             required_session=required_session,
         )
-        if payload.get("incomplete_symbols") != list(incomplete):
+        if expected_incomplete != list(incomplete):
             return None
         return result
 
@@ -4484,53 +4504,62 @@ class QmtSectorStrengthSource:
                 explained_suspended | explained_prelisting
             ),
         )
-        histories: dict[str, tuple[SectorMemberHistory, ...]] = {}
-        for sector_id, members in normalized_members_by_sector.items():
-            rows: list[SectorMemberHistory] = []
-            for symbol in members:
-                daily = bars.get(symbol, ())
-                member_cutoff_complete = bool(daily) and (
-                    required_session is not None
-                    and daily[-1].session == required_session
-                )
-                member_suspended = (
-                    not member_cutoff_complete
-                    and symbol in explained_suspended
-                )
-                listed_on = listing_dates.get(symbol)
-                new_listing_complete = self._new_listing_history_complete(
-                    daily,
-                    listed_on=listed_on,
-                    required_session=required_session,
-                    observed=observed,
-                )
-                rows.append(
-                    SectorMemberHistory(
-                        symbol=symbol,
-                        listed_on=(
-                            listed_on
-                            or (daily[0].session if daily else observed.date())
-                        ),
-                        history_status=(
-                            "COMPLETE"
-                            if member_cutoff_complete and len(daily) >= 5
-                            else "NEW_LISTING"
-                            if new_listing_complete
-                            else "SUSPENDED"
-                            if member_suspended
-                            else "UNEXPLAINED_GAP"
-                        ),
-                        closes=tuple(
-                            CompletedDailyClose(
-                                session=value.session,
-                                close=value.close,
-                                known_at=value.known_at,
-                            )
-                            for value in daily
-                        ),
+        member_histories: dict[str, SectorMemberHistory] = {}
+        for ordinal, symbol in enumerate(sorted(member_symbols), start=1):
+            daily = bars.get(symbol, ())
+            member_cutoff_complete = bool(daily) and (
+                required_session is not None
+                and daily[-1].session == required_session
+            )
+            member_suspended = (
+                not member_cutoff_complete
+                and symbol in explained_suspended
+            )
+            listed_on = listing_dates.get(symbol)
+            new_listing_complete = self._new_listing_history_complete(
+                daily,
+                listed_on=listed_on,
+                required_session=required_session,
+                observed=observed,
+            )
+            member_histories[symbol] = SectorMemberHistory(
+                symbol=symbol,
+                listed_on=(
+                    listed_on
+                    or (daily[0].session if daily else observed.date())
+                ),
+                history_status=(
+                    "COMPLETE"
+                    if member_cutoff_complete and len(daily) >= 5
+                    else "NEW_LISTING"
+                    if new_listing_complete
+                    else "SUSPENDED"
+                    if member_suspended
+                    else "UNEXPLAINED_GAP"
+                ),
+                closes=tuple(
+                    CompletedDailyClose(
+                        session=value.session,
+                        close=value.close,
+                        known_at=value.known_at,
                     )
-                )
-            histories[sector_id] = tuple(rows)
+                    for value in daily
+                ),
+            )
+            if ordinal % 32 == 0:
+                self._progress_callback()
+        self._progress_callback()
+        histories: dict[str, tuple[SectorMemberHistory, ...]] = {}
+        for ordinal, (sector_id, members) in enumerate(
+            normalized_members_by_sector.items(),
+            start=1,
+        ):
+            histories[sector_id] = tuple(
+                member_histories[symbol] for symbol in members
+            )
+            if ordinal % 16 == 0:
+                self._progress_callback()
+        self._progress_callback()
         result = build_horizontal_sector_strength_batch(
             decision_time=observed,
             benchmark_symbol=self._benchmark_symbol,
@@ -4541,7 +4570,9 @@ class QmtSectorStrengthSource:
             ),
             members_by_sector=histories,
             membership_revision=membership_revision,
+            progress_callback=self._progress_callback,
         )
+        self._progress_callback()
             # 发布滞后或未解析日历属于瞬时状态。若把该未解析批次留在全天内存缓存中，
             # 单例生产数据源不重启便永远无法恢复。
         member_history_complete = all(

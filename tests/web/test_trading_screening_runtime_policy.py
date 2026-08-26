@@ -164,15 +164,19 @@ def test_manifest_migration_allows_exact_validation_archive_idle_transition() ->
     path = "web/chanlun_chart/cl_app/services/trading_screening.py"
     current_row = next(row for row in current["files"] if row["path"] == path)
     cached_row = next(row for row in cached["files"] if row["path"] == path)
-    assert current_row["sha256"] == (
+    # Reconstruct the reviewed historical transition explicitly.  Later
+    # decision-rule edits must invalidate an old archive rather than forcing
+    # this orchestration-only migration test to bless the latest source hash.
+    current_row["sha256"] = (
         "sha256:3cd8d938d16a422000dd7f6ea307645bed15c4a30094bd2302c845392b23cc85"
     )
     cached_row["sha256"] = (
         "sha256:6a1d8dd8fbf3b80794fb7f8e16f721cc73faf4119430a8c07e968adf2af233fa"
     )
-    cached["aggregate_sha256"] = sha256_json(
-        {"schema": cached["schema"], "files": cached["files"]}
-    )
+    for snapshot in (cached, current):
+        snapshot["aggregate_sha256"] = sha256_json(
+            {"schema": snapshot["schema"], "files": snapshot["files"]}
+        )
 
     assert orchestration_source_migration_allowed(
         cached_decision_source_snapshot_id=cached["aggregate_sha256"],

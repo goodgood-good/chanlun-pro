@@ -730,20 +730,31 @@ def member_ma_strength_category(
     )
     if len(visible) < 5:
         return 1
-    conquered: list[bool] = []
-    for period in _SECTOR_MA_PERIODS:
-        attacked = False
-        for index, row in enumerate(visible):
-            if row.session < anchor_session:
-                continue
-            prefix = tuple(value.close for value in visible[: index + 1])
-            average = completed_sma(prefix, period)
-            if average is not None and row.close > average:
-                attacked = True
+    # A prefix sum preserves the exact rolling-window rule while avoiding a
+    # new tuple and a repeated sum for every member/session/period pair.  The
+    # former quadratic implementation becomes prohibitive for the complete
+    # QMT GICS3/GICS4 cohort even though the resulting category is identical.
+    prefix_sums = [Decimal("0")]
+    for row in visible:
+        prefix_sums.append(prefix_sums[-1] + row.close)
+    anchor_index = next(
+        (
+            index
+            for index, row in enumerate(visible)
+            if row.session >= anchor_session
+        ),
+        len(visible),
+    )
+    for ordinal, period in enumerate(_SECTOR_MA_PERIODS, start=1):
+        conquered = False
+        for index in range(max(anchor_index, period - 1), len(visible)):
+            average = (
+                prefix_sums[index + 1] - prefix_sums[index + 1 - period]
+            ) / Decimal(period)
+            if visible[index].close > average:
+                conquered = True
                 break
-        conquered.append(attacked)
-    for ordinal, attacked in enumerate(conquered, start=1):
-        if not attacked:
+        if not conquered:
             return ordinal
     return 9
 

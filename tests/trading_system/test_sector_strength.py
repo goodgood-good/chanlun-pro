@@ -164,6 +164,38 @@ def test_precomputed_categories_are_byte_identical_to_full_history_core() -> Non
     assert optimized.evidence_revision == full.evidence_revision
 
 
+def test_full_history_batch_reports_progress_between_sectors() -> None:
+    values = (
+        10, 11, 12, 11, 10, 9, 10, 11, 12, 13, 12, 11,
+        10, 9, 8, 9, 10, 11, 10, 9, 8, 7, 8, 9, 10, 11, 10,
+    )
+    start = date(2020, 1, 1)
+    benchmark = tuple(
+        _market_bar(start + timedelta(days=index), value)
+        for index, value in enumerate(values)
+    )
+    decision = benchmark[-1].known_at
+    progress: list[int] = []
+
+    build_horizontal_sector_strength_batch(
+        decision_time=decision,
+        benchmark_symbol="SH.000300",
+        benchmark_daily=benchmark,
+        members_by_sector={
+            "strong": (
+                _member("SH.600001", strong=True, decision=decision.date()),
+            ),
+            "weak": (
+                _member("SH.600002", strong=False, decision=decision.date()),
+            ),
+        },
+        membership_revision="sha256:" + "7" * 64,
+        progress_callback=lambda: progress.append(len(progress)),
+    )
+
+    assert len(progress) == 4
+
+
 def test_unexplained_member_gap_never_receives_a_synthetic_rank() -> None:
     benchmark = tuple(
         _market_bar(date(2020, 1, 1) + timedelta(days=index), value)

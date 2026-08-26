@@ -1763,6 +1763,63 @@ class DailyFakeXtdata:
         return fields
 
 
+def test_daily_fact_decode_consumes_rows_and_reports_bounded_progress(
+    tmp_path: Path,
+) -> None:
+    progress: list[int] = []
+    source = QmtSectorStrengthSource(
+        fact_cache_path=tmp_path / "daily.json",
+        fact_cache_revision="sha256:" + "a" * 64,
+        progress_callback=lambda: progress.append(len(progress)),
+    )
+    required = AS_OF.date() - timedelta(days=1)
+    symbols = tuple(f"SH.60{index:04d}" for index in range(33))
+    identity = source._fact_identity(
+        symbols=symbols,
+        observed=AS_OF,
+        membership_revision="sha256:" + "b" * 64,
+        required_session=required,
+    )
+    assert identity is not None
+    known_at = datetime.combine(
+        required,
+        datetime.min.time().replace(hour=15),
+        tzinfo=SHANGHAI,
+    )
+    payload = {
+        **identity,
+        "incomplete_symbols": [],
+        "bars": {
+            symbol: [
+                [
+                    required.isoformat(),
+                    "10.0",
+                    "10.2",
+                    "9.9",
+                    "10.1",
+                    "1000",
+                    known_at.isoformat(),
+                    True,
+                ]
+            ]
+            for symbol in symbols
+        },
+    }
+
+    decoded = source._daily_bars_from_payload(
+        payload,
+        identity=identity,
+        observed=AS_OF,
+    )
+
+    assert decoded is not None
+    assert len(decoded) == 33
+    assert payload["bars"] == {}
+    assert len(progress) == 2
+    assert decoded[symbols[0]][0].session is decoded[symbols[1]][0].session
+    assert decoded[symbols[0]][0].known_at is decoded[symbols[1]][0].known_at
+
+
 def test_daily_strength_normalization_is_future_scale_invariant() -> None:
     known = datetime(2026, 7, 22, 15, 0, tzinfo=SHANGHAI)
 
@@ -1897,6 +1954,41 @@ def test_daily_strength_memory_cache_is_scoped_to_normalized_membership(
     assert reordered_narrow is narrow
     assert fake.market_calls == calls_after_narrow
     assert len(builder_cohorts) == 2
+
+
+def test_daily_strength_reuses_one_history_across_hierarchy_levels(
+    monkeypatch,
+) -> None:
+    fake = DailyFakeXtdata()
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    actual_builder = subject.build_horizontal_sector_strength_batch
+    captured: list[dict[str, tuple[object, ...]]] = []
+
+    def recording_builder(**kwargs):
+        captured.append(kwargs["members_by_sector"])
+        return actual_builder(**kwargs)
+
+    monkeypatch.setattr(
+        subject,
+        "build_horizontal_sector_strength_batch",
+        recording_builder,
+    )
+
+    QmtSectorStrengthSource().strengths(
+        members_by_sector={
+            "qmt-gics3:parent": ("SH.600000",),
+            "qmt-gics4:child": ("SH.600000",),
+        },
+        as_of=AS_OF,
+        membership_revision="sha256:" + "c" * 64,
+    )
+
+    [hierarchy] = captured
+    parent = hierarchy["qmt-gics3:parent"][0]
+    child = hierarchy["qmt-gics4:child"][0]
+    assert parent is child
+    assert parent.closes is child.closes
 
 
 class ShortDailyHistoryXtdata(DailyFakeXtdata):
