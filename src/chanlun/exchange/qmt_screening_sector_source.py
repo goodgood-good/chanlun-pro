@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
+from time import sleep as _sleep
 import unicodedata
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -124,6 +125,8 @@ _FACT_PRODUCER_SCHEMA = "chanlun-qmt-sector-fact-producer"
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FACT_STREAM_BUFFER_CHARACTERS = 64 * 1024
 _DAILY_STRENGTH_REQUEST_CHUNK_SIZE = 64
+_DAILY_STRENGTH_REFRESH_CHUNK_SIZE = 16
+_DAILY_STRENGTH_REFRESH_SETTLE_SECONDS = 1.0
 _DAILY_STRENGTH_PROGRESS_SYMBOL_INTERVAL = 8
 
 
@@ -3451,6 +3454,7 @@ class QmtSectorStrengthSource:
         benchmark_symbol: str = "SH.000300",
         request_bars: int = 300,
         request_chunk_size: int = _DAILY_STRENGTH_REQUEST_CHUNK_SIZE,
+        refresh_chunk_size: int = _DAILY_STRENGTH_REFRESH_CHUNK_SIZE,
         progress_callback: Callable[[], None] = lambda: None,
         fact_cache_path: Path | str | None = None,
         fact_cache_revision: str | None = None,
@@ -3461,7 +3465,11 @@ class QmtSectorStrengthSource:
     ) -> None:
         if _NORMALIZED_A_SHARE_CODE.fullmatch(benchmark_symbol) is None:
             raise ValueError("benchmark_symbol must be a normalized A-share code")
-        if request_bars < 233 or request_chunk_size <= 0:
+        if (
+            request_bars < 233
+            or request_chunk_size <= 0
+            or refresh_chunk_size <= 0
+        ):
             raise ValueError("daily sector strength history configuration is invalid")
         if not callable(progress_callback):
             raise TypeError("progress_callback must be callable")
@@ -3475,6 +3483,7 @@ class QmtSectorStrengthSource:
         self._benchmark_symbol = benchmark_symbol
         self._request_bars = request_bars
         self._request_chunk_size = request_chunk_size
+        self._refresh_chunk_size = refresh_chunk_size
         self._progress_callback = progress_callback
         self._fact_cache_path = cache_path
         self._fact_cache_revision = cache_revision
@@ -4348,8 +4357,8 @@ class QmtSectorStrengthSource:
         return output
 
     def _refresh_daily(self, symbols: tuple[str, ...]) -> None:
-        for start in range(0, len(symbols), self._request_chunk_size):
-            chunk = symbols[start : start + self._request_chunk_size]
+        for start in range(0, len(symbols), self._refresh_chunk_size):
+            chunk = symbols[start : start + self._refresh_chunk_size]
             native = tuple(_qmt_code(value) for value in chunk)
             # Refresh only facts whose local cutoff proof failed. The native
             # call stays bounded so a wide industry cohort never falls back to
@@ -4371,6 +4380,13 @@ class QmtSectorStrengthSource:
                 pass
             finally:
                 self._progress_callback()
+            if start + self._refresh_chunk_size < len(symbols):
+                # QMT may return before its daily download task has completely
+                # released the RPC lane.  A second immediate batch can then
+                # block inside download_history_data2 until the worker's idle
+                # timeout.  Production probes established this bounded settle
+                # interval while preserving small-batch throughput.
+                _sleep(_DAILY_STRENGTH_REFRESH_SETTLE_SECONDS)
 
     def _fetch(
         self,

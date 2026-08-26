@@ -1798,6 +1798,27 @@ def test_daily_read_uses_memory_bounded_chunks_and_inner_progress(
     assert len(progress) == 25
 
 
+def test_daily_refresh_uses_smaller_bounded_chunks_and_progress(
+    monkeypatch,
+) -> None:
+    fake = DailyFakeXtdata()
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    settles: list[float] = []
+    monkeypatch.setattr(subject, "_sleep", settles.append)
+    progress: list[int] = []
+    source = QmtSectorStrengthSource(
+        progress_callback=lambda: progress.append(len(progress)),
+    )
+    symbols = tuple(f"SH.60{index:04d}" for index in range(35))
+
+    source._refresh_daily(symbols)
+
+    assert [len(call[0]) for call in fake.batch_download_calls] == [16, 16, 3]
+    assert len(progress) == 6
+    assert settles == [1.0, 1.0]
+
+
 def test_daily_fact_decode_consumes_rows_and_reports_bounded_progress(
     tmp_path: Path,
 ) -> None:
