@@ -2105,6 +2105,7 @@ def test_qmt_daily_fact_cache_recomputes_strength_with_current_code(
     ).strengths(**_daily_strength_arguments())
 
     assert fake.market_calls == calls_after_first == 1
+    assert fake.batch_download_calls == []
     assert len(builder_calls) == 2
     assert (
         first.evidence_document()["schema"]
@@ -2121,7 +2122,9 @@ def test_qmt_daily_fact_cache_recomputes_strength_with_current_code(
         fact_cache_revision=revision,
     )
     stale = after_close_source.strengths(**after_close)
-    assert fake.market_calls == calls_after_first + 1
+    # One local read proves the stale cutoff, then the bounded refresh is read
+    # back once. The old implementation downloaded before its only read.
+    assert fake.market_calls == calls_after_first + 2
     assert builder_calls[-1]["benchmark_daily"] == ()
     assert all(not value.resolved for value in stale.values())
     stale_document = json.loads(path.read_text(encoding="utf-8"))
@@ -2137,7 +2140,9 @@ def test_qmt_daily_fact_cache_recomputes_strength_with_current_code(
     fake.latest_session = AS_OF.date()
     fake.benchmark_latest_session = AS_OF.date()
     fresh = after_close_source.strengths(**after_close)
-    assert fake.market_calls == calls_after_first + 2
+    # QMT has published the facts between attempts, so the pre-download local
+    # read recovers them without another native download.
+    assert fake.market_calls == calls_after_first + 3
     assert builder_calls[-1]["benchmark_daily"][-1].session == AS_OF.date()
     assert fresh.evidence_document()["decision_time"].startswith(
         AS_OF.date().isoformat()
@@ -2189,9 +2194,7 @@ def test_qmt_daily_fact_cache_rejects_stale_benchmark_before_close(
     recovered = source.strengths(**_daily_strength_arguments())
 
     assert fake.market_calls > calls_after_stale
-    assert fake.batch_download_calls == [
-        (("000300.SH",), "1d", "", "", None, True)
-    ]
+    assert fake.batch_download_calls == []
     assert tuple(recovered.values())
     persisted = json.loads(path.read_text(encoding="utf-8"))["payload"]
     assert persisted["required_daily_session"] == required.isoformat()
@@ -2199,7 +2202,7 @@ def test_qmt_daily_fact_cache_rejects_stale_benchmark_before_close(
     assert persisted["bars"]["SH.000300"][-1][0] == required.isoformat()
 
 
-def test_qmt_daily_source_batch_refreshes_benchmark_and_members(
+def test_qmt_daily_source_batch_refreshes_only_stale_symbols(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -2221,7 +2224,7 @@ def test_qmt_daily_source_batch_refreshes_benchmark_and_members(
     assert fake.download_calls == []
     assert fake.batch_download_calls == [
         (
-            ("000300.SH", "600000.SH"),
+            ("000300.SH",),
             "1d",
             "",
             "",
@@ -2234,6 +2237,39 @@ def test_qmt_daily_source_batch_refreshes_benchmark_and_members(
     assert persisted["required_daily_session"] == required.isoformat()
     assert persisted["incomplete_symbols"] == []
     assert persisted["bars"]["SH.000300"][-1][0] == required.isoformat()
+
+
+def test_qmt_daily_source_failed_partial_refresh_stays_unresolved(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    required = AS_OF.date() - timedelta(days=1)
+
+    class FailedRefreshXtdata(DailyFakeXtdata):
+        def download_history_data2(self, *args, **kwargs):
+            super().download_history_data2(*args, **kwargs)
+            raise RuntimeError("QMT daily refresh failed")
+
+    fake = FailedRefreshXtdata(
+        latest_session=required,
+        benchmark_latest_session=required - timedelta(days=20),
+    )
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    path = tmp_path / "daily.json"
+
+    result = QmtSectorStrengthSource(
+        fact_cache_path=path,
+        fact_cache_revision="sha256:" + "6" * 64,
+    ).strengths(**_daily_strength_arguments())
+
+    assert all(not value.resolved for value in result.values())
+    assert fake.market_calls == 2
+    assert fake.batch_download_calls == [
+        (("000300.SH",), "1d", "", "", None, True)
+    ]
+    persisted = json.loads(path.read_text(encoding="utf-8"))["payload"]
+    assert persisted["incomplete_symbols"] == ["SH.000300"]
 
 
 def test_qmt_daily_fact_cache_rejects_stale_member_before_close(
@@ -2282,9 +2318,7 @@ def test_qmt_daily_fact_cache_rejects_stale_member_before_close(
     recovered = source.strengths(**_daily_strength_arguments())
 
     assert fake.market_calls > calls_after_stale
-    assert fake.batch_download_calls == [
-        (("600000.SH",), "1d", "", "", None, True)
-    ]
+    assert fake.batch_download_calls == []
     assert tuple(recovered.values())
     [recovered_member] = builder_calls[-1]["members_by_sector"][
         "qmt-gics3:daily"

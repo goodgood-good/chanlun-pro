@@ -1701,6 +1701,10 @@ def test_bounded_sector_assessment_limits_work_and_routing_without_clipping_cont
         ("qmt-gics3:bank", "5m"),
     ]
     assert gateway.members() == {"qmt-gics3:bank": admitted}
+    timings = gateway.runtime_health_snapshot()["performance"]["timings"]
+    assert timings["sector_frame_provider.30m"]["count"] == 1
+    assert timings["sector_frame_provider.5m"]["count"] == 1
+    assert timings["sector_strength_provider"]["count"] == 1
 
 
 @pytest.mark.parametrize(

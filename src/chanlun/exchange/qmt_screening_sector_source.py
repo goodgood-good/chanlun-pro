@@ -4206,7 +4206,7 @@ class QmtSectorStrengthSource:
         finally:
             self._progress_callback()
 
-    def _fetch(
+    def _read_daily(
         self,
         symbols: tuple[str, ...],
         *,
@@ -4216,23 +4216,6 @@ class QmtSectorStrengthSource:
         for start in range(0, len(symbols), self._request_chunk_size):
             chunk = symbols[start : start + self._request_chunk_size]
             native = tuple(_qmt_code(value) for value in chunk)
-            # QMT 本地日线表可能按整个交易所分区存在不同程度的滞后。每个有界分块只用
-            # 一次原生调用刷新，避免发起数千次单标的下载；失败分块仍会读取，并在下方
-            # 截点门中失败关闭。
-            try:
-                self._progress_callback()
-                with _XTDATA_NATIVE_LOCK:
-                    xtdata.download_history_data2(
-                        list(native),
-                        "1d",
-                        start_time="",
-                        end_time="",
-                        incrementally=True,
-                    )
-            except Exception:
-                pass
-            finally:
-                self._progress_callback()
             self._progress_callback()
             with _XTDATA_NATIVE_LOCK:
                 raw = xtdata.get_market_data(
@@ -4255,6 +4238,62 @@ class QmtSectorStrengthSource:
                 if rows:
                     output[symbol] = rows
         return output
+
+    def _refresh_daily(self, symbols: tuple[str, ...]) -> None:
+        for start in range(0, len(symbols), self._request_chunk_size):
+            chunk = symbols[start : start + self._request_chunk_size]
+            native = tuple(_qmt_code(value) for value in chunk)
+            # Refresh only facts whose local cutoff proof failed. The native
+            # call stays bounded so a wide industry cohort never falls back to
+            # thousands of single-symbol downloads.
+            try:
+                self._progress_callback()
+                with _XTDATA_NATIVE_LOCK:
+                    xtdata.download_history_data2(
+                        list(native),
+                        "1d",
+                        start_time="",
+                        end_time="",
+                        incrementally=True,
+                    )
+            except Exception:
+                # The post-refresh read remains authoritative. A failed or
+                # partial native refresh therefore fails closed at the cutoff
+                # gate without discarding usable local history.
+                pass
+            finally:
+                self._progress_callback()
+
+    def _fetch(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        as_of: datetime,
+        required_session: date | None,
+        force_refresh: bool = False,
+    ) -> dict[str, tuple[DailyMarketBar, ...]]:
+        # Completed local QMT daily bars are already exact evidence for the
+        # decision cutoff. Read and validate them before any network refresh;
+        # only missing/stale symbols are downloaded and read again.
+        current = self._read_daily(symbols, as_of=as_of)
+        refresh_targets = (
+            symbols
+            if force_refresh
+            else self._incomplete_symbols(
+                current,
+                symbols=symbols,
+                required_session=required_session,
+            )
+        )
+        if not refresh_targets:
+            return current
+        self._refresh_daily(refresh_targets)
+        refreshed = self._read_daily(refresh_targets, as_of=as_of)
+        return {
+            symbol: refreshed.get(symbol, current.get(symbol, ()))
+            for symbol in symbols
+            if refreshed.get(symbol) or current.get(symbol)
+        }
 
     def strengths(
         self,
@@ -4327,7 +4366,11 @@ class QmtSectorStrengthSource:
             if symbol not in status_facts or not current_bars.get(symbol)
         )
         if refresh_targets and required_session is not None:
-            refreshed = self._fetch(refresh_targets, as_of=observed)
+            refreshed = self._fetch(
+                refresh_targets,
+                as_of=observed,
+                required_session=required_session,
+            )
             current_bars = {
                 symbol: refreshed.get(symbol, current_bars.get(symbol, ()))
                 for symbol in symbols
@@ -4391,6 +4434,8 @@ class QmtSectorStrengthSource:
             refreshed = self._fetch(
                 tuple(sorted(listing_gap_targets)),
                 as_of=observed,
+                required_session=required_session,
+                force_refresh=True,
             )
             current_bars = {
                 symbol: refreshed.get(symbol, current_bars.get(symbol, ()))

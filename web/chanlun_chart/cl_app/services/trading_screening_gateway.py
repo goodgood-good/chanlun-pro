@@ -3173,14 +3173,21 @@ class NativeTradingDataGateway:
                             self._config.request_bars("30m") * 6 + 47
                         )
                     self._report_progress()
-                    raw_sector_frame = self._sector_frame_provider(
-                        sector_id=sector_id,
-                        sector_name=sector_name.strip(),
-                        members=analysis_members,
-                        frequency=provider_frequency,
-                        as_of=observed_at,
-                        request_bars=provider_request_bars,
-                    )
+                    provider_started = perf_counter()
+                    try:
+                        raw_sector_frame = self._sector_frame_provider(
+                            sector_id=sector_id,
+                            sector_name=sector_name.strip(),
+                            members=analysis_members,
+                            frequency=provider_frequency,
+                            as_of=observed_at,
+                            request_bars=provider_request_bars,
+                        )
+                    finally:
+                        self._record_performance_timing(
+                            f"sector_frame_provider.{frequency}",
+                            perf_counter() - provider_started,
+                        )
                     self._report_progress()
                     if frequency == "30m":
                         if not isinstance(raw_sector_frame, pd.DataFrame):
@@ -3302,11 +3309,18 @@ class NativeTradingDataGateway:
                     latest_bars.values(),
                     default=observed_at,
                 )
-                strengths = self._sector_strength_provider(
-                    members_by_sector=analysis_members_by_sector,
-                    as_of=strength_decision_time,
-                    membership_revision=catalog_revision,
-                )
+                strength_started = perf_counter()
+                try:
+                    strengths = self._sector_strength_provider(
+                        members_by_sector=analysis_members_by_sector,
+                        as_of=strength_decision_time,
+                        membership_revision=catalog_revision,
+                    )
+                finally:
+                    self._record_performance_timing(
+                        "sector_strength_provider",
+                        perf_counter() - strength_started,
+                    )
                 self._report_progress()
                 if not isinstance(strengths, Mapping):
                     raise TypeError("sector strength provider must return a mapping")
