@@ -134,6 +134,65 @@ def test_runtime_state_cache_cleanup_reclaims_only_unleased_persistent_versions(
     assert unrelated.exists()
 
 
+def test_runtime_state_cache_maintenance_reclaims_rolling_version_after_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "trading_screening_runtime_state_cache"
+    old = parent / f"runtime-{'f' * 24}"
+    old.mkdir(parents=True)
+    (old / "state.clrt").write_text("stale producer state", encoding="utf-8")
+    old_owner = parent / f".{old.name}.owner-123-{'1' * 16}"
+    old_owner.touch()
+    rolling_owner_alive = {123: True}
+    monkeypatch.setattr(
+        screening_process_subject,
+        "_process_exists",
+        lambda pid: pid == os.getpid() or rolling_owner_alive.get(pid, False),
+    )
+    monkeypatch.setattr(
+        screening_process_subject,
+        "_RUNTIME_STATE_CACHE_MAINTENANCE_INITIAL_DELAY_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        screening_process_subject,
+        "_RUNTIME_STATE_CACHE_MAINTENANCE_INTERVAL_SECONDS",
+        0.02,
+    )
+    revision = "a" * 40 + ".tree." + "b" * 24
+    proxy = NativeTradingDataGatewayProcessProxy(
+        log_path=tmp_path / "native-worker.log",
+        structure_worker_count=3,
+        expected_application_source_revision=revision,
+        runtime_state_cache_secret=b"stable-production-secret-material",
+    )
+    maintenance_thread = proxy._runtime_state_cache_maintenance_thread  # noqa: SLF001
+    try:
+        assert old.exists()
+        assert old_owner.exists()
+
+        rolling_owner_alive[123] = False
+        deadline = time.monotonic() + 2.0
+        while old.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert not old.exists()
+        assert not old_owner.exists()
+        maintenance = proxy.health_snapshot()["structure_worker_pool"][
+            "runtime_state_cache_maintenance"
+        ]
+        assert maintenance["enabled"] is True
+        assert maintenance["non_blocking"] is True
+        assert maintenance["thread_alive"] is True
+        assert maintenance["attempt_count"] >= 2
+        assert maintenance["last_error"] is None
+    finally:
+        proxy.close()
+    assert maintenance_thread is not None
+    assert not maintenance_thread.is_alive()
+
+
 def test_runtime_state_cache_producer_ignores_decision_only_changes(
     tmp_path: Path,
 ) -> None:
@@ -2299,18 +2358,25 @@ def test_proxy_retags_exact_reviewed_sector_snapshot_transition(
     as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     cache_path = tmp_path / "sector-snapshot.json"
     cached_revision = (
-        "sha256:544bc1e62b74d754771c8764114d8c754f5fd4c91b9dededaa83e036538c1ac8"
+        "sha256:bb88417a5a59aafc1891512071d40f0f0432f4a26469b26aba709146b10216ab"
     )
     current_revision = (
-        "sha256:c6c3e04ad2fcce74127fed58ee68ff39ffa1d3206218f70f4497c3950ea0a7d4"
+        "sha256:fcb531d1e2940880845580d169999c5be7bc7d45875147c54605b38fc613bd9a"
     )
+    bounded_snapshot = _rich_atomic_snapshot(as_of)
+    bounded_snapshot["admitted_codes"] = ("SH.600000",)
     first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
-        transport=_AtomicTransport(_rich_atomic_snapshot(as_of)),
+        transport=_AtomicTransport(bounded_snapshot),
         sector_cache_path=cache_path,
         sector_cache_revision=cached_revision,
-        sector_cache_scope_mode="FULL_MARKET",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
     )
-    expected = first.native_sector_assessments(as_of=as_of)
+    expected = first.native_sector_assessments(
+        as_of=as_of,
+        admitted_codes=("SH.600000",),
+    )
 
     unavailable = _AtomicTransport(_atomic_snapshot(as_of))
     unavailable.available = False
@@ -2318,10 +2384,15 @@ def test_proxy_retags_exact_reviewed_sector_snapshot_transition(
         transport=unavailable,
         sector_cache_path=cache_path,
         sector_cache_revision=current_revision,
-        sector_cache_scope_mode="FULL_MARKET",
+        sector_cache_scope_mode="VALIDATION_COHORT",
+        sector_cache_scope_limit=12,
+        sector_cache_admitted_codes=("SH.600000",),
     )
 
-    assert second.native_sector_assessments(as_of=as_of) == expected
+    assert second.native_sector_assessments(
+        as_of=as_of,
+        admitted_codes=("SH.600000",),
+    ) == expected
     assert unavailable.calls == []
     migrated = json.loads(cache_path.read_text(encoding="utf-8"))
     proof = json.loads(

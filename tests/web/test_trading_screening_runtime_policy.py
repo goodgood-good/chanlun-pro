@@ -157,23 +157,20 @@ def test_manifest_migration_allows_exact_candidate_cadence_transition() -> None:
     )
 
 
-def test_manifest_migration_allows_exact_worker_log_lifecycle_transition() -> None:
+def test_manifest_migration_allows_exact_runtime_cache_maintenance_transition() -> None:
     current = current_decision_source_snapshot()
     cached = copy.deepcopy(current)
     path = "web/chanlun_chart/cl_app/services/trading_screening_process.py"
     current_row = next(row for row in current["files"] if row["path"] == path)
     cached_row = next(row for row in cached["files"] if row["path"] == path)
     assert current_row["sha256"] == (
-        "sha256:43e1a04db1d82ef7a81de2002752d93e8a2ee22e0c6d23b2a5a0a5b7512469fa"
+        "sha256:cbfd8b3c23680a2b604bae14d0c2baf8a8dc14fb537824bcb38184b5572fb0a7"
     )
     cached_row["sha256"] = (
-        "sha256:bb5077ac0b737d14494a3357f8057c20de3171049e4f722321d4c57d6d84b568"
+        "sha256:43e1a04db1d82ef7a81de2002752d93e8a2ee22e0c6d23b2a5a0a5b7512469fa"
     )
     cached["aggregate_sha256"] = sha256_json(
         {"schema": cached["schema"], "files": cached["files"]}
-    )
-    assert cached["aggregate_sha256"] == (
-        "sha256:eedccb8c94a4b44e86b58ac133a1959840a8861c4499032be35eb7c4572dafe5"
     )
 
     assert orchestration_source_migration_allowed(
@@ -253,4 +250,19 @@ def test_sector_snapshot_migration_allows_only_exact_reviewed_revision_pair() ->
     assert not sector_snapshot_source_migration_allowed(
         cached_source_revision=log_lifecycle,
         current_source_revision=current_cached,
+    )
+
+    maintenance_cached = (
+        "sha256:bb88417a5a59aafc1891512071d40f0f0432f4a26469b26aba709146b10216ab"
+    )
+    maintenance_current = (
+        "sha256:fcb531d1e2940880845580d169999c5be7bc7d45875147c54605b38fc613bd9a"
+    )
+    assert sector_snapshot_source_migration_allowed(
+        cached_source_revision=maintenance_cached,
+        current_source_revision=maintenance_current,
+    )
+    assert not sector_snapshot_source_migration_allowed(
+        cached_source_revision=maintenance_current,
+        current_source_revision=maintenance_cached,
     )

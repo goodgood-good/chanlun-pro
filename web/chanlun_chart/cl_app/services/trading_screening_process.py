@@ -426,6 +426,8 @@ _PERSISTENT_RUNTIME_STATE_CACHE_OWNER_PATTERN = re.compile(
 _RUNTIME_STATE_CACHE_KEY_CONTEXT = (
     b"chanlun-screening-runtime-state-cache/structure-producer-v1"
 )
+_RUNTIME_STATE_CACHE_MAINTENANCE_INITIAL_DELAY_SECONDS = 30.0
+_RUNTIME_STATE_CACHE_MAINTENANCE_INTERVAL_SECONDS = 300.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2134,6 +2136,13 @@ class NativeTradingDataGatewayProcessProxy:
         self._runtime_state_cache_root: Path | None = None
         self._runtime_state_cache_delete_on_close = False
         self._runtime_state_cache_owner_marker: Path | None = None
+        self._runtime_state_cache_maintenance_stop = Event()
+        self._runtime_state_cache_maintenance_lock = Lock()
+        self._runtime_state_cache_maintenance_thread: Thread | None = None
+        self._runtime_state_cache_maintenance_attempt_count = 0
+        self._runtime_state_cache_maintenance_last_started_at: datetime | None = None
+        self._runtime_state_cache_maintenance_last_completed_at: datetime | None = None
+        self._runtime_state_cache_maintenance_last_error: str | None = None
         runtime_state_cache_key: str | None = None
         runtime_state_cache_identity: str | None = None
         runtime_state_cache_scope: str | None = None
@@ -2154,14 +2163,11 @@ class NativeTradingDataGatewayProcessProxy:
                 self._runtime_state_cache_owner_marker = (
                     _claim_persistent_runtime_state_cache_root(runtime_cache.root)
                 )
-            _cleanup_stale_runtime_state_cache_roots(
-                cache_parent,
-                current_root=runtime_cache.root,
-            )
             self._runtime_state_cache_root = runtime_cache.root
             self._runtime_state_cache_delete_on_close = (
                 runtime_cache.delete_on_close
             )
+            self._run_runtime_state_cache_maintenance_once()
             runtime_state_cache_key = runtime_cache.key_hex
             runtime_state_cache_identity = runtime_cache.identity
             runtime_state_cache_scope = runtime_cache.scope
@@ -2256,6 +2262,11 @@ class NativeTradingDataGatewayProcessProxy:
         self._prepared_history_as_of: datetime | None = None
         self._prepared_history_by_code: dict[str, tuple[str, ...]] = {}
         self._sector_snapshot_in_flight = Event()
+        if (
+            self._runtime_state_cache_root is not None
+            and not self._runtime_state_cache_delete_on_close
+        ):
+            self._start_runtime_state_cache_maintenance()
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         for transport in (self._transport, *self._structure_transports):
@@ -4219,8 +4230,80 @@ class NativeTradingDataGatewayProcessProxy:
                 return ()
             return self._prepared_history_by_code.get(code, ())
 
+    def _run_runtime_state_cache_maintenance_once(self) -> None:
+        cache_root = self._runtime_state_cache_root
+        if cache_root is None:
+            return
+        started_at = _now()
+        error: str | None = None
+        try:
+            _cleanup_stale_runtime_state_cache_roots(
+                cache_root.parent,
+                current_root=cache_root,
+            )
+        except Exception as exc:  # pragma: no cover - defensive filesystem boundary
+            error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        completed_at = _now()
+        with self._runtime_state_cache_maintenance_lock:
+            self._runtime_state_cache_maintenance_attempt_count += 1
+            self._runtime_state_cache_maintenance_last_started_at = started_at
+            self._runtime_state_cache_maintenance_last_completed_at = completed_at
+            self._runtime_state_cache_maintenance_last_error = error
+
+    def _runtime_state_cache_maintenance_loop(self) -> None:
+        stop = self._runtime_state_cache_maintenance_stop
+        initial_delay = max(
+            0.01,
+            float(_RUNTIME_STATE_CACHE_MAINTENANCE_INITIAL_DELAY_SECONDS),
+        )
+        interval = max(
+            0.01,
+            float(_RUNTIME_STATE_CACHE_MAINTENANCE_INTERVAL_SECONDS),
+        )
+        if stop.wait(initial_delay):
+            return
+        while not stop.is_set():
+            self._run_runtime_state_cache_maintenance_once()
+            if stop.wait(interval):
+                return
+
+    def _start_runtime_state_cache_maintenance(self) -> None:
+        thread = Thread(
+            target=self._runtime_state_cache_maintenance_loop,
+            name="chanlun-runtime-state-cache-maintenance",
+            daemon=True,
+        )
+        self._runtime_state_cache_maintenance_thread = thread
+        thread.start()
+
     def health_snapshot(self) -> dict[str, object]:
         result = self._transport.health_snapshot()
+        with self._runtime_state_cache_maintenance_lock:
+            maintenance_thread = self._runtime_state_cache_maintenance_thread
+            runtime_cache_maintenance = {
+                "schema": "chanlun-runtime-state-cache-maintenance-v1",
+                "enabled": maintenance_thread is not None,
+                "non_blocking": True,
+                "current_root": (
+                    None
+                    if self._runtime_state_cache_root is None
+                    else self._runtime_state_cache_root.name
+                ),
+                "thread_alive": bool(
+                    maintenance_thread is not None
+                    and maintenance_thread.is_alive()
+                ),
+                "attempt_count": (
+                    self._runtime_state_cache_maintenance_attempt_count
+                ),
+                "last_started_at": _iso(
+                    self._runtime_state_cache_maintenance_last_started_at
+                ),
+                "last_completed_at": _iso(
+                    self._runtime_state_cache_maintenance_last_completed_at
+                ),
+                "last_error": self._runtime_state_cache_maintenance_last_error,
+            }
         with self._cache_lock:
             coverage_affinity = (
                 self._coverage_sector_affinity_plan.audit_document()
@@ -4276,6 +4359,7 @@ class NativeTradingDataGatewayProcessProxy:
                 )
             ),
             "running_application_source_revisions": sorted(running_revisions),
+            "runtime_state_cache_maintenance": runtime_cache_maintenance,
             "workers": list(worker_health),
         }
         with self._cache_lock:
@@ -4296,6 +4380,10 @@ class NativeTradingDataGatewayProcessProxy:
         return result
 
     def close(self) -> None:
+        self._runtime_state_cache_maintenance_stop.set()
+        maintenance_thread = self._runtime_state_cache_maintenance_thread
+        if maintenance_thread is not None and maintenance_thread.is_alive():
+            maintenance_thread.join(timeout=2.0)
         seen: set[int] = set()
         for transport in (self._transport, *self._structure_transports):
             if id(transport) in seen:
