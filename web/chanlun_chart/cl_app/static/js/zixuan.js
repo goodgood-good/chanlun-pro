@@ -60,17 +60,28 @@ var ZiXuan = (function () {
     return MARKET_LABELS[market] || String(market || "未知市场");
   }
 
-  function recordMarketFailure(market) {
+  function recordMarketFailure(market, minimumDelayMs) {
     var previous = marketRetryState[market];
     var retryIndex = previous
       ? Math.min(previous.retryIndex + 1, UPDATE_RETRY_DELAYS_MS.length - 1)
       : 0;
     var delay = UPDATE_RETRY_DELAYS_MS[retryIndex];
+    var hintedDelay = Number(minimumDelayMs);
+    if (Number.isFinite(hintedDelay) && hintedDelay > delay) {
+      delay = Math.min(hintedDelay, UPDATE_CLOSED_DELAY_MS);
+    }
     marketRetryState[market] = {
       retryIndex: retryIndex,
       retryAt: Date.now() + delay,
     };
     return delay;
+  }
+
+  function retryDelayFromError(xhr) {
+    var error = xhr && xhr.responseJSON && xhr.responseJSON.error;
+    var seconds = Number(error && error.retry_after_seconds);
+    if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+    return seconds * 1000;
   }
 
   function recordMarketSuccess(market, marketState) {
@@ -579,11 +590,11 @@ var ZiXuan = (function () {
 
       batches.forEach(function (batch) {
         var batchFailed = false;
-        function failBatch() {
+        function failBatch(xhr) {
           if (request_generation !== update_poll_generation) return;
           if (batchFailed) return;
           batchFailed = true;
-          recordMarketFailure(batch.market);
+          recordMarketFailure(batch.market, retryDelayFromError(xhr));
           setMarketQuoteState(
             batch.market,
             "unavailable",

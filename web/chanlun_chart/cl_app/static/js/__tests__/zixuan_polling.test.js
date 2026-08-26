@@ -183,10 +183,13 @@ function loadZiXuan(customNodes) {
   };
 }
 
-function failRequest(call) {
+function failRequest(call, retryAfterSeconds) {
   assert.equal(typeof call.error, 'function', 'AJAX errors must be handled');
   assert.equal(typeof call.complete, 'function', 'next poll must wait for completion');
-  call.error({}, 'error', new Error('temporary failure'));
+  const xhr = Number.isFinite(retryAfterSeconds)
+    ? { responseJSON: { error: { retry_after_seconds: retryAfterSeconds } } }
+    : {};
+  call.error(xhr, 'error', new Error('temporary failure'));
   call.complete({}, 'error');
 }
 
@@ -416,6 +419,16 @@ test('uses capped error backoff delays and keeps a single recursive poll', () =>
   }
 
   assert.equal(h.intervalCalls.length, 0);
+});
+
+test('server retry hint extends the shared-provider retry delay', () => {
+  const h = loadZiXuan([{ market: 'currency_spot', code: 'BTC/USDT' }]);
+  h.ZiXuan.stocks_update_rate();
+
+  failRequest(h.ajaxCalls[0], 90);
+
+  assert.deepEqual(h.timers.map((timer) => timer.delay), [90000]);
+  assert.equal(h.watchStatus().state, 'error');
 });
 
 test('open success resets the error backoff to six seconds', () => {

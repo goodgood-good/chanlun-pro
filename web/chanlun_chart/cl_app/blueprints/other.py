@@ -13,6 +13,7 @@ from flask_login import login_required
 from chanlun.market import Market
 from chanlun.exchange import get_exchange, market_now_trading
 from chanlun.tools.log_util import LogUtil
+from ..services.external_tick_backoff import ExternalMarketTickBackoff
 from ..services.realtime_quotes import isolated_a_share_quote_batch
 
 
@@ -23,15 +24,25 @@ other_bp = Blueprint("other", __name__)
 _MAX_TICK_CODES = 500
 
 _VALID_MARKETS = {m.value for m in Market}
+_EXTERNAL_TICK_BACKOFF_EXTENSION = "external_market_tick_backoff"
 
 
-def _error_response(code: str, message: str, status_code: int):
+def _error_response(
+    code: str,
+    message: str,
+    status_code: int,
+    *,
+    retry_after_seconds: int | None = None,
+):
+    error: dict[str, object] = {"code": code, "message": message}
+    if type(retry_after_seconds) is int and retry_after_seconds > 0:
+        error["retry_after_seconds"] = retry_after_seconds
     return {
         "ok": False,
         "market_state": "unknown",
         "now_trading": None,
         "ticks": [],
-        "error": {"code": code, "message": message},
+        "error": error,
     }, status_code
 
 
@@ -49,6 +60,18 @@ def _success_response(now_trading, ticks):
         "ticks": ticks,
         "error": None,
     }
+
+
+def _external_tick_backoff() -> ExternalMarketTickBackoff:
+    existing = current_app.extensions.get(_EXTERNAL_TICK_BACKOFF_EXTENSION)
+    if existing is None:
+        existing = current_app.extensions.setdefault(
+            _EXTERNAL_TICK_BACKOFF_EXTENSION,
+            ExternalMarketTickBackoff(),
+        )
+    if not isinstance(existing, ExternalMarketTickBackoff):
+        raise RuntimeError("external market tick backoff extension is invalid")
+    return existing
 
 
 @other_bp.route("/ticks", methods=["POST"])
@@ -72,6 +95,25 @@ def ticks():
     # 元素必须是字符串，避免下游交易所 SDK 收到非法类型崩溃。
     if not all(isinstance(c, str) for c in codes):
         return _error_response("code_must_be_string", "each code must be a string.", 400)
+
+    external_backoff = None
+    if market != Market.A.value and codes:
+        external_backoff = _external_tick_backoff()
+        permit = external_backoff.acquire(market)
+        if not permit.allowed:
+            readiness = current_app.extensions.get("readiness")
+            if readiness is not None:
+                readiness.record_ticks_failure(
+                    market,
+                    "service_unavailable",
+                    "Tick provider retry is temporarily deferred.",
+                )
+            return _error_response(
+                "service_unavailable",
+                "Tick service is temporarily unavailable.",
+                503,
+                retry_after_seconds=permit.retry_after_seconds,
+            )
 
     try:
         isolated_batch = (
@@ -127,6 +169,11 @@ def ticks():
                     "empty_result",
                     "Tick service returned no usable data.",
                 )
+        if external_backoff is not None:
+            # A provider response, including a valid empty/closed result,
+            # proves transport recovery. Empty-open handling remains the
+            # separate data-quality contract below.
+            external_backoff.record_success(market)
         if codes and not res_ticks and not market_closed:
             return _error_response(
                 "empty_result",
@@ -143,5 +190,15 @@ def ticks():
                 "service_unavailable",
                 "Tick service is temporarily unavailable.",
             )
+        retry_after_seconds = None
+        if external_backoff is not None:
+            retry_after_seconds = external_backoff.record_failure(
+                market
+            ).retry_after_seconds
         LogUtil.exception(f"/ticks failed market={market} codes_len={len(codes)}")
-        return _error_response("service_unavailable", "Tick service is temporarily unavailable.", 503)
+        return _error_response(
+            "service_unavailable",
+            "Tick service is temporarily unavailable.",
+            503,
+            retry_after_seconds=retry_after_seconds,
+        )

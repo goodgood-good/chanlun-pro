@@ -18,6 +18,9 @@ import pytest  # noqa: E402
 
 from cl_app import create_app  # noqa: E402
 from cl_app.blueprints import other as other_mod  # noqa: E402
+from cl_app.services.external_tick_backoff import (  # noqa: E402
+    ExternalMarketTickBackoff,
+)
 from chanlun.exchange.exchange import Tick  # noqa: E402
 
 
@@ -248,6 +251,85 @@ def test_us_ticks_fail_closed_when_primary_times_out(client, monkeypatch):
     )
 
     _assert_ticks_error(resp, 503, "service_unavailable")
+
+
+def test_external_tick_failures_open_one_shared_market_backoff(
+    client,
+    monkeypatch,
+):
+    class _Clock:
+        value = 100.0
+
+        def __call__(self):
+            return self.value
+
+    class _UnavailableExchange:
+        def ticks(self, _codes):
+            raise TimeoutError("provider timeout")
+
+    clock = _Clock()
+    client.application.extensions["external_market_tick_backoff"] = (
+        ExternalMarketTickBackoff(clock=clock)
+    )
+    calls = []
+
+    def exchange(_market):
+        calls.append(_market)
+        return _UnavailableExchange()
+
+    monkeypatch.setattr(other_mod, "get_exchange", exchange)
+
+    first = client.post(
+        "/ticks", data={"market": "us", "codes": json.dumps(["AAPL.US"])}
+    )
+    duplicate = client.post(
+        "/ticks", data={"market": "us", "codes": json.dumps(["AAPL.US"])}
+    )
+
+    _assert_ticks_error(first, 503, "service_unavailable")
+    _assert_ticks_error(duplicate, 503, "service_unavailable")
+    assert first.get_json()["error"]["retry_after_seconds"] == 15
+    assert duplicate.get_json()["error"]["retry_after_seconds"] == 15
+    assert len(calls) == 1
+
+    clock.value += 15
+    healthy = {"AAPL.US": _tick("AAPL.US", 201.25, 1.75)}
+    monkeypatch.setattr(
+        other_mod,
+        "get_exchange",
+        lambda _market: _FakeEx(healthy),
+    )
+    recovered = client.post(
+        "/ticks", data={"market": "us", "codes": json.dumps(["AAPL.US"])}
+    )
+    assert recovered.status_code == 200
+    assert recovered.get_json()["ticks"] == [
+        {"code": "AAPL.US", "price": 201.25, "rate": 1.75}
+    ]
+
+
+def test_a_share_ticks_bypass_external_market_backoff(client, monkeypatch):
+    clock = lambda: 100.0
+    backoff = ExternalMarketTickBackoff(clock=clock)
+    assert backoff.acquire("a").allowed is True
+    backoff.record_failure("a")
+    client.application.extensions["external_market_tick_backoff"] = backoff
+    ticks_map = {"SZ.000001": _tick("SZ.000001", 3.0, 2.5)}
+    monkeypatch.setattr(
+        other_mod,
+        "isolated_a_share_quote_batch",
+        lambda _app, _codes: None,
+    )
+    monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _FakeEx(ticks_map))
+
+    response = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SZ.000001"])}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["ticks"] == [
+        {"code": "SZ.000001", "price": 3.0, "rate": 2.5}
+    ]
 
 
 def test_us_ticks_do_not_fill_missing_primary_rows_from_another_source(client, monkeypatch):
