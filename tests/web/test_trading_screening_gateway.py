@@ -1861,6 +1861,56 @@ def test_sector_strength_time_uses_completed_market_cutoff_not_worker_clock() ->
     )
 
 
+def test_sector_strength_time_keeps_same_session_postclose_evidence_cutoff() -> None:
+    market_cutoff = datetime.fromisoformat("2026-07-20T15:00:00+08:00")
+    postclose_observed_at = datetime.fromisoformat("2026-07-20T15:05:00+08:00")
+    calls: list[dict[str, object]] = []
+
+    class SameCloseAnalyzer(RecordingAnalyzer):
+        def __call__(self, *, code, frequency, frame, as_of):
+            del frame, as_of
+            self.calls.append((code, frequency))
+            return FrameStructureAnalysis(
+                closed_at=market_cutoff,
+                direction="neutral",
+                confirmed_points=(),
+                provisional_points=(),
+            )
+
+    def strength_provider(**kwargs):
+        calls.append(kwargs)
+        return build_horizontal_sector_strength_batch(
+            decision_time=kwargs["as_of"],
+            benchmark_symbol="SH.000300",
+            benchmark_daily=(),
+            members_by_sector={
+                sector_id: tuple(
+                    SectorMemberHistory(
+                        symbol,
+                        market_cutoff.date(),
+                        "SUSPENDED",
+                        (),
+                    )
+                    for symbol in members
+                )
+                for sector_id, members in kwargs["members_by_sector"].items()
+            },
+            membership_revision=kwargs["membership_revision"],
+        )
+
+    gateway, _analyzer, _exchange = _gateway(
+        analyzer=SameCloseAnalyzer(),
+        sector_strength_provider=strength_provider,
+    )
+    batch = gateway.native_sector_assessments(as_of=postclose_observed_at)
+
+    assert calls[0]["as_of"] == postclose_observed_at
+    assert batch.strength_evidence is not None
+    assert batch.strength_evidence.evidence_document()["decision_time"] == (
+        postclose_observed_at.isoformat()
+    )
+
+
 def test_structure_bundle_attaches_and_enforces_mwd_risk_gates() -> None:
     calls: list[dict[str, object]] = []
 

@@ -1828,10 +1828,13 @@
     const delivery = isRecord(health.notification_delivery)
       ? health.notification_delivery
       : {};
+    const candidateCadenceText = candidateStatus === "not_due"
+      ? `5分钟候选轮换 ${statusLabel(candidateStatus)}（${candidateReasons}）· 非交易时段不计算当前缺失与逾期`
+      : `5分钟候选轮换 ${statusLabel(candidateStatus)}（${candidateReasons}）· 当前 ${candidateCurrent}/${candidateUniverse} 只 · 缺失 ${candidateMissing} · 逾期 ${candidateOverdue}${candidateTarget ? ` · 目标 ${Math.round(candidateTarget / 60)} 分钟` : ""}`;
     const parts = [
       `A股实时预警 ${statusLabel(text(health.realtime_alert_status, "unavailable"))}（${reasonLabel(text(health.realtime_alert_reason_code, "PRIORITY_MONITOR_UNAVAILABLE"))}）`,
       `即时复查 ${statusLabel(priorityStatus)}（${priorityReasons}）· 最近 ${priorityCount} 只`,
-      `5分钟候选轮换 ${statusLabel(candidateStatus)}（${candidateReasons}）· 当前 ${candidateCurrent}/${candidateUniverse} 只 · 缺失 ${candidateMissing} · 逾期 ${candidateOverdue}${candidateTarget ? ` · 目标 ${Math.round(candidateTarget / 60)} 分钟` : ""}`,
+      candidateCadenceText,
       `1分钟精确定位队列 待定位的当前5分钟候选 ${freshSegmentCount} 只 · 持续轮转直至结构被替换`,
       scope.validation
         ? `实时预警范围：仅处理当前 ${scope.cohort || scope.effectiveLimit || 12} 只固定小样本`

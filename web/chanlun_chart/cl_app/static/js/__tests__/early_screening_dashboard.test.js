@@ -3531,10 +3531,10 @@ test("operator status copy explains degraded state without exposing internal cod
     candidate_monitor_status: "not_due",
     candidate_monitor_reason_codes: [],
     candidate_monitor_five_minute: {
-      universe_count: 2,
-      current_count: 2,
-      missing_count: 0,
-      overdue_count: 0,
+      universe_count: 12,
+      current_count: 3,
+      missing_count: 9,
+      overdue_count: 9,
       target_seconds: 300,
     },
     realtime_alert_status: "not_due",
@@ -3548,6 +3548,8 @@ test("operator status copy explains degraded state without exposing internal cod
   }, {});
   assert.match(afterHoursDiagnostics, /即时复查 未到运行时段（当前不在A股分钟监听时段）/);
   assert.match(afterHoursDiagnostics, /5分钟候选轮换 未到运行时段（当前不在A股分钟监听时段）/);
+  assert.match(afterHoursDiagnostics, /非交易时段不计算当前缺失与逾期/);
+  assert.doesNotMatch(afterHoursDiagnostics, /当前 3\/12 只|缺失 9|逾期 9/);
   assert.doesNotMatch(afterHoursDiagnostics, /（）|状态原因未提供/);
 
   const capacityBlocked = {

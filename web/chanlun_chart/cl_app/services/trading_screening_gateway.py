@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 import hashlib
 import hmac
@@ -3301,13 +3301,25 @@ class NativeTradingDataGateway:
             try:
                 self._report_progress()
                 # ``observed_at`` 是工作进程墙钟。午夜后回放可能在周二观察目录，但全部
-                # 已完成 30m/5m K 线仍属于周一收盘。板块强度使用同一已完成价格事实，
-                # 决策时间必须取其已验证截止点而非进程时钟；否则因果有效的周一快照会
-                # 被误标为周二并被不可变复核边界拒绝。``latest_bars`` 只包含已确认不晚于
-                # ``observed_at`` 的分析。
-                strength_decision_time = max(
+                # 已完成 30m/5m K 线仍属于周一收盘；这种跨日回放必须继续使用周一截止点，
+                # 否则会被误标为周二并被不可变复核边界拒绝。
+                #
+                # 同一交易日盘后则不同：QMT 的正向停牌事实只能在 15:00 后采集。如果把
+                # 15:41 的真实观察时点无条件截断成最后一根 15:00 K 线，停牌事实会永久被
+                # 判成“来自未来”，当日成员历史也就永远无法收敛。价格仍严格截止于已完成
+                # K 线；这里只保留同日已经实际可见的非价格证据时点。
+                strength_market_cutoff = max(
                     latest_bars.values(),
                     default=observed_at,
+                )
+                strength_decision_time = (
+                    observed_at
+                    if (
+                        strength_market_cutoff.date() == observed_at.date()
+                        and strength_market_cutoff.timetz().replace(tzinfo=None)
+                        >= time(15, 0)
+                    )
+                    else strength_market_cutoff
                 )
                 strength_started = perf_counter()
                 try:
