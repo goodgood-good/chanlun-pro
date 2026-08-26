@@ -520,6 +520,26 @@ def test_explicit_startup_attests_worker_without_data_request(tmp_path: Path) ->
         transport.shutdown()
 
 
+def test_worker_log_replaces_previous_lifecycle_then_appends_restarts(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "native-worker.log"
+    log_path.write_bytes(b"obsolete-lifecycle\n")
+    transport = _transport(tmp_path)
+    try:
+        transport.startup()
+        assert b"obsolete-lifecycle" not in log_path.read_bytes()
+
+        transport.shutdown()
+        with log_path.open("ab") as current_log:
+            current_log.write(b"current-lifecycle\n")
+
+        transport.startup()
+        assert b"current-lifecycle" in log_path.read_bytes()
+    finally:
+        transport.shutdown()
+
+
 def test_worker_startup_fails_closed_when_source_revision_is_missing(
     tmp_path: Path,
 ) -> None:

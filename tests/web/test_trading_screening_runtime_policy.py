@@ -157,6 +157,39 @@ def test_manifest_migration_allows_exact_candidate_cadence_transition() -> None:
     )
 
 
+def test_manifest_migration_allows_exact_worker_log_lifecycle_transition() -> None:
+    current = current_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    path = "web/chanlun_chart/cl_app/services/trading_screening_process.py"
+    current_row = next(row for row in current["files"] if row["path"] == path)
+    cached_row = next(row for row in cached["files"] if row["path"] == path)
+    assert current_row["sha256"] == (
+        "sha256:43e1a04db1d82ef7a81de2002752d93e8a2ee22e0c6d23b2a5a0a5b7512469fa"
+    )
+    cached_row["sha256"] = (
+        "sha256:bb5077ac0b737d14494a3357f8057c20de3171049e4f722321d4c57d6d84b568"
+    )
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+    assert cached["aggregate_sha256"] == (
+        "sha256:eedccb8c94a4b44e86b58ac133a1959840a8861c4499032be35eb7c4572dafe5"
+    )
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
 def test_manifest_migration_allows_exact_review_auditor_transition() -> None:
     current = current_decision_source_snapshot()
     cached = copy.deepcopy(current)
@@ -205,4 +238,19 @@ def test_sector_snapshot_migration_allows_only_exact_reviewed_revision_pair() ->
     assert not sector_snapshot_source_migration_allowed(
         cached_source_revision=cached,
         current_source_revision="sha256:" + "0" * 64,
+    )
+
+    current_cached = (
+        "sha256:c6c3e04ad2fcce74127fed58ee68ff39ffa1d3206218f70f4497c3950ea0a7d4"
+    )
+    log_lifecycle = (
+        "sha256:2a5e1822092334582e3480e6908e909f3bf5b9625ab273fd59b137d017f818b1"
+    )
+    assert sector_snapshot_source_migration_allowed(
+        cached_source_revision=current_cached,
+        current_source_revision=log_lifecycle,
+    )
+    assert not sector_snapshot_source_migration_allowed(
+        cached_source_revision=log_lifecycle,
+        current_source_revision=current_cached,
     )

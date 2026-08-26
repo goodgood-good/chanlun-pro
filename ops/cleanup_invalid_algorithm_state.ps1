@@ -61,6 +61,7 @@ $runtimeRelativeTargets = @(
     "decision_support\trading_screening_native_worker.structure-1.log",
     "decision_support\trading_screening_native_worker.structure-2.log",
     "decision_support\trading_screening_native_worker.structure-3.log",
+    "decision_support\trading_screening_native_worker.structure-4.log",
     "chart_cache",
     "monitor\holding_group_runtime.json",
     "cache\last_chart_state.json"

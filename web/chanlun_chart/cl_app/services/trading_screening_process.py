@@ -1336,6 +1336,7 @@ class NativeWorkerProcessTransport:
                 "expected_application_source_revision must be content-addressed"
             )
         self._log_path = log_path.resolve()
+        self._log_lifecycle_initialized = False
         self._config = config
         self._worker_command = (
             None
@@ -1444,7 +1445,21 @@ class NativeWorkerProcessTransport:
         environment["PYTHONUTF8"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
         environment[IPC_AUTHKEY_ENV] = authkey.hex()
-        log_handle = self._log_path.open("ab", buffering=0)
+        first_lifecycle_spawn = not self._log_lifecycle_initialized
+        if first_lifecycle_spawn:
+            # 旧应用生命周期的日志不能继续追加，也不能在旧 worker 仍持有写入
+            # 偏移时原地截断；后者会在 Windows 上生成整段 NUL 文件空洞。
+            # 先删除目录项再独占创建新文件：若旧进程仍锁定它则启动明确失败，
+            # 而不是静默破坏当前诊断日志。当前生命周期内的 worker 回收仍追加，
+            # 以保留同一轮运行的崩溃与重启上下文。
+            try:
+                self._log_path.unlink()
+            except FileNotFoundError:
+                pass
+        log_handle = self._log_path.open(
+            "xb" if first_lifecycle_spawn else "ab",
+            buffering=0,
+        )
         try:
             process = subprocess.Popen(
                 command,
@@ -1455,6 +1470,7 @@ class NativeWorkerProcessTransport:
                 stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            self._log_lifecycle_initialized = True
         except BaseException:
             listener.close()
             log_handle.close()
