@@ -1123,6 +1123,10 @@ class ChartManager {
         this._dataReadyProbeIdentity = null;
         this._intervalGeneration = 0;
         this._drawingsCache = new Map();  // 按 symbol+interval 缓存用户画线状态
+        // 记录服务端已确认的画线状态，而不是仅记录当前画布状态。TradingView 会在
+        // 初始化完成约 5 秒后触发 auto-save；只有和这份基线真正不同时才允许写入。
+        this._persistedDrawingFingerprints = new Map();
+        this._drawingLoadsInFlight = new Map();
         this._intervalSwitchSeq = 0;
         this._drawingsRequestSeq = 0;
         this._latestAppliedBarTime = null;
@@ -1221,10 +1225,105 @@ class ChartManager {
             }
         }
     }
+
+    loadDrawingStateOnce(persistenceKey, taskFactory) {
+        if (typeof taskFactory !== "function") {
+            return Promise.reject(new TypeError("drawing load task must be a function"));
+        }
+        if (!(this._drawingLoadsInFlight instanceof Map)) {
+            this._drawingLoadsInFlight = new Map();
+        }
+        const existing = this._drawingLoadsInFlight.get(persistenceKey);
+        if (existing) return existing;
+
+        let task;
+        task = Promise.resolve()
+            .then(taskFactory)
+            .finally(() => {
+                if (this._drawingLoadsInFlight.get(persistenceKey) === task) {
+                    this._drawingLoadsInFlight.delete(persistenceKey);
+                }
+            });
+        this._drawingLoadsInFlight.set(persistenceKey, task);
+        return task;
+    }
+
     getDrawingsCacheKey(symbol, interval) {
         const mode = this.cl_independent_drawings ? "ind" : "shared";
         const resolutionKey = this.cl_independent_drawings ? interval : "all";
         return `${symbol}_${resolutionKey}_${mode}`;
+    }
+
+    getDrawingPersistenceKey(layoutId, chartId, symbol, resolution) {
+        // 后端存储名同时包含 layout/chart/symbol/resolution。不能只按图表缓存键
+        // 记基线，否则 TradingView 自己的 chart=1 请求会污染 default/default 记录。
+        return JSON.stringify([
+            String(layoutId),
+            String(chartId),
+            String(symbol),
+            String(resolution),
+        ]);
+    }
+
+    drawingStateFingerprint(state) {
+        const canonicalize = (value) => {
+            if (Array.isArray(value)) return value.map(canonicalize);
+            if (value && typeof value === "object") {
+                const result = {};
+                for (const key of Object.keys(value).sort()) {
+                    result[key] = canonicalize(value[key]);
+                }
+                return result;
+            }
+            return value;
+        };
+        return JSON.stringify(canonicalize(state));
+    }
+
+    _setPersistedDrawingFingerprint(persistenceKey, fingerprint) {
+        if (!(this._persistedDrawingFingerprints instanceof Map)) {
+            this._persistedDrawingFingerprints = new Map();
+        }
+        // delete + set 维护简单的 LRU 顺序，限制多标的长时间运行的内存占用。
+        this._persistedDrawingFingerprints.delete(persistenceKey);
+        this._persistedDrawingFingerprints.set(persistenceKey, fingerprint);
+        while (this._persistedDrawingFingerprints.size > 400) {
+            const oldestKey = this._persistedDrawingFingerprints.keys().next().value;
+            if (oldestKey === undefined) break;
+            this._persistedDrawingFingerprints.delete(oldestKey);
+        }
+    }
+
+    rememberPersistedDrawingState(persistenceKey, state) {
+        const fingerprint = this.drawingStateFingerprint(state);
+        this._setPersistedDrawingFingerprint(persistenceKey, fingerprint);
+        return fingerprint;
+    }
+
+    enqueueDrawingStateSave(persistenceKey, state, taskFactory, options = {}) {
+        if (typeof taskFactory !== "function") {
+            return Promise.reject(new TypeError("drawing save task must be a function"));
+        }
+        const fingerprint = this.drawingStateFingerprint(state);
+        return this.enqueueLatestDrawingSave(async () => {
+            if (!(this._persistedDrawingFingerprints instanceof Map)) {
+                this._persistedDrawingFingerprints = new Map();
+            }
+            const baselineKnown = this._persistedDrawingFingerprints.has(persistenceKey);
+            if (!baselineKnown && options.requireKnownBaseline) {
+                clog("[DEBUG-CHARTS] Skip drawings auto-save before baseline is loaded");
+                return;
+            }
+            if (baselineKnown && this._persistedDrawingFingerprints.get(persistenceKey) === fingerprint) {
+                clog("[DEBUG-CHARTS] Skip unchanged drawings save");
+                return;
+            }
+
+            // 必须在任务真正执行时比较，而不是入队时比较。这样 A 正在写入、随后
+            // 用户撤回到旧状态 B 时，B 会在 A 成功后再次写回，不会被旧基线误跳过。
+            await taskFactory();
+            this._setPersistedDrawingFingerprint(persistenceKey, fingerprint);
+        });
     }
 
     getCurrentChartIdentity() {
@@ -1878,13 +1977,15 @@ class ChartManager {
                         layer.msg("画线状态无效，已取消保存");
                     }
                     return Promise.reject(error);
-                }                const rawResolution = self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id);
+                }
+                const rawResolution = self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id);
                 const resolution = self.cl_independent_drawings ? rawResolution : 'all';
                 const symbol = self.chart ? self.chart.symbol() : Utils.get_market() + ":" + Utils.get_code();
                 const cacheKey = self.getDrawingsCacheKey(symbol, rawResolution);
+                const persistenceKey = self.getDrawingPersistenceKey(layoutId, chartId, symbol, resolution);
 
                 const processedState = self.serializeUserDrawingsState(state);
-                clog("[DEBUG-CHARTS] Queuing drawings save", { symbol, resolution, reason: options.reason });
+                clog("[DEBUG-CHARTS] Evaluating drawings save", { symbol, resolution, reason: options.reason });
                 const query = new URLSearchParams({
                     client: client_id,
                     user: user_id,
@@ -1893,7 +1994,7 @@ class ChartManager {
                     symbol: String(symbol),
                     resolution: String(resolution),
                 });
-                return self.enqueueLatestDrawingSave(function () {
+                return self.enqueueDrawingStateSave(persistenceKey, processedState, function () {
                     return fetch("/tv/1.1/drawings?" + query.toString(), {
                         method: "POST",
                         headers: { 'Content-Type': 'application/json' },
@@ -1912,10 +2013,15 @@ class ChartManager {
                             self.deserializeUserDrawingsState(processedState),
                         );
                     });
+                }, {
+                    // auto-save 是 TradingView 初始化也会触发的事件。若读取尚未成功，
+                    // 绝不能用本地空状态删除服务端已有画线；明确 drawing_event 则仍可写入。
+                    requireKnownBaseline: options.reason === 'auto_save',
                 });
-            },            loadLineToolsAndGroups: function (layoutId, chartId, requestType, requestContext = {}) {
+            },
+            loadLineToolsAndGroups: function (layoutId, chartId, requestType, requestContext = {}) {
                 clog("[DEBUG-CHARTS] loadLineToolsAndGroups called", { layoutId, chartId, requestType, requestContext });
-                return new Promise((resolve) => {
+                return new Promise((resolve, reject) => {
                     const resolution = requestContext.resolution;
                     const symbol = requestContext.symbol;
                     const token = requestContext.token;
@@ -1929,21 +2035,45 @@ class ChartManager {
                     if (!loadSymbol || !loadResolution) {
                         return resolve(null);
                     }
+                    const persistenceKey = self.getDrawingPersistenceKey(
+                        layoutId,
+                        chartId,
+                        loadSymbol,
+                        loadResolution,
+                    );
+                    const query = new URLSearchParams({
+                        client: client_id,
+                        user: user_id,
+                        chart: String(chartId),
+                        layout: String(layoutId),
+                        symbol: String(loadSymbol),
+                        resolution: String(loadResolution),
+                    });
 
-                    fetch("/tv/1.1/drawings?client=" + client_id + "&user=" + user_id + "&chart=" + chartId + "&layout=" + layoutId + "&symbol=" + loadSymbol + "&resolution=" + loadResolution)
-                        .then(res => res.json())
-                        .then(res => {
+                    self.loadDrawingStateOnce(persistenceKey, () => (
+                        fetch("/tv/1.1/drawings?" + query.toString())
+                            .then(response => {
+                                if (!response.ok) {
+                                    throw new Error("Drawing load failed with HTTP " + response.status);
+                                }
+                                return response.json();
+                            })
+                    ))
+                        .then(payload => {
                             if (token && !self.isTokenCurrent(token)) {
                                 return resolve(null);
                             }
-                            if (res.status === 'ok' && res.data && Object.keys(res.data).length > 0) {
-                                resolve(self.deserializeUserDrawingsState(res.data));
-                            } else {
-                                resolve(self.emptyUserDrawingsState());
+                            if (!payload || payload.status !== 'ok' || !payload.data) {
+                                throw new Error(
+                                    (payload && (payload.message || payload.error)) || "Drawing load was rejected",
+                                );
                             }
+                            const loadedState = self.deserializeUserDrawingsState(payload.data);
+                            self.rememberPersistedDrawingState(persistenceKey, payload.data);
+                            resolve(loadedState);
                         }).catch(err => {
                             console.error("[DEBUG-CHARTS] loadLineToolsAndGroups error:", err);
-                            resolve(null);
+                            reject(err);
                         });
                 });
             }

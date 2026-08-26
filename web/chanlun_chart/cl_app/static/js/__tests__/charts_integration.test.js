@@ -84,6 +84,15 @@ function makeManager(ChartManager, mockWidget, barsResultMap) {
   return cm;
 }
 
+function makeDrawingPersistenceManager(ChartManager) {
+  const cm = Object.create(ChartManager.prototype);
+  cm._drawingSaveInFlight = false;
+  cm._drawingSavePending = null;
+  cm._persistedDrawingFingerprints = new Map();
+  cm._drawingLoadsInFlight = new Map();
+  return cm;
+}
+
 function spyWidget() {
   const calls = { resetCache: 0, resetData: 0 };
   const widget = {
@@ -1092,4 +1101,163 @@ test('drawing save failures reject the adapter promise', async () => {
     cm.enqueueLatestDrawingSave(() => Promise.reject(new Error('write failed'))),
     /write failed/,
   );
+});
+
+test('concurrent drawing loads share one request but a later reload can refetch', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeDrawingPersistenceManager(ChartManager);
+  const key = '["undefined","1","a:SH.513100","all"]';
+  let requests = 0;
+  let finishFirst;
+  const first = cm.loadDrawingStateOnce(key, () => new Promise((resolve) => {
+    requests++;
+    finishFirst = resolve;
+  }));
+  const concurrent = cm.loadDrawingStateOnce(key, async () => {
+    requests++;
+    return { stale: true };
+  });
+
+  assert.equal(first, concurrent, '同一存储键的并发读取应共享同一个 Promise');
+  assert.equal(requests, 0, '任务通过微任务启动，便于同一轮调用先完成合并');
+  await Promise.resolve();
+  assert.equal(requests, 1);
+  finishFirst({ status: 'ok' });
+  assert.deepEqual(await concurrent, { status: 'ok' });
+
+  await cm.loadDrawingStateOnce(key, async () => {
+    requests++;
+    return { status: 'new' };
+  });
+  assert.equal(requests, 2, '完成后的明确重载不能被永久缓存挡住');
+});
+
+test('drawing persistence fingerprints ignore object key order and isolate storage records', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeDrawingPersistenceManager(ChartManager);
+  const first = {
+    schema: 'chanlun-user-drawings',
+    sources: {
+      lineB: { state: { linewidth: 4, linecolor: '#0F766E' }, points: [{ time_t: 2, price: 3 }] },
+      lineA: { points: [{ price: 1, time_t: 1 }], state: { linecolor: '#0F766E', linewidth: 4 } },
+    },
+    groups: {},
+  };
+  const reordered = {
+    groups: {},
+    sources: {
+      lineA: { state: { linewidth: 4, linecolor: '#0F766E' }, points: [{ time_t: 1, price: 1 }] },
+      lineB: { points: [{ price: 3, time_t: 2 }], state: { linecolor: '#0F766E', linewidth: 4 } },
+    },
+    schema: 'chanlun-user-drawings',
+  };
+
+  assert.equal(
+    cm.drawingStateFingerprint(first),
+    cm.drawingStateFingerprint(reordered),
+    '服务端排序后的 JSON 与浏览器原始键序应视为同一画线状态',
+  );
+  assert.notEqual(
+    cm.getDrawingPersistenceKey('default', 'default', 'A:SH.513100', 'all'),
+    cm.getDrawingPersistenceKey('undefined', '1', 'a:SH.513100', 'all'),
+    '不同 TradingView 布局记录不能共享持久化指纹',
+  );
+});
+
+test('unchanged drawing state skips writes while changed state persists once', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeDrawingPersistenceManager(ChartManager);
+  const key = cm.getDrawingPersistenceKey('default', 'default', 'A:SH.513100', 'all');
+  const baseline = {
+    schema: 'chanlun-user-drawings',
+    sources: { line1: { points: [{ time_t: 1, price: 1 }], state: { linewidth: 4 } } },
+    groups: {},
+  };
+  const sameWithDifferentKeyOrder = {
+    groups: {},
+    sources: { line1: { state: { linewidth: 4 }, points: [{ price: 1, time_t: 1 }] } },
+    schema: 'chanlun-user-drawings',
+  };
+  const changed = {
+    schema: 'chanlun-user-drawings',
+    sources: { line1: { points: [{ time_t: 1, price: 2 }], state: { linewidth: 4 } } },
+    groups: {},
+  };
+  let writes = 0;
+  cm.rememberPersistedDrawingState(key, baseline);
+
+  await cm.enqueueDrawingStateSave(key, sameWithDifferentKeyOrder, async () => { writes++; });
+  assert.equal(writes, 0, '初始化 auto-save 不应把刚读取的相同状态再写一次');
+
+  await cm.enqueueDrawingStateSave(key, changed, async () => { writes++; });
+  await cm.enqueueDrawingStateSave(key, changed, async () => { writes++; });
+  assert.equal(writes, 1, '真实变化应写入一次，成功后的重复 auto-save 应跳过');
+});
+
+test('failed drawing write keeps the previous fingerprint so the same change can retry', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeDrawingPersistenceManager(ChartManager);
+  const key = cm.getDrawingPersistenceKey('default', 'default', 'A:SH.513100', 'all');
+  const baseline = { schema: 'chanlun-user-drawings', sources: {}, groups: {} };
+  const changed = {
+    schema: 'chanlun-user-drawings',
+    sources: { line1: { points: [{ time_t: 1, price: 2 }] } },
+    groups: {},
+  };
+  let attempts = 0;
+  cm.rememberPersistedDrawingState(key, baseline);
+
+  await assert.rejects(
+    cm.enqueueDrawingStateSave(key, changed, async () => {
+      attempts++;
+      throw new Error('write failed');
+    }),
+    /write failed/,
+  );
+  await cm.enqueueDrawingStateSave(key, changed, async () => { attempts++; });
+
+  assert.equal(attempts, 2, '失败写入不能伪装成已持久化并阻断重试');
+});
+
+test('queued revert is compared after the in-flight write and is not dropped', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeDrawingPersistenceManager(ChartManager);
+  const key = cm.getDrawingPersistenceKey('default', 'default', 'A:SH.513100', 'all');
+  const baseline = { schema: 'chanlun-user-drawings', sources: {}, groups: {} };
+  const changed = {
+    schema: 'chanlun-user-drawings',
+    sources: { line1: { points: [{ time_t: 1, price: 2 }] } },
+    groups: {},
+  };
+  const writes = [];
+  let finishChanged;
+  cm.rememberPersistedDrawingState(key, baseline);
+
+  const first = cm.enqueueDrawingStateSave(key, changed, () => new Promise((resolve) => {
+    writes.push('changed');
+    finishChanged = resolve;
+  }));
+  const reverted = cm.enqueueDrawingStateSave(key, baseline, async () => { writes.push('reverted'); });
+
+  assert.deepEqual(writes, ['changed']);
+  finishChanged();
+  await Promise.all([first, reverted]);
+  assert.deepEqual(writes, ['changed', 'reverted']);
+});
+
+test('automatic save without a loaded baseline cannot overwrite unknown server state', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeDrawingPersistenceManager(ChartManager);
+  const key = cm.getDrawingPersistenceKey('default', 'default', 'A:SH.513100', 'all');
+  const state = { schema: 'chanlun-user-drawings', sources: {}, groups: {} };
+  let writes = 0;
+
+  await cm.enqueueDrawingStateSave(
+    key,
+    state,
+    async () => { writes++; },
+    { requireKnownBaseline: true },
+  );
+
+  assert.equal(writes, 0, '读取失败或尚未完成时，初始化 auto-save 不得删除服务端旧画线');
 });
