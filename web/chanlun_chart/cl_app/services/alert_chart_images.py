@@ -23,7 +23,14 @@ from chanlun import fun
 from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     StrictPhysicalMonitorState,
 )
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
+    normalize_qmt_opening_events_for_completed_minutes,
+)
+from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_CANONICAL_REQUEST_BARS,
+)
 from chanlun.exchange import get_exchange
+from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 from chanlun.market import Market
 
 
@@ -203,6 +210,35 @@ class SignedAlertChartStore:
         return image_path
 
 
+class _CanonicalScreeningAlertState(StrictPhysicalMonitorState):
+    """Replay A-share alert charts from the screening producer's exact prefix."""
+
+    def _fetch_klines(self, frequency, _last, *, as_of):
+        # ``StrictPhysicalMonitorState`` normally uses monitor-specific day
+        # windows (30/120/365 days).  A-share screening instead uses the
+        # canonical QMT request contract (12k/12k/4k bars); mixing the two can
+        # make a real emitted point disappear when the notification chart is
+        # rebuilt.  Evidence alerts always perform one bounded, full-prefix
+        # replay, so incremental tail fetches are intentionally unnecessary.
+        return self.ex.klines(
+            self.code,
+            frequency,
+            args={
+                "req_counts": SCREENING_CANONICAL_REQUEST_BARS[frequency],
+                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
+            },
+        )
+
+    def _closed_frame(self, raw, frequency, *, as_of=None):
+        frame = super()._closed_frame(raw, frequency, as_of=as_of)
+        if frequency == "1m":
+            # The screening gateway merges QMT's 09:30 auction row into the
+            # first completed minute before structure analysis.  Reapply that
+            # same-base contract before validating the chart occurrence.
+            frame = normalize_qmt_opening_events_for_completed_minutes(frame)
+        return frame
+
+
 class AlertChartImageService:
     """基于严格实时核心生成不可变的 30m、5m、1m 复核图。"""
 
@@ -331,7 +367,13 @@ class AlertChartImageService:
                             state_options["warmup_start_by_frequency"] = dict(
                                 raw_starts
                             )
-                        state = self._state_factory(code, exchange, **state_options)
+                        state_factory = (
+                            _CanonicalScreeningAlertState
+                            if market == Market.A.value
+                            and self._state_factory is StrictPhysicalMonitorState
+                            else self._state_factory
+                        )
+                        state = state_factory(code, exchange, **state_options)
                     else:
                         # Legacy pending records did not persist their producer prefix.
                         state = self._state(market, code)

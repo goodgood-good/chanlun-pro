@@ -6,19 +6,90 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+import pandas as pd
+
 from cl_app import create_app
 from cl_app.services.alert_chart_images import (
+    _CanonicalScreeningAlertState,
     AlertChartImageService,
     SignedAlertChartStore,
+)
+from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_CANONICAL_REQUEST_BARS,
 )
 from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     StrictPhysicalMonitorState,
 )
+from chanlun.exchange.price_basis import QMT_STRUCTURE_DIVIDEND_TYPE
 import chanlun.decision_support.trading_system.strict_realtime_monitor as monitor_module
 from chanlun.notifications import DingTalkWebhookNotifier
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"test-png-body"
+
+
+def test_a_share_evidence_state_uses_exact_screening_prefix() -> None:
+    calls = []
+
+    class Exchange:
+        market = "a"
+        kline_time_label = "start"
+
+        @staticmethod
+        def klines(code, frequency, *, args):
+            calls.append((code, frequency, args))
+            return "canonical-frame"
+
+    observed_at = datetime.fromisoformat("2026-08-26T10:15:00+08:00")
+    state = _CanonicalScreeningAlertState(
+        "SH.600250",
+        Exchange(),
+        clock=lambda: observed_at,
+    )
+
+    assert state._fetch_klines("1m", None, as_of=observed_at) == "canonical-frame"
+    assert calls == [
+        (
+            "SH.600250",
+            "1m",
+            {
+                "req_counts": SCREENING_CANONICAL_REQUEST_BARS["1m"],
+                "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
+            },
+        )
+    ]
+
+
+def test_a_share_evidence_state_normalizes_qmt_opening_minute(monkeypatch) -> None:
+    observed_at = datetime.fromisoformat("2026-08-26T10:15:00+08:00")
+    state = _CanonicalScreeningAlertState(
+        "SH.600250",
+        SimpleNamespace(market="a", kline_time_label="start"),
+        clock=lambda: observed_at,
+    )
+    frame = pd.DataFrame(
+        {
+            "code": ["SH.600250", "SH.600250"],
+            "date": pd.to_datetime(
+                ["2026-08-26T09:30:00+08:00", "2026-08-26T09:31:00+08:00"]
+            ),
+            "open": [9.0, 9.1],
+            "high": [9.2, 9.3],
+            "low": [8.9, 9.0],
+            "close": [9.1, 9.2],
+            "volume": [100.0, 200.0],
+        }
+    )
+    monkeypatch.setattr(
+        StrictPhysicalMonitorState,
+        "_closed_frame",
+        lambda *_args, **_kwargs: frame,
+    )
+
+    normalized = state._closed_frame(object(), "1m", as_of=observed_at)
+
+    assert normalized["date"].dt.strftime("%H:%M").tolist() == ["09:31"]
+    assert normalized.iloc[0]["volume"] == 300.0
 
 
 def test_signed_store_is_immutable_and_rejects_bad_or_expired_url(
