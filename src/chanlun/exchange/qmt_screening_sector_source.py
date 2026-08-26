@@ -7,6 +7,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+import gc
 import hashlib
 import json
 import math
@@ -118,6 +119,8 @@ _MEMBER_LISTING_FACT_SCHEMA = "chanlun-qmt-sector-member-listing-facts"
 _FACT_PRODUCER_SCHEMA = "chanlun-qmt-sector-fact-producer"
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FACT_STREAM_BUFFER_CHARACTERS = 64 * 1024
+_DAILY_STRENGTH_REQUEST_CHUNK_SIZE = 64
+_DAILY_STRENGTH_PROGRESS_SYMBOL_INTERVAL = 8
 
 
 def _producer_ast_manifest(
@@ -3398,7 +3401,7 @@ class QmtSectorStrengthSource:
         *,
         benchmark_symbol: str = "SH.000300",
         request_bars: int = 300,
-        request_chunk_size: int = 400,
+        request_chunk_size: int = _DAILY_STRENGTH_REQUEST_CHUNK_SIZE,
         progress_callback: Callable[[], None] = lambda: None,
         fact_cache_path: Path | str | None = None,
         fact_cache_revision: str | None = None,
@@ -4250,13 +4253,25 @@ class QmtSectorStrengthSource:
                 )
             self._progress_callback()
             if not isinstance(raw, Mapping):
+                del raw
                 continue
-            for symbol, native_code in zip(chunk, native):
+            for ordinal, (symbol, native_code) in enumerate(
+                zip(chunk, native, strict=True),
+                start=1,
+            ):
                 rows = _normalize_equal_ratio_daily_bars(
                     _daily_rows(raw, native_code, not_after=as_of)
                 )
                 if rows:
                     output[symbol] = rows
+                if ordinal % _DAILY_STRENGTH_PROGRESS_SYMBOL_INTERVAL == 0:
+                    self._progress_callback()
+            # QMT returns six wide pandas frames.  Release them before the next
+            # chunk so the growing typed history and multiple native responses
+            # never coexist at the worker's 1.5 GiB fail-closed boundary.
+            del raw
+            gc.collect()
+            self._progress_callback()
         return output
 
     def _refresh_daily(self, symbols: tuple[str, ...]) -> None:

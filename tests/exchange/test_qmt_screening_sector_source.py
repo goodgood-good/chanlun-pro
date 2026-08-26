@@ -1763,6 +1763,36 @@ class DailyFakeXtdata:
         return fields
 
 
+def test_daily_read_uses_memory_bounded_chunks_and_inner_progress(
+    monkeypatch,
+) -> None:
+    class RecordingDailyXtdata(DailyFakeXtdata):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_sizes: list[int] = []
+
+        def get_market_data(self, **kwargs):
+            self.request_sizes.append(len(kwargs["stock_list"]))
+            return super().get_market_data(**kwargs)
+
+    fake = RecordingDailyXtdata()
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    progress: list[int] = []
+    source = QmtSectorStrengthSource(
+        progress_callback=lambda: progress.append(len(progress)),
+    )
+    symbols = tuple(f"SH.60{index:04d}" for index in range(130))
+
+    bars = source._read_daily(symbols, as_of=AS_OF)
+
+    assert len(bars) == len(symbols)
+    assert fake.request_sizes == [64, 64, 2]
+    # Each native request has before/after callbacks, every eight converted
+    # symbols reports progress, and every released response reports once more.
+    assert len(progress) == 25
+
+
 def test_daily_fact_decode_consumes_rows_and_reports_bounded_progress(
     tmp_path: Path,
 ) -> None:
