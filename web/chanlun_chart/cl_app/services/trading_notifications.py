@@ -793,6 +793,193 @@ def _structure_anchor_value(setup: Mapping[str, object]) -> object:
     return setup.get("anchor_price") or setup.get("structure_anchor_price")
 
 
+def _entry_execution_boundary(
+    signal: Mapping[str, object],
+) -> Mapping[str, object]:
+    return _mapping(signal.get("entry_execution_boundary"))
+
+
+def _buy_entry_guidance_state(
+    signal: Mapping[str, object],
+    *,
+    detected_at: object | None = None,
+) -> tuple[str, float | None]:
+    """Project the short-lived 1m locator into a fail-closed display state.
+
+    The 5m anchor is structural evidence and must never be substituted for the
+    raw high of the 1m confirmation bar.  This helper only affects notification
+    guidance; the canonical decision document remains unchanged.
+    """
+
+    side = str(
+        signal.get("side")
+        or _mapping(signal.get("setup_5m")).get("side")
+        or ""
+    )
+    if side != "buy":
+        return "not_applicable", None
+    boundary_status = segment_difference_boundary_status(
+        signal,
+        evaluated_at=detected_at,
+    )
+    if boundary_status == "absent":
+        return "waiting", None
+    if boundary_status == "expired":
+        return "expired", _positive_float(
+            _entry_execution_boundary(signal).get("raw_high")
+        )
+    if boundary_status != "current":
+        return "unavailable", None
+    boundary = _entry_execution_boundary(signal)
+    price_cap = _positive_float(boundary.get("raw_high"))
+    if (
+        price_cap is None
+        or _parse_time(boundary.get("confirmation_bar_closed_at")) is None
+        or _parse_time(boundary.get("entry_valid_until")) is None
+    ):
+        return "unavailable", None
+    current_price = _positive_float(signal.get("current_price"))
+    if current_price is not None and current_price > price_cap:
+        return "price_above_cap", price_cap
+    if str(signal.get("realtime_quote_status") or "") == "unavailable":
+        return "price_unavailable", price_cap
+    return "current", price_cap
+
+
+def _risk_gate_summary(signal: Mapping[str, object]) -> str:
+    risk = _mapping(signal.get("higher_timeframe_risk"))
+    labels = {
+        "GREEN": "通过",
+        "AMBER": "谨慎",
+        "RED": "阻断",
+        "UNRESOLVED": "待核验",
+    }
+    values = (
+        ("市场", risk.get("market_gate")),
+        ("板块", risk.get("sector_gate")),
+        ("个股", risk.get("symbol_gate")),
+    )
+    if not any(value not in (None, "") for _label, value in values):
+        return "风险门待核验"
+    return "／".join(
+        f"{label}{labels.get(str(value or ''), '待核验')}"
+        for label, value in values
+    )
+
+
+def _judgment_checklist_line(
+    signal: Mapping[str, object],
+    *,
+    setup_point: str,
+    trigger_evidence: str,
+    new_stage: str,
+    detected_at: object | None = None,
+) -> str:
+    side = str(
+        signal.get("side")
+        or _mapping(signal.get("setup_5m")).get("side")
+        or ""
+    )
+    if new_stage == "invalidated":
+        five_minute = "已失效"
+    elif new_stage == "closed":
+        five_minute = "跟踪结束"
+    else:
+        five_minute = f"已确认（{setup_point}）"
+
+    trigger = _mapping(signal.get("segment_difference_1m"))
+    boundary_status = segment_difference_boundary_status(
+        signal,
+        trigger=trigger,
+        evaluated_at=detected_at,
+    )
+    if not trigger:
+        one_minute = "待出现"
+    elif side == "sell":
+        one_minute = f"已确认（{trigger_evidence}，仅精确定位）"
+    elif boundary_status == "current":
+        one_minute = f"已确认（{trigger_evidence}，窗口有效）"
+    elif boundary_status == "expired":
+        one_minute = f"历史已确认（{trigger_evidence}，窗口已过）"
+    else:
+        one_minute = f"已确认（{trigger_evidence}，执行边界缺失）"
+    return (
+        f"判断：5分钟主信号={five_minute}｜"
+        f"1分钟精确定位={one_minute}｜风险门={_risk_gate_summary(signal)}"
+    )
+
+
+def _execution_boundary_line(
+    signal: Mapping[str, object],
+    setup: Mapping[str, object],
+    *,
+    new_stage: str,
+    detected_at: object | None = None,
+) -> str:
+    side = str(signal.get("side") or setup.get("side") or "")
+    defense = _current_price_text(_defense_price_value(setup))
+    if new_stage == "invalidated":
+        return "执行边界：原5分钟结构已失效；旧1分钟定位与旧比例同时作废"
+    if new_stage == "closed":
+        return "执行边界：本次结构跟踪已结束；旧边界不得继续使用"
+    if side == "sell":
+        return (
+            f"执行边界：5分钟卖出结构失效价 {defense}（向上突破则取消原判断）｜"
+            "1分钟只确定精确卖出时点｜退出比例由卖点与持有结构级别关系决定"
+        )
+    if side != "buy":
+        return "执行边界：待人工核对"
+
+    state, price_cap = _buy_entry_guidance_state(
+        signal,
+        detected_at=detected_at,
+    )
+    if state == "waiting":
+        return (
+            f"执行边界：等待同向1分钟区间套；未定位前不执行｜"
+            f"5分钟失效价 {defense}"
+        )
+    if state == "expired":
+        old_cap = (
+            f" { _current_price_text(price_cap) }"
+            if price_cap is not None
+            else ""
+        )
+        return (
+            f"执行边界：旧1分钟买入上限{old_cap}已过期，仅保留审计；"
+            f"等待新的1分钟区间套｜5分钟失效价 {defense}"
+        )
+    if state == "unavailable":
+        return (
+            "执行边界：1分钟确认K最高价缺失，精确买入上限不可用；"
+            f"5分钟锚点不得替代｜5分钟失效价 {defense}"
+        )
+
+    boundary = _entry_execution_boundary(signal)
+    valid_until = _notification_time_text(boundary.get("entry_valid_until"))
+    current_price = _positive_float(signal.get("current_price"))
+    source = str(signal.get("current_price_source") or "")
+    if current_price is None:
+        price_condition = "实时价待核对"
+    else:
+        relation = "≤" if price_cap is not None and current_price <= price_cap else ">"
+        source_label = _current_price_label(source)
+        price_condition = (
+            f"{source_label} {_current_price_text(current_price)}{relation}上限"
+        )
+        if state == "price_above_cap":
+            price_condition += "，禁止追价"
+        elif source == "realtime_tick":
+            price_condition += "，价格条件通过"
+        else:
+            price_condition += "，仅作预检；执行前须核实时价"
+    return (
+        "执行边界：1分钟确认K最高价／买入上限 "
+        f"{_current_price_text(price_cap)}｜有效至 {valid_until}｜"
+        f"{price_condition}｜5分钟失效价 {defense}"
+    )
+
+
 def _notification_position_recommendation(
     signal: Mapping[str, object],
     *,
@@ -807,16 +994,22 @@ def _notification_position_recommendation(
         side == "buy"
         and str(signal.get("realtime_quote_status") or "") == "unavailable"
     )
-    boundary_expired = bool(
-        side == "buy"
-        and segment_difference_boundary_status(
-            signal,
-            evaluated_at=detected_at,
-        )
-        == "expired"
+    entry_guidance_state, _entry_price_cap = _buy_entry_guidance_state(
+        signal,
+        detected_at=detected_at,
     )
+    boundary_blocked = entry_guidance_state in {
+        "expired",
+        "unavailable",
+        "price_above_cap",
+    }
     projected = _mapping(signal.get("notification_position_recommendation"))
-    if projected and not realtime_quote_unavailable and not boundary_expired:
+    if (
+        projected
+        and not realtime_quote_unavailable
+        and not boundary_blocked
+        and entry_guidance_state != "waiting"
+    ):
         return projected
 
     canonical = _mapping(signal.get("position_recommendation"))
@@ -827,7 +1020,9 @@ def _notification_position_recommendation(
     # an inconsistent READY recommendation behind.
     recommendation = (
         "BLOCKED"
-        if profile.get("hard_blocked") is True or boundary_expired
+        if profile.get("hard_blocked") is True or boundary_blocked
+        else WAITING_SEGMENT_DIFFERENCE_RECOMMENDATION
+        if entry_guidance_state == "waiting"
         else str(profile.get("recommendation") or "")
     )
     if not recommendation:
@@ -1096,15 +1291,32 @@ def _action_advice(
         return "操作：取消该结构计划"
     if new_stage == "closed":
         return "操作：结束跟踪"
+    side = str(signal.get("side") or "").strip()
+    entry_state, entry_price_cap = _buy_entry_guidance_state(
+        signal,
+        detected_at=detected_at,
+    )
     if new_stage == _SEGMENT_ENRICHED_STAGE:
         boundary_status = segment_difference_boundary_status(
             signal,
             evaluated_at=detected_at,
         )
+        if side == "buy" and entry_state == "price_above_cap":
+            return (
+                "操作：1分钟区间套仍在有效期内，但当前可见价格已超过买入上限 "
+                f"{_current_price_text(entry_price_cap)}；不追价，等待价格重新满足边界"
+                "或新的1分钟区间套"
+            )
+        if side == "buy" and entry_state == "unavailable":
+            return (
+                "操作：1分钟区间套已出现，但确认K最高价缺失；"
+                "5分钟锚点不能替代买入上限，暂不执行"
+            )
         if boundary_status == "current":
             return (
                 "操作：1分钟区间套已完成且定位窗口有效，现已升级为精确执行候选；"
-                "核对原5分钟结构与风险比例后，在其他交易软件手工决定"
+                "仅在实时价不高于1分钟买入上限、原5分钟结构仍有效且风险门无阻断时，"
+                "在其他交易软件手工决定"
             )
         if boundary_status == "expired":
             return (
@@ -1124,7 +1336,6 @@ def _action_advice(
         return "操作：1分钟区间套状态待核对；未确认前不生成精确执行比例"
 
     point = str(point_type or "").strip()
-    side = str(signal.get("side") or "").strip()
     if not side:
         side = "buy" if "buy" in point else "sell" if "sell" in point else ""
     profile = _mapping(signal.get("execution_profile"))
@@ -1144,6 +1355,27 @@ def _action_advice(
         if isinstance(value, str)
     }
     if side == "buy":
+        if entry_state == "waiting":
+            return (
+                "操作：5分钟买点已确认；等待同向1分钟区间套给出精确位置和买入上限，"
+                "当前不执行、不生成买入比例"
+            )
+        if entry_state == "expired":
+            return (
+                "操作：5分钟买点仍保留，但旧1分钟定位窗口已过；"
+                "不追价，等待新的1分钟区间套"
+            )
+        if entry_state == "unavailable":
+            return (
+                "操作：1分钟区间套已出现，但精确买入上限缺失；"
+                "5分钟锚点不能替代，暂不执行"
+            )
+        if entry_state == "price_above_cap":
+            return (
+                "操作：当前可见价格已超过1分钟买入上限 "
+                f"{_current_price_text(entry_price_cap)}；不追价，"
+                "仅在定位有效期内价格重新满足边界时复核，否则等待新的1分钟区间套"
+            )
         if (
             operational.get("status") == "NOT_ACTIONABLE"
             and ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON
@@ -1198,7 +1430,9 @@ def _action_advice(
         else:
             condition = "人工确认后"
         return (
-            f"操作：{condition}在其他交易软件手工确认并分批{action}；本系统不会自动下单"
+            f"操作：{condition}，并在定位有效期内确认实时价不高于1分钟买入上限 "
+            f"{_current_price_text(entry_price_cap)}、风险门无阻断且5分钟结构未失效后，"
+            f"在其他交易软件手工分批{action}；本系统不会自动下单"
         )
     if side == "sell":
         if (
@@ -1215,6 +1449,23 @@ def _action_advice(
                 "操作：结构卖出提醒已达到操作确认；请核对卖点级别与结构仍然有效，"
                 "再在其他交易软件手工决定；本系统不会自动下单"
             )
+        if "SAME_OR_HIGHER_STRUCTURE_FULL_EXIT" in operational_reasons:
+            return (
+                "操作：卖点与持有结构已判定为同级或更高级别；"
+                "优先按完整退出规则人工复核，并确认5分钟卖出结构未向上失效；"
+                "本系统不会自动下单"
+            )
+        if "LOWER_STRUCTURE_SEGMENT_DIFFERENCE_REDUCTION" in operational_reasons:
+            return (
+                "操作：当前卖点属于低级别或不同结构；仅按段差减仓规则人工复核，"
+                "不得误当作完整退出；本系统不会自动下单"
+            )
+        if operational.get("status") == "CONDITIONAL":
+            return (
+                "操作：先核对当前卖点与持有结构的级别关系；"
+                "同级或更高级别复核完整退出，低级别或不同结构只作段差处理；"
+                "关系未确认前不执行"
+            )
         if point.startswith("3sell"):
             return "操作：优先检查退出条件"
         if point.startswith("2sell"):
@@ -1229,6 +1480,21 @@ def _position_recommendation_line(
     detected_at: object | None = None,
     new_stage: str = "triggered",
 ) -> str:
+    entry_state, entry_price_cap = _buy_entry_guidance_state(
+        signal,
+        detected_at=detected_at,
+    )
+    if entry_state == "waiting":
+        return "风险参考：暂不计算（等待1分钟区间套给出精确买入位置）"
+    if entry_state == "expired":
+        return "风险参考：本次执行比例 0%（旧1分钟定位窗口已过）"
+    if entry_state == "unavailable":
+        return "风险参考：本次执行比例 0%（1分钟确认K最高价缺失）"
+    if entry_state == "price_above_cap":
+        return (
+            "风险参考：本次执行比例 0%（当前可见价格超过1分钟买入上限 "
+            f"{_current_price_text(entry_price_cap)}；结构模型上限不构成执行许可）"
+        )
     recommendation = _notification_position_recommendation(
         signal,
         detected_at=detected_at,
@@ -1383,6 +1649,14 @@ def _operation_status_text(
     if new_stage == "closed":
         return "跟踪结束"
     if new_stage == _SEGMENT_ENRICHED_STAGE:
+        entry_state, _entry_price_cap = _buy_entry_guidance_state(
+            signal,
+            detected_at=detected_at,
+        )
+        if entry_state == "price_above_cap":
+            return "1分钟定位有效，但价格超过买入上限"
+        if entry_state == "unavailable":
+            return "1分钟定位已确认，但执行上限缺失"
         boundary_status = segment_difference_boundary_status(
             signal,
             evaluated_at=detected_at,
@@ -1395,6 +1669,18 @@ def _operation_status_text(
             return "1分钟卖出区间套已确认，等待人工复核"
         return "1分钟区间套已确认，定位边界待人工核对"
     if side == "buy":
+        entry_state, _entry_price_cap = _buy_entry_guidance_state(
+            signal,
+            detected_at=detected_at,
+        )
+        if entry_state == "waiting":
+            return "5分钟信号已确认，等待1分钟区间套"
+        if entry_state == "expired":
+            return "5分钟信号保留，1分钟定位窗口已过"
+        if entry_state == "unavailable":
+            return "5分钟信号保留，1分钟执行上限缺失"
+        if entry_state == "price_above_cap":
+            return "禁止追价（超过1分钟买入上限）"
         if operational_status == "BLOCKED":
             return (
                 "禁止买入（0%保护）"
@@ -1494,16 +1780,36 @@ def format_notification(
         for value in operational_position.get("reason_codes", ())
         if isinstance(value, str)
     }
+    entry_guidance_state, _entry_price_cap = _buy_entry_guidance_state(
+        signal,
+        detected_at=detected_at,
+    )
     if new_stage in {"invalidated", "closed"}:
         headline = new_stage_label
         notification_kind = "信号失效" if new_stage == "invalidated" else "跟踪结束"
     elif new_stage == _SEGMENT_ENRICHED_STAGE:
         headline = f"5分钟{setup_point}＋1分钟区间套{trigger_evidence}"
-        notification_kind = "1分钟精确定位新出现"
+        notification_kind = (
+            "1分钟定位已过期"
+            if side == "buy" and entry_guidance_state == "expired"
+            else "1分钟执行边界缺失"
+            if side == "buy" and entry_guidance_state == "unavailable"
+            else "1分钟定位·禁止追价"
+            if side == "buy" and entry_guidance_state == "price_above_cap"
+            else "1分钟精确定位新出现"
+        )
     else:
         headline = f"5分钟{setup_point}"
         notification_kind = (
-            "买点确认·0%保护"
+            "买点确认·等待1分钟定位"
+            if side == "buy" and entry_guidance_state == "waiting"
+            else "买点确认·1分钟定位过期"
+            if side == "buy" and entry_guidance_state == "expired"
+            else "买点确认·执行边界缺失"
+            if side == "buy" and entry_guidance_state == "unavailable"
+            else "买点确认·禁止追价"
+            if side == "buy" and entry_guidance_state == "price_above_cap"
+            else "买点确认·0%保护"
             if side == "buy"
             and operational_status == "BLOCKED"
             and operational_reason_codes
@@ -1618,10 +1924,31 @@ def format_notification(
         recommendation=recommendation,
         detected_at=detected_at,
     )
+    action_advice = _action_advice(
+        signal,
+        point_type=effective_point_type,
+        scope=scope,
+        new_stage=new_stage,
+        detected_at=detected_at,
+    )
     lines = [
+        "结论：" + action_advice.removeprefix("操作："),
         (
             f"股票：{name}｜状态：{operation_status}｜"
             f"进度：{old_stage_label}→{new_stage_label}"
+        ),
+        _judgment_checklist_line(
+            signal,
+            setup_point=setup_point,
+            trigger_evidence=trigger_evidence,
+            new_stage=new_stage,
+            detected_at=detected_at,
+        ),
+        _execution_boundary_line(
+            signal,
+            setup,
+            new_stage=new_stage,
+            detected_at=detected_at,
         ),
         _price_risk_line(signal, setup),
         _position_recommendation_line(
@@ -1644,13 +1971,6 @@ def format_notification(
             + _same_period_context_text(daily_context, "日线").replace("：", " ", 1)
             + "｜"
             + _same_period_context_text(context, "30分钟").replace("：", " ", 1)
-        ),
-        _action_advice(
-            signal,
-            point_type=effective_point_type,
-            scope=scope,
-            new_stage=new_stage,
-            detected_at=detected_at,
         ),
     ]
     return title, lines

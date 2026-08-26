@@ -95,6 +95,7 @@ def signal_document(stage: str = "triggered") -> dict[str, object]:
         "exit_allowed": False,
         "entry_execution_boundary": {
             "confirmation_bar_closed_at": "2026-07-20T10:01:00+08:00",
+            "raw_high": "10.30",
             "entry_valid_until": "2026-07-20T10:02:00+08:00",
         },
         "risk_multiplier": "0.75",
@@ -194,7 +195,7 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
     assert "30分钟向上（有利）" in rendered
     assert "5分钟三类买点" in rendered
     assert "1分钟区间套定位：一类买点" in rendered
-    assert "在其他交易软件手工确认并分批买入" in rendered
+    assert "在其他交易软件手工分批买入" in rendered
     assert "本系统不会自动下单" in rendered
     assert (
         "风险参考：结构模型比例上限 8.5%"
@@ -209,6 +210,142 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
     assert "进度：旧版等待态→5分钟操作确认" in rendered
     assert "计划风险倍数" not in rendered
     assert "结构层级" not in rendered
+
+
+def test_ready_buy_notification_starts_with_an_executable_judgment_card() -> None:
+    signal = signal_document("triggered")
+    signal["current_price_source"] = "realtime_tick"
+    signal["current_price_at"] = "2026-07-20T10:01:29+08:00"
+
+    title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    assert title.startswith("买卖通知｜新买点·待人工确认｜")
+    assert lines[0].startswith("结论：回抽确认后")
+    assert "实时价不高于1分钟买入上限 10.3" in lines[0]
+    assert "风险门无阻断且5分钟结构未失效" in lines[0]
+    assert lines[1].startswith("股票：SZ.000001｜状态：可人工复核执行")
+    assert lines[2] == (
+        "判断：5分钟主信号=已确认（三类买点）｜"
+        "1分钟精确定位=已确认（一类买点，窗口有效）｜"
+        "风险门=市场通过／板块通过／个股通过"
+    )
+    assert lines[3] == (
+        "执行边界：1分钟确认K最高价／买入上限 10.3｜"
+        "有效至 2026-07-20 10:02:00｜当前价 10.25≤上限，价格条件通过｜"
+        "5分钟失效价 9.8"
+    )
+
+
+def test_buy_above_one_minute_cap_is_fail_closed_in_every_guidance_line() -> None:
+    signal = signal_document("triggered")
+    signal["current_price"] = 10.31
+    signal["current_price_source"] = "realtime_tick"
+
+    title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    rendered = "\n".join(lines)
+    assert title.startswith("买卖通知｜买点确认·禁止追价｜")
+    assert lines[0].startswith("结论：当前可见价格已超过1分钟买入上限 10.3")
+    assert "状态：禁止追价（超过1分钟买入上限）" in lines[1]
+    assert "当前价 10.31>上限，禁止追价" in lines[3]
+    assert "风险参考：本次执行比例 0%" in rendered
+    assert "结构模型比例上限" not in rendered
+    assert "手工分批买入" not in rendered
+
+
+def test_buy_above_one_minute_cap_is_zeroed_in_review_projection(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    inbox = RealtimeReviewInbox(tmp_path / "cap-review.json")
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "cap-delivery.json",
+        review_inbox=inbox,
+    )
+    signal = signal_document("triggered")
+    signal["current_price"] = 10.31
+    signal["current_price_source"] = "realtime_tick"
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [signal]})
+
+    [event] = inbox.snapshot()["events"]
+    recommendation = event["position_recommendation"]
+    assert recommendation["status"] == "BLOCKED"
+    assert recommendation["recommended_percent"] == "0"
+    assert recommendation["automated_order_authorized"] is False
+
+
+def test_missing_one_minute_raw_high_never_reuses_five_minute_anchor() -> None:
+    signal = signal_document("triggered")
+    boundary = dict(signal["entry_execution_boundary"])
+    boundary.pop("raw_high")
+    signal["entry_execution_boundary"] = boundary
+
+    title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    rendered = "\n".join(lines)
+    assert title.startswith("买卖通知｜买点确认·执行边界缺失｜")
+    assert "状态：5分钟信号保留，1分钟执行上限缺失" in lines[1]
+    assert "5分钟锚点不得替代" in lines[3]
+    assert "本次执行比例 0%（1分钟确认K最高价缺失）" in rendered
+    assert "结构模型比例上限" not in rendered
+    assert "手工分批买入" not in rendered
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("confirmation_bar_closed_at", "entry_valid_until"),
+)
+def test_incomplete_one_minute_time_boundary_is_fail_closed(
+    missing_field: str,
+) -> None:
+    signal = signal_document("triggered")
+    boundary = dict(signal["entry_execution_boundary"])
+    boundary.pop(missing_field)
+    signal["entry_execution_boundary"] = boundary
+
+    title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    rendered = "\n".join(lines)
+    assert title.startswith("买卖通知｜买点确认·执行边界缺失｜")
+    assert "本次执行比例 0%" in rendered
+    assert "手工分批买入" not in rendered
+
+
+def test_five_minute_buy_waiting_for_one_minute_locator_is_not_executable() -> None:
+    signal = _without_one_minute_segment(signal_document("triggered"))
+
+    title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    rendered = "\n".join(lines)
+    assert title.startswith("买卖通知｜买点确认·等待1分钟定位｜")
+    assert "5分钟买点已确认" in lines[0]
+    assert "等待同向1分钟区间套" in lines[0]
+    assert "1分钟精确定位=待出现" in lines[2]
+    assert "未定位前不执行" in lines[3]
+    assert "风险参考：暂不计算" in rendered
+    assert "手工分批买入" not in rendered
 
 
 def test_geometric_candidate_never_sends_a_trade_notification(tmp_path: Path) -> None:
@@ -294,6 +431,7 @@ def test_a_share_lunch_break_does_not_expire_a_fresh_confirmed_point(
     }
     signal["entry_execution_boundary"] = {
         "confirmation_bar_closed_at": "2026-07-20T13:01:00+08:00",
+        "raw_high": "10.30",
         "entry_valid_until": "2026-07-20T13:02:00+08:00",
     }
 
@@ -379,10 +517,10 @@ def test_final_position_block_overrides_caution_action_copy() -> None:
         new_stage="triggered",
     )
 
-    assert lines[-1] == (
-        "操作：本条买入不纳入操作计划；三买离开中枢的价格空间不足一个最小价位"
+    assert lines[0] == (
+        "结论：本条买入不纳入操作计划；三买离开中枢的价格空间不足一个最小价位"
     )
-    assert "谨慎" not in lines[-1]
+    assert "谨慎" not in lines[0]
 
 
 def test_notification_does_not_conflate_recursive_confirmation_and_availability() -> (
@@ -560,6 +698,7 @@ def test_newer_one_minute_segment_rearms_same_five_minute_notification(
     }
     current["entry_execution_boundary"] = {
         "confirmation_bar_closed_at": "2026-07-20T10:02:00+08:00",
+        "raw_high": "10.30",
         "entry_valid_until": "2026-07-20T10:03:00+08:00",
     }
     now[0] = datetime(
@@ -952,6 +1091,7 @@ def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
     second["observed_at"] = "2026-07-20T10:02:30+08:00"
     second["entry_execution_boundary"] = {
         "confirmation_bar_closed_at": "2026-07-20T10:02:00+08:00",
+        "raw_high": "10.30",
         "entry_valid_until": "2026-07-20T10:03:00+08:00",
     }
 
@@ -1198,8 +1338,10 @@ def test_late_detection_keeps_current_setup_waiting_for_one_minute_locator(
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
     rendered = "\n".join(lines)
-    assert title.startswith("买卖通知｜新买点·待人工确认｜")
-    assert "结构模型比例上限" in rendered
+    assert title.startswith("买卖通知｜买点确认·等待1分钟定位｜")
+    assert "结构模型比例上限" not in rendered
+    assert "风险参考：暂不计算" in rendered
+    assert "等待同向1分钟区间套" in rendered
     assert "监听发现：2026-07-20 10:10:51（延迟 10分51秒）" in rendered
     assert "发现时效" not in rendered
 
@@ -1317,6 +1459,7 @@ def test_expired_one_minute_boundary_does_not_suppress_five_minute_signal(
     expired["observed_at"] = "2026-07-20T10:01:30+08:00"
     expired["entry_execution_boundary"] = {
         "confirmation_bar_closed_at": "2026-07-20T10:01:00+08:00",
+        "raw_high": "10.30",
         "entry_valid_until": "2026-07-20T10:01:15+08:00",
     }
 
@@ -1346,7 +1489,8 @@ def test_notification_expires_boundary_crossed_after_snapshot_observation() -> N
     assert "定位窗口已过" in rendered
     assert "精确执行候选已解锁" not in rendered
     assert "结构模型比例上限" not in rendered
-    assert "本条买入不纳入操作计划" in rendered
+    assert "本次执行比例 0%（旧1分钟定位窗口已过）" in rendered
+    assert "不追价，等待新的1分钟区间套" in rendered
 
 
 def test_sell_transition_notifies_without_an_actual_holding_exit_decision(
@@ -1635,8 +1779,8 @@ def test_notification_localizes_every_lifecycle_stage(
     )
 
     assert label in "\n".join((title, *lines))
-    assert f"{label}→{label}" in lines[0]
-    assert f"{stage}→{stage}" not in lines[0]
+    assert f"{label}→{label}" in lines[1]
+    assert f"{stage}→{stage}" not in lines[1]
 
 
 def test_manual_attention_source_is_explicitly_separated_from_candidate() -> None:
@@ -1651,8 +1795,10 @@ def test_manual_attention_source_is_explicitly_separated_from_candidate() -> Non
 
     assert title == ("买卖通知｜新买点·待人工确认｜人工关注｜SZ.000001｜5分钟三类买点")
     assert "候选" not in title
-    assert lines[-1] == (
-        "操作：回抽确认后在其他交易软件手工确认并分批买入；本系统不会自动下单"
+    assert lines[0] == (
+        "结论：回抽确认后，并在定位有效期内确认实时价不高于1分钟买入上限 "
+        "10.3、风险门无阻断且5分钟结构未失效后，在其他交易软件手工分批买入；"
+        "本系统不会自动下单"
     )
 
 
@@ -1688,8 +1834,8 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
     )
     assert title.endswith("5分钟三类卖点")
     assert "防守价：10.80（突破卖出结构失效）" in "\n".join(lines)
-    assert lines[-1] == (
-        "操作：结构卖出提醒已达到操作确认；请核对卖点级别与结构仍然有效，"
+    assert lines[0] == (
+        "结论：结构卖出提醒已达到操作确认；请核对卖点级别与结构仍然有效，"
         "再在其他交易软件手工决定；本系统不会自动下单"
     )
 
@@ -1698,7 +1844,58 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
         old_stage="triggered",
         new_stage="invalidated",
     )
-    assert invalidated_lines[-1] == "操作：取消该结构计划"
+    assert invalidated_lines[0] == "结论：取消该结构计划"
+
+
+def test_sell_notification_explains_level_relation_and_invalidation_rule() -> None:
+    sell = signal_document("triggered")
+    sell.update(
+        {
+            "side": "sell",
+            "point_type": "1sell",
+            "entry_allowed": False,
+            "exit_allowed": True,
+            "exit_action": "exit_full",
+            "setup_5m": {
+                **sell["setup_5m"],
+                "point_type": "1sell",
+                "side": "sell",
+                "invalidation_price": "10.80",
+            },
+            "segment_difference_1m": {
+                **sell["segment_difference_1m"],
+                "point_type": "1sell",
+                "side": "sell",
+            },
+        }
+    )
+    recommendation = build_position_recommendation(
+        side="sell",
+        recommendation="READY",
+        risk_multiplier="1",
+        context_risk_scale="1",
+        entry_price="10.25",
+        structural_stop="10.80",
+        exit_action="exit_full",
+    ).document()
+    sell["position_recommendation"] = recommendation
+    sell["notification_position_recommendation"] = recommendation
+
+    title, lines = format_notification(
+        sell,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    rendered = "\n".join(lines)
+    assert "新卖点·退出复核" in title
+    assert "同级或更高级别" in lines[0]
+    assert "优先按完整退出规则人工复核" in lines[0]
+    assert "向上失效" in lines[0]
+    assert "1分钟精确定位=已确认（一类卖点，仅精确定位）" in lines[2]
+    assert "5分钟卖出结构失效价 10.8" in lines[3]
+    assert "退出比例由卖点与持有结构级别关系决定" in lines[3]
+    assert "结构退出比例 100%" in rendered
 
 
 def test_unknown_sell_structure_relation_never_looks_like_an_exit_ratio() -> None:
@@ -1745,7 +1942,7 @@ def test_missing_defense_price_is_explicit_and_never_estimated() -> None:
     )
 
     assert title.startswith("买卖通知｜买点观察·待人工复核｜")
-    assert "状态：仅观察，结构风险待核对" in lines[0]
+    assert "状态：仅观察，结构风险待核对" in lines[1]
     assert "防守价：待结构确认（跌破买入结构失效）" in "\n".join(lines)
 
 

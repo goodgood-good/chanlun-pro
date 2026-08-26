@@ -104,11 +104,10 @@ from cl_app.services.trading_screening import (
     _priority_monitor_compute_window_open,
     _priority_monitor_session_open,
     _rotating_signal_candidate_admission_order,
+    _current_session_suspension_can_be_confirmed,
     _current_session_zero_trade_codes,
     _structure_bundle_is_current,
     _structure_bundle_is_current_for_intraday_evidence,
-    _structure_bundle_is_current_for_zero_trade_session,
-    _structure_bundle_is_current_for_zero_trade_intraday_evidence,
     _take_rotating_priority_batch,
     _take_rule_recheck_batch,
     _take_due_candidate_batch,
@@ -116,6 +115,9 @@ from cl_app.services.trading_screening import (
 )
 from cl_app.services.trading_screening_scope import (
     ScreeningScopeAuthorizationError,
+)
+from cl_app.services.trading_screening_source_migrations import (
+    suspension_evidence_recheck_source_migration_allowed,
 )
 from cl_app.services.realtime_quotes import (
     AShareInstrumentSessionStatus,
@@ -146,9 +148,7 @@ def test_stock_decision_outcome_uses_current_executable_five_minute_contract() -
     )
     current = replace(
         historical,
-        five_points=(
-            confirmed_point("1buy", minutes_after=(5 * 24 * 60) + 295),
-        ),
+        five_points=(confirmed_point("1buy", minutes_after=(5 * 24 * 60) + 295),),
     )
     engine = HumanAssistedDecisionCore(formal_selection_required=False)
 
@@ -156,15 +156,21 @@ def test_stock_decision_outcome_uses_current_executable_five_minute_contract() -
     current_evaluated = engine.evaluate_symbol(current)
 
     assert historical_evaluated == ()
-    assert trading_screening_subject._symbol_stock_decision_outcome(
-        historical,
-        historical_evaluated,
-    ) == "NO_CURRENT_EXECUTABLE_5M_STRUCTURAL_POINT"
+    assert (
+        trading_screening_subject._symbol_stock_decision_outcome(
+            historical,
+            historical_evaluated,
+        )
+        == "NO_CURRENT_EXECUTABLE_5M_STRUCTURAL_POINT"
+    )
     assert current_evaluated
-    assert trading_screening_subject._symbol_stock_decision_outcome(
-        current,
-        current_evaluated,
-    ) == "CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED"
+    assert (
+        trading_screening_subject._symbol_stock_decision_outcome(
+            current,
+            current_evaluated,
+        )
+        == "CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED"
+    )
 
 
 def _current_terminal_point(point, *, terminal_minutes: int = 30):
@@ -846,8 +852,7 @@ def test_no_signal_scan_keeps_warmup_fail_closed_audit(
                 warmup_difference_codes_by_frequency=differences,
                 enforce_warmup_entry_gate=True,
                 analysis_closed_at_by_frequency=tuple(
-                    (frequency, as_of)
-                    for frequency in ("d", "30m", "5m", "1m")
+                    (frequency, as_of) for frequency in ("d", "30m", "5m", "1m")
                 ),
             )
 
@@ -894,10 +899,7 @@ def test_no_signal_scan_keeps_warmup_fail_closed_audit(
         "SZ.000698",
     ]
     assert service.health_snapshot()["warmup_sensitive_symbol_count"] == 2
-    assert (
-        service.health_snapshot()["trade_level_warmup_fail_closed_symbol_count"]
-        == 1
-    )
+    assert service.health_snapshot()["trade_level_warmup_fail_closed_symbol_count"] == 1
     assert service.health_snapshot()["stock_decision_outcome_counts"] == {
         "NO_CURRENT_5M_STRUCTURAL_POINT": 2,
     }
@@ -946,9 +948,7 @@ def test_stock_structure_requests_use_configured_parallel_workers(
     assert set(market.bundle_codes) == set(symbols)
     assert payload["scan_audit"]["completed_symbol_count"] == len(symbols)
     assert payload["scan_audit"]["stock_worker_count"] == 3
-    assert sector_catalog.affinity_calls == [
-        {eligible_sector().sector_id: symbols}
-    ]
+    assert sector_catalog.affinity_calls == [{eligible_sector().sector_id: symbols}]
     assert payload["scan_audit"]["coverage_sector_affinity"] == {
         "schema": "test-coverage-sector-affinity",
         "configured": True,
@@ -2004,12 +2004,16 @@ def test_bounded_cache_rejects_missing_scope_proof_before_payload_read(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
-    cache_path.write_text("{this large legacy payload must not be parsed", encoding="utf-8")
+    cache_path.write_text(
+        "{this large legacy payload must not be parsed", encoding="utf-8"
+    )
     original_read_text = Path.read_text
 
     def guarded_read_text(path: Path, *args, **kwargs):
         if path == cache_path:
-            raise AssertionError("bounded restore opened the payload before scope admission")
+            raise AssertionError(
+                "bounded restore opened the payload before scope admission"
+            )
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guarded_read_text)
@@ -2471,6 +2475,27 @@ def _previous_runtime_policy_source_snapshot(
     return previous
 
 
+def _previous_suspension_evidence_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    screening_row = next(
+        row
+        for row in previous["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    assert screening_row["sha256"] == (
+        "sha256:98b8373179fcb2c2ab772bc58975f832fc79c86c46880e4f8f34becf899a646f"
+    )
+    screening_row["sha256"] = (
+        "sha256:117e1e518f6c4417385e72f2ad9a911147192eb413543b7610550f1bbaebf8e3"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
 def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -2572,9 +2597,105 @@ def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
         legacy_generation
     )
     assert (
-        generation_health["cache_decision_source_migrated_from"]
-        == previous_source_id
+        generation_health["cache_decision_source_migrated_from"] == previous_source_id
     )
+
+
+def test_suspension_evidence_source_migration_rechecks_only_old_exclusions(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
+    first = TradingScreeningService(
+        market_data=CurrentSessionSuspendedMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    published = first.refresh_now()
+    assert published["coverage_manifest"]["excluded_codes"] == ["SZ.000002"]
+
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    current_source = persisted["decision_source_snapshot"]
+    current_source_id = persisted["decision_source_snapshot_id"]
+    previous_source = _previous_suspension_evidence_source_snapshot(current_source)
+    previous_source_id = previous_source["aggregate_sha256"]
+    assert suspension_evidence_recheck_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_source_id,
+        current_decision_source_snapshot_id=current_source_id,
+        cached_decision_source_snapshot=previous_source,
+        current_decision_source_snapshot=current_source,
+    )
+    assert not suspension_evidence_recheck_source_migration_allowed(
+        cached_decision_source_snapshot_id=current_source_id,
+        current_decision_source_snapshot_id=previous_source_id,
+        cached_decision_source_snapshot=current_source,
+        current_decision_source_snapshot=previous_source,
+    )
+    persisted["decision_source_snapshot_id"] = previous_source_id
+    persisted["decision_source_snapshot"] = previous_source
+    persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        persisted
+    )
+    cache_path.write_text(json.dumps(persisted), encoding="utf-8")
+    first._persist_cache_scope_sidecar(cache_path, persisted)
+    for generation in first._generation_paths():
+        first._cache_scope_sidecar_path(generation).unlink(missing_ok=True)
+        generation.unlink()
+
+    migrated_market = PositiveStatusTradingMarketData()
+    migrated_planner = RecordingPlanner(())
+    migrated = TradingScreeningService(
+        market_data=migrated_market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=migrated_planner,
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    migrated_health = migrated.health_snapshot()
+    assert migrated_market.bundle_codes == []
+    assert migrated.snapshot()["available"] is True
+    assert migrated_health["cache_decision_source_recheck_codes"] == ["SZ.000002"]
+    assert migrated_health["cache_decision_source_recheck_pending_codes"] == [
+        "SZ.000002"
+    ]
+    on_disk = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert on_disk["source_migration_suspension_evidence_recheck_codes"] == [
+        "SZ.000002"
+    ]
+
+    durable_market = PositiveStatusTradingMarketData()
+    durable_planner = RecordingPlanner(())
+    durable = TradingScreeningService(
+        market_data=durable_market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=durable_planner,
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    assert durable_market.bundle_codes == []
+    assert (
+        durable.health_snapshot()["cache_decision_source_recheck_pending_code_count"]
+        == 1
+    )
+
+    refreshed = durable.refresh_now()
+    refreshed_health = durable.health_snapshot()
+
+    assert durable_planner.calls == 0
+    assert durable_market.bundle_codes == ["SZ.000002"]
+    assert refreshed["coverage_manifest"]["completed_codes"] == list(symbols)
+    assert refreshed["coverage_manifest"]["excluded_codes"] == []
+    assert "source_migration_suspension_evidence_recheck_codes" not in refreshed
+    assert refreshed_health["cache_decision_source_recheck_code_count"] == 1
+    assert refreshed_health["cache_decision_source_recheck_pending_code_count"] == 0
 
 
 def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
@@ -2596,9 +2717,7 @@ def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
     legacy["decision_source_snapshot_id"] = previous_source["aggregate_sha256"]
     legacy["decision_source_snapshot"] = previous_source
     legacy["scan_state"] = "in_progress"
-    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
-        legacy
-    )
+    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(legacy)
     original = copy.deepcopy(legacy)
 
     assert service._operationally_migrated_cache(legacy) is None
@@ -2643,9 +2762,7 @@ def test_previous_close_preselection_continuity_keeps_current_notifications_live
             "files": previous_source["files"],
         }
     )
-    persisted["decision_source_snapshot_id"] = previous_source[
-        "aggregate_sha256"
-    ]
+    persisted["decision_source_snapshot_id"] = previous_source["aggregate_sha256"]
     persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
         persisted
     )
@@ -2835,9 +2952,10 @@ def test_completed_continuity_recheck_leaves_recurring_candidate_rotation(
     )
 
     assert market.bundle_codes == []
-    assert service.health_snapshot()["candidate_monitor_five_minute"][
-        "universe_count"
-    ] == 0
+    assert (
+        service.health_snapshot()["candidate_monitor_five_minute"]["universe_count"]
+        == 0
+    )
 
 
 def test_current_unavailable_checkpoint_rejects_stale_generation_scope_proofs(
@@ -3894,7 +4012,9 @@ def test_full_scan_freshness_uses_independent_materialized_frequency_times(
             )
             return replace(
                 bundle,
-                as_of=max(closed_at for _frequency, closed_at in self.closed_at_by_frequency),
+                as_of=max(
+                    closed_at for _frequency, closed_at in self.closed_at_by_frequency
+                ),
                 warmup_by_frequency=tuple(
                     (frequency, True, 100, 100)
                     for frequency, _closed_at in self.closed_at_by_frequency
@@ -4065,67 +4185,20 @@ def test_priority_lunch_freshness_accepts_a_materialized_five_minute_empty_branc
     assert service.health_snapshot()["priority_monitor_last_error_count"] == 0
 
 
-def test_zero_trade_session_freshness_accepts_only_previous_scheduled_close() -> None:
-    observed_at = datetime(2026, 7, 27, 10, 0, tzinfo=AS_OF.tzinfo)
+def test_suspension_confirmation_requires_complete_trading_session() -> None:
+    session = date(2026, 7, 20)
 
-    assert _structure_bundle_is_current_for_zero_trade_session(
-        observed_at=observed_at,
-        bundle_as_of=datetime(2026, 7, 24, 15, 0, tzinfo=AS_OF.tzinfo),
-        max_age_seconds=3600,
+    assert not _current_session_suspension_can_be_confirmed(
+        session=session,
+        market_data_as_of=datetime(2026, 7, 20, 10, 30, tzinfo=AS_OF.tzinfo),
     )
-    assert not _structure_bundle_is_current_for_zero_trade_session(
-        observed_at=observed_at,
-        bundle_as_of=datetime(2026, 7, 23, 15, 0, tzinfo=AS_OF.tzinfo),
-        max_age_seconds=3600,
+    assert _current_session_suspension_can_be_confirmed(
+        session=session,
+        market_data_as_of=datetime(2026, 7, 20, 15, 0, tzinfo=AS_OF.tzinfo),
     )
-
-
-def test_zero_trade_session_freshness_checks_each_materialized_intraday_time() -> None:
-    observed_at = datetime(2026, 7, 27, 10, 0, tzinfo=AS_OF.tzinfo)
-    previous_close = datetime(2026, 7, 24, 15, 0, tzinfo=AS_OF.tzinfo)
-    older_close = datetime(2026, 7, 23, 15, 0, tzinfo=AS_OF.tzinfo)
-    base = SymbolStructureBundle(
-        code="SZ.000001",
-        as_of=previous_close,
-        sector=eligible_sector(),
-        thirty_direction="neutral",
-        thirty_points=(),
-        five_points=(),
-        one_points=(),
-        opposite_points=(),
-        warmup_by_frequency=(
-            ("5m", True, 100, 100),
-            ("1m", True, 100, 100),
-        ),
-        analysis_closed_at_by_frequency=(
-            ("5m", previous_close),
-            ("1m", previous_close),
-        ),
-    )
-
-    assert _structure_bundle_is_current_for_zero_trade_intraday_evidence(
-        base,
-        observed_at=observed_at,
-        max_age_seconds=60,
-        requested_frequencies=("5m", "1m"),
-    )
-    assert not _structure_bundle_is_current_for_zero_trade_intraday_evidence(
-        replace(
-            base,
-            analysis_closed_at_by_frequency=(
-                ("5m", previous_close),
-                ("1m", older_close),
-            ),
-        ),
-        observed_at=observed_at,
-        max_age_seconds=60,
-        requested_frequencies=("5m", "1m"),
-    )
-    assert not _structure_bundle_is_current_for_zero_trade_intraday_evidence(
-        replace(base, as_of=observed_at + timedelta(minutes=1)),
-        observed_at=observed_at,
-        max_age_seconds=60,
-        requested_frequencies=("5m", "1m"),
+    assert _current_session_suspension_can_be_confirmed(
+        session=session,
+        market_data_as_of=datetime(2026, 7, 21, 8, 45, tzinfo=AS_OF.tzinfo),
     )
 
 
@@ -4229,9 +4302,7 @@ def test_transient_stale_structure_retries_only_the_exact_symbol(
         return ScanPlan(
             sectors=(eligible_sector().sector_id,),
             symbols=symbols,
-            symbol_frequencies=tuple(
-                (code, ("1m", "5m", "30m")) for code in symbols
-            ),
+            symbol_frequencies=tuple((code, ("1m", "5m", "30m")) for code in symbols),
             full_market_history_scan=False,
             background_full_refresh_required=False,
         )
@@ -4322,15 +4393,70 @@ class CurrentSessionSuspendedMarketData(RecordingMarketData):
         )
 
     def structure_bundle(self, code: str, *, as_of: datetime, sector, frequencies=()):
-        if code == self.suspended_code:
-            raise AssertionError(
-                "suspended symbol must not enter structure calculation"
-            )
-        return super().structure_bundle(
+        bundle = super().structure_bundle(
             code,
             as_of=as_of,
             sector=sector,
             frequencies=frequencies,
+        )
+        if code != self.suspended_code:
+            return bundle
+        previous_close = as_of - timedelta(days=3)
+        return replace(
+            bundle,
+            as_of=previous_close,
+            analysis_closed_at_by_frequency=(
+                ("5m", previous_close),
+                ("1m", previous_close),
+            ),
+        )
+
+
+class PositiveStatusTradingMarketData(RecordingMarketData):
+    status_code = "SZ.000002"
+
+    def __init__(self, *, stale_one_minute: bool = False) -> None:
+        super().__init__()
+        self.stale_one_minute = stale_one_minute
+
+    def current_session_instrument_statuses(
+        self,
+        codes: tuple[str, ...],
+        *,
+        session: date,
+    ) -> AShareInstrumentSessionStatusBatch:
+        return AShareInstrumentSessionStatusBatch(
+            requested_codes=tuple(sorted(set(codes))),
+            session=session,
+            facts=(
+                AShareInstrumentSessionStatus(
+                    code=self.status_code,
+                    trading_day=session,
+                    instrument_name="跨境ETF",
+                    instrument_status=1,
+                    is_trading=False,
+                ),
+            ),
+        )
+
+    def structure_bundle(self, code: str, *, as_of: datetime, sector, frequencies=()):
+        bundle = super().structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+        )
+        if code != self.status_code:
+            return bundle
+        one_minute_closed_at = (
+            as_of - timedelta(days=7) if self.stale_one_minute else as_of
+        )
+        return replace(
+            bundle,
+            analysis_closed_at_by_frequency=(
+                ("5m", as_of),
+                ("1m", one_minute_closed_at),
+            ),
         )
 
 
@@ -4469,8 +4595,9 @@ def test_low_completion_batch_advances_remaining_coverage_instead_of_spinning(
     assert first["scan_audit"]["coverage_cycle_completed_symbol_count"] == 5
     assert first["scan_audit"]["coverage_cycle_failed_symbol_count"] == 2
     assert first["scan_audit"]["coverage_cycle_started_at"] == AS_OF.isoformat()
-    assert first["sector_strength_evidence_revision"] == (
-        first["coverage_manifest"]["sector_strength_evidence_revision"]
+    assert (
+        first["sector_strength_evidence_revision"]
+        == (first["coverage_manifest"]["sector_strength_evidence_revision"])
     )
     assert first["sectors"]
 
@@ -4836,7 +4963,7 @@ def test_minimum_history_rejection_is_audited_as_epoch_exclusion(
     assert restored["snapshot_content_sha256"] == payload["snapshot_content_sha256"]
 
 
-def test_current_session_suspension_is_excluded_before_structure_calculation(
+def test_current_session_suspension_requires_stale_five_minute_trade_evidence(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
@@ -4856,7 +4983,7 @@ def test_current_session_suspension_is_excluded_before_structure_calculation(
     manifest = payload["coverage_manifest"]
     audit = payload["scan_audit"]
 
-    assert market.suspended_code not in market.bundle_codes
+    assert market.bundle_codes.count(market.suspended_code) == 2
     assert payload["scan_state"] == "complete"
     assert payload["errors"] == []
     assert payload["data_quality"] == {
@@ -4881,6 +5008,7 @@ def test_current_session_suspension_is_excluded_before_structure_calculation(
     ]
     assert audit["stock_instrument_status_probe_status"] == "completed"
     assert audit["stock_instrument_status_probe_error"] is None
+    assert audit["stock_instrument_status_suspension_hint_count"] == 1
     assert audit["stock_current_session_suspended_code_count"] == 1
     assert audit["coverage_cycle_completed_symbol_count"] == 4
     assert audit["coverage_cycle_excluded_symbol_count"] == 1
@@ -4904,6 +5032,100 @@ def test_current_session_suspension_is_excluded_before_structure_calculation(
     assert restored._coverage_cycle_exclusions == {
         market.suspended_code: manifest["exclusions"][0]
     }
+
+
+def test_intraday_status_hint_without_trade_waits_instead_of_suspending(
+    tmp_path: Path,
+) -> None:
+    observed_at = datetime(2026, 7, 20, 10, 0, tzinfo=AS_OF.tzinfo)
+    symbols = ("SZ.000001", "SZ.000002")
+    market = CurrentSessionSuspendedMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+    )
+
+    payload = service.refresh_now()
+    manifest = payload["coverage_manifest"]
+    audit = payload["scan_audit"]
+    error = payload["errors"][0]
+
+    assert market.bundle_codes.count(market.suspended_code) == 2
+    assert manifest["completed_codes"] == ["SZ.000001"]
+    assert manifest["excluded_codes"] == []
+    assert manifest["failed_codes"] == [market.suspended_code]
+    assert manifest["exclusions"] == []
+    assert error["code"] == market.suspended_code
+    assert error["reason_code"] == "CURRENT_SESSION_FIRST_TRADE_PENDING"
+    assert error["failure_class"] == "MARKET_DATA_PENDING"
+    assert error["retry_policy"] == "NEXT_REFRESH_AFTER_BACKOFF"
+    assert error["deterministic_for_coverage_epoch"] is False
+    assert audit["stock_current_session_suspended_code_count"] == 0
+    assert audit["stock_exclusion_counts"] == {}
+    assert audit["stock_failure_counts"] == {"CURRENT_SESSION_FIRST_TRADE_PENDING": 1}
+    assert audit["backoff_retry_symbol_count"] == 1
+
+
+def test_positive_status_with_current_five_minute_trade_is_not_suspended(
+    tmp_path: Path,
+) -> None:
+    symbols = ("SZ.000001", "SZ.000002")
+    market = PositiveStatusTradingMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    payload = service.refresh_now()
+    audit = payload["scan_audit"]
+
+    assert payload["coverage_manifest"]["completed_codes"] == list(symbols)
+    assert payload["coverage_manifest"]["excluded_codes"] == []
+    assert market.bundle_codes.count(market.status_code) == 1
+    assert audit["stock_instrument_status_suspension_hint_count"] == 1
+    assert audit["stock_current_session_suspended_code_count"] == 0
+    assert audit["stock_exclusion_counts"] == {}
+
+
+def test_current_five_minute_with_stale_one_minute_is_not_suspension(
+    tmp_path: Path,
+) -> None:
+    symbols = ("SZ.000001", "SZ.000002")
+    market = PositiveStatusTradingMarketData(stale_one_minute=True)
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    payload = service.refresh_now()
+    audit = payload["scan_audit"]
+    manifest = payload["coverage_manifest"]
+    error = payload["errors"][0]
+
+    assert market.bundle_codes.count(market.status_code) == 2
+    assert manifest["excluded_codes"] == []
+    assert manifest["failed_codes"] == [market.status_code]
+    assert error["code"] == market.status_code
+    assert error["reason_code"] == "STRUCTURE_BUNDLE_STALE"
+    assert audit["stock_instrument_status_suspension_hint_count"] == 1
+    assert audit["stock_current_session_suspended_code_count"] == 0
+    assert audit["stock_exclusion_counts"] == {}
+    assert audit["stock_failure_counts"] == {"STRUCTURE_BUNDLE_STALE": 1}
 
 
 def test_runtime_symbol_failure_retries_after_paced_refresh_in_same_epoch(
@@ -5082,9 +5304,10 @@ def test_refresh_failure_retains_an_existing_complete_snapshot(
         "RuntimeError: same-epoch sector transport failure"
     )
     assert "screening_background_error" not in failed_health["reasons"]
-    assert "screening_background_error" in failed_health[
-        "selection_operational_reason_codes"
-    ]
+    assert (
+        "screening_background_error"
+        in failed_health["selection_operational_reason_codes"]
+    )
 
     catalog.fail = False
     recovered = service.refresh_now()
@@ -5804,12 +6027,14 @@ def test_snapshot_exposes_exact_session_gap_without_blocking_five_minute_signal(
 
     assert signal["entry_allowed"] is True
     assert risk["data_integrity_hard_block_reason_codes"] == []
-    assert "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING" in signal[
-        "execution_profile"
-    ]["advisory_reason_codes"]
-    assert "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING" not in signal[
-        "execution_profile"
-    ]["hard_block_reason_codes"]
+    assert (
+        "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING"
+        in signal["execution_profile"]["advisory_reason_codes"]
+    )
+    assert (
+        "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING"
+        not in signal["execution_profile"]["hard_block_reason_codes"]
+    )
     assert risk["session_evidence_contract_id"] == (
         HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID
     )
@@ -6547,12 +6772,12 @@ def test_priority_monitor_continuation_preserves_sector_source_provenance(
     )
     [signal] = service.refresh_now()["signals"]
 
-    continuation = (
-        trading_screening_subject._priority_monitor_continuation_document(signal)
-    )
-    presentation_risk = trading_screening_subject._presentation_signal_document(
+    continuation = trading_screening_subject._priority_monitor_continuation_document(
         signal
-    )["higher_timeframe_risk"]
+    )
+    presentation_risk = trading_screening_subject._presentation_signal_document(signal)[
+        "higher_timeframe_risk"
+    ]
     continuation_risk = continuation["higher_timeframe_risk"]
     sector_source_fields = (
         "sector_higher_timeframe_source_mode",
@@ -6561,9 +6786,9 @@ def test_priority_monitor_continuation_preserves_sector_source_provenance(
         "sector_research_bridge_parameter_set_id",
     )
 
-    assert {
-        field: continuation_risk[field] for field in sector_source_fields
-    } == {field: presentation_risk[field] for field in sector_source_fields}
+    assert {field: continuation_risk[field] for field in sector_source_fields} == {
+        field: presentation_risk[field] for field in sector_source_fields
+    }
     assert (
         trading_screening_subject.validate_signal_decision_document(continuation)
         == signal["decision_document_id"]
@@ -7488,9 +7713,7 @@ def test_candidate_scheduler_covers_a_five_minute_universe_once_per_cadence() ->
 def test_candidate_scheduler_drains_lumpy_deadline_before_capacity_gap() -> None:
     universe = tuple(f"SZ.{value:06d}" for value in range(1, 21))
     observed_at = AS_OF.replace(hour=10, minute=0, second=2, microsecond=0)
-    last_success_at = {
-        code: observed_at - timedelta(seconds=239) for code in universe
-    }
+    last_success_at = {code: observed_at - timedelta(seconds=239) for code in universe}
 
     # All twenty rows have the same deadline.  Only twelve fit in the next
     # physical wave, so eight must use otherwise-idle capacity now even though
@@ -7643,7 +7866,9 @@ def test_candidate_scheduler_preserves_lifecycle_priority_for_equal_due_times() 
     assert batch == universe[:2]
 
 
-def test_candidate_scheduler_does_not_starve_due_rows_behind_rotated_cold_rows() -> None:
+def test_candidate_scheduler_does_not_starve_due_rows_behind_rotated_cold_rows() -> (
+    None
+):
     observed_at = AS_OF.replace(hour=10, minute=0, second=2, microsecond=0)
     cold = tuple(f"COLD_{value:02d}" for value in range(31))
     due = tuple(f"DUE_{value:02d}" for value in range(4))
@@ -7879,9 +8104,7 @@ def test_candidate_cadence_overdue_still_degrades_realtime_alert(
     assert health["candidate_monitor_status"] == "cadence_overdue"
     assert health["realtime_alert_ready"] is False
     assert health["realtime_alert_status"] == "candidate_monitor_degraded"
-    assert health["realtime_alert_reason_code"] == (
-        "CANDIDATE_MONITOR_CADENCE_OVERDUE"
-    )
+    assert health["realtime_alert_reason_code"] == ("CANDIDATE_MONITOR_CADENCE_OVERDUE")
 
 
 def test_deferred_candidate_with_fresh_observation_does_not_claim_capacity_failure(
@@ -7991,12 +8214,8 @@ def test_rule_migration_rechecks_only_current_buy_candidates(
                 "point_type": "1buy",
                 "lifecycle_stage": "triggered",
                 "setup_5m": {
-                    "anchor_at": (
-                        observed_at - timedelta(minutes=5)
-                    ).isoformat(),
-                    "available_at": (
-                        observed_at - timedelta(minutes=5)
-                    ).isoformat()
+                    "anchor_at": (observed_at - timedelta(minutes=5)).isoformat(),
+                    "available_at": (observed_at - timedelta(minutes=5)).isoformat(),
                 },
             },
             {
@@ -8005,9 +8224,7 @@ def test_rule_migration_rechecks_only_current_buy_candidates(
                 "point_type": "2buy",
                 "lifecycle_stage": "approaching",
                 "setup_5m": {
-                    "available_at": (
-                        observed_at - timedelta(minutes=30)
-                    ).isoformat()
+                    "available_at": (observed_at - timedelta(minutes=30)).isoformat()
                 },
             },
             {
@@ -8016,12 +8233,8 @@ def test_rule_migration_rechecks_only_current_buy_candidates(
                 "point_type": "3buy",
                 "lifecycle_stage": "triggered",
                 "setup_5m": {
-                    "anchor_at": (
-                        observed_at - timedelta(minutes=11)
-                    ).isoformat(),
-                    "available_at": (
-                        observed_at - timedelta(minutes=11)
-                    ).isoformat()
+                    "anchor_at": (observed_at - timedelta(minutes=11)).isoformat(),
+                    "available_at": (observed_at - timedelta(minutes=11)).isoformat(),
                 },
             },
             {
@@ -8030,9 +8243,7 @@ def test_rule_migration_rechecks_only_current_buy_candidates(
                 "point_type": "1sell",
                 "lifecycle_stage": "triggered",
                 "setup_5m": {
-                    "available_at": (
-                        observed_at - timedelta(minutes=5)
-                    ).isoformat()
+                    "available_at": (observed_at - timedelta(minutes=5)).isoformat()
                 },
             },
         ],
@@ -8232,9 +8443,7 @@ def test_archive_mandatory_subjects_share_the_bounded_admission_gate(
         config=TradingScreeningConfig(),
     )
 
-    assert service.admit_archive_universe_codes(("SZ.000001",)) == (
-        "SZ.000001",
-    )
+    assert service.admit_archive_universe_codes(("SZ.000001",)) == ("SZ.000001",)
     with pytest.raises(
         ScreeningScopeAuthorizationError,
         match="mandatory screening universe has 13 symbols",
@@ -8354,8 +8563,7 @@ def test_validation_restart_rejects_broad_compact_signal_archive(
         ),
         successful_codes=codes,
         lanes_by_code={
-            code: trading_screening_subject.CANDIDATE_MONITOR_LANE_1M
-            for code in codes
+            code: trading_screening_subject.CANDIDATE_MONITOR_LANE_1M for code in codes
         },
     )
     producer._persist_priority_monitor_state()
@@ -8433,9 +8641,7 @@ def test_validation_restart_rejects_compact_state_without_scope_proof(
     persisted.pop("screening_scope_mode")
     persisted.pop("effective_monitor_universe_limit")
     persisted.pop("admitted_universe_codes")
-    persisted["content_sha256"] = producer._priority_monitor_state_sha256(
-        persisted
-    )
+    persisted["content_sha256"] = producer._priority_monitor_state_sha256(persisted)
     state_path.write_text(json.dumps(persisted), encoding="utf-8")
 
     bounded = TradingScreeningService(
@@ -8697,20 +8903,15 @@ def test_validation_cohort_uses_idle_capacity_for_live_five_minute_probes(
 
     assert market.bundle_codes == list(symbols)
     assert {
-        code: set(frequencies)
-        for code, frequencies in market.bundle_frequency_requests
-    } == {
-        code: {"5m", "30m"} for code in symbols
-    }
+        code: set(frequencies) for code, frequencies in market.bundle_frequency_requests
+    } == {code: {"5m", "30m"} for code in symbols}
     assert all(
         bundle.selection_sources == ("QMT_SECTOR_ELIGIBLE_SCOPE",)
         for bundle in engine.bundles
     )
     health = service.health_snapshot()
     assert health["candidate_monitor_validation_probe_pool_count"] == len(symbols)
-    assert health["candidate_monitor_validation_probe_admitted_count"] == len(
-        symbols
-    )
+    assert health["candidate_monitor_validation_probe_admitted_count"] == len(symbols)
     assert health["candidate_monitor_validation_probe_deferred_count"] == 0
     assert health["candidate_monitor_active"] is True
     assert health["candidate_monitor_status"] == "verified"
@@ -8814,15 +9015,9 @@ def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
                 "point_type": "1buy",
                 "lifecycle_stage": "triggered",
                 "setup_5m": {
-                    "anchor_at": (
-                        observed_at - timedelta(minutes=5)
-                    ).isoformat(),
-                    "available_at": (
-                        observed_at - timedelta(minutes=5)
-                    ).isoformat(),
-                    "confirmed_at": (
-                        observed_at - timedelta(minutes=5)
-                    ).isoformat(),
+                    "anchor_at": (observed_at - timedelta(minutes=5)).isoformat(),
+                    "available_at": (observed_at - timedelta(minutes=5)).isoformat(),
+                    "confirmed_at": (observed_at - timedelta(minutes=5)).isoformat(),
                 },
             },
             {
@@ -9174,9 +9369,7 @@ def test_priority_phase_finishes_before_candidate_phase_uses_remaining_budget(
 
     assert priority_observed_candidate == [False]
     assert events.index(("evaluate_priority", symbols[0])) < next(
-        index
-        for index, event in enumerate(events)
-        if event[0] == "prepare_candidate"
+        index for index, event in enumerate(events) if event[0] == "prepare_candidate"
     )
     assert set(events) == {
         (
@@ -9294,9 +9487,7 @@ def test_candidate_phase_cannot_open_a_second_budget_after_priority_deadline(
             deadline_monotonic: float,
             **kwargs,
         ) -> SymbolStructureBundle:
-            raise AssertionError(
-                f"候选 {code} 不得在 1m 已耗尽本轮截止时间后启动"
-            )
+            raise AssertionError(f"候选 {code} 不得在 1m 已耗尽本轮截止时间后启动")
 
     market = SharedDeadlineMarket()
     catalog = MultiMemberSectorCatalog(codes)
@@ -9543,13 +9734,17 @@ def test_priority_time_budget_reports_unstarted_mandatory_codes(
     }
 
 
-def test_priority_monitor_skips_current_session_suspended_instrument(
+def test_priority_monitor_waits_for_first_trade_without_marking_suspended(
     tmp_path: Path,
 ) -> None:
     observed_at = datetime(2026, 7, 27, 10, 0, tzinfo=AS_OF.tzinfo)
     previous_close = datetime(2026, 7, 24, 15, 0, tzinfo=AS_OF.tzinfo)
 
-    class SuspendedPriorityMarket(RecordingMarketData):
+    class FirstTradePendingPriorityMarket(RecordingMarketData):
+        def __init__(self) -> None:
+            super().__init__()
+            self.trading = False
+
         def active_watchlist(self) -> tuple[str, ...]:
             return ("SH.513100",)
 
@@ -9565,12 +9760,12 @@ def test_priority_monitor_skips_current_session_suspended_instrument(
                     AShareRealtimeQuote(
                         code="SH.513100",
                         last=2.264,
-                        buy1=0.0,
-                        sell1=0.0,
-                        high=0.0,
-                        low=0.0,
-                        open=0.0,
-                        volume=0.0,
+                        buy1=2.263 if self.trading else 0.0,
+                        sell1=2.264 if self.trading else 0.0,
+                        high=2.27 if self.trading else 0.0,
+                        low=2.25 if self.trading else 0.0,
+                        open=2.26 if self.trading else 0.0,
+                        volume=1000.0 if self.trading else 0.0,
                         rate=0.0,
                     ),
                 ),
@@ -9614,15 +9809,15 @@ def test_priority_monitor_skips_current_session_suspended_instrument(
             frequencies=(),
             risk_evidence_cutoff: datetime,
         ) -> SymbolStructureBundle:
-            del as_of, risk_evidence_cutoff
+            del risk_evidence_cutoff
             return self.structure_bundle(
                 code,
-                as_of=previous_close,
+                as_of=as_of if self.trading else previous_close,
                 sector=sector,
                 frequencies=frequencies,
             )
 
-    market = SuspendedPriorityMarket()
+    market = FirstTradePendingPriorityMarket()
     service = TradingScreeningService(
         market_data=market,
         sector_catalog=MultiMemberSectorCatalog(("SH.513100",)),
@@ -9652,15 +9847,13 @@ def test_priority_monitor_skips_current_session_suspended_instrument(
     assert health["priority_monitor_scheduled_count"] == 0
     assert health["priority_monitor_current_session_zero_trade_code_count"] == 1
     assert health["priority_monitor_current_session_zero_trade_codes"] == ["SH.513100"]
-    assert health["priority_monitor_current_session_suspended_code_count"] == 1
-    assert health["priority_monitor_current_session_suspended_codes"] == ["SH.513100"]
+    assert health["priority_monitor_current_session_suspended_code_count"] == 0
+    assert health["priority_monitor_current_session_suspended_codes"] == []
     assert health["priority_monitor_instrument_status_probe_status"] == (
-        "verified_suspended"
+        "awaiting_first_trade"
     )
     assert health["priority_monitor_instrument_status_probe_error"] is None
-    assert health["priority_monitor_zero_trade_quote_status"] == (
-        "verified_zero_trade"
-    )
+    assert health["priority_monitor_zero_trade_quote_status"] == ("verified_zero_trade")
     assert health["priority_monitor_zero_trade_quote_error"] is None
     assert health["priority_monitor_zero_trade_quote_diagnostics"] == [
         {
@@ -9672,8 +9865,23 @@ def test_priority_monitor_skips_current_session_suspended_instrument(
         }
     ]
 
+    market.trading = True
+    service._run_priority_monitor(
+        previous=service.snapshot(),
+        observed_at=observed_at + timedelta(minutes=31),
+    )
 
-def test_suspended_mandatory_symbol_does_not_consume_live_capacity(
+    resumed = service.health_snapshot()
+    assert market.bundle_codes == ["SH.513100"]
+    assert resumed["priority_monitor_scheduled_count"] == 1
+    assert resumed["priority_monitor_last_codes"] == ["SH.513100"]
+    assert resumed["priority_monitor_current_session_suspended_codes"] == []
+    assert resumed["priority_monitor_instrument_status_probe_status"] == (
+        "verified_no_suspension"
+    )
+
+
+def test_awaiting_first_trade_symbol_does_not_consume_live_capacity(
     tmp_path: Path,
 ) -> None:
     codes = ("SH.513100", "SZ.000001")
@@ -9765,7 +9973,10 @@ def test_suspended_mandatory_symbol_does_not_consume_live_capacity(
     assert health["priority_monitor_scheduled_count"] == 1
     assert health["priority_monitor_last_codes"] == ["SZ.000001"]
     assert health["priority_monitor_last_error_count"] == 0
-    assert health["priority_monitor_current_session_suspended_codes"] == ["SH.513100"]
+    assert health["priority_monitor_current_session_suspended_codes"] == []
+    assert health["priority_monitor_instrument_status_probe_status"] == (
+        "awaiting_first_trade"
+    )
 
 
 def test_positive_instrument_status_does_not_exclude_actively_trading_etf(
@@ -9850,14 +10061,18 @@ def test_positive_instrument_status_does_not_exclude_actively_trading_etf(
     assert health["priority_monitor_last_error_count"] == 0
 
 
-def test_candidate_suspended_symbol_is_verified_once_and_removed_from_cadence(
+def test_candidate_waiting_for_first_trade_retries_on_next_five_minute_epoch(
     tmp_path: Path,
 ) -> None:
     code = "SZ.002084"
     observed_at = datetime(2026, 7, 27, 10, 0, tzinfo=AS_OF.tzinfo)
     previous_close = datetime(2026, 7, 24, 15, 0, tzinfo=AS_OF.tzinfo)
 
-    class SuspendedCandidateMarket(RecordingMarketData):
+    class FirstTradePendingCandidateMarket(RecordingMarketData):
+        def __init__(self) -> None:
+            super().__init__()
+            self.trading = False
+
         def priority_realtime_ticks(
             self,
             requested: tuple[str, ...],
@@ -9870,12 +10085,12 @@ def test_candidate_suspended_symbol_is_verified_once_and_removed_from_cadence(
                     AShareRealtimeQuote(
                         code=code,
                         last=3.59,
-                        buy1=0.0,
-                        sell1=0.0,
-                        high=0.0,
-                        low=0.0,
-                        open=0.0,
-                        volume=0.0,
+                        buy1=3.58 if self.trading else 0.0,
+                        sell1=3.59 if self.trading else 0.0,
+                        high=3.61 if self.trading else 0.0,
+                        low=3.55 if self.trading else 0.0,
+                        open=3.57 if self.trading else 0.0,
+                        volume=1000.0 if self.trading else 0.0,
                         rate=0.0,
                     ),
                 ),
@@ -9912,15 +10127,15 @@ def test_candidate_suspended_symbol_is_verified_once_and_removed_from_cadence(
             frequencies=(),
             risk_evidence_cutoff: datetime,
         ) -> SymbolStructureBundle:
-            del as_of, risk_evidence_cutoff
+            del risk_evidence_cutoff
             return self.structure_bundle(
                 requested_code,
-                as_of=previous_close,
+                as_of=as_of if self.trading else previous_close,
                 sector=sector,
                 frequencies=frequencies,
             )
 
-    market = SuspendedCandidateMarket()
+    market = FirstTradePendingCandidateMarket()
     supportive_batch = SectorAssessmentBatch(
         assessments=(replace(eligible_sector(), regime="supportive"),),
         discovered_count=1,
@@ -9951,20 +10166,29 @@ def test_candidate_suspended_symbol_is_verified_once_and_removed_from_cadence(
     assert market.bundle_codes == [code]
     assert health["candidate_monitor_last_error_count"] == 0
     assert health["candidate_monitor_five_minute"]["universe_count"] == 0
-    assert health["candidate_monitor_current_session_suspended_codes"] == [code]
+    assert health["candidate_monitor_current_session_suspended_codes"] == []
     assert health["candidate_monitor_suspension_probe_status"] == (
-        "verified_suspended"
+        "awaiting_first_trade"
     )
+    assert health["candidate_monitor_symbol_exclusion_codes"] == [code]
+    assert health["candidate_monitor_symbol_exclusion_reason_counts"] == {
+        "CURRENT_SESSION_FIRST_TRADE_PENDING": 1
+    }
 
+    market.trading = True
     service._run_priority_monitor(
         previous=service.snapshot(),
-        observed_at=observed_at + timedelta(minutes=1),
+        observed_at=observed_at + timedelta(minutes=6),
     )
 
-    assert market.bundle_codes == [code]
-    assert service.health_snapshot()[
-        "candidate_monitor_current_session_suspended_code_count"
-    ] == 1
+    assert market.bundle_codes == [code, code]
+    assert (
+        service.health_snapshot()[
+            "candidate_monitor_current_session_suspended_code_count"
+        ]
+        == 0
+    )
+    assert service.health_snapshot()["candidate_monitor_symbol_exclusion_codes"] == []
 
 
 def test_deterministic_candidate_rejection_is_epoch_scoped_not_lane_failure(
@@ -10220,7 +10444,9 @@ def test_priority_locator_wave_uses_all_configured_workers(
 
     assert market.max_active == 4
     assert set(market.bundle_codes) == set(codes)
-    assert service.health_snapshot()["priority_monitor_locator_runtime_verified"] is True
+    assert (
+        service.health_snapshot()["priority_monitor_locator_runtime_verified"] is True
+    )
 
 
 def test_optional_segment_deadline_miss_is_visible_and_fails_closed(
@@ -10529,9 +10755,7 @@ def test_continuity_recheck_backlog_does_not_inflate_formal_candidate_sla(
     health = service.health_snapshot()
     assert health["candidate_monitor_five_minute"]["universe_count"] == 1
     assert health["candidate_monitor_thirty_minute"]["universe_count"] == 1
-    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [
-        formal_code
-    ]
+    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [formal_code]
     assert formal_code in market.bundle_codes
     assert health["decision_rule_recheck_pending_count"] == 1
 
@@ -10589,7 +10813,9 @@ def test_priority_signal_candidates_treat_buy_and_sell_symmetrically() -> None:
     assert urgent == ("BUY_EXECUTABLE", "SELL_ONLY", "BUY_ARMED")
 
 
-def test_signal_candidate_admission_pins_current_setups_and_rotates_completed_window() -> None:
+def test_signal_candidate_admission_pins_current_setups_and_rotates_completed_window() -> (
+    None
+):
     observed_at = AS_OF.replace(hour=10, minute=0)
     universe = ("ACTIVE", "A", "B", "C", "D")
 
@@ -10689,9 +10915,7 @@ def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(
                 "point_type": "2buy",
                 "lifecycle_stage": "approaching",
                 "setup_5m": {
-                    "available_at": (
-                        observed_at - timedelta(minutes=30)
-                    ).isoformat(),
+                    "available_at": (observed_at - timedelta(minutes=30)).isoformat(),
                 },
             },
             *(
@@ -10702,9 +10926,7 @@ def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(
                     "point_type": "2buy",
                     "lifecycle_stage": "triggered",
                     "setup_5m": {
-                        "anchor_at": (
-                            observed_at - timedelta(minutes=5)
-                        ).isoformat(),
+                        "anchor_at": (observed_at - timedelta(minutes=5)).isoformat(),
                         "available_at": (
                             observed_at - timedelta(minutes=5)
                         ).isoformat(),
@@ -10801,9 +11023,9 @@ def test_validation_scope_caps_old_snapshot_locator_universe(
     assert health["candidate_monitor_signal_deferred_count"] == 22
     assert health["candidate_monitor_signal_rotation_active"] is True
     assert health["candidate_monitor_five_minute"]["universe_count"] == 12
-    assert {
-        code for code, _frequencies in market.bundle_frequency_requests
-    } == set(codes[:12])
+    assert {code for code, _frequencies in market.bundle_frequency_requests} == set(
+        codes[:12]
+    )
 
 
 def test_segment_monitor_membership_requires_execution_fresh_setup_anchor() -> None:
@@ -10826,8 +11048,8 @@ def test_segment_monitor_membership_requires_execution_fresh_setup_anchor() -> N
                 11,
                 30,
                 tzinfo=AS_OF.tzinfo,
-            ).isoformat()
-        }
+            ).isoformat(),
+        },
     }
 
     assert (
@@ -10850,8 +11072,8 @@ def test_segment_monitor_membership_requires_execution_fresh_setup_anchor() -> N
                         11,
                         30,
                         tzinfo=AS_OF.tzinfo,
-                    ).isoformat()
-                }
+                    ).isoformat(),
+                },
             },
             observed_at,
         )
@@ -10870,7 +11092,7 @@ def test_segment_monitor_membership_requires_execution_fresh_setup_anchor() -> N
                         15,
                         tzinfo=AS_OF.tzinfo,
                     ).isoformat()
-                }
+                },
             },
             observed_at,
         )
@@ -10902,9 +11124,7 @@ def test_first_one_minute_witness_never_reopens_after_boundary_expiry() -> None:
         "side": "buy",
         "segment_difference_1m": {"point_id": "segment:one"},
         "entry_execution_boundary": {
-            "entry_valid_until": (
-                observed_at + timedelta(minutes=1)
-            ).isoformat(),
+            "entry_valid_until": (observed_at + timedelta(minutes=1)).isoformat(),
         },
     }
 
@@ -11609,12 +11829,8 @@ def test_failed_streaming_candidate_handoff_retries_at_round_end(
     service._run_priority_monitor(previous=service.snapshot(), observed_at=AS_OF)
 
     assert len(notifier.calls) == 2
-    assert set(notifier.calls[0][1]["notification_authoritative_codes"]) == set(
-        symbols
-    )
-    assert set(notifier.calls[1][1]["notification_authoritative_codes"]) == set(
-        symbols
-    )
+    assert set(notifier.calls[0][1]["notification_authoritative_codes"]) == set(symbols)
+    assert set(notifier.calls[1][1]["notification_authoritative_codes"]) == set(symbols)
 
 
 def test_fresh_five_minute_candidate_notifies_without_one_minute_segment(
@@ -11677,9 +11893,8 @@ def test_fresh_five_minute_candidate_notifies_without_one_minute_segment(
     title, lines = sender.messages[0]
     assert "5分钟二类买点" in title
     assert "段差已定位" not in title
-    assert (
-        "1分钟区间套：暂未出现（5分钟信号保留，精确执行尚未解锁）"
-        in "\n".join(lines)
+    assert "1分钟区间套：暂未出现（5分钟信号保留，精确执行尚未解锁）" in "\n".join(
+        lines
     )
 
 
@@ -13815,9 +14030,10 @@ def test_after_close_failed_locator_does_not_satisfy_startup_verification(
     assert health["priority_monitor_locator_runtime_status"] == "failed"
     assert health["startup_priority_bootstrap_ready"] is False
     assert service._startup_priority_bootstrap_required() is True
-    assert service.presentation_snapshot()["priority_live_overlay"][
-        "startup_bootstrap"
-    ] is False
+    assert (
+        service.presentation_snapshot()["priority_live_overlay"]["startup_bootstrap"]
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -14151,9 +14367,10 @@ def test_background_health_rechecks_an_untrusted_snapshot_publication(
 
     assert tampered["ready"] is True
     assert tampered["snapshot_content_sha256"] is None
-    assert "screening_snapshot_identity_missing" in tampered[
-        "selection_operational_reason_codes"
-    ]
+    assert (
+        "screening_snapshot_identity_missing"
+        in tampered["selection_operational_reason_codes"]
+    )
 
     with service._state_lock:
         service._snapshot["data_quality"]["stale"] = False
@@ -14186,9 +14403,10 @@ def test_background_health_rechecks_an_untrusted_snapshot_publication(
 
     assert forged_but_self_hashed["ready"] is True
     assert forged_but_self_hashed["snapshot_content_sha256"] is None
-    assert "screening_snapshot_identity_missing" in forged_but_self_hashed[
-        "selection_operational_reason_codes"
-    ]
+    assert (
+        "screening_snapshot_identity_missing"
+        in forged_but_self_hashed["selection_operational_reason_codes"]
+    )
 
 
 def test_background_health_does_not_deep_copy_public_snapshot(

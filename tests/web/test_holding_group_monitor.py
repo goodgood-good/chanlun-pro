@@ -315,7 +315,10 @@ def test_every_non_a_holding_is_routed_to_its_own_market(tmp_path):
         assert "关系未确认前不生成退出比例" in lines[0]
         assert "25%" not in lines[0]
         assert "30分钟向下" in lines[0]
-        assert "操作：优先复核卖出或退出条件" in lines[0]
+        assert lines[0].startswith("结论：先核对卖点与持有结构级别")
+        assert "关系未确认前不执行" in lines[0]
+        assert "5分钟卖出结构失效价" in lines[0]
+        assert "退出比例由卖点与持有结构级别关系决定" in lines[0]
         assert "参考卖出比例" not in lines[0]
         assert "辅助结构线索" not in lines[0]
         assert "time=" not in lines[0]
@@ -438,11 +441,15 @@ def test_buy_position_copy_is_an_unadjusted_structural_risk_upper_bound() -> Non
         structure_anchor_price="10",
     ).document()
     line = monitor_module._notification_position_line(
-        SimpleNamespace(side="buy", position_recommendation=recommendation)
+        SimpleNamespace(
+            side="buy",
+            segment_difference_point_type="1buy",
+            position_recommendation=recommendation,
+        )
     )
 
     assert line == (
-        "风险参考：结构模型比例上限 7.5%（模型比较值）"
+        "风险参考：结构模型比例上限 7.5%（模型比较值；不构成执行许可）"
     )
     assert "只可下调" not in line
 
@@ -529,7 +536,9 @@ def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
     assert "状态：1分钟区间套定位新出现，仅补充精确位置" in line
     assert "5分钟操作确认 2026-08-04 10:00:00" in line
     assert "1分钟定位可用 2026-08-04 10:01:00" in line
-    assert "只有当前有效时才进入精确执行候选" in line
+    assert "仅用于精确时点复核" in line
+    assert "跨市场监听不生成认证价格上限" in line
+    assert "不得把5分钟锚点当作执行价" in line
     assert monitor_module._notification_bucket(event) == "segment_sell"
     assert monitor_module._delivery_identity(event) == event.delivery_identity
     assert payload["review_events"][0]["new_stage"] == "segment_enriched"

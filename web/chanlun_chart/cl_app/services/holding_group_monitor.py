@@ -992,8 +992,13 @@ def _position_reasons(event: object) -> set[str]:
 
 def _notification_position_line(event: object) -> str:
     side = str(getattr(event, "side", "") or "")
+    segment_present = bool(
+        str(getattr(event, "segment_difference_point_type", "") or "")
+    )
     recommendation = getattr(event, "position_recommendation", None)
     if not isinstance(recommendation, Mapping):
+        if side == "buy" and not segment_present:
+            return "风险参考：暂不计算（5分钟买点已确认，等待1分钟区间套精确定位）"
         return (
             "风险参考：买入比例待核对结构价格与风险参数"
             if side == "buy"
@@ -1001,11 +1006,23 @@ def _notification_position_line(event: object) -> str:
         )
     status = str(recommendation.get("status") or "")
     percent = str(recommendation.get("recommended_percent") or "").strip()
+    if status == "BLOCKED" and side == "buy":
+        reasons = _position_reasons(event)
+        reason = (
+            "偏离结构锚点过远，不追价"
+            if "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR" in reasons
+            else "当前价已到达或跌破结构防守位"
+            if "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP" in reasons
+            else "具体限制原因未完整保存，请核对诊断证据"
+        )
+        return f"风险参考：本条买入不纳入操作计划（{reason}）"
+    if side == "buy" and not segment_present:
+        return "风险参考：暂不计算（5分钟买点已确认，等待1分钟区间套精确定位）"
     if status == "RECOMMENDED" and percent:
         displayed, model_value = _display_percent(percent)
         detail = f"精确模型值 {model_value}%" if model_value else "模型比较值"
         return (
-            f"风险参考：结构模型比例上限 {displayed}%（{detail}）"
+            f"风险参考：结构模型比例上限 {displayed}%（{detail}；不构成执行许可）"
             if side == "buy"
             else f"风险参考：结构退出比例 {displayed}%（仅作结构模型比较）"
         )
@@ -1022,16 +1039,6 @@ def _notification_position_line(event: object) -> str:
             "风险参考：暂不计算（实时价格未取得；"
             "不使用已完成K线价格生成买入比例）"
         )
-    if status == "BLOCKED" and side == "buy":
-        reasons = _position_reasons(event)
-        reason = (
-            "偏离结构锚点过远，不追价"
-            if "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR" in reasons
-            else "当前价已到达或跌破结构防守位"
-            if "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP" in reasons
-            else "具体限制原因未完整保存，请核对诊断证据"
-        )
-        return f"风险参考：本条买入不纳入操作计划（{reason}）"
     return (
         "风险参考：买入比例待核对结构价格与风险参数"
         if side == "buy"
@@ -1054,14 +1061,181 @@ def _event_operation_status(event: object) -> str:
     if side == "buy" and _position_reasons(event) & _BUY_PROTECTION_REASONS:
         return "禁止买入（0%保护）"
     if side == "buy":
+        if not str(
+            getattr(event, "segment_difference_point_type", "") or ""
+        ):
+            return "5分钟信号已确认，等待1分钟区间套"
         if getattr(event, "realtime_quote_status", "") == "unavailable":
             return "实时价格未取得，待人工复核"
-        return "可人工复核执行" if status == "RECOMMENDED" else "仅观察，待人工复核"
+        return (
+            "1分钟定位已出现，待人工核对执行价"
+            if status == "RECOMMENDED"
+            else "仅观察，待人工复核"
+        )
     if side == "sell":
         return "卖出或退出复核"
     if side == "risk":
         return "环境转弱，仅作参考"
     return "待人工复核"
+
+
+def _event_action_advice(event: object) -> str:
+    side = str(getattr(event, "side", "") or "")
+    segment_update = str(getattr(event, "signal_role", "") or "") == (
+        "SEGMENT_DIFFERENCE_1M"
+    )
+    point = str(getattr(event, "bs_type", "") or "")
+    segment_present = bool(
+        str(getattr(event, "segment_difference_point_type", "") or "")
+    )
+    position_reasons = _position_reasons(event)
+    position_recommendation = getattr(event, "position_recommendation", None)
+    position_status = (
+        str(position_recommendation.get("status") or "")
+        if isinstance(position_recommendation, Mapping)
+        else ""
+    )
+    if segment_update:
+        return (
+            "操作：1分钟区间套证据已补充，仅用于精确时点复核；"
+            "跨市场监听不生成认证价格上限，须在其他交易软件核对实时价格，"
+            "不得把5分钟锚点当作执行价"
+        )
+    if side == "buy" and position_reasons & _BUY_PROTECTION_REASONS:
+        return "操作：不追价，等待新的5分钟结构，仅在其他交易软件手工复核"
+    if (
+        side == "buy"
+        and not segment_present
+        and getattr(event, "realtime_quote_status", "") == "unavailable"
+    ):
+        return (
+            "操作：5分钟买点已确认，但1分钟精确定位尚未出现且实时价格未取得；"
+            "不使用已完成K线价格生成买入比例，等待两项证据补齐后再复核"
+        )
+    if side == "buy" and not segment_present:
+        return (
+            "操作：5分钟买点已确认；等待同向1分钟区间套给出精确位置，"
+            "当前不执行、不生成买入比例"
+        )
+    if side == "buy" and getattr(
+        event, "realtime_quote_status", ""
+    ) == "unavailable":
+        return (
+            "操作：5分钟买点和1分钟定位已出现，但实时价格未取得；"
+            "不使用已完成K线价格生成买入比例，等待实时价格证据后再复核"
+        )
+    if side == "buy" and position_status == "BLOCKED":
+        return "操作：本条买入不纳入操作计划；等待新的5分钟结构后再复核"
+    if side == "buy" and position_status != "RECOMMENDED":
+        return (
+            "操作：5分钟买点已确认，但结构价格或防守信息不足；"
+            "暂不生成买入比例，补齐证据后再复核"
+        )
+    if side == "buy":
+        condition = (
+            "确认反转"
+            if point.startswith("1buy")
+            else "回踩不破"
+            if point.startswith("2buy")
+            else "回抽确认"
+            if point.startswith("3buy")
+            else "人工确认"
+        )
+        return (
+            f"操作：{condition}，并核对实时价、5分钟防守位和30分钟环境后，"
+            "在其他交易软件手工决定；系统不自动下单"
+        )
+    if side == "sell":
+        if "SAME_OR_HIGHER_STRUCTURE_FULL_EXIT" in position_reasons:
+            return (
+                "操作：卖点与持有结构为同级或更高级别；"
+                "优先按完整退出规则人工复核，并确认5分钟卖出结构未向上失效"
+            )
+        if "LOWER_STRUCTURE_SEGMENT_DIFFERENCE_REDUCTION" in position_reasons:
+            return (
+                "操作：当前卖点属于低级别或不同结构；仅按段差减仓规则复核，"
+                "不得误当作完整退出"
+            )
+        if position_status == "CONDITIONAL":
+            return (
+                "操作：先核对卖点与持有结构级别；同级或更高级别复核完整退出，"
+                "低级别或不同结构只作段差处理，关系未确认前不执行"
+            )
+        if not segment_present:
+            return (
+                "操作：5分钟卖点已确认，立即复核退出风险；1分钟定位未出现，"
+                "不得虚构精确卖出价"
+            )
+    if side == "risk":
+        return "操作：仅核对30分钟逆风环境；等待5分钟卖点达到操作确认后再决定卖出"
+    if point in _POINT_ADVICE:
+        return _POINT_ADVICE[point].replace("建议：", "操作：", 1) + (
+            "（在其他软件手工确认；系统不自动下单）"
+        )
+    if side == "sell":
+        return "操作：人工确认后复核卖出或退出条件（系统不自动下单）"
+    return "操作：人工复核后再处理"
+
+
+def _event_judgment_line(event: object) -> str:
+    side = str(getattr(event, "side", "") or "")
+    point = str(getattr(event, "bs_type", "") or "")
+    point_label = _POINT_LABELS.get(point, point or "结构提示")
+    segment_point = str(
+        getattr(event, "segment_difference_point_type", "") or ""
+    )
+    segment_label = (
+        _POINT_LABELS.get(segment_point, segment_point)
+        if segment_point
+        else "待出现"
+    )
+    if segment_point:
+        segment_label += "（仅精确定位）"
+    big_direction = _DIRECTION_LABELS.get(
+        str(getattr(event, "big_dir", "") or ""),
+        "未知",
+    )
+    if side not in {"buy", "sell"}:
+        return f"判断：30分钟环境={big_direction}｜本条不是买卖点"
+    return (
+        f"判断：5分钟主信号=已确认（{point_label}）｜"
+        f"1分钟精确定位={segment_label}｜30分钟环境={big_direction}"
+    )
+
+
+def _event_execution_boundary_line(event: object) -> str:
+    side = str(getattr(event, "side", "") or "")
+    segment_present = bool(
+        str(getattr(event, "segment_difference_point_type", "") or "")
+    )
+    try:
+        defense_price = float(
+            getattr(event, "structure_invalidation_price", 0) or 0
+        )
+    except (TypeError, ValueError):
+        defense_price = 0.0
+    defense = (
+        f"{defense_price:.3f}"
+        if defense_price > 0 and isfinite(defense_price)
+        else "暂不可用"
+    )
+    if side == "buy":
+        if not segment_present:
+            return (
+                f"执行边界：等待1分钟精确定位｜5分钟失效价 {defense}｜"
+                "未定位前不执行"
+            )
+        return (
+            f"执行边界：5分钟失效价 {defense}｜"
+            "跨市场监听不生成认证买入上限；执行前须核对实时价，"
+            "5分钟锚点不得替代"
+        )
+    if side == "sell":
+        return (
+            f"执行边界：5分钟卖出结构失效价 {defense}（向上突破则取消原判断）｜"
+            "退出比例由卖点与持有结构级别关系决定"
+        )
+    return "执行边界：仅作环境复核，不生成买卖价格或比例"
 
 
 def _notification_line(
@@ -1085,9 +1259,12 @@ def _notification_line(
     code = str(getattr(event, "code", "") or "")
     name = str(getattr(event, "name", "") or "")
     marker = f"[{ordinal}/{total}] " if ordinal and total and total > 1 else ""
+    action_advice = _event_action_advice(event)
     parts = [
-        f"{marker}{code} {name}".strip()
-        + f"｜状态：{_event_operation_status(event)}"
+        f"{marker}结论：{action_advice.removeprefix('操作：')}",
+        f"{code} {name}".strip() + f"｜状态：{_event_operation_status(event)}",
+        _event_judgment_line(event),
+        _event_execution_boundary_line(event),
     ]
 
     signal_time = str(getattr(event, "signal_time", "") or "")
@@ -1215,46 +1392,6 @@ def _notification_line(
         )
         parts.append(f"依据：{big_level}{big_dir}｜环境风险提示（不是买卖点）")
 
-    position_reasons = _position_reasons(event)
-    position_recommendation = getattr(event, "position_recommendation", None)
-    position_status = (
-        str(position_recommendation.get("status") or "")
-        if isinstance(position_recommendation, Mapping)
-        else ""
-    )
-    if segment_update:
-        advice = (
-            "操作：1分钟区间套证据已补充；先核对定位窗口，只有当前有效时"
-            "才进入精确执行候选，仍须在其他交易软件手工决定"
-        )
-    elif side == "buy" and position_reasons & _BUY_PROTECTION_REASONS:
-        advice = "操作：不追价，等待新的5分钟结构，仅在其他交易软件手工复核"
-    elif side == "buy" and getattr(
-        event, "realtime_quote_status", ""
-    ) == "unavailable":
-        advice = (
-            "操作：5分钟买点已达到操作确认，但实时价格未取得；"
-            "不使用已完成K线价格生成买入比例，等待实时价格证据后再复核"
-        )
-    elif side == "buy" and position_status == "BLOCKED":
-        advice = "操作：本条买入不纳入操作计划；等待新的5分钟结构后再复核"
-    elif side == "buy" and position_status != "RECOMMENDED":
-        advice = (
-            "操作：5分钟买点已达到操作确认，但结构价格或防守信息不足；"
-            "暂不生成买入比例，补齐证据后再复核"
-        )
-    elif side == "risk":
-        advice = "操作：仅核对30分钟逆风环境；等待5分钟卖点达到操作确认后再决定卖出"
-    elif point in _POINT_ADVICE:
-        advice = _POINT_ADVICE[point].replace("建议：", "操作：", 1)
-        advice += "（在其他软件手工确认；系统不自动下单）"
-    elif side == "buy":
-        advice = "操作：人工确认后再复合买入条件（系统不自动下单）"
-    elif side == "sell":
-        advice = "操作：人工确认后复核卖出或退出条件（系统不自动下单）"
-    else:
-        advice = "操作：人工复核后再处理"
-    parts.append(advice)
     return "\n".join(parts)
 
 

@@ -2,6 +2,8 @@
 param(
     [switch]$Execute,
     [switch]$PreserveValidationGate,
+    [switch]$PreserveCurrentScreeningState,
+    [switch]$PurgeDevelopmentCaches,
     [switch]$PurgeInvalidSectorDailyFacts,
     [string]$RuntimeRoot = "D:\chanlun_pro",
     [string]$RepositoryRoot = ""
@@ -17,6 +19,9 @@ $roots = @(
     (Resolve-Path -LiteralPath $RuntimeRoot -ErrorAction Stop).Path,
     (Resolve-Path -LiteralPath $RepositoryRoot -ErrorAction Stop).Path
 )
+if ($PreserveCurrentScreeningState -and $PurgeInvalidSectorDailyFacts) {
+    throw "Preserving current screening state conflicts with purging sector facts"
+}
 
 function Get-TreeBytes {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
@@ -90,6 +95,112 @@ $runtimeRelativeTargets = @(
     "monitor\realtime_review_inbox.json",
     "cache\last_chart_state.json"
 )
+$currentScreeningStateTargets = @(
+    "decision_support\trading_screening_runtime_state_cache",
+    "decision_support\.trading_screening_snapshot.json.generations",
+    "decision_support\trading_screening_snapshot.json",
+    "decision_support\trading_screening_snapshot.json.lock",
+    "decision_support\trading_screening_snapshot.json.scope",
+    "decision_support\trading_screening_sector_snapshot.json",
+    "decision_support\trading_screening_sector_snapshot.json.scope",
+    "decision_support\trading_screening_sector_member_status_facts"
+)
+if ($PreserveCurrentScreeningState) {
+    $runtimeRelativeTargets = @(
+        $runtimeRelativeTargets | Where-Object {
+            $_ -notin $currentScreeningStateTargets
+        }
+    )
+
+    # Keep only the immutable generation referenced by the current main
+    # snapshot.  An unreadable or unauthenticated pointer fails closed and
+    # preserves every generation instead of guessing which one is current.
+    $snapshotPath = Join-Path `
+        $roots[0] `
+        "decision_support\trading_screening_snapshot.json"
+    $generationDirectory = Join-Path `
+        $roots[0] `
+        "decision_support\.trading_screening_snapshot.json.generations"
+    $currentGenerationName = $null
+    if (
+        (Test-Path -LiteralPath $snapshotPath) -and
+        (Test-Path -LiteralPath $generationDirectory)
+    ) {
+        try {
+            $snapshot = Get-Content `
+                -LiteralPath $snapshotPath `
+                -Raw `
+                -Encoding utf8 | ConvertFrom-Json
+            $contentIdentity = [string]$snapshot.snapshot_content_sha256
+            if ($contentIdentity -match "^sha256:([0-9a-f]{64})$") {
+                $currentGenerationName = "$($Matches[1]).json"
+                $currentGenerationPath = Join-Path `
+                    $generationDirectory `
+                    $currentGenerationName
+                if (
+                    -not (Test-Path -LiteralPath $currentGenerationPath) -or
+                    (Get-FileHash -LiteralPath $snapshotPath -Algorithm SHA256).Hash -ne
+                    (
+                        Get-FileHash `
+                            -LiteralPath $currentGenerationPath `
+                            -Algorithm SHA256
+                    ).Hash
+                ) {
+                    $currentGenerationName = $null
+                }
+            }
+        } catch {
+            $currentGenerationName = $null
+        }
+    }
+    if ($null -ne $currentGenerationName) {
+        foreach ($generation in @(
+            Get-ChildItem `
+                -LiteralPath $generationDirectory `
+                -File `
+                -Force `
+                -ErrorAction SilentlyContinue
+        )) {
+            if (
+                $generation.Name -match "^[0-9a-f]{64}\.json(\.scope)?$" -and
+                $generation.Name -ne $currentGenerationName -and
+                $generation.Name -ne "$currentGenerationName.scope"
+            ) {
+                $runtimeRelativeTargets += (
+                    "decision_support\.trading_screening_snapshot.json.generations\" +
+                    $generation.Name
+                )
+            }
+        }
+    }
+
+    $runtimeCacheParent = Join-Path `
+        $roots[0] `
+        "decision_support\trading_screening_runtime_state_cache"
+    if (Test-Path -LiteralPath $runtimeCacheParent) {
+        foreach ($ownerMarker in @(
+            Get-ChildItem `
+                -LiteralPath $runtimeCacheParent `
+                -File `
+                -Force `
+                -ErrorAction SilentlyContinue
+        )) {
+            if (
+                $ownerMarker.Name -match (
+                    "^\.runtime-[0-9a-f]{24}\.owner-(\d+)-[0-9a-f]{16}$"
+                ) -and
+                $null -eq (
+                    Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue
+                )
+            ) {
+                $runtimeRelativeTargets += (
+                    "decision_support\trading_screening_runtime_state_cache\" +
+                    $ownerMarker.Name
+                )
+            }
+        }
+    }
+}
 if ($PurgeInvalidSectorDailyFacts) {
     $runtimeRelativeTargets += (
         "decision_support\trading_screening_sector_daily_facts.json"
@@ -108,6 +219,29 @@ if (-not $PreserveValidationGate) {
         "audit\chanlun_trading_system_backtest\research_sample_validation_12"
     )
 }
+if ($PurgeDevelopmentCaches) {
+    $gitRoot = Join-Path $roots[1] ".git"
+    foreach ($directory in @(
+        Get-ChildItem `
+            -LiteralPath $roots[1] `
+            -Directory `
+            -Force `
+            -Recurse `
+            -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -in @("__pycache__", ".pytest_cache", ".ruff_cache") -and
+                -not $_.FullName.StartsWith(
+                    $gitRoot + [IO.Path]::DirectorySeparatorChar,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )) {
+        $repositoryRelativeTargets += $directory.FullName.Substring(
+            $roots[1].Length + 1
+        )
+    }
+}
+$runtimeRelativeTargets = @($runtimeRelativeTargets | Sort-Object -Unique)
+$repositoryRelativeTargets = @($repositoryRelativeTargets | Sort-Object -Unique)
 
 $candidates = [System.Collections.Generic.List[object]]::new()
 foreach ($definition in @(
@@ -187,6 +321,15 @@ $preserved = @(
     "$($roots[1])\audit\chanlun_trading_system_backtest\pit_reference",
     "$($roots[1])\.cache\chanlun_qmt_sector_ledger"
 )
+if ($PreserveCurrentScreeningState) {
+    $preserved += @(
+        "$($roots[0])\decision_support\trading_screening_snapshot.json",
+        "$($roots[0])\decision_support\.trading_screening_snapshot.json.generations\$currentGenerationName",
+        "$($roots[0])\decision_support\trading_screening_runtime_state_cache",
+        "$($roots[0])\decision_support\trading_screening_sector_snapshot.json",
+        "$($roots[0])\decision_support\trading_screening_sector_member_status_facts"
+    )
+}
 if (-not $PurgeInvalidSectorDailyFacts) {
     $preserved += (
         "$($roots[0])\decision_support\trading_screening_sector_daily_facts.json"

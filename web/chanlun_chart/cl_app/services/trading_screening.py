@@ -183,6 +183,7 @@ from cl_app.services.trading_screening_runtime_policy import (
 )
 from cl_app.services.trading_screening_source_migrations import (
     orchestration_source_migration_allowed,
+    suspension_evidence_recheck_source_migration_allowed,
 )
 from cl_app.services.live_review_runtime_contract import (
     validate_live_review_snapshot,
@@ -204,6 +205,9 @@ _TRADABLE_MONITOR_INSTRUMENT_TYPES = frozenset({"stock_cn", "etf_cn"})
 
 SCHEMA = "chanlun-trading-screening"
 CN = ZoneInfo("Asia/Shanghai")
+_SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD = (
+    "source_migration_suspension_evidence_recheck_codes"
+)
 # 次日候选池的重计算属于收盘后任务。15:05 为 QMT 写入 15:00 已完成分钟线
 # 预留一个很小的落盘缓冲；全市场覆盖一旦开始，收盘后必须连续运行到次日盘前，
 # 不能在 23:00 人为停顿一小时。盘中窗口仍只运行有界实时监听，不让几千只股票
@@ -227,9 +231,8 @@ PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor-v2-continuation"
 CANDIDATE_MONITOR_CONTRACT_ID = (
     "bar-cadence-live-candidate-monitor-v5-validation-liveness"
 )
-CANDIDATE_MONITOR_SYMBOL_EXCLUSION_SCHEMA = (
-    "chanlun-candidate-monitor-symbol-exclusion"
-)
+CANDIDATE_MONITOR_SYMBOL_EXCLUSION_SCHEMA = "chanlun-candidate-monitor-symbol-exclusion"
+CANDIDATE_FIRST_TRADE_PENDING_REASON_CODE = "CURRENT_SESSION_FIRST_TRADE_PENDING"
 CANDIDATE_MONITOR_LANE_1M = "CURRENT_1M"
 CANDIDATE_MONITOR_LANE_5M = "CURRENT_5M"
 CANDIDATE_MONITOR_LANE_30M = "CURRENT_30M"
@@ -271,9 +274,7 @@ COMPLETE_CLOSE_IDLE_REASON = "COMPLETE_CLOSE_SNAPSHOT_OUTSIDE_ACTIVE_WINDOW"
 FULL_COVERAGE_PAUSE_REASON = "OUTSIDE_FULL_COVERAGE_REFRESH_WINDOW"
 _CACHE_GENERATION_RETENTION = 3
 _CACHE_GENERATION_FILE = re.compile(r"^[0-9a-f]{64}\.json$")
-_CACHE_SCOPE_SIDECAR_SCHEMA = (
-    "chanlun-trading-screening-cache-scope-v2-exact-cohort"
-)
+_CACHE_SCOPE_SIDECAR_SCHEMA = "chanlun-trading-screening-cache-scope-v2-exact-cohort"
 _CACHE_SCOPE_SIDECAR_MAX_BYTES = 64 * 1024
 _LARGE_INCOMPLETE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 _DECISION_SOURCE_UNSPECIFIED = object()
@@ -917,7 +918,8 @@ def _structure_bundle_intraday_freshness_evidence(
     """
 
     materialized = {
-        frequency for frequency, _converged, _full, _suffix in bundle.warmup_by_frequency
+        frequency
+        for frequency, _converged, _full, _suffix in bundle.warmup_by_frequency
     }
     closed_at_by_frequency = dict(bundle.analysis_closed_at_by_frequency)
     if closed_at_by_frequency:
@@ -938,6 +940,44 @@ def _structure_bundle_intraday_freshness_evidence(
         return (("5m", bundle.as_of),)
     frequency = "1m" if "1m" in requested_frequencies else "5m"
     return ((frequency, bundle.as_of),)
+
+
+def _structure_bundle_has_current_five_minute_trade_evidence(
+    bundle: SymbolStructureBundle,
+    *,
+    observed_at: datetime,
+    max_age_seconds: int,
+) -> bool:
+    """Confirm same-session trading from the 5m lane only.
+
+    QMT ``InstrumentStatus`` is an operational hint rather than a reliable
+    suspension boolean.  A current completed 5m bar disproves suspension even
+    when the optional 1m locator lane is absent or stale; 1m may reject a
+    precision decision later, but it must never redefine the trading level.
+    """
+
+    observed = normalize_datetime(observed_at, "observed_at")
+    if bundle.as_of > observed:
+        return False
+    evidence = _structure_bundle_intraday_freshness_evidence(
+        bundle,
+        requested_frequencies=("5m",),
+    )
+    if evidence is None:
+        return False
+    five_minute_closed_at = next(
+        (closed_at for frequency, closed_at in evidence if frequency == "5m"),
+        None,
+    )
+    return bool(
+        five_minute_closed_at is not None
+        and _structure_bundle_is_current(
+            observed_at=observed,
+            bundle_as_of=five_minute_closed_at,
+            max_age_seconds=max_age_seconds,
+            expected_frequency="5m",
+        )
+    )
 
 
 def _structure_bundle_is_current_for_intraday_evidence(
@@ -961,68 +1001,6 @@ def _structure_bundle_is_current_for_intraday_evidence(
             expected_frequency=frequency,
         )
         for frequency, closed_at in evidence
-    )
-
-
-def _structure_bundle_is_current_for_zero_trade_session(
-    *,
-    observed_at: datetime,
-    bundle_as_of: datetime,
-    max_age_seconds: int,
-) -> bool:
-    """Accept the previous close only when today's quote proves no trade.
-
-    A suspended or not-yet-traded instrument has no completed intraday bar even
-    while the exchange as a whole is open.  The ordinary freshness check must
-    therefore fail closed first.  A zero-trade quote may explain only the
-    current session; it cannot excuse an arbitrarily old structure, so the
-    bundle must still be current at the immediately preceding scheduled close.
-    """
-
-    observed = normalize_datetime(observed_at, "observed_at").astimezone(CN)
-    bundle = normalize_datetime(bundle_as_of, "bundle_as_of").astimezone(CN)
-    if bundle > observed:
-        return False
-    is_trading, _source = _scheduled_trading_day(
-        observed.date(),
-        observed_at=observed,
-    )
-    if not is_trading or not _priority_monitor_session_open(observed):
-        return False
-    previous = _previous_scheduled_trading_day(
-        observed.date(),
-        observed_at=observed,
-    )
-    if previous is None:
-        return False
-    previous_close = datetime.combine(previous, MARKET_CLOSE_CUTOFF, tzinfo=CN)
-    return _structure_bundle_is_current(
-        observed_at=previous_close,
-        bundle_as_of=bundle,
-        max_age_seconds=max_age_seconds,
-    )
-
-
-def _structure_bundle_is_current_for_zero_trade_intraday_evidence(
-    bundle: SymbolStructureBundle,
-    *,
-    observed_at: datetime,
-    max_age_seconds: int,
-    requested_frequencies: Sequence[str],
-) -> bool:
-    if bundle.as_of > normalize_datetime(observed_at, "observed_at"):
-        return False
-    evidence = _structure_bundle_intraday_freshness_evidence(
-        bundle,
-        requested_frequencies=requested_frequencies,
-    )
-    return evidence is not None and all(
-        _structure_bundle_is_current_for_zero_trade_session(
-            observed_at=observed_at,
-            bundle_as_of=closed_at,
-            max_age_seconds=max_age_seconds,
-        )
-        for _frequency, closed_at in evidence
     )
 
 
@@ -1139,6 +1117,33 @@ def _current_session_suspended_codes(
     return frozenset(fact.code for fact in batch.facts if fact.suspended)
 
 
+def _current_session_suspension_can_be_confirmed(
+    *,
+    session: date,
+    market_data_as_of: datetime,
+) -> bool:
+    """Allow suspension only after the whole referenced session has elapsed.
+
+    A positive QMT ``InstrumentStatus`` is a hint, not a live suspension fact.
+    Before the first trade of the day, a valid instrument can expose both that
+    hint and a zero-trade quote. During the session those facts mean only
+    "awaiting first trade". They become eligible suspension evidence after the
+    referenced trading session has reached its complete 15:00 cutoff.
+    """
+
+    cutoff = normalize_datetime(market_data_as_of, "market_data_as_of").astimezone(CN)
+    session_is_trading, _calendar_source = _scheduled_trading_day(
+        session,
+        observed_at=cutoff,
+    )
+    if not session_is_trading or cutoff.date() < session:
+        return False
+    return bool(
+        cutoff.date() > session
+        or (cutoff.date() == session and cutoff.time() >= MARKET_CLOSE_CUTOFF)
+    )
+
+
 def _priority_monitor_delay_seconds(
     observed_at: datetime,
     last_at: datetime | None,
@@ -1190,9 +1195,7 @@ def _priority_monitor_delay_seconds(
             continue
         elapsed = (local_observed - session_start).total_seconds()
         slot_index = int(elapsed // interval_seconds)
-        current_slot = session_start + timedelta(
-            seconds=slot_index * interval_seconds
-        )
+        current_slot = session_start + timedelta(seconds=slot_index * interval_seconds)
         if local_previous < current_slot <= local_observed:
             return 0.0
         next_slot = current_slot + timedelta(seconds=interval_seconds)
@@ -1326,9 +1329,7 @@ def _priority_monitor_continuation_document(
             **copy.deepcopy(decision_risk),
         }
         document["decision_document_schema"] = decision_schema
-        document["decision_document_id"] = copy.deepcopy(
-            signal["decision_document_id"]
-        )
+        document["decision_document_id"] = copy.deepcopy(signal["decision_document_id"])
     else:
         for field in _MONITOR_CONTINUATION_FALLBACK_FIELDS:
             if field in signal:
@@ -1620,9 +1621,7 @@ def _take_due_candidate_batch(
         observed_rows,
         start=1,
     ):
-        remaining_seconds = (
-            -1.0 if clock_invalid else maximum_age_seconds - age_seconds
-        )
+        remaining_seconds = -1.0 if clock_invalid else maximum_age_seconds - age_seconds
         future_round_count = max(
             0,
             int(max(0.0, remaining_seconds) // monitor_interval_seconds),
@@ -1713,9 +1712,7 @@ def _take_rotating_priority_batch(
         # executable row whenever the time budget ended mid-universe.
         candidates = tuple(
             code for code in candidates if code not in previous_set
-        ) + tuple(
-            code for code in candidates if code in previous_set
-        )
+        ) + tuple(code for code in candidates if code in previous_set)
     return candidates[:max_symbols]
 
 
@@ -1747,9 +1744,7 @@ def _rotating_signal_candidate_admission_order(
     def rotate_completed_window(values: tuple[str, ...]) -> tuple[str, ...]:
         value_set = set(values)
         previous_values = tuple(
-            code
-            for code in dict.fromkeys(previous_universe)
-            if code in value_set
+            code for code in dict.fromkeys(previous_universe) if code in value_set
         )
         if not values or not previous_values:
             return values
@@ -2461,9 +2456,7 @@ class TradingScreeningConfig:
     priority_monitor_interval_seconds: int = 60
     priority_monitor_time_budget_seconds: float = 55.0
     candidate_monitor_time_budget_seconds: float = 50.0
-    max_five_minute_candidate_symbols_per_refresh: int = (
-        DEFAULT_VALIDATION_COHORT_SIZE
-    )
+    max_five_minute_candidate_symbols_per_refresh: int = DEFAULT_VALIDATION_COHORT_SIZE
     max_thirty_minute_candidate_symbols_per_refresh: int = (
         DEFAULT_VALIDATION_COHORT_SIZE
     )
@@ -2561,8 +2554,7 @@ class TradingScreeningConfig:
                 or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
                 for code in self.admitted_universe_codes
             )
-            or len(self.admitted_universe_codes)
-            > self.effective_monitor_universe_limit
+            or len(self.admitted_universe_codes) > self.effective_monitor_universe_limit
         ):
             raise ValueError("admitted_universe_codes must be a unique bounded tuple")
 
@@ -2692,9 +2684,7 @@ def _project_scan_plan_to_configured_scope(
 
 
 _WARMUP_AUDIT_CONTRACT_ID = "chanlun-screening-warmup-audit-v1"
-_STOCK_DECISION_OUTCOME_CONTRACT_ID = (
-    "chanlun-screening-stock-decision-outcome-v1"
-)
+_STOCK_DECISION_OUTCOME_CONTRACT_ID = "chanlun-screening-stock-decision-outcome-v1"
 _STOCK_DECISION_OUTCOMES = frozenset(
     {
         "CURRENT_5M_STRUCTURAL_SIGNAL_EMITTED",
@@ -2781,9 +2771,7 @@ def _warmup_audit_document(
         "warmup_context_only_sensitive_symbol_count": sum(
             row.get("context_only") is True for row in rows
         ),
-        "trade_level_warmup_unconverged_symbol_count": (
-            trade_level_unconverged_count
-        ),
+        "trade_level_warmup_unconverged_symbol_count": (trade_level_unconverged_count),
         "trade_level_warmup_fail_closed_symbol_count": sum(
             row.get("trade_level_fail_closed") is True for row in rows
         ),
@@ -2902,9 +2890,7 @@ def _stock_decision_outcome_audit_document(
     for outcome in normalized.values():
         counts[outcome] = counts.get(outcome, 0) + 1
     return {
-        "stock_decision_outcome_contract_id": (
-            _STOCK_DECISION_OUTCOME_CONTRACT_ID
-        ),
+        "stock_decision_outcome_contract_id": (_STOCK_DECISION_OUTCOME_CONTRACT_ID),
         "stock_decision_outcome_counts": dict(sorted(counts.items())),
         # A compact code -> outcome ledger remains small even for full-market
         # coverage and lets a later batch/restart restore exact aggregate counts.
@@ -3347,8 +3333,7 @@ def _snapshot_sector_routing_allowlist(
     if scope_mode is None and raw_limit is None and raw_admitted is None:
         return None
     if (
-        scope_mode
-        not in {"FULL_MARKET", "LARGE_SCOPE", "VALIDATION_COHORT"}
+        scope_mode not in {"FULL_MARKET", "LARGE_SCOPE", "VALIDATION_COHORT"}
         or type(raw_limit) is not int
         or raw_limit <= 0
         or not isinstance(raw_admitted, list)
@@ -3378,8 +3363,7 @@ def _snapshot_sector_routing_allowlist(
                     or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
                     for code in raw_configured_admitted
                 )
-                or len(raw_configured_admitted)
-                != len(set(raw_configured_admitted))
+                or len(raw_configured_admitted) != len(set(raw_configured_admitted))
                 or frozenset(raw_configured_admitted) != admitted
             )
         )
@@ -3529,9 +3513,7 @@ def _coverage_sector_state_from_snapshot(
         }
         if routing_allowlist is not None:
             admitted_members = {
-                sector_id: tuple(
-                    code for code in codes if code in routing_allowlist
-                )
+                sector_id: tuple(code for code in codes if code in routing_allowlist)
                 for sector_id, codes in members.items()
             }
             discovered = frozenset(manifest["discovered_codes"])
@@ -3972,6 +3954,20 @@ def _stock_analysis_error_document(
         retry_policy = "NEXT_MARKET_DATA_EPOCH"
         deterministic_for_epoch = True
     else:
+        pending_market_reasons = (
+            (
+                "current_session_first_trade_pending",
+                "CURRENT_SESSION_FIRST_TRADE_PENDING",
+            ),
+        )
+        reason_code = next(
+            (
+                value
+                for fragment, value in pending_market_reasons
+                if fragment in remote_message or fragment in reason
+            ),
+            None,
+        )
         runtime_codes = {
             "NativeScreeningWorkerTimeout": "NATIVE_WORKER_TIMEOUT",
             "NativeScreeningWorkerUnavailable": "NATIVE_WORKER_UNAVAILABLE",
@@ -3983,11 +3979,15 @@ def _stock_analysis_error_document(
                 "PRIORITY_MONITOR_TIME_BUDGET_EXHAUSTED"
             ),
         }
-        reason_code = runtime_codes.get(type(error).__name__)
         if reason_code is not None:
-            failure_class = "RUNTIME_FAILURE"
+            failure_class = "MARKET_DATA_PENDING"
             retry_policy = "NEXT_REFRESH_AFTER_BACKOFF"
         else:
+            reason_code = runtime_codes.get(type(error).__name__)
+        if reason_code in runtime_codes.values():
+            failure_class = "RUNTIME_FAILURE"
+            retry_policy = "NEXT_REFRESH_AFTER_BACKOFF"
+        elif reason_code is None:
             reason_code = "STOCK_ANALYSIS_UNCLASSIFIED"
             failure_class = "UNCLASSIFIED_FAILURE"
             retry_policy = "NEXT_COVERAGE_CYCLE"
@@ -4011,6 +4011,20 @@ def _is_coverage_exclusion(error: Mapping[str, object]) -> bool:
         error.get("reason_code") in COVERAGE_EXCLUSION_REASON_CODES
         and error.get("retry_policy") == "NEXT_MARKET_DATA_EPOCH"
         and error.get("deterministic_for_coverage_epoch") is True
+    )
+
+
+def _is_candidate_monitor_epoch_exclusion(error: Mapping[str, object]) -> bool:
+    """Accept audited coverage rejections or a local first-trade wait fact."""
+
+    return bool(
+        _is_coverage_exclusion(error)
+        or (
+            error.get("reason_code") == CANDIDATE_FIRST_TRADE_PENDING_REASON_CODE
+            and error.get("failure_class") == "MARKET_DATA_PENDING"
+            and error.get("retry_policy") == "NEXT_MARKET_DATA_EPOCH"
+            and error.get("deterministic_for_coverage_epoch") is True
+        )
     )
 
 
@@ -4047,7 +4061,7 @@ def _candidate_monitor_symbol_exclusion_document(
 
     if observation_lane not in _CANDIDATE_MONITOR_LANES:
         raise ValueError("candidate symbol exclusion lane is invalid")
-    if not _is_coverage_exclusion(error):
+    if not _is_candidate_monitor_epoch_exclusion(error):
         return None
     cutoff = (
         _latest_expected_a_share_minute_cutoff(observed_at)
@@ -4061,7 +4075,7 @@ def _candidate_monitor_symbol_exclusion_document(
         "code": str(error["code"]),
         "error_type": "stock_analysis_error",
         "reason_code": str(error["reason_code"]),
-        "failure_class": "MARKET_DATA_REJECTION",
+        "failure_class": str(error["failure_class"]),
         "retry_policy": "NEXT_MARKET_DATA_EPOCH",
         "deterministic_for_coverage_epoch": True,
         "remote_error_type": str(error["remote_error_type"]),
@@ -4081,14 +4095,15 @@ def _candidate_monitor_symbol_exclusion_is_valid(
         or value.get("schema") != CANDIDATE_MONITOR_SYMBOL_EXCLUSION_SCHEMA
         or value.get("observation_lane") not in _CANDIDATE_MONITOR_LANES
         or value.get("error_type") != "stock_analysis_error"
-        or value.get("failure_class") != "MARKET_DATA_REJECTION"
+        or value.get("failure_class")
+        not in {"MARKET_DATA_REJECTION", "MARKET_DATA_PENDING"}
         or not isinstance(value.get("code"), str)
         or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", str(value.get("code"))) is None
         or not isinstance(value.get("remote_error_type"), str)
         or not value.get("remote_error_type")
         or not isinstance(value.get("reason"), str)
         or not value.get("reason")
-        or not _is_coverage_exclusion(value)
+        or not _is_candidate_monitor_epoch_exclusion(value)
     ):
         return False
     try:
@@ -4398,6 +4413,52 @@ def _sector_parent_relations_are_valid(snapshot: Mapping[str, object]) -> bool:
     )
 
 
+def _current_session_suspension_exclusion_codes(
+    value: Mapping[str, object],
+) -> tuple[str, ...]:
+    manifest = value.get("coverage_manifest")
+    raw_exclusions = (
+        manifest.get("exclusions") if isinstance(manifest, Mapping) else None
+    )
+    if not isinstance(raw_exclusions, list):
+        return ()
+    return tuple(
+        sorted(
+            str(exclusion["code"])
+            for exclusion in raw_exclusions
+            if isinstance(exclusion, Mapping)
+            and exclusion.get("reason_code") == "CURRENT_SESSION_SUSPENDED"
+            and isinstance(exclusion.get("code"), str)
+        )
+    )
+
+
+def _validated_source_migration_suspension_recheck_codes(
+    value: object,
+) -> tuple[str, ...] | None:
+    """Validate the durable, content-hashed targeted migration marker."""
+
+    if not isinstance(value, Mapping):
+        return None
+    if _SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD not in value:
+        return ()
+    raw_codes = value.get(_SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD)
+    expected = _current_session_suspension_exclusion_codes(value)
+    if (
+        not isinstance(raw_codes, list)
+        or not raw_codes
+        or any(
+            not isinstance(code, str)
+            or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+            for code in raw_codes
+        )
+        or raw_codes != sorted(set(raw_codes))
+        or tuple(raw_codes) != expected
+    ):
+        return None
+    return expected
+
+
 def _cache_contract_is_valid(
     value: object,
     config: TradingScreeningConfig,
@@ -4428,9 +4489,7 @@ def _cache_contract_is_valid(
         )
     )
     embedded_decision_source = (
-        value.get("decision_source_snapshot")
-        if isinstance(value, Mapping)
-        else None
+        value.get("decision_source_snapshot") if isinstance(value, Mapping) else None
     )
     try:
         embedded_decision_source_valid = bool(
@@ -4469,12 +4528,9 @@ def _cache_contract_is_valid(
         == value.get("signal_document_contract_id")
         and manifest.get("sector_strength_evidence_revision")
         == value.get("sector_strength_evidence_revision")
-        and coverage_manifest_dispositions_are_consistent(
-            manifest, value.get("errors")
-        )
+        and coverage_manifest_dispositions_are_consistent(manifest, value.get("errors"))
         and manifest.get("schema") == COVERAGE_MANIFEST_SCHEMA
-        and manifest.get("coverage_state_contract_id")
-        == COVERAGE_STATE_CONTRACT_ID
+        and manifest.get("coverage_state_contract_id") == COVERAGE_STATE_CONTRACT_ID
         and isinstance(value.get("sectors"), list)
         and isinstance(value.get("signals"), list)
         and signal_documents_current
@@ -4562,13 +4618,11 @@ def _restored_snapshot_scope_is_valid(
     nested_member_codes = _restored_snapshot_nested_member_codes(value)
     if nested_member_codes is None:
         return False
-    if (
-        not _bounded_snapshot_admission_is_valid(
-            raw_admitted_codes,
-            raw_configured_admitted_codes=raw_configured_admitted_codes,
-            strategy_subject_codes=ordered_codes,
-            config=config,
-        )
+    if not _bounded_snapshot_admission_is_valid(
+        raw_admitted_codes,
+        raw_configured_admitted_codes=raw_configured_admitted_codes,
+        strategy_subject_codes=ordered_codes,
+        config=config,
     ):
         return False
     manifest = value.get("coverage_manifest")
@@ -4888,6 +4942,7 @@ class TradingScreeningService:
         self._cache_decision_source_migrated_from: str | None = None
         self._cache_decision_source_migrated_snapshot_sha256_from: str | None = None
         self._cache_decision_source_migration_persist_error: str | None = None
+        self._cache_decision_source_recheck_codes: tuple[str, ...] = ()
         self._last_incomplete_checkpoint_at: datetime | None = None
         self._state_lock = RLock()
         self._scan_lock = Lock()
@@ -4947,9 +5002,7 @@ class TradingScreeningService:
         self._priority_monitor_instrument_status_probe_status = "not_observed"
         self._priority_monitor_instrument_status_probe_error: str | None = None
         self._candidate_monitor_last_errors: tuple[dict[str, object], ...] = ()
-        self._candidate_monitor_symbol_exclusions: dict[
-            str, dict[str, object]
-        ] = {}
+        self._candidate_monitor_symbol_exclusions: dict[str, dict[str, object]] = {}
         self._candidate_monitor_started_at: datetime | None = None
         self._candidate_monitor_five_universe: tuple[str, ...] = ()
         self._candidate_monitor_thirty_universe: tuple[str, ...] = ()
@@ -5028,9 +5081,7 @@ class TradingScreeningService:
         self._coverage_cycle_exclusions: dict[str, dict[str, object]] = {}
         self._coverage_cycle_discarded_retry_codes: set[str] = set()
         self._coverage_cycle_errors: dict[str, dict[str, object]] = {}
-        self._coverage_cycle_warmup_diagnostics: dict[
-            str, dict[str, object]
-        ] = {}
+        self._coverage_cycle_warmup_diagnostics: dict[str, dict[str, object]] = {}
         self._coverage_cycle_stock_decision_outcomes: dict[str, str] = {}
         self._coverage_sector_restore_error: str | None = None
         self._coverage_cycle_full_market_history_scan = False
@@ -5539,12 +5590,10 @@ class TradingScreeningService:
             raw_admitted_codes = payload.get("admitted_universe_codes")
             if (
                 raw_scope_mode != self._config.screening_scope_mode
-                or raw_scope_limit
-                != self._config.effective_monitor_universe_limit
+                or raw_scope_limit != self._config.effective_monitor_universe_limit
                 or not isinstance(raw_admitted_codes, list)
                 or any(
-                    not isinstance(code, str) or not code
-                    for code in raw_admitted_codes
+                    not isinstance(code, str) or not code for code in raw_admitted_codes
                 )
                 or len(raw_admitted_codes) != len(set(raw_admitted_codes))
             ):
@@ -5608,12 +5657,9 @@ class TradingScreeningService:
                 )
             )
             configured_allowlist = _configured_scope_allowlist(self._config)
-            if (
-                set(restored_codes) != set(raw_admitted_codes)
-                or (
-                    configured_allowlist is not None
-                    and not set(restored_codes).issubset(configured_allowlist)
-                )
+            if set(restored_codes) != set(raw_admitted_codes) or (
+                configured_allowlist is not None
+                and not set(restored_codes).issubset(configured_allowlist)
             ):
                 return
             with self._state_lock:
@@ -5838,10 +5884,7 @@ class TradingScreeningService:
                     *five_last_success_at,
                     *code_observations,
                     *signal_codes.values(),
-                    *(
-                        str(value["code"])
-                        for value in candidate_symbol_exclusions
-                    ),
+                    *(str(value["code"]) for value in candidate_symbol_exclusions),
                     *(
                         code
                         for error in (*last_errors, *candidate_last_errors)
@@ -5977,17 +6020,12 @@ class TradingScreeningService:
             locator_verification_required = bool(
                 self._priority_monitor_locator_last_scheduled_count > 0
             )
-            locator_runtime_verified = (
-                self._priority_monitor_locator_runtime_verified
-            )
+            locator_runtime_verified = self._priority_monitor_locator_runtime_verified
         return bool(
             self._config.priority_monitoring_enabled
             and (
                 not runtime_verified
-                or (
-                    locator_verification_required
-                    and not locator_runtime_verified
-                )
+                or (locator_verification_required and not locator_runtime_verified)
             )
         )
 
@@ -6283,9 +6321,7 @@ class TradingScreeningService:
                     value,
                     observed_at=observed_at,
                 )
-                and (
-                    configured_allowlist is None or code in configured_allowlist
-                )
+                and (configured_allowlist is None or code in configured_allowlist)
             }
             # Epoch changes are the retry trigger.  Pruning here prevents a
             # deterministic individual rejection from being retried every minute
@@ -6293,19 +6329,14 @@ class TradingScreeningService:
             self._candidate_monitor_symbol_exclusions = copy.deepcopy(
                 active_candidate_symbol_exclusions
             )
-            if self._candidate_monitor_suspended_session == monitor_session:
-                candidate_suspended_codes = set(
-                    _project_codes_to_configured_scope(
-                        self._candidate_monitor_current_session_suspended_codes,
-                        self._config,
-                    )
-                )
-            else:
-                candidate_suspended_codes = set()
-                self._candidate_monitor_suspended_session = monitor_session
-                self._candidate_monitor_current_session_suspended_codes = ()
-                self._candidate_monitor_suspension_probe_status = "not_required"
-                self._candidate_monitor_suspension_probe_error = None
+            # Live zero-trade evidence is never a session-long suspension fact.
+            # Clear any in-memory value produced by an older process revision;
+            # current first-trade waits are represented by a 5m-epoch exclusion.
+            candidate_suspended_codes: set[str] = set()
+            self._candidate_monitor_suspended_session = monitor_session
+            self._candidate_monitor_current_session_suspended_codes = ()
+            self._candidate_monitor_suspension_probe_status = "not_required"
+            self._candidate_monitor_suspension_probe_error = None
         priority_deadline_perf = (
             priority_round_started_perf
             + self._config.priority_monitor_time_budget_seconds
@@ -6498,7 +6529,7 @@ class TradingScreeningService:
         zero_trade_quote_error: str | None = None
         zero_trade_quote_diagnostics: tuple[dict[str, object], ...] = ()
         current_session_suspended_codes = frozenset()
-        raw_current_session_suspended_codes = frozenset()
+        current_session_awaiting_first_trade_codes = frozenset()
         instrument_status_probe_status = "not_required"
         instrument_status_probe_error: str | None = None
         if realtime_notification_eligible and mandatory_codes:
@@ -6560,41 +6591,40 @@ class TradingScreeningService:
                         f"{type(exc).__name__}: {str(exc)[:140]}"
                     )
                 else:
-                    raw_current_session_suspended_codes = (
+                    _raw_current_session_suspension_hints = (
                         _current_session_suspended_codes(
                             status_batch,
                             requested_codes=tuple(sorted(mandatory_codes)),
                             session=status_session,
                         )
                     )
-                    # QMT ``InstrumentStatus`` is not a stable boolean across
-                    # instrument classes: an actively trading ETF can expose a
-                    # positive value.  Exclude a live symbol only when the same
-                    # session quote independently proves that it has made no
-                    # trade.  If either source is absent we keep calculating and
-                    # let the ordinary stale-bar check fail closed.
-                    current_session_suspended_codes = frozenset(
-                        raw_current_session_suspended_codes.intersection(
-                            current_session_zero_trade_codes
-                        )
-                    )
-                    instrument_status_probe_status = (
-                        "verified_suspended"
-                        if current_session_suspended_codes
-                        else "verified_no_suspension"
-                    )
+                    # The live lane never promotes QMT status hints to a
+                    # suspension. A zero-trade quote means only that the first
+                    # trade is still pending; post-close coverage owns the final
+                    # suspension decision.
+                    if current_session_zero_trade_codes:
+                        instrument_status_probe_status = "awaiting_first_trade"
+                    else:
+                        instrument_status_probe_status = "verified_no_suspension"
             else:
                 instrument_status_probe_status = "provider_unavailable"
-        current_session_no_bar_codes = frozenset(
-            (*current_session_zero_trade_codes, *current_session_suspended_codes)
+        current_session_awaiting_first_trade_codes = frozenset(
+            current_session_zero_trade_codes.difference(current_session_suspended_codes)
         )
-        # 只有“同日状态异常 + 同日零成交”交叉确认的停牌标的才移出本轮结构调度。
-        # 它仍保留在健康诊断中，但不会反复读取数日前的结构；单独一个正数状态或一份
-        # 零成交报价都不足以把仍在交易的标的静默排除。
+        # A zero-trade live quote means there is no new structure to calculate.
+        # Poll it again on the next priority round without spending a structure
+        # worker slot. The code returns automatically as soon as its first trade
+        # appears; no session-long suspension cache is created.
+        nonmonitorable_mandatory_codes = frozenset(
+            (
+                *current_session_suspended_codes,
+                *current_session_awaiting_first_trade_codes,
+            )
+        )
         monitorable_mandatory_codes = tuple(
             code
             for code in mandatory_codes
-            if code not in current_session_suspended_codes
+            if code not in nonmonitorable_mandatory_codes
         )
         with self._background_lock:
             self._priority_monitor_current_session_zero_trade_codes = tuple(
@@ -6620,8 +6650,7 @@ class TradingScreeningService:
             for row in previous.get("signals", ())
             if isinstance(row, Mapping)
             and (
-                configured_allowlist is None
-                or row.get("code") in configured_allowlist
+                configured_allowlist is None or row.get("code") in configured_allowlist
             )
         )
         with self._background_lock:
@@ -6713,7 +6742,7 @@ class TradingScreeningService:
         signal_candidate_codes = tuple(
             code
             for code in signal_candidate_codes
-            if code not in current_session_suspended_codes
+            if code not in nonmonitorable_mandatory_codes
             and code not in candidate_suspended_codes
             and code not in candidate_cadence_epoch_excluded_codes
         )
@@ -6727,7 +6756,7 @@ class TradingScreeningService:
             excluded_codes=frozenset(
                 (
                     *excluded_codes,
-                    *current_session_suspended_codes,
+                    *nonmonitorable_mandatory_codes,
                     *candidate_suspended_codes,
                     *candidate_cadence_epoch_excluded_codes,
                 )
@@ -6775,7 +6804,7 @@ class TradingScreeningService:
             code
             for code in supportive_eligible_codes
             if code not in excluded_codes
-            and code not in current_session_suspended_codes
+            and code not in nonmonitorable_mandatory_codes
             and code not in candidate_suspended_codes
             and code not in candidate_cadence_epoch_excluded_codes
             and code not in reserved_candidate_codes
@@ -6798,7 +6827,7 @@ class TradingScreeningService:
             code
             for code in _configured_validation_cohort_codes(self._config)
             if code not in excluded_codes
-            and code not in current_session_suspended_codes
+            and code not in nonmonitorable_mandatory_codes
             and code not in candidate_suspended_codes
             and code not in candidate_cadence_epoch_excluded_codes
             and code not in validation_probe_reserved_codes
@@ -6865,7 +6894,7 @@ class TradingScreeningService:
                 (
                     *excluded_codes,
                     *mandatory_scope,
-                    *current_session_suspended_codes,
+                    *nonmonitorable_mandatory_codes,
                     *candidate_suspended_codes,
                     *candidate_cadence_epoch_excluded_codes,
                     *candidate_locator_epoch_excluded_codes,
@@ -6874,14 +6903,10 @@ class TradingScreeningService:
             allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
         )
         immediate_signal_universe = tuple(
-            code
-            for code in locator_signal_pool
-            if code in admitted_signal_code_set
+            code for code in locator_signal_pool if code in admitted_signal_code_set
         )
         locator_admission_deferred_codes = tuple(
-            code
-            for code in locator_signal_pool
-            if code not in admitted_signal_code_set
+            code for code in locator_signal_pool if code not in admitted_signal_code_set
         )
         urgent_signal_universe = immediate_signal_universe
         urgent_signal_codes = _take_rotating_priority_batch(
@@ -6963,7 +6988,7 @@ class TradingScreeningService:
                 )
             )
             if code not in excluded_codes
-            and code not in current_session_suspended_codes
+            and code not in nonmonitorable_mandatory_codes
             and code not in candidate_suspended_codes
             and code not in candidate_cadence_epoch_excluded_codes
         )
@@ -6973,7 +6998,7 @@ class TradingScreeningService:
         thirty_universe = tuple(
             code
             for code in dict.fromkeys((*regular_five_universe, *supportive_codes))
-            if code not in current_session_suspended_codes
+            if code not in nonmonitorable_mandatory_codes
             and code not in candidate_suspended_codes
             and code not in candidate_cadence_epoch_excluded_codes
         )
@@ -7208,15 +7233,6 @@ class TradingScreeningService:
                     max_age_seconds=self._config.max_structure_age_seconds,
                     requested_frequencies=requested_frequencies,
                 )
-                if not bundle_is_current and code in current_session_no_bar_codes:
-                    bundle_is_current = (
-                        _structure_bundle_is_current_for_zero_trade_intraday_evidence(
-                            bundle,
-                            observed_at=observed_at,
-                            max_age_seconds=self._config.max_structure_age_seconds,
-                            requested_frequencies=requested_frequencies,
-                        )
-                    )
                 if not bundle_is_current:
                     raise ValueError("priority_monitor_structure_bundle_stale")
                 evaluated = self._engine.evaluate_symbol(bundle)
@@ -7507,9 +7523,7 @@ class TradingScreeningService:
             partial_previous = {
                 "signals": [
                     document
-                    for signal_id, document in sorted(
-                        previous_documents_by_id.items()
-                    )
+                    for signal_id, document in sorted(previous_documents_by_id.items())
                     if signal_id in prior_stages
                     and document.get("code") in successful_set
                 ]
@@ -7595,9 +7609,7 @@ class TradingScreeningService:
                     # can fit; the remaining five seconds are the publication
                     # reserve.  Ordinary candidates keep the wider variance
                     # guard because they have no right to consume that reserve.
-                    wave_guard_multiplier = (
-                        1.0 if phase == "priority_1m" else 1.25
-                    )
+                    wave_guard_multiplier = 1.0 if phase == "priority_1m" else 1.25
                     admission_guard_seconds = max(
                         admission_guard_seconds,
                         previous_wave_elapsed_seconds * wave_guard_multiplier,
@@ -7712,8 +7724,7 @@ class TradingScreeningService:
         )
         publish_completed_minute_results()
         candidate_budget_deadline_perf = (
-            time.perf_counter()
-            + self._config.candidate_monitor_time_budget_seconds
+            time.perf_counter() + self._config.candidate_monitor_time_budget_seconds
         )
         candidate_deadline_perf = candidate_monitor_deadline_perf(
             priority_deadline_perf=priority_deadline_perf,
@@ -7871,7 +7882,7 @@ class TradingScreeningService:
         )
         candidate_suspension_probe_status = "not_required"
         candidate_suspension_probe_error: str | None = None
-        verified_candidate_suspended_codes: frozenset[str] = frozenset()
+        candidate_first_trade_pending_codes: frozenset[str] = frozenset()
         if realtime_notification_eligible and candidate_stale_codes:
             candidate_quote_provider = getattr(
                 self._market_data,
@@ -7895,19 +7906,13 @@ class TradingScreeningService:
                     "current_session_instrument_statuses",
                     None,
                 )
-            if not callable(candidate_quote_provider) or not callable(
-                candidate_status_provider
-            ):
+            if not callable(candidate_quote_provider):
                 candidate_suspension_probe_status = "provider_unavailable"
             else:
                 candidate_suspension_probe_status = "failed"
                 try:
                     candidate_quote_batch = candidate_quote_provider(
                         candidate_stale_codes
-                    )
-                    candidate_status_batch = candidate_status_provider(
-                        candidate_stale_codes,
-                        session=monitor_session,
                     )
                 except Exception as exc:
                     candidate_suspension_probe_error = (
@@ -7918,43 +7923,43 @@ class TradingScreeningService:
                         candidate_quote_batch,
                         requested_codes=candidate_stale_codes,
                     )
-                    candidate_status_suspended_codes = (
-                        _current_session_suspended_codes(
-                            candidate_status_batch,
-                            requested_codes=candidate_stale_codes,
-                            session=monitor_session,
-                        )
-                    )
-                    verified_candidate_suspended_codes = frozenset(
-                        candidate_zero_trade_codes.intersection(
-                            candidate_status_suspended_codes
-                        )
-                    )
-                    candidate_suspension_probe_status = (
-                        "verified_suspended"
-                        if verified_candidate_suspended_codes
-                        else "verified_no_suspension"
-                    )
-        if verified_candidate_suspended_codes:
-            candidate_suspended_codes.update(verified_candidate_suspended_codes)
+                    if callable(candidate_status_provider):
+                        try:
+                            candidate_status_batch = candidate_status_provider(
+                                candidate_stale_codes,
+                                session=monitor_session,
+                            )
+                            _candidate_status_suspension_hints = (
+                                _current_session_suspended_codes(
+                                    candidate_status_batch,
+                                    requested_codes=candidate_stale_codes,
+                                    session=monitor_session,
+                                )
+                            )
+                        except Exception as exc:
+                            candidate_suspension_probe_error = (
+                                f"{type(exc).__name__}: {str(exc)[:140]}"
+                            )
+                    candidate_first_trade_pending_codes = candidate_zero_trade_codes
+                    if candidate_zero_trade_codes:
+                        candidate_suspension_probe_status = "awaiting_first_trade"
+                    else:
+                        candidate_suspension_probe_status = "verified_no_suspension"
+        if candidate_first_trade_pending_codes:
             candidate_errors = [
-                error
+                {
+                    **error,
+                    "reason_code": CANDIDATE_FIRST_TRADE_PENDING_REASON_CODE,
+                    "failure_class": "MARKET_DATA_PENDING",
+                    "retry_policy": "NEXT_MARKET_DATA_EPOCH",
+                    "deterministic_for_coverage_epoch": True,
+                    "reason": "current_session_first_trade_pending",
+                }
+                if error.get("code") in candidate_first_trade_pending_codes
+                else error
                 for error in candidate_errors
-                if error.get("code") not in verified_candidate_suspended_codes
             ]
-            five_universe = tuple(
-                code
-                for code in five_universe
-                if code not in verified_candidate_suspended_codes
-            )
-            thirty_universe = tuple(
-                code
-                for code in thirty_universe
-                if code not in verified_candidate_suspended_codes
-            )
-        candidate_symbol_exclusions = copy.deepcopy(
-            active_candidate_symbol_exclusions
-        )
+        candidate_symbol_exclusions = copy.deepcopy(active_candidate_symbol_exclusions)
         retained_candidate_errors: list[dict[str, object]] = []
         newly_excluded_candidate_codes: set[str] = set()
         for error in candidate_errors:
@@ -7977,7 +7982,9 @@ class TradingScreeningService:
         candidate_errors = retained_candidate_errors
         if newly_excluded_candidate_codes:
             five_universe = tuple(
-                code for code in five_universe if code not in newly_excluded_candidate_codes
+                code
+                for code in five_universe
+                if code not in newly_excluded_candidate_codes
             )
             thirty_universe = tuple(
                 code
@@ -8070,9 +8077,7 @@ class TradingScreeningService:
             (0, 0.0),
         )
         locator_completed_count = sum(
-            1
-            for code, _rows, exc in results
-            if code in minute_code_set and exc is None
+            1 for code, _rows, exc in results if code in minute_code_set and exc is None
         )
         locator_runtime_failures = tuple(
             error
@@ -8379,6 +8384,16 @@ class TradingScreeningService:
             )
         ):
             return False
+        source_migration_recheck_codes = (
+            _validated_source_migration_suspension_recheck_codes(snapshot)
+        )
+        if source_migration_recheck_codes is None or any(
+            code not in parsed_frequency_maps["deferred_frequencies"]
+            or code in parsed_frequency_maps["pending_frequencies"]
+            or code in parsed_frequency_maps["backoff_frequencies"]
+            for code in source_migration_recheck_codes
+        ):
+            return False
         screening_policy_id = manifest.get("screening_policy_id")
         source_cutoff = manifest.get("source_cutoff")
         market_data_as_of = manifest.get("market_data_as_of")
@@ -8483,6 +8498,12 @@ class TradingScreeningService:
         self._pending_frequencies = parsed_frequency_maps["pending_frequencies"]
         self._backoff_frequencies = parsed_frequency_maps["backoff_frequencies"]
         self._deferred_frequencies = parsed_frequency_maps["deferred_frequencies"]
+        self._cache_decision_source_recheck_codes = source_migration_recheck_codes
+        for code in source_migration_recheck_codes:
+            frequencies = self._deferred_frequencies.pop(code)
+            self._pending_frequencies.setdefault(code, set()).update(frequencies)
+            self._coverage_cycle_excluded_codes.discard(code)
+            self._coverage_cycle_exclusions.pop(code, None)
         errors = snapshot.get("errors")
         stock_errors = (
             tuple(value for value in errors if isinstance(value, Mapping))
@@ -8513,11 +8534,9 @@ class TradingScreeningService:
             self._coverage_cycle_background_refresh_required = bool(
                 audit.get("background_full_refresh_required")
             )
-            self._coverage_cycle_warmup_diagnostics = (
-                _restored_warmup_diagnostics(
-                    audit,
-                    completed_codes=self._coverage_cycle_completed_codes,
-                )
+            self._coverage_cycle_warmup_diagnostics = _restored_warmup_diagnostics(
+                audit,
+                completed_codes=self._coverage_cycle_completed_codes,
             )
             self._coverage_cycle_stock_decision_outcomes = (
                 _restored_stock_decision_outcomes(
@@ -8551,15 +8570,12 @@ class TradingScreeningService:
         if (
             codes is None
             or nested_member_codes is None
-            or payload.get("screening_scope_mode")
-            != self._config.screening_scope_mode
+            or payload.get("screening_scope_mode") != self._config.screening_scope_mode
             or payload.get("effective_monitor_universe_limit")
             != self._config.effective_monitor_universe_limit
             or not _bounded_snapshot_admission_is_valid(
                 raw_admitted_codes,
-                raw_configured_admitted_codes=(
-                    raw_configured_admitted_codes
-                ),
+                raw_configured_admitted_codes=(raw_configured_admitted_codes),
                 strategy_subject_codes=codes,
                 config=self._config,
             )
@@ -8575,15 +8591,11 @@ class TradingScreeningService:
             "effective_monitor_universe_limit": payload.get(
                 "effective_monitor_universe_limit"
             ),
-            "configured_admitted_codes": list(
-                self._config.admitted_universe_codes
-            ),
+            "configured_admitted_codes": list(self._config.admitted_universe_codes),
             "snapshot_admitted_codes": list(raw_admitted_codes),
             "strategy_subject_codes": list(codes),
             "analysis_context_member_count": len(nested_member_codes),
-            "analysis_context_member_codes_sha256": sha256_json(
-                nested_member_codes
-            ),
+            "analysis_context_member_codes_sha256": sha256_json(nested_member_codes),
             "payload_name": path.name,
             "payload_size_bytes": payload_stat.st_size,
             "payload_mtime_ns": payload_stat.st_mtime_ns,
@@ -8650,13 +8662,10 @@ class TradingScreeningService:
             return False
         codes = document.get("strategy_subject_codes")
         raw_admitted_codes = document.get("snapshot_admitted_codes")
-        raw_configured_admitted_codes = document.get(
-            "configured_admitted_codes"
-        )
+        raw_configured_admitted_codes = document.get("configured_admitted_codes")
         if (
             document.get("schema") != _CACHE_SCOPE_SIDECAR_SCHEMA
-            or document.get("screening_scope_mode")
-            != self._config.screening_scope_mode
+            or document.get("screening_scope_mode") != self._config.screening_scope_mode
             or document.get("effective_monitor_universe_limit")
             != self._config.effective_monitor_universe_limit
             or document.get("payload_name") != path.name
@@ -8666,12 +8675,10 @@ class TradingScreeningService:
             or not isinstance(codes, list)
             or type(document.get("analysis_context_member_count")) is not int
             or document.get("analysis_context_member_count", -1) < 0
-            or not isinstance(
-                document.get("analysis_context_member_codes_sha256"), str
+            or not isinstance(document.get("analysis_context_member_codes_sha256"), str)
+            or not str(document.get("analysis_context_member_codes_sha256")).startswith(
+                "sha256:"
             )
-            or not str(
-                document.get("analysis_context_member_codes_sha256")
-            ).startswith("sha256:")
             or any(
                 not isinstance(code, str)
                 or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
@@ -8680,9 +8687,7 @@ class TradingScreeningService:
             or len(codes) != len(set(codes))
             or not _bounded_snapshot_admission_is_valid(
                 raw_admitted_codes,
-                raw_configured_admitted_codes=(
-                    raw_configured_admitted_codes
-                ),
+                raw_configured_admitted_codes=(raw_configured_admitted_codes),
                 strategy_subject_codes=tuple(codes),
                 config=self._config,
             )
@@ -8717,8 +8722,7 @@ class TradingScreeningService:
             == payload.get("admitted_universe_codes")
             and isinstance(document.get("configured_admitted_codes"), list)
             and all(
-                isinstance(code, str)
-                for code in document["configured_admitted_codes"]
+                isinstance(code, str) for code in document["configured_admitted_codes"]
             )
             and frozenset(document["configured_admitted_codes"])
             == frozenset(self._config.admitted_universe_codes)
@@ -8740,13 +8744,19 @@ class TradingScreeningService:
         manifest = value.get("coverage_manifest")
         audit = value.get("scan_audit")
         data_quality = value.get("data_quality")
+        suspension_evidence_recheck = (
+            suspension_evidence_recheck_source_migration_allowed(
+                cached_decision_source_snapshot_id=cached_source_id,
+                current_decision_source_snapshot_id=current_source_id,
+                cached_decision_source_snapshot=value.get("decision_source_snapshot"),
+                current_decision_source_snapshot=self._decision_source_snapshot,
+            )
+        )
         if (
             not orchestration_source_migration_allowed(
                 cached_decision_source_snapshot_id=cached_source_id,
                 current_decision_source_snapshot_id=current_source_id,
-                cached_decision_source_snapshot=value.get(
-                    "decision_source_snapshot"
-                ),
+                cached_decision_source_snapshot=value.get("decision_source_snapshot"),
                 current_decision_source_snapshot=self._decision_source_snapshot,
             )
             or value.get("available") is not True
@@ -8766,12 +8776,19 @@ class TradingScreeningService:
             )
             or not self._coverage_epoch_identity_valid(value)
             or not isinstance(current_source_id, str)
+            or _SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD in value
         ):
             return None
         # Do not mutate the authenticated legacy document until the replacement
         # has passed the complete current contract.  A failed migration must
         # remain distinguishable from a current-source cache corruption.
         migrated = dict(value)
+        if suspension_evidence_recheck:
+            recheck_codes = _current_session_suspension_exclusion_codes(value)
+            if recheck_codes:
+                migrated[_SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD] = list(
+                    recheck_codes
+                )
         migrated["decision_source_snapshot_id"] = current_source_id
         migrated["decision_source_snapshot"] = copy.deepcopy(
             self._decision_source_snapshot
@@ -8804,9 +8821,9 @@ class TradingScreeningService:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
-        if not isinstance(value, Mapping) or not self._cache_scope_sidecar_matches_loaded_payload(
-            path, value
-        ):
+        if not isinstance(
+            value, Mapping
+        ) or not self._cache_scope_sidecar_matches_loaded_payload(path, value):
             return None
         # ``json.loads`` 已生成全新对象树；此处深拷贝超过 100 MiB 的已校验快照只会
         # 让启动内存翻倍，不会增加隔离性，因为返回树本身即服务私有的不可变发布。
@@ -8990,14 +9007,11 @@ class TradingScreeningService:
         ):
             return False
         try:
-            continuity_discovered_count = int(
-                audit.get("discovered_symbol_count", 0)
-            )
+            continuity_discovered_count = int(audit.get("discovered_symbol_count", 0))
         except (TypeError, ValueError):
             return False
         if (
-            continuity_discovered_count
-            > self._config.effective_monitor_universe_limit
+            continuity_discovered_count > self._config.effective_monitor_universe_limit
             and self._config.screening_scope_mode != "FULL_MARKET"
         ):
             # A complete production snapshot is not a bounded validation or
@@ -9110,16 +9124,12 @@ class TradingScreeningService:
         """
 
         with self._background_lock:
-            continuity_source = (
-                self._preselection_continuity_source_snapshot_sha256
-            )
+            continuity_source = self._preselection_continuity_source_snapshot_sha256
             if continuity_source is None:
                 return False
             if (
-                self._decision_rule_recheck_source_snapshot_sha256
-                == continuity_source
-                and self._decision_rule_recheck_source_core_id
-                == self._decision_core_id
+                self._decision_rule_recheck_source_snapshot_sha256 == continuity_source
+                and self._decision_rule_recheck_source_core_id == self._decision_core_id
             ):
                 return False
             self._decision_rule_recheck_source_snapshot_sha256 = continuity_source
@@ -9163,9 +9173,9 @@ class TradingScreeningService:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
-        if not isinstance(value, Mapping) or not self._cache_scope_sidecar_matches_loaded_payload(
-            path, value
-        ):
+        if not isinstance(
+            value, Mapping
+        ) or not self._cache_scope_sidecar_matches_loaded_payload(path, value):
             return None
         return value if isinstance(value, dict) else None
 
@@ -9228,9 +9238,7 @@ class TradingScreeningService:
                     self._cache_path, current_value
                 )
             ):
-                self._quarantined_cache_reason = (
-                    "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH"
-                )
+                self._quarantined_cache_reason = "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH"
                 return None
             if isinstance(current_value, dict):
                 migrated_value = self._operationally_migrated_cache(current_value)
@@ -9778,12 +9786,8 @@ class TradingScreeningService:
                 # are overlaid below after the same admission intersection.
                 snapshot = _initial_snapshot(
                     self._config,
-                    selection_research_revision=(
-                        self._selection_research_revision
-                    ),
-                    decision_source_snapshot_id=(
-                        self._decision_source_snapshot_id
-                    ),
+                    selection_research_revision=(self._selection_research_revision),
+                    decision_source_snapshot_id=(self._decision_source_snapshot_id),
                 )
                 snapshot_available = False
             source_sha256 = snapshot.get("snapshot_content_sha256")
@@ -9912,8 +9916,7 @@ class TradingScreeningService:
                 if isinstance(value, Mapping)
                 and _is_current_selection_signal(value)
                 and (
-                    admitted_code_set is None
-                    or value.get("code") in admitted_code_set
+                    admitted_code_set is None or value.get("code") in admitted_code_set
                 )
             ]
             if isinstance(raw_signals, (list, tuple))
@@ -10565,9 +10568,7 @@ class TradingScreeningService:
                     admitted_code_set
                 )
             )
-            priority_monitor_last_errors = admitted_errors(
-                priority_monitor_last_errors
-            )
+            priority_monitor_last_errors = admitted_errors(priority_monitor_last_errors)
             candidate_monitor_last_errors = admitted_errors(
                 candidate_monitor_last_errors
             )
@@ -10656,9 +10657,7 @@ class TradingScreeningService:
             self._config,
         )
         snapshot_scope_codes = (
-            _restored_snapshot_scope_codes(snapshot)
-            if snapshot_scope_valid
-            else None
+            _restored_snapshot_scope_codes(snapshot) if snapshot_scope_valid else None
         )
         if (
             snapshot_scope_valid
@@ -10808,9 +10807,7 @@ class TradingScreeningService:
                 "screening_snapshot_not_publishable"
             )
         if last_error is not None and scan_state != "refresh_failed":
-            selection_operational_reason_codes.append(
-                "screening_background_error"
-            )
+            selection_operational_reason_codes.append("screening_background_error")
         scan_audit = snapshot.get("scan_audit")
         coverage_complete = None
         if not isinstance(scan_audit, Mapping):
@@ -10925,8 +10922,8 @@ class TradingScreeningService:
         validation_snapshot_priority_only = (
             self._validation_snapshot_uses_priority_only(snapshot, observed_at)
         )
-        coverage_execution_window_open = (
-            self._full_coverage_execution_window_open(snapshot, observed_at)
+        coverage_execution_window_open = self._full_coverage_execution_window_open(
+            snapshot, observed_at
         )
         monitoring_failure_codes = sorted(
             {
@@ -11242,9 +11239,7 @@ class TradingScreeningService:
             candidate_monitor_ready = False
             candidate_monitor_reason_codes.append("CANDIDATE_MONITOR_CADENCE_OVERDUE")
         if candidate_monitor_symbol_exclusions and priority_monitor_enabled:
-            candidate_monitor_reason_codes.append(
-                "CANDIDATE_MONITOR_SYMBOL_EXCLUSIONS"
-            )
+            candidate_monitor_reason_codes.append("CANDIDATE_MONITOR_SYMBOL_EXCLUSIONS")
         notification_dispatcher_configured = self._notifier is not None
         notification_delivery: dict[str, object] | None = None
         if notification_dispatcher_configured:
@@ -11403,6 +11398,24 @@ class TradingScreeningService:
             "cache_decision_source_migration_persist_error": (
                 self._cache_decision_source_migration_persist_error
             ),
+            "cache_decision_source_recheck_code_count": len(
+                self._cache_decision_source_recheck_codes
+            ),
+            "cache_decision_source_recheck_codes": list(
+                self._cache_decision_source_recheck_codes
+            ),
+            "cache_decision_source_recheck_pending_code_count": sum(
+                1
+                for code in self._cache_decision_source_recheck_codes
+                if code in self._pending_frequencies
+                or code in self._backoff_frequencies
+            ),
+            "cache_decision_source_recheck_pending_codes": [
+                code
+                for code in self._cache_decision_source_recheck_codes
+                if code in self._pending_frequencies
+                or code in self._backoff_frequencies
+            ],
             "incomplete_checkpoint_interval_seconds": (
                 self._config.incomplete_checkpoint_interval_seconds
             ),
@@ -11743,8 +11756,7 @@ class TradingScreeningService:
             "candidate_monitor_active": bool(
                 priority_monitor_session_open
                 and (
-                    candidate_monitor_five_universe
-                    or candidate_monitor_thirty_universe
+                    candidate_monitor_five_universe or candidate_monitor_thirty_universe
                 )
             ),
             "candidate_notification_streaming_enabled": True,
@@ -11828,8 +11840,7 @@ class TradingScreeningService:
                 realtime_alert_ready
                 and priority_monitor_session_open
                 and (
-                    candidate_monitor_five_universe
-                    or candidate_monitor_thirty_universe
+                    candidate_monitor_five_universe or candidate_monitor_thirty_universe
                 )
             ),
             "realtime_alert_status": realtime_alert_status,
@@ -11844,9 +11855,7 @@ class TradingScreeningService:
                 COMPLETE_CLOSE_IDLE_REASON if refresh_suppressed else None
             ),
             "coverage_execution_window_open": coverage_execution_window_open,
-            "validation_snapshot_priority_only": (
-                validation_snapshot_priority_only
-            ),
+            "validation_snapshot_priority_only": (validation_snapshot_priority_only),
             "screening_scope_mode": self._config.screening_scope_mode,
             "validation_cohort_size": self._config.validation_cohort_size,
             "effective_monitor_universe_limit": (
@@ -11864,9 +11873,7 @@ class TradingScreeningService:
             "full_coverage_auto_recovery_active": (
                 full_coverage_auto_recovery_reason is not None
             ),
-            "full_coverage_auto_recovery_reason": (
-                full_coverage_auto_recovery_reason
-            ),
+            "full_coverage_auto_recovery_reason": (full_coverage_auto_recovery_reason),
             "full_coverage_scheduled_window_open": (
                 full_coverage_scheduled_window_open
             ),
@@ -12049,9 +12056,7 @@ class TradingScreeningService:
             "stock_decision_outcome_counts": scan_audit.get(
                 "stock_decision_outcome_counts", {}
             ),
-            "warmup_audit_contract_id": scan_audit.get(
-                "warmup_audit_contract_id"
-            ),
+            "warmup_audit_contract_id": scan_audit.get("warmup_audit_contract_id"),
             "warmup_sensitive_symbol_count": scan_audit.get(
                 "warmup_sensitive_symbol_count", 0
             ),
@@ -12067,9 +12072,7 @@ class TradingScreeningService:
             "warmup_difference_reason_counts": scan_audit.get(
                 "warmup_difference_reason_counts", {}
             ),
-            "warmup_sensitive_symbols": scan_audit.get(
-                "warmup_sensitive_symbols", []
-            ),
+            "warmup_sensitive_symbols": scan_audit.get("warmup_sensitive_symbols", []),
             "coverage_excluded_codes": coverage_manifest.get("excluded_codes", []),
             "coverage_exclusions": coverage_manifest.get("exclusions", []),
             "superseded_coverage_epoch_id": coverage_manifest.get(
@@ -12164,6 +12167,15 @@ class TradingScreeningService:
         每分钟重新哈希大型快照。
         """
 
+        targeted_source_recheck_pending = any(
+            code in self._pending_frequencies or code in self._backoff_frequencies
+            for code in self._cache_decision_source_recheck_codes
+        )
+        if (
+            self._config.full_coverage_refresh_enabled
+            and targeted_source_recheck_pending
+        ):
+            return True
         automatic_recovery_reason = self._quarantined_cache_reason
         automatic_recovery = (
             automatic_recovery_reason
@@ -12180,8 +12192,7 @@ class TradingScreeningService:
         ):
             automatic_recovery = False
         if not self._config.full_coverage_refresh_enabled or not (
-            self._config.force_full_coverage_until_complete
-            or automatic_recovery
+            self._config.force_full_coverage_until_complete or automatic_recovery
         ):
             return False
         with self._state_lock:
@@ -12263,8 +12274,7 @@ class TradingScreeningService:
             validated_snapshot_sha256 = self._validated_snapshot_sha256
         if (
             not isinstance(snapshot.get("snapshot_content_sha256"), str)
-            or snapshot.get("snapshot_content_sha256")
-            != validated_snapshot_sha256
+            or snapshot.get("snapshot_content_sha256") != validated_snapshot_sha256
         ):
             return False
 
@@ -12743,9 +12753,7 @@ class TradingScreeningService:
                         self._cache_generation_error = (
                             f"{type(exc).__name__}: {str(exc)[:160]}"
                         )
-                self._cache_scope_sidecar_path(self._cache_path).unlink(
-                    missing_ok=True
-                )
+                self._cache_scope_sidecar_path(self._cache_path).unlink(missing_ok=True)
                 os.replace(temporary, self._cache_path)
                 self._persist_cache_scope_sidecar(self._cache_path, payload)
                 if not (
@@ -13866,8 +13874,7 @@ class TradingScreeningService:
                     for row in previous.get("signals", ())
                     if isinstance(row, Mapping)
                     and isinstance(row.get("code"), str)
-                    and row.get("lifecycle_stage")
-                    not in {"closed", "invalidated"}
+                    and row.get("lifecycle_stage") not in {"closed", "invalidated"}
                 ),
                 self._config,
             )
@@ -14323,7 +14330,11 @@ class TradingScreeningService:
         )
         stock_instrument_status_probe_status = "not_required"
         stock_instrument_status_probe_error: str | None = None
-        suspended_codes: frozenset[str] = frozenset()
+        suspension_hint_codes: frozenset[str] = frozenset()
+        suspension_evidence_cutoff = (
+            self._coverage_market_data_as_of or market_data_as_of
+        )
+        suspension_evidence_session = suspension_evidence_cutoff.astimezone(CN).date()
         if symbols:
             status_provider = getattr(
                 self._market_data,
@@ -14331,15 +14342,10 @@ class TradingScreeningService:
                 None,
             )
             if callable(status_provider):
-                status_session = (
-                    (self._coverage_market_data_as_of or market_data_as_of)
-                    .astimezone(CN)
-                    .date()
-                )
                 try:
                     status_batch = status_provider(
                         tuple(sorted(set(symbols))),
-                        session=status_session,
+                        session=suspension_evidence_session,
                     )
                     if not isinstance(
                         status_batch,
@@ -14348,7 +14354,7 @@ class TradingScreeningService:
                         raise TypeError(
                             "instrument status provider returned an invalid batch"
                         )
-                    suspended_codes = frozenset(
+                    suspension_hint_codes = frozenset(
                         fact.code for fact in status_batch.facts if fact.suspended
                     )
                     stock_instrument_status_probe_status = "completed"
@@ -14369,7 +14375,9 @@ class TradingScreeningService:
                 "stock_instrument_status_probe_error": (
                     stock_instrument_status_probe_error
                 ),
-                "stock_current_session_suspended_code_count": len(suspended_codes),
+                "stock_instrument_status_suspension_hint_count": len(
+                    suspension_hint_codes
+                ),
             }
         )
 
@@ -14387,8 +14395,6 @@ class TradingScreeningService:
                 ),
             )
             try:
-                if code in suspended_codes:
-                    raise ValueError("current_session_suspended")
                 selection_sources = selection_sources_for(code)
                 requested_frequencies = batch_frequencies.get(code, ())
                 bundle = self._structure_bundle_with_causal_risk(
@@ -14423,6 +14429,19 @@ class TradingScreeningService:
                         ),
                         work_lane=coverage_work_lane,
                     )
+                if code in suspension_hint_codes and not (
+                    _structure_bundle_has_current_five_minute_trade_evidence(
+                        bundle,
+                        observed_at=as_of,
+                        max_age_seconds=self._config.max_structure_age_seconds,
+                    )
+                ):
+                    if _current_session_suspension_can_be_confirmed(
+                        session=suspension_evidence_session,
+                        market_data_as_of=suspension_evidence_cutoff,
+                    ):
+                        raise ValueError("current_session_suspended")
+                    raise ValueError("current_session_first_trade_pending")
                 bundle = replace(
                     bundle,
                     selection_sources=selection_sources,
@@ -14605,13 +14624,12 @@ class TradingScreeningService:
             stock_exclusion_counts[reason_code] = (
                 stock_exclusion_counts.get(reason_code, 0) + 1
             )
-        warmup_audit = _warmup_audit_document(
-            self._coverage_cycle_warmup_diagnostics
+        sector_audit["stock_current_session_suspended_code_count"] = (
+            stock_exclusion_counts.get("CURRENT_SESSION_SUSPENDED", 0)
         )
-        stock_decision_outcome_audit = (
-            _stock_decision_outcome_audit_document(
-                self._coverage_cycle_stock_decision_outcomes
-            )
+        warmup_audit = _warmup_audit_document(self._coverage_cycle_warmup_diagnostics)
+        stock_decision_outcome_audit = _stock_decision_outcome_audit_document(
+            self._coverage_cycle_stock_decision_outcomes
         )
         # 在批次完成闸门前先分类失败。若把低完成率批次整体重新入队，排序靠前的一簇
         # 确定性行情拒绝会垄断每次刷新，使冻结计划中后续有效标的永远无法访问。

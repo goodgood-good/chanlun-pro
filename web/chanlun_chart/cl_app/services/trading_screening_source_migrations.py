@@ -85,6 +85,17 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
         ),
     }
 )
+_REVIEWED_SUSPENSION_EVIDENCE_RECHECK_SOURCE_TRANSITIONS = frozenset(
+    {
+        (
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:117e1e518f6c4417385e72f2ad9a911147192eb413543b7610550f1bbaebf8e3",
+                "sha256:98b8373179fcb2c2ab772bc58975f832fc79c86c46880e4f8f34becf899a646f",
+            ),
+        ),
+    }
+)
 _REVIEWED_SECTOR_SNAPSHOT_SOURCE_TRANSITIONS = frozenset(
     {
         (
@@ -104,25 +115,23 @@ _REVIEWED_SECTOR_SNAPSHOT_SOURCE_TRANSITIONS = frozenset(
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
-def orchestration_source_migration_allowed(
+def _authenticated_source_changed_rows(
     *,
     cached_decision_source_snapshot_id: object,
     current_decision_source_snapshot_id: object,
     cached_decision_source_snapshot: object = None,
     current_decision_source_snapshot: object = None,
-) -> bool:
-    """Authorize an authenticated, byte-exact orchestration transition."""
-
+) -> tuple[tuple[str, str | None, str | None], ...] | None:
     if not isinstance(cached_decision_source_snapshot_id, str) or not isinstance(
         current_decision_source_snapshot_id,
         str,
     ):
-        return False
+        return None
     if not isinstance(cached_decision_source_snapshot, Mapping) or not isinstance(
         current_decision_source_snapshot,
         Mapping,
     ):
-        return False
+        return None
     try:
         if (
             decision_source_snapshot_id(cached_decision_source_snapshot)
@@ -130,25 +139,38 @@ def orchestration_source_migration_allowed(
             or decision_source_snapshot_id(current_decision_source_snapshot)
             != current_decision_source_snapshot_id
         ):
-            return False
-    except (TypeError, ValueError):
-        return False
+            return None
+        cached_rows = cached_decision_source_snapshot["files"]
+        current_rows = current_decision_source_snapshot["files"]
+        if not isinstance(cached_rows, (list, tuple)) or not isinstance(
+            current_rows,
+            (list, tuple),
+        ):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
     cached_files = {
         str(row["path"]): str(row["sha256"])
-        for row in cached_decision_source_snapshot["files"]
+        for row in cached_rows
         if isinstance(row, Mapping)
+        and isinstance(row.get("path"), str)
+        and isinstance(row.get("sha256"), str)
     }
     current_files = {
         str(row["path"]): str(row["sha256"])
-        for row in current_decision_source_snapshot["files"]
+        for row in current_rows
         if isinstance(row, Mapping)
+        and isinstance(row.get("path"), str)
+        and isinstance(row.get("sha256"), str)
     }
+    if len(cached_files) != len(cached_rows) or len(current_files) != len(current_rows):
+        return None
     changed_paths = {
         path
         for path in set(cached_files).union(current_files)
         if cached_files.get(path) != current_files.get(path)
     }
-    changed_rows = tuple(
+    return tuple(
         sorted(
             (
                 path,
@@ -158,12 +180,52 @@ def orchestration_source_migration_allowed(
             for path in changed_paths
         )
     )
+
+
+def orchestration_source_migration_allowed(
+    *,
+    cached_decision_source_snapshot_id: object,
+    current_decision_source_snapshot_id: object,
+    cached_decision_source_snapshot: object = None,
+    current_decision_source_snapshot: object = None,
+) -> bool:
+    """Authorize an authenticated, byte-exact reviewed cache transition."""
+
+    changed_rows = _authenticated_source_changed_rows(
+        cached_decision_source_snapshot_id=cached_decision_source_snapshot_id,
+        current_decision_source_snapshot_id=current_decision_source_snapshot_id,
+        cached_decision_source_snapshot=cached_decision_source_snapshot,
+        current_decision_source_snapshot=current_decision_source_snapshot,
+    )
+    changed_paths = set() if changed_rows is None else {row[0] for row in changed_rows}
     return bool(
         changed_rows
         and (
             changed_paths <= _ORCHESTRATION_ONLY_SOURCE_PATHS
             or changed_rows in _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS
+            or changed_rows in _REVIEWED_SUSPENSION_EVIDENCE_RECHECK_SOURCE_TRANSITIONS
         )
+    )
+
+
+def suspension_evidence_recheck_source_migration_allowed(
+    *,
+    cached_decision_source_snapshot_id: object,
+    current_decision_source_snapshot_id: object,
+    cached_decision_source_snapshot: object = None,
+    current_decision_source_snapshot: object = None,
+) -> bool:
+    """Authorize only the reviewed status-hint/5m-evidence transition."""
+
+    changed_rows = _authenticated_source_changed_rows(
+        cached_decision_source_snapshot_id=cached_decision_source_snapshot_id,
+        current_decision_source_snapshot_id=current_decision_source_snapshot_id,
+        cached_decision_source_snapshot=cached_decision_source_snapshot,
+        current_decision_source_snapshot=current_decision_source_snapshot,
+    )
+    return bool(
+        changed_rows
+        and changed_rows in _REVIEWED_SUSPENSION_EVIDENCE_RECHECK_SOURCE_TRANSITIONS
     )
 
 
@@ -187,4 +249,5 @@ def sector_snapshot_source_migration_allowed(
 __all__ = (
     "orchestration_source_migration_allowed",
     "sector_snapshot_source_migration_allowed",
+    "suspension_evidence_recheck_source_migration_allowed",
 )
