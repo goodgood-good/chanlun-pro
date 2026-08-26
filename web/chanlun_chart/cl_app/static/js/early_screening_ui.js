@@ -4054,8 +4054,9 @@
     ]));
   }
 
-  function chartUrlsForSignal(signal) {
+  function chartUrlsForSignal(signal, options) {
     const safeSignal = isRecord(signal) ? signal : {};
+    const embedded = isRecord(options) && options.embedded === true;
     const supplied = isRecord(safeSignal.chart_urls) ? safeSignal.chart_urls : {};
     const appendQueryValue = (url, key, value) => {
       const hashIndex = url.indexOf("#");
@@ -4063,6 +4064,37 @@
       const hash = hashIndex >= 0 ? url.slice(hashIndex) : "";
       const separator = base.includes("?") ? (/[?&]$/.test(base) ? "" : "&") : "?";
       return `${base}${separator}${encodeURIComponent(key)}=${encodeURIComponent(value)}${hash}`;
+    };
+    const setQueryValue = (url, key, value) => {
+      const hashIndex = url.indexOf("#");
+      const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+      const hash = hashIndex >= 0 ? url.slice(hashIndex) : "";
+      const queryIndex = base.indexOf("?");
+      const path = queryIndex >= 0 ? base.slice(0, queryIndex) : base;
+      const query = queryIndex >= 0 ? base.slice(queryIndex + 1) : "";
+      const encodedKey = encodeURIComponent(key);
+      const keepValue = value !== null && value !== undefined;
+      const encodedValue = keepValue ? encodeURIComponent(value) : "";
+      let matched = false;
+      const pairs = query.split("&").filter(Boolean).reduce((result, pair) => {
+        const rawKey = pair.split("=", 1)[0];
+        let decodedKey = rawKey;
+        try {
+          decodedKey = decodeURIComponent(rawKey.replace(/\+/g, " "));
+        } catch (_error) {
+          // Preserve malformed unrelated entries; only normalize the owned key.
+        }
+        if (decodedKey !== key) {
+          result.push(pair);
+        } else if (!matched && keepValue) {
+          result.push(`${encodedKey}=${encodedValue}`);
+        }
+        if (decodedKey === key) matched = true;
+        return result;
+      }, []);
+      if (!matched && keepValue) pairs.push(`${encodedKey}=${encodedValue}`);
+      const nextQuery = pairs.length ? `?${pairs.join("&")}` : "";
+      return `${path}${nextQuery}${hash}`;
     };
     const withInitialSidebarState = (url) => {
       if (/[?&]chart_sidebar=/.test(url)) return url;
@@ -4074,7 +4106,11 @@
     };
     const normalized = (frequency) => {
       const url = supplied[frequency];
-      return withDefaultMacdStudy(withInitialSidebarState(url));
+      return setQueryValue(
+        withDefaultMacdStudy(withInitialSidebarState(url)),
+        "chart_embed",
+        embedded ? "decision-support" : null,
+      );
     };
     return {
       "d": normalized("d"),
@@ -4589,10 +4625,13 @@
     }
 
     const urls = chartUrlsForSignal(signal);
+    const embeddedUrls = chartUrlsForSignal(signal, { embedded: true });
     for (const frequency of ["d", "30m", "5m", "1m"]) {
       const frame = rootElement.querySelector(`[data-chart-frame="${frequency}"]`);
       const link = rootElement.querySelector(`[data-chart-link="${frequency}"]`);
-      if (frame && frame.getAttribute("src") !== urls[frequency]) frame.setAttribute("src", urls[frequency]);
+      if (frame && frame.getAttribute("src") !== embeddedUrls[frequency]) {
+        frame.setAttribute("src", embeddedUrls[frequency]);
+      }
       if (link) link.setAttribute("href", urls[frequency]);
     }
     const workbench = rootElement.querySelector("[data-chart-workbench]");

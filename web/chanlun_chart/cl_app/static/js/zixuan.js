@@ -1,9 +1,13 @@
 var ZiXuan = (function () {
+  function auxiliaryUiEnabled() {
+    return window.__CHANLUN_EMBEDDED_CHART !== true;
+  }
+
   var zx_group = "我的关注";
   var timeout_update_rates = null;
   var update_request_in_flight = false;
   var update_poll_generation = 0;
-  var rate_polling_active = true;
+  var rate_polling_active = auxiliaryUiEnabled();
   var UPDATE_NORMAL_DELAY_MS = 3000;
   var UPDATE_CLOSED_DELAY_MS = 300000;
   var UPDATE_RETRY_DELAYS_MS = [6000, 12000, 24000, 30000];
@@ -127,7 +131,7 @@ var ZiXuan = (function () {
   }
 
   function schedule_rate_update(delay, generation) {
-    if (!rate_polling_active) return;
+    if (!auxiliaryUiEnabled() || !rate_polling_active) return;
     if (generation !== update_poll_generation) return;
     if (timeout_update_rates !== null) clearTimeout(timeout_update_rates);
     timeout_update_rates = setTimeout(function () {
@@ -341,6 +345,7 @@ var ZiXuan = (function () {
       return true;
     },
     load_groups: function (preferredGroup, onLoaded) {
+      if (!auxiliaryUiEnabled()) return false;
       var market = Utils.get_market();
       var requested = validateGroupName(preferredGroup || "");
       var preferred = requested.ok ? requested.name : "";
@@ -398,6 +403,7 @@ var ZiXuan = (function () {
       });
     },
     render_zixuan_opts: function () {
+      if (!auxiliaryUiEnabled()) return false;
       var market = Utils.get_market();
       var code = String(Utils.get_code() || "").replace(/\//g, "__");
       var generation = ++zixuanOptsRequestGeneration;
@@ -434,6 +440,11 @@ var ZiXuan = (function () {
       });
     },
     set_rate_polling_active: function (is_active) {
+      if (!auxiliaryUiEnabled()) {
+        rate_polling_active = false;
+        stop_timer();
+        return false;
+      }
       var next_active = is_active === true;
       if (next_active === rate_polling_active) return;
 
@@ -450,7 +461,7 @@ var ZiXuan = (function () {
     // 再等待最慢的数据源，造成持仓信息短暂消失。已有请求继续更新同一批行，
     // 避免重复请求；同时清除失败市场退避，让下一次请求立即尝试全部市场。
     refresh_rates: function () {
-      if (!rate_polling_active) return false;
+      if (!auxiliaryUiEnabled() || !rate_polling_active) return false;
       if (timeout_update_rates !== null) {
         clearTimeout(timeout_update_rates);
         timeout_update_rates = null;
@@ -467,7 +478,7 @@ var ZiXuan = (function () {
 
     // 跨市场分组按标的自身市场拆批请求行情，分组本身不再从属于当前图表市场。
     stocks_update_rate: function (generation) {
-      if (!rate_polling_active) return false;
+      if (!auxiliaryUiEnabled() || !rate_polling_active) return false;
       var request_generation =
         typeof generation === "number" ? generation : update_poll_generation;
       if (request_generation !== update_poll_generation) return false;
@@ -679,6 +690,7 @@ var ZiXuan = (function () {
     },
 
     render_zixuan_stocks: function () {
+      if (!auxiliaryUiEnabled()) return false;
       stop_timer();
       $("#zixuan_stock_count").text("—");
       setCurrentGroupLabel(ZiXuan.zx_group);
@@ -902,6 +914,7 @@ var ZiXuan = (function () {
     },
 
     init_zixuan_opts: function () {
+        if (!auxiliaryUiEnabled()) return false;
         layui.use(function () {
            var layer = layui.layer;
            var dropdown = layui.dropdown;

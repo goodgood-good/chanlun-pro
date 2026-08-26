@@ -838,6 +838,9 @@
     // 历史人工复核图由服务端验证候选身份后注入。charts.js 会把这些固定参数
     // 传给每一次 /tv/history 请求；后端据此从取数和结构计算阶段截断未来 K 线。
     window.__chanlunReviewChartLock = {{ (review_chart_lock|default(none))|tojson }};
+    // Decision-support pages embed four complete charts. Embedded charts keep the
+    // chart data path active but do not duplicate main-workbench auxiliary requests.
+    window.__CHANLUN_EMBEDDED_CHART = false;
     var initial_market = {{ initial_market|tojson }};
     var market_frequencys = `{{ market_frequencys| tojson }}`;
     var market_frequencys = JSON.parse(market_frequencys);
@@ -849,6 +852,8 @@
     (function applyUrlSymbolParams() {
       try {
         var params = new URLSearchParams(window.location.search || "");
+        window.__CHANLUN_EMBEDDED_CHART =
+          (params.get("chart_embed") || "").trim().toLowerCase() === "decision-support";
         var urlMarket = (params.get("market") || "").trim().toLowerCase();
         var urlCode = (params.get("code") || "").trim();
         var urlLayout = (params.get("layout") || "").trim();
@@ -957,7 +962,7 @@
       layui.each(chart_widgets, function (i, w) {
         w.activeChart().setSymbol(market + ":" + code);
       });
-      ZiXuan.render_zixuan_opts();
+      if (!window.__CHANLUN_EMBEDDED_CHART) ZiXuan.render_zixuan_opts();
     }
   </script>
   <script src="{{ url_for('static', filename='js/utils.js') }}?asset={{ static_asset_token }}"></script>
@@ -1589,7 +1594,7 @@
 
         // SymbolsPanel 是此 callback 的局部变量，必须在 layui form ready 后立即调用；
         // 若移到外部 defer 块则 typeof 检查永远 undefined，面板停在"加载中"。
-        SymbolsPanel.init();
+        if (!window.__CHANLUN_EMBEDDED_CHART) SymbolsPanel.init();
       });
   </script>
   <script nonce="{{ csp_nonce }}">
@@ -1734,7 +1739,7 @@
           },
         });
 
-        ZiXuan.init_zixuan_opts();
+        if (!window.__CHANLUN_EMBEDDED_CHART) ZiXuan.init_zixuan_opts();
 
         // 折叠面板展开/收起事件
         element.on("collapse(collapse-opts)", function (data) {
@@ -1885,7 +1890,7 @@
             chart_widgets.push(Charts.show_tv_chart(cfg.id, chart_height));
           });
         }
-        ZiXuan.render_zixuan_opts();
+        if (!window.__CHANLUN_EMBEDDED_CHART) ZiXuan.render_zixuan_opts();
       }
 
       init_web();

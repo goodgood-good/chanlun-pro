@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadZiXuan(customNodes) {
+function loadZiXuan(customNodes, options) {
+  options = options || {};
   const ajaxCalls = [];
   const timers = [];
   const intervalCalls = [];
@@ -154,6 +155,7 @@ function loadZiXuan(customNodes) {
     Array,
     Object,
     Date: FakeDate,
+    __CHANLUN_EMBEDDED_CHART: options.embeddedChart === true,
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -182,6 +184,21 @@ function loadZiXuan(customNodes) {
     },
   };
 }
+
+test('decision-support embedded charts never start auxiliary watchlist work', () => {
+  const h = loadZiXuan(undefined, { embeddedChart: true });
+
+  assert.equal(h.ZiXuan.load_groups(), false);
+  assert.equal(h.ZiXuan.render_zixuan_opts(), false);
+  assert.equal(h.ZiXuan.render_zixuan_stocks(), false);
+  assert.equal(h.ZiXuan.refresh_rates(), false);
+  assert.equal(h.ZiXuan.stocks_update_rate(), false);
+  assert.equal(h.ZiXuan.init_zixuan_opts(), false);
+  assert.equal(h.ZiXuan.set_rate_polling_active(true), false);
+  assert.equal(h.ajaxCalls.length, 0);
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.intervalCalls.length, 0);
+});
 
 function failRequest(call, retryAfterSeconds) {
   assert.equal(typeof call.error, 'function', 'AJAX errors must be handled');
@@ -513,6 +530,23 @@ test('index collapse handler owns the watchlist polling lifecycle', () => {
   assert.match(
     template,
     /if \(ca_title === "自选组"\) \{\s*ZiXuan\.set_rate_polling_active\(is_open\);\s*\}/,
+  );
+});
+
+test('index derives decision-support embed mode before auxiliary workbench startup', () => {
+  const template = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'templates', 'index.html'),
+    'utf8',
+  );
+
+  assert.match(template, /window\.__CHANLUN_EMBEDDED_CHART\s*=\s*false/);
+  assert.match(
+    template,
+    /params\.get\("chart_embed"\)[^;]+===\s*"decision-support"/,
+  );
+  assert.match(
+    template,
+    /if \(!window\.__CHANLUN_EMBEDDED_CHART\) SymbolsPanel\.init\(\)/,
   );
 });
 

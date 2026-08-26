@@ -2658,33 +2658,41 @@ test("chart URLs use the supplied current four-period contract", () => {
   });
 });
 
-test("chart URLs keep fragments and never duplicate the requested MACD_HTF study", () => {
+test("chart URLs keep fragments and normalize study and embedded mode exactly once", () => {
   const Ui = loadUi();
-  const urls = Ui.chartUrlsForSignal({
+  const signal = {
     code: "SH.600000",
     chart_urls: {
       "d": "/?market=a&code=SH.600000&layout=single&intervals=D#daily",
       "30m": "/?market=a&code=SH.600000&layout=single&intervals=30&default_study=MACD_HTF#main",
       "5m": "/?market=a&code=SH.600000&layout=single&intervals=5&chart_sidebar=expanded#setup",
-      "1m": "/?market=a&code=SH.600000&layout=single&intervals=1#trigger",
+      "1m": "/?market=a&code=SH.600000&layout=single&intervals=1&chart_embed=legacy#trigger",
     },
-  });
+  };
+  const urls = Ui.chartUrlsForSignal(signal, { embedded: true });
+  const workbenchUrls = Ui.chartUrlsForSignal(signal);
 
   assert.equal(
     urls["30m"],
-    "/?market=a&code=SH.600000&layout=single&intervals=30&default_study=MACD_HTF&chart_sidebar=collapsed#main",
+    "/?market=a&code=SH.600000&layout=single&intervals=30&default_study=MACD_HTF&chart_sidebar=collapsed&chart_embed=decision-support#main",
   );
   assert.equal(
     urls["5m"],
-    "/?market=a&code=SH.600000&layout=single&intervals=5&chart_sidebar=expanded&default_study=MACD_HTF#setup",
+    "/?market=a&code=SH.600000&layout=single&intervals=5&chart_sidebar=expanded&default_study=MACD_HTF&chart_embed=decision-support#setup",
   );
   assert.equal(
     urls["1m"],
-    "/?market=a&code=SH.600000&layout=single&intervals=1&chart_sidebar=collapsed&default_study=MACD_HTF#trigger",
+    "/?market=a&code=SH.600000&layout=single&intervals=1&chart_embed=decision-support&chart_sidebar=collapsed&default_study=MACD_HTF#trigger",
   );
   for (const url of Object.values(urls)) {
     assert.equal((url.match(/default_study=MACD_HTF/g) || []).length, 1);
+    assert.equal((url.match(/chart_embed=decision-support/g) || []).length, 1);
   }
+  assert.equal(
+    workbenchUrls["1m"],
+    "/?market=a&code=SH.600000&layout=single&intervals=1&chart_sidebar=collapsed&default_study=MACD_HTF#trigger",
+  );
+  for (const url of Object.values(workbenchUrls)) assert.doesNotMatch(url, /chart_embed=/);
 });
 
 test("analysis layout switch accepts only current layout values", () => {
@@ -4861,6 +4869,14 @@ test("chart workspace renders the decision path evidence groups and active frequ
   assert.equal(
     view.node("[data-chart-workbench]").getAttribute("href"),
     "/?market=a&code=SZ.000001&layout=single&intervals=5&chart_sidebar=collapsed&default_study=MACD_HTF",
+  );
+  assert.equal(
+    view.node('[data-chart-link="5m"]').getAttribute("href"),
+    "/?market=a&code=SZ.000001&layout=single&intervals=5&chart_sidebar=collapsed&default_study=MACD_HTF",
+  );
+  assert.equal(
+    view.node('[data-chart-frame="5m"]').getAttribute("src"),
+    "/?market=a&code=SZ.000001&layout=single&intervals=5&chart_sidebar=collapsed&default_study=MACD_HTF&chart_embed=decision-support",
   );
   assert.deepEqual(
     view.list("[data-focus-frequency]").map((node) => node.getAttribute("aria-pressed")),
