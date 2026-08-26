@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CLEANUP = ROOT / "ops" / "cleanup_local_generated_artifacts.ps1"
 RUNTIME_CLEANUP = ROOT / "ops" / "cleanup_legacy_runtime_state.ps1"
+INVALID_ALGORITHM_CLEANUP = ROOT / "ops" / "cleanup_invalid_algorithm_state.ps1"
 HISTORICAL_BACKTEST = ROOT / "ops" / "run_historical_backtest.ps1"
 RESEARCH_SAMPLES = {
     "smoke2": (ROOT / "config" / "research_backtest_smoke_2.txt", 2),
@@ -180,6 +181,16 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert '"server-*.stderr.log"' in source
     assert '"targeted_v*"' in source
     assert '"research_diagnostic_*"' in source
+
+    invalid_algorithm_cleanup = INVALID_ALGORITHM_CLEANUP.read_text(
+        encoding="utf-8-sig"
+    )
+    assert "[switch]$PreserveValidationGate" in invalid_algorithm_cleanup
+    assert "if (-not $PreserveValidationGate)" in invalid_algorithm_cleanup
+    assert (
+        '"audit\\chanlun_trading_system_backtest\\research_sample_validation_12"'
+        in invalid_algorithm_cleanup
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="cleanup helper targets Windows")

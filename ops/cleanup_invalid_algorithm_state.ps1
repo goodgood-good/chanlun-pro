@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$Execute,
+    [switch]$PreserveValidationGate,
     [string]$RuntimeRoot = "D:\chanlun_pro",
     [string]$RepositoryRoot = ""
 )
@@ -76,13 +77,17 @@ $runtimeRelativeTargets = @(
 )
 $repositoryRelativeTargets = @(
     "audit\chanlun_trading_system_backtest\research_sample_smoke_2",
-    "audit\chanlun_trading_system_backtest\research_sample_validation_12",
     ".cache\chanlun_scheduler",
     ".cache\chanlun_web_watchdog",
     ".cache\chanlun_human_review_forward\forward_paper_ledger.json.lock",
     ".cache\center_trend_probe_smoke2.json",
     ".cache\center_trend_probe_validation30.json"
 )
+if (-not $PreserveValidationGate) {
+    $repositoryRelativeTargets += (
+        "audit\chanlun_trading_system_backtest\research_sample_validation_12"
+    )
+}
 
 $candidates = [System.Collections.Generic.List[object]]::new()
 foreach ($definition in @(
@@ -155,6 +160,19 @@ $totalBytes = [int64]0
 foreach ($target in $ordered) {
     $totalBytes += [int64]$target.bytes
 }
+$preserved = @(
+    "$($roots[0])\klines",
+    "$($roots[0])\xdxr",
+    "$($roots[0])\decision_support\trading_screening_sector_frame_facts",
+    "$($roots[0])\decision_support\trading_screening_sector_daily_facts.json",
+    "$($roots[1])\audit\chanlun_trading_system_backtest\pit_reference",
+    "$($roots[1])\.cache\chanlun_qmt_sector_ledger"
+)
+if ($PreserveValidationGate) {
+    $preserved += (
+        "$($roots[1])\audit\chanlun_trading_system_backtest\research_sample_validation_12"
+    )
+}
 [ordered]@{
     schema = "chanlun-invalid-algorithm-state-cleanup"
     observed_at = [DateTimeOffset]::Now.ToString("o")
@@ -164,12 +182,5 @@ foreach ($target in $ordered) {
     removed_count = if ($Execute) { $ordered.Count - $remaining.Count } else { 0 }
     remaining_count = $remaining.Count
     candidates = $ordered
-    preserved = @(
-        "$($roots[0])\klines",
-        "$($roots[0])\xdxr",
-        "$($roots[0])\decision_support\trading_screening_sector_frame_facts",
-        "$($roots[0])\decision_support\trading_screening_sector_daily_facts.json",
-        "$($roots[1])\audit\chanlun_trading_system_backtest\pit_reference",
-        "$($roots[1])\.cache\chanlun_qmt_sector_ledger"
-    )
+    preserved = $preserved
 } | ConvertTo-Json -Depth 6
