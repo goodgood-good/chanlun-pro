@@ -1238,10 +1238,10 @@ def _decision_context_is_consistent(raw: object) -> bool:
             dominant_id
         ):
             return False
-        if str(dominant_type).endswith("buy"):
+        if str(dominant_type).endswith("buy") and direction != "down":
             disposition = "supportive"
             reason = "confirmed_buy_structure"
-        elif direction == "down":
+        elif str(dominant_type).endswith("sell") and direction == "down":
             disposition = "hostile"
             reason = "confirmed_sell_with_down_structure"
         else:

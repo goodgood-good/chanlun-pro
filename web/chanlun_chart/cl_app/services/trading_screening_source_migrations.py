@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Mapping
 
 from chanlun.decision_support.trading_system.decision_source_provenance import (
@@ -18,6 +19,18 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
     {
         (
             (
+                "src/chanlun/decision_support/trading_system/live_human_review.py",
+                "sha256:b554ac6c931cea904e0660dff27fe57537adddd9cd25f2cf4cc3285464966f03",
+                "sha256:4e4ace9302d304a00373e01e659bb097677f8f3c9db5dfeb6bc57836215e8b84",
+            ),
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening_process.py",
+                "sha256:5e8b6809f29cd7aae51142a84f6d34af2db4894f44dde8b1252bda6de9c5f356",
+                "sha256:bb5077ac0b737d14494a3357f8057c20de3171049e4f722321d4c57d6d84b568",
+            ),
+        ),
+        (
+            (
                 "web/chanlun_chart/cl_app/services/trading_screening.py",
                 "sha256:f4d1bf3f5030621a03c590946d28b318bbb715d4c9ad187b9b463324d7f81d25",
                 "sha256:743704a5116f4dfac1530ae38dd1c9f491f5d56c8e21296322f717ff4a81141b",
@@ -30,6 +43,15 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
         ),
     }
 )
+_REVIEWED_SECTOR_SNAPSHOT_SOURCE_TRANSITIONS = frozenset(
+    {
+        (
+            "sha256:544bc1e62b74d754771c8764114d8c754f5fd4c91b9dededaa83e036538c1ac8",
+            "sha256:c6c3e04ad2fcce74127fed58ee68ff39ffa1d3206218f70f4497c3950ea0a7d4",
+        ),
+    }
+)
+_SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def orchestration_source_migration_allowed(
@@ -95,4 +117,24 @@ def orchestration_source_migration_allowed(
     )
 
 
-__all__ = ("orchestration_source_migration_allowed",)
+def sector_snapshot_source_migration_allowed(
+    *,
+    cached_source_revision: object,
+    current_source_revision: object,
+) -> bool:
+    """Authorize one reviewed non-sector change by exact producer identities."""
+
+    return bool(
+        isinstance(cached_source_revision, str)
+        and isinstance(current_source_revision, str)
+        and _SHA256_ID.fullmatch(cached_source_revision) is not None
+        and _SHA256_ID.fullmatch(current_source_revision) is not None
+        and (cached_source_revision, current_source_revision)
+        in _REVIEWED_SECTOR_SNAPSHOT_SOURCE_TRANSITIONS
+    )
+
+
+__all__ = (
+    "orchestration_source_migration_allowed",
+    "sector_snapshot_source_migration_allowed",
+)

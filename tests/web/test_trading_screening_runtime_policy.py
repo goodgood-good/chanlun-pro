@@ -13,6 +13,7 @@ from cl_app.services.trading_screening_runtime_policy import (
 )
 from cl_app.services.trading_screening_source_migrations import (
     orchestration_source_migration_allowed,
+    sector_snapshot_source_migration_allowed,
 )
 
 
@@ -123,4 +124,55 @@ def test_manifest_migration_allows_only_exact_reviewed_shard_transition() -> Non
         current_decision_source_snapshot_id=current["aggregate_sha256"],
         cached_decision_source_snapshot=cached,
         current_decision_source_snapshot=current,
+    )
+
+
+def test_manifest_migration_allows_exact_review_auditor_transition() -> None:
+    current = current_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    transitions = {
+        "src/chanlun/decision_support/trading_system/live_human_review.py": (
+            "sha256:b554ac6c931cea904e0660dff27fe57537adddd9cd25f2cf4cc3285464966f03",
+            "sha256:4e4ace9302d304a00373e01e659bb097677f8f3c9db5dfeb6bc57836215e8b84",
+        ),
+        "web/chanlun_chart/cl_app/services/trading_screening_process.py": (
+            "sha256:5e8b6809f29cd7aae51142a84f6d34af2db4894f44dde8b1252bda6de9c5f356",
+            "sha256:bb5077ac0b737d14494a3357f8057c20de3171049e4f722321d4c57d6d84b568",
+        ),
+    }
+    for snapshot, offset in ((cached, 0), (current, 1)):
+        rows = {row["path"]: row for row in snapshot["files"]}
+        for path, digests in transitions.items():
+            rows[path]["sha256"] = digests[offset]
+        snapshot["aggregate_sha256"] = sha256_json(
+            {"schema": snapshot["schema"], "files": snapshot["files"]}
+        )
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+
+
+def test_sector_snapshot_migration_allows_only_exact_reviewed_revision_pair() -> None:
+    cached = (
+        "sha256:544bc1e62b74d754771c8764114d8c754f5fd4c91b9dededaa83e036538c1ac8"
+    )
+    current = (
+        "sha256:c6c3e04ad2fcce74127fed58ee68ff39ffa1d3206218f70f4497c3950ea0a7d4"
+    )
+
+    assert sector_snapshot_source_migration_allowed(
+        cached_source_revision=cached,
+        current_source_revision=current,
+    )
+    assert not sector_snapshot_source_migration_allowed(
+        cached_source_revision=current,
+        current_source_revision=cached,
+    )
+    assert not sector_snapshot_source_migration_allowed(
+        cached_source_revision=cached,
+        current_source_revision="sha256:" + "0" * 64,
     )

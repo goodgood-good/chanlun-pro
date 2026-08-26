@@ -72,6 +72,9 @@ from cl_app.services.realtime_quotes import (
     validated_instrument_session_status_batch,
     validated_quote_batch,
 )
+from cl_app.services.trading_screening_source_migrations import (
+    sector_snapshot_source_migration_allowed,
+)
 
 
 IPC_SCHEMA = "chanlun-trading-screening-native-ipc"
@@ -2783,6 +2786,19 @@ class NativeTradingDataGatewayProcessProxy:
             ),
         }
 
+    def _sector_cache_source_revision_allowed(self, value: object) -> bool:
+        current = self._sector_cache_revision
+        return bool(
+            isinstance(current, str)
+            and (
+                value == current
+                or sector_snapshot_source_migration_allowed(
+                    cached_source_revision=value,
+                    current_source_revision=current,
+                )
+            )
+        )
+
     def _sector_cache_scope_allows_payload(self, path: Path) -> bool:
         """Reject broad/legacy cache files before reading their payload bytes."""
 
@@ -2810,7 +2826,9 @@ class NativeTradingDataGatewayProcessProxy:
             and document.get("schema") == _SECTOR_CACHE_SCOPE_SIDECAR_SCHEMA
             and document.get("scope_mode") == self._sector_cache_scope_mode
             and document.get("max_symbols") == limit
-            and document.get("source_revision") == self._sector_cache_revision
+            and self._sector_cache_source_revision_allowed(
+                document.get("source_revision")
+            )
             and document.get("payload_name") == path.name
             and document.get("payload_size_bytes") == payload_stat.st_size
             and document.get("payload_mtime_ns") == payload_stat.st_mtime_ns
@@ -2935,7 +2953,9 @@ class NativeTradingDataGatewayProcessProxy:
                 "CACHE_PAYLOAD_SCHEMA_MISMATCH",
                 "sector cache payload schema is unsupported",
             )
-        if payload.get("source_revision") != self._sector_cache_revision:
+        if not self._sector_cache_source_revision_allowed(
+            payload.get("source_revision")
+        ):
             raise _SectorSnapshotCacheError(
                 "CACHE_SOURCE_REVISION_MISMATCH",
                 "sector cache was produced by a different source revision",
@@ -3056,8 +3076,14 @@ class NativeTradingDataGatewayProcessProxy:
             return None
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
-            components, content_sha256, _cached_as_of = self._components_from_cache_document(
-                document, as_of
+            components, content_sha256, cached_as_of = (
+                self._components_from_cache_document(document, as_of)
+            )
+            payload = document.get("payload")
+            cached_source_revision = (
+                payload.get("source_revision")
+                if isinstance(payload, Mapping)
+                else None
             )
             if not self._sector_cache_scope_matches_loaded_payload(
                 path,
@@ -3068,6 +3094,13 @@ class NativeTradingDataGatewayProcessProxy:
                     "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH",
                     "sector cache scope proof belongs to another payload",
                 )
+            if cached_source_revision != self._sector_cache_revision:
+                # The old payload and its scope proof have both passed their
+                # original content identities plus one byte-exact reviewed
+                # producer transition. Retag that same validated fact tree so
+                # future starts no longer need the migration exception.
+                self._persist_sector_snapshot_cache(components, cached_as_of)
+                return components
         except FileNotFoundError:
             self._set_sector_cache_status(
                 state="miss",

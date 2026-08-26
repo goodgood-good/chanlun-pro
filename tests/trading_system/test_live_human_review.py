@@ -2889,3 +2889,20 @@ def test_neutral_context_accepts_both_empty_and_expired_point_reasons(
             "reason_codes": [reason_code],
         }
     )
+
+
+def test_down_context_with_dominant_buy_is_mixed_not_supportive() -> None:
+    context = {
+        "direction": "down",
+        "disposition": "neutral",
+        "hard_block": False,
+        "dominant_point_id": "sha256:" + "1" * 64,
+        "dominant_point_type": "2buy",
+        "reason_codes": ["mixed_or_transition_structure"],
+    }
+
+    assert _decision_context_is_consistent(context)
+
+    context["disposition"] = "supportive"
+    context["reason_codes"] = ["confirmed_buy_structure"]
+    assert not _decision_context_is_consistent(context)

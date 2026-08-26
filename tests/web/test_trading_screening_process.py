@@ -2273,6 +2273,48 @@ def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
     assert cache_health["content_sha256"] == document["content_sha256"]
 
 
+def test_proxy_retags_exact_reviewed_sector_snapshot_transition(
+    tmp_path: Path,
+) -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cache_path = tmp_path / "sector-snapshot.json"
+    cached_revision = (
+        "sha256:544bc1e62b74d754771c8764114d8c754f5fd4c91b9dededaa83e036538c1ac8"
+    )
+    current_revision = (
+        "sha256:c6c3e04ad2fcce74127fed58ee68ff39ffa1d3206218f70f4497c3950ea0a7d4"
+    )
+    first = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=_AtomicTransport(_rich_atomic_snapshot(as_of)),
+        sector_cache_path=cache_path,
+        sector_cache_revision=cached_revision,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
+    expected = first.native_sector_assessments(as_of=as_of)
+
+    unavailable = _AtomicTransport(_atomic_snapshot(as_of))
+    unavailable.available = False
+    second = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=unavailable,
+        sector_cache_path=cache_path,
+        sector_cache_revision=current_revision,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
+
+    assert second.native_sector_assessments(as_of=as_of) == expected
+    assert unavailable.calls == []
+    migrated = json.loads(cache_path.read_text(encoding="utf-8"))
+    proof = json.loads(
+        second._sector_cache_scope_sidecar_path(cache_path).read_text(  # noqa: SLF001
+            encoding="utf-8"
+        )
+    )
+    assert migrated["payload"]["source_revision"] == current_revision
+    assert migrated["content_sha256"] == sha256_json(migrated["payload"])
+    assert proof["source_revision"] == current_revision
+    assert second.health_snapshot()["sector_snapshot_cache"]["state"] == "refreshed"
+
+
 def test_full_market_sector_cache_identity_survives_json_key_sorting(
     tmp_path: Path,
 ) -> None:
