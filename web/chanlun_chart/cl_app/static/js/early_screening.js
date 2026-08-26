@@ -326,6 +326,16 @@
           snapshot.market_data_as_of || snapshot.as_of || snapshot.generated_at,
         ),
       );
+      setText(
+        "es-market-data-label",
+        scopeFacts.validation ? "验证基线截止" : "行情结构截止",
+      );
+      setText(
+        "es-sector-scope",
+        scopeFacts.validation
+          ? `板块仅用于固定 ${scopeFacts.cohort || scopeFacts.effectiveLimit || 12} 只样本复核，不代表全市场成员已扫描`
+          : "合格板块成员进入股票扫描",
+      );
       setText("es-sector-completion", sectorCompletion);
       setText("es-completion", completion);
       setText(
@@ -365,7 +375,8 @@
       const unifiedSignals = Array.isArray(snapshot.unified_signals)
         ? snapshot.unified_signals
         : snapshot.signals;
-      setText("es-signal-count", unifiedSignals.length);
+      const queueFacts = Ui.signalQueueFacts(unifiedSignals);
+      setText("es-signal-count", queueFacts.structure_clue_count);
       setText(
         "es-sector-trigger-count",
         Number(snapshot.sector_trigger_signal_count) || 0,
@@ -409,8 +420,8 @@
         Ui.segmentScopeText(runtimeHealth, segmentDifferenceCount),
       );
       setText("es-executable-count", countStage("executable"));
-      document.title = unifiedSignals.length
-        ? `(${unifiedSignals.length}) 缠论提前选股 · 实时盯盘与个股分析`
+      document.title = queueFacts.structure_clue_count
+        ? `(${queueFacts.structure_clue_count}) 缠论提前选股 · 实时盯盘与个股分析`
         : "缠论提前选股 · 实时盯盘与个股分析";
     }
 
@@ -648,7 +659,15 @@
         ? snapshot.sector_catalog_overlay
         : {};
       const sectorCount = Array.isArray(snapshot.sectors) ? snapshot.sectors.length : 0;
-      if (overlay.provisional === true && overlay.source === "CURRENT_COVERAGE_CYCLE") {
+      const runtimeHealth = snapshot.runtime_health
+        && typeof snapshot.runtime_health === "object"
+        ? snapshot.runtime_health
+        : {};
+      const scopeFacts = Ui.screeningScopeFacts(runtimeHealth, snapshot);
+      if (scopeFacts.validation && sectorCount > 0) {
+        node.dataset.state = "published";
+        node.textContent = `本次验证基线载入 ${sectorCount} 个板块；当前只复查固定 ${scopeFacts.cohort || scopeFacts.effectiveLimit || 12} 只标的，不代表全市场覆盖。`;
+      } else if (overlay.provisional === true && overlay.source === "CURRENT_COVERAGE_CYCLE") {
         node.dataset.state = "preview";
         node.textContent = `本轮板块目录已载入 ${sectorCount} 个；个股全覆盖仍在进行，当前仅用于浏览和筛选。`;
       } else if (overlay.provisional === true && overlay.source === "CACHED_SECTOR_SNAPSHOT") {
@@ -873,7 +892,10 @@
         if (state.theaterMode) showTheater(false);
       }
 
-      setText("es-visible-count", `${filtered.length} / ${selectionScopedSignals().length}`);
+      setText(
+        "es-visible-count",
+        Ui.signalQueueCountText(filtered, selectionScopedSignals()),
+      );
       const empty = byId("es-empty");
       if (empty) empty.hidden = filtered.length !== 0;
       setText(

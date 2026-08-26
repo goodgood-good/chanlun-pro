@@ -1454,6 +1454,39 @@ test("US monitor symbols share the signal queue and bypass only A-share sector f
   );
 });
 
+test("pure monitor positions remain browseable without inflating 5m clue counts", () => {
+  const Ui = loadUi();
+  const monitorPosition = Ui.usMonitorSignal(
+    {
+      code: "QQQ.US",
+      name: "纳指100ETF",
+      monitoring_scope: "MANUAL_ATTENTION",
+      status: "market_closed",
+    },
+    { last_completed_at: "2026-08-26T14:22:21+08:00" },
+  );
+  const rows = [snapshot.signals[0], monitorPosition];
+
+  assert.deepEqual(Ui.signalQueueFacts(rows), {
+    total_count: 2,
+    structure_clue_count: 1,
+    monitor_position_count: 1,
+  });
+  assert.equal(
+    Ui.signalQueueCountText(rows),
+    "1 条5m结构线索 · 1 个独立监听",
+  );
+  assert.equal(
+    Ui.signalQueueCountText([monitorPosition], rows),
+    "0 条5m结构线索 · 1 个独立监听 / 全部 1 条5m结构线索 · 1 个独立监听",
+  );
+  assert.match(controllerSource, /queueFacts\.structure_clue_count/);
+  assert.match(controllerSource, /Ui\.signalQueueCountText\(filtered, selectionScopedSignals\(\)\)/);
+  assert.match(template, /id="es-market-data-label"/);
+  assert.match(template, /id="es-sector-scope"/);
+  assert.match(template, /买卖点与监听队列/);
+});
+
 test("unmatched notification history stays in human review and cannot create a current selection", () => {
   const Ui = loadUi();
   const HumanUi = loadHumanReviewUi();

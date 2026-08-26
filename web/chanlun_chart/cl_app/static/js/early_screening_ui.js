@@ -170,6 +170,38 @@
     );
   }
 
+  function signalQueueFacts(signals) {
+    const current = Array.isArray(signals)
+      ? signals.filter((signal) => isRecord(signal) && isCurrentSelectionSignal(signal))
+      : [];
+    const monitorPositionCount = current.filter((signal) => (
+      signal.us_monitor_projection === true
+      && !POINT_TYPES.includes(text(signal.point_type, ""))
+    )).length;
+    return {
+      total_count: current.length,
+      structure_clue_count: current.length - monitorPositionCount,
+      monitor_position_count: monitorPositionCount,
+    };
+  }
+
+  function signalQueueCountText(visibleSignals, allSignals = visibleSignals) {
+    const visible = signalQueueFacts(visibleSignals);
+    const total = signalQueueFacts(allSignals);
+    const describe = (facts) => {
+      const parts = [`${facts.structure_clue_count} 条5m结构线索`];
+      if (facts.monitor_position_count > 0) {
+        parts.push(`${facts.monitor_position_count} 个独立监听`);
+      }
+      return parts.join(" · ");
+    };
+    if (
+      visible.structure_clue_count === total.structure_clue_count
+      && visible.monitor_position_count === total.monitor_position_count
+    ) return describe(visible);
+    return `${describe(visible)} / 全部 ${describe(total)}`;
+  }
+
   function setupFormationStateForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
     const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
@@ -4746,6 +4778,8 @@
     lifecycleLabel,
     lifecycleStageForSignal,
     isCurrentSelectionSignal,
+    signalQueueCountText,
+    signalQueueFacts,
     setupFormationStateForSignal,
     setupLockStateForSignal,
     terminalSegmentRange,

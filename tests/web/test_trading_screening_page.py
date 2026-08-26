@@ -934,9 +934,10 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "必须形成同向区间套后，才升级为精确执行候选并生成结构比例参考" in html
     assert "5分钟确认结构信号；1分钟同向区间套解锁精确执行候选" in html
     assert "本系统仍不自动下单" in html
-    assert "结构线索队列 · 人工复核" in html
-    assert "买卖点线索队列" in html
-    assert "线索只供人工识别，没有一条天然可执行" in html
+    assert "5m结构线索 + 独立监听 · 人工复核" in html
+    assert "买卖点与监听队列" in html
+    assert "等待买卖点 / 实时监听" in html
+    assert "只是关注范围，不计入信号或通知" in html
     assert "ACTIONABLE QUEUE" not in html
     assert "实时模式图表会随市场继续更新" in html
     assert "不可作为历史因果复核" in html

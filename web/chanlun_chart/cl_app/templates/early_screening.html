@@ -78,7 +78,7 @@
           </div>
         </div>
         <dl class="es-status-facts es-status-facts--primary">
-          <div><dt>行情结构截止</dt><dd id="es-generated">尚未发布</dd></div>
+          <div><dt id="es-market-data-label">行情结构截止</dt><dd id="es-generated">尚未发布</dd></div>
           <div><dt>今日候选名单</dt><dd id="es-preselection-status">待生成</dd></div>
           <div><dt>盘中实时预警</dt><dd id="es-priority-monitor-status">待开盘</dd></div>
         </dl>
@@ -114,7 +114,7 @@
       </details>
 
       <section class="es-summary" aria-label="实时快照摘要">
-        <article><span>合格板块</span><strong id="es-sector-count">0</strong><small>全部进入股票扫描</small></article>
+        <article><span>合格板块</span><strong id="es-sector-count">0</strong><small id="es-sector-scope">合格板块成员进入股票扫描</small></article>
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>可含未完成线段，仅供提前观察</small></article>
         <article class="is-trigger"><span>当前 5m 操作确认</span><strong id="es-triggered-count">0</strong><small>5分钟是交易级别，决定主信号是否成立；1分钟定位可在首报后补充</small></article>
         <article class="is-segment"><span>当前 1 分钟区间套定位</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">仅统计当前5分钟操作候选中，同向1分钟区间套已经形成且精确位置仍有效的买卖点；不累计历史证据</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看当前定位</button></article>
@@ -412,12 +412,12 @@
         <section class="es-workspace es-signal-workspace" data-workspace="signals" aria-labelledby="es-signal-title">
           <header class="es-workspace__header">
             <div>
-              <p class="es-eyebrow">结构线索队列 · 人工复核</p>
-              <h2 id="es-signal-title">买卖点线索队列</h2>
+              <p class="es-eyebrow">5m结构线索 + 独立监听 · 人工复核</p>
+              <h2 id="es-signal-title">买卖点与监听队列</h2>
             </div>
             <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
           </header>
-          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。<span class="es-sr-only">线索只供人工识别，没有一条天然可执行。</span></p>
+          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。有一二三类标记的才计入5m结构线索；“等待买卖点 / 实时监听”只是关注范围，不计入信号或通知。</p>
 
           <div class="es-signal-channel-bar" role="group" aria-label="六类买卖点快捷筛选">
             <strong>六类通道</strong>
