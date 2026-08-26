@@ -2486,7 +2486,7 @@ def _previous_suspension_evidence_source_snapshot(
         if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
     )
     assert screening_row["sha256"] == (
-        "sha256:98b8373179fcb2c2ab772bc58975f832fc79c86c46880e4f8f34becf899a646f"
+        "sha256:401efa0ccbda18ec6bc203fbcac93a92ce6131dba602c70373e218918182e6e5"
     )
     screening_row["sha256"] = (
         "sha256:117e1e518f6c4417385e72f2ad9a911147192eb413543b7610550f1bbaebf8e3"
@@ -2519,6 +2519,27 @@ def _previous_review_availability_source_snapshot(
     return previous
 
 
+def _previous_closed_session_bootstrap_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    screening_row = next(
+        row
+        for row in previous["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    assert screening_row["sha256"] == (
+        "sha256:401efa0ccbda18ec6bc203fbcac93a92ce6131dba602c70373e218918182e6e5"
+    )
+    screening_row["sha256"] = (
+        "sha256:98b8373179fcb2c2ab772bc58975f832fc79c86c46880e4f8f34becf899a646f"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
 def test_review_availability_source_migration_reuses_decision_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -2536,6 +2557,39 @@ def test_review_availability_source_migration_reuses_decision_snapshot(
     assert isinstance(current, dict)
     assert isinstance(current_id, str)
     previous = _previous_review_availability_source_snapshot(current)
+    previous_id = previous["aggregate_sha256"]
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_id,
+        current_decision_source_snapshot_id=current_id,
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
+    )
+    assert not suspension_evidence_recheck_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_id,
+        current_decision_source_snapshot_id=current_id,
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
+    )
+
+
+def test_closed_session_bootstrap_source_migration_requires_no_stock_recheck(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    current = service._decision_source_snapshot
+    current_id = service._decision_source_snapshot_id
+    assert isinstance(current, dict)
+    assert isinstance(current_id, str)
+    previous = _previous_closed_session_bootstrap_source_snapshot(current)
     previous_id = previous["aggregate_sha256"]
 
     assert orchestration_source_migration_allowed(
@@ -14048,11 +14102,18 @@ def test_startup_priority_runs_after_close_without_sector_rebuild(
     ]
 
 
-def test_after_close_failed_locator_does_not_satisfy_startup_verification(
+@pytest.mark.parametrize(
+    ("observed_at", "expected_retry"),
+    (
+        (AS_OF.replace(hour=10, minute=0), True),
+        (AS_OF.replace(hour=18, minute=30), False),
+    ),
+)
+def test_failed_locator_startup_retry_respects_compute_window(
     tmp_path: Path,
+    observed_at: datetime,
+    expected_retry: bool,
 ) -> None:
-    observed_at = AS_OF.replace(hour=18, minute=30)
-
     class FailingWatchlistMarket(RecordingMarketData):
         def active_watchlist(self) -> tuple[str, ...]:
             return ("SZ.000001",)
@@ -14085,7 +14146,7 @@ def test_after_close_failed_locator_does_not_satisfy_startup_verification(
     assert health["priority_monitor_locator_runtime_verified"] is False
     assert health["priority_monitor_locator_runtime_status"] == "failed"
     assert health["startup_priority_bootstrap_ready"] is False
-    assert service._startup_priority_bootstrap_required() is True
+    assert service._startup_priority_bootstrap_required() is expected_retry
     assert (
         service.presentation_snapshot()["priority_live_overlay"]["startup_bootstrap"]
         is False

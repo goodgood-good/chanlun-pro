@@ -6012,9 +6012,15 @@ class TradingScreeningService:
 
     def _startup_priority_bootstrap_required(
         self,
+        observed_at: datetime | None = None,
     ) -> bool:
         """全量快照不可用时先用当前进程复核显式监听标的。"""
 
+        observed = normalize_datetime(
+            self._clock() if observed_at is None else observed_at,
+            "startup priority bootstrap observed_at",
+        )
+        compute_window_open = _priority_monitor_compute_window_open(observed)
         with self._background_lock:
             runtime_verified = self._priority_monitor_runtime_verified
             locator_verification_required = bool(
@@ -6025,7 +6031,14 @@ class TradingScreeningService:
             self._config.priority_monitoring_enabled
             and (
                 not runtime_verified
-                or (locator_verification_required and not locator_runtime_verified)
+                # 允许闭市后的新进程完成一次基础监听自检，但 1m 精确定位的
+                # SLA 只在盘前预热和连续竞价计算窗口有意义。闭市后仅因定位
+                # 失败而持续重试，会每分钟重算关注标的且永远无法变成当前 1m。
+                or (
+                    compute_window_open
+                    and locator_verification_required
+                    and not locator_runtime_verified
+                )
             )
         )
 
@@ -12382,7 +12395,9 @@ class TradingScreeningService:
                 # 决策合同升级会隔离旧信号快照。全量行业重建可能持续数分钟，因此先用
                 # 当前核心复核显式关注/持仓，页面和通知通道即可获得一份不含旧结论的
                 # 快速观测；有认证过渡预选时，完整覆盖延后到非交易关键窗口。
-                if coverage_window_open and self._startup_priority_bootstrap_required():
+                if coverage_window_open and self._startup_priority_bootstrap_required(
+                    observed_at
+                ):
                     if self._priority_scan_lock.locked():
                         wake.wait(timeout=1.0)
                         continue
@@ -13483,7 +13498,9 @@ class TradingScreeningService:
                 for code in rejected:
                     frequencies.pop(code, None)
         if priority_only:
-            force_startup_bootstrap = self._startup_priority_bootstrap_required()
+            force_startup_bootstrap = self._startup_priority_bootstrap_required(
+                observed_at
+            )
             with self._background_lock:
                 continuity_sector_batch = self._preselection_continuity_sector_batch
                 continuity_sector_members = (
