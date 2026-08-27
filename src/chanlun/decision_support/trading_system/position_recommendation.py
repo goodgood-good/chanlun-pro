@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Mapping
 
@@ -22,24 +23,23 @@ from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
 
 
 _RATIO_QUANTUM = Decimal("0.0001")
-_MAX_BUY_ANCHOR_DRIFT_RATE = Decimal("0.05")
+MAX_BUY_ANCHOR_DRIFT_RATE = Decimal("0.05")
+MAX_INITIAL_STRUCTURAL_RISK_RATE = Decimal("0.05")
 BUY_SIGNAL_PROTECTION_REASON_CODES = frozenset(
     {
         "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR",
         "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP",
+        "INITIAL_STRUCTURAL_RISK_TOO_WIDE",
+        "ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP",
     }
 )
 _UNCONFIRMED_STRUCTURE_BASIS = "UNCONFIRMED_5M_STRUCTURE"
-_GEOMETRY_AWAITING_CONFIRMATION_BASIS = (
-    "GEOMETRIC_5M_CANDIDATE_AWAITING_CONFIRMATION"
-)
+_GEOMETRY_AWAITING_CONFIRMATION_BASIS = "GEOMETRIC_5M_CANDIDATE_AWAITING_CONFIRMATION"
 _UNCONFIRMED_STRUCTURE_REASON = "FIVE_MINUTE_TRADE_SIGNAL_NOT_CONFIRMED"
 _GEOMETRY_AWAITING_CONFIRMATION_REASON = (
     "FIVE_MINUTE_GEOMETRIC_CANDIDATE_AWAITING_CONFIRMATION"
 )
-ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS = (
-    "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED"
-)
+ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS = "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED"
 ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON = (
     "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_FOR_PRECISE_EXECUTION"
 )
@@ -51,6 +51,21 @@ def _decimal(value: object) -> Decimal | None:
     except (InvalidOperation, TypeError, ValueError):
         return None
     return parsed if parsed.is_finite() else None
+
+
+def _aware_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _ratio(value: Decimal) -> Decimal:
@@ -146,10 +161,7 @@ def _pending_setup_label(*, side: str, geometry_ready: bool) -> str:
 def _waiting_segment_difference_label(*, side: str) -> str:
     prefix = "结构风险参考比例" if side == "buy" else "结构退出参考比例"
     point = "买点" if side == "buy" else "卖点"
-    return (
-        f"{prefix}：暂不计算（5分钟{point}已确认，"
-        "等待1分钟区间套精确定位）"
-    )
+    return f"{prefix}：暂不计算（5分钟{point}已确认，等待1分钟区间套精确定位）"
 
 
 def parse_position_recommendation_document(
@@ -167,9 +179,10 @@ def parse_position_recommendation_document(
         raise ValueError("position recommendation document is malformed")
     if raw.get("side") not in {"buy", "sell"}:
         raise ValueError("position recommendation side is invalid")
-    if raw.get("manual_confirmation_required") is not True or raw.get(
-        "automated_order_authorized"
-    ) is not False:
+    if (
+        raw.get("manual_confirmation_required") is not True
+        or raw.get("automated_order_authorized") is not False
+    ):
         raise ValueError("position recommendation cannot authorize an order")
     if not isinstance(raw.get("label"), str) or not str(raw["label"]).strip():
         raise ValueError("position recommendation label is missing")
@@ -308,7 +321,10 @@ def build_position_recommendation(
     structural_stop: object,
     exit_action: str,
     structure_anchor_price: object | None = None,
-    max_buy_anchor_drift_rate: object = _MAX_BUY_ANCHOR_DRIFT_RATE,
+    five_minute_available_at: object | None = None,
+    one_minute_available_at: object | None = None,
+    max_buy_anchor_drift_rate: object = MAX_BUY_ANCHOR_DRIFT_RATE,
+    max_initial_structural_risk_rate: object = MAX_INITIAL_STRUCTURAL_RISK_RATE,
     risk_limits: RiskLimits = RiskLimits(),
 ) -> PositionRecommendation:
     """返回可审计的建议比例；数据不足时明确返回“待核对”。"""
@@ -378,6 +394,20 @@ def build_position_recommendation(
             else _decimal(structure_anchor_price)
         )
         maximum_anchor_drift = _decimal(max_buy_anchor_drift_rate)
+        maximum_structural_risk = _decimal(max_initial_structural_risk_rate)
+        precision_times_supplied = (
+            five_minute_available_at is not None or one_minute_available_at is not None
+        )
+        five_minute_time = (
+            _aware_datetime(five_minute_available_at)
+            if precision_times_supplied
+            else None
+        )
+        one_minute_time = (
+            _aware_datetime(one_minute_available_at)
+            if precision_times_supplied
+            else None
+        )
         if (
             multiplier is None
             or context_scale is None
@@ -385,12 +415,17 @@ def build_position_recommendation(
             or stop is None
             or anchor is None
             or maximum_anchor_drift is None
+            or maximum_structural_risk is None
             or multiplier <= 0
             or context_scale <= 0
             or price <= 0
             or stop <= 0
             or anchor <= 0
             or maximum_anchor_drift <= 0
+            or maximum_structural_risk <= 0
+            or maximum_structural_risk >= 1
+            or precision_times_supplied
+            and (five_minute_time is None or one_minute_time is None)
         ):
             return PositionRecommendation(
                 side=side,
@@ -400,6 +435,25 @@ def build_position_recommendation(
                 recommended_percent=None,
                 label="结构风险参考比例：待核对（结构价格或风险参数不足）",
                 reason_codes=("POSITION_RATIO_INPUT_UNRESOLVED",),
+                segment_difference_max_ratio=segment_ratio,
+            )
+        if (
+            five_minute_time is not None
+            and one_minute_time is not None
+            and one_minute_time < five_minute_time
+        ):
+            return PositionRecommendation(
+                side=side,
+                status="BLOCKED",
+                basis="NO_TRADE",
+                recommended_ratio=Decimal("0"),
+                recommended_percent="0",
+                label=(
+                    "结构风险参考：本条买入不纳入操作计划（1分钟精确定位点"
+                    "早于5分钟交易级别确认，只保留为历史区间套证据；等待5分钟"
+                    "信号成立后的新1分钟买点）"
+                ),
+                reason_codes=("ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP",),
                 segment_difference_max_ratio=segment_ratio,
             )
         if price <= stop:
@@ -441,9 +495,23 @@ def build_position_recommendation(
                 segment_difference_max_ratio=segment_ratio,
             )
         structural_risk_rate = (price - stop) / price
-        risk_budget_fraction = (
-            risk_limits.base_trade_risk * multiplier * context_scale
-        )
+        if structural_risk_rate > maximum_structural_risk:
+            return PositionRecommendation(
+                side=side,
+                status="BLOCKED",
+                basis="NO_TRADE",
+                recommended_ratio=Decimal("0"),
+                recommended_percent="0",
+                label=(
+                    "结构风险参考：本条买入不纳入操作计划（当前价至5分钟结构"
+                    f"防守位距离 {_percent_text(structural_risk_rate)}%，超过"
+                    f" {_percent_text(maximum_structural_risk)}% 初始风险上限；"
+                    "T+1与跳空风险会使仓位测算失真）"
+                ),
+                reason_codes=("INITIAL_STRUCTURAL_RISK_TOO_WIDE",),
+                segment_difference_max_ratio=segment_ratio,
+            )
+        risk_budget_fraction = risk_limits.base_trade_risk * multiplier * context_scale
         recommended = _ratio(
             min(
                 risk_limits.max_symbol_fraction,
@@ -474,9 +542,7 @@ def build_position_recommendation(
         )
 
     if side == "sell" and exit_action in {"exit_full", "reduce_tactical"}:
-        recommended = (
-            Decimal("1") if exit_action == "exit_full" else segment_ratio
-        )
+        recommended = Decimal("1") if exit_action == "exit_full" else segment_ratio
         percent = _percent_text(recommended)
         return PositionRecommendation(
             side=side,
@@ -526,6 +592,8 @@ def build_position_recommendation(
 
 __all__ = (
     "BUY_SIGNAL_PROTECTION_REASON_CODES",
+    "MAX_BUY_ANCHOR_DRIFT_RATE",
+    "MAX_INITIAL_STRUCTURAL_RISK_RATE",
     "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_BASIS",
     "ONE_MINUTE_SEGMENT_DIFFERENCE_REQUIRED_REASON",
     "PositionRecommendation",

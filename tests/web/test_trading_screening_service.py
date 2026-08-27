@@ -2497,9 +2497,22 @@ def _previous_suspension_evidence_source_snapshot(
     return previous
 
 
-def _previous_review_availability_source_snapshot(
-    current: dict[str, object],
-) -> dict[str, object]:
+def _reviewed_review_availability_source_snapshots(
+    template: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    current = copy.deepcopy(template)
+    review_row = next(
+        row
+        for row in current["files"]
+        if row["path"]
+        == "src/chanlun/decision_support/trading_system/live_human_review.py"
+    )
+    review_row["sha256"] = (
+        "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"
+    )
+    current["aggregate_sha256"] = sha256_json(
+        {"schema": current["schema"], "files": current["files"]}
+    )
     previous = copy.deepcopy(current)
     review_row = next(
         row
@@ -2507,16 +2520,13 @@ def _previous_review_availability_source_snapshot(
         if row["path"]
         == "src/chanlun/decision_support/trading_system/live_human_review.py"
     )
-    assert review_row["sha256"] == (
-        "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"
-    )
     review_row["sha256"] = (
         "sha256:4e4ace9302d304a00373e01e659bb097677f8f3c9db5dfeb6bc57836215e8b84"
     )
     previous["aggregate_sha256"] = sha256_json(
         {"schema": previous["schema"], "files": previous["files"]}
     )
-    return previous
+    return previous, current
 
 
 def _previous_closed_session_bootstrap_source_snapshot(
@@ -2553,22 +2563,68 @@ def test_review_availability_source_migration_reuses_decision_snapshot(
         notifier=None,
     )
     current = service._decision_source_snapshot
-    current_id = service._decision_source_snapshot_id
     assert isinstance(current, dict)
-    assert isinstance(current_id, str)
-    previous = _previous_review_availability_source_snapshot(current)
+    previous, reviewed_current = _reviewed_review_availability_source_snapshots(current)
     previous_id = previous["aggregate_sha256"]
+    current_id = reviewed_current["aggregate_sha256"]
 
     assert orchestration_source_migration_allowed(
         cached_decision_source_snapshot_id=previous_id,
         current_decision_source_snapshot_id=current_id,
         cached_decision_source_snapshot=previous,
-        current_decision_source_snapshot=current,
+        current_decision_source_snapshot=reviewed_current,
     )
     assert not suspension_evidence_recheck_source_migration_allowed(
         cached_decision_source_snapshot_id=previous_id,
         current_decision_source_snapshot_id=current_id,
         cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=reviewed_current,
+    )
+
+
+def test_context_risk_role_source_change_requires_decision_recompute(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    current = service._decision_source_snapshot
+    current_id = service._decision_source_snapshot_id
+    assert isinstance(current, dict)
+    assert isinstance(current_id, str)
+    cached = copy.deepcopy(current)
+    review_row = next(
+        row
+        for row in cached["files"]
+        if row["path"]
+        == "src/chanlun/decision_support/trading_system/live_human_review.py"
+    )
+    current_review_row = next(
+        row
+        for row in current["files"]
+        if row["path"]
+        == "src/chanlun/decision_support/trading_system/live_human_review.py"
+    )
+    assert current_review_row["sha256"] == (
+        "sha256:7c04f3e18286adf36121ed88e04e0c9878ae7665c40e5f6914d647cc4051e615"
+    )
+    review_row["sha256"] = (
+        "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"
+    )
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current_id,
+        cached_decision_source_snapshot=cached,
         current_decision_source_snapshot=current,
     )
 

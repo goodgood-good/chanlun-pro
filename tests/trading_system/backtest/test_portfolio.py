@@ -17,6 +17,7 @@ from chanlun.decision_support.trading_system.backtest.models import (
 )
 from chanlun.decision_support.trading_system.backtest.portfolio import (
     BacktestRun,
+    risk_candidate_from,
     run_event_backtest,
 )
 from chanlun.decision_support.trading_system.engine import (
@@ -54,11 +55,21 @@ class FakePoint:
     point_type: PointType
     tower: StructureTower = "formal"
     recursive_level: int = 0
+    structure_anchor_price: float = 10.0
+    available_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeTrigger:
+    available_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class FakeSector:
     sector_id: str
+    regime: str = "neutral"
+    rank_score: int = 0
+    horizontal_rank: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +79,25 @@ class FakeSetup:
 
 
 @dataclass(frozen=True, slots=True)
+class FakeContext:
+    grade: str = "A"
+
+
+@dataclass(frozen=True, slots=True)
+class FakeBoundary:
+    raw_high: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class FakeEvaluation:
     setup: FakeSetup
     entry: EntryDecision | None
     exit: ExitDecision | None
+    context_assessment: FakeContext | None = FakeContext()
+    market_risk_gate: str = "UNRESOLVED"
+    symbol_risk_gate: str = "UNRESOLVED"
+    entry_execution_boundary: FakeBoundary | None = None
+    trigger: FakeTrigger | None = None
 
 
 class ScheduledEngine:
@@ -197,10 +223,22 @@ def allowed_entry(
     point_type: str = "2buy",
     sector_id: str = "TDX.880301",
     multiplier: str = "1.00",
+    context_grade: str | None = "A",
+    anchor: str = "10.00",
+    price_cap: str | None = None,
+    five_minute_available_at: datetime | None = None,
+    one_minute_available_at: datetime | None = None,
 ) -> FakeEvaluation:
     typed_point = cast(PointType, point_type)
     return FakeEvaluation(
-        setup=FakeSetup(FakePoint(typed_point), FakeSector(sector_id)),
+        setup=FakeSetup(
+            FakePoint(
+                typed_point,
+                structure_anchor_price=float(anchor),
+                available_at=five_minute_available_at,
+            ),
+            FakeSector(sector_id),
+        ),
         entry=EntryDecision(
             allowed=True,
             signal_id=signal_id,
@@ -209,6 +247,17 @@ def allowed_entry(
             reason_codes=(),
         ),
         exit=None,
+        context_assessment=(
+            None if context_grade is None else FakeContext(context_grade)
+        ),
+        entry_execution_boundary=(
+            None if price_cap is None else FakeBoundary(Decimal(price_cap))
+        ),
+        trigger=(
+            None
+            if one_minute_available_at is None
+            else FakeTrigger(one_minute_available_at)
+        ),
     )
 
 
@@ -258,9 +307,7 @@ def run_fixture(
 
 def test_intraday_low_crossing_structural_stop_creates_exit() -> None:
     first = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 30, tzinfo=CN))
-    entry_bar = market_bar(
-        "SZ.000001", datetime(2026, 7, 20, 10, 31, tzinfo=CN)
-    )
+    entry_bar = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 31, tzinfo=CN))
     stop_bar = market_bar(
         "SZ.000001",
         datetime(2026, 7, 20, 10, 32, tzinfo=CN),
@@ -283,9 +330,7 @@ def test_intraday_low_crossing_structural_stop_creates_exit() -> None:
 
 def test_same_day_stop_respects_t_plus_one() -> None:
     first = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 30, tzinfo=CN))
-    entry_bar = market_bar(
-        "SZ.000001", datetime(2026, 7, 20, 10, 31, tzinfo=CN)
-    )
+    entry_bar = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 31, tzinfo=CN))
     stop_bar = market_bar(
         "SZ.000001",
         datetime(2026, 7, 20, 10, 32, tzinfo=CN),
@@ -343,6 +388,228 @@ def test_entry_fills_on_next_bar_not_signal_bar() -> None:
     accepted = tuple(fill for fill in run.fills if fill.filled)
     assert len(accepted) == 1
     assert accepted[0].filled_at == second.closed_at
+
+
+def test_live_no_chase_anchor_guard_is_applied_to_backtest_admission() -> None:
+    signal = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 30, tzinfo=CN),
+        opened="10.58",
+        high="10.62",
+        low="10.55",
+        closed="10.60",
+    )
+    next_bar = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+        opened="10.60",
+        high="10.65",
+        low="10.55",
+        closed="10.62",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(
+                signal_id="entry-a",
+                stop="9.80",
+                anchor="10.00",
+            ),
+        )
+    }
+
+    run = run_fixture((signal, next_bar), schedule)
+
+    assert run.open_positions == ()
+    assert len(run.fills) == 1
+    assert run.fills[0].order_id.startswith("admission:")
+    assert run.fills[0].reason == "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR"
+
+
+def test_stale_one_minute_precision_is_rejected_at_backtest_admission() -> None:
+    signal = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 30, tzinfo=CN),
+    )
+    next_bar = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(
+                signal_id="entry-a",
+                stop="9.80",
+                five_minute_available_at=signal.closed_at,
+                one_minute_available_at=signal.closed_at - timedelta(minutes=25),
+            ),
+        )
+    }
+
+    run = run_fixture((signal, next_bar), schedule)
+
+    assert run.open_positions == ()
+    assert len(run.fills) == 1
+    assert run.fills[0].reason == ("ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP")
+
+
+def test_wide_initial_structural_risk_is_rejected_at_backtest_admission() -> None:
+    signal = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 30, tzinfo=CN),
+    )
+    next_bar = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(signal_id="entry-a", stop="9.40"),
+        )
+    }
+
+    run = run_fixture((signal, next_bar), schedule)
+
+    assert run.open_positions == ()
+    assert len(run.fills) == 1
+    assert run.fills[0].reason == "INITIAL_STRUCTURAL_RISK_TOO_WIDE"
+
+
+def test_one_minute_confirmation_high_is_a_terminal_no_chase_cap() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    signal = market_bar("SZ.000001", opened)
+    crossed = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=1),
+        opened="10.08",
+        high="10.10",
+        low="10.06",
+        closed="10.08",
+    )
+    later = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=2),
+        high="10.04",
+        low="10.00",
+        closed="10.02",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(
+                signal_id="entry-a",
+                stop="9.80",
+                price_cap="10.05",
+            ),
+        )
+    }
+
+    run = run_fixture((signal, crossed, later), schedule)
+
+    assert run.open_positions == ()
+    assert tuple(fill.reason for fill in run.fills) == ("entry_price_cap_crossed",)
+
+
+def test_mixed_price_cap_bar_defers_until_a_whole_bar_is_within_cap() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    signal = market_bar("SZ.000001", opened)
+    mixed = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=1),
+        opened="10.03",
+        high="10.08",
+        low="10.00",
+        closed="10.04",
+    )
+    within = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=2),
+        opened="10.02",
+        high="10.04",
+        low="10.00",
+        closed="10.02",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(
+                signal_id="entry-a",
+                stop="9.80",
+                price_cap="10.05",
+            ),
+        )
+    }
+
+    run = run_fixture((signal, mixed, within), schedule)
+
+    assert run.fills[0].reason == "entry_price_cap_unresolved"
+    accepted = tuple(fill for fill in run.fills if fill.filled)
+    assert len(accepted) == 1
+    assert accepted[0].filled_at == within.closed_at
+    assert accepted[0].execution_price <= Decimal("10.05")
+
+
+def test_entry_fill_cannot_use_an_earlier_low_from_the_same_bar() -> None:
+    signal = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 30, tzinfo=CN),
+    )
+    fill = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+        high="10.05",
+        low="9.70",
+        closed="10.00",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(signal_id="entry-a", stop="9.80"),
+        )
+    }
+
+    run = run_fixture((signal, fill), schedule, t_plus_days=0)
+
+    assert run.trades == ()
+    assert len(run.open_positions) == 1
+    assert run.pending_exits == ()
+
+
+def test_breakeven_stop_arms_after_one_r_and_activates_next_bar() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    signal = market_bar("SZ.000001", opened)
+    fill = market_bar("SZ.000001", opened + timedelta(minutes=1))
+    trigger = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=2),
+        high="10.30",
+        low="9.90",
+        closed="10.10",
+    )
+    next_bar = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=3),
+        high="10.05",
+        low="9.95",
+        closed="10.00",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(signal_id="entry-a", stop="9.80"),
+        )
+    }
+
+    armed = run_fixture((signal, fill, trigger), schedule, t_plus_days=0)
+    completed = run_fixture(
+        (signal, fill, trigger, next_bar),
+        schedule,
+        t_plus_days=0,
+    )
+
+    assert armed.trades == ()
+    assert armed.open_positions[0].breakeven_armed_at == trigger.closed_at
+    assert armed.open_positions[0].structural_stop == (
+        armed.open_positions[0].entry_price
+    )
+    assert completed.trades[0].exit_at == next_bar.closed_at
+    assert completed.trades[0].exit_reason == "breakeven_stop"
+    assert completed.trades[0].exit_trigger_price == (completed.trades[0].entry_price)
 
 
 def test_entry_is_resized_to_next_bar_volume_capacity() -> None:
@@ -413,21 +680,21 @@ def test_exit_partials_are_aggregated_into_one_trade() -> None:
         (signal.closed_at, signal.code): (
             allowed_entry(signal_id="entry-a", stop="9.80"),
         ),
-        (exit_signal.closed_at, exit_signal.code): (
-            allowed_exit(signal_id="exit-a"),
-        ),
+        (exit_signal.closed_at, exit_signal.code): (allowed_exit(signal_id="exit-a"),),
     }
 
     run = run_fixture(
         (signal, entry_fill, exit_signal, exit_fill_a, exit_fill_b),
         schedule,
         t_plus_days=0,
+        risk_limits=RiskLimits(
+            base_trade_risk=Decimal("0.005"),
+            max_symbol_fraction=Decimal("0.10"),
+        ),
     )
 
     sell_fills = tuple(
-        fill
-        for fill in run.fills
-        if fill.filled and fill.order_id.startswith("exit:")
+        fill for fill in run.fills if fill.filled and fill.order_id.startswith("exit:")
     )
     assert tuple(fill.shares for fill in sell_fills) == (500, 400)
     assert len(run.trades) == 1
@@ -465,7 +732,65 @@ def test_entry_uses_shared_risk_sizing() -> None:
         ),
         limits=RiskLimits(),
     )
-    assert position.shares == expected.shares == 900
+    assert position.shares == expected.shares == 400
+
+
+def test_context_grade_scales_the_portfolio_risk_candidate() -> None:
+    bar = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 30, tzinfo=CN),
+    )
+    grade_a = allowed_entry(
+        signal_id="entry-a",
+        stop="9.80",
+        context_grade="A",
+    )
+    grade_b = allowed_entry(
+        signal_id="entry-b",
+        stop="9.80",
+        context_grade="B",
+    )
+    unresolved = allowed_entry(
+        signal_id="entry-u",
+        stop="9.80",
+        context_grade=None,
+    )
+
+    assert risk_candidate_from(grade_a, bar).risk_multiplier == Decimal("1.00")
+    assert risk_candidate_from(grade_b, bar).risk_multiplier == Decimal("0.75")
+    assert risk_candidate_from(unresolved, bar).risk_multiplier == Decimal("0.50")
+
+
+def test_context_scale_is_preserved_during_fill_price_revalidation() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    signal = market_bar("SZ.000001", opened)
+    gap_fill = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=1),
+        opened="10.50",
+        high="10.52",
+        low="10.49",
+        closed="10.50",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(
+                signal_id="entry-b",
+                stop="9.80",
+                context_grade="B",
+            ),
+        )
+    }
+    limits = RiskLimits(
+        base_trade_risk=Decimal("0.005"),
+        max_symbol_fraction=Decimal("1"),
+        max_sector_fraction=Decimal("1"),
+        max_portfolio_heat=Decimal("1"),
+    )
+
+    run = run_fixture((signal, gap_fill), schedule, risk_limits=limits)
+
+    assert run.open_positions[0].shares == 500
 
 
 def test_sector_exposure_reserves_same_timestamp_orders() -> None:
@@ -483,7 +808,7 @@ def test_sector_exposure_reserves_same_timestamp_orders() -> None:
         )
         for bar in signal_bars
     }
-    limits = replace(RiskLimits(), max_sector_fraction=Decimal("0.10"))
+    limits = replace(RiskLimits(), max_sector_fraction=Decimal("0.05"))
 
     run = run_fixture(signal_bars + fill_bars, schedule, risk_limits=limits)
 
@@ -491,6 +816,39 @@ def test_sector_exposure_reserves_same_timestamp_orders() -> None:
     assert sum(
         position.last_price * position.shares for position in run.open_positions
     ) <= Decimal("10000")
+
+
+def test_causal_context_priority_wins_limited_same_timestamp_capacity() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    signal_c = market_bar("SH.600000", opened)
+    signal_a = market_bar("SZ.000001", opened)
+    fill_c = market_bar("SH.600000", opened + timedelta(minutes=1))
+    fill_a = market_bar("SZ.000001", opened + timedelta(minutes=1))
+    schedule = {
+        (signal_c.closed_at, signal_c.code): (
+            allowed_entry(
+                signal_id="entry-c",
+                stop="9.99",
+                context_grade="C",
+            ),
+        ),
+        (signal_a.closed_at, signal_a.code): (
+            allowed_entry(
+                signal_id="entry-a",
+                stop="9.99",
+                context_grade="A",
+            ),
+        ),
+    }
+    limits = replace(RiskLimits(), max_sector_fraction=Decimal("0.05"))
+
+    run = run_fixture(
+        (signal_c, signal_a, fill_c, fill_a),
+        schedule,
+        risk_limits=limits,
+    )
+
+    assert tuple(position.code for position in run.open_positions) == ("SZ.000001",)
 
 
 def test_portfolio_heat_reserves_same_timestamp_orders() -> None:
@@ -532,7 +890,7 @@ def test_drawdown_stop_gate_blocks_new_entry() -> None:
     next_b = market_bar("SZ.000001", opened + timedelta(minutes=3))
     schedule = {
         (first.closed_at, first.code): (
-            allowed_entry(signal_id="entry-a", stop="1.00"),
+            allowed_entry(signal_id="entry-a", stop="9.50"),
         ),
         (drawdown_b.closed_at, drawdown_b.code): (
             allowed_entry(signal_id="entry-b", stop="9.80"),
@@ -573,7 +931,14 @@ def test_terminal_open_position_is_marked_not_counted_as_trade() -> None:
         )
     }
 
-    run = run_fixture((first, final), schedule)
+    run = run_fixture(
+        (first, final),
+        schedule,
+        risk_limits=replace(
+            RiskLimits(),
+            base_trade_risk=Decimal("0.005"),
+        ),
+    )
 
     assert run.trades == ()
     assert run.open_positions
@@ -602,10 +967,19 @@ def test_forced_liquidation_is_explicit_sensitivity() -> None:
         )
     }
 
-    marked = run_fixture((first, final), schedule)
+    mechanics_limits = replace(
+        RiskLimits(),
+        base_trade_risk=Decimal("0.005"),
+    )
+    marked = run_fixture(
+        (first, final),
+        schedule,
+        risk_limits=mechanics_limits,
+    )
     liquidated = run_fixture(
         (first, final),
         schedule,
+        risk_limits=mechanics_limits,
         terminal_liquidation=True,
     )
 
@@ -628,7 +1002,7 @@ def test_symbol_input_order_does_not_change_portfolio_result() -> None:
             allowed_entry(signal_id="entry-b", stop="9.99"),
         ),
     }
-    limits = replace(RiskLimits(), max_sector_fraction=Decimal("0.10"))
+    limits = replace(RiskLimits(), max_sector_fraction=Decimal("0.05"))
 
     forward = run_fixture(
         (signal_a, signal_b, fill_a, fill_b),
@@ -659,8 +1033,7 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
                 source_kind=SourceKind.SEGMENT,
                 direction="down" if point.side == "buy" else "up",
                 state="locked",
-                market_start=point.anchor_at
-                - timedelta(minutes=terminal_minutes),
+                market_start=point.anchor_at - timedelta(minutes=terminal_minutes),
                 market_end=point.anchor_at,
                 available_at=point.available_at,
             ),

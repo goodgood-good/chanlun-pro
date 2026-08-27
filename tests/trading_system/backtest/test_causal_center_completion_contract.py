@@ -280,7 +280,7 @@ def test_physical_causal_center_records_and_validates_five_roles(
         center_completions=(fact,),
     )
 
-    assert FACT_SCHEMA == "chanlun-fixed-year-symbol-facts-v14"
+    assert FACT_SCHEMA == "chanlun-fixed-year-symbol-facts-v15"
     assert fact.contract == CAUSAL_CENTER_COMPLETION_CONTRACT
     assert fact.establishment_unit_ids == (
         fact.entry_unit_id,

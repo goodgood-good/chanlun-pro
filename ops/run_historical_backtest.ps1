@@ -4,7 +4,7 @@ param(
     [string]$QmtDataDir = "",
     [ValidateRange(1, 5)]
     [int]$ExtractionAttempts = 3,
-    [ValidateSet("smoke2", "validation12")]
+    [ValidateSet("smoke2", "validation12", "diagnostic32")]
     [string]$Profile = "smoke2",
     [ValidateSet("Extract", "Prefix", "Finalize", "All")]
     [string]$Stage = "Extract",
@@ -12,7 +12,15 @@ param(
     [string]$MembershipCheckpointDir = "",
     [string]$MembershipIndex = "",
     [switch]$ConfirmLargeScope,
-    [switch]$FullMarket
+    [switch]$FullMarket,
+    [ValidatePattern("^\d{4}-\d{2}-\d{2}$")]
+    [string]$WarmupStart = "2025-11-01",
+    [ValidatePattern("^\d{4}-\d{2}-\d{2}$")]
+    [string]$RequestedStart = "2026-01-25",
+    [ValidatePattern("^\d{4}-\d{2}-\d{2}$")]
+    [string]$EffectiveStart = "2026-01-26",
+    [ValidatePattern("^\d{4}-\d{2}-\d{2}$")]
+    [string]$RequestedEnd = "2026-07-24"
 )
 
 Set-StrictMode -Version Latest
@@ -37,6 +45,13 @@ $profileDefinitions = @{
         CodesPath = "config\research_backtest_validation_12.txt"
         OutputPath = "audit\chanlun_trading_system_backtest\research_sample_validation_12"
     }
+    diagnostic32 = @{
+        ExpectedCount = 32
+        MaxSectorCount = 8
+        MaxSectorClosure = 2200
+        CodesPath = "config\research_backtest_diagnostic_32.txt"
+        OutputPath = "audit\chanlun_trading_system_backtest\research_sample_diagnostic_32"
+    }
 }
 $profileDefinition = $profileDefinitions[$Profile]
 $researchInputDirectory = Join-Path $repoRoot $profileDefinition.OutputPath
@@ -57,6 +72,19 @@ if ($FullMarket -and $PSBoundParameters.ContainsKey("Profile")) {
 }
 if ($FullMarket -and -not $ConfirmLargeScope) {
     throw "-FullMarket also requires -ConfirmLargeScope."
+}
+$parsedWindow = @(
+    [DateTime]::ParseExact($WarmupStart, "yyyy-MM-dd", $null),
+    [DateTime]::ParseExact($RequestedStart, "yyyy-MM-dd", $null),
+    [DateTime]::ParseExact($EffectiveStart, "yyyy-MM-dd", $null),
+    [DateTime]::ParseExact($RequestedEnd, "yyyy-MM-dd", $null)
+)
+if (
+    $parsedWindow[0] -gt $parsedWindow[1] -or
+    $parsedWindow[1] -gt $parsedWindow[2] -or
+    $parsedWindow[2] -gt $parsedWindow[3]
+) {
+    throw "Expected WarmupStart <= RequestedStart <= EffectiveStart <= RequestedEnd."
 }
 
 $researchCodes = @()
@@ -215,7 +243,11 @@ try {
                 $extractionArguments = @(
                     "--workers", "$Workers",
                     "--pit-snapshot", $pitSnapshot,
-                    "--output-dir", $inputDirectory
+                    "--output-dir", $inputDirectory,
+                    "--warmup-start", $WarmupStart,
+                    "--start", $RequestedStart,
+                    "--effective-start", $EffectiveStart,
+                    "--end", $RequestedEnd
                 )
                 if (-not $FullMarket) {
                     $extractionArguments += @("--codes", ($researchCodes -join ","))
@@ -255,11 +287,11 @@ try {
             $finalizationArguments = @(
                 "--input-dir", $inputDirectory,
                 "--report", $report,
+                "--reuse-sector-cache",
                 "--sector-workers", "$([Math]::Min($Workers, 3))"
             )
             if (-not $FullMarket) {
                 $finalizationArguments += @(
-                    "--reuse-sector-cache",
                     "--max-sector-count", "$($profileDefinition.MaxSectorCount)",
                     "--max-sector-closure", "$($profileDefinition.MaxSectorClosure)"
                 )

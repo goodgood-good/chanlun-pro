@@ -647,8 +647,7 @@ def _validated_review_scope_admission(
     if scope_mode is None and raw_limit is None and raw_admitted is None:
         return "FULL_MARKET", frozenset()
     if (
-        scope_mode
-        not in {"FULL_MARKET", "LARGE_SCOPE", "VALIDATION_COHORT"}
+        scope_mode not in {"FULL_MARKET", "LARGE_SCOPE", "VALIDATION_COHORT"}
         or type(raw_limit) is not int
         or raw_limit <= 0
         or not isinstance(raw_admitted, list)
@@ -662,8 +661,7 @@ def _validated_review_scope_admission(
         raise ValueError("live screening scope admission is invalid")
     admitted = frozenset(raw_admitted)
     if scope_mode != "FULL_MARKET" and (
-        len(admitted) > raw_limit
-        or not set(discovered_codes).issubset(admitted)
+        len(admitted) > raw_limit or not set(discovered_codes).issubset(admitted)
     ):
         raise ValueError("live screening scope admission is invalid")
     return str(scope_mode), admitted
@@ -2977,6 +2975,12 @@ def _separated_buy_decision_evidence_is_consistent(
         structural_stop=setup.get("invalidation_price"),
         exit_action="none",
         structure_anchor_price=setup.get("anchor_price"),
+        five_minute_available_at=setup.get("available_at"),
+        one_minute_available_at=(
+            None
+            if not isinstance(segment_difference, Mapping)
+            else segment_difference.get("available_at")
+        ),
     ).document()
     operational_buy_protections = tuple(
         reason
@@ -3026,7 +3030,7 @@ def _separated_buy_decision_evidence_is_consistent(
         and raw_profile_advisories == expected_advisories
         and profile.get("context_grade") == grade
         and profile.get("context_risk_scale") == context_scale
-        and profile.get("context_risk_scale_role") == "MANUAL_POSITION_SIZING_ONLY"
+        and profile.get("context_risk_scale_role") == "POSITION_RISK_SIZING_ONLY"
         and signal.get("position_recommendation") == expected_position_recommendation
         and profile.get("position_recommendation") == expected_position_recommendation
         and profile.get("manual_confirmation_required") is True
@@ -3477,7 +3481,7 @@ def _displayed_decision_evidence_is_consistent(
             == expected_profile_advisories
             and profile.get("context_grade") == grade
             and profile.get("context_risk_scale") == context_scale
-            and profile.get("context_risk_scale_role") == "MANUAL_POSITION_SIZING_ONLY"
+            and profile.get("context_risk_scale_role") == "POSITION_RISK_SIZING_ONLY"
             and signal.get("position_recommendation")
             == expected_position_recommendation
             and profile.get("position_recommendation")

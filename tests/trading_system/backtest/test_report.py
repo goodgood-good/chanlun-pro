@@ -240,7 +240,10 @@ def test_required_ablation_and_benchmark_fields_are_present() -> None:
     assert tuple(row["ablation_id"] for row in report["ablations"]) == (
         REQUIRED_ABLATION_IDS
     )
-    assert all("quality_change" in row and "sample_reduction" in row for row in report["ablations"])
+    assert all(
+        "quality_change" in row and "sample_reduction" in row
+        for row in report["ablations"]
+    )
     assert tuple(row["benchmark_id"] for row in report["benchmarks"]) == (
         REQUIRED_BENCHMARK_IDS
     )
@@ -415,3 +418,24 @@ def test_execution_contract_discloses_unified_buy_point_execution() -> None:
     assert "trigger_frequency" not in contract
     assert contract["max_five_minute_setup_age_seconds"] == 345600
     assert contract["formal_selection_required"] is False
+    assert contract["same_bar_entry_stop_forbidden"] is True
+    assert contract["breakeven_arm_r_multiple"] == "1"
+    assert contract["breakeven_activation"] == (
+        "trigger_observed_in_completed_bar_stop_active_next_bar"
+    )
+    assert contract["context_grade_scales_portfolio_risk"] is True
+    assert contract["simultaneous_entries_causally_ranked"] is True
+    assert contract["max_buy_anchor_drift_rate"] == "0.05"
+    assert contract["entry_price_cap_source"] == (
+        "one_minute_confirmation_bar_raw_high"
+    )
+    assert contract["entry_price_cap_mixed_bar_resolution"] == (
+        "defer_until_whole_bar_within_cap_or_terminal_rejection_or_ttl"
+    )
+    assert contract["base_trade_risk"] == "0.001"
+    assert contract["max_symbol_fraction"] == "0.05"
+    assert contract["max_sector_fraction"] == "0.2"
+    assert contract["max_portfolio_heat"] == "0.02"
+    diagnostics = report["execution_diagnostics"]
+    assert diagnostics["admission_rejection_count"] == 0
+    assert diagnostics["admission_rejections_by_reason"] == {}

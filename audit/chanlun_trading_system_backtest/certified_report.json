@@ -1,0 +1,854 @@
+{
+  "ablations": [
+    {
+      "ablation_id": "original_definitions_only",
+      "calmar": null,
+      "completed": false,
+      "data_grade": "invalid",
+      "failure_codes": [
+        "fixed_policy_ablation_not_run"
+      ],
+      "label": "original_definitions_only",
+      "max_drawdown": "0",
+      "net_return": "0",
+      "quality_change": "0",
+      "sample_reduction": "0",
+      "trade_count": 0
+    },
+    {
+      "ablation_id": "plus_sector_ranking",
+      "calmar": null,
+      "completed": false,
+      "data_grade": "invalid",
+      "failure_codes": [
+        "fixed_policy_ablation_not_run"
+      ],
+      "label": "plus_sector_ranking",
+      "max_drawdown": "0",
+      "net_return": "0",
+      "quality_change": "0",
+      "sample_reduction": "0",
+      "trade_count": 0
+    },
+    {
+      "ablation_id": "plus_30m_context",
+      "calmar": null,
+      "completed": false,
+      "data_grade": "invalid",
+      "failure_codes": [
+        "fixed_policy_ablation_not_run"
+      ],
+      "label": "plus_30m_context",
+      "max_drawdown": "0",
+      "net_return": "0",
+      "quality_change": "0",
+      "sample_reduction": "0",
+      "trade_count": 0
+    },
+    {
+      "ablation_id": "plus_1m_segment_difference",
+      "calmar": null,
+      "completed": false,
+      "data_grade": "invalid",
+      "failure_codes": [
+        "fixed_policy_ablation_not_run"
+      ],
+      "label": "plus_1m_segment_difference",
+      "max_drawdown": "0",
+      "net_return": "0",
+      "quality_change": "0",
+      "sample_reduction": "0",
+      "trade_count": 0
+    },
+    {
+      "ablation_id": "plus_unified_buy_point_execution",
+      "calmar": null,
+      "completed": false,
+      "data_grade": "invalid",
+      "failure_codes": [
+        "fixed_policy_ablation_not_run"
+      ],
+      "label": "plus_unified_buy_point_execution",
+      "max_drawdown": "0",
+      "net_return": "0",
+      "quality_change": "0",
+      "sample_reduction": "0",
+      "trade_count": 0
+    },
+    {
+      "ablation_id": "plus_portfolio_risk",
+      "calmar": null,
+      "completed": false,
+      "data_grade": "invalid",
+      "failure_codes": [
+        "fixed_policy_ablation_not_run"
+      ],
+      "label": "plus_portfolio_risk",
+      "max_drawdown": "0",
+      "net_return": "0",
+      "quality_change": "0",
+      "sample_reduction": "0",
+      "trade_count": 0
+    }
+  ],
+  "active_strategy_count": 1,
+  "aggregate_out_of_sample": {
+    "annualized_return": null,
+    "calmar": null,
+    "cost_to_gross_profit": null,
+    "expectancy": "-0.01022282652067566271607382127",
+    "expected_shortfall_95": "0.0009342826152408022",
+    "exposure_ratio": "0.2570173297534781547473761289",
+    "max_drawdown": "0.003358351087638650784547123589",
+    "max_drawdown_duration_bars": 12553,
+    "net_return": "-0.00054534",
+    "payoff_ratio": null,
+    "profit_factor": "0",
+    "sharpe": null,
+    "sortino": null,
+    "total_cost": "74.34",
+    "turnover": "0.127373",
+    "ulcer_index": "0.0020721213661407467",
+    "value_at_risk_95": "0.0005676747783011867",
+    "warnings": [
+      "insufficient_calendar_span",
+      "symbol_trade_concentration_over_20pct",
+      "sector_trade_concentration_over_20pct"
+    ],
+    "win_rate": "0",
+    "worst_day": "-0.0012844497378899169487973324",
+    "worst_month": "-0.00050181",
+    "worst_trade": "-0.01450794740562567952740177428",
+    "worst_week": "-0.0024124862867165721415362403"
+  },
+  "algorithm_hashes": [
+    {
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "src/chanlun/__init__.py"
+    },
+    {
+      "sha256": "sha256:2a47271cfd0aadafdbfaaab045462ca6c495b9109675e38665339aeca86782da",
+      "source": "src/chanlun/config.py"
+    },
+    {
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "src/chanlun/core/__init__.py"
+    },
+    {
+      "sha256": "sha256:3f346c587544a00f8bd59bff5df1730e3e30ee6662ef88d50987bd25af2194a8",
+      "source": "src/chanlun/core/bi_calculator.py"
+    },
+    {
+      "sha256": "sha256:fcf28b85b4015c590dcc45e82e8d34f682445e274bce792a87565e5d779ef604",
+      "source": "src/chanlun/core/cl.py"
+    },
+    {
+      "sha256": "sha256:b911a96287d86379bf644dd6aa52980ee7ad6159322e6721e74985867967b4ba",
+      "source": "src/chanlun/core/cl_kline_process.py"
+    },
+    {
+      "sha256": "sha256:fffc12d1cd49cbb6010a690c4cb17076b5150472c6eb60a94bab2a6304a963ca",
+      "source": "src/chanlun/core/kline_data_processor.py"
+    },
+    {
+      "sha256": "sha256:bee9e00a82de17f7f48443233bbcddf9f7c8bdcd2da4c15442f0d25dbee36ce0",
+      "source": "src/chanlun/core/macd.py"
+    },
+    {
+      "sha256": "sha256:495345d2c756a13c9899ef6fb8a7e7883f44a59aa2d4c7c126b2aa9ea9e03ef9",
+      "source": "src/chanlun/core/macd_htf.py"
+    },
+    {
+      "sha256": "sha256:7c14bef8e1caa5528fcc13d087042cf7721f66e4bac8838643c44684b0e7646d",
+      "source": "src/chanlun/core/strict_structure/__init__.py"
+    },
+    {
+      "sha256": "sha256:05eb0d8dcd02f5aa93fe629f69390959b960eb8fae6498a0fa326cee1efccce6",
+      "source": "src/chanlun/core/strict_structure/base_profile.py"
+    },
+    {
+      "sha256": "sha256:12681d2164672ff190a0457078c56dbd7050031d9b5d6feee6880bb40da54354",
+      "source": "src/chanlun/core/strict_structure/center_machine.py"
+    },
+    {
+      "sha256": "sha256:df7bf4ce6ec0f2df63305f5eb4f8ed46755af1485e30892d81e49cd08e2d4fb3",
+      "source": "src/chanlun/core/strict_structure/center_relation.py"
+    },
+    {
+      "sha256": "sha256:5a22e2a4f94d235fafbbea1226d65051bcd94eaa601765298e684c6da29a82be",
+      "source": "src/chanlun/core/strict_structure/current_events.py"
+    },
+    {
+      "sha256": "sha256:b64dd571b82f762c23ee44da5d4411d973a0a2c63ce3da9684ca8ffd43d4afab",
+      "source": "src/chanlun/core/strict_structure/divergence.py"
+    },
+    {
+      "sha256": "sha256:d39373aaca9df64b9c0a34937f5d080545a2a25b318210742c77b30a9e5430ac",
+      "source": "src/chanlun/core/strict_structure/errors.py"
+    },
+    {
+      "sha256": "sha256:ee42da527842847d36791b25d2619b042d3efc5c470596a9069968df95423cc4",
+      "source": "src/chanlun/core/strict_structure/evidence_assembler.py"
+    },
+    {
+      "sha256": "sha256:ae08a59290a93307050404ddc9837e7e8ac0487c6a18bac561797aa7257a74f9",
+      "source": "src/chanlun/core/strict_structure/formal_state.py"
+    },
+    {
+      "sha256": "sha256:f00984491e4453ae33fa1e13996808e9b304a20f4047d5c9348e888b6b6b6392",
+      "source": "src/chanlun/core/strict_structure/identity.py"
+    },
+    {
+      "sha256": "sha256:efe11025e00edf88e2e8a517ee14d806409f68d24d4f2da240b03547d4f03584",
+      "source": "src/chanlun/core/strict_structure/level_catalog.py"
+    },
+    {
+      "sha256": "sha256:667eb6ef9c0bf6a8e57ffd8b56f482f691c9a50ae9116337549480448c1c160c",
+      "source": "src/chanlun/core/strict_structure/models.py"
+    },
+    {
+      "sha256": "sha256:27180b509076cfe61d92cfd34bda4aa698000b6d2597bd0f5ed1f2835a60b97e",
+      "source": "src/chanlun/core/strict_structure/point_rules.py"
+    },
+    {
+      "sha256": "sha256:c95de92519cb3f1376d41a51a7edc8ddfadbb44a6ac5c710f201ffa18cd897e9",
+      "source": "src/chanlun/core/strict_structure/recursive_engine.py"
+    },
+    {
+      "sha256": "sha256:632632d0071a6ea4e351e35417ca07ab79019ac9ac0e16ec3fd3f53add9444fb",
+      "source": "src/chanlun/core/strict_structure/same_level_decomposition.py"
+    },
+    {
+      "sha256": "sha256:6759715465220496626cfccb5f15e83d8a71df54e232a99755920c390586cb98",
+      "source": "src/chanlun/core/strict_structure/signals.py"
+    },
+    {
+      "sha256": "sha256:b6eea83b5b04013e07daf15b8e561c579f071dfa5421309d78729ad6e2b0e53f",
+      "source": "src/chanlun/core/strict_structure/strength.py"
+    },
+    {
+      "sha256": "sha256:d5a44b92681df8ab890add71433cba58eadeb8b2bb8bb78879017bea4306b21f",
+      "source": "src/chanlun/core/strict_structure/trend_assembler.py"
+    },
+    {
+      "sha256": "sha256:538125d1135c26bdd5baa3f2851a3107911b6b16ebd44cd0ce198c2054a33c44",
+      "source": "src/chanlun/core/strict_structure/unit_adapter.py"
+    },
+    {
+      "sha256": "sha256:20df57e1d51d89014e885ddcdb35b5184517596c28d1d162bba57a5190559de4",
+      "source": "src/chanlun/core/strict_structure/upgrade_evidence.py"
+    },
+    {
+      "sha256": "sha256:09a78b188b10167481d8ed55a615e7995cdc598f3a2eb0e04600ea9b5dbec64b",
+      "source": "src/chanlun/core/types/__init__.py"
+    },
+    {
+      "sha256": "sha256:80cbca3698a32493db1d7bd8a309bbc0f5e6ef45a4c002346649cb39374dd1a7",
+      "source": "src/chanlun/core/types/interface.py"
+    },
+    {
+      "sha256": "sha256:3ea54037561f5c1301ae2f0fa5a9111ec72cfe805906e801cb6b7c873fda9be8",
+      "source": "src/chanlun/core/types/kline.py"
+    },
+    {
+      "sha256": "sha256:35be190850b15a1c7f5b0cd6f4157910d6e040b8d77b90ab7a4b7fe8018f4280",
+      "source": "src/chanlun/core/types/line.py"
+    },
+    {
+      "sha256": "sha256:f807bf5848e5661df52a0d2592494d29f4cb4972a0fe7d662f848ca646fc1ad4",
+      "source": "src/chanlun/core/xd_calculator.py"
+    },
+    {
+      "sha256": "sha256:32d24dd3043ac8891f7c15e42aabc693acedb13a2d87d3c5e161df0f7e3f8118",
+      "source": "src/chanlun/decision_support/__init__.py"
+    },
+    {
+      "sha256": "sha256:25b1fdedfa006671bccf707e7e1e8642cd018789e9f2d95e5872b48639bb9007",
+      "source": "src/chanlun/decision_support/fingerprints.py"
+    },
+    {
+      "sha256": "sha256:bf01481a083eaf66f201eca1d75ad264a1e95521aed2382f06672f150bb65213",
+      "source": "src/chanlun/decision_support/trading_system/__init__.py"
+    },
+    {
+      "sha256": "sha256:175f7abf385480ec17ccaa4cdd1653721d4337fdf8a93b0229e4a44ea6415ce1",
+      "source": "src/chanlun/decision_support/trading_system/a_share_minute_grid.py"
+    },
+    {
+      "sha256": "sha256:60b38f42f92733f49339d879e38b4322670e0d28255c91b6a4d03906aa02633b",
+      "source": "src/chanlun/decision_support/trading_system/backtest/__init__.py"
+    },
+    {
+      "sha256": "sha256:498564cc78307e2764a8b86daf3bb0a875e98978205cd236156f965f48f3ae04",
+      "source": "src/chanlun/decision_support/trading_system/backtest/benchmarks.py"
+    },
+    {
+      "sha256": "sha256:0a08762c8ec02b2802db618671c3ff0d979d542fdd4c9134bb0be81df00ef71e",
+      "source": "src/chanlun/decision_support/trading_system/backtest/causality_gate_contract.py"
+    },
+    {
+      "sha256": "sha256:cb9f66bd06ee0b6920de2e546f9a8f289c351c8976d08e4e3fdea41bac23a8c9",
+      "source": "src/chanlun/decision_support/trading_system/backtest/current_sector.py"
+    },
+    {
+      "sha256": "sha256:f2326ba3369b22ae5354ff5e16564aaf83f5c07718a83a69721fff8a31bb4420",
+      "source": "src/chanlun/decision_support/trading_system/backtest/data_audit.py"
+    },
+    {
+      "sha256": "sha256:296483318af156a54373fdd35dd6609f5cba6ad6ef4d10db6abf03250d0aace6",
+      "source": "src/chanlun/decision_support/trading_system/backtest/execution.py"
+    },
+    {
+      "sha256": "sha256:ee282cd0ebecbb2515d0580892a09794020e51a1d9e5274626e4d330326a984e",
+      "source": "src/chanlun/decision_support/trading_system/backtest/fixed_year.py"
+    },
+    {
+      "sha256": "sha256:bb139274a596ecda34bb9edbb2dd0ea66dbe40156fb06360a1a190df66f6a6a4",
+      "source": "src/chanlun/decision_support/trading_system/backtest/metrics.py"
+    },
+    {
+      "sha256": "sha256:cc0800696fdf53b0afdc183d6cacf97bf84c4d472c10744c1947e51c5e26b2b0",
+      "source": "src/chanlun/decision_support/trading_system/backtest/models.py"
+    },
+    {
+      "sha256": "sha256:f87847a7d053e0bf2d829941b0f6ef2d95db0420e60e5127afd5fce226326253",
+      "source": "src/chanlun/decision_support/trading_system/backtest/pit_metadata.py"
+    },
+    {
+      "sha256": "sha256:6054f356e2cbf56b84580e8f82cbfcac9257446efca9ea599ac0c7211d5f864f",
+      "source": "src/chanlun/decision_support/trading_system/backtest/pit_scope.py"
+    },
+    {
+      "sha256": "sha256:eccf575d9e8507a0e6d9488b81d8f64048880ada9914cacfd9de580ad47bd83b",
+      "source": "src/chanlun/decision_support/trading_system/backtest/pit_sector.py"
+    },
+    {
+      "sha256": "sha256:6358112e068554b35b47c754a528b2edc2b13ccc635bb514c4f7e395c926da46",
+      "source": "src/chanlun/decision_support/trading_system/backtest/portfolio.py"
+    },
+    {
+      "sha256": "sha256:8154ddf34c67ae09b1ad5c67f85f0331fbed5247c9150961accbe0ae13645e00",
+      "source": "src/chanlun/decision_support/trading_system/backtest/qmt_local_cache.py"
+    },
+    {
+      "sha256": "sha256:3f78230f8be97dc8ab0ca5a7bae4d576063991f5d33b1a0da550c2eb3dccb352",
+      "source": "src/chanlun/decision_support/trading_system/backtest/report.py"
+    },
+    {
+      "sha256": "sha256:f3942d355258fe939cb1d624562591117d6b9b3a2ae0a66927263d6fc57a5dd0",
+      "source": "src/chanlun/decision_support/trading_system/backtest/walk_forward.py"
+    },
+    {
+      "sha256": "sha256:da0ea70ff3a0e4162733cfa9f8ea3785c165b0606a418e6a3af9c79e95d407ab",
+      "source": "src/chanlun/decision_support/trading_system/bar_execution.py"
+    },
+    {
+      "sha256": "sha256:bec18d462e61056eaffca9b614198be72707c2bc649ac5d53d275aba842f5bea",
+      "source": "src/chanlun/decision_support/trading_system/candidate_warmup_diagnostics.py"
+    },
+    {
+      "sha256": "sha256:313bf6f3a3130b16f55038f4d98c03cda659a72e4702e81f7e53d8464afa6d4f",
+      "source": "src/chanlun/decision_support/trading_system/conflicts.py"
+    },
+    {
+      "sha256": "sha256:f29cbaa3f5dabe109fa0e74e2ac12b6476dedb006d61ef617c3f47e6cc58202b",
+      "source": "src/chanlun/decision_support/trading_system/context.py"
+    },
+    {
+      "sha256": "sha256:ade99704142fc450506ce6cf62e50b814eac42eb2f209aeb9d052c3185ed6ac7",
+      "source": "src/chanlun/decision_support/trading_system/context_evidence.py"
+    },
+    {
+      "sha256": "sha256:ef0f56b102bb1827e051260bae561bf327e96677f3541ba3f3e58672e57f4ec0",
+      "source": "src/chanlun/decision_support/trading_system/data_audit.py"
+    },
+    {
+      "sha256": "sha256:04759cf2d33748eb4b2123a5ef2963786d9179ba37f3dad7f1ef34467ccbbdf2",
+      "source": "src/chanlun/decision_support/trading_system/decision_source_provenance.py"
+    },
+    {
+      "sha256": "sha256:4a72d6f9ad60b9077b5c2f1c9d4368bc0c0d41101d6c5daf3741f6fdaa338458",
+      "source": "src/chanlun/decision_support/trading_system/engine.py"
+    },
+    {
+      "sha256": "sha256:09ad3ca84f339e973a4be7354b7b9f84a4d707afd3ddca44cc119758bd06e839",
+      "source": "src/chanlun/decision_support/trading_system/etf_proxy_facts.py"
+    },
+    {
+      "sha256": "sha256:7c300c2b1cfe2c6a04553cda98f3151f299f9cc3db4664569a6c9ec7573e8b4e",
+      "source": "src/chanlun/decision_support/trading_system/execution.py"
+    },
+    {
+      "sha256": "sha256:efbd8b6707d33a83f25b79279f90b9a1876caec1bb9c1995c714bd22c03716ae",
+      "source": "src/chanlun/decision_support/trading_system/execution_policy.py"
+    },
+    {
+      "sha256": "sha256:5b2de45fba3c31c4915633fdb87431fe6c42f675e0a85ceffbe89a336cef5d7a",
+      "source": "src/chanlun/decision_support/trading_system/file_lock.py"
+    },
+    {
+      "sha256": "sha256:140b50b539537b105b741da4a58718fb5cd5019216bd19a773c7a82775670272",
+      "source": "src/chanlun/decision_support/trading_system/five_minute_setup_state.py"
+    },
+    {
+      "sha256": "sha256:24fcad29fc0a4d8f8bf25fc0663dc175e733517f1f16337119771a73370632ba",
+      "source": "src/chanlun/decision_support/trading_system/forward_paper.py"
+    },
+    {
+      "sha256": "sha256:ca153bad8ee1698fc00ae7539fd8d96a8022763bbc5c507838ad8b1ac5033887",
+      "source": "src/chanlun/decision_support/trading_system/forward_review_markout.py"
+    },
+    {
+      "sha256": "sha256:00d72ee10b5d6eac68498e9d864c5642aef2665f2ea0a18255c2269401a6c867",
+      "source": "src/chanlun/decision_support/trading_system/forward_warmup_structure_lineage.py"
+    },
+    {
+      "sha256": "sha256:162c091bbd7125afec0ea3dd68f93f287af692b2a810850b0adeec693a0ecec3",
+      "source": "src/chanlun/decision_support/trading_system/higher_timeframe_execution_attribution.py"
+    },
+    {
+      "sha256": "sha256:864f919777cf34ced31c83d73280ca49d2fbc8fd5217317462b2f306764e3f14",
+      "source": "src/chanlun/decision_support/trading_system/higher_timeframe_gate.py"
+    },
+    {
+      "sha256": "sha256:a058468f9014ba29c147df7e3929f38d34d7f4dbd9d021c8779a792e6efe3a19",
+      "source": "src/chanlun/decision_support/trading_system/human_assisted_decision.py"
+    },
+    {
+      "sha256": "sha256:4e45388a14def79ead85e0de544356262ca5af6e3be9efa180ef25958b02bc77",
+      "source": "src/chanlun/decision_support/trading_system/human_paper_accounting.py"
+    },
+    {
+      "sha256": "sha256:5cad036e7ceeef088e6e9fd6e4b2c78b4242b83b78f516fc9df628a89fdd32bb",
+      "source": "src/chanlun/decision_support/trading_system/human_paper_ledger.py"
+    },
+    {
+      "sha256": "sha256:936dcee8a46399202970ce91b2a6b015ee1302c526c8d100cfc133868827c628",
+      "source": "src/chanlun/decision_support/trading_system/human_paper_valuation.py"
+    },
+    {
+      "sha256": "sha256:2aa7f811c55128422e789497c3aa9d550d1cb7d3c37574b9dfa1dc1668b5f77a",
+      "source": "src/chanlun/decision_support/trading_system/human_review_screening.py"
+    },
+    {
+      "sha256": "sha256:8ef90afa114fca07a82dde5f57b2f3333c88950927e345dbf44c28c8a84d6f9b",
+      "source": "src/chanlun/decision_support/trading_system/incremental_scan.py"
+    },
+    {
+      "sha256": "sha256:23788f5c2203e9ecf8917eacbf102e9d7808f9f0c1373c35cc8fc324fdfb588b",
+      "source": "src/chanlun/decision_support/trading_system/individual_research.py"
+    },
+    {
+      "sha256": "sha256:4b15702aaf72c994db940bc180e891287abcb8efb4ccc932f1a10e09f0c65f82",
+      "source": "src/chanlun/decision_support/trading_system/lifecycle.py"
+    },
+    {
+      "sha256": "sha256:7c04f3e18286adf36121ed88e04e0c9878ae7665c40e5f6914d647cc4051e615",
+      "source": "src/chanlun/decision_support/trading_system/live_human_review.py"
+    },
+    {
+      "sha256": "sha256:c5aee69bd9e341d9f81b5243b16bac64e8216fa78585b85cc675159570be3456",
+      "source": "src/chanlun/decision_support/trading_system/live_review_materialization.py"
+    },
+    {
+      "sha256": "sha256:0aab3e745477f08e16c0fa26a4c2e072131c7a5b8f87f1c0596856c01c4f6397",
+      "source": "src/chanlun/decision_support/trading_system/models.py"
+    },
+    {
+      "sha256": "sha256:8c5cb36a00de62946c307d69ac7b38a5ac621ac7da0549a9c21a4d4712b19b15",
+      "source": "src/chanlun/decision_support/trading_system/operation_level.py"
+    },
+    {
+      "sha256": "sha256:d91df9a8c626bb63f58cbf084b6beba6e89e6009ffdb63174da7d7dfee3c4d88",
+      "source": "src/chanlun/decision_support/trading_system/parameters.py"
+    },
+    {
+      "sha256": "sha256:904260b53c56e5b05f14070441fbc88e33e046c7ec6e5ec2200142eb73083865",
+      "source": "src/chanlun/decision_support/trading_system/portfolio.py"
+    },
+    {
+      "sha256": "sha256:3b6aa8348ce6580d78260b5f7a56bcfed54a46283433acc12d01885f6b7fc912",
+      "source": "src/chanlun/decision_support/trading_system/portfolio_risk.py"
+    },
+    {
+      "sha256": "sha256:6d6ea99462074d655fa0691078a705b24f0f81bd4ef2eeb472a7b03fb83d04f7",
+      "source": "src/chanlun/decision_support/trading_system/position_recommendation.py"
+    },
+    {
+      "sha256": "sha256:2099717f914ad5e84f3641f1d54f51190ab97fa6cf68de8a167a79907ce8abfe",
+      "source": "src/chanlun/decision_support/trading_system/provisional.py"
+    },
+    {
+      "sha256": "sha256:3dc3572a1ed4bb86e7a3b1bcf62c4007daddb566f226d6c44bab431cc89977bc",
+      "source": "src/chanlun/decision_support/trading_system/qmt_causal_factor_adjustment.py"
+    },
+    {
+      "sha256": "sha256:a70198e4e52e9445ae901a6a4dfc35af08b2d1b3342f2dda4ef9c162cc434441",
+      "source": "src/chanlun/decision_support/trading_system/qmt_higher_timeframe.py"
+    },
+    {
+      "sha256": "sha256:4925592deda4597eaf994fef4f874fdb0b4ec648baa3ed2f0923d2184d7beb7b",
+      "source": "src/chanlun/decision_support/trading_system/qmt_instrument_status_snapshot.py"
+    },
+    {
+      "sha256": "sha256:6fd79ef9233adc4df00bf665f56ab9ffb159dba9f09468d8c95a39b74453a6f2",
+      "source": "src/chanlun/decision_support/trading_system/qmt_native_daily_bridge.py"
+    },
+    {
+      "sha256": "sha256:d1f656f3c58498aef87a0adfb7a2bc0c8bddf7c3702034e8a782ca0c9136b13c",
+      "source": "src/chanlun/decision_support/trading_system/qmt_same_base_stream.py"
+    },
+    {
+      "sha256": "sha256:405d75d49753b9f21a73514f2b6a0c9afdaac010d7b0913723b13c21895e191f",
+      "source": "src/chanlun/decision_support/trading_system/qmt_sector_ledger.py"
+    },
+    {
+      "sha256": "sha256:1fefffca17343e4b5cefc203f9a777cdf7eb5227b92fe5d82e510f871d0a86b7",
+      "source": "src/chanlun/decision_support/trading_system/qmt_sector_same_base.py"
+    },
+    {
+      "sha256": "sha256:0886602d54c5d7eb359c7e6f1977ba65c84c2cc3c71917dc17042e0bdac98034",
+      "source": "src/chanlun/decision_support/trading_system/runtime_config.py"
+    },
+    {
+      "sha256": "sha256:37349f6aab90daa2f34d807572b9ef7b5d02afea6559ea29f6db78ef87a0119c",
+      "source": "src/chanlun/decision_support/trading_system/screening_runtime.py"
+    },
+    {
+      "sha256": "sha256:ca8d2fc7637399382703829216977ed6a00657957c2d49fb8118bff8265ee646",
+      "source": "src/chanlun/decision_support/trading_system/screening_structure.py"
+    },
+    {
+      "sha256": "sha256:2308f8f0c14821b0cb992c940383cb0a60246a9ee35365fb294ca39fe6bd1db0",
+      "source": "src/chanlun/decision_support/trading_system/screening_warmup.py"
+    },
+    {
+      "sha256": "sha256:5e74774776a2ed723bc09832e929dabd39d941fd8472fb57c5f4178339af7259",
+      "source": "src/chanlun/decision_support/trading_system/sector_first_scope.py"
+    },
+    {
+      "sha256": "sha256:9b0d763395ff472ebe397fb76f942fb58d95f4ffd2949a53ff52116c5a0b8d2e",
+      "source": "src/chanlun/decision_support/trading_system/sector_policy.py"
+    },
+    {
+      "sha256": "sha256:a13ea3cf9d5f285a34b0fd6dd6bb7c05cb859c7546334520ff2bb03880e8060f",
+      "source": "src/chanlun/decision_support/trading_system/sector_strength.py"
+    },
+    {
+      "sha256": "sha256:6c00e89770d503504649a9dba16f8bed3cf91125dd7aa76d699c0dde4222b389",
+      "source": "src/chanlun/decision_support/trading_system/selection.py"
+    },
+    {
+      "sha256": "sha256:b9f602d410a531b753875c1ab2fa5b6ff57a15dfbcea5b537f112021fea82da4",
+      "source": "src/chanlun/decision_support/trading_system/signal_alignment.py"
+    },
+    {
+      "sha256": "sha256:015dad01e51fef976e898c8a6c2d6c828b887f127cbd8a1b03eea01c3e49cc5f",
+      "source": "src/chanlun/decision_support/trading_system/strict_realtime_monitor.py"
+    },
+    {
+      "sha256": "sha256:062294d7458b0455db472fbcd5dd36972306ba9b0dce641f4124339c19e3ca12",
+      "source": "src/chanlun/decision_support/trading_system/structure_adapter.py"
+    },
+    {
+      "sha256": "sha256:af7fd9ac644d44a4739c70ebd1f37be6ee54fb04294693f04cc2fcdf4767cb96",
+      "source": "src/chanlun/decision_support/trading_system/trading_session.py"
+    },
+    {
+      "sha256": "sha256:ee645f638ad5aec51fc8d044dfdacb065bed889e2d08e12eb4be9ece402fd001",
+      "source": "src/chanlun/decision_support/trading_system/warmup_convergence.py"
+    },
+    {
+      "sha256": "sha256:fa23c75a69a217327a0e9017b17ac718b2f6ff50de734674007d3f91075b5bea",
+      "source": "src/chanlun/decision_support/trading_system/warmup_structure_lineage.py"
+    },
+    {
+      "sha256": "sha256:3481dc2090057f019700962dedad1f4038a22d400bb8a088c5fff1aa41e0b4e7",
+      "source": "src/chanlun/exchange/__init__.py"
+    },
+    {
+      "sha256": "sha256:396d64908ca8d7bfb1ab922408d9b5d50b93953c1c4b246030cdcbbcbde4cfee",
+      "source": "src/chanlun/exchange/exchange.py"
+    },
+    {
+      "sha256": "sha256:7d903e321bb5e353d7f7631ef5ba42972bbd3cd249e7d595dd18505499e28f57",
+      "source": "src/chanlun/exchange/kline_precision.py"
+    },
+    {
+      "sha256": "sha256:5b0a65bc74e39f8c80ba5efc3a11dd10b78a5ad71df124e5d0826fbf0e151ac4",
+      "source": "src/chanlun/exchange/price_basis.py"
+    },
+    {
+      "sha256": "sha256:94f16f459cbf9b1f5cd2a587729726a8ee8ad77b531b93507a7aa1f01a010cac",
+      "source": "src/chanlun/exchange/qmt_screening_sector_source.py"
+    },
+    {
+      "sha256": "sha256:c01003a047f4db614873d53c602184e20d03a8c7c85a17d322139e52274e1f7a",
+      "source": "src/chanlun/market.py"
+    },
+    {
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "src/chanlun/tools/__init__.py"
+    },
+    {
+      "sha256": "sha256:82126e4bf39dc6369941ce9bd97624e7d0e05a695563cebd69fffd09a0646366",
+      "source": "src/chanlun/tools/log_util.py"
+    },
+    {
+      "sha256": "sha256:ec42a2826fe6577976560d08ca65f721d1433846e89e60f99c46d722b3c983e3",
+      "source": "tools/audit_qmt_prefix_invariance.py"
+    },
+    {
+      "sha256": "sha256:a609e510947479446c9c0144c171e8df6814ef7e2343d88d1f627e60fca30abe",
+      "source": "tools/backtest_qmt_fixed_year.py"
+    },
+    {
+      "sha256": "sha256:e18d57a63df2cfee857ee5faab5223a8b7283ed73edcb0a9cca36d3414d441e3",
+      "source": "tools/backtest_qmt_fixed_year.py#symbol_fact_worker"
+    },
+    {
+      "sha256": "sha256:b385b615f89520fae40856e49aa751facb75ae2f97a898ecdf97db0c4931ebad",
+      "source": "tools/finalize_qmt_pit_fixed_year.py"
+    },
+    {
+      "sha256": "sha256:99a157335e86cb3f2736cbf4d201c1ccdc373f02782582e380452435a0a2cde9",
+      "source": "tools/qmt_research_contract.py"
+    },
+    {
+      "sha256": "sha256:ab6ca87906a8bd7098519c004620f2dd6af02a1ed825124acc3fd97bac4a7093",
+      "source": "tools/snapshot_qmt_pit_metadata.py"
+    }
+  ],
+  "benchmarks": [
+    {
+      "benchmark_id": "csi_300",
+      "data_grade": "invalid",
+      "label": "csi_300",
+      "max_drawdown": null,
+      "net_return": null
+    },
+    {
+      "benchmark_id": "csi_500",
+      "data_grade": "invalid",
+      "label": "csi_500",
+      "max_drawdown": null,
+      "net_return": null
+    },
+    {
+      "benchmark_id": "eligible_universe_equal_weight",
+      "data_grade": "invalid",
+      "label": "eligible_universe_equal_weight",
+      "max_drawdown": null,
+      "net_return": null
+    }
+  ],
+  "bootstrap_intervals": {
+    "cluster_count": 3,
+    "expectancy": {
+      "lower": "-0.014507947405625679",
+      "median": "-0.010222826520675663",
+      "upper": "-0.002179858422827855"
+    },
+    "max_drawdown": {
+      "lower": "0.006525330278466468",
+      "median": "0.030403989664660513",
+      "upper": "0.04289545424367791"
+    },
+    "net_return": {
+      "lower": "-0.04289545424367791",
+      "median": "-0.030403989664660513",
+      "upper": "-0.006525330278466468"
+    },
+    "repetitions": 2000,
+    "seed": 20260720
+  },
+  "concentration": {
+    "limit": "0.2",
+    "max_sector_trade_fraction": "0.6666666666666666666666666667",
+    "max_symbol_trade_fraction": "0.3333333333333333333333333333",
+    "passed": false
+  },
+  "content_sha256": "sha256:b08818db957209344b56dbe66e8c62540afa4cd54e4ec8e780d62abe8a3a19c3",
+  "data_evidence": {
+    "coverage": {
+      "archived_universe_membership_coverage": "1",
+      "causal_current_structure_ledgers": "1",
+      "corporate_action_accounting": "1",
+      "entry_higher_timeframe_integrity_evidence": "1",
+      "exact_one_minute_nesting_pair_scheduling": "1",
+      "historical_membership": "1",
+      "historical_security_status": "1",
+      "point_in_time_adjustment": "1",
+      "sector_event_coverage": "1",
+      "symbol_extraction": "1"
+    },
+    "failures": [],
+    "grade": "certified",
+    "warnings": [
+      "fixed_policy_single_year_no_parameter_search",
+      "malformed_qmt_expiry_sentinels_resolved_by_status_and_observed_bars",
+      "gross_cash_dividends_before_investor_specific_holding_period_tax"
+    ]
+  },
+  "data_source_hashes": {
+    "certified_portfolio_run": "sha256:adbd7ea5b3738a53387bdfc344ba1e6db27f1bd950a809338fce3f54b79b251b",
+    "pit_metadata_snapshot": "sha256:102de46686ab8667ee2fa4b261217ac9f5a739e7a4316fcb78e5494d27be0512",
+    "prefix_invariance_audit": "sha256:e86b11e864ee7ed3679154acc61e184866ee6ce4f3a264862bc50987f37a5f3b",
+    "qmt_extract_manifest": "sha256:6e3adb502edfa588cef35013c2c2146388ef2febd6f88b088de28d2e12a80149",
+    "sector_fact_checkpoint_tree": "sha256:07bf0a97dc495dcefa6e0dae3a792b1c182bd34d0eb6c328e5a934e6ce8c902d",
+    "symbol_fact_checkpoint_tree": "sha256:de5fdeec03b67854bc34ea0524b6f81f5a28c6219f90c59d87229787e572d63b"
+  },
+  "effective_range": {
+    "end": "2026-07-24",
+    "start": "2026-01-26"
+  },
+  "evaluation_mode": "fixed_policy_one_year",
+  "execution_contract": {
+    "base_trade_risk": "0.001",
+    "breakeven_activation": "trigger_observed_in_completed_bar_stop_active_next_bar",
+    "breakeven_arm_r_multiple": "1",
+    "buy_point_classes_share_execution_logic": true,
+    "context_frequency": "30m",
+    "context_grade_scales_portfolio_risk": true,
+    "entry_liquidity_resize": "one_shot_to_10pct_minute_volume",
+    "entry_price_cap_mixed_bar_resolution": "defer_until_whole_bar_within_cap_or_terminal_rejection_or_ttl",
+    "entry_price_cap_source": "one_minute_confirmation_bar_raw_high",
+    "entry_risk_ttl_seconds": 300,
+    "execution_observation_frequency": "1m",
+    "exit_liquidity_execution": "partial_up_to_10pct_minute_volume_until_complete",
+    "formal_selection_required": false,
+    "intraday_structural_stop": true,
+    "max_buy_anchor_drift_rate": "0.05",
+    "max_five_minute_setup_age_seconds": 345600,
+    "max_portfolio_heat": "0.02",
+    "max_sector_fraction": "0.2",
+    "max_symbol_fraction": "0.05",
+    "next_tradable_minute_fill": true,
+    "point_classes_analyzed_independently": true,
+    "same_bar_entry_stop_forbidden": true,
+    "sector_price_change_gate": false,
+    "sector_price_source": "qmt-sw1-pit-composite",
+    "segment_difference_frequency": "1m",
+    "segment_difference_required_for_precise_execution": true,
+    "segment_difference_required_for_trade_signal": false,
+    "setup_frequency": "5m",
+    "simultaneous_entries_causally_ranked": true,
+    "t_plus_one": true,
+    "trade_frequency": "5m"
+  },
+  "execution_diagnostics": {
+    "admission_rejection_count": 1314,
+    "admission_rejections_by_reason": {
+      "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR": 3,
+      "INITIAL_STRUCTURAL_RISK_TOO_WIDE": 5,
+      "ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP": 1306
+    },
+    "filled_order_count": 6,
+    "rejected_fill_attempt_count": 62
+  },
+  "generated_at": "2026-08-28T04:50:04.907085+08:00",
+  "historical": true,
+  "limitations": [
+    "fixed_policy_single_year_no_parameter_search",
+    "required_ablations_not_run",
+    "required_benchmarks_not_run",
+    "investor_specific_dividend_withholding_tax_not_modelled",
+    "formal_selection_research_ledger_not_used_by_current_production_policy",
+    "required_ablation_evidence_invalid",
+    "required_benchmark_evidence_invalid",
+    "research_output_not_an_order_instruction"
+  ],
+  "no_order_execution": true,
+  "parameter_robustness": {},
+  "point_type_metrics": {
+    "3buy": {
+      "expectancy": "-0.01022282652067566271607382127",
+      "net_pnl": "-769.34",
+      "net_return": "-0.0304039896646605385965023",
+      "trade_count": 3,
+      "win_rate": "0"
+    }
+  },
+  "read_only": true,
+  "requested_range": {
+    "end": "2026-07-24",
+    "start": "2026-01-25"
+  },
+  "sample_adequacy": {
+    "closed_trade_count": 3,
+    "enabled_buy_classes": [
+      "1buy",
+      "2buy",
+      "3buy"
+    ],
+    "failures": [
+      "closed_trades_below_200",
+      "1buy_closed_trades_below_50",
+      "2buy_closed_trades_below_50",
+      "3buy_closed_trades_below_50"
+    ],
+    "passed": false,
+    "point_counts": {
+      "1buy": 0,
+      "2buy": 0,
+      "3buy": 3
+    },
+    "required_closed_trade_count": 200,
+    "required_per_enabled_buy_class": 50
+  },
+  "schema": "chanlun-low-drawdown-backtest",
+  "sector_year_liquidity_metrics": {
+    "liquidity": {},
+    "sectors": {
+      "qmt-sw1:S27": {
+        "expectancy": "-0.002179858422827854989594541089",
+        "net_pnl": "-24.94",
+        "net_return": "-0.0021798584228278549895945411",
+        "trade_count": 1,
+        "win_rate": "0"
+      },
+      "qmt-sw1:S64": {
+        "expectancy": "-0.01424431056959956657931346136",
+        "net_pnl": "-744.4",
+        "net_return": "-0.0282857902599772370893065213",
+        "trade_count": 2,
+        "win_rate": "0"
+      }
+    },
+    "years": {
+      "2026": {
+        "expectancy": "-0.01022282652067566271607382127",
+        "net_pnl": "-769.34",
+        "net_return": "-0.0304039896646605385965023",
+        "trade_count": 3,
+        "win_rate": "0"
+      }
+    }
+  },
+  "strategy_id": "chanlun_source_faithful",
+  "strategy_label": "缠论原文定义 · 低回撤执行体系",
+  "universe": {
+    "archived_intersecting_symbol_count": 5201,
+    "catalog_source": "qmt_sw1_with_cninfo_effective_dates",
+    "causal_evaluation_count": 216638,
+    "corporate_action_count": 3701,
+    "eligible_sector_count": 31,
+    "formal_selection_required": false,
+    "sector_composite_member_limit": null,
+    "selected_symbol_count": 5201,
+    "unclassified_excluded_symbol_count": 0
+  },
+  "verdict": {
+    "failed_conditions": [
+      "sample_adequacy",
+      "net_return",
+      "calmar",
+      "concentration",
+      "ablation_evidence",
+      "benchmark_evidence"
+    ],
+    "live_ready": false,
+    "status": "sample_inadequate"
+  },
+  "walk_forward_windows": []
+}

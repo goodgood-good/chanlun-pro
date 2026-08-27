@@ -198,8 +198,8 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
     assert "在其他交易软件手工分批买入" in rendered
     assert "本系统不会自动下单" in rendered
     assert (
-        "风险参考：结构模型比例上限 8.5%"
-        "（按当前价至5分钟防守位；精确测算 8.54%；仅作结构模型比较）"
+        "风险参考：结构模型比例上限 1.7%"
+        "（按当前价至5分钟防守位；仅作结构模型比较）"
     ) in rendered
     assert "结构锚点：10（+2.50%）" in rendered
     assert "状态：可人工复核执行" in rendered

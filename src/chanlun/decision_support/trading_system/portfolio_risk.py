@@ -6,8 +6,10 @@ from decimal import Decimal
 
 @dataclass(frozen=True, slots=True)
 class RiskLimits:
-    base_trade_risk: Decimal = Decimal("0.005")
-    max_symbol_fraction: Decimal = Decimal("0.10")
+    # Twenty aligned risk/exposure slots: 0.1% planned risk and at most 5%
+    # gross value per symbol, while retaining the existing 2% portfolio heat.
+    base_trade_risk: Decimal = Decimal("0.001")
+    max_symbol_fraction: Decimal = Decimal("0.05")
     max_sector_fraction: Decimal = Decimal("0.20")
     max_portfolio_heat: Decimal = Decimal("0.02")
     first_drawdown: Decimal = Decimal("0.05")
@@ -75,8 +77,7 @@ class PortfolioSnapshot:
         if len(sectors) != len(set(sectors)):
             raise ValueError("sector market values must be unique")
         if any(
-            type(sector_id) is not str or not sector_id.strip()
-            for sector_id in sectors
+            type(sector_id) is not str or not sector_id.strip() for sector_id in sectors
         ):
             raise ValueError("sector identity cannot be empty")
         if any(
@@ -88,8 +89,7 @@ class PortfolioSnapshot:
         if len(symbols) != len(set(symbols)):
             raise ValueError("symbol market values must be unique")
         if any(
-            type(symbol_id) is not str or not symbol_id.strip()
-            for symbol_id in symbols
+            type(symbol_id) is not str or not symbol_id.strip() for symbol_id in symbols
         ):
             raise ValueError("symbol identity cannot be empty")
         if any(
@@ -210,19 +210,13 @@ def size_entry(
             "risk_multiplier_zero",
         )
     risk_cash = (
-        portfolio.equity
-        * limits.base_trade_risk
-        * candidate.risk_multiplier
-        * factor
+        portfolio.equity * limits.base_trade_risk * candidate.risk_multiplier * factor
     )
     sector_cash = (
         portfolio.equity * limits.max_sector_fraction
         - portfolio.sector_market_value(candidate.sector_id)
     )
-    heat_cash = (
-        portfolio.equity * limits.max_portfolio_heat
-        - portfolio.open_risk_cash
-    )
+    heat_cash = portfolio.equity * limits.max_portfolio_heat - portfolio.open_risk_cash
     symbol_cash = (
         portfolio.equity * limits.max_symbol_fraction
         - portfolio.symbol_market_value(candidate.symbol_id)

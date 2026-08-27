@@ -449,7 +449,7 @@ def test_buy_position_copy_is_an_unadjusted_structural_risk_upper_bound() -> Non
     )
 
     assert line == (
-        "风险参考：结构模型比例上限 7.5%（模型比较值；不构成执行许可）"
+        "风险参考：结构模型比例上限 1.5%（模型比较值；不构成执行许可）"
     )
     assert "只可下调" not in line
 

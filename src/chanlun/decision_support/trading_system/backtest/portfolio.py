@@ -25,6 +25,9 @@ from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
 )
+from chanlun.decision_support.trading_system.context_evidence import (
+    signal_context_risk_scale,
+)
 from chanlun.decision_support.trading_system.models import (
     PointType,
     StructureTower,
@@ -36,10 +39,15 @@ from chanlun.decision_support.trading_system.portfolio_risk import (
     RiskSizedOrder,
     size_entry,
 )
+from chanlun.decision_support.trading_system.position_recommendation import (
+    BUY_SIGNAL_PROTECTION_REASON_CODES,
+    build_position_recommendation,
+)
 
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+BREAKEVEN_ARM_R_MULTIPLE = Decimal("1")
 
 
 def _analysis_price_to_raw(value: Decimal, bar: MinuteBar) -> Decimal:
@@ -142,6 +150,8 @@ class OpenPosition:
     opened_at: datetime
     entry_price: Decimal
     structural_stop: Decimal
+    initial_structural_stop: Decimal
+    breakeven_armed_at: datetime | None
     last_price: Decimal
 
 
@@ -173,6 +183,10 @@ class _PositionState:
     opened_at: datetime
     entry_price: Decimal
     structural_stop: Decimal
+    initial_structural_stop: Decimal
+    breakeven_trigger_price: Decimal
+    breakeven_stop_price: Decimal
+    breakeven_armed_at: datetime | None
     last_price: Decimal
     entry_fees: Decimal
 
@@ -185,6 +199,8 @@ class _PositionState:
             opened_at=self.opened_at,
             entry_price=self.entry_price,
             structural_stop=self.structural_stop,
+            initial_structural_stop=self.initial_structural_stop,
+            breakeven_armed_at=self.breakeven_armed_at,
             last_price=self.last_price,
         )
 
@@ -254,14 +270,15 @@ class _PortfolioState:
                 if self.cash < 0:
                     raise ValueError("corporate action subscription exceeds cash")
             if action.share_multiplier != _ONE:
-                new_shares = int(
-                    Decimal(old_shares) * action.share_multiplier
-                )
+                new_shares = int(Decimal(old_shares) * action.share_multiplier)
                 if new_shares <= 0:
                     raise ValueError("corporate action removed all position shares")
                 position.shares = new_shares
                 position.entry_price /= action.share_multiplier
             position.structural_stop /= action.raw_price_divisor
+            position.initial_structural_stop /= action.raw_price_divisor
+            position.breakeven_trigger_price /= action.raw_price_divisor
+            position.breakeven_stop_price /= action.raw_price_divisor
             position.last_price /= action.raw_price_divisor
             self.last_prices[action.code] = position.last_price
             for pending in self.pending_orders:
@@ -277,13 +294,17 @@ class _PortfolioState:
                         ),
                     )
                 stop = pending.intent.structural_stop
+                price_cap = pending.intent.entry_price_cap
                 pending.intent = replace(
                     pending.intent,
                     shares=shares,
                     structural_stop=(
+                        None if stop is None else stop / action.raw_price_divisor
+                    ),
+                    entry_price_cap=(
                         None
-                        if stop is None
-                        else stop / action.raw_price_divisor
+                        if price_cap is None
+                        else price_cap / action.raw_price_divisor
                     ),
                 )
                 pending.reference_price /= action.raw_price_divisor
@@ -293,12 +314,10 @@ class _PortfolioState:
                     pending.candidate = replace(
                         pending.candidate,
                         entry_price=(
-                            pending.candidate.entry_price
-                            / action.raw_price_divisor
+                            pending.candidate.entry_price / action.raw_price_divisor
                         ),
                         stop_price=(
-                            pending.candidate.stop_price
-                            / action.raw_price_divisor
+                            pending.candidate.stop_price / action.raw_price_divisor
                         ),
                     )
 
@@ -338,10 +357,13 @@ class _PortfolioState:
         reserved_cash = _ZERO
         for position in self.positions_by_code.values():
             position_value = position.last_price * Decimal(position.shares)
-            sector_values[position.sector_id] = sector_values.get(
-                position.sector_id,
-                _ZERO,
-            ) + position_value
+            sector_values[position.sector_id] = (
+                sector_values.get(
+                    position.sector_id,
+                    _ZERO,
+                )
+                + position_value
+            )
             symbol_values[position.code] = (
                 symbol_values.get(position.code, _ZERO) + position_value
             )
@@ -356,9 +378,7 @@ class _PortfolioState:
                 or pending.intent.side != "buy"
             ):
                 continue
-            reserved_cash += pending.reference_price * Decimal(
-                pending.intent.shares
-            )
+            reserved_cash += pending.reference_price * Decimal(pending.intent.shares)
             open_risk += pending.planned_risk_cash
             sector_values[pending.sector_id] = sector_values.get(
                 pending.sector_id,
@@ -379,6 +399,32 @@ class _PortfolioState:
 
     def snapshot(self) -> PortfolioSnapshot:
         return self._snapshot()
+
+    def reject_entry_admission(
+        self,
+        *,
+        signal_id: str,
+        created_at: datetime,
+        reason_codes: tuple[str, ...],
+    ) -> None:
+        if not signal_id or not reason_codes:
+            raise ValueError("portfolio admission rejection must be complete")
+        if len(reason_codes) != len(set(reason_codes)):
+            raise ValueError("portfolio admission reasons must be unique")
+        self.consumed_signal_ids.add(signal_id)
+        order_id = f"admission:{signal_id}:{created_at.isoformat()}"
+        self.fills.extend(
+            FillDecision(
+                order_id=order_id,
+                filled=False,
+                reason=reason,
+                filled_at=None,
+                execution_price=None,
+                shares=0,
+                fees=_ZERO,
+            )
+            for reason in reason_codes
+        )
 
     def held_structures(self) -> dict[str, tuple[StructureTower, int]]:
         return {
@@ -408,15 +454,9 @@ class _PortfolioState:
         tower = evaluated.setup.point.tower
         recursive_level = evaluated.setup.point.recursive_level
         sector_id = evaluated.setup.sector.sector_id
-        raw_stop = _analysis_price_to_raw(entry.structural_stop, bar)
-        candidate = RiskCandidate(
-            signal_id=entry.signal_id,
-            sector_id=sector_id,
-            entry_price=bar.raw_close,
-            stop_price=raw_stop,
-            risk_multiplier=entry.risk_multiplier,
-            symbol_id=bar.code,
-        )
+        candidate = risk_candidate_from(evaluated, bar)
+        raw_stop = candidate.stop_price
+        entry_boundary = getattr(evaluated, "entry_execution_boundary", None)
         intent = OrderIntent(
             order_id=f"entry:{entry.signal_id}:{created_at.isoformat()}",
             signal_id=entry.signal_id,
@@ -425,6 +465,9 @@ class _PortfolioState:
             shares=sized.shares,
             created_at=created_at,
             structural_stop=raw_stop,
+            entry_price_cap=(
+                None if entry_boundary is None else entry_boundary.raw_high
+            ),
         )
         self.pending_orders.append(
             _PendingOrder(
@@ -642,9 +685,7 @@ class _PortfolioState:
                     continue
             attempted_intent = pending.intent
             if bar.volume > 0:
-                capacity = int(
-                    bar.volume * execution_policy.max_volume_participation
-                )
+                capacity = int(bar.volume * execution_policy.max_volume_participation)
                 capacity = capacity // status.lot_size * status.lot_size
                 if 0 < capacity < pending.intent.shares:
                     attempted_intent = replace(
@@ -666,6 +707,7 @@ class _PortfolioState:
                     "not_listed",
                     "lot_size_mismatch",
                     "fee_schedule_unavailable",
+                    "entry_price_cap_crossed",
                 }:
                     self.pending_orders.remove(pending)
                 continue
@@ -692,8 +734,7 @@ class _PortfolioState:
                 if decision.execution_price is None or decision.filled_at is None:
                     raise ValueError("entry fill lacks execution details")
                 self.cash -= (
-                    decision.execution_price * Decimal(intent.shares)
-                    + decision.fees
+                    decision.execution_price * Decimal(intent.shares) + decision.fees
                 )
                 self.positions_by_code[intent.code] = _PositionState(
                     code=intent.code,
@@ -707,6 +748,23 @@ class _PortfolioState:
                     structural_stop=intent.structural_stop
                     if intent.structural_stop is not None
                     else decision.execution_price,
+                    initial_structural_stop=intent.structural_stop
+                    if intent.structural_stop is not None
+                    else decision.execution_price,
+                    breakeven_trigger_price=(
+                        decision.execution_price
+                        + (
+                            decision.execution_price
+                            - (
+                                intent.structural_stop
+                                if intent.structural_stop is not None
+                                else decision.execution_price
+                            )
+                        )
+                        * BREAKEVEN_ARM_R_MULTIPLE
+                    ),
+                    breakeven_stop_price=decision.execution_price,
+                    breakeven_armed_at=None,
                     last_price=decision.execution_price,
                     entry_fees=decision.fees,
                 )
@@ -761,28 +819,48 @@ class _PortfolioState:
         execution_policy: ExecutionPolicy,
     ) -> None:
         position = self.positions_by_code.get(bar.code)
+        if position is not None and position.opened_at >= bar.closed_at:
+            # A close-time fill cannot observe an earlier low in that bar.
+            return
+        if (
+            position is not None
+            and not self._has_pending(bar.code, "sell")
+            and bar.raw_low > position.structural_stop
+            and position.breakeven_armed_at is None
+            and position.breakeven_trigger_price > position.breakeven_stop_price
+            and bar.raw_high >= position.breakeven_trigger_price
+        ):
+            # The raised stop becomes active on the next bar.  This never
+            # assumes an unknown intrabar high/low order.
+            position.structural_stop = max(
+                position.structural_stop,
+                position.breakeven_stop_price,
+            )
+            position.breakeven_armed_at = bar.closed_at
+            return
         if (
             position is None
-        # 以收盘时间记入的开仓，不能被同一分钟内可能更早出现的最低价触发止损。
-            or position.opened_at >= bar.closed_at
             or bar.raw_low > position.structural_stop
             or self._has_pending(bar.code, "sell")
         ):
             return
         stop_order = self._stop_order(position, bar)
+        exit_reason = (
+            "breakeven_stop"
+            if position.breakeven_armed_at is not None
+            else "structural_stop"
+        )
         if not self._is_sellable(position, status):
             self._enqueue_exit(
                 position=position,
                 shares=position.shares,
                 signal_id=stop_order.signal_id,
                 created_at=bar.closed_at,
-                reason="structural_stop",
+                reason=exit_reason,
                 trigger_price=position.structural_stop,
                 last_rejection_reason="t_plus_one_locked",
             )
-            self.fills.append(
-                FillDecision.rejected(stop_order, "t_plus_one_locked")
-            )
+            self.fills.append(FillDecision.rejected(stop_order, "t_plus_one_locked"))
             return
         limit_down = _round_price(
             bar.previous_raw_close * (_ONE - status.limit_pct),
@@ -809,7 +887,7 @@ class _PortfolioState:
                 shares=position.shares,
                 signal_id=stop_order.signal_id,
                 created_at=bar.closed_at,
-                reason="structural_stop",
+                reason=exit_reason,
                 trigger_price=position.structural_stop,
                 last_rejection_reason=reason,
             )
@@ -859,14 +937,14 @@ class _PortfolioState:
             candidate=None,
             planned_risk_cash=_ZERO,
             reference_price=reference,
-            reason="structural_stop",
+            reason=exit_reason,
             exit_trigger_price=position.structural_stop,
         )
         self.fills.append(fill)
         self._close_position(
             direct,
             fill,
-            exit_reason="structural_stop",
+            exit_reason=exit_reason,
             exit_trigger_price=position.structural_stop,
         )
 
@@ -1019,11 +1097,7 @@ class _PortfolioState:
                 reason=row.last_rejection_reason or row.reason,
             )
             for row in sorted(
-                (
-                    item
-                    for item in self.pending_orders
-                    if item.intent.side == "sell"
-                ),
+                (item for item in self.pending_orders if item.intent.side == "sell"),
                 key=lambda item: (item.intent.code, item.intent.created_at),
             )
         )
@@ -1053,9 +1127,164 @@ def risk_candidate_from(
         sector_id=evaluated.setup.sector.sector_id,
         entry_price=bar.raw_close,
         stop_price=_analysis_price_to_raw(entry.structural_stop, bar),
-        risk_multiplier=entry.risk_multiplier,
+        risk_multiplier=(
+            entry.risk_multiplier
+            * signal_context_risk_scale(getattr(evaluated, "context_assessment", None))
+        ),
         symbol_id=bar.code,
     )
+
+
+def entry_protection_reasons(
+    evaluated: EvaluatedSignal,
+    bar: MinuteBar,
+    *,
+    risk_limits: RiskLimits,
+) -> tuple[str, ...]:
+    """Return the same causal no-chase blockers shown by live review."""
+
+    entry = evaluated.entry
+    point = evaluated.setup.point
+    anchor = getattr(point, "structure_anchor_price", None)
+    if entry is None or entry.structural_stop is None or anchor is None:
+        return ()
+    trigger = getattr(evaluated, "trigger", None)
+    five_minute_available_at = getattr(point, "available_at", None)
+    one_minute_available_at = getattr(trigger, "available_at", None)
+    precision_times = (
+        {
+            "five_minute_available_at": five_minute_available_at,
+            "one_minute_available_at": one_minute_available_at,
+        }
+        if five_minute_available_at is not None and one_minute_available_at is not None
+        else {}
+    )
+    recommendation = build_position_recommendation(
+        side="buy",
+        recommendation="READY",
+        risk_multiplier=entry.risk_multiplier,
+        context_risk_scale=signal_context_risk_scale(
+            getattr(evaluated, "context_assessment", None)
+        ),
+        entry_price=bar.raw_close,
+        structural_stop=_analysis_price_to_raw(entry.structural_stop, bar),
+        exit_action="none",
+        structure_anchor_price=_analysis_price_to_raw(Decimal(str(anchor)), bar),
+        risk_limits=risk_limits,
+        **precision_times,
+    )
+    return tuple(
+        reason
+        for reason in recommendation.reason_codes
+        if reason in BUY_SIGNAL_PROTECTION_REASON_CODES
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatedDecisionAt:
+    code: str
+    evaluated: EvaluatedSignal
+    bar: MinuteBar
+    lot_size: int
+
+
+def _entry_priority(row: EvaluatedDecisionAt) -> tuple[object, ...]:
+    """Order simultaneous entries only from evidence known at that close."""
+
+    evaluated = row.evaluated
+    assessment = getattr(evaluated, "context_assessment", None)
+    grade = "UNRESOLVED" if assessment is None else assessment.grade
+    gate_order = {"GREEN": 0, "AMBER": 1, "UNRESOLVED": 2, "RED": 3}
+    point_order = {"2buy": 0, "3buy": 1, "1buy": 2}
+    sector = evaluated.setup.sector
+    horizontal_rank = getattr(sector, "horizontal_rank", None)
+    return (
+        {"A": 0, "B": 1, "UNRESOLVED": 2, "C": 3}.get(grade, 4),
+        gate_order.get(getattr(evaluated, "market_risk_gate", "UNRESOLVED"), 4),
+        gate_order.get(getattr(evaluated, "symbol_risk_gate", "UNRESOLVED"), 4),
+        {"supportive": 0, "neutral": 1, "hostile": 2}.get(
+            getattr(sector, "regime", "neutral"),
+            3,
+        ),
+        -int(getattr(sector, "rank_score", 0)),
+        10**9 if horizontal_rank is None else int(horizontal_rank),
+        point_order.get(evaluated.setup.point.point_type, 3),
+        row.code,
+        entry.signal_id if (entry := evaluated.entry) is not None else "",
+    )
+
+
+def apply_evaluated_decisions(
+    state: _PortfolioState,
+    decisions: tuple[EvaluatedDecisionAt, ...],
+    *,
+    risk_limits: RiskLimits,
+    created_at: datetime,
+) -> None:
+    """Apply exits first, then causally rank simultaneous entry candidates."""
+
+    for row in sorted(
+        decisions,
+        key=lambda value: (
+            value.code,
+            "" if value.evaluated.exit is None else value.evaluated.exit.signal_id,
+        ),
+    ):
+        evaluated = row.evaluated
+        if (
+            evaluated.exit is not None
+            and evaluated.exit.allowed
+            and evaluated.exit.signal_id not in state.consumed_signal_ids
+        ):
+            state.enqueue_structural_exit(
+                evaluated,
+                code=row.code,
+                created_at=created_at,
+                lot_size=row.lot_size,
+            )
+
+    entries = tuple(
+        row
+        for row in decisions
+        if row.evaluated.entry is not None
+        and row.evaluated.entry.allowed
+        and row.evaluated.entry.signal_id not in state.consumed_signal_ids
+    )
+    for row in sorted(entries, key=_entry_priority):
+        entry = row.evaluated.entry
+        if entry is None or entry.signal_id in state.consumed_signal_ids:
+            continue
+        protection_reasons = entry_protection_reasons(
+            row.evaluated,
+            row.bar,
+            risk_limits=risk_limits,
+        )
+        if protection_reasons:
+            state.reject_entry_admission(
+                signal_id=entry.signal_id,
+                created_at=created_at,
+                reason_codes=protection_reasons,
+            )
+            continue
+        candidate = risk_candidate_from(row.evaluated, row.bar)
+        sized = size_entry(
+            portfolio=state.snapshot(),
+            candidate=candidate,
+            limits=risk_limits,
+        )
+        if sized.shares <= 0:
+            state.reject_entry_admission(
+                signal_id=entry.signal_id,
+                created_at=created_at,
+                reason_codes=sized.reason_codes,
+            )
+            continue
+        state.enqueue_entry(
+            sized,
+            evaluated=row.evaluated,
+            bar=row.bar,
+            created_at=created_at,
+        )
 
 
 def replay_engine_decisions(
@@ -1066,9 +1295,7 @@ def replay_engine_decisions(
     closed_at: datetime,
     held_structures: Mapping[str, tuple[StructureTower, int]] | None = None,
 ) -> tuple[tuple[str, tuple[EvaluatedSignal, ...]], ...]:
-    codes = sorted(
-        {bar.code for bar in dataset.bars if bar.closed_at == closed_at}
-    )
+    codes = sorted({bar.code for bar in dataset.bars if bar.closed_at == closed_at})
     positions = held_structures or {}
     output: list[tuple[str, tuple[EvaluatedSignal, ...]]] = []
     for code in codes:
@@ -1130,40 +1357,25 @@ def run_event_backtest(
             held_structures=state.held_structures(),
         )
         bars_by_code = {bar.code: bar for bar in bars}
+        evaluated_rows: list[EvaluatedDecisionAt] = []
         for code, evaluations in decisions:
             bar = bars_by_code[code]
             status = dataset.status_at(code, bar.opened_at.date())
             for evaluated in evaluations:
-                if (
-                    evaluated.entry is not None
-                    and evaluated.entry.allowed
-                    and evaluated.entry.signal_id
-                    not in state.consumed_signal_ids
-                ):
-                    candidate = risk_candidate_from(evaluated, bar)
-                    sized = size_entry(
-                        portfolio=state.snapshot(),
-                        candidate=candidate,
-                        limits=risk_limits,
-                    )
-                    state.enqueue_entry(
-                        sized,
+                evaluated_rows.append(
+                    EvaluatedDecisionAt(
+                        code=code,
                         evaluated=evaluated,
                         bar=bar,
-                        created_at=closed_at,
-                    )
-                if (
-                    evaluated.exit is not None
-                    and evaluated.exit.allowed
-                    and evaluated.exit.signal_id
-                    not in state.consumed_signal_ids
-                ):
-                    state.enqueue_structural_exit(
-                        evaluated,
-                        code=code,
-                        created_at=closed_at,
                         lot_size=status.lot_size,
                     )
+                )
+        apply_evaluated_decisions(
+            state,
+            tuple(evaluated_rows),
+            risk_limits=risk_limits,
+            created_at=closed_at,
+        )
         state.record_equity(closed_at)
 
     if terminal_liquidation:
@@ -1177,13 +1389,17 @@ def run_event_backtest(
 
 
 __all__ = [
+    "BREAKEVEN_ARM_R_MULTIPLE",
     "BacktestRun",
     "BacktestTrade",
     "CausalStructureReplay",
     "EquityPoint",
+    "EvaluatedDecisionAt",
     "OpenPosition",
     "PendingExit",
     "StructureReplay",
+    "apply_evaluated_decisions",
+    "entry_protection_reasons",
     "replay_engine_decisions",
     "risk_candidate_from",
     "run_event_backtest",

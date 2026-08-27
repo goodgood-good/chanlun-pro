@@ -14,6 +14,9 @@ from chanlun.decision_support.trading_system.backtest import fixed_year
 from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
     QMTLocalKlineAudit,
 )
+from chanlun.decision_support.trading_system.context_evidence import (
+    SamePeriodTechnicalContext,
+)
 from chanlun.decision_support.trading_system.backtest.fixed_year import (
     FACT_SCHEMA,
     FiveMinuteWarmupFact,
@@ -78,6 +81,32 @@ def _strict_witness(point):
     )
 
 
+def _technical_context(
+    frequency: str,
+    observed_at: datetime,
+) -> SamePeriodTechnicalContext:
+    return SamePeriodTechnicalContext(
+        frequency=frequency,  # type: ignore[arg-type]
+        observed_at=observed_at,
+        source_bar_count=30,
+        close=10.0,
+        ma5=9.9,
+        ma10=9.8,
+        close_vs_ma5="above",
+        ma5_vs_ma10="ma5_above_ma10",
+        ma_cross="golden",
+        consecutive_closes_vs_ma5=3,
+        fractal_type="none",
+        fractal_state="unresolved",
+        fractal_anchor_at=None,
+        fractal_confirmed_at=None,
+        fractal_price=None,
+        latest_pen_direction="none",
+        latest_pen_locked=None,
+        reason_codes=(),
+    )
+
+
 def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> None:
     observed_at = datetime(2026, 7, 20, 10, 1, tzinfo=CN)
     sector = eligible_sector()
@@ -88,12 +117,16 @@ def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> N
     five_l1 = confirmed_point("2buy", frequency="5m", level=1)
     one_l0 = confirmed_point("1buy", frequency="1m", level=0)
     one_l1 = confirmed_point("1buy", frequency="1m", level=1)
+    daily_technical = _technical_context("d", observed_at)
+    thirty_technical = _technical_context("30m", observed_at)
     evaluation = SparseEvaluationFact(
         observed_at=observed_at,
         thirty_direction="neutral",
         bar=minute_bar(
             opened_at=observed_at - timedelta(minutes=1),
         ),
+        daily_technical_context=daily_technical,
+        thirty_technical_context=thirty_technical,
     )
     facts = SymbolResearchFacts(
         schema=FACT_SCHEMA,
@@ -119,6 +152,8 @@ def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> N
     assert bundle.thirty_points == (thirty_l0, thirty_l1)
     assert bundle.five_points == (five_l0,)
     assert bundle.one_points == (one_l0, one_l1)
+    assert bundle.daily_technical_context is daily_technical
+    assert bundle.thirty_technical_context is thirty_technical
     assert bundle.opposite_points == (
         daily_l0,
         thirty_l0,
@@ -128,6 +163,29 @@ def test_symbol_bundle_keeps_recursive_points_as_context_not_trade_setups() -> N
         one_l0,
         one_l1,
     )
+
+
+def test_sparse_evaluation_rejects_misaligned_technical_context() -> None:
+    observed_at = datetime(2026, 7, 20, 10, 1, tzinfo=CN)
+    bar = minute_bar(opened_at=observed_at - timedelta(minutes=1))
+
+    with pytest.raises(ValueError, match="technical context"):
+        SparseEvaluationFact(
+            observed_at=observed_at,
+            thirty_direction="neutral",
+            bar=bar,
+            daily_technical_context=_technical_context("30m", observed_at),
+        )
+    with pytest.raises(ValueError, match="technical context"):
+        SparseEvaluationFact(
+            observed_at=observed_at,
+            thirty_direction="neutral",
+            bar=bar,
+            thirty_technical_context=_technical_context(
+                "30m",
+                observed_at - timedelta(minutes=1),
+            ),
+        )
 
 
 def test_preexisting_nested_witness_opens_boundary_once_at_joint_knowledge() -> None:
@@ -862,9 +920,7 @@ def test_one_minute_replay_keeps_point_current_at_inclusive_setup_expiry(
     windows = fixed_year._one_minute_replay_windows(
         (setup,),
         end_at=expiry,
-        point_visibility=(
-            PointVisibilityInterval(setup.point_id, setup.available_at),
-        ),
+        point_visibility=(PointVisibilityInterval(setup.point_id, setup.available_at),),
     )
 
     def replay(*_args, **_kwargs):
@@ -1400,9 +1456,9 @@ def test_sparse_nested_witness_executes_on_next_complete_minute(
             "code": [setup.code],
             "date": [fill_at],
             "open": [10.0],
-            "high": [10.1],
+            "high": [10.04],
             "low": [9.95],
-            "close": [10.05],
+            "close": [10.02],
             "volume": [1_000_000.0],
         }
     )
@@ -1570,10 +1626,10 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         {
             "code": ["SZ.000001", "SZ.000001"],
             "date": list(dates),
-            "open": [10.0, 10.1],
-            "high": [10.15, 10.2],
-            "low": [9.95, 10.05],
-            "close": [10.1, 10.15],
+            "open": [10.0, 10.02],
+            "high": [10.04, 10.05],
+            "low": [9.95, 10.0],
+            "close": [10.02, 10.03],
             "volume": [1_000_000.0, 1_000_000.0],
         }
     )
@@ -1610,7 +1666,7 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
     assert run.trades == ()
     assert len(run.open_positions) == 1
     assert run.open_positions[0].opened_at == dates[0]
-    assert run.open_positions[0].last_price == Decimal("10.15")
+    assert run.open_positions[0].last_price == Decimal("10.03")
     assert run.equity_curve[0].closed_at == datetime.combine(
         observed_at.date(),
         time(9, 30),

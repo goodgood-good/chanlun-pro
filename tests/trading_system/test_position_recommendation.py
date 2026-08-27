@@ -29,8 +29,8 @@ def test_buy_ratio_uses_structural_risk_budget_and_symbol_cap() -> None:
 
     assert value.status == "RECOMMENDED"
     assert value.basis == "STRUCTURAL_RISK_MODEL_UPPER_BOUND"
-    assert value.recommended_ratio == Decimal("0.1000")
-    assert value.document()["recommended_percent"] == "10"
+    assert value.recommended_ratio == Decimal("0.0200")
+    assert value.document()["recommended_percent"] == "2"
     assert value.automated_order_authorized is False
     assert "仅作结构模型比较" in value.label
 
@@ -41,19 +41,21 @@ def test_buy_ratio_applies_point_and_context_risk_scales() -> None:
         context_risk_scale="0.75",
     )
 
-    assert value.recommended_ratio == Decimal("0.0375")
-    assert value.document()["recommended_percent"] == "3.75"
+    assert value.recommended_ratio == Decimal("0.0075")
+    assert value.document()["recommended_percent"] == "0.75"
 
 
-def test_buy_ratio_uses_current_price_to_structural_stop_when_anchor_is_explicit() -> None:
+def test_buy_ratio_uses_current_price_to_structural_stop_when_anchor_is_explicit() -> (
+    None
+):
     value = recommendation(
         entry_price="10.25",
         structure_anchor_price="10.00",
-        structural_stop="9.50",
+        structural_stop="9.80",
     )
 
     assert value.status == "RECOMMENDED"
-    assert value.recommended_ratio == Decimal("0.0683")
+    assert value.recommended_ratio == Decimal("0.0227")
     assert "当前价至5分钟防守位" in value.label
     assert "CURRENT_PRICE_STRUCTURAL_RISK_BUDGET_SIZED" in value.reason_codes
 
@@ -66,7 +68,7 @@ def test_current_price_resolves_anchor_equal_to_stop_without_division_by_zero() 
     )
 
     assert value.status == "RECOMMENDED"
-    assert value.recommended_ratio == Decimal("0.1000")
+    assert value.recommended_ratio == Decimal("0.0500")
 
 
 def test_buy_price_above_anchor_protection_blocks_chasing() -> None:
@@ -80,6 +82,35 @@ def test_buy_price_above_anchor_protection_blocks_chasing() -> None:
     assert value.recommended_ratio == Decimal("0")
     assert value.reason_codes == ("BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR",)
     assert parse_position_recommendation_document(value.document()) == value
+
+
+def test_preexisting_one_minute_point_cannot_authorize_precise_entry() -> None:
+    value = recommendation(
+        five_minute_available_at="2026-07-20T10:30:00+08:00",
+        one_minute_available_at="2026-07-20T10:05:00+08:00",
+    )
+
+    assert value.status == "BLOCKED"
+    assert value.recommended_ratio == Decimal("0")
+    assert value.reason_codes == ("ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP",)
+    assert parse_position_recommendation_document(value.document()) == value
+
+
+def test_new_one_minute_point_after_five_minute_setup_remains_eligible() -> None:
+    value = recommendation(
+        five_minute_available_at="2026-07-20T10:05:00+08:00",
+        one_minute_available_at="2026-07-20T10:30:00+08:00",
+    )
+
+    assert value.status == "RECOMMENDED"
+
+
+def test_initial_structural_risk_above_five_percent_is_blocked() -> None:
+    value = recommendation(structural_stop="9.49")
+
+    assert value.status == "BLOCKED"
+    assert value.recommended_ratio == Decimal("0")
+    assert value.reason_codes == ("INITIAL_STRUCTURAL_RISK_TOO_WIDE",)
 
 
 def test_position_sizing_has_no_fixed_setup_age_gate() -> None:

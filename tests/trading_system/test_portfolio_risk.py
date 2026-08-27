@@ -61,6 +61,15 @@ def test_wider_stop_reduces_position_size() -> None:
     assert narrow.shares > wide.shares > 0
 
 
+def test_default_limits_diversify_across_twenty_symbol_slots() -> None:
+    limits = RiskLimits()
+
+    assert limits.base_trade_risk == Decimal("0.001")
+    assert limits.max_symbol_fraction == Decimal("0.05")
+    assert limits.max_sector_fraction == Decimal("0.20")
+    assert limits.max_portfolio_heat == Decimal("0.02")
+
+
 @pytest.mark.parametrize(
     ("drawdown", "factor"),
     (
@@ -90,6 +99,7 @@ def test_point_risk_multipliers_are_independent(
 ) -> None:
     limits = replace(
         RiskLimits(),
+        base_trade_risk=Decimal("0.005"),
         max_symbol_fraction=Decimal("1"),
         max_sector_fraction=Decimal("1"),
         max_portfolio_heat=Decimal("1"),
@@ -180,6 +190,7 @@ def test_cash_cap_prevents_unfunded_position() -> None:
 def test_lot_rounding_never_rounds_up() -> None:
     limits = replace(
         RiskLimits(),
+        base_trade_risk=Decimal("0.005"),
         max_symbol_fraction=Decimal("1"),
         max_sector_fraction=Decimal("1"),
         max_portfolio_heat=Decimal("1"),

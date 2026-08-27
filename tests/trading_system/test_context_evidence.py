@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
+from decimal import Decimal
 
 from chanlun.decision_support.trading_system.context_evidence import (
     SamePeriodTechnicalContext,
+    SignalContextAssessment,
     assess_signal_context,
+    signal_context_risk_scale,
 )
 from tests.trading_system.helpers import AS_OF, neutral_context
 
@@ -123,3 +126,16 @@ def test_context_document_maps_each_physical_period_directly_to_5m_and_1m() -> N
     assert document["lower_confirmation_frequencies"] == ["5m", "1m"]
     assert "weekly" not in document
     assert "monthly" not in document
+
+
+def test_context_risk_scale_is_shared_and_unresolved_is_fail_small() -> None:
+    assert signal_context_risk_scale(None) == Decimal("0.50")
+    assert signal_context_risk_scale(
+        SignalContextAssessment("A", "supportive", "supportive", ())
+    ) == Decimal("1.00")
+    assert signal_context_risk_scale(
+        SignalContextAssessment("B", "neutral", "supportive", ())
+    ) == Decimal("0.75")
+    assert signal_context_risk_scale(
+        SignalContextAssessment("C", "adverse", "adverse", ())
+    ) == Decimal("0.50")

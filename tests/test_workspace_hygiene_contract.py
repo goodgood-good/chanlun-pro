@@ -19,6 +19,10 @@ RESEARCH_SAMPLES = {
         ROOT / "config" / "research_backtest_validation_12.txt",
         12,
     ),
+    "diagnostic32": (
+        ROOT / "config" / "research_backtest_diagnostic_32.txt",
+        32,
+    ),
 }
 
 
@@ -42,7 +46,7 @@ def test_generated_lesson_corpus_remains_ignored() -> None:
 def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
     source = HISTORICAL_BACKTEST.read_text(encoding="utf-8-sig")
 
-    assert '[ValidateSet("smoke2", "validation12")]' in source
+    assert '[ValidateSet("smoke2", "validation12", "diagnostic32")]' in source
     assert '[string]$Profile = "smoke2"' in source
     assert '[ValidateSet("Extract", "Prefix", "Finalize", "All")]' in source
     assert '[string]$Stage = "Extract"' in source
@@ -75,6 +79,7 @@ def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
     assert '"--confirm-large-sector-scope"' in source
     assert "research_sample_smoke_2" in source
     assert "research_sample_validation_12" in source
+    assert "research_sample_diagnostic_32" in source
     assert "full_market_explicit" in source
     assert "pit_reference" in source
     assert "fixed_year_2025_2026" not in source
@@ -85,6 +90,10 @@ def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
     assert '"--codes-file", $researchCodesPath' in source
     assert '"--membership-index", $MembershipIndex' in source
     assert '@("--full-market", "--confirm-large-scope")' in source
+    assert '"--warmup-start", $WarmupStart' in source
+    assert '"--start", $RequestedStart' in source
+    assert '"--effective-start", $EffectiveStart' in source
+    assert '"--end", $RequestedEnd' in source
 
     samples: dict[str, tuple[str, ...]] = {}
     for profile, (path, expected_count) in RESEARCH_SAMPLES.items():
@@ -101,11 +110,18 @@ def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
         samples[profile] = symbols
 
     assert set(samples["smoke2"]).isdisjoint(samples["validation12"])
+    assert set(samples["smoke2"]).isdisjoint(samples["diagnostic32"])
+    assert set(samples["validation12"]).isdisjoint(samples["diagnostic32"])
     validation_contract = RESEARCH_SAMPLES["validation12"][0].read_text(
         encoding="utf-8"
     )
     assert "Pre-registered gate cohort" in validation_contract
     assert "Never select by later" in validation_contract
+    diagnostic_contract = RESEARCH_SAMPLES["diagnostic32"][0].read_text(
+        encoding="utf-8"
+    )
+    assert "without signal or return data" in diagnostic_contract
+    assert "not a performance holdout" in diagnostic_contract
 
 
 @pytest.mark.parametrize(
@@ -158,6 +174,17 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert 'Category "legacy_cache"' in source
     assert ".cache\\chanlun_v3_human_review_forward" in source
     assert ".cache\\chanlun_v31_csi300_broad_pool" in source
+    assert (
+        ".cache\\chanlun_backtest_six_month_target_sh600216_afterfix_20260126_20260724"
+        in source
+    )
+    assert (
+        ".cache\\chanlun_backtest_six_month_target_sz301500_afterfix_20260126_20260724"
+        in source
+    )
+    assert ".cache\\chanlun_backtest_six_month_full_20260126_20260724" in source
+    assert ".cache\\chanlun_backtest_six_month_validation12_20260126_20260724" in source
+    assert ".cache\\chanlun_backtest_six_month_validation32_20260126_20260724" in source
     assert ".cache\\historical_backtest_preflight_report_20260816" in source
     assert "qmt_runtime_\\d{4}-\\d{2}-\\d{2}" in source
     assert '"historical_backtest.lock"' in source

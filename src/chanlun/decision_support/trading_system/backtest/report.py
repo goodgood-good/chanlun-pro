@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -17,10 +18,17 @@ from chanlun.decision_support.trading_system.backtest.metrics import (
     clustered_bootstrap,
     sample_adequacy,
 )
-from chanlun.decision_support.trading_system.backtest.portfolio import BacktestRun
+from chanlun.decision_support.trading_system.backtest.portfolio import (
+    BREAKEVEN_ARM_R_MULTIPLE,
+    BacktestRun,
+)
 from chanlun.decision_support.trading_system.models import (
     MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
     PointType,
+)
+from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
+from chanlun.decision_support.trading_system.position_recommendation import (
+    MAX_BUY_ANCHOR_DRIFT_RATE,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
     STRICT_STRATEGY_ID,
@@ -289,6 +297,7 @@ def build_report(
     formal_selection_required: bool = False,
     universe_summary: dict[str, object] | None = None,
     data_source_hashes: tuple[tuple[str, str], ...] = (),
+    risk_limits: RiskLimits = RiskLimits(),
 ) -> dict[str, object]:
     generated = normalize_datetime(generated_at, "generated_at")
     hash_names = tuple(name for name, _digest in algorithm_hashes)
@@ -421,6 +430,12 @@ def build_report(
     if analyses_complete and not benchmark_evidence_available:
         report_limitations.append("required_benchmark_evidence_invalid")
     report_limitations.append("research_output_not_an_order_instruction")
+    admission_rows = tuple(
+        fill
+        for fill in result.aggregate_run.fills
+        if fill.order_id.startswith("admission:")
+    )
+    admission_reasons = Counter(fill.reason for fill in admission_rows)
     report: dict[str, object] = {
         "schema": SCHEMA,
         "generated_at": generated.isoformat(),
@@ -481,6 +496,35 @@ def build_report(
             ),
             "t_plus_one": True,
             "intraday_structural_stop": True,
+            "same_bar_entry_stop_forbidden": True,
+            "breakeven_arm_r_multiple": _decimal(BREAKEVEN_ARM_R_MULTIPLE),
+            "breakeven_activation": (
+                "trigger_observed_in_completed_bar_stop_active_next_bar"
+            ),
+            "context_grade_scales_portfolio_risk": True,
+            "simultaneous_entries_causally_ranked": True,
+            "max_buy_anchor_drift_rate": _decimal(MAX_BUY_ANCHOR_DRIFT_RATE),
+            "entry_price_cap_source": "one_minute_confirmation_bar_raw_high",
+            "entry_price_cap_mixed_bar_resolution": (
+                "defer_until_whole_bar_within_cap_or_terminal_rejection_or_ttl"
+            ),
+            "base_trade_risk": _decimal(risk_limits.base_trade_risk),
+            "max_symbol_fraction": _decimal(risk_limits.max_symbol_fraction),
+            "max_sector_fraction": _decimal(risk_limits.max_sector_fraction),
+            "max_portfolio_heat": _decimal(risk_limits.max_portfolio_heat),
+        },
+        "execution_diagnostics": {
+            "filled_order_count": sum(
+                fill.filled for fill in result.aggregate_run.fills
+            ),
+            "rejected_fill_attempt_count": sum(
+                not fill.filled and not fill.order_id.startswith("admission:")
+                for fill in result.aggregate_run.fills
+            ),
+            "admission_rejection_count": len(
+                {fill.order_id for fill in admission_rows}
+            ),
+            "admission_rejections_by_reason": dict(sorted(admission_reasons.items())),
         },
         "walk_forward_windows": [
             _window_document(window)

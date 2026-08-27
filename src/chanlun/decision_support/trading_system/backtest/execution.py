@@ -109,6 +109,7 @@ class OrderIntent:
     shares: int
     created_at: datetime
     structural_stop: Decimal | None
+    entry_price_cap: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.order_id or not self.signal_id or not self.code:
@@ -119,6 +120,10 @@ class OrderIntent:
             raise ValueError("shares must be positive")
         if self.structural_stop is not None and self.structural_stop <= 0:
             raise ValueError("structural_stop must be positive")
+        if self.entry_price_cap is not None and (
+            self.side != "buy" or self.entry_price_cap <= 0
+        ):
+            raise ValueError("entry_price_cap requires a positive buy limit")
         object.__setattr__(
             self,
             "created_at",
@@ -160,8 +165,8 @@ class FillDecision:
             order_id=order.order_id,
             filled=True,
             reason="filled",
-        # ``try_fill`` 使用本分钟完整的开高低收量判断可交易性、容量与滑点。
-        # 这些信息到收盘才完整，因此成交时间绝不能记在开盘时刻。
+            # ``try_fill`` 使用本分钟完整的开高低收量判断可交易性、容量与滑点。
+            # 这些信息到收盘才完整，因此成交时间绝不能记在开盘时刻。
             filled_at=bar.closed_at,
             execution_price=price,
             shares=order.shares,
@@ -257,6 +262,8 @@ def try_fill(
         # 再使用该根 K 线的开高低收量。
     if bar.closed_at <= order.created_at:
         return FillDecision.rejected(order, "bar_not_after_trigger")
+    if order.entry_price_cap is not None and bar.raw_low > order.entry_price_cap:
+        return FillDecision.rejected(order, "entry_price_cap_crossed")
     if status.suspended or bar.volume <= 0:
         return FillDecision.rejected(order, "not_tradable")
 
@@ -267,6 +274,8 @@ def try_fill(
         return FillDecision.rejected(order, "limit_down_locked")
         # 认证回放不会臆造历史 ST 涨跌停比例。若下一完整分钟只有一个成交价，
         # 排队优先级便不可知，因此无论标签为何都禁止模拟成交。
+    if order.entry_price_cap is not None and bar.raw_high > order.entry_price_cap:
+        return FillDecision.rejected(order, "entry_price_cap_unresolved")
     if policy.require_observed_price_range and bar.raw_high == bar.raw_low:
         return FillDecision.rejected(order, "one_price_bar_unfillable")
     if Decimal(order.shares) > bar.volume * policy.max_volume_participation:
@@ -276,6 +285,8 @@ def try_fill(
     if order.side == "buy":
         adverse_price = bar.raw_close * (_ONE + slippage)
         execution_price = min(adverse_price, bar.raw_high, limit_up)
+        if order.entry_price_cap is not None:
+            execution_price = min(execution_price, order.entry_price_cap)
     else:
         adverse_price = bar.raw_close * (_ONE - slippage)
         execution_price = max(adverse_price, bar.raw_low, limit_down)

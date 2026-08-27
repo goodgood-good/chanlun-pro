@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from math import isfinite
 from typing import Literal
 
@@ -39,6 +40,14 @@ FractalState = Literal[
 ]
 ContextStance = Literal["supportive", "neutral", "adverse", "unresolved"]
 ContextGrade = Literal["A", "B", "C", "UNRESOLVED"]
+
+
+_CONTEXT_RISK_SCALES: dict[ContextGrade, Decimal] = {
+    "A": Decimal("1.00"),
+    "B": Decimal("0.75"),
+    "C": Decimal("0.50"),
+    "UNRESOLVED": Decimal("0.50"),
+}
 
 
 _GRADE_LABELS: dict[ContextGrade, str] = {
@@ -190,6 +199,20 @@ class SignalContextAssessment:
         }
 
 
+def signal_context_risk_scale(
+    assessment: SignalContextAssessment | None,
+) -> Decimal:
+    """Return the shared sizing-only scale for one causal context grade.
+
+    Context never creates or invalidates a 5m signal.  The scale is consumed
+    by both the human position recommendation and the portfolio replay so the
+    two execution views cannot silently size the same signal differently.
+    """
+
+    grade: ContextGrade = "UNRESOLVED" if assessment is None else assessment.grade
+    return _CONTEXT_RISK_SCALES[grade]
+
+
 def _position(left: float, right: float | None) -> PriceMa5Position:
     if right is None:
         return "unresolved"
@@ -228,7 +251,13 @@ def _consecutive_close_position(closes: pd.Series) -> int:
     ma5 = closes.rolling(5).mean()
     if pd.isna(ma5.iloc[-1]):
         return 0
-    latest_relation = 1 if closes.iloc[-1] > ma5.iloc[-1] else -1 if closes.iloc[-1] < ma5.iloc[-1] else 0
+    latest_relation = (
+        1
+        if closes.iloc[-1] > ma5.iloc[-1]
+        else -1
+        if closes.iloc[-1] < ma5.iloc[-1]
+        else 0
+    )
     if latest_relation == 0:
         return 0
     count = 0
@@ -243,7 +272,10 @@ def _consecutive_close_position(closes: pd.Series) -> int:
 
 
 def _fractal_key(value: object) -> tuple[object, object]:
-    return (getattr(value, "type", None), getattr(getattr(value, "k", None), "index", None))
+    return (
+        getattr(value, "type", None),
+        getattr(getattr(value, "k", None), "index", None),
+    )
 
 
 def _forming_fractal(cl_state: CL) -> tuple[FractalType, datetime, float] | None:
@@ -370,9 +402,7 @@ def build_same_period_technical_context(
         latest_pen_locked=(None if latest_bi is None else latest_bi.is_done()),
         reason_codes=tuple(dict.fromkeys(reasons)),
         latest_pen_end_at=(
-            None
-            if latest_bi is None or latest_bi.end is None
-            else latest_bi.end.k.date
+            None if latest_bi is None or latest_bi.end is None else latest_bi.end.k.date
         ),
     )
 
@@ -387,11 +417,7 @@ def _fresh_context_event(
 ) -> bool:
     if event_at is None:
         return False
-    maximum_age = (
-        timedelta(days=21)
-        if evidence.frequency == "d"
-        else timedelta(days=4)
-    )
+    maximum_age = timedelta(days=21) if evidence.frequency == "d" else timedelta(days=4)
     return evidence.observed_at - event_at <= maximum_age
 
 
@@ -429,9 +455,7 @@ def _frequency_stance(
             if evidence.ma_cross in {"golden", "death"}:
                 positive = evidence.ma_cross == "golden"
                 ma_facts.append(1 if _desired(side, positive) else -1)
-                reasons.append(
-                    f"{prefix}_MA_CROSS_{evidence.ma_cross.upper()}"
-                )
+                reasons.append(f"{prefix}_MA_CROSS_{evidence.ma_cross.upper()}")
             if ma_facts:
                 votes.append(1 if sum(ma_facts) > 0 else -1 if sum(ma_facts) < 0 else 0)
                 reasons.append(
@@ -491,7 +515,10 @@ def _frequency_stance(
             reasons.append(
                 f"{prefix}_{evidence.fractal_type.upper()}_FRACTAL_{'SUPPORTS' if _desired(side, positive) else 'OPPOSES'}_{side.upper()}"
             )
-        elif evidence.latest_pen_end_at is not None or evidence.fractal_confirmed_at is not None:
+        elif (
+            evidence.latest_pen_end_at is not None
+            or evidence.fractal_confirmed_at is not None
+        ):
             reasons.append(f"{prefix}_STRUCTURE_CONTEXT_STALE")
     if not votes:
         return "unresolved", tuple(dict.fromkeys(reasons))
@@ -532,15 +559,11 @@ def assess_signal_context(
         ("30M", thirty_minute_evidence),
     ):
         if evidence is None:
-            completeness_reasons.append(
-                f"{frequency}_SAME_PERIOD_CONTEXT_UNAVAILABLE"
-            )
+            completeness_reasons.append(f"{frequency}_SAME_PERIOD_CONTEXT_UNAVAILABLE")
         elif point_type in {"2buy", "2sell"} and (
             evidence.close_vs_ma5 == "unresolved"
         ):
-            completeness_reasons.append(
-                f"{frequency}_MA5_REQUIRED_FOR_SECOND_POINT"
-            )
+            completeness_reasons.append(f"{frequency}_MA5_REQUIRED_FOR_SECOND_POINT")
         elif point_type in {"3buy", "3sell"} and (
             evidence.close_vs_ma5 == "unresolved"
             or evidence.ma5_vs_ma10 == "unresolved"
@@ -586,4 +609,5 @@ __all__ = (
     "SignalContextAssessment",
     "assess_signal_context",
     "build_same_period_technical_context",
+    "signal_context_risk_scale",
 )

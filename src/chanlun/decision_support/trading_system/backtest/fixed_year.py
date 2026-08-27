@@ -76,6 +76,10 @@ from chanlun.decision_support.trading_system.context import (
     classify_context,
     context_point_max_age,
 )
+from chanlun.decision_support.trading_system.context_evidence import (
+    SamePeriodTechnicalContext,
+    build_same_period_technical_context,
+)
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeGateBundle,
@@ -108,6 +112,7 @@ from chanlun.decision_support.trading_system.runtime_config import (
     strict_cl_config,
 )
 from chanlun.decision_support.trading_system.screening_runtime import (
+    ScreeningRuntimeState,
     screening_evidence_from_frame,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
@@ -221,7 +226,7 @@ def _buy_segment_difference_boundary_times(
 
 
 BASE_FRAME_COLUMNS = FRAME_COLUMNS[:7]
-FACT_SCHEMA = "chanlun-fixed-year-symbol-facts-v14"
+FACT_SCHEMA = "chanlun-fixed-year-symbol-facts-v15"
 SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts-v2"
 CAUSAL_CENTER_COMPLETION_CONTRACT = (
     "chanlun-causal-center-completion-v3-lifecycle-replay"
@@ -308,6 +313,8 @@ class SparseEvaluationFact:
     daily_direction: ContextDirection = "neutral"
     higher_timeframe_gates: HigherTimeframeGateBundle | None = None
     one_minute_bar_count: int = SCREENING_MINIMUM_BARS_BY_FREQUENCY["1m"]
+    daily_technical_context: SamePeriodTechnicalContext | None = None
+    thirty_technical_context: SamePeriodTechnicalContext | None = None
 
     def __post_init__(self) -> None:
         observed = normalize_datetime(self.observed_at, "observed_at")
@@ -323,6 +330,16 @@ class SparseEvaluationFact:
             for value in (gates.market, gates.sector, gates.symbol)
         ):
             raise ValueError("higher-timeframe gate must match the evaluation time")
+        for frequency, context in (
+            ("d", self.daily_technical_context),
+            ("30m", self.thirty_technical_context),
+        ):
+            if context is not None and (
+                context.frequency != frequency or context.observed_at != observed
+            ):
+                raise ValueError(
+                    "same-period technical context must match its evaluation"
+                )
         object.__setattr__(self, "observed_at", observed)
 
 
@@ -1229,15 +1246,11 @@ class CausalStructureEventLedger:
                 unit.unit_id: offset for offset, unit in enumerate(context_units)
             }
             seed_units = (*referenced_units[:establishment_start], *establishment_units)
-            seed_offsets = tuple(
-                context_positions[unit.unit_id] for unit in seed_units
-            )
+            seed_offsets = tuple(context_positions[unit.unit_id] for unit in seed_units)
             if seed_offsets != tuple(
                 range(seed_offsets[0], seed_offsets[0] + len(seed_offsets))
             ):
-                raise ValueError(
-                    "causal center establishment is not one source slice"
-                )
+                raise ValueError("causal center establishment is not one source slice")
             leave = referenced_units[-2]
             ret = referenced_units[-1]
             leave_signature = (
@@ -1349,12 +1362,8 @@ class CausalStructureEventLedger:
                     "causal center establishment cannot be replayed"
                 ) from exc
             if replayed is None or replayed.center_id != center.center_id:
-                raise ValueError(
-                    "causal center establishment cannot be replayed"
-                )
-            lifecycle_units = context_units[
-                seed_end_offset + 1 : return_offset + 1
-            ]
+                raise ValueError("causal center establishment cannot be replayed")
+            lifecycle_units = context_units[seed_end_offset + 1 : return_offset + 1]
             for lifecycle_unit in lifecycle_units:
                 try:
                     replayed, _event = advance_center(
@@ -2116,16 +2125,13 @@ def _one_minute_replay_windows(
         for window_start, bounded_end, close_at in active_windows:
             end_is_exclusive = close_at == bounded_end
             if (
-                (
-                    setup.available_at >= bounded_end
-                    if end_is_exclusive
-                    else setup.available_at > bounded_end
-                )
-                or (
-                    window_start >= bounded_end
-                    if end_is_exclusive
-                    else window_start > bounded_end
-                )
+                setup.available_at >= bounded_end
+                if end_is_exclusive
+                else setup.available_at > bounded_end
+            ) or (
+                window_start >= bounded_end
+                if end_is_exclusive
+                else window_start > bounded_end
             ):
                 continue
             output.append(
@@ -2173,9 +2179,7 @@ def _five_minute_replay_windows(
 def _causal_one_minute_events_by_windows(
     code: str,
     frame: pd.DataFrame,
-    visibility_windows: Sequence[
-        tuple[datetime, datetime] | _OneMinuteReplayWindow
-    ],
+    visibility_windows: Sequence[tuple[datetime, datetime] | _OneMinuteReplayWindow],
 ) -> tuple[tuple[StructuralPoint, ...], tuple[PointVisibilityInterval, ...]]:
     """Replay each active 5m terminal epoch from production-sized cold history.
 
@@ -2708,6 +2712,66 @@ def _production_context_snapshots(
         visibility,
         tuple(unavailable),
     )
+
+
+def _same_period_technical_context_snapshots(
+    code: str,
+    frequency: str,
+    frame: pd.DataFrame,
+    observed_times: Sequence[datetime],
+    *,
+    request_bars: int,
+    minimum_bars: int,
+) -> dict[datetime, SamePeriodTechnicalContext]:
+    """Freeze the live MA/fractal/pen context at sparse entry boundaries."""
+
+    if frequency not in {"d", "30m"}:
+        raise ValueError("same-period snapshots require d or 30m")
+    if request_bars <= 0 or minimum_bars <= 0 or minimum_bars > request_bars:
+        raise ValueError("same-period context bar budgets are invalid")
+    if not observed_times:
+        return {}
+    dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
+    cache: dict[int, SamePeriodTechnicalContext | None] = {}
+    output: dict[datetime, SamePeriodTechnicalContext] = {}
+    for raw_time in sorted(set(observed_times)):
+        observed_at = normalize_datetime(raw_time, "technical context observation")
+        end = bisect_right(dates, observed_at)
+        base = cache.get(end)
+        if end not in cache:
+            if end < minimum_bars:
+                base = None
+            else:
+                start = max(0, end - request_bars)
+                prefix = frame.iloc[start:end].copy().reset_index(drop=True)
+                copy_price_basis_metadata(frame, prefix)
+                source_closed_at = dates[end - 1]
+                try:
+                    runtime = ScreeningRuntimeState(
+                        code=code,
+                        frequency=frequency,
+                        market="a",
+                    )
+                    update = runtime.update_from_frame(
+                        frame=prefix,
+                        as_of=source_closed_at,
+                    )
+                    base = build_same_period_technical_context(
+                        frequency=frequency,
+                        frame=prefix,
+                        cl_state=update.state,
+                        as_of=source_closed_at,
+                    )
+                except (
+                    StrictStructureContractError,
+                    TypeError,
+                    ValueError,
+                ):
+                    base = None
+            cache[end] = base
+        if base is not None:
+            output[observed_at] = replace(base, observed_at=observed_at)
+    return output
 
 
 class _HistoricalQmtFrameExchange:
@@ -3368,6 +3432,8 @@ def build_symbol_bundle(
         entry_execution_boundaries=entry_boundaries,
         selection_sources=selection_sources,
         selection_research=selection_research,
+        daily_technical_context=evaluation.daily_technical_context,
+        thirty_technical_context=evaluation.thirty_technical_context,
     )
 
 
@@ -3648,8 +3714,9 @@ def run_sparse_portfolio(
         ExecutionPolicy,
     )
     from chanlun.decision_support.trading_system.backtest.portfolio import (
+        EvaluatedDecisionAt,
         _PortfolioState,
-        risk_candidate_from,
+        apply_evaluated_decisions,
     )
     from chanlun.decision_support.trading_system.human_assisted_decision import (
         HumanAssistedDecisionCore,
@@ -3657,7 +3724,6 @@ def run_sparse_portfolio(
     from chanlun.decision_support.trading_system.models import TradingPolicy
     from chanlun.decision_support.trading_system.portfolio_risk import (
         RiskLimits,
-        size_entry,
     )
 
     if initial_cash <= 0:
@@ -3796,6 +3862,7 @@ def run_sparse_portfolio(
                 execution_policy,
             )
             last_bars[code] = bar
+        evaluated_rows: list[EvaluatedDecisionAt] = []
         for facts, evaluation in sorted(current_events, key=lambda row: row[0].code):
             bar = bars[facts.code]
             evaluation_sector_id = (
@@ -3839,34 +3906,20 @@ def run_sparse_portfolio(
             )
             status = _status_for_bar(bar, facts.security_master)
             for evaluated in engine.evaluate_symbol(bundle):
-                if (
-                    evaluated.entry is not None
-                    and evaluated.entry.allowed
-                    and evaluated.entry.signal_id not in state.consumed_signal_ids
-                ):
-                    candidate = risk_candidate_from(evaluated, bar)
-                    sized = size_entry(
-                        portfolio=state.snapshot(),
-                        candidate=candidate,
-                        limits=risk_limits,
-                    )
-                    state.enqueue_entry(
-                        sized,
+                evaluated_rows.append(
+                    EvaluatedDecisionAt(
+                        code=facts.code,
                         evaluated=evaluated,
                         bar=bar,
-                        created_at=observed_at,
-                    )
-                if (
-                    evaluated.exit is not None
-                    and evaluated.exit.allowed
-                    and evaluated.exit.signal_id not in state.consumed_signal_ids
-                ):
-                    state.enqueue_structural_exit(
-                        evaluated,
-                        code=facts.code,
-                        created_at=observed_at,
                         lot_size=status.lot_size,
                     )
+                )
+        apply_evaluated_decisions(
+            state,
+            tuple(evaluated_rows),
+            risk_limits=risk_limits,
+            created_at=observed_at,
+        )
         state.record_equity(observed_at)
         needed = set(state.positions_by_code)
         needed.update(row.intent.code for row in state.pending_orders)
@@ -4163,6 +4216,22 @@ def build_symbol_facts(
         one_frame,
         buy_boundary_times,
     )
+    daily_technical_contexts = _same_period_technical_context_snapshots(
+        code,
+        "d",
+        daily_frame,
+        buy_boundary_times,
+        request_bars=SCREENING_CANONICAL_REQUEST_BARS["d"],
+        minimum_bars=SCREENING_MINIMUM_BARS_BY_FREQUENCY["d"],
+    )
+    thirty_technical_contexts = _same_period_technical_context_snapshots(
+        code,
+        "30m",
+        frames["30m"],
+        buy_boundary_times,
+        request_bars=SCREENING_CANONICAL_REQUEST_BARS["30m"],
+        minimum_bars=SCREENING_MINIMUM_BARS_BY_FREQUENCY["30m"],
+    )
     sector_by_time = {
         observed_at: sector_at(observed_at) for observed_at in buy_boundary_times
     }
@@ -4181,6 +4250,8 @@ def build_symbol_facts(
             sector_id=sector_at(observed_at),
             daily_direction=daily_direction_by_time[observed_at],
             higher_timeframe_gates=higher_timeframe_gates.get(observed_at),
+            daily_technical_context=daily_technical_contexts.get(observed_at),
+            thirty_technical_context=thirty_technical_contexts.get(observed_at),
             one_minute_bar_count=min(
                 bisect_right(one_dates, observed_at),
                 SCREENING_CANONICAL_REQUEST_BARS["1m"],

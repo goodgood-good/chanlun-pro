@@ -1,0 +1,35 @@
+# Engineering diagnostic cohort selected without signal or return data.
+# Four deterministic SHA-256 picks from each of eight deterministic PIT sectors;
+# salt chanlun-diagnostic32-20260827-v1. This is not a performance holdout.
+SZ.300374
+SH.603256
+SH.601992
+SZ.002333
+SH.688045
+SH.688007
+SH.688150
+SZ.301491
+SH.603215
+SZ.000521
+SH.603355
+SZ.300894
+SH.601601
+SH.601211
+SZ.002926
+SZ.000617
+SH.600398
+SH.600527
+SH.600439
+SZ.000026
+SH.688375
+SZ.300726
+SZ.002111
+SZ.300629
+SZ.300664
+SZ.000598
+SH.600526
+SH.600817
+SH.688201
+SH.688058
+SH.600536
+SH.688692

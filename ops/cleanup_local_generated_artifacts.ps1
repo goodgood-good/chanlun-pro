@@ -203,6 +203,11 @@ $legacyCacheTargets = @(
     ".cache\fixed_year_preflight_current",
     ".cache\fixed_year_preflight_current_v2",
     ".cache\fixed_year_probe",
+    ".cache\chanlun_backtest_six_month_target_sh600216_afterfix_20260126_20260724",
+    ".cache\chanlun_backtest_six_month_target_sz301500_afterfix_20260126_20260724",
+    ".cache\chanlun_backtest_six_month_full_20260126_20260724",
+    ".cache\chanlun_backtest_six_month_validation12_20260126_20260724",
+    ".cache\chanlun_backtest_six_month_validation32_20260126_20260724",
     ".cache\historical_backtest_preflight_fix_20260816",
     ".cache\historical_backtest_preflight_report_20260816",
     ".cache\icon-preview"
