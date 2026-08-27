@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 import hashlib
 import json
@@ -39,6 +39,9 @@ from tools import qmt_research_contract
 
 CN = ZoneInfo("Asia/Shanghai")
 AUDIT_SCHEMA = "chanlun-prefix-invariance-audit"
+CALENDAR_UNAVAILABLE_REASON = (
+    "QMT_HIGHER_TIMEFRAME_TRADING_CALENDAR_PROVIDER_UNAVAILABLE"
+)
 
 
 def _positive_int(value: str) -> int:
@@ -221,6 +224,76 @@ class Request:
     target: str
     warmup_start: date
     algorithm_revision: str
+    prefix_algorithm_revision: str
+
+
+def _capture_frozen_trading_calendar(
+    *,
+    effective_start: date,
+    requested_end: date,
+) -> tuple[date, date, tuple[date, ...]]:
+    """Read the official calendar once before concurrent prefix workers start."""
+
+    from chanlun.exchange.qmt_screening_sector_source import qmt_trading_sessions
+
+    coverage_start = effective_start - timedelta(days=365)
+    coverage_end = requested_end
+    sessions = tuple(
+        qmt_trading_sessions(
+            start=coverage_start,
+            end=coverage_end,
+            observed_at=datetime.now(CN),
+        )
+    )
+    if (
+        not sessions
+        or sessions != tuple(sorted(set(sessions)))
+        or sessions[0] < coverage_start
+        or sessions[-1] > coverage_end
+    ):
+        raise RuntimeError("frozen QMT trading calendar is invalid")
+    return coverage_start, coverage_end, sessions
+
+
+def _install_frozen_trading_calendar(
+    coverage_start: date,
+    coverage_end: date,
+    sessions: tuple[date, ...],
+) -> None:
+    """Install a read-only calendar slicer in one spawned audit process."""
+
+    from chanlun.exchange import qmt_screening_sector_source
+
+    frozen = tuple(sessions)
+
+    def provider(*, start: date, end: date, observed_at: datetime) -> tuple[date, ...]:
+        observed = observed_at.astimezone(CN)
+        if (
+            start < coverage_start
+            or end > coverage_end
+            or start > end
+            or end > observed.date()
+        ):
+            raise RuntimeError("prefix calendar request escaped frozen coverage")
+        selected = tuple(value for value in frozen if start <= value <= end)
+        if not selected:
+            raise RuntimeError("prefix calendar interval is empty")
+        return selected
+
+    qmt_screening_sector_source.qmt_trading_sessions = provider
+
+
+def _has_transient_calendar_failure(facts: SymbolResearchFacts) -> bool:
+    return any(
+        CALENDAR_UNAVAILABLE_REASON in gate.reason_codes
+        for evaluation in facts.evaluations
+        if evaluation.higher_timeframe_gates is not None
+        for gate in (
+            evaluation.higher_timeframe_gates.market,
+            evaluation.higher_timeframe_gates.symbol,
+            evaluation.higher_timeframe_gates.sector,
+        )
+    )
 
 
 def _worker(request: Request) -> dict[str, object]:
@@ -230,12 +303,15 @@ def _worker(request: Request) -> dict[str, object]:
     full = pickle.loads(path.read_bytes())
     if not isinstance(full, SymbolResearchFacts) or full.schema != FACT_SCHEMA:
         raise ValueError("invalid full symbol fact")
+    if _has_transient_calendar_failure(full):
+        raise RuntimeError("full fact contains a transient QMT calendar failure")
     prefix_end = _prefix_end(full)
     if prefix_end is None:
         result = {
             "schema": AUDIT_SCHEMA,
             "code": full.code,
             "algorithm_revision": request.algorithm_revision,
+            "prefix_algorithm_revision": request.prefix_algorithm_revision,
             "full_source_revision": full.source_revision,
             "status": "passed",
             "reason": "no_preterminal_decision_prefix",
@@ -261,6 +337,8 @@ def _worker(request: Request) -> dict[str, object]:
             row for row in full.factors if row.effective_on <= prefix_end
         ),
     )
+    if _has_transient_calendar_failure(prefix):
+        raise RuntimeError("prefix fact contains a transient QMT calendar failure")
     expected = _projection(full, cutoff)
     actual = _projection(prefix, cutoff)
     passed = expected == actual
@@ -268,6 +346,7 @@ def _worker(request: Request) -> dict[str, object]:
         "schema": AUDIT_SCHEMA,
         "code": full.code,
         "algorithm_revision": request.algorithm_revision,
+        "prefix_algorithm_revision": request.prefix_algorithm_revision,
         "full_source_revision": full.source_revision,
         "status": "passed" if passed else "failed",
         "reason": "semantic_prefix_equal" if passed else "semantic_prefix_changed",
@@ -292,6 +371,8 @@ def _valid_existing(path: Path, request: Request) -> dict[str, object] | None:
     if (
         raw.get("schema") != AUDIT_SCHEMA
         or raw.get("algorithm_revision") != request.algorithm_revision
+        or raw.get("prefix_algorithm_revision")
+        != request.prefix_algorithm_revision
         or raw.get("full_fact_sha256") != _sha256(Path(request.fact_path))
     ):
         return None
@@ -325,6 +406,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     prefix_algorithm_hashes = qmt_research_contract.prefix_algorithm_hashes()
     prefix_algorithm_revision = _algorithm_revision(prefix_algorithm_hashes)
     warmup_start = date.fromisoformat(str(request_info["warmup_start"]))
+    effective_start = date.fromisoformat(str(request_info["effective_start"]))
+    requested_end = date.fromisoformat(str(request_info["requested_end"]))
+    calendar_start, calendar_end, trading_sessions = (
+        _capture_frozen_trading_calendar(
+            effective_start=effective_start,
+            requested_end=requested_end,
+        )
+    )
+    trading_calendar_sha256 = _semantic_hash(
+        (calendar_start, calendar_end, trading_sessions)
+    )
     requests: list[Request] = []
     skipped_no_evaluations = 0
     for code, summary in sorted(symbols.items()):
@@ -339,6 +431,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target=str(_audit_path(directory, str(code))),
                 warmup_start=warmup_start,
                 algorithm_revision=fact_algorithm_revision,
+                prefix_algorithm_revision=prefix_algorithm_revision,
             )
         )
     completed: dict[str, dict[str, object]] = {}
@@ -353,7 +446,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             completed[str(existing["code"])] = existing
     started = wall_time.perf_counter()
     if pending:
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=args.workers,
+            initializer=_install_frozen_trading_calendar,
+            initargs=(calendar_start, calendar_end, trading_sessions),
+        ) as executor:
             futures = {executor.submit(_worker, row): row for row in pending}
             for ordinal, future in enumerate(as_completed(futures), start=1):
                 row = future.result()
@@ -394,6 +491,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "algorithm_revision": prefix_algorithm_revision,
         "prefix_algorithm_revision": prefix_algorithm_revision,
         "fact_algorithm_revision": fact_algorithm_revision,
+        "trading_calendar_sha256": trading_calendar_sha256,
+        "trading_calendar_coverage": {
+            "start": calendar_start.isoformat(),
+            "end": calendar_end.isoformat(),
+            "session_count": len(trading_sessions),
+        },
         "pit_snapshot_sha256": request_info["pit_snapshot_sha256"],
         "extract_manifest_sha256": _sha256(manifest_path),
         "signal_producing_symbol_count": len(requests),

@@ -86,3 +86,38 @@ def test_finalizer_rejects_blocked_gate_that_claims_pnl(tmp_path) -> None:
         )
 
     assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    (
+        "expected_pair_keys",
+        "snapshot_pair_keys",
+        "snapshot_converged",
+        "expected",
+    ),
+    (
+        ({("setup-a", "witness-a")}, {("setup-a", "witness-a")}, True, False),
+        ({("setup-a", "witness-a")}, set(), True, True),
+        ({("setup-a", "witness-a")}, set(), False, False),
+        (
+            {("setup-a", "witness-a")},
+            {("setup-b", "witness-a")},
+            False,
+            False,
+        ),
+    ),
+)
+def test_production_snapshot_pair_mismatch_only_blocks_certification_when_unsafe(
+    expected_pair_keys: set[tuple[str, str]],
+    snapshot_pair_keys: set[tuple[str, str]],
+    snapshot_converged: bool,
+    expected: bool,
+) -> None:
+    assert (
+        pit_finalizer._production_snapshot_pair_mismatch_is_unsafe(
+            expected_pair_keys=expected_pair_keys,
+            snapshot_pair_keys=snapshot_pair_keys,
+            snapshot_converged=snapshot_converged,
+        )
+        is expected
+    )

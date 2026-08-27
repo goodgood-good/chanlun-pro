@@ -609,11 +609,21 @@ class _TechnicalSignalEvaluator:
                     (structural_point_occurrence_id(setup.point), trigger.point_id)
                 )
             )
-            if entry_boundary is not None:
-                jointly_known_at = max(
-                    normalize_datetime(setup.point.available_at, "setup available_at"),
-                    normalize_datetime(trigger.available_at, "witness available_at"),
+            jointly_known_at = (
+                None
+                if trigger is None
+                else max(
+                    normalize_datetime(
+                        setup.point.available_at,
+                        "setup available_at",
+                    ),
+                    normalize_datetime(
+                        trigger.available_at,
+                        "witness available_at",
+                    ),
                 )
+            )
+            if entry_boundary is not None:
                 if (
                     normalize_datetime(
                         entry_boundary.confirmation_bar_closed_at,
@@ -684,10 +694,14 @@ class _TechnicalSignalEvaluator:
                 and bundle.physical_timeframe_recursive
             ):
                 if entry_boundary is None:
+                    if jointly_known_at is None:
+                        raise AssertionError(
+                            "triggered lifecycle requires a joint-knowledge time"
+                        )
                     entry_boundary_reason = (
                         "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"
                         if a_share_optional_entry_valid_until(
-                            trigger.available_at
+                            jointly_known_at
                         )
                         <= bundle.as_of
                         else "ONE_MINUTE_SEGMENT_BOUNDARY_MISSING"

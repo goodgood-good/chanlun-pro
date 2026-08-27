@@ -277,6 +277,55 @@ def test_recursive_ongoing_center_keeps_both_opposite_edges_pending() -> None:
     )
 
 
+def test_recursive_supersession_moves_boundary_unit_to_successor_movement() -> None:
+    specs = (
+        ("up", 1885, 2245, 1885, 2245),
+        ("down", 2245, 1540, 1540, 2498),
+        ("up", 1540, 1866, 1539, 1959),
+        ("down", 1866, 1518, 1451, 1866),
+        ("up", 1518, 2769, 1518, 2769),
+        ("down", 2769, 2665, 1845, 3216),
+    )
+    values = tuple(
+        replace(
+            unit(
+                index,
+                direction,
+                start_tick,
+                end_tick,
+                structural_level=1,
+                source_kind=SourceKind.TREND_TYPE,
+            ),
+            low_tick=low_tick,
+            high_tick=high_tick,
+        )
+        for index, (
+            direction,
+            start_tick,
+            end_tick,
+            low_tick,
+            high_tick,
+        ) in enumerate(specs)
+    )
+
+    centers = calculate_centers(values, 1, SourceKind.TREND_TYPE).centers
+    assert tuple(center.state for center in centers) == (
+        CenterState.SUPERSEDED,
+        CenterState.ONGOING,
+    )
+
+    result = assemble_trend_types(centers, values, 1)
+
+    assert _movement_ranges(result, values) == (
+        (1, 1, "down"),
+        (2, 4, "up"),
+    )
+    assert _pending_ranges(result, values) == (
+        (0, 0, "up"),
+        (5, 5, "down"),
+    )
+
+
 def test_sh513100_manual_5m_tail_is_partitioned_at_saved_boundaries() -> None:
     values = sh513100_manual_tail_fixture()
 

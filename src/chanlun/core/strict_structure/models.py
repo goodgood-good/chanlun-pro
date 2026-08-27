@@ -1591,6 +1591,30 @@ class TrendType:
                     and terminal.end_tick == external_tail[0].start_tick
                     and external_tail[0].market_start >= terminal.market_end
                 )
+                supersession_boundary = (
+                    center.supersession_bridge_units[-1]
+                    if center.supersession_bridge_units
+                    else center.body_units[-1]
+                )
+                # Boundary alignment transfers the opposite terminal unit of
+                # a superseded recursive center to the successor movement.
+                # The successor identity is immutable evidence that this is a
+                # real internal boundary rather than an unproven live suffix.
+                superseded_tail_is_external = (
+                    self.state in (TrendState.COMPLETE, TrendState.LOCKED)
+                    and self.terminal_divergence is None
+                    and center.source_kind is SourceKind.TREND_TYPE
+                    and center_offset == len(self.centers) - 1
+                    and center.state is CenterState.SUPERSEDED
+                    and center.superseded_by_center_id is not None
+                    and terminal_offset >= 0
+                    and len(external_tail) == 1
+                    and external_tail[0] == supersession_boundary
+                    and terminal.direction == self.direction
+                    and external_tail[0].direction != self.direction
+                    and terminal.end_tick == external_tail[0].start_tick
+                    and external_tail[0].market_start >= terminal.market_end
+                )
                 # A finite recursive window can expose both boundaries at
                 # once: the first ongoing center may be ``opposite / movement
                 # / opposite``.  In that case the middle same-direction unit
@@ -1606,7 +1630,12 @@ class TrendType:
                             if recursive_open_history_head_is_external
                             else ()
                         ),
-                        *(external_tail if live_tail_is_external else ()),
+                        *(
+                            external_tail
+                            if live_tail_is_external
+                            or superseded_tail_is_external
+                            else ()
+                        ),
                     )
                 )
                 active_edge_is_external = (

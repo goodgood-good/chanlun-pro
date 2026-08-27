@@ -2012,25 +2012,82 @@ def _one_minute_visibility_windows(
 ) -> tuple[tuple[datetime, datetime], ...]:
     """Return causal 1m replay windows covering each complete 5m terminal leg."""
 
+    return tuple(
+        (window.start, window.end)
+        for window in _one_minute_replay_windows(
+            setups,
+            active_ends,
+            end_at=end_at,
+            point_visibility=point_visibility,
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _OneMinuteReplayWindow:
+    """A bounded 1m replay epoch and its causal right-edge state.
+
+    ``close_at`` is the first instant outside the active epoch.  It is the
+    exact endpoint when a newer 5m state supersedes the setup, one microsecond
+    after an inclusive execution expiry, and ``None`` when the research
+    request itself right-censors the epoch.
+    """
+
+    start: datetime
+    end: datetime
+    close_at: datetime | None
+
+    def __post_init__(self) -> None:
+        start = normalize_datetime(self.start, "1m replay window start")
+        end = normalize_datetime(self.end, "1m replay window end")
+        close_at = (
+            None
+            if self.close_at is None
+            else normalize_datetime(self.close_at, "1m replay window close")
+        )
+        if start > end:
+            raise ValueError("1m replay window start cannot follow end")
+        if close_at is not None and close_at < end:
+            raise ValueError("1m replay window cannot close before its data end")
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "end", end)
+        object.__setattr__(self, "close_at", close_at)
+
+
+def _one_minute_replay_windows(
+    setups: Sequence[StructuralPoint],
+    active_ends: Mapping[str, tuple[datetime, bool]] | None = None,
+    *,
+    end_at: datetime,
+    point_visibility: Sequence[PointVisibilityInterval] = (),
+) -> tuple[_OneMinuteReplayWindow, ...]:
+    """Return 1m epochs without collapsing inclusive and exclusive ends."""
+
     replay_end = normalize_datetime(end_at, "one minute visibility end")
-    output: list[tuple[datetime, datetime]] = []
+    output: list[_OneMinuteReplayWindow] = []
     visibility_by_point: dict[str, list[PointVisibilityInterval]] = {}
     for interval in point_visibility:
         visibility_by_point.setdefault(interval.point_id, []).append(interval)
     for setup in setups:
         setup_start = five_minute_segment_difference_window_start(setup)
-        setup_end = min(
-            five_minute_setup_expires_at(setup),
-            replay_end,
-        )
+        expiry = five_minute_setup_expires_at(setup)
         if point_visibility:
             active_windows = tuple(
                 (
                     setup_start,
-                    min(interval.visible_until or setup_end, setup_end),
+                    min(interval.visible_until or expiry, expiry, replay_end),
+                    (
+                        min(interval.visible_until, expiry, replay_end)
+                        if interval.visible_until is not None
+                        and interval.visible_until <= expiry
+                        and interval.visible_until <= replay_end
+                        else min(expiry, replay_end) + timedelta(microseconds=1)
+                        if expiry <= replay_end
+                        else None
+                    ),
                 )
                 for interval in visibility_by_point.get(setup.point_id, ())
-                if interval.visible_from <= setup_end
+                if interval.visible_from <= min(expiry, replay_end)
                 and (
                     interval.visible_until is None
                     or interval.visible_until >= setup.available_at
@@ -2039,17 +2096,45 @@ def _one_minute_visibility_windows(
         else:
             if active_ends is None:
                 raise ValueError("legacy setup windows require active ends")
+            active_end, end_exclusive = active_ends[setup.point_id]
+            bounded_end = min(active_end, expiry, replay_end)
             active_windows = (
                 (
                     setup_start,
-                    min(active_ends[setup.point_id][0], setup_end),
+                    bounded_end,
+                    (
+                        bounded_end
+                        if end_exclusive
+                        and active_end <= expiry
+                        and active_end <= replay_end
+                        else bounded_end + timedelta(microseconds=1)
+                        if min(active_end, expiry) <= replay_end
+                        else None
+                    ),
                 ),
             )
-        output.extend(
-            (window_start, active_end)
-            for window_start, active_end in active_windows
-            if setup.available_at <= active_end and window_start <= active_end
-        )
+        for window_start, bounded_end, close_at in active_windows:
+            end_is_exclusive = close_at == bounded_end
+            if (
+                (
+                    setup.available_at >= bounded_end
+                    if end_is_exclusive
+                    else setup.available_at > bounded_end
+                )
+                or (
+                    window_start >= bounded_end
+                    if end_is_exclusive
+                    else window_start > bounded_end
+                )
+            ):
+                continue
+            output.append(
+                _OneMinuteReplayWindow(
+                    start=window_start,
+                    end=bounded_end,
+                    close_at=close_at,
+                )
+            )
     return tuple(output)
 
 
@@ -2088,7 +2173,9 @@ def _five_minute_replay_windows(
 def _causal_one_minute_events_by_windows(
     code: str,
     frame: pd.DataFrame,
-    visibility_windows: Sequence[tuple[datetime, datetime]],
+    visibility_windows: Sequence[
+        tuple[datetime, datetime] | _OneMinuteReplayWindow
+    ],
 ) -> tuple[tuple[StructuralPoint, ...], tuple[PointVisibilityInterval, ...]]:
     """Replay each active 5m terminal epoch from production-sized cold history.
 
@@ -2102,28 +2189,63 @@ def _causal_one_minute_events_by_windows(
 
     if frame.empty or not visibility_windows:
         return (), ()
-    normalized = sorted(
+    legacy_end = max(
         (
-            normalize_datetime(start, "1m replay window start"),
-            normalize_datetime(end, "1m replay window end"),
+            window.end
+            if isinstance(window, _OneMinuteReplayWindow)
+            else normalize_datetime(window[1], "1m replay window end")
         )
-        for start, end in visibility_windows
+        for window in visibility_windows
     )
-    if any(start > end for start, end in normalized):
-        raise ValueError("1m replay window start cannot follow end")
-    merged: list[tuple[datetime, datetime]] = []
-    for start, end in normalized:
-        if not merged or start > merged[-1][1]:
-            merged.append((start, end))
+    normalized = sorted(
+        [
+            window
+            if isinstance(window, _OneMinuteReplayWindow)
+            else _OneMinuteReplayWindow(
+                start=window[0],
+                end=window[1],
+                close_at=(
+                    None
+                    if normalize_datetime(window[1], "1m replay window end")
+                    == legacy_end
+                    else normalize_datetime(window[1], "1m replay window end")
+                ),
+            )
+            for window in visibility_windows
+        ],
+        key=lambda window: (window.start, window.end),
+    )
+    merged: list[_OneMinuteReplayWindow] = []
+    for window in normalized:
+        if not merged or window.start > merged[-1].end:
+            merged.append(window)
+            continue
+        previous = merged[-1]
+        if window.end < previous.end:
+            continue
+        if window.end > previous.end:
+            merged[-1] = _OneMinuteReplayWindow(
+                start=previous.start,
+                end=window.end,
+                close_at=window.close_at,
+            )
         else:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            merged[-1] = _OneMinuteReplayWindow(
+                start=previous.start,
+                end=previous.end,
+                close_at=(
+                    None
+                    if previous.close_at is None or window.close_at is None
+                    else max(previous.close_at, window.close_at)
+                ),
+            )
 
     dates = tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
     history_bars = SCREENING_CANONICAL_REQUEST_BARS["1m"]
     points_by_id: dict[str, StructuralPoint] = {}
     point_visibility: list[PointVisibilityInterval] = []
-    replay_end = max(end for _start, end in merged)
-    for start, end in merged:
+    for window in merged:
+        start, end = window.start, window.end
         first = bisect_right(dates, start - timedelta(microseconds=1))
         stop = bisect_right(dates, end)
         if first >= len(dates) or stop <= first:
@@ -2159,8 +2281,10 @@ def _causal_one_minute_events_by_windows(
             if interval.point_id not in eligible_points:
                 continue
             visible_until = interval.visible_until
-            if visible_until is None and end < replay_end:
-                visible_until = end
+            if window.close_at is not None and (
+                visible_until is None or visible_until > window.close_at
+            ):
+                visible_until = window.close_at
             if visible_until is not None and visible_until <= interval.visible_from:
                 continue
             point_visibility.append(replace(interval, visible_until=visible_until))
@@ -2231,6 +2355,12 @@ def _operation_point_identity_signature(point: StructuralPoint) -> tuple[object,
             terminal.market_end,
         )
     )
+    carrier_geometry = tuple(
+        ("terminal_segment", terminal_geometry)
+        if terminal is not None and unit_id == terminal.unit_id
+        else unit_id
+        for unit_id in point.small_to_large_carrier_unit_ids
+    )
     return (
         point.point_id,
         point.code,
@@ -2252,7 +2382,7 @@ def _operation_point_identity_signature(point: StructuralPoint) -> tuple[object,
         point.divergence_kind,
         point.parent_point_id,
         point.related_point_ids,
-        point.small_to_large_carrier_unit_ids,
+        carrier_geometry,
         terminal_geometry,
     )
 
@@ -3940,7 +4070,7 @@ def build_symbol_facts(
     one_points, one_point_visibility = _causal_one_minute_events_by_windows(
         code,
         one_frame,
-        _one_minute_visibility_windows(
+        _one_minute_replay_windows(
             relevant_setups,
             end_at=end_at,
             point_visibility=operation_point_visibility,

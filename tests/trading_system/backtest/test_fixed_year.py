@@ -31,8 +31,13 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
     load_qmt_frame,
 )
 from chanlun.decision_support.trading_system.lifecycle import (
+    five_minute_setup_expires_at,
     structural_point_occurrence_id,
 )
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    HumanAssistedDecisionCore,
+)
+from chanlun.decision_support.trading_system.models import TradingPolicy
 from tests.trading_system.backtest.helpers import minute_bar
 from tests.trading_system.helpers import (
     CN,
@@ -140,7 +145,10 @@ def test_preexisting_nested_witness_opens_boundary_once_at_joint_knowledge() -> 
             "1buy",
             frequency="1m",
             anchor=9.9,
-            minutes_after=-5,
+            # The opening-auction observation may confirm an older completed
+            # 1m segment at 09:30.  It is causal structural evidence, but is
+            # not itself a completed continuous-auction execution minute.
+            minutes_after=-30,
         )
     )
     older_witness = _strict_witness(
@@ -148,7 +156,7 @@ def test_preexisting_nested_witness_opens_boundary_once_at_joint_knowledge() -> 
             "2buy",
             frequency="1m",
             anchor=9.8,
-            minutes_after=-10,
+            minutes_after=-40,
         )
     )
     jointly_known_at = setup.available_at
@@ -209,6 +217,15 @@ def test_preexisting_nested_witness_opens_boundary_once_at_joint_knowledge() -> 
         == jointly_known_at
     )
     assert repeated.entry_execution_boundaries == ()
+    [repeated_decision] = HumanAssistedDecisionCore(
+        TradingPolicy(),
+        formal_selection_required=False,
+    ).evaluate_symbol(repeated)
+    assert repeated_decision.entry is not None
+    assert repeated_decision.entry.allowed is False
+    assert "ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED" in (
+        repeated_decision.entry.reason_codes
+    )
 
 
 def test_symbol_bundle_uses_current_context_but_keeps_one_minute_event_ledger() -> None:
@@ -818,6 +835,72 @@ def test_one_minute_visibility_drops_epochs_after_execution_expiry() -> None:
     ) == ((setup.available_at, first_end),)
 
 
+def test_one_minute_replay_keeps_point_current_at_inclusive_setup_expiry(
+    monkeypatch,
+) -> None:
+    setup = _strict_setup(
+        confirmed_point(
+            "3buy",
+            anchor=10.0,
+            stop=9.8,
+            center_zg=9.9,
+        )
+    )
+    expiry = five_minute_setup_expires_at(setup)
+    point = _strict_witness(
+        confirmed_point(
+            "1buy",
+            frequency="1m",
+            minutes_after=4 * 24 * 60 - 4,
+        )
+    )
+    source = pd.DataFrame({"date": [point.available_at, expiry]})
+    source.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="test-raw",
+    )
+    windows = fixed_year._one_minute_replay_windows(
+        (setup,),
+        end_at=expiry,
+        point_visibility=(
+            PointVisibilityInterval(setup.point_id, setup.available_at),
+        ),
+    )
+
+    def replay(*_args, **_kwargs):
+        return SimpleNamespace(
+            points=(point,),
+            point_visibility=(
+                PointVisibilityInterval(point.point_id, point.available_at),
+            ),
+        )
+
+    monkeypatch.setattr(fixed_year, "_causal_confirmed_structure_events", replay)
+
+    assert windows == (
+        fixed_year._OneMinuteReplayWindow(
+            start=setup.terminal_segment.market_start - timedelta(minutes=5),
+            end=expiry,
+            close_at=expiry + timedelta(microseconds=1),
+        ),
+    )
+    points, visibility = fixed_year._causal_one_minute_events_by_windows(
+        setup.code,
+        source,
+        windows,
+    )
+
+    assert points == (point,)
+    assert visibility == (
+        PointVisibilityInterval(
+            point.point_id,
+            point.available_at,
+            expiry + timedelta(microseconds=1),
+        ),
+    )
+    assert visibility[0].contains(expiry)
+
+
 def test_sector_facts_use_only_points_current_at_each_decision(
     monkeypatch,
 ) -> None:
@@ -1038,6 +1121,71 @@ def test_operation_identity_allows_terminal_start_refinement() -> None:
 
     assert fixed_year._operation_point_identity_signature(first) == (
         fixed_year._operation_point_identity_signature(refined)
+    )
+
+
+def test_operation_identity_normalizes_only_refined_terminal_carrier_id() -> None:
+    point = confirmed_point("2sell", frequency="5m", level=1)
+    assert point.parent_point_id is not None
+    first_terminal_id = "trend-type:first-tail"
+    refined_terminal_id = "trend-type:refined-tail"
+    first = replace(
+        point,
+        evidence_codes=("small_to_large_reversal",),
+        related_point_ids=(point.parent_point_id,),
+        small_to_large_carrier_unit_ids=(
+            "trend-type:departure",
+            "trend-type:reversal",
+            first_terminal_id,
+        ),
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=1,
+            unit_id=first_terminal_id,
+            source_kind=SourceKind.TREND_TYPE,
+            direction="up",
+            state="formed",
+            market_start=point.anchor_at - timedelta(days=3),
+            market_end=point.anchor_at,
+            available_at=point.available_at,
+        ),
+    )
+    refined_at = point.available_at + timedelta(minutes=17)
+    refined = replace(
+        first,
+        confirmed_at=refined_at,
+        available_at=refined_at,
+        small_to_large_carrier_unit_ids=(
+            "trend-type:departure",
+            "trend-type:reversal",
+            refined_terminal_id,
+        ),
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=1,
+            unit_id=refined_terminal_id,
+            source_kind=SourceKind.TREND_TYPE,
+            direction="up",
+            state="locked",
+            market_start=point.anchor_at - timedelta(days=3),
+            market_end=point.anchor_at,
+            available_at=refined_at,
+        ),
+    )
+    changed_non_terminal_carrier = replace(
+        refined,
+        small_to_large_carrier_unit_ids=(
+            "trend-type:different-departure",
+            "trend-type:reversal",
+            refined_terminal_id,
+        ),
+    )
+
+    assert fixed_year._operation_point_identity_signature(first) == (
+        fixed_year._operation_point_identity_signature(refined)
+    )
+    assert fixed_year._operation_point_identity_signature(refined) != (
+        fixed_year._operation_point_identity_signature(changed_non_terminal_carrier)
     )
 
 

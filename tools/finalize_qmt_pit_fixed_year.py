@@ -1009,6 +1009,25 @@ def _new_exact_buy_nesting_pairs(
     return tuple(output)
 
 
+def _production_snapshot_pair_mismatch_is_unsafe(
+    *,
+    expected_pair_keys: set[tuple[str, str]],
+    snapshot_pair_keys: set[tuple[str, str]],
+    snapshot_converged: bool,
+) -> bool:
+    """Return whether a production/full-ledger disagreement can reach an order.
+
+    A converged production snapshot is required to agree exactly with the causal
+    full-history ledger.  A non-converged snapshot is deliberately different:
+    no production pair means no execution boundary, while a production pair
+    makes ``build_symbol_bundle`` enforce the non-overridable 5m warmup gate.
+    Either branch is unable to enqueue an entry, so it is a proven blocked
+    candidate rather than a future-function failure for the portfolio replay.
+    """
+
+    return expected_pair_keys != snapshot_pair_keys and snapshot_converged
+
+
 def _causality_failures(
     *,
     symbols: Sequence[SymbolResearchFacts],
@@ -1102,7 +1121,11 @@ def _causality_failures(
                     (structural_point_occurrence_id(setup), witness.point_id)
                     for setup, witness in snapshot_pairs
                 }
-                if expected_pair_keys != snapshot_pair_keys:
+                if _production_snapshot_pair_mismatch_is_unsafe(
+                    expected_pair_keys=expected_pair_keys,
+                    snapshot_pair_keys=snapshot_pair_keys,
+                    snapshot_converged=execution_snapshot.converged,
+                ):
                     failures.append(
                         "production_execution_snapshot_nesting_pair_mismatch"
                     )
