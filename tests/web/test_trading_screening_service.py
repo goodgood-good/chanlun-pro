@@ -117,6 +117,7 @@ from cl_app.services.trading_screening_scope import (
     ScreeningScopeAuthorizationError,
 )
 from cl_app.services.trading_screening_source_migrations import (
+    completed_retry_residue_source_migration_allowed,
     incomplete_retry_reconciliation_source_migration_allowed,
     orchestration_source_migration_allowed,
     suspension_evidence_recheck_source_migration_allowed,
@@ -2564,7 +2565,7 @@ def _previous_incomplete_retry_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"
+        "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe"
     )
     rows[
         "src/chanlun/decision_support/trading_system/live_human_review.py"
@@ -2575,6 +2576,25 @@ def _previous_incomplete_retry_source_snapshot(
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] = (
         "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
+def _previous_completed_retry_residue_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    rows = {row["path"]: row for row in previous["files"]}
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe"
+    )
+    rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
+        "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"
     )
     previous["aggregate_sha256"] = sha256_json(
         {"schema": previous["schema"], "files": previous["files"]}
@@ -3034,6 +3054,125 @@ def test_incomplete_retry_migration_prunes_fanout_and_finishes_exact_symbol(
     assert (
         "source_migration_incomplete_retry_reconciliation_codes" not in repaired
     )
+
+
+def test_completed_retry_residue_migration_repairs_only_exact_symbols(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
+    first = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    published = first.refresh_now()
+    assert published["coverage_manifest"]["complete"] is True
+
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    retry_code = "SZ.000002"
+    manifest = persisted["coverage_manifest"]
+    manifest["failed_codes"] = [retry_code]
+    manifest["deferred_frequencies"][retry_code] = ["d", "30m", "5m", "1m"]
+    persisted["errors"] = [
+        {
+            "code": retry_code,
+            "error_type": "stock_analysis_error",
+            "reason_code": "STRUCTURE_BUNDLE_STALE",
+            "failure_class": "MARKET_DATA_REJECTION",
+            "retry_policy": "NEXT_MARKET_DATA_EPOCH",
+            "deterministic_for_coverage_epoch": True,
+            "remote_error_type": "ValueError",
+            "reason": "structure_bundle_stale",
+        }
+    ]
+    persisted["scan_audit"]["coverage_cycle_failed_symbol_count"] = 1
+    persisted["scan_audit"]["stock_failure_counts"] = {
+        "STRUCTURE_BUNDLE_STALE": 1
+    }
+    persisted["scan_audit"]["retry_symbol_count"] = 1
+    persisted["scan_audit"]["next_epoch_retry_symbol_count"] = 1
+    persisted["data_quality"] = {
+        "complete": False,
+        "stale": False,
+        "failure_codes": ["stock_scan_partial"],
+    }
+    current_source = persisted["decision_source_snapshot"]
+    current_source_id = persisted["decision_source_snapshot_id"]
+    previous_source = _previous_completed_retry_residue_source_snapshot(
+        current_source
+    )
+    previous_source_id = previous_source["aggregate_sha256"]
+    assert completed_retry_residue_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_source_id,
+        current_decision_source_snapshot_id=current_source_id,
+        cached_decision_source_snapshot=previous_source,
+        current_decision_source_snapshot=current_source,
+    )
+    persisted["decision_source_snapshot_id"] = previous_source_id
+    persisted["decision_source_snapshot"] = previous_source
+    persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        persisted
+    )
+    cache_path.write_text(json.dumps(persisted), encoding="utf-8")
+    first._persist_cache_scope_sidecar(cache_path, persisted)
+    for generation in first._generation_paths():
+        first._cache_scope_sidecar_path(generation).unlink(missing_ok=True)
+        generation.unlink()
+
+    market = RecordingMarketData()
+    original = market.structure_bundle
+
+    def stale_structure_bundle(code, **kwargs):
+        bundle = original(code, **kwargs)
+        if code != retry_code:
+            return bundle
+        stale_at = AS_OF - timedelta(hours=2)
+        return replace(
+            bundle,
+            as_of=stale_at,
+            analysis_closed_at_by_frequency=(
+                ("5m", stale_at),
+                ("1m", stale_at),
+            ),
+        )
+
+    market.structure_bundle = stale_structure_bundle
+    planner = RecordingPlanner(symbols)
+    restarted = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=planner,
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    assert restarted._pending_frequencies == {}
+    assert set(restarted._backoff_frequencies) == {retry_code}
+    assert restarted._coverage_cycle_failed_codes == {retry_code}
+    assert market.bundle_codes == []
+
+    repaired = restarted.refresh_now()
+
+    assert planner.calls == 0
+    assert market.bundle_codes == [retry_code, retry_code]
+    assert repaired["coverage_epoch_id"] == published["coverage_epoch_id"]
+    assert repaired["scan_state"] == "complete"
+    assert repaired["coverage_manifest"]["complete"] is True
+    assert repaired["coverage_manifest"]["failed_codes"] == []
+    assert repaired["coverage_manifest"]["backoff_frequencies"] == {}
+    assert repaired["errors"] == []
+    assert repaired["data_quality"]["complete"] is True
+    assert "source_migration_completed_retry_residue_codes" not in repaired
+    on_disk = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "source_migration_completed_retry_residue_codes" not in on_disk
+    assert on_disk["decision_source_snapshot_id"] == current_source_id
 
 
 def test_previous_close_preselection_continuity_keeps_current_notifications_live(
@@ -5565,6 +5704,74 @@ def test_same_epoch_backoff_retry_does_not_reopen_changed_symbols(
         market.bundle_codes.count(code) == 1
         for code in ("SZ.000001", "SZ.000003", "SZ.000004", "SZ.000005")
     )
+
+
+def test_same_epoch_stale_retry_cannot_revoke_completed_symbol(
+    tmp_path: Path,
+) -> None:
+    class NativeScreeningWorkerUnavailable(RuntimeError):
+        pass
+
+    symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
+    market = RecordingMarketData()
+    planner = RecordingPlanner(symbols)
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=planner,
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    first = service.refresh_now()
+    retry_code = "SZ.000002"
+    assert first["coverage_manifest"]["complete"] is True
+
+    original = market.structure_bundle
+
+    def stale_structure_bundle(code, **kwargs):
+        bundle = original(code, **kwargs)
+        if code != retry_code:
+            return bundle
+        stale_at = AS_OF - timedelta(hours=2)
+        return replace(
+            bundle,
+            as_of=stale_at,
+            analysis_closed_at_by_frequency=(
+                ("5m", stale_at),
+                ("1m", stale_at),
+            ),
+        )
+
+    market.structure_bundle = stale_structure_bundle
+    service._backoff_frequencies[retry_code] = {"d", "30m", "5m", "1m"}
+    service._coverage_cycle_failed_codes.add(retry_code)
+    service._coverage_cycle_errors[f"stock_analysis_error:{retry_code}"] = (
+        trading_screening_subject._stock_analysis_error_document(
+            retry_code,
+            NativeScreeningWorkerUnavailable("worker restarted"),
+        )
+    )
+
+    repaired = service.refresh_now()
+
+    assert planner.calls == 1
+    assert market.bundle_codes.count(retry_code) == 3
+    assert repaired["coverage_epoch_id"] == first["coverage_epoch_id"]
+    assert repaired["coverage_manifest"]["complete"] is True
+    assert repaired["coverage_manifest"]["failed_codes"] == []
+    assert repaired["coverage_manifest"]["pending_frequencies"] == {}
+    assert repaired["coverage_manifest"]["backoff_frequencies"] == {}
+    assert repaired["errors"] == []
+    assert repaired["scan_audit"]["stock_decision_outcomes"] == first[
+        "scan_audit"
+    ]["stock_decision_outcomes"]
+    assert repaired["data_quality"] == {
+        "complete": True,
+        "stale": False,
+        "failure_codes": [],
+    }
 
 
 class FailingSectorCatalog(RecordingSectorCatalog):

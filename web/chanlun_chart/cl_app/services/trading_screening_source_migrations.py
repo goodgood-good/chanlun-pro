@@ -145,6 +145,29 @@ _REVIEWED_INCOMPLETE_RETRY_RECONCILIATION_SOURCE_TRANSITIONS = frozenset(
                 "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c",
             ),
         ),
+        (
+            (
+                "src/chanlun/decision_support/trading_system/live_human_review.py",
+                "sha256:0ac28b9de593731560b31adc01c85c54ff36d77e7f74b80725b62992fc62d59f",
+                "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26",
+            ),
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0",
+                "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe",
+            ),
+        ),
+    }
+)
+_REVIEWED_COMPLETED_RETRY_RESIDUE_SOURCE_TRANSITIONS = frozenset(
+    {
+        (
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c",
+                "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe",
+            ),
+        ),
     }
 )
 _REVIEWED_SECTOR_SNAPSHOT_SOURCE_TRANSITIONS = frozenset(
@@ -257,6 +280,8 @@ def orchestration_source_migration_allowed(
             or changed_rows in _REVIEWED_SUSPENSION_EVIDENCE_RECHECK_SOURCE_TRANSITIONS
             or changed_rows
             in _REVIEWED_INCOMPLETE_RETRY_RECONCILIATION_SOURCE_TRANSITIONS
+            or changed_rows
+            in _REVIEWED_COMPLETED_RETRY_RESIDUE_SOURCE_TRANSITIONS
         )
     )
 
@@ -304,6 +329,27 @@ def incomplete_retry_reconciliation_source_migration_allowed(
     )
 
 
+def completed_retry_residue_source_migration_allowed(
+    *,
+    cached_decision_source_snapshot_id: object,
+    current_decision_source_snapshot_id: object,
+    cached_decision_source_snapshot: object = None,
+    current_decision_source_snapshot: object = None,
+) -> bool:
+    """Authorize one exact cleanup of stale errors after completed coverage."""
+
+    changed_rows = _authenticated_source_changed_rows(
+        cached_decision_source_snapshot_id=cached_decision_source_snapshot_id,
+        current_decision_source_snapshot_id=current_decision_source_snapshot_id,
+        cached_decision_source_snapshot=cached_decision_source_snapshot,
+        current_decision_source_snapshot=current_decision_source_snapshot,
+    )
+    return bool(
+        changed_rows
+        and changed_rows in _REVIEWED_COMPLETED_RETRY_RESIDUE_SOURCE_TRANSITIONS
+    )
+
+
 def sector_snapshot_source_migration_allowed(
     *,
     cached_source_revision: object,
@@ -322,6 +368,7 @@ def sector_snapshot_source_migration_allowed(
 
 
 __all__ = (
+    "completed_retry_residue_source_migration_allowed",
     "incomplete_retry_reconciliation_source_migration_allowed",
     "orchestration_source_migration_allowed",
     "sector_snapshot_source_migration_allowed",

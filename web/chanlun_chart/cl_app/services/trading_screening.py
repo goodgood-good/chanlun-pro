@@ -185,6 +185,7 @@ from cl_app.services.trading_screening_runtime_policy import (
     candidate_monitor_deadline_perf,
 )
 from cl_app.services.trading_screening_source_migrations import (
+    completed_retry_residue_source_migration_allowed,
     incomplete_retry_reconciliation_source_migration_allowed,
     orchestration_source_migration_allowed,
     suspension_evidence_recheck_source_migration_allowed,
@@ -214,6 +215,9 @@ _SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD = (
 )
 _SOURCE_MIGRATION_INCOMPLETE_RETRY_RECONCILIATION_CODES_FIELD = (
     "source_migration_incomplete_retry_reconciliation_codes"
+)
+_SOURCE_MIGRATION_COMPLETED_RETRY_RESIDUE_CODES_FIELD = (
+    "source_migration_completed_retry_residue_codes"
 )
 # 次日候选池的重计算属于收盘后任务。15:05 为 QMT 写入 15:00 已完成分钟线
 # 预留一个很小的落盘缓冲；全市场覆盖一旦开始，收盘后必须连续运行到次日盘前，
@@ -4653,6 +4657,155 @@ def _validated_source_migration_incomplete_retry_reconciliation(
     return state
 
 
+def _completed_retry_residue_codes(value: object) -> tuple[str, ...] | None:
+    """Identify stale retry residue that cannot revoke frozen successes.
+
+    The affected writer completed the entire frozen coverage plan, then kept a
+    deterministic next-epoch failure for symbols whose successful decision was
+    already authenticated in that same epoch.  Only this exact terminal shape
+    is repairable without a market-wide recomputation.
+    """
+
+    if not isinstance(value, Mapping):
+        return None
+    manifest = value.get("coverage_manifest")
+    audit = value.get("scan_audit")
+    quality = value.get("data_quality")
+    errors = value.get("errors")
+    if (
+        value.get("scan_state") != "complete"
+        or value.get("full_coverage_state") != "complete"
+        or not isinstance(manifest, Mapping)
+        or manifest.get("complete") is not True
+        or not isinstance(audit, Mapping)
+        or audit.get("coverage_cycle_complete") is not True
+        or not isinstance(quality, Mapping)
+        or quality
+        != {
+            "complete": False,
+            "stale": False,
+            "failure_codes": ["stock_scan_partial"],
+        }
+        or not isinstance(errors, list)
+        or not errors
+        or manifest.get("pending_frequencies") != {}
+        or manifest.get("backoff_frequencies") != {}
+    ):
+        return None
+    raw_completed = manifest.get("completed_codes")
+    raw_excluded = manifest.get("excluded_codes")
+    raw_failed = manifest.get("failed_codes")
+    raw_deferred = manifest.get("deferred_frequencies")
+    if (
+        not isinstance(raw_completed, list)
+        or not isinstance(raw_excluded, list)
+        or not isinstance(raw_failed, list)
+        or not isinstance(raw_deferred, Mapping)
+    ):
+        return None
+    residue_codes: list[str] = []
+    for error in errors:
+        if (
+            not isinstance(error, Mapping)
+            or error.get("error_type") != "stock_analysis_error"
+            or not isinstance(error.get("code"), str)
+            or error.get("reason_code") != "STRUCTURE_BUNDLE_STALE"
+            or error.get("failure_class") != "MARKET_DATA_REJECTION"
+            or error.get("retry_policy") != "NEXT_MARKET_DATA_EPOCH"
+            or error.get("deterministic_for_coverage_epoch") is not True
+        ):
+            return None
+        residue_codes.append(str(error["code"]))
+    expected = tuple(sorted(set(residue_codes)))
+    completed = set(raw_completed)
+    excluded = set(raw_excluded)
+    failed = set(raw_failed)
+    if (
+        tuple(residue_codes) != expected
+        or failed != set(expected)
+        or not set(expected).issubset(completed)
+        or set(expected).intersection(excluded)
+        or any(code not in raw_deferred for code in expected)
+        or audit.get("coverage_cycle_failed_symbol_count") != len(expected)
+        or audit.get("stock_failure_counts")
+        != {"STRUCTURE_BUNDLE_STALE": len(expected)}
+    ):
+        return None
+    return expected
+
+
+def _normalized_completed_retry_residue_snapshot(
+    value: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Build a validation-only clean projection of completed retry residue."""
+
+    residue_codes = _completed_retry_residue_codes(value)
+    if residue_codes is None:
+        return None
+    projected = copy.deepcopy(dict(value))
+    manifest = projected.get("coverage_manifest")
+    errors = projected.get("errors")
+    audit = projected.get("scan_audit")
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(errors, list)
+        or not isinstance(audit, dict)
+        or not isinstance(manifest.get("deferred_frequencies"), dict)
+    ):
+        return None
+    residue = set(residue_codes)
+    manifest["failed_codes"] = [
+        code for code in manifest.get("failed_codes", []) if code not in residue
+    ]
+    for code in residue_codes:
+        manifest["deferred_frequencies"].pop(code, None)
+    projected["errors"] = [
+        error
+        for error in errors
+        if not (
+            isinstance(error, Mapping)
+            and error.get("error_type") == "stock_analysis_error"
+            and error.get("code") in residue
+        )
+    ]
+    audit["coverage_cycle_failed_symbol_count"] = 0
+    audit["stock_failure_counts"] = {}
+    audit["retry_symbol_count"] = len(manifest["deferred_frequencies"])
+    audit["next_epoch_retry_symbol_count"] = len(
+        manifest["deferred_frequencies"]
+    )
+    projected["data_quality"] = {
+        "complete": True,
+        "stale": False,
+        "failure_codes": [],
+    }
+    projected["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        projected
+    )
+    return projected
+
+
+def _validated_source_migration_completed_retry_residue(
+    value: object,
+) -> tuple[str, ...] | None:
+    """Validate the one-shot marker that seeds only exact residue retries."""
+
+    if not isinstance(value, Mapping):
+        return None
+    if _SOURCE_MIGRATION_COMPLETED_RETRY_RESIDUE_CODES_FIELD not in value:
+        return ()
+    raw_codes = value.get(_SOURCE_MIGRATION_COMPLETED_RETRY_RESIDUE_CODES_FIELD)
+    expected = _completed_retry_residue_codes(value)
+    if (
+        expected is None
+        or not isinstance(raw_codes, list)
+        or raw_codes != sorted(set(raw_codes))
+        or tuple(raw_codes) != expected
+    ):
+        return None
+    return expected
+
+
 def _cache_contract_is_valid(
     value: object,
     config: TradingScreeningConfig,
@@ -8589,7 +8742,13 @@ class TradingScreeningService:
         incomplete_retry_reconciliation = (
             _validated_source_migration_incomplete_retry_reconciliation(snapshot)
         )
-        if incomplete_retry_reconciliation is None:
+        completed_retry_residue_codes = (
+            _validated_source_migration_completed_retry_residue(snapshot)
+        )
+        if (
+            incomplete_retry_reconciliation is None
+            or completed_retry_residue_codes is None
+        ):
             return False
         dispositions_valid = coverage_manifest_dispositions_are_consistent(
             manifest,
@@ -8601,6 +8760,23 @@ class TradingScreeningService:
             in snapshot
         ):
             normalized = _normalized_incomplete_retry_migration_snapshot(snapshot)
+            normalized_manifest = (
+                normalized.get("coverage_manifest")
+                if isinstance(normalized, Mapping)
+                else None
+            )
+            dispositions_valid = bool(
+                isinstance(normalized_manifest, Mapping)
+                and coverage_manifest_dispositions_are_consistent(
+                    normalized_manifest,
+                    normalized.get("errors"),
+                )
+            )
+        if (
+            not dispositions_valid
+            and _SOURCE_MIGRATION_COMPLETED_RETRY_RESIDUE_CODES_FIELD in snapshot
+        ):
+            normalized = _normalized_completed_retry_residue_snapshot(snapshot)
             normalized_manifest = (
                 normalized.get("coverage_manifest")
                 if isinstance(normalized, Mapping)
@@ -8739,6 +8915,12 @@ class TradingScreeningService:
         self._deferred_frequencies = parsed_frequency_maps["deferred_frequencies"]
         for code in self._backoff_frequencies:
             self._deferred_frequencies.pop(code, None)
+        for code in completed_retry_residue_codes:
+            # Reconcile only the exact symbols left by the old writer.  Moving
+            # their next-epoch entries to backoff forces one bounded same-epoch
+            # pass, which deliberately bypasses the changed-bar planner.
+            frequencies = self._deferred_frequencies.pop(code)
+            self._backoff_frequencies.setdefault(code, set()).update(frequencies)
         for code in completed_recheck_codes:
             # These symbols already have a successful decision at the frozen
             # cutoff.  The legacy retry fan-out only observed newer bars that
@@ -9042,9 +9224,24 @@ class TradingScreeningService:
                 current_decision_source_snapshot=self._decision_source_snapshot,
             )
         )
+        completed_retry_residue_reconciliation = (
+            completed_retry_residue_source_migration_allowed(
+                cached_decision_source_snapshot_id=cached_source_id,
+                current_decision_source_snapshot_id=current_source_id,
+                cached_decision_source_snapshot=value.get(
+                    "decision_source_snapshot"
+                ),
+                current_decision_source_snapshot=self._decision_source_snapshot,
+            )
+        )
         incomplete_retry_state = (
             _incomplete_retry_reconciliation_state(value)
             if incomplete_retry_reconciliation
+            else None
+        )
+        completed_retry_residue_codes = (
+            _completed_retry_residue_codes(value)
+            if completed_retry_residue_reconciliation
             else None
         )
         complete_snapshot = bool(
@@ -9068,9 +9265,22 @@ class TradingScreeningService:
             and isinstance(data_quality, Mapping)
             and data_quality.get("complete") is False
         )
+        repairable_completed_retry_residue = bool(
+            completed_retry_residue_codes
+            and value.get("scan_state") == "complete"
+            and value.get("full_coverage_state") == "complete"
+            and isinstance(manifest, Mapping)
+            and manifest.get("complete") is True
+            and isinstance(audit, Mapping)
+            and audit.get("coverage_cycle_complete") is True
+            and isinstance(data_quality, Mapping)
+            and data_quality.get("complete") is False
+        )
         legacy_validation_value = (
             _normalized_incomplete_retry_migration_snapshot(value)
             if resumable_incomplete_retry
+            else _normalized_completed_retry_residue_snapshot(value)
+            if repairable_completed_retry_residue
             else value
         )
         if (
@@ -9081,7 +9291,11 @@ class TradingScreeningService:
                 current_decision_source_snapshot=self._decision_source_snapshot,
             )
             or value.get("available") is not True
-            or not (complete_snapshot or resumable_incomplete_retry)
+            or not (
+                complete_snapshot
+                or resumable_incomplete_retry
+                or repairable_completed_retry_residue
+            )
             or legacy_validation_value is None
             or not _cache_is_valid(
                 legacy_validation_value,
@@ -9094,6 +9308,7 @@ class TradingScreeningService:
             or _SOURCE_MIGRATION_SUSPENSION_RECHECK_CODES_FIELD in value
             or _SOURCE_MIGRATION_INCOMPLETE_RETRY_RECONCILIATION_CODES_FIELD
             in value
+            or _SOURCE_MIGRATION_COMPLETED_RETRY_RESIDUE_CODES_FIELD in value
         ):
             return None
         # Do not mutate the authenticated legacy document until the replacement
@@ -9111,6 +9326,11 @@ class TradingScreeningService:
             migrated[
                 _SOURCE_MIGRATION_INCOMPLETE_RETRY_RECONCILIATION_CODES_FIELD
             ] = list(incomplete_retry_state[0])
+        if repairable_completed_retry_residue:
+            assert completed_retry_residue_codes is not None
+            migrated[_SOURCE_MIGRATION_COMPLETED_RETRY_RESIDUE_CODES_FIELD] = list(
+                completed_retry_residue_codes
+            )
         migrated["decision_source_snapshot_id"] = current_source_id
         migrated["decision_source_snapshot"] = copy.deepcopy(
             self._decision_source_snapshot
@@ -9121,6 +9341,8 @@ class TradingScreeningService:
         migrated_validation_value = (
             _normalized_incomplete_retry_migration_snapshot(migrated)
             if resumable_incomplete_retry
+            else _normalized_completed_retry_residue_snapshot(migrated)
+            if repairable_completed_retry_residue
             else migrated
         )
         if not _cache_is_valid(
@@ -9140,7 +9362,7 @@ class TradingScreeningService:
         self._quarantined_cache_decision_core_id = None
         self._quarantined_cache_reason = None
         self._cache_incomplete_retry_migration_pending = (
-            resumable_incomplete_retry
+            resumable_incomplete_retry or repairable_completed_retry_residue
         )
         return migrated
 
@@ -14672,6 +14894,7 @@ class TradingScreeningService:
         completed = 0
         completed_codes: set[str] = set()
         excluded_codes: set[str] = set()
+        retained_completed_stale_codes: set[str] = set()
         stock_started_perf = time.perf_counter()
         sector_by_code: dict[str, SectorAssessment] = dict(
             routing.context_sector_by_code
@@ -14874,15 +15097,29 @@ class TradingScreeningService:
                 completed += 1
                 completed_codes.add(code)
             else:
-                if not monitoring_only_refresh:
-                    self._coverage_cycle_warmup_diagnostics.pop(code, None)
-                    self._coverage_cycle_stock_decision_outcomes.pop(code, None)
                 error = _stock_analysis_error_document(code, exc)
-                if _is_coverage_exclusion(error):
-                    exclusions.append(_stock_analysis_exclusion_document(error))
-                    excluded_codes.add(code)
+                retain_completed_stale = bool(
+                    not monitoring_only_refresh
+                    and code in self._coverage_cycle_completed_codes
+                    and error.get("reason_code") == "STRUCTURE_BUNDLE_STALE"
+                    and error.get("retry_policy") == "NEXT_MARKET_DATA_EPOCH"
+                    and error.get("deterministic_for_coverage_epoch") is True
+                )
+                if retain_completed_stale:
+                    # A retry cannot revoke an authenticated success from the
+                    # same frozen cutoff merely because the mutable local frame
+                    # has since advanced.  Keep the prior decision and let the
+                    # next market-data epoch evaluate the newer bars.
+                    retained_completed_stale_codes.add(code)
                 else:
-                    errors.append(error)
+                    if not monitoring_only_refresh:
+                        self._coverage_cycle_warmup_diagnostics.pop(code, None)
+                        self._coverage_cycle_stock_decision_outcomes.pop(code, None)
+                    if _is_coverage_exclusion(error):
+                        exclusions.append(_stock_analysis_exclusion_document(error))
+                        excluded_codes.add(code)
+                    else:
+                        errors.append(error)
             self._record_background_heartbeat()
 
         worker_limit = (
@@ -14922,7 +15159,9 @@ class TradingScreeningService:
         failed_codes = tuple(
             code
             for code in symbols
-            if code not in completed_codes and code not in excluded_codes
+            if code not in completed_codes
+            and code not in excluded_codes
+            and code not in retained_completed_stale_codes
         )
         stock_batch_errors = errors[len(sector_errors) :]
         if not monitoring_only_refresh:
@@ -14940,6 +15179,12 @@ class TradingScreeningService:
                 )
             for code in excluded_codes:
                 self._coverage_cycle_completed_codes.discard(code)
+                self._coverage_cycle_failed_codes.discard(code)
+                self._coverage_cycle_errors.pop(
+                    f"stock_analysis_error:{code}",
+                    None,
+                )
+            for code in retained_completed_stale_codes:
                 self._coverage_cycle_failed_codes.discard(code)
                 self._coverage_cycle_errors.pop(
                     f"stock_analysis_error:{code}",
@@ -15027,7 +15272,12 @@ class TradingScreeningService:
         batch_resolution = (
             Decimal("1")
             if planned_count == 0
-            else Decimal(completed + len(excluded_codes)) / Decimal(planned_count)
+            else Decimal(
+                completed
+                + len(excluded_codes)
+                + len(retained_completed_stale_codes)
+            )
+            / Decimal(planned_count)
         )
         coverage_attempted_count = len(
             self._coverage_cycle_completed_codes

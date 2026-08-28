@@ -12,6 +12,7 @@ from cl_app.services.trading_screening_runtime_policy import (
     candidate_monitor_deadline_perf,
 )
 from cl_app.services.trading_screening_source_migrations import (
+    completed_retry_residue_source_migration_allowed,
     incomplete_retry_reconciliation_source_migration_allowed,
     orchestration_source_migration_allowed,
     sector_snapshot_source_migration_allowed,
@@ -286,6 +287,50 @@ def test_manifest_migration_allows_exact_incomplete_retry_reconciliation() -> No
         current_decision_source_snapshot=current,
     )
     assert not incomplete_retry_reconciliation_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
+def test_manifest_migration_allows_exact_completed_retry_residue_cleanup() -> None:
+    current = current_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    for snapshot, digest in (
+        (
+            cached,
+            "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c",
+        ),
+        (
+            current,
+            "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe",
+        ),
+    ):
+        row = next(
+            row
+            for row in snapshot["files"]
+            if row["path"]
+            == "web/chanlun_chart/cl_app/services/trading_screening.py"
+        )
+        row["sha256"] = digest
+        snapshot["aggregate_sha256"] = sha256_json(
+            {"schema": snapshot["schema"], "files": snapshot["files"]}
+        )
+
+    assert completed_retry_residue_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert not completed_retry_residue_source_migration_allowed(
         cached_decision_source_snapshot_id=current["aggregate_sha256"],
         current_decision_source_snapshot_id=cached["aggregate_sha256"],
         cached_decision_source_snapshot=current,
