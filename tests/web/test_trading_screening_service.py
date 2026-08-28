@@ -2565,7 +2565,7 @@ def _previous_incomplete_retry_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:f314a453febeb7c5eaa63f73e74384d3c3f394cb267853098ac2ed0a278f84a5"
+        "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e"
     )
     rows[
         "src/chanlun/decision_support/trading_system/live_human_review.py"
@@ -2591,7 +2591,7 @@ def _previous_completed_retry_residue_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:f314a453febeb7c5eaa63f73e74384d3c3f394cb267853098ac2ed0a278f84a5"
+        "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e"
     )
     rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
         "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"
@@ -6814,6 +6814,40 @@ def test_presentation_snapshot_compacts_audit_only_evidence(
     second_reference = service.presentation_snapshot_reference()
     assert first_reference is second_reference
     assert first_reference is not again
+
+
+def test_presentation_snapshot_replaces_stale_embedded_backtest_verdict(
+    tmp_path: Path,
+) -> None:
+    current_verdict = {
+        "live_ready": False,
+        "status": "evidence_unavailable",
+        "evidence_grade": "invalid",
+    }
+    service = TradingScreeningService(
+        market_data=WarmupIssueMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        backtest_verdict=current_verdict,
+    )
+    service.refresh_now()
+    with service._state_lock:
+        service._snapshot["backtest_verdict"] = {
+            "live_ready": True,
+            "status": "stale_report",
+            "evidence_grade": "certified",
+        }
+        service._presentation_cache = None
+        service._presentation_cache_sha256 = None
+
+    presentation = service.presentation_snapshot()
+
+    assert presentation["backtest_verdict"] == current_verdict
+    assert service.snapshot()["backtest_verdict"]["status"] == "stale_report"
 
 
 def test_presentation_snapshot_excludes_invalidated_rows_from_current_selection(

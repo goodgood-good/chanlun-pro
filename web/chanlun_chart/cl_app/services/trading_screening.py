@@ -10387,6 +10387,13 @@ class TradingScreeningService:
             for key, value in snapshot.items()
             if key != "signals"
         }
+        # The structural snapshot and the certified backtest have independent
+        # lifecycles.  A valid frozen market snapshot may outlive the report
+        # that existed when it was published (for example after a strategy
+        # revision invalidates that report).  Never surface the embedded old
+        # verdict in the live page projection; use the audit evidence verified
+        # for this exact application process instead.
+        document["backtest_verdict"] = copy.deepcopy(self._backtest_verdict)
         document["screening_scope"] = {
             "schema": "chanlun-screening-scope-v1",
             "mode": self._config.screening_scope_mode,
