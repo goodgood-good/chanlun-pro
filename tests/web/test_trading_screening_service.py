@@ -117,6 +117,7 @@ from cl_app.services.trading_screening_scope import (
     ScreeningScopeAuthorizationError,
 )
 from cl_app.services.trading_screening_source_migrations import (
+    incomplete_retry_reconciliation_source_migration_allowed,
     orchestration_source_migration_allowed,
     suspension_evidence_recheck_source_migration_allowed,
 )
@@ -2550,6 +2551,37 @@ def _previous_closed_session_bootstrap_source_snapshot(
     return previous
 
 
+def _previous_incomplete_retry_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    rows = {row["path"]: row for row in previous["files"]}
+    assert rows[
+        "src/chanlun/decision_support/trading_system/live_human_review.py"
+    ]["sha256"] == (
+        "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26"
+    )
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"
+    )
+    rows[
+        "src/chanlun/decision_support/trading_system/live_human_review.py"
+    ]["sha256"] = (
+        "sha256:0ac28b9de593731560b31adc01c85c54ff36d77e7f74b80725b62992fc62d59f"
+    )
+    rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] = (
+        "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
 def test_review_availability_source_migration_reuses_decision_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -2612,7 +2644,7 @@ def test_context_risk_role_source_change_requires_decision_recompute(
         == "src/chanlun/decision_support/trading_system/live_human_review.py"
     )
     assert current_review_row["sha256"] == (
-        "sha256:0ac28b9de593731560b31adc01c85c54ff36d77e7f74b80725b62992fc62d59f"
+        "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26"
     )
     review_row["sha256"] = (
         "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"
@@ -2642,23 +2674,37 @@ def test_closed_session_bootstrap_source_migration_requires_no_stock_recheck(
         notifier=None,
     )
     current = service._decision_source_snapshot
-    current_id = service._decision_source_snapshot_id
     assert isinstance(current, dict)
-    assert isinstance(current_id, str)
-    previous = _previous_closed_session_bootstrap_source_snapshot(current)
+    reviewed_current = copy.deepcopy(current)
+    screening_row = next(
+        row
+        for row in reviewed_current["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    screening_row["sha256"] = (
+        "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0"
+    )
+    reviewed_current["aggregate_sha256"] = sha256_json(
+        {
+            "schema": reviewed_current["schema"],
+            "files": reviewed_current["files"],
+        }
+    )
+    current_id = reviewed_current["aggregate_sha256"]
+    previous = _previous_closed_session_bootstrap_source_snapshot(reviewed_current)
     previous_id = previous["aggregate_sha256"]
 
     assert orchestration_source_migration_allowed(
         cached_decision_source_snapshot_id=previous_id,
         current_decision_source_snapshot_id=current_id,
         cached_decision_source_snapshot=previous,
-        current_decision_source_snapshot=current,
+        current_decision_source_snapshot=reviewed_current,
     )
     assert not suspension_evidence_recheck_source_migration_allowed(
         cached_decision_source_snapshot_id=previous_id,
         current_decision_source_snapshot_id=current_id,
         cached_decision_source_snapshot=previous,
-        current_decision_source_snapshot=current,
+        current_decision_source_snapshot=reviewed_current,
     )
 
 
@@ -2767,7 +2813,7 @@ def test_reviewed_orchestration_source_migration_reuses_complete_snapshot(
     )
 
 
-def test_suspension_evidence_source_migration_rechecks_only_old_exclusions(
+def test_incomplete_retry_source_migration_reuses_clean_complete_snapshot(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
@@ -2787,15 +2833,21 @@ def test_suspension_evidence_source_migration_rechecks_only_old_exclusions(
     persisted = json.loads(cache_path.read_text(encoding="utf-8"))
     current_source = persisted["decision_source_snapshot"]
     current_source_id = persisted["decision_source_snapshot_id"]
-    previous_source = _previous_suspension_evidence_source_snapshot(current_source)
+    previous_source = _previous_incomplete_retry_source_snapshot(current_source)
     previous_source_id = previous_source["aggregate_sha256"]
-    assert suspension_evidence_recheck_source_migration_allowed(
+    assert incomplete_retry_reconciliation_source_migration_allowed(
         cached_decision_source_snapshot_id=previous_source_id,
         current_decision_source_snapshot_id=current_source_id,
         cached_decision_source_snapshot=previous_source,
         current_decision_source_snapshot=current_source,
     )
     assert not suspension_evidence_recheck_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_source_id,
+        current_decision_source_snapshot_id=current_source_id,
+        cached_decision_source_snapshot=previous_source,
+        current_decision_source_snapshot=current_source,
+    )
+    assert not incomplete_retry_reconciliation_source_migration_allowed(
         cached_decision_source_snapshot_id=current_source_id,
         current_decision_source_snapshot_id=previous_source_id,
         cached_decision_source_snapshot=current_source,
@@ -2813,7 +2865,7 @@ def test_suspension_evidence_source_migration_rechecks_only_old_exclusions(
         generation.unlink()
 
     migrated_market = PositiveStatusTradingMarketData()
-    migrated_planner = RecordingPlanner(())
+    migrated_planner = RecordingPlanner(symbols)
     migrated = TradingScreeningService(
         market_data=migrated_market,
         sector_catalog=RecordingSectorCatalog(),
@@ -2824,44 +2876,20 @@ def test_suspension_evidence_source_migration_rechecks_only_old_exclusions(
         notifier=None,
     )
     migrated_health = migrated.health_snapshot()
+    restored = migrated.snapshot()
     assert migrated_market.bundle_codes == []
-    assert migrated.snapshot()["available"] is True
-    assert migrated_health["cache_decision_source_recheck_codes"] == ["SZ.000002"]
-    assert migrated_health["cache_decision_source_recheck_pending_codes"] == [
-        "SZ.000002"
-    ]
+    assert restored["available"] is True
+    assert restored["scan_state"] == "complete"
+    assert restored["coverage_manifest"]["excluded_codes"] == ["SZ.000002"]
+    assert restored["decision_source_snapshot_id"] == current_source_id
+    assert migrated_health["cache_decision_source_recheck_codes"] == []
+    assert migrated_health["cache_decision_source_migrated_from"] == previous_source_id
     on_disk = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert on_disk["source_migration_suspension_evidence_recheck_codes"] == [
-        "SZ.000002"
-    ]
-
-    durable_market = PositiveStatusTradingMarketData()
-    durable_planner = RecordingPlanner(())
-    durable = TradingScreeningService(
-        market_data=durable_market,
-        sector_catalog=RecordingSectorCatalog(),
-        engine=RecordingEngine(),
-        scan_planner=durable_planner,
-        cache_path=cache_path,
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    assert durable_market.bundle_codes == []
+    assert on_disk["decision_source_snapshot_id"] == current_source_id
+    assert "source_migration_suspension_evidence_recheck_codes" not in on_disk
     assert (
-        durable.health_snapshot()["cache_decision_source_recheck_pending_code_count"]
-        == 1
+        "source_migration_incomplete_retry_reconciliation_codes" not in on_disk
     )
-
-    refreshed = durable.refresh_now()
-    refreshed_health = durable.health_snapshot()
-
-    assert durable_planner.calls == 0
-    assert durable_market.bundle_codes == ["SZ.000002"]
-    assert refreshed["coverage_manifest"]["completed_codes"] == list(symbols)
-    assert refreshed["coverage_manifest"]["excluded_codes"] == []
-    assert "source_migration_suspension_evidence_recheck_codes" not in refreshed
-    assert refreshed_health["cache_decision_source_recheck_code_count"] == 1
-    assert refreshed_health["cache_decision_source_recheck_pending_code_count"] == 0
 
 
 def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
@@ -2888,6 +2916,124 @@ def test_reviewed_source_migration_rejects_incomplete_snapshot_without_mutation(
 
     assert service._operationally_migrated_cache(legacy) is None
     assert legacy == original
+
+
+def test_incomplete_retry_migration_prunes_fanout_and_finishes_exact_symbol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
+    observed_at = datetime(2026, 7, 20, 10, 0, tzinfo=AS_OF.tzinfo)
+    current_error_document = trading_screening_subject._stock_analysis_error_document
+
+    def legacy_error_document(code, error):
+        document = current_error_document(code, error)
+        if document["reason_code"] == "CURRENT_SESSION_FIRST_TRADE_PENDING":
+            document = {
+                **document,
+                "failure_class": "MARKET_DATA_PENDING",
+                "retry_policy": "NEXT_REFRESH_AFTER_BACKOFF",
+                "deterministic_for_coverage_epoch": False,
+            }
+        return document
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            trading_screening_subject,
+            "_stock_analysis_error_document",
+            legacy_error_document,
+        )
+        first = TradingScreeningService(
+            market_data=CurrentSessionSuspendedMarketData(),
+            sector_catalog=RecordingSectorCatalog(),
+            engine=RecordingEngine(),
+            scan_planner=RecordingPlanner(symbols),
+            cache_path=cache_path,
+            clock=lambda: observed_at,
+            notifier=None,
+        )
+        legacy = first.refresh_now()
+
+    pending_code = CurrentSessionSuspendedMarketData.suspended_code
+    assert legacy["coverage_manifest"]["backoff_frequencies"] == {
+        pending_code: ["d", "30m", "5m", "1m"]
+    }
+    assert legacy["scan_state"] == "in_progress"
+
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    completed_recheck_code = "SZ.000001"
+    manifest = persisted["coverage_manifest"]
+    manifest["pending_frequencies"][completed_recheck_code] = ["1m"]
+    manifest["deferred_frequencies"][completed_recheck_code] = ["1m"]
+    manifest["failed_codes"] = sorted(
+        set(manifest["failed_codes"]) | {completed_recheck_code}
+    )
+    persisted["errors"].append(
+        {
+            "code": completed_recheck_code,
+            "error_type": "stock_analysis_error",
+            "reason_code": "STRUCTURE_BUNDLE_STALE",
+            "failure_class": "MARKET_DATA_REJECTION",
+            "retry_policy": "NEXT_MARKET_DATA_EPOCH",
+            "deterministic_for_coverage_epoch": True,
+            "remote_error_type": "ValueError",
+            "reason": "structure_bundle_stale",
+        }
+    )
+    previous_source = _previous_incomplete_retry_source_snapshot(
+        persisted["decision_source_snapshot"]
+    )
+    previous_source_id = previous_source["aggregate_sha256"]
+    current_source_id = persisted["decision_source_snapshot_id"]
+    assert incomplete_retry_reconciliation_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous_source_id,
+        current_decision_source_snapshot_id=current_source_id,
+        cached_decision_source_snapshot=previous_source,
+        current_decision_source_snapshot=persisted["decision_source_snapshot"],
+    )
+    persisted["decision_source_snapshot_id"] = previous_source_id
+    persisted["decision_source_snapshot"] = previous_source
+    persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        persisted
+    )
+    cache_path.write_text(json.dumps(persisted), encoding="utf-8")
+    first._persist_cache_scope_sidecar(cache_path, persisted)
+    for generation in first._generation_paths():
+        first._cache_scope_sidecar_path(generation).unlink(missing_ok=True)
+        generation.unlink()
+
+    market = CurrentSessionSuspendedMarketData()
+    planner = RecordingPlanner(symbols)
+    restarted = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=planner,
+        cache_path=cache_path,
+        clock=lambda: observed_at,
+        notifier=None,
+    )
+
+    assert restarted._pending_frequencies == {}
+    assert set(restarted._backoff_frequencies) == {pending_code}
+    assert restarted._coverage_cycle_failed_codes == {pending_code}
+    assert market.bundle_codes == []
+
+    repaired = restarted.refresh_now()
+
+    assert planner.calls == 0
+    assert set(market.bundle_codes) == {pending_code}
+    assert completed_recheck_code not in market.bundle_codes
+    assert repaired["scan_state"] == "complete"
+    assert repaired["coverage_manifest"]["complete"] is True
+    assert repaired["coverage_manifest"]["failed_codes"] == []
+    assert repaired["coverage_manifest"]["excluded_codes"] == [pending_code]
+    assert repaired["errors"] == []
+    assert repaired["data_quality"]["complete"] is True
+    assert (
+        "source_migration_incomplete_retry_reconciliation_codes" not in repaired
+    )
 
 
 def test_previous_close_preselection_continuity_keeps_current_notifications_live(
@@ -5219,22 +5365,32 @@ def test_intraday_status_hint_without_trade_waits_instead_of_suspending(
     payload = service.refresh_now()
     manifest = payload["coverage_manifest"]
     audit = payload["scan_audit"]
-    error = payload["errors"][0]
 
     assert market.bundle_codes.count(market.suspended_code) == 2
     assert manifest["completed_codes"] == ["SZ.000001"]
-    assert manifest["excluded_codes"] == []
-    assert manifest["failed_codes"] == [market.suspended_code]
-    assert manifest["exclusions"] == []
-    assert error["code"] == market.suspended_code
-    assert error["reason_code"] == "CURRENT_SESSION_FIRST_TRADE_PENDING"
-    assert error["failure_class"] == "MARKET_DATA_PENDING"
-    assert error["retry_policy"] == "NEXT_REFRESH_AFTER_BACKOFF"
-    assert error["deterministic_for_coverage_epoch"] is False
+    assert manifest["excluded_codes"] == [market.suspended_code]
+    assert manifest["failed_codes"] == []
+    assert manifest["exclusions"] == [
+        {
+            "code": market.suspended_code,
+            "exclusion_type": "stock_analysis_exclusion",
+            "eligibility": "AWAITING_CURRENT_SESSION_FIRST_TRADE",
+            "reason_code": "CURRENT_SESSION_FIRST_TRADE_PENDING",
+            "retry_policy": "NEXT_MARKET_DATA_EPOCH",
+            "deterministic_for_coverage_epoch": True,
+            "remote_error_type": "ValueError",
+            "reason": "current_session_first_trade_pending",
+        }
+    ]
+    assert payload["errors"] == []
+    assert payload["scan_state"] == "complete"
+    assert payload["data_quality"]["complete"] is True
     assert audit["stock_current_session_suspended_code_count"] == 0
-    assert audit["stock_exclusion_counts"] == {}
-    assert audit["stock_failure_counts"] == {"CURRENT_SESSION_FIRST_TRADE_PENDING": 1}
-    assert audit["backoff_retry_symbol_count"] == 1
+    assert audit["stock_exclusion_counts"] == {
+        "CURRENT_SESSION_FIRST_TRADE_PENDING": 1
+    }
+    assert audit["stock_failure_counts"] == {}
+    assert audit["backoff_retry_symbol_count"] == 0
 
 
 def test_positive_status_with_current_five_minute_trade_is_not_suspended(
@@ -5364,6 +5520,51 @@ def test_runtime_symbol_failure_retries_after_paced_refresh_in_same_epoch(
     assert second["scan_audit"]["coverage_cycle_failed_symbol_count"] == 0
     assert second["errors"] == []
     assert market.bundle_codes.count("SZ.000002") == 2
+
+
+def test_same_epoch_backoff_retry_does_not_reopen_changed_symbols(
+    tmp_path: Path,
+) -> None:
+    class NativeScreeningWorkerUnavailable(RuntimeError):
+        pass
+
+    symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
+    market = RecordingMarketData()
+    original = market.structure_bundle
+    failed_once = False
+
+    def structure_bundle(code, **kwargs):
+        nonlocal failed_once
+        if code == "SZ.000002" and not failed_once:
+            failed_once = True
+            market.bundle_codes.append(code)
+            raise NativeScreeningWorkerUnavailable("worker restarted")
+        return original(code, **kwargs)
+
+    market.structure_bundle = structure_bundle
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        # This planner deliberately keeps reporting the whole changed set.  A
+        # frozen-epoch retry must still evaluate only the failed symbol.
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    first = service.refresh_now()
+    second = service.refresh_now()
+
+    assert first["scan_audit"]["backoff_retry_symbol_count"] == 1
+    assert second["coverage_epoch_id"] == first["coverage_epoch_id"]
+    assert second["scan_audit"]["coverage_cycle_complete"] is True
+    assert market.bundle_codes.count("SZ.000002") == 2
+    assert all(
+        market.bundle_codes.count(code) == 1
+        for code in ("SZ.000001", "SZ.000003", "SZ.000004", "SZ.000005")
+    )
 
 
 class FailingSectorCatalog(RecordingSectorCatalog):

@@ -12,6 +12,7 @@ from cl_app.services.trading_screening_runtime_policy import (
     candidate_monitor_deadline_perf,
 )
 from cl_app.services.trading_screening_source_migrations import (
+    incomplete_retry_reconciliation_source_migration_allowed,
     orchestration_source_migration_allowed,
     sector_snapshot_source_migration_allowed,
 )
@@ -248,6 +249,47 @@ def test_manifest_migration_allows_exact_review_auditor_transition() -> None:
         current_decision_source_snapshot_id=current["aggregate_sha256"],
         cached_decision_source_snapshot=cached,
         current_decision_source_snapshot=current,
+    )
+
+
+def test_manifest_migration_allows_exact_incomplete_retry_reconciliation() -> None:
+    current = current_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    transitions = {
+        "src/chanlun/decision_support/trading_system/live_human_review.py": (
+            "sha256:0ac28b9de593731560b31adc01c85c54ff36d77e7f74b80725b62992fc62d59f",
+            "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26",
+        ),
+        "web/chanlun_chart/cl_app/services/trading_screening.py": (
+            "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0",
+            "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c",
+        ),
+    }
+    for snapshot, offset in ((cached, 0), (current, 1)):
+        rows = {row["path"]: row for row in snapshot["files"]}
+        for path, digests in transitions.items():
+            rows[path]["sha256"] = digests[offset]
+        snapshot["aggregate_sha256"] = sha256_json(
+            {"schema": snapshot["schema"], "files": snapshot["files"]}
+        )
+
+    assert incomplete_retry_reconciliation_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert not incomplete_retry_reconciliation_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
     )
 
 

@@ -610,6 +610,7 @@
     QMT_BENCHMARK_ONE_MINUTE_PREFIX_STALE: "QMT 市场基准1分钟前缀已过期",
     QMT_NATIVE_DAILY_AHEAD_OF_ONE_MINUTE_BASE: "QMT 原生日线超前于1分钟同源截止，存在时间穿越",
     KLINE_MINIMUM_HISTORY_NOT_MET: "当前一年窗口的最小K线历史不足",
+    CURRENT_SESSION_FIRST_TRADE_PENDING: "当前覆盖时点尚无首笔成交",
     THIRD_SELL_IGNORED_AFTER_CENTER_EXTENSION: "中枢扩展后的三卖不用于确认该风险事件",
     MARKET_GATE_AMBER: "市场高级别风险门为琥珀色，需要人工复核",
     SECTOR_GATE_AMBER: "板块高级别风险门为琥珀色，需要人工复核",
