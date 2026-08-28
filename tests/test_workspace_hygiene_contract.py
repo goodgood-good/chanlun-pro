@@ -153,6 +153,8 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert "[switch]$Execute" in source
     assert "[switch]$PurgeInvalidBacktestFacts" in source
     assert '"audit\\chanlun_trading_system_backtest\\full_market_explicit"' in source
+    assert '"audit\\chanlun_trading_system_backtest\\certified_report.json"' in source
+    assert '"audit\\chanlun_trading_system_backtest\\causality_gate.json"' in source
     assert "[switch]$PurgeRetiredRuntimeState" in source
     assert "if ($Execute)" in source
     assert "Refusing cleanup target outside repository" in source

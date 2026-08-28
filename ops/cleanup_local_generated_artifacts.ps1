@@ -126,9 +126,12 @@ if ($PurgeInvalidBacktestFacts) {
         # A portfolio report and its PIT metadata are inseparable from the
         # extracted symbol facts that produced them. Purging only the fact
         # shards leaves a stale result that can be mistaken for current
-        # evidence, so invalidate the explicitly bounded run directory as one
-        # unit. Add-CleanupCandidate still refuses repository-root escapes.
-        "audit\chanlun_trading_system_backtest\full_market_explicit"
+        # evidence, so invalidate the explicitly bounded run directory and
+        # the two root-level publication artifacts as one unit.
+        # Add-CleanupCandidate still refuses repository-root escapes.
+        "audit\chanlun_trading_system_backtest\full_market_explicit",
+        "audit\chanlun_trading_system_backtest\certified_report.json",
+        "audit\chanlun_trading_system_backtest\causality_gate.json"
     )
     foreach ($target in $invalidBacktestTargets) {
         Add-CleanupCandidate `
