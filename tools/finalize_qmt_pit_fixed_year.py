@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -1009,6 +1010,169 @@ def _new_exact_buy_nesting_pairs(
     return tuple(output)
 
 
+def _decision_funnel_diagnostics(
+    *,
+    symbols: Sequence[SymbolResearchFacts],
+    sectors: Mapping[str, SectorResearchFacts],
+) -> dict[str, object]:
+    """Summarize the causal 5m-to-1m funnel without replaying market orders.
+
+    Counts are taken from the same current-state ledgers and exact joint-
+    knowledge boundaries consumed by ``run_sparse_portfolio``.  Keeping this
+    structural funnel next to the PnL report prevents a sparse trade count from
+    being mistaken for a missing first/second/third-class classifier.
+    """
+
+    point_types = ("1buy", "1sell", "2buy", "2sell", "3buy", "3sell")
+
+    def count_document(values: Counter[str]) -> dict[str, int]:
+        return {point_type: int(values[point_type]) for point_type in point_types}
+
+    signal_events: Counter[str] = Counter()
+    unique_setups: dict[tuple[str, str], str] = {}
+    exact_boundary_events: Counter[str] = Counter()
+    exact_boundary_setups: dict[tuple[str, str], str] = {}
+    sector_regimes: Counter[str] = Counter()
+    market_gates: Counter[str] = Counter()
+    sector_gates: Counter[str] = Counter()
+    symbol_gates: Counter[str] = Counter()
+    evaluations_without_signal = 0
+    boundary_events_without_gate = 0
+    sector_assessment_missing = 0
+    sector_assessments = {
+        sector_id: dict(facts.assessments)
+        for sector_id, facts in sectors.items()
+    }
+
+    for facts in symbols:
+        points_by_id = {point.point_id: point for point in facts.five_points}
+        for evaluation in facts.evaluations:
+            if facts.five_point_visibility:
+                visible_ids = {
+                    interval.point_id
+                    for interval in facts.five_point_visibility
+                    if interval.contains(evaluation.observed_at)
+                }
+                visible_points = tuple(
+                    points_by_id[point_id]
+                    for point_id in sorted(visible_ids)
+                    if point_id in points_by_id
+                )
+            else:
+                visible_points = tuple(
+                    point
+                    for point in facts.five_points
+                    if point.available_at <= evaluation.observed_at
+                )
+            current_points = tuple(
+                point
+                for point in current_five_minute_setup_points(
+                    visible_points,
+                    as_of=evaluation.observed_at,
+                )
+                if five_minute_setup_is_executable(
+                    point,
+                    as_of=evaluation.observed_at,
+                )
+            )
+            if not current_points:
+                evaluations_without_signal += 1
+            for point in current_points:
+                signal_events[point.point_type] += 1
+                occurrence = structural_point_occurrence_id(point)
+                key = (facts.code, occurrence)
+                previous_type = unique_setups.setdefault(key, point.point_type)
+                if previous_type != point.point_type:
+                    raise ValueError(
+                        "one 5m setup occurrence changed canonical point type"
+                    )
+
+            resolved_sector_id = evaluation.sector_id or facts.sector_id
+            sector = sector_assessments.get(resolved_sector_id, {}).get(
+                evaluation.observed_at
+            )
+            if sector is None:
+                sector_assessment_missing += 1
+            else:
+                sector_regimes[sector.regime] += 1
+
+            exact_pairs = _new_exact_buy_nesting_pairs(facts, evaluation)
+            for setup, _witness in exact_pairs:
+                exact_boundary_events[setup.point_type] += 1
+                occurrence = structural_point_occurrence_id(setup)
+                key = (facts.code, occurrence)
+                previous_type = exact_boundary_setups.setdefault(
+                    key,
+                    setup.point_type,
+                )
+                if previous_type != setup.point_type:
+                    raise ValueError(
+                        "one exact nesting setup changed canonical point type"
+                    )
+            if exact_pairs:
+                gates = evaluation.higher_timeframe_gates
+                if gates is None:
+                    boundary_events_without_gate += 1
+                else:
+                    market_gates[gates.market.gate] += 1
+                    sector_gates[gates.sector.gate] += 1
+                    symbol_gates[gates.symbol.gate] += 1
+
+    unique_setup_counts = Counter(unique_setups.values())
+    exact_setup_counts = Counter(exact_boundary_setups.values())
+    evaluation_count = sum(len(facts.evaluations) for facts in symbols)
+    buy_signal_events = sum(
+        signal_events[point_type] for point_type in ("1buy", "2buy", "3buy")
+    )
+    buy_setups = sum(
+        unique_setup_counts[point_type]
+        for point_type in ("1buy", "2buy", "3buy")
+    )
+    exact_events = sum(exact_boundary_events.values())
+    exact_setups = len(exact_boundary_setups)
+    return {
+        "schema": "chanlun-fixed-year-decision-funnel-v1",
+        "causal_evaluation_count": evaluation_count,
+        "evaluation_without_current_5m_signal_count": (
+            evaluations_without_signal
+        ),
+        "five_minute_signal_event_count": sum(signal_events.values()),
+        "five_minute_signal_events_by_point_type": count_document(signal_events),
+        "unique_five_minute_setup_count": len(unique_setups),
+        "unique_five_minute_setups_by_point_type": count_document(
+            unique_setup_counts
+        ),
+        "buy_signal_event_count": buy_signal_events,
+        "unique_buy_setup_count": buy_setups,
+        "exact_one_minute_nesting_boundary_event_count": exact_events,
+        "exact_one_minute_nesting_boundary_events_by_five_minute_point_type": (
+            count_document(exact_boundary_events)
+        ),
+        "unique_five_minute_setups_with_exact_one_minute_boundary_count": (
+            exact_setups
+        ),
+        "unique_five_minute_setups_with_exact_one_minute_boundary_by_point_type": (
+            count_document(exact_setup_counts)
+        ),
+        "boundary_event_without_higher_timeframe_gate_count": (
+            boundary_events_without_gate
+        ),
+        "higher_timeframe_market_gates_at_boundary": dict(
+            sorted(market_gates.items())
+        ),
+        "higher_timeframe_sector_gates_at_boundary": dict(
+            sorted(sector_gates.items())
+        ),
+        "higher_timeframe_symbol_gates_at_boundary": dict(
+            sorted(symbol_gates.items())
+        ),
+        "sector_regimes_at_causal_evaluation": dict(
+            sorted(sector_regimes.items())
+        ),
+        "sector_assessment_missing_count": sector_assessment_missing,
+    }
+
+
 def _production_snapshot_pair_mismatch_is_unsafe(
     *,
     expected_pair_keys: set[tuple[str, str]],
@@ -1474,6 +1638,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         initial_cash=args.initial_cash,
         formal_selection_required=False,
     )
+    decision_funnel = _decision_funnel_diagnostics(
+        symbols=symbols,
+        sectors=sectors,
+    )
     terminal_same_bar = tuple(
         trade.code
         for trade in run.trades
@@ -1585,6 +1753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "corporate_action_count": len(snapshot.factors),
             "causal_evaluation_count": evaluations,
             "formal_selection_required": False,
+            "decision_funnel": decision_funnel,
         },
         data_source_hashes=(
             ("pit_metadata_snapshot", snapshot_hash),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from chanlun.decision_support.trading_system.backtest.causality_gate_contract import (
@@ -8,6 +10,7 @@ from chanlun.decision_support.trading_system.backtest.causality_gate_contract im
     causality_gate_state_is_consistent,
 )
 from tools import finalize_qmt_pit_fixed_year as pit_finalizer
+from tests.trading_system.helpers import confirmed_point, eligible_sector
 
 
 def test_causality_gate_schema_and_controls_are_frozen() -> None:
@@ -121,3 +124,58 @@ def test_production_snapshot_pair_mismatch_only_blocks_certification_when_unsafe
         )
         is expected
     )
+
+
+def test_decision_funnel_discloses_point_types_and_exact_one_minute_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    point = confirmed_point("3buy")
+    sector = eligible_sector()
+    gates = SimpleNamespace(
+        market=SimpleNamespace(gate="GREEN"),
+        sector=SimpleNamespace(gate="AMBER"),
+        symbol=SimpleNamespace(gate="UNRESOLVED"),
+    )
+    evaluation = SimpleNamespace(
+        observed_at=point.available_at,
+        sector_id=sector.sector_id,
+        higher_timeframe_gates=gates,
+    )
+    visibility = SimpleNamespace(
+        point_id=point.point_id,
+        contains=lambda _observed_at: True,
+    )
+    symbol = SimpleNamespace(
+        code=point.code,
+        sector_id=sector.sector_id,
+        five_points=(point,),
+        five_point_visibility=(visibility,),
+        evaluations=(evaluation,),
+    )
+    sector_facts = SimpleNamespace(
+        assessments=((evaluation.observed_at, sector),),
+    )
+    monkeypatch.setattr(
+        pit_finalizer,
+        "_new_exact_buy_nesting_pairs",
+        lambda _facts, _evaluation: ((point, object()),),
+    )
+
+    document = pit_finalizer._decision_funnel_diagnostics(
+        symbols=(symbol,),
+        sectors={sector.sector_id: sector_facts},
+    )
+
+    assert document["schema"] == "chanlun-fixed-year-decision-funnel-v1"
+    assert document["five_minute_signal_event_count"] == 1
+    assert document["unique_five_minute_setups_by_point_type"]["3buy"] == 1
+    assert document["exact_one_minute_nesting_boundary_event_count"] == 1
+    assert document[
+        "exact_one_minute_nesting_boundary_events_by_five_minute_point_type"
+    ]["3buy"] == 1
+    assert document["higher_timeframe_market_gates_at_boundary"] == {"GREEN": 1}
+    assert document["higher_timeframe_sector_gates_at_boundary"] == {"AMBER": 1}
+    assert document["higher_timeframe_symbol_gates_at_boundary"] == {
+        "UNRESOLVED": 1
+    }
+    assert document["sector_regimes_at_causal_evaluation"] == {"neutral": 1}
