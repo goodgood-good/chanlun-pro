@@ -3,12 +3,12 @@
 (function startTradingScreeningController() {
   const POLL_INTERVAL_MS = 60_000;
   const SNAPSHOT_REQUEST_TIMEOUT_MS = 20_000;
+  const MANUAL_QUOTE_TIMEOUT_MS = 8_000;
   const SNAPSHOT_RECOVERY_RETRY_MS = 750;
   const STORAGE_KEY = "chanlun:trading-screening:view";
-  // The current-only contract invalidates every persisted pre-migration view.
-  // Earlier versions could retain a narrow point/stage/scope filter and make
-  // current first/second-class rows appear to be missing.
-  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS_V7_5M_TRADE_1M_PRECISION";
+  // V8 invalidates views where the primary “全部” button could retain a narrow
+  // point/stage/segment filter and therefore present a partial queue as all.
+  const VIEW_CONTRACT = "CANONICAL_SIX_POINT_CHANNELS_V8_EXPLICIT_ALL_SIGNALS";
 
   function boot() {
     const Ui = globalThis.TradingScreeningUi;
@@ -18,6 +18,13 @@
     root.dataset.initialized = "true";
 
     const byId = (id) => document.getElementById(id);
+    const normalizeAttentionCode = (value) => Ui.text(value, "").trim().toUpperCase();
+    const manualAttentionIdentityKey = (market, code) => (
+      `${Ui.text(market, "").trim().toLowerCase()}|${normalizeAttentionCode(code)}`
+    );
+    const manualQuoteCache = new Map();
+    const manualQuoteStatus = new Map();
+    let manualQuoteGeneration = 0;
     const sectorList = byId("es-sector-list");
     const sectorExpand = byId("es-sector-expand");
     const signalList = byId("es-signal-list");
@@ -175,6 +182,48 @@
       action.textContent = count === 0
         ? "当前暂无精确定位"
         : active ? "正在查看当前定位" : "查看当前定位";
+    }
+
+    function resetSignalFilters(segmentState = "all") {
+      const scopeChanged = state.selectionScope !== "all-qualified";
+      state.pointType = "all";
+      state.lifecycle = "all";
+      state.market = "all";
+      state.signalSource = "all";
+      state.reviewStage = "all";
+      state.segmentState = segmentState;
+      state.selectionScope = "all-qualified";
+      state.sectorId = "all";
+      state.query = "";
+      state.revealCurrentSegmentsAfterRender = segmentState === "current";
+      const search = byId("es-signal-search");
+      if (search) search.value = "";
+      saveView();
+      return scopeChanged;
+    }
+
+    function syncShowAllSignalsAction() {
+      const action = byId("es-show-all-signals");
+      if (!action) return;
+      const active = state.pointType === "all"
+        && state.lifecycle === "all"
+        && state.market === "all"
+        && state.signalSource === "all"
+        && state.reviewStage === "all"
+        && state.segmentState === "all"
+        && state.selectionScope === "all-qualified"
+        && state.sectorId === "all"
+        && Ui.text(state.query, "").trim() === "";
+      const facts = Ui.signalQueueFacts(allQualifiedSignals());
+      action.classList.toggle("is-active", active);
+      action.setAttribute("aria-pressed", active ? "true" : "false");
+      action.dataset.count = facts.monitor_position_count > 0
+        ? `${facts.structure_clue_count}+${facts.monitor_position_count}监听`
+        : String(facts.structure_clue_count);
+      action.setAttribute(
+        "aria-label",
+        `全部线索，${facts.structure_clue_count} 条5分钟结构线索，${facts.monitor_position_count} 个独立监听；点击清除全部队列筛选`,
+      );
     }
 
     function revealCurrentSegmentResults() {
@@ -467,7 +516,92 @@
         : "缠论提前选股 · 实时盯盘与个股分析";
     }
 
-    function renderManualAttention() {
+    async function refreshManualAttentionQuotes(symbols) {
+      const generation = ++manualQuoteGeneration;
+      const groups = new Map();
+      const activeKeys = new Set();
+      for (const row of Array.isArray(symbols) ? symbols : []) {
+        const market = Ui.text(row && row.market, "").trim().toLowerCase();
+        const code = normalizeAttentionCode(row && row.code);
+        if (!market || market === "a" || !code) continue;
+        const key = manualAttentionIdentityKey(market, code);
+        activeKeys.add(key);
+        if (!groups.has(market)) groups.set(market, new Set());
+        groups.get(market).add(code);
+      }
+      for (const key of manualQuoteCache.keys()) {
+        if (!activeKeys.has(key)) manualQuoteCache.delete(key);
+      }
+      for (const market of manualQuoteStatus.keys()) {
+        if (!groups.has(market)) manualQuoteStatus.delete(market);
+      }
+      if (!groups.size) return;
+
+      for (const market of groups.keys()) manualQuoteStatus.set(market, "loading");
+      const requests = Array.from(groups.entries()).map(async ([market, codeSet]) => {
+        const codes = Array.from(codeSet);
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), MANUAL_QUOTE_TIMEOUT_MS);
+        try {
+          const response = await fetch("/ticks", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { Accept: "application/json" },
+            body: new URLSearchParams({
+              market,
+              codes: JSON.stringify(codes),
+            }),
+            signal: controller.signal,
+          });
+          const payload = await response.json();
+          if (generation !== manualQuoteGeneration) return;
+          if (!response.ok || !payload || payload.ok !== true) {
+            manualQuoteStatus.set(market, "unavailable");
+            return;
+          }
+          if (payload.quote_state === "deferred") {
+            manualQuoteStatus.set(market, "deferred");
+            return;
+          }
+
+          const returnedCodes = new Set();
+          const ticks = Array.isArray(payload.ticks) ? payload.ticks : [];
+          for (const tick of ticks) {
+            const code = normalizeAttentionCode(tick && tick.code);
+            const price = Number(tick && tick.price);
+            const rate = Number(tick && tick.rate);
+            if (!codeSet.has(code) || !Number.isFinite(price) || price <= 0 || !Number.isFinite(rate)) {
+              continue;
+            }
+            returnedCodes.add(code);
+            manualQuoteCache.set(manualAttentionIdentityKey(market, code), { price, rate });
+          }
+          if (payload.market_state !== "closed") {
+            for (const code of codes) {
+              if (!returnedCodes.has(code)) {
+                manualQuoteCache.delete(manualAttentionIdentityKey(market, code));
+              }
+            }
+          }
+          manualQuoteStatus.set(
+            market,
+            returnedCodes.size > 0
+              ? "ready"
+              : payload.market_state === "closed" ? "closed" : "unavailable",
+          );
+        } catch (_error) {
+          if (generation === manualQuoteGeneration) {
+            manualQuoteStatus.set(market, "unavailable");
+          }
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      });
+      await Promise.allSettled(requests);
+      if (generation === manualQuoteGeneration) renderManualAttention(false);
+    }
+
+    function renderManualAttention(refreshQuotes = true) {
       const snapshot = state.snapshot || {};
       const attention = snapshot.manual_attention && typeof snapshot.manual_attention === "object"
         ? snapshot.manual_attention
@@ -477,12 +611,10 @@
         : [];
       const list = byId("es-holdings-list");
       const empty = byId("es-holdings-empty");
-      const normalizeCode = (value) => Ui.text(value, "").trim().toUpperCase();
-      const identityKey = (market, code) => `${Ui.text(market, "").trim().toLowerCase()}|${normalizeCode(code)}`;
       const inferSignalMarket = (signal) => {
         const explicit = Ui.text(signal && signal.market, "").trim().toLowerCase();
         if (explicit) return explicit;
-        const code = normalizeCode(signal && signal.code);
+        const code = normalizeAttentionCode(signal && signal.code);
         return code.startsWith("SH.") || code.startsWith("SZ.") || code.startsWith("BJ.")
           ? "a"
           : code.endsWith(".US")
@@ -505,9 +637,9 @@
       ];
       for (const signal of attentionSignals) {
         if (!signal || typeof signal !== "object") continue;
-        const code = normalizeCode(signal.code);
+        const code = normalizeAttentionCode(signal.code);
         if (!code) continue;
-        const key = identityKey(inferSignalMarket(signal), code);
+        const key = manualAttentionIdentityKey(inferSignalMarket(signal), code);
         const current = signalsByIdentity.get(key);
         const nextRank = stagePriority[Ui.lifecycleStageForSignal(signal)] ?? 99;
         const currentRank = current
@@ -542,6 +674,7 @@
           ? "人工关注组尚无标的；可在行情页把需要优先监听的标的加入该分组。"
           : "暂时无法读取本地人工关注分组。";
       }
+      if (refreshQuotes) void refreshManualAttentionQuotes(symbols);
       if (!list) return;
       const fragment = document.createDocumentFragment();
       const alertStages = new Set(["approaching", "triggered", "executable", "active"]);
@@ -550,10 +683,10 @@
         ny_futures: "纽约期货", currency: "数字货币", currency_spot: "数字货币现货",
       };
       for (const symbolRow of symbols) {
-        const market = Ui.text(symbolRow.market, "").trim();
+        const market = Ui.text(symbolRow.market, "").trim().toLowerCase();
         const code = Ui.text(symbolRow.code, "").trim();
         const name = Ui.text(symbolRow.name, code);
-        const signal = signalsByIdentity.get(identityKey(market, code)) || null;
+        const signal = signalsByIdentity.get(manualAttentionIdentityKey(market, code)) || null;
         const stage = signal ? Ui.lifecycleStageForSignal(signal) : "";
         const card = document.createElement("a");
         card.className = "es-holding-card";
@@ -576,20 +709,23 @@
         status.className = "es-holding-card__status";
         const quote = document.createElement("span");
         quote.className = "es-holding-card__quote";
-        if (market === "a" && symbolRow.quote_available === true) {
-          const price = Number(symbolRow.current_price);
-          const change = Number(symbolRow.change_percent);
-          if (Number.isFinite(price) && price > 0 && Number.isFinite(change)) {
-            const priceDigits = price < 10 ? 3 : 2;
-            quote.textContent = `${price.toFixed(priceDigits)}  ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
-            quote.dataset.direction = change > 0 ? "up" : change < 0 ? "down" : "flat";
-          } else {
-            quote.textContent = "行情暂不可用";
-          }
-        } else if (market === "a") {
-          quote.textContent = "行情暂不可用";
+        const cachedQuote = manualQuoteCache.get(manualAttentionIdentityKey(market, code));
+        const quoteAvailable = market === "a"
+          ? symbolRow.quote_available === true
+          : Boolean(cachedQuote);
+        const price = Number(market === "a" ? symbolRow.current_price : cachedQuote && cachedQuote.price);
+        const change = Number(market === "a" ? symbolRow.change_percent : cachedQuote && cachedQuote.rate);
+        if (quoteAvailable && Number.isFinite(price) && price > 0 && Number.isFinite(change)) {
+          const priceDigits = price < 10 ? 3 : 2;
+          quote.textContent = `${price.toFixed(priceDigits)}  ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+          quote.dataset.direction = change > 0 ? "up" : change < 0 ? "down" : "flat";
         } else {
-          quote.hidden = true;
+          const quoteState = manualQuoteStatus.get(market);
+          quote.textContent = quoteState === "loading"
+            ? "行情读取中"
+            : quoteState === "deferred"
+              ? "行情请求合并中"
+              : quoteState === "closed" ? "休市暂无报价" : "行情暂不可用";
         }
         const realtimeStatus = Ui.text(symbolRow.realtime_status, "awaiting_first_run");
         if (realtimeStatus === "error") {
@@ -733,11 +869,15 @@
       }
     }
 
-    function selectionScopedSignals() {
+    function allQualifiedSignals() {
       if (!state.snapshot) return [];
-      const rows = Array.isArray(state.snapshot.unified_signals)
+      return Array.isArray(state.snapshot.unified_signals)
         ? state.snapshot.unified_signals
-        : state.snapshot.signals;
+        : Array.isArray(state.snapshot.signals) ? state.snapshot.signals : [];
+    }
+
+    function selectionScopedSignals() {
+      const rows = allQualifiedSignals();
       return state.selectionScope === "sector-trigger"
         ? rows.filter((signal) => (
           Ui.inferSignalMarket(signal) === "us"
@@ -965,6 +1105,7 @@
       syncFilterSummary();
       syncSectorExpandButton();
       syncCurrentSegmentAction();
+      syncShowAllSignalsAction();
       if (state.revealCurrentSegmentsAfterRender) revealCurrentSegmentResults();
     }
 
@@ -1173,36 +1314,19 @@
     if (refreshButton) refreshButton.addEventListener("click", () => void requestSnapshot());
     const filterReset = byId("es-filter-reset");
     if (filterReset) filterReset.addEventListener("click", () => {
-      const scopeChanged = state.selectionScope !== "all-qualified";
-      state.pointType = "all";
-      state.lifecycle = "all";
-      state.market = "all";
-      state.signalSource = "all";
-      state.reviewStage = "all";
-      state.segmentState = "all";
-      state.selectionScope = "all-qualified";
-      state.sectorId = "all";
-      state.query = "";
-      if (search) search.value = "";
-      saveView();
+      const scopeChanged = resetSignalFilters();
       if (scopeChanged) void requestSnapshot();
+      else renderWorkspaces();
+    });
+    const showAllSignals = byId("es-show-all-signals");
+    if (showAllSignals) showAllSignals.addEventListener("click", () => {
+      const scopeChanged = resetSignalFilters();
+      if (scopeChanged || !state.snapshot) void requestSnapshot();
       else renderWorkspaces();
     });
     const showCurrentSegments = byId("es-show-current-segments");
     if (showCurrentSegments) showCurrentSegments.addEventListener("click", () => {
-      const scopeChanged = state.selectionScope !== "all-qualified";
-      state.pointType = "all";
-      state.lifecycle = "all";
-      state.market = "all";
-      state.signalSource = "all";
-      state.reviewStage = "all";
-      state.segmentState = "current";
-      state.selectionScope = "all-qualified";
-      state.sectorId = "all";
-      state.query = "";
-      state.revealCurrentSegmentsAfterRender = true;
-      if (search) search.value = "";
-      saveView();
+      const scopeChanged = resetSignalFilters("current");
       const liveModeButton = document.querySelector('[role="tab"][data-screening-mode="live"]');
       if (liveModeButton && !liveModeButton.classList.contains("is-active")) {
         liveModeButton.click();

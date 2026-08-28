@@ -62,11 +62,20 @@ test("live and review requests are bounded and the review queue polls while visi
   );
 });
 
-test("manual A-share attention symbols render the isolated quote price and percentage", () => {
+test("manual attention symbols render bounded cross-market quote price and percentage", () => {
+  assert.match(controllerSource, /MANUAL_QUOTE_TIMEOUT_MS\s*=\s*8_000/);
   assert.match(controllerSource, /symbolRow\.quote_available === true/);
   assert.match(controllerSource, /symbolRow\.current_price/);
   assert.match(controllerSource, /symbolRow\.change_percent/);
+  assert.match(controllerSource, /fetch\("\/ticks"/);
+  assert.match(controllerSource, /body:\s*new URLSearchParams\(/);
+  assert.match(controllerSource, /market === "a" \|\| !code/);
+  assert.match(controllerSource, /manualQuoteCache\.set/);
+  assert.match(controllerSource, /Promise\.allSettled\(requests\)/);
   assert.match(controllerSource, /change\.toFixed\(2\)\}%/);
+  assert.match(controllerSource, /行情读取中/);
+  assert.match(controllerSource, /行情请求合并中/);
+  assert.doesNotMatch(controllerSource, /quote\.hidden\s*=\s*true/);
   assert.match(dashboardCss, /\.es-holding-card__quote/);
   assert.match(dashboardCss, /font-variant-numeric:\s*tabular-nums/);
 });
@@ -325,7 +334,7 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(template, /id="es-sector-catalog-status"/);
   assert.match(template, /data-selection-scope="sector-trigger"/);
   assert.match(template, /data-selection-scope="all-qualified"/);
-  assert.match(controllerSource, /function renderManualAttention\(\)/);
+  assert.match(controllerSource, /function renderManualAttention\(refreshQuotes = true\)/);
   assert.match(controllerSource, /function renderUsMonitorStatus\(\)/);
   assert.doesNotMatch(controllerSource, /es-us-monitor-card__groups/);
   assert.match(controllerSource, /function renderSectorCatalogStatus\(\)/);
@@ -842,7 +851,7 @@ test("dashboard exposes and persists the optional one-minute segment-difference 
   assert.match(controllerSource, /unifiedSignals\.filter\(Ui\.isCurrentSelectionSignal\)/);
   assert.match(controllerSource, /\[data-segment-state\]/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
-  assert.match(controllerSource, /state\.segmentState = "current"/);
+  assert.match(controllerSource, /resetSignalFilters\("current"\)/);
   assert.match(controllerSource, /revealCurrentSegmentsAfterRender/);
   assert.match(controllerSource, /workspace\.scrollIntoView\(\{ behavior: "smooth", block: "start" \}\)/);
   assert.match(controllerSource, /正在查看当前定位/);
@@ -986,7 +995,7 @@ test("stock selection opens with all six point channels visible", () => {
   assert.match(controllerSource, /lifecycle:\s*lifecycleFilters\.includes\(saved\.lifecycle\)/);
   assert.match(
     controllerSource,
-    /CANONICAL_SIX_POINT_CHANNELS_V7_5M_TRADE_1M_PRECISION/,
+    /CANONICAL_SIX_POINT_CHANNELS_V8_EXPLICIT_ALL_SIGNALS/,
   );
   assert.match(controllerSource, /value\.contract\s*!==\s*VIEW_CONTRACT/);
   assert.match(controllerSource, /localStorage\.removeItem\(STORAGE_KEY\)/);
@@ -999,6 +1008,16 @@ test("stock selection opens with all six point channels visible", () => {
   for (const point of ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]) {
     assert.match(quickChannels[0], new RegExp(`data-point-type="${point}"`));
   }
+  assert.match(quickChannels[0], /id="es-show-all-signals"[^>]*>全部线索</);
+  assert.doesNotMatch(
+    quickChannels[0].match(/<button id="es-show-all-signals"[^>]*>/)?.[0] || "",
+    /data-point-type/,
+  );
+  assert.match(template, /data-point-type="all"[^>]*>不限买卖点类型</);
+  assert.match(controllerSource, /function resetSignalFilters\(segmentState = "all"\)/);
+  assert.match(controllerSource, /Ui\.signalQueueFacts\(allQualifiedSignals\(\)\)/);
+  assert.match(controllerSource, /state\.segmentState = segmentState/);
+  assert.match(controllerSource, /const showAllSignals = byId\("es-show-all-signals"\)/);
   assert.match(humanReviewSource, /alertType:\s*"all"/);
   assert.match(humanReviewSource, /reviewLane:\s*"focus"/);
   assert.match(
@@ -3808,6 +3827,8 @@ test("sector workspace puts every eligible sector first and labels scan scope", 
     workspace.root.children.map((row) => row.dataset.sectorId),
     ["all", "selected", "unselected"],
   );
+  assert.equal(workspace.root.children[0].children[0].children[1].textContent, "0 条");
+  assert.match(workspace.root.children[0].children[1].textContent, /当前 0 条5m结构线索/);
   assert.equal(workspace.root.children[1].dataset.shortlisted, "true");
   assert.match(workspace.root.children[1].children[1].textContent, /符合要求并进入扫描/);
   assert.equal(workspace.root.children[2].dataset.shortlisted, "false");

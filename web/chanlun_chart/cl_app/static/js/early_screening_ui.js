@@ -4460,7 +4460,7 @@
       const heading = element(documentRef, "span", "es-sector-row__heading");
       heading.append(
         element(documentRef, "strong", "", sectorId === "all" ? "全部板块" : text(sector.sector_name, sectorId)),
-        element(documentRef, "b", "", numberText(count)),
+        element(documentRef, "b", "", `${numberText(count)} 条`),
       );
       const reasonCodes = Array.isArray(sector.reason_codes) ? sector.reason_codes : [];
       const hasStrength = sector.horizontal_strength !== null
@@ -4473,7 +4473,7 @@
       const strengthAnchor = text(sector.strength_anchor_session, "无锚点");
       const fullEvidence = sectorId === "all" ? "" : sectorEvidenceText(sector);
       const facts = sectorId === "all"
-        ? `共 ${numberText(snapshot.sectors.length)} 个 QMT GICS3/GICS4 分层板块`
+        ? `当前 ${numberText(count)} 条5m结构线索 · 共 ${numberText(snapshot.sectors.length)} 个 QMT GICS3/GICS4 分层板块`
         : `${shortlisted ? "符合要求并进入扫描" : "未通过结构门槛"} · ${rank === null ? "无有效排序" : `#${numberText(rank)}`} · 强度 ${horizontalStrength}`;
       const gate = sectorId === "all"
         ? "仅按结构筛选，不使用板块涨跌幅"
@@ -4481,12 +4481,12 @@
           ? `暂不纳入扫描：${reasonLabel(reasonCodes[0] || "原因未提供")}`
           : `结构依据：${reasonLabel(reasonCodes[0] || "待补充")}`;
       button.classList.toggle("is-blocked", sector.hard_block === true);
-      if (sectorId !== "all") {
-        button.setAttribute(
-          "title",
-          `${facts} · 锚点 ${strengthAnchor} · ${fullEvidence} · ${gate}`,
-        );
-      }
+      button.setAttribute(
+        "title",
+        sectorId === "all"
+          ? `${facts} · ${gate}`
+          : `${facts} · 锚点 ${strengthAnchor} · ${fullEvidence} · ${gate}`,
+      );
       button.append(
         heading,
         element(documentRef, "small", "", facts),

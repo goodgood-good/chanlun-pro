@@ -317,7 +317,7 @@
             </div>
             <button id="es-sector-expand" class="es-text-button" type="button" aria-expanded="false" hidden>显示全部板块</button>
           </header>
-          <p class="es-workspace__help">按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。展示顺序固定为：有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序。板块选择只筛 A 股，美股线索不参与板块门且会继续保留。</p>
+          <p class="es-workspace__help">按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。展示顺序固定为：有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序。板块行右侧数字是该板块当前的5分钟结构线索数；“全部板块”统计全板块结构线索，不受右侧队列筛选影响，也不包含独立监听占位。板块选择只筛 A 股，美股线索不参与板块门且会继续保留。</p>
           <p id="es-sector-catalog-status" class="es-sector-catalog-status" data-state="loading">正在读取板块目录。</p>
           <details class="es-rule-note">
             <summary>规则与数据口径</summary>
@@ -395,7 +395,7 @@
                 <div id="es-point-filters" class="es-filter-buttons es-point-filters">
                   <button type="button" data-point-type="buy" aria-pressed="false">买点</button>
                   <button type="button" data-point-type="sell" aria-pressed="false">卖点观察</button>
-                  <button class="is-active" type="button" data-point-type="all" aria-pressed="true">全部</button>
+                  <button class="is-active" type="button" data-point-type="all" aria-pressed="true">不限买卖点类型</button>
                   <button type="button" data-point-type="1buy" aria-pressed="false">一买</button>
                   <button type="button" data-point-type="2buy" aria-pressed="false">二买</button>
                   <button type="button" data-point-type="3buy" aria-pressed="false">三买</button>
@@ -420,12 +420,12 @@
             </div>
             <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
           </header>
-          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。队列按人工复核优先级、生命周期、板块结构名次、买卖点类型和代码稳定排序；有一二三类标记的才计入5m结构线索，“等待买卖点 / 实时监听”只是关注范围，不计入信号或通知。</p>
+          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。队列按人工复核优先级、生命周期、板块结构名次、买卖点类型和代码稳定排序；有一二三类标记的才计入5m结构线索，“等待买卖点 / 实时监听”只是关注范围，不计入信号或通知。“全部线索”会清除市场、来源、板块、定位和买卖点等全部队列筛选。</p>
 
-          <div class="es-signal-channel-bar" role="group" aria-label="六类买卖点快捷筛选">
-            <strong>六类通道</strong>
+          <div class="es-signal-channel-bar" role="group" aria-label="买卖点与监听队列快捷筛选">
+            <strong>队列通道</strong>
             <div class="es-filter-buttons es-point-filters">
-              <button class="is-active" type="button" data-point-type="all" aria-pressed="true">全部</button>
+              <button id="es-show-all-signals" class="is-active" type="button" aria-pressed="true" data-count="0">全部线索</button>
               <button type="button" data-point-type="1buy" aria-pressed="false">一买</button>
               <button type="button" data-point-type="2buy" aria-pressed="false">二买</button>
               <button type="button" data-point-type="3buy" aria-pressed="false">三买</button>
