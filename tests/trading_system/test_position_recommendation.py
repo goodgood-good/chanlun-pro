@@ -84,15 +84,14 @@ def test_buy_price_above_anchor_protection_blocks_chasing() -> None:
     assert parse_position_recommendation_document(value.document()) == value
 
 
-def test_preexisting_one_minute_point_cannot_authorize_precise_entry() -> None:
+def test_preexisting_one_minute_point_is_eligible_at_joint_knowledge() -> None:
     value = recommendation(
         five_minute_available_at="2026-07-20T10:30:00+08:00",
         one_minute_available_at="2026-07-20T10:05:00+08:00",
     )
 
-    assert value.status == "BLOCKED"
-    assert value.recommended_ratio == Decimal("0")
-    assert value.reason_codes == ("ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP",)
+    assert value.status == "RECOMMENDED"
+    assert value.recommended_ratio == Decimal("0.0200")
     assert parse_position_recommendation_document(value.document()) == value
 
 

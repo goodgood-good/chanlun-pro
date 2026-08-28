@@ -235,6 +235,58 @@
     );
   }
 
+  function pointDistributionForSignals(signals) {
+    const emptyBucket = () => ({
+      total: 0,
+      counts_by_point_type: Object.fromEntries(
+        POINT_TYPES.map((pointType) => [pointType, 0]),
+      ),
+    });
+    const distribution = {
+      contract_id: "chanlun-5m-point-distribution-v1",
+      trading_level: "5m",
+      precision_level: "1m",
+      precision_points_included: false,
+      all_signals: emptyBucket(),
+      candidate: emptyBucket(),
+      operational_confirmed: emptyBucket(),
+      audit_locked: emptyBucket(),
+      executable: emptyBucket(),
+    };
+    const increment = (bucket, pointType) => {
+      bucket.total += 1;
+      bucket.counts_by_point_type[pointType] += 1;
+    };
+    (Array.isArray(signals) ? signals : []).forEach((signal) => {
+      if (!isRecord(signal) || !isCurrentSelectionSignal(signal)) return;
+      const pointType = text(signal.point_type, "");
+      if (!POINT_TYPES.includes(pointType)) return;
+      const confirmed = fiveMinuteTradeSignalConfirmedForSignal(signal);
+      increment(distribution.all_signals, pointType);
+      if (!confirmed) {
+        increment(distribution.candidate, pointType);
+        return;
+      }
+      increment(distribution.operational_confirmed, pointType);
+      if (setupLockStateForSignal(signal) === "locked") {
+        increment(distribution.audit_locked, pointType);
+      }
+      if (signal.entry_allowed === true || signal.exit_allowed === true) {
+        increment(distribution.executable, pointType);
+      }
+    });
+    return distribution;
+  }
+
+  function pointDistributionCountText(bucket) {
+    const counts = isRecord(bucket) && isRecord(bucket.counts_by_point_type)
+      ? bucket.counts_by_point_type
+      : {};
+    return POINT_REVIEW_ORDER.map((pointType) => (
+      `${POINT_LABELS[pointType]} ${Number(counts[pointType]) || 0}`
+    )).join(" · ");
+  }
+
   function pointLabelForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
     const pointType = text(safeSignal.point_type, "");
@@ -3948,6 +4000,7 @@
       Array.isArray(signal.selection_sources)
       && signal.selection_sources.includes("QMT_SECTOR_TRIGGER")
     )).length;
+    const pointDistribution = pointDistributionForSignals(signals);
     if (signals.some((signal) => {
       const risk = isRecord(signal.higher_timeframe_risk)
         ? signal.higher_timeframe_risk
@@ -3972,6 +4025,7 @@
       ...value,
       counts_by_stage: countsByStage,
       counts_by_point_type: countsByPointType,
+      point_distribution: pointDistribution,
       presentation_signal_count: signals.length,
       sector_trigger_signal_count: sectorTriggerSignalCount,
       total_qualified_signal_count: signals.length,
@@ -4881,6 +4935,8 @@
     normalizeRealtimeNotifications,
     normalizeUsMonitor,
     pointLabelForSignal,
+    pointDistributionCountText,
+    pointDistributionForSignals,
     positionRecommendationLabel,
     positionRecommendationForSignal,
     segmentDifferenceEvidenceCurrentForReview,

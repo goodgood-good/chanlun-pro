@@ -414,6 +414,10 @@ def test_execution_contract_discloses_unified_buy_point_execution() -> None:
     assert contract["trade_frequency"] == "5m"
     assert contract["segment_difference_frequency"] == "1m"
     assert contract["segment_difference_required_for_trade_signal"] is False
+    assert contract["preexisting_nested_witness_allowed"] is True
+    assert contract["nested_witness_actionable_at"] == (
+        "max(five_minute_setup_available_at,one_minute_witness_available_at)"
+    )
     assert contract["execution_observation_frequency"] == "1m"
     assert "trigger_frequency" not in contract
     assert contract["max_five_minute_setup_age_seconds"] == 345600

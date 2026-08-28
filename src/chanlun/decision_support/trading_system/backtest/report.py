@@ -481,6 +481,10 @@ def build_report(
             "segment_difference_frequency": "1m",
             "segment_difference_required_for_trade_signal": False,
             "segment_difference_required_for_precise_execution": True,
+            "preexisting_nested_witness_allowed": True,
+            "nested_witness_actionable_at": (
+                "max(five_minute_setup_available_at,one_minute_witness_available_at)"
+            ),
             "execution_observation_frequency": "1m",
             "point_classes_analyzed_independently": True,
             "buy_point_classes_share_execution_logic": True,

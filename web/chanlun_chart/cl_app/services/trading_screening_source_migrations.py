@@ -20,6 +20,13 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
         (
             (
                 "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:98b8373179fcb2c2ab772bc58975f832fc79c86c46880e4f8f34becf899a646f",
+                "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0",
+            ),
+        ),
+        (
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
                 "sha256:6a1d8dd8fbf3b80794fb7f8e16f721cc73faf4119430a8c07e968adf2af233fa",
                 "sha256:3cd8d938d16a422000dd7f6ea307645bed15c4a30094bd2302c845392b23cc85",
             ),
@@ -101,6 +108,13 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
 )
 _REVIEWED_SUSPENSION_EVIDENCE_RECHECK_SOURCE_TRANSITIONS = frozenset(
     {
+        (
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:117e1e518f6c4417385e72f2ad9a911147192eb413543b7610550f1bbaebf8e3",
+                "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0",
+            ),
+        ),
         (
             (
                 "web/chanlun_chart/cl_app/services/trading_screening.py",

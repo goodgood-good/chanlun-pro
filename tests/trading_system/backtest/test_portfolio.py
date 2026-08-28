@@ -425,7 +425,7 @@ def test_live_no_chase_anchor_guard_is_applied_to_backtest_admission() -> None:
     assert run.fills[0].reason == "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR"
 
 
-def test_stale_one_minute_precision_is_rejected_at_backtest_admission() -> None:
+def test_preexisting_one_minute_precision_is_admitted_at_joint_knowledge() -> None:
     signal = market_bar(
         "SZ.000001",
         datetime(2026, 7, 20, 10, 30, tzinfo=CN),
@@ -447,9 +447,10 @@ def test_stale_one_minute_precision_is_rejected_at_backtest_admission() -> None:
 
     run = run_fixture((signal, next_bar), schedule)
 
-    assert run.open_positions == ()
-    assert len(run.fills) == 1
-    assert run.fills[0].reason == ("ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP")
+    assert len(run.open_positions) == 1
+    assert run.open_positions[0].code == signal.code
+    assert len(tuple(fill for fill in run.fills if fill.filled)) == 1
+    assert not any(fill.order_id.startswith("admission:") for fill in run.fills)
 
 
 def test_wide_initial_structural_risk_is_rejected_at_backtest_admission() -> None:

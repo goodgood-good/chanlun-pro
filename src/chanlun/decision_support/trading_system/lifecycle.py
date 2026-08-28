@@ -139,13 +139,17 @@ def five_minute_setup_is_in_policy_scope(
 ) -> bool:
     """Return whether a 5m setup belongs to the frozen production scope.
 
-    The current screening contract deliberately trades only the first-center
-    third buy.  A later-center or identity-unknown third buy may still remain
-    available as chart evidence, but it must never enter selection,
-    notification, review, or replay execution lanes.
+    The current screening contract admits only the first center-relative third
+    point on both sides. Later-center third buys and third sells remain chart
+    evidence, but cannot enter selection, notification, review or replay lanes.
+    Keeping this rule symmetric prevents sell distributions from including a
+    broader structural population than buy distributions.
     """
 
-    return point.point_type != "3buy" or point.center_ordinal == 1
+    return (
+        point.point_type not in {"3buy", "3sell"}
+        or point.center_ordinal == 1
+    )
 
 
 def _five_minute_terminal_segment_lane(
@@ -240,6 +244,29 @@ def _five_minute_setup_structural_rank(
     )
 
 
+def _five_minute_setup_tie_rank(
+    point: StructuralPoint | ProvisionalCandidate,
+) -> tuple[bool, Decimal, int, str]:
+    """Choose one conservative event when one tail maps to multiple centers."""
+
+    if isinstance(point, ProvisionalCandidate):
+        anchor = Decimal(str(point.anchor_price))
+        invalidation = Decimal(str(point.invalidation_price))
+    else:
+        anchor = Decimal(str(point.structure_anchor_price))
+        invalidation = Decimal(str(point.structure_invalidation_price))
+    # Standard geometry outranks a boundary touch. Within the same geometry
+    # class, the nearest valid structural invalidation is the conservative,
+    # lower-risk representative. A lower center ordinal wins the remaining
+    # ambiguity and the stable identity makes the result deterministic.
+    return (
+        point.variant == "standard",
+        -abs(anchor - invalidation),
+        -(point.center_ordinal or 0),
+        _five_minute_setup_identity(point),
+    )
+
+
 def current_five_minute_setup_points(
     points: Sequence[StructuralPoint | ProvisionalCandidate],
     *,
@@ -259,7 +286,8 @@ def current_five_minute_setup_points(
         tuple[str, str, int, str, str, str],
         tuple[
             tuple[datetime, datetime],
-            list[StructuralPoint | ProvisionalCandidate],
+            tuple[bool, Decimal, int, str],
+            StructuralPoint | ProvisionalCandidate,
         ],
     ] = {}
     for point in points:
@@ -295,14 +323,16 @@ def current_five_minute_setup_points(
             certainty_lane,
         )
         structural_rank = _five_minute_setup_structural_rank(point)
+        tie_rank = _five_minute_setup_tie_rank(point)
         previous = latest.get(lane)
-        if previous is None or structural_rank > previous[0]:
-            latest[lane] = (structural_rank, [point])
-        elif structural_rank == previous[0]:
-            previous[1].append(point)
+        if previous is None or (structural_rank, tie_rank) > (
+            previous[0],
+            previous[1],
+        ):
+            latest[lane] = (structural_rank, tie_rank, point)
 
     retained = [
-        point for _rank, lane_points in latest.values() for point in lane_points
+        point for _rank, _tie_rank, point in latest.values()
     ]
     formed_frontier_by_lane: dict[tuple[str, str, int, str, str], datetime] = {}
     for point in retained:

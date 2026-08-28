@@ -8,6 +8,7 @@ from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system.lifecycle import (
     advance_lifecycle,
     build_setup,
+    current_five_minute_setup_points,
     five_minute_setup_is_current,
     five_minute_setup_is_executable,
     lifecycle_stage_from_signal,
@@ -811,6 +812,44 @@ def test_terminal_tail_remains_current_for_display_after_execution_expiry() -> N
 
     assert five_minute_setup_is_current(point, as_of=stale_at) is True
     assert five_minute_setup_is_executable(point, as_of=stale_at) is False
+
+
+def test_same_tail_same_class_keeps_one_conservative_center_event() -> None:
+    base = provisional_point("3sell")
+    terminal = TerminalSegmentReference(
+        role="latest_unfinished",
+        structural_level=0,
+        unit_id="segment:same-physical-tail",
+        source_kind=SourceKind.SEGMENT,
+        direction="up",
+        state="forming",
+        market_start=base.anchor_at - timedelta(minutes=30),
+        market_end=base.anchor_at,
+        available_at=base.available_at,
+    )
+    near = replace(
+        base,
+        candidate_id="candidate:3sell:near-center",
+        center_id="center-near",
+        center_zd=10.1,
+        center_zg=10.3,
+        invalidation_price=10.1,
+        terminal_segment=terminal,
+    )
+    far = replace(
+        base,
+        candidate_id="candidate:3sell:far-center",
+        center_id="center-far",
+        center_zd=10.3,
+        center_zg=10.5,
+        invalidation_price=10.3,
+        terminal_segment=terminal,
+    )
+
+    assert current_five_minute_setup_points(
+        (far, near),
+        as_of=AS_OF,
+    ) == (near,)
 
 
 def test_later_nested_witness_does_not_move_first_execution_boundary() -> None:

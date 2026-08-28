@@ -294,6 +294,9 @@ const snapshot = {
 test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(template, /data-schema="chanlun-trading-screening\"/);
   assert.match(template, /id="es-sector-completion"/);
+  assert.match(template, /id="es-audit-locked-count"/);
+  assert.match(template, /id="es-confirmed-point-distribution"/);
+  assert.match(template, /id="es-candidate-point-distribution"/);
   assert.match(template, /id="es-scan-timing"/);
   assert.match(template, /id="hr-sector-receipts"/);
   assert.match(template, /id="hr-forward-scheduler-status"/);
@@ -1031,6 +1034,18 @@ test("normalizeSnapshot accepts only the new read-only schema", () => {
 
   assert.equal(normalized.schema, "chanlun-trading-screening");
   assert.equal(normalized.signals.length, 2);
+  assert.equal(normalized.point_distribution.all_signals.total, 2);
+  assert.equal(normalized.point_distribution.candidate.counts_by_point_type["1buy"], 1);
+  assert.equal(
+    normalized.point_distribution.operational_confirmed.counts_by_point_type["2buy"],
+    1,
+  );
+  assert.equal(normalized.point_distribution.executable.total, 1);
+  assert.equal(normalized.point_distribution.audit_locked.total, 0);
+  assert.equal(
+    Ui.pointDistributionCountText(normalized.point_distribution.operational_confirmed),
+    "一买 0 · 一卖 0 · 二买 1 · 二卖 0 · 三买 0 · 三卖 0",
+  );
   assert.throws(
     () => Ui.normalizeSnapshot({ ...snapshot, schema: "chanlun-early-screening" }),
     /snapshot_schema_invalid/,

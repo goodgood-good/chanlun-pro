@@ -16,6 +16,9 @@ from flask_login import current_user, login_required
 from chanlun.decision_support.trading_system.lifecycle import (
     lifecycle_stage_from_signal,
 )
+from chanlun.decision_support.trading_system.signal_aggregates import (
+    point_distribution_document,
+)
 from chanlun.decision_support.fingerprints import sha256_json
 
 from ..services.research_audit import (
@@ -397,6 +400,7 @@ def _presentation_scope(
         )
     output["counts_by_stage"] = counts_by_stage
     output["counts_by_point_type"] = counts_by_point_type
+    output["point_distribution"] = point_distribution_document(selected)
     output["presentation_scope"] = scope
     output["presentation_signal_count"] = len(selected)
     output["sector_trigger_signal_count"] = len(sector_triggered)

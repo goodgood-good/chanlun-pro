@@ -46,6 +46,9 @@ from chanlun.decision_support.trading_system.models import (
     EntryExecutionBoundary,
     parse_entry_execution_boundary_document,
 )
+from chanlun.decision_support.trading_system.signal_aggregates import (
+    point_distribution_document,
+)
 from chanlun.decision_support.trading_system.operation_level import (
     is_five_minute_trade_level,
 )
@@ -4616,6 +4619,12 @@ def validate_live_review_snapshot(
         != expected_point_counts
     ):
         raise ValueError("live screening signal aggregates are invalid")
+    declared_distribution = payload.get("point_distribution")
+    if (
+        declared_distribution is not None
+        and declared_distribution != point_distribution_document(signals)
+    ):
+        raise ValueError("live screening point distribution is invalid")
     return review_at, tuple(signals)
 
 

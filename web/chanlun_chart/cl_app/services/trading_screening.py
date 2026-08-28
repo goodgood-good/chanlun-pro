@@ -95,6 +95,9 @@ from chanlun.decision_support.trading_system.runtime_config import (
 from chanlun.decision_support.trading_system.screening_structure import (
     SCREENING_STRUCTURE_FREQUENCIES,
 )
+from chanlun.decision_support.trading_system.signal_aggregates import (
+    point_distribution_document,
+)
 from chanlun.decision_support.trading_system.sector_policy import rank_sectors
 from chanlun.decision_support.trading_system.sector_strength import (
     MIN_MEMBER_HISTORY_COVERAGE,
@@ -2959,6 +2962,7 @@ def _initial_snapshot(
         "no_order_execution": True,
         "counts_by_stage": {},
         "counts_by_point_type": {point_type: 0 for point_type in CANONICAL_POINT_TYPES},
+        "point_distribution": point_distribution_document(()),
         "screening_policy": _screening_policy_document(),
         "screening_policy_id": _screening_policy_id(),
         "sectors": [],
@@ -9970,6 +9974,9 @@ class TradingScreeningService:
             point_type = str(value.get("point_type") or "")
             if point_type in document["counts_by_point_type"]:
                 document["counts_by_point_type"][point_type] += 1
+        document["point_distribution"] = point_distribution_document(
+            projected_signals
+        )
         document["presentation_schema"] = "chanlun-trading-screening-presentation"
         document["presentation_revision"] = sha256_json(
             {
@@ -15071,6 +15078,7 @@ class TradingScreeningService:
             ),
             "counts_by_stage": dict(sorted(counts_by_stage.items())),
             "counts_by_point_type": counts_by_point,
+            "point_distribution": point_distribution_document(signals),
             "screening_policy": _screening_policy_document(),
             "screening_policy_id": _screening_policy_id(),
             "sectors": [

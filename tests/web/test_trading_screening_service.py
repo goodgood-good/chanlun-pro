@@ -2486,7 +2486,7 @@ def _previous_suspension_evidence_source_snapshot(
         if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
     )
     assert screening_row["sha256"] == (
-        "sha256:401efa0ccbda18ec6bc203fbcac93a92ce6131dba602c70373e218918182e6e5"
+        "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0"
     )
     screening_row["sha256"] = (
         "sha256:117e1e518f6c4417385e72f2ad9a911147192eb413543b7610550f1bbaebf8e3"
@@ -2539,7 +2539,7 @@ def _previous_closed_session_bootstrap_source_snapshot(
         if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
     )
     assert screening_row["sha256"] == (
-        "sha256:401efa0ccbda18ec6bc203fbcac93a92ce6131dba602c70373e218918182e6e5"
+        "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0"
     )
     screening_row["sha256"] = (
         "sha256:98b8373179fcb2c2ab772bc58975f832fc79c86c46880e4f8f34becf899a646f"
@@ -2612,7 +2612,7 @@ def test_context_risk_role_source_change_requires_decision_recompute(
         == "src/chanlun/decision_support/trading_system/live_human_review.py"
     )
     assert current_review_row["sha256"] == (
-        "sha256:7c04f3e18286adf36121ed88e04e0c9878ae7665c40e5f6914d647cc4051e615"
+        "sha256:0ac28b9de593731560b31adc01c85c54ff36d77e7f74b80725b62992fc62d59f"
     )
     review_row["sha256"] = (
         "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"

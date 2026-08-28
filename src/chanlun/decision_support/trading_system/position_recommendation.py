@@ -30,7 +30,6 @@ BUY_SIGNAL_PROTECTION_REASON_CODES = frozenset(
         "BUY_PRICE_TOO_FAR_ABOVE_STRUCTURE_ANCHOR",
         "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP",
         "INITIAL_STRUCTURAL_RISK_TOO_WIDE",
-        "ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP",
     }
 )
 _UNCONFIRMED_STRUCTURE_BASIS = "UNCONFIRMED_5M_STRUCTURE"
@@ -437,25 +436,11 @@ def build_position_recommendation(
                 reason_codes=("POSITION_RATIO_INPUT_UNRESOLVED",),
                 segment_difference_max_ratio=segment_ratio,
             )
-        if (
-            five_minute_time is not None
-            and one_minute_time is not None
-            and one_minute_time < five_minute_time
-        ):
-            return PositionRecommendation(
-                side=side,
-                status="BLOCKED",
-                basis="NO_TRADE",
-                recommended_ratio=Decimal("0"),
-                recommended_percent="0",
-                label=(
-                    "结构风险参考：本条买入不纳入操作计划（1分钟精确定位点"
-                    "早于5分钟交易级别确认，只保留为历史区间套证据；等待5分钟"
-                    "信号成立后的新1分钟买点）"
-                ),
-                reason_codes=("ONE_MINUTE_PRECISION_PRECEDES_FIVE_MINUTE_SETUP",),
-                segment_difference_max_ratio=segment_ratio,
-            )
+        # A nested 1m witness may complete while the terminal 5m segment is
+        # still being confirmed. It becomes actionable only when both facts
+        # are known: max(five_minute_time, one_minute_time). The execution
+        # boundary owns that causal timestamp; sizing must not reject the
+        # witness merely because its own fact timestamp is earlier.
         if price <= stop:
             if structure_anchor_price is None:
                 return PositionRecommendation(

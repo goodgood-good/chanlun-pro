@@ -1,3 +1,5 @@
+import pytest
+
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     _TechnicalSignalEvaluator,
@@ -58,13 +60,25 @@ def test_empty_strict_snapshot_stays_empty_on_every_frequency() -> None:
     assert _mapped("1m", ()) == ()
 
 
-def test_later_center_three_buy_is_excluded_from_selection() -> None:
-    five = (confirmed_point("3buy", center_ordinal=2),)
+@pytest.mark.parametrize("point_type", ("3buy", "3sell"))
+def test_later_center_third_point_is_excluded_from_selection(
+    point_type: str,
+) -> None:
+    side = "buy" if point_type == "3buy" else "sell"
+    five = (
+        confirmed_point(
+            point_type,
+            center_ordinal=2,
+            stop=9.8 if side == "buy" else 10.2,
+            center_zd=9.0 if side == "buy" else 10.1,
+            center_zg=9.8 if side == "buy" else 10.3,
+        ),
+    )
     one = (
         confirmed_point(
-            "1buy",
+            f"1{side}",
             frequency="1m",
-            anchor=9.9,
+            anchor=9.9 if side == "buy" else 10.1,
             minutes_after=1,
         ),
     )

@@ -163,11 +163,6 @@
       setText("es-status-detail", detail);
     }
 
-    function countStage(stage) {
-      const counts = state.snapshot && state.snapshot.counts_by_stage;
-      return Number(counts && counts[stage]) || 0;
-    }
-
     function snapshotHeader() {
       const snapshot = state.snapshot;
       if (!snapshot) return;
@@ -376,6 +371,13 @@
         ? snapshot.unified_signals
         : snapshot.signals;
       const queueFacts = Ui.signalQueueFacts(unifiedSignals);
+      const pointDistribution = snapshot.point_distribution
+        && typeof snapshot.point_distribution === "object"
+        ? snapshot.point_distribution
+        : Ui.pointDistributionForSignals(snapshot.signals);
+      const distributionTotal = (bucket) => (
+        bucket && typeof bucket === "object" ? Number(bucket.total) || 0 : 0
+      );
       setText("es-signal-count", queueFacts.structure_clue_count);
       setText(
         "es-sector-trigger-count",
@@ -383,14 +385,29 @@
       );
       setText(
         "es-total-qualified-count",
-        Number(snapshot.total_qualified_signal_count) || snapshot.signals.length,
+        distributionTotal(pointDistribution.all_signals),
       );
       const currentSignals = unifiedSignals.filter(Ui.isCurrentSelectionSignal);
-      setText("es-approaching-count", countStage("approaching"));
-      const fiveMinuteConfirmedCount = currentSignals.filter(
-        (signal) => Ui.fiveMinuteTradeSignalConfirmedForSignal(signal),
-      ).length;
+      setText(
+        "es-approaching-count",
+        distributionTotal(pointDistribution.candidate),
+      );
+      const fiveMinuteConfirmedCount = distributionTotal(
+        pointDistribution.operational_confirmed,
+      );
       setText("es-triggered-count", fiveMinuteConfirmedCount);
+      setText(
+        "es-audit-locked-count",
+        distributionTotal(pointDistribution.audit_locked),
+      );
+      setText(
+        "es-confirmed-point-distribution",
+        Ui.pointDistributionCountText(pointDistribution.operational_confirmed),
+      );
+      setText(
+        "es-candidate-point-distribution",
+        Ui.pointDistributionCountText(pointDistribution.candidate),
+      );
       const segmentDifferenceCount = currentSignals.filter(
         (signal) => Ui.currentSegmentDifferenceReadyForSignal(signal),
       ).length;
@@ -419,7 +436,10 @@
         "es-segment-scope",
         Ui.segmentScopeText(runtimeHealth, segmentDifferenceCount),
       );
-      setText("es-executable-count", countStage("executable"));
+      setText(
+        "es-executable-count",
+        distributionTotal(pointDistribution.executable),
+      );
       document.title = queueFacts.structure_clue_count
         ? `(${queueFacts.structure_clue_count}) 缠论提前选股 · 实时盯盘与个股分析`
         : "缠论提前选股 · 实时盯盘与个股分析";
