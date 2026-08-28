@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLEANUP = ROOT / "ops" / "cleanup_local_generated_artifacts.ps1"
+POST_COVERAGE_BACKTEST = ROOT / "ops" / "run_full_backtest_after_coverage.ps1"
 RUNTIME_CLEANUP = ROOT / "ops" / "cleanup_legacy_runtime_state.ps1"
 INVALID_ALGORITHM_CLEANUP = ROOT / "ops" / "cleanup_invalid_algorithm_state.ps1"
 HISTORICAL_BACKTEST = ROOT / "ops" / "run_historical_backtest.ps1"
@@ -227,6 +228,20 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
         '"audit\\chanlun_trading_system_backtest\\research_sample_validation_12"'
         in invalid_algorithm_cleanup
     )
+
+
+def test_full_backtest_waits_for_post_close_zero_failure_coverage() -> None:
+    source = POST_COVERAGE_BACKTEST.read_text(encoding="utf-8")
+
+    assert "[Parameter(Mandatory = $true)]" in source
+    assert '[string]$QmtDataDir' in source
+    assert '$marketDataAsOf.TimeOfDay -ge [TimeSpan]::FromHours(15)' in source
+    assert '$screening.coverage_cycle_complete -eq $true' in source
+    assert '[int]$screening.coverage_cycle_failed_symbol_count -eq 0' in source
+    assert '-FullMarket' in source
+    assert '-ConfirmLargeScope' in source
+    assert '-GeneratePIT' in source
+    assert "Start-Sleep -Seconds $PollSeconds" in source
 
 
 @pytest.mark.skipif(os.name != "nt", reason="cleanup helper targets Windows")
