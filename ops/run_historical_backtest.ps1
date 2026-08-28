@@ -124,25 +124,45 @@ if (
 ) {
     throw "Profile-scoped PIT metadata is missing: $pitSnapshot. Re-run with -GeneratePIT after verifying the checkpoint directory."
 }
-if (-not $FullMarket -and $GeneratePIT) {
-    if ([string]::IsNullOrWhiteSpace($MembershipCheckpointDir)) {
-        $MembershipCheckpointDir = Join-Path $pitReferenceDirectory "cninfo_memberships"
+if ($GeneratePIT) {
+    $defaultCheckpointDir = Join-Path $pitReferenceDirectory "cninfo_memberships"
+    $defaultMembershipIndex = Join-Path $pitReferenceDirectory "membership_index.json"
+    if ($FullMarket) {
+        $hasCheckpointDir = -not [string]::IsNullOrWhiteSpace($MembershipCheckpointDir)
+        $hasMembershipIndex = -not [string]::IsNullOrWhiteSpace($MembershipIndex)
+        if ($hasCheckpointDir -ne $hasMembershipIndex) {
+            throw "Full-market checkpoint reuse requires both MembershipCheckpointDir and MembershipIndex."
+        }
+        if (
+            -not $hasCheckpointDir -and
+            (Test-Path -LiteralPath $defaultCheckpointDir -PathType Container) -and
+            (Test-Path -LiteralPath $defaultMembershipIndex -PathType Leaf)
+        ) {
+            $MembershipCheckpointDir = $defaultCheckpointDir
+            $MembershipIndex = $defaultMembershipIndex
+        }
+    } else {
+        if ([string]::IsNullOrWhiteSpace($MembershipCheckpointDir)) {
+            $MembershipCheckpointDir = $defaultCheckpointDir
+        }
+        if ([string]::IsNullOrWhiteSpace($MembershipIndex)) {
+            $MembershipIndex = $defaultMembershipIndex
+        }
     }
-    if (-not (Test-Path -LiteralPath $MembershipCheckpointDir -PathType Container)) {
-        throw "A complete CNInfo membership checkpoint directory is required: $MembershipCheckpointDir"
+    if (-not [string]::IsNullOrWhiteSpace($MembershipCheckpointDir)) {
+        if (-not (Test-Path -LiteralPath $MembershipCheckpointDir -PathType Container)) {
+            throw "A complete CNInfo membership checkpoint directory is required: $MembershipCheckpointDir"
+        }
+        if (-not (Test-Path -LiteralPath $MembershipIndex -PathType Leaf)) {
+            throw "An immutable full-capture membership index is required: $MembershipIndex"
+        }
+        $MembershipCheckpointDir = (
+            Resolve-Path -LiteralPath $MembershipCheckpointDir
+        ).Path
+        $MembershipIndex = (Resolve-Path -LiteralPath $MembershipIndex).Path
+    } elseif (-not $FullMarket) {
+        throw "Scoped PIT capture requires immutable membership checkpoints."
     }
-    $MembershipCheckpointDir = (
-        Resolve-Path -LiteralPath $MembershipCheckpointDir
-    ).Path
-    if ([string]::IsNullOrWhiteSpace($MembershipIndex)) {
-        $MembershipIndex = Join-Path (
-            Split-Path -Parent $MembershipCheckpointDir
-        ) "membership_index.json"
-    }
-    if (-not (Test-Path -LiteralPath $MembershipIndex -PathType Leaf)) {
-        throw "An immutable full-capture membership index is required: $MembershipIndex"
-    }
-    $MembershipIndex = (Resolve-Path -LiteralPath $MembershipIndex).Path
 }
 
 if ($Stage -in @("Extract", "Finalize", "All")) {
@@ -220,6 +240,12 @@ try {
             )
             if ($FullMarket) {
                 $pitArguments += @("--full-market", "--confirm-large-scope")
+                if (-not [string]::IsNullOrWhiteSpace($MembershipCheckpointDir)) {
+                    $pitArguments += @(
+                        "--membership-checkpoint-dir", $MembershipCheckpointDir,
+                        "--membership-index", $MembershipIndex
+                    )
+                }
             } else {
                 $pitArguments += @(
                     "--codes-file", $researchCodesPath,

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 import json
 import sys
+from types import SimpleNamespace
 import pytest
 
 from chanlun.decision_support.trading_system.backtest.pit_metadata import (
@@ -644,6 +645,148 @@ def test_scoped_capture_reads_details_and_factors_only_for_sector_closure(
         "SH.600001",
         "SH.600002",
     ]
+
+
+def test_full_capture_reuses_an_exact_immutable_membership_index(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    codes = ("SH.600001", "SH.600002")
+    for code in codes:
+        records = [
+            {
+                "F001V": "008003",
+                "VARYDATE": "2020-01-01",
+                "F003V": "S1101",
+                "F004V": "农林牧渔",
+            }
+        ]
+        (checkpoint_dir / f"{code.replace('.', '_')}.json").write_text(
+            json.dumps(
+                {
+                    "schema": "cninfo-p_stock2110-checkpoint",
+                    "code": code,
+                    "not_after": END.isoformat(),
+                    "records": records,
+                    "records_sha256": sha256_json(records),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    indexed_memberships, checkpoint_paths = (
+        subject._load_complete_checkpoint_inventory(
+            inventory_codes=codes,
+            checkpoint_dir=checkpoint_dir,
+            end=END,
+        )
+    )
+    membership_index = tmp_path / "membership_index.json"
+    membership_index.write_text(
+        json.dumps(
+            subject._membership_index_payload(
+                memberships=indexed_memberships,
+                checkpoint_paths=checkpoint_paths,
+                checkpoint_root=checkpoint_dir,
+                end=END,
+            ),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "xtquant",
+        SimpleNamespace(xtdata=SimpleNamespace(enable_hello=True)),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_qmt_a_share_inventory",
+        lambda: tuple((code, subject.qmt_native_code(code)) for code in codes),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_security_master",
+        lambda _start, _end, *, native_codes: (
+            tuple(
+                SecurityMasterRecord(
+                    code=f"{native[-2:]}.{native[:6]}",
+                    name=native,
+                    listed_from=date(2010, 1, 1),
+                    listed_through=None,
+                )
+                for native in sorted(native_codes)
+            ),
+            {"detail_read_code_count": len(native_codes)},
+        ),
+    )
+    monkeypatch.setattr(subject, "_cninfo_headers", lambda: {})
+    monkeypatch.setattr(
+        subject,
+        "_taxonomy",
+        lambda _headers: ({"qmt-sw1:S11": "农林牧渔"}, {"rows": ["S11"]}),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_qmt_current_sw1",
+        lambda _taxonomy: {"qmt-sw1:S11": codes},
+    )
+    monkeypatch.setattr(
+        subject,
+        "_capture_memberships",
+        lambda **_kwargs: pytest.fail(
+            "an exact immutable full-market index must not be downloaded again"
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_capture_factors",
+        lambda **_kwargs: ((), []),
+    )
+    output = tmp_path / "full" / "pit.json"
+
+    assert (
+        subject.main(
+            [
+                "--full-market",
+                "--confirm-large-scope",
+                "--membership-checkpoint-dir",
+                str(checkpoint_dir),
+                "--membership-index",
+                str(membership_index),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    raw = json.loads(output.read_text(encoding="utf-8"))
+    assert raw["audit"]["scope"]["closure_codes"] == list(codes)
+    assert raw["audit"]["scope"]["membership_checkpoint_count"] == 2
+    assert raw["audit"]["membership_checkpoint_source"] == {
+        "mode": "IMMUTABLE_INDEX_REUSE",
+        "membership_index": str(membership_index.resolve()),
+        "checkpoint_directory": str(checkpoint_dir.resolve()),
+    }
+    assert not (output.parent / "pit_sources").exists()
+
+
+def test_full_capture_requires_a_complete_checkpoint_reuse_pair(tmp_path) -> None:
+    with pytest.raises(ValueError, match="requires both"):
+        subject.main(
+            [
+                "--full-market",
+                "--confirm-large-scope",
+                "--membership-index",
+                str(tmp_path / "membership_index.json"),
+                "--output",
+                str(tmp_path / "pit.json"),
+            ]
+        )
 
 
 def test_scoped_capture_missing_membership_index_fails_before_xtquant(

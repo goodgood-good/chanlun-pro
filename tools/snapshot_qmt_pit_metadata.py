@@ -1078,8 +1078,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "scoped PIT capture requires an immutable --membership-index; "
             "create it only through an explicitly authorized full PIT capture"
         )
-    if args.full_market and args.membership_index is not None:
-        raise ValueError("--full-market cannot be combined with --membership-index")
+    if args.full_market and (
+        (args.membership_checkpoint_dir is None)
+        != (args.membership_index is None)
+    ):
+        raise ValueError(
+            "full-market checkpoint reuse requires both "
+            "--membership-checkpoint-dir and --membership-index"
+        )
+    if args.full_market and args.force and args.membership_index is not None:
+        raise ValueError("--force cannot be combined with immutable checkpoint reuse")
     if not args.full_market and args.refresh_contracts:
         raise ValueError("--refresh-contracts is forbidden for scoped PIT capture")
     output = args.output.resolve()
@@ -1147,7 +1155,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         inventory_codes = tuple(code for code, _native in inventory)
         native_by_code = dict(inventory)
         inventory_hash = sha256_json(list(inventory_codes))
-        source_dir.mkdir(parents=True, exist_ok=True)
         headers = _cninfo_headers()
         taxonomy, raw_taxonomy = _taxonomy(headers)
         securities, master_audit = _security_master(
@@ -1156,25 +1163,81 @@ def main(argv: Sequence[str] | None = None) -> int:
             native_codes=tuple(native_by_code.values()),
         )
         current_sw1 = _qmt_current_sw1(taxonomy)
-        memberships, membership_paths = _capture_memberships(
-            securities=securities,
-            end=args.end,
-            headers=headers,
-            source_dir=source_dir,
-            workers=args.workers,
-            force=args.force,
-        )
-        membership_index_path = source_dir / "membership_index.json"
-        _atomic_json(
-            membership_index_path,
-            _membership_index_payload(
-                memberships=memberships,
-                checkpoint_paths=membership_paths,
-                checkpoint_root=source_dir / "cninfo_memberships",
-                end=args.end,
-            ),
-        )
         requested_codes = tuple(row.code for row in securities)
+        if args.membership_index is not None:
+            (
+                indexed_codes,
+                indexed_memberships,
+                indexed_checkpoints,
+                _indexed_tree_hash,
+            ) = _load_membership_index(
+                path=args.membership_index,
+                checkpoint_dir=args.membership_checkpoint_dir,
+                end=args.end,
+            )
+            if indexed_codes != requested_codes:
+                missing = tuple(sorted(set(requested_codes) - set(indexed_codes)))
+                stale = tuple(sorted(set(indexed_codes) - set(requested_codes)))
+                raise RuntimeError(
+                    "immutable membership index does not match the full-market "
+                    f"security master (missing={len(missing)}, stale={len(stale)}): "
+                    + ",".join((*missing[:5], *stale[:5]))
+                )
+            memberships, membership_paths = _verify_indexed_closure_checkpoints(
+                codes=indexed_codes,
+                checkpoints=indexed_checkpoints,
+                end=args.end,
+            )
+            normalized_indexed_memberships = tuple(
+                sorted(
+                    indexed_memberships,
+                    key=lambda row: (row.code, row.known_at, row.sector_id),
+                )
+            )
+            normalized_verified_memberships = tuple(
+                sorted(
+                    memberships,
+                    key=lambda row: (row.code, row.known_at, row.sector_id),
+                )
+            )
+            if normalized_verified_memberships != normalized_indexed_memberships:
+                raise RuntimeError(
+                    "membership index does not match its verified checkpoints"
+                )
+            checkpoint_root = args.membership_checkpoint_dir.resolve()
+            membership_source = {
+                "mode": "IMMUTABLE_INDEX_REUSE",
+                "membership_index": str(args.membership_index.resolve()),
+                "checkpoint_directory": str(checkpoint_root),
+            }
+        else:
+            source_dir.mkdir(parents=True, exist_ok=True)
+            memberships, membership_paths = _capture_memberships(
+                securities=securities,
+                end=args.end,
+                headers=headers,
+                source_dir=source_dir,
+                workers=args.workers,
+                force=args.force,
+            )
+            checkpoint_root = source_dir
+            membership_index_path = source_dir / "membership_index.json"
+            _atomic_json(
+                membership_index_path,
+                _membership_index_payload(
+                    memberships=memberships,
+                    checkpoint_paths=membership_paths,
+                    checkpoint_root=source_dir / "cninfo_memberships",
+                    end=args.end,
+                ),
+            )
+            membership_source = {
+                "mode": "FULL_NETWORK_CAPTURE",
+                "membership_index": str(membership_index_path.resolve()),
+                "checkpoint_directory": str(
+                    (source_dir / "cninfo_memberships").resolve()
+                ),
+            }
         closure_codes = requested_codes
         closure_candidate_codes = closure_codes
         checkpoint_absent_codes: tuple[str, ...] = ()
@@ -1186,7 +1249,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             start=args.start,
             end=args.end,
         )
-        checkpoint_root = source_dir
         checkpoint_tree_hash = _tree_hash(
             membership_paths,
             root=checkpoint_root,
@@ -1233,6 +1295,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         current_sw1 = {}
         checkpoint_root = args.membership_checkpoint_dir.resolve()
+        membership_source = {
+            "mode": "IMMUTABLE_INDEX_REUSE",
+            "membership_index": str(args.membership_index.resolve()),
+            "checkpoint_directory": str(checkpoint_root),
+        }
         scope_mode = SCOPED_SECTOR_CLOSURE_MODE
         taxonomy_hash = sha256_json(
             {key: value for key, value in sorted(taxonomy.items())}
@@ -1372,6 +1439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "qmt_cninfo_crosscheck": crosscheck,
         "certifiable_action_contract": rights == 0 and reforms == 0,
         "security_master_anomalies": master_audit,
+        "membership_checkpoint_source": membership_source,
     }
     _atomic_json(output, snapshot_payload(snapshot, audit=audit))
     console_scope = {
