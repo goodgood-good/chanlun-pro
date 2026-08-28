@@ -65,6 +65,7 @@
       pollTimer: null,
       signalRenderLimit: 200,
       signalFilterKey: "",
+      revealCurrentSegmentsAfterRender: false,
     };
 
     const resizeController = Resize.createController(chartWorkspace, state.chartSizing, {
@@ -161,6 +162,30 @@
       if (dot) dot.className = `es-status-dot is-${kind}`;
       setText("es-status", title);
       setText("es-status-detail", detail);
+    }
+
+    function syncCurrentSegmentAction() {
+      const action = byId("es-show-current-segments");
+      if (!action) return;
+      const count = Math.max(0, Number(byId("es-segment-count")?.textContent) || 0);
+      const active = count > 0 && state.segmentState === "current";
+      action.disabled = count === 0;
+      action.classList.toggle("is-active", active);
+      action.setAttribute("aria-pressed", active ? "true" : "false");
+      action.textContent = count === 0
+        ? "当前暂无精确定位"
+        : active ? "正在查看当前定位" : "查看当前定位";
+    }
+
+    function revealCurrentSegmentResults() {
+      state.revealCurrentSegmentsAfterRender = false;
+      const workspace = signalList && signalList.closest("[data-workspace=\"signals\"]");
+      if (!workspace) return;
+      window.requestAnimationFrame(() => {
+        workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+        const focusTarget = signalList.querySelector("button") || byId("es-signal-search");
+        if (focusTarget) focusTarget.focus({ preventScroll: true });
+      });
     }
 
     function snapshotHeader() {
@@ -418,10 +443,7 @@
       setText("es-precise-count", preciseExecutionReadyCount);
       const showCurrentSegments = byId("es-show-current-segments");
       if (showCurrentSegments) {
-        showCurrentSegments.disabled = segmentDifferenceCount === 0;
-        showCurrentSegments.textContent = segmentDifferenceCount === 0
-          ? "当前暂无精确定位"
-          : "查看当前定位";
+        syncCurrentSegmentAction();
       }
       if (
         segmentDifferenceCount === 0
@@ -942,6 +964,8 @@
       syncFilterCounts();
       syncFilterSummary();
       syncSectorExpandButton();
+      syncCurrentSegmentAction();
+      if (state.revealCurrentSegmentsAfterRender) revealCurrentSegmentResults();
     }
 
     function render() {
@@ -1176,6 +1200,7 @@
       state.selectionScope = "all-qualified";
       state.sectorId = "all";
       state.query = "";
+      state.revealCurrentSegmentsAfterRender = true;
       if (search) search.value = "";
       saveView();
       const liveModeButton = document.querySelector('[role="tab"][data-screening-mode="live"]');

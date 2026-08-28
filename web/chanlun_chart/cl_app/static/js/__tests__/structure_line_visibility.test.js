@@ -84,8 +84,10 @@ test('相邻周期共享同一绝对结构级别颜色', () => {
 test('实际绘制和菜单色块共用同一基础结构样式', () => {
   assert.ok(source.includes("const biLineStyle = getBaseStructureStyle(currentInterval, 'bis')"));
   assert.ok(source.includes("const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds')"));
-  assert.ok(source.includes('ChartUtils.createLineShape(this.chart, item, biLineStyle)'));
-  assert.ok(source.includes('ChartUtils.createLineShape(this.chart, item, xdLineStyle)'));
+  assert.ok(source.includes('ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), biLineStyle)'));
+  assert.ok(source.includes('ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), xdLineStyle)'));
+  assert.ok(source.includes('if (!baseStructureLineIsUnfinished(item)) return item;'));
+  assert.ok(source.includes('linestyle: CHART_CONFIG.LINE_STYLES.DASHED'));
   assert.ok(source.includes('color: getDynamicColor(interval, elementType)'));
   assert.ok(source.includes('transparency: 0'), '自动结构线必须完全不透明');
 });

@@ -23,16 +23,16 @@ test('只裁掉较早的形成中尾段，待锁定线段完整保留', () => {
 
   assert.deepEqual(
     LineStates.uniqueRenderList([formedA, formingA, formedB, formingB]),
-    [formedA, formedB, formingB],
+    [formedA, formedB, { ...formingB, linestyle: '2' }],
   );
 });
 
-test('旧缓存中的已成形虚线会在浏览器端恢复为实线', () => {
+test('形成中结构统一改成虚线且旧缓存中的已成形虚线恢复为实线', () => {
   const legacyFormed = line('formed', '2');
   const forming = line('forming', '1');
 
   assert.equal(LineStates.normalizeBaseStructureLine(legacyFormed).linestyle, '0');
-  assert.equal(LineStates.normalizeBaseStructureLine(forming).linestyle, '1');
+  assert.equal(LineStates.normalizeBaseStructureLine(forming).linestyle, '2');
   assert.equal(
     LineStates.normalizeBaseStructureLine({ linestyle: '2' }).linestyle,
     '2',

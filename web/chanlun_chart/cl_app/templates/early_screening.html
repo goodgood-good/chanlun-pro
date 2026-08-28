@@ -317,7 +317,7 @@
             </div>
             <button id="es-sector-expand" class="es-text-button" type="button" aria-expanded="false" hidden>显示全部板块</button>
           </header>
-          <p class="es-workspace__help">按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。板块选择只筛 A 股，美股线索不参与板块门且会继续保留。</p>
+          <p class="es-workspace__help">按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。展示顺序固定为：有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序。板块选择只筛 A 股，美股线索不参与板块门且会继续保留。</p>
           <p id="es-sector-catalog-status" class="es-sector-catalog-status" data-state="loading">正在读取板块目录。</p>
           <details class="es-rule-note">
             <summary>规则与数据口径</summary>
@@ -420,7 +420,7 @@
             </div>
             <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
           </header>
-          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。有一二三类标记的才计入5m结构线索；“等待买卖点 / 实时监听”只是关注范围，不计入信号或通知。</p>
+          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。队列按人工复核优先级、生命周期、板块结构名次、买卖点类型和代码稳定排序；有一二三类标记的才计入5m结构线索，“等待买卖点 / 实时监听”只是关注范围，不计入信号或通知。</p>
 
           <div class="es-signal-channel-bar" role="group" aria-label="六类买卖点快捷筛选">
             <strong>六类通道</strong>

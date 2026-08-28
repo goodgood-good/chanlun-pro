@@ -3,17 +3,15 @@
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    schema: "chanlun-chart-config-v2",
-    // 首屏只展示可审计的正式结构。分型、笔、线段仍可在显示设置中
-    // 随时打开，但不再用数百个基础图形遮住正式走势与中枢。
+    schema: "chanlun-chart-config-v3",
+    // 首屏展示正式结构，并让唯一未完成的中枢/尾段跟随所属结构层以虚线显示。
+    // 分型、笔、线段仍可在显示设置中随时打开。
     fx: false,
     bi: false,
     xd: false,
     center_observation: false,
     center_all: true,
-    center_provisional: false,
     trend_all: true,
-    pending_movement: false,
     point_all: true,
     point_1buy: true,
     point_2buy: true,
@@ -487,7 +485,7 @@ function normalizeClShowConfig(config, interval) {
     const output = Object.assign({}, CL_SHOW_DEFAULT);
     for (const key of [
         'fx', 'bi', 'xd', 'center_observation', 'center_all',
-        'center_provisional', 'trend_all', 'pending_movement',
+        'trend_all',
         'point_all', 'point_1buy', 'point_2buy', 'point_3buy',
         'point_1sell', 'point_2sell', 'point_3sell', 'divergence_all',
     ]) {
@@ -519,7 +517,6 @@ function strictItemEnabled(cfg, item) {
     }
     if (item.render_kind === 'center_preview' || item.render_kind === 'center_projection') {
         return config.center_all === true
-            && config.center_provisional === true
             && config[`center_L${level}`] !== false;
     }
     if (item.render_kind === 'strict_trend') {
@@ -527,7 +524,6 @@ function strictItemEnabled(cfg, item) {
     }
     if (item.render_kind === 'pending_movement') {
         return config.trend_all !== false
-            && config.pending_movement === true
             && config[`trend_L${level}`] !== false;
     }
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
@@ -706,6 +702,7 @@ const CHART_CONFIG = {
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
     CHART_TYPES: ["fxs", "bis", "xds"],
 };
+const ONE_CLICK_DRAW_LINE_WIDTH = 1;
 
 // 方向性标记必须同时适配 TradingView 浅色、深色画布。结构级别继续使用下方
 // LEVEL_COLOR_CHAIN；这里的红/蓝只表达“买/卖、顶/底”等方向语义，不能拿来表达级别。
@@ -783,7 +780,7 @@ function getCenterVisualStyle(role, item = {}) {
     const spec = CHANLUN_VISUAL_STYLE.center[role] || CHANLUN_VISUAL_STYLE.center.formal;
     const ongoing = _centerIsOngoing(item);
     let linestyle = ongoing ? CHART_CONFIG.LINE_STYLES.DASHED : CHART_CONFIG.LINE_STYLES.SOLID;
-    if (role === "projection") linestyle = CHART_CONFIG.LINE_STYLES.DOTTED;
+    if (role === "projection") linestyle = CHART_CONFIG.LINE_STYLES.DASHED;
     return {
         linewidth: spec.linewidth,
         transparency: ongoing ? spec.ongoingTransparency : spec.completedTransparency,
@@ -889,6 +886,18 @@ const BASE_STRUCTURE_LINE_WIDTHS = Object.freeze({
     bis: 1,
     xds: 2,
 });
+
+function baseStructureLineIsUnfinished(item) {
+    const explicit = String(item?.state || "").trim().toLowerCase();
+    if (explicit) return explicit === "forming";
+    return item?.locked !== true && parseInt(item?.linestyle) === 1;
+}
+
+function baseStructureRenderItem(item) {
+    if (!baseStructureLineIsUnfinished(item)) return item;
+    if (parseInt(item?.linestyle) === CHART_CONFIG.LINE_STYLES.DASHED) return item;
+    return { ...item, linestyle: CHART_CONFIG.LINE_STYLES.DASHED };
+}
 
 function getBaseStructureStyle(interval, elementType) {
     return {
@@ -2316,7 +2325,6 @@ class ChartManager {
 
                         ${_grpTitle('中枢控制', '严格递归结构')}
                         ${_cbRow('center_all', '中枢总开关')}
-                        ${_cbRow('center_provisional', '形成中 / 投影（非正式）', false)}
                         <div style="padding-left:14px;display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
                             ${_centerLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
@@ -2326,7 +2334,6 @@ class ChartManager {
 
                         ${_grpTitle('走势类型', '由当前 K 线递归产生')}
                         ${_cbRow('trend_all', '走势类型总开关')}
-                        ${_cbRow('pending_movement', '待定尾段（非正式）', false)}
                         <div style="padding-left:14px;display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
                             ${_trendLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
@@ -2414,7 +2421,7 @@ class ChartManager {
 
                 const keys = [
                     'fx', 'bi', 'xd', 'center_observation', 'center_all',
-                    'center_provisional', 'trend_all', 'pending_movement',
+                    'trend_all',
                     'point_all', 'divergence_all',
                     ..._centerLevels.map((item) => item.key),
                     ..._trendLevels.map((item) => item.key),
@@ -2591,6 +2598,7 @@ class ChartManager {
                             if ('linecolor' in p) ov.linecolor = this._drawColor;
                             if ('color' in p) ov.color = this._drawColor;
                             if ('backgroundColor' in p) ov.backgroundColor = this._drawColor;
+                            if ('linewidth' in p) ov.linewidth = ONE_CLICK_DRAW_LINE_WIDTH;
                             if (Object.keys(ov).length) { this._coloredDrawings.add(id); sh.setProperties(ov); }
                         }
                     } catch (e) {}
@@ -2619,10 +2627,11 @@ class ChartManager {
         try {
             this.chart.applyOverrides({
                 "linetooltrendline.linecolor": color,
-                "linetooltrendline.linewidth": 2,
+                "linetooltrendline.linewidth": ONE_CLICK_DRAW_LINE_WIDTH,
                 "linetoolrectangle.color": color,
                 "linetoolrectangle.backgroundColor": color,
                 "linetoolrectangle.linecolor": color,
+                "linetoolrectangle.linewidth": ONE_CLICK_DRAW_LINE_WIDTH,
                 "linetoolrectangle.transparency": 80,
             });
         } catch (e) { /* override 失败不致命,create 事件仍会兜底套色 */ }
@@ -3709,7 +3718,7 @@ class ChartManager {
         if (item.render_kind === 'pending_movement') {
             return ChartUtils.createLineShape(this.chart, {
                 ...item,
-                linestyle: CHART_CONFIG.LINE_STYLES.DOTTED,
+                linestyle: CHART_CONFIG.LINE_STYLES.DASHED,
             }, {
                 color: levelColor,
                 linewidth: 1,
@@ -4233,7 +4242,7 @@ class ChartManager {
         const finished = [];
         const unfinished = [];
         sourceList.forEach(item => {
-            if (item.linestyle == '1' || item.linestyle == 1) {
+            if (baseStructureLineIsUnfinished(item)) {
                 unfinished.push(item);
             } else {
                 finished.push(item);
@@ -4308,7 +4317,7 @@ class ChartManager {
         // 不再截断字符串，避免最新中枢位于截断范围后时漏掉边界修正。
         const unfinishedKeys = new Set(
             itemsToProcess
-                .filter(p => p.item.linestyle == '1' || p.item.linestyle == 1)
+                .filter(p => baseStructureLineIsUnfinished(p.item))
                 .map(p => p.key)
         );
         const guardKey = `${symbolKey}__${type}`;
@@ -4370,12 +4379,16 @@ class ChartManager {
                 // isUnfinished 恒 false 不触发,天然只作用于笔/线段/走势类型线。
                 const newItem = keyToNewItem.get(existing.key);
                 if (newItem) {
-                    const newUnfinished = (newItem.linestyle == '1' || newItem.linestyle == 1);
+                    const newUnfinished = baseStructureLineIsUnfinished(newItem);
                     if (newUnfinished !== existing.isUnfinished && existing.id != null) {
                         try {
                             const sh = this.chart.getShapeById(existing.id);
                             if (sh && sh.setProperties) {
-                                sh.setProperties({ linestyle: parseInt(newItem.linestyle) || 0 });
+                                sh.setProperties({
+                                    linestyle: newUnfinished
+                                        ? CHART_CONFIG.LINE_STYLES.DASHED
+                                        : parseInt(newItem.linestyle) || CHART_CONFIG.LINE_STYLES.SOLID,
+                                });
                             }
                         } catch (e) {}
                         existing.isUnfinished = newUnfinished;
@@ -4400,7 +4413,7 @@ class ChartManager {
                 time: time,
                 tailTime: tailTime,
                 key: key,
-                isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
+                isUnfinished: baseStructureLineIsUnfinished(item),
             };
             if (result != null && typeof result.then === 'function') {
                 createAsync += 1;
@@ -4616,8 +4629,8 @@ class ChartManager {
         // 基础结构按绝对递归级别取色，同时让线段比笔再粗一级；菜单色块走同一颜色函数。
         const biLineStyle = getBaseStructureStyle(currentInterval, 'bis');
         const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds');
-        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, biLineStyle), 'bi'));
-        this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, xdLineStyle), 'xd'));
+        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), biLineStyle), 'bi'));
+        this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), xdLineStyle), 'xd'));
         // 中枢、走势、买卖点与背驰由同一个严格原子快照统一绘制。
         this._drawStrictStructure(chartData, currentInterval);
         this.updateDrawPalette();

@@ -1187,7 +1187,7 @@ test('locking the five-role center replaces its preview with a formal ongoing ce
   assert.equal(calls.create[1].options.overrides.linestyle, 2);
 });
 
-test('unresolved movement renders as a faint dotted non-tradable trend partition', () => {
+test('unresolved movement renders as a faint dashed non-tradable trend partition', () => {
   const { cm, calls } = manager('chart-manager-pending-movement');
   const strict = snapshot({
     levels: [{
@@ -1201,7 +1201,7 @@ test('unresolved movement renders as a faint dotted non-tradable trend partition
 
   assert.equal(calls.create.length, 1);
   assert.equal(calls.create[0].options.shape, 'trend_line');
-  assert.equal(calls.create[0].options.overrides.linestyle, 1);
+  assert.equal(calls.create[0].options.overrides.linestyle, 2);
   assert.equal(calls.create[0].options.overrides.transparency, 82);
 });
 

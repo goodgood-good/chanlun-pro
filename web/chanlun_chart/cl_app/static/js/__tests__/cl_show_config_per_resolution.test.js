@@ -121,7 +121,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v2');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v3');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -132,7 +132,7 @@ test('only the current display schema is accepted', () => {
   );
 });
 
-test('production defaults show only formal centers and alternating movements', () => {
+test('production defaults show unfinished centers and tails with their parent structure layers', () => {
   const { api } = loadClConfigApi();
   const config = api.normalize(null, '5');
 
@@ -141,24 +141,24 @@ test('production defaults show only formal centers and alternating movements', (
   assert.equal(config.xd, false);
   assert.equal(config.center_observation, false);
   assert.equal(config.center_all, true);
-  assert.equal(config.center_provisional, false);
+  assert.equal(Object.hasOwn(config, 'center_provisional'), false);
   assert.equal(config.trend_all, true);
-  assert.equal(config.pending_movement, false);
+  assert.equal(Object.hasOwn(config, 'pending_movement'), false);
   assert.equal(api.enabled(config, {
     render_kind: 'formal_center', structural_level: 0,
   }), true);
   assert.equal(api.enabled(config, {
     render_kind: 'center_preview', structural_level: 0,
-  }), false);
+  }), true);
   assert.equal(api.enabled(config, {
     render_kind: 'center_projection', structural_level: 0,
-  }), false);
+  }), true);
   assert.equal(api.enabled(config, {
     render_kind: 'strict_trend', structural_level: 0,
   }), true);
   assert.equal(api.enabled(config, {
     render_kind: 'pending_movement', structural_level: 0,
-  }), false);
+  }), true);
 });
 
 test('stored non-current or malformed configuration is removed', () => {
@@ -185,6 +185,8 @@ test('current schema retains only current fields and period levels', () => {
     fx: false,
     center_L0: false,
     point_L1: false,
+    center_provisional: false,
+    pending_movement: false,
     removed_switch: true,
   }, '5');
 
@@ -198,6 +200,8 @@ test('current schema retains only current fields and period levels', () => {
   assert.equal(Object.hasOwn(config, 'center_L3'), false);
   assert.equal(Object.hasOwn(config, 'point_L3'), false);
   assert.equal(Object.hasOwn(config, 'removed_switch'), false);
+  assert.equal(Object.hasOwn(config, 'center_provisional'), false);
+  assert.equal(Object.hasOwn(config, 'pending_movement'), false);
 });
 
 test('recursive display levels are derived from the active period', () => {

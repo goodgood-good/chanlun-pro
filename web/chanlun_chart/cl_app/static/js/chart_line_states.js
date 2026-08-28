@@ -43,7 +43,7 @@
     )) return item;
     // 兼容服务重启前已经落盘的旧图表缓存：内部 state 仍能准确区分
     // formed/forming，渲染层强制保证只有 forming 使用虚线。
-    const linestyle = stateOf(item) === 'forming' ? '1' : '0';
+    const linestyle = stateOf(item) === 'forming' ? '2' : '0';
     return String(item.linestyle) === linestyle ? item : { ...item, linestyle };
   }
 

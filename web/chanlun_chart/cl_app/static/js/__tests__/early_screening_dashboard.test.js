@@ -843,9 +843,12 @@ test("dashboard exposes and persists the optional one-minute segment-difference 
   assert.match(controllerSource, /\[data-segment-state\]/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
   assert.match(controllerSource, /state\.segmentState = "current"/);
+  assert.match(controllerSource, /revealCurrentSegmentsAfterRender/);
+  assert.match(controllerSource, /workspace\.scrollIntoView\(\{ behavior: "smooth", block: "start" \}\)/);
+  assert.match(controllerSource, /正在查看当前定位/);
   assert.match(controllerSource, /state\.pointType = "all"/);
   assert.match(controllerSource, /data-screening-mode="live"/);
-  assert.match(controllerSource, /showCurrentSegments\.disabled = segmentDifferenceCount === 0/);
+  assert.match(controllerSource, /action\.disabled = count === 0/);
   assert.match(controllerSource, /Ui\.currentPreciseExecutionReadyForSignal\(signal\)/);
   assert.match(controllerSource, /state\.segmentState === "current"/);
   assert.match(controllerSource, /state\.segmentState = "all"/);
@@ -3810,6 +3813,28 @@ test("sector workspace puts every eligible sector first and labels scan scope", 
   assert.equal(workspace.root.children[2].dataset.shortlisted, "false");
   assert.match(workspace.root.children[2].children[1].textContent, /未通过结构门槛/);
   assert.match(dashboardCss, /\.es-sector-row\.is-shortlisted/);
+});
+
+test("sector radar uses a stable business order for unranked rows", () => {
+  const Ui = loadUi();
+  const sectors = [
+    { sector_id: "blocked", sector_name: "阻断", rank: null, hard_block: true, horizontal_strength: 99 },
+    { sector_id: "quiet", sector_name: "无信号", rank: null, hard_block: false, horizontal_strength: 8 },
+    { sector_id: "weak", sector_name: "有信号弱", rank: null, hard_block: false, horizontal_strength: 2 },
+    { sector_id: "strong", sector_name: "有信号强", rank: null, hard_block: false, horizontal_strength: 7 },
+    { sector_id: "ranked", sector_name: "正式排名", rank: 3, hard_block: false, horizontal_strength: 1 },
+  ];
+  const signals = [
+    { signal_id: "a", sector: { sector_id: "weak" } },
+    { signal_id: "b", sector: { sector_id: "strong" } },
+  ];
+
+  assert.deepEqual(
+    Ui.sortSectorRowsForRadar(sectors, signals).map((row) => row.sector_id),
+    ["ranked", "strong", "weak", "quiet", "blocked"],
+  );
+  assert.match(template, /有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序/);
+  assert.match(template, /人工复核优先级、生命周期、板块结构名次、买卖点类型和代码稳定排序/);
 });
 
 test("sector workspace defaults to top ten while retaining an off-list selection", () => {

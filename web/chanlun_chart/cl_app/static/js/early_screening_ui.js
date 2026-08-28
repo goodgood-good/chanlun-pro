@@ -1560,6 +1560,38 @@
     return Number.isFinite(rank) && rank > 0 ? rank : null;
   }
 
+  function sortSectorRowsForRadar(sectors, signals = []) {
+    const grouped = groupSignalsBySector(signals);
+    const signalCount = (sector) => (
+      grouped[text(sector && sector.sector_id, "unclassified")] || []
+    ).length;
+    const strength = (sector) => {
+      const value = Number(sector && sector.horizontal_strength);
+      return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+    };
+    return (Array.isArray(sectors) ? sectors : []).filter(isRecord).slice().sort((left, right) => {
+      const leftRank = sectorRank(left.rank);
+      const rightRank = sectorRank(right.rank);
+      if ((leftRank === null) !== (rightRank === null)) return leftRank === null ? 1 : -1;
+      if (leftRank !== null && rightRank !== null && leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      const leftBlocked = left.hard_block === true ? 1 : 0;
+      const rightBlocked = right.hard_block === true ? 1 : 0;
+      if (leftBlocked !== rightBlocked) return leftBlocked - rightBlocked;
+      const countDifference = signalCount(right) - signalCount(left);
+      if (countDifference) return countDifference;
+      const strengthDifference = strength(right) - strength(left);
+      if (Number.isFinite(strengthDifference) && strengthDifference) return strengthDifference;
+      const nameDifference = text(left.sector_name, left.sector_id).localeCompare(
+        text(right.sector_name, right.sector_id),
+        "zh-CN",
+      );
+      if (nameDifference) return nameDifference;
+      return text(left.sector_id).localeCompare(text(right.sector_id), "zh-CN");
+    });
+  }
+
   function sectorEvidenceText(sector) {
     const safeSector = isRecord(sector) ? sector : {};
     return ["30m", "5m"].map((frequency) => {
@@ -4387,11 +4419,7 @@
     const documentRef = container.ownerDocument;
     const grouped = groupSignalsBySector(snapshot.signals);
     const shortlistSize = selectedSectorCount(snapshot);
-    const sectorRows = snapshot.sectors.slice().sort((left, right) => {
-      const leftRank = sectorRank(left.rank) ?? Number.MAX_SAFE_INTEGER;
-      const rightRank = sectorRank(right.rank) ?? Number.MAX_SAFE_INTEGER;
-      return leftRank - rightRank || text(left.sector_id).localeCompare(text(right.sector_id), "zh-CN");
-    });
+    const sectorRows = sortSectorRowsForRadar(snapshot.sectors, snapshot.signals);
     const requestedLimit = Number(options.limit);
     const limit = Number.isInteger(requestedLimit) && requestedLimit > 0
       ? requestedLimit
@@ -4972,6 +5000,7 @@
     screeningScopeLabel,
     sectorCoverageText,
     sectorEvidenceText,
+    sortSectorRowsForRadar,
     selectedSectorCount,
     setChartLayout,
     setEvidencePanelOpen,

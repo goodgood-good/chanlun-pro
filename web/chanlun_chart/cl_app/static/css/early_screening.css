@@ -186,6 +186,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .es-summary .is-segment { border-color: rgba(88, 173, 255, 0.28); }
 .es-summary-action { margin-top: 8px; padding: 5px 9px; border: 1px solid rgba(88, 173, 255, 0.32); border-radius: 999px; color: var(--es-blue); background: var(--es-blue-soft); cursor: pointer; font-size: 12px; font-weight: 800; }
 .es-summary-action:hover { border-color: var(--es-blue); }
+.es-summary-action.is-active { border-color: var(--es-blue); color: #fff; background: var(--es-blue); }
+.es-summary-action:disabled { cursor: not-allowed; opacity: 0.56; }
 .es-summary .is-risk { border-color: rgba(255, 140, 128, 0.24); }
 .es-summary-details { margin-top: 5px; color: var(--es-muted); }
 .es-summary-details > summary { width: fit-content; padding: 2px 1px; font-size: 13px; }

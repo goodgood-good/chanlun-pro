@@ -85,7 +85,7 @@ test('中枢用线宽表达权重并用线型和透明度表达完成状态', ()
   assert.equal(completedPreview.linewidth, 1);
   assert.equal(completedPreview.transparency, 96);
   assert.equal(formingPreview.transparency, 100);
-  assert.equal(projection.linestyle, 1);
+  assert.equal(projection.linestyle, 2);
   assert.ok(formal.transparency < completedPreview.transparency, '正式中枢必须比预览更醒目');
 });
 
@@ -164,4 +164,11 @@ test('设置菜单展示实际方向色而非错误的背驰级别色', () => {
   assert.ok(source.includes("_dualSwatch(getSignalColor('buy'), getSignalColor('sell'), '向上背驰 / 向下背驰')"));
   assert.ok(source.includes("_swatch(getSignalColor(item.key.endsWith('buy') ? 'buy' : 'sell'))"));
   assert.ok(source.includes("_dualSwatch(getSignalColor('fractalTop'), getSignalColor('fractalBottom'), '顶分型 / 底分型')"));
+});
+
+test('一键画线默认使用细线并在创建事件中兜底应用', () => {
+  assert.match(source, /const ONE_CLICK_DRAW_LINE_WIDTH = 1;/);
+  assert.match(source, /"linetooltrendline\.linewidth": ONE_CLICK_DRAW_LINE_WIDTH/);
+  assert.match(source, /"linetoolrectangle\.linewidth": ONE_CLICK_DRAW_LINE_WIDTH/);
+  assert.match(source, /ov\.linewidth = ONE_CLICK_DRAW_LINE_WIDTH/);
 });

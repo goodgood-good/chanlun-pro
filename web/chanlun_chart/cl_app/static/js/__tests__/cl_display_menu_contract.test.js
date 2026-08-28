@@ -101,8 +101,6 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
     '笔中枢',
     '中枢总开关',
     '走势类型总开关',
-    '形成中 / 投影（非正式）',
-    '待定尾段（非正式）',
     '买卖点总开关',
     '背驰总开关',
     '盘整背驰',
@@ -122,16 +120,20 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
   }
   assert.equal(source.includes('严格递归中枢总开关'), false);
   assert.ok(source.includes("_cbRow('center_all', '中枢总开关')"));
-  assert.ok(source.includes("_cbRow('center_provisional', '形成中 / 投影（非正式）', false)"));
-  assert.ok(source.includes("_cbRow('pending_movement', '待定尾段（非正式）', false)"));
+  assert.equal(source.includes('形成中 / 投影（非正式）'), false);
+  assert.equal(source.includes('待定尾段（非正式）'), false);
+  assert.equal(source.includes("_cbRow('center_provisional'"), false);
+  assert.equal(source.includes("_cbRow('pending_movement'"), false);
   assert.ok(source.includes('const _pointLevels = _displayLevels.map'));
   assert.ok(source.includes('..._pointLevels.map((item) => item.key)'));
 });
 
-test('菜单不暴露接近触发或中枢投影复选框', () => {
+test('菜单不暴露接近触发、中枢投影或未完成结构复选框', () => {
   assert.equal(source.includes('接近触发（未确认）'), false);
   assert.equal(source.includes("_cbRow('center_projection'"), false);
   assert.equal(source.includes("cbId('center_projection')"), false);
+  assert.equal(source.includes("cbId('center_provisional')"), false);
+  assert.equal(source.includes("cbId('pending_movement')"), false);
 });
 
 test('显示设置浮层保留纵向拖动空间并在内部滚动', () => {
