@@ -9,8 +9,8 @@ param(
     [int]$MaxWaitHours = 36,
     [ValidateRange(15, 300)]
     [int]$PollSeconds = 60,
-    [ValidateRange(1, 6)]
-    [int]$Workers = 2,
+    [ValidateRange(1, 16)]
+    [int]$Workers = 16,
     [ValidateRange(1, 65535)]
     [int]$WebPort = 9900,
     [switch]$RestartWebAfterCompletion

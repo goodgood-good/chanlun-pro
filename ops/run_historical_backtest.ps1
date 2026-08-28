@@ -1,6 +1,6 @@
 param(
-    [ValidateRange(1, 6)]
-    [int]$Workers = 2,
+    [ValidateRange(1, 16)]
+    [int]$Workers = 16,
     [string]$QmtDataDir = "",
     [ValidateRange(1, 5)]
     [int]$ExtractionAttempts = 3,
@@ -236,7 +236,7 @@ try {
         if ($GeneratePIT) {
             $pitArguments = @(
                 "--output", $pitSnapshot,
-                "--workers", "$Workers"
+                "--workers", "$([Math]::Min($Workers, 12))"
             )
             if ($FullMarket) {
                 $pitArguments += @("--full-market", "--confirm-large-scope")
@@ -306,7 +306,10 @@ try {
             Invoke-PythonStage `
                 -Label "prefix causality audit" `
                 -Script "tools\audit_qmt_prefix_invariance.py" `
-                -Arguments @("--input-dir", $inputDirectory, "--workers", "$Workers")
+                -Arguments @(
+                    "--input-dir", $inputDirectory,
+                    "--workers", "$([Math]::Min($Workers, 12))"
+                )
         }
 
         if ($Stage -in @("Finalize", "All")) {
