@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import date, datetime, time
 from decimal import Decimal
 import hashlib
@@ -86,6 +87,9 @@ from tools import qmt_research_contract
 _SECTOR_CACHE_METADATA_SCHEMA = "chanlun-pit-sector-cache-metadata-v1"
 _SECTOR_COMPOSITE_CACHE_METADATA_SCHEMA = (
     "chanlun-pit-sector-composite-cache-metadata-v1"
+)
+_PRODUCTION_SNAPSHOT_PAIR_OVERLAY_SCHEMA = (
+    "chanlun-production-snapshot-pair-consistency-overlay-v1"
 )
 
 
@@ -1192,6 +1196,109 @@ def _production_snapshot_pair_mismatch_is_unsafe(
     return expected_pair_keys != snapshot_pair_keys and snapshot_converged
 
 
+def _apply_production_snapshot_pair_consistency_overlay(
+    symbols: Sequence[SymbolResearchFacts],
+    *,
+    algorithm_revision: str,
+    fact_algorithm_revision: str,
+) -> tuple[tuple[SymbolResearchFacts, ...], dict[str, object]]:
+    """Hard-block execution snapshots that disagree with the causal ledger.
+
+    The production warm-up probe establishes stability between the canonical
+    5m request and its suffix. Certification adds an independent comparison
+    against the append-only full causal ledger. A disagreement must never be
+    repaired by trusting either structure: the in-memory execution copy is
+    conservatively downgraded to non-converged, so any production boundary is
+    rejected by the normal warm-up gate while the immutable fact file remains
+    available for audit.
+    """
+
+    adjusted_symbols: list[SymbolResearchFacts] = []
+    downgrades: list[dict[str, object]] = []
+    snapshot_count = 0
+    for facts in symbols:
+        evaluations_by_time = {
+            evaluation.observed_at: evaluation for evaluation in facts.evaluations
+        }
+        adjusted_warmup = []
+        for snapshot in facts.five_minute_warmup:
+            snapshot_count += 1
+            evaluation = evaluations_by_time.get(snapshot.observed_at)
+            if evaluation is None:
+                raise ValueError("production snapshot lacks its causal evaluation")
+            expected_pairs = _new_exact_buy_nesting_pairs(facts, evaluation)
+            production_pairs = _new_exact_buy_nesting_pairs(
+                facts,
+                evaluation,
+                setup_points=snapshot.production_five_points,
+            )
+            expected_pair_keys = tuple(
+                sorted(
+                    (
+                        structural_point_occurrence_id(setup),
+                        witness.point_id,
+                    )
+                    for setup, witness in expected_pairs
+                )
+            )
+            production_pair_keys = tuple(
+                sorted(
+                    (
+                        structural_point_occurrence_id(setup),
+                        witness.point_id,
+                    )
+                    for setup, witness in production_pairs
+                )
+            )
+            if snapshot.converged and expected_pair_keys != production_pair_keys:
+                adjusted_snapshot = replace(
+                    snapshot,
+                    converged=False,
+                    reason_code="WARMUP_TAIL_DIVERGED",
+                    difference_codes=("WARMUP_OTHER_SEMANTIC_CHANGED",),
+                )
+                downgrades.append(
+                    {
+                        "code": facts.code,
+                        "observed_at": snapshot.observed_at.isoformat(),
+                        "original_reason_code": snapshot.reason_code,
+                        "effective_reason_code": adjusted_snapshot.reason_code,
+                        "expected_pair_keys": [
+                            {
+                                "setup_occurrence_id": setup_id,
+                                "witness_point_id": witness_id,
+                            }
+                            for setup_id, witness_id in expected_pair_keys
+                        ],
+                        "production_pair_keys": [
+                            {
+                                "setup_occurrence_id": setup_id,
+                                "witness_point_id": witness_id,
+                            }
+                            for setup_id, witness_id in production_pair_keys
+                        ],
+                    }
+                )
+                snapshot = adjusted_snapshot
+            adjusted_warmup.append(snapshot)
+        adjusted_symbols.append(
+            replace(facts, five_minute_warmup=tuple(adjusted_warmup))
+        )
+    downgraded_codes = tuple(sorted({str(row["code"]) for row in downgrades}))
+    document: dict[str, object] = {
+        "schema": _PRODUCTION_SNAPSHOT_PAIR_OVERLAY_SCHEMA,
+        "algorithm_revision": algorithm_revision,
+        "fact_algorithm_revision": fact_algorithm_revision,
+        "symbol_count": len(symbols),
+        "production_snapshot_count": snapshot_count,
+        "downgraded_snapshot_count": len(downgrades),
+        "downgraded_symbol_count": len(downgraded_codes),
+        "downgraded_codes": list(downgraded_codes),
+        "downgrades": downgrades,
+    }
+    return tuple(adjusted_symbols), document
+
+
 def _causality_failures(
     *,
     symbols: Sequence[SymbolResearchFacts],
@@ -1602,6 +1709,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         reuse_cache=args.reuse_sector_cache,
         workers=args.sector_workers,
     )
+    symbols, production_snapshot_overlay = (
+        _apply_production_snapshot_pair_consistency_overlay(
+            symbols,
+            algorithm_revision=algorithm_revision,
+            fact_algorithm_revision=fact_algorithm_revision,
+        )
+    )
+    production_snapshot_overlay_path = (
+        directory / "production_snapshot_pair_consistency_overlay.json"
+    )
+    _atomic_json(production_snapshot_overlay_path, production_snapshot_overlay)
+    print(
+        json.dumps(
+            {
+                "stage": "production_snapshot_pair_consistency",
+                "snapshots": production_snapshot_overlay[
+                    "production_snapshot_count"
+                ],
+                "downgraded": production_snapshot_overlay[
+                    "downgraded_snapshot_count"
+                ],
+                "symbols": production_snapshot_overlay["downgraded_symbol_count"],
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     failures = _causality_failures(
         symbols=symbols,
         sectors=sectors,
@@ -1696,6 +1830,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if complete_sector_events < len(sector_assessments)
                 else ()
             ),
+            *(
+                ("production_snapshot_pair_disagreements_hard_blocked",)
+                if production_snapshot_overlay["downgraded_snapshot_count"]
+                else ()
+            ),
         ),
         coverage=(
             ("symbol_extraction", Decimal("1")),
@@ -1708,6 +1847,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("causal_current_structure_ledgers", Decimal("1")),
             ("exact_one_minute_nesting_pair_scheduling", Decimal("1")),
             ("entry_higher_timeframe_integrity_evidence", Decimal("1")),
+            ("production_snapshot_pair_consistency_gate", Decimal("1")),
         ),
     )
     result = BacktestEvaluationResult(
@@ -1754,11 +1894,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             "causal_evaluation_count": evaluations,
             "formal_selection_required": False,
             "decision_funnel": decision_funnel,
+            "production_snapshot_pair_consistency": {
+                "snapshot_count": production_snapshot_overlay[
+                    "production_snapshot_count"
+                ],
+                "downgraded_snapshot_count": production_snapshot_overlay[
+                    "downgraded_snapshot_count"
+                ],
+                "downgraded_symbol_count": production_snapshot_overlay[
+                    "downgraded_symbol_count"
+                ],
+                "downgraded_codes": production_snapshot_overlay[
+                    "downgraded_codes"
+                ],
+            },
         },
         data_source_hashes=(
             ("pit_metadata_snapshot", snapshot_hash),
             ("qmt_extract_manifest", _sha256(manifest_path)),
             ("prefix_invariance_audit", _sha256(prefix_path)),
+            (
+                "production_snapshot_pair_consistency_overlay",
+                _sha256(production_snapshot_overlay_path),
+            ),
             (
                 "symbol_fact_checkpoint_tree",
                 _checkpoint_tree(symbol_paths, root=directory),

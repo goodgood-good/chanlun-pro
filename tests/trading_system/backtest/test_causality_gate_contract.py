@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,9 @@ from chanlun.decision_support.trading_system.backtest.causality_gate_contract im
     CAUSALITY_GATE_PROVEN_CONTROLS,
     CAUSALITY_GATE_SCHEMA,
     causality_gate_state_is_consistent,
+)
+from chanlun.decision_support.trading_system.backtest.fixed_year import (
+    FiveMinuteWarmupFact,
 )
 from tools import finalize_qmt_pit_fixed_year as pit_finalizer
 from tests.trading_system.helpers import confirmed_point, eligible_sector
@@ -124,6 +128,87 @@ def test_production_snapshot_pair_mismatch_only_blocks_certification_when_unsafe
         )
         is expected
     )
+
+
+def test_pair_consistency_overlay_downgrades_mismatched_converged_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_setup = confirmed_point("3buy", center_id="expected-center")
+    production_setup = confirmed_point(
+        "3buy",
+        anchor=10.1,
+        center_id="production-center",
+    )
+    witness = confirmed_point("1buy", frequency="1m", center_id="witness-center")
+    observed_at = expected_setup.available_at
+    snapshot = FiveMinuteWarmupFact(
+        observed_at=observed_at,
+        source_closed_at=observed_at,
+        converged=True,
+        full_bar_count=12000,
+        suffix_bar_count=8000,
+        reason_code="WARMUP_TAIL_STABLE",
+        production_five_points=(production_setup,),
+        one_minute_bar_count=12000,
+    )
+
+    @dataclass(frozen=True)
+    class FakeFacts:
+        code: str
+        evaluations: tuple[SimpleNamespace, ...]
+        five_minute_warmup: tuple[FiveMinuteWarmupFact, ...]
+
+    facts = FakeFacts(
+        code=expected_setup.code,
+        evaluations=(SimpleNamespace(observed_at=observed_at),),
+        five_minute_warmup=(snapshot,),
+    )
+
+    def exact_pairs(
+        _facts: object,
+        _evaluation: object,
+        *,
+        setup_points: object | None = None,
+    ) -> tuple[tuple[object, object], ...]:
+        setup = expected_setup if setup_points is None else production_setup
+        return ((setup, witness),)
+
+    monkeypatch.setattr(pit_finalizer, "_new_exact_buy_nesting_pairs", exact_pairs)
+
+    adjusted, document = (
+        pit_finalizer._apply_production_snapshot_pair_consistency_overlay(
+            (facts,),
+            algorithm_revision="sha256:" + "1" * 64,
+            fact_algorithm_revision="sha256:" + "2" * 64,
+        )
+    )
+
+    [adjusted_facts] = adjusted
+    [adjusted_snapshot] = adjusted_facts.five_minute_warmup
+    assert snapshot.converged is True
+    assert adjusted_snapshot.converged is False
+    assert adjusted_snapshot.reason_code == "WARMUP_TAIL_DIVERGED"
+    assert adjusted_snapshot.difference_codes == (
+        "WARMUP_OTHER_SEMANTIC_CHANGED",
+    )
+    assert document["production_snapshot_count"] == 1
+    assert document["downgraded_snapshot_count"] == 1
+    assert document["downgraded_codes"] == [expected_setup.code]
+    assert pit_finalizer._production_snapshot_pair_mismatch_is_unsafe(
+        expected_pair_keys={
+            (
+                pit_finalizer.structural_point_occurrence_id(expected_setup),
+                witness.point_id,
+            )
+        },
+        snapshot_pair_keys={
+            (
+                pit_finalizer.structural_point_occurrence_id(production_setup),
+                witness.point_id,
+            )
+        },
+        snapshot_converged=adjusted_snapshot.converged,
+    ) is False
 
 
 def test_decision_funnel_discloses_point_types_and_exact_one_minute_boundary(
