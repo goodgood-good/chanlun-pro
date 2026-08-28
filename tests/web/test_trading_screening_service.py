@@ -2565,7 +2565,7 @@ def _previous_incomplete_retry_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe"
+        "sha256:f314a453febeb7c5eaa63f73e74384d3c3f394cb267853098ac2ed0a278f84a5"
     )
     rows[
         "src/chanlun/decision_support/trading_system/live_human_review.py"
@@ -2591,7 +2591,7 @@ def _previous_completed_retry_residue_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe"
+        "sha256:f314a453febeb7c5eaa63f73e74384d3c3f394cb267853098ac2ed0a278f84a5"
     )
     rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
         "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"
@@ -10950,6 +10950,76 @@ def test_large_scope_priority_wave_covers_48_current_locators(
     assert health["priority_monitor_ready"] is True
 
 
+def test_large_scope_admits_pending_locators_before_enriched_setups(
+    tmp_path: Path,
+) -> None:
+    mandatory_codes = ("SH.600001", "SH.600002")
+    # Enriched codes sort before locator codes, reproducing the production
+    # overflow in which a generic pinned rotation spent three execution slots
+    # before setups still awaiting their first immutable 1m witness.
+    enriched_codes = tuple(f"SZ.{index:06d}" for index in range(1, 14))
+    locator_codes = tuple(f"SZ.{100000 + index:06d}" for index in range(1, 49))
+    all_codes = mandatory_codes + enriched_codes + locator_codes
+
+    class MandatoryMarket(RecordingMarketData):
+        def active_watchlist(self) -> tuple[str, ...]:
+            return mandatory_codes
+
+    market = MandatoryMarket()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(all_codes),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            large_scope_authorized=True,
+            max_monitor_symbols_per_refresh=50,
+            max_admitted_universe_symbols=60,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": f"triggered-{code}",
+                "code": code,
+                "side": "buy",
+                "point_type": "1buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "anchor_at": AS_OF.isoformat(),
+                    "available_at": AS_OF.isoformat(),
+                    "confirmed_at": AS_OF.isoformat(),
+                },
+                "segment_difference_1m": (
+                    {"status": "confirmed"} if code in enriched_codes else None
+                ),
+            }
+            for code in (*enriched_codes, *locator_codes)
+        ]
+    }
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    health = service.health_snapshot()
+    assert health["candidate_monitor_signal_pool_count"] == 61
+    assert health["candidate_monitor_signal_admitted_count"] == 58
+    assert health["candidate_monitor_signal_deferred_count"] == 3
+    assert health["priority_monitor_locator_pool_count"] == 48
+    assert health["priority_monitor_locator_admission_deferred_count"] == 0
+    assert health["priority_monitor_immediate_universe_count"] == 48
+    assert health["priority_monitor_scheduled_count"] == 50
+    assert health["priority_monitor_locator_deferred_count"] == 0
+    assert health["priority_monitor_locator_capacity_sufficient"] is True
+    assert health["priority_monitor_locator_runtime_verified"] is True
+    assert health["priority_monitor_last_failure_reason_counts"] == {}
+    assert health["priority_monitor_ready"] is True
+
+
 def test_priority_locator_wave_uses_all_configured_workers(
     tmp_path: Path,
 ) -> None:
@@ -11429,6 +11499,24 @@ def test_signal_candidate_admission_rotates_completed_pinned_overflow() -> None:
 
     assert incomplete == ("PIN_A", "PIN_B", "PIN_C", "PIN_D", "DISCOVERY")
     assert completed == ("PIN_C", "PIN_D", "PIN_A", "PIN_B", "DISCOVERY")
+
+
+def test_signal_candidate_admission_keeps_required_locators_ahead_of_rotation() -> (
+    None
+):
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    universe = ("ENRICHED_A", "ENRICHED_B", "LOCATOR_A", "LOCATOR_B")
+
+    ordered = _rotating_signal_candidate_admission_order(
+        universe,
+        pinned_codes=universe,
+        critical_pinned_codes=("LOCATOR_A", "LOCATOR_B"),
+        previous_universe=universe,
+        last_success_at={code: observed_at for code in universe},
+    )
+
+    assert ordered[:2] == ("LOCATOR_A", "LOCATOR_B")
+    assert set(ordered) == set(universe)
 
 
 def test_segment_monitor_keeps_current_five_minute_setups_in_locator_rotation(

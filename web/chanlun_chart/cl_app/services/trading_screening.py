@@ -1731,6 +1731,7 @@ def _rotating_signal_candidate_admission_order(
     universe: tuple[str, ...],
     *,
     pinned_codes: tuple[str, ...],
+    critical_pinned_codes: tuple[str, ...] = (),
     previous_universe: tuple[str, ...],
     last_success_at: Mapping[str, datetime],
 ) -> tuple[str, ...]:
@@ -1741,16 +1742,25 @@ def _rotating_signal_candidate_admission_order(
     rows, so an overflow tail could never be observed.  Keep an incomplete prior
     window until every retained row has one successful observation; after that,
     advance from its tail.  Confirmed/current setups remain ahead of this
-    discovery rotation on every pass.
+    discovery rotation on every pass.  The critical subset still awaiting its
+    first 1m witness remains ahead of already-enriched pinned setups.
     """
 
     candidates = tuple(dict.fromkeys(universe))
     if not candidates:
         return ()
     candidate_set = set(candidates)
-    pinned_set = set(pinned_codes).intersection(candidate_set)
+    critical_set = set(critical_pinned_codes).intersection(candidate_set)
+    pinned_set = set(pinned_codes).intersection(candidate_set).difference(
+        critical_set
+    )
+    critical = tuple(code for code in candidates if code in critical_set)
     pinned = tuple(code for code in candidates if code in pinned_set)
-    optional = tuple(code for code in candidates if code not in pinned_set)
+    optional = tuple(
+        code
+        for code in candidates
+        if code not in critical_set and code not in pinned_set
+    )
 
     def rotate_completed_window(values: tuple[str, ...]) -> tuple[str, ...]:
         value_set = set(values)
@@ -1775,7 +1785,11 @@ def _rotating_signal_candidate_admission_order(
     # admission ceiling can still be smaller than the pinned set.  Rotate a
     # fully observed pinned wave as well, otherwise its lexicographic tail is
     # permanently starved exactly when locator capacity is already degraded.
-    return rotate_completed_window(pinned) + rotate_completed_window(optional)
+    return (
+        rotate_completed_window(critical)
+        + rotate_completed_window(pinned)
+        + rotate_completed_window(optional)
+    )
 
 
 def _take_rule_recheck_batch(
@@ -7099,6 +7113,30 @@ class TradingScreeningService:
                 observed_at,
             )
         )
+        # Compute the exact 1m execution lane before the broader 5m admission.
+        # A bounded candidate window may rotate already-enriched setups, but it
+        # must never spend those slots ahead of a setup still awaiting its first
+        # immutable 1m segment-difference witness.
+        pending_segment_documents = tuple(
+            row
+            for row in current_signal_documents
+            if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
+            and _one_minute_segment_requires_monitor(row, observed_at)
+        )
+        locator_signal_pool = _priority_signal_candidate_codes(
+            pending_segment_documents,
+            excluded_codes=frozenset(
+                (
+                    *excluded_codes,
+                    *mandatory_scope,
+                    *nonmonitorable_mandatory_codes,
+                    *candidate_suspended_codes,
+                    *candidate_cadence_epoch_excluded_codes,
+                    *candidate_locator_epoch_excluded_codes,
+                )
+            ),
+            allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
+        )
         signal_candidate_codes = _priority_signal_candidate_codes(
             recurring_signal_documents,
             excluded_codes=excluded_codes,
@@ -7129,6 +7167,7 @@ class TradingScreeningService:
         signal_candidate_codes = _rotating_signal_candidate_admission_order(
             signal_candidate_codes,
             pinned_codes=pinned_signal_candidate_codes,
+            critical_pinned_codes=locator_signal_pool,
             previous_universe=previous_candidate_five_universe,
             last_success_at=candidate_five_last_success_at,
         )
@@ -7246,26 +7285,6 @@ class TradingScreeningService:
         # immutable; an expired execution boundary must not silently replace it
         # with a later occurrence.  Holdings and explicit watchlist symbols keep
         # their independent mandatory 1m observation lane.
-        pending_segment_documents = tuple(
-            row
-            for row in current_signal_documents
-            if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
-            and _one_minute_segment_requires_monitor(row, observed_at)
-        )
-        locator_signal_pool = _priority_signal_candidate_codes(
-            pending_segment_documents,
-            excluded_codes=frozenset(
-                (
-                    *excluded_codes,
-                    *mandatory_scope,
-                    *nonmonitorable_mandatory_codes,
-                    *candidate_suspended_codes,
-                    *candidate_cadence_epoch_excluded_codes,
-                    *candidate_locator_epoch_excluded_codes,
-                )
-            ),
-            allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
-        )
         immediate_signal_universe = tuple(
             code for code in locator_signal_pool if code in admitted_signal_code_set
         )

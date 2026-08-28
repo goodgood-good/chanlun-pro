@@ -338,6 +338,43 @@ def test_manifest_migration_allows_exact_completed_retry_residue_cleanup() -> No
     )
 
 
+def test_manifest_migration_allows_exact_locator_admission_transition() -> None:
+    current = current_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    current_row = next(
+        row
+        for row in current["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    cached_row = next(
+        row
+        for row in cached["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    assert current_row["sha256"] == (
+        "sha256:f314a453febeb7c5eaa63f73e74384d3c3f394cb267853098ac2ed0a278f84a5"
+    )
+    cached_row["sha256"] = (
+        "sha256:e6846a56cd2770b68af525a9b94f2dfd0bc156c0eb1340de9a849f3266a8d1fe"
+    )
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+    assert not completed_retry_residue_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
+    )
+
+
 def test_sector_snapshot_migration_allows_only_exact_reviewed_revision_pair() -> None:
     cached = (
         "sha256:544bc1e62b74d754771c8764114d8c754f5fd4c91b9dededaa83e036538c1ac8"
