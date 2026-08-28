@@ -2478,6 +2478,27 @@ def _previous_runtime_policy_source_snapshot(
     return previous
 
 
+def _previous_superseded_bundle_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    previous = copy.deepcopy(current)
+    screening_row = next(
+        row
+        for row in previous["files"]
+        if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    assert screening_row["sha256"] == (
+        "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d"
+    )
+    screening_row["sha256"] = (
+        "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    return previous
+
+
 def _previous_suspension_evidence_source_snapshot(
     current: dict[str, object],
 ) -> dict[str, object]:
@@ -2565,7 +2586,7 @@ def _previous_incomplete_retry_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e"
+        "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d"
     )
     rows[
         "src/chanlun/decision_support/trading_system/live_human_review.py"
@@ -2591,7 +2612,7 @@ def _previous_completed_retry_residue_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e"
+        "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d"
     )
     rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
         "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"
@@ -2631,6 +2652,42 @@ def test_review_availability_source_migration_reuses_decision_snapshot(
         current_decision_source_snapshot_id=current_id,
         cached_decision_source_snapshot=previous,
         current_decision_source_snapshot=reviewed_current,
+    )
+
+
+def test_superseded_bundle_source_migration_is_orchestration_only(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    current = service._decision_source_snapshot
+    assert isinstance(current, dict)
+    previous = _previous_superseded_bundle_source_snapshot(current)
+
+    assert orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
+    )
+    assert not incomplete_retry_reconciliation_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
+    )
+    assert not completed_retry_residue_source_migration_allowed(
+        cached_decision_source_snapshot_id=previous["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=previous,
+        current_decision_source_snapshot=current,
     )
 
 
@@ -11929,6 +11986,98 @@ def test_priority_monitor_tombstone_persists_until_newer_full_snapshot() -> None
     assert overlay == ()
     assert authoritative == frozenset()
     assert superseded == frozenset({"SH.600001"})
+
+
+def test_newer_persisted_lifecycle_supersedes_an_older_lane_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = {
+        "signal_id": "newer-signal",
+        "code": "SH.600001",
+        "decision_core_id": "decision-core:test",
+    }
+    lifecycle = type(
+        "Lifecycle",
+        (),
+        {"observed_at": AS_OF + timedelta(minutes=1)},
+    )()
+    monkeypatch.setattr(
+        trading_screening_subject,
+        "lifecycle_state_from_signal_document",
+        lambda _row: (lifecycle, None),
+    )
+
+    with pytest.raises(
+        trading_screening_subject._PersistedLifecycleSupersedesStructureBundle
+    ):
+        trading_screening_subject._previous_lifecycle_bundle_state(
+            (row,),
+            code="SH.600001",
+            as_of=AS_OF,
+            decision_core_id="decision-core:test",
+        )
+
+    preserved = (
+        trading_screening_subject._preserved_signal_documents_for_superseded_bundle(
+            (row, {**row, "code": "SH.600002"}),
+            code="SH.600001",
+            decision_core_id="decision-core:test",
+        )
+    )
+    assert preserved == (row,)
+    assert preserved[0] is not row
+
+
+def test_priority_monitor_treats_a_superseded_bundle_as_an_idempotent_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = [AS_OF.replace(hour=14, minute=58)]
+
+    class WatchlistMarket(RecordingMarketData):
+        def active_watchlist(self) -> tuple[str, ...]:
+            return ("SZ.000001",)
+
+    service = TradingScreeningService(
+        market_data=WatchlistMarket(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at[0],
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            priority_monitor_interval_seconds=60,
+        ),
+    )
+    first = service.refresh_now()
+    assert first["coverage_manifest"]["complete"] is True
+
+    calls = 0
+
+    def superseded(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise trading_screening_subject._PersistedLifecycleSupersedesStructureBundle(
+            "newer live evidence"
+        )
+
+    monkeypatch.setattr(
+        trading_screening_subject,
+        "_previous_lifecycle_bundle_state",
+        superseded,
+    )
+    observed_at[0] += timedelta(minutes=1)
+
+    second = service.refresh_now()
+    health = service.health_snapshot()
+
+    assert calls >= 1
+    assert second["coverage_manifest"] == first["coverage_manifest"]
+    assert health["priority_monitor_ready"] is True
+    assert health["priority_monitor_last_error_count"] == 0
+    assert health["candidate_monitor_last_error_count"] == 0
 
 
 def test_priority_batch_rotates_after_a_partial_deadline_round() -> None:

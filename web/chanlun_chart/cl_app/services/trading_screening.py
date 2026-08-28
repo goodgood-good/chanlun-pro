@@ -3906,6 +3906,10 @@ def _signal_document(
     return document
 
 
+class _PersistedLifecycleSupersedesStructureBundle(ValueError):
+    """A monotonic live observation already covers an older structure bundle."""
+
+
 def _previous_lifecycle_bundle_state(
     rows: object,
     *,
@@ -3933,11 +3937,37 @@ def _previous_lifecycle_bundle_state(
             continue
         lifecycle, trigger = lifecycle_state_from_signal_document(row)
         if lifecycle.observed_at > as_of:
-            raise ValueError("persisted lifecycle is newer than structure bundle")
+            raise _PersistedLifecycleSupersedesStructureBundle(
+                "persisted lifecycle is newer than structure bundle"
+            )
         lifecycles.append(lifecycle)
         if trigger is not None:
             triggers[trigger.point_id] = trigger
     return tuple(lifecycles), tuple(triggers.values())
+
+
+def _preserved_signal_documents_for_superseded_bundle(
+    rows: object,
+    *,
+    code: str,
+    decision_core_id: str,
+) -> tuple[dict[str, object], ...]:
+    """Retain newer code-level evidence when a slower lane observes older bars."""
+
+    if isinstance(rows, Mapping):
+        rows = tuple(rows.values())
+    elif not isinstance(rows, (list, tuple)):
+        try:
+            rows = tuple(rows)  # type: ignore[arg-type]
+        except TypeError:
+            rows = ()
+    return tuple(
+        copy.deepcopy(dict(row))
+        for row in rows
+        if isinstance(row, Mapping)
+        and row.get("code") == code
+        and row.get("decision_core_id") == decision_core_id
+    )
 
 
 def _stock_analysis_error_document(
@@ -7637,6 +7667,21 @@ class TradingScreeningService:
                         higher_timeframe_gates=bundle.higher_timeframe_gates,
                     )
                     for item in evaluated
+                )
+                return code, documents, None
+            except _PersistedLifecycleSupersedesStructureBundle:
+                # The 1m locator can publish after the last completed 5m bar
+                # while the rotating 5m/30m lane is still reading that older
+                # bar.  Re-evaluating it would move the lifecycle backwards;
+                # reporting a stock failure would also be false because the
+                # already-persisted document is the newer, authoritative fact.
+                # Treat this lane hand-off as an idempotent success and publish
+                # the same documents, so notification identity and tombstones
+                # remain unchanged until a genuinely newer bundle arrives.
+                documents = _preserved_signal_documents_for_superseded_bundle(
+                    previous_documents_by_id.values(),
+                    code=code,
+                    decision_core_id=self._decision_core_id,
                 )
                 return code, documents, None
             except Exception as exc:

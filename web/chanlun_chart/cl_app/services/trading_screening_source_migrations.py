@@ -20,6 +20,13 @@ _REVIEWED_ORCHESTRATION_SOURCE_TRANSITIONS = frozenset(
         (
             (
                 "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e",
+                "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d",
+            ),
+        ),
+        (
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
                 "sha256:f314a453febeb7c5eaa63f73e74384d3c3f394cb267853098ac2ed0a278f84a5",
                 "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e",
             ),
@@ -156,6 +163,18 @@ _REVIEWED_INCOMPLETE_RETRY_RECONCILIATION_SOURCE_TRANSITIONS = frozenset(
             (
                 "web/chanlun_chart/cl_app/services/trading_screening.py",
                 "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0",
+                "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d",
+            ),
+        ),
+        (
+            (
+                "src/chanlun/decision_support/trading_system/live_human_review.py",
+                "sha256:0ac28b9de593731560b31adc01c85c54ff36d77e7f74b80725b62992fc62d59f",
+                "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26",
+            ),
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:9468b01376dc29927f52c0289355c387167a3c45a1a1b9779d8f67ef3341b6b0",
                 "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e",
             ),
         ),
@@ -199,6 +218,13 @@ _REVIEWED_INCOMPLETE_RETRY_RECONCILIATION_SOURCE_TRANSITIONS = frozenset(
 )
 _REVIEWED_COMPLETED_RETRY_RESIDUE_SOURCE_TRANSITIONS = frozenset(
     {
+        (
+            (
+                "web/chanlun_chart/cl_app/services/trading_screening.py",
+                "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c",
+                "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d",
+            ),
+        ),
         (
             (
                 "web/chanlun_chart/cl_app/services/trading_screening.py",
