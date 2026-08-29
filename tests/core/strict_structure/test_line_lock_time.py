@@ -111,6 +111,12 @@ def test_done_and_locked_at_are_bijective(sample_frame):
             assert line.locked_at >= line.end.k.date
             assert line.locked_at <= sample_frame.iloc[-1]["date"]
 
+    bis = cd.get_bis()
+    assert bis
+    assert all(not bi.forming for bi in bis[:-1])
+    assert bis[-1].forming is True
+    assert bis[-1].is_done() is False
+
 
 def test_bi_lock_time_is_first_sufficient_following_endpoint_witness(sample_frame):
     cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")

@@ -61,6 +61,7 @@ def _line_signature(lines) -> tuple[tuple[object, ...], ...]:
             line.end.k.k_index,
             line.type,
             bool(line.is_done()),
+            bool(getattr(line, "forming", False)),
             line.locked_at,
         )
         for line in lines
@@ -108,6 +109,42 @@ def test_deepcopied_strict_state_remains_incrementally_equivalent() -> None:
         batch = CL("TST", FREQUENCY, _config(), market="a")
         batch.process_klines(prefix)
         assert _strict_signature(incremental) == _strict_signature(batch)
+
+
+def test_production_incremental_path_does_not_repeat_full_fractal_scans() -> None:
+    """连续追加普通 K 线时，完整分型扫描只允许发生在首次冷启动。"""
+
+    count = 120
+    index = np.arange(count, dtype=float)
+    center = 100.0 + np.sin(index / 3.0) * 4.0 + index * 0.01
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-05 09:30:00", periods=count, freq="min"),
+            "open": center,
+            "high": center + 0.25,
+            "low": center - 0.25,
+            "close": center,
+            "volume": np.full(count, 1000.0),
+        }
+    )
+    incremental = CL("TST", FREQUENCY, _config(), market="a")
+    original_collect = incremental.bi_calculator._collect_fxs
+    full_scan_lengths: list[int] = []
+
+    def counted_collect(values):
+        full_scan_lengths.append(len(values))
+        return original_collect(values)
+
+    incremental.bi_calculator._collect_fxs = counted_collect
+    incremental.process_klines(frame.iloc[:40].reset_index(drop=True))
+    for length in range(41, count + 1):
+        incremental.process_klines(frame.iloc[:length].reset_index(drop=True))
+
+    batch = CL("TST", FREQUENCY, _config(), market="a")
+    batch.process_klines(frame)
+
+    assert full_scan_lengths == [40]
+    assert _strict_signature(incremental) == _strict_signature(batch)
 
 
 def test_validated_incremental_htf_fast_path_equals_normal_and_cold_batch() -> None:

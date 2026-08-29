@@ -218,7 +218,11 @@ class CL(ICL):
             validated_incremental_prefix=validated_incremental_prefix,
         )
         self.cl_kline_processor.process_cl_klines(self.kline_processor.klines)
-        self.bi_calculator.calculate(self.cl_kline_processor.cl_klines)
+        self.bi_calculator.calculate(
+            self.cl_kline_processor.cl_klines,
+            source_revision=self.cl_kline_processor.structure_revision,
+            validated_incremental_prefix=True,
+        )
         self.xd_calculator.calculate(self.bi_calculator.bis)
         self._strict_structure_memo.clear()
         return self

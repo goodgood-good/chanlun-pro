@@ -155,12 +155,17 @@ class BI(LINE):
 
         # 记录是否是拆分笔
         self.is_split = ""
+        # 笔只有“已锁定前缀 + 唯一正在形成的尾笔”两种状态。尾笔已有候选
+        # 分型端点但仍可被后续同类更极端分型延伸，因此在下一有效端点出现前
+        # 保持 forming=True，并由 BiCalculator 在锁定时原子切换为 False。
+        self.forming: bool = True
 
     def to_dict(self):
         """将BI对象转换为字典"""
         data = super().to_dict()
         data.update({
             'is_split': self.is_split,
+            'forming': self.forming,
         })
         return data
     def is_done(self) -> bool:

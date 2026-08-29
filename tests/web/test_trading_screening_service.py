@@ -2631,7 +2631,7 @@ def _previous_superseded_bundle_source_snapshot(
         if row["path"] == "web/chanlun_chart/cl_app/services/trading_screening.py"
     )
     assert screening_row["sha256"] == (
-        "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d"
+        "sha256:ba7d42d155bd5a45936f8bee9f6224ca9278bde0e684ac52130a075de564989e"
     )
     screening_row["sha256"] = (
         "sha256:32cb16b0d5cc0201617b9ca39b7a1d1245008a697f9ad0ae4509bc21f8049a8e"
@@ -2729,7 +2729,7 @@ def _previous_incomplete_retry_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d"
+        "sha256:ba7d42d155bd5a45936f8bee9f6224ca9278bde0e684ac52130a075de564989e"
     )
     rows[
         "src/chanlun/decision_support/trading_system/live_human_review.py"
@@ -2755,7 +2755,7 @@ def _previous_completed_retry_residue_source_snapshot(
     assert rows[
         "web/chanlun_chart/cl_app/services/trading_screening.py"
     ]["sha256"] == (
-        "sha256:bf56c653c086fc37e495d1824e960959fe48736ad346ee8a5e4b3d8c8d384e1d"
+        "sha256:ba7d42d155bd5a45936f8bee9f6224ca9278bde0e684ac52130a075de564989e"
     )
     rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
         "sha256:709c35a877c5ced067661e55bf16ae30d4d0a542803e9a4606e7a2c57dadf53c"

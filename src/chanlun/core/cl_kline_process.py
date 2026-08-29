@@ -20,6 +20,15 @@ class CL_Kline_Process:
         self.cl_klines: List[CLKline] = []
         # 跟踪最后一个已处理的 *原始* K线索引
         self._last_src_kline_index: int = -1
+        # 供下游增量计算使用的进程内数据代次。每次实际处理新增/更新原始 K 后
+        # 单调递增；旧 pickle 没有该字段时由 property 安全回退到 0。
+        self._structure_revision: int = 0
+
+    @property
+    def structure_revision(self) -> int:
+        """返回当前包含处理结果的数据代次。"""
+
+        return int(getattr(self, "_structure_revision", 0))
 
     def _need_merge(self, k1: CLKline, k2: CLKline) -> bool:
         """判断两根缠论K线是否存在包含关系"""
@@ -152,6 +161,8 @@ class CL_Kline_Process:
         if not src_klines:
             return
 
+        processed_change = False
+
         # 调用方每根新 bar 都传入全量 src_klines(= KlineDataProcessor.klines)，前缀里
         # index < _last_src_kline_index 的旧数据必然全部命中下方「情况1」被跳过。
         # KlineDataProcessor 保证 klines[i].index == i（连续 0-based），故可 O(1) 直接切到
@@ -175,6 +186,7 @@ class CL_Kline_Process:
                 #   - slow path: dirty_cl_k 由多根原始 K 合并而来 → 走 pop + 重放逻辑
                 if not self.cl_klines:
                     self._process_one_kline(current_k)
+                    processed_change = True
                     continue
 
                 dirty_cl_k = self.cl_klines[-1]
@@ -194,6 +206,7 @@ class CL_Kline_Process:
                     else:
                         self._last_src_kline_index = -1
                     self._process_one_kline(current_k)
+                    processed_change = True
                     continue
 
                 # slow path：原通用逻辑，处理「dirty_cl_k 由多根原始 K 合并而来」
@@ -214,7 +227,12 @@ class CL_Kline_Process:
 
                 # 处理当前这根更新后的 K 线
                 self._process_one_kline(current_k)
+                processed_change = True
 
             # --- 情况3: 这是一个新数据 (Index 更大) ---
             else:
                 self._process_one_kline(current_k)
+                processed_change = True
+
+        if processed_change:
+            self._structure_revision = self.structure_revision + 1

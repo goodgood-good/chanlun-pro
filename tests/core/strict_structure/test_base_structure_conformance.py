@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -101,7 +102,7 @@ def test_l062_fractal_requires_both_high_and_low_relationships():
     assert high_only is None
 
 
-def test_l065_strict_stroke_uses_merged_k_distance_and_extreme_endpoint():
+def test_l065_strict_stroke_uses_merged_k_distance_and_directional_endpoint():
     calc = BiCalculator()
     bottom = _fx("di", cl_index=10, source_index=10, value=90)
     too_near_top = _fx("ding", cl_index=13, source_index=13, value=110)
@@ -114,6 +115,119 @@ def test_l065_strict_stroke_uses_merged_k_distance_and_extreme_endpoint():
         [bottom, too_near_top, valid_top], incremental=False
     )
     assert endpoints == [bottom, valid_top]
+
+
+@pytest.mark.parametrize(
+    (
+        "start_kind",
+        "near_kind",
+        "start_value",
+        "near_value",
+        "middle_value",
+        "later_value",
+    ),
+    (
+        ("ding", "di", 609.127, 591.101, 600.114, 597.153),
+        ("di", "ding", 90.0, 110.0, 95.0, 105.0),
+    ),
+)
+def test_l065_secondary_fractal_may_form_after_more_extreme_near_fractal(
+    start_kind,
+    near_kind,
+    start_value,
+    near_value,
+    middle_value,
+    later_value,
+):
+    """距离不足的反向分型不成笔，也不约束后续次高/次低端点。"""
+
+    calc = BiCalculator()
+    start = _fx(start_kind, cl_index=8, source_index=8, value=start_value)
+    too_near = _fx(near_kind, cl_index=11, source_index=11, value=near_value)
+    weaker_same_as_start = _fx(
+        start_kind,
+        cl_index=13,
+        source_index=13,
+        value=middle_value,
+    )
+    later_secondary = _fx(
+        near_kind,
+        cl_index=14,
+        source_index=14,
+        value=later_value,
+    )
+    all_fxs = [start, too_near, weaker_same_as_start, later_secondary]
+
+    endpoints = calc._build_endpoint_stack(all_fxs, incremental=False)
+
+    assert endpoints == [start, later_secondary]
+    assert too_near in all_fxs
+
+
+def test_l065_equal_same_type_fractal_keeps_earlier_endpoint():
+    calc = BiCalculator()
+    earlier = _fx("ding", cl_index=8, source_index=8, value=100)
+    equal_later = _fx("ding", cl_index=12, source_index=12, value=100)
+    bottom = _fx("di", cl_index=16, source_index=16, value=90)
+
+    endpoints = calc._build_endpoint_stack(
+        [earlier, equal_later, bottom], incremental=False
+    )
+
+    assert endpoints == [earlier, bottom]
+
+
+def test_direct_bi_replay_detects_historical_change_when_last_k_is_unchanged():
+    values = (
+        (10, 8),
+        (12, 10),
+        (11, 9),
+        (10, 8),
+        (9, 7),
+        (8, 6),
+        (9, 7),
+        (10, 8),
+        (11, 9),
+        (13, 11),
+        (12, 10),
+    )
+    original = [_cl(index, high, low) for index, (high, low) in enumerate(values)]
+    changed = copy.deepcopy(original)
+    changed[5].h = 10.5
+    changed[5].l = 8.5
+
+    reused = BiCalculator()
+    reused.calculate(copy.deepcopy(original))
+    original_signature = [
+        (bi.start.k.index, bi.end.k.index, bi.type) for bi in reused.bis
+    ]
+    reused.calculate(changed)
+
+    fresh = BiCalculator()
+    fresh.calculate(copy.deepcopy(changed))
+    changed_signature = [
+        (bi.start.k.index, bi.end.k.index, bi.type) for bi in reused.bis
+    ]
+
+    assert changed_signature != original_signature
+    assert changed_signature == [
+        (bi.start.k.index, bi.end.k.index, bi.type) for bi in fresh.bis
+    ]
+
+
+def test_cl_kline_structure_revision_is_monotonic_and_old_state_safe():
+    processor = CL_Kline_Process()
+
+    assert processor.structure_revision == 0
+    processor.process_cl_klines([_raw(0, 10, 8)])
+    assert processor.structure_revision == 1
+    processor.process_cl_klines([_raw(0, 11, 9), _raw(1, 12, 10)])
+    assert processor.structure_revision == 2
+
+    del processor._structure_revision
+    assert processor.structure_revision == 0
+    processor.process_cl_klines([_raw(0, 11, 9), _raw(1, 13, 11)])
+    assert processor.structure_revision == 1
 
 
 def test_l067_feature_sequence_inclusion_is_directional_and_ordered():
@@ -145,6 +259,18 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base"
     assert config["strict_base_profile_id"] == STRICT_BASE_PROFILE_ID
     assert config["stroke_rule"] == "strict-cl-k-distance"
+    assert config["stroke_secondary_fractal_rule"] == "allowed"
+    assert config["stroke_endpoint_range_rule"] == (
+        "fractal-endpoints-not-interval-extremes"
+    )
+    assert config["stroke_near_opposite_rule"] == (
+        "retain-fractal-ignore-as-endpoint"
+    )
+    assert config["stroke_same_type_rule"] == "replace-only-if-more-extreme"
+    assert config["stroke_equal_extreme_rule"] == "keep-earlier-fractal"
+    assert config["stroke_lock_rule"] == (
+        "next-valid-endpoint-physical-witness-no-rollback"
+    )
     assert config["segment_rule"] == "feature-sequence"
     assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
     assert config["strict_macd_source"] == (

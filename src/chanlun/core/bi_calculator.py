@@ -80,6 +80,10 @@ class BiCalculator:
         self.bi_index: int = 0
         self.cl_klines: List[CLKline] = []
         self._last_kline_snapshot: Optional[tuple] = None
+        # 由 CL_Kline_Process 提供的单调数据代次。只有调用方提供可信代次时，
+        # 才允许使用快照/增量捷径；直接传入任意列表一律全量重放，避免历史修正
+        # 但末根 index/h/l 未变时误返回旧笔。
+        self._last_source_revision: Optional[int] = None
         # 增量字段必须在此初始化：calculate() 里 _try_incremental_extend 先于
         # _update_prefix_fingerprint（唯一赋值入口）调用，否则首次调用 AttributeError。
         self._last_processed_kline_count: int = 0
@@ -171,6 +175,7 @@ class BiCalculator:
         """
 
         bi._end.done = done
+        bi.forming = not done
         if not done:
             bi.locked_at = None
             return
@@ -247,12 +252,14 @@ class BiCalculator:
         对全部分型重跑单调栈的 O(F²)。全量降级走新 FX 对象重建,故档3
         ``_rebuild_from_fxs(incremental=False)`` 传 False。
 
-        单调栈语义(对每个分型跑 while 循环,逐字保留原情形①②③):
+        单调栈语义(对每个分型跑 while 循环):
         - 情形①同类：与栈顶同类，更极端则取代栈顶，否则丢弃；
         - 情形②异类成笔：与栈顶异类且满足成笔条件 → 入栈；
-        - 情形③异类不成笔：栈顶是被新分型与其同类前驱夹击的「多余端点」则弹出，
-          否则（真端点/新分型不够极端/栈不足 3 时兜底）丢弃新分型。
-        不变量：stack 始终顶底严格交替（情形③取 stack[-2]/stack[-3] 依赖此）。
+        - 情形③异类不成笔：分型仍保留在 ``fxs``，但不进入端点栈。后续达到
+          距离要求的次高/次低分型允许成笔，不要求端点是候选区间绝对极值。
+
+        已压入的相邻端点恒为有效笔端点，锁定前缀不做历史回退。该规则与唯一
+        生产 profile 的 ``stroke_secondary_fractal_rule=allowed`` 一致。
         """
         n = self._endpoint_stack_n
         can_incr = (
@@ -289,29 +296,9 @@ class BiCalculator:
                     # 情形②：异类成笔
                     stack.append(fx)
                     break
-                # 情形③：异类不成笔
-                if len(stack) < 3:
-                    break  # 栈不足，无法判定，丢弃 fx
-                prev = stack[-2]
-                # prev→last 满足成笔距离 ⇒ last 是「合法距离的反弹/回调端点」,不应被
-                # 「过路的近距分型 fx」回溯吞并。丢弃 fx,待后续达成笔距离的真实端点经
-                # 情形②自然接出下一笔。
-                if self._check_stroke_validity(prev, last):
-                    break
-                # 以下原「夹击弹出」回溯分支:因栈内相邻对 (prev, last) 恒满足成笔距离
-                # (均经情形②压入 / 情形①同类替换保持该不变量),上面守卫恒 break ⇒ 此
-                # 分支恒不可达,保留作防御性兜底(未来栈维护契约若变动致相邻对可不合法)。
-                last_peer = stack[-3]  # 栈顶 last 的同类前驱
-                if self._is_more_extreme(last, last_peer):
-                    break  # last 是创新高/新低的真端点 → 丢弃 fx
-                if not self._is_more_extreme(fx, prev):
-                    break  # fx 不够格取代 prev → 丢弃 fx
-                # last 被 fx 与 prev 夹击、显得多余 → 弹出 last 与 prev
-                stack.pop()
-                stack.pop()
-                if len(stack) < stable:
-                    stable = len(stack)
-                continue
+                # 情形③：异类但距离/价格方向不成笔。它仍在完整 fxs 中供分型展示，
+                # 这里只是不进入端点序列；允许后续距离足够的次高/次低分型成笔。
+                break
         self._endpoint_stack = stack
         self._endpoint_stack_n = len(fxs)
         self._endpoint_stack_tail_sig = self._fx_sig(fxs[-1]) if fxs else None
@@ -356,8 +343,17 @@ class BiCalculator:
             fx.val,
         )
 
-    def _snapshot_matches(self, cl_klines: List[CLKline]) -> bool:
-        if not self._last_kline_snapshot or not cl_klines:
+    def _snapshot_matches(
+        self,
+        cl_klines: List[CLKline],
+        source_revision: Optional[int],
+    ) -> bool:
+        if (
+            source_revision is None
+            or source_revision != getattr(self, "_last_source_revision", None)
+            or not self._last_kline_snapshot
+            or not cl_klines
+        ):
             return False
         current_last = cl_klines[-1]
         last_idx, last_h, last_l = self._last_kline_snapshot
@@ -367,23 +363,31 @@ class BiCalculator:
             and current_last.l == last_l
         )
 
-    def _update_snapshot(self):
+    def _update_snapshot(self, source_revision: Optional[int]) -> None:
+        self._last_source_revision = source_revision
         if not self.cl_klines:
             self._last_kline_snapshot = None
             return
         last_k = self.cl_klines[-1]
         self._last_kline_snapshot = (last_k.index, last_k.h, last_k.l)
 
-    def calculate(self, cl_klines: List[CLKline]):
+    def calculate(
+        self,
+        cl_klines: List[CLKline],
+        *,
+        source_revision: Optional[int] = None,
+        validated_incremental_prefix: bool = False,
+    ):
         """
         计算笔列表。
 
         分三档处理：
-          1. 末根 snapshot 命中 → 直接 return
-          2. 前缀指纹命中 + 仅末尾追加 → 增量扩展 fxs
+          1. 可信数据代次 + 末根 snapshot 同时命中 → 直接 return
+          2. 数据代次前进 + 前缀指纹命中 + 仅末尾追加 → 增量扩展 fxs
           3. 其他情况（前缀变更、长度缩短、首次计算）→ 全量重放
-        增量分支只在前 N-1 根缠论 K 线完全没动、仅末尾追加时启用，
-        否则一律降级到全量，正确性优先。
+        没有 ``source_revision`` 的直接调用不信任列表的历史前缀，一律全量重放。
+        生产 CL 路径由包含处理器提供单调代次并显式认证历史前缀未改写，维持
+        尾部增量性能。代次前进但没有前缀认证时仍全量重放。
         """
         if not cl_klines:
             self.cl_klines = []
@@ -393,6 +397,7 @@ class BiCalculator:
             self.bis = []
             self.bi_index = 0
             self._last_kline_snapshot = None
+            self._last_source_revision = None
             self._last_processed_kline_count = 0
             self._last_prefix_fingerprint = None
             self._endpoint_stack = []
@@ -403,14 +408,22 @@ class BiCalculator:
             self._prev_pending_pos = -1
             return
 
-        # 档 1：末根快照命中（数据完全没变）
-        if self._snapshot_matches(cl_klines):
+        # 档 1：调用方数据代次和末根快照同时命中（数据完全没变）
+        if self._snapshot_matches(cl_klines, source_revision):
             return
 
-        # 档 2：尝试增量扩展
-        if self._try_incremental_extend(cl_klines):
+        previous_revision = getattr(self, "_last_source_revision", None)
+        trusted_forward_revision = (
+            validated_incremental_prefix
+            and source_revision is not None
+            and previous_revision is not None
+            and source_revision > previous_revision
+        )
+
+        # 档 2：只有可信数据代次向前推进时才尝试增量扩展。
+        if trusted_forward_revision and self._try_incremental_extend(cl_klines):
             self.cl_klines = cl_klines
-            self._update_snapshot()
+            self._update_snapshot(source_revision)
             self._update_prefix_fingerprint(cl_klines)
             return
 
@@ -418,7 +431,7 @@ class BiCalculator:
         self.cl_klines = cl_klines
         self.fxs = self._collect_fxs(cl_klines)
         self._rebuild_from_fxs(self.fxs)
-        self._update_snapshot()
+        self._update_snapshot(source_revision)
         self._update_prefix_fingerprint(cl_klines)
 
     def _update_prefix_fingerprint(self, cl_klines: List[CLKline]) -> None:

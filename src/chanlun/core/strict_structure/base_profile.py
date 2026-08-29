@@ -20,6 +20,16 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     "kline_inclusion_rule": "directional-sequential",
     "fractal_rule": "three-cl-k-both-extremes",
     "stroke_rule": STRICT_STROKE_MODE,
+    # 笔只要求端点分型、方向和合并 K 距离成立，不要求端点是候选笔时间区间
+    # 内的绝对最高/最低。距离不足的反向分型仍保留在完整分型序列中，但不进入
+    # 笔端点序列；后续达到距离要求的次高/次低分型允许成笔。
+    "stroke_secondary_fractal_rule": "allowed",
+    "stroke_endpoint_range_rule": "fractal-endpoints-not-interval-extremes",
+    "stroke_near_opposite_rule": "retain-fractal-ignore-as-endpoint",
+    "stroke_same_type_rule": "replace-only-if-more-extreme",
+    "stroke_equal_extreme_rule": "keep-earlier-fractal",
+    # 当前候选笔只有在下一有效端点分型出现后才锁定，锁定前缀不得回退重画。
+    "stroke_lock_rule": "next-valid-endpoint-physical-witness-no-rollback",
     # 线段采用特征序列，并明确处理缺口。
     "segment_rule": "feature-sequence",
     "segment_gap_rule": "second-feature-sequence-fractal",
