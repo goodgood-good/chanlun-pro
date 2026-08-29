@@ -9221,6 +9221,77 @@ class TradingScreeningService:
             return False
         return True
 
+    def _cache_scope_sidecar_proves_other_bounded_scope(self, path: Path) -> bool:
+        """Recognize one intact bounded pointer while starting full-market mode.
+
+        The proof is deliberately checked without opening the payload.  It is
+        only an authorization to inspect current-scope immutable generations;
+        the bounded payload itself is never restored by the full-market
+        process.  A stale, malformed, or stat-unbound proof remains fail-closed.
+        """
+
+        if self._config.screening_scope_mode != "FULL_MARKET":
+            return False
+        sidecar = self._cache_scope_sidecar_path(path)
+        try:
+            if sidecar.stat().st_size > _CACHE_SCOPE_SIDECAR_MAX_BYTES:
+                return False
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            payload_stat = path.stat()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(document, Mapping):
+            return False
+
+        def valid_code_list(value: object) -> bool:
+            return bool(
+                isinstance(value, list)
+                and all(
+                    isinstance(code, str)
+                    and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is not None
+                    for code in value
+                )
+                and len(value) == len(set(value))
+            )
+
+        scope_mode = document.get("screening_scope_mode")
+        monitor_limit = document.get("effective_monitor_universe_limit")
+        configured_codes = document.get("configured_admitted_codes")
+        admitted_codes = document.get("snapshot_admitted_codes")
+        strategy_codes = document.get("strategy_subject_codes")
+        snapshot_sha256 = document.get("snapshot_content_sha256")
+        member_codes_sha256 = document.get("analysis_context_member_codes_sha256")
+        if (
+            document.get("schema") != _CACHE_SCOPE_SIDECAR_SCHEMA
+            or scope_mode not in {"VALIDATION_COHORT", "LARGE_SCOPE"}
+            or type(monitor_limit) is not int
+            or monitor_limit <= 0
+            or document.get("payload_name") != path.name
+            or document.get("payload_size_bytes") != payload_stat.st_size
+            or document.get("payload_mtime_ns") != payload_stat.st_mtime_ns
+            or not isinstance(snapshot_sha256, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", snapshot_sha256) is None
+            or type(document.get("analysis_context_member_count")) is not int
+            or document.get("analysis_context_member_count", -1) < 0
+            or not isinstance(member_codes_sha256, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", member_codes_sha256) is None
+            or not valid_code_list(configured_codes)
+            or not valid_code_list(admitted_codes)
+            or not valid_code_list(strategy_codes)
+            or len(admitted_codes) > monitor_limit
+            or not set(strategy_codes).issubset(admitted_codes)
+            or (
+                bool(configured_codes)
+                and frozenset(admitted_codes) != frozenset(configured_codes)
+            )
+            or (
+                not configured_codes
+                and frozenset(admitted_codes) != frozenset(strategy_codes)
+            )
+        ):
+            return False
+        return True
+
     def _cache_scope_sidecar_matches_loaded_payload(
         self,
         path: Path,
@@ -9831,12 +9902,47 @@ class TradingScreeningService:
                 )
         return None
 
+    def _recover_complete_cache_from_generations(
+        self,
+        generations: tuple[Path, ...],
+        *,
+        required_coverage_epoch_id: str | None = None,
+    ) -> dict[str, object] | None:
+        """Restore only a fully validated, completely published generation."""
+
+        for path in generations:
+            recovered = self._valid_cache_from_path(path)
+            recovered_manifest = (
+                recovered.get("coverage_manifest")
+                if isinstance(recovered, Mapping)
+                else None
+            )
+            if (
+                isinstance(recovered_manifest, Mapping)
+                and recovered_manifest.get("complete") is True
+                and (
+                    required_coverage_epoch_id is None
+                    or recovered.get("coverage_epoch_id") == required_coverage_epoch_id
+                )
+            ):
+                self._cache_recovered_from_generation = str(path)
+                return recovered
+        return None
+
     def _load_valid_cache(self) -> dict[str, object] | None:
         generations = self._generation_paths()
         self._cache_generation_count = len(generations)
         self._cache_recovered_from_generation = None
         if not self._cache_scope_sidecar_allows_payload(self._cache_path):
             if self._cache_path.exists():
+                if self._cache_scope_sidecar_proves_other_bounded_scope(
+                    self._cache_path
+                ):
+                    recovered = self._recover_complete_cache_from_generations(
+                        generations
+                    )
+                    if recovered is not None:
+                        return recovered
                 self._quarantined_cache_reason = "CACHE_SCOPE_PROOF_MISSING_OR_INVALID"
                 return None
             return self._recover_cache_or_preselection_from_generations(
@@ -9937,6 +10043,32 @@ class TradingScreeningService:
                         }
                     )
                 )
+                pristine_current_pointer = bool(
+                    continuity_checkpoint_identity
+                    and current_value.get("available") is False
+                    and current_value.get("scan_state") == "not_started"
+                    and current_value.get("last_batch_state") == "not_started"
+                    and current_value.get("full_coverage_state") == "not_started"
+                    and current_epoch_id is None
+                    and current_manifest.get("source_cutoff") is None
+                    and current_manifest.get("market_data_as_of") is None
+                    and current_manifest.get("universe_revision") is None
+                    and current_manifest.get("sector_catalog_revision") is None
+                    and current_manifest.get("complete") is False
+                    and not current_manifest.get("discovered_codes")
+                    and not current_manifest.get("completed_codes")
+                    and not current_manifest.get("excluded_codes")
+                    and not current_manifest.get("failed_codes")
+                    and not current_manifest.get("pending_frequencies")
+                    and not current_manifest.get("backoff_frequencies")
+                    and not current_manifest.get("deferred_frequencies")
+                )
+                if pristine_current_pointer:
+                    recovered = self._recover_complete_cache_from_generations(
+                        generations
+                    )
+                    if recovered is not None:
+                        return recovered
                 if (
                     isinstance(current_manifest, Mapping)
                     and current_manifest.get("complete") is False
@@ -9947,20 +10079,12 @@ class TradingScreeningService:
                     # 同一覆盖纪元曾经完整发布后，局部重试产生的未完成检查点不能
                     # 让页面退回“全量构建中”。优先恢复不可变完整代；恢复出的失败
                     # 标的仍会由启动重试队列按当前代码单独复算。
-                    for path in generations:
-                        recovered = self._valid_cache_from_path(path)
-                        recovered_manifest = (
-                            recovered.get("coverage_manifest")
-                            if isinstance(recovered, Mapping)
-                            else None
-                        )
-                        if (
-                            isinstance(recovered_manifest, Mapping)
-                            and recovered_manifest.get("complete") is True
-                            and recovered.get("coverage_epoch_id") == current_epoch_id
-                        ):
-                            self._cache_recovered_from_generation = str(path)
-                            return recovered
+                    recovered = self._recover_complete_cache_from_generations(
+                        generations,
+                        required_coverage_epoch_id=current_epoch_id,
+                    )
+                    if recovered is not None:
+                        return recovered
                 if current_contract_valid and current_content_identity_valid:
                     if continuity_checkpoint_identity:
                         self._recover_cache_or_preselection_from_generations(

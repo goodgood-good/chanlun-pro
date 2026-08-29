@@ -2258,6 +2258,149 @@ def test_full_market_restart_restores_full_market_generation(tmp_path: Path) -> 
     assert restarted.health_snapshot()["cache_recovered_from_generation"]
 
 
+def test_full_market_restart_recovers_generation_after_bounded_pointer(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    full_config = TradingScreeningConfig(
+        priority_monitoring_enabled=True,
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+    full = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=full_config,
+    )
+    expected = full.refresh_now()
+
+    bounded = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    bounded.refresh_now()
+    assert bounded._cache_scope_sidecar_path(cache_path).is_file()
+
+    restarted_market = RecordingMarketData()
+    restarted = TradingScreeningService(
+        market_data=restarted_market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=full_config,
+    )
+
+    assert restarted_market.bundle_codes == []
+    assert (
+        restarted.snapshot()["snapshot_content_sha256"]
+        == expected["snapshot_content_sha256"]
+    )
+    assert restarted.health_snapshot()["cache_recovered_from_generation"]
+
+
+def test_full_market_restart_recovers_generation_after_pristine_pointer(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    config = TradingScreeningConfig(
+        priority_monitoring_enabled=True,
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+    pristine = service.snapshot()
+    expected = service.refresh_now()
+    service._finalize_snapshot_identity(pristine)
+    cache_path.write_text(
+        json.dumps(pristine, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    restarted_market = RecordingMarketData()
+    restarted = TradingScreeningService(
+        market_data=restarted_market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+
+    assert restarted_market.bundle_codes == []
+    assert (
+        restarted.snapshot()["snapshot_content_sha256"]
+        == expected["snapshot_content_sha256"]
+    )
+    assert restarted.health_snapshot()["cache_recovered_from_generation"]
+
+
+def test_full_market_corrupt_pointer_with_invalid_scope_proof_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    config = TradingScreeningConfig(
+        priority_monitoring_enabled=True,
+        full_coverage_refresh_enabled=True,
+        large_scope_authorized=True,
+    )
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+    service.refresh_now()
+    cache_path.write_text("{interrupted", encoding="utf-8")
+    service._cache_scope_sidecar_path(cache_path).write_text("{}", encoding="utf-8")
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=config,
+    )
+
+    assert restarted.snapshot()["scan_state"] == "not_started"
+    health = restarted.health_snapshot()
+    assert health["cache_recovered_from_generation"] is None
+    assert health["quarantined_cache_reason"] == (
+        "CACHE_SCOPE_PROOF_MISSING_OR_INVALID"
+    )
+
+
 def test_startup_sector_cache_receives_exact_bounded_admission_before_restore(
     tmp_path: Path,
 ) -> None:
