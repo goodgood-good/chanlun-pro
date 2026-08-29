@@ -194,6 +194,7 @@ function Register-LimitedWebLaunchTask {
         '-WindowStyle Hidden',
         '-ExecutionPolicy Bypass',
         ('-File "{0}"' -f $ScriptPath),
+        '-SkipWatchdog',
         ('-WebReadinessTimeoutSeconds {0}' -f $TimeoutSeconds)
     )
     if ($LargeScopeEnabled) { $argumentParts += '-EnableLargeScreeningScope' }

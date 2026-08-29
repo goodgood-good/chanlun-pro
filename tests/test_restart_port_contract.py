@@ -132,6 +132,7 @@ def test_elevated_restart_hands_start_to_limited_task_after_unlocking():
     assert elevated_branch < unlock < limited_start < direct_start
     assert "-RunLevel Limited" in source
     assert "Register-LimitedWebLaunchTask" in branch
+    assert "'-SkipWatchdog'" in source
     assert "Exit-DeploymentMutex -Mutex $deploymentMutex" in branch
     assert "Start-ScheduledTask -TaskName $handoffTaskName" in branch
     assert "Remove-LimitedWebLaunchTask -TaskName $handoffTaskName" in branch
