@@ -121,7 +121,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v4');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v5');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -145,7 +145,10 @@ test('production defaults show strokes segments and only current-period signals'
   assert.equal(config.center_L1, false);
   assert.equal(config.center_L2, false);
   assert.equal(Object.hasOwn(config, 'center_provisional'), false);
-  assert.equal(config.trend_all, true);
+  assert.equal(config.trend_all, false);
+  assert.equal(config.trend_L0, false);
+  assert.equal(config.trend_L1, false);
+  assert.equal(config.trend_L2, false);
   assert.equal(Object.hasOwn(config, 'pending_movement'), false);
   assert.equal(config.point_all, true);
   assert.equal(config.point_L0, true);
@@ -169,10 +172,10 @@ test('production defaults show strokes segments and only current-period signals'
   }), true);
   assert.equal(api.enabled(config, {
     render_kind: 'strict_trend', structural_level: 0,
-  }), true);
+  }), false);
   assert.equal(api.enabled(config, {
     render_kind: 'pending_movement', structural_level: 0,
-  }), true);
+  }), false);
   assert.equal(api.enabled(config, {
     render_kind: 'formal_center', structural_level: 1,
   }), false);
@@ -197,6 +200,10 @@ test('stored non-current or malformed configuration is removed', () => {
   assert.equal(store.has(key), false);
 
   store.set(key, JSON.stringify({ ...api.DEFAULT, schema: 'chanlun-chart-config-v3' }));
+  assert.equal(api.load('cm1', '5'), null);
+  assert.equal(store.has(key), false);
+
+  store.set(key, JSON.stringify({ ...api.DEFAULT, schema: 'chanlun-chart-config-v4' }));
   assert.equal(api.load('cm1', '5'), null);
   assert.equal(store.has(key), false);
 
