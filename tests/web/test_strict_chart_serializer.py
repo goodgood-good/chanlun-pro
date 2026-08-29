@@ -50,6 +50,9 @@ from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_current_confirmed_points,
 )
+from chanlun.decision_support.trading_system.operational_point_graph import (
+    resolve_current_operational_point_graph,
+)
 from tests.core.strict_structure.helpers import (
     completed_up_center,
     engine_for,
@@ -360,9 +363,7 @@ def test_fifth_leave_establishes_center_and_sixth_return_completes_lifecycle() -
 
     leaving_payload = strict_center_to_chart_dict(center)
     assert leaving_payload["pending_leave_unit_id"] == units[4].unit_id
-    assert leaving_payload["body_unit_ids"] == [
-        item.unit_id for item in units[1:4]
-    ]
+    assert leaving_payload["body_unit_ids"] == [item.unit_id for item in units[1:4]]
     assert leaving_payload["establishment_component_count"] == 5
 
     completed, _event = advance_center(center, units[5])
@@ -383,8 +384,7 @@ def test_failed_departure_reentry_increases_actual_overlap_evidence_count() -> N
     assert payload["establishment_component_count"] == 5
     assert payload["overlap_component_count"] == 6
     assert [item["unit_id"] for item in payload["overlap_components"]] == [
-        item.unit_id
-        for item in (*center.establishment_units, *center.extension_units)
+        item.unit_id for item in (*center.establishment_units, *center.extension_units)
     ]
 
 
@@ -686,11 +686,14 @@ def test_physical_preview_establishment_time_waits_for_locked_fifth_role() -> No
         _unit(3, "down", 115, 105),
         _unit(4, "up", 105, 130),
     )
-    unlocked_units = (*locked_units[:-1], replace(
-        locked_units[-1],
-        locked=False,
-        confirmed_at=None,
-    ))
+    unlocked_units = (
+        *locked_units[:-1],
+        replace(
+            locked_units[-1],
+            locked=False,
+            confirmed_at=None,
+        ),
+    )
     preview = establish_center_preview(
         unlocked_units,
         0,
@@ -795,9 +798,7 @@ def test_snapshot_keeps_active_core_until_adjacent_five_roles_exist() -> None:
     assert len(result.previews) == 1
     preview = result.previews[0]
     assert preview.entry_unit_id == units[0].unit_id
-    expected_body = tuple(
-        units[index].unit_id for index in (1, 2, 3, 5, 6, 7, 9)
-    )
+    expected_body = tuple(units[index].unit_id for index in (1, 2, 3, 5, 6, 7, 9))
     expected_failed = (units[4].unit_id, units[8].unit_id)
     assert preview.unit_ids == expected_body
     assert preview.failed_departure_unit_ids == expected_failed
@@ -1096,6 +1097,147 @@ def test_snapshot_uses_same_latest_completed_operational_confirmation_as_selecti
     assert still_forming["formation_state"] == "forming"
     assert still_forming["terminal_segment_role"] == "latest_unfinished"
     assert still_forming["tradable"] is False
+
+
+@pytest.mark.parametrize(
+    ("parent_type", "child_type", "tail_type"),
+    (
+        ("1buy", "2buy", "1sell"),
+        ("1sell", "2sell", "1buy"),
+    ),
+)
+def test_projected_second_class_promotes_its_parent_geometry_atomically(
+    parent_type: str,
+    child_type: str,
+    tail_type: str,
+) -> None:
+    parent = strict_point(
+        parent_type,
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=10),
+    )
+    raw_child = strict_point(
+        child_type,
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=20),
+    )
+    child = replace(
+        raw_child,
+        point_id=build_approaching_point_id(
+            price_basis_revision=raw_child.price_basis_revision,
+            point_type=raw_child.point_type,
+            structural_level=raw_child.structural_level,
+            anchor_unit_id=raw_child.anchor_unit_id,
+            center_id=raw_child.center_id,
+            parent_point_id=parent.point_id,
+        ),
+        parent_point_id=parent.point_id,
+        evidence_codes=(
+            "formed_first_class_parent",
+            "complete_adjacent_rebound",
+            "complete_first_pullback",
+            "prior_extreme_held",
+            "projected_geometric_structure",
+        ),
+    )
+    forming_tail = strict_point(
+        tail_type,
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=30),
+    )
+    evidence = strict_evidence_result(
+        code="SZ.000062",
+        source_frequency="5m",
+        source_closed_at=BASE + timedelta(hours=5, minutes=30),
+        approaching_points=(parent, child, forming_tail),
+    )
+
+    snapshot = build_strict_structure_snapshot(evidence, interval="5m")
+    level = snapshot["levels"][0]
+    confirmed = {point["point_id"]: point for point in level["confirmed_points"]}
+
+    assert parent.point_id in confirmed
+    assert child.point_id in confirmed
+    assert not {
+        parent.point_id,
+        child.point_id,
+    }.intersection(point["point_id"] for point in level["approaching_points"])
+
+    parent_payload = confirmed[parent.point_id]
+    assert parent_payload["strict_status"] == "approaching"
+    assert parent_payload["status"] == "confirmed"
+    assert parent_payload["confirmation_basis"] == "dependency_chain_geometry"
+    assert parent_payload["terminal_segment_role"] == "dependency_completed"
+    assert parent_payload["lock_state"] == "pending"
+
+    child_payload = confirmed[child.point_id]
+    assert child_payload["confirmation_basis"] == "latest_completed_geometry"
+    assert child_payload["parent_point_id"] == parent.point_id
+    assert child_payload["operational_parent_point_ids"] == [parent.point_id]
+    assert "operational_parent_geometry_confirmed" in child_payload["evidence_codes"]
+
+    selected = extract_current_confirmed_points(
+        evidence,
+        code=evidence.symbol,
+        source_frequency=evidence.source_frequency,
+        as_of=evidence.source_closed_at,
+    )
+    assert [point.point_type for point in selected] == [child_type]
+    assert "operational_parent_geometry_confirmed" in selected[0].evidence_codes
+
+
+def test_projected_child_fails_closed_when_parent_geometry_is_not_complete() -> None:
+    parent = strict_point(
+        "1sell",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=10),
+    )
+    raw_child = strict_point(
+        "2sell",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=20),
+    )
+    child = replace(
+        raw_child,
+        point_id=build_approaching_point_id(
+            price_basis_revision=raw_child.price_basis_revision,
+            point_type=raw_child.point_type,
+            structural_level=raw_child.structural_level,
+            anchor_unit_id=raw_child.anchor_unit_id,
+            center_id=raw_child.center_id,
+            parent_point_id=parent.point_id,
+        ),
+        parent_point_id=parent.point_id,
+    )
+    forming_tail = strict_point(
+        "1buy",
+        status=StrictPointStatus.APPROACHING,
+        available_at=BASE + timedelta(hours=5, minutes=30),
+    )
+    evidence = strict_evidence_result(
+        source_frequency="5m",
+        source_closed_at=BASE + timedelta(hours=5, minutes=30),
+        approaching_points=(parent, child, forming_tail),
+    )
+    level = evidence.structure.levels[0]
+    incomplete_parent_units = tuple(
+        replace(unit, formed_at=None) if unit.unit_id == parent.anchor_unit_id else unit
+        for unit in level.units
+    )
+    incomplete_structure = replace(
+        evidence.structure,
+        levels=(replace(level, units=incomplete_parent_units),),
+    )
+
+    projections = resolve_current_operational_point_graph(
+        incomplete_structure,
+        confirmed_points=evidence.confirmed_points,
+        approaching_points=evidence.approaching_points,
+        source_frequency=evidence.source_frequency,
+    )
+
+    assert parent.point_id not in projections
+    assert child.point_id not in projections
 
 
 def test_non_trade_frequency_keeps_latest_completed_point_approaching() -> None:

@@ -21,6 +21,9 @@ from chanlun.decision_support.trading_system.models import (
     StructuralPoint,
     build_point_id,
 )
+from chanlun.decision_support.trading_system.operational_point_graph import (
+    resolve_current_operational_point_graph,
+)
 
 
 def structural_point_id_map(
@@ -63,9 +66,7 @@ def structural_point_id_map(
                 ),
                 variant=cast(PointVariant, raw.variant.value),
                 structure_anchor_price=float(raw.structure_anchor_price),
-                structure_invalidation_price=float(
-                    raw.structure_invalidation_price
-                ),
+                structure_invalidation_price=float(raw.structure_invalidation_price),
                 center_zd=(
                     None
                     if raw.center_zd_tick is None
@@ -176,9 +177,7 @@ def convert_confirmed_point_evidence(
                 confirmed_at=raw.confirmed_at,
                 available_at=raw.available_at,
                 structure_anchor_price=float(raw.structure_anchor_price),
-                structure_invalidation_price=float(
-                    raw.structure_invalidation_price
-                ),
+                structure_invalidation_price=float(raw.structure_invalidation_price),
                 center_id=raw.center_id,
                 center_zd=(
                     None
@@ -203,9 +202,7 @@ def convert_confirmed_point_evidence(
                 related_point_ids=tuple(
                     converted_ids[point_id] for point_id in raw.related_point_ids
                 ),
-                small_to_large_carrier_unit_ids=(
-                    raw.small_to_large_carrier_unit_ids
-                ),
+                small_to_large_carrier_unit_ids=(raw.small_to_large_carrier_unit_ids),
                 terminal_segment=_historical_terminal_segment_reference(
                     structure,
                     raw,
@@ -288,8 +285,17 @@ def convert_current_confirmed_point_evidence(
     normalize_datetime(as_of, "as_of")
     if not isinstance(structure, StrictStructureResult):
         raise TypeError("current point conversion requires strict structure")
-    raw_points = (*tuple(confirmed_points), *tuple(approaching_points))
+    confirmed_values = tuple(confirmed_points)
+    approaching_values = tuple(approaching_points)
+    raw_points = (*confirmed_values, *approaching_values)
     raw_current = current_strict_point_evidence(structure, raw_points)
+    operational_graph = resolve_current_operational_point_graph(
+        structure,
+        confirmed_points=confirmed_values,
+        approaching_points=approaching_values,
+        source_frequency=source_frequency,
+        include_one_minute_segment_level=True,
+    )
     converted_ids = structural_point_id_map(
         raw_points,
         code=code,
@@ -324,8 +330,7 @@ def convert_current_confirmed_point_evidence(
             # same operation point's clock forward after a process restart.
             geometry_confirmed_at = (
                 unit.formed_at
-                if reference.role == "latest_completed"
-                and unit.formed_at is not None
+                if reference.role == "latest_completed" and unit.formed_at is not None
                 else None
             )
             confirmed_at = geometry_confirmed_at or raw.confirmed_at
@@ -344,25 +349,28 @@ def convert_current_confirmed_point_evidence(
                 )
             )
         else:
+            projection = operational_graph.get(raw.point_id)
             if (
-                reference.role != "latest_completed"
-                or unit.formed_at is None
+                projection is None
+                or projection.confirmation_basis != "latest_completed_geometry"
             ):
                 continue
-            # While the segment is still unlocked, raw.available_at is the
-            # exact first geometry witness.  If this snapshot is reconstructed
-            # after the later audit lock, backdate to the preserved formed_at
-            # so a restart cannot turn an old structure into a fresh alert.
-            confirmed_at = (
-                raw.available_at
-                if reference.state == "formed"
-                else unit.formed_at
-            )
+            if projection.terminal_segment != reference:
+                raise ValueError("operational point terminal lineage diverged")
+            confirmed_at = projection.confirmed_at
             available_at = confirmed_at
             priority = 0
             evidence_codes = tuple(
                 dict.fromkeys(
-                    (*raw.evidence_codes, "geometry_confirmed_before_audit_lock")
+                    (
+                        *raw.evidence_codes,
+                        "geometry_confirmed_before_audit_lock",
+                        *(
+                            ("operational_parent_geometry_confirmed",)
+                            if projection.projected_parent_point_ids
+                            else ()
+                        ),
+                    )
                 )
             )
         if confirmed_at is None:
@@ -396,9 +404,7 @@ def convert_current_confirmed_point_evidence(
                 else float(raw.center_zg_tick * raw.price_quantum)
             ),
             center_ordinal=raw.center_ordinal,
-            divergence_kind=(
-                None if raw.divergence is None else raw.divergence.kind
-            ),
+            divergence_kind=(None if raw.divergence is None else raw.divergence.kind),
             parent_point_id=(
                 None
                 if raw.parent_point_id is None
@@ -408,9 +414,7 @@ def convert_current_confirmed_point_evidence(
             related_point_ids=tuple(
                 converted_ids[point_id] for point_id in raw.related_point_ids
             ),
-            small_to_large_carrier_unit_ids=(
-                raw.small_to_large_carrier_unit_ids
-            ),
+            small_to_large_carrier_unit_ids=(raw.small_to_large_carrier_unit_ids),
             terminal_segment=reference,
         )
         previous = output.get(point.point_id)

@@ -38,8 +38,10 @@ from chanlun.core.strict_structure.models import (
 from chanlun.decision_support.trading_system.five_minute_setup_state import (
     classify_five_minute_setup_state,
 )
-from chanlun.decision_support.trading_system.operation_level import (
-    is_five_minute_trade_level,
+from chanlun.decision_support.trading_system.operational_point_graph import (
+    OperationalConfirmationBasis,
+    OperationalPointProjection,
+    resolve_current_operational_point_graph,
 )
 
 
@@ -53,8 +55,10 @@ def _preview_lifecycle_role_count(preview: CenterPreview) -> int:
         preview.pending_leave_unit_id is not None
         or preview.completion_leave_unit_id is not None
     )
-    return int(preview.entry_unit_id is not None) + len(preview.unit_ids) + int(
-        leave_present
+    return (
+        int(preview.entry_unit_id is not None)
+        + len(preview.unit_ids)
+        + int(leave_present)
     )
 
 
@@ -101,8 +105,7 @@ def _center_overlap_units(
     return tuple(
         item
         for item in candidates
-        if max(item.low_tick, center.zd_tick)
-        < min(item.high_tick, center.zg_tick)
+        if max(item.low_tick, center.zd_tick) < min(item.high_tick, center.zg_tick)
     )
 
 
@@ -338,8 +341,7 @@ def _center_payload(
             item.unit_id for item in center.supersession_bridge_units
         ],
         "supersession_bridge_units": [
-            _unit_audit_payload(item)
-            for item in center.supersession_bridge_units
+            _unit_audit_payload(item) for item in center.supersession_bridge_units
         ],
         "entering_segment": (
             None
@@ -536,11 +538,7 @@ def strict_center_preview_to_chart_dict(
     if len(by_id) != len(values):
         raise ValueError("chart center preview units require unique ids")
     try:
-        entry = (
-            None
-            if preview.entry_unit_id is None
-            else by_id[preview.entry_unit_id]
-        )
+        entry = None if preview.entry_unit_id is None else by_id[preview.entry_unit_id]
         body = tuple(by_id[item_id] for item_id in preview.unit_ids)
         failed_departures = tuple(
             by_id[item_id] for item_id in preview.failed_departure_unit_ids
@@ -592,13 +590,12 @@ def strict_center_preview_to_chart_dict(
         raise ValueError(
             "chart center preview transition history must start at its body"
         )
-    if tuple(
-        item for item in ordered_transitions if item.unit_id in body_ids
-    ) != body:
+    if tuple(item for item in ordered_transitions if item.unit_id in body_ids) != body:
         raise ValueError("chart center preview body order conflicts with transitions")
-    if tuple(
-        item for item in ordered_transitions if item.unit_id in failed_ids
-    ) != failed_departures:
+    if (
+        tuple(item for item in ordered_transitions if item.unit_id in failed_ids)
+        != failed_departures
+    ):
         raise ValueError(
             "chart center preview failed history order conflicts with transitions"
         )
@@ -661,13 +658,10 @@ def strict_center_preview_to_chart_dict(
         )
         offset = transition_offsets[failed.unit_id]
         if offset + 1 >= len(ordered_transitions):
-            raise ValueError(
-                "chart center preview failed departure requires a return"
-            )
+            raise ValueError("chart center preview failed departure requires a return")
         ret = ordered_transitions[offset + 1]
         return_overlaps = (
-            max(ret.low_tick, preview.zd_tick)
-            <= min(ret.high_tick, preview.zg_tick)
+            max(ret.low_tick, preview.zd_tick) <= min(ret.high_tick, preview.zg_tick)
             if preview.source_kind is SourceKind.TREND_TYPE
             else max(ret.low_tick, preview.zd_tick)
             < min(ret.high_tick, preview.zg_tick)
@@ -711,9 +705,7 @@ def strict_center_preview_to_chart_dict(
         if max(leaving_unit.low_tick, preview.zd_tick) > min(
             leaving_unit.high_tick, preview.zg_tick
         ):
-            raise ValueError(
-                "chart center preview leave must touch its core"
-            )
+            raise ValueError("chart center preview leave must touch its core")
     establishment_units = (
         tuple(initial_units)
         if preview.source_kind is SourceKind.TREND_TYPE
@@ -745,7 +737,11 @@ def strict_center_preview_to_chart_dict(
                 (
                     *((entry,) if entry is not None else ()),
                     *body,
-                    *((establishment_leave,) if establishment_leave is not None else ()),
+                    *(
+                        (establishment_leave,)
+                        if establishment_leave is not None
+                        else ()
+                    ),
                     *failed_departures,
                     *((leaving_unit,) if leaving_unit is not None else ()),
                 )
@@ -755,8 +751,7 @@ def strict_center_preview_to_chart_dict(
         )
     )
     if preview.source_kind is not SourceKind.TREND_TYPE and any(
-        max(item.low_tick, preview.zd_tick)
-        >= min(item.high_tick, preview.zg_tick)
+        max(item.low_tick, preview.zd_tick) >= min(item.high_tick, preview.zg_tick)
         for item in overlap_units
     ):
         raise ValueError(
@@ -777,9 +772,7 @@ def strict_center_preview_to_chart_dict(
     closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
     completed = preview.state is CenterPreviewState.COMPLETED
     failed_revision = (
-        ""
-        if not failed_departures
-        else f"@failed{len(failed_departures)}"
+        "" if not failed_departures else f"@failed{len(failed_departures)}"
     )
     end_epoch = (
         aware_datetime_to_epoch_seconds(leaving_unit.market_start)
@@ -841,21 +834,15 @@ def strict_center_preview_to_chart_dict(
         "middle_three_component_ids": [item.unit_id for item in core_units],
         "core_unit_ids": [item.unit_id for item in core_units],
         "establishment_leave_unit_id": (
-            None
-            if establishment_leave is None
-            else establishment_leave.unit_id
+            None if establishment_leave is None else establishment_leave.unit_id
         ),
         "initial_exit_unit_id": (
-            None
-            if establishment_leave is None
-            else establishment_leave.unit_id
+            None if establishment_leave is None else establishment_leave.unit_id
         ),
         "initial_unit_ids": [item.unit_id for item in initial_units],
         "body_unit_ids": [item.unit_id for item in body],
         "extension_unit_ids": [item.unit_id for item in body[seed_width:]],
-        "failed_departure_unit_ids": [
-            item.unit_id for item in failed_departures
-        ],
+        "failed_departure_unit_ids": [item.unit_id for item in failed_departures],
         "pending_leave_unit_id": (
             leaving_unit.unit_id
             if (not completed and leaving_unit is not None)
@@ -870,9 +857,7 @@ def strict_center_preview_to_chart_dict(
         "completion_direction": (
             None if completion_leave is None else completion_leave.direction
         ),
-        "entering_segment": (
-            None if entry is None else _unit_audit_payload(entry)
-        ),
+        "entering_segment": (None if entry is None else _unit_audit_payload(entry)),
         "middle_three_components": [_unit_audit_payload(item) for item in core_units],
         "overlap_components": [_unit_audit_payload(item) for item in overlap_units],
         "establishment_segments": [
@@ -1069,9 +1054,7 @@ def pending_movement_to_chart_dict(
             "low_tick": min(item.low_tick for item in partition.constituent_units),
             "high_tick": max(item.high_tick for item in partition.constituent_units),
         },
-        "constituent_unit_ids": [
-            item.unit_id for item in partition.constituent_units
-        ],
+        "constituent_unit_ids": [item.unit_id for item in partition.constituent_units],
         "confirmed_at": None,
         "available_at": aware_datetime_to_epoch_seconds(partition.available_at),
     }
@@ -1142,6 +1125,8 @@ def strict_point_to_chart_dict(
     *,
     terminal_segment: TerminalSegmentReference | None = None,
     operational_confirmed_at: datetime | None = None,
+    operational_confirmation_basis: OperationalConfirmationBasis | None = None,
+    projected_parent_point_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """序列化严格点，并显式区分操作确认与防重绘审计锁。
 
@@ -1158,15 +1143,22 @@ def strict_point_to_chart_dict(
     ):
         raise ValueError("chart point terminal segment lineage mismatch")
     operational_confirmation = operational_confirmed_at is not None
-    if operational_confirmation and (
-        point.status is not StrictPointStatus.APPROACHING
-        or terminal_segment is None
+    if operational_confirmation != (operational_confirmation_basis is not None):
+        raise ValueError("operational chart confirmation basis is incomplete")
+    if operational_confirmation and point.status is not StrictPointStatus.APPROACHING:
+        raise ValueError("operational chart confirmation requires approaching evidence")
+    if operational_confirmation_basis == "latest_completed_geometry" and (
+        terminal_segment is None
         or terminal_segment.role != "latest_completed"
         or terminal_segment.state not in {"formed", "locked"}
     ):
-        raise ValueError(
-            "operational chart confirmation requires the latest completed segment"
-        )
+        raise ValueError("latest geometry confirmation requires terminal lineage")
+    if operational_confirmation_basis == "dependency_chain_geometry" and (
+        terminal_segment is not None
+    ):
+        raise ValueError("dependency geometry cannot claim current terminal lineage")
+    if not operational_confirmation and projected_parent_point_ids:
+        raise ValueError("projected parent ids require operational confirmation")
     if operational_confirmation and (
         operational_confirmed_at < point.anchor_at
         or operational_confirmed_at > point.available_at
@@ -1181,6 +1173,8 @@ def strict_point_to_chart_dict(
         strict_status,
         status,
         operational_confirmed_at,
+        operational_confirmation_basis,
+        projected_parent_point_ids,
         (
             None
             if terminal_segment is None
@@ -1205,17 +1199,27 @@ def strict_point_to_chart_dict(
         if point.status is StrictPointStatus.CONFIRMED
         else f"{point.point_id}@{evidence_revision}"
     )
+    setup_terminal_role = (
+        "dependency_completed"
+        if operational_confirmation_basis == "dependency_chain_geometry"
+        else None
+        if terminal_segment is None
+        else terminal_segment.role
+    )
+    setup_terminal_state = (
+        "formed"
+        if operational_confirmation_basis == "dependency_chain_geometry"
+        else None
+        if terminal_segment is None
+        else terminal_segment.state
+    )
     setup_state = classify_five_minute_setup_state(
         point_type=point.point_type,
         status="confirmed" if status == "confirmed" else "provisional",
         evidence_codes=point.evidence_codes,
         missing_conditions=point.missing_conditions,
-        terminal_segment_role=(
-            None if terminal_segment is None else terminal_segment.role
-        ),
-        terminal_segment_state=(
-            None if terminal_segment is None else terminal_segment.state
-        ),
+        terminal_segment_role=setup_terminal_role,
+        terminal_segment_state=setup_terminal_state,
     )
     evidence_codes = tuple(point.evidence_codes)
     if (
@@ -1223,6 +1227,16 @@ def strict_point_to_chart_dict(
         and "geometry_confirmed_before_audit_lock" not in evidence_codes
     ):
         evidence_codes = (*evidence_codes, "geometry_confirmed_before_audit_lock")
+    if (
+        operational_confirmation_basis == "dependency_chain_geometry"
+        and "dependency_chain_geometry_confirmation" not in evidence_codes
+    ):
+        evidence_codes = (*evidence_codes, "dependency_chain_geometry_confirmation")
+    if (
+        projected_parent_point_ids
+        and "operational_parent_geometry_confirmed" not in evidence_codes
+    ):
+        evidence_codes = (*evidence_codes, "operational_parent_geometry_confirmed")
     return {
         "schema": "chanlun-chart-point",
         "render_kind": render_kind,
@@ -1234,7 +1248,7 @@ def strict_point_to_chart_dict(
         "strict_status": strict_status,
         "operational_confirmation": operational_confirmation,
         "confirmation_basis": (
-            "latest_completed_geometry"
+            operational_confirmation_basis
             if operational_confirmation
             else "strict_audit_lock"
             if point.status is StrictPointStatus.CONFIRMED
@@ -1245,12 +1259,8 @@ def strict_point_to_chart_dict(
         "actionable": setup_state.actionable,
         "contains_forming_segment": setup_state.contains_forming_segment,
         "contains_unlocked_segment": setup_state.contains_unlocked_segment,
-        "terminal_segment_role": (
-            None if terminal_segment is None else terminal_segment.role
-        ),
-        "terminal_segment_state": (
-            None if terminal_segment is None else terminal_segment.state
-        ),
+        "terminal_segment_role": setup_terminal_role,
+        "terminal_segment_state": setup_terminal_state,
         "variant": point.variant.value,
         "structural_level": point.structural_level,
         "source_kind": point.source_kind.value,
@@ -1272,6 +1282,7 @@ def strict_point_to_chart_dict(
         "evidence_codes": list(evidence_codes),
         "missing_conditions": list(point.missing_conditions),
         "related_point_ids": list(point.related_point_ids),
+        "operational_parent_point_ids": list(projected_parent_point_ids),
         "small_to_large_carrier_unit_ids": list(point.small_to_large_carrier_unit_ids),
         "evidence_revision": evidence_revision,
         "tradable": setup_state.actionable,
@@ -1282,50 +1293,6 @@ def strict_point_to_chart_dict(
             }
         ],
     }
-
-
-def _chart_point_terminal_projection(
-    evidence: StrictEvidenceResult,
-    point: StrictPointEvidence,
-) -> tuple[TerminalSegmentReference | None, datetime | None]:
-    """返回图表点的末端血缘与操作确认时刻。
-
-    这里只投影生产交易级别 ``5m/L0``。1 分钟段差、30 分钟环境以及递归高层
-    仍展示严格核心原始状态，不能被误升格为可操作买卖点。
-    """
-
-    reference = terminal_segment_reference(
-        evidence.structure,
-        structural_level=point.structural_level,
-        unit_id=point.anchor_unit_id,
-    )
-    if (
-        point.status is not StrictPointStatus.APPROACHING
-        or not is_five_minute_trade_level(
-            evidence.source_frequency,
-            point.structural_level,
-        )
-        or reference is None
-        or reference.role != "latest_completed"
-    ):
-        return reference, None
-
-    unit = next(
-        (
-            item
-            for level in evidence.structure.levels
-            if level.structural_level == point.structural_level
-            for item in level.units
-            if item.unit_id == point.anchor_unit_id
-        ),
-        None,
-    )
-    if unit is None or unit.formed_at is None:
-        return reference, None
-    # 与 structure_adapter.extract_current_confirmed_points 完全同口径：当前仍为
-    # formed 时使用首次完整几何见证；重建到后来已锁定的历史截面时回溯 formed_at。
-    confirmed_at = point.available_at if reference.state == "formed" else unit.formed_at
-    return reference, confirmed_at
 
 
 def _operational_third_class_center_payload(
@@ -1481,7 +1448,7 @@ def build_strict_structure_snapshot(
             tuple[
                 StrictPointEvidence,
                 TerminalSegmentReference | None,
-                datetime | None,
+                OperationalPointProjection | None,
             ]
         ],
     ] = {}
@@ -1491,29 +1458,40 @@ def build_strict_structure_snapshot(
             tuple[
                 StrictPointEvidence,
                 TerminalSegmentReference | None,
-                datetime | None,
+                OperationalPointProjection | None,
             ]
         ],
     ] = {}
     divergences_by_level: dict[int, list[DivergenceEvidence]] = {}
+    operational_graph = resolve_current_operational_point_graph(
+        evidence.structure,
+        confirmed_points=evidence.confirmed_points,
+        approaching_points=evidence.approaching_points,
+        source_frequency=evidence.source_frequency,
+    )
     for point in _visible(evidence.confirmed_points, evidence.source_closed_at):
-        reference, _operational_at = _chart_point_terminal_projection(
-            evidence,
-            point,
+        reference = terminal_segment_reference(
+            evidence.structure,
+            structural_level=point.structural_level,
+            unit_id=point.anchor_unit_id,
         )
         confirmed_by_level.setdefault(point.structural_level, []).append(
             (point, reference, None)
         )
     for point in _visible(evidence.approaching_points, evidence.source_closed_at):
-        reference, operational_at = _chart_point_terminal_projection(
-            evidence,
-            point,
+        projection = operational_graph.get(point.point_id)
+        reference = (
+            projection.terminal_segment
+            if projection is not None
+            else terminal_segment_reference(
+                evidence.structure,
+                structural_level=point.structural_level,
+                unit_id=point.anchor_unit_id,
+            )
         )
-        target = (
-            confirmed_by_level if operational_at is not None else approaching_by_level
-        )
+        target = confirmed_by_level if projection is not None else approaching_by_level
         target.setdefault(point.structural_level, []).append(
-            (point, reference, operational_at)
+            (point, reference, projection)
         )
     for divergence in _visible(evidence.divergences, evidence.source_closed_at):
         divergences_by_level.setdefault(
@@ -1584,12 +1562,12 @@ def build_strict_structure_snapshot(
             "preview_id",
         )
         operational_thirds = tuple(
-            (point, operational_at)
-            for point, _reference, operational_at in confirmed_by_level.get(
+            (point, projection.confirmed_at)
+            for point, _reference, projection in confirmed_by_level.get(
                 level.structural_level,
                 (),
             )
-            if operational_at is not None and point.point_type in {"3buy", "3sell"}
+            if projection is not None and point.point_type in {"3buy", "3sell"}
         )
         for point, operational_at in operational_thirds:
             center_payloads = [
@@ -1655,9 +1633,19 @@ def build_strict_structure_snapshot(
                 strict_point_to_chart_dict(
                     point,
                     terminal_segment=reference,
-                    operational_confirmed_at=operational_at,
+                    operational_confirmed_at=(
+                        None if projection is None else projection.confirmed_at
+                    ),
+                    operational_confirmation_basis=(
+                        None if projection is None else projection.confirmation_basis
+                    ),
+                    projected_parent_point_ids=(
+                        ()
+                        if projection is None
+                        else projection.projected_parent_point_ids
+                    ),
                 )
-                for point, reference, operational_at in confirmed_by_level.get(
+                for point, reference, projection in confirmed_by_level.get(
                     level.structural_level,
                     (),
                 )
@@ -1669,9 +1657,19 @@ def build_strict_structure_snapshot(
                 strict_point_to_chart_dict(
                     point,
                     terminal_segment=reference,
-                    operational_confirmed_at=operational_at,
+                    operational_confirmed_at=(
+                        None if projection is None else projection.confirmed_at
+                    ),
+                    operational_confirmation_basis=(
+                        None if projection is None else projection.confirmation_basis
+                    ),
+                    projected_parent_point_ids=(
+                        ()
+                        if projection is None
+                        else projection.projected_parent_point_ids
+                    ),
                 )
-                for point, reference, operational_at in approaching_by_level.get(
+                for point, reference, projection in approaching_by_level.get(
                     level.structural_level,
                     (),
                 )

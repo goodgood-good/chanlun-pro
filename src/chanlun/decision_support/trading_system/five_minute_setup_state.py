@@ -18,9 +18,7 @@ from typing import Literal
 FIVE_MINUTE_SETUP_STATE_CONTRACT = (
     "chanlun-five-minute-setup-state-v4-operational-confirmation"
 )
-GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION = (
-    "GEOMETRY_AWAITING_CONFIRMATION"
-)
+GEOMETRY_AWAITING_CONFIRMATION_RECOMMENDATION = "GEOMETRY_AWAITING_CONFIRMATION"
 GEOMETRY_AWAITING_CONFIRMATION_REASON_CODE = (
     "five_minute_geometry_candidate_awaiting_confirmation"
 )
@@ -65,9 +63,7 @@ SetupLockState = Literal["pending", "locked"]
 def _codes(value: object) -> frozenset[str]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         return frozenset()
-    return frozenset(
-        item for item in value if isinstance(item, str) and item
-    )
+    return frozenset(item for item in value if isinstance(item, str) and item)
 
 
 def has_ready_provisional_geometry(
@@ -105,11 +101,10 @@ class FiveMinuteSetupState:
                 )
             return
         if self.lock_state != "pending" or self.actionable:
-            raise ValueError("unconfirmed setup state must remain pending and non-actionable")
-        if (
-            self.formation_state == "geometry_ready"
-            and self.contains_forming_segment
-        ):
+            raise ValueError(
+                "unconfirmed setup state must remain pending and non-actionable"
+            )
+        if self.formation_state == "geometry_ready" and self.contains_forming_segment:
             raise ValueError("ready geometry cannot contain a forming segment")
         if self.contains_forming_segment and not self.contains_unlocked_segment:
             raise ValueError("forming segment must also be unlocked")
@@ -142,7 +137,9 @@ def classify_five_minute_setup_state(
     新版生产点都携带精确的末端线段血缘。此时线段角色是几何状态的唯一
     主判据：最新未完成线段只能是 ``forming``；尚未被交易适配层提升的完整几何只能
     是 ``geometry_ready``；已发布的操作确认点是 ``confirmed``，并另外用 lock_state
-    区分审计锁待完成或已完成。证据码只为没有血缘的历史研究文档和测试夹具保留
+    区分审计锁待完成或已完成。二类点的父级几何会以
+    ``dependency_completed`` 同步确认，避免出现“父级接近、子级确认”的矛盾状态，
+    但它不冒充当前末端线段。证据码只为没有血缘的历史研究文档和测试夹具保留
     兼容，不得覆盖当前线段事实。
     """
 
@@ -153,12 +150,12 @@ def classify_five_minute_setup_state(
 
     if status == "confirmed":
         if has_terminal_role:
-            if (
-                terminal_segment_role != "latest_completed"
-                or terminal_segment_state not in {"formed", "locked"}
-            ):
+            if terminal_segment_role not in {
+                "latest_completed",
+                "dependency_completed",
+            } or terminal_segment_state not in {"formed", "locked"}:
                 raise ValueError(
-                    "confirmed setup must belong to the formed latest completed segment"
+                    "confirmed setup must belong to completed point geometry"
                 )
             locked = terminal_segment_state == "locked"
         else:
@@ -225,10 +222,14 @@ def setup_state_for_point(point: object) -> FiveMinuteSetupState:
         evidence_codes=getattr(point, "evidence_codes", ()),
         missing_conditions=getattr(point, "missing_conditions", ()),
         terminal_segment_role=(
-            None if terminal_segment is None else getattr(terminal_segment, "role", None)
+            None
+            if terminal_segment is None
+            else getattr(terminal_segment, "role", None)
         ),
         terminal_segment_state=(
-            None if terminal_segment is None else getattr(terminal_segment, "state", None)
+            None
+            if terminal_segment is None
+            else getattr(terminal_segment, "state", None)
         ),
     )
 
