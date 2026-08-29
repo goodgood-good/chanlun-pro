@@ -37,6 +37,7 @@ $stateRoot = Join-Path $ProjectRoot '.cache\chanlun_web_watchdog'
 $logRoot = Join-Path $ProjectRoot 'ops\logs'
 $heartbeatPath = Join-Path $stateRoot 'heartbeat.json'
 $lockPath = Join-Path $stateRoot 'watchdog.lock'
+$deploymentScopePath = Join-Path $stateRoot 'deployment_scope.json'
 $liveUri = 'http://127.0.0.1:{0}/livez' -f $WebPort
 $healthUri = 'http://127.0.0.1:{0}/readyz?market={1}' -f `
     $WebPort, [Uri]::EscapeDataString($ReadinessMarket)
@@ -54,6 +55,90 @@ function Write-WatchdogLog([string]$Message) {
     $line = '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
     $path = Join-Path $logRoot ('web_watchdog_{0}.log' -f (Get-Date -Format 'yyyy-MM-dd'))
     Add-Content -LiteralPath $path -Value $line -Encoding UTF8
+}
+
+$scopeSwitchNames = @(
+    'EnableLargeScreeningScope',
+    'EnableLargeHoldingMonitorScope',
+    'EnableFullSymbolCatalog',
+    'EnableFullCoverage',
+    'ForceFullCoverageUntilComplete'
+)
+$explicitScope = @(
+    $scopeSwitchNames | Where-Object { $PSBoundParameters.ContainsKey($_) }
+).Count -gt 0
+$scopeSource = if ($explicitScope) { 'explicit' } else { 'default_bounded' }
+if (-not $explicitScope -and (Test-Path -LiteralPath $deploymentScopePath -PathType Leaf)) {
+    try {
+        $deploymentScope = Get-Content `
+            -LiteralPath $deploymentScopePath `
+            -Raw `
+            -Encoding UTF8 | ConvertFrom-Json
+        if ($deploymentScope.schema -ne 'chanlun-web-watchdog-deployment-scope-v1') {
+            throw 'schema mismatch'
+        }
+        $persistedRoot = [IO.Path]::GetFullPath(
+            [string]$deploymentScope.project_root
+        )
+        if (-not [string]::Equals(
+            $persistedRoot.TrimEnd('\'),
+            $ProjectRoot.TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'project root mismatch'
+        }
+        if ([int]$deploymentScope.web_port -ne $WebPort) {
+            throw 'web port mismatch'
+        }
+        $scopeProperties = @(
+            [pscustomobject]@{
+                Parameter = 'EnableLargeScreeningScope'
+                Property = 'enable_large_screening_scope'
+            },
+            [pscustomobject]@{
+                Parameter = 'EnableLargeHoldingMonitorScope'
+                Property = 'enable_large_holding_monitor_scope'
+            },
+            [pscustomobject]@{
+                Parameter = 'EnableFullSymbolCatalog'
+                Property = 'enable_full_symbol_catalog'
+            },
+            [pscustomobject]@{
+                Parameter = 'EnableFullCoverage'
+                Property = 'enable_full_coverage'
+            },
+            [pscustomobject]@{
+                Parameter = 'ForceFullCoverageUntilComplete'
+                Property = 'force_full_coverage_until_complete'
+            }
+        )
+        foreach ($scopeProperty in $scopeProperties) {
+            if (
+                $deploymentScope.PSObject.Properties.Name -notcontains `
+                    $scopeProperty.Property
+            ) {
+                throw ('missing property: {0}' -f $scopeProperty.Property)
+            }
+            $value = $deploymentScope.($scopeProperty.Property)
+            if ($value -isnot [bool]) {
+                throw ('property is not boolean: {0}' -f $scopeProperty.Property)
+            }
+            Set-Variable -Name $scopeProperty.Parameter -Value ([bool]$value)
+        }
+        if ($EnableFullCoverage -and -not $EnableLargeScreeningScope) {
+            throw 'full coverage requires large screening scope'
+        }
+        if ($ForceFullCoverageUntilComplete -and -not $EnableFullCoverage) {
+            throw 'forced full coverage requires full coverage'
+        }
+        $scopeSource = 'persisted'
+    } catch {
+        Write-WatchdogLog (
+            'ERROR: persisted deployment scope is invalid: {0}' -f `
+                $_.Exception.Message
+        )
+        throw
+    }
 }
 
 function Write-WatchdogHeartbeat {
@@ -85,6 +170,15 @@ function Write-WatchdogHeartbeat {
         priority_monitor_age_seconds = $PriorityMonitorAgeSeconds
         candidate_monitor_status = $CandidateMonitorStatus
         realtime_alert_status = $RealtimeAlertStatus
+        scope_source = $scopeSource
+        deployment_scope = [ordered]@{
+            enable_large_screening_scope = [bool]$EnableLargeScreeningScope
+            enable_large_holding_monitor_scope = [bool]$EnableLargeHoldingMonitorScope
+            enable_full_symbol_catalog = [bool]$EnableFullSymbolCatalog
+            enable_full_coverage = [bool]$EnableFullCoverage
+            force_full_coverage_until_complete = `
+                [bool]$ForceFullCoverageUntilComplete
+        }
         detail = $Detail
     }
     $temporary = '{0}.{1}.tmp' -f $heartbeatPath, $PID
@@ -477,8 +571,16 @@ $lockStream.Flush()
 
 try {
     Write-WatchdogLog (
-        'watchdog started; pid={0}; live_uri={1}; health_uri={2}' -f `
-            $PID, $liveUri, $healthUri
+        'watchdog started; pid={0}; live_uri={1}; health_uri={2}; scope_source={3}; large={4}; holding={5}; catalog={6}; coverage={7}; force={8}' -f `
+            $PID,
+            $liveUri,
+            $healthUri,
+            $scopeSource,
+            [bool]$EnableLargeScreeningScope,
+            [bool]$EnableLargeHoldingMonitorScope,
+            [bool]$EnableFullSymbolCatalog,
+            [bool]$EnableFullCoverage,
+            [bool]$ForceFullCoverageUntilComplete
     )
     $consecutiveFailures = 0
     $lastFailureClass = $null

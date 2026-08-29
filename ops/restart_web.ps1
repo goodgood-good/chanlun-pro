@@ -36,6 +36,8 @@ $SrcPath      = Join-Path $ProjectRoot 'src'
 $AppScript    = Join-Path $AppDir 'app.py'
 $verifyScript = Join-Path $ProjectRoot 'ops\verify_deploy.ps1'
 $watchdogScript = Join-Path $ProjectRoot 'ops\watch_web.ps1'
+$watchdogStateRoot = Join-Path $ProjectRoot '.cache\chanlun_web_watchdog'
+$watchdogScopePath = Join-Path $watchdogStateRoot 'deployment_scope.json'
 $PreflightTimeoutSec = 30
 $LargeScopePriorityMaxSymbols = 50
 $LogDir       = Join-Path $PSScriptRoot 'logs'
@@ -50,6 +52,53 @@ function Log([string]$msg) {
     $line = '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
     Write-Host $line
     Add-Content -LiteralPath $LogFile -Value $line
+}
+
+function Write-WatchdogDeploymentScope {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [bool]$LargeScreeningScopeEnabled,
+        [bool]$LargeHoldingMonitorScopeEnabled,
+        [bool]$FullSymbolCatalogEnabled,
+        [bool]$FullCoverageEnabled,
+        [bool]$ForcedFullCoverageEnabled
+    )
+
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $payload = [ordered]@{
+        schema = 'chanlun-web-watchdog-deployment-scope-v1'
+        project_root = $ProjectRoot
+        web_port = $Port
+        updated_at = (Get-Date).ToString('o')
+        enable_large_screening_scope = $LargeScreeningScopeEnabled
+        enable_large_holding_monitor_scope = $LargeHoldingMonitorScopeEnabled
+        enable_full_symbol_catalog = $FullSymbolCatalogEnabled
+        enable_full_coverage = $FullCoverageEnabled
+        force_full_coverage_until_complete = $ForcedFullCoverageEnabled
+    }
+    $temporary = '{0}.{1}.tmp' -f $Path, $PID
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            (($payload | ConvertTo-Json -Depth 3 -Compress) + [Environment]::NewLine),
+            (New-Object Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+    Log (
+        'persisted watchdog deployment scope: large={0}; holding={1}; catalog={2}; coverage={3}; force={4}' -f `
+            $LargeScreeningScopeEnabled,
+            $LargeHoldingMonitorScopeEnabled,
+            $FullSymbolCatalogEnabled,
+            $FullCoverageEnabled,
+            $ForcedFullCoverageEnabled
+    )
 }
 
 function Open-WebApplication([string]$Uri) {
@@ -969,6 +1018,21 @@ $verifyExit = $LASTEXITCODE
 foreach ($line in $verifyOutput) { Log ('deploy verify: {0}' -f $line) }
 if ($verifyExit -ne 0) {
     Log ('ERROR: deployment verification failed; preserving ready PID={0}' -f $startedProcess.Id)
+    Log '===== web restart ABORTED ====='
+    exit 1
+}
+try {
+    Write-WatchdogDeploymentScope `
+        -Path $watchdogScopePath `
+        -Port $webPort `
+        -LargeScreeningScopeEnabled $EnableLargeScreeningScope.IsPresent `
+        -LargeHoldingMonitorScopeEnabled `
+            $EnableLargeHoldingMonitorScope.IsPresent `
+        -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent `
+        -FullCoverageEnabled $EnableFullCoverage.IsPresent `
+        -ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent
+} catch {
+    Log ('ERROR: unable to persist watchdog deployment scope: {0}' -f $_.Exception.Message)
     Log '===== web restart ABORTED ====='
     exit 1
 }

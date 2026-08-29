@@ -61,6 +61,12 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     assert "$premarketTrigger = New-ScheduledTaskTrigger" in installer
     assert "-Weekly" in installer
     assert "08:20" in installer
+    assert "deployment_scope.json" in restart
+    assert "deployment_scope.json" in watchdog
+    assert "Write-WatchdogDeploymentScope" in restart
+    assert "$PSBoundParameters.ContainsKey($_)" in watchdog
+    assert "chanlun-web-watchdog-deployment-scope-v1" in restart
+    assert "chanlun-web-watchdog-deployment-scope-v1" in watchdog
 
 
 def _healthy_readiness_payload() -> dict[str, object]:
@@ -656,3 +662,98 @@ exit 0
     assert "recovery completed successfully" in watchdog_log.read_text(
         encoding="utf-8-sig"
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
+def test_scheduled_watchdog_recovery_uses_persisted_deployment_scope(
+    tmp_path: Path,
+) -> None:
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    received_parameters = tmp_path / "received-parameters.txt"
+    (ops / "restart_web.ps1").write_text(
+        """param(
+    [switch]$SkipWatchdog,
+    [int]$WebReadinessTimeoutSeconds,
+    [switch]$EnableLargeScreeningScope,
+    [switch]$EnableLargeHoldingMonitorScope,
+    [switch]$EnableFullSymbolCatalog,
+    [switch]$EnableFullCoverage,
+    [switch]$ForceFullCoverageUntilComplete
+)
+$PSBoundParameters.Keys |
+    Sort-Object |
+    Set-Content -LiteralPath '{received_parameters}' -Encoding UTF8
+exit 0
+""".format(
+            received_parameters=str(received_parameters).replace("'", "''")
+        ),
+        encoding="utf-8",
+    )
+
+    with socket.socket() as probe_socket:
+        probe_socket.bind(("127.0.0.1", 0))
+        unavailable_port = probe_socket.getsockname()[1]
+
+    state_root = tmp_path / ".cache" / "chanlun_web_watchdog"
+    state_root.mkdir(parents=True)
+    (state_root / "deployment_scope.json").write_text(
+        json.dumps(
+            {
+                "schema": "chanlun-web-watchdog-deployment-scope-v1",
+                "project_root": str(tmp_path),
+                "web_port": unavailable_port,
+                "updated_at": "2026-08-29T00:00:00+08:00",
+                "enable_large_screening_scope": True,
+                "enable_large_holding_monitor_scope": True,
+                "enable_full_symbol_catalog": True,
+                "enable_full_coverage": True,
+                "force_full_coverage_until_complete": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(WATCHDOG),
+            "-ProjectRoot",
+            str(tmp_path),
+            "-WebPort",
+            str(unavailable_port),
+            "-FailureThreshold",
+            "1",
+            "-LivenessTimeoutSeconds",
+            "5",
+            "-RestartCooldownSeconds",
+            "10",
+            "-Once",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    received = set(
+        received_parameters.read_text(encoding="utf-8-sig").splitlines()
+    )
+    assert {
+        "EnableLargeScreeningScope",
+        "EnableLargeHoldingMonitorScope",
+        "EnableFullSymbolCatalog",
+        "EnableFullCoverage",
+        "ForceFullCoverageUntilComplete",
+        "SkipWatchdog",
+        "WebReadinessTimeoutSeconds",
+    } <= received
+    heartbeat = json.loads(
+        (state_root / "heartbeat.json").read_text(encoding="utf-8-sig")
+    )
+    assert heartbeat["scope_source"] == "persisted"
+    assert all(heartbeat["deployment_scope"].values())
