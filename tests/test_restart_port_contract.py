@@ -138,6 +138,16 @@ def test_elevated_restart_hands_start_to_limited_task_after_unlocking():
     assert "$expectedHandoffRevisionPrefix" in branch
     assert "$candidateOwners -contains $candidatePid" in branch
     assert "-ExpectedProcessId $handoffPid" in branch
+    verify = branch.index("-ExpectedProcessId $handoffPid")
+    persist_scope = branch.index("Write-WatchdogDeploymentScope", verify)
+    watchdog_gate = branch.index("if (-not $SkipWatchdog)", persist_scope)
+    stop_watchdog = branch.index("Stop-Process `", watchdog_gate)
+    install_watchdog = branch.index("-File $watchdogInstaller", stop_watchdog)
+    done = branch.index("===== web restart DONE =====", install_watchdog)
+
+    assert verify < persist_scope < watchdog_gate < stop_watchdog
+    assert stop_watchdog < install_watchdog < done
+    assert "Limited scheduled task with persisted deployment scope" in branch
 
 
 @pytest.mark.skipif(os.name != "nt", reason="restart script targets Windows")

@@ -36,6 +36,7 @@ $SrcPath      = Join-Path $ProjectRoot 'src'
 $AppScript    = Join-Path $AppDir 'app.py'
 $verifyScript = Join-Path $ProjectRoot 'ops\verify_deploy.ps1'
 $watchdogScript = Join-Path $ProjectRoot 'ops\watch_web.ps1'
+$watchdogInstaller = Join-Path $ProjectRoot 'ops\install_web_watchdog.ps1'
 $watchdogStateRoot = Join-Path $ProjectRoot '.cache\chanlun_web_watchdog'
 $watchdogScopePath = Join-Path $watchdogStateRoot 'deployment_scope.json'
 $PreflightTimeoutSec = 30
@@ -952,6 +953,79 @@ if (Test-CurrentProcessElevated) {
             Log ('ERROR: limited-token deployment verification failed; preserving ready PID={0}' -f $handoffPid)
             Log '===== web restart ABORTED ====='
             exit 1
+        }
+        try {
+            Write-WatchdogDeploymentScope `
+                -Path $watchdogScopePath `
+                -Port $webPort `
+                -LargeScreeningScopeEnabled $EnableLargeScreeningScope.IsPresent `
+                -LargeHoldingMonitorScopeEnabled `
+                    $EnableLargeHoldingMonitorScope.IsPresent `
+                -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent `
+                -FullCoverageEnabled $EnableFullCoverage.IsPresent `
+                -ForcedFullCoverageEnabled `
+                    $ForceFullCoverageUntilComplete.IsPresent
+        } catch {
+            Log ('ERROR: unable to persist watchdog deployment scope: {0}' -f $_.Exception.Message)
+            Log '===== web restart ABORTED ====='
+            exit 1
+        }
+        if (-not $SkipWatchdog) {
+            # The handoff child exits after starting Web and deliberately cannot
+            # own a long-running watchdog.  Replace an exact stale instance,
+            # then let the installed Limited task load the authenticated scope
+            # persisted above.  This keeps both Web and its recovery path out of
+            # the elevated deployment token.
+            $watchdogScriptToken = '-File {0}' -f $watchdogScript
+            $watchdogRootToken = '-ProjectRoot {0}' -f $ProjectRoot
+            $watchdogPortToken = '-WebPort {0}' -f $webPort
+            $existingWatchdogs = @(
+                Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+                    Where-Object {
+                        if ([string]::IsNullOrWhiteSpace($_.CommandLine)) {
+                            return $false
+                        }
+                        $unquotedCommandLine = $_.CommandLine.Replace('"', '')
+                        return (
+                            $_.ProcessId -ne $PID -and
+                            $unquotedCommandLine.IndexOf(
+                                $watchdogScriptToken,
+                                [StringComparison]::OrdinalIgnoreCase
+                            ) -ge 0 -and
+                            $unquotedCommandLine.IndexOf(
+                                $watchdogRootToken,
+                                [StringComparison]::OrdinalIgnoreCase
+                            ) -ge 0 -and
+                            $unquotedCommandLine.IndexOf(
+                                $watchdogPortToken,
+                                [StringComparison]::OrdinalIgnoreCase
+                            ) -ge 0
+                        )
+                    }
+            )
+            foreach ($existingWatchdog in $existingWatchdogs) {
+                Stop-Process `
+                    -Id $existingWatchdog.ProcessId `
+                    -Force `
+                    -ErrorAction Stop
+                Log ('stopped superseded web watchdog PID={0}' -f $existingWatchdog.ProcessId)
+            }
+            $watchdogInstallOutput = & powershell.exe `
+                -NoProfile `
+                -ExecutionPolicy Bypass `
+                -File $watchdogInstaller `
+                -ProjectRoot $ProjectRoot `
+                -WebPort $webPort 2>&1
+            $watchdogInstallExit = $LASTEXITCODE
+            foreach ($line in $watchdogInstallOutput) {
+                Log ('watchdog install: {0}' -f $line)
+            }
+            if ($watchdogInstallExit -ne 0) {
+                Log ('ERROR: limited-token watchdog installation failed; preserving ready PID={0}' -f $handoffPid)
+                Log '===== web restart ABORTED ====='
+                exit 1
+            }
+            Log 'web watchdog launched from Limited scheduled task with persisted deployment scope'
         }
         if ($OpenBrowser) { Open-WebApplication -Uri $webUri }
         Log '===== web restart DONE ====='
