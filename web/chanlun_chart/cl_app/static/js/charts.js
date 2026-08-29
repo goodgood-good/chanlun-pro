@@ -3,12 +3,12 @@
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    schema: "chanlun-chart-config-v3",
-    // 首屏展示正式结构，并让唯一未完成的中枢/尾段跟随所属结构层以虚线显示。
-    // 分型、笔、线段仍可在显示设置中随时打开。
+    schema: "chanlun-chart-config-v4",
+    // 首屏展示笔和线段；递归结构默认只展示 L0（当前 K 线级别），
+    // 避免把更高级别中枢、买卖点和背驰叠加到当前图表上。
     fx: false,
-    bi: false,
-    xd: false,
+    bi: true,
+    xd: true,
     center_observation: false,
     center_all: true,
     trend_all: true,
@@ -495,14 +495,14 @@ function normalizeClShowConfig(config, interval) {
         const centerKey = `center_L${level}`;
         const trendKey = `trend_L${level}`;
         const pointKey = `point_L${level}`;
-        output[centerKey] = has(centerKey) ? source[centerKey] !== false : true;
+        output[centerKey] = has(centerKey) ? source[centerKey] !== false : level === 0;
         output[trendKey] = has(trendKey) ? source[trendKey] !== false : true;
-        output[pointKey] = has(pointKey) ? source[pointKey] !== false : true;
+        output[pointKey] = has(pointKey) ? source[pointKey] !== false : level === 0;
         for (const kind of ['consolidation', 'trend']) {
             const divergenceKey = `divergence_${kind}_L${level}`;
             output[divergenceKey] = has(divergenceKey)
                 ? source[divergenceKey] !== false
-                : true;
+                : level === 0;
         }
     }
     return output;

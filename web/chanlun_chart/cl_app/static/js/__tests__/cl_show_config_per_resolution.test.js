@@ -121,7 +121,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v3');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v4');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -132,18 +132,32 @@ test('only the current display schema is accepted', () => {
   );
 });
 
-test('production defaults show unfinished centers and tails with their parent structure layers', () => {
+test('production defaults show strokes segments and only current-period signals', () => {
   const { api } = loadClConfigApi();
   const config = api.normalize(null, '5');
 
   assert.equal(config.fx, false);
-  assert.equal(config.bi, false);
-  assert.equal(config.xd, false);
+  assert.equal(config.bi, true);
+  assert.equal(config.xd, true);
   assert.equal(config.center_observation, false);
   assert.equal(config.center_all, true);
+  assert.equal(config.center_L0, true);
+  assert.equal(config.center_L1, false);
+  assert.equal(config.center_L2, false);
   assert.equal(Object.hasOwn(config, 'center_provisional'), false);
   assert.equal(config.trend_all, true);
   assert.equal(Object.hasOwn(config, 'pending_movement'), false);
+  assert.equal(config.point_all, true);
+  assert.equal(config.point_L0, true);
+  assert.equal(config.point_L1, false);
+  assert.equal(config.point_L2, false);
+  assert.equal(config.divergence_all, true);
+  assert.equal(config.divergence_consolidation_L0, true);
+  assert.equal(config.divergence_trend_L0, true);
+  assert.equal(config.divergence_consolidation_L1, false);
+  assert.equal(config.divergence_trend_L1, false);
+  assert.equal(config.divergence_consolidation_L2, false);
+  assert.equal(config.divergence_trend_L2, false);
   assert.equal(api.enabled(config, {
     render_kind: 'formal_center', structural_level: 0,
   }), true);
@@ -159,6 +173,15 @@ test('production defaults show unfinished centers and tails with their parent st
   assert.equal(api.enabled(config, {
     render_kind: 'pending_movement', structural_level: 0,
   }), true);
+  assert.equal(api.enabled(config, {
+    render_kind: 'formal_center', structural_level: 1,
+  }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'point_confirmed', structural_level: 1, point_type: '1buy',
+  }), false);
+  assert.equal(api.enabled(config, {
+    render_kind: 'strict_divergence', structural_level: 1, kind: 'trend',
+  }), false);
 });
 
 test('stored non-current or malformed configuration is removed', () => {
@@ -170,6 +193,10 @@ test('stored non-current or malformed configuration is removed', () => {
   assert.equal(store.has(key), false);
 
   store.set(key, JSON.stringify({ ...api.DEFAULT, schema: 'chanlun-chart-config' }));
+  assert.equal(api.load('cm1', '5'), null);
+  assert.equal(store.has(key), false);
+
+  store.set(key, JSON.stringify({ ...api.DEFAULT, schema: 'chanlun-chart-config-v3' }));
   assert.equal(api.load('cm1', '5'), null);
   assert.equal(store.has(key), false);
 
@@ -192,11 +219,11 @@ test('current schema retains only current fields and period levels', () => {
 
   assert.equal(config.fx, false);
   assert.equal(config.center_L0, false);
-  assert.equal(config.center_L1, true);
-  assert.equal(config.center_L2, true);
+  assert.equal(config.center_L1, false);
+  assert.equal(config.center_L2, false);
   assert.equal(config.point_L0, true);
   assert.equal(config.point_L1, false);
-  assert.equal(config.point_L2, true);
+  assert.equal(config.point_L2, false);
   assert.equal(Object.hasOwn(config, 'center_L3'), false);
   assert.equal(Object.hasOwn(config, 'point_L3'), false);
   assert.equal(Object.hasOwn(config, 'removed_switch'), false);

@@ -120,6 +120,7 @@ test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
   }
   assert.equal(source.includes('严格递归中枢总开关'), false);
   assert.ok(source.includes("_cbRow('center_all', '中枢总开关')"));
+  assert.ok(source.includes("_grpTitle('背驰', '由当前 K 线递归产生')"));
   assert.equal(source.includes('形成中 / 投影（非正式）'), false);
   assert.equal(source.includes('待定尾段（非正式）'), false);
   assert.equal(source.includes("_cbRow('center_provisional'"), false);
