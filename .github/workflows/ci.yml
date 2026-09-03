@@ -121,6 +121,8 @@ jobs:
       - name: Smoke test fresh core Web import
         env:
           PYTHONPATH: src;web/chanlun_chart
+          # 安全配置要求至少存在一个命名登录账户；烟测只验证应用可启动，不执行登录。
+          CHANLUN_LOGIN_USERS: '{"ci":"scrypt:32768:8:1$ci$startup-smoke"}'
         run: >-
           poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
       - name: Install test profile dependencies

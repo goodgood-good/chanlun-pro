@@ -2,6 +2,8 @@
 # 不放宽 generic-api-key 或其他密钥检测规则。
 52efa3f34d2c3ec93e1890757c388809f6e53623:web/chanlun_chart/cl_app/services/trading_screening.py:generic-api-key:2031
 f71f3ebe1de8ab71dfed01c2c34827e184fd5027:tests/web/test_kline_recompute_price_basis.py:generic-api-key:85
+b3471edaf2ef12d4a5a1b2f4bdd62e6ebab67e5d:web/chanlun_chart/cl_app/services/trading_screening_presentation.py:generic-api-key:226
+6f9d1e232db3a7a1231f18faf7b0c98c5d07f1da:tests/web/test_kline_recompute_price_basis.py:generic-api-key:85
 
 # 该令牌已存在于 master 的 2023 历史提交，当前 HEAD 已删除。这里仅建立精确历史
 # 基线；对应外部平台令牌仍应按已泄露处理并轮换，不应重新写入仓库。

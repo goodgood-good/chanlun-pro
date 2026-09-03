@@ -36,7 +36,7 @@ dependencies = [
     "sqlalchemy>=2.0.41",
     "ta-lib",
     "tenacity>=9.1.2",
-    "tornado>=6.5.7",
+    "tornado>=6.5.8",
     "tqdm>=4.67.1",
     "urllib3>=2.7.0",
 ]
@@ -58,7 +58,7 @@ charts = [
 monitor = ["playwright>=1.53.0"]
 corpus = [
     "pdfplumber>=0.11.8,<0.12",
-    "pypdf>=6.6,<7",
+    "pypdf>=6.16.1,<7",
     "pillow>=12.3,<13",
 ]
 
