@@ -48,9 +48,13 @@ def test_chart_uses_same_origin_iframe_under_nonce_csp():
     source = (ROOT / "web/chanlun_chart/cl_app/static/js/charts.js").read_text(
         encoding="utf-8"
     )
-    enabled = re.search(r"enabled_features:\s*\[([^\]]+)\]", source)
+    enabled = re.search(
+        r"CHART_ENABLED_FEATURES\s*=\s*Object\.freeze\(\[([^\]]+)\]\)",
+        source,
+    )
     assert enabled is not None
     assert '"iframe_loading_same_origin"' in enabled.group(1)
+    assert "enabled_features: viewportOptions.enabledFeatures" in source
     assert 'location.assign("/?market="' in source
 
 

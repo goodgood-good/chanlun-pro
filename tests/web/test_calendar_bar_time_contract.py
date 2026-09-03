@@ -11,6 +11,7 @@ from cl_app.services import chart_cache
 from cl_app.services.chart_compute import (
     _decide_full_snapshot,
     chart_bar_time_coordinate,
+    slice_chart_data_to_countback,
     slice_chart_data_to_window,
     strict_structure_history_fields,
     trim_future_bars,
@@ -77,7 +78,6 @@ def test_calendar_poll_window_includes_the_active_period() -> None:
         _ts(2026, 8, 1),
         frequency="m",
     )
-
     assert sliced["t"] == [july_close]
     assert _decide_full_snapshot(
         "false",
@@ -87,6 +87,27 @@ def test_calendar_poll_window_includes_the_active_period() -> None:
         frequency="m",
     )
 
+
+def test_initial_countback_projects_bars_and_shapes_without_mutating_cache() -> None:
+    times = [1_700_000_000 + index * 60 for index in range(10)]
+    source = _chart_data(times)
+    source["fxs"] = [
+        {"points": {"time": times[2], "price": 10}},
+        {"points": {"time": times[8], "price": 11}},
+    ]
+    source["bis"] = [
+        {"points": [
+            {"time": times[5], "price": 9},
+            {"time": times[7], "price": 12},
+        ]},
+    ]
+
+    projected = slice_chart_data_to_countback(source, 3, frequency="1m")
+
+    assert projected["t"] == times[-3:]
+    assert projected["fxs"] == source["fxs"][-1:]
+    assert projected["bis"] == source["bis"]
+    assert source["t"] == times
 
 def test_final_response_close_must_match_atomic_strict_snapshot() -> None:
     strict = {
@@ -175,3 +196,47 @@ def test_monthly_history_response_keeps_active_bar_and_matching_strict_snapshot(
     assert payload["t"] == [july_close]
     assert payload["strict_structure_mode"] == "replace"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]
+
+
+def test_first_history_response_honors_tradingview_countback(
+    client,
+    monkeypatch,
+) -> None:
+    market = "a"
+    code = "SH.600001"
+    times = [1_780_000_000 + index * 300 for index in range(1_200)]
+    chart_data = _chart_data(times)
+    chart_data.update({"fxs": [], "bis": [], "xds": []})
+    config = query_cl_chart_config(market, code)
+    cache_key = chart_cache._build_cache_key(market, code, "5m", config)
+    entry = chart_cache._build_chart_cache_entry(
+        chart_data,
+        is_full_snapshot=True,
+        validated_at=time.time(),
+    )
+    with chart_cache.cache_lock:
+        chart_cache.chart_data_cache[cache_key] = entry
+
+    monkeypatch.setattr(tv_mod, "market_now_trading", lambda _market: False)
+    monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tv_mod.market_frequencys,
+        "cached_snapshot",
+        lambda _markets: {market: ["5m"]},
+    )
+    response = client.get(
+        "/tv/history"
+        f"?symbol={market}:{code}"
+        "&resolution=5"
+        "&firstDataRequest=true"
+        "&countback=329"
+        "&from=0"
+        f"&to={times[-1] + 300}"
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["s"] == "ok"
+    assert payload["t"] == times[-329:]
+    assert len(payload["c"]) == 329
+    assert len(entry["data"]["t"]) == 1_200

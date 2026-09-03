@@ -1401,10 +1401,11 @@
       root.dataset.screeningMode = state.mode;
       const liveWorkspaces = byId("es-live-workspaces");
       if (liveWorkspaces) liveWorkspaces.classList.toggle("is-review-mode", state.mode === "human-review");
-      document.querySelectorAll("[data-screening-mode]").forEach((button) => {
+      document.querySelectorAll('[role="tab"][data-screening-mode]').forEach((button) => {
         const active = button.dataset.screeningMode === state.mode;
         button.classList.toggle("is-active", active);
         button.setAttribute("aria-selected", active ? "true" : "false");
+        button.tabIndex = active ? 0 : -1;
       });
       setText(
         "hr-mode-description",
@@ -2477,8 +2478,23 @@
       }
     }
 
-    document.querySelectorAll("[data-screening-mode]").forEach((button) => {
+    const modeButtons = Array.from(
+      document.querySelectorAll('[role="tab"][data-screening-mode]'),
+    );
+    modeButtons.forEach((button, index) => {
       button.addEventListener("click", () => setMode(button.dataset.screeningMode));
+      button.addEventListener("keydown", (event) => {
+        let targetIndex = null;
+        if (event.key === "ArrowRight") targetIndex = (index + 1) % modeButtons.length;
+        else if (event.key === "ArrowLeft") targetIndex = (index - 1 + modeButtons.length) % modeButtons.length;
+        else if (event.key === "Home") targetIndex = 0;
+        else if (event.key === "End") targetIndex = modeButtons.length - 1;
+        if (targetIndex === null) return;
+        event.preventDefault();
+        const target = modeButtons[targetIndex];
+        target.focus();
+        setMode(target.dataset.screeningMode);
+      });
     });
     byId("hr-source").addEventListener("change", (event) => {
       state.source = event.target.value || "latest";

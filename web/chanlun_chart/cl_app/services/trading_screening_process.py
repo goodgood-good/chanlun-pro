@@ -10,6 +10,7 @@ xtquant 客户端含有可能直接终止解释器、且不抛出 Python 异常�
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -26,7 +27,7 @@ import secrets
 import shutil
 import subprocess
 import sys
-from threading import Event, Lock, RLock, Thread
+from threading import Condition, Event, Lock, RLock, Thread
 import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -56,6 +57,7 @@ from chanlun.decision_support.trading_system.trading_session import (
 )
 from cl_app.services.trading_screening_gateway import (
     CachedSectorSnapshot,
+    NativeSectorAnalysisShard,
     SectorAnalysisExclusion,
     SectorAnalysisFailure,
     SectorAssessmentBatch,
@@ -2261,7 +2263,22 @@ class NativeTradingDataGatewayProcessProxy:
         self._prepared_history_lock = RLock()
         self._prepared_history_as_of: datetime | None = None
         self._prepared_history_by_code: dict[str, tuple[str, ...]] = {}
+        # Full-coverage/candidate threads and the minute locator share the same
+        # isolated transports.  Once a minute phase is due, stop admitting new
+        # ordinary requests and let only the already-running request on each
+        # shard drain; otherwise ordinary executor threads can repeatedly win
+        # the per-transport lock and consume the complete 55-second alert SLA.
+        self._structure_phase_condition = Condition()
+        self._priority_structure_phase_depth = 0
+        self._ordinary_structure_request_count = 0
+        self._ordinary_structure_waiter_count = 0
         self._sector_snapshot_in_flight = Event()
+        self._parallel_sector_snapshot_in_flight = Event()
+        # A parallel sector build owns only the transports whose shard request
+        # is still running. Completed shards are returned to the urgent lane
+        # immediately instead of remaining artificially unavailable until the
+        # single slowest shard finishes.
+        self._parallel_sector_busy_transport_ids: set[int] = set()
         if (
             self._runtime_state_cache_root is not None
             and not self._runtime_state_cache_delete_on_close
@@ -2271,6 +2288,80 @@ class NativeTradingDataGatewayProcessProxy:
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         for transport in (self._transport, *self._structure_transports):
             transport.set_progress_callback(callback)
+
+    def begin_priority_structure_phase(self, *, deadline_monotonic: float) -> None:
+        """Drain admitted ordinary symbol work and reserve every free shard."""
+
+        if (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+        ):
+            raise TypeError("priority structure phase deadline must be numeric")
+        deadline = float(deadline_monotonic)
+        condition = self._structure_phase_condition
+        with condition:
+            self._priority_structure_phase_depth += 1
+            try:
+                while self._ordinary_structure_request_count > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise NativePriorityScreeningWorkerDeadlineExceeded(
+                            "ordinary structure requests did not drain before "
+                            "the priority deadline"
+                        )
+                    condition.wait(timeout=min(remaining, 0.1))
+            except BaseException:
+                self._priority_structure_phase_depth -= 1
+                if self._priority_structure_phase_depth == 0:
+                    condition.notify_all()
+                raise
+
+    def end_priority_structure_phase(self) -> None:
+        """Release ordinary symbol admission after the exact 1m phase."""
+
+        condition = self._structure_phase_condition
+        with condition:
+            if self._priority_structure_phase_depth <= 0:
+                raise RuntimeError("priority structure phase is not active")
+            self._priority_structure_phase_depth -= 1
+            if self._priority_structure_phase_depth == 0:
+                condition.notify_all()
+
+    def _enter_ordinary_structure_request(
+        self,
+        *,
+        deadline_monotonic: float | None,
+    ) -> None:
+        condition = self._structure_phase_condition
+        with condition:
+            waiting = self._priority_structure_phase_depth > 0
+            if waiting:
+                self._ordinary_structure_waiter_count += 1
+            try:
+                while self._priority_structure_phase_depth > 0:
+                    if deadline_monotonic is None:
+                        condition.wait(timeout=0.1)
+                        continue
+                    remaining = float(deadline_monotonic) - time.monotonic()
+                    if remaining <= 0:
+                        raise NativeScreeningWorkerDeadlineExceeded(
+                            "ordinary structure admission exceeded its deadline "
+                            "while the priority phase was active"
+                        )
+                    condition.wait(timeout=min(remaining, 0.1))
+            finally:
+                if waiting:
+                    self._ordinary_structure_waiter_count -= 1
+            self._ordinary_structure_request_count += 1
+
+    def _exit_ordinary_structure_request(self) -> None:
+        condition = self._structure_phase_condition
+        with condition:
+            if self._ordinary_structure_request_count <= 0:
+                raise RuntimeError("ordinary structure request is not active")
+            self._ordinary_structure_request_count -= 1
+            if self._ordinary_structure_request_count == 0:
+                condition.notify_all()
 
     def configure_sector_cache_restore_scope(
         self,
@@ -2351,6 +2442,12 @@ class NativeTradingDataGatewayProcessProxy:
             self._coverage_sector_affinity_plan = plan
         return plan.audit_document()
 
+    def coverage_sector_affinity_slots(self) -> dict[str, int]:
+        """Return the exact installed coverage routes for service-side waves."""
+
+        with self._cache_lock:
+            return dict(self._coverage_sector_affinity_plan.worker_by_sector)
+
     def _structure_transports_for_lane(
         self,
         lane: str,
@@ -2367,8 +2464,52 @@ class NativeTradingDataGatewayProcessProxy:
             )
         if lane == "priority_burst":
             # 精确 1m 区间套拥有本轮最高优先级。服务层保证该波次结束后才会
-            # 接纳普通候选，因此可临时借用全部结构分片而不发生跨通道争抢。
+            # 接纳普通候选，因此通常可临时借用全部结构分片。原子板块快照是
+            # 唯一会跨越多个分钟边界的既有长任务，并固定在第一个候选分片；
+            # 快照仍在构建时必须绕开该分片，否则一个确定性亲和命中会一直等到
+            # 1m 绝对截止点，并通过波次屏障连带延期其他本可完成的实时标的。
+            if self._sector_snapshot_in_flight.is_set() and len(
+                self._structure_transports
+            ) > 1:
+                if self._parallel_sector_snapshot_in_flight.is_set():
+                    # Parallel sector shards deliberately leave worker 0 and
+                    # the first candidate worker outside the multi-minute
+                    # catalog build. A builder belongs to the urgent lane again
+                    # as soon as its own shard is complete; waiting for the
+                    # slowest shard stranded most of the process pool during
+                    # the long-tail phase and made live coverage regress.
+                    with self._cache_lock:
+                        busy_ids = frozenset(
+                            self._parallel_sector_busy_transport_ids
+                        )
+                    if not busy_ids:
+                        # Defensive fallback for manually toggled/test states
+                        # and the sub-millisecond handoff to finalization.
+                        return self._structure_transports[:2]
+                    available = tuple(
+                        transport
+                        for transport in self._structure_transports
+                        if id(transport) not in busy_ids
+                    )
+                    return available or self._structure_transports[:1]
+                return (
+                    self._structure_transports[0],
+                    *self._structure_transports[2:],
+                )
             return self._structure_transports
+        if lane == "monitor_candidate":
+            # The formal 5m notification phase shares the same short admission
+            # gate as the 1m locator.  It may therefore borrow every genuinely
+            # free shard.  During a parallel catalog build, worker 0 and the
+            # deliberately reserved first candidate worker remain available;
+            # every other candidate process is already occupied by a shard.
+            if (
+                self._sector_snapshot_in_flight.is_set()
+                and self._parallel_sector_snapshot_in_flight.is_set()
+                and len(self._structure_transports) > 1
+            ):
+                return self._structure_transports_for_lane("priority_burst")
+            return self._structure_transports_for_lane("priority_burst")
         if lane in {"candidate", "candidate_overflow"}:
             # 只有一个分片时保持兼容；多分片配置把第一个永久从普通候选中保留，
             # 其余分片并行服务正式 5m 候选。精确定位阶段可在候选开始前借用全部分片。
@@ -2381,6 +2522,11 @@ class NativeTradingDataGatewayProcessProxy:
             # 候选分片时，期间把普通 5m/30m 轮换收敛到其余分片，避免亲和哈希落到
             # 长请求的标的连续延期；板块请求结束后立即恢复完整分片和原缓存亲和。
             if self._sector_snapshot_in_flight.is_set() and len(candidates) > 1:
+                if self._parallel_sector_snapshot_in_flight.is_set():
+                    # One ordinary-candidate process is deliberately kept outside
+                    # the sector build set.  Preserve that lane while the other
+                    # workers fan out the catalog.
+                    return candidates[:1]
                 return candidates[1:]
             return candidates
         if lane == "coverage":
@@ -2449,6 +2595,7 @@ class NativeTradingDataGatewayProcessProxy:
 
         if work_lane in {
             "priority_burst",
+            "monitor_candidate",
             "candidate",
             "candidate_overflow",
         } and affinity_key.startswith("sector:"):
@@ -2497,15 +2644,107 @@ class NativeTradingDataGatewayProcessProxy:
                 # 行业快照可能持续数分钟。生产多分片配置必须把它放到普通候选分片，第一
                 # 个结构进程永久留给实时优先标的；否则盘中显式重建会让 1m/5m 监听整段过期。
                 # 单分片测试和嵌入式配置仍自然回退到唯一进程。
-                sector_transport = self._structure_transports_for_lane("candidate")[0]
-                request_kwargs: dict[str, object] = {"as_of": as_of}
-                if expected_admitted_codes is not None:
-                    request_kwargs["admitted_codes"] = expected_admitted_codes
+                candidate_transports = self._structure_transports_for_lane(
+                    "candidate"
+                )
+                parallel_sector_build = len(candidate_transports) > 2
+                # Small/embedded pools retain the historical single request.
+                # A production-width pool keeps one ordinary candidate worker
+                # responsive and fans the catalog across every other process.
+                sector_transports = (
+                    candidate_transports[1:]
+                    if parallel_sector_build
+                    else candidate_transports[:1]
+                )
+                shard_count = len(sector_transports)
+                with self._cache_lock:
+                    self._parallel_sector_busy_transport_ids = (
+                        {id(transport) for transport in sector_transports}
+                        if parallel_sector_build
+                        else set()
+                    )
                 self._sector_snapshot_in_flight.set()
+                if parallel_sector_build:
+                    self._parallel_sector_snapshot_in_flight.set()
             try:
-                value = sector_transport.request("sector_snapshot", **request_kwargs)
+                if not parallel_sector_build:
+                    request_kwargs: dict[str, object] = {
+                        "as_of": as_of,
+                    }
+                    if expected_admitted_codes is not None:
+                        request_kwargs["admitted_codes"] = expected_admitted_codes
+                    value = sector_transports[0].request(
+                        "sector_snapshot", **request_kwargs
+                    )
+                else:
+                    def request_shard(
+                        shard_index: int,
+                        transport: NativeWorkerProcessTransport,
+                    ) -> NativeSectorAnalysisShard:
+                        try:
+                            request_kwargs = {
+                                "as_of": as_of,
+                                "shard_index": shard_index,
+                                "shard_count": shard_count,
+                            }
+                            if expected_admitted_codes is not None:
+                                request_kwargs["admitted_codes"] = (
+                                    expected_admitted_codes
+                                )
+                            raw = transport.request(
+                                "sector_analysis_shard",
+                                **request_kwargs,
+                            )
+                            return self._validated_sector_analysis_shard(
+                                raw,
+                                expected_admitted_codes=expected_admitted_codes,
+                                expected_shard_index=shard_index,
+                                expected_shard_count=shard_count,
+                            )
+                        finally:
+                            with self._cache_lock:
+                                self._parallel_sector_busy_transport_ids.discard(
+                                    id(transport)
+                                )
+
+                    with ThreadPoolExecutor(
+                        max_workers=shard_count,
+                        thread_name_prefix="SectorSnapshotShard",
+                    ) as executor:
+                        futures = tuple(
+                            executor.submit(request_shard, index, transport)
+                            for index, transport in enumerate(sector_transports)
+                        )
+                        shards = tuple(future.result() for future in futures)
+
+                    finalize_kwargs: dict[str, object] = {
+                        "as_of": as_of,
+                        "shards": shards,
+                    }
+                    if expected_admitted_codes is not None:
+                        finalize_kwargs["admitted_codes"] = (
+                            expected_admitted_codes
+                        )
+                    finalize_transport = sector_transports[0]
+                    with self._cache_lock:
+                        self._parallel_sector_busy_transport_ids.add(
+                            id(finalize_transport)
+                        )
+                    try:
+                        value = finalize_transport.request(
+                            "sector_snapshot_finalize",
+                            **finalize_kwargs,
+                        )
+                    finally:
+                        with self._cache_lock:
+                            self._parallel_sector_busy_transport_ids.discard(
+                                id(finalize_transport)
+                            )
             finally:
+                self._parallel_sector_snapshot_in_flight.clear()
                 self._sector_snapshot_in_flight.clear()
+                with self._cache_lock:
+                    self._parallel_sector_busy_transport_ids.clear()
 
             with self._sector_scope_lock:
                 current_scope_identity = (
@@ -2526,6 +2765,37 @@ class NativeTradingDataGatewayProcessProxy:
                 self._install_sector_snapshot(components)
                 self._persist_sector_snapshot_cache(components, observed_at)
                 return components.batch
+
+    @staticmethod
+    def _validated_sector_analysis_shard(
+        value: object,
+        *,
+        expected_admitted_codes: tuple[str, ...] | None,
+        expected_shard_index: int,
+        expected_shard_count: int,
+    ) -> NativeSectorAnalysisShard:
+        if not isinstance(value, Mapping) or (
+            value.get("schema") != "chanlun-native-sector-analysis-shard"
+            or value.get("admitted_codes") != expected_admitted_codes
+            or value.get("minimum_market_data_frequency") != "1m"
+            or value.get("tick_data_used") is not False
+            or value.get("real_account_access") is not False
+            or value.get("real_order_transport") is not False
+        ):
+            raise NativeScreeningWorkerProtocolError(
+                "invalid native sector analysis shard envelope"
+            )
+        shard = value.get("shard")
+        if (
+            not isinstance(shard, NativeSectorAnalysisShard)
+            or shard.shard_index != expected_shard_index
+            or shard.shard_count != expected_shard_count
+            or shard.admitted_codes != expected_admitted_codes
+        ):
+            raise NativeScreeningWorkerProtocolError(
+                "native sector analysis shard identity mismatch"
+            )
+        return shard
 
     def _validated_atomic_snapshot(
         self,
@@ -3803,28 +4073,15 @@ class NativeTradingDataGatewayProcessProxy:
         *,
         frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
         as_of: datetime,
+        deadline_monotonic: float,
     ) -> Mapping[str, object]:
-        """登记可复用的低频本地库，禁止盘中优先通道执行无界批量下载。"""
+        """Authorize validated local-first reads for the live 1m lane."""
 
-        observed_at = normalize_datetime(as_of, "as_of")
-        canonical = self._validated_history_requests(frequency_requests)
-        # 日线在盘中不会形成新完成 K 线。结构入口固定先刷新 5m；QMT 的 30m 也以
-        # 5m 为下载基础，因此随后只读本地 30m 就已经包含本轮刚刷新的基础事实。
-        # 其余周期仍由有界逐只请求刷新，避免 download_history_data2 卡住数分钟。
-        reusable = {
-            code: tuple(
-                frequency
-                for frequency in SCREENING_STRUCTURE_FREQUENCIES
-                if frequency in {"d", "30m"}
-            )
-            for code, _frequencies in canonical
-        }
-        return self._install_prepared_history_scope(
-            canonical=canonical,
-            observed_at=observed_at,
-            prepared=reusable,
-            batch_download_available=False,
-            merge=True,
+        return self._prepare_realtime_local_history_until(
+            frequency_requests=frequency_requests,
+            as_of=as_of,
+            deadline_monotonic=deadline_monotonic,
+            lane="priority_burst",
         )
 
     def prepare_candidate_local_history_until(
@@ -3834,32 +4091,61 @@ class NativeTradingDataGatewayProcessProxy:
         as_of: datetime,
         deadline_monotonic: float,
     ) -> Mapping[str, object]:
-        """普通候选只刷新会变化的基础周期，禁止重复下载占满分钟预算。"""
+        """Authorize validated local-first reads for the candidate 5m lane."""
 
+        return self._prepare_realtime_local_history_until(
+            frequency_requests=frequency_requests,
+            as_of=as_of,
+            deadline_monotonic=deadline_monotonic,
+            lane="candidate",
+        )
+
+    def _prepare_realtime_local_history_until(
+        self,
+        *,
+        frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
+        as_of: datetime,
+        deadline_monotonic: float,
+        lane: str,
+    ) -> Mapping[str, object]:
+        """Authorize local-first reads while preserving exact-symbol fallback.
+
+        MiniQMT continuously advances its shared local store during the live
+        session.  Issuing download RPCs for every monitored symbol serializes an
+        already-current fact lane.  The native gateway now validates both full
+        warmup history and the latest expected close for every local-first read;
+        only a genuinely short or stale frame falls back to the original
+        per-symbol download path.
+        """
+
+        if lane not in {"priority_burst", "candidate"}:
+            raise ValueError("unsupported realtime history preparation lane")
         if (
             isinstance(deadline_monotonic, bool)
             or not isinstance(deadline_monotonic, (int, float))
-            or deadline_monotonic <= time.monotonic()
         ):
+            raise TypeError("realtime history preparation deadline must be numeric")
+        outer_deadline = float(deadline_monotonic)
+        now = time.monotonic()
+        if outer_deadline <= now:
             raise NativeScreeningWorkerDeadlineExceeded(
-                "candidate history preparation deadline already elapsed"
+                f"{lane} history preparation deadline already elapsed"
             )
         observed_at = normalize_datetime(as_of, "as_of")
         canonical = self._validated_history_requests(frequency_requests)
-        # 所有结构包都先读取 5m；30m 的 QMT 下载基础同样是 5m，所以在 5m 本轮刷新后
-        # 直接读取本地 30m 可避免同一基础周期下载两次。日线盘中不变，也无需逐只刷新。
-        reusable = {
+        prepared = {
             code: tuple(
                 frequency
                 for frequency in SCREENING_STRUCTURE_FREQUENCIES
                 if frequency in {"d", "30m"}
+                or frequency in frequencies and frequency in {"5m", "1m"}
             )
-            for code, _frequencies in canonical
+            for code, frequencies in canonical
         }
         return self._install_prepared_history_scope(
             canonical=canonical,
             observed_at=observed_at,
-            prepared=reusable,
+            prepared=prepared,
             batch_download_available=False,
             merge=True,
         )
@@ -4085,6 +4371,31 @@ class NativeTradingDataGatewayProcessProxy:
             work_lane="candidate",
         )
 
+    def monitor_candidate_structure_bundle_with_risk_cutoff_until(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector: SectorAssessment,
+        frequencies: tuple[str, ...],
+        risk_evidence_cutoff: datetime,
+        deadline_monotonic: float,
+    ) -> SymbolStructureBundle:
+        """Read a formal 5m alert candidate inside the live admission gate."""
+
+        return self._structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
+            higher_timeframe_as_of=normalize_datetime(
+                risk_evidence_cutoff,
+                "risk_evidence_cutoff",
+            ),
+            deadline_monotonic=deadline_monotonic,
+            work_lane="monitor_candidate",
+        )
+
     def candidate_overflow_structure_bundle_with_risk_cutoff_until(
         self,
         code: str,
@@ -4174,6 +4485,11 @@ class NativeTradingDataGatewayProcessProxy:
             "candidate",
             "candidate_overflow",
         }:
+            # Ordinary/background candidates may finish one admitted cold
+            # request so their incremental process state is not churned. The
+            # formal monitor candidate lane is different: it shares the live
+            # one-minute boundary and must never extend an in-flight request
+            # beyond that absolute deadline.
             request_deadline_monotonic = max(
                 float(deadline_monotonic),
                 time.monotonic() + _CANDIDATE_IN_FLIGHT_MINIMUM_SECONDS,
@@ -4211,10 +4527,22 @@ class NativeTradingDataGatewayProcessProxy:
         }
         if request_deadline_monotonic is not None:
             request_kwargs["deadline_monotonic"] = request_deadline_monotonic
-        value = request(
-            "structure_bundle",
-            **request_kwargs,
-        )
+        ordinary_request = work_lane not in {
+            "priority_burst",
+            "monitor_candidate",
+        }
+        if ordinary_request:
+            self._enter_ordinary_structure_request(
+                deadline_monotonic=request_deadline_monotonic,
+            )
+        try:
+            value = request(
+                "structure_bundle",
+                **request_kwargs,
+            )
+        finally:
+            if ordinary_request:
+                self._exit_ordinary_structure_request()
         if not isinstance(value, SymbolStructureBundle):
             raise NativeScreeningWorkerProtocolError("invalid structure bundle result")
         return value
@@ -4311,6 +4639,19 @@ class NativeTradingDataGatewayProcessProxy:
         worker_health = tuple(
             transport.health_snapshot() for transport in self._structure_transports
         )
+        with self._structure_phase_condition:
+            priority_phase_active = self._priority_structure_phase_depth > 0
+            ordinary_structure_request_count = (
+                self._ordinary_structure_request_count
+            )
+            ordinary_structure_waiter_count = self._ordinary_structure_waiter_count
+        priority_burst_worker_count = len(
+            self._structure_transports_for_lane("priority_burst")
+        )
+        with self._cache_lock:
+            parallel_sector_busy_worker_count = len(
+                self._parallel_sector_busy_transport_ids
+            )
         running_revisions = {
             value.get("worker_application_source_revision")
             for value in worker_health
@@ -4322,8 +4663,18 @@ class NativeTradingDataGatewayProcessProxy:
             "coverage_sector_affinity": coverage_affinity,
             "configured_worker_count": len(worker_health),
             "priority_reserved_worker_count": 1 if worker_health else 0,
-            "priority_burst_worker_count": len(worker_health),
+            "priority_burst_worker_count": priority_burst_worker_count,
+            "parallel_sector_busy_worker_count": (
+                parallel_sector_busy_worker_count
+            ),
+            "priority_burst_sector_snapshot_exclusion_active": bool(
+                self._sector_snapshot_in_flight.is_set()
+                and len(worker_health) > 1
+            ),
             "priority_phase_exclusive": True,
+            "priority_phase_active": priority_phase_active,
+            "ordinary_structure_request_count": ordinary_structure_request_count,
+            "ordinary_structure_waiter_count": ordinary_structure_waiter_count,
             "candidate_worker_count": (
                 max(1, len(worker_health) - 1) if worker_health else 0
             ),

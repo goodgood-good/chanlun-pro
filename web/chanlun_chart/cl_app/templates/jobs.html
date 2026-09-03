@@ -50,12 +50,21 @@
           </div>
           <span class="cp-status-pill">{{ jobs|length }} 项任务</span>
         </header>
+        {% if jobs %}
         <div class="cp-data-shell-body">
           <table class="layui-hide" id="table-jobs" aria-label="后台调度任务列表"></table>
         </div>
+        {% else %}
+        <div class="cp-empty-state" role="status">
+          <span class="cp-empty-state__icon" aria-hidden="true">◇</span>
+          <strong>暂时没有已注册的调度任务</strong>
+          <p>后台调度尚未启动，或当前没有可展示的任务。使用正式运行入口启动服务后，可刷新本页查看状态。</p>
+        </div>
+        {% endif %}
       </section>
     </main>
 
+    {% if jobs %}
     <script nonce="{{ csp_nonce }}">
       $(function () {
         layui.use('table', function () {
@@ -74,5 +83,6 @@
         });
       });
     </script>
+    {% endif %}
   </body>
 </html>

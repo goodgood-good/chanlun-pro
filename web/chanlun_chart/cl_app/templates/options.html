@@ -12,7 +12,8 @@
   {% include 'dark.html' %}
 </head>
 <body class="cp-ui">
-  <main class="cp-page cp-page-stack">
+  <a class="cp-skip-link" href="#main-content">跳到显示配置</a>
+  <main id="main-content" class="cp-page cp-page--compact cp-page-stack">
     <header class="cp-page-header">
       <div class="cp-page-header-copy">
         <span class="cp-eyebrow">PRODUCTION CHART</span>
@@ -24,36 +25,39 @@
       </div>
     </header>
 
-    <form class="layui-form layui-form-pane cl_config_setting cp-section-card cp-config-form" lay-filter="cl_config">
+    <form class="layui-form layui-form-pane cl_config_setting cp-section-card cp-config-form" lay-filter="cl_config" aria-labelledby="base-display-title">
       <input type="hidden" name="market" value="{{ market }}" />
       <input type="hidden" name="code" value="{{ code }}" />
       <input type="hidden" name="is_del" value="false" />
 
+      <h2 id="base-display-title" class="cp-config-section-title">基础结构图元</h2>
+
       <div class="layui-form-item" title="配置保存范围">
-        <label class="layui-form-label">配置范围</label>
+        <label class="layui-form-label" for="config_use_type">配置范围</label>
         <div class="layui-input-block">
-          <select name="config_use_type">
+          <select id="config_use_type" name="config_use_type" aria-label="配置范围">
             <option value="common" {% if config_use_type == 'common' %}selected{% endif %}>市场通用</option>
             <option value="custom" {% if config_use_type == 'custom' %}selected{% endif %}>当前标的</option>
           </select>
         </div>
       </div>
 
-      <div class="layui-form-item cp-base-display-options">
+      <div class="layui-form-item cp-config-wide cp-base-display-options" role="group" aria-labelledby="base-options-label">
+        <span id="base-options-label" class="layui-form-label">显示内容</span>
         <div class="layui-row">
           <div class="layui-col-xs4">
-            <input type="checkbox" name="chart_show_fx" value="1" title="分型" {% if chart_show_fx == '1' %}checked{% endif %} />
+            <input type="checkbox" name="chart_show_fx" value="1" title="分型" aria-label="分型" {% if chart_show_fx == '1' %}checked{% endif %} />
           </div>
           <div class="layui-col-xs4">
-            <input type="checkbox" name="chart_show_bi" value="1" title="笔" {% if chart_show_bi == '1' %}checked{% endif %} />
+            <input type="checkbox" name="chart_show_bi" value="1" title="笔" aria-label="笔" {% if chart_show_bi == '1' %}checked{% endif %} />
           </div>
           <div class="layui-col-xs4">
-            <input type="checkbox" name="chart_show_xd" value="1" title="线段" {% if chart_show_xd == '1' %}checked{% endif %} />
+            <input type="checkbox" name="chart_show_xd" value="1" title="线段" aria-label="线段" {% if chart_show_xd == '1' %}checked{% endif %} />
           </div>
         </div>
       </div>
 
-      <div class="layui-form-item">
+      <div class="layui-form-item cp-actions cp-actions--sticky">
         <button type="button" class="layui-btn" id="save_cl_config_btn">保存显示配置</button>
         <button type="button" class="layui-btn layui-btn-primary" id="delete_cl_config_btn">删除当前标的配置</button>
       </div>

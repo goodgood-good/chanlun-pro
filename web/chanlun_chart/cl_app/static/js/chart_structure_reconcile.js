@@ -88,13 +88,23 @@
     return barTime / 1000;
   }
 
-  function chartTimeCoordinate(epochSeconds, frequency) {
+  function intradayFrequencySeconds(frequency) {
+    const matched = /^([1-9][0-9]*)([ms])$/i.exec(String(frequency || "").trim());
+    if (!matched) return null;
+    const amount = Number(matched[1]);
+    return matched[2].toLowerCase() === "s" ? amount : amount * 60;
+  }
+
+  function chartTimeCoordinate(epochSeconds, frequency, sourceTimeIsClose = false) {
     if (!Number.isInteger(epochSeconds)) {
       throw new Error("chart source time must be epoch seconds");
     }
     const calendar = String(frequency || "");
     if (!["d", "2d", "w", "m", "q", "y"].includes(calendar)) {
-      return epochSeconds;
+      const duration = sourceTimeIsClose
+        ? intradayFrequencySeconds(calendar)
+        : null;
+      return duration === null ? epochSeconds : epochSeconds - duration;
     }
 
     const source = new Date(epochSeconds * 1000);
@@ -119,7 +129,7 @@
     return coordinate;
   }
 
-  function itemToChartCoordinates(item, frequency) {
+  function itemToChartCoordinates(item, frequency, sourceTimeIsClose = false) {
     if (!item || !Array.isArray(item.points)) {
       throw new Error("strict render item requires points");
     }
@@ -127,7 +137,7 @@
       ...item,
       points: item.points.map((point) => ({
         ...point,
-        time: chartTimeCoordinate(point && point.time, frequency),
+        time: chartTimeCoordinate(point && point.time, frequency, sourceTimeIsClose),
       })),
     };
   }

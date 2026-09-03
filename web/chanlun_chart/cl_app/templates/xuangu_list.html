@@ -24,7 +24,7 @@
         <div class="cp-page-header-actions">
           <div class="cp-context-card">
             <span>当前市场</span>
-            <strong>{{ market|upper }}</strong>
+            <strong>{{ market_label }}</strong>
           </div>
         </div>
       </header>
@@ -42,9 +42,9 @@
           </div>
           <div class="cp-form-grid">
             <div class="layui-form-item">
-              <label class="layui-form-label">市场</label>
+              <label class="layui-form-label" for="xuangu_market">市场</label>
               <div class="layui-input-block">
-                <select class="form-control" name="market" lay-filter="market" disabled>
+                <select id="xuangu_market" class="form-control" name="market" lay-filter="market" disabled>
                   <option value="a" {% if market=='a' %}selected{% endif %}>沪深 A 股</option>
                   <option value="hk" {% if market=='hk' %}selected{% endif %}>港股</option>
                   <option value="futures" {% if market=='futures' %}selected{% endif %}>国内期货</option>
@@ -57,9 +57,9 @@
               </div>
             </div>
             <div class="layui-form-item">
-              <label class="layui-form-label">选股策略</label>
+              <label class="layui-form-label" for="xuangu_task_name">选股策略</label>
               <div class="layui-input-block">
-                <select class="form-control" name="task_name" lay-filter="task_name">
+                <select id="xuangu_task_name" class="form-control" name="task_name" lay-filter="task_name">
                   {% for _task_name, _task_config in tasks.items() %}
                   <option value="{{ _task_name }}">{{ _task_config['name'] }}</option>
                   {% endfor %}
@@ -74,11 +74,11 @@
               </div>
             </div>
             <div class="layui-form-item cp-field--span-2">
-              <label class="layui-form-label">选股方向</label>
-              <div class="layui-input-block cp-choice-group">
-                <input type="checkbox" class="form-control" name="opt_type" value="long" title="做多"
+              <span id="xuangu_direction_label" class="layui-form-label">选股方向</span>
+              <div class="layui-input-block cp-choice-group" role="group" aria-labelledby="xuangu_direction_label">
+                <input type="checkbox" class="form-control" name="opt_type" value="long" title="做多" aria-label="做多"
                   checked lay-filter="opt_type" />
-                <input type="checkbox" class="form-control" name="opt_type" value="short" title="做空"
+                <input type="checkbox" class="form-control" name="opt_type" value="short" title="做空" aria-label="做空"
                   lay-filter="opt_type" />
               </div>
             </div>
@@ -97,11 +97,11 @@
           </div>
           <div class="cp-form-grid">
             <div class="layui-form-item cp-field--span-2">
-              <label class="layui-form-label">行情周期</label>
-              <div class="layui-input-block cp-choice-group">
+              <span id="xuangu_frequency_label" class="layui-form-label">行情周期</span>
+              <div class="layui-input-block cp-choice-group" role="group" aria-labelledby="xuangu_frequency_label">
                 {% for f, v in frequencys.items() %}
                 <input type="checkbox" class="form-control" name="frequencys" value="{{ f }}"
-                  title="{{ v }}" lay-filter="frequencys" />
+                  title="{{ v }}" aria-label="{{ v }}" lay-filter="frequencys" />
                 {% endfor %}
               </div>
             </div>
@@ -115,9 +115,9 @@
               </div>
             </div>
             <div class="layui-form-item cp-field--span-2">
-              <label class="layui-form-label">验证上限</label>
+              <label class="layui-form-label" for="xuangu_scope_limit">验证上限</label>
               <div class="layui-input-block">
-                <select class="form-control" name="scope_limit" lay-filter="scope_limit">
+                <select id="xuangu_scope_limit" class="form-control" name="scope_limit" lay-filter="scope_limit">
                   <option value="12" selected>小样本 · 最多 12 只</option>
                   <option value="20">扩展验证 · 最多 20 只</option>
                 </select>
@@ -138,9 +138,9 @@
           </div>
           <div class="cp-form-grid">
             <div class="layui-form-item cp-field--span-2">
-              <label class="layui-form-label">目标自选组</label>
+              <label class="layui-form-label" for="xuangu_target_group">目标自选组</label>
               <div class="layui-input-block">
-                <select class="form-control" name="target_zx_group" lay-filter="target_zx_group">
+                <select id="xuangu_target_group" class="form-control" name="target_zx_group" lay-filter="target_zx_group">
                   {% for zg in zixuan_groups %}
                   <option value="{{ zg['name'] }}">{{ zg['name'] }}</option>
                   {% endfor %}

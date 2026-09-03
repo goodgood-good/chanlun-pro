@@ -674,6 +674,8 @@ def a_share_notification_event(
     setup = document.get("setup_5m")
     setup = setup if isinstance(setup, Mapping) else {}
     trigger = document.get("segment_difference_1m")
+    if not isinstance(trigger, Mapping):
+        trigger = document.get("notification_preconfirmation_divergence_1m")
     trigger = trigger if isinstance(trigger, Mapping) else {}
     if trigger and not is_one_minute_segment_level(
         "1m",

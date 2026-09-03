@@ -1282,7 +1282,7 @@ class CenterLevelResult:
         ]
         if len(forming) > 1:
             raise ValueError("only one forming center preview is allowed")
-        if not ongoing or not forming:
+        if not ongoing:
             return
 
         active = ongoing[0]
@@ -1296,13 +1296,6 @@ class CenterLevelResult:
                 else active.establishment_leave_unit.unit_id
             ),
         )
-        forming_seed = (
-            forming[0].entry_unit_id,
-            *forming[0].unit_ids[:seed_width],
-            forming[0].establishment_leave_unit_id,
-        )
-        if forming_seed == active_seed:
-            return
         active_completion_observed = any(
             preview.state is CenterPreviewState.COMPLETED
             and (
@@ -1313,7 +1306,29 @@ class CenterLevelResult:
             == active_seed
             for preview in self.previews
         )
-        if not active_completion_observed:
+        shifted_live = tuple(
+            preview
+            for preview in self.previews
+            if preview.state
+            in (CenterPreviewState.FORMING, CenterPreviewState.COMPLETED)
+            and (
+                preview.entry_unit_id,
+                *preview.unit_ids[:seed_width],
+                preview.establishment_leave_unit_id,
+            )
+            != active_seed
+        )
+        if not shifted_live or active_completion_observed:
+            return
+        if any(
+            preview.state is CenterPreviewState.COMPLETED
+            for preview in shifted_live
+        ):
+            raise ValueError(
+                "shifted completed preview cannot displace an unresolved "
+                "active-center extension"
+            )
+        if forming:
             raise ValueError(
                 "shifted forming preview cannot displace an unresolved "
                 "active-center extension"

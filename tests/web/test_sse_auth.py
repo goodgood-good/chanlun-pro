@@ -1,5 +1,7 @@
 """SSE requests use the same authenticated Flask session as HTTP routes."""
 
+import json
+
 import pytest
 from werkzeug.security import generate_password_hash
 
@@ -23,11 +25,14 @@ def test_no_cookie_denies(app):
 
 def test_valid_login_cookie_allows(app, monkeypatch):
     password = "sse-test-password"
-    monkeypatch.setenv("CHANLUN_LOGIN_PWD", generate_password_hash(password))
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_USERS",
+        json.dumps({"sse-user": generate_password_hash(password)}),
+    )
     with app.test_client() as client:
         response = client.post(
             "/login",
-            data={"password": password},
+            data={"username": "sse-user", "password": password},
             follow_redirects=False,
         )
         set_cookie = response.headers.get("Set-Cookie") or ""

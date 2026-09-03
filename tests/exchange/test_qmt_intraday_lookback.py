@@ -113,6 +113,7 @@ def test_qmt_single_symbol_download_holds_shared_process_lane(monkeypatch):
 
 def test_qmt_local_only_read_does_not_take_shared_download_lane(monkeypatch):
     ex = ExchangeQMT()
+    subscriptions: list[tuple[object, ...]] = []
 
     @contextmanager
     def forbidden_download_lane():
@@ -136,6 +137,15 @@ def test_qmt_local_only_read_does_not_take_shared_download_lane(monkeypatch):
         "get_market_data",
         lambda **_kwargs: {},
     )
+    monkeypatch.setattr(
+        exchange_qmt.xtdata,
+        "subscribe_quote2",
+        lambda *args, callback, **_kwargs: (
+            subscriptions.append(args),
+            callback({}),
+            7,
+        )[-1],
+    )
 
     frame = ex.klines(
         "SZ.000001",
@@ -144,3 +154,59 @@ def test_qmt_local_only_read_does_not_take_shared_download_lane(monkeypatch):
     )
 
     assert frame.empty
+    assert subscriptions == [("000001.SZ", "5m")]
+
+
+def test_qmt_local_only_intraday_subscription_is_reused(monkeypatch):
+    ex = ExchangeQMT()
+    subscriptions: list[dict[str, object]] = []
+    unsubscribed: list[int] = []
+
+    def subscribe(*args, callback, **kwargs):
+        subscriptions.append({"args": args, **kwargs})
+        callback({args[0]: []})
+        return 11
+
+    monkeypatch.setattr(exchange_qmt.xtdata, "subscribe_quote2", subscribe)
+    monkeypatch.setattr(
+        exchange_qmt.xtdata,
+        "unsubscribe_quote",
+        unsubscribed.append,
+    )
+    monkeypatch.setattr(exchange_qmt.xtdata, "get_market_data", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        exchange_qmt.xtdata,
+        "download_history_data",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local subscription must not download history")
+        ),
+    )
+
+    for _ in range(2):
+        frame = ex.klines(
+            "SH.600000",
+            "1m",
+            args={
+                "req_counts": 10,
+                "skip_download": True,
+                "dividend_type": "front_ratio",
+            },
+        )
+        assert frame.empty
+
+    assert len(subscriptions) == 1
+    assert subscriptions[0] == {
+        "args": ("600000.SH", "1m"),
+        "start_time": datetime.now().strftime("%Y%m%d"),
+        "end_time": "",
+        "count": -1,
+        "dividend_type": "front_ratio",
+    }
+
+    assert ex.refresh_live_kline_subscription(
+        "SH.600000",
+        "1m",
+        dividend_type="front_ratio",
+    )
+    assert len(subscriptions) == 2
+    assert unsubscribed == [11]

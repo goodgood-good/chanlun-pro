@@ -106,18 +106,18 @@ test("normalizeSizing preserves responsive heights and clamps every adjustable b
   const Resize = loadResize();
 
   assert.deepEqual(Resize.normalizeSizing(null), {
-    heights: { focus: null, dual: null, triple: null },
+    heights: { focus: null, dual: null, triple: null, quad: null },
     dualRatio: 50,
     tripleMainRatio: 67,
     tripleSideRatio: 50,
   });
   assert.deepEqual(Resize.normalizeSizing({
-    heights: { focus: 300, dual: "900", triple: 1600 },
+    heights: { focus: 300, dual: "900", triple: 1600, quad: 880 },
     dualRatio: 95,
     tripleMainRatio: 20,
     tripleSideRatio: "68",
   }), {
-    heights: { focus: 520, dual: 900, triple: 1200 },
+    heights: { focus: 520, dual: 900, triple: 1200, quad: 880 },
     dualRatio: 70,
     tripleMainRatio: 55,
     tripleSideRatio: 68,
@@ -130,7 +130,7 @@ test("applySizing exposes ratios as CSS variables and keeps irrelevant handles o
   const fixture = makeFixture("focus");
 
   Resize.applySizing(fixture.root, {
-    heights: { focus: 760, dual: null, triple: null },
+    heights: { focus: 760, dual: null, triple: null, quad: null },
     dualRatio: 58,
     tripleMainRatio: 72,
     tripleSideRatio: 45,
@@ -214,7 +214,7 @@ test("keyboard controls clamp ratios and Enter resets only the active separator"
   const fixture = makeFixture("triple");
   const changes = [];
   const controller = Resize.createController(fixture.root, {
-    heights: { focus: 700, dual: 720, triple: 900 },
+    heights: { focus: 700, dual: 720, triple: 900, quad: 940 },
     dualRatio: 60,
     tripleMainRatio: 79,
     tripleSideRatio: 50,
@@ -243,7 +243,7 @@ test("layout changes select independent heights and reset button restores all re
   const Resize = loadResize();
   const fixture = makeFixture("focus");
   const controller = Resize.createController(fixture.root, {
-    heights: { focus: 740, dual: 860, triple: 980 },
+    heights: { focus: 740, dual: 860, triple: 980, quad: 1040 },
     dualRatio: 65,
     tripleMainRatio: 74,
     tripleSideRatio: 60,
@@ -253,10 +253,14 @@ test("layout changes select independent heights and reset button restores all re
   assert.equal(fixture.root.style.getPropertyValue("--es-chart-height"), "860px");
   assert.equal(fixture.columns.tabIndex, 0);
   assert.equal(fixture.rows.tabIndex, -1);
+  controller.setLayout("quad");
+  assert.equal(fixture.root.style.getPropertyValue("--es-chart-height"), "1040px");
+  assert.equal(fixture.columns.tabIndex, -1);
+  assert.equal(fixture.rows.tabIndex, -1);
   fixture.reset.dispatch("click");
 
   assert.deepEqual(controller.getSizing(), {
-    heights: { focus: null, dual: null, triple: null },
+    heights: { focus: null, dual: null, triple: null, quad: null },
     dualRatio: 50,
     tripleMainRatio: 67,
     tripleSideRatio: 50,

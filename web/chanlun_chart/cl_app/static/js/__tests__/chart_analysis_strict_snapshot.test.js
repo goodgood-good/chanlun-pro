@@ -651,13 +651,13 @@ test('strict analysis rejects reordered or same-direction current movements', ()
   assert.match(summary.statusDetail, /上下交替的因果连接链/);
 });
 
-test('unavailable or context-mismatched strict data reports synchronization failure', () => {
+test('unavailable strict data enters recovery and context mismatch stays syncing', () => {
   const unavailable = Analysis.summarizeChartData({
     bars: [{ time: CLOSED_AT * 1000, close: 11 }],
     strict_structure_mode: 'unavailable',
     strict_structure_error: { code: 'strict_evidence_invalid' },
   }, context);
-  assert.equal(unavailable.state, 'unavailable');
+  assert.equal(unavailable.state, 'recovering');
   assert.equal(unavailable.formalCenters.length, 0);
   assert.equal(unavailable.centerPreviews.length, 0);
   assert.equal(unavailable.confirmedPoints.length, 0);
@@ -696,7 +696,7 @@ test('same-context unavailable reuses only the manager last-good snapshot as sta
     symbol: 'A:SH.600519',
     cachedStrictSnapshot: snapshot(),
   });
-  assert.equal(wrongSymbol.state, 'unavailable');
+  assert.equal(wrongSymbol.state, 'recovering');
   assert.equal(wrongSymbol.formalCenters.length, 0);
 });
 

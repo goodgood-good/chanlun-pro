@@ -569,7 +569,6 @@ def test_first_preload_round_skips_refresh_for_disk_warmed_symbols(monkeypatch):
         raise RuntimeError("stop after first refresh")
 
     monkeypatch.setattr(stock_list, "PRELOAD_EXCHANGES", ["a"])
-    monkeypatch.setattr(stock_list, "PRELOAD_PARALLEL_WORKERS", 1)
     monkeypatch.setattr(stock_list, "PRELOAD_STARTUP_DELAY_SECONDS", 0)
     monkeypatch.setattr(stock_list, "_preload_single_exchange", record_refresh)
     monkeypatch.setattr(stock_list.time, "sleep", stop_after_first_round)
@@ -594,7 +593,6 @@ def test_later_preload_rounds_refresh_disk_warmed_symbols(monkeypatch):
             raise RuntimeError("stop after second refresh")
 
     monkeypatch.setattr(stock_list, "PRELOAD_EXCHANGES", ["a"])
-    monkeypatch.setattr(stock_list, "PRELOAD_PARALLEL_WORKERS", 1)
     monkeypatch.setattr(stock_list, "PRELOAD_STARTUP_DELAY_SECONDS", 0)
     monkeypatch.setattr(stock_list, "_preload_single_exchange", record_refresh)
     monkeypatch.setattr(stock_list.time, "sleep", stop_after_second_round)

@@ -207,10 +207,6 @@ def _completed_times(session: date) -> tuple[datetime, ...]:
     return a_share_completed_one_minute_closes(session, timezone=None)
 
 
-def _expected_native_times(session: date) -> tuple[datetime, ...]:
-    return (datetime.combine(session, time(9, 30)), *_completed_times(session))
-
-
 def _visible_one_minute(
     frame: pd.DataFrame,
     *,
@@ -241,10 +237,6 @@ def _visible_one_minute(
             raise ValueError("QMT 1m frame contains invalid OHLCV")
     work.attrs = dict(frame.attrs)
     return work
-
-
-def _naive_times(rows: pd.DataFrame) -> tuple[datetime, ...]:
-    return tuple(pd.Timestamp(value).tz_localize(None).to_pydatetime() for value in rows["date"])
 
 
 def normalize_qmt_opening_event_for_completed_minutes(

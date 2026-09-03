@@ -50,6 +50,41 @@ def test_client_identity_ignores_forged_auth_cookie():
     assert first == second
 
 
+def test_stream_identifier_validation_is_bounded():
+    assert sse_stream._normalize_stream_identifier("screening.page-1.30m")
+    assert sse_stream._normalize_stream_identifier("../bad/channel") is None
+    assert sse_stream._normalize_stream_identifier("x" * 129) is None
+
+
+def test_new_logical_channel_supersedes_proxy_ghost():
+    class FakeHandler:
+        def __init__(self, connection_id):
+            self._connection_id = connection_id
+            self._client_id = "session-a"
+            self._channel_id = "screening.page-1.5m"
+            self.superseded = False
+
+        def _supersede(self):
+            self.superseded = True
+            sse_stream._unregister_active_connection(self)
+
+    old = FakeHandler("connection.old")
+    replacement = FakeHandler("connection.new")
+    sse_stream._active_connections_by_id.clear()
+    sse_stream._active_connections_by_channel.clear()
+    try:
+        sse_stream._register_active_connection(old)
+        assert sse_stream._supersede_active_channel(
+            "session-a", "screening.page-1.5m", replacement=replacement
+        ) is True
+        assert old.superseded is True
+        assert old._connection_id not in sse_stream._active_connections_by_id
+        assert not sse_stream._active_connections_by_channel
+    finally:
+        sse_stream._active_connections_by_id.clear()
+        sse_stream._active_connections_by_channel.clear()
+
+
 def test_slow_client_does_not_block_fast_client_and_is_unsubscribed(monkeypatch):
     async def scenario():
         slow_started = asyncio.Event()
@@ -119,6 +154,7 @@ def test_build_routes_flag_on(monkeypatch):
     })
     routes = build_routes(app)
     assert any("/tv/stream" in str(r[0]) for r in routes)
+    assert any("/tv/stream/close" in str(r[0]) for r in routes)
 
 
 def test_build_routes_flag_off(monkeypatch):

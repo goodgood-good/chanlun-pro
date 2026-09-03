@@ -22,6 +22,17 @@ from ..services.trading_screening_scope import (
 
 xuangu_bp = Blueprint("xuangu", __name__)
 
+MARKET_LABELS = {
+    "a": "沪深 A 股",
+    "hk": "港股",
+    "futures": "国内期货",
+    "ny_futures": "纽约期货",
+    "fx": "外汇",
+    "us": "美股",
+    "currency": "数字货币（合约）",
+    "currency_spot": "数字货币（现货）",
+}
+
 
 @xuangu_bp.route("/xuangu/task_list/<market>")
 @login_required
@@ -48,6 +59,7 @@ def xuangu_task_list(market):
     return render_template(
         "xuangu_list.html",
         market=market,
+        market_label=MARKET_LABELS.get(market, market.upper()),
         tasks=xuangu_task_list,
         task_infos=task_infos,
         zixuan_groups=zixuan_groups,

@@ -14,10 +14,13 @@ import re
 
 DEFAULT_VALIDATION_COHORT_SIZE = 12
 DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS = 20
-# Twelve 5m observations per minute can sustain exactly sixty symbols across
-# one five-minute cadence.  Large-scope monitoring defaults to that physical
-# capacity; full-market daily coverage remains an independent background job.
-DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS = 60
+# Forty-eight ordinary 5m observations per minute sustain 240 rotating
+# candidates across one five-minute cadence.  The exact 1m locator lane also
+# has to cover unconfirmed setups that can exceed that rotating candidate
+# window; 384 authorized subjects average 32 symbols across twelve affinity
+# workers and remain bounded by the 48-slot hot-runtime cache plus its
+# authenticated overflow tier. Full-market daily coverage remains independent.
+DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS = 384
 LARGE_SCOPE_THRESHOLD = 20
 
 

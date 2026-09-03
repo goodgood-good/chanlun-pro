@@ -5,9 +5,9 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.TradingScreeningChartResize = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createResizeApi() {
-  const LAYOUTS = new Set(["focus", "dual", "triple"]);
+  const LAYOUTS = new Set(["focus", "dual", "triple", "quad"]);
   const DEFAULT_SIZING = Object.freeze({
-    heights: Object.freeze({ focus: null, dual: null, triple: null }),
+    heights: Object.freeze({ focus: null, dual: null, triple: null, quad: null }),
     dualRatio: 50,
     tripleMainRatio: 67,
     tripleSideRatio: 50,
@@ -18,7 +18,7 @@
     tripleMainRatio: Object.freeze([55, 80]),
     tripleSideRatio: Object.freeze([25, 75]),
   });
-  const FALLBACK_HEIGHTS = Object.freeze({ focus: 800, dual: 720, triple: 820 });
+  const FALLBACK_HEIGHTS = Object.freeze({ focus: 840, dual: 820, triple: 920, quad: 980 });
 
   function isRecord(value) {
     return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -54,6 +54,7 @@
         focus: normalizedHeight(heights.focus),
         dual: normalizedHeight(heights.dual),
         triple: normalizedHeight(heights.triple),
+        quad: normalizedHeight(heights.quad),
       },
       dualRatio: normalizedNumber(source.dualRatio, DEFAULT_SIZING.dualRatio, LIMITS.dualRatio),
       tripleMainRatio: normalizedNumber(

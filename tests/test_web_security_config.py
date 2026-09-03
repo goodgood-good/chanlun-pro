@@ -8,26 +8,64 @@ import pytest
 from chanlun import security
 
 
-def test_login_password_prefers_environment(monkeypatch):
-    monkeypatch.setattr(security.config, "LOGIN_PWD", "config-value", raising=False)
-    monkeypatch.setenv("CHANLUN_LOGIN_PWD", "env-value")
+def _accounts(password_hash: str) -> tuple[security.WebLoginAccount, ...]:
+    return (security.WebLoginAccount("admin", password_hash),)
 
-    assert security.get_login_password() == "env-value"
+
+def test_login_accounts_support_named_json_mapping(monkeypatch):
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_USERS",
+        json.dumps(
+            {
+                "Alice": "scrypt:32768:8:1$alice$stub",
+                "研究员": "pbkdf2:sha256:1$research$stub",
+            }
+        ),
+    )
+
+    accounts = security.get_login_accounts()
+
+    assert [account.username for account in accounts] == ["alice", "研究员"]
+    security.validate_web_security_config(
+        "127.0.0.1",
+        accounts,
+    )
+
+
+def test_malformed_explicit_login_accounts_fail_closed(monkeypatch):
+    monkeypatch.setenv("CHANLUN_LOGIN_USERS", "not-json")
+
+    accounts = security.get_login_accounts()
+
+    assert accounts == ()
+    with pytest.raises(ValueError, match="LOGIN_USERS"):
+        security.validate_web_security_config("127.0.0.1", accounts)
+
+
+def test_missing_named_login_accounts_fail_closed(monkeypatch):
+    monkeypatch.delenv("CHANLUN_LOGIN_USERS", raising=False)
+    monkeypatch.setattr(security.config, "LOGIN_USERS", None, raising=False)
+
+    accounts = security.get_login_accounts()
+
+    assert accounts == ()
+    with pytest.raises(ValueError, match="LOGIN_USERS"):
+        security.validate_web_security_config("127.0.0.1", accounts)
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.20", "::"])
-def test_external_bind_rejects_missing_password(host, monkeypatch):
+def test_external_bind_rejects_missing_accounts(host, monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
 
-    with pytest.raises(ValueError, match="LOGIN_PWD"):
-        security.validate_web_security_config(host, "")
+    with pytest.raises(ValueError, match="LOGIN_USERS"):
+        security.validate_web_security_config(host, ())
 
 
-def test_external_bind_rejects_plaintext_password(monkeypatch):
+def test_external_bind_rejects_plaintext_account_hash(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
 
     with pytest.raises(ValueError, match="hash"):
-        security.validate_web_security_config("0.0.0.0", "plain-text")
+        security.validate_web_security_config("0.0.0.0", _accounts("plain-text"))
 
 
 def test_external_bind_rejects_hash_without_https(monkeypatch):
@@ -35,22 +73,22 @@ def test_external_bind_rejects_hash_without_https(monkeypatch):
 
     with pytest.raises(ValueError, match="HTTPS"):
         security.validate_web_security_config(
-            "0.0.0.0", "scrypt:32768:8:1$stub$stub"
+            "0.0.0.0", _accounts("scrypt:32768:8:1$stub$stub")
         )
 
 
-def test_loopback_rejects_passwordless_startup(monkeypatch):
+def test_loopback_rejects_accountless_startup(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
-    with pytest.raises(ValueError, match="LOGIN_PWD"):
-        security.validate_web_security_config("127.0.0.1", "")
+    with pytest.raises(ValueError, match="LOGIN_USERS"):
+        security.validate_web_security_config("127.0.0.1", ())
 
 
-def test_loopback_requires_a_password_hash(monkeypatch):
+def test_loopback_requires_account_password_hashes(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
     with pytest.raises(ValueError, match="hash"):
-        security.validate_web_security_config("127.0.0.1", "plain-text")
+        security.validate_web_security_config("127.0.0.1", _accounts("plain-text"))
     security.validate_web_security_config(
-        "127.0.0.1", "scrypt:32768:8:1$stub$stub"
+        "127.0.0.1", _accounts("scrypt:32768:8:1$stub$stub")
     )
 
 
@@ -157,7 +195,7 @@ def test_runtime_credentials_path_can_live_outside_repository(
 def test_external_bind_accepts_password_hash_with_https(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
     security.validate_web_security_config(
-        "0.0.0.0", "scrypt:32768:8:1$stub$stub"
+        "0.0.0.0", _accounts("scrypt:32768:8:1$stub$stub")
     )
 
 

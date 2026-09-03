@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import re
@@ -9,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from cl_app import create_app
+
+
+def _login_users(password_hash: str) -> str:
+    return json.dumps({"admin": password_hash})
 
 
 def _app():
@@ -226,7 +231,7 @@ def test_desktop_main_starts_runtime_after_http_listener(monkeypatch):
     monkeypatch.setattr(desktop_app, "_warm_chart_cache_from_disk", lambda: None)
     monkeypatch.setattr(desktop_app, "validate_web_security_config", lambda *_a: None)
     monkeypatch.setattr(desktop_app, "get_web_host", lambda: "127.0.0.1")
-    monkeypatch.setattr(desktop_app, "get_login_password", lambda: "")
+    monkeypatch.setattr(desktop_app, "get_login_accounts", lambda: ())
     monkeypatch.setattr(desktop_app, "is_https_enabled", lambda: False)
     monkeypatch.setattr(desktop_app.sys, "argv", ["app.py", "nobrowser"])
 
@@ -285,10 +290,9 @@ def test_factory_blocks_external_request_when_runtime_bind_bypasses_config(
 ):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "127.0.0.1")
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
-    monkeypatch.delenv("CHANLUN_LOGIN_PWD", raising=False)
-    monkeypatch.setattr(
-        "cl_app.get_login_password",
-        lambda: "scrypt:32768:8:1$stub$stub",
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_USERS",
+        _login_users("scrypt:32768:8:1$stub$stub"),
     )
     app = create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
 
@@ -300,18 +304,23 @@ def test_factory_blocks_external_request_when_runtime_bind_bypasses_config(
     assert response.get_json() == {"status": "security_misconfigured"}
     app.extensions["shutdown_scheduler"]()
 
-def test_factory_rejects_external_plaintext_password(monkeypatch):
+def test_factory_rejects_external_plaintext_account_hash(monkeypatch):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "0.0.0.0")
-    monkeypatch.setenv("CHANLUN_LOGIN_PWD", "plaintext-is-rejected")
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_USERS", _login_users("plaintext-is-rejected")
+    )
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
 
-    with pytest.raises(ValueError, match="hash"):
+    with pytest.raises(ValueError, match="LOGIN_USERS"):
         create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
 
 
 def test_factory_rejects_external_hash_without_https(monkeypatch):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "0.0.0.0")
-    monkeypatch.setenv("CHANLUN_LOGIN_PWD", "scrypt:32768:8:1$stub$stub")
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_USERS",
+        _login_users("scrypt:32768:8:1$stub$stub"),
+    )
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
 
     with pytest.raises(ValueError, match="HTTPS"):
@@ -322,7 +331,10 @@ def test_factory_accepts_external_hash_with_https_and_forces_secure_cookies(
     monkeypatch,
 ):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "0.0.0.0")
-    monkeypatch.setenv("CHANLUN_LOGIN_PWD", "scrypt:32768:8:1$stub$stub")
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_USERS",
+        _login_users("scrypt:32768:8:1$stub$stub"),
+    )
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
     monkeypatch.setenv("CHANLUN_SESSION_COOKIE_SECURE", "0")
 
@@ -337,7 +349,8 @@ def test_factory_accepts_external_hash_with_https_and_forces_secure_cookies(
 def test_factory_allows_loopback_hash_with_http(monkeypatch):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "127.0.0.1")
     monkeypatch.setenv(
-        "CHANLUN_LOGIN_PWD", "scrypt:32768:8:1$stub$stub"
+        "CHANLUN_LOGIN_USERS",
+        _login_users("scrypt:32768:8:1$stub$stub"),
     )
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
 

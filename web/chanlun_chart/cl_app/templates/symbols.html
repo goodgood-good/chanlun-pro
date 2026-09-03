@@ -91,8 +91,47 @@
             $('#header_total_tip').text(total + ' 条');
           }
 
+          function labelPaginationControls() {
+            var skipInput = document.querySelector('#symbols_table_wrap .layui-laypage-skip input');
+            if (skipInput) {
+              skipInput.setAttribute('aria-label', '跳转页码');
+              skipInput.setAttribute('inputmode', 'numeric');
+            }
+            var limitSelect = document.querySelector('#symbols_table_wrap .layui-laypage-limits select');
+            if (limitSelect) limitSelect.setAttribute('aria-label', '每页显示数量');
+          }
+
+          function usesCompactColumns() {
+            return typeof window.matchMedia === 'function'
+              && window.matchMedia('(max-width: 720px)').matches;
+          }
+
           function renderTable() {
             $('#total_tip').text('正在加载…');
+            var compactColumns = usesCompactColumns();
+            var columns = [
+              {
+                field: 'code', title: '代码', width: compactColumns ? 132 : 220, templet: function (d) {
+                  const url = '/?market=' + encodeURIComponent(state.market)
+                    + '&code=' + encodeURIComponent(d.code);
+                  const link = document.createElement('a');
+                  link.className = 'symbol-code-link';
+                  link.href = url;
+                  link.target = '_blank';
+                  link.rel = 'noopener';
+                  link.textContent = String(d.code == null ? '' : d.code);
+                  link.setAttribute('aria-label', '在新标签打开 ' + link.textContent + ' 行情工作台');
+                  return link.outerHTML;
+                }
+              },
+              { field: 'name', title: '名称', minWidth: compactColumns ? 128 : 200 }
+            ];
+            if (!compactColumns) {
+              columns.push(
+                { field: 'pinyin', title: '拼音首字母', width: 180 },
+                { field: 'type', title: '类型', width: 120 }
+              );
+            }
             table.render({
               elem: '#symbols_table',
               url: '/symbols/list',
@@ -110,25 +149,11 @@
                 limits: [50, 100, 200, 500],
                 limit: 50
               },
-              done: function (res) { updateCount((res && res.total) || 0); },
-              cols: [[
-                {
-                  field: 'code', title: '代码', width: 220, templet: function (d) {
-                    const url = '/?market=' + encodeURIComponent(state.market)
-                      + '&code=' + encodeURIComponent(d.code);
-                    const link = document.createElement('a');
-                    link.className = 'symbol-code-link';
-                    link.href = url;
-                    link.target = '_blank';
-                    link.rel = 'noopener';
-                    link.textContent = String(d.code == null ? '' : d.code);
-                    return link.outerHTML;
-                  }
-                },
-                { field: 'name', title: '名称', minWidth: 200 },
-                { field: 'pinyin', title: '拼音首字母', width: 180 },
-                { field: 'type', title: '类型', width: 120 }
-              ]]
+              done: function (res) {
+                updateCount((res && res.total) || 0);
+                labelPaginationControls();
+              },
+              cols: [columns]
             });
           }
 
@@ -156,6 +181,21 @@
             $('#search_input').val('').trigger('focus');
             renderTable();
           });
+
+          var compactMedia = typeof window.matchMedia === 'function'
+            ? window.matchMedia('(max-width: 720px)')
+            : null;
+          var lastCompactState = compactMedia ? compactMedia.matches : false;
+          function handleColumnBreakpoint(event) {
+            if (event.matches === lastCompactState) return;
+            lastCompactState = event.matches;
+            renderTable();
+          }
+          if (compactMedia && typeof compactMedia.addEventListener === 'function') {
+            compactMedia.addEventListener('change', handleColumnBreakpoint);
+          } else if (compactMedia && typeof compactMedia.addListener === 'function') {
+            compactMedia.addListener(handleColumnBreakpoint);
+          }
 
           renderTable();
         });

@@ -27,6 +27,19 @@ test('summarizeChartData handles an empty or still-loading chart honestly', () =
   assert.match(summary.plan.wait, /等待同一标的、周期和末根闭合时间/);
 });
 
+test('strict transport failures stay in recovery instead of exposing an unavailable chart', () => {
+  const summary = Analysis.summarizeChartData({
+    bars: [],
+    strict_structure_mode: 'unavailable',
+    strict_structure_error: { code: 'strict_context_mismatch' },
+  }, { resolution: '5' });
+
+  assert.equal(summary.state, 'recovering');
+  assert.equal(summary.verdict, '正在自动恢复严格缠论结构');
+  assert.match(summary.verdictDetail, /自动恢复中/);
+  assert.doesNotMatch(summary.verdict, /暂不可用/);
+});
+
 test('formatResolution covers intraday and higher timeframes', () => {
   assert.equal(Analysis.formatResolution('5'), '5 分钟');
   assert.equal(Analysis.formatResolution('120'), '2小时');
@@ -207,7 +220,7 @@ test('every chart-sidebar tool uses explicit purpose, action and empty-state cop
   }
 
   assert.match(zixuan, /关注标的/);
-  assert.match(zixuan, /涨跌 \/ 现价/);
+  assert.match(zixuan, /涨跌\/现价/);
   assert.match(zixuan, /当前分组暂无标的/);
   assert.match(zixuan, /输入代码、名称或拼音/);
   assert.match(bkgn, /板块名称/);

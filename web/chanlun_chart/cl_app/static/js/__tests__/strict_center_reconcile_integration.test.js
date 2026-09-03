@@ -325,8 +325,8 @@ function dailyChartData(rawCloseAt = DAILY_CLOSE_AT) {
   return data;
 }
 
-function manager(instanceId = 'chart-manager-1') {
-  const { ChartManager, sandbox } = loadChartManager();
+function manager(instanceId = 'chart-manager-1', runtimeOverrides = {}) {
+  const { ChartManager, sandbox } = loadChartManager(runtimeOverrides);
   const cm = Object.create(ChartManager.prototype);
   const calls = { create: [], remove: [] };
   let nextId = 1;
@@ -836,7 +836,7 @@ test('same-context strict unavailable briefly retains the last good entity as st
   assert.equal(cm._strictStructureStatus.code, 'strict_evidence_invalid');
 });
 
-test('strict unavailable clears a snapshot after its bounded retention window', () => {
+test('strict failure clears an expired snapshot and enters automatic recovery', () => {
   const { cm, calls } = manager();
   cm._drawStrictStructure(chartData(), '5');
   const unavailable = chartData('unavailable', undefined, [
@@ -849,10 +849,10 @@ test('strict unavailable clears a snapshot after its bounded retention window', 
 
   assert.equal(calls.remove.length, 1);
   assert.equal(cm._strictStructureSnapshot, null);
-  assert.equal(cm._strictStructureStatus.state, 'unavailable');
+  assert.equal(cm._strictStructureStatus.state, 'recovering');
 });
 
-test('strict unavailable without a same-context snapshot still clears and reports unavailable', () => {
+test('strict failure without a same-context snapshot clears and enters recovery', () => {
   const { cm } = manager();
   const unavailable = chartData('unavailable', undefined);
   unavailable.barsResult.strict_structure_error = { code: 'strict_evidence_invalid' };
@@ -860,7 +860,7 @@ test('strict unavailable without a same-context snapshot still clears and report
   cm._drawStrictStructure(unavailable, '5');
 
   assert.equal(cm._strictContainers?.size || 0, 0);
-  assert.equal(cm._strictStructureStatus.state, 'unavailable');
+  assert.equal(cm._strictStructureStatus.state, 'recovering');
   assert.equal(cm._strictStructureStatus.code, 'strict_evidence_invalid');
 });
 
@@ -876,7 +876,7 @@ test('strict unavailable for a different symbol clears the prior symbol entities
   assert.equal(calls.remove.length, 1);
   assert.equal(cm._strictContainers.size, 0);
   assert.equal(cm._strictStructureSnapshot, null);
-  assert.equal(cm._strictStructureStatus.state, 'unavailable');
+  assert.equal(cm._strictStructureStatus.state, 'recovering');
 });
 
 test('history pagination unchanged keeps the authoritative snapshot and entity id', () => {
@@ -1231,7 +1231,7 @@ test('stroke observation is dashed only while ongoing and solid when completed',
   assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
 });
 
-test('level-scoped consolidation and trend divergences render with direction and explicit labels', () => {
+test('coincident consolidation and trend divergences render as one explicit label', () => {
   const { cm, calls } = manager('chart-manager-divergence');
   const strict = snapshot();
   strict.levels[0].divergences = [divergence('consolidation'), divergence('trend')];
@@ -1239,13 +1239,138 @@ test('level-scoped consolidation and trend divergences render with direction and
   cm._drawStrictStructure(chartData('replace', strict), '5');
 
   const texts = calls.create.map((entry) => entry.options.text).filter(Boolean);
-  assert.deepEqual(texts.sort(), ['▲5m·盘整背驰', '▲5m·趋势背驰'].sort());
-  const consolidation = calls.create.find((entry) => entry.options.text?.includes('盘整背驰'));
-  const trend = calls.create.find((entry) => entry.options.text?.includes('趋势背驰'));
-  assert.equal(consolidation.options.overrides.fontsize, 12);
-  assert.equal(consolidation.options.overrides.bold, false);
-  assert.equal(trend.options.overrides.fontsize, 13);
-  assert.equal(trend.options.overrides.bold, true);
+  assert.deepEqual(texts, ['▲5m·盘整/趋势背驰']);
+  const combined = calls.create.find((entry) => entry.options.text?.includes('盘整/趋势背驰'));
+  assert.equal(combined.options.overrides.fontsize, 13);
+  assert.equal(combined.options.overrides.bold, true);
+});
+
+test('coincident point and divergence evidence render as one non-overlapping label', () => {
+  const { cm, calls } = manager('chart-manager-coincident-labels');
+  const strict = snapshot();
+  strict.levels[0] = {
+    ...strict.levels[0],
+    label: '1m/L0',
+    centers: [],
+    confirmed_points: [{
+      schema: 'chanlun-chart-point',
+      render_kind: 'point_confirmed',
+      render_id: '1buy-confirmed',
+      point_id: '1buy-confirmed',
+      structural_level: 0,
+      point_type: '1buy',
+      side: 'buy',
+      status: 'confirmed',
+      formation_state: 'confirmed',
+      lock_state: 'locked',
+      contains_forming_segment: false,
+      contains_unlocked_segment: false,
+      points: [{ time: BASE + 500, price_tick: 1000, price: 10 }],
+    }],
+    divergences: [divergence('consolidation'), divergence('trend')],
+  };
+
+  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].render_kind, 'point_confirmed');
+  assert.deepEqual(
+    Array.from(grouped[0].presentation_divergence_kinds),
+    ['consolidation', 'trend'],
+  );
+  assert.deepEqual(grouped[0].points, [{ time: BASE + 500, price_tick: 1000, price: 10 }]);
+
+  cm._drawStrictStructure(chartData('replace', strict), '5');
+
+  assert.equal(calls.create.length, 1);
+  assert.equal(calls.create[0].options.text, '▲一买·盘整/趋势背驰');
+  assert.deepEqual(calls.create[0].points, { time: BASE + 500, price_tick: 1000, price: 10 });
+});
+
+test('nearby labels become compact markers only while their screen boxes collide', () => {
+  const { cm, calls } = manager('chart-manager-density-labels');
+  const attachedTitles = [];
+  const makePoint = (pointType, offset, price) => ({
+    schema: 'chanlun-chart-point',
+    render_kind: 'point_confirmed',
+    render_id: `${pointType}-confirmed`,
+    point_id: `${pointType}-confirmed`,
+    structural_level: 0,
+    point_type: pointType,
+    side: pointType.endsWith('buy') ? 'buy' : 'sell',
+    status: 'confirmed',
+    formation_state: 'confirmed',
+    lock_state: 'locked',
+    contains_forming_segment: false,
+    contains_unlocked_segment: false,
+    points: [{ time: BASE + offset, price }],
+  });
+  const strict = snapshot();
+  strict.levels[0] = {
+    ...strict.levels[0],
+    centers: [],
+    confirmed_points: [makePoint('1buy', 480, 10), makePoint('2buy', 500, 10.01)],
+  };
+  Object.assign(cm.chart, {
+    getVisibleRange: () => ({ from: BASE, to: BASE + 1000 }),
+    getVisiblePriceRange: () => ({ from: 9, to: 11 }),
+    getTimeScale: () => ({ width: () => 100 }),
+    getPanes: () => [{ hasMainSeries: () => true, getHeight: () => 100 }],
+    getShapeById: (id) => {
+      const created = calls.create.find((entry) => entry.id === id);
+      return {
+        getPoints: () => [created.points],
+        setProperties: (properties) => attachedTitles.push(properties.title),
+      };
+    },
+  });
+
+  cm._drawStrictStructure(chartData('replace', strict), '5');
+
+  assert.deepEqual(calls.create.map((entry) => entry.options.text), ['一', '二']);
+  assert.deepEqual(calls.create.map((entry) => entry.options.title), ['▲5m·一买', '▲5m·二买']);
+  assert.equal(calls.create.every((entry) => entry.options.overrides.fontsize === 10), true);
+  assert.deepEqual(attachedTitles, ['▲5m·一买', '▲5m·二买']);
+});
+
+test('chart resize re-evaluates label density once and observer cleanup is complete', () => {
+  let resizeCallback = null;
+  let observedHost = null;
+  let disconnected = false;
+  class FakeResizeObserver {
+    constructor(callback) { resizeCallback = callback; }
+    observe(host) { observedHost = host; }
+    disconnect() { disconnected = true; }
+  }
+  const { cm, sandbox } = manager('chart-manager-density-resize', {
+    ResizeObserver: FakeResizeObserver,
+  });
+  const host = { clientWidth: 400, clientHeight: 300 };
+  const timers = [];
+  sandbox.document.getElementById = () => host;
+  sandbox.setTimeout = (callback) => { timers.push(callback); return timers.length; };
+  sandbox.clearTimeout = () => {};
+  cm._strictLabelResizeObserver = null;
+  cm._strictLabelResizeTimer = null;
+  cm._strictLabelViewportSignature = null;
+  cm._initialLoadDone = true;
+  let refreshes = 0;
+  cm._refreshStrictLabelDensity = () => { refreshes += 1; return true; };
+
+  assert.equal(cm._installStrictLabelDensityObserver(), true);
+  assert.equal(observedHost, host);
+  resizeCallback([{ contentRect: { width: 400, height: 300 } }]);
+  assert.equal(timers.length, 0);
+  resizeCallback([{ contentRect: { width: 900, height: 600 } }]);
+  assert.equal(timers.length, 1);
+  timers[0]();
+  assert.equal(refreshes, 1);
+  resizeCallback([{ contentRect: { width: 900, height: 600 } }]);
+  assert.equal(timers.length, 1);
+
+  cm._disconnectStrictLabelDensityObserver();
+  assert.equal(disconnected, true);
+  assert.equal(cm._strictLabelResizeObserver, null);
+  assert.equal(cm._strictLabelViewportSignature, null);
 });
 
 test('六类确认点和接近点都进入主图且保持各自状态样式', () => {

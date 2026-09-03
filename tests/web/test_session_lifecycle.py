@@ -3,17 +3,26 @@ import datetime
 import pytest
 from werkzeug.security import generate_password_hash
 
+from chanlun.security import WebLoginAccount
 from cl_app import create_app
+
+
+USERNAME = "test-user"
+
+
+def _login_data(password: str) -> dict[str, str]:
+    return {"username": USERNAME, "password": password}
 
 
 def _make_app(monkeypatch, password_ref):
     password_hashes: dict[str, str] = {}
 
-    def configured_password() -> str:
+    def configured_accounts() -> tuple[WebLoginAccount, ...]:
         raw = password_ref[0]
-        return password_hashes.setdefault(raw, generate_password_hash(raw))
+        password_hash = password_hashes.setdefault(raw, generate_password_hash(raw))
+        return (WebLoginAccount(USERNAME, password_hash),)
 
-    monkeypatch.setattr("cl_app.get_login_password", configured_password)
+    monkeypatch.setattr("cl_app._configured_login_accounts", configured_accounts)
     return create_app(
         test_config={
             "TESTING": True,
@@ -29,7 +38,7 @@ def test_post_logout_revokes_the_current_session(monkeypatch):
     app = _make_app(monkeypatch, password)
     client = app.test_client()
 
-    assert client.post("/login", data={"password": password[0]}).status_code == 302
+    assert client.post("/login", data=_login_data(password[0])).status_code == 302
     assert client.get("/").status_code == 200
 
     response = client.post("/logout")
@@ -40,6 +49,21 @@ def test_post_logout_revokes_the_current_session(monkeypatch):
     app.extensions["shutdown_scheduler"]()
 
 
+def test_login_requires_explicit_username_even_for_one_account(monkeypatch):
+    password = ["first-password"]
+    app = _make_app(monkeypatch, password)
+    client = app.test_client()
+
+    try:
+        response = client.post("/login", data={"password": password[0]})
+        protected = client.get("/", follow_redirects=False)
+    finally:
+        app.extensions["shutdown_scheduler"]()
+
+    assert response.status_code == 200
+    assert protected.status_code == 302
+
+
 def test_remembered_login_survives_browser_restart_and_refreshes(monkeypatch):
     password = ["first-password"]
     app = _make_app(monkeypatch, password)
@@ -48,7 +72,7 @@ def test_remembered_login_survives_browser_restart_and_refreshes(monkeypatch):
     try:
         assert app.config["REMEMBER_COOKIE_DURATION"] == datetime.timedelta(days=30)
         assert app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] is True
-        assert client.post("/login", data={"password": password[0]}).status_code == 302
+        assert client.post("/login", data=_login_data(password[0])).status_code == 302
 
         remember_cookie = client.get_cookie("remember_token")
         assert remember_cookie is not None
@@ -71,7 +95,7 @@ def test_password_rotation_invalidates_existing_session(monkeypatch):
     app = _make_app(monkeypatch, password)
     client = app.test_client()
 
-    assert client.post("/login", data={"password": password[0]}).status_code == 302
+    assert client.post("/login", data=_login_data(password[0])).status_code == 302
     assert client.get("/").status_code == 200
 
     password[0] = "rotated-password"
@@ -90,10 +114,10 @@ def test_login_route_blocks_repeated_password_failures(monkeypatch):
 
     try:
         for _ in range(limiter.max_failures):
-            response = client.post("/login", data={"password": "wrong"})
+            response = client.post("/login", data=_login_data("wrong"))
             assert response.status_code == 200
 
-        blocked = client.post("/login", data={"password": "wrong"})
+        blocked = client.post("/login", data=_login_data("wrong"))
         assert blocked.status_code == 429
     finally:
         app.extensions["shutdown_scheduler"]()
@@ -106,10 +130,10 @@ def test_successful_login_clears_failed_attempt_state(monkeypatch):
     limiter = app.extensions["login_rate_limiter"]
 
     try:
-        assert client.post("/login", data={"password": "wrong"}).status_code == 200
+        assert client.post("/login", data=_login_data("wrong")).status_code == 200
         assert limiter.tracked_keys() == 1
 
-        response = client.post("/login", data={"password": password[0]})
+        response = client.post("/login", data=_login_data(password[0]))
         assert response.status_code == 302
         assert limiter.tracked_keys() == 0
     finally:
@@ -164,7 +188,7 @@ def test_authenticated_client_can_refresh_csrf_token(monkeypatch):
     client = app.test_client()
 
     try:
-        assert client.post("/login", data={"password": password[0]}).status_code == 302
+        assert client.post("/login", data=_login_data(password[0])).status_code == 302
         response = client.get("/api/session")
     finally:
         app.extensions["shutdown_scheduler"]()

@@ -115,8 +115,6 @@ PRELOAD_INTERVAL_SECONDS = 3600
 # 启动后延迟多少秒才开始第一轮预加载，让启动初期完全静默。
 # 可通过 config.PRELOAD_STARTUP_DELAY_SECONDS 覆盖，默认 30s。
 PRELOAD_STARTUP_DELAY_SECONDS = max(0, int(getattr(config, "PRELOAD_STARTUP_DELAY_SECONDS", 30)))
-# 并发度自适应：不超过待加载市场数量，也不超过原上限 8。
-PRELOAD_PARALLEL_WORKERS = min(8, max(1, len(PRELOAD_EXCHANGES))) if PRELOAD_EXCHANGES else 1
 
 # 单市场单次刷新的最大耗时阈值，仅用于日志告警，不会强制 kill 任务。
 _PRELOAD_SLOW_WARN_SECONDS = 10

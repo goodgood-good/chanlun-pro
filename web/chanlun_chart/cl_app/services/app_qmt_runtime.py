@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+from time import monotonic, sleep
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -59,7 +60,22 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
     )
     try:
         temporary.write_text(encoded + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        deadline = monotonic() + 2.0
+        while True:
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                retryable_windows_share = bool(
+                    os.name == "nt"
+                    and (
+                        isinstance(exc, PermissionError)
+                        or getattr(exc, "winerror", None) in {5, 32}
+                    )
+                )
+                if not retryable_windows_share or monotonic() >= deadline:
+                    raise
+                sleep(0.05)
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -137,6 +153,8 @@ class AppQmtRuntimeController:
             raise ValueError("observation_max_age_seconds must be at least 60")
         self._operation_lock = threading.Lock()
         self._state_lock = threading.RLock()
+        self._operation_action: str | None = None
+        self._operation_started_at: datetime | None = None
         self._registered = False
         self._registered_at: datetime | None = None
 
@@ -342,6 +360,9 @@ class AppQmtRuntimeController:
                 **_SAFETY,
             }
         try:
+            with self._state_lock:
+                self._operation_action = action.strip().upper()
+                self._operation_started_at = self._now()
             if notify_change and action in {"Ensure", "Restart"}:
                 if self._before_change is not None:
                     self._before_change(action.upper())
@@ -365,6 +386,9 @@ class AppQmtRuntimeController:
                 self._after_change(action.upper())
             return observation
         finally:
+            with self._state_lock:
+                self._operation_action = None
+                self._operation_started_at = None
             self._operation_lock.release()
 
     @staticmethod
@@ -539,6 +563,8 @@ class AppQmtRuntimeController:
         reasons = self._configuration_reasons()
         with self._state_lock:
             state = self._load_state()
+            operation_action = self._operation_action
+            operation_started_at = self._operation_started_at
         raw_observation = state.get("observation")
         observation = (
             dict(raw_observation) if isinstance(raw_observation, Mapping) else {}
@@ -596,6 +622,18 @@ class AppQmtRuntimeController:
                 None if registered_at is None else _canonical_at(registered_at)
             ),
             "last_action": state.get("last_action"),
+            # The persisted observation intentionally remains the last completed
+            # proof while Ensure/Restart is running. Expose the in-flight
+            # operation separately so a liveness watchdog does not mistake the
+            # expected gateway pause for a dead Web process and discard all hot
+            # chart/screening caches during the daily 08:30 maintenance.
+            "operation_in_progress": operation_action is not None,
+            "operation_action": operation_action,
+            "operation_started_at": (
+                None
+                if operation_started_at is None
+                else _canonical_at(operation_started_at)
+            ),
             "last_attempt_at": state.get("last_attempt_at"),
             "last_success_at": state.get("last_success_at"),
             "daily_session": state.get("daily_session"),

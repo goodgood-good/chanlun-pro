@@ -4,6 +4,8 @@ var BKGN = (function () {
   var allBkgnList = [];         // 板块全量缓存（首次拉取后永驻）
   var stocksCache = new Map();  // 成员股票按板块缓存：key="hy|白酒"
   var currentBkgnKey = null;    // 用于翻页 / 搜索 reload 后恢复高亮
+  var visibleBkgn = [];         // 当前板块表渲染数据
+  var currentBkgnIndex = -1;    // 键盘导航当前板块行
   var currentStockData = [];    // 下层完整数据，前端过滤的源
   var visibleStocks = [];       // 当前下层 table 渲染中的数据（搜索过滤后）
   var currentStockIndex = -1;   // 键盘导航当前选中行（基于 visibleStocks）
@@ -30,7 +32,8 @@ var BKGN = (function () {
   // 板块层标题点击折叠 / 展开 body
   function bind_layer_toggle() {
     $("#bkgn_layer_toggle").off("click.bkgn").on("click.bkgn", function () {
-      $(this).toggleClass("is-collapsed");
+      var collapsed = $(this).toggleClass("is-collapsed").hasClass("is-collapsed");
+      $(this).attr("aria-expanded", collapsed ? "false" : "true");
       $("#bkgn_layer_body").slideToggle(120);
     });
   }
@@ -64,6 +67,10 @@ var BKGN = (function () {
         type: item.type,
       };
     });
+    visibleBkgn = tableData;
+    currentBkgnIndex = tableData.findIndex(function (item) {
+      return item.type + "|" + item.bkgn_code === currentBkgnKey;
+    });
     layui.table.render({
       elem: "#bkgn_table",
       data: tableData,
@@ -77,6 +84,8 @@ var BKGN = (function () {
       done: function () {
         $("#bkgn_total_tip").text("共 " + tableData.length + " 个板块");
         if (currentBkgnKey) restore_bkgn_highlight();
+        decorate_bkgn_rows();
+        bind_bkgn_table_keyboard();
       },
     });
     if (!bkgnRowClickBound) {
@@ -87,10 +96,61 @@ var BKGN = (function () {
 
   function on_bkgn_row_click(obj) {
     var data = obj.data;
+    currentBkgnIndex = Number(obj.index);
     currentBkgnKey = data.type + "|" + data.bkgn_code;
     layui.table.setRowChecked("bkgn_table", { index: "all", checked: false });
     layui.table.setRowChecked("bkgn_table", { index: obj.index });
     load_bkgn_codes(data.type, data.bkgn_code);
+    decorate_bkgn_rows();
+  }
+
+  function bkgn_rows() {
+    if (typeof document === "undefined" || typeof document.getElementById !== "function") return [];
+    var source = document.getElementById("bkgn_table");
+    var view = source && source.nextElementSibling;
+    return view ? Array.prototype.slice.call(view.querySelectorAll(".layui-table-body tbody tr")) : [];
+  }
+
+  function decorate_bkgn_rows() {
+    bkgn_rows().forEach(function (row, index) {
+      row.setAttribute("tabindex", "-1");
+      row.setAttribute("aria-selected", index === currentBkgnIndex ? "true" : "false");
+    });
+  }
+
+  function select_bkgn_index(index, activate) {
+    if (!visibleBkgn.length) return;
+    currentBkgnIndex = Math.max(0, Math.min(visibleBkgn.length - 1, index));
+    layui.table.setRowChecked("bkgn_table", { index: "all", checked: false });
+    layui.table.setRowChecked("bkgn_table", { index: currentBkgnIndex });
+    decorate_bkgn_rows();
+    var row = bkgn_rows()[currentBkgnIndex];
+    if (row) row.focus();
+    var data = visibleBkgn[currentBkgnIndex];
+    $("#bkgn_keyboard_status").text(
+      "已选择板块 " + data.bkgn_name + (activate ? "，正在加载成分股" : "，按 Enter 加载成分股"),
+    );
+    if (!activate) return;
+    currentBkgnKey = data.type + "|" + data.bkgn_code;
+    load_bkgn_codes(data.type, data.bkgn_code);
+  }
+
+  function bind_bkgn_table_keyboard() {
+    if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
+    var wrap = document.getElementById("bkgn_table_wrap");
+    if (!wrap || wrap.__bkgnKeyboardBound) return;
+    wrap.__bkgnKeyboardBound = true;
+    wrap.addEventListener("keydown", function (event) {
+      var key = event.key;
+      if (["ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].indexOf(key) === -1) return;
+      event.preventDefault();
+      if (!visibleBkgn.length) return;
+      if (key === "Home") select_bkgn_index(0, false);
+      else if (key === "End") select_bkgn_index(visibleBkgn.length - 1, false);
+      else if (key === "ArrowDown") select_bkgn_index(currentBkgnIndex < 0 ? 0 : currentBkgnIndex + 1, false);
+      else if (key === "ArrowUp") select_bkgn_index(currentBkgnIndex < 0 ? visibleBkgn.length - 1 : currentBkgnIndex - 1, false);
+      else select_bkgn_index(currentBkgnIndex < 0 ? 0 : currentBkgnIndex, true);
+    });
   }
 
   function restore_bkgn_highlight() {

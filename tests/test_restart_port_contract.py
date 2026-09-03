@@ -315,7 +315,7 @@ def test_restart_builds_complete_longbridge_environment_before_preflight():
         assert source.count(f"'{name}'") >= 2
 
 
-def test_project_login_hash_overrides_stale_parent_process_value():
+def test_project_named_login_config_overrides_stale_parent_process_value():
     source = (
         Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
@@ -323,11 +323,11 @@ def test_project_login_hash_overrides_stale_parent_process_value():
     managed_names = source.index("$deploymentManagedNames = @(")
     dotenv_call = source.index("Import-ProjectDotEnv -Path")
     validation = source.index(
-        "if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD))"
+        "if (-not (Test-LoginUsersConfig -Value $env:CHANLUN_LOGIN_USERS))"
     )
 
     assert managed_names < dotenv_call < validation
-    assert "'CHANLUN_LOGIN_PWD'" in source[managed_names:dotenv_call]
+    assert "'CHANLUN_LOGIN_USERS'" in source[managed_names:dotenv_call]
 
 
 def test_restart_rejects_invalid_login_environment_before_stopping_service():
@@ -336,15 +336,32 @@ def test_restart_rejects_invalid_login_environment_before_stopping_service():
     ).read_text(encoding="utf-8")
 
     validation = source.index(
-        "if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD))"
+        "if (-not (Test-LoginUsersConfig -Value $env:CHANLUN_LOGIN_USERS))"
     )
     stop_phase = source.index("# --- 1. 先停止网页项目")
 
     assert validation < stop_phase
-    assert "function Test-LoginPasswordHash" in source
+    assert "function Test-LoginUsersConfig" in source
+    assert "ConvertFrom-Json" in source
     assert ".StartsWith('pbkdf2:')" in source
     assert ".StartsWith('scrypt:')" in source
     assert "现有服务未停止" in source
+
+
+def test_restart_logs_large_scope_gate_failure_before_stopping_service():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    ).read_text(encoding="utf-8")
+
+    validation = source.index("$validationOutput = @(& $PythonExe")
+    failure_log = source.index(
+        "ERROR: large-scope validation12 gate rejected startup before service stop"
+    )
+    stop_phase = source.index("# --- 1. ")
+
+    assert validation < failure_log < stop_phase
+    assert "$validationExitCode = $LASTEXITCODE" in source
+    assert "===== web restart ABORTED =====" in source[failure_log:stop_phase]
 
 
 def test_poetry_python_resolution_tolerates_informational_stderr_only():

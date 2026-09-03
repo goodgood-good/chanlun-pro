@@ -84,9 +84,9 @@ def test_livez_and_healthz_have_distinct_compatible_contracts(app):
 
 
 def test_priority_locator_budget_preserves_five_second_publish_reserve(app):
-    assert app.config["TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS"] == 55.0
+    assert app.config["TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS"] == 58.0
     screening = app.extensions["decision_support_trading_screening"]
-    assert screening._config.priority_monitor_time_budget_seconds == 55.0
+    assert screening._config.priority_monitor_time_budget_seconds == 58.0
 
 
 def test_disabled_scheduler_monitor_cannot_bypass_virtual_paper_gate(app):
@@ -167,6 +167,8 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
     assert payload["selection_status"] == "disabled"
     assert payload["selection_reason_code"] == "SCREENING_DISABLED"
     assert payload["realtime_alert_ready"] is None
+    assert payload["realtime_alert_capacity_ready"] is None
+    assert payload["realtime_alert_next_session_ready"] is None
     assert payload["realtime_alert_status"] == "disabled"
     assert payload["realtime_alert_reason_code"] == "SCREENING_DISABLED"
     assert payload["revision"] == "test-revision"

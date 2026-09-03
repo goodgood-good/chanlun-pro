@@ -54,11 +54,11 @@ ENABLE_SSE_PUSH = True
 SSE_REFRESH_MS = 8000
 SSE_REFRESH_MS_US = 8000
 
-# WEB 登录密码，为空则无需进行登录
-# 推荐写入 werkzeug 生成的哈希值（以 pbkdf2: 开头）；明文也支持但请仅在内网/本机使用。
+# WEB 命名登录账号；空映射会拒绝启动，也可通过 CHANLUN_LOGIN_USERS JSON 配置。
+# 每个密码必须使用 Werkzeug 生成的 pbkdf2:/scrypt: 哈希，禁止明文。
 # 生成方法（getpass 输入，不把明文写入命令历史）：
 # poetry run python script/generate_web_password_hash.py
-LOGIN_PWD = os.environ.get('CHANLUN_LOGIN_PWD', '')
+LOGIN_USERS = {}
 
 # Flask 会话密钥；为空则按 env(CHANLUN_FLASK_SECRET_KEY) > 数据目录持久化文件 顺序解析。
 # 可手动设置，建议使用 secrets.token_hex(32) 生成。
@@ -210,7 +210,7 @@ def get_data_path():
 # 长桥按订阅级别限制每月可查询的不同 history kline symbol 数量：
 #   基础账户 100 / 10K HKD+ 400 / 800K HKD+ 2000 / 6M HKD+ 3000
 # 触发 301607 后到月初前任何"新"symbol 都拿不到 K 线。
-# 下面三项用于把烧配额行为收敛到可控范围。
+# 下面两项用于把烧配额行为收敛到可控范围。
 
 # 月度配额上限（按你的实际订阅级别填）。设为 0 表示不做预检查（仅在 301607 后被动收敛）。
 LB_QUOTA_MONTHLY_LIMIT = 100
@@ -220,8 +220,3 @@ LB_QUOTA_MONTHLY_LIMIT = 100
 # 只支持 "longbridge"（长桥）与 "usmart"（盈立）。
 # 长桥实时报价不受影响，仍走 cq。
 US_HISTORY_KLINE_SOURCE = "longbridge"
-
-# 美股 prewarm 范围限制：
-#   True  - 仅预热自选股（zixuan 表中 market='us' 的所有股票），保护配额
-#   False - 全市场预热（旧行为，会很快烧光基础账户配额）
-US_PREWARM_ZIXUAN_ONLY = True

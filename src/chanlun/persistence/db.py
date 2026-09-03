@@ -337,27 +337,35 @@ class DB(object):
             if table_name in self.__cache_tables:
                 return self.__cache_tables[table_name]
 
-            class TableByKlines(Base):
-                __tablename__ = table_name
-                __table_args__ = (
+            orm_class_name = f"TableByKlines_{table_name}"
+            table_attributes = {
+                "__module__": __name__,
+                "__tablename__": table_name,
+                "__table_args__": (
                     UniqueConstraint("code", "dt", "f", name="table_code_dt_f_unique"),
                     # 频繁的 (code,f,dt) 查询与排序，建立复合索引
                     Index("idx_code_f_dt", "code", "f", "dt"),
                     {"mysql_collate": "utf8mb4_general_ci"},
-                )
-                code = Column(String(20), primary_key=True, comment="标的代码")
-                dt = Column(DateTime, primary_key=True, comment="日期")
-                f = Column(String(5), primary_key=True, comment="周期")
-                o = Column(Float)
-                c = Column(Float)
-                h = Column(Float)
-                l = Column(Float)
-                v = Column(Float)
-                # 注意：__table_args__ 已在上方统一声明，避免覆盖
+                ),
+                "code": Column(String(20), primary_key=True, comment="标的代码"),
+                "dt": Column(DateTime, primary_key=True, comment="日期"),
+                "f": Column(String(5), primary_key=True, comment="周期"),
+                "o": Column(Float),
+                "c": Column(Float),
+                "h": Column(Float),
+                "l": Column(Float),
+                "v": Column(Float),
+            }
 
             if market == Market.FUTURES.value:
                 # 期货市场，添加持仓列
-                TableByKlines.p = Column(Float, comment="持仓量")
+                table_attributes["p"] = Column(Float, comment="持仓量")
+
+            # A fixed inner-class name makes SQLAlchemy replace the previous
+            # class-registry entry every time a different market table is
+            # declared.  Give each table model a stable, distinct diagnostic
+            # identity while retaining the same metadata and cache contract.
+            TableByKlines = type(orm_class_name, (Base,), table_attributes)
 
             self.__cache_tables[table_name] = TableByKlines
             Base.metadata.create_all(self.engine)
@@ -897,8 +905,8 @@ class DB(object):
     ):
         """保存图表布局，返回记录 id；drawing/study_template 类型按名称做覆盖更新。"""
         with self.Session() as session:
-            # drawing/study_template 按名称覆盖，避免同名模板重复堆积
-            if chart_type in ["drawing", "study_template", "template"]:
+            # drawing/study_template/preference 按名称覆盖，避免同名记录重复堆积
+            if chart_type in ["drawing", "study_template", "template", "preference"]:
                 chart = (
                     session.query(TableByTVCharts)
                     .filter(

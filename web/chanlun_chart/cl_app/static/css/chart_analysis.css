@@ -5,15 +5,17 @@
   --ca-surface-soft: var(--lay-color-bg-3, #f2f4f7);
   --ca-text: var(--lay-color-text-1, #18212f);
   --ca-text-secondary: var(--lay-color-text-2, #4f5b6b);
-  --ca-text-muted: var(--lay-color-text-3, #7b8797);
+  --ca-text-muted: #5f6b7a;
   --ca-border: var(--lay-color-border-1, #e4e8ee);
   --ca-border-strong: var(--lay-color-border-2, #d5dbe4);
-  --ca-blue: #1677ff;
-  --ca-blue-soft: rgba(22, 119, 255, 0.09);
-  --ca-live: #0f9f6e;
-  --ca-buy: #e5484d;
-  --ca-sell: #0a9b83;
-  --ca-warning: #b7791f;
+  --ca-blue: #0958d9;
+  --ca-blue-fill: #0958d9;
+  --ca-blue-fill-hover: #0648b7;
+  --ca-blue-soft: rgba(9, 88, 217, 0.1);
+  --ca-live: #087a55;
+  --ca-buy: #c9363e;
+  --ca-sell: #08796a;
+  --ca-warning: #8a5a16;
   box-sizing: border-box;
   overflow-x: hidden !important;
   color: var(--ca-text-secondary);
@@ -21,6 +23,98 @@
   background: var(--ca-bg);
   box-shadow: -10px 0 28px rgba(15, 23, 42, 0.05);
   scrollbar-gutter: stable;
+}
+
+#chart_container {
+  position: relative;
+}
+
+.ca-chart-transition[hidden] {
+  display: none;
+}
+
+.ca-chart-transition {
+  position: absolute;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #172033;
+  background: rgba(246, 248, 252, 0.985);
+}
+
+html.cl-theme-dark .ca-chart-transition {
+  color: #edf5f2;
+  background: rgba(7, 16, 14, 0.985);
+}
+
+.ca-chart-transition__card {
+  display: grid;
+  width: min(380px, calc(100% - 24px));
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  border: 1px solid rgba(84, 105, 133, 0.24);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 18px 48px rgba(24, 39, 59, 0.12);
+  text-align: center;
+}
+
+html.cl-theme-dark .ca-chart-transition__card {
+  border-color: rgba(180, 214, 201, 0.2);
+  background: rgba(13, 25, 22, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+
+.ca-chart-transition__card strong {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.ca-chart-transition__card small {
+  color: #667387;
+  line-height: 1.5;
+}
+
+html.cl-theme-dark .ca-chart-transition__card small {
+  color: #a8bbb4;
+}
+
+.ca-chart-transition__spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(9, 88, 217, 0.16);
+  border-top-color: #0958d9;
+  border-radius: 50%;
+  animation: ca-chart-transition-spin 0.8s linear infinite;
+}
+
+.ca-chart-transition[data-state="error"] .ca-chart-transition__spinner,
+.ca-chart-transition[data-state="delayed"] .ca-chart-transition__spinner {
+  animation-duration: 1.6s;
+  border-top-color: #b7791f;
+}
+
+@keyframes ca-chart-transition-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ca-chart-transition__spinner { animation: none; }
+}
+
+html.cl-theme-dark #chart_menu {
+  --ca-text-muted: #aeb8c6;
+  --ca-blue: #79b2ff;
+  --ca-blue-fill: #2368c4;
+  --ca-blue-fill-hover: #1a56a3;
+  --ca-blue-soft: rgba(121, 178, 255, 0.14);
+  --ca-live: #55d6a4;
+  --ca-buy: #ff8a8f;
+  --ca-sell: #55d9c2;
+  --ca-warning: #f0bd62;
 }
 
 #chart_menu *,
@@ -76,6 +170,32 @@
   color: var(--ca-text-muted);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.ca-account-context {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 250px;
+  margin: 7px 0 0;
+  color: var(--ca-text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ca-account-context span {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ca-account-context small {
+  flex: 0 0 auto;
+  padding-left: 5px;
+  border-left: 1px solid var(--ca-border);
+  color: var(--ca-text-muted);
+  font-size: 10px;
 }
 
 .ca-sidebar-collapse,
@@ -143,6 +263,16 @@
   background: var(--ca-bg) !important;
 }
 
+#chart_menu .layui-input::placeholder,
+#chart_menu .xm-search-input::placeholder {
+  color: var(--ca-text-muted);
+  opacity: 1;
+}
+
+#chart_menu xm-select .xm-tips {
+  color: var(--ca-text-muted);
+}
+
 .ca-overview {
   position: relative;
   margin: 0 14px 12px;
@@ -191,19 +321,21 @@
 .ca-symbol-line {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 7px;
 }
 
 .ca-symbol-name {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   color: var(--ca-text);
   font-size: 15px;
   font-weight: 700;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .ca-symbol-code {
@@ -306,14 +438,15 @@
 
 .ca-summary-facts strong {
   margin-top: 2px;
-  overflow: hidden;
+  overflow: visible;
   color: var(--ca-text-secondary);
   font-size: 12px;
   font-weight: 750;
   font-variant-numeric: tabular-nums;
   line-height: 1.3;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 #ca-current-price {
@@ -334,6 +467,7 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 7px;
   padding: 0 2px;
@@ -341,14 +475,15 @@
 
 .ca-summary-time strong {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   color: var(--ca-text-muted);
   font-size: 11px;
   font-weight: 550;
   line-height: 1.35;
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .ca-overview:not(.is-collapsed) .ca-overview-summary {
@@ -466,6 +601,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -478,13 +614,15 @@
 }
 
 .ca-analysis-group-head > small {
+  flex: 1 1 120px;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   color: var(--ca-text-muted);
   font-size: 11px;
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .ca-group-index {
@@ -562,8 +700,9 @@
 
 .ca-zone-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 5px;
   margin-bottom: 5px;
 }
@@ -579,7 +718,8 @@
   color: var(--ca-text-muted);
   font-size: 10px;
   line-height: 1.2;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ca-zone-card > strong {
@@ -843,7 +983,7 @@
   min-height: 36px;
   border-color: rgba(22, 119, 255, 0.28);
   color: #ffffff;
-  background: var(--ca-blue);
+  background: var(--ca-blue-fill);
 }
 
 .ca-action:hover,
@@ -856,7 +996,7 @@
 .ca-action--primary:hover,
 .ca-action--primary:focus-visible {
   color: #ffffff;
-  background: #0d65d9;
+  background: var(--ca-blue-fill-hover);
 }
 
 .ca-disclaimer {
@@ -934,21 +1074,25 @@
 #chart_menu .layui-colla-title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  height: 46px;
-  padding: 0 38px 0 13px;
+  height: auto;
+  min-height: 46px;
+  padding: 9px 38px 9px 13px;
   color: var(--ca-text-secondary);
   background: var(--ca-surface);
   font-size: 12px;
   font-weight: 650;
-  line-height: 46px;
+  line-height: 1.4;
 }
 
 #chart_menu .ca-menu-title-main {
+  flex: 1 1 130px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 #chart_menu .ca-menu-title-meta {
@@ -958,7 +1102,8 @@
   font-size: 9px;
   font-weight: 500;
   line-height: 1.2;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 #chart_menu .layui-colla-title:hover {
   color: var(--ca-blue);
@@ -989,8 +1134,17 @@
 }
 
 #chart_menu .layui-colla-icon {
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  left: auto;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
   color: var(--ca-text-muted);
   font-size: 12px;
+  line-height: 14px;
+  text-align: center;
 }
 
 #chart_menu_toggle {

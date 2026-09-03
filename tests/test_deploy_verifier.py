@@ -361,11 +361,17 @@ def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
         "'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS'"
         in reset_body
     )
-    assert "$LargeScopePriorityMaxSymbols = 50" in restart
+    assert "$LargeScopePriorityMaxSymbols = 384" in restart
+    assert "$LargeScopeMonitorUniverseSymbols = 384" in restart
+    assert "$LargeScopeCandidateFiveMinuteSymbols = 80" in restart
     assert "} else {" in reset_body
     assert (
         "'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS'" in reset_body
         and "[string]$LargeScopePriorityMaxSymbols" in reset_body
+    )
+    assert (
+        "'CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS'" in reset_body
+        and "[string]$LargeScopeCandidateFiveMinuteSymbols" in reset_body
     )
     assert 'set "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=' not in windows_run
 

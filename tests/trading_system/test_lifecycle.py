@@ -13,6 +13,7 @@ from chanlun.decision_support.trading_system.lifecycle import (
     five_minute_setup_is_executable,
     lifecycle_stage_from_signal,
     match_one_minute_nesting_witness,
+    match_one_minute_preconfirmation_divergences,
 )
 from tests.trading_system.helpers import (
     AS_OF,
@@ -56,6 +57,95 @@ def _strict_witness(point):
     return _with_terminal_interval(
         point,
         market_start=point.anchor_at - timedelta(minutes=1),
+    )
+
+
+def _strict_provisional(point):
+    return replace(
+        point,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_unfinished",
+            structural_level=point.recursive_level,
+            unit_id=f"segment:{point.source_frequency}:{point.candidate_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down" if point.side == "buy" else "up",
+            state="forming",
+            market_start=point.anchor_at - timedelta(minutes=30),
+            market_end=point.anchor_at,
+            available_at=point.available_at,
+        ),
+    )
+
+
+def test_unconfirmed_five_minute_setup_retains_nested_one_minute_divergences() -> None:
+    five_point = _strict_provisional(provisional_point("3buy"))
+    setup = build_setup(five_point, neutral_context("30m"), eligible_sector())
+    first = _strict_witness(
+        confirmed_point("1buy", frequency="1m", minutes_after=-5)
+    )
+    second = _strict_witness(
+        confirmed_point("1buy", frequency="1m", minutes_after=-3)
+    )
+
+    matches = match_one_minute_preconfirmation_divergences(
+        setup,
+        (second, first),
+        as_of=AS_OF,
+    )
+
+    assert matches == (first, second)
+    assert setup.point.status == "provisional"
+    assert all(point.divergence_kind == "trend" for point in matches)
+
+
+def test_locked_five_minute_geometry_still_accepts_preconfirmation_divergence() -> None:
+    base = provisional_point("3buy")
+    five_point = replace(
+        base,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=base.recursive_level,
+            unit_id=f"segment:{base.source_frequency}:{base.candidate_id}",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=base.anchor_at - timedelta(minutes=30),
+            market_end=base.anchor_at,
+            available_at=base.available_at,
+        ),
+    )
+    setup = build_setup(five_point, neutral_context("30m"), eligible_sector())
+    divergence = _strict_witness(
+        confirmed_point("1buy", frequency="1m", minutes_after=-5)
+    )
+
+    assert match_one_minute_preconfirmation_divergences(
+        setup,
+        (divergence,),
+        as_of=AS_OF,
+    ) == (divergence,)
+
+
+def test_preconfirmation_divergence_rejects_non_divergence_and_bad_lineage() -> None:
+    five_point = _strict_provisional(provisional_point("3buy"))
+    setup = build_setup(five_point, neutral_context("30m"), eligible_sector())
+    non_divergence = _strict_witness(
+        confirmed_point("3buy", frequency="1m", minutes_after=-5)
+    )
+    opposite = _strict_witness(
+        confirmed_point("1sell", frequency="1m", minutes_after=-5)
+    )
+    outside = _strict_witness(
+        confirmed_point("1buy", frequency="1m", minutes_after=5)
+    )
+
+    assert (
+        match_one_minute_preconfirmation_divergences(
+            setup,
+            (non_divergence, opposite, outside),
+            as_of=AS_OF,
+        )
+        == ()
     )
 
 

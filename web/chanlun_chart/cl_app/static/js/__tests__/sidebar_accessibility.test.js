@@ -26,13 +26,18 @@ function createElement() {
   return {
     style: {},
     title: '',
+    inert: false,
+    focused: false,
     classList: {
       add(name) { classes.add(name); },
       remove(name) { classes.delete(name); },
       contains(name) { return classes.has(name); },
     },
     setAttribute(name, value) { attributes.set(name, String(value)); },
+    removeAttribute(name) { attributes.delete(name); },
     getAttribute(name) { return attributes.has(name) ? attributes.get(name) : null; },
+    contains() { return false; },
+    focus() { this.focused = true; },
     addEventListener(name, handler) { listeners.set(name, handler); },
     dispatch(name, event = {}) {
       const handler = listeners.get(name);
@@ -56,12 +61,14 @@ function loadResizeModule(initialCollapsed = false, viewportWidth = 1200, search
     chart_resize_handle: createElement(),
     chart_menu_toggle: createElement(),
     chart_menu_inline_collapse: createElement(),
+    chart_menu_skip_link: createElement(),
     'toggle-menu': createElement(),
   };
   const body = createElement();
   const storage = new Map([
     ['chart_menu_collapsed', initialCollapsed ? '1' : '0'],
   ]);
+  const windowListeners = new Map();
   const sandbox = {
     document: {
       readyState: 'complete',
@@ -76,8 +83,11 @@ function loadResizeModule(initialCollapsed = false, viewportWidth = 1200, search
     innerWidth: viewportWidth,
     location: { search },
     chart_widgets: [],
-    addEventListener() {},
-    dispatchEvent() {},
+    addEventListener(name, handler) { windowListeners.set(name, handler); },
+    dispatchEvent(event) {
+      const handler = windowListeners.get(event && event.type);
+      if (handler) handler(event);
+    },
     Event: function Event(type) { this.type = type; },
   };
   sandbox.window = sandbox;
@@ -131,6 +141,12 @@ test('sidebar collapse and expand synchronize accessible state', () => {
 
   collapse.dispatch('click');
   assert.equal(body.classList.contains('chart-menu-collapsed'), true);
+  assert.equal(elements.chart_menu.inert, true);
+  assert.equal(elements.chart_menu.getAttribute('inert'), '');
+  assert.equal(elements.chart_menu.getAttribute('aria-hidden'), 'true');
+  assert.equal(elements.chart_menu_skip_link.tabIndex, -1);
+  assert.equal(elements.chart_menu_skip_link.getAttribute('aria-hidden'), 'true');
+  assert.equal(expand.focused, true);
   assert.equal(expand.getAttribute('aria-expanded'), 'false');
   assert.equal(collapse.getAttribute('aria-expanded'), 'false');
   assert.match(expand.getAttribute('aria-label'), /展开/);
@@ -138,6 +154,12 @@ test('sidebar collapse and expand synchronize accessible state', () => {
 
   expand.dispatch('click');
   assert.equal(body.classList.contains('chart-menu-collapsed'), false);
+  assert.equal(elements.chart_menu.inert, false);
+  assert.equal(elements.chart_menu.getAttribute('inert'), null);
+  assert.equal(elements.chart_menu.getAttribute('aria-hidden'), null);
+  assert.equal(elements.chart_menu_skip_link.tabIndex, 0);
+  assert.equal(elements.chart_menu_skip_link.getAttribute('aria-hidden'), null);
+  assert.equal(collapse.focused, true);
   assert.equal(expand.getAttribute('aria-expanded'), 'true');
   assert.equal(collapse.getAttribute('aria-expanded'), 'true');
   assert.match(expand.getAttribute('aria-label'), /收起/);
@@ -170,4 +192,23 @@ test('mobile sidebar overlays the chart instead of squeezing its working area', 
 
   elements.chart_menu_inline_collapse.dispatch('click');
   assert.equal(body.classList.contains('chart-menu-overlay'), false);
+});
+
+test('portrait tablet keeps the chart full-width under an overlay sidebar', () => {
+  const { sandbox, elements, body } = loadResizeModule(false, 768);
+
+  assert.equal(elements.chart_menu.style.width, '420px');
+  assert.equal(elements.chart_container.style.width, '100%');
+  assert.equal(elements.chart_container.style.maxWidth, '100%');
+  assert.equal(body.classList.contains('chart-menu-overlay'), true);
+
+  sandbox.innerWidth = 1200;
+  sandbox.dispatchEvent({ type: 'resize' });
+  assert.equal(elements.chart_container.style.width, 'calc(100% - 420px)');
+  assert.equal(body.classList.contains('chart-menu-overlay'), false);
+
+  sandbox.innerWidth = 768;
+  sandbox.dispatchEvent({ type: 'resize' });
+  assert.equal(elements.chart_container.style.width, '100%');
+  assert.equal(body.classList.contains('chart-menu-overlay'), true);
 });

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import hashlib
 import hmac
@@ -30,6 +30,7 @@ from chanlun.core.strict_structure.formal_state import current_formal_direction
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_completed_one_minute_prefix_closes,
     a_share_optional_entry_valid_until,
 )
 from chanlun.decision_support.trading_system.context import (
@@ -151,6 +152,25 @@ _QMT_DOWNLOAD_BASE_BY_FREQUENCY = {
     "1m": "1m",
 }
 _REALTIME_INCREMENTAL_REFRESH_DAYS = {"5m": 14, "1m": 7}
+_LOCKED_UNIT_CONFIRMATION_TIME_CHANGED = (
+    "locked unit confirmation time changed"
+)
+
+
+def _expected_completed_intraday_close(
+    observed_at: datetime,
+    frequency: str,
+) -> datetime | None:
+    """Return the latest causally complete A-share 1m/5m/30m close."""
+
+    group_size = {"1m": 1, "5m": 5, "30m": 30}.get(frequency)
+    if group_size is None:
+        return None
+    minute_closes = a_share_completed_one_minute_prefix_closes(observed_at)
+    completed_count = len(minute_closes) // group_size
+    if completed_count <= 0:
+        return None
+    return minute_closes[completed_count * group_size - 1]
 
 
 def _default_qmt_instrument_detail(native_code: str) -> object:
@@ -158,17 +178,21 @@ def _default_qmt_instrument_detail(native_code: str) -> object:
 
     return xtdata.get_instrument_detail(native_code, iscomplete=False)
 _RUNTIME_CACHE_CAPACITY_BY_FREQUENCY = {
-    # 一个严格运行状态会保留完整递归结构；旧上限在单进程中可占用数 GiB。
-    # LRU 只用于分钟级热点复用，覆盖通道被逐出后会从冻结物理帧确定性重建。
-    "1m": 8,
+    # 1m 必须容纳 384 只授权定位池在十二路亲和分片后的完整工作集。哈希分片并不
+    # 保证绝对均匀；生产池 345 只时已经出现 37/37 的两个热点分片，32 槽会产生
+    # 顺序 LRU 抖动并让整批每分钟重复解压。48 槽覆盖该偏斜并保留增长余量。5m 严格
+    # 状态明显更大；实测 32 槽会把十二个进程的常驻集推到系统提交上限，因此只
+    # 保留 8 个解码热点，其余由认证磁盘层承接。同一已完成 5m 周期会在进入这层
+    # 之前命中轻量分析摘要，所以磁盘恢复只发生在新的 5m 边界，而非每一分钟。
+    "1m": 48,
     "5m": 8,
 }
-# 严格运行态远大于最终分析摘要，不能把数百只待定位标的全部常驻为 Python 对象；
-# 但直接丢弃 LRU 尾部又会让轮转监听每次重放约 12,000 根 K 线。1m 内存二级缓存只
-# 保存本进程刚生成的压缩字节；候选 5m 的完整轮换状态另由 Web 生命周期密钥认证的
-# 本地磁盘层承接工作进程回收。416 个 1m 槽覆盖两个优先分片的热点段差标的；候选
-# 进程的 512 MiB 内存层只负责最快的一组热点，容量不足时按稳定代码哈希保留固定
-# 子集；生产环境的多个候选分片各自承接稳定亲和子集，避免顺序轮询造成零命中抖动。
+# Strict runtime graphs are much larger than their final summaries. The L1
+# cache keeps 48 decoded 1m states per shard; candidate shards also keep up to
+# 64 compressed 1m states / 128 MiB for temporary affinity skew. Full rotating
+# 5m state remains in the authenticated lifecycle-scoped disk layer. Stable
+# sharding plus these bounded tiers avoids replaying roughly 12,000 bars while
+# keeping worker memory finite.
 _RUNTIME_CACHE_ROLE = os.environ.get(
     "CHANLUN_SCREENING_WORKER_CACHE_ROLE",
     "shared",
@@ -177,14 +201,15 @@ if _RUNTIME_CACHE_ROLE not in {"shared", "priority", "candidate"}:
     _RUNTIME_CACHE_ROLE = "shared"
 _CANDIDATE_CACHE_ROLE = _RUNTIME_CACHE_ROLE == "candidate"
 _SERIALIZED_RUNTIME_CACHE_CAPACITY_BY_FREQUENCY = {
-    # 候选分片不计算实时 1m 段差；1m 状态留给优先监听分片，避免覆盖扫描占用内存。
-    "1m": 0 if _CANDIDATE_CACHE_ROLE else 416,
+    # 候选分片会被 priority_burst 借用计算实时 1m 段差。L1 已覆盖正常
+    # 亲和工作集；这里再保留一个小型压缩后备层，处理临时偏斜而不允许内存无界增长。
+    "1m": 64 if _CANDIDATE_CACHE_ROLE else 416,
     # 候选分片可把有界内存层用于轮换 5m 池；优先/共享分片保持较小，避免挤出 1m
     # 热点或触发 RSS 回收。完整候选轮回由下方认证磁盘层承接。
     "5m": 256 if _CANDIDATE_CACHE_ROLE else 32,
 }
 _SERIALIZED_RUNTIME_CACHE_MAX_BYTES_BY_FREQUENCY = {
-    "1m": 0 if _CANDIDATE_CACHE_ROLE else 896 * 1024 * 1024,
+    "1m": (128 if _CANDIDATE_CACHE_ROLE else 896) * 1024 * 1024,
     "5m": (512 if _CANDIDATE_CACHE_ROLE else 96) * 1024 * 1024,
 }
 _DISK_RUNTIME_CACHE_SCHEMA = "chanlun-screening-runtime-state-disk-cache-v2"
@@ -786,6 +811,165 @@ class SectorAnalysisExclusion:
             raise ValueError("required_member_count must be positive")
         if self.universe_member_count >= self.required_member_count:
             raise ValueError("sector exclusion must be below its member threshold")
+
+
+def _native_sector_shard_slot(sector_id: str, shard_count: int) -> int:
+    """Return a process-stable sector partition without Python hash randomization."""
+
+    if not isinstance(sector_id, str) or not sector_id:
+        raise ValueError("sector_id is required")
+    if type(shard_count) is not int or shard_count <= 0:
+        raise ValueError("shard_count must be positive")
+    digest = hashlib.sha256(sector_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % shard_count
+
+
+@dataclass(frozen=True, slots=True)
+class NativeSectorAnalysisShard:
+    """One deterministic, pre-strength sector-analysis partition.
+
+    Shards deliberately stop before horizontal strength ranking and parent
+    gating.  Those two policies require the complete catalog and are applied
+    exactly once after every authenticated worker partition has arrived.
+    """
+
+    shard_index: int
+    shard_count: int
+    admitted_codes: tuple[str, ...] | None
+    catalog_source: str
+    catalog_revision: str
+    catalog_sector_ids: tuple[str, ...]
+    assigned_sector_ids: tuple[str, ...]
+    assessments: tuple[SectorAssessment, ...]
+    completed_count: int
+    errors: tuple[SectorAnalysisFailure, ...]
+    exclusions: tuple[SectorAnalysisExclusion, ...]
+    members: Mapping[str, tuple[str, ...]]
+    analysis_members: Mapping[str, tuple[str, ...]]
+    latest_bars: tuple[BarKey, ...]
+    parent_relations: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.shard_index) is not int
+            or type(self.shard_count) is not int
+            or self.shard_count <= 0
+            or not 0 <= self.shard_index < self.shard_count
+        ):
+            raise ValueError("native sector shard coordinates are invalid")
+        if self.admitted_codes is not None and (
+            type(self.admitted_codes) is not tuple
+            or not self.admitted_codes
+            or len(self.admitted_codes) != len(set(self.admitted_codes))
+            or any(
+                type(code) is not str or _A_STOCK_CODE.fullmatch(code) is None
+                for code in self.admitted_codes
+            )
+        ):
+            raise ValueError("native sector shard admission is invalid")
+        if self.catalog_source not in {
+            QMT_GICS3_CATALOG_SOURCE,
+            QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+        }:
+            raise ValueError("native sector shard catalog source is invalid")
+        if not self.catalog_revision.startswith("sha256:"):
+            raise ValueError("native sector shard catalog revision is invalid")
+
+        catalog_ids = tuple(sorted(self.catalog_sector_ids))
+        assigned_ids = tuple(sorted(self.assigned_sector_ids))
+        object.__setattr__(self, "catalog_sector_ids", catalog_ids)
+        object.__setattr__(self, "assigned_sector_ids", assigned_ids)
+        if len(catalog_ids) != len(set(catalog_ids)):
+            raise ValueError("native sector shard catalog ids must be unique")
+        expected_assigned = tuple(
+            sector_id
+            for sector_id in catalog_ids
+            if _native_sector_shard_slot(sector_id, self.shard_count)
+            == self.shard_index
+        )
+        if assigned_ids != expected_assigned:
+            raise ValueError("native sector shard assignment is not exhaustive")
+
+        assessments = tuple(sorted(self.assessments, key=lambda item: item.sector_id))
+        errors = tuple(sorted(self.errors, key=lambda item: item.sector_id))
+        exclusions = tuple(sorted(self.exclusions, key=lambda item: item.sector_id))
+        latest_bars = tuple(
+            sorted(
+                self.latest_bars,
+                key=lambda item: (item.closed_at, item.code, item.frequency),
+            )
+        )
+        parent_relations = tuple(sorted(tuple(value) for value in self.parent_relations))
+        normalized_members = {
+            sector_id: tuple(values) for sector_id, values in self.members.items()
+        }
+        normalized_analysis_members = {
+            sector_id: tuple(values)
+            for sector_id, values in self.analysis_members.items()
+        }
+        object.__setattr__(self, "assessments", assessments)
+        object.__setattr__(self, "errors", errors)
+        object.__setattr__(self, "exclusions", exclusions)
+        object.__setattr__(self, "members", normalized_members)
+        object.__setattr__(self, "analysis_members", normalized_analysis_members)
+        object.__setattr__(self, "latest_bars", latest_bars)
+        object.__setattr__(self, "parent_relations", parent_relations)
+
+        assessment_ids = tuple(item.sector_id for item in assessments)
+        if assessment_ids != assigned_ids:
+            raise ValueError("native sector shard assessments do not match assignment")
+        if set(normalized_members) != set(assigned_ids) or set(
+            normalized_analysis_members
+        ) != set(assigned_ids):
+            raise ValueError("native sector shard membership is incomplete")
+        admitted = None if self.admitted_codes is None else set(self.admitted_codes)
+        for sector_id in assigned_ids:
+            display_members = normalized_members[sector_id]
+            full_members = normalized_analysis_members[sector_id]
+            if (
+                tuple(sorted(set(display_members))) != display_members
+                or tuple(sorted(set(full_members))) != full_members
+                or not set(display_members).issubset(full_members)
+                or (admitted is None and display_members != full_members)
+                or (
+                    admitted is not None
+                    and (
+                        not display_members
+                        or not set(display_members).issubset(admitted)
+                    )
+                )
+            ):
+                raise ValueError("native sector shard membership is invalid")
+        error_ids = {item.sector_id for item in errors}
+        exclusion_ids = {item.sector_id for item in exclusions}
+        if (
+            error_ids & exclusion_ids
+            or not error_ids.issubset(assigned_ids)
+            or not exclusion_ids.issubset(assigned_ids)
+            or type(self.completed_count) is not int
+            or self.completed_count < 0
+            or self.completed_count + len(errors) + len(exclusions)
+            != len(assigned_ids)
+        ):
+            raise ValueError("native sector shard completion is inconsistent")
+        bar_keys = tuple(
+            (item.code, item.frequency, item.closed_at) for item in latest_bars
+        )
+        if len(bar_keys) != len(set(bar_keys)) or any(
+            item.code not in assigned_ids for item in latest_bars
+        ):
+            raise ValueError("native sector shard bars are invalid")
+        child_ids: set[str] = set()
+        for child_id, parent_id in parent_relations:
+            if (
+                child_id in child_ids
+                or child_id not in assigned_ids
+                or parent_id not in catalog_ids
+                or not child_id.startswith("qmt-gics4:")
+                or not parent_id.startswith("qmt-gics3:")
+            ):
+                raise ValueError("native sector shard parent relation is invalid")
+            child_ids.add(child_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2223,13 +2407,61 @@ class NativeTradingDataGateway:
             f"runtime_state_cache_{'hit' if runtime_state_hit else 'miss'}.{frequency}"
         )
         try:
-            result = analyze_native_frame_with_warmup(
-                code=code,
-                frequency=frequency,
-                frame=frame,
-                as_of=as_of,
-                runtime_states=states,
-            )
+            try:
+                result = analyze_native_frame_with_warmup(
+                    code=code,
+                    frequency=frequency,
+                    frame=frame,
+                    as_of=as_of,
+                    runtime_states=states,
+                )
+            except StrictStructureAnalysisError as exc:
+                if (
+                    not runtime_state_hit
+                    or str(exc) != _LOCKED_UNIT_CONFIRMATION_TIME_CHANGED
+                ):
+                    raise
+                # A completed QMT bar can replace an earlier locally cached
+                # close without changing its timestamp. The strict registry
+                # correctly rejects that incremental history rewrite. Rebuild
+                # this symbol from the already authenticated full frame once;
+                # never relax the registry or mask any other structure error.
+                self._record_performance_event(
+                    f"runtime_state_contract_rebuild_attempt.{frequency}"
+                )
+                replacement = _WarmupRuntimeStates(
+                    full=ScreeningRuntimeState(code, frequency, market="a"),
+                    suffix=ScreeningRuntimeState(code, frequency, market="a"),
+                )
+                with self._lock:
+                    cache = self._runtime_states_by_frequency[frequency]
+                    if cache.get(code) is states:
+                        cache[code] = replacement
+                LogUtil.warning(
+                    "[trading_screening.runtime_state_contract_rebuild] "
+                    f"code={code} frequency={frequency} reason={str(exc)}"
+                )
+                try:
+                    result = analyze_native_frame_with_warmup(
+                        code=code,
+                        frequency=frequency,
+                        frame=frame,
+                        as_of=as_of,
+                        runtime_states=replacement,
+                    )
+                except Exception:
+                    self._record_performance_event(
+                        f"runtime_state_contract_rebuild_failure.{frequency}"
+                    )
+                    with self._lock:
+                        cache = self._runtime_states_by_frequency[frequency]
+                        if cache.get(code) is replacement:
+                            cache.pop(code, None)
+                    raise
+                states = replacement
+                self._record_performance_event(
+                    f"runtime_state_contract_rebuild_success.{frequency}"
+                )
         except Exception:
             self._record_performance_event(
                 f"structure_analysis_failure.{frequency}"
@@ -2337,7 +2569,44 @@ class NativeTradingDataGateway:
             >= self._config.request_bars(frequency) + extra_bars
         ):
             return None
-        return normalize_datetime(retained_start, "runtime retained frame start")
+        query_start = retained_start
+        if states is not None:
+            retained_frame = getattr(states.full, "_frame", None)
+            if isinstance(retained_frame, pd.DataFrame) and not retained_frame.empty:
+                query_start = _market_datetime(
+                    retained_frame["date"].iloc[-1],
+                    "runtime retained frame end",
+                )
+        if (
+            frequency == "1m"
+            and query_start.hour == 9
+            and query_start.minute == 31
+        ):
+            # QMT exposes the opening auction as a 09:30 event.  The canonical
+            # completed-minute grid folds that event into 09:31, so a stable
+            # query starting at the retained 09:31 row would omit the auction
+            # volume and make the first historical row differ on every read.
+            # Include exactly that source event; normalization removes it again
+            # and preserves the runtime state's true 09:31 left boundary.
+            return normalize_datetime(
+                query_start - timedelta(minutes=1),
+                "runtime opening-event query start",
+            )
+        return normalize_datetime(query_start, "runtime retained query start")
+
+    def _stable_incremental_retained_frame(
+        self,
+        *,
+        code: str,
+        frequency: str,
+    ) -> pd.DataFrame | None:
+        """Return the authenticated prefix paired with a hot tail request."""
+
+        with self._lock:
+            cache = self._runtime_states_by_frequency.get(frequency)
+            states = None if cache is None else cache.get(code)
+            retained = None if states is None else getattr(states.full, "_frame", None)
+        return retained if isinstance(retained, pd.DataFrame) else None
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         if not callable(callback):
@@ -2476,6 +2745,28 @@ class NativeTradingDataGateway:
         local_only = bool(
             skip_download and frame_override is _FRAME_UNSET and not is_sector
         )
+        if (local_only or fast_incremental_refresh) and frequency == "5m":
+            expected_closed_at = _expected_completed_intraday_close(
+                as_of,
+                frequency,
+            )
+            if expected_closed_at is not None:
+                cached_analysis = self._cached_analysis(analysis_code, frequency)
+                if (
+                    cached_analysis is not None
+                    and cached_analysis.closed_at == expected_closed_at
+                ):
+                    # A completed 5m fact cannot change during its four
+                    # intervening 1m rounds. Reuse the already validated strict
+                    # analysis before touching QMT or hashing thousands of rows.
+                    self._record_performance_event(
+                        "completed_epoch_cache_hit.5m"
+                    )
+                    self._record_performance_timing(
+                        "load_analysis_total.5m",
+                        perf_counter() - request_started,
+                    )
+                    return cached_analysis
         args: dict[str, object] = {
             "req_counts": self._config.request_bars(frequency),
             "dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
@@ -2495,6 +2786,14 @@ class NativeTradingDataGateway:
             if (local_only or fast_incremental_refresh) and exchange is not None
             else None
         )
+        stable_incremental_frame = (
+            self._stable_incremental_retained_frame(
+                code=analysis_code,
+                frequency=frequency,
+            )
+            if stable_incremental_start is not None
+            else None
+        )
         if stable_incremental_start is not None:
             # ``req_counts`` would truncate the anchored response back to the
             # latest N rows and recreate the moving-left-boundary problem.
@@ -2503,21 +2802,25 @@ class NativeTradingDataGateway:
                 f"stable_incremental_window_request.{frequency}"
             )
         frame_acquisition_started = perf_counter()
+
+        def load_market_frame(load_args: dict[str, object]) -> object:
+            return (
+                loader(
+                    code,
+                    frequency,
+                    start_date=stable_incremental_start.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    args=load_args,
+                )
+                if stable_incremental_start is not None
+                else loader(code, frequency, args=load_args)
+            )
+
         if frame_override is _FRAME_UNSET:
             try:
                 self._report_progress()
-                raw_frame = (
-                    loader(
-                        code,
-                        frequency,
-                        start_date=stable_incremental_start.strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                        args=args,
-                    )
-                    if stable_incremental_start is not None
-                    else loader(code, frequency, args=args)
-                )
+                raw_frame = load_market_frame(args)
                 self._report_progress()
             except SectorAnalysisUnavailable:
                 raise
@@ -2590,16 +2893,61 @@ class NativeTradingDataGateway:
                 ) from exc
         fallback_reason_codes: tuple[str, ...] = ()
 
-        def close_stock_frame(value: object) -> pd.DataFrame:
+        def close_stock_frame(
+            value: object,
+            *,
+            merge_stable_prefix: bool = True,
+        ) -> pd.DataFrame:
+            retained_frame = (
+                stable_incremental_frame if merge_stable_prefix else None
+            )
             frame = _closed_frame(
                 value,
                 not_after=as_of,
-                minimum_bars=self._config.minimum_bars(frequency),
+                minimum_bars=(
+                    1
+                    if retained_frame is not None
+                    else self._config.minimum_bars(frequency)
+                ),
             )
             if frequency == "1m" and not is_sector:
                 frame = normalize_qmt_opening_events_for_completed_minutes(frame)
-                if len(frame) < self._config.minimum_bars("1m"):
-                    raise ValueError("kline frame does not meet minimum history")
+            if retained_frame is not None:
+                if strict_snapshot_price_metadata(
+                    retained_frame
+                ) != strict_snapshot_price_metadata(frame):
+                    raise ValueError("stable incremental price basis changed")
+                previous_end = pd.Timestamp(retained_frame["date"].iloc[-1])
+                overlap = frame.index[frame["date"] == previous_end]
+                if len(overlap) != 1:
+                    raise ValueError("stable incremental tail has no exact overlap")
+                tail = frame.loc[overlap[0] :].copy().reset_index(drop=True)
+                tail.attrs = dict(frame.attrs)
+                frame = pd.concat(
+                    [retained_frame.iloc[:-1], tail],
+                    ignore_index=True,
+                )
+                frame.attrs = dict(tail.attrs)
+                self._record_performance_event(
+                    f"stable_incremental_tail_merge.{frequency}"
+                )
+            if len(frame) < self._config.minimum_bars(frequency):
+                raise ValueError("kline frame does not meet minimum history")
+            if (
+                not is_sector
+                and (local_only or fast_incremental_refresh)
+                and frequency in {"1m", "5m"}
+            ):
+                expected_close = _expected_completed_intraday_close(
+                    as_of,
+                    frequency,
+                )
+                actual_close = _market_datetime(
+                    frame["date"].iloc[-1],
+                    "local kline close",
+                )
+                if expected_close is not None and actual_close < expected_close:
+                    raise ValueError("incremental local history is stale")
             return frame
 
         validation_error: Exception | None = None
@@ -2613,6 +2961,44 @@ class NativeTradingDataGateway:
                 )
         except Exception as exc:
             validation_error = exc
+        stale_local_history = bool(
+            validation_error is not None
+            and str(validation_error) == "incremental local history is stale"
+        )
+        if (
+            stale_local_history
+            and local_only
+        ):
+            refresh_subscription = getattr(
+                exchange,
+                "refresh_live_kline_subscription",
+                None,
+            )
+            if callable(refresh_subscription):
+                self._record_performance_event(
+                    f"local_history_subscription_refresh_attempt.{frequency}"
+                )
+                try:
+                    self._report_progress()
+                    refreshed = refresh_subscription(
+                        code,
+                        frequency,
+                        dividend_type=QMT_STRUCTURE_DIVIDEND_TYPE,
+                    )
+                    self._report_progress()
+                    if refreshed is not True:
+                        raise ValueError("live K-line subscription refresh failed")
+                    raw_frame = load_market_frame(args)
+                    frame = close_stock_frame(raw_frame)
+                    validation_error = None
+                    self._record_performance_event(
+                        f"local_history_subscription_refresh_success.{frequency}"
+                    )
+                except Exception as exc:
+                    validation_error = exc
+                    self._record_performance_event(
+                        f"local_history_subscription_refresh_failure.{frequency}"
+                    )
         if validation_error is not None and (
             local_only or fast_incremental_refresh
         ):
@@ -2622,11 +3008,20 @@ class NativeTradingDataGateway:
             retry_args.pop("skip_download", None)
             retry_args.pop("incremental_refresh_days", None)
             retry_args["req_counts"] = self._config.request_bars(frequency)
+            # Preserve the original strict-freshness cause even when the
+            # subscription renewal itself fails with a different exception.
+            if stale_local_history:
+                self._record_performance_event(
+                    f"local_history_freshness_fallback.{frequency}"
+                )
             try:
                 self._report_progress()
                 raw_frame = loader(code, frequency, args=retry_args)
                 self._report_progress()
-                frame = close_stock_frame(raw_frame)
+                frame = close_stock_frame(
+                    raw_frame,
+                    merge_stable_prefix=False,
+                )
                 validation_error = None
             except Exception as exc:
                 validation_error = exc
@@ -2843,6 +3238,9 @@ class NativeTradingDataGateway:
         *,
         frequency_requests: tuple[tuple[str, tuple[str, ...]], ...],
         as_of: datetime,
+        req_counts_by_frequency: Mapping[str, int] | None = None,
+        cancel_deadline_monotonic: float | None = None,
+        chunk_size: int = 100,
     ) -> dict[str, object]:
         """按频率组合批量补齐 QMT 本地库，随后仍由严格结构入口逐只校验。
 
@@ -2853,6 +3251,25 @@ class NativeTradingDataGateway:
         observed_at = normalize_datetime(as_of, "as_of")
         if type(frequency_requests) is not tuple:
             raise TypeError("frequency_requests must be an exact tuple")
+        if req_counts_by_frequency is None:
+            requested_counts: dict[str, int] = {}
+        elif not isinstance(req_counts_by_frequency, Mapping) or any(
+            type(frequency) is not str
+            or frequency not in _FREQUENCIES
+            or type(count) is not int
+            or count <= 0
+            for frequency, count in req_counts_by_frequency.items()
+        ):
+            raise ValueError("history preparation request counts are invalid")
+        else:
+            requested_counts = dict(req_counts_by_frequency)
+        if cancel_deadline_monotonic is not None and (
+            isinstance(cancel_deadline_monotonic, bool)
+            or not isinstance(cancel_deadline_monotonic, (int, float))
+        ):
+            raise TypeError("history preparation deadline must be numeric")
+        if type(chunk_size) is not int or chunk_size <= 0:
+            raise ValueError("history preparation chunk size must be positive")
         normalized: list[tuple[str, tuple[str, ...]]] = []
         for item in frequency_requests:
             if (
@@ -2877,6 +3294,13 @@ class NativeTradingDataGateway:
             sorted(normalized, key=lambda value: value[0])
         ) or len({code for code, _frequencies in normalized}) != len(normalized):
             raise ValueError("frequency_requests must be canonical and unique")
+        requested_frequencies = {
+            frequency for _code, frequencies in normalized for frequency in frequencies
+        }
+        if not set(requested_counts).issubset(requested_frequencies):
+            raise ValueError(
+                "history preparation request counts contain an unrequested frequency"
+            )
         if not normalized:
             return {
                 "schema": "chanlun-screening-local-history-preparation",
@@ -2893,22 +3317,48 @@ class NativeTradingDataGateway:
             for code, frequencies in normalized:
                 grouped.setdefault(frequencies, []).append(code)
             for frequencies, codes in sorted(grouped.items()):
+                if (
+                    cancel_deadline_monotonic is not None
+                    and perf_counter() >= cancel_deadline_monotonic
+                ):
+                    break
                 self._report_progress()
+                # The 1m locator owns the realtime alert SLA.  QMT preserves
+                # input order when deriving its base-download plan, so refresh
+                # 1m before 5m when a bounded priority batch cannot finish both.
+                download_frequencies = tuple(
+                    sorted(
+                        frequencies,
+                        key=lambda frequency: (
+                            0 if frequency == "1m" else 1,
+                            _FREQUENCIES.index(frequency),
+                        ),
+                    )
+                )
                 result = downloader(
                     tuple(codes),
-                    frequencies,
+                    download_frequencies,
+                    cancel_check=(
+                        None
+                        if cancel_deadline_monotonic is None
+                        else lambda: perf_counter() >= cancel_deadline_monotonic
+                    ),
                     progress_callback=(
                         lambda _base, _done, _total: self._report_progress()
                     ),
+                    chunk_size=chunk_size,
                     req_counts_by_frequency={
-                        frequency: self._config.request_bars(frequency)
-                        for frequency in frequencies
+                        frequency: requested_counts.get(
+                            frequency,
+                            self._config.request_bars(frequency),
+                        )
+                        for frequency in download_frequencies
                     },
                 )
                 self._report_progress()
                 if not isinstance(result, Mapping) or (
                     result.get("schema") != "chanlun-qmt-batch-download-result"
-                    or result.get("cancelled") is not False
+                    or type(result.get("cancelled")) is not bool
                     or not isinstance(result.get("successful_by_base"), Mapping)
                     or not isinstance(result.get("failed_by_base"), Mapping)
                 ):
@@ -2922,6 +3372,8 @@ class NativeTradingDataGateway:
                         failures = failed_by_base.get(base, ())
                         if code in successes and code not in failures:
                             prepared[code].add(frequency)
+                if result.get("cancelled") is True:
+                    break
 
         prepared_document = {
             code: tuple(
@@ -2989,13 +3441,22 @@ class NativeTradingDataGateway:
                 self._analysis_cache[cache_key] = cached
         return None if cached is None else cached[1]
 
-    def native_sector_assessments(
+    def native_sector_analysis_shard(
         self,
         *,
         as_of: datetime,
+        shard_index: int,
+        shard_count: int,
         admitted_codes: tuple[str, ...] | None = None,
-    ) -> SectorAssessmentBatch:
+    ) -> NativeSectorAnalysisShard:
         observed_at = normalize_datetime(as_of, "as_of")
+        if (
+            type(shard_index) is not int
+            or type(shard_count) is not int
+            or shard_count <= 0
+            or not 0 <= shard_index < shard_count
+        ):
+            raise ValueError("native sector shard coordinates are invalid")
         if admitted_codes is not None and (
             type(admitted_codes) is not tuple
             or not admitted_codes
@@ -3035,7 +3496,6 @@ class NativeTradingDataGateway:
             raise ValueError("QMT sector catalog revision does not match its members")
         # 当前 QMT 成分构成时点化选股标的池。
         digits = _qmt_catalog_universe(rows)
-        symbol_names: dict[str, str] = {}
         universe_codes = set(digits.values())
         assessments: list[SectorAssessment] = []
         errors: list[SectorAnalysisFailure] = []
@@ -3046,6 +3506,8 @@ class NativeTradingDataGateway:
         analysis_members_by_sector: dict[str, tuple[str, ...]] = {}
         latest_bars: dict[tuple[str, str], datetime] = {}
         parent_relations: list[tuple[str, str]] = []
+        catalog_sector_ids: list[str] = []
+        assigned_sector_ids: list[str] = []
         seen: set[str] = set()
         for row in rows:
             if not isinstance(row, Mapping):
@@ -3106,6 +3568,10 @@ class NativeTradingDataGateway:
                 members = analysis_members
             catalog_member_count = _catalog_member_count(raw_members)
             seen.add(sector_id)
+            catalog_sector_ids.append(sector_id)
+            if _native_sector_shard_slot(sector_id, shard_count) != shard_index:
+                continue
+            assigned_sector_ids.append(sector_id)
             discovered_count += 1
             members_by_sector[sector_id] = members
             analysis_members_by_sector[sector_id] = analysis_members
@@ -3296,6 +3762,117 @@ class NativeTradingDataGateway:
                         reason_codes=(failure.error_type,),
                     )
                 )
+        return NativeSectorAnalysisShard(
+            shard_index=shard_index,
+            shard_count=shard_count,
+            admitted_codes=admitted_codes,
+            catalog_source=cast(str, catalog_source),
+            catalog_revision=catalog_revision,
+            catalog_sector_ids=tuple(catalog_sector_ids),
+            assigned_sector_ids=tuple(assigned_sector_ids),
+            assessments=tuple(assessments),
+            completed_count=completed_count,
+            errors=tuple(errors),
+            exclusions=tuple(exclusions),
+            members=members_by_sector,
+            analysis_members=analysis_members_by_sector,
+            latest_bars=tuple(
+                BarKey(code=code, frequency=frequency, closed_at=closed_at)
+                for (code, frequency), closed_at in latest_bars.items()
+            ),
+            parent_relations=tuple(parent_relations),
+        )
+
+    def finalize_native_sector_analysis_shards(
+        self,
+        *,
+        as_of: datetime,
+        shards: tuple[NativeSectorAnalysisShard, ...],
+        admitted_codes: tuple[str, ...] | None = None,
+    ) -> SectorAssessmentBatch:
+        """Merge every partition before global ranking and atomic publication."""
+
+        observed_at = normalize_datetime(as_of, "as_of")
+        if type(shards) is not tuple or not shards or any(
+            not isinstance(value, NativeSectorAnalysisShard) for value in shards
+        ):
+            raise ValueError("native sector analysis shards are invalid")
+        if admitted_codes is not None and (
+            type(admitted_codes) is not tuple
+            or not admitted_codes
+            or len(admitted_codes) != len(set(admitted_codes))
+            or any(
+                type(code) is not str or _A_STOCK_CODE.fullmatch(code) is None
+                for code in admitted_codes
+            )
+        ):
+            raise ValueError("admitted_codes must be a unique non-empty A-share tuple")
+
+        first = shards[0]
+        shard_count = first.shard_count
+        if (
+            shard_count != len(shards)
+            or tuple(sorted(item.shard_index for item in shards))
+            != tuple(range(shard_count))
+            or any(
+                item.shard_count != shard_count
+                or item.admitted_codes != admitted_codes
+                or item.catalog_source != first.catalog_source
+                or item.catalog_revision != first.catalog_revision
+                or item.catalog_sector_ids != first.catalog_sector_ids
+                for item in shards
+            )
+        ):
+            raise ValueError("native sector analysis shard identities disagree")
+
+        catalog_sector_ids = first.catalog_sector_ids
+        assigned_ids = tuple(
+            sorted(
+                sector_id
+                for item in shards
+                for sector_id in item.assigned_sector_ids
+            )
+        )
+        if assigned_ids != catalog_sector_ids:
+            raise ValueError("native sector analysis shards are not exhaustive")
+
+        assessments = [
+            assessment for item in shards for assessment in item.assessments
+        ]
+        errors = [error for item in shards for error in item.errors]
+        exclusions = [exclusion for item in shards for exclusion in item.exclusions]
+        parent_relations = [
+            relation for item in shards for relation in item.parent_relations
+        ]
+        members_by_sector = {
+            sector_id: members
+            for item in shards
+            for sector_id, members in item.members.items()
+        }
+        analysis_members_by_sector = {
+            sector_id: members
+            for item in shards
+            for sector_id, members in item.analysis_members.items()
+        }
+        latest_bars = {
+            (bar.code, bar.frequency): bar.closed_at
+            for item in shards
+            for bar in item.latest_bars
+        }
+        if (
+            tuple(sorted(item.sector_id for item in assessments))
+            != catalog_sector_ids
+            or set(members_by_sector) != set(catalog_sector_ids)
+            or set(analysis_members_by_sector) != set(catalog_sector_ids)
+            or len(latest_bars)
+            != sum(len(item.latest_bars) for item in shards)
+        ):
+            raise ValueError("native sector analysis shard payloads overlap or are incomplete")
+
+        catalog_revision = first.catalog_revision
+        discovered_count = len(catalog_sector_ids)
+        completed_count = sum(item.completed_count for item in shards)
+        symbol_names: dict[str, str] = {}
         strength_evidence: SectorStrengthBatch | None = None
         if self._sector_strength_provider is not None:
             try:
@@ -3449,6 +4026,26 @@ class NativeTradingDataGateway:
             catalog_revision=catalog_revision,
             strength_evidence=strength_evidence,
             parent_relations=tuple(sorted(parent_relations)),
+        )
+
+    def native_sector_assessments(
+        self,
+        *,
+        as_of: datetime,
+        admitted_codes: tuple[str, ...] | None = None,
+    ) -> SectorAssessmentBatch:
+        """Compatibility entry point for an exact single-process build."""
+
+        shard = self.native_sector_analysis_shard(
+            as_of=as_of,
+            shard_index=0,
+            shard_count=1,
+            admitted_codes=admitted_codes,
+        )
+        return self.finalize_native_sector_analysis_shards(
+            as_of=as_of,
+            shards=(shard,),
+            admitted_codes=admitted_codes,
         )
 
     def members(self) -> Mapping[str, tuple[str, ...]]:
@@ -4251,6 +4848,7 @@ __all__ = (
     "CANONICAL_REQUEST_BARS_BY_FREQUENCY",
     "CachedSectorSnapshot",
     "FrameStructureAnalysis",
+    "NativeSectorAnalysisShard",
     "NativeTradingDataGateway",
     "NativeTradingGatewayConfig",
     "SectorAnalysisExclusion",

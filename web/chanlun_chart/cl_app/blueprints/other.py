@@ -64,16 +64,46 @@ def _success_response(now_trading, ticks):
     }
 
 
-def _shared_success_response(shared, requested_codes):
+def _quote_code_identity(market: str, code: object) -> str:
+    value = str(code or "").strip().upper()
+    if market == Market.US.value:
+        if value.startswith("US."):
+            value = value[3:]
+        if value.endswith(".US"):
+            value = value[:-3]
+    elif market == Market.HK.value:
+        if value.startswith(("KH.", "HK.")):
+            value = value[3:]
+        if value.endswith(".HK"):
+            value = value[:-3]
+        value = value.zfill(5) if value.isdigit() else value
+    elif market == Market.A.value:
+        parts = value.split(".", 1)
+        if len(parts) == 2 and parts[0] in {"SH", "SZ"}:
+            value = parts[0] + parts[1]
+        elif len(parts) == 2 and parts[1] in {"SH", "SZ"}:
+            value = parts[1] + parts[0]
+    return value
+
+
+def _shared_success_response(shared, requested_codes, market):
     payload = dict(shared.payload)
-    requested = set(requested_codes)
+    requested = {
+        _quote_code_identity(market, code): code for code in requested_codes
+    }
     ticks = payload.get("ticks")
     if isinstance(ticks, list):
-        filtered_ticks = [
-            tick
-            for tick in ticks
-            if isinstance(tick, dict) and tick.get("code") in requested
-        ]
+        filtered_ticks = []
+        for tick in ticks:
+            if not isinstance(tick, dict):
+                continue
+            identity = _quote_code_identity(market, tick.get("code"))
+            requested_code = requested.get(identity)
+            if requested_code is None:
+                continue
+            normalized_tick = dict(tick)
+            normalized_tick["code"] = requested_code
+            filtered_ticks.append(normalized_tick)
         # A larger cached batch may have omitted one requested symbol while
         # still succeeding for its other symbols. Do not turn that omission
         # into a false successful response for a narrower request.
@@ -143,7 +173,7 @@ def ticks():
             max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS,
         )
         if shared is not None:
-            shared_response = _shared_success_response(shared, codes)
+            shared_response = _shared_success_response(shared, codes, market)
             if shared_response is not None:
                 return shared_response
         permit = external_backoff.acquire(market)
@@ -157,7 +187,7 @@ def ticks():
                     max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS,
                 )
                 if shared is not None:
-                    shared_response = _shared_success_response(shared, codes)
+                    shared_response = _shared_success_response(shared, codes, market)
                     if shared_response is not None:
                         return shared_response
                 # The first request may have completed with another code set or
@@ -211,6 +241,9 @@ def ticks():
         # rate 可为 None（盈透经 Redis 透传或币安 ccxt 缺少 percentage），原列表推导中
         # float(None) 抛 TypeError 被外层 except 吞→整批(含健康标的)清空且 now_trading=False
         # 停掉前端轮询。改逐标的隔离 + `or 0` 守零, 镜像 /tv/quotes(tv.py:637)。
+        requested_by_identity = {
+            _quote_code_identity(market, code): code for code in codes
+        }
         res_ticks = []
         for _c, _t in stock_ticks.items():
             if _t is None or _t.last is None:
@@ -222,7 +255,13 @@ def ticks():
                 # 打断前端严格 JSON.parse → 整批含健康标的全失败), 镜像 /tv/quotes(tv.py:654)降级跳过。
                 if not math.isfinite(_price) or not math.isfinite(_rate):
                     continue
-                res_ticks.append({"code": _c, "price": _price, "rate": _rate})
+                response_code = requested_by_identity.get(
+                    _quote_code_identity(market, _c),
+                    str(_c),
+                )
+                res_ticks.append(
+                    {"code": response_code, "price": _price, "rate": _rate}
+                )
             except Exception:
                 LogUtil.exception(
                     f"/ticks tick convert failed market={market} code={_c}"

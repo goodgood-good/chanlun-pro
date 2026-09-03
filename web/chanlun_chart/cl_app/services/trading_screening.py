@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import shutil
 import subprocess
@@ -74,6 +75,9 @@ from chanlun.decision_support.trading_system.models import (
     RankedSector,
     SectorAssessment,
     TimeframeContext,
+)
+from chanlun.decision_support.trading_system.operation_level import (
+    is_five_minute_trade_level,
 )
 from chanlun.decision_support.trading_system.live_review_materialization import (
     resolve_live_review_materialization_receipt,
@@ -188,6 +192,8 @@ from cl_app.services.trading_screening_source_migrations import (
     completed_retry_residue_source_migration_allowed,
     incomplete_retry_reconciliation_source_migration_allowed,
     orchestration_source_migration_allowed,
+    priority_monitor_state_source_migration_allowed,
+    resumable_checkpoint_source_migration_allowed,
     suspension_evidence_recheck_source_migration_allowed,
 )
 from cl_app.services.live_review_runtime_contract import (
@@ -236,6 +242,12 @@ PRIORITY_MONITOR_AFTERNOON_END = datetime_time(15, 1)
 # QMT 的分钟线在整分钟闭合后才可读取。固定落在闭合后 2 秒，既避免随机
 # 进程启动相位读取上一根缓存，也给原生行情落盘留出一个小缓冲。
 PRIORITY_MONITOR_BAR_READY_OFFSET_SECONDS = 2
+# A live alert must use the latest expected completed bar.  The general scan
+# age remains configurable for archival/recovery work, but accepting the prior
+# 1m bar for up to an hour can silently miss the exact divergence the realtime
+# lane exists to report.  A sub-minute tolerance rejects that previous bar while
+# retaining a small clock/publication allowance for the current close.
+PRIORITY_MONITOR_MAX_STRUCTURE_LAG_SECONDS = 30
 # 买入区间套边界只保留到下一根合法 1m K 线，任何多轮轮转都无法满足它。
 ONE_MINUTE_LOCATOR_SLA_SECONDS = 60
 PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor-v2-continuation"
@@ -253,6 +265,8 @@ PRIORITY_MONITOR_PUBLISH_BATCH_SIZE = 8
 # supportive universe into one state-file transaction per symbol.
 CANDIDATE_NOTIFICATION_PUBLISH_BATCH_SIZE = 4
 MONITOR_ADMISSION_MIN_GUARD_SECONDS = 5.0
+PRIORITY_MONITOR_FINALIZATION_RESERVE_SECONDS = 8.0
+PRIORITY_MONITOR_CLOCK_POLL_SECONDS = 0.5
 PRIORITY_MONITOR_PERSIST_BATCH_SIZE = 64
 _CANDIDATE_MONITOR_LANES = frozenset(
     {
@@ -275,6 +289,34 @@ def _remove_orphan_atomic_temporaries(target: Path) -> None:
             continue
 
 
+def _replace_file_with_retry(source: Path, target: Path) -> None:
+    """Atomically replace ``target``, tolerating transient Windows readers.
+
+    Antivirus/indexing and a just-finished JSON reader can briefly open the
+    destination without delete sharing.  ``os.replace`` then raises WinError 5
+    or 32 even though both files and the directory are writable.  Keep the
+    completed temporary file and retry for a short bounded window; permanent
+    permission failures still surface to health instead of being hidden.
+    """
+
+    deadline = time.perf_counter() + 2.0
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            retryable_windows_share = bool(
+                os.name == "nt"
+                and (
+                    isinstance(exc, PermissionError)
+                    or getattr(exc, "winerror", None) in {5, 32}
+                )
+            )
+            if not retryable_windows_share or time.perf_counter() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 _CANDIDATE_MONITOR_PRESENTATION_LANES = {
     CANDIDATE_MONITOR_LANE_1M: "PRIORITY_CURRENT_1M",
     CANDIDATE_MONITOR_LANE_5M: "CANDIDATE_CURRENT_5M",
@@ -289,6 +331,18 @@ _CACHE_SCOPE_SIDECAR_SCHEMA = "chanlun-trading-screening-cache-scope-v2-exact-co
 _CACHE_SCOPE_SIDECAR_MAX_BYTES = 64 * 1024
 _LARGE_INCOMPLETE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 _DECISION_SOURCE_UNSPECIFIED = object()
+# A monitor-capacity increase changes only how many already selected subjects
+# may be revisited per realtime cycle.  It does not alter the authenticated
+# full-market decisions or their coverage epoch.  Keep this list exact and
+# release-reviewed so an arbitrary scope change can never be smuggled through
+# the orchestration source-migration path.
+_REVIEWED_FULL_MARKET_MONITOR_CAPACITY_MIGRATIONS = frozenset(
+    {
+        (60, 240),
+        (240, 320),
+        (320, 384),
+    }
+)
 
 
 @lru_cache(maxsize=4)
@@ -1225,7 +1279,15 @@ _PRIORITY_SIGNAL_STAGE_RANK = {
     "active": 6,
 }
 
-_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES = frozenset({"triggered", "executable", "active"})
+_PRECONFIRMATION_DIVERGENCE_STAGES = frozenset({"approaching", "formed"})
+_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES = frozenset(
+    {
+        *_PRECONFIRMATION_DIVERGENCE_STAGES,
+        "triggered",
+        "executable",
+        "active",
+    }
+)
 _CURRENT_SELECTION_LIFECYCLE_STAGES = frozenset(
     {
         "observed",
@@ -1355,21 +1417,62 @@ def _one_minute_segment_requires_monitor(
     signal: Mapping[str, object],
     observed_at: datetime,
 ) -> bool:
-    """Return whether a buy setup still awaits its first exact 1m witness.
+    """Return whether a current 5m setup still needs the exact 1m lane.
 
-    Once a segment-difference witness exists, its first jointly-known boundary
-    is immutable.  Expiry or missing execution metadata must not put the setup
-    back into discovery and let a later witness replace it.
+    An unconfirmed setup remains in this lane so every newly confirmed 1m
+    divergence can produce an observation alert.  Once a *confirmed* 5m buy
+    setup has its first segment-difference witness, that formal execution
+    boundary is immutable and no later witness may replace it.
     """
 
-    # Optional discovery capacity is only useful for buy execution.  Sell
-    # sell witnesses matter when a symbol is actually held (or explicitly watched),
-    # and those symbols already enter the independent mandatory lane.  A
-    # non-held sell without 1m evidence must not displace a pending buy setup.
-    if _signal_side(signal) != "buy":
+    side = _signal_side(signal)
+    if side not in {"buy", "sell"}:
+        return False
+    stage = lifecycle_stage_from_signal(signal)
+    if stage in _PRECONFIRMATION_DIVERGENCE_STAGES:
+        return _preconfirmation_divergence_requires_monitor(signal)
+    # Optional post-confirmation discovery capacity is useful only for precise
+    # buy execution. Confirmed sell witnesses for held/watched symbols already
+    # enter the independent mandatory lane.
+    if side != "buy":
         return False
     segment = signal.get("segment_difference_1m")
     return not isinstance(segment, Mapping)
+
+
+def _preconfirmation_divergence_requires_monitor(
+    signal: Mapping[str, object],
+) -> bool:
+    """Admit only an authoritative unconfirmed physical 5m setup to 1m work."""
+
+    stage = lifecycle_stage_from_signal(signal)
+    expected_lineage = {
+        "approaching": ("latest_unfinished", frozenset({"forming"})),
+        "formed": ("latest_completed", frozenset({"formed", "locked"})),
+    }
+    if stage not in expected_lineage:
+        return False
+    setup = signal.get("setup_5m")
+    if not isinstance(setup, Mapping):
+        return False
+    side = _signal_side(signal)
+    expected_role, expected_states = expected_lineage[stage]
+    recursive_level = setup.get("recursive_level")
+    return bool(
+        side in {"buy", "sell"}
+        and signal.get("physical_timeframe_recursive") is True
+        and setup.get("status") == "provisional"
+        and setup.get("actionable") is False
+        and setup.get("source_frequency") == "5m"
+        and setup.get("side") == side
+        and setup.get("point_id") == signal.get("point_id")
+        and type(recursive_level) is int
+        and is_five_minute_trade_level("5m", recursive_level)
+        and setup.get("terminal_segment_role") == expected_role
+        and setup.get("terminal_segment_state") in expected_states
+        and setup.get("terminal_segment_source_kind") == "segment"
+        and not isinstance(signal.get("segment_difference_1m"), Mapping)
+    )
 
 
 def _is_current_selection_signal(signal: Mapping[str, object]) -> bool:
@@ -1708,8 +1811,18 @@ def _take_rotating_priority_batch(
     *,
     previous_codes: tuple[str, ...],
     max_symbols: int,
+    last_success_at: Mapping[str, datetime] | None = None,
 ) -> tuple[str, ...]:
-    """Bound and rotate non-mandatory 1m work without starving the tail."""
+    """Bound and rotate non-mandatory 1m work without starving the tail.
+
+    Moving only the immediately preceding physical wave is sufficient for two
+    waves, but alternates those same waves forever once cold throughput needs
+    three or more.  The authenticated per-code 1m observations provide the
+    durable fairness cursor: never-observed and oldest-observed symbols stay in
+    business-priority order ahead of recently completed work.  The previous
+    wave rotation remains the deterministic tie-breaker and the compatibility
+    path for callers without observation state.
+    """
 
     if max_symbols <= 0:
         return ()
@@ -1724,6 +1837,27 @@ def _take_rotating_priority_batch(
         candidates = tuple(
             code for code in candidates if code not in previous_set
         ) + tuple(code for code in candidates if code in previous_set)
+    if last_success_at is not None:
+        rotated_position = {code: index for index, code in enumerate(candidates)}
+        normalized_success_at = {
+            code: normalize_datetime(value, f"{code} priority last_success_at")
+            for code, value in last_success_at.items()
+            if code in rotated_position
+        }
+        candidates = tuple(
+            sorted(
+                candidates,
+                key=lambda code: (
+                    code in normalized_success_at,
+                    (
+                        normalized_success_at[code].timestamp()
+                        if code in normalized_success_at
+                        else 0.0
+                    ),
+                    rotated_position[code],
+                ),
+            )
+        )
     return candidates[:max_symbols]
 
 
@@ -1951,12 +2085,16 @@ def _ranked_sector_round_robin_codes(
     rank_by_id: Mapping[str, int],
     *,
     affinity_worker_count: int = 1,
+    affinity_worker_by_sector: Mapping[str, int] | None = None,
 ) -> tuple[str, ...]:
-    """Interleave ranked sectors so one affinity shard cannot serialize a batch.
+    """Interleave worker queues so every bounded coverage prefix stays parallel.
 
-    Sector order remains deterministic and rank-first.  Only members within the
-    same 64-symbol coverage window are striped across sectors; each symbol still
-    reaches its stable sector-affinity worker and keeps the shared sector cache.
+    Sector order remains deterministic and rank-first inside each worker.  The
+    final sequence is striped by the *installed worker slot*, not merely by
+    sector count: a balanced plan can intentionally place one very large sector
+    alone on a shard, so sector-level round robin would give that shard only one
+    task near the beginning and overload it near the end.  Each symbol still
+    reaches its stable whole-sector worker and retains the shared sector cache.
     """
 
     codes_by_sector: dict[str, list[str]] = {}
@@ -1970,26 +2108,62 @@ def _ranked_sector_round_robin_codes(
             sector_id,
         ),
     )
+    if affinity_worker_by_sector is not None:
+        if type(affinity_worker_count) is not int or affinity_worker_count <= 0:
+            raise ValueError("affinity_worker_count must be a positive integer")
+        if set(affinity_worker_by_sector) != set(codes_by_sector) or any(
+            not isinstance(sector_id, str)
+            or not sector_id
+            or type(slot) is not int
+            or slot < 0
+            or slot >= affinity_worker_count
+            for sector_id, slot in affinity_worker_by_sector.items()
+        ):
+            raise ValueError("configured sector affinity slots are invalid")
+    for codes in codes_by_sector.values():
+        codes.sort()
     if affinity_worker_count > 1:
-        worker_buckets: dict[int, list[str]] = {
+        worker_sector_buckets: dict[int, list[str]] = {
             index: [] for index in range(affinity_worker_count)
         }
         for sector_id in ordered_sector_ids:
-            slot = _affinity_worker_slot(
-                f"sector:{sector_id}",
-                affinity_worker_count,
+            slot = (
+                affinity_worker_by_sector[sector_id]
+                if affinity_worker_by_sector is not None
+                else _affinity_worker_slot(
+                    f"sector:{sector_id}",
+                    affinity_worker_count,
+                )
             )
-            worker_buckets[slot].append(sector_id)
-        ordered_sector_ids = [
-            worker_buckets[slot][offset]
+            worker_sector_buckets[slot].append(sector_id)
+        worker_code_buckets: dict[int, tuple[str, ...]] = {
+            slot: tuple(
+                codes_by_sector[sector_id][offset]
+                for offset in range(
+                    max(
+                        (
+                            len(codes_by_sector[sector_id])
+                            for sector_id in sector_ids
+                        ),
+                        default=0,
+                    )
+                )
+                for sector_id in sector_ids
+                if offset < len(codes_by_sector[sector_id])
+            )
+            for slot, sector_ids in worker_sector_buckets.items()
+        }
+        return tuple(
+            worker_code_buckets[slot][offset]
             for offset in range(
-                max((len(values) for values in worker_buckets.values()), default=0)
+                max(
+                    (len(values) for values in worker_code_buckets.values()),
+                    default=0,
+                )
             )
             for slot in range(affinity_worker_count)
-            if offset < len(worker_buckets[slot])
-        ]
-    for codes in codes_by_sector.values():
-        codes.sort()
+            if offset < len(worker_code_buckets[slot])
+        )
     return tuple(
         codes_by_sector[sector_id][offset]
         for offset in range(
@@ -2015,10 +2189,35 @@ def _priority_affinity_striped_codes(
     monitor queue.
     """
 
+    buckets = _priority_affinity_worker_buckets(
+        codes,
+        sector_by_code=sector_by_code,
+        worker_count=worker_count,
+        symbol_striping=symbol_striping,
+    )
+    return tuple(
+        buckets[slot][offset]
+        for offset in range(
+            max((len(values) for values in buckets), default=0)
+        )
+        for slot in range(worker_count)
+        if offset < len(buckets[slot])
+    )
+
+
+def _priority_affinity_worker_buckets(
+    codes: tuple[str, ...],
+    *,
+    sector_by_code: Mapping[str, SectorAssessment],
+    worker_count: int,
+    symbol_striping: bool = False,
+) -> tuple[tuple[str, ...], ...]:
+    """Return stable per-worker queues matching the native affinity contract."""
+
+    if type(worker_count) is not int or worker_count <= 0:
+        raise ValueError("worker_count must be a positive integer")
     canonical = tuple(dict.fromkeys(codes))
-    if worker_count <= 1 or len(canonical) <= 1:
-        return canonical
-    buckets: dict[int, list[str]] = {index: [] for index in range(worker_count)}
+    buckets: list[list[str]] = [[] for _index in range(worker_count)]
     for code in canonical:
         sector = sector_by_code.get(code)
         affinity_key = (
@@ -2029,17 +2228,10 @@ def _priority_affinity_striped_codes(
         if symbol_striping and affinity_key.startswith("sector:"):
             # Live workers each cache the same bounded sector composite. Add
             # stable symbol entropy so one large supportive sector cannot pin
-            # an entire priority/candidate wave to one process.
+            # an entire priority/candidate queue to one process.
             affinity_key = f"{affinity_key}|symbol:{code}"
         buckets[_affinity_worker_slot(affinity_key, worker_count)].append(code)
-    return tuple(
-        buckets[slot][offset]
-        for offset in range(
-            max((len(values) for values in buckets.values()), default=0)
-        )
-        for slot in range(worker_count)
-        if offset < len(buckets[slot])
-    )
+    return tuple(tuple(values) for values in buckets)
 
 
 def _sector_member_routing(
@@ -2463,6 +2655,17 @@ class NotificationDispatcher(Protocol):
         current: Mapping[str, object],
     ) -> None: ...
 
+    def dispatch_approaching_digest(
+        self,
+        current: Mapping[str, object],
+    ) -> None: ...
+
+    def dispatch_screening_completion(
+        self,
+        previous: Mapping[str, object],
+        current: Mapping[str, object],
+    ) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class TradingScreeningConfig:
@@ -2479,7 +2682,7 @@ class TradingScreeningConfig:
     # 完整快照发布成功，覆盖通道会自动恢复常规时段闸门。
     force_full_coverage_until_complete: bool = False
     priority_monitor_interval_seconds: int = 60
-    priority_monitor_time_budget_seconds: float = 55.0
+    priority_monitor_time_budget_seconds: float = 58.0
     candidate_monitor_time_budget_seconds: float = 50.0
     max_five_minute_candidate_symbols_per_refresh: int = DEFAULT_VALIDATION_COHORT_SIZE
     max_thirty_minute_candidate_symbols_per_refresh: int = (
@@ -5335,6 +5538,7 @@ class TradingScreeningService:
         self._cache_decision_source_migration_persist_error: str | None = None
         self._cache_decision_source_recheck_codes: tuple[str, ...] = ()
         self._cache_incomplete_retry_migration_pending = False
+        self._priority_monitor_source_migrated_from: str | None = None
         self._last_incomplete_checkpoint_at: datetime | None = None
         self._state_lock = RLock()
         self._scan_lock = Lock()
@@ -5346,6 +5550,9 @@ class TradingScreeningService:
         self._priority_monitor_persist_lock = Lock()
         self._priority_progress_launch_lock = Lock()
         self._priority_progress_thread: Thread | None = None
+        self._priority_clock_thread: Thread | None = None
+        self._priority_clock_last_tick_at: datetime | None = None
+        self._priority_clock_last_error: str | None = None
         self._background_lock = Lock()
         self._background_stop = Event()
         self._background_wake = Event()
@@ -5514,9 +5721,15 @@ class TradingScreeningService:
             self._restore_preselection_continuity_recheck_seed()
         )
         if (
-            loaded_snapshot is not None
-            and self._reconcile_rule_recheck_after_current_snapshot(self._snapshot)
-        ) or continuity_recheck_reseeded:
+            (
+                loaded_snapshot is not None
+                and self._reconcile_rule_recheck_after_current_snapshot(
+                    self._snapshot
+                )
+            )
+            or continuity_recheck_reseeded
+            or self._priority_monitor_source_migrated_from is not None
+        ):
             self._persist_priority_monitor_state()
         # 已加载快照已通过完整语义与内容哈希闸门；健康检查可按身份认证这份
         # 不可变发布，无需每个 HTTP 请求都重新哈希超过 100 MiB 的信号树。
@@ -5701,6 +5914,22 @@ class TradingScreeningService:
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return
+        payload_source_id = (
+            payload.get("decision_source_snapshot_id")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        current_source_id = self._decision_source_snapshot_id
+        source_identity_compatible = bool(
+            isinstance(current_source_id, str)
+            and (
+                payload_source_id == current_source_id
+                or priority_monitor_state_source_migration_allowed(
+                    cached_decision_source_snapshot_id=payload_source_id,
+                    current_decision_source_snapshot_id=current_source_id,
+                )
+            )
+        )
         if (
             not isinstance(payload, Mapping)
             or payload.get("schema") != PRIORITY_MONITOR_SCHEMA
@@ -5713,9 +5942,7 @@ class TradingScreeningService:
                 str(payload.get("decision_core_id")),
             )
             is None
-            or not isinstance(self._decision_source_snapshot_id, str)
-            or payload.get("decision_source_snapshot_id")
-            != self._decision_source_snapshot_id
+            or not source_identity_compatible
             or payload.get("selection_research_revision")
             != self._selection_research_revision
             or payload.get("signal_document_contract_id") != SIGNAL_DOCUMENT_CONTRACT_ID
@@ -6209,6 +6436,8 @@ class TradingScreeningService:
         self._decision_rule_recheck_last_errors = tuple(
             copy.deepcopy(dict(value)) for value in effective_recheck_errors
         )
+        if payload_source_id != current_source_id:
+            self._priority_monitor_source_migrated_from = str(payload_source_id)
 
     def _persist_priority_monitor_state(self) -> None:
         if not self._config.priority_monitoring_enabled:
@@ -6385,7 +6614,7 @@ class TradingScreeningService:
                     )
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, path)
+                _replace_file_with_retry(temporary, path)
             finally:
                 temporary.unlink(missing_ok=True)
 
@@ -6718,7 +6947,6 @@ class TradingScreeningService:
             return
         priority_round_started_perf = time.perf_counter()
         realtime_notification_eligible = _priority_monitor_session_open(observed_at)
-        candidate_lunch_catchup = _candidate_monitor_lunch_catchup_open(observed_at)
         monitor_session = observed_at.astimezone(CN).date()
         with self._background_lock:
             configured_allowlist = _configured_scope_allowlist(self._config)
@@ -6748,6 +6976,18 @@ class TradingScreeningService:
         priority_deadline_perf = (
             priority_round_started_perf
             + self._config.priority_monitor_time_budget_seconds
+        )
+        priority_finalization_reserve_seconds = min(
+            PRIORITY_MONITOR_FINALIZATION_RESERVE_SECONDS,
+            self._config.priority_monitor_time_budget_seconds / 4,
+        )
+        # Notification dispatch, state reconciliation and the final atomic
+        # persist are part of the one-minute SLA too.  Native preparation and
+        # structure waves must stop before the nominal 58-second deadline;
+        # reserving time only for the candidate suffix still allowed a slow 1m
+        # locator wave to consume the whole minute and publish late.
+        priority_work_deadline_perf = (
+            priority_deadline_perf - priority_finalization_reserve_seconds
         )
         if (frozen_sector_batch is None) != (frozen_sector_members is None):
             raise ValueError(
@@ -7092,6 +7332,11 @@ class TradingScreeningService:
             candidate_five_last_success_at = dict(
                 self._candidate_monitor_five_last_success_at
             )
+        priority_one_minute_last_success_at = {
+            code: value[0]
+            for code, value in monitor_code_observations.items()
+            if value[1] == CANDIDATE_MONITOR_LANE_1M
+        }
         decision_rule_recheck_code_set = set(decision_rule_recheck_codes)
         # Continuity identifies the bounded one-off recheck queue; it is not by
         # itself evidence that every archived code still belongs to the live 5m
@@ -7137,7 +7382,10 @@ class TradingScreeningService:
         recurring_signal_documents = tuple(
             row
             for row in current_signal_documents
-            if _signal_side(row) == "buy"
+            if (
+                _signal_side(row) == "buy"
+                or _preconfirmation_divergence_requires_monitor(row)
+            )
             and _current_five_minute_setup_requires_segment_monitor(
                 row,
                 observed_at,
@@ -7310,11 +7558,11 @@ class TradingScreeningService:
                     admitted_signal_code_set,
                 )
             )
-        # A confirmed 5m buy setup enters the exact 1m locator lane until its
-        # first causal segment-difference witness is attached.  That witness is
-        # immutable; an expired execution boundary must not silently replace it
-        # with a later occurrence.  Holdings and explicit watchlist symbols keep
-        # their independent mandatory 1m observation lane.
+        # Unconfirmed 5m buy/sell setups enter the exact 1m lane so a divergence
+        # can be observed before formal 5m confirmation. A confirmed 5m buy stays
+        # only until its first causal segment-difference witness is attached;
+        # that execution boundary is immutable. Holdings and explicit watchlist
+        # symbols retain their independent mandatory 1m observation lane.
         immediate_signal_universe = tuple(
             code for code in locator_signal_pool if code in admitted_signal_code_set
         )
@@ -7330,28 +7578,28 @@ class TradingScreeningService:
                 self._config.max_monitor_symbols_per_refresh
                 - len(monitorable_mandatory_codes),
             ),
+            last_success_at=priority_one_minute_last_success_at,
         )
         selected_immediate_codes = urgent_signal_codes
         priority_worker_count = self._config.effective_priority_worker_count
-        minute_codes = (
-            ()
-            if candidate_lunch_catchup
-            else tuple(
-                dict.fromkeys(
-                    (
-                        *_priority_affinity_striped_codes(
-                            monitorable_mandatory_codes,
-                            sector_by_code=sector_by_code,
-                            worker_count=priority_worker_count,
-                            symbol_striping=True,
-                        ),
-                        *_priority_affinity_striped_codes(
-                            selected_immediate_codes,
-                            sector_by_code=sector_by_code,
-                            worker_count=priority_worker_count,
-                            symbol_striping=True,
-                        ),
-                    )
+        # 午休不具备实时通知资格，但仍应轮换预热完整 1m 定位池。服务若在
+        # 上午盘中重启，旧逻辑把 minute_codes 置空，导致 13:00 第一轮从零
+        # 重放数千根 K 线并耗尽 55 秒预算；午休预热可让下午只做增量更新。
+        minute_codes = tuple(
+            dict.fromkeys(
+                (
+                    *_priority_affinity_striped_codes(
+                        monitorable_mandatory_codes,
+                        sector_by_code=sector_by_code,
+                        worker_count=priority_worker_count,
+                        symbol_striping=True,
+                    ),
+                    *_priority_affinity_striped_codes(
+                        selected_immediate_codes,
+                        sector_by_code=sector_by_code,
+                        worker_count=priority_worker_count,
+                        symbol_striping=True,
+                    ),
                 )
             )
         )
@@ -7481,8 +7729,8 @@ class TradingScreeningService:
         )[: self._config.max_thirty_minute_candidate_symbols_per_refresh]
         frequencies_by_code: dict[str, set[str]] = {}
         for code in minute_codes:
-            # 当前 1m 段差只有绑定最新已完成 5m 正式点才有意义；二者同时刷新可
-            # 防止过期的 5m 缓存结构跨越五分钟边界继续生效。
+            # 1m 证据既可定位已确认 5m 点，也可为未确认 5m 候选提供背驰预警；
+            # 二者同时刷新，防止 1m 事实绑定到已经被新 5m 结构替换的旧候选。
             frequencies_by_code.setdefault(code, set()).update(("5m", "1m"))
         for code in five_codes:
             frequencies_by_code.setdefault(code, set()).add("5m")
@@ -7608,7 +7856,7 @@ class TradingScreeningService:
                     frequencies=requested_frequencies,
                     risk_evidence_cutoff=sector_as_of,
                     deadline_monotonic=(
-                        priority_deadline_perf
+                        priority_work_deadline_perf
                         if code in minute_code_set
                         else candidate_deadline_perf
                     ),
@@ -7643,7 +7891,10 @@ class TradingScreeningService:
                 bundle_is_current = _structure_bundle_is_current_for_intraday_evidence(
                     bundle,
                     observed_at=observed_at,
-                    max_age_seconds=self._config.max_structure_age_seconds,
+                    max_age_seconds=min(
+                        self._config.max_structure_age_seconds,
+                        PRIORITY_MONITOR_MAX_STRUCTURE_LAG_SECONDS,
+                    ),
                     requested_frequencies=requested_frequencies,
                 )
                 if not bundle_is_current:
@@ -7737,6 +7988,7 @@ class TradingScreeningService:
                 return
             try:
                 bounded_preparer = None
+                priority_preparer = None
                 if phase == "priority_1m":
                     priority_preparer = getattr(
                         self._market_data,
@@ -7790,7 +8042,13 @@ class TradingScreeningService:
                     "frequency_requests": frequency_requests,
                     "as_of": observed_at,
                 }
-                if bounded_preparer is not None and prepare is bounded_preparer:
+                if (
+                    phase == "priority_1m"
+                    and priority_preparer is not None
+                    and prepare is priority_preparer
+                ):
+                    kwargs["deadline_monotonic"] = priority_work_deadline_perf
+                elif bounded_preparer is not None and prepare is bounded_preparer:
                     kwargs["deadline_monotonic"] = candidate_deadline_perf
                 prepare(
                     **kwargs,
@@ -8010,12 +8268,170 @@ class TradingScreeningService:
             *,
             phase: str,
             admission_deadline_perf: float | None = None,
+            work_lane_override: str | None = None,
         ) -> tuple[str, ...]:
             phase_started_perf = time.perf_counter()
             if not phase_codes:
                 with results_lock:
                     phase_metrics[phase] = (0, 0.0)
                 return ()
+            # Prepare the complete admitted phase once.  Preparing each worker
+            # wave separately recreates the QMT round-trip overhead this batch
+            # boundary is meant to remove and can consume the whole lane before
+            # later waves start.  The preparer is cancellable and records only
+            # partial successes, so one whole-phase call remains bounded.
+            prepare_history(phase_codes, phase=phase)
+            if (
+                admission_deadline_perf is not None
+                and time.perf_counter() >= admission_deadline_perf
+            ):
+                with results_lock:
+                    phase_metrics[phase] = (
+                        0,
+                        max(0.0, time.perf_counter() - phase_started_perf),
+                    )
+                return ()
+            phase_worker_limit = (
+                self._config.effective_priority_worker_count
+                if phase == "priority_1m"
+                else self._config.effective_candidate_worker_count
+            )
+            if (
+                phase == "priority_1m"
+                and admission_deadline_perf is not None
+                and phase_worker_limit > 1
+                and len(phase_codes) > phase_worker_limit * 2
+            ):
+                # A global wave barrier turns the cost of every 12-symbol wave
+                # into the slowest symbol in that wave. Across a large live
+                # locator pool those tail latencies accumulate until the hard
+                # minute deadline, even though most native shards have spent
+                # much of the interval idle. Run one stable serial stream per
+                # native affinity shard instead: each process still receives at
+                # most one request at a time and every symbol keeps its warm
+                # process-local state, while a slow shard no longer stalls the
+                # other eleven. Results return through one consumer so partial
+                # state publication and notification ordering stay serialized.
+                worker_buckets = tuple(
+                    values
+                    for values in _priority_affinity_worker_buckets(
+                        phase_codes,
+                        sector_by_code=sector_by_code,
+                        worker_count=phase_worker_limit,
+                        symbol_striping=True,
+                    )
+                    if values
+                )
+                completed_results: Queue[
+                    tuple[
+                        str,
+                        tuple[dict[str, object], ...],
+                        Exception | None,
+                    ]
+                ] = Queue()
+
+                def evaluate_priority_bucket(
+                    bucket: tuple[str, ...],
+                ) -> tuple[str, ...]:
+                    attempted_bucket: list[str] = []
+                    longest_request_seconds: float | None = None
+                    previous_request_seconds: float | None = None
+                    for code in bucket:
+                        phase_budget_seconds = (
+                            self._config.priority_monitor_time_budget_seconds
+                        )
+                        admission_guard_seconds = min(
+                            MONITOR_ADMISSION_MIN_GUARD_SECONDS,
+                            phase_budget_seconds / 10,
+                        )
+                        if longest_request_seconds is not None:
+                            # Use the slowest request already observed on this
+                            # exact shard, not the duration of an unrelated
+                            # global wave. The modest variance margin prevents
+                            # the final request from destroying a reusable hot
+                            # worker at the absolute deadline.
+                            admission_guard_seconds = max(
+                                admission_guard_seconds,
+                                longest_request_seconds * 1.25,
+                            )
+                        if (
+                            len(bucket) - len(attempted_bucket) == 1
+                            and previous_request_seconds is not None
+                        ):
+                            # A fixed five-second guard used to reject the final
+                            # hot symbol even when the immediately preceding
+                            # request proved it could finish comfortably. Keep
+                            # the conservative longest-request guard for every
+                            # earlier admission and for a cold singleton, but
+                            # let the final warmed request use its own shard's
+                            # latest duration with a small variance margin.
+                            admission_guard_seconds = min(
+                                admission_guard_seconds,
+                                max(0.25, previous_request_seconds * 1.1),
+                            )
+                        now_perf = time.perf_counter()
+                        if now_perf >= admission_deadline_perf or (
+                            attempted_bucket
+                            and admission_deadline_perf - now_perf
+                            <= admission_guard_seconds
+                        ):
+                            break
+                        attempted_bucket.append(code)
+                        request_started_perf = time.perf_counter()
+                        completed_results.put(
+                            evaluate(
+                                code,
+                                work_lane_override=work_lane_override,
+                            )
+                        )
+                        request_elapsed_seconds = max(
+                            0.0,
+                            time.perf_counter() - request_started_perf,
+                        )
+                        longest_request_seconds = max(
+                            longest_request_seconds or 0.0,
+                            request_elapsed_seconds,
+                        )
+                        previous_request_seconds = request_elapsed_seconds
+                    return tuple(attempted_bucket)
+
+                attempted_set: set[str] = set()
+                with ThreadPoolExecutor(
+                    max_workers=len(worker_buckets),
+                    thread_name_prefix="TradingPriority1mShard",
+                ) as executor:
+                    pending_futures = {
+                        executor.submit(evaluate_priority_bucket, bucket)
+                        for bucket in worker_buckets
+                    }
+                    while pending_futures:
+                        try:
+                            completed = completed_results.get(timeout=0.02)
+                        except Empty:
+                            pass
+                        else:
+                            consume_result(completed)
+                        finished = {
+                            future for future in pending_futures if future.done()
+                        }
+                        for future in finished:
+                            attempted_set.update(future.result())
+                        pending_futures.difference_update(finished)
+                while True:
+                    try:
+                        consume_result(completed_results.get_nowait())
+                    except Empty:
+                        break
+                attempted = tuple(
+                    code for code in phase_codes if code in attempted_set
+                )
+                elapsed_seconds = max(
+                    0.0,
+                    time.perf_counter() - phase_started_perf,
+                )
+                with results_lock:
+                    phase_metrics[phase] = (len(attempted), elapsed_seconds)
+                return attempted
             attempted: list[str] = []
             start = 0
             previous_wave_elapsed_seconds: float | None = None
@@ -8030,13 +8446,13 @@ class TradingScreeningService:
                     phase_budget_seconds / 10,
                 )
                 if previous_wave_elapsed_seconds is not None:
-                    # The 1m locator owns the first 55 seconds of a 60-second
-                    # SLA and every in-flight native request still carries the
-                    # same absolute deadline.  Admit its final partial wave
-                    # whenever the immediately preceding warm wave proved it
-                    # can fit; the remaining five seconds are the publication
-                    # reserve.  Ordinary candidates keep the wider variance
-                    # guard because they have no right to consume that reserve.
+                    # The 1m locator owns a bounded portion of the 60-second SLA
+                    # and every in-flight native request still carries the same
+                    # absolute deadline. Admit its final partial wave whenever
+                    # the immediately preceding warm wave proved it can fit;
+                    # the interval remainder is reserved for publication and
+                    # the next bar-aligned launch. Ordinary candidates keep the
+                    # wider variance guard because they cannot consume it.
                     wave_guard_multiplier = 1.0 if phase == "priority_1m" else 1.25
                     admission_guard_seconds = max(
                         admission_guard_seconds,
@@ -8054,11 +8470,6 @@ class TradingScreeningService:
                     # 安全窗口。否则在绝对截止点前接纳一个不可能完成的新波次，
                     # 会回收仍可复用的增量工作进程，并把后续每分钟都变成冷启动。
                     break
-                phase_worker_limit = (
-                    self._config.effective_priority_worker_count
-                    if phase == "priority_1m"
-                    else self._config.effective_candidate_worker_count
-                )
                 wave_size = (
                     len(phase_codes) - start
                     if admission_deadline_perf is None
@@ -8067,17 +8478,16 @@ class TradingScreeningService:
                 wave = phase_codes[start : start + wave_size]
                 start += len(wave)
                 wave_started_perf = time.perf_counter()
-                prepare_history(wave, phase=phase)
-                if (
-                    admission_deadline_perf is not None
-                    and time.perf_counter() >= admission_deadline_perf
-                ):
-                    break
                 attempted.extend(wave)
                 worker_count = min(phase_worker_limit, len(wave))
                 if worker_count == 1:
                     for code in wave:
-                        consume_result(evaluate(code))
+                        consume_result(
+                            evaluate(
+                                code,
+                                work_lane_override=work_lane_override,
+                            )
+                        )
                     previous_wave_elapsed_seconds = (
                         time.perf_counter() - wave_started_perf
                     )
@@ -8094,6 +8504,7 @@ class TradingScreeningService:
                         executor.submit(
                             evaluate,
                             code,
+                            work_lane_override=work_lane_override,
                         ): code
                         for code in wave
                     }
@@ -8136,6 +8547,17 @@ class TradingScreeningService:
         regular_candidate_code_set = (
             set(regular_five_codes) | set(thirty_codes)
         ).difference(minute_code_set)
+        formal_five_candidate_code_set = set(regular_five_codes).difference(
+            minute_code_set
+        )
+        formal_five_candidate_codes = tuple(
+            code for code in candidate_codes if code in formal_five_candidate_code_set
+        )
+        candidate_tail_codes = tuple(
+            code
+            for code in candidate_codes
+            if code not in formal_five_candidate_code_set
+        )
         scheduled_recheck_code_set = set(decision_rule_recheck_codes).intersection(
             codes
         )
@@ -8145,26 +8567,79 @@ class TradingScreeningService:
         # 精确 1m 区间套先独占全部结构分片，完成并发布后，普通 5m/30m 候选
         # 才能使用非保留分片。两个阶段共用本轮绝对截止点，不能因串行化把下一次
         # 一分钟监听推迟到第二个预算窗口；候选只使用优先阶段留下的安全余量。
-        attempted_minute_codes = evaluate_phase(
-            minute_codes,
-            phase="priority_1m",
-            admission_deadline_perf=priority_deadline_perf,
+        begin_priority_phase = getattr(
+            self._market_data,
+            "begin_priority_structure_phase",
+            None,
         )
-        publish_completed_minute_results()
-        candidate_budget_deadline_perf = (
-            time.perf_counter() + self._config.candidate_monitor_time_budget_seconds
+        end_priority_phase = getattr(
+            self._market_data,
+            "end_priority_structure_phase",
+            None,
         )
-        candidate_deadline_perf = candidate_monitor_deadline_perf(
-            priority_deadline_perf=priority_deadline_perf,
-            candidate_budget_deadline_perf=candidate_budget_deadline_perf,
-            minute_codes_present=bool(minute_codes),
-            force_startup_bootstrap=force_startup_bootstrap,
-            compute_window_open=_priority_monitor_compute_window_open(observed_at),
-        )
-        attempted_candidate_codes = evaluate_phase(
-            candidate_codes,
+        priority_phase_entered = False
+        attempted_minute_codes: tuple[str, ...] = ()
+        attempted_formal_five_codes: tuple[str, ...] = ()
+        try:
+            if (
+                minute_codes
+                and callable(begin_priority_phase)
+                and callable(end_priority_phase)
+            ):
+                begin_priority_phase(
+                    deadline_monotonic=priority_work_deadline_perf
+                )
+                priority_phase_entered = True
+            attempted_minute_codes = evaluate_phase(
+                minute_codes,
+                phase="priority_1m",
+                admission_deadline_perf=priority_work_deadline_perf,
+            )
+            publish_completed_minute_results()
+            candidate_budget_deadline_perf = (
+                time.perf_counter()
+                + self._config.candidate_monitor_time_budget_seconds
+            )
+            candidate_deadline_perf = candidate_monitor_deadline_perf(
+                priority_deadline_perf=priority_deadline_perf,
+                candidate_budget_deadline_perf=candidate_budget_deadline_perf,
+                minute_codes_present=bool(minute_codes),
+                force_startup_bootstrap=force_startup_bootstrap,
+                compute_window_open=_priority_monitor_compute_window_open(observed_at),
+                priority_finalization_reserve_seconds=min(
+                    priority_finalization_reserve_seconds,
+                    self._config.priority_monitor_time_budget_seconds,
+                ),
+            )
+            if (
+                formal_five_candidate_codes
+                and not priority_phase_entered
+                and callable(begin_priority_phase)
+                and callable(end_priority_phase)
+            ):
+                begin_priority_phase(deadline_monotonic=candidate_deadline_perf)
+                priority_phase_entered = True
+            attempted_formal_five_codes = evaluate_phase(
+                formal_five_candidate_codes,
+                phase="candidate_cadence",
+                admission_deadline_perf=candidate_deadline_perf,
+                work_lane_override="monitor_candidate",
+            )
+            publish_completed_candidate_results()
+        finally:
+            if priority_phase_entered:
+                end_priority_phase()
+        attempted_candidate_tail_codes = evaluate_phase(
+            candidate_tail_codes,
             phase="candidate_cadence",
             admission_deadline_perf=candidate_deadline_perf,
+            # This is still part of the bar-cadence monitor. Use its exact
+            # shared deadline instead of the 75-second cold background lane,
+            # otherwise a 30m/recheck tail can block the following 1m round.
+            work_lane_override="monitor_candidate",
+        )
+        attempted_candidate_codes = (
+            attempted_formal_five_codes + attempted_candidate_tail_codes
         )
         publish_completed_candidate_results()
         attempted_minute_code_set = set(attempted_minute_codes)
@@ -8568,6 +9043,37 @@ class TradingScreeningService:
                     "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
                 }
                 errors.append(notification_error)
+                self._record_priority_monitor_result(
+                    observed_at=observed_at,
+                    codes=minute_codes,
+                    errors=tuple(errors),
+                )
+        dispatch_approaching_digest = getattr(
+            self._notifier,
+            "dispatch_approaching_digest",
+            None,
+        )
+        if realtime_notification_eligible and callable(dispatch_approaching_digest):
+            with self._background_lock:
+                approaching_snapshot = {
+                    "signals": [
+                        copy.deepcopy(
+                            self._priority_monitor_latest_documents[signal_id]
+                        )
+                        for signal_id in sorted(
+                            self._priority_monitor_latest_documents
+                        )
+                    ]
+                }
+            try:
+                dispatch_approaching_digest(approaching_snapshot)
+            except Exception as exc:
+                approaching_notification_error = {
+                    "error_type": "approaching_digest_notification_error",
+                    "reason_code": "APPROACHING_DIGEST_NOTIFICATION_FAILED",
+                    "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+                }
+                errors.append(approaching_notification_error)
                 self._record_priority_monitor_result(
                     observed_at=observed_at,
                     codes=minute_codes,
@@ -9160,7 +9666,7 @@ class TradingScreeningService:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, sidecar)
+            _replace_file_with_retry(temporary, sidecar)
         except OSError:
             sidecar.unlink(missing_ok=True)
             return False
@@ -9369,6 +9875,16 @@ class TradingScreeningService:
                 current_decision_source_snapshot=self._decision_source_snapshot,
             )
         )
+        resumable_checkpoint_transition = (
+            resumable_checkpoint_source_migration_allowed(
+                cached_decision_source_snapshot_id=cached_source_id,
+                current_decision_source_snapshot_id=current_source_id,
+                cached_decision_source_snapshot=value.get(
+                    "decision_source_snapshot"
+                ),
+                current_decision_source_snapshot=self._decision_source_snapshot,
+            )
+        )
         incomplete_retry_state = (
             _incomplete_retry_reconciliation_state(value)
             if incomplete_retry_reconciliation
@@ -9379,6 +9895,11 @@ class TradingScreeningService:
             if completed_retry_residue_reconciliation
             else None
         )
+        # A coverage cycle is a complete publication even when a bounded set
+        # of symbols failed and ``data_quality.complete`` is false.  The cache
+        # contract authenticates those failures and restores their retry queue;
+        # a source-only orchestration deployment must not discard the usable
+        # selection while waiting for those symbols to recover.
         complete_snapshot = bool(
             value.get("scan_state") == "complete"
             and value.get("full_coverage_state") == "complete"
@@ -9386,11 +9907,20 @@ class TradingScreeningService:
             and manifest.get("complete") is True
             and isinstance(audit, Mapping)
             and audit.get("coverage_cycle_complete") is True
-            and isinstance(data_quality, Mapping)
-            and data_quality.get("complete") is True
         )
         resumable_incomplete_retry = bool(
             incomplete_retry_state is not None
+            and value.get("scan_state") == "in_progress"
+            and value.get("full_coverage_state") == "in_progress"
+            and isinstance(manifest, Mapping)
+            and manifest.get("complete") is False
+            and isinstance(audit, Mapping)
+            and audit.get("coverage_cycle_complete") is False
+            and isinstance(data_quality, Mapping)
+            and data_quality.get("complete") is False
+        )
+        resumable_orchestration_checkpoint = bool(
+            resumable_checkpoint_transition
             and value.get("scan_state") == "in_progress"
             and value.get("full_coverage_state") == "in_progress"
             and isinstance(manifest, Mapping)
@@ -9411,6 +9941,26 @@ class TradingScreeningService:
             and isinstance(data_quality, Mapping)
             and data_quality.get("complete") is False
         )
+        legacy_content_identity_valid = bool(
+            isinstance(cached_snapshot_sha256, str)
+            and cached_snapshot_sha256
+            == live_screening_snapshot_content_sha256(value)
+        )
+        legacy_monitor_limit = value.get("effective_monitor_universe_limit")
+        reviewed_monitor_capacity_upgrade = bool(
+            complete_snapshot
+            and legacy_content_identity_valid
+            and value.get("screening_scope_mode") == "FULL_MARKET"
+            and self._config.screening_scope_mode == "FULL_MARKET"
+            and type(legacy_monitor_limit) is int
+            and (
+                legacy_monitor_limit,
+                self._config.effective_monitor_universe_limit,
+            )
+            in _REVIEWED_FULL_MARKET_MONITOR_CAPACITY_MIGRATIONS
+            and value.get("configured_admitted_codes")
+            == list(self._config.admitted_universe_codes)
+        )
         legacy_validation_value = (
             _normalized_incomplete_retry_migration_snapshot(value)
             if resumable_incomplete_retry
@@ -9418,6 +9968,18 @@ class TradingScreeningService:
             if repairable_completed_retry_residue
             else value
         )
+        if reviewed_monitor_capacity_upgrade:
+            # Validate the legacy payload against the current scope contract
+            # without changing any decision, evidence, queue, or coverage-epoch
+            # field.  The original content hash was authenticated above before
+            # this one-field projection was created.
+            legacy_validation_value = dict(legacy_validation_value)
+            legacy_validation_value["effective_monitor_universe_limit"] = (
+                self._config.effective_monitor_universe_limit
+            )
+            legacy_validation_value["snapshot_content_sha256"] = (
+                live_screening_snapshot_content_sha256(legacy_validation_value)
+            )
         if (
             not orchestration_source_migration_allowed(
                 cached_decision_source_snapshot_id=cached_source_id,
@@ -9429,8 +9991,10 @@ class TradingScreeningService:
             or not (
                 complete_snapshot
                 or resumable_incomplete_retry
+                or resumable_orchestration_checkpoint
                 or repairable_completed_retry_residue
             )
+            or not legacy_content_identity_valid
             or legacy_validation_value is None
             or not _cache_is_valid(
                 legacy_validation_value,
@@ -9450,6 +10014,10 @@ class TradingScreeningService:
         # has passed the complete current contract.  A failed migration must
         # remain distinguishable from a current-source cache corruption.
         migrated = dict(value)
+        if reviewed_monitor_capacity_upgrade:
+            migrated["effective_monitor_universe_limit"] = (
+                self._config.effective_monitor_universe_limit
+            )
         if suspension_evidence_recheck:
             recheck_codes = _current_session_suspension_exclusion_codes(value)
             if recheck_codes:
@@ -9911,6 +10479,19 @@ class TradingScreeningService:
         """Restore only a fully validated, completely published generation."""
 
         for path in generations:
+            # Source migration validation records which payload would be
+            # adopted so the constructor can re-sign it and retire only that
+            # exact legacy generation.  An otherwise valid generation from a
+            # different coverage epoch is merely a probe, not an adoption;
+            # roll those mutable audit fields back before inspecting the next
+            # candidate or falling through to code-only continuity recovery.
+            migration_state = (
+                self._cache_decision_source_migrated_from,
+                self._cache_decision_source_migrated_snapshot_sha256_from,
+                self._quarantined_cache_decision_core_id,
+                self._quarantined_cache_reason,
+                self._cache_incomplete_retry_migration_pending,
+            )
             recovered = self._valid_cache_from_path(path)
             recovered_manifest = (
                 recovered.get("coverage_manifest")
@@ -9927,6 +10508,13 @@ class TradingScreeningService:
             ):
                 self._cache_recovered_from_generation = str(path)
                 return recovered
+            (
+                self._cache_decision_source_migrated_from,
+                self._cache_decision_source_migrated_snapshot_sha256_from,
+                self._quarantined_cache_decision_core_id,
+                self._quarantined_cache_reason,
+                self._cache_incomplete_retry_migration_pending,
+            ) = migration_state
         return None
 
     def _load_valid_cache(self) -> dict[str, object] | None:
@@ -9963,9 +10551,6 @@ class TradingScreeningService:
                 self._quarantined_cache_reason = "CACHE_SCOPE_PAYLOAD_IDENTITY_MISMATCH"
                 return None
             if isinstance(current_value, dict):
-                migrated_value = self._operationally_migrated_cache(current_value)
-                if migrated_value is not None:
-                    return migrated_value
                 current_manifest = current_value.get("coverage_manifest")
                 current_epoch_id = current_value.get("coverage_epoch_id")
                 current_content_identity_valid = bool(
@@ -9987,6 +10572,31 @@ class TradingScreeningService:
                         self._decision_source_snapshot_id,
                     )
                 )
+                source_agnostic_contract_valid = bool(
+                    current_scope_valid
+                    and _cache_contract_is_valid(
+                        current_value,
+                        self._config,
+                        self._decision_core_id,
+                        self._selection_research_revision,
+                    )
+                )
+                reviewed_source_transition = bool(
+                    orchestration_source_migration_allowed(
+                        cached_decision_source_snapshot_id=current_value.get(
+                            "decision_source_snapshot_id"
+                        ),
+                        current_decision_source_snapshot_id=(
+                            self._decision_source_snapshot_id
+                        ),
+                        cached_decision_source_snapshot=current_value.get(
+                            "decision_source_snapshot"
+                        ),
+                        current_decision_source_snapshot=(
+                            self._decision_source_snapshot
+                        ),
+                    )
+                )
                 recoverable_checkpoint_identity = bool(
                     current_scope_valid
                     and current_content_identity_valid
@@ -9997,8 +10607,11 @@ class TradingScreeningService:
                     and current_value.get("parameter_set_id")
                     == self._config.parameter_set_id
                     and current_value.get("decision_core_id") == self._decision_core_id
-                    and current_value.get("decision_source_snapshot_id")
-                    == self._decision_source_snapshot_id
+                    and (
+                        current_value.get("decision_source_snapshot_id")
+                        == self._decision_source_snapshot_id
+                        or reviewed_source_transition
+                    )
                     and isinstance(self._decision_source_snapshot_id, str)
                     and current_value.get("selection_research_revision")
                     == self._selection_research_revision
@@ -10043,8 +10656,9 @@ class TradingScreeningService:
                         }
                     )
                 )
-                pristine_current_pointer = bool(
-                    continuity_checkpoint_identity
+                pristine_generation_recovery_pointer = bool(
+                    source_agnostic_contract_valid
+                    and current_content_identity_valid
                     and current_value.get("available") is False
                     and current_value.get("scan_state") == "not_started"
                     and current_value.get("last_batch_state") == "not_started"
@@ -10063,7 +10677,14 @@ class TradingScreeningService:
                     and not current_manifest.get("backoff_frequencies")
                     and not current_manifest.get("deferred_frequencies")
                 )
-                if pristine_current_pointer:
+                if pristine_generation_recovery_pointer:
+                    # A prior binary can leave behind an authenticated empty
+                    # pointer before it discovers that its complete generation
+                    # needs a reviewed source/capacity migration.  The pointer
+                    # itself is never restored here; it only authorizes trying
+                    # immutable generations, each of which must independently
+                    # pass the complete current contract.  This avoids needing
+                    # a second restart after every such deployment transition.
                     recovered = self._recover_complete_cache_from_generations(
                         generations
                     )
@@ -10076,15 +10697,33 @@ class TradingScreeningService:
                     and current_epoch_id
                     and recoverable_checkpoint_identity
                 ):
-                    # 同一覆盖纪元曾经完整发布后，局部重试产生的未完成检查点不能
-                    # 让页面退回“全量构建中”。优先恢复不可变完整代；恢复出的失败
-                    # 标的仍会由启动重试队列按当前代码单独复算。
+                    # 同一覆盖纪元曾经完整发布后，局部重试或纯编排升级前留下的
+                    # 未完成检查点不能让页面退回“全量构建中”。检查点只授权查找
+                    # 同纪元不可变完整代；完整代仍须独立通过当前源码迁移与契约校验。
+                    # 恢复出的失败标的仍由启动重试队列按当前代码单独复算。
                     recovered = self._recover_complete_cache_from_generations(
                         generations,
                         required_coverage_epoch_id=current_epoch_id,
                     )
                     if recovered is not None:
                         return recovered
+                    # A reviewed deployment can land after today's authenticated
+                    # checkpoint has started but before that epoch has ever
+                    # produced a complete generation.  Do not restore an older
+                    # generation as today's result; retain only its independently
+                    # validated previous-close sector/code continuity so the live
+                    # candidate lane is not empty while current coverage resumes.
+                    self._recover_cache_or_preselection_from_generations(
+                        generations,
+                        recover_current_cache=False,
+                    )
+                # Delay retagging a reviewed checkpoint until immutable
+                # generations have been inspected.  Returning the migrated
+                # checkpoint first would bypass same-epoch recovery and delete
+                # the previous-close generation before it can seed continuity.
+                migrated_value = self._operationally_migrated_cache(current_value)
+                if migrated_value is not None:
+                    return migrated_value
                 if current_contract_valid and current_content_identity_valid:
                     if continuity_checkpoint_identity:
                         self._recover_cache_or_preselection_from_generations(
@@ -10332,7 +10971,21 @@ class TradingScreeningService:
         observed_at = normalize_datetime(self._clock(), "clock")
         with self._state_lock:
             snapshot_available = self._snapshot.get("available") is True
+            raw_snapshot_market_data_as_of = self._snapshot.get("market_data_as_of")
             cached_sector_snapshot = self._presentation_cached_sector_snapshot
+        try:
+            snapshot_market_data_as_of = (
+                datetime.fromisoformat(raw_snapshot_market_data_as_of)
+                if isinstance(raw_snapshot_market_data_as_of, str)
+                else raw_snapshot_market_data_as_of
+            )
+            if snapshot_market_data_as_of is not None:
+                snapshot_market_data_as_of = normalize_datetime(
+                    snapshot_market_data_as_of,
+                    "snapshot market_data_as_of",
+                )
+        except (TypeError, ValueError):
+            snapshot_market_data_as_of = None
         # 全覆盖扫描会先完成并冻结板块批次，再进入耗时更长的个股扫描。这里读取的
         # 是不可变 dataclass 引用，不获取长时间持有的扫描锁，以免页面请求被首轮
         # 全市场扫描阻塞。它只可用于页面目录预览，绝不能冒充已发布决策快照。
@@ -10442,10 +11095,11 @@ class TradingScreeningService:
             if priority_last_at is None
             else max(0.0, (observed_at - priority_last_at).total_seconds())
         )
+        priority_market_session_open = _priority_monitor_session_open(observed_at)
         priority_live = bool(
             self._config.priority_monitoring_enabled
             and priority_last_at is not None
-            and _priority_monitor_session_open(observed_at)
+            and priority_market_session_open
             and priority_age_seconds is not None
             and priority_age_seconds <= priority_max_age_seconds
         )
@@ -10461,12 +11115,6 @@ class TradingScreeningService:
             )
             and not priority_errors
         )
-        overlay_active = bool(
-            self._config.priority_monitoring_enabled
-            and (
-                _priority_monitor_session_open(observed_at) or startup_bootstrap_overlay
-            )
-        )
         lane_max_age_seconds = {
             CANDIDATE_MONITOR_LANE_1M: priority_max_age_seconds,
             CANDIDATE_MONITOR_LANE_5M: (
@@ -10478,14 +11126,75 @@ class TradingScreeningService:
                 + self._config.priority_monitor_interval_seconds
             ),
         }
-        fresh_code_observations = {
+        eligible_code_observations = {
             code: (value[0], value[1])
             for code, value in code_observations.items()
-            if overlay_active
-            and observed_at >= value[0]
-            and (observed_at - value[0]).total_seconds()
+            if observed_at >= value[0]
+            and _candidate_trading_elapsed_seconds(value[0], observed_at)
             <= lane_max_age_seconds[value[1]]
         }
+        observation_market_data_cutoffs = {
+            code: (
+                _latest_expected_a_share_minute_cutoff(value[0])
+                if value[1] == CANDIDATE_MONITOR_LANE_1M
+                else _latest_expected_a_share_five_minute_cutoff(value[0])
+            )
+            for code, value in eligible_code_observations.items()
+        }
+        latest_observation_market_data_as_of = max(
+            (
+                value
+                for value in observation_market_data_cutoffs.values()
+                if value is not None
+            ),
+            default=None,
+        )
+        observations_advance_snapshot = bool(
+            latest_observation_market_data_as_of is not None
+            and (
+                snapshot_market_data_as_of is None
+                or latest_observation_market_data_as_of
+                > snapshot_market_data_as_of
+            )
+        )
+        # A minute observation remains the newest market fact throughout the
+        # lunch break and after the close until a full snapshot reaches the
+        # same cutoff.  Tying the page overlay to the notification session made
+        # the shortlist jump back to yesterday at 11:30 even though the live
+        # monitor continued to compute and persist current candidate changes.
+        # Notification eligibility stays session-bound; presentation freshness
+        # is independently driven by the latest completed market-data cutoff.
+        retained_latest_overlay = bool(
+            eligible_code_observations and observations_advance_snapshot
+        )
+        overlay_active = bool(
+            self._config.priority_monitoring_enabled
+            and (
+                priority_market_session_open
+                or startup_bootstrap_overlay
+                or retained_latest_overlay
+            )
+        )
+        fresh_code_observations = (
+            eligible_code_observations if overlay_active else {}
+        )
+        overlay_applied = bool(overlay_active and fresh_code_observations)
+        overlay_observed_at = (
+            max(value[0] for value in fresh_code_observations.values())
+            if fresh_code_observations
+            else None
+        )
+        presentation_market_data_as_of = snapshot_market_data_as_of
+        if (
+            overlay_applied
+            and latest_observation_market_data_as_of is not None
+            and (
+                presentation_market_data_as_of is None
+                or latest_observation_market_data_as_of
+                > presentation_market_data_as_of
+            )
+        ):
+            presentation_market_data_as_of = latest_observation_market_data_as_of
         fresh_codes = set(fresh_code_observations)
         priority_documents = tuple(
             value
@@ -10536,7 +11245,9 @@ class TradingScreeningService:
             )
             presentation_revision = (
                 f"{source_sha256}|{priority_revision}|live={priority_live}"
+                f"|overlay={overlay_applied}"
                 f"|fresh={sha256_json(tuple(sorted(fresh_code_observations)))}"
+                f"|market_data={presentation_market_data_as_of}"
                 f"|sector_batch={id(presentation_sector_batch)}"
                 f"|validated={validated_source_sha256}"
                 f"|scope={sha256_json(admitted_universe)}"
@@ -10708,6 +11419,19 @@ class TradingScreeningService:
             projected_signals
         )
         document["presentation_schema"] = "chanlun-trading-screening-presentation"
+        document["presentation_market_data_as_of"] = (
+            None
+            if presentation_market_data_as_of is None
+            else presentation_market_data_as_of.isoformat()
+        )
+        document["presentation_updated_at"] = (
+            None if overlay_observed_at is None else overlay_observed_at.isoformat()
+        )
+        document["presentation_data_mode"] = (
+            "INTRADAY_INCREMENTAL"
+            if overlay_applied
+            else "FROZEN_FULL_MARKET_SNAPSHOT"
+        )
         document["presentation_revision"] = sha256_json(
             {
                 "schema": "chanlun-trading-screening-presentation-revision",
@@ -10719,8 +11443,21 @@ class TradingScreeningService:
         document["priority_live_overlay"] = {
             "schema": "chanlun-priority-live-page-overlay",
             "enabled": self._config.priority_monitoring_enabled,
+            "active": overlay_applied,
             "live": priority_live,
             "startup_bootstrap": startup_bootstrap_overlay,
+            "retained_latest": bool(
+                overlay_applied
+                and retained_latest_overlay
+                and not priority_market_session_open
+                and not startup_bootstrap_overlay
+            ),
+            "market_session_open": priority_market_session_open,
+            "market_data_as_of": (
+                None
+                if presentation_market_data_as_of is None
+                else presentation_market_data_as_of.isoformat()
+            ),
             "observed_at": (
                 None if priority_last_at is None else priority_last_at.isoformat()
             ),
@@ -10728,7 +11465,7 @@ class TradingScreeningService:
             "max_age_seconds": priority_max_age_seconds,
             "signal_count": (
                 len(minute_documents)
-                if priority_live or startup_bootstrap_overlay
+                if overlay_applied
                 else 0
             ),
             "error_count": len(priority_errors),
@@ -10739,7 +11476,20 @@ class TradingScreeningService:
             "schema": "chanlun-candidate-live-page-overlay",
             "contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
             "enabled": self._config.priority_monitoring_enabled,
-            "live": bool(overlay_active and fresh_code_observations),
+            "active": overlay_applied,
+            "live": overlay_applied,
+            "retained_latest": bool(
+                overlay_applied
+                and retained_latest_overlay
+                and not priority_market_session_open
+                and not startup_bootstrap_overlay
+            ),
+            "market_session_open": priority_market_session_open,
+            "market_data_as_of": (
+                None
+                if presentation_market_data_as_of is None
+                else presentation_market_data_as_of.isoformat()
+            ),
             "fresh_code_count": len(fresh_code_observations),
             "signal_count": len(candidate_documents),
             "error_count": len(candidate_errors),
@@ -10786,11 +11536,9 @@ class TradingScreeningService:
                 return
             self._background_heartbeat_at = normalize_datetime(self._clock(), "clock")
 
-    def _record_native_progress(self) -> None:
-        """记录长任务进度，并在独立分片按时唤醒实时监听。"""
+    def _launch_due_priority_refresh(self, observed_at: datetime) -> None:
+        """Launch one due priority refresh without depending on long-task I/O."""
 
-        self._record_background_heartbeat()
-        observed_at = normalize_datetime(self._clock(), "clock")
         if self._priority_scan_lock.locked() or not self._priority_monitor_due(
             observed_at
         ):
@@ -10814,6 +11562,48 @@ class TradingScreeningService:
             )
             self._priority_progress_thread = worker
             worker.start()
+
+    def _record_native_progress(self) -> None:
+        """记录长任务进度，并在独立分片按时唤醒实时监听。"""
+
+        self._record_background_heartbeat()
+        self._launch_due_priority_refresh(
+            normalize_datetime(self._clock(), "clock")
+        )
+
+    def _priority_clock_loop(self, stop: Event) -> None:
+        """Keep minute-bar scheduling alive while the main refresh is blocked.
+
+        A sector provider can spend more than a minute inside one native call
+        without emitting a progress frame. The realtime lane therefore needs a
+        lightweight wall-clock trigger of its own; native progress remains a
+        heartbeat signal, but is no longer the scheduling clock.
+        """
+
+        try:
+            while not stop.wait(PRIORITY_MONITOR_CLOCK_POLL_SECONDS):
+                try:
+                    observed_at = normalize_datetime(self._clock(), "clock")
+                    # Publish the scheduler heartbeat before launching work.
+                    # The launch can hand off immediately to another thread,
+                    # so recording it afterwards creates a false missing-tick
+                    # window (and hides that the independent clock is alive).
+                    with self._background_lock:
+                        self._priority_clock_last_tick_at = observed_at
+                        self._priority_clock_last_error = None
+                    self._launch_due_priority_refresh(observed_at)
+                except Exception as exc:  # pragma: no cover - defensive clock boundary
+                    # A transient provider/clock exception must not permanently
+                    # remove the only scheduler that is independent of native
+                    # progress callbacks. Keep polling and expose the fault.
+                    with self._background_lock:
+                        self._priority_clock_last_error = (
+                            f"{type(exc).__name__}: {str(exc)[:160]}"
+                        )
+        finally:
+            with self._background_lock:
+                if self._priority_clock_thread is current_thread():
+                    self._priority_clock_thread = None
 
     def _refresh_priority_from_native_progress(self) -> None:
         try:
@@ -10904,7 +11694,10 @@ class TradingScreeningService:
                         if self._snapshot is snapshot:
                             self._review_readiness_error = None
                     file_backed = bool(
-                        hasattr(self, "_cache_path") and self._cache_path.is_file()
+                        hasattr(self, "_cache_path")
+                        and self._review_validation_source_path(
+                            snapshot_sha256
+                        ).is_file()
                     )
                     worker = Thread(
                         target=(
@@ -10945,12 +11738,35 @@ class TradingScreeningService:
         if archive_root is None or decision_source_id is None:
             return False
         report = resolve_live_review_materialization_receipt(
-            source_path=self._cache_path,
+            source_path=self._review_validation_source_path(snapshot_sha256),
             archive_root=archive_root,
             expected_source_snapshot_content_sha256=snapshot_sha256,
             expected_decision_source_snapshot_id=decision_source_id,
         )
         return report is not None
+
+    def _review_validation_source_path(self, snapshot_sha256: str) -> Path:
+        """Return the exact durable file backing the in-memory publication.
+
+        A full-market process may legitimately recover a content-addressed
+        generation while the mutable main pointer still belongs to a bounded
+        validation scope.  Validating the pointer in that state rejects the
+        correct in-memory publication forever.  Prefer the immutable file whose
+        name is the declared content identity; the validator still recomputes
+        the hash and therefore fails closed if that file was damaged.
+        """
+
+        if (
+            isinstance(snapshot_sha256, str)
+            and snapshot_sha256.startswith("sha256:")
+            and len(snapshot_sha256) == 71
+        ):
+            generation_path = self._cache_generation_directory() / (
+                snapshot_sha256.removeprefix("sha256:") + ".json"
+            )
+            if generation_path.is_file():
+                return generation_path
+        return self._cache_path
 
     def _validate_review_readiness_in_background(
         self,
@@ -10990,11 +11806,12 @@ class TradingScreeningService:
 
         project_root = Path(__file__).resolve().parents[4]
         validator = project_root / "tools" / "validate_trading_screening_review.py"
+        source_path = self._review_validation_source_path(snapshot_sha256)
         command = [
             sys.executable,
             str(validator),
             "--input",
-            str(self._cache_path),
+            str(source_path),
             "--expected-sha256",
             snapshot_sha256,
         ]
@@ -11073,6 +11890,13 @@ class TradingScreeningService:
         with self._background_lock:
             worker = self._background_thread
             worker_alive = worker is not None and worker.is_alive()
+            priority_clock_worker = self._priority_clock_thread
+            priority_clock_alive = bool(
+                priority_clock_worker is not None
+                and priority_clock_worker.is_alive()
+            )
+            priority_clock_last_tick_at = self._priority_clock_last_tick_at
+            priority_clock_last_error = self._priority_clock_last_error
             started_at = self._background_started_at
             heartbeat_at = self._background_heartbeat_at
             refresh_started_at = self._background_refresh_started_at
@@ -11800,6 +12624,33 @@ class TradingScreeningService:
             and priority_monitor_locator_last_attempted_count > 0
             else None
         )
+        priority_monitor_locator_required_symbols_per_second = (
+            priority_monitor_locator_pool_count
+            / self._config.priority_monitor_time_budget_seconds
+            if priority_monitor_locator_pool_count > 0
+            else 0.0
+        )
+        priority_monitor_locator_configured_capacity_sufficient = bool(
+            priority_monitor_locator_admission_deferred_count == 0
+            and priority_monitor_configured_rotation_seconds is not None
+            and priority_monitor_configured_rotation_seconds
+            <= ONE_MINUTE_LOCATOR_SLA_SECONDS
+        )
+        priority_monitor_locator_observed_capacity_sufficient: bool | None
+        if (
+            priority_monitor_locator_last_observed_at is None
+            or priority_monitor_locator_last_scheduled_count == 0
+            or priority_monitor_locator_observed_symbols_per_second is None
+        ):
+            priority_monitor_locator_observed_capacity_sufficient = None
+        else:
+            priority_monitor_locator_observed_capacity_sufficient = bool(
+                priority_monitor_locator_runtime_verified
+                and priority_monitor_locator_last_attempted_count
+                == priority_monitor_locator_last_scheduled_count
+                and priority_monitor_locator_observed_symbols_per_second
+                >= priority_monitor_locator_required_symbols_per_second
+            )
         five_candidate_coverage = _candidate_lane_coverage(
             candidate_monitor_five_universe,
             last_success_at=candidate_monitor_five_last_success_at,
@@ -12092,6 +12943,23 @@ class TradingScreeningService:
             realtime_alert_status = "ready"
             realtime_alert_reason_code = "READY"
 
+        # Current-session due-ness and next-session capacity are deliberately
+        # independent. During lunch/closed hours realtime_alert_ready may be
+        # "not_due", but an admission deficit or measured throughput shortfall
+        # must remain visible so operators can repair it before the next bar.
+        realtime_alert_capacity_ready = bool(
+            notification_dispatcher_configured
+            and not notification_delivery_degraded
+            and priority_monitor_locator_configured_capacity_sufficient
+            and priority_monitor_locator_observed_capacity_sufficient is not False
+            and candidate_configured_capacity_sufficient
+            and candidate_observed_capacity_sufficient is not False
+        )
+        realtime_alert_next_session_ready = bool(
+            realtime_alert_capacity_ready
+            and notification_delivery_verified
+        )
+
         member_history_diagnostics = snapshot.get("sector_member_history_diagnostics")
         if not isinstance(member_history_diagnostics, Mapping):
             member_history_diagnostics = None
@@ -12111,6 +12979,13 @@ class TradingScreeningService:
             ),
             "status": "ready" if runtime_ready else "not_ready",
             "worker_alive": worker_alive,
+            "priority_clock_alive": priority_clock_alive,
+            "priority_clock_last_tick_at": (
+                None
+                if priority_clock_last_tick_at is None
+                else priority_clock_last_tick_at.isoformat()
+            ),
+            "priority_clock_last_error": priority_clock_last_error,
             "background_started_at": (
                 None if started_at is None else started_at.isoformat()
             ),
@@ -12147,6 +13022,9 @@ class TradingScreeningService:
             ),
             "cache_decision_source_migration_persist_error": (
                 self._cache_decision_source_migration_persist_error
+            ),
+            "priority_monitor_source_migrated_from": (
+                self._priority_monitor_source_migrated_from
             ),
             "cache_decision_source_recheck_code_count": len(
                 self._cache_decision_source_recheck_codes
@@ -12332,10 +13210,17 @@ class TradingScreeningService:
             ),
             "priority_monitor_locator_sla_seconds": ONE_MINUTE_LOCATOR_SLA_SECONDS,
             "priority_monitor_locator_capacity_sufficient": bool(
-                priority_monitor_locator_admission_deferred_count == 0
-                and priority_monitor_configured_rotation_seconds is not None
-                and priority_monitor_configured_rotation_seconds
-                <= ONE_MINUTE_LOCATOR_SLA_SECONDS
+                priority_monitor_locator_configured_capacity_sufficient
+            ),
+            "priority_monitor_locator_configured_capacity_sufficient": (
+                priority_monitor_locator_configured_capacity_sufficient
+            ),
+            "priority_monitor_locator_observed_capacity_sufficient": (
+                priority_monitor_locator_observed_capacity_sufficient
+            ),
+            "priority_monitor_locator_required_symbols_per_second": round(
+                priority_monitor_locator_required_symbols_per_second,
+                6,
             ),
             "priority_monitor_locator_pool_count": (
                 priority_monitor_locator_pool_count
@@ -12516,6 +13401,10 @@ class TradingScreeningService:
             "priority_monitor_time_budget_seconds": (
                 self._config.priority_monitor_time_budget_seconds
             ),
+            "priority_monitor_finalization_reserve_seconds": min(
+                PRIORITY_MONITOR_FINALIZATION_RESERVE_SECONDS,
+                self._config.priority_monitor_time_budget_seconds / 4,
+            ),
             "priority_monitor_bar_ready_offset_seconds": (
                 PRIORITY_MONITOR_BAR_READY_OFFSET_SECONDS
             ),
@@ -12586,6 +13475,10 @@ class TradingScreeningService:
                 else None
             ),
             "realtime_alert_ready": realtime_alert_ready,
+            "realtime_alert_capacity_ready": realtime_alert_capacity_ready,
+            "realtime_alert_next_session_ready": (
+                realtime_alert_next_session_ready
+            ),
             "realtime_alert_active": bool(
                 realtime_alert_ready
                 and priority_monitor_session_open
@@ -12950,6 +13843,47 @@ class TradingScreeningService:
         audit = snapshot.get("scan_audit")
         manifest = snapshot.get("coverage_manifest")
         quality = snapshot.get("data_quality")
+        # Once a complete authenticated coverage manifest has produced a
+        # publishable previous-close shortlist, unresolved next-epoch symbol
+        # retries must not occupy all structure shards during the live monitor
+        # window.  They made the priority phase wait for ordinary requests to
+        # drain and repeatedly miss the one-minute notification SLA at every
+        # new 5m boundary.  This only defers low-priority repair work: an absent,
+        # quarantined or unfinished first snapshot still rebuilds immediately,
+        # and the explicit force resumes automatically in the post-close window.
+        authenticated_publishable_snapshot = bool(
+            snapshot.get("available") is True
+            and snapshot.get("scan_state") == "complete"
+            and isinstance(snapshot.get("snapshot_content_sha256"), str)
+            and snapshot.get("snapshot_content_sha256")
+            == validated_snapshot_sha256
+            and isinstance(audit, Mapping)
+            and audit.get("coverage_cycle_complete") is True
+            and self._pending_symbol_count(snapshot) == 0
+            and isinstance(manifest, Mapping)
+            and manifest.get("complete") is True
+        )
+        local_observed = normalize_datetime(
+            observed_at or self._clock(),
+            "clock",
+        ).astimezone(CN)
+        local_is_trading, _calendar_source = _scheduled_trading_day(
+            local_observed.date(),
+            observed_at=local_observed,
+        )
+        realtime_resource_protection_open = bool(
+            local_is_trading
+            and PREOPEN_RECONCILIATION_START
+            <= local_observed.time()
+            < POST_CLOSE_PRESELECTION_START
+        )
+        if (
+            self._config.priority_monitoring_enabled
+            and not automatic_recovery
+            and authenticated_publishable_snapshot
+            and realtime_resource_protection_open
+        ):
+            return False
         return not bool(
             snapshot.get("available") is True
             and isinstance(snapshot.get("snapshot_content_sha256"), str)
@@ -13243,6 +14177,16 @@ class TradingScreeningService:
         with self._background_lock:
             existing = self._background_thread
             if existing is not None and existing.is_alive():
+                priority_clock = self._priority_clock_thread
+                if priority_clock is None or not priority_clock.is_alive():
+                    priority_clock = Thread(
+                        target=self._priority_clock_loop,
+                        args=(self._background_stop,),
+                        daemon=True,
+                        name="trading-screening-priority-clock",
+                    )
+                    self._priority_clock_thread = priority_clock
+                    priority_clock.start()
                 return existing
             self._background_stop = Event()
             self._background_wake = Event()
@@ -13252,14 +14196,24 @@ class TradingScreeningService:
             self._background_last_result_at = None
             self._background_last_error = None
             self._background_iteration_count = 0
+            self._priority_clock_last_tick_at = None
+            self._priority_clock_last_error = None
             worker = Thread(
                 target=self._background_loop,
                 args=(self._background_stop, self._background_wake),
                 daemon=True,
                 name="trading-screening-background",
             )
+            priority_clock = Thread(
+                target=self._priority_clock_loop,
+                args=(self._background_stop,),
+                daemon=True,
+                name="trading-screening-priority-clock",
+            )
             self._background_thread = worker
+            self._priority_clock_thread = priority_clock
             worker.start()
+            priority_clock.start()
             return worker
 
     def shutdown_background(
@@ -13272,16 +14226,23 @@ class TradingScreeningService:
 
         with self._background_lock:
             worker = self._background_thread
+            priority_clock = self._priority_clock_thread
             stop = self._background_stop
             wake = self._background_wake
         with self._priority_progress_launch_lock:
             priority_worker = self._priority_progress_thread
-        if worker is None and priority_worker is None:
+        if worker is None and priority_clock is None and priority_worker is None:
             return True
         stop.set()
         wake.set()
         if wait and worker is not None and worker is not current_thread():
             worker.join(timeout=timeout)
+        if (
+            wait
+            and priority_clock is not None
+            and priority_clock is not current_thread()
+        ):
+            priority_clock.join(timeout=timeout)
         if (
             wait
             and priority_worker is not None
@@ -13290,12 +14251,15 @@ class TradingScreeningService:
             priority_worker.join(timeout=timeout)
         stopped = bool(
             (worker is None or not worker.is_alive())
+            and (priority_clock is None or not priority_clock.is_alive())
             and (priority_worker is None or not priority_worker.is_alive())
         )
         if stopped:
             with self._background_lock:
                 if self._background_thread is worker:
                     self._background_thread = None
+                if self._priority_clock_thread is priority_clock:
+                    self._priority_clock_thread = None
             with self._priority_progress_launch_lock:
                 if self._priority_progress_thread is priority_worker:
                     self._priority_progress_thread = None
@@ -13486,7 +14450,10 @@ class TradingScreeningService:
                                     )
                                     destination.flush()
                                     os.fsync(destination.fileno())
-                                os.replace(generation_temporary, generation_path)
+                                _replace_file_with_retry(
+                                    generation_temporary,
+                                    generation_path,
+                                )
                             finally:
                                 generation_temporary.unlink(missing_ok=True)
                         self._persist_cache_scope_sidecar(generation_path, payload)
@@ -13506,7 +14473,7 @@ class TradingScreeningService:
                             f"{type(exc).__name__}: {str(exc)[:160]}"
                         )
                 self._cache_scope_sidecar_path(self._cache_path).unlink(missing_ok=True)
-                os.replace(temporary, self._cache_path)
+                _replace_file_with_retry(temporary, self._cache_path)
                 self._persist_cache_scope_sidecar(self._cache_path, payload)
                 if not (
                     isinstance(manifest, Mapping) and manifest.get("complete") is True
@@ -13754,6 +14721,7 @@ class TradingScreeningService:
         if work_lane not in {
             "coverage",
             "priority",
+            "monitor_candidate",
             "candidate",
             "candidate_overflow",
         }:
@@ -13795,6 +14763,9 @@ class TradingScreeningService:
                 )
         else:
             bounded_method = {
+                "monitor_candidate": (
+                    "monitor_candidate_structure_bundle_with_risk_cutoff_until"
+                ),
                 "candidate": "candidate_structure_bundle_with_risk_cutoff_until",
                 "candidate_overflow": (
                     "candidate_overflow_structure_bundle_with_risk_cutoff_until"
@@ -13803,6 +14774,7 @@ class TradingScreeningService:
             }[work_lane]
             bounded_provider = getattr(self._market_data, bounded_method, None)
             if not callable(bounded_provider) and work_lane in {
+                "monitor_candidate",
                 "candidate",
                 "candidate_overflow",
             }:
@@ -13812,6 +14784,7 @@ class TradingScreeningService:
                     None,
                 )
             if not callable(bounded_provider) and work_lane in {
+                "monitor_candidate",
                 "candidate",
                 "candidate_overflow",
             }:
@@ -13821,6 +14794,7 @@ class TradingScreeningService:
                     None,
                 )
             if deadline_monotonic is None and work_lane in {
+                "monitor_candidate",
                 "candidate",
                 "candidate_overflow",
             }:
@@ -14171,10 +15145,6 @@ class TradingScreeningService:
                     )
                 return result(payload)
             self._finalize_snapshot_identity(payload)
-            if payload.get("snapshot_content_sha256") == previous.get(
-                "snapshot_content_sha256"
-            ):
-                return result(dict(previous))
             payload_valid = _cache_contract_is_valid(
                 payload,
                 self._config,
@@ -14182,6 +15152,21 @@ class TradingScreeningService:
                 self._selection_research_revision,
                 self._decision_source_snapshot_id,
             )
+            dispatch_screening_completion = getattr(
+                self._notifier,
+                "dispatch_screening_completion",
+                None,
+            )
+            if payload_valid and callable(dispatch_screening_completion):
+                # The completion dispatcher owns a durable pending ledger. It
+                # must run before the unchanged-snapshot shortcut so a failed
+                # enqueue can be retried after restart without republishing or
+                # fabricating a second daily selection transition.
+                dispatch_screening_completion(previous, payload)
+            if payload.get("snapshot_content_sha256") == previous.get(
+                "snapshot_content_sha256"
+            ):
+                return result(dict(previous))
             notification_context = payload.get("notification_context")
             notification_eligible = bool(
                 isinstance(notification_context, Mapping)
@@ -14597,6 +15582,31 @@ class TradingScreeningService:
             )
             if isinstance(affinity_audit, Mapping):
                 sector_audit["coverage_sector_affinity"] = dict(affinity_audit)
+            affinity_slots_provider = getattr(
+                self._sector_catalog,
+                "coverage_sector_affinity_slots",
+                None,
+            )
+            if callable(affinity_slots_provider):
+                affinity_slots = affinity_slots_provider()
+                if not isinstance(affinity_slots, Mapping):
+                    raise TypeError(
+                        "coverage sector affinity slots must be a mapping"
+                    )
+                ranked_scan_codes = _ranked_sector_round_robin_codes(
+                    selected_sector_by_code,
+                    ranked_ordinals,
+                    affinity_worker_count=(
+                        self._config.effective_full_coverage_worker_count
+                    ),
+                    affinity_worker_by_sector=affinity_slots,
+                )
+                sector_audit["scan_order_contract"] = (
+                    "RANKED_CONFIGURED_WORKER_QUEUE_ROUND_ROBIN_V3"
+                )
+                sector_audit["scan_affinity_plan_sector_count"] = len(
+                    affinity_slots
+                )
         watchlist, rejected_watchlist = _validated_monitor_instrument_scope(
             self._market_data.active_watchlist_scope(),
             "active_watchlist_scope",

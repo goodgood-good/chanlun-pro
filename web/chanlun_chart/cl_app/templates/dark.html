@@ -279,6 +279,14 @@
             handleAuthenticationFailure: handleAuthenticationFailure
         };
     })();
+</script>
+<script type="text/javascript" nonce="{{ csp_nonce }}">
+    window.__CHANLUN_ACCOUNT_PREFERENCES__ = {{ account_preferences_bootstrap|default(none)|tojson }};
+</script>
+<script
+    type="text/javascript"
+    src="{{ url_for('static', filename='js/account_preferences.js') }}?asset={{ static_asset_token|default('') }}"></script>
+<script type="text/javascript" nonce="{{ csp_nonce }}">
     (function () {
         if (window.JSON && window.JSON.parse) {
             var c = document.getElementsByTagName("head");
@@ -307,6 +315,7 @@
 
     // 已移除百度统计脚本（hm.baidu.com）以减少第三方数据外发；如需开启可恢复。
 </script>
+<script src="{{ url_for('static', filename='js/layui_accessibility.js') }}?asset={{ static_asset_token|default('') }}"></script>
 <style>
     .layui-card-body p,
     .layui-card-body li {

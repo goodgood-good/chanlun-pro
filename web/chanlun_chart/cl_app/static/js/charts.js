@@ -22,6 +22,26 @@ const CL_SHOW_DEFAULT = {
     divergence_all: true,
 };
 
+// Causal review links remain centered around their immutable evidence time.
+// Live embedded 1m charts use the complete loaded history instead (see
+// _maybeWidenDefaultView), while standalone workbench charts retain two days.
+const CAUSAL_ONE_MINUTE_VIEW_SPAN_DAYS = 5;
+// Atomic initial history already contains the complete current snapshot. Keep
+// only a small scheduling window for TradingView's immediate boundary probe;
+// active requests are tracked independently, so a slow request still keeps the
+// chart covered without adding a fixed 400ms penalty after it has completed.
+const CHART_HISTORY_SETTLE_QUIET_MS = 120;
+const CHART_STABLE_QUIET_MS = 50;
+const VERIFY_REBUILD_DELAY_MS = 120;
+const STRICT_LABEL_RESIZE_DEBOUNCE_MS = 120;
+const BASE_STRUCTURE_PATH_MAX_SEGMENTS = 64;
+// Four embedded EventSource requests otherwise occupy most HTTP/1.1
+// per-origin connections while the next symbol's four history snapshots are
+// trying to load. The parent resumes realtime immediately after the whole
+// visible chart batch is stable; this timeout is only a fail-safe for a lost
+// bridge message or an embedding page that does not implement that contract.
+const EMBEDDED_REALTIME_DEFER_FALLBACK_MS = 35_000;
+
 function recursiveDisplayLevels(interval) {
     const key = String(interval || '').trim();
     const map = {
@@ -58,8 +78,32 @@ const CHART_DISABLED_FEATURES = Object.freeze([
     "go_to_date",
     "use_blob_for_iframe_loading",
 ]);
+const CHART_ENABLED_FEATURES = Object.freeze([
+    "study_templates",
+    "seconds_resolution",
+    "saveload_separate_drawings_storage",
+    "iframe_loading_same_origin",
+]);
+function chartWidgetViewportOptions(interval) {
+    const showFullEmbeddedOneMinuteHistory = (
+        typeof window !== 'undefined'
+        && window.__CHANLUN_EMBEDDED_CHART === true
+        && String(interval) === '1'
+    );
+    const enabledFeatures = [...CHART_ENABLED_FEATURES];
+    if (showFullEmbeddedOneMinuteHistory) {
+        // 保持当前完整时间范围，而不是在影院模式/响应式布局改变画布宽度时
+        // 保持柱宽并重新裁掉左侧历史。
+        enabledFeatures.push("lock_visible_time_range_on_resize");
+    }
+    return {
+        enabledFeatures,
+        minBarSpacing: showFullEmbeddedOneMinuteHistory ? 0.01 : 0.05,
+    };
+}
 const USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings";
-const DEFAULT_STUDY_ALLOWLIST = new Set(["MACD_HTF"]);
+const MAX_AUTHORITATIVE_SSE_REPLAY_BARS = 240;
+const DEFAULT_STUDY_ALLOWLIST = new Set(["MACD_HTF", "MACD"]);
 function requestedDefaultStudies(search) {
     try {
         const params = new URLSearchParams(search || "");
@@ -91,6 +135,33 @@ function getMarketTimezone(market) {
 // 错误诊断（console.warn / console.error）不受此开关控制。
 function clog(...args) {
     if (window.__chanlunDebug) console.log(...args);
+}
+
+function chartPreferenceGetItem(key) {
+    if (window.AccountPreferences && typeof window.AccountPreferences.getItem === 'function') {
+        return window.AccountPreferences.getItem(key);
+    }
+    return typeof localStorage.getItem === 'function'
+        ? localStorage.getItem(key)
+        : (localStorage[key] === undefined ? null : localStorage[key]);
+}
+
+function chartPreferenceSetItem(key, value) {
+    if (window.AccountPreferences && typeof window.AccountPreferences.setItem === 'function') {
+        return window.AccountPreferences.setItem(key, value);
+    }
+    if (typeof localStorage.setItem === 'function') localStorage.setItem(key, value);
+    else localStorage[key] = String(value);
+    return true;
+}
+
+function chartPreferenceRemoveItem(key) {
+    if (window.AccountPreferences && typeof window.AccountPreferences.removeItem === 'function') {
+        return window.AccountPreferences.removeItem(key);
+    }
+    if (typeof localStorage.removeItem === 'function') localStorage.removeItem(key);
+    else delete localStorage[key];
+    return true;
 }
 
 // 菜单在主文档中，TradingView 的可交互区域在同源 iframe 中；递归收集这些
@@ -636,13 +707,13 @@ function _resolutionKey(resolution) {
 function loadClShowConfig(chartId, resolution) {
     const storageKey = 'cl_show_config_' + chartId + '_' + _resolutionKey(resolution);
     try {
-        const raw = localStorage.getItem(storageKey);
+        const raw = chartPreferenceGetItem(storageKey);
         if (raw) {
             const parsed = JSON.parse(raw);
             return normalizeClShowConfig(parsed, resolution);
         }
     } catch (e) {
-        localStorage.removeItem(storageKey);
+        chartPreferenceRemoveItem(storageKey);
         console.warn('[CHARTS] invalid cl_show_config removed', e);
     }
     // 该周期从未配置 → null 哨兵，由 resolveClConfigForResolution 决定继承。
@@ -652,7 +723,7 @@ function loadClShowConfig(chartId, resolution) {
 function saveClShowConfig(chartId, resolution, cfg) {
     const normalized = normalizeClShowConfig(cfg, resolution);
     try {
-        localStorage.setItem(
+        chartPreferenceSetItem(
             'cl_show_config_' + chartId + '_' + _resolutionKey(resolution),
             JSON.stringify(normalized),
         );
@@ -676,7 +747,7 @@ function resolveClConfigForResolution(chartId, resolution, currentCfg) {
 
 function loadClIndependentDrawings(chartId) {
     try {
-        const raw = localStorage.getItem('cl_independent_drawings_' + chartId);
+        const raw = chartPreferenceGetItem('cl_independent_drawings_' + chartId);
         if (raw !== null) {
             return JSON.parse(raw) === true;
         }
@@ -688,7 +759,7 @@ function loadClIndependentDrawings(chartId) {
 
 function saveClIndependentDrawings(chartId, val) {
     try {
-        localStorage.setItem('cl_independent_drawings_' + chartId, JSON.stringify(!!val));
+        chartPreferenceSetItem('cl_independent_drawings_' + chartId, JSON.stringify(!!val));
     } catch (e) {
         console.warn('[CHARTS] saveClIndependentDrawings failed', e);
     }
@@ -754,9 +825,7 @@ function currentChartTheme() {
     } catch (e) { /* 回退到 TradingView 本地状态 */ }
     try {
         if (typeof localStorage !== "undefined") {
-            const raw = typeof localStorage.getItem === "function"
-                ? localStorage.getItem("tv_chart")
-                : localStorage.tv_chart;
+            const raw = chartPreferenceGetItem("tv_chart");
             const stored = raw ? JSON.parse(raw) : {};
             return normalizeChartTheme(stored.theme);
         }
@@ -841,6 +910,123 @@ function pointTypeLabel(pointType) {
     return POINT_TYPE_LABELS[value.toLowerCase()] || value;
 }
 
+function compactStrictLevelLabel(levelLabel, structuralLevel = 0) {
+    const normalized = String(levelLabel || "").trim();
+    if (!normalized) return `L${structuralLevel}`;
+    const recursiveLabel = /(?:^|\/)(L\d+)$/i.exec(normalized);
+    // The chart header already identifies the physical interval. Repeating
+    // "1m/" in every recursive label wastes horizontal room in compact panes
+    // and makes otherwise distinct signals overlap.
+    if (!recursiveLabel || !normalized.includes("/")) return normalized;
+    const compact = recursiveLabel[1].toUpperCase();
+    // L0 is the chart's own base level, so both the physical interval and L0
+    // are already communicated by the pane header. Higher recursive levels
+    // remain explicit because they add information.
+    return compact === "L0" ? "" : compact;
+}
+
+function strictDivergenceKindLabel(kind) {
+    return String(kind || "").toLowerCase() === "trend" ? "趋势背驰" : "盘整背驰";
+}
+
+function strictDivergenceSummary(kinds) {
+    const uniqueKinds = Array.from(new Set(
+        (Array.isArray(kinds) ? kinds : [])
+            .map((kind) => String(kind || "").toLowerCase())
+            .filter((kind) => kind === "consolidation" || kind === "trend"),
+    ));
+    if (uniqueKinds.length === 0) return "";
+    if (uniqueKinds.includes("consolidation") && uniqueKinds.includes("trend")) {
+        return "盘整/趋势背驰";
+    }
+    return strictDivergenceKindLabel(uniqueKinds[0]);
+}
+
+function strictLabelDirection(item) {
+    if (item?.render_kind === "strict_divergence") {
+        if (item.direction === "down") return "buy";
+        if (item.direction === "up") return "sell";
+        return null;
+    }
+    if (item?.render_kind === "point_confirmed" || item?.render_kind === "point_approaching") {
+        const pointType = String(item.point_type || "").toLowerCase();
+        if (String(item.side || "").toLowerCase() === "buy" || pointType.includes("buy")) return "buy";
+        if (String(item.side || "").toLowerCase() === "sell" || pointType.includes("sell")) return "sell";
+    }
+    return null;
+}
+
+function strictLabelAnchorKey(item) {
+    const point = item?.points?.[0];
+    const direction = strictLabelDirection(item);
+    if (!point || !Number.isInteger(point.time) || !direction) return null;
+    const priceTick = Number.isInteger(point.price_tick)
+        ? point.price_tick
+        : (Number.isInteger(item?.anchor_tick) ? item.anchor_tick : null);
+    const numericPrice = Number(point.price);
+    // Price is present on every drawing point, whereas older divergence
+    // payloads may keep price_tick only as anchor_tick. Prefer the common
+    // coordinate representation so mixed snapshot revisions still coalesce.
+    const priceKey = Number.isFinite(numericPrice)
+        ? `price:${numericPrice.toPrecision(14)}`
+        : (priceTick !== null ? `tick:${priceTick}` : null);
+    if (!priceKey) return null;
+    return `${item.structural_level}|${point.time}|${priceKey}|${direction}`;
+}
+
+function coalesceCoincidentStrictLabels(items = []) {
+    const output = [];
+    const pointByAnchor = new Map();
+    const divergenceByAnchor = new Map();
+
+    // Confirmed points are supplied before approaching points. Keeping the
+    // first point as the carrier preserves the strongest signal when stale or
+    // transitional snapshots briefly contain both at one market coordinate.
+    for (const item of items) {
+        if (item?.render_kind !== "point_confirmed" && item?.render_kind !== "point_approaching") continue;
+        const key = strictLabelAnchorKey(item);
+        const outputIndex = output.length;
+        output.push(item);
+        if (key && !pointByAnchor.has(key)) pointByAnchor.set(key, outputIndex);
+    }
+
+    for (const item of items) {
+        if (item?.render_kind !== "strict_divergence") continue;
+        const anchorKey = strictLabelAnchorKey(item);
+        let carrierIndex = pointByAnchor.get(anchorKey);
+        if (carrierIndex === undefined) carrierIndex = divergenceByAnchor.get(anchorKey);
+        if (carrierIndex === undefined) {
+            const outputIndex = output.length;
+            output.push(item);
+            if (anchorKey) divergenceByAnchor.set(anchorKey, outputIndex);
+            continue;
+        }
+        const carrier = output[carrierIndex];
+        const kinds = Array.from(new Set([
+            ...(carrier.presentation_divergence_kinds || []),
+            carrier.kind,
+            item.kind,
+        ].filter(Boolean))).sort();
+        const ids = Array.from(new Set([
+            ...(carrier.presentation_divergence_ids || []),
+            carrier.divergence_id,
+            item.divergence_id,
+        ].filter(Boolean))).sort();
+        const sourceRenderId = carrier.presentation_source_render_id || carrier.render_id;
+        output[carrierIndex] = {
+            ...carrier,
+            presentation_source_render_id: sourceRenderId,
+            presentation_divergence_kinds: kinds,
+            presentation_divergence_ids: ids,
+            // A presentation-only revision makes reconciliation replace an
+            // existing point when coincident evidence appears or disappears,
+            // while the point's logical identity remains unchanged.
+            render_id: `${sourceRenderId}|coincident:${ids.join(",")}`,
+        };
+    }
+    return output;
+}
+
 function getStrictPointVisual(item = {}) {
     const pointType = String(item.point_type || "").toLowerCase();
     const isBuy = String(item.side || "").toLowerCase() === "buy" || pointType.includes("buy");
@@ -852,32 +1038,63 @@ function getStrictPointVisual(item = {}) {
         : item.render_kind === "point_confirmed";
     const geometryCandidate = declaredFormation === "geometry_ready";
     const level = Number.isInteger(item.structural_level) ? item.structural_level : 0;
-    const levelLabel = item.level_label || `L${level}`;
+    const levelLabel = compactStrictLevelLabel(item.level_label, level);
+    const divergenceSummary = strictDivergenceSummary(item.presentation_divergence_kinds);
+    const pointLabel = pointTypeLabel(pointType);
+    const stateLabel = confirmed ? "" : geometryCandidate ? "候选待锁·" : "接近·";
+    const fullText = `${isBuy ? "▲" : "▼"}${stateLabel}${levelLabel ? `${levelLabel}·` : ""}${pointLabel}${divergenceSummary ? `·${divergenceSummary}` : ""}`;
     const fontsize = confirmed
         ? (level > 0 ? CHANLUN_VISUAL_STYLE.point.higherFontsize : CHANLUN_VISUAL_STYLE.point.fontsize)
         : CHANLUN_VISUAL_STYLE.point.approachingFontsize;
+    const markerText = ({ "1buy": "一", "2buy": "二", "3buy": "三", "1sell": "一", "2sell": "二", "3sell": "三" })[pointType]
+        || pointLabel.slice(0, 1)
+        || "点";
+    const markerMode = item.presentation_density === "marker";
     return {
         color: getSignalColor(isBuy ? "buy" : "sell"),
-        fontsize,
+        fontsize: markerMode ? 10 : fontsize,
         bold: confirmed,
         transparency: confirmed ? 0 : 45,
-        text: `${isBuy ? "▲" : "▼"}${confirmed ? "" : geometryCandidate ? "候选待锁·" : "接近·"}${levelLabel}·${pointTypeLabel(pointType)}`,
+        text: markerMode ? markerText : fullText,
+        fullText,
     };
 }
 
 function getStrictDivergenceVisual(item = {}) {
     const bullish = item.direction === "down";
-    const trend = item.kind === "trend";
+    const divergenceKinds = Array.isArray(item.presentation_divergence_kinds)
+        ? item.presentation_divergence_kinds
+        : [item.kind];
+    const trend = divergenceKinds.includes("trend");
     const level = Number.isInteger(item.structural_level) ? item.structural_level : 0;
-    const levelLabel = item.level_label || `L${level}`;
+    const levelLabel = compactStrictLevelLabel(item.level_label, level);
+    const divergenceSummary = strictDivergenceSummary(divergenceKinds) || strictDivergenceKindLabel(item.kind);
+    const fullText = `${bullish ? "▲" : "▼"}${levelLabel ? `${levelLabel}·` : ""}${divergenceSummary}`;
+    const markerMode = item.presentation_density === "marker";
     return {
         color: getSignalColor(bullish ? "buy" : "sell"),
-        fontsize: trend
+        fontsize: markerMode ? 10 : trend
             ? CHANLUN_VISUAL_STYLE.divergence.trendFontsize
             : CHANLUN_VISUAL_STYLE.divergence.consolidationFontsize,
         bold: trend,
-        text: `${bullish ? "▲" : "▼"}${levelLabel}·${trend ? "趋势背驰" : "盘整背驰"}`,
+        text: markerMode ? "背" : fullText,
+        fullText,
     };
+}
+
+function strictTextWidth(text, fontsize) {
+    const em = Array.from(String(text || "")).reduce((total, character) => (
+        total + (/^[\x00-\x7F]$/.test(character) ? 0.62 : 1)
+    ), 0);
+    return Math.max(fontsize, em * fontsize + 4);
+}
+
+function strictLabelBoxesOverlap(left, right) {
+    const horizontal = Math.abs(left.x - right.x)
+        < (left.width + right.width) / 2 + 3;
+    const vertical = Math.abs(left.y - right.y)
+        < (left.height + right.height) / 2 + 3;
+    return horizontal && vertical;
 }
 
 // 基础结构保留“笔细、线段粗”的第二重视觉层级；颜色由下面的绝对递归级别色链决定，
@@ -975,11 +1192,37 @@ function getRecursiveLevelColor(interval, level) {
 // 递归层级走势类型与本级中枢同色；形状区分走势与中枢。
 
 function debounce(func, wait) {
-    let timeout;
-    return function (...args) {
+    let timeout = null;
+    const debounced = function (...args) {
         clearTimeout(timeout);
-        timeout = setTimeout(() => func.apply(this, args), wait);
+        timeout = setTimeout(() => {
+            timeout = null;
+            func.apply(this, args);
+        }, wait);
     };
+    debounced.pending = () => timeout != null;
+    debounced.cancel = () => {
+        if (timeout != null) clearTimeout(timeout);
+        timeout = null;
+    };
+    return debounced;
+}
+
+function embeddedDefaultTimeframe(interval) {
+    if (typeof window === 'undefined' || window.__CHANLUN_EMBEDDED_CHART !== true) {
+        return undefined;
+    }
+    return {
+        '1': '2D',
+        '1m': '2D',
+        '5': '3M',
+        '5m': '3M',
+        '30': '3M',
+        '30m': '3M',
+        '1D': '27M',
+        'D': '27M',
+        'd': '27M',
+    }[String(interval || '')];
 }
 
 function getTVRegistry() {
@@ -1005,6 +1248,7 @@ const ChartUtils = {
             if (!chart) return Promise.reject("Chart object is null");
 
             return config.shape === "trend_line" || config.shape === "rectangle" || config.shape === "circle"
+                || config.shape === "polyline" || config.shape === "path"
                 ? chart.createMultipointShape(points, config)
                 : chart.createShape(points, config);
         } catch (e) {
@@ -1043,6 +1287,36 @@ const ChartUtils = {
                 linewidth,
                 linecolor: color,
                 transparency: 0,
+                ...overrides,
+            },
+        });
+    },
+    createPathShape(chart, line, options = {}) {
+        const {
+            overrides = {},
+            linewidth = 1,
+            color = CHART_CONFIG.COLORS.BI,
+            ...shapeOptions
+        } = options;
+        const linestyle = parseInt(line.linestyle) || 0;
+        return this.createShape(chart, line.points, {
+            // TradingView 的 polyline 实际由 PolygonRenderer 绘制；当其
+            // `filled` 状态被用户模板或库内部状态恢复为 true 时，会把末点
+            // 自动连回首点，产生一条横跨图表的伪线段。Path 是开放折线，既能
+            // 保留批量绘制性能，也从图元语义上杜绝首尾闭合。
+            shape: "path",
+            ...shapeOptions,
+            overrides: {
+                lineColor: color,
+                lineStyle: linestyle,
+                lineWidth: linewidth,
+                leftEnd: 0,
+                rightEnd: 0,
+                "linetoolpath.lineColor": color,
+                "linetoolpath.lineStyle": linestyle,
+                "linetoolpath.lineWidth": linewidth,
+                "linetoolpath.leftEnd": 0,
+                "linetoolpath.rightEnd": 0,
                 ...overrides,
             },
         });
@@ -1096,6 +1370,40 @@ function shouldLoadLastChart() {
     }
 }
 
+function validSseStreamIdentifier(value) {
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(String(value || ''));
+}
+
+function createSseStreamIdentifier(prefix) {
+    let entropy = '';
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            entropy = crypto.randomUUID();
+        }
+    } catch (e) { /* fall through to a local random id */ }
+    if (!entropy) {
+        entropy = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+    return `${prefix}.${entropy}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 128);
+}
+
+function resolveSseStreamChannel(chartId) {
+    try {
+        const supplied = new URLSearchParams(window.location.search || '').get('stream_channel');
+        if (validSseStreamIdentifier(supplied)) return supplied;
+    } catch (e) { /* use the per-tab fallback */ }
+    const storageKey = `chanlun:sse-stream-channel:${chartId}`;
+    try {
+        const saved = window.sessionStorage.getItem(storageKey);
+        if (validSseStreamIdentifier(saved)) return saved;
+        const generated = createSseStreamIdentifier(`chart-${chartId}`);
+        window.sessionStorage.setItem(storageKey, generated);
+        return generated;
+    } catch (e) {
+        return createSseStreamIdentifier(`chart-${chartId}`);
+    }
+}
+
 class ChartManager {
     constructor(id) {
         this.id = id;
@@ -1104,7 +1412,10 @@ class ChartManager {
         this.widget = null;
         this.udf_datafeed = null;
         this.chart = null;
-        this.debouncedDrawChanlun = debounce(() => this.draw_chanlun(), 300);
+        this.debouncedDrawChanlun = debounce(
+            () => this.draw_chanlun({ skipIfUnchanged: true }),
+            300,
+        );
         this.macdStudyId = null;
         this._defaultStudiesPromise = null;
         this._defaultStudyIds = new Map();
@@ -1139,6 +1450,9 @@ class ChartManager {
         this._intervalSwitchSeq = 0;
         this._drawingsRequestSeq = 0;
         this._latestAppliedBarTime = null;
+        // 上一次真正完成绘制时的完整输入指纹。分页、SSE 与 TradingView 会针对
+        // 同一快照重复发 ready；只有输入完全相同才跳过，避免每次平白再等 300ms。
+        this._lastCompletedRenderSignature = null;
         this._is_switching_interval = false;
         this._is_drawing_chanlun = false;
         this._drawingStatePhase = null;
@@ -1147,10 +1461,36 @@ class ChartManager {
         this._pendingSaveState = null;
         this._saveScheduled = false;
         this._saveInFlight = null;
+        this._strictLabelResizeObserver = null;
+        this._strictLabelResizeTimer = null;
+        this._strictLabelViewportSignature = null;
         this._drawingSaveInFlight = false;
         this._drawingSavePending = null;
         this._barReadyHandler = null;
         this._sse = null;  // SSE 实时推送连接(每图表一个; flag 关/不支持时为 null)
+        this._sseConnectionId = null;
+        this._sseChannelId = resolveSseStreamChannel(this.id);
+        const isEmbeddedChart = (
+            typeof window !== 'undefined'
+            && window.__CHANLUN_EMBEDDED_CHART === true
+        );
+        // Initial embedded history gets the same connection priority as later
+        // symbol switches. EmbeddedChartBridge replaces this sentinel with the
+        // concrete parent request id before asking TradingView to load data.
+        this._embeddedRealtimeDeferredRequestId = isEmbeddedChart ? 'initial' : null;
+        this._embeddedRealtimeFallbackTimer = null;
+        this._pageHideHandler = null;
+        this._pageShowHandler = null;
+        const embeddedBridgeState = (
+            typeof window !== 'undefined'
+            && window.__chanlunEmbeddedChartBridgeState
+        ) || null;
+        this._embeddedChartActive = !(
+            typeof window !== 'undefined'
+            && window.__CHANLUN_EMBEDDED_CHART === true
+            && embeddedBridgeState
+            && embeddedBridgeState.active === false
+        );
         this._visibilityHandler = null;  // 页面可见性兜底监听句柄
         this._onlineHandler = null;      // 网络恢复(online)监听句柄: 断网后立即重连 SSE 补断档
         this._needResetOnNextData = false; // reconnect 后置位: 下一 SSE 帧无条件全量补齐(治轮询竞态/服务端重启)
@@ -1181,9 +1521,25 @@ class ChartManager {
         // 每个 reconcile scope 的异步创建代际。旧 Promise 即使晚于新数据返回，也只能
         // 删除自己创建的实体，不能再写回当前容器形成重叠/旧范围中枢。
         this._reconcileEpochs = new Map();
-        // full rebuild 后 500ms 补一次 verify-rebuild，让 TV 在稳定布局上重新落位 shape
+        // 初次创建后做一次短延迟几何核验。核验只检查并修复真正漂移的实体，
+        // 不再清空全部 reconcile 守卫触发另一轮全量重建。
         this._verifyRebuildTimer = null;
+        this._verifyRebuildVersion = 0;
+        this._verifyRebuildScheduledAt = null;
         this._verifyingUntil = null;  // performance.now() 时间戳，在此之前的 reconcile 属于 verify 内部
+        // 嵌入图表只能在 K 线、严格结构、异步图元和补绘都稳定后向父页
+        // 宣告完成。旧逻辑在 dataReady 回调内立即上报，父页会提前移除 loading，
+        // 用户随后仍要等待数百毫秒到数秒才能看到完整中枢/买卖点。
+        this._embeddedStableReadyTimer = null;
+        this._embeddedStableReadySince = null;
+        this._embeddedStableReadyStartedAt = null;
+        // 默认视窗调整会在 dataReady 之后继续触发历史补载与 300ms 防抖重绘。
+        // 每一段异步工作都要有显式句柄，嵌入页才能等最终画布稳定后再揭开遮罩。
+        this._defaultViewFallbackTimer = null;
+        this._defaultViewAttemptTimer = null;
+        this._defaultViewRetryTimer = null;
+        this._defaultViewApplySettleTimer = null;
+        this._defaultViewApplyPending = false;
         // 严格结构使用独立、按图表实例隔离的 ownership 容器。状态在首次消费原子
         // strict_structure 时惰性初始化，避免 charts.js 单测或降级页面缺少辅助脚本时崩溃。
         this._strictContainers = new Map();
@@ -1195,6 +1551,8 @@ class ChartManager {
         this._strictStructureSnapshot = null;
         this._strictStructureContextToken = null;
         this._strictStructureStatus = { state: 'waiting', code: null };
+        this._strictRecoveryTimer = null;
+        this._strictRecoveryAttempts = new Map();
     }
 
     enqueueLatestDrawingSave(taskFactory) {
@@ -1336,11 +1694,19 @@ class ChartManager {
     }
 
     getCurrentChartIdentity() {
-        if (!this.chart) return null;
-        return {
-            symbol: this.chart.symbol(),
-            interval: this.chart.resolution(),
-        };
+        if (
+            !this.chart
+            || typeof this.chart.symbol !== 'function'
+            || typeof this.chart.resolution !== 'function'
+        ) return null;
+        try {
+            return {
+                symbol: this.chart.symbol(),
+                interval: this.chart.resolution(),
+            };
+        } catch (error) {
+            return null;
+        }
     }
 
     createContextToken(symbol, interval) {
@@ -1562,6 +1928,7 @@ class ChartManager {
         const token = this.beginContextSwitch(reason, symbol, interval);
         const cacheKey = this.getDrawingsCacheKey(symbol, interval);
         const cachedDrawings = this._drawingsCache.get(cacheKey);
+        let currentAtFinish = false;
 
         try {
             if (!options.bypassCache && this._drawingsCache.has(cacheKey)) {
@@ -1569,31 +1936,34 @@ class ChartManager {
                     cachedDrawings,
                     token,
                     cacheKey,
-                    options,
+                    { ...options, redrawAutomatic: false },
                 );
-                return;
+            } else {
+                const state = await this.save_load_adapter.loadLineToolsAndGroups('default', 'default', 'load', {
+                    resolution: interval,
+                    symbol,
+                    token,
+                });
+
+                if (this.isTokenCurrent(token)) {
+                    await this.applyUserDrawingsState(
+                        state || this.emptyUserDrawingsState(),
+                        token,
+                        cacheKey,
+                        { ...options, redrawAutomatic: false },
+                    );
+                }
             }
-
-            const state = await this.save_load_adapter.loadLineToolsAndGroups('default', 'default', 'load', {
-                resolution: interval,
-                symbol,
-                token,
-            });
-
-            if (!this.isTokenCurrent(token)) {
-                return;
-            }
-
-            await this.applyUserDrawingsState(
-                state || this.emptyUserDrawingsState(),
-                token,
-                cacheKey,
-                options,
-            );
         } catch (e) {
             console.error(`[DEBUG-CHARTS] Failed to reload drawings (${reason})`, e);
         } finally {
+            currentAtFinish = this.isTokenCurrent(token);
             this.finishContextSwitch(token);
+        }
+        // 恢复人工画线会 removeAllShapes。必须等它完全结束后再立即重建自动结构；
+        // 旧逻辑先首绘、再恢复、最后 300ms 防抖补绘，正是切标的时先缺一块后补齐的来源。
+        if (currentAtFinish && options.redrawAutomatic !== false) {
+            this._requestChanlunDrawWhenReady({ immediate: true });
         }
     }
 
@@ -1640,6 +2010,12 @@ class ChartManager {
     }
 
     _resetDataReadyContext() {
+        this._cancelEmbeddedStableReady();
+        this._cancelDefaultViewWork();
+        this._cancelStrictStructureRecovery();
+        if (this.debouncedDrawChanlun && typeof this.debouncedDrawChanlun.cancel === 'function') {
+            this.debouncedDrawChanlun.cancel();
+        }
         this._dataContextGeneration = (this._dataContextGeneration || 0) + 1;
         this._tvDataReadyGeneration = -1;
         this._tvDataReadyIdentity = null;
@@ -1648,7 +2024,182 @@ class ChartManager {
         this._dataReadyProbeGeneration = null;
         this._dataReadyProbeIdentity = null;
         this._initialLoadDone = false;
+        this._lastCompletedRenderSignature = null;
+        // Context changes invalidate both the visible strict entities and the
+        // prior readiness verdict. Keep embedded charts veiled until the new
+        // symbol/resolution has consumed and validated its own atomic snapshot.
+        this._setStrictStructureStatus('waiting');
         return this._dataContextGeneration;
+    }
+
+    _cancelStrictStructureRecovery() {
+        if (this._strictRecoveryTimer != null) {
+            clearTimeout(this._strictRecoveryTimer);
+        }
+        this._strictRecoveryTimer = null;
+    }
+
+    _cancelEmbeddedStableReady() {
+        if (this._embeddedStableReadyTimer != null) {
+            clearTimeout(this._embeddedStableReadyTimer);
+        }
+        this._embeddedStableReadyTimer = null;
+        this._embeddedStableReadySince = null;
+        this._embeddedStableReadyStartedAt = null;
+    }
+
+    _cancelDefaultViewFallback() {
+        if (this._defaultViewFallbackTimer != null) {
+            clearTimeout(this._defaultViewFallbackTimer);
+        }
+        this._defaultViewFallbackTimer = null;
+    }
+
+    _cancelDefaultViewWork() {
+        this._cancelDefaultViewFallback();
+        for (const key of [
+            '_defaultViewAttemptTimer',
+            '_defaultViewRetryTimer',
+            '_defaultViewApplySettleTimer',
+        ]) {
+            if (this[key] != null) clearTimeout(this[key]);
+            this[key] = null;
+        }
+        this._defaultViewApplyPending = false;
+    }
+
+    _defaultViewWorkPending() {
+        return Boolean(
+            this._defaultViewFallbackTimer != null
+            || this._defaultViewAttemptTimer != null
+            || this._defaultViewRetryTimer != null
+            || this._defaultViewApplySettleTimer != null
+            || this._defaultViewApplyPending === true
+        );
+    }
+
+    _resumePendingInitialDraw() {
+        const contextGeneration = this._dataContextGeneration || 0;
+        const identity = this._currentDataIdentityKey();
+        if (
+            !identity
+            || this._pendingChanlunDrawGeneration !== contextGeneration
+            || this._pendingChanlunDrawIdentity !== identity
+            || this._defaultViewWorkPending()
+            || this._is_switching_interval === true
+            || this.isApplyingDrawingState === true
+        ) return false;
+        return this._requestChanlunDrawWhenReady({ immediate: true });
+    }
+
+    _scheduleDefaultViewFallback(delayMs = 400) {
+        this._cancelDefaultViewFallback();
+        const contextGeneration = this._dataContextGeneration || 0;
+        this._defaultViewFallbackTimer = setTimeout(() => {
+            this._defaultViewFallbackTimer = null;
+            if (contextGeneration !== (this._dataContextGeneration || 0)) return;
+            this._maybeWidenDefaultView();
+        }, delayMs);
+    }
+
+    _embeddedDrawingWorkPending() {
+        const historyProvider = this.udf_datafeed?._historyProvider;
+        const historyWorkPending = Boolean(
+            historyProvider
+            && typeof historyProvider.hasPendingHistoryWork === 'function'
+            && historyProvider.hasPendingHistoryWork(CHART_HISTORY_SETTLE_QUIET_MS)
+        );
+        return Boolean(
+            historyWorkPending
+            || (this._activeDrawingMutations && this._activeDrawingMutations.size > 0)
+            || (this._automaticShapeCreateCount || 0) > 0
+            || (this._strictPendingCreates instanceof Map && this._strictPendingCreates.size > 0)
+            || this._is_switching_interval === true
+            || this.isApplyingDrawingState === true
+            || Boolean(
+                this.debouncedDrawChanlun
+                && typeof this.debouncedDrawChanlun.pending === 'function'
+                && this.debouncedDrawChanlun.pending()
+            )
+            || this._defaultViewWorkPending()
+            || this._verifyRebuildTimer != null
+            || (this._reconcileRetry && this._reconcileRetry.timer != null)
+            || this._sweepOrphanTimer != null
+            || !this._strictStructureReadyForCurrentContext()
+        );
+    }
+
+    _strictStructureReadyForCurrentContext() {
+        return Boolean(
+            this._strictStructureStatus?.state === 'ready'
+            && this._strictStructureSnapshot
+            && this._strictStructureContextToken
+            && this._strictReconcileComplete()
+        );
+    }
+
+    _scheduleEmbeddedStableReady(contextGeneration, expectedIdentity) {
+        if (typeof window === 'undefined') return false;
+        const embeddedNotifierReady = Boolean(
+            window.__CHANLUN_EMBEDDED_CHART === true
+            && window.EmbeddedChartBridge
+            && typeof window.EmbeddedChartBridge.notifyDataReady === 'function'
+        );
+        const standaloneNotifierReady = Boolean(
+            window.__CHANLUN_EMBEDDED_CHART !== true
+            && window.ChartTransition
+            && typeof window.ChartTransition.markReady === 'function'
+        );
+        if (!embeddedNotifierReady && !standaloneNotifierReady) return false;
+
+        this._cancelEmbeddedStableReady();
+        const startedAt = performance.now();
+        this._embeddedStableReadyStartedAt = startedAt;
+        const poll = () => {
+            this._embeddedStableReadyTimer = null;
+            if (
+                this._disposed
+                || contextGeneration !== (this._dataContextGeneration || 0)
+                || expectedIdentity !== this._currentDataIdentityKey()
+                || !this._chartDataReadyNow()
+            ) return;
+
+            const now = performance.now();
+            const pending = this._embeddedDrawingWorkPending();
+            // 所有异步绘图入口都有显式 pending 状态；无需再用固定 650ms 猜测。
+            // 一次额外轮询足以让已完成的 Promise 和 TradingView 微任务提交到画布。
+            if (pending) {
+                this._embeddedStableReadySince = null;
+            } else if (this._embeddedStableReadySince == null) {
+                this._embeddedStableReadySince = now;
+            } else if (now - this._embeddedStableReadySince >= CHART_STABLE_QUIET_MS) {
+                const identity = this.getCurrentChartIdentity();
+                this._embeddedStableReadySince = null;
+                this._embeddedStableReadyStartedAt = null;
+                if (embeddedNotifierReady) {
+                    window.EmbeddedChartBridge.notifyDataReady(identity || {});
+                } else {
+                    window.ChartTransition.markReady({
+                        ...(identity || {}),
+                        managerId: this.instanceId,
+                    });
+                }
+                return;
+            }
+            this._embeddedStableReadyTimer = setTimeout(poll, 50);
+        };
+        this._embeddedStableReadyTimer = setTimeout(poll, 50);
+        return true;
+    }
+
+    requestEmbeddedStableReady() {
+        const contextGeneration = this._dataContextGeneration || 0;
+        const identity = this._currentDataIdentityKey();
+        if (!identity || !this._chartDataReadyNow()) {
+            this._requestChanlunDrawWhenReady();
+            return false;
+        }
+        return this._scheduleEmbeddedStableReady(contextGeneration, identity);
     }
 
     _chartDataReadyNow() {
@@ -1669,7 +2220,7 @@ class ChartManager {
         return `${String(identity.symbol).toLowerCase()}|${String(identity.interval).toLowerCase()}`;
     }
 
-    _requestChanlunDrawWhenReady() {
+    _requestChanlunDrawWhenReady(options = {}) {
         const contextGeneration = this._dataContextGeneration || 0;
         const contextIdentity = this._currentDataIdentityKey();
         if (!contextIdentity) return false;
@@ -1681,10 +2232,18 @@ class ChartManager {
             this._tvDataReadyIdentity === contextIdentity &&
             this._chartDataReadyNow()
         ) {
+            // 首次 setVisibleRange 与人工画线恢复都会改变 TradingView 的 line-tool
+            // 坐标。两者完成前只登记一次待绘制，避免先按旧视窗画、随后全量重画。
+            if (
+                this._defaultViewWorkPending()
+                || this._is_switching_interval === true
+                || this.isApplyingDrawingState === true
+            ) return false;
             this._pendingChanlunDrawGeneration = null;
             this._pendingChanlunDrawIdentity = null;
             this._initialLoadDone = true;
-            this.debouncedDrawChanlun();
+            if (options.immediate === true) this.draw_chanlun();
+            else this.debouncedDrawChanlun();
             return true;
         }
 
@@ -1739,8 +2298,29 @@ class ChartManager {
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
         // 新传输响应提供了重新放置图形的机会。在 TradingView 装入新历史数据前，
         // 不能让上一画布状态的失败消耗本轮重试预算。
-        if ((this._reconcileRetry?.count || 0) > 0) {
+        const hadReconcileFailures = (this._reconcileRetry?.count || 0) > 0;
+        if (hadReconcileFailures) {
             this._clearReconcileRetryBudget();
+        }
+        if (!hadReconcileFailures && this._lastCompletedRenderSignature != null) {
+            try {
+                const chartData = this.getChartData();
+                const currentInterval = identity.interval;
+                const signature = chartData
+                    ? this._chartRenderInputSignature(chartData, currentInterval)
+                    : null;
+                if (signature && signature === this._lastCompletedRenderSignature) {
+                    // 重复的分页尾帧或 SSE 快照没有改变任何绘图输入。正在排队的
+                    // 同内容防抖任务也可安全取消，稳定完成信号无需再空等一轮。
+                    if (
+                        this.debouncedDrawChanlun
+                        && typeof this.debouncedDrawChanlun.cancel === 'function'
+                    ) this.debouncedDrawChanlun.cancel();
+                    return;
+                }
+            } catch (e) {
+                // 指纹只是无损去重优化；异常时继续走原有重绘路径。
+            }
         }
         // bars-ready 只表示 bars_result 已写入，TradingView 此时可能尚未接收 K 线。
         // 首次绘图必须等当前标的/周期 dataReady 后再执行；后续更新仍复用防抖入口。
@@ -1759,6 +2339,18 @@ class ChartManager {
             review_source_sha256: _reviewLock.source_sha256,
             review_as_of: _reviewLock.review_as_of,
         } : {};
+        // Standalone and embedded charts both use an atomic first frame.  The
+        // loading veil remains until this full response, any immediate history
+        // warm-up requests, strict structure and automatic drawings are idle.
+        _historyParams.atomic_initial = 1;
+        if (
+            typeof window !== 'undefined'
+            && window.__CHANLUN_EMBEDDED_CHART === true
+        ) {
+            // 嵌入式决策图必须在第一次 getBars 就拿到业务默认视窗，而不是
+            // 先回 329 根、揭开遮罩后再等 setVisibleRange/SSE 分批补到完整结构。
+            _historyParams.embedded = 1;
+        }
         this.udf_datafeed = new Datafeeds.UDFCompatibleDatafeed("/tv", _sseOn ? 30000 : 3000, undefined, {
             managerId: this.instanceId,
             historyParams: _historyParams,
@@ -1857,6 +2449,7 @@ class ChartManager {
         // 缠论侧在后台由 SSE 推送(onmessage 不受定时器节流)已保持最新。
         this._visibilityHandler = () => {
             if (document.visibilityState !== 'visible') return;
+            if (!this._isEmbeddedChartActivityEnabled()) return;
             // SSE 连通(readyState OPEN)时, K线由 feedRealtimeBar、缠论由 applyChanlunUpdate
             // 经 SSE onmessage 实时喂入(onmessage 不受后台标签定时器节流), 后台期间数据已保持
             // 最新 → 切回前台无需 resetData。resetData 会整块清空 K线+缠论、重新 getBars 重绘,
@@ -1882,6 +2475,18 @@ class ChartManager {
         };
         if (typeof window !== 'undefined') {
             window.addEventListener('online', this._onlineHandler);
+            // EventSource.close() is not enough behind every FRP/proxy: the
+            // backend half can remain established after an iframe disappears.
+            // Explicit page lifecycle cleanup prevents those ghosts from
+            // exhausting the account's realtime-stream allowance.
+            this._pageHideHandler = () => this._closeSseStream();
+            this._pageShowHandler = () => {
+                if (!this._disposed && this._isEmbeddedChartActivityEnabled()) {
+                    this._openSseStream();
+                }
+            };
+            window.addEventListener('pagehide', this._pageHideHandler);
+            window.addEventListener('pageshow', this._pageShowHandler);
         }
 
         // 墙钟新鲜度看门狗: 独立于 SSE 帧, 每 20s 自查"画布末根 vs 当下"是否在交易时段内严重失速
@@ -1889,6 +2494,7 @@ class ChartManager {
         // resetData(带防抖退避 + 交易时段门控, 收盘/周末不误闪)。
         this._watchdogTimer = setInterval(() => {
             try {
+                if (!this._isEmbeddedChartActivityEnabled()) return;
                 if (typeof window === 'undefined' || !window.SseGap || !this.widget) return;
                 let si = null;
                 try { si = this.widget.symbolInterval(); } catch (e) { return; }
@@ -1909,7 +2515,51 @@ class ChartManager {
 
         const self = this;
         const client_id = "chanlun_pro_" + Utils.get_market() + "_" + this.id;
-        const user_id = "999";
+        // The server derives the real storage owner from the authenticated
+        // session.  This placeholder only satisfies TradingView's URL contract.
+        const user_id = "session";
+        const drawingManifestState = {
+            loaded: false,
+            complete: false,
+            entries: new Set(),
+        };
+        const drawingManifestKey = (layoutId, chartId, symbol, resolution) => (
+            `drawings_${String(layoutId)}_${String(chartId)}_${String(symbol || '')}_${String(resolution || '')}`
+        );
+        const preloadDrawingManifest = () => {
+            const query = new URLSearchParams({
+                client: client_id,
+                user: user_id,
+                chart: 'default',
+                layout: 'default',
+                manifest: '1',
+                scope: 'all',
+            });
+            return fetch("/tv/1.1/drawings?" + query.toString())
+                .then((response) => {
+                    if (!response.ok) throw new Error("Drawing manifest failed with HTTP " + response.status);
+                    return response.json();
+                })
+                .then((payload) => {
+                    const data = payload && payload.status === 'ok' ? payload.data : null;
+                    if (!data || !Array.isArray(data.entries)) {
+                        throw new Error("Drawing manifest was rejected");
+                    }
+                    drawingManifestState.entries = new Set(
+                        data.entries
+                            .map((entry) => String(entry && entry.name || ''))
+                            .filter(Boolean),
+                    );
+                    drawingManifestState.complete = data.complete === true;
+                    drawingManifestState.loaded = true;
+                    return drawingManifestState;
+                })
+                .catch((error) => {
+                    // 清单只是负缓存优化；失败时保持逐标的读取的完整正确性。
+                    clog("[DEBUG-CHARTS] drawing manifest preload skipped", error);
+                    return null;
+                });
+        };
         const save_load_adapter = {
             getAllCharts: function () {
                 return fetch("/tv/1.1/charts?client=" + client_id + "&user=" + user_id)
@@ -2021,6 +2671,17 @@ class ChartManager {
                             cacheKey,
                             self.deserializeUserDrawingsState(processedState),
                         );
+                        const manifestKey = drawingManifestKey(
+                            layoutId,
+                            chartId,
+                            symbol,
+                            resolution,
+                        );
+                        if (Object.keys(processedState.sources || {}).length > 0) {
+                            drawingManifestState.entries.add(manifestKey);
+                        } else {
+                            drawingManifestState.entries.delete(manifestKey);
+                        }
                     });
                 }, {
                     // auto-save 是 TradingView 初始化也会触发的事件。若读取尚未成功，
@@ -2050,6 +2711,28 @@ class ChartManager {
                         loadSymbol,
                         loadResolution,
                     );
+                    const manifestEligible = requestType === 'load'
+                        || requestType === 'mainSeriesLineTools';
+                    const manifestKey = drawingManifestKey(
+                        layoutId,
+                        chartId,
+                        loadSymbol,
+                        loadResolution,
+                    );
+                    if (
+                        manifestEligible
+                        && drawingManifestState.loaded
+                        && drawingManifestState.complete
+                        && !drawingManifestState.entries.has(manifestKey)
+                    ) {
+                        const emptyState = {
+                            schema: USER_DRAWING_STATE_SCHEMA,
+                            sources: {},
+                            groups: {},
+                        };
+                        self.rememberPersistedDrawingState(persistenceKey, emptyState);
+                        return resolve(self.deserializeUserDrawingsState(emptyState));
+                    }
                     const query = new URLSearchParams({
                         client: client_id,
                         user: user_id,
@@ -2059,15 +2742,52 @@ class ChartManager {
                         resolution: String(loadResolution),
                     });
 
-                    self.loadDrawingStateOnce(persistenceKey, () => (
-                        fetch("/tv/1.1/drawings?" + query.toString())
-                            .then(response => {
-                                if (!response.ok) {
-                                    throw new Error("Drawing load failed with HTTP " + response.status);
-                                }
-                                return response.json();
-                            })
-                    ))
+                    self.loadDrawingStateOnce(persistenceKey, () => {
+                        const controller = typeof AbortController === 'function'
+                            ? new AbortController()
+                            : null;
+                        const requestOptions = controller ? { signal: controller.signal } : {};
+                        const itemRequest = fetch(
+                            "/tv/1.1/drawings?" + query.toString(),
+                            requestOptions,
+                        ).then(response => {
+                            if (!response.ok) {
+                                throw new Error("Drawing load failed with HTTP " + response.status);
+                            }
+                            return response.json();
+                        }).catch((error) => {
+                            // 清单已经严格证明该上下文为空时会主动取消正文请求。浏览器对
+                            // abort 与 provenEmpty 的微任务排序没有跨实现保证；把这个预期
+                            // 的 AbortError 保持为 pending，确保 Promise.race 必定由空状态完成。
+                            if (controller && controller.signal.aborted) {
+                                return new Promise(() => {});
+                            }
+                            throw error;
+                        });
+                        if (!manifestEligible || !self._drawingManifestPromise) {
+                            return itemRequest;
+                        }
+                        const provenEmpty = Promise.resolve(self._drawingManifestPromise).then((manifest) => {
+                            if (
+                                !manifest
+                                || manifest.complete !== true
+                                || manifest.entries.has(manifestKey)
+                            ) {
+                                // 永不抢赢 itemRequest；存在画线或清单不完整时必须读取正文。
+                                return new Promise(() => {});
+                            }
+                            if (controller) controller.abort();
+                            return {
+                                status: 'ok',
+                                data: {
+                                    schema: USER_DRAWING_STATE_SCHEMA,
+                                    sources: {},
+                                    groups: {},
+                                },
+                            };
+                        });
+                        return Promise.race([itemRequest, provenEmpty]);
+                    })
                         .then(payload => {
                             if (token && !self.isTokenCurrent(token)) {
                                 return resolve(null);
@@ -2079,6 +2799,13 @@ class ChartManager {
                             }
                             const loadedState = self.deserializeUserDrawingsState(payload.data);
                             self.rememberPersistedDrawingState(persistenceKey, payload.data);
+                            if (manifestEligible) {
+                                if (loadedState.sources.size > 0) {
+                                    drawingManifestState.entries.add(manifestKey);
+                                } else {
+                                    drawingManifestState.entries.delete(manifestKey);
+                                }
+                            }
                             resolve(loadedState);
                         }).catch(err => {
                             console.error("[DEBUG-CHARTS] loadLineToolsAndGroups error:", err);
@@ -2088,13 +2815,19 @@ class ChartManager {
             }
         };
         this.save_load_adapter = save_load_adapter;
+        // 后台只预取“哪些上下文有人工画线”的小清单。清单就绪后，绝大多数
+        // 无人工画线的候选可直接命中空状态，不再为每次切标的排一个数据库请求。
+        this._drawingManifestPromise = preloadDrawingManifest();
+
+        const initialChartInterval = getInitialChartInterval(this.id);
+        const viewportOptions = chartWidgetViewportOptions(initialChartInterval);
 
         this.widget = new TradingView.widget({
             // loading_screen 让 widget 内部加载阶段显示 spinner 而非空白
             loading_screen: (function () {
                 var isDark = false;
                 try {
-                    var t = JSON.parse(localStorage.tv_chart || '{}');
+                    var t = JSON.parse(chartPreferenceGetItem('tv_chart') || '{}');
                     isDark = (t.theme === 'dark');
                 } catch (e) {}
                 return {
@@ -2105,21 +2838,32 @@ class ChartManager {
             debug: false, autosize: true, fullscreen: false,
             container: "tv_chart_container_" + this.id,
             symbol: Utils.get_market() + ":" + Utils.get_code(),
-            interval: getInitialChartInterval(this.id),
+            interval: initialChartInterval,
+            // 嵌入式多周期图从第一次请求就使用业务所需跨度，避免先加载窄视窗、
+            // 再 setVisibleRange 拉取第二批历史并把自动结构重画一遍。
+            timeframe: embeddedDefaultTimeframe(initialChartInterval),
             datafeed: this.udf_datafeed,
             library_path: "static/charting_library/",
-            theme: Utils.get_local_data("theme"),
+            // The widget contract accepts only lowercase "light" / "dark".
+            // Older account state stores "Light"; normalize it before schema
+            // validation instead of relying on TradingView's fallback.
+            theme: normalizeChartTheme(Utils.get_local_data("theme")),
             numeric_formatting: { decimal_sign: "." },
             time_frames: [], timezone: getMarketTimezone(Utils.get_market()), locale: "zh",
             symbol_search_request_delay: 100, auto_save_delay: 5, study_count_limit: 100,
             disabled_features: CHART_DISABLED_FEATURES,
-            enabled_features: ["study_templates", "seconds_resolution", "saveload_separate_drawings_storage", "iframe_loading_same_origin"],
+            enabled_features: viewportOptions.enabledFeatures,
             saved_data_meta_info: { uid: 1, name: "default", description: "default" },
             save_load_adapter: save_load_adapter,
             client_id: "chanlun_pro_" + Utils.get_market() + "_" + this.id,
-            user_id: "999", load_last_chart: shouldLoadLastChart(),
+            user_id: "session", load_last_chart: shouldLoadLastChart(),
             custom_indicators_getter: this.getCustomIndicators,
-            time_scale: { min_bar_spacing: 0.05, max_bar_spacing: 800 },
+            // TradingView 会在画布放不下时忽略 setVisibleRange 的 from。
+            // 仅 1m 选股嵌入图允许官方支持的 0.01 最小间距，使当前完整缓存
+            // （约万根）可以在半屏卡片内一次展示；其他图保持原值控制计算量。
+            time_scale: {
+                min_bar_spacing: viewportOptions.minBarSpacing,
+            },
         });
         this.setupEventListeners();
         return this;
@@ -2521,6 +3265,7 @@ class ChartManager {
             if (sk) sk.remove();
             this.chart = this.widget.activeChart();
             if (!this.chart) return;
+            this._installStrictLabelDensityObserver();
             this.ensureRequestedDefaultStudies().catch((e) => {
                 console.warn("[CHARTS] initialize requested default studies failed", e);
             });
@@ -2534,6 +3279,9 @@ class ChartManager {
 
             this.chart.onSymbolChanged().subscribe(null, (s) => this.handleSymbolChange(s));
             this.chart.onIntervalChanged().subscribe(null, (i) => this.handleIntervalChange(i));
+            // 先进入人工画线恢复阶段，再消费 dataReady。否则极快的缓存命中会先画
+            // 自动结构，随后 removeAllShapes 清空并二次补绘，造成首屏“先少后全”。
+            this.reloadDrawingsForCurrentContext('initial-load');
             this.chart.onDataLoaded().subscribe(
                 null,
                 () => this.handleDataReady(
@@ -2553,7 +3301,6 @@ class ChartManager {
             this.widget.subscribe("onTick", () => this.handleTick());
             this.chart.onVisibleRangeChanged().subscribe(null, () => this.handleVisibleRangeChange());
 
-            this.reloadDrawingsForCurrentContext('initial-load');
             this._openSseStream();
             this.updateDrawPalette();   // 画图调色板:优先原生注入 TV 工具栏,失败回退浮层
             this.applyOverscrollGuard();   // 给 TV iframe 注入 overscroll-behavior:none(防 macOS 横滑后退)
@@ -2670,7 +3417,7 @@ class ChartManager {
         // 列头:左=线段、右=矩形
         const colhd = doc.createElement('div');
         colhd.style.cssText = 'display:flex; gap:2px; font-size:9px; color:#aaa; user-select:none;';
-        ['线', '框'].forEach(t => { const c = doc.createElement('div'); c.textContent = t; c.style.cssText = 'width:23px; text-align:center;'; colhd.appendChild(c); });
+        ['线', '框'].forEach(t => { const c = doc.createElement('div'); c.textContent = t; c.style.cssText = 'width:28px; text-align:center;'; colhd.appendChild(c); });
         grp.appendChild(colhd);
         // 每级一行:左「线段」按钮(下划线样式) + 右「矩形」按钮(方框样式),均为该级颜色。
         // 点一下 = 设画图色 + 激活对应工具,直接画(用户要的「一键直画」)。
@@ -2678,14 +3425,16 @@ class ChartManager {
             const row = doc.createElement('div');
             row.style.cssText = 'display:flex; gap:2px;';
             const mk = (tool, isBox) => {
-                const b = doc.createElement('div');
+                const b = doc.createElement('button');
+                b.type = 'button';
                 b.className = 'cl-drawbtn';
                 b.textContent = it.label;
                 b.title = '画 ' + it.label + ' 级别' + (isBox ? '矩形' : '线段') + '(一键:选色+激活工具)';
-                b.style.cssText = 'width:23px; height:17px; line-height:14px; text-align:center; font-size:9.5px; font-weight:700; cursor:pointer; box-sizing:border-box; color:' + it.color + '; '
+                b.setAttribute('aria-label', b.title);
+                b.style.cssText = 'width:28px; height:24px; padding:0; line-height:20px; text-align:center; font-family:inherit; font-size:10px; font-weight:700; cursor:pointer; box-sizing:border-box; background:transparent; color:' + it.color + '; '
                     + (isBox
                         ? 'border:1.5px solid ' + it.color + '; border-radius:3px;'
-                        : 'border-bottom:2.5px solid ' + it.color + ';');
+                        : 'border:0; border-bottom:2.5px solid ' + it.color + ';');
                 b.addEventListener('click', (e) => {
                     e.stopPropagation();
                     this.setDrawColor(it.color);
@@ -2808,15 +3557,34 @@ class ChartManager {
         // 返回大写)，而 Utils.get_market() 存的是小写 "us"。不归一 → "us" !== "US" 恒成立 →
         // 每次切标的都误判 market 变 → location.reload() 整页刷新 → 多标的切换卡死(浏览器实测复现+补丁验证)。
         const market = marketRaw.toLowerCase();
-        if (Utils.get_market() !== market) { Utils.set_local_data("market", market); location.assign("/?market=" + encodeURIComponent(market)); return; }
+        if (
+            !window.__CHANLUN_EMBEDDED_CHART
+            && window.ChartTransition
+            && typeof window.ChartTransition.begin === 'function'
+        ) {
+            window.ChartTransition.begin({ market, code, expected: 1 });
+        }
+        if (Utils.get_market() !== market && !window.__CHANLUN_EMBEDDED_CHART) {
+            Utils.set_local_data("market", market);
+            const target = "/?market=" + encodeURIComponent(market);
+            if (window.AccountPreferences && typeof window.AccountPreferences.navigateAfterSave === "function") {
+                window.AccountPreferences.navigateAfterSave(target, false);
+            } else {
+                location.assign("/?market=" + encodeURIComponent(market));
+            }
+            return;
+        }
         Utils.set_local_data("market", market); Utils.set_local_data(`${market}_code`, code);
         this._resetDataReadyContext();
         this._latestAppliedBarTime = null;
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('symbol-change');
         this._openSseStream();
-        if (typeof ZiXuan.render_zixuan_opts === "function") ZiXuan.render_zixuan_opts();
-        setTimeout(() => this._maybeWidenDefaultView(), 400);   // 同市场切标的:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
+        if (
+            !window.__CHANLUN_EMBEDDED_CHART
+            && typeof ZiXuan.render_zixuan_opts === "function"
+        ) ZiXuan.render_zixuan_opts();
+        this._scheduleDefaultViewFallback(400);   // 同市场切标的:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
     }
     // 切周期时的显示配置编排:把当前配置存回旧周期 key,解析并应用新周期配置(未配过则继承当前并固化),
     // 更新 _curResolution。纯前端 localStorage,不触发缠论重算;重绘由既有 handleDataReady→重绘链路负责。
@@ -2860,7 +3628,7 @@ class ChartManager {
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('interval-change');
         this._openSseStream();
-        setTimeout(() => this._maybeWidenDefaultView(), 400);   // 切周期:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
+        this._scheduleDefaultViewFallback(400);   // 切周期:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
     }
 
     handleDataReady(
@@ -2880,6 +3648,10 @@ class ChartManager {
             this._pendingChanlunDrawGeneration === contextGeneration &&
             this._pendingChanlunDrawIdentity === currentIdentity
         );
+        const drawingRestorePending = (
+            this._is_switching_interval === true
+            || this.isApplyingDrawingState === true
+        );
         const hadReconcileFailures = (this._reconcileRetry?.count || 0) > 0;
         if (hadReconcileFailures) this._resetReconcileRetry();
         this._tvDataReadyGeneration = contextGeneration;
@@ -2888,13 +3660,24 @@ class ChartManager {
         this._dataReadyProbeIdentity = null;
         this._pendingChanlunDrawGeneration = null;
         this._pendingChanlunDrawIdentity = null;
-        this._initialLoadDone = true;
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady ✓ context=${contextGeneration} initial=${wasInitialLoad} pending=${hasPendingDraw}`);
+        this._cancelDefaultViewFallback();
         if (!this._maybeApplyCausalFocus()) this._maybeWidenDefaultView();
+        const viewportWorkPending = this._defaultViewWorkPending();
+        // 恢复人工画线或确定最终首屏视窗前，不允许 visibleRange 触发第二轮自动绘制。
+        this._initialLoadDone = !(drawingRestorePending || viewportWorkPending);
 
         if (hasPendingDraw || wasInitialLoad || hadReconcileFailures) {
-            if (wasInitialLoad) this.draw_chanlun();
-            else this.debouncedDrawChanlun();
+            this._pendingChanlunDrawGeneration = contextGeneration;
+            this._pendingChanlunDrawIdentity = currentIdentity;
+            if (wasInitialLoad || hasPendingDraw) {
+                this._requestChanlunDrawWhenReady({ immediate: true });
+            } else if (!drawingRestorePending && !viewportWorkPending) {
+                this.debouncedDrawChanlun();
+            }
+        }
+        if (wasInitialLoad) {
+            this._scheduleEmbeddedStableReady(contextGeneration, currentIdentity);
         }
         return true;
     }
@@ -2978,7 +3761,10 @@ class ChartManager {
             this._ensureCausalAuditMarker(lock, si, key, focusAt);
             if (this._causalFocusSetFor === key) return true;
             const spanDays = {
-                '1': 2, '5': 6, '30': 45,
+                '1': window.__CHANLUN_EMBEDDED_CHART === true
+                    ? CAUSAL_ONE_MINUTE_VIEW_SPAN_DAYS
+                    : 2,
+                '5': 6, '30': 45,
                 '1D': 400, '1W': 1825, '1M': 5475,
             }[String(si.interval)];
             if (!spanDays) return false;
@@ -2989,7 +3775,11 @@ class ChartManager {
             };
             if (target.from >= target.to) return false;
             this._causalFocusSetFor = key;
-            setTimeout(() => {
+            if (this._defaultViewAttemptTimer != null) {
+                clearTimeout(this._defaultViewAttemptTimer);
+            }
+            this._defaultViewAttemptTimer = setTimeout(() => {
+                this._defaultViewAttemptTimer = null;
                 try {
                     const current = this.widget && this.widget.symbolInterval
                         ? this.widget.symbolInterval()
@@ -2998,8 +3788,28 @@ class ChartManager {
                         !current
                         || `${lock.candidate_id}|${current.symbol}|${current.interval}|${focusAt}` !== key
                     ) return;
-                    this.chart.setVisibleRange(target);
-                } catch (e) { /* 聚焦失败不影响只读图表 */ }
+                    this._defaultViewApplyPending = true;
+                    const settle = () => {
+                        if (this._defaultViewApplySettleTimer != null) {
+                            clearTimeout(this._defaultViewApplySettleTimer);
+                        }
+                        this._defaultViewApplySettleTimer = setTimeout(() => {
+                            this._defaultViewApplySettleTimer = null;
+                            this._defaultViewApplyPending = false;
+                            this._resumePendingInitialDraw();
+                        }, 50);
+                    };
+                    const result = this.chart.setVisibleRange(target);
+                    if (result != null && typeof result.then === 'function') {
+                        Promise.resolve(result).then(settle, () => {
+                            this._defaultViewApplyPending = false;
+                            this._resumePendingInitialDraw();
+                        });
+                    } else settle();
+                } catch (e) {
+                    this._defaultViewApplyPending = false;
+                    this._resumePendingInitialDraw();
+                }
             }, 150);
             return true;
         } catch (e) {
@@ -3010,12 +3820,16 @@ class ChartManager {
     // 首次加载某 标的+周期 时,若默认可视窗过窄(实测外汇默认仅 ~4h/~43根 → 只见 1 笔,而数据有 438 笔),
     // 按周期拉宽到一个合理跨度,让图表一打开就显示更多历史与缠论。仅首次、且仅当过窄时设,
     // 不夺已够宽的图(A股默认已宽则跳过)或用户后续缩放。设更宽视窗会触发 TV 按需加载更早的 K 线。
-    _maybeWidenDefaultView() {
+    _maybeWidenDefaultView(retryCount = 0) {
         try {
             const si = this.widget && this.widget.symbolInterval ? this.widget.symbolInterval() : null;
             if (!si || !si.symbol || !si.interval) return;
             const key = si.symbol + '|' + si.interval;
-            if (this._viewSetFor === key) return;
+            const contextGeneration = this._dataContextGeneration || 0;
+            if (
+                this._viewSetFor === key
+                && this._viewSetGeneration === contextGeneration
+            ) return;
             // 当前 标的+周期 的 K 线必须已加载,否则数据/视窗未就绪 → 不设标记,等下次(handleDataReady/切换)再试。
             const resKey = String(si.symbol).toLowerCase() + String(si.interval).toLowerCase();
             const hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
@@ -3033,35 +3847,143 @@ class ChartManager {
             const lastBarSec = toEpochSeconds(br.bars[br.bars.length - 1]?.time);
             if (!Number.isFinite(firstBarSec) || !Number.isFinite(lastBarSec) || firstBarSec > lastBarSec) return;
             const visibleOutsideLoadedBars = vr.to < firstBarSec || vr.from > lastBarSec;
-            this._viewSetFor = key;
             // 各周期默认视窗跨度(日历天);跨度按天数,外汇 24h 连续→根数多,A股有夜盘缺口→根数少,均显示充足缠论。
             // 白名单只列分钟~月线;未列出的周期(秒线10S/30S、季线3M、年线12M等)直接跳过不拉宽——
             // 否则 6 天 fallback 对秒线会触发拉数万根、对季/年线又过窄;且这些周期 TV 默认视窗本就够宽。
             // 5m 是正式交易结构级别，6 天视窗通常容不下一条完整走势，导致严格线
             // 因端点在画面外而全部隐藏。默认展开到 90 天；正式结构优先配置会同时
             // 关闭高密度分型/笔/线段，因此不会把扩大视窗转化为数百个绘图实体。
-            // 30m / 日线继续保留约 3 个月 / 2.2 年的审阅跨度。
+            // 选股四周期中的 1m 默认适配服务端当前返回的全部历史；独立行情页仍
+            // 使用 2 日跨度。30m / 日线继续保留约 3 个月 / 2.2 年。
             const SPAN_DAYS = { '1': 2, '2': 3, '3': 3, '5': 90, '10': 8, '15': 12, '30': 90, '60': 90, '120': 120, '180': 150, '240': 200, '1D': 800, '2D': 700, '1W': 1825, '1M': 5475 };
+            const showAllLoadedBars = (
+                window.__CHANLUN_EMBEDDED_CHART === true
+                && String(si.interval) === '1'
+            );
             const days = SPAN_DAYS[si.interval];
-            if (!days) return;   // 周期不在白名单(秒/季/年等)→保持 TV 默认视窗
-            const span = days * 86400;
-            if (!visibleOutsideLoadedBars && (vr.to - vr.from) >= span * 0.7) return;   // 当前已够宽且与行情相交→不动
-            setTimeout(() => {
+            if (!showAllLoadedBars && !days) {
+                this._viewSetFor = key;
+                this._viewSetGeneration = contextGeneration;
+                return;   // 周期不在白名单(秒/季/年等)→保持 TV 默认视窗
+            }
+            const span = showAllLoadedBars
+                ? lastBarSec - firstBarSec
+                : days * 86400;
+            const alreadyShowsAllLoadedBars = showAllLoadedBars && (
+                vr.from <= firstBarSec
+                && vr.to >= lastBarSec
+            );
+            if (
+                !visibleOutsideLoadedBars
+                && (
+                    alreadyShowsAllLoadedBars
+                    || (!showAllLoadedBars && (vr.to - vr.from) >= span * 0.7)
+                )
+            ) {
+                this._viewSetFor = key;
+                this._viewSetGeneration = contextGeneration;
+                return;   // 当前已够宽且与行情相交→不动
+            }
+            this._viewSetFor = key;
+            this._viewSetGeneration = contextGeneration;
+            if (this._defaultViewAttemptTimer != null) {
+                clearTimeout(this._defaultViewAttemptTimer);
+            }
+            this._defaultViewAttemptTimer = setTimeout(() => {
+                this._defaultViewAttemptTimer = null;
+                const retryAfterTransientFailure = () => {
+                    this._defaultViewApplyPending = false;
+                    if (
+                        retryCount >= 2
+                        || contextGeneration !== (this._dataContextGeneration || 0)
+                    ) {
+                        this._resumePendingInitialDraw();
+                        return;
+                    }
+                    const current = this.widget && this.widget.symbolInterval
+                        ? this.widget.symbolInterval()
+                        : null;
+                    if (!current || (current.symbol + '|' + current.interval) !== key) return;
+                    if (
+                        this._viewSetFor === key
+                        && this._viewSetGeneration === contextGeneration
+                    ) {
+                        this._viewSetFor = null;
+                        this._viewSetGeneration = null;
+                    }
+                    if (this._defaultViewRetryTimer != null) {
+                        clearTimeout(this._defaultViewRetryTimer);
+                    }
+                    this._defaultViewRetryTimer = setTimeout(() => {
+                        this._defaultViewRetryTimer = null;
+                        const scheduled = this._maybeWidenDefaultView(retryCount + 1);
+                        if (!scheduled && !this._defaultViewWorkPending()) {
+                            this._resumePendingInitialDraw();
+                        }
+                    }, 200);
+                };
+                const settleSuccessfulApply = () => {
+                    if (contextGeneration !== (this._dataContextGeneration || 0)) {
+                        this._defaultViewApplyPending = false;
+                        return;
+                    }
+                    if (this._defaultViewApplySettleTimer != null) {
+                        clearTimeout(this._defaultViewApplySettleTimer);
+                    }
+                    // 让 onVisibleRangeChanged 有机会登记其 300ms 防抖重绘。
+                    this._defaultViewApplySettleTimer = setTimeout(() => {
+                        this._defaultViewApplySettleTimer = null;
+                        this._defaultViewApplyPending = false;
+                        this._resumePendingInitialDraw();
+                    }, 50);
+                };
                 try {
                     // 竞态防护:延时期间用户若已切到别的标的/周期,放弃,避免把视窗设成上一周期的范围。
                     const si2 = this.widget && this.widget.symbolInterval ? this.widget.symbolInterval() : null;
-                    if (!si2 || (si2.symbol + '|' + si2.interval) !== key) return;
+                    if (
+                        contextGeneration !== (this._dataContextGeneration || 0)
+                        || !si2
+                        || (si2.symbol + '|' + si2.interval) !== key
+                    ) return;
                     const v = this.chart.getVisibleRange();
-                    const targetTo = visibleOutsideLoadedBars ? lastBarSec : v?.to;
-                    if (!targetTo) return;
-                    this.chart.setVisibleRange({
-                        from: visibleOutsideLoadedBars
+                    const targetTo = Number(
+                        showAllLoadedBars || visibleOutsideLoadedBars
+                            ? lastBarSec
+                            : v?.to
+                    );
+                    const targetFrom = showAllLoadedBars
+                        ? firstBarSec
+                        : visibleOutsideLoadedBars
                             ? Math.max(firstBarSec, targetTo - span)
-                            : targetTo - span,
+                            : targetTo - span;
+                    if (
+                        !Number.isFinite(targetFrom)
+                        || !Number.isFinite(targetTo)
+                        || targetFrom >= targetTo
+                    ) {
+                        retryAfterTransientFailure();
+                        return;
+                    }
+                    this._defaultViewApplyPending = true;
+                    const result = this.chart.setVisibleRange({
+                        from: targetFrom,
                         to: targetTo,
                     });
-                } catch (e) {}
-            }, 150);
+                    // TradingView can reject while its series is between the old
+                    // and new symbol even though symbolInterval already reports
+                    // the new identity. Consume that rejection and retry after a
+                    // short settle window; otherwise Chrome reports an uncaught
+                    // `Value is null` and the default range remains too narrow.
+                    if (result != null && typeof result.then === 'function') {
+                        Promise.resolve(result).then(
+                            settleSuccessfulApply,
+                            retryAfterTransientFailure,
+                        );
+                    } else settleSuccessfulApply();
+                } catch (e) {
+                    retryAfterTransientFailure();
+                }
+            }, 100);
         } catch (e) { /* 视窗调整失败不影响主流程 */ }
     }
     handleTick() {
@@ -3272,12 +4194,62 @@ class ChartManager {
                 host.appendChild(status);
             }
             status.dataset.state = state;
-            status.textContent = state === 'unavailable'
-                ? `严格缠论结构暂不可用（${code || 'unknown'}）`
+            status.textContent = state === 'recovering'
+                ? '严格缠论结构加载异常，正在自动恢复…'
+                : state === 'error'
+                    ? '严格缠论结构加载失败，请重新加载数据'
                 : state === 'stale'
                     ? `严格缠论结构正在同步，暂沿用最近有效结果（${code || 'unknown'}）`
                     : '正在同步严格缠论结构…';
         } catch (e) { /* 状态提示失败不能阻断 K 线和严格实体清理 */ }
+    }
+
+    _scheduleStrictStructureRecovery(code) {
+        const identity = this._currentDataIdentityKey();
+        if (!identity || this._strictRecoveryTimer != null || this._disposed) return false;
+        if (!(this._strictRecoveryAttempts instanceof Map)) {
+            this._strictRecoveryAttempts = new Map();
+        }
+        const attempts = Number(this._strictRecoveryAttempts.get(identity) || 0);
+        if (attempts >= 1) {
+            this._setStrictStructureStatus('error', code);
+            return false;
+        }
+        const contextGeneration = this._dataContextGeneration || 0;
+        this._strictRecoveryAttempts.set(identity, attempts + 1);
+        while (this._strictRecoveryAttempts.size > 64) {
+            const oldest = this._strictRecoveryAttempts.keys().next().value;
+            if (oldest === undefined) break;
+            this._strictRecoveryAttempts.delete(oldest);
+        }
+        this._strictRecoveryTimer = setTimeout(() => {
+            this._strictRecoveryTimer = null;
+            if (
+                this._disposed
+                || contextGeneration !== (this._dataContextGeneration || 0)
+                || identity !== this._currentDataIdentityKey()
+                || this._strictStructureReadyForCurrentContext()
+            ) return;
+            try {
+                const historyProvider = this.udf_datafeed?._historyProvider;
+                if (historyProvider) historyProvider._forceRefreshOnce = true;
+                if (this.widget && typeof this.widget.resetCache === 'function') {
+                    this.widget.resetCache();
+                }
+                this._resetDataReadyContext();
+                this._latestAppliedBarTime = null;
+                if (this.chart && typeof this.chart.resetData === 'function') {
+                    this.chart.resetData();
+                    this._requestChanlunDrawWhenReady();
+                } else {
+                    this._setStrictStructureStatus('error', code);
+                }
+            } catch (error) {
+                console.warn('[STRICT-CHART] automatic strict recovery failed', error);
+                this._setStrictStructureStatus('error', code);
+            }
+        }, 250);
+        return true;
     }
 
     _strictLoadedRange(bars) {
@@ -3421,27 +4393,37 @@ class ChartManager {
     _strictRenderGroups(snapshot, context) {
         const api = this._strictApi();
         const groups = new Map();
+        const prepare = (rawItem, levelLabel = null) => {
+            const labeledItem = (
+                levelLabel && (
+                    rawItem?.render_kind === 'strict_divergence'
+                    || rawItem?.render_kind === 'point_confirmed'
+                    || rawItem?.render_kind === 'point_approaching'
+                )
+                    ? { ...rawItem, level_label: levelLabel }
+                    : rawItem
+            );
+            if (!labeledItem || !Number.isInteger(labeledItem.structural_level) || !Array.isArray(labeledItem.points)) {
+                throw new Error('strict render item is invalid');
+            }
+            // 严格证据保留精确市场收盘时刻作为审计身份；绘图时使用与
+            // TradingView 日历 K 线一致的 UTC 周期锚点。
+            const item = api.itemToChartCoordinates(
+                labeledItem,
+                context.interval,
+                this._chartUsesCloseTimestampCoordinates(),
+            );
+            return this._strictItemEnabled(item) ? item : null;
+        };
+        const append = (item) => {
+            const scope = api.scopeKey(context, item);
+            if (!groups.has(scope)) groups.set(scope, []);
+            groups.get(scope).push(item);
+        };
         const add = (values, levelLabel = null) => {
             for (const rawItem of values || []) {
-                const labeledItem = (
-                    levelLabel && (
-                        rawItem?.render_kind === 'strict_divergence'
-                        || rawItem?.render_kind === 'point_confirmed'
-                        || rawItem?.render_kind === 'point_approaching'
-                    )
-                        ? { ...rawItem, level_label: levelLabel }
-                        : rawItem
-                );
-                if (!labeledItem || !Number.isInteger(labeledItem.structural_level) || !Array.isArray(labeledItem.points)) {
-                    throw new Error('strict render item is invalid');
-                }
-                // 严格证据保留精确市场收盘时刻作为审计身份；绘图时使用与
-                // TradingView 日历 K 线一致的 UTC 周期锚点。
-                const item = api.itemToChartCoordinates(labeledItem, context.interval);
-                if (!this._strictItemEnabled(item)) continue;
-                const scope = api.scopeKey(context, item);
-                if (!groups.has(scope)) groups.set(scope, []);
-                groups.get(scope).push(item);
+                const item = prepare(rawItem, levelLabel);
+                if (item) append(item);
             }
         };
         for (const observation of snapshot.stroke_center_observations) {
@@ -3653,11 +4635,177 @@ class ChartManager {
             add(level.current_trends);
             add(level.pending_movements);
             // completed_trend_snapshots 是只读审计证据，不创建默认图形。
-            add(level.confirmed_points, level.label);
-            add(level.approaching_points, level.label);
-            add(level.divergences, level.label);
+            const strictLabels = [];
+            for (const values of [
+                level.confirmed_points,
+                level.approaching_points,
+                level.divergences,
+            ]) {
+                for (const rawItem of values) {
+                    const item = prepare(rawItem, level.label);
+                    if (item) strictLabels.push(item);
+                }
+            }
+            // A buy/sell point and its divergence frequently share the exact
+            // market coordinate. Two independent text tools at that anchor can
+            // only paint on top of each other, so present one combined label.
+            for (const item of coalesceCoincidentStrictLabels(strictLabels)) append(item);
         }
         return groups;
+    }
+
+    _applyStrictLabelDensity(groups) {
+        try {
+            if (!(groups instanceof Map) || !this.chart) return groups;
+            const chart = this.chart;
+            const timeRange = chart.getVisibleRange?.();
+            const priceRange = chart.getVisiblePriceRange?.();
+            const timeScaleApi = chart.getTimeScale?.();
+            const timeScale = timeScaleApi?._timeScale;
+            const width = Number(timeScaleApi?.width?.());
+            const paneApi = chart.getPanes?.()?.find((pane) => (
+                typeof pane?.hasMainSeries !== 'function' || pane.hasMainSeries()
+            ));
+            const height = Number(paneApi?.getHeight?.());
+            const pane = paneApi?._pane;
+            const mainSource = pane?.mainDataSource?.();
+            const priceScale = mainSource?.priceScale?.() || pane?.defaultPriceScale?.();
+            const firstValue = mainSource?.firstValue?.();
+            if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+                return groups;
+            }
+
+            const timeCoordinate = (time) => {
+                try {
+                    const exact = timeScale?.timeToCoordinate?.(time);
+                    if (Number.isFinite(exact)) return exact;
+                } catch (e) { /* fall through to public visible-range projection */ }
+                const from = Number(timeRange?.from);
+                const to = Number(timeRange?.to);
+                if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+                return ((time - from) / (to - from)) * width;
+            };
+            const priceCoordinate = (price) => {
+                try {
+                    const exact = priceScale?.priceToCoordinate?.(price, firstValue);
+                    if (Number.isFinite(exact)) return exact;
+                } catch (e) { /* fall through to public visible-price projection */ }
+                const from = Number(priceRange?.from);
+                const to = Number(priceRange?.to);
+                if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+                return ((to - price) / (to - from)) * height;
+            };
+
+            const entries = [];
+            for (const items of groups.values()) {
+                for (const item of items) {
+                    if (
+                        item?.render_kind !== 'point_confirmed'
+                        && item?.render_kind !== 'point_approaching'
+                        && item?.render_kind !== 'strict_divergence'
+                    ) continue;
+                    const point = item.points?.[0];
+                    const price = Number(point?.price);
+                    if (!Number.isInteger(point?.time) || !Number.isFinite(price)) continue;
+                    const x = timeCoordinate(point.time);
+                    const y = priceCoordinate(price);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                    if (x < 0 || x > width || y < 0 || y > height) continue;
+                    const visual = item.render_kind === 'strict_divergence'
+                        ? getStrictDivergenceVisual(item)
+                        : getStrictPointVisual(item);
+                    entries.push({
+                        item,
+                        x,
+                        y,
+                        width: strictTextWidth(visual.fullText || visual.text, visual.fontsize),
+                        height: visual.fontsize * 1.35 + 4,
+                    });
+                }
+            }
+            if (entries.length < 2) return groups;
+
+            const collisions = new Set();
+            for (let left = 0; left < entries.length; left += 1) {
+                for (let right = left + 1; right < entries.length; right += 1) {
+                    if (!strictLabelBoxesOverlap(entries[left], entries[right])) continue;
+                    collisions.add(entries[left].item);
+                    collisions.add(entries[right].item);
+                }
+            }
+            if (collisions.size === 0) return groups;
+
+            for (const [scope, items] of groups.entries()) {
+                groups.set(scope, items.map((item) => {
+                    if (!collisions.has(item)) return item;
+                    const sourceRenderId = item.presentation_density_source_render_id || item.render_id;
+                    return {
+                        ...item,
+                        presentation_density: 'marker',
+                        presentation_density_source_render_id: sourceRenderId,
+                        render_id: `${sourceRenderId}|density:marker`,
+                    };
+                }));
+            }
+            return groups;
+        } catch (error) {
+            // Density adaptation is presentation-only. A private coordinate API
+            // changing must never invalidate otherwise auditable strict data.
+            clog('[STRICT-CHART] label density fallback', error);
+            return groups;
+        }
+    }
+
+    _refreshStrictLabelDensity() {
+        if (this._disposed || !this._initialLoadDone || !this.chart) return false;
+        const chartData = this.getChartData();
+        const symbolInterval = this.widget?.symbolInterval?.();
+        if (!chartData || !symbolInterval) return false;
+        this.markDrawingMutationStart('strict-label-density');
+        try {
+            this._drawStrictStructure(chartData, symbolInterval.interval);
+            return true;
+        } finally {
+            this.markDrawingMutationEnd('strict-label-density');
+        }
+    }
+
+    _installStrictLabelDensityObserver() {
+        if (
+            this._strictLabelResizeObserver
+            || typeof ResizeObserver !== 'function'
+            || typeof document === 'undefined'
+        ) return false;
+        const host = document.getElementById(`tv_chart_container_${this.id}`);
+        if (!host) return false;
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries?.[entries.length - 1];
+            const width = Math.round(Number(entry?.contentRect?.width ?? host.clientWidth));
+            const height = Math.round(Number(entry?.contentRect?.height ?? host.clientHeight));
+            if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+            const signature = `${width}x${height}`;
+            const previous = this._strictLabelViewportSignature;
+            this._strictLabelViewportSignature = signature;
+            if (!previous || previous === signature || !this._initialLoadDone) return;
+            if (this._strictLabelResizeTimer != null) clearTimeout(this._strictLabelResizeTimer);
+            this._strictLabelResizeTimer = setTimeout(() => {
+                this._strictLabelResizeTimer = null;
+                this._refreshStrictLabelDensity();
+            }, STRICT_LABEL_RESIZE_DEBOUNCE_MS);
+        });
+        observer.observe(host);
+        this._strictLabelResizeObserver = observer;
+        return true;
+    }
+
+    _disconnectStrictLabelDensityObserver() {
+        if (this._strictLabelResizeTimer != null) clearTimeout(this._strictLabelResizeTimer);
+        this._strictLabelResizeTimer = null;
+        if (this._strictLabelResizeObserver) {
+            try { this._strictLabelResizeObserver.disconnect(); } catch (e) { /* already detached */ }
+        }
+        this._strictLabelResizeObserver = null;
+        this._strictLabelViewportSignature = null;
     }
 
     _createStrictShape(item, currentInterval, bars) {
@@ -3730,6 +4878,7 @@ class ChartManager {
             return ChartUtils.createShape(this.chart, item.points[0], {
                 shape: 'text',
                 text: style.text,
+                title: style.fullText,
                 overrides: {
                     color: style.color,
                     fontsize: style.fontsize,
@@ -3746,6 +4895,7 @@ class ChartManager {
             return ChartUtils.createShape(this.chart, item.points[0], {
                 shape: 'text',
                 text: style.text,
+                title: style.fullText,
                 overrides: {
                     color: style.color,
                     fontsize: style.fontsize,
@@ -3816,6 +4966,20 @@ class ChartManager {
             this.safeRemove(realId);
             this._scheduleReconcileRetry('strict-create-snapped');
             return false;
+        }
+        if (item.presentation_density === 'marker' && typeof this.chart?.getShapeById === 'function') {
+            try {
+                const shape = this.chart.getShapeById(realId);
+                const visual = item.render_kind === 'strict_divergence'
+                    ? getStrictDivergenceVisual(item)
+                    : getStrictPointVisual(item);
+                if (shape && typeof shape.setProperties === 'function' && visual.fullText) {
+                    // The compact glyph prevents collisions; the complete
+                    // evidence remains attached to the TradingView object for
+                    // inspection and automatically returns after zooming in.
+                    shape.setProperties({ title: visual.fullText });
+                }
+            } catch (e) { /* title metadata is optional; geometry remains authoritative */ }
         }
         container.push({
             id: realId,
@@ -4021,7 +5185,8 @@ class ChartManager {
         this._clearAllStrictScopes(code || 'unavailable');
         this._strictStructureSnapshot = null;
         this._strictStructureContextToken = null;
-        this._setStrictStructureStatus('unavailable', errorCode);
+        this._setStrictStructureStatus('recovering', errorCode);
+        this._scheduleStrictStructureRecovery(errorCode);
         return false;
     }
 
@@ -4050,7 +5215,9 @@ class ChartManager {
 
         try {
             const validated = this._validateStrictStructureSnapshot(snapshot, chartData, currentInterval);
-            const groups = this._strictRenderGroups(snapshot, validated.context);
+            const groups = this._applyStrictLabelDensity(
+                this._strictRenderGroups(snapshot, validated.context),
+            );
             if (this._strictStructureContextToken !== validated.contextToken) {
                 this._clearReconcileRetryBudget();
             }
@@ -4078,6 +5245,10 @@ class ChartManager {
             }
             this._settleReconcileRetryIfComplete();
             this._setStrictStructureStatus('ready');
+            this._cancelStrictStructureRecovery();
+            if (this._strictRecoveryAttempts instanceof Map) {
+                this._strictRecoveryAttempts.delete(this._currentDataIdentityKey());
+            }
         } catch (error) {
             console.warn('[STRICT-CHART] rejected strict snapshot', error);
             this._strictUnavailable('strict_context_mismatch', chartData, currentInterval);
@@ -4137,6 +5308,62 @@ class ChartManager {
         };
     }
 
+    _chartRenderInputSignature(chartData, currentInterval) {
+        if (!chartData || !chartData.barsResult) return null;
+        const barsResult = chartData.barsResult;
+        const bars = Array.isArray(barsResult.bars) ? barsResult.bars : [];
+        const visibleFrom = Math.floor(Number(
+            chartData.visibleRange?.from ?? chartData.from,
+        ));
+        const visibleTo = Math.ceil(Number(
+            chartData.visibleRange?.to ?? chartData.from,
+        ));
+        const visibleFractals = this._fractalRenderList(
+            barsResult.fxs || [],
+            bars,
+            { from: visibleFrom, to: visibleTo },
+            currentInterval,
+        );
+        const visibleBaseStructures = (items) => this.getUniqueRenderList(
+            this._baseStructureRenderList(items, currentInterval),
+        ).filter((item) => {
+            const headTime = Array.isArray(item?.points)
+                ? item.points[0]?.time
+                : item?.points?.time;
+            return Number(headTime) >= visibleFrom;
+        });
+        const strictMode = String(barsResult.strict_structure_mode || 'missing');
+        const effectiveStrictSnapshot = strictMode === 'unchanged'
+            ? this._strictStructureSnapshot
+            : barsResult.strict_structure;
+        const strictState = strictMode === 'unavailable' || strictMode === 'missing'
+            ? [strictMode, barsResult.strict_structure_error || null]
+            : [
+                'ready',
+                effectiveStrictSnapshot?.render_revision || null,
+                effectiveStrictSnapshot?.snapshot_revision || null,
+                effectiveStrictSnapshot?.structure_revision || null,
+                effectiveStrictSnapshot?.source_closed_at || null,
+            ];
+        const configFingerprint = this.drawingStateFingerprint(
+            this.cl_show_config || {},
+        );
+        // 指纹只包含当前视窗真正会进入 reconcile 的实体。SSE 补入一整年但
+        // 全部落在画外的历史不应延长切换；画内分型已先按真实 K 线坐标规整，
+        // 因而停牌/节假日对齐变化仍会反映到指纹中。
+        return JSON.stringify([
+            this._currentDataIdentityKey(),
+            String(currentInterval || ''),
+            visibleFrom,
+            visibleTo,
+            visibleFractals,
+            visibleBaseStructures(barsResult.bis),
+            visibleBaseStructures(barsResult.xds),
+            strictState,
+            configFingerprint,
+        ]);
+    }
+
 
 
     makeKey(item) {
@@ -4155,7 +5382,14 @@ class ChartManager {
         if (!Number.isInteger(epochSeconds)) return null;
         const frequency = this._strictFrequencyFromResolution(currentInterval);
         if (!['d', '2d', 'w', 'm', 'q', 'y'].includes(frequency)) {
-            return epochSeconds;
+            if (!this._chartUsesCloseTimestampCoordinates()) return epochSeconds;
+            const matched = /^([1-9][0-9]*)([ms])$/i.exec(frequency);
+            if (!matched) return epochSeconds;
+            const amount = Number(matched[1]);
+            const duration = matched[2].toLowerCase() === 's'
+                ? amount
+                : amount * 60;
+            return epochSeconds - duration;
         }
         const source = new Date(epochSeconds * 1000);
         let year = source.getUTCFullYear();
@@ -4174,6 +5408,83 @@ class ChartManager {
         }
         const coordinate = Date.UTC(year, month, day) / 1000;
         return Number.isInteger(coordinate) ? coordinate : null;
+    }
+    _chartUsesCloseTimestampCoordinates() {
+        let symbol = '';
+        try {
+            symbol = this.widget?.symbolInterval?.()?.symbol || '';
+        } catch (error) { /* chart is changing symbol */ }
+        if (!symbol) {
+            try { symbol = this.chart?.symbol?.() || ''; }
+            catch (error) { /* chart is not ready */ }
+        }
+        return String(symbol).trim().toLowerCase().startsWith('a:');
+    }
+    _baseStructureRenderList(sourceList, currentInterval) {
+        if (!Array.isArray(sourceList)) return [];
+        return sourceList.map((item) => {
+            if (!item || !Array.isArray(item.points)) return item;
+            return {
+                ...item,
+                points: item.points.map((point) => ({
+                    ...point,
+                    time: this._centerChartTimeCoordinate(
+                        point?.time,
+                        currentInterval,
+                    ),
+                })),
+            };
+        });
+    }
+    _baseStructurePathRenderList(sourceList, currentInterval, visibleFrom) {
+        const normalized = this.getUniqueRenderList(
+            this._baseStructureRenderList(sourceList, currentInterval),
+        ).filter((item) => {
+            if (!item || !Array.isArray(item.points) || item.points.length < 2) return false;
+            const tail = Number(item.points[item.points.length - 1]?.time);
+            return Number.isFinite(tail) && tail >= Number(visibleFrom);
+        });
+        const batches = [];
+        const samePoint = (left, right) => Boolean(
+            left && right
+            && Number(left.time) === Number(right.time)
+            && Number(left.price) === Number(right.price)
+        );
+        let batch = null;
+        const flush = () => {
+            if (batch && batch.points.length >= 2) batches.push(batch);
+            batch = null;
+        };
+        normalized.forEach((rawItem) => {
+            const item = baseStructureRenderItem(rawItem);
+            const unfinished = baseStructureLineIsUnfinished(item);
+            const linestyle = parseInt(item.linestyle) || 0;
+            const points = item.points.map((point) => ({ ...point }));
+            const canAppend = Boolean(
+                batch
+                && batch.isUnfinished === unfinished
+                && batch.linestyle === linestyle
+                && batch.segmentCount < BASE_STRUCTURE_PATH_MAX_SEGMENTS
+                && samePoint(batch.points[batch.points.length - 1], points[0])
+            );
+            if (!canAppend) {
+                flush();
+                batch = {
+                    points,
+                    linestyle,
+                    state: unfinished ? 'forming' : 'completed',
+                    locked: !unfinished,
+                    isUnfinished: unfinished,
+                    segmentCount: 1,
+                    _shapeKind: 'path',
+                };
+                return;
+            }
+            batch.points.push(...points.slice(1));
+            batch.segmentCount += 1;
+        });
+        flush();
+        return batches;
     }
     _fractalRenderList(sourceList, bars, visibleRange, currentInterval) {
         if (!Array.isArray(sourceList) || sourceList.length === 0) return [];
@@ -4384,11 +5695,15 @@ class ChartManager {
                         try {
                             const sh = this.chart.getShapeById(existing.id);
                             if (sh && sh.setProperties) {
-                                sh.setProperties({
-                                    linestyle: newUnfinished
+                                    const linestyle = newUnfinished
                                         ? CHART_CONFIG.LINE_STYLES.DASHED
-                                        : parseInt(newItem.linestyle) || CHART_CONFIG.LINE_STYLES.SOLID,
-                                });
+                                        : parseInt(newItem.linestyle) || CHART_CONFIG.LINE_STYLES.SOLID;
+                                    sh.setProperties(existing.shapeKind === 'path'
+                                        ? {
+                                            lineStyle: linestyle,
+                                            'linetoolpath.lineStyle': linestyle,
+                                        }
+                                        : { linestyle });
                             }
                         } catch (e) {}
                         existing.isUnfinished = newUnfinished;
@@ -4414,6 +5729,7 @@ class ChartManager {
                 tailTime: tailTime,
                 key: key,
                 isUnfinished: baseStructureLineIsUnfinished(item),
+                shapeKind: item?._shapeKind || null,
             };
             if (result != null && typeof result.then === 'function') {
                 createAsync += 1;
@@ -4530,10 +5846,11 @@ class ChartManager {
             clearTimeout(this._verifyRebuildTimer);
             this._verifyRebuildTimer = null;
         }
+        this._verifyRebuildScheduledAt = null;
         this._verifyingUntil = null;
     }
 
-    // 补绘调度：full rebuild 后 500ms 触发一次 verify-rebuild，用于补齐布局抖动遗漏的 shape。
+    // 补绘调度：首绘后短延迟触发一次差量 verify，用于修复布局抖动造成的漂移 shape。
     // 守门用 timestamp（_verifyingUntil）而非微任务标志：draw_chanlun 是 async，
     // microtask 重置会在首个 await 之前跑掉，导致 verify 自身又排队 → 500ms 自循环。
     _scheduleVerifyRebuild() {
@@ -4541,16 +5858,42 @@ class ChartManager {
         if (this._verifyRebuildTimer) {
             clearTimeout(this._verifyRebuildTimer);
         }
+        this._verifyRebuildVersion = (this._verifyRebuildVersion || 0) + 1;
+        this._verifyRebuildScheduledAt = performance.now();
         this._verifyRebuildTimer = setTimeout(() => {
             this._verifyRebuildTimer = null;
+            this._verifyRebuildScheduledAt = null;
             if (this._disposed) return;
             this._verifyingUntil = performance.now() + 1500;
-            // 清掉守卫缓存，确保 reconcile 走全量 rebuild 路径，基于稳定布局重新落位 shape
-            this._reconcileGuard = {};
-            if (this._reconcileEpochs instanceof Map) this._reconcileEpochs.clear();
-            clog(`[CHANLUN-TIMING] verify-rebuild firing`);
-            this.draw_chanlun();
-        }, 500);
+            // 保留守卫：reconcile 仍会逐项读取已创建实体的真实坐标，但只重建
+            // 漂移或缺失项，不再重复处理全部笔、线段和严格结构。
+            clog(`[CHANLUN-TIMING] verify-rebuild firing (differential)`);
+            this.draw_chanlun({ verificationPass: true });
+        }, VERIFY_REBUILD_DELAY_MS);
+    }
+
+    _cancelCoveredVerifyRebuild(versionAtDrawStart, scheduledAtDrawStart) {
+        if (
+            this._verifyRebuildTimer == null
+            || scheduledAtDrawStart == null
+            || this._verifyRebuildVersion !== versionAtDrawStart
+            || this._verifyRebuildScheduledAt !== scheduledAtDrawStart
+            || performance.now() - scheduledAtDrawStart < 250
+            || (this._strictPendingCreates instanceof Map && this._strictPendingCreates.size > 0)
+            || this._defaultViewFallbackTimer != null
+            || this._defaultViewAttemptTimer != null
+            || this._defaultViewRetryTimer != null
+            || this._defaultViewApplySettleTimer != null
+            || this._defaultViewApplyPending === true
+            || !this._strictReconcileComplete()
+        ) return false;
+        // A later stable redraw has already re-read every retained entity's
+        // actual TradingView coordinates. If it introduced no new strict
+        // geometry, the older deferred verification is now fully covered.
+        clearTimeout(this._verifyRebuildTimer);
+        this._verifyRebuildTimer = null;
+        this._verifyRebuildScheduledAt = null;
+        return true;
     }
 
     _isVerifyingNow() {
@@ -4616,6 +5959,16 @@ class ChartManager {
             visibleRange,
             currentInterval,
         );
+        const biRenderItems = this._baseStructurePathRenderList(
+            barsResult.bis || [],
+            currentInterval,
+            from,
+        );
+        const xdRenderItems = this._baseStructurePathRenderList(
+            barsResult.xds || [],
+            currentInterval,
+            from,
+        );
         this.reconcile(
             'fxs',
             cfg.fx ? fractalRenderItems : [],
@@ -4629,8 +5982,8 @@ class ChartManager {
         // 基础结构按绝对递归级别取色，同时让线段比笔再粗一级；菜单色块走同一颜色函数。
         const biLineStyle = getBaseStructureStyle(currentInterval, 'bis');
         const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds');
-        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), biLineStyle), 'bi'));
-        this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), xdLineStyle), 'xd'));
+        this.reconcile('bis', cfg.bi ? biRenderItems : [], from, symbolKey, (item) => safeCreate(ChartUtils.createPathShape(this.chart, item, biLineStyle), 'bi'), false, true);
+        this.reconcile('xds', cfg.xd ? xdRenderItems : [], from, symbolKey, (item) => safeCreate(ChartUtils.createPathShape(this.chart, item, xdLineStyle), 'xd'), false, true);
         // 中枢、走势、买卖点与背驰由同一个严格原子快照统一绘制。
         this._drawStrictStructure(chartData, currentInterval);
         this.updateDrawPalette();
@@ -4749,7 +6102,7 @@ class ChartManager {
         // 所有权容器之外的孤儿扫描，避免和按类型的几何自愈重复删除同一实体。
     }
 
-    async draw_chanlun() {
+    async draw_chanlun(options = {}) {
         if (this._disposed) return;
         const currentGeneration = this._intervalGeneration;
         const capturedSeq = this._intervalSwitchSeq;
@@ -4805,6 +6158,18 @@ class ChartManager {
             return;
         }
 
+        const renderSignature = this._chartRenderInputSignature(
+            chartData,
+            symbolInterval.interval,
+        );
+        if (
+            options.skipIfUnchanged === true
+            && renderSignature
+            && renderSignature === this._lastCompletedRenderSignature
+        ) {
+            return;
+        }
+
         // 计算可视区与 bars 范围对比，分析"可视区比 bars 窄多少"
         const vr = this.chart?.getVisibleRange?.();
         const firstBarSec = (chartData.barsResult.bars?.[0]?.time || 0) / 1000;
@@ -4820,8 +6185,46 @@ class ChartManager {
         clog(`[CHANLUN-TIMING]   FILTER bis: ${bisInside}/${totalBis} pass (filtered out ${totalBis - bisInside}), xds: ${xdsInside}/${totalXds} pass (filtered out ${totalXds - xdsInside})`);
         this.markDrawingMutationStart('chanlun-redraw');
         const drawStartTs = performance.now();
+        const verifyVersionAtDrawStart = this._verifyRebuildVersion || 0;
+        const verifyScheduledAtDrawStart = this._verifyRebuildScheduledAt;
         try {
             this.drawChartElements(chartData, symbolInterval.interval);
+            this._lastCompletedRenderSignature = renderSignature;
+            const latestRenderedBar = chartData.barsResult?.bars?.[
+                (chartData.barsResult?.bars?.length || 0) - 1
+            ];
+            if (latestRenderedBar?.time != null) {
+                // TradingView 在首绘后还会回放一次同根 onTick。首绘已经包含这根
+                // K 线，提前登记可避免遮罩解除后再启动一次无内容变化的 300ms 重绘。
+                this._latestAppliedBarTime = latestRenderedBar.time;
+            }
+            // 当前绘制若已经覆盖了分页/SSE 在本轮排队的最终输入，继续等待同一
+            // 指纹的 300ms 防抖只会增加切标延迟。重新读取最新输入后才取消，
+            // 因而绘制期间真正到达的新结构或新视窗不会被吞掉。
+            if (
+                renderSignature
+                && this.debouncedDrawChanlun
+                && typeof this.debouncedDrawChanlun.pending === 'function'
+                && this.debouncedDrawChanlun.pending()
+                && typeof this.debouncedDrawChanlun.cancel === 'function'
+            ) {
+                try {
+                    const latestChartData = this.getChartData();
+                    const latestSignature = latestChartData
+                        ? this._chartRenderInputSignature(
+                            latestChartData,
+                            symbolInterval.interval,
+                        )
+                        : null;
+                    if (latestSignature === renderSignature) {
+                        this.debouncedDrawChanlun.cancel();
+                    }
+                } catch (e) { /* 去重失败时保留原有防抖重绘 */ }
+            }
+            this._cancelCoveredVerifyRebuild(
+                verifyVersionAtDrawStart,
+                verifyScheduledAtDrawStart,
+            );
             // 切回已缓存周期时 TV 不再触发 onDataLoaded，handleDataReady 不来，
             // _initialLoadDone 永远 false，导致后续缩放平移无法补绘左侧形态。
             // 兜底：draw_chanlun 成功执行说明 chart 已有数据，强制置 true 恢复响应能力。
@@ -4832,10 +6235,117 @@ class ChartManager {
         }
     }
 
-    _closeSseStream() {
+    _isEmbeddedChartActivityEnabled() {
+        if (
+            typeof window === 'undefined'
+            || window.__CHANLUN_EMBEDDED_CHART !== true
+        ) return true;
+        const bridgeState = window.__chanlunEmbeddedChartBridgeState;
+        return this._embeddedChartActive !== false
+            && (!bridgeState || bridgeState.active !== false);
+    }
+
+    setEmbeddedChartActive(active) {
+        const next = active === true;
+        if (this._embeddedChartActive === next) {
+            if (!next) this._closeSseStream();
+            return;
+        }
+        this._embeddedChartActive = next;
+        if (!next) {
+            this._closeSseStream();
+            return;
+        }
+        if (!this._disposed) this._openSseStream();
+    }
+
+    _clearEmbeddedRealtimeFallback() {
+        if (this._embeddedRealtimeFallbackTimer != null) {
+            clearTimeout(this._embeddedRealtimeFallbackTimer);
+        }
+        this._embeddedRealtimeFallbackTimer = null;
+    }
+
+    _armEmbeddedRealtimeFallback() {
+        if (
+            this._embeddedRealtimeFallbackTimer != null
+            || !this._embeddedRealtimeDeferredRequestId
+        ) return;
+        this._embeddedRealtimeFallbackTimer = setTimeout(() => {
+            this._embeddedRealtimeFallbackTimer = null;
+            if (this._disposed || !this._embeddedRealtimeDeferredRequestId) return;
+            this._embeddedRealtimeDeferredRequestId = null;
+            if (this._isEmbeddedChartActivityEnabled()) this._openSseStream();
+        }, EMBEDDED_REALTIME_DEFER_FALLBACK_MS);
+    }
+
+    deferEmbeddedRealtime(requestId = 'switch') {
+        if (
+            typeof window === 'undefined'
+            || window.__CHANLUN_EMBEDDED_CHART !== true
+        ) return false;
+        const normalizedRequestId = String(requestId || 'switch');
+        this._clearEmbeddedRealtimeFallback();
+        this._embeddedRealtimeDeferredRequestId = normalizedRequestId;
+        // EventSource.close() releases the browser connection immediately. A
+        // separate close beacon would compete with the history requests we are
+        // deliberately prioritising; the SSE handler also cleans up on socket
+        // disconnect, so no extra request is needed for this short hand-off.
+        this._closeSseStream({ notifyServer: false });
+        this._armEmbeddedRealtimeFallback();
+        return true;
+    }
+
+    resumeEmbeddedRealtime(requestId = '') {
+        if (
+            typeof window === 'undefined'
+            || window.__CHANLUN_EMBEDDED_CHART !== true
+        ) return false;
+        const deferredRequestId = this._embeddedRealtimeDeferredRequestId;
+        if (!deferredRequestId) return false;
+        const normalizedRequestId = String(requestId || '');
+        if (
+            normalizedRequestId
+            && deferredRequestId !== 'initial'
+            && normalizedRequestId !== deferredRequestId
+        ) return false;
+        this._embeddedRealtimeDeferredRequestId = null;
+        this._clearEmbeddedRealtimeFallback();
+        if (!this._disposed && this._isEmbeddedChartActivityEnabled()) {
+            this._openSseStream();
+        }
+        return true;
+    }
+
+    _notifySseStreamClosed(connectionId) {
+        if (!validSseStreamIdentifier(connectionId) || typeof window === 'undefined') return;
+        const url = `/tv/stream/close?connection_id=${encodeURIComponent(connectionId)}`;
+        let queued = false;
+        try {
+            if (window.navigator && typeof window.navigator.sendBeacon === 'function') {
+                queued = window.navigator.sendBeacon(url);
+            }
+        } catch (e) { /* fall back to keepalive fetch */ }
+        if (!queued && typeof window.fetch === 'function') {
+            try {
+                window.fetch(url, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    keepalive: true,
+                }).catch(() => {});
+            } catch (e) { /* page teardown is best-effort */ }
+        }
+    }
+
+    _closeSseStream(options = {}) {
+        const connectionId = this._sseConnectionId;
+        this._sseConnectionId = null;
         if (this._sse) {
             try { this._sse.close(); } catch (e) { /* ignore */ }
             this._sse = null;
+        }
+        if (connectionId && options.notifyServer !== false) {
+            this._notifySseStreamClosed(connectionId);
         }
         this._clearSseFallback();
     }
@@ -4884,6 +6394,26 @@ class ChartManager {
         } catch (e) { return null; }
     }
 
+    _authoritativeSseReplayStart(data, viewLatestSec, resolution) {
+        if (
+            !data
+            || data.full_snapshot !== true
+            || !Number.isFinite(viewLatestSec)
+            || !/^\d+$/.test(String(resolution || ''))
+            || !Array.isArray(data.t)
+            || data.t.length === 0
+        ) return null;
+        const firstReplayIndex = data.t.findIndex((value) => (
+            Number.isFinite(Number(value)) && Number(value) >= viewLatestSec
+        ));
+        if (firstReplayIndex < 0) return null;
+        const replayCount = data.t.length - firstReplayIndex;
+        if (replayCount < 2 || replayCount > MAX_AUTHORITATIVE_SSE_REPLAY_BARS) {
+            return null;
+        }
+        return viewLatestSec;
+    }
+
     // 统一 resetData 入口: 防抖 + 指数退避(避免冷缓存/数据源停滞下每 8s reset 风暴) +
     // resetCache()(TV 文档契约, 清内部 datafeed 缓存/合并基准, 与重载按钮一致) + 退避记账。
     // 返回是否真的执行了 reset(false=被防抖跳过或无图表, 调用方据此决定是否继续走增量)。
@@ -4913,6 +6443,15 @@ class ChartManager {
     }
 
     _openSseStream() {
+        if (this._embeddedRealtimeDeferredRequestId) {
+            this._closeSseStream({ notifyServer: false });
+            this._armEmbeddedRealtimeFallback();
+            return;
+        }
+        if (!this._isEmbeddedChartActivityEnabled()) {
+            this._closeSseStream();
+            return;
+        }
         // feature flag 关闭 → 完全不建连, 退回纯轮询(现状)。
         if (typeof window !== 'undefined' && window.__CHANLUN_SSE_ENABLED === false) return;
         if (typeof EventSource === 'undefined' || !this.widget) return;
@@ -4924,10 +6463,18 @@ class ChartManager {
         // 保证 SSE 更新写入的 res_key 与缠论重绘读取的一致。
         const symbol = si.symbol;
         const resolution = si.interval;
-        const url = `/tv/stream?symbol=${encodeURIComponent(symbol)}&resolution=${encodeURIComponent(resolution)}`;
+        const connectionId = createSseStreamIdentifier('connection');
+        const params = new URLSearchParams({
+            symbol,
+            resolution,
+            channel_id: this._sseChannelId,
+            connection_id: connectionId,
+        });
+        const url = `/tv/stream?${params.toString()}`;
         let es = null;
         try { es = new EventSource(url); } catch (e) { console.warn('[SSE] 创建失败', e); return; }
         this._sse = es;
+        this._sseConnectionId = connectionId;
         this._sseGotData = false;
         es.addEventListener('chanlun', (ev) => {
             // 首个数据帧到达 → SSE 通道确实通(未被中间层缓冲) → 取消 fallback 快轮询。
@@ -4947,22 +6494,42 @@ class ChartManager {
                 const data = JSON.parse(ev.data);
                 const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
                 const hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
+                const _viewLatestBeforeUpdate = this._getViewLatestSec(resKey, resolution);
+                let _replayFromSec = null;
 
                 // reconnect 后首帧: 无条件全量补齐, 不去猜中间缺几根。只要发生过真断档重连(online 事件
                 // 或 es.onerror 断流≥30s 置位 _needResetOnNextData), 这一帧就整段重拉——治"30s 轮询抢在
                 // SSE 首帧前推进 bars_result、污染断档参照系致漏判"的竞态, 以及服务端重启后的整段补齐。
                 if (this._needResetOnNextData) {
                     this._needResetOnNextData = false;
-                    if (this._doReset(resKey, 'reconnect', this._getViewLatestSec(resKey, resolution))) return;
+                    _replayFromSec = this._authoritativeSseReplayStart(
+                        data,
+                        _viewLatestBeforeUpdate,
+                        resolution,
+                    );
+                    if (
+                        _replayFromSec === null
+                        && this._doReset(resKey, 'reconnect', _viewLatestBeforeUpdate)
+                    ) return;
                 }
 
                 // 常规断档检测(SSE 持续连通但数据跳变/长时间无更新恢复): data.t 完整快照里
                 // (画布末根, SSE 末根) 之间真有缺根才补。_doReset 内含防抖+退避+resetCache。
                 try {
                     if (hp && hp.bars_result && typeof window !== 'undefined' && window.SseGap) {
-                        const _tvLatestSec = this._getViewLatestSec(resKey, resolution);
+                        const _tvLatestSec = _viewLatestBeforeUpdate;
                         if (window.SseGap.shouldResetForGap(data.t, _tvLatestSec, resolution)) {
-                            if (this._doReset(resKey, 'gap-detect', _tvLatestSec)) return;
+                            if (_replayFromSec === null) {
+                                _replayFromSec = this._authoritativeSseReplayStart(
+                                    data,
+                                    _tvLatestSec,
+                                    resolution,
+                                );
+                            }
+                            if (
+                                _replayFromSec === null
+                                && this._doReset(resKey, 'gap-detect', _tvLatestSec)
+                            ) return;
                         }
                     }
                 } catch (_gapErr) { /* gap 检测失败不阻断正常推送 */ }
@@ -4974,7 +6541,12 @@ class ChartManager {
                 }
                 // K线也随 SSE 实时刷新：把推送里的最新 bar 喂给 TV(绕过轮询/节流/bars<2 抛错)。
                 if (this.udf_datafeed && typeof this.udf_datafeed.feedRealtimeBar === 'function') {
-                    this.udf_datafeed.feedRealtimeBar(resKey, data, resolution);
+                    this.udf_datafeed.feedRealtimeBar(
+                        resKey,
+                        data,
+                        resolution,
+                        _replayFromSec === null ? undefined : _replayFromSec,
+                    );
                 }
             } catch (e) { console.warn('[SSE] 处理推送失败', e); }
         });
@@ -4999,6 +6571,14 @@ class ChartManager {
     dispose() {
         if (this._disposed) return;
         this._disposed = true;
+        this._cancelEmbeddedStableReady();
+        this._cancelDefaultViewWork();
+        this._clearEmbeddedRealtimeFallback();
+        this._embeddedRealtimeDeferredRequestId = null;
+        this._disconnectStrictLabelDensityObserver();
+        if (this.debouncedDrawChanlun && typeof this.debouncedDrawChanlun.cancel === 'function') {
+            this.debouncedDrawChanlun.cancel();
+        }
         this._resetReconcileRetry();
         if (this._sweepOrphanTimer) {
             clearTimeout(this._sweepOrphanTimer);
@@ -5035,6 +6615,14 @@ class ChartManager {
         if (this._onlineHandler) {
             if (typeof window !== 'undefined') window.removeEventListener('online', this._onlineHandler);
             this._onlineHandler = null;
+        }
+        if (this._pageHideHandler) {
+            if (typeof window !== 'undefined') window.removeEventListener('pagehide', this._pageHideHandler);
+            this._pageHideHandler = null;
+        }
+        if (this._pageShowHandler) {
+            if (typeof window !== 'undefined') window.removeEventListener('pageshow', this._pageShowHandler);
+            this._pageShowHandler = null;
         }
         if (this._barReadyHandler) {
             window.removeEventListener('chanlun-bars-ready', this._barReadyHandler);

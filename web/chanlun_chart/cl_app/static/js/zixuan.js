@@ -39,6 +39,7 @@ var ZiXuan = (function () {
   var refreshUiBound = false;
   var visibilityLifecycleBound = false;
   var createGroupRequestInFlight = false;
+  var currentWatchIndex = -1;
 
   function appAjax(options) {
     var requestOptions = Object.assign({ timeout: 10000 }, options || {});
@@ -94,6 +95,26 @@ var ZiXuan = (function () {
 
   function marketLabel(market) {
     return MARKET_LABELS[market] || String(market || "未知市场");
+  }
+
+  function quoteCodeIdentity(market, code) {
+    var value = String(code == null ? "" : code).trim().toUpperCase();
+    if (market === "us") {
+      if (value.indexOf("US.") === 0) value = value.slice(3);
+      if (value.slice(-3) === ".US") value = value.slice(0, -3);
+    } else if (market === "hk") {
+      if (value.indexOf("KH.") === 0 || value.indexOf("HK.") === 0) value = value.slice(3);
+      if (value.slice(-3) === ".HK") value = value.slice(0, -3);
+      if (/^\d+$/.test(value)) value = ("00000" + value).slice(-5);
+    } else if (market === "a") {
+      var parts = value.split(".");
+      if (parts.length === 2 && (parts[0] === "SH" || parts[0] === "SZ")) {
+        value = parts[0] + parts[1];
+      } else if (parts.length === 2 && (parts[1] === "SH" || parts[1] === "SZ")) {
+        value = parts[1] + parts[0];
+      }
+    }
+    return value;
   }
 
   function recordMarketFailure(market, minimumDelayMs) {
@@ -187,19 +208,64 @@ var ZiXuan = (function () {
     return String(name || "") === "我的持仓" ? "人工关注组" : String(name || "");
   }
 
+  function accessibleDisplayColor(color) {
+    var raw = String(color || "").trim();
+    var semanticColors = {
+      "#ff5722": "var(--zx-rate-up, #c93612)",
+      "#16baaa": "var(--zx-rate-down, #08796f)",
+      "#1e9fff": "var(--zx-rate-flat, #0969b7)",
+      "#ffb800": "var(--zx-marker-warning, #8a5a00)",
+    };
+    return semanticColors[raw.toLowerCase()] || raw;
+  }
+
+  function compactDecimal(value, maximumFractionDigits) {
+    var number = Number(value);
+    if (!Number.isFinite(number)) return "-";
+    if (Object.is(number, -0)) number = 0;
+    return number
+      .toFixed(maximumFractionDigits)
+      .replace(/(\.\d*?[1-9])0+$/, "$1")
+      .replace(/\.0+$/, "");
+  }
+
+  function formatQuotePrice(value, market) {
+    var price = Number(value);
+    if (!Number.isFinite(price)) return "-";
+    var normalizedMarket = String(market || "").toLowerCase();
+    var absolute = Math.abs(price);
+    var digits = 2;
+    if (normalizedMarket === "a") digits = absolute < 10 ? 3 : 2;
+    else if (normalizedMarket === "fx") digits = absolute < 1 ? 6 : 4;
+    else if (normalizedMarket === "currency" || normalizedMarket === "currency_spot") {
+      digits = absolute < 1 ? 6 : 2;
+    } else if (normalizedMarket === "futures" || normalizedMarket === "ny_futures") {
+      digits = absolute < 1 ? 4 : 2;
+    }
+    return compactDecimal(price, digits);
+  }
+
+  function formatQuoteRate(value) {
+    var rate = Number(value);
+    if (!Number.isFinite(rate)) return "- %";
+    if (Math.abs(rate) < 0.005) rate = 0;
+    return (rate > 0 ? "+" : "") + compactDecimal(rate, 2) + "%";
+  }
+
   function rateNode(code, price, rate, color, market) {
     var root = document.createElement("div");
     root.className = "code_rate";
     root.dataset.code = String(code || "");
     root.dataset.market = String(market || "");
-    if (color) root.style.color = color;
+    var displayColor = accessibleDisplayColor(color);
+    if (displayColor) root.style.color = displayColor;
     var rateLine = document.createElement("div");
     rateLine.className = "layui-font-14";
-    if (color) rateLine.style.color = color;
-    rateLine.textContent = rate == null ? "- %" : String(rate) + "%";
+    if (displayColor) rateLine.style.color = displayColor;
+    rateLine.textContent = formatQuoteRate(rate);
     var priceLine = document.createElement("div");
     priceLine.className = "layui-font-12";
-    priceLine.textContent = price == null ? "-" : String(price);
+    priceLine.textContent = formatQuotePrice(price, market);
     root.appendChild(rateLine);
     root.appendChild(priceLine);
     return root;
@@ -207,18 +273,95 @@ var ZiXuan = (function () {
 
   function stockNode(name, code, color, market) {
     var root = document.createElement("div");
+    root.className = "zx-stock-identity";
     var nameLine = document.createElement("div");
-    nameLine.className = "layui-font-14";
-    if (color) nameLine.style.color = color;
+    nameLine.className = "layui-font-14 zx-stock-name";
+    var displayColor = accessibleDisplayColor(color);
+    if (displayColor) nameLine.style.color = displayColor;
     nameLine.textContent = String(name || "");
     var codeLine = document.createElement("div");
-    codeLine.className = "layui-font-12 layui-font-gray";
+    codeLine.className = "layui-font-12 layui-font-gray zx-stock-code";
     codeLine.textContent = market
       ? String(market).toUpperCase() + " · " + String(code || "")
       : String(code || "");
     root.appendChild(nameLine);
     root.appendChild(codeLine);
     return root;
+  }
+
+  function watchlistRows() {
+    if (typeof document === "undefined" || typeof document.getElementById !== "function") return [];
+    var source = document.getElementById("table_zixuan_list");
+    var view = source && source.nextElementSibling;
+    return view ? Array.prototype.slice.call(view.querySelectorAll(".layui-table-body tbody tr")) : [];
+  }
+
+  function watchlistData() {
+    var cache = window.layui && layui.table && layui.table.cache;
+    return cache && Array.isArray(cache.table_zixuan_list) ? cache.table_zixuan_list : [];
+  }
+
+  function decorateWatchlistRows() {
+    watchlistRows().forEach(function (row, index) {
+      row.setAttribute("tabindex", "-1");
+      row.setAttribute("aria-selected", index === currentWatchIndex ? "true" : "false");
+    });
+  }
+
+  function selectWatchIndex(index, activate) {
+    var rows = watchlistRows();
+    var data = watchlistData();
+    if (!rows.length || !data.length) return;
+    currentWatchIndex = Math.max(0, Math.min(Math.min(rows.length, data.length) - 1, index));
+    layui.table.setRowChecked("table_zixuan_list", { index: "all", checked: false });
+    layui.table.setRowChecked("table_zixuan_list", { index: currentWatchIndex });
+    decorateWatchlistRows();
+    var row = rows[currentWatchIndex];
+    if (row) row.focus();
+    var stock = data[currentWatchIndex];
+    var label = String(stock.name || stock.code || "当前标的");
+    var status = document.getElementById("zixuan_keyboard_status");
+    if (status) {
+      status.textContent = "已选择 " + label + (activate ? "，已切换主图" : "，按 Enter 切换主图");
+    }
+    if (activate) change_chart_ticker(stock.market || Utils.get_market(), stock.code);
+  }
+
+  function openWatchContextMenu() {
+    var row = watchlistRows()[currentWatchIndex];
+    if (!row) return;
+    var rect = row.getBoundingClientRect();
+    row.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + Math.min(24, rect.width / 2),
+      clientY: rect.top + Math.min(18, rect.height / 2),
+      button: 2,
+    }));
+  }
+
+  function bindWatchlistKeyboard() {
+    if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
+    var wrap = document.getElementById("zixuan_stock_wrap");
+    if (!wrap || wrap.__zixuanKeyboardBound) return;
+    wrap.__zixuanKeyboardBound = true;
+    wrap.addEventListener("keydown", function (event) {
+      var data = watchlistData();
+      if (!data.length) return;
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        if (currentWatchIndex < 0) selectWatchIndex(0, false);
+        openWatchContextMenu();
+        return;
+      }
+      if (["ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].indexOf(event.key) === -1) return;
+      event.preventDefault();
+      if (event.key === "Home") selectWatchIndex(0, false);
+      else if (event.key === "End") selectWatchIndex(data.length - 1, false);
+      else if (event.key === "ArrowDown") selectWatchIndex(currentWatchIndex < 0 ? 0 : currentWatchIndex + 1, false);
+      else if (event.key === "ArrowUp") selectWatchIndex(currentWatchIndex < 0 ? data.length - 1 : currentWatchIndex - 1, false);
+      else selectWatchIndex(currentWatchIndex < 0 ? 0 : currentWatchIndex, true);
+    });
   }
 
   function validateGroupName(value) {
@@ -691,18 +834,23 @@ var ZiXuan = (function () {
               let rate = Number(tick.rate);
               let price = Number(tick.price);
               if (!Number.isFinite(rate)) continue;
-              let color = "#1e9fff";
-              if (rate > 0) color = "#ff5722";
-              else if (rate < 0) color = "#16baaa";
+              let color = "var(--zx-rate-flat, #0969b7)";
+              if (rate > 0) color = "var(--zx-rate-up, #c93612)";
+              else if (rate < 0) color = "var(--zx-rate-down, #08796f)";
 
               let obj_span_rate = $(".code_rate").filter(function () {
                 var node = $(this);
                 var nodeMarket = String(node.data("market") || Utils.get_market() || "");
                 return nodeMarket === batch.market &&
-                  String(node.data("code")) === String(tick.code);
+                  quoteCodeIdentity(nodeMarket, node.data("code")) ===
+                    quoteCodeIdentity(batch.market, tick.code);
               });
+              var requestedCode = batch.codes.find(function (code) {
+                return quoteCodeIdentity(batch.market, code) ===
+                  quoteCodeIdentity(batch.market, tick.code);
+              }) || tick.code;
               obj_span_rate.replaceWith(rateNode(
-                tick.code,
+                requestedCode,
                 Number.isFinite(price) ? price : null,
                 rate,
                 color,
@@ -768,9 +916,9 @@ var ZiXuan = (function () {
                 },
                 {
                   field: "zf",
-                  title: "涨跌 / 现价",
+                  title: "涨跌/现价",
                   sort: false,
-                  width: 70,
+                  width: 92,
                   templet: function (d) {
                     return rateNode(d.code, null, null, null, d.market).outerHTML;
                   },
@@ -779,6 +927,9 @@ var ZiXuan = (function () {
               text: { none: "当前分组暂无标的" },
               done: function () {
                 if (requestGeneration === stockListRequestGeneration) {
+                  currentWatchIndex = -1;
+                  decorateWatchlistRows();
+                  bindWatchlistKeyboard();
                   ZiXuan.stocks_update_rate();
                 }
               },
@@ -796,6 +947,7 @@ var ZiXuan = (function () {
         table.on("row(table_zixuan_list)", function (obj) {
           const data = obj.data;
           const code = data.code;
+          currentWatchIndex = Number(obj.index);
           change_chart_ticker(data.market || Utils.get_market(), code);
           table.setRowChecked("table_zixuan_list", {
             index: "all",
@@ -804,6 +956,7 @@ var ZiXuan = (function () {
           table.setRowChecked("table_zixuan_list", {
             index: obj.index,
           });
+          decorateWatchlistRows();
         });
 
         table.on("rowContextmenu(table_zixuan_list)", function (obj) {

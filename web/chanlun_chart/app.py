@@ -61,7 +61,7 @@ from tornado.web import RequestHandler
 from tornado.wsgi import WSGIContainer
 from chanlun.tools.daemon_executor import DaemonExecutor
 from chanlun.security import (
-    get_login_password,
+    get_login_accounts,
     is_https_enabled,
     get_web_host,
     validate_web_security_config,
@@ -449,7 +449,10 @@ def main() -> int:
             os.environ["CHANLUN_WEB_HOST"] = "127.0.0.1"
         web_host = get_web_host()
         web_port = _get_web_port()
-        validate_web_security_config(web_host, get_login_password())
+        validate_web_security_config(
+            web_host,
+            get_login_accounts(),
+        )
         app = create_app(start_scheduler=False)
 
         # HTTP 线程池容量可配置，默认 32。
@@ -481,8 +484,10 @@ def main() -> int:
             "static",
         )
 
-        # Tornado Application 路由——charting_library / datafeeds 走自定义
-        # CachedStaticFileHandler（immutable cache + 透明 gzip），其余 fallback Flask
+        # Tornado Application 路由——全部静态资源走原生静态处理器，避免四周期
+        # 图表并发加载几十个脚本时占满业务 WSGI 队列。charting_library / datafeeds
+        # 的显式路由保留在前，便于边界审计；其余字体、CSS、JS 由最后一条静态
+        # 路由统一承接，并使用逐文件缓存策略与透明 gzip。
         from tornado.web import Application, FallbackHandler
         from cl_app.handlers.cached_static import CachedStaticFileHandler
 
@@ -530,6 +535,11 @@ def main() -> int:
                     r"/static/datafeeds/(.*)",
                     CachedStaticFileHandler,
                     {"path": os.path.join(static_root, "datafeeds")},
+                ),
+                (
+                    r"/static/(.*)",
+                    CachedStaticFileHandler,
+                    {"path": static_root},
                 ),
                 *sse_build_routes(app, pool=sse_pool),
                 (r".*", FallbackHandler, {"fallback": wsgi_container}),

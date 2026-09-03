@@ -752,7 +752,7 @@
 
   function strictEmptySummary(source, options, state, detail) {
     const base = summarizeBaseChartData(source, options);
-    const unavailable = state === 'unavailable';
+    const recovering = state === 'recovering';
     return {
       ...base,
       state,
@@ -783,10 +783,12 @@
       approachingPoints: [],
       divergences: [],
       pointCounts: emptyStrictPointCounts(),
-      verdict: unavailable ? '严格缠论结构暂不可用' : '正在同步严格缠论结构',
+      verdict: recovering ? '正在自动恢复严格缠论结构' : '正在同步严格缠论结构',
       verdictDetail: detail,
       plan: {
-        now: unavailable ? '严格结构数据不可用，未采用旧结构降级。' : '严格结构与当前图表尚未完成同步。',
+        now: recovering
+          ? '严格结构权威快照正在自动重取，完成前不展示不完整结论。'
+          : '严格结构与当前图表尚未完成同步。',
         wait: '等待同一标的、周期和末根闭合时间的权威严格快照。',
         boundary: '同步完成前不生成结构边界或交易判断。',
       },
@@ -1495,7 +1497,7 @@
           };
         } catch (_) { /* 缓存属于其他标的、周期或未来数据时不得复用 */ }
       }
-      return strictEmptySummary(source, options, 'unavailable', `严格结构不可用：${code}`);
+      return strictEmptySummary(source, options, 'recovering', `严格结构自动恢复中：${code}`);
     }
     let snapshot = null;
     if (mode === 'replace') snapshot = source.strict_structure;
@@ -1662,10 +1664,13 @@
     if (!root || !root.localStorage || !manager || !manager.id) return;
     const resolution = String(manager._curResolution || '1').trim().toLowerCase() || '_';
     try {
-      root.localStorage.setItem(
-        `cl_show_config_${manager.id}_${resolution}`,
-        JSON.stringify(manager.cl_show_config),
-      );
+      const key = `cl_show_config_${manager.id}_${resolution}`;
+      const value = JSON.stringify(manager.cl_show_config);
+      if (root.AccountPreferences && typeof root.AccountPreferences.setItem === 'function') {
+        root.AccountPreferences.setItem(key, value);
+      } else {
+        root.localStorage.setItem(key, value);
+      }
     } catch (_) { /* display preferences are optional */ }
   }
 
@@ -1751,7 +1756,9 @@
 
   function readOverviewCollapsed() {
     try {
-      const stored = root.localStorage.getItem(OVERVIEW_COLLAPSE_STORAGE_KEY);
+      const stored = root.AccountPreferences && typeof root.AccountPreferences.getItem === 'function'
+        ? root.AccountPreferences.getItem(OVERVIEW_COLLAPSE_STORAGE_KEY)
+        : root.localStorage.getItem(OVERVIEW_COLLAPSE_STORAGE_KEY);
       return stored === null ? true : stored !== '0';
     } catch (_) {
       return true;
@@ -1771,7 +1778,11 @@
     setText('ca-overview-toggle-label', collapsed ? '展开' : '收起');
     if (persist) {
       try {
-        root.localStorage.setItem(OVERVIEW_COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
+        if (root.AccountPreferences && typeof root.AccountPreferences.setItem === 'function') {
+          root.AccountPreferences.setItem(OVERVIEW_COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
+        } else {
+          root.localStorage.setItem(OVERVIEW_COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
+        }
       } catch (_) { /* 本地存储可能不可用 */ }
     }
   }

@@ -197,6 +197,77 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     assert service.refresh_requests == 0
 
 
+def test_early_signals_warms_the_account_visible_queue(
+    app: Flask,
+    logged_in_client,
+    monkeypatch,
+) -> None:
+    view = {
+        "contract": "CANONICAL_SIX_POINT_CHANNELS_V8_EXPLICIT_ALL_SIGNALS",
+        "pointType": "3buy",
+        "lifecycle": "triggered",
+        "market": "a",
+    }
+    scheduled = []
+    app.config["ENABLE_CANDIDATE_CHART_CACHE_WARM"] = True
+    monkeypatch.setattr(
+        decision_support_module,
+        "load_preferences_for_user",
+        lambda _user: (
+            {
+                "schema": "chanlun-account-chart-preferences/v1",
+                "values": {"trading_screening_view": json.dumps(view)},
+            },
+            True,
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        decision_support_module,
+        "schedule_candidate_chart_cache_warm",
+        lambda snapshot, *, preferred_view=None: scheduled.append(
+            (snapshot, preferred_view)
+        ),
+    )
+
+    response = logged_in_client.get("/decision-support/early-signals")
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    assert scheduled[0][1] == view
+
+
+def test_early_signals_keeps_global_warming_when_preference_read_fails(
+    app: Flask,
+    logged_in_client,
+    monkeypatch,
+) -> None:
+    scheduled = []
+    app.config["ENABLE_CANDIDATE_CHART_CACHE_WARM"] = True
+
+    def fail_preferences(_user):
+        raise RuntimeError("preference store unavailable")
+
+    monkeypatch.setattr(
+        decision_support_module,
+        "load_preferences_for_user",
+        fail_preferences,
+    )
+    monkeypatch.setattr(
+        decision_support_module,
+        "schedule_candidate_chart_cache_warm",
+        lambda snapshot, *, preferred_view=None: scheduled.append(
+            (snapshot, preferred_view)
+        ),
+    )
+
+    response = logged_in_client.get("/decision-support/early-signals")
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    assert scheduled[0][1] is None
+
+
 def test_early_signals_compresses_large_response_when_client_accepts_gzip(
     app: Flask,
     logged_in_client,
@@ -936,8 +1007,8 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "本系统仍不自动下单" in html
     assert "5m结构线索 + 独立监听 · 人工复核" in html
     assert "买卖点与监听队列" in html
-    assert "等待买卖点 / 实时监听" in html
-    assert "只是关注范围，不计入信号或通知" in html
+    assert "等待买卖点 / 实时监听" not in html
+    assert "只是关注范围，不计入信号或通知" not in html
     assert "ACTIONABLE QUEUE" not in html
     assert "实时模式图表会随市场继续更新" in html
     assert "不可作为历史因果复核" in html
@@ -1038,6 +1109,32 @@ def test_screening_page_exposes_resizable_chart_controls(logged_in_client) -> No
     assert html.count('role="separator"') == 3
     assert 'data-chart-size-reset' in html
     assert 'data-chart-resize-status' in html
+    assert 'data-theater-picker-toggle' in html
+    assert html.count('data-signal-list-toggle') == 1
+    assert 'data-signal-list-open="true"' in html
+    assert 'id="es-signal-workspace"' in html
+    assert 'data-theater-toolbar-exit' in html
+    assert (
+        'aria-controls="es-signal-workspace es-theater-signal-picker"' in html
+    )
+    assert 'id="es-theater-signal-picker"' in html
+    chart_grid_start = html.index('class="es-chart-grid"')
+    chart_grid_end = html.index('data-chart-resizer="columns"', chart_grid_start)
+    chart_grid = html[chart_grid_start:chart_grid_end]
+    chart_positions = [
+        chart_grid.index(f'data-frequency="{frequency}"')
+        for frequency in ("1m", "5m", "30m", "d")
+    ]
+    assert chart_positions == sorted(chart_positions)
+
+    focus_switch_start = html.index('class="es-focus-switch"')
+    focus_switch_end = html.index('class="es-chart-actions"', focus_switch_start)
+    focus_switch = html[focus_switch_start:focus_switch_end]
+    focus_positions = [
+        focus_switch.index(f'data-focus-frequency="{frequency}"')
+        for frequency in ("1m", "5m", "30m", "d")
+    ]
+    assert focus_positions == sorted(focus_positions)
 
 
 class _HumanReviewService:

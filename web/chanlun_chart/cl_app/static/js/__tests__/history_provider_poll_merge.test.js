@@ -39,7 +39,14 @@ function segment(headTime, headPrice, tailTime, tailPrice, linestyle) {
   };
 }
 
-function response({ times, prices, bis = [], update = false }) {
+function response({
+  times,
+  prices,
+  bis = [],
+  update = false,
+  strictMode,
+  strictStructure,
+}) {
   return {
     s: 'ok',
     update,
@@ -52,6 +59,8 @@ function response({ times, prices, bis = [], update = false }) {
     fxs: [],
     bis,
     xds: [],
+    ...(strictMode ? { strict_structure_mode: strictMode } : {}),
+    ...(strictStructure ? { strict_structure: strictStructure } : {}),
   };
 }
 
@@ -128,6 +137,75 @@ test('backward history merge preserves recent bars while adding older bars', () 
   );
 
   const times = history.bars_result.get(RESULT_KEY).bars.map((bar) => bar.time);
-  assert.ok(times.includes(500 * 1000));
-  assert.ok(times.includes(5500 * 1000));
+  assert.ok(times.includes((500 - 300) * 1000));
+  assert.ok(times.includes((5500 - 300) * 1000));
+  // Strict/MACD identity keeps the unmodified market-close timestamps while
+  // only the TradingView Bar coordinates use the interval opening time.
+  const rawTimes = history.bars_result.get(RESULT_KEY).times;
+  assert.ok(rawTimes.includes(500 * 1000));
+  assert.ok(rawTimes.includes(5500 * 1000));
+});
+
+test('backward unchanged delta preserves an unconsumed atomic strict snapshot', () => {
+  const history = makeDatafeed()._historyProvider;
+  const snapshot = {
+    schema: 'chanlun-chart-structure',
+    source_closed_at: 5500,
+    render_revision: 'strict-initial',
+  };
+
+  history.applyChanlunUpdate(
+    response({
+      times: [4000, 5000, 5500],
+      prices: [18, 20, 22],
+      strictMode: 'replace',
+      strictStructure: snapshot,
+    }),
+    { ...BASE_PARAMS, from: 0, to: 5500, firstDataRequest: 'true' },
+  );
+  history.applyChanlunUpdate(
+    response({
+      times: [500, 900, 1000],
+      prices: [9, 10, 10],
+      update: true,
+      strictMode: 'unchanged',
+    }),
+    { ...BASE_PARAMS, from: 0, to: 3000, firstDataRequest: 'false' },
+  );
+
+  const stored = history.bars_result.get(RESULT_KEY);
+  assert.equal(stored.strict_structure_mode, 'replace');
+  assert.equal(stored.strict_structure.render_revision, 'strict-initial');
+});
+
+test('unchanged realtime tail does not present a stale snapshot as replace', () => {
+  const history = makeDatafeed()._historyProvider;
+  const snapshot = {
+    schema: 'chanlun-chart-structure',
+    source_closed_at: 5500,
+    render_revision: 'strict-initial',
+  };
+
+  history.applyChanlunUpdate(
+    response({
+      times: [4000, 5000, 5500],
+      prices: [18, 20, 22],
+      strictMode: 'replace',
+      strictStructure: snapshot,
+    }),
+    { ...BASE_PARAMS, from: 0, to: 5500, firstDataRequest: 'true' },
+  );
+  history.applyChanlunUpdate(
+    response({
+      times: [6000],
+      prices: [23],
+      update: true,
+      strictMode: 'unchanged',
+    }),
+    { ...BASE_PARAMS, from: 6000, to: 6000, firstDataRequest: 'false' },
+  );
+
+  const stored = history.bars_result.get(RESULT_KEY);
+  assert.equal(stored.strict_structure_mode, 'unchanged');
+  assert.equal(stored.strict_structure.render_revision, 'strict-initial');
 });

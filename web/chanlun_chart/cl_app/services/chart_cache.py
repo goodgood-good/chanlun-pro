@@ -59,11 +59,17 @@ def _positive_env_int(name: str, default: int) -> int:
 
 _CHART_CACHE_MAX_BYTES = max(
     16 * 1024 * 1024,
-    _positive_env_int("CHANLUN_CHART_CACHE_MAX_BYTES", 256 * 1024 * 1024),
+    # The selection workspace presents four charts per candidate.  The old
+    # 256 MiB default could retain only about a dozen complete four-period
+    # candidates on a normal production data set, so later clicks repeatedly
+    # fell through to multi-megabyte disk snapshots.  Keep a conservative
+    # byte-weighted ceiling, but size the default for the complete top-20
+    # working set on the 32 GiB deployment host.
+    _positive_env_int("CHANLUN_CHART_CACHE_MAX_BYTES", 768 * 1024 * 1024),
 )
 _CHART_CACHE_MAX_ENTRIES = _positive_env_int(
     "CHANLUN_CHART_CACHE_MAX_ENTRIES",
-    512,
+    1024,
 )
 _CHART_CACHE_MEMORY_FACTOR = _positive_env_int(
     "CHANLUN_CHART_CACHE_MEMORY_FACTOR",
@@ -73,11 +79,23 @@ _CHART_CACHE_MIN_ENTRY_WEIGHT = max(
     1,
     _CHART_CACHE_MAX_BYTES // _CHART_CACHE_MAX_ENTRIES,
 )
+_CHART_CACHE_RAM_TTL_SECONDS = _positive_env_int(
+    "CHANLUN_CHART_CACHE_RAM_TTL_SECONDS",
+    12 * 60 * 60,
+)
+_RESIDENT_WEIGHT_FIELD = "resident_weight"
 
 
 def _chart_cache_entry_weight(value: object) -> int:
     """Estimate resident weight from compact UTF-8 JSON, conservatively scaled."""
 
+    prepared = _chart_cache_weight_hints.get(id(value))
+    if prepared is not None:
+        return prepared
+    if isinstance(value, dict):
+        persisted = value.get(_RESIDENT_WEIGHT_FIELD)
+        if isinstance(persisted, int) and not isinstance(persisted, bool) and persisted > 0:
+            return persisted
     try:
         serialized_bytes = len(
             json.dumps(
@@ -108,11 +126,21 @@ class _WeightedTTLCache(TTLCache):
 
 chart_data_cache: TTLCache = _WeightedTTLCache(
     maxsize=_CHART_CACHE_MAX_BYTES,
-    ttl=3600,
+    # Freshness is enforced independently by ``validated_at``.  A one-hour RAM
+    # TTL used to evict the entire ranked-candidate working set during a normal
+    # trading morning, forcing an avoidable pickle load and weight
+    # re-serialization on the next click.  Keep bounded entries resident across
+    # a session; the byte budget remains the authoritative memory limit.
+    ttl=_CHART_CACHE_RAM_TTL_SECONDS,
     getsizeof=_chart_cache_entry_weight,
 )
 
 cache_lock: RLock = RLock()
+# ``cachetools`` invokes getsizeof from inside ``__setitem__``. Large chart
+# entries take measurable time to serialize for their conservative weight, so
+# callers calculate it before taking ``cache_lock`` and expose the result only
+# for the duration of that assignment. Access is serialized by ``cache_lock``.
+_chart_cache_weight_hints: Dict[int, int] = {}
 
 
 def chart_cache_metrics() -> dict[str, int]:
@@ -131,9 +159,17 @@ def chart_cache_metrics() -> dict[str, int]:
         }
 
 
-def _put_chart_cache_ram(cache_key: str, entry: dict) -> bool:
+def _put_chart_cache_ram(
+    cache_key: str,
+    entry: dict,
+    *,
+    prepared_weight: int | None = None,
+) -> bool:
     """Best-effort RAM insert; oversized entries remain available on disk."""
 
+    entry_id = id(entry)
+    if prepared_weight is not None:
+        _chart_cache_weight_hints[entry_id] = prepared_weight
     try:
         chart_data_cache[cache_key] = entry
         return True
@@ -142,6 +178,9 @@ def _put_chart_cache_ram(cache_key: str, entry: dict) -> bool:
             f"[chart_cache] RAM entry exceeds byte budget, skip key={cache_key}"
         )
         return False
+    finally:
+        if prepared_weight is not None:
+            _chart_cache_weight_hints.pop(entry_id, None)
 
 # 缓存数据最近验证时间戳（防止非交易时段 DataPulse 反复 cache miss）
 # H4: 验证时间戳直接放在 chart_data_cache 的 entry["validated_at"] 中，
@@ -224,13 +263,25 @@ def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, valida
 def _normalize_cache_entry(cached) -> Optional[dict]:
     """Validate the sole production chart-cache entry schema."""
     required = {"data", "min_time", "max_time", "validated_at", "is_full_snapshot"}
-    if not isinstance(cached, dict) or set(cached) != required:
+    allowed = required | {_RESIDENT_WEIGHT_FIELD}
+    if (
+        not isinstance(cached, dict)
+        or not required.issubset(cached)
+        or not set(cached).issubset(allowed)
+    ):
         return None
     if not isinstance(cached["data"], dict):
         return None
     if not isinstance(cached["validated_at"], (int, float)):
         return None
     if type(cached["is_full_snapshot"]) is not bool:
+        return None
+    resident_weight = cached.get(_RESIDENT_WEIGHT_FIELD)
+    if resident_weight is not None and (
+        not isinstance(resident_weight, int)
+        or isinstance(resident_weight, bool)
+        or resident_weight <= 0
+    ):
         return None
     return cached
 
@@ -267,6 +318,11 @@ def _get_chart_cache_entry(cache_key: str):
     entry = _normalize_cache_entry(disk_entry)
     if entry is None:
         return None
+    # Weighting serializes the multi-megabyte entry. Do that outside the global
+    # RAM-cache lock so a background disk restore cannot queue interactive
+    # history hits behind unrelated candidates.
+    prepared_weight = _chart_cache_entry_weight(entry)
+    entry[_RESIDENT_WEIGHT_FIELD] = prepared_weight
 
     # 回填 RAM(CAS): 锁外读盘期间别的线程可能已写入更新值(SSE recompute / 用户重算),
     # 优先用已有的, 不用旧磁盘值覆盖更新的内存值。
@@ -274,7 +330,7 @@ def _get_chart_cache_entry(cache_key: str):
         existing = _normalize_cache_entry(chart_data_cache.get(cache_key))
         if existing is not None:
             return existing
-        _put_chart_cache_ram(cache_key, entry)
+        _put_chart_cache_ram(cache_key, entry, prepared_weight=prepared_weight)
 
     # 机会型清理(磁盘 IO)也移出锁。
     if random.randint(0, 2000) <= 1:
@@ -553,13 +609,25 @@ def shutdown_chart_cache_runtime(wait=False):
 def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot: bool):
     """两层缓存写入：RAM 立即可见，磁盘异步持久化。
 
-    本函数自带 ``cache_lock``（可重入 RLock），调用方无需（也可重复）持锁——
-    ``deepcopy`` 在锁内做，与 ``_persist_chart_cache_async`` 的 snapshot 不变量一致。
+    本函数自带 ``cache_lock``（可重入 RLock），调用方无需持锁。RAM 发布只在
+    临界区内做 O(1) 赋值；多 MiB 图对象的持久化快照复制移到锁外，避免一个
+    候选预热写入把所有交互式 ``/tv/history`` 命中串行阻塞。
     """
     entry = _build_chart_cache_entry(cl_chart_data, is_full_snapshot=is_full_snapshot)
+    prepared_weight = _chart_cache_entry_weight(entry)
+    # Persist the already-paid estimate.  Restoring a multi-megabyte snapshot
+    # can then reinsert it into the weighted RAM cache in O(1), instead of
+    # serializing the complete nested chart a second time on every process/RAM
+    # cold start.  Legacy five-field entries remain accepted and are upgraded
+    # on their next normal write.
+    entry[_RESIDENT_WEIGHT_FIELD] = prepared_weight
     with cache_lock:
-        _put_chart_cache_ram(cache_key, entry)
-        _persist_chart_cache_async(cache_key, entry)
+        _put_chart_cache_ram(cache_key, entry, prepared_weight=prepared_weight)
+    # Published entries are immutable apart from the scalar validated_at stamp;
+    # nested chart arrays are replaced as a whole on refresh, never mutated in
+    # place.  A concurrent validation can therefore only make this disk snapshot
+    # newer, not tear its data graph.
+    _persist_chart_cache_async(cache_key, entry)
     return entry
 
 
@@ -595,15 +663,24 @@ def _delete_chart_cache_entry(cache_key: str) -> None:
 
 
 def _mark_chart_cache_validated(cache_key: str):
-    # H4: validated_at 只更新到 entry 内部；entry 本身的 TTL 由 chart_data_cache 统一管理。
-    # 若 cache 已被 TTL 淘汰，没有 entry 可标记，直接返回（下次请求自然重算）。
-    # 自带 cache_lock（可重入）；_get_chart_cache_entry 同样自锁，嵌套获取安全。
+    """Refresh one resident entry without doing disk I/O under the global lock.
+
+    A validation mark is meaningful only for the snapshot that is already in
+    RAM.  The previous implementation called the two-tier cache getter while
+    holding ``cache_lock``; on a RAM miss that synchronously unpickled a
+    multi-megabyte disk entry and stalled every unrelated chart request.  A
+    missing resident entry is deliberately left alone so the next real request
+    performs the normal freshness/recompute decision.
+    """
     with cache_lock:
-        entry = _get_chart_cache_entry(cache_key)
+        entry = _normalize_cache_entry(chart_data_cache.get(cache_key))
         if entry is None:
-            return
-        entry["validated_at"] = time.time()
-        _put_chart_cache_ram(cache_key, entry)
+            return False
+        # Publish a new outer record so concurrent readers see either complete
+        # scalar metadata version; the immutable nested chart data is shared.
+        refreshed = {**entry, "validated_at": time.time()}
+        _put_chart_cache_ram(cache_key, refreshed)
+        return True
 
 
 # ---------------- 负缓存（空数据短期记忆）----------------

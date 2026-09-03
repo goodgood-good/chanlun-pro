@@ -12,10 +12,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import base64
+import time
 from urllib.parse import urlencode, urlsplit
 
 
 _PNG_HEADER = b"\x89PNG\r\n\x1a\n"
+REQUIRED_CAPTURE_STUDIES = ("MACD", "MACD_HTF")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +46,7 @@ class TradingViewClientScreenshotRenderer:
         session_cookie_provider: Callable[[], str],
         specs: Sequence[TradingViewCaptureSpec] = DEFAULT_CAPTURE_SPECS,
         viewport_width: int = 2400,
-        viewport_height: int = 1100,
+        viewport_height: int = 1400,
         timeout_ms: int = 45_000,
     ) -> None:
         parsed = urlsplit(str(base_url or "").strip().rstrip("/"))
@@ -74,16 +76,24 @@ class TradingViewClientScreenshotRenderer:
         self.viewport_height = int(viewport_height)
         self.timeout_ms = int(timeout_ms)
 
+    def _remaining_timeout_ms(self, started_at: float) -> int:
+        elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
+        remaining_ms = self.timeout_ms - elapsed_ms
+        if remaining_ms < 1_000:
+            raise TimeoutError("TradingView capture total time budget exhausted")
+        return remaining_ms
+
     def _url(self, market: str, code: str, spec: TradingViewCaptureSpec) -> str:
         query = urlencode(
-            {
-                "market": market,
-                "code": code,
-                "layout": "single",
-                "intervals": spec.interval,
-                "chart_sidebar": "collapsed",
-                "default_study": "MACD_HTF",
-            }
+            (
+                ("market", market),
+                ("code", code),
+                ("layout", "single"),
+                ("intervals", spec.interval),
+                ("chart_sidebar", "collapsed"),
+                ("default_study", "MACD_HTF"),
+                ("default_study", "MACD"),
+            )
         )
         return f"{self.base_url}/?{query}"
 
@@ -116,6 +126,7 @@ class TradingViewClientScreenshotRenderer:
         from playwright.sync_api import sync_playwright
 
         output: list[dict[str, object]] = []
+        started_at = time.monotonic()
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
@@ -144,7 +155,7 @@ class TradingViewClientScreenshotRenderer:
                             page.goto(
                                 self._url(market, code, spec),
                                 wait_until="domcontentloaded",
-                                timeout=self.timeout_ms,
+                                timeout=self._remaining_timeout_ms(started_at),
                             )
                             if urlsplit(page.url).path == "/login":
                                 raise RuntimeError(
@@ -158,15 +169,26 @@ class TradingViewClientScreenshotRenderer:
                                         const chart = widget.activeChart && widget.activeChart();
                                         if (!chart || !chart.dataReady || !chart.dataReady()) return false;
                                         const studies = chart.getAllStudies ? chart.getAllStudies() : [];
-                                        return studies.some(value => value && value.name === 'MACD_HTF');
+                                        const names = new Set(studies.map(value => value && value.name));
+                                        return names.has('MACD') && names.has('MACD_HTF');
                                     } catch (_error) {
                                         return false;
                                     }
                                 }""",
-                                timeout=self.timeout_ms,
+                                timeout=self._remaining_timeout_ms(started_at),
+                            )
+                            remaining_ms = self._remaining_timeout_ms(started_at)
+                            if remaining_ms < 3_000:
+                                raise TimeoutError(
+                                    "TradingView capture total time budget exhausted"
+                                )
+                            settle_ms = min(1_200, max(250, remaining_ms // 5))
+                            range_timeout_ms = max(
+                                1_000,
+                                remaining_ms - settle_ms - 1_000,
                             )
                             capture = page.evaluate(
-                                """async ({lookbackDays, barSpacing}) => {
+                                """async ({lookbackDays, barSpacing, rangeTimeoutMs, settleMs}) => {
                                     const widget = window.tvWidget;
                                     const chart = widget.activeChart();
                                     const visible = chart.getVisibleRange();
@@ -182,16 +204,17 @@ class TradingViewClientScreenshotRenderer:
                                     }
                                     await chart.setVisibleRange(
                                         {from: targetFrom, to},
-                                        {percentRightMargin: 1, rejectByTimeout: 20000}
+                                        {percentRightMargin: 1, rejectByTimeout: rangeTimeoutMs}
                                     );
                                     if (timeScale && typeof timeScale.setBarSpacing === 'function') {
                                         timeScale.setBarSpacing(barSpacing);
                                     }
-                                    await new Promise(resolve => setTimeout(resolve, 1800));
+                                    await new Promise(resolve => setTimeout(resolve, settleMs));
                                     if (!chart.dataReady()) throw new Error('chart data is not ready');
                                     const studies = chart.getAllStudies();
-                                    if (!studies.some(value => value && value.name === 'MACD_HTF')) {
-                                        throw new Error('MACD_HTF is absent');
+                                    const names = new Set(studies.map(value => value && value.name));
+                                    if (!names.has('MACD') || !names.has('MACD_HTF')) {
+                                        throw new Error('MACD or MACD_HTF is absent');
                                     }
                                     const canvas = await widget.takeClientScreenshot({
                                         hideStudiesFromLegend: false,
@@ -207,6 +230,8 @@ class TradingViewClientScreenshotRenderer:
                                 {
                                     "lookbackDays": spec.lookback_days,
                                     "barSpacing": spec.bar_spacing,
+                                    "rangeTimeoutMs": range_timeout_ms,
+                                    "settleMs": settle_ms,
                                 },
                             )
                             if not isinstance(capture, Mapping):
@@ -227,6 +252,7 @@ class TradingViewClientScreenshotRenderer:
                                     "lookback_days": spec.lookback_days,
                                     "visible_from": visible_from,
                                     "visible_to": visible_to,
+                                    "studies": REQUIRED_CAPTURE_STUDIES,
                                     "png": self._decode_png(capture.get("dataUrl")),
                                 }
                             )
@@ -243,6 +269,7 @@ class TradingViewClientScreenshotRenderer:
 
 __all__ = [
     "DEFAULT_CAPTURE_SPECS",
+    "REQUIRED_CAPTURE_STUDIES",
     "TradingViewCaptureSpec",
     "TradingViewClientScreenshotRenderer",
 ]

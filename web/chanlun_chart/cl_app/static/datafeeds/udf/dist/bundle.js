@@ -45,12 +45,13 @@
 
     class Requester {
         constructor(headers, timeoutMs = 15_000) {
+            this._controllersByKey = new Map();
             if (headers) {
                 this._headers = headers;
             }
             this._timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
         }
-        sendRequest(datafeedUrl, urlPath, params, timeoutMs) {
+        sendRequest(datafeedUrl, urlPath, params, timeoutMs, requestKey) {
             if (params !== undefined) {
                 const paramKeys = Object.keys(params);
                 if (paramKeys.length !== 0) {
@@ -65,6 +66,13 @@
                 : this._timeoutMs;
             // Send user cookies if the URL is on the same origin as the calling script.
             const controller = typeof AbortController === 'undefined' ? undefined : new AbortController();
+            if (controller !== undefined && requestKey) {
+                const previous = this._controllersByKey.get(requestKey);
+                if (previous !== undefined) {
+                    previous.abort();
+                }
+                this._controllersByKey.set(requestKey, controller);
+            }
             const options = { credentials: 'same-origin' };
             if (controller !== undefined) {
                 options.signal = controller.signal;
@@ -91,7 +99,14 @@
                     .then((responseText) => JSON.parse(responseText)),
                 timeout,
             ])
-                .finally(() => clearTimeout(timeoutId));
+                .finally(() => {
+                clearTimeout(timeoutId);
+                if (controller !== undefined &&
+                    requestKey &&
+                    this._controllersByKey.get(requestKey) === controller) {
+                    this._controllersByKey.delete(requestKey);
+                }
+            });
         }
     }
 
@@ -114,19 +129,44 @@
         }
         return null;
     }
+    function intradayResolutionSeconds(resolution) {
+        const value = String(resolution || "").trim();
+        let matched = /^([1-9][0-9]*)$/.exec(value);
+        if (matched) {
+            return Number(matched[1]) * 60;
+        }
+        matched = /^([1-9][0-9]*)([mMsS])$/.exec(value);
+        if (!matched) {
+            return null;
+        }
+        const amount = Number(matched[1]);
+        return matched[2].toLowerCase() === "s" ? amount : amount * 60;
+    }
+    function marketFromSymbol(symbol) {
+        const matched = /^([^:]+):/.exec(String(symbol || "").trim());
+        return matched ? matched[1].toLowerCase() : "";
+    }
     /**
      * Convert a raw market-close timestamp to the coordinate TradingView expects.
      *
      * The raw timestamp remains available separately for strict-snapshot identity
      * and MACD alignment.  Only the Bar passed to the chart uses this coordinate.
      */
-    function chartBarTimeSeconds(sourceTime, resolution) {
+    function chartBarTimeSeconds(sourceTime, resolution, symbol = "") {
         if (!Number.isInteger(sourceTime)) {
             throw new Error("history bar time must be epoch seconds");
         }
         const calendar = calendarResolution(resolution);
         if (calendar === null) {
-            return sourceTime;
+            // QMT A-share bars are identified by their close timestamp while
+            // TradingView requires an intraday bar's opening coordinate. Keep the
+            // raw close timestamp in bars_result.times for strict evidence identity,
+            // and normalize only the Bar sent to the chart. Other providers (for
+            // example Binance) already return opening timestamps and must not shift.
+            const duration = intradayResolutionSeconds(resolution);
+            return marketFromSymbol(symbol) === "a" && duration !== null
+                ? sourceTime - duration
+                : sourceTime;
         }
         const source = new Date(sourceTime * 1000);
         let year = source.getUTCFullYear();
@@ -157,10 +197,37 @@
     // 首次冷态请求若刚好撞上服务启动或缓存落盘，服务端可能在客户端超时后不久完成。
     // 自动重试一次即可命中刚生成的缓存，避免图表永久停在“这里没有数据”等待手动刷新。
     const INITIAL_HISTORY_RETRY_DELAY_MS = 750;
+    function decodeNumericDeltaColumn(values = [], scale, label, allowNull = true) {
+        if (scale === undefined)
+            return values;
+        if (!Number.isSafeInteger(scale) || scale <= 0) {
+            throw new Error(`${label} delta scale is invalid`);
+        }
+        let previous = 0;
+        return values.map((delta) => {
+            if (delta === null || delta === undefined) {
+                if (allowNull)
+                    return NaN;
+                throw new Error(`${label} delta contains a null value`);
+            }
+            if (!Number.isSafeInteger(delta)) {
+                throw new Error(`${label} delta contains an unsafe integer`);
+            }
+            const current = previous + delta;
+            if (!Number.isSafeInteger(current)) {
+                throw new Error(`${label} delta accumulator is unsafe`);
+            }
+            previous = current;
+            return current / scale;
+        });
+    }
     class HistoryProvider {
         constructor(datafeedUrl, requester, limitedServerResponse, options = {}) {
             this._fullRequestSerial = 0;
             this._latestFullRequestByKey = new Map();
+            this._completeHistoryFloorByKey = new Map();
+            this._activeHistoryRequests = 0;
+            this._lastHistorySettledAt = 0;
             // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
             // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
             this._forceRefreshOnce = false;
@@ -177,6 +244,19 @@
             this._barsResultMaxSize = options.barsResultMaxSize || 100;
             this.bars_result = new Map();
         }
+        /**
+         * 图表切换的原子展示闸门使用此状态，避免 TradingView 首帧完成后仍有
+         * 向左补历史请求在运行，导致用户先看到少量 K 线、随后又整批扩展。
+         */
+        hasPendingHistoryWork(quietPeriodMs = 0) {
+            if (this._activeHistoryRequests > 0) {
+                return true;
+            }
+            const quietMs = Math.max(0, Number(quietPeriodMs) || 0);
+            return quietMs > 0 &&
+                this._lastHistorySettledAt > 0 &&
+                Date.now() - this._lastHistorySettledAt < quietMs;
+        }
         /** 把 bars_result 裁到 _barsResultMaxSize 以内，按插入顺序淘汰最老条目。 */
         _pruneBarsResult() {
             while (this.bars_result.size > this._barsResultMaxSize) {
@@ -186,6 +266,7 @@
                 }
                 this.bars_result.delete(oldestKey);
                 this._latestFullRequestByKey.delete(oldestKey);
+                this._completeHistoryFloorByKey.delete(oldestKey);
             }
         }
         _resultKey(symbol, resolution) {
@@ -202,14 +283,31 @@
                 return true;
             }
             const resKey = this._resultKey(requestParams["symbol"], requestParams["resolution"]);
-            return this._latestFullRequestByKey.get(resKey) === requestGeneration;
+            return this._fullRequestSerial === requestGeneration &&
+                this._latestFullRequestByKey.get(resKey) === requestGeneration;
         }
         _resultForCompletedRequest(result, requestParams, requestGeneration) {
-            if (this._fullRequestIsCurrent(requestParams, requestGeneration)) {
-                return result;
-            }
             const resKey = this._resultKey(requestParams["symbol"], requestParams["resolution"]);
             const current = this.bars_result.get(resKey);
+            const requestIsCurrent = this._fullRequestIsCurrent(requestParams, requestGeneration);
+            if (requestIsCurrent) {
+                const resultLastRaw = result.times?.[result.times.length - 1];
+                const currentLastRaw = current?.times?.[current.times.length - 1];
+                const resultLast = result.bars[result.bars.length - 1]?.time;
+                const currentLast = current?.bars[current.bars.length - 1]?.time;
+                // A current-generation request can still finish with an older durable
+                // snapshot than the SSE/polling aggregate already held in memory.  The
+                // cache write is rejected below; return that same non-regressive cache to
+                // TradingView as well so the visible chart cannot jump backwards.
+                const currentIsAhead = resultLastRaw !== undefined && currentLastRaw !== undefined
+                    ? currentLastRaw > resultLastRaw
+                    : resultLast !== undefined && currentLast !== undefined
+                        ? currentLast > resultLast
+                        : false;
+                if (requestGeneration === undefined || current === undefined || !currentIsAhead) {
+                    return result;
+                }
+            }
             if (current === undefined) {
                 return result;
             }
@@ -232,9 +330,14 @@
             }
             const resKey = this._resultKey(symbol, resolution);
             this.bars_result.delete(resKey);
+            this._completeHistoryFloorByKey.delete(resKey);
             // Deleting the generation invalidates every response that was already in
             // flight.  A later request receives a globally unique serial.
+            const invalidatedGeneration = this._latestFullRequestByKey.get(resKey);
             this._latestFullRequestByKey.delete(resKey);
+            if (invalidatedGeneration === this._fullRequestSerial) {
+                this._fullRequestSerial += 1;
+            }
         }
         /** 通知前端：bars_result[resKey] 已就绪，可以读出来画缠论了。 */
         _emitBarsReady(resKey, requestParams) {
@@ -252,7 +355,7 @@
         }
         async _requestHistoryWithStartupRetry(requestParams, requestTimeoutMs, requestGeneration) {
             try {
-                return await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs);
+                return await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs, requestGeneration === undefined ? undefined : "history-initial");
             }
             catch (error) {
                 const reasonString = error instanceof Error || typeof error === "string"
@@ -273,7 +376,7 @@
                 if (!this._fullRequestIsCurrent(requestParams, requestGeneration)) {
                     throw error;
                 }
-                return this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs);
+                return this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs, requestGeneration === undefined ? undefined : "history-initial");
             }
         }
         getBars(symbolInfo, resolution, periodParams) {
@@ -284,8 +387,19 @@
                 from: periodParams.from,
                 to: periodParams.to,
             };
+            if (String(this._historyParams.embedded || "") === "1") {
+                requestParams.numeric_delta = 1;
+            }
             if (periodParams.countBack !== undefined) {
-                requestParams.countback = periodParams.countBack;
+                const atomicFullInitialHistory = (periodParams.firstDataRequest === true
+                    && (String(this._historyParams.embedded || "") === "1"
+                        || String(this._historyParams.atomic_initial || "") === "1"));
+                // 原子展示页面不能先接收 countback 短帧，再于遮罩解除后补齐历史。
+                // 首次请求不传 countback，使 /tv/history 在同一响应里返回当前完整缓存；
+                // 其他通用 datafeed 调用方仍保留 TradingView 原生 countback 语义。
+                if (!atomicFullInitialHistory) {
+                    requestParams.countback = periodParams.countBack;
+                }
             }
             if (periodParams.firstDataRequest !== undefined) {
                 requestParams.firstDataRequest = periodParams.firstDataRequest;
@@ -302,12 +416,30 @@
             if (symbolInfo.unit_id !== undefined) {
                 requestParams.unitId = symbolInfo.unit_id;
             }
+            const resKey = this._resultKey(requestParams["symbol"], requestParams["resolution"]);
+            const completeHistoryFloor = this._completeHistoryFloorByKey.get(resKey);
+            if (periodParams.firstDataRequest !== true &&
+                String(this._historyParams.embedded || "") === "1" &&
+                completeHistoryFloor !== undefined &&
+                Number.isFinite(Number(periodParams.from)) &&
+                Number.isFinite(Number(periodParams.to)) &&
+                Number(periodParams.from) <= Number(periodParams.to) &&
+                Number(periodParams.to) <= completeHistoryFloor) {
+                return Promise.resolve({
+                    bars: [],
+                    meta: { noData: true },
+                    fxs: [],
+                    bis: [],
+                    xds: [],
+                });
+            }
             const requestGeneration = periodParams.firstDataRequest
                 ? this._beginFullRequest(requestParams)
                 : undefined;
             const requestTimeoutMs = requestGeneration === undefined
                 ? undefined
                 : this._initialHistoryTimeoutMs;
+            this._activeHistoryRequests += 1;
             return new Promise(async (resolve, reject) => {
                 try {
                     const initialResponse = await this._requestHistoryWithStartupRetry(requestParams, requestTimeoutMs, requestGeneration);
@@ -319,13 +451,21 @@
                     resolve(this._resultForCompletedRequest(result, requestParams, requestGeneration));
                 }
                 catch (e) {
-                    if (e instanceof Error || typeof e === "string") {
-                        const reasonString = getErrorMessage(e);
+                    const reasonString = e instanceof Error || typeof e === "string"
+                        ? getErrorMessage(e)
+                        : "Unknown history request failure";
+                    const supersededAbort = requestGeneration !== undefined &&
+                        !this._fullRequestIsCurrent(requestParams, requestGeneration) &&
+                        /abort/i.test(reasonString);
+                    if (!supersededAbort) {
                         // tslint:disable-next-line:no-console
                         console.warn(`HistoryProvider: getBars() failed, error=${reasonString}`);
-                        reject(reasonString);
                     }
+                    reject(reasonString);
                 }
+            }).finally(() => {
+                this._activeHistoryRequests = Math.max(0, this._activeHistoryRequests - 1);
+                this._lastHistorySettledAt = Date.now();
             });
         }
         async _processTruncatedResponse(result, requestParams, requestGeneration) {
@@ -348,7 +488,7 @@
                     }
                     const followupResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestGeneration === undefined
                         ? undefined
-                        : this._initialHistoryTimeoutMs);
+                        : this._initialHistoryTimeoutMs, requestGeneration === undefined ? undefined : "history-initial");
                     const followupResult = this._processHistoryResponse(followupResponse, requestParams, requestGeneration);
                     lastResultLength = followupResult.bars.length;
                     // merge result with results collected so far
@@ -397,6 +537,7 @@
                 throw new Error(response.errmsg);
             }
             const bars = [];
+            let resultTimes;
             const meta = {
                 noData: false,
             };
@@ -406,9 +547,14 @@
             }
             else {
                 const resolution = String(requestParams["resolution"] || "");
-                for (let i = 0; i < response.t.length; ++i) {
+                const symbol = String(requestParams["symbol"] || "");
+                const fullResponse = response;
+                const responseTimes = decodeNumericDeltaColumn(fullResponse.t, fullResponse.time_delta === true ? 1 : undefined, "history time", false);
+                const res_key = this._resultKey(requestParams["symbol"], requestParams["resolution"]);
+                const historyFloor = Number(fullResponse.history_floor);
+                for (let i = 0; i < responseTimes.length; ++i) {
                     const barValue = {
-                        time: chartBarTimeSeconds(response.t[i], resolution) * 1000,
+                        time: chartBarTimeSeconds(responseTimes[i], resolution, symbol) * 1000,
                         close: response.c[i],
                         open: response.o[i],
                         high: response.h[i],
@@ -418,7 +564,6 @@
                     bars.push(barValue);
                 }
                 // 设置保存的key
-                const res_key = this._resultKey(requestParams["symbol"], requestParams["resolution"]);
                 // 保存数据
                 let obj_res = this.bars_result.get(res_key);
                 // 2026-07 修复(前端幽灵形态)：判断本次响应是否为"右侧最新窗口"的权威回答。
@@ -455,17 +600,18 @@
                         windowTo === undefined ||
                         !Number.isInteger(sourceTime))
                         return false;
-                    const chartTime = chartBarTimeSeconds(sourceTime, resolution);
+                    const chartTime = chartBarTimeSeconds(sourceTime, resolution, symbol);
                     return chartTime >= windowFrom && chartTime <= windowTo;
                 };
-                const raw_times = (response.t || []).map((t) => t * 1000);
-                const macd_dif = response.macd_dif || [];
-                const macd_dea = response.macd_dea || [];
-                const macd_hist = response.macd_hist || [];
-                const macd_area = response.macd_area || [];
-                const higher_macd_dif = response.higher_macd_dif || [];
-                const higher_macd_dea = response.higher_macd_dea || [];
-                const higher_macd_hist = response.higher_macd_hist || [];
+                const raw_times = responseTimes.map((t) => t * 1000);
+                resultTimes = raw_times;
+                const macdScale = fullResponse.macd_delta_scale;
+                const macd_dif = decodeNumericDeltaColumn(fullResponse.macd_dif || [], macdScale, "macd_dif");
+                const macd_dea = decodeNumericDeltaColumn(fullResponse.macd_dea || [], macdScale, "macd_dea");
+                const macd_hist = decodeNumericDeltaColumn(fullResponse.macd_hist || [], macdScale, "macd_hist");
+                const higher_macd_dif = decodeNumericDeltaColumn(fullResponse.higher_macd_dif || [], macdScale, "higher_macd_dif");
+                const higher_macd_dea = decodeNumericDeltaColumn(fullResponse.higher_macd_dea || [], macdScale, "higher_macd_dea");
+                const higher_macd_hist = decodeNumericDeltaColumn(fullResponse.higher_macd_hist || [], macdScale, "higher_macd_hist");
                 const mergeAlignedArrays = (existingTimes = [], existingArr = [], newTimes = [], newArr = []) => {
                     const map = new Map();
                     existingTimes.forEach((t, i) => {
@@ -505,11 +651,18 @@
                     existingLastRawMs !== undefined &&
                     incomingLastRawMs < existingLastRawMs;
                 const canWriteCache = generationIsCurrent && !isRegressiveFullSnapshot;
+                if (canWriteCache &&
+                    requestGeneration !== undefined &&
+                    Number.isSafeInteger(historyFloor) &&
+                    historyFloor > 0 &&
+                    responseTimes.length > 0 &&
+                    historyFloor === responseTimes[0]) {
+                    this._completeHistoryFloorByKey.set(res_key, historyFloor);
+                }
                 if (canWriteCache && (response.update == false || obj_res == undefined)) {
                     const difObj = mergeAlignedArrays([], [], raw_times, macd_dif);
                     const deaObj = mergeAlignedArrays([], [], raw_times, macd_dea);
                     const histObj = mergeAlignedArrays([], [], raw_times, macd_hist);
-                    const areaObj = mergeAlignedArrays([], [], raw_times, macd_area);
                     const hDifObj = mergeAlignedArrays([], [], raw_times, higher_macd_dif);
                     const hDeaObj = mergeAlignedArrays([], [], raw_times, higher_macd_dea);
                     const hHistObj = mergeAlignedArrays([], [], raw_times, higher_macd_hist);
@@ -523,7 +676,6 @@
                         macd_dif: difObj.values,
                         macd_dea: deaObj.values,
                         macd_hist: histObj.values,
-                        macd_area: areaObj.values,
                         higher_macd_dif: hDifObj.values,
                         higher_macd_dea: hDeaObj.values,
                         higher_macd_hist: hHistObj.values,
@@ -705,7 +857,6 @@
                     const difObj = mergeAlignedArrays(oldTimes, obj_res.macd_dif, raw_times, macd_dif);
                     const deaObj = mergeAlignedArrays(oldTimes, obj_res.macd_dea, raw_times, macd_dea);
                     const histObj = mergeAlignedArrays(oldTimes, obj_res.macd_hist, raw_times, macd_hist);
-                    const areaObj = mergeAlignedArrays(oldTimes, obj_res.macd_area, raw_times, macd_area);
                     const hDifObj = mergeAlignedArrays(oldTimes, obj_res.higher_macd_dif, raw_times, higher_macd_dif);
                     const hDeaObj = mergeAlignedArrays(oldTimes, obj_res.higher_macd_dea, raw_times, higher_macd_dea);
                     const hHistObj = mergeAlignedArrays(oldTimes, obj_res.higher_macd_hist, raw_times, higher_macd_hist);
@@ -713,7 +864,6 @@
                     obj_res.macd_dif = difObj.values;
                     obj_res.macd_dea = deaObj.values;
                     obj_res.macd_hist = histObj.values;
-                    obj_res.macd_area = areaObj.values;
                     obj_res.higher_macd_dif = hDifObj.values;
                     obj_res.higher_macd_dea = hDeaObj.values;
                     obj_res.higher_macd_hist = hHistObj.values;
@@ -743,11 +893,29 @@
                             };
                     }
                     else if (strictMode === "unchanged") {
-                        // Preserve the last atomic snapshot as cached evidence, but expose
-                        // the transport mode verbatim.  Leaving the old "replace" mode in
-                        // place makes pagination/realtime merges re-validate a stale payload
-                        // as though it arrived with the newly merged bars.
-                        obj_res.strict_structure_mode = "unchanged";
+                        const cachedStrict = obj_res.strict_structure;
+                        const mergedLastRawMs = obj_res.times.length > 0
+                            ? obj_res.times[obj_res.times.length - 1]
+                            : undefined;
+                        const cachedSourceClosedAt = Number(cachedStrict?.source_closed_at);
+                        const cachedSnapshotStillAtomic = Boolean(cachedStrict
+                            && cachedStrict.schema === "chanlun-chart-structure"
+                            && Number.isInteger(cachedSourceClosedAt)
+                            && mergedLastRawMs !== undefined
+                            && cachedSourceClosedAt * 1000 === mergedLastRawMs);
+                        // ``unchanged`` is a transport delta, while bars_result represents
+                        // effective aggregate state. A backward pagination response can
+                        // arrive before charts.js consumes the initial ``replace`` snapshot.
+                        // Downgrading the aggregate to ``unchanged`` in that window loses the
+                        // only consumable snapshot and produces strict_snapshot_missing.
+                        // Keep ``replace`` while its source close still equals the merged bar
+                        // tail. If realtime advanced the tail, expose ``unchanged`` so the
+                        // chart may retain only an already-validated prior snapshot.
+                        obj_res.strict_structure_mode = cachedSnapshotStillAtomic
+                            ? "replace"
+                            : "unchanged";
+                        if (cachedSnapshotStillAtomic)
+                            delete obj_res.strict_structure_error;
                     }
                     else if (strictMode !== "unchanged" && strictMode !== undefined) {
                         obj_res.strict_structure_mode = "unavailable";
@@ -764,6 +932,7 @@
             const result = {
                 bars: bars,
                 meta: meta,
+                times: resultTimes,
                 fxs: response.fxs,
                 bis: response.bis,
                 xds: response.xds,
@@ -1014,6 +1183,61 @@
         }
     }
 
+    const symbolResolveCacheTtlMs = 5 * 60 * 1000;
+    const symbolResolveCacheMaxEntries = 256;
+    function sharedSymbolResolveHost() {
+        const current = globalThis;
+        try {
+            const candidate = current.parent;
+            if (candidate !== undefined
+                && candidate !== current
+                && candidate.location?.origin
+                && candidate.location.origin === current.location?.origin) {
+                return candidate;
+            }
+        }
+        catch (_error) {
+            // Cross-origin parents are deliberately isolated from this optimization.
+        }
+        return current;
+    }
+    function sharedSymbolResolveResponse(datafeedURL, params, request) {
+        const host = sharedSymbolResolveHost();
+        let cache = host.__chanlunUdfSharedSymbolResolveCacheV1;
+        if (cache === undefined
+            || typeof cache.get !== 'function'
+            || typeof cache.set !== 'function') {
+            cache = new Map();
+            host.__chanlunUdfSharedSymbolResolveCacheV1 = cache;
+        }
+        const normalizedParams = Object.keys(params)
+            .sort()
+            .map((key) => [key, params[key]]);
+        const cacheKey = `${datafeedURL}|${JSON.stringify(normalizedParams)}`;
+        const now = Date.now();
+        const existing = cache.get(cacheKey);
+        if (existing !== undefined && now - existing.createdAt <= symbolResolveCacheTtlMs) {
+            return existing.promise;
+        }
+        if (existing !== undefined)
+            cache.delete(cacheKey);
+        const promise = request().then((response) => {
+            if (response.s !== undefined)
+                cache?.delete(cacheKey);
+            return response;
+        }, (error) => {
+            cache?.delete(cacheKey);
+            throw error;
+        });
+        cache.set(cacheKey, { createdAt: now, promise });
+        while (cache.size > symbolResolveCacheMaxEntries) {
+            const oldestKey = cache.keys().next().value;
+            if (oldestKey === undefined)
+                break;
+            cache.delete(oldestKey);
+        }
+        return promise;
+    }
     /**
      * This class implements interaction with UDF-compatible datafeed.
      * See [UDF protocol reference](@docs/connecting_data/UDF.md)
@@ -1115,7 +1339,7 @@
             if (unitId !== undefined) {
                 params.unitId = unitId;
             }
-            this._send('symbols', params)
+            sharedSymbolResolveResponse(this._datafeedURL, params, () => this._send('symbols', params))
                 .then((response) => {
                 if (response.s !== undefined) {
                     onError('unknown_symbol');
@@ -1166,7 +1390,7 @@
          * SSE 推送驱动 K 线：从 /tv/history 同构 response 取最新一根 bar，喂给
          * DataPulseProvider 的订阅者，让 K 线随 SSE 实时刷新(不依赖轮询)。
          */
-        feedRealtimeBar(symbolResKey, response, resolution = '') {
+        feedRealtimeBar(symbolResKey, response, resolution = '', replayFromSeconds) {
             const t = response.t;
             const c = response.c;
             if (!response || !t || t.length === 0 || !c) {
@@ -1182,7 +1406,7 @@
                     return null;
                 }
                 const bar = {
-                    time: chartBarTimeSeconds(t[idx], resolution) * 1000,
+                    time: chartBarTimeSeconds(t[idx], resolution, symbolResKey) * 1000,
                     open: o ? o[idx] : closeVal,
                     high: h ? h[idx] : closeVal,
                     low: l ? l[idx] : closeVal,
@@ -1194,6 +1418,28 @@
                 return bar;
             };
             const i = t.length - 1;
+            // An authoritative SSE snapshot can safely repair a small gap without
+            // resetData()+a second full /tv/history request. Replay the already
+            // available bars in chronological order, including the current canvas
+            // tail once so its final OHLC is corrected before newer bars arrive.
+            if (Number.isFinite(replayFromSeconds)) {
+                let start = -1;
+                for (let idx = 0; idx <= i; idx++) {
+                    if (chartBarTimeSeconds(t[idx], resolution, symbolResKey) >= Number(replayFromSeconds)) {
+                        start = idx;
+                        break;
+                    }
+                }
+                if (start >= 0) {
+                    for (let idx = start; idx <= i; idx++) {
+                        const bar = makeBar(idx);
+                        if (bar !== null) {
+                            this._dataPulseProvider.feedBar(symbolResKey, bar);
+                        }
+                    }
+                    return;
+                }
+            }
             // 新根出现先补喂倒数第二根(刚收盘那根)最终 OHLC, 再喂末根: 复刻 DataPulseProvider
             // 轮询的 previousBar 补发。否则该根蜡烛永久停在收盘前 <=8s 旧值(SSE 已把 sub.lastBarTime
             // 推进到末根, 废掉轮询里 isNewBar 的 previousBar 分支)。feedBar 的 bar.time<lastBarTime

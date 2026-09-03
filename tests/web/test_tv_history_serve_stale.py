@@ -122,6 +122,105 @@ def test_endpoint_reads_disk_cache_outside_global_cache_lock(client, monkeypatch
     assert observed == [False]
 
 
+def test_complete_cache_hit_never_waits_for_calculation_lock(client, monkeypatch):
+    """A readable snapshot stays interactive while background refresh owns its lock."""
+
+    _seed_entry(validated_at=time.time())
+    monkeypatch.setattr(tv_mod, "market_now_trading", lambda _market: False)
+    monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *_a, **_k: None)
+
+    class _UnexpectedLockRegistry:
+        def get(self, _cache_key):
+            raise AssertionError("complete cache hits must bypass the calc lock")
+
+    monkeypatch.setattr(tv_mod, "chart_calc_locks", _UnexpectedLockRegistry())
+
+    response = client.get(_url())
+
+    assert response.status_code == 200
+    assert response.get_json()["s"] == "ok"
+
+
+def test_cache_miss_rechecks_after_waiting_for_calculation_lock(client, monkeypatch):
+    """A concurrent fill wins while waiting; the follower must not recompute it."""
+
+    cfg = query_cl_chart_config(MARKET, CODE)
+    key = chart_cache._build_cache_key(MARKET, CODE, FREQ, cfg)
+    filled_entry = chart_cache._build_chart_cache_entry(
+        _make_full_chart_data(12), is_full_snapshot=True, validated_at=time.time()
+    )
+    reads = []
+
+    def _read_entry(_cache_key):
+        assert _cache_key == key
+        reads.append(_cache_key)
+        return None if len(reads) == 1 else filled_entry
+
+    class _Lock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+    class _LockRegistry:
+        def get(self, _cache_key):
+            assert _cache_key == key
+            return _Lock()
+
+    monkeypatch.setattr(tv_mod, "_get_chart_cache_entry", _read_entry)
+    monkeypatch.setattr(tv_mod, "chart_calc_locks", _LockRegistry())
+    monkeypatch.setattr(tv_mod, "market_now_trading", lambda _market: False)
+    monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        tv_mod,
+        "fetch_klines_and_compute_cl_data",
+        lambda *_a, **_k: pytest.fail("the second cache check should win"),
+    )
+
+    response = client.get(_url())
+
+    assert response.status_code == 200
+    assert response.get_json()["s"] == "ok"
+    assert len(response.get_json()["t"]) == 12
+    assert len(reads) == 2
+
+
+def test_history_before_ram_cache_floor_does_not_wait_for_calculation_lock(
+    client, monkeypatch
+):
+    """Indicator warm-up before a complete embedded history must finish at once.
+
+    A background revalidation can legitimately own the per-symbol calculation
+    lock.  The requested range is already known to end before the oldest cached
+    bar, so queueing behind that work would reveal a second batch of bars after
+    the parent page has declared the chart ready.
+    """
+
+    _seed_entry(validated_at=time.time())
+
+    class _UnexpectedLockRegistry:
+        def get(self, _cache_key):
+            raise AssertionError("cache-floor no-data must bypass the calc lock")
+
+    monkeypatch.setattr(tv_mod, "chart_calc_locks", _UnexpectedLockRegistry())
+    monkeypatch.setattr(
+        tv_mod,
+        "market_now_trading",
+        lambda _market: pytest.fail("cache-floor no-data must bypass market work"),
+    )
+    oldest = _make_full_chart_data(1)["t"][0]
+
+    response = client.get(
+        f"/tv/history?symbol={MARKET}:{CODE}&resolution=5"
+        f"&firstDataRequest=false&countback=69"
+        f"&from={oldest - 7200}&to={oldest}"
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"s": "no_data"}
+
+
 def test_partial_cache_entry_is_not_mutated(client, monkeypatch):
     """T0-2: cache hit 缺 higher_macd_* 键时的 lazy 补算, 不得原地给共享 cache dict 加键。
 

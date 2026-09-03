@@ -2,7 +2,11 @@
 import tornado.web
 
 from cl_app import create_app
-from cl_app.handlers.sse_stream import SseStreamHandler, build_routes
+from cl_app.handlers.sse_stream import (
+    SseStreamCloseHandler,
+    SseStreamHandler,
+    build_routes,
+)
 
 
 def test_routes_integrate_into_application(monkeypatch):
@@ -20,9 +24,11 @@ def test_routes_integrate_into_application(monkeypatch):
     ]
     application = tornado.web.Application(routes)
     assert application is not None
-    matched = [r for r in routes if "/tv/stream" in str(r[0])]
-    assert len(matched) == 1
-    assert matched[0][1] is SseStreamHandler
+    matched = {route[0]: route[1] for route in routes if route[0].startswith("/tv/stream")}
+    assert matched == {
+        r"/tv/stream": SseStreamHandler,
+        r"/tv/stream/close": SseStreamCloseHandler,
+    }
 
 
 def test_routes_empty_when_flag_off(monkeypatch):

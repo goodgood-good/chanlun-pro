@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+from time import monotonic, sleep
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -277,7 +278,22 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
     )
     try:
         temporary.write_text(encoded + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        deadline = monotonic() + 2.0
+        while True:
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                retryable_windows_share = bool(
+                    os.name == "nt"
+                    and (
+                        isinstance(exc, PermissionError)
+                        or getattr(exc, "winerror", None) in {5, 32}
+                    )
+                )
+                if not retryable_windows_share or monotonic() >= deadline:
+                    raise
+                sleep(0.05)
     finally:
         try:
             temporary.unlink(missing_ok=True)

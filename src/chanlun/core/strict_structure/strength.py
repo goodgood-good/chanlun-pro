@@ -317,19 +317,6 @@ def _is_contiguous_three_leg(values: tuple[ConstituentUnit, ...]) -> bool:
     )
 
 
-def comparison_leg_from_units(units) -> ComparisonLeg:
-    """从来源证据构建精确的一段或三段背驰比较腿。"""
-
-    values = tuple(units)
-    if len(values) not in (1, 3):
-        raise ValueError("comparison leg width must be one or three")
-    if len(values) == 3 and not _is_contiguous_three_leg(values):
-        raise ValueError(
-            "three-unit comparison leg must be contiguous enter/reverse/re-enter"
-        )
-    return _comparison_leg(values)
-
-
 def center_entry_comparison_leg(
     center: TrendCenter,
     units,

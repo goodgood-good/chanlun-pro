@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
+from dataclasses import dataclass
 import hashlib
 import ipaddress
 import json
@@ -23,7 +24,8 @@ import os
 from pathlib import Path
 import secrets
 import time
-from typing import Optional
+from typing import Mapping, Optional
+import unicodedata
 from urllib.parse import parse_qs, urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -42,11 +44,81 @@ _RUNTIME_CREDENTIALS_PATH = (
 )
 
 
-def get_login_password() -> str:
-    """Return the configured Web password with environment-first precedence."""
-    return os.environ.get("CHANLUN_LOGIN_PWD") or str(
-        getattr(config, "LOGIN_PWD", "") or ""
-    )
+def normalize_login_username(value: object) -> str:
+    """Return the canonical, case-insensitive Web account name.
+
+    Usernames are intentionally kept human-readable at the login boundary while
+    control characters and ambiguous surrounding whitespace are rejected by
+    returning an empty value.  NFKC makes full-width names behave consistently
+    across browsers and operating systems.
+    """
+
+    if not isinstance(value, str):
+        return ""
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized or len(normalized) > 64:
+        return ""
+    if any(unicodedata.category(char).startswith("C") for char in normalized):
+        return ""
+    return normalized.casefold()
+
+
+@dataclass(frozen=True)
+class WebLoginAccount:
+    """Validated login account configuration."""
+
+    username: str
+    password_hash: str
+
+
+def _configured_login_users_value():
+    if "CHANLUN_LOGIN_USERS" in os.environ:
+        return os.environ.get("CHANLUN_LOGIN_USERS")
+    return getattr(config, "LOGIN_USERS", None)
+
+
+def _parse_login_users(value: object) -> tuple[WebLoginAccount, ...]:
+    """Parse a username-to-hash mapping and fail closed on invalid input."""
+
+    if value is None or value == "":
+        return ()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return ()
+    if not isinstance(value, Mapping) or not value:
+        return ()
+
+    accounts: list[WebLoginAccount] = []
+    seen: set[str] = set()
+    for raw_username, raw_password_hash in value.items():
+        username = normalize_login_username(raw_username)
+        password_hash = (
+            raw_password_hash.strip()
+            if isinstance(raw_password_hash, str)
+            else ""
+        )
+        if (
+            not username
+            or username in seen
+            or not password_hash.startswith(_PASSWORD_HASH_PREFIXES)
+        ):
+            return ()
+        seen.add(username)
+        accounts.append(WebLoginAccount(username, password_hash))
+    return tuple(accounts)
+
+
+def get_login_accounts() -> tuple[WebLoginAccount, ...]:
+    """Return the configured named Web accounts.
+
+    ``CHANLUN_LOGIN_USERS`` takes precedence over ``config.LOGIN_USERS`` and
+    must be a JSON object such as
+    ``{"alice": "scrypt:...", "bob": "scrypt:..."}``.
+    """
+
+    return _parse_login_users(_configured_login_users_value())
 
 
 def get_web_host() -> str:
@@ -76,14 +148,19 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def validate_web_security_config(host: str, password: str) -> None:
-    """Require a hashed login secret; external listeners also require HTTPS."""
-    configured_password = str(password or "").strip()
-    if not configured_password:
-        raise ValueError(
-            "WEB_HOST requires CHANLUN_LOGIN_PWD/LOGIN_PWD"
-        )
-    if not configured_password.startswith(_PASSWORD_HASH_PREFIXES):
+def validate_web_security_config(
+    host: str,
+    accounts: tuple[WebLoginAccount, ...],
+) -> None:
+    """Require hashed login credentials; external listeners also require HTTPS."""
+
+    configured_passwords = [account.password_hash for account in accounts]
+    if not configured_passwords or any(not value for value in configured_passwords):
+        raise ValueError("WEB_HOST requires CHANLUN_LOGIN_USERS/LOGIN_USERS")
+    if any(
+        not configured_password.startswith(_PASSWORD_HASH_PREFIXES)
+        for configured_password in configured_passwords
+    ):
         raise ValueError(
             "WEB_HOST requires a pbkdf2:/scrypt: password hash"
         )

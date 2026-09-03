@@ -2156,26 +2156,6 @@ class QmtSectorCompositeSource:
             )
         return result
 
-    def _load_fact_frame(
-        self,
-        *,
-        path: Path | None,
-        identity: Mapping[str, object],
-        observed_at: datetime,
-        expected_closed_at: datetime,
-        expected_closes: tuple[datetime, ...],
-    ) -> pd.DataFrame | None:
-        payload = self._load_fact_payload(path)
-        if payload is None:
-            return None
-        return self._frame_from_fact_payload(
-            payload,
-            identity=identity,
-            observed_at=observed_at,
-            expected_closed_at=expected_closed_at,
-            expected_closes=expected_closes,
-        )
-
     def _load_fact_payload(
         self,
         path: Path | None,

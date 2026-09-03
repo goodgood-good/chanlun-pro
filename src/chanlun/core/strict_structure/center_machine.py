@@ -1598,25 +1598,12 @@ def calculate_centers(
                 oscillatory_ids,
             )
             # 正式进行中中枢拥有整个临时后缀。来源特定的偏移种子在单元锁定前只是
-            # 另一种划分；与归属中枢并列展示会造成 TSLA/SH.513100 曾出现的重复
-            # 未完成中枢，也可能制造第二个临时三类点。采用封闭失败：只暴露以
-            # 不可变正式 center_id 为根的投影；若其几何无效，在锁定前缀计算解决
-            # 边界之前不暴露替代项。
-            if projected is None:
-                # 偏移的普通形成中窗口不能替换正式归属者；但偏移的已完成预览不同，
-                # 其锁定离开段加外部首次回返是更强生命周期证据，必须保留，避免可见
-                # 三买/三卖退化成旧的进行中中枢框。
-                if (
-                    latest_live_preview is None
-                    or latest_live_preview.state is not CenterPreviewState.COMPLETED
-                ):
-                    latest_live_preview = None
-            elif (
-                latest_live_preview is None
-                or latest_live_preview.state is not CenterPreviewState.COMPLETED
-                or projected.state is CenterPreviewState.COMPLETED
-            ):
-                latest_live_preview = projected
+            # 另一种划分；即使偏移窗口在几何上已经“完成”，只要原中枢仍能合法吸收
+            # 整个实时后缀，它就仍是原中枢内部的滑动子窗口，不能被提升为第二个中枢。
+            # SH.601059 曾因此同时显示前一 ongoing 中枢和一个与其价格核心重叠的
+            # completed 预览。采用唯一活动归属：能投影时始终保留原 center_id 的
+            # 投影；不能投影时，在锁定前缀明确完成或取代旧中枢前不暴露偏移候选。
+            latest_live_preview = projected
         if latest_live_preview is not None and latest_live_preview not in previews:
             previews.append(latest_live_preview)
             active_owner = (

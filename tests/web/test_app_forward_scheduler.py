@@ -34,6 +34,7 @@ from cl_app.services.app_forward_scheduler import (
 from cl_app.services.forward_scheduler import (
     validate_forward_scheduler_snapshot,
 )
+from cl_app.services import app_forward_scheduler as app_forward_scheduler_subject
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -41,6 +42,33 @@ ROOT = Path(__file__).resolve().parents[2]
 PARAMETER_SNAPSHOT = (
     ROOT / "config" / "decision_support" / "human_review_parameters.json"
 )
+
+
+def test_atomic_json_retries_transient_windows_share_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "owner.json"
+    target.write_text('{"generation":1}\n', encoding="utf-8")
+    original_replace = app_forward_scheduler_subject.os.replace
+    attempts = 0
+
+    def flaky_replace(source: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            error = PermissionError("temporarily opened without delete sharing")
+            error.winerror = 5  # type: ignore[attr-defined]
+            raise error
+        original_replace(source, destination)
+
+    monkeypatch.setattr(app_forward_scheduler_subject.os, "name", "nt")
+    monkeypatch.setattr(app_forward_scheduler_subject.os, "replace", flaky_replace)
+
+    app_forward_scheduler_subject._atomic_json(target, {"generation": 2})
+
+    assert attempts == 2
+    assert json.loads(target.read_text(encoding="utf-8")) == {"generation": 2}
 
 
 def _superseded_forward_ledger() -> dict[str, object]:

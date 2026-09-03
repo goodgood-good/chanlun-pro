@@ -858,6 +858,28 @@ def _notification_datetime(value: object) -> datetime | None:
     return parsed_time.astimezone(CN)
 
 
+def _notification_timeline_parts(
+    items: Sequence[tuple[str, object]],
+) -> list[str]:
+    """同一交易日只写一次日期，跨日时保留每个完整时刻。"""
+
+    parsed = [_notification_datetime(value) for _label, value in items]
+    if all(value is not None for value in parsed):
+        localized = [value for value in parsed if value is not None]
+        if len({value.date() for value in localized}) == 1:
+            return [
+                f"日期 {localized[0].strftime('%Y-%m-%d')}",
+                *[
+                    f"{label} {value.strftime('%H:%M:%S')}"
+                    for (label, _raw), value in zip(items, localized, strict=True)
+                ],
+            ]
+    return [
+        f"{label} {_render_notification_time(value)}"
+        for label, value in items
+    ]
+
+
 def _notification_event_value(event: object, name: str) -> object:
     if isinstance(event, Mapping):
         return event.get(name)
@@ -1022,16 +1044,12 @@ def _notification_position_line(event: object) -> str:
         displayed, model_value = _display_percent(percent)
         detail = f"精确模型值 {model_value}%" if model_value else "模型比较值"
         return (
-            f"风险参考：结构模型比例上限 {displayed}%（{detail}；不构成执行许可）"
+            f"风险参考：结构模型比例上限 {displayed}%（{detail}；非仓位建议）"
             if side == "buy"
             else f"风险参考：结构退出比例 {displayed}%（仅作结构模型比较）"
         )
     if status == "CONDITIONAL" and side == "sell":
-        return (
-            "风险参考：卖点与目标结构的级别关系待人工核对；同级或更高级别卖点"
-            "按完整退出规则复核，低级别或不同结构仅作段差处理；"
-            "关系未确认前不生成退出比例"
-        )
+        return "风险参考：卖点与目标结构级别待核对；关系未确认前不生成退出比例"
     if status == "UNRESOLVED" and side == "buy" and (
         getattr(event, "realtime_quote_status", "") == "unavailable"
     ):
@@ -1096,84 +1114,63 @@ def _event_action_advice(event: object) -> str:
         else ""
     )
     if segment_update:
-        return (
-            "操作：1分钟区间套证据已补充，仅用于精确时点复核；"
-            "跨市场监听不生成认证价格上限，须在其他交易软件核对实时价格，"
-            "不得把5分钟锚点当作执行价"
-        )
+        return "操作：1分钟精确定位已补充；仅复核时点，不改变原5分钟判断"
     if side == "buy" and position_reasons & _BUY_PROTECTION_REASONS:
-        return "操作：不追价，等待新的5分钟结构，仅在其他交易软件手工复核"
+        return "操作：禁止买入；不追价，等待新的5分钟结构"
     if (
         side == "buy"
         and not segment_present
         and getattr(event, "realtime_quote_status", "") == "unavailable"
     ):
         return (
-            "操作：5分钟买点已确认，但1分钟精确定位尚未出现且实时价格未取得；"
-            "不使用已完成K线价格生成买入比例，等待两项证据补齐后再复核"
+            "操作：暂不执行；1分钟定位未出现且实时价格未取得，"
+            "不使用已完成K线价格生成买入比例"
         )
     if side == "buy" and not segment_present:
-        return (
-            "操作：5分钟买点已确认；等待同向1分钟区间套给出精确位置，"
-            "当前不执行、不生成买入比例"
-        )
+        return "操作：暂不执行；5分钟买点已确认，等待同向1分钟精确定位"
     if side == "buy" and getattr(
         event, "realtime_quote_status", ""
     ) == "unavailable":
-        return (
-            "操作：5分钟买点和1分钟定位已出现，但实时价格未取得；"
-            "不使用已完成K线价格生成买入比例，等待实时价格证据后再复核"
-        )
+        return "操作：暂不执行；1分钟定位已出现，但实时价格未取得"
     if side == "buy" and position_status == "BLOCKED":
         return "操作：本条买入不纳入操作计划；等待新的5分钟结构后再复核"
     if side == "buy" and position_status != "RECOMMENDED":
-        return (
-            "操作：5分钟买点已确认，但结构价格或防守信息不足；"
-            "暂不生成买入比例，补齐证据后再复核"
-        )
+        return "操作：仅观察；结构价格或失效信息不足，补齐证据后再复核"
     if side == "buy":
         condition = (
-            "确认反转"
+            "一买反转已确认"
             if point.startswith("1buy")
-            else "回踩不破"
+            else "二买回踩不破已确认"
             if point.startswith("2buy")
-            else "回抽确认"
+            else "三买回抽已确认"
             if point.startswith("3buy")
-            else "人工确认"
+            else "5分钟买点已确认"
         )
         return (
-            f"操作：{condition}，并核对实时价、5分钟防守位和30分钟环境后，"
-            "在其他交易软件手工决定；系统不自动下单"
+            f"操作：可人工复核买入；{condition}，"
+            "须满足下方全部执行与风险边界"
         )
     if side == "sell":
         if "SAME_OR_HIGHER_STRUCTURE_FULL_EXIT" in position_reasons:
             return (
-                "操作：卖点与持有结构为同级或更高级别；"
-                "优先按完整退出规则人工复核，并确认5分钟卖出结构未向上失效"
+                "操作：复核完整退出；卖点与持有结构同级或更高级，"
+                "且5分钟结构未向上失效"
             )
         if "LOWER_STRUCTURE_SEGMENT_DIFFERENCE_REDUCTION" in position_reasons:
             return (
-                "操作：当前卖点属于低级别或不同结构；仅按段差减仓规则复核，"
-                "不得误当作完整退出"
+                "操作：仅复核段差减仓；卖点属于低级别或不同结构，"
+                "不得作为完整退出"
             )
         if position_status == "CONDITIONAL":
-            return (
-                "操作：先核对卖点与持有结构级别；同级或更高级别复核完整退出，"
-                "低级别或不同结构只作段差处理，关系未确认前不执行"
-            )
+            return "操作：暂不执行；先核对卖点与持有结构级别，再决定完整退出或段差减仓"
         if not segment_present:
-            return (
-                "操作：5分钟卖点已确认，立即复核退出风险；1分钟定位未出现，"
-                "不得虚构精确卖出价"
-            )
+            return "操作：立即复核退出风险；1分钟定位未出现，不生成精确卖出价"
     if side == "risk":
-        return "操作：仅核对30分钟逆风环境；等待5分钟卖点达到操作确认后再决定卖出"
+        return "操作：仅复核30分钟逆风环境；这不是卖点，等待5分钟卖点确认"
     if point in _POINT_ADVICE:
-        return _POINT_ADVICE[point].replace("建议：", "操作：", 1) + (
-            "（在其他软件手工确认；系统不自动下单）"
-        )
+        return _POINT_ADVICE[point].replace("建议：", "操作：", 1)
     if side == "sell":
-        return "操作：人工确认后复核卖出或退出条件（系统不自动下单）"
+        return "操作：复核卖出或退出条件"
     return "操作：人工复核后再处理"
 
 
@@ -1190,17 +1187,112 @@ def _event_judgment_line(event: object) -> str:
         else "待出现"
     )
     if segment_point:
-        segment_label += "（仅精确定位）"
+        divergence_label = _DIVERGENCE_LABELS.get(
+            str(getattr(event, "segment_difference_divergence_kind", "") or "")
+        )
+        if divergence_label:
+            segment_label += f"（{divergence_label}）"
+        segment_label += "已确认（仅精确定位）"
     big_direction = _DIRECTION_LABELS.get(
         str(getattr(event, "big_dir", "") or ""),
         "未知",
     )
     if side not in {"buy", "sell"}:
         return f"判断：30分钟环境={big_direction}｜本条不是买卖点"
-    return (
-        f"判断：5分钟主信号=已确认（{point_label}）｜"
-        f"1分钟精确定位={segment_label}｜30分钟环境={big_direction}"
+    recursive_level = int(getattr(event, "recursive_level", 0) or 0)
+    lock_state = str(getattr(event, "setup_lock_state", "unknown") or "unknown")
+    terminal_state = (
+        "末端结构已封存"
+        if lock_state == "locked"
+        else "末端结构未封存，后续K线继续复核"
+        if lock_state == "pending"
+        else "末端结构锁状态待核对（结合图表）"
     )
+    return (
+        f"判断：5分钟{point_label}（L{recursive_level}）已确认｜{terminal_state}｜"
+        f"1分钟区间套定位：{segment_label}｜30分钟={big_direction}"
+    )
+
+
+def _event_price_snapshot(event: object) -> str:
+    try:
+        price = float(getattr(event, "price", 0) or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    price_source = str(getattr(event, "price_source", "") or "")
+    price_label = {
+        "realtime_tick": "当前价",
+        "latest_completed_1m_close": "最近1分钟收盘价",
+        "latest_completed_5m_close": "最近5分钟收盘价",
+    }.get(price_source, "最近已完成K线收盘价")
+    rendered = (
+        f"{price_label}：{price:.3f}"
+        if price > 0 and isfinite(price)
+        else "当前价：暂不可用"
+    )
+    price_at = _render_notification_time(getattr(event, "price_observed_at", ""))
+    if price_source == "realtime_tick" and price_at != "暂不可用":
+        rendered += f"（获取 {price_at}）"
+
+    try:
+        anchor_price = float(getattr(event, "structure_anchor_price", 0) or 0)
+    except (TypeError, ValueError):
+        anchor_price = 0.0
+    if anchor_price > 0 and isfinite(anchor_price):
+        rendered += f"｜5分钟锚点：{anchor_price:.3f}"
+        if price > 0 and isfinite(price):
+            rendered += f"（{(price - anchor_price) / anchor_price:+.2%}）"
+    else:
+        rendered += "｜5分钟锚点：暂不可用"
+    return rendered
+
+
+def _event_defense_snapshot(event: object) -> tuple[str, float | None]:
+    try:
+        defense_price = float(
+            getattr(event, "structure_invalidation_price", 0) or 0
+        )
+    except (TypeError, ValueError):
+        defense_price = 0.0
+    if defense_price > 0 and isfinite(defense_price):
+        return f"{defense_price:.3f}", defense_price
+    return "暂不可用", None
+
+
+def _event_invalidation_line(event: object) -> str | None:
+    side = str(getattr(event, "side", "") or "")
+    if side not in {"buy", "sell"}:
+        return None
+    defense, defense_price = _event_defense_snapshot(event)
+    direction = (
+        "跌破买入结构失效" if side == "buy" else "突破卖出结构失效"
+    )
+    rendered = f"失效：5分钟失效价 {defense}（{direction}）"
+    try:
+        price = float(getattr(event, "price", 0) or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    if (
+        defense_price is None
+        or price <= 0
+        or not isfinite(price)
+    ):
+        return rendered
+    if side == "buy":
+        distance = (price - defense_price) / price * 100
+        distance_text = (
+            f"距向下失效 {distance:.2f}%"
+            if distance >= 0
+            else f"已跌破失效价 {abs(distance):.2f}%"
+        )
+    else:
+        distance = (defense_price - price) / price * 100
+        distance_text = (
+            f"距向上失效 {distance:.2f}%"
+            if distance >= 0
+            else f"已突破失效价 {abs(distance):.2f}%"
+        )
+    return f"{rendered}｜{distance_text}"
 
 
 def _event_execution_boundary_line(event: object) -> str:
@@ -1208,34 +1300,25 @@ def _event_execution_boundary_line(event: object) -> str:
     segment_present = bool(
         str(getattr(event, "segment_difference_point_type", "") or "")
     )
-    try:
-        defense_price = float(
-            getattr(event, "structure_invalidation_price", 0) or 0
-        )
-    except (TypeError, ValueError):
-        defense_price = 0.0
-    defense = (
-        f"{defense_price:.3f}"
-        if defense_price > 0 and isfinite(defense_price)
-        else "暂不可用"
-    )
+    price = _event_price_snapshot(event)
     if side == "buy":
         if not segment_present:
-            return (
-                f"执行边界：等待1分钟精确定位｜5分钟失效价 {defense}｜"
-                "未定位前不执行"
-            )
+            return f"执行：等待1分钟精确定位，未定位前不执行｜{price}"
         return (
-            f"执行边界：5分钟失效价 {defense}｜"
-            "跨市场监听不生成认证买入上限；执行前须核对实时价，"
+            f"执行：{price}｜"
+            "跨市场监听不生成认证价格上限；执行前须核对实时价，"
             "5分钟锚点不得替代"
         )
     if side == "sell":
+        price_restriction = (
+            "；不得把5分钟锚点当作执行价" if segment_present else ""
+        )
         return (
-            f"执行边界：5分钟卖出结构失效价 {defense}（向上突破则取消原判断）｜"
+            f"执行：{price}｜1分钟只定位卖出时点，不生成认证卖出价"
+            f"{price_restriction}｜"
             "退出比例由卖点与持有结构级别关系决定"
         )
-    return "执行边界：仅作环境复核，不生成买卖价格或比例"
+    return "执行：仅作环境复核，不生成买卖价格或比例"
 
 
 def _notification_line(
@@ -1251,21 +1334,20 @@ def _notification_line(
     segment_update = str(getattr(event, "signal_role", "") or "") == (
         "SEGMENT_DIFFERENCE_1M"
     )
-    point = str(getattr(event, "bs_type", "") or "")
-    point_label = _POINT_LABELS.get(point, f"结构点（{point}）" if point else "结构提示")
-    op_level = _level_label(getattr(event, "op_level", ""))
     big_level = _level_label(getattr(event, "big_level", ""))
-    recursive_level = int(getattr(event, "recursive_level", 0) or 0)
     code = str(getattr(event, "code", "") or "")
     name = str(getattr(event, "name", "") or "")
     marker = f"[{ordinal}/{total}] " if ordinal and total and total > 1 else ""
     action_advice = _event_action_advice(event)
     parts = [
         f"{marker}结论：{action_advice.removeprefix('操作：')}",
-        f"{code} {name}".strip() + f"｜状态：{_event_operation_status(event)}",
+        "标的：" + f"{code} {name}".strip() + f"｜状态：{_event_operation_status(event)}",
         _event_judgment_line(event),
         _event_execution_boundary_line(event),
     ]
+    invalidation_line = _event_invalidation_line(event)
+    if invalidation_line is not None:
+        parts.append(invalidation_line)
 
     signal_time = str(getattr(event, "signal_time", "") or "")
     confirmed_time = str(getattr(event, "confirmed_time", "") or signal_time)
@@ -1284,114 +1366,41 @@ def _notification_line(
             else f"{minutes}分{seconds}秒"
         )
 
-    try:
-        price = float(getattr(event, "price", 0) or 0)
-    except (TypeError, ValueError):
-        price = 0.0
-    price_source = str(getattr(event, "price_source", "") or "")
-    price_label = {
-        "realtime_tick": "当前价",
-        "latest_completed_1m_close": "最近1分钟收盘价",
-        "latest_completed_5m_close": "最近5分钟收盘价",
-    }.get(price_source, "最近已完成K线收盘价")
-    price_text = f"{price_label}：{price:.3f}" if price > 0 and isfinite(price) else "当前价：暂不可用"
-    price_at = _render_notification_time(getattr(event, "price_observed_at", ""))
-    if price_source == "realtime_tick" and price_at != "暂不可用":
-        price_text += f"（获取 {price_at}）"
-    if side in {"buy", "sell"}:
-        try:
-            anchor_price = float(getattr(event, "structure_anchor_price", 0) or 0)
-            defense_price = float(getattr(event, "structure_invalidation_price", 0) or 0)
-        except (TypeError, ValueError):
-            anchor_price = 0.0
-            defense_price = 0.0
-        anchor_text = (
-            f"锚点：{anchor_price:.3f}"
-            if anchor_price > 0 and isfinite(anchor_price)
-            else "锚点：暂不可用"
-        )
-        if anchor_price > 0 and isfinite(anchor_price) and price > 0 and isfinite(price):
-            anchor_text += f"（{(price - anchor_price) / anchor_price:+.2%}）"
-        defense_text = (
-            f"防守位：{defense_price:.3f}"
-            if defense_price > 0 and isfinite(defense_price)
-            else "防守位：暂不可用"
-        )
-        if defense_price > 0 and isfinite(defense_price):
-            defense_text += "（跌破买入结构失效）" if side == "buy" else "（突破卖出结构失效）"
-        price_text += f"｜{anchor_text}｜{defense_text}"
-    parts.append("价格：" + price_text)
-
     if side in {"buy", "sell"}:
         parts.append(_notification_position_line(event))
-        time_parts = [
+        timeline_items: list[tuple[str, object]] = [
             (
-                "5分钟操作确认 "
-                + _render_notification_time(
-                    getattr(event, "setup_confirmed_time", "") or confirmed_time
-                )
+                "5分钟操作确认",
+                getattr(event, "setup_confirmed_time", "") or confirmed_time,
             )
             if segment_update
-            else f"操作确认 {_render_notification_time(confirmed_time)}"
+            else ("操作确认", confirmed_time)
         ]
-        rendered_signal_time = _render_notification_time(signal_time)
         if segment_update:
-            time_parts.append(f"1分钟定位可用 {rendered_signal_time}")
-        elif rendered_signal_time != _render_notification_time(confirmed_time):
-            time_parts.append(f"信号可用 {rendered_signal_time}")
-        time_parts.append(
-            f"监听发现 {_render_notification_time(event_detected_at)}（延迟 {delay_text}）"
-        )
-        parts.append("时间：" + "｜".join(time_parts))
-
-        segment_point = str(getattr(event, "segment_difference_point_type", "") or "")
-        if segment_point:
-            segment_label = _POINT_LABELS.get(segment_point, f"结构点（{segment_point}）")
-            divergence_label = _DIVERGENCE_LABELS.get(
-                str(getattr(event, "segment_difference_divergence_kind", "") or "")
-            )
-            if divergence_label:
-                segment_label = f"{segment_label}（{divergence_label}）"
-            # 递归层级属于结构引擎内部血缘，不是 1 分钟主交易级别。
-            # 对外只说明它是 5 分钟操作点的区间套精确定位，避免再次把
-            # 1 分钟结构血缘误读成独立交易信号。
-            segment_text = f"1分钟区间套定位：{segment_label}"
-        else:
-            segment_text = "1分钟区间套定位未完成（不影响5分钟主信号）"
-        big_dir = _DIRECTION_LABELS.get(
-            str(getattr(event, "big_dir", "") or ""),
-            str(getattr(event, "big_dir", "") or "未知"),
-        )
-        parts.append(
-            f"依据：{op_level}{point_label}（L{recursive_level}）｜"
-            f"{big_level}{big_dir}｜{segment_text}"
-        )
-        setup_lock_state = str(
-            getattr(event, "setup_lock_state", "unknown") or "unknown"
-        )
-        if setup_lock_state == "locked":
-            parts.append("结构状态：5分钟操作确认已完成｜末端线段审计锁已完成")
-        elif setup_lock_state == "pending":
-            parts.append(
-                "结构状态：5分钟操作确认已完成｜末端线段审计锁待完成；"
-                "后续K线仍须持续复核"
-            )
-        else:
-            parts.append(
-                "结构状态：5分钟操作确认已记录｜末端线段审计锁状态未保存；"
-                "必须结合当前图表复核"
-            )
+            timeline_items.append(("1分钟定位可用", signal_time))
+        elif _notification_datetime(signal_time) != _notification_datetime(
+            confirmed_time
+        ):
+            timeline_items.append(("信号可用", signal_time))
+        timeline_items.append(("监听发现", event_detected_at))
+        time_parts = _notification_timeline_parts(timeline_items)
+        time_parts[-1] += f"（延迟 {delay_text}）"
+        parts.append("时效：" + "｜".join(time_parts))
     else:
-        parts.append(
-            f"时间：结构确认 {_render_notification_time(confirmed_time)}｜"
-            f"监听发现 {_render_notification_time(event_detected_at)}"
+        time_parts = _notification_timeline_parts(
+            (("结构确认", confirmed_time), ("监听发现", event_detected_at))
         )
+        parts.append("时效：" + "｜".join(time_parts))
         big_dir = _DIRECTION_LABELS.get(
             str(getattr(event, "big_dir", "") or ""),
             str(getattr(event, "big_dir", "") or "未知"),
         )
-        parts.append(f"依据：{big_level}{big_dir}｜环境风险提示（不是买卖点）")
+        parts.append(f"背景：{big_level}{big_dir}｜环境风险提示（不是买卖点）")
 
+    parts.append(
+        "说明：仅供人工复核；如需操作，请在其他交易软件手工决定并完成；"
+        "系统不会自动下单"
+    )
     return "\n".join(parts)
 
 
@@ -1707,29 +1716,6 @@ class HoldingGroupMonitorService:
         self._last_result: dict[str, object] | None = None
         self._admitted_identities: frozenset[tuple[str, str]] = frozenset()
         self._log = fun.get_logger()
-
-    def _record_review_events(
-        self,
-        market: str,
-        events: Sequence[object],
-        *,
-        status: str,
-        reason: str | None = None,
-    ) -> bool:
-        if self._review_inbox is None:
-            return True
-        recorded_at = self._now()
-        documents = [
-            monitor_notification_event(
-                market=market,
-                event=event,
-                delivery_status=status,
-                delivery_reason=reason,
-                recorded_at=recorded_at,
-            )
-            for event in events
-        ]
-        return self._record_review_documents(documents)
 
     def _record_review_documents(
         self,

@@ -36,6 +36,8 @@ from chanlun.market import Market
 
 _PNG_HEADER = b"\x89PNG\r\n\x1a\n"
 _ARTIFACT_RE = re.compile(r"^[0-9a-f]{64}$")
+_CHART_PRESENTATION_REVISION = "macd-and-macd-htf-v2"
+_REQUIRED_INDICATOR_STUDIES = ("MACD", "MACD_HTF")
 
 
 class SignedAlertChartStore:
@@ -240,7 +242,7 @@ class _CanonicalScreeningAlertState(StrictPhysicalMonitorState):
 
 
 class AlertChartImageService:
-    """基于严格实时核心生成不可变的 30m、5m、1m 复核图。"""
+    """生成同时包含标准 MACD 与 MACD_HTF 的不可变多周期复核图。"""
 
     def __init__(
         self,
@@ -320,11 +322,13 @@ class AlertChartImageService:
                             f"alert evidence identity incomplete for {market}:{code}"
                         )
                     evidence_artifact_key = (
-                        f"{artifact_key}:strict-evidence-bound"
+                        f"{artifact_key}:strict-evidence-bound:"
+                        f"{_CHART_PRESENTATION_REVISION}"
                     )
                     alt = (
                         f"{name} {code} 30分钟/5分钟/1分钟结构图"
-                        f"（已核验{raw.get('frequency') or '5m'}"
+                        "（含MACD与MACD_HTF；"
+                        f"已核验{raw.get('frequency') or '5m'}"
                         f"{point_type}：{signal_time}）"
                     )
                     existing_url = self.store.existing_url(
@@ -461,6 +465,11 @@ class AlertChartImageService:
                                 raise RuntimeError(
                                     "TradingView capture image is invalid"
                                 )
+                            studies = value.get("studies")
+                            if tuple(studies or ()) != _REQUIRED_INDICATOR_STUDIES:
+                                raise RuntimeError(
+                                    "TradingView capture indicator set is incomplete"
+                                )
                             validated.append(
                                 (
                                     str(value["frequency"]),
@@ -476,13 +485,21 @@ class AlertChartImageService:
                             "[notify] TradingView chart capture failed: %s",
                             type(exc).__name__,
                         )
+                        if type(exc).__name__ == "TimeoutError":
+                            # Browser images are optional for this branch. A
+                            # timeout must not start another three-frequency
+                            # native rebuild and hold the durable notification
+                            # behind image enrichment. Evidence-bound alerts
+                            # were handled by the verified strict path above.
+                            continue
                     else:
                         for frequency, label, lookback_days, png in validated:
                             url = self.store.publish(
                                 png,
                                 artifact_key=(
                                     f"{artifact_key}:tradingview-client:"
-                                    f"{frequency}:strict"
+                                    f"{frequency}:strict:"
+                                    f"{_CHART_PRESENTATION_REVISION}"
                                 ),
                             )
                             output.append(
@@ -490,7 +507,7 @@ class AlertChartImageService:
                                     "url": url,
                                     "alt": (
                                         f"{name} {code} {label}结构图"
-                                        f"（含MACD_HTF，至少{lookback_days}天）"
+                                        f"（含MACD与MACD_HTF，至少{lookback_days}天）"
                                     ),
                                 }
                             )
@@ -512,12 +529,18 @@ class AlertChartImageService:
                 png = self._renderer(charts)
                 url = self.store.publish(
                     png,
-                    artifact_key=f"{artifact_key}:strict-static-fallback",
+                    artifact_key=(
+                        f"{artifact_key}:strict-static-fallback:"
+                        f"{_CHART_PRESENTATION_REVISION}"
+                    ),
                 )
                 output.append(
                     {
                         "url": url,
-                        "alt": f"{name} {code} 30分钟/5分钟/1分钟结构图",
+                        "alt": (
+                            f"{name} {code} 30分钟/5分钟/1分钟结构图"
+                            "（含MACD与MACD_HTF）"
+                        ),
                     }
                 )
         return output

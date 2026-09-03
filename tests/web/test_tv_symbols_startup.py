@@ -70,6 +70,8 @@ def test_tv_symbols_resolves_from_warm_cache_without_touching_exchange(
     assert payload["description"] == name
     assert payload["pricescale"] == expected_pricescale
     assert payload["supported_resolutions"] == ["1", "5", "30", "1D", "1W", "1M"]
+    assert payload["session"] == "0929-0930,0930-1130,1300-1500"
+    assert payload["timezone"] == "Asia/Shanghai"
 
 
 def test_tv_symbols_cache_miss_preserves_live_exchange_fallback(
@@ -124,7 +126,14 @@ def test_tv_symbols_non_a_miss_never_calls_expanding_stock_info(
 
     assert payload["ticker"] == "hk:HK.00700"
     assert payload["description"] == "HK.00700"
+    assert payload["session"] == "0930-1200,1300-1600"
     assert calls == {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}
+
+
+def test_equity_sessions_do_not_claim_closed_hours_are_missing_bars() -> None:
+    assert tv_module.market_session["a"] == "0929-0930,0930-1130,1300-1500"
+    assert tv_module.market_session["hk"] == "0930-1200,1300-1600"
+    assert tv_module.market_session["us"] == "0930-1600"
 
 
 def test_cached_symbol_lookup_returns_a_defensive_copy() -> None:

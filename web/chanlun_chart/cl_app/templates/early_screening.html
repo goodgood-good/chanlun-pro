@@ -45,21 +45,21 @@
           <p class="es-sr-only">板块优先 · 只看严格结构 · 手工交易</p>
           <h1 id="es-title">缠论提前选股 · 实时盯盘与个股分析</h1>
           <p class="es-hero__intro">
-            收盘后生成候选，盘中跟踪结构变化并发送技术买卖信号；由人最终判断，在其他交易软件手工操作，不会自动下单。
+            收盘生成候选，盘中增量更新结构；点击标的即可同步查看四周期图，所有交易均由人工确认。
             <span class="es-sr-only">提前选股固定使用唯一严格笔和各物理周期的完整递归中枢证据。</span>
           </p>
         </div>
         <aside class="es-boundary-card" aria-label="系统边界">
           <strong>手工交易辅助</strong>
-          <span>信号通知 · 无委托 · 人工确认</span>
-          <span class="es-sr-only">不连接券商委托，不承诺收益或胜率。</span>
+          <span>仅提示 · 不下单</span>
+          <span class="es-sr-only">信号通知 · 无委托 · 人工确认。不连接券商委托，不承诺收益或胜率。</span>
           <a href="{{ url_for('decision_support.research_audit') }}">审计证据</a>
         </aside>
       </section>
 
       <section class="es-mode-switch" aria-label="选股工作模式">
         <div role="tablist" aria-label="选择提前选股模式">
-          <button type="button" role="tab" data-screening-mode="human-review" aria-selected="false">
+          <button type="button" role="tab" data-screening-mode="human-review" aria-selected="false" tabindex="-1">
             人工复核选股
           </button>
           <button type="button" role="tab" data-screening-mode="live" aria-selected="true" class="is-active">
@@ -120,8 +120,7 @@
         <article class="is-segment"><span>当前 1 分钟区间套定位</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">仅统计当前5分钟操作候选中，同向1分钟区间套已经形成且精确位置仍有效的买卖点；不累计历史证据</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看当前定位</button></article>
         <article class="is-action"><span>当前精确执行就绪</span><strong id="es-precise-count">0</strong><small>在1分钟完成精确定位后，还必须通过买入/卖出操作许可与风险门；1分钟不生成独立交易信号</small></article>
       </section>
-      <details class="es-summary-details">
-        <summary>其他统计</summary>
+      <section class="es-secondary-stats" hidden aria-hidden="true">
         <div>
           <span>当前候选范围 <b id="es-signal-count">0</b></span>
           <span>板块真实触发 <b id="es-sector-trigger-count">0</b></span>
@@ -132,25 +131,31 @@
           <span>提前候选分布 <b id="es-candidate-point-distribution">一买 0 · 一卖 0 · 二买 0 · 二卖 0 · 三买 0 · 三卖 0</b></span>
           <span>失效与结束状态仅保留在人工复核历史，不进入当前选股</span>
         </div>
-      </details>
-
-      <section class="es-holdings" aria-labelledby="es-holdings-title">
-        <header>
-          <div>
-            <p class="es-eyebrow">本地分组 · 优先监听</p>
-            <h2 id="es-holdings-title">人工关注组盯盘</h2>
-            <p id="es-holdings-status">读取行情页人工维护的优先关注分组，仅代表监听范围。</p>
-          </div>
-          <a class="es-button es-button--secondary" href="/">管理分组</a>
-        </header>
-        <dl class="es-holdings-summary" aria-label="人工关注监控摘要">
-          <div><dt>人工声明</dt><dd id="es-holdings-declared">0</dd></div>
-          <div><dt>主动扫描</dt><dd id="es-holdings-monitored">0</dd></div>
-          <div><dt>休市/暖机/异常</dt><dd id="es-holdings-unsupported">0</dd></div>
-        </dl>
-        <div id="es-holdings-list" class="es-holdings-list" role="list" aria-live="polite"></div>
-        <p id="es-holdings-empty" class="es-holdings-empty">人工关注组尚无标的；可在行情页把需要优先监听的标的加入该分组。</p>
       </section>
+
+      <details class="es-holdings" aria-labelledby="es-holdings-title">
+        <summary>
+          <span class="es-holdings__identity">
+            <span class="es-eyebrow">优先监听</span>
+            <strong id="es-holdings-title" role="heading" aria-level="2">人工关注组</strong>
+            <span id="es-holdings-status">读取人工维护的优先关注分组。</span>
+          </span>
+          <span class="es-holdings-summary" role="group" aria-label="人工关注监控摘要">
+            <span><small>人工</small><b id="es-holdings-declared">0</b></span>
+            <span><small>扫描</small><b id="es-holdings-monitored">0</b></span>
+            <span><small>待机</small><b id="es-holdings-unsupported">0</b></span>
+          </span>
+          <span class="es-holdings__toggle" aria-hidden="true"><span>展开</span><span>收起</span></span>
+        </summary>
+        <div class="es-holdings__body">
+          <header>
+            <p>仅表示优先监听范围，不计入买卖点信号。</p>
+            <a class="es-button es-button--secondary" href="/zixuan_group/a">管理自选分组</a>
+          </header>
+          <ul id="es-holdings-list" class="es-holdings-list" aria-live="polite"></ul>
+          <p id="es-holdings-empty" class="es-holdings-empty">人工关注组尚无标的；可在行情页把需要优先监听的标的加入该分组。</p>
+        </div>
+      </details>
 
       <section id="hr-workspace" class="hr-workspace" aria-labelledby="hr-title">
         <header class="hr-header">
@@ -308,7 +313,7 @@
         </div>
       </section>
 
-      <section id="es-live-workspaces" class="es-workspaces" aria-label="提前选股工作台">
+      <section id="es-live-workspaces" class="es-workspaces" data-signal-list-open="true" aria-label="提前选股工作台">
         <aside class="es-workspace es-sector-workspace" data-workspace="sector" aria-labelledby="es-sector-title">
           <header class="es-workspace__header">
             <div>
@@ -317,13 +322,13 @@
             </div>
             <button id="es-sector-expand" class="es-text-button" type="button" aria-expanded="false" hidden>显示全部板块</button>
           </header>
-          <p class="es-workspace__help">按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。展示顺序固定为：有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序。板块行右侧数字是该板块当前的5分钟结构线索数；“全部板块”统计全板块结构线索，不受右侧队列筛选影响，也不包含独立监听占位。板块选择只筛 A 股，美股线索不参与板块门且会继续保留。</p>
           <p id="es-sector-catalog-status" class="es-sector-catalog-status" data-state="loading">正在读取板块目录。</p>
+          <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
+
           <details class="es-rule-note">
             <summary>规则与数据口径</summary>
-            <p>板块按点时成分的中长期相对结构排序，不按当日涨跌追强；日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线。日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟操作确认决定主信号和首报，1分钟同向区间套决定是否进入精确执行候选；结构、复权或行情证据失真时关闭操作资格。</p>
+            <p>板块按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。板块按点时成分的中长期相对结构排序，有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序，不按当日涨跌追强。板块数字仅统计当前5分钟结构线索；板块选择只筛 A 股，美股线索不参与板块门且会继续保留。日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线；日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟操作确认决定主信号和首报，1分钟同向区间套决定是否进入精确执行候选；结构、复权或行情证据失真时关闭操作资格。</p>
           </details>
-          <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
 
           <details class="es-global-filter-drawer">
             <summary>高级筛选 <span id="es-filter-summary">全部市场 · 全部来源 · 全部状态 · 全部买卖点</span></summary>
@@ -342,7 +347,7 @@
                 <div class="es-filter-buttons">
                   <button class="is-active" type="button" data-signal-source="all" aria-pressed="true">全部来源</button>
                   <button type="button" data-signal-source="screening" aria-pressed="false">提前选股</button>
-                  <button type="button" data-signal-source="notification" aria-pressed="false">实时通知</button>
+                  <button type="button" data-signal-source="notification" aria-pressed="false">今日实时通知</button>
                   <button type="button" data-signal-source="attention" aria-pressed="false">人工关注组</button>
                   <button type="button" data-signal-source="watchlist" aria-pressed="false">关注监听</button>
                 </div>
@@ -412,20 +417,26 @@
           </details>
         </aside>
 
-        <section class="es-workspace es-signal-workspace" data-workspace="signals" aria-labelledby="es-signal-title">
-          <header class="es-workspace__header">
+        <section id="es-signal-workspace" class="es-workspace es-signal-workspace" data-workspace="signals" aria-labelledby="es-signal-title" aria-hidden="false">
+          <header class="es-workspace__header es-signal-header">
             <div>
               <p class="es-eyebrow">5m结构线索 + 独立监听 · 人工复核</p>
               <h2 id="es-signal-title">买卖点与监听队列</h2>
+              <p class="es-workspace-subtitle">按环境等级与复核优先级排序，选择标的后右侧同步切换。</p>
             </div>
-            <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
+            <span class="es-signal-header__actions">
+              <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
+              <a class="es-workspace-jump" href="#es-chart-workspace">查看图表</a>
+            </span>
           </header>
-          <p class="es-workspace__help">点击标的，右侧四周期图同步切换。队列按人工复核优先级、生命周期、板块结构名次、买卖点类型和代码稳定排序；有一二三类标记的才计入5m结构线索，“等待买卖点 / 实时监听”只是关注范围，不计入信号或通知。“全部线索”会清除市场、来源、板块、定位和买卖点等全部队列筛选。</p>
-
           <div class="es-signal-channel-bar" role="group" aria-label="买卖点与监听队列快捷筛选">
-            <strong>队列通道</strong>
-            <div class="es-filter-buttons es-point-filters">
+            <span class="es-signal-filter-label">范围</span>
+            <div class="es-filter-buttons es-point-filters es-signal-channel-primary">
               <button id="es-show-all-signals" class="is-active" type="button" aria-pressed="true" data-count="0">全部线索</button>
+              <button id="es-show-today-notifications" type="button" data-signal-source="notification" aria-pressed="false" data-count="0">今日实时通知</button>
+            </div>
+            <span class="es-signal-filter-label">类型</span>
+            <div class="es-filter-buttons es-point-filters es-signal-type-filters">
               <button type="button" data-point-type="1buy" aria-pressed="false">一买</button>
               <button type="button" data-point-type="2buy" aria-pressed="false">二买</button>
               <button type="button" data-point-type="3buy" aria-pressed="false">三买</button>
@@ -435,14 +446,20 @@
             </div>
           </div>
 
-          <div id="es-us-monitor" class="es-us-monitor-compact" aria-labelledby="es-us-monitor-title">
-            <div class="es-us-monitor-compact__header">
+          <label class="es-search">
+            <span>搜索</span>
+            <input id="es-signal-search" type="search" autocomplete="off" placeholder="输入名称、代码、市场或板块" />
+          </label>
+
+          <details id="es-us-monitor" class="es-us-monitor-compact" aria-labelledby="es-us-monitor-title">
+            <summary class="es-us-monitor-compact__header">
               <span class="es-us-monitor-compact__title"><i id="es-us-monitor-health-panel" data-health="loading" aria-hidden="true"></i><strong id="es-us-monitor-title">美股实时监听</strong></span>
               <span class="es-us-monitor-compact__actions">
                 <b id="es-us-monitor-health" class="es-us-monitor-compact__health">正在连接</b>
                 <a href="/?market=us">行情</a>
+                <span class="es-us-monitor-compact__disclosure">详情</span>
               </span>
-            </div>
+            </summary>
             <div class="es-us-monitor-compact__summary">
               <p class="es-us-monitor-compact__updated"><span>最近完成</span><time id="es-us-monitor-updated">等待首次完成</time></p>
               <dl class="es-us-monitor-compact__metrics" aria-label="美股实时监听摘要">
@@ -453,12 +470,7 @@
               </dl>
             </div>
             <small id="es-us-monitor-status" class="es-sr-only" aria-live="polite">正在读取监听状态。</small>
-          </div>
-
-          <label class="es-search">
-            <span>搜索</span>
-            <input id="es-signal-search" type="search" autocomplete="off" placeholder="股票代码、名称、市场或板块" />
-          </label>
+          </details>
 
           <div id="es-empty" class="es-empty" hidden>
             <strong>当前条件下没有可展示的结构信号</strong>
@@ -474,6 +486,7 @@
           data-current-layout="focus"
           data-layout="focus"
           data-focused-frequency="5m"
+          data-theater-picker-open="true"
           aria-labelledby="es-chart-title"
         >
           <header class="es-workspace__header es-chart-header">
@@ -481,32 +494,54 @@
               <p class="es-eyebrow">行情 · 缠论 · 图表</p>
               <h2 id="es-chart-title">多周期行情与结构证据</h2>
             </div>
-            <a data-chart-workbench class="es-button es-button--link" href="/" target="_blank" rel="noopener">打开完整画图工作台</a>
+            <span class="es-chart-header__actions">
+              <a class="es-workspace-jump" href="#es-signal-workspace">返回列表</a>
+              <a data-chart-workbench class="es-button es-button--link" href="/" target="_blank" rel="noopener">打开完整画图工作台</a>
+            </span>
           </header>
-          <p class="es-workspace__help">图表始终跟随左侧高亮标的。<span class="es-sr-only">实时模式图表会随市场继续更新，只用于当前盯盘，不可作为历史因果复核；需要按候选首次可见时刻审查时，请切换“人工复核选股”。</span></p>
+          <p class="es-sr-only">图表始终跟随左侧高亮标的。实时模式图表会随市场继续更新，只用于当前盯盘，不可作为历史因果复核；需要按候选首次可见时刻审查时，请切换“人工复核选股”。</p>
 
           <div data-chart-content class="es-chart-content">
             <div class="es-chart-toolbar">
-              <div class="es-focus-switch" role="group" aria-label="主图周期">
-                <span>主图</span>
-                <button type="button" data-focus-frequency="d" aria-pressed="false">日线</button>
-                <button type="button" data-focus-frequency="30m" aria-pressed="false">30分钟</button>
-                <button class="is-active" type="button" data-focus-frequency="5m" aria-pressed="true">5分钟</button>
-                <button type="button" data-focus-frequency="1m" aria-pressed="false">1分钟</button>
+              <div class="es-chart-view-controls">
+                <div class="es-layout-switch" role="radiogroup" aria-label="图表布局">
+                  <span>布局</span>
+                  <button class="is-active" type="button" role="radio" data-layout="focus" aria-checked="true" aria-pressed="true">单图</button>
+                  <button type="button" role="radio" data-layout="dual" aria-checked="false" aria-pressed="false" tabindex="-1">双图</button>
+                  <button type="button" role="radio" data-layout="triple" aria-checked="false" aria-pressed="false" tabindex="-1">三图</button>
+                  <button type="button" role="radio" data-layout="quad" aria-checked="false" aria-pressed="false" tabindex="-1">四图</button>
+                </div>
+                <div class="es-focus-switch" role="group" aria-label="重点查看周期">
+                  <span>重点</span>
+                  <button type="button" data-focus-frequency="1m" aria-pressed="false">1m</button>
+                  <button class="is-active" type="button" data-focus-frequency="5m" aria-pressed="true">5m</button>
+                  <button type="button" data-focus-frequency="30m" aria-pressed="false">30m</button>
+                  <button type="button" data-focus-frequency="d" aria-pressed="false">日线</button>
+                </div>
               </div>
               <div class="es-chart-actions">
+                <button
+                  class="es-signal-list-toolbar-toggle"
+                  type="button"
+                  data-theater-picker-toggle
+                  data-signal-list-toggle
+                  aria-controls="es-signal-workspace es-theater-signal-picker"
+                  aria-expanded="true"
+                  aria-label="收起买卖点股票列表"
+                  title="收起买卖点股票列表"
+                >
+                  <span class="es-signal-list-toggle__icon" aria-hidden="true"></span>
+                  <span data-theater-picker-label data-signal-list-label>收起列表</span>
+                </button>
+                <button class="es-theater-toolbar-exit" type="button" data-theater-toolbar-exit>
+                  退出影院
+                </button>
                 <button type="button" data-evidence-toggle aria-controls="es-structure-evidence" aria-expanded="false" disabled>
                   结构证据 <span data-evidence-count>0</span>
                 </button>
                 <details class="es-chart-display-settings">
-                  <summary>显示设置</summary>
+                  <summary>更多</summary>
                   <div>
-                    <div class="es-layout-switch" role="radiogroup" aria-label="图表布局">
-                      <span>对照</span>
-                      <button class="is-active" type="button" role="radio" data-layout="focus" aria-checked="true" aria-pressed="true">聚焦</button>
-                      <button type="button" role="radio" data-layout="dual" aria-checked="false" aria-pressed="false">双周期</button>
-                      <button type="button" role="radio" data-layout="triple" aria-checked="false" aria-pressed="false">三周期</button>
-                    </div>
                     <button type="button" data-chart-size-reset title="恢复当前工作台的响应式默认尺寸">重置尺寸</button>
                     <button type="button" data-theater-toggle aria-controls="es-chart-workspace" aria-pressed="false" disabled>
                       <span data-theater-label>影院模式</span>
@@ -514,49 +549,6 @@
                   </div>
                 </details>
               </div>
-            </div>
-
-            <div class="es-analysis-grid">
-              <div class="es-chart-stage">
-                <div class="es-chart-grid" data-chart-grid>
-                  <article class="es-chart-card is-d" data-frequency="d">
-                    <header><strong>日线高级别环境</strong><a data-chart-link="d" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                    <iframe data-chart-frame="d" title="日线行情与缠论图" loading="lazy" src="about:blank"></iframe>
-                  </article>
-                  <article class="es-chart-card is-30m" data-frequency="30m">
-                    <header><strong>30m 大级别环境</strong><a data-chart-link="30m" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                    <iframe data-chart-frame="30m" title="30分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
-                  </article>
-                  <article class="es-chart-card is-5m" data-frequency="5m">
-                    <header><strong>5m 可操作结构</strong><a data-chart-link="5m" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                    <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
-                  </article>
-                  <article class="es-chart-card is-1m" data-frequency="1m">
-                    <header><strong>1m 区间套精确定位</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                    <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
-                  </article>
-                  <div class="es-chart-resizer is-columns" data-chart-resizer="columns" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整图表左右比例" title="拖动调节左右比例，双击恢复默认"></div>
-                  <div class="es-chart-resizer is-rows" data-chart-resizer="rows" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整辅助图上下比例" title="拖动调节上下比例，双击恢复默认"></div>
-                </div>
-                <div class="es-chart-resizer is-height" data-chart-resizer="height" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整图表区高度" title="拖动调节图表高度，双击恢复默认"><span aria-hidden="true">拖动调节高度</span></div>
-                <p class="es-sr-only" data-chart-resize-status aria-live="polite"></p>
-              </div>
-
-              <aside id="es-structure-evidence" class="es-evidence-panel" data-evidence-panel aria-label="结构证据与风险" aria-hidden="true">
-                <header>
-                  <div><span>决策证据</span><strong>结构证据与风险</strong><small>成立 · 缺失 · 否决 · 重评</small></div>
-                  <button type="button" data-evidence-close aria-label="关闭结构证据">关闭</button>
-                </header>
-                <section class="is-established"><h4>成立证据</h4><ul data-evidence-group="established"></ul></section>
-                <section class="is-missing"><h4>尚缺条件</h4><ul data-evidence-group="missing"></ul></section>
-                <section class="is-blocking"><h4>否决 / 冲突</h4><ul data-evidence-group="blocking"></ul></section>
-                <section class="is-next"><h4>下一确认条件</h4><ul data-evidence-group="next"></ul></section>
-                <section class="is-risk"><h4>风险边界</h4><ul data-evidence-group="risk"></ul></section>
-                <details>
-                  <summary>查看原始证据代码</summary>
-                  <ul data-raw-evidence></ul>
-                </details>
-              </aside>
             </div>
 
             <section class="es-decision-deck" aria-label="当前信号决策驾驶舱">
@@ -574,11 +566,16 @@
                 <strong data-decision-title aria-live="polite">数据未知</strong>
                 <p data-decision-detail>等待结构事实</p>
               </div>
-              <dl class="es-decision-risk">
-                <div><dt>结构防守价</dt><dd data-selected-stop>—</dd></div>
-                <div><dt>5m 失效价</dt><dd data-decision-invalidation>—</dd></div>
-                <div><dt>结构风险参考</dt><dd data-selected-risk>—</dd></div>
-              </dl>
+              <div class="es-decision-risk-cluster">
+                <dl class="es-decision-risk">
+                  <div><dt>结构防守价</dt><dd data-selected-stop>—</dd></div>
+                  <div><dt>5m 失效价</dt><dd data-decision-invalidation>—</dd></div>
+                </dl>
+                <details class="es-decision-risk-reference">
+                  <summary>结构风险参考</summary>
+                  <p data-selected-risk>—</p>
+                </details>
+              </div>
             </section>
 
             <nav class="es-period-path" aria-label="日线到1分钟真实周期结构链">
@@ -610,6 +607,84 @@
                 <em data-period-boundary="1m">只作定位；不能独立授权买卖</em>
               </button>
             </nav>
+
+            <div class="es-analysis-grid">
+              <aside
+                id="es-theater-signal-picker"
+                class="es-theater-signal-picker"
+                data-theater-signal-picker
+                aria-label="影院模式买卖点股票列表"
+                aria-hidden="true"
+              >
+                <header>
+                  <div class="es-theater-signal-picker__heading">
+                    <strong>买卖点股票</strong>
+                    <span class="es-theater-signal-picker__count" data-theater-signal-count>0 / 0</span>
+                  </div>
+                </header>
+                <div class="es-filter-buttons es-theater-point-filters" role="group" aria-label="影院模式买卖方向">
+                  <button class="is-active" type="button" data-theater-point-type="all" aria-pressed="true">全部</button>
+                  <button type="button" data-theater-point-type="buy" aria-pressed="false">买点</button>
+                  <button type="button" data-theater-point-type="sell" aria-pressed="false">卖点</button>
+                </div>
+                <label class="es-theater-signal-search">
+                  <span class="es-sr-only">搜索影院模式买卖点股票</span>
+                  <input data-theater-signal-search type="search" autocomplete="off" placeholder="搜索名称、代码或板块" />
+                </label>
+                <p class="es-theater-signal-empty" data-theater-signal-empty hidden>当前队列中没有匹配的买卖点股票</p>
+                <div
+                  class="es-signal-list es-theater-signal-list"
+                  data-theater-signal-list
+                  role="list"
+                  aria-label="可切换的买卖点股票"
+                ></div>
+              </aside>
+              <div class="es-chart-stage">
+                <div class="es-chart-grid" data-chart-grid>
+                  <article class="es-chart-card is-1m" data-frequency="1m">
+                    <header><strong>1m 区间套精确定位</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <div class="es-chart-loading" data-chart-loading role="status" aria-live="polite" hidden></div>
+                    <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="eager" src="about:blank"></iframe>
+                  </article>
+                  <article class="es-chart-card is-5m" data-frequency="5m">
+                    <header><strong>5m 可操作结构</strong><a data-chart-link="5m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <div class="es-chart-loading" data-chart-loading role="status" aria-live="polite" hidden></div>
+                    <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="eager" src="about:blank"></iframe>
+                  </article>
+                  <article class="es-chart-card is-30m" data-frequency="30m">
+                    <header><strong>30m 大级别环境</strong><a data-chart-link="30m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <div class="es-chart-loading" data-chart-loading role="status" aria-live="polite" hidden></div>
+                    <iframe data-chart-frame="30m" title="30分钟行情与缠论图" loading="eager" src="about:blank"></iframe>
+                  </article>
+                  <article class="es-chart-card is-d" data-frequency="d">
+                    <header><strong>日线高级别环境</strong><a data-chart-link="d" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <div class="es-chart-loading" data-chart-loading role="status" aria-live="polite" hidden></div>
+                    <iframe data-chart-frame="d" title="日线行情与缠论图" loading="eager" src="about:blank"></iframe>
+                  </article>
+                  <div class="es-chart-resizer is-columns" data-chart-resizer="columns" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整图表左右比例" title="拖动调节左右比例，双击恢复默认"></div>
+                  <div class="es-chart-resizer is-rows" data-chart-resizer="rows" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整辅助图上下比例" title="拖动调节上下比例，双击恢复默认"></div>
+                </div>
+                <div class="es-chart-resizer is-height" data-chart-resizer="height" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整图表区高度" title="拖动调节图表高度，双击恢复默认"><span aria-hidden="true">拖动调节高度</span></div>
+                <p class="es-sr-only" data-chart-resize-status aria-live="polite"></p>
+              </div>
+
+              <aside id="es-structure-evidence" class="es-evidence-panel" data-evidence-panel aria-label="结构证据与风险" aria-hidden="true">
+                <header>
+                  <div><span>决策证据</span><strong>结构证据与风险</strong><small>成立 · 缺失 · 否决 · 重评</small></div>
+                  <button type="button" data-evidence-close aria-label="关闭结构证据">关闭</button>
+                </header>
+                <section class="is-established"><h4>成立证据</h4><ul data-evidence-group="established"></ul></section>
+                <section class="is-missing"><h4>尚缺条件</h4><ul data-evidence-group="missing"></ul></section>
+                <section class="is-blocking"><h4>否决 / 冲突</h4><ul data-evidence-group="blocking"></ul></section>
+                <section class="is-next"><h4>下一确认条件</h4><ul data-evidence-group="next"></ul></section>
+                <section class="is-risk"><h4>风险边界</h4><ul data-evidence-group="risk"></ul></section>
+                <details>
+                  <summary>查看原始证据代码</summary>
+                  <ul data-raw-evidence></ul>
+                </details>
+              </aside>
+            </div>
+
           </div>
         </section>
       </section>

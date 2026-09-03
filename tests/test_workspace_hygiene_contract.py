@@ -25,6 +25,36 @@ RESEARCH_SAMPLES = {
         32,
     ),
 }
+RETIRED_STATIC_ASSETS = (
+    "web/chanlun_chart/cl_app/static/css/admin.css",
+    "web/chanlun_chart/cl_app/static/css/login.css",
+    "web/chanlun_chart/cl_app/static/css/layui.css.map",
+    "web/chanlun_chart/cl_app/static/echarts.min.js",
+    "web/chanlun_chart/cl_app/static/layui.js.map",
+)
+RETIRED_DEAD_SYMBOLS = {
+    "src/chanlun/core/strict_structure/strength.py": (
+        "comparison_leg_from_units",
+    ),
+    "src/chanlun/decision_support/trading_system/human_review_screening.py": (
+        "sector_ranking_review_evidence_from_candidate_audit",
+    ),
+    "src/chanlun/decision_support/trading_system/qmt_same_base_stream.py": (
+        "_expected_native_times",
+        "_naive_times",
+    ),
+    "src/chanlun/exchange/qmt_screening_sector_source.py": ("_load_fact_frame",),
+    "web/chanlun_chart/cl_app/services/candidate_chart_cache_warm.py": (
+        "candidate_chart_cache_warm_metrics",
+    ),
+    "web/chanlun_chart/cl_app/services/holding_group_monitor.py": (
+        "_record_review_events",
+    ),
+    "web/chanlun_chart/cl_app/services/stock_list.py": (
+        "PRELOAD_PARALLEL_WORKERS",
+    ),
+    "src/chanlun/config.py.demo": ("US_PREWARM_ZIXUAN_ONLY",),
+}
 
 
 def _git(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -42,6 +72,17 @@ def test_generated_lesson_corpus_remains_ignored() -> None:
     ignored = _git("check-ignore", "-v", "--", corpus_probe)
     assert ignored.returncode == 0
     assert "/audit/chanlun_lesson_corpus/" in ignored.stdout
+
+
+def test_retired_unreferenced_assets_and_symbols_remain_absent() -> None:
+    assert [path for path in RETIRED_STATIC_ASSETS if (ROOT / path).exists()] == []
+    offenders = []
+    for path, symbols in RETIRED_DEAD_SYMBOLS.items():
+        source = (ROOT / path).read_text(encoding="utf-8-sig")
+        offenders.extend(
+            f"{path}:{symbol}" for symbol in symbols if symbol in source
+        )
+    assert offenders == []
 
 
 def test_historical_backtest_defaults_to_fixed_small_research_cohort() -> None:
@@ -163,6 +204,9 @@ def test_local_cleanup_is_dry_run_by_default_and_path_bounded() -> None:
     assert '@{ path = "output"; category = "generated_output" }' in source
     assert '@{ path = "tmp"; category = "temporary_artifact" }' in source
     assert '@{ path = ".omc"; category = "agent_session_artifact" }' in source
+    assert '$_.Name -in @(".omc", ".pytest_cache", ".ruff_cache")' in source
+    assert 'Category "orphan_precompressed_static"' in source
+    assert '$sourcePath = $_.FullName.Substring(0, $_.FullName.Length - 3)' in source
     assert "rootGeneratedLogPath" in source
     assert "appGeneratedLogPath" in source
     assert '"web\\chanlun_chart\\logs"' in source

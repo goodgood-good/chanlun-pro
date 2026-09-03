@@ -36,16 +36,24 @@ from flask import (
     send_file,
     session,
 )
-from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
+from flask_login import (
+    LoginManager,
+    UserMixin,
+    current_user,
+    login_required,
+    login_user,
+    logout_user,
+)
 from flask_wtf.csrf import CSRFError, generate_csrf
 from chanlun import config, fun
 from chanlun.security import (
     get_dingtalk_keyword,
     get_dingtalk_webhook,
     get_flask_secret_key,
-    get_login_password,
+    get_login_accounts,
     get_web_host,
     is_https_enabled,
+    normalize_login_username,
     validate_web_security_config,
     verify_login_password,
 )
@@ -74,6 +82,19 @@ _TASK_HISTORY_LIMIT = 500
 _TASK_TERMINAL_STATES = {"已完成", "执行异常", "未执行", "删除作业"}
 _SHARED_RUNTIME_OWNER_LOCK = threading.RLock()
 _SHARED_RUNTIME_OWNER: object | None = None
+_MAX_NATIVE_STRUCTURE_WORKERS = 12
+_DEFAULT_NATIVE_STRUCTURE_WORKERS = min(
+    _MAX_NATIVE_STRUCTURE_WORKERS,
+    max(1, ((os.cpu_count() or 4) * 3) // 4),
+)
+_FULL_COVERAGE_BATCH_SYMBOLS = 240
+_LIVE_CANDIDATE_BATCH_SYMBOLS = 48
+
+
+def _configured_login_accounts():
+    """Resolve the configured named Web accounts."""
+
+    return get_login_accounts()
 
 
 def _human_review_historical_report() -> pathlib.Path:
@@ -130,6 +151,25 @@ def create_app(test_config=None, start_scheduler=False):
         .strip()
         .lower()
         in {"1", "true", "yes", "on"}
+    )
+    full_coverage_enabled = (
+        os.environ.get(
+            "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
+            "0",
+        )
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+    default_screening_batch_symbols = (
+        _FULL_COVERAGE_BATCH_SYMBOLS
+        if large_screening_scope_enabled and full_coverage_enabled
+        else DEFAULT_VALIDATION_COHORT_SIZE
+    )
+    default_candidate_five_minute_symbols = (
+        _LIVE_CANDIDATE_BATCH_SYMBOLS
+        if large_screening_scope_enabled
+        else DEFAULT_VALIDATION_COHORT_SIZE
     )
     app.config.from_mapping(
         WEB_HOST=get_web_host(),
@@ -195,15 +235,7 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         # 开发与策略验证默认不运行全市场预选。只有最终验收/生产运行显式设置环境变量
         # 为 1 才开启盘后完整覆盖，避免每次代码修改都重新处理五千余只标的。
-        TRADING_SCREENING_FULL_COVERAGE_ENABLED=(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
-                "0",
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        ),
+        TRADING_SCREENING_FULL_COVERAGE_ENABLED=full_coverage_enabled,
         # 仅供一次明确运维启动使用：在当前逻辑的完整快照发布前绕过常规盘后窗口。
         # 环境变量不写入项目配置，完成后即使进程仍存活也会自动恢复时段闸门。
         TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE=(
@@ -218,7 +250,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
+                str(default_candidate_five_minute_symbols),
             )
         ),
         TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS=int(
@@ -245,7 +277,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS=float(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
-                "55",
+                "58",
             )
         ),
         # 低频候选必须在下一次 1m 监听到期前停止接纳新任务；剩余标的下一轮继续。
@@ -318,19 +350,23 @@ def create_app(test_config=None, start_scheduler=False):
         )
         .strip()
         .rstrip("/"),
+        ALERT_CHART_CAPTURE_TIMEOUT_MS=int(
+            os.environ.get("CHANLUN_ALERT_CHART_CAPTURE_TIMEOUT_MS", "10000")
+        ),
         ALERT_CHART_ROOT=(config.get_data_path() / "monitor" / "dingtalk_chart_images"),
         TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
+                str(default_screening_batch_symbols),
             )
         ),
-        # 修改与策略验证阶段每轮只处理固定小样本。全市场覆盖即使已显式授权，
-        # 仍沿用独立批次上限，不能从工作进程数量反推或放大处理范围。
+        # 修改与策略验证阶段每轮仍只处理 12 只。仅在大范围和完整覆盖两个独立
+        # 授权同时开启时使用固定 240 只批次，让十二个结构进程各自保持约二十个
+        # 连续任务，摊薄每轮发布和长尾等待；盘中 5m 实时候选仍独立限制为 48 只。
         TRADING_SCREENING_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
+                str(default_screening_batch_symbols),
             )
         ),
         # Scheduling the full armed/triggered universe is cheap; the absolute
@@ -338,7 +374,11 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_PRIORITY_MAX_SYMBOLS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
+                str(
+                    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS
+                    if large_screening_scope_enabled
+                    else DEFAULT_VALIDATION_COHORT_SIZE
+                ),
             )
         ),
         TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
@@ -354,8 +394,9 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
         # 原生结构库的长期内存不会完全归还给 Windows。当前候选池约两千只，过早在
-        # 1024 次请求回收会使进程永远无法走完一次缓存轮回；默认允许覆盖完整候选池，
-        # 同时继续由 1536 MiB 工作集硬门提前回收异常增长的进程。
+        # 1024 次请求回收会使进程永远无法走完一次缓存轮回；默认允许覆盖完整候选池。
+        # 32-GiB 生产机上 1536 MiB × 12 会与 MiniQMT 一起触发系统提交耗尽，因此在
+        # 1280 MiB 的安全请求边界提前回收；显式环境变量仍可按更大主机容量调高。
         TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS",
@@ -365,20 +406,20 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_NATIVE_MAX_RSS_MB=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_NATIVE_MAX_RSS_MB",
-                "1536",
+                "1280",
             )
         ),
-        # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多四个结构进程，
-        # 另有一个独立控制进程专供逐笔、日历与轻量分类，总原生子进程上限为五。
+        # QMT 本地 RPC 以等待为主，结构进程按四分之三逻辑 CPU 扩张以覆盖等待
+        # 时间；上限十二个并保留其余 CPU 给 Web、实时监听和 QMT。另有控制进程。
         TRADING_SCREENING_STOCK_WORKERS=int(
             min(
-                4,
+                _MAX_NATIVE_STRUCTURE_WORKERS,
                 max(
                     1,
                     int(
                         os.environ.get(
                             "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
-                            str(min(4, max(1, (os.cpu_count() or 4) // 4))),
+                            str(_DEFAULT_NATIVE_STRUCTURE_WORKERS),
                         )
                     ),
                 ),
@@ -387,7 +428,7 @@ def create_app(test_config=None, start_scheduler=False):
         TRADING_SCREENING_FULL_COVERAGE_WORKERS=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_WORKERS",
-                "4",
+                str(_DEFAULT_NATIVE_STRUCTURE_WORKERS),
             )
         ),
         FORWARD_SCHEDULER_MONITOR_ENABLED=True,
@@ -550,7 +591,10 @@ def create_app(test_config=None, start_scheduler=False):
         app.config["SESSION_COOKIE_SECURE"] = True
         app.config["REMEMBER_COOKIE_SECURE"] = True
     if app.config.get("VALIDATE_WEB_SECURITY", True):
-        validate_web_security_config(app.config["WEB_HOST"], get_login_password())
+        validate_web_security_config(
+            app.config["WEB_HOST"],
+            accounts=_configured_login_accounts(),
+        )
     scheduler_enabled = bool(app.config.get("SCHEDULER_ENABLED", False))
     app.logger.addFilter(lambda record: "/static/" not in record.getMessage().lower())
 
@@ -710,7 +754,8 @@ def create_app(test_config=None, start_scheduler=False):
             return None
         try:
             validate_web_security_config(
-                request.remote_addr or "", get_login_password()
+                request.remote_addr or "",
+                accounts=_configured_login_accounts(),
             )
         except ValueError:
             return {"status": "security_misconfigured"}, 503
@@ -834,28 +879,59 @@ def create_app(test_config=None, start_scheduler=False):
             }, 400
         return render_template("login.html", emsg=error.description), 400
 
-    def _current_login_user_id() -> str:
+    from .services.account_preferences import (
+        InvalidAccountPreferences,
+        empty_preferences,
+        load_preferences_for_user,
+        save_preferences_for_user,
+        storage_scope_for_username,
+        storage_user_id_for_username,
+    )
+
+    def _login_session_user_id(account) -> str:
         secret = app.secret_key
         secret_bytes = secret if isinstance(secret, bytes) else str(secret).encode()
-        password = get_login_password() or ""
         digest = hmac.new(
             secret_bytes,
-            password.encode(),
+            (
+                "chanlun-pro-login-session\0"
+                + account.username
+                + "\0"
+                + account.password_hash
+            ).encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        return f"cl_pro:{digest}"
+        return f"cl_pro:{storage_scope_for_username(account.username)[:24]}:{digest}"
+
+    def _current_login_user_id() -> str:
+        accounts = _configured_login_accounts()
+        if not accounts:
+            return "cl_pro:unconfigured"
+        return _login_session_user_id(accounts[0])
 
     class LoginUser(UserMixin):
-        def __init__(self, user_id=None) -> None:
+        def __init__(self, account, user_id=None) -> None:
             super().__init__()
-            self.id = user_id or _current_login_user_id()
+            self.username = account.username
+            self.storage_scope = storage_scope_for_username(account.username)
+            self.storage_user_id = storage_user_id_for_username(account.username)
+            self.id = user_id or _login_session_user_id(account)
 
     @login_manager.user_loader
     def load_user(user_id):
-        expected = _current_login_user_id()
-        if not isinstance(user_id, str) or not hmac.compare_digest(user_id, expected):
+        if not isinstance(user_id, str):
             return None
-        return LoginUser(expected)
+        accounts = _configured_login_accounts()
+        for account in accounts:
+            expected = _login_session_user_id(account)
+            if hmac.compare_digest(user_id, expected):
+                return LoginUser(account, expected)
+        return None
+
+    @app.get("/favicon.ico")
+    def favicon():
+        """Serve the conventional browser favicon path without an avoidable 404."""
+        return app.send_static_file("favicon.ico")
 
     from .services.login_rate_limit import LoginRateLimiter
 
@@ -863,32 +939,54 @@ def create_app(test_config=None, start_scheduler=False):
 
     @app.route("/login", methods=["GET", "POST"])
     def login_opt():
-        configured_password = get_login_password()
+        accounts = _configured_login_accounts()
         remember_duration = app.config["REMEMBER_COOKIE_DURATION"]
 
         emsg = ""
+        submitted_username = ""
         if request.method == "POST":
             client_key = request.remote_addr or "unknown"
             if login_rate_limiter.is_blocked(client_key):
                 return render_template(
-                    "login.html", emsg="尝试次数过多，请稍后再试"
+                    "login.html",
+                    emsg="尝试次数过多，请稍后再试",
+                    login_username=request.form.get("username") or "",
                 ), 429
 
+            submitted_username = normalize_login_username(
+                request.form.get("username") or ""
+            )
+            account = next(
+                (
+                    candidate
+                    for candidate in accounts
+                    if hmac.compare_digest(candidate.username, submitted_username)
+                ),
+                None,
+            )
             password = request.form.get("password") or ""
-            if verify_login_password(password, configured_password):
+            if account is not None and verify_login_password(
+                password, account.password_hash
+            ):
                 login_rate_limiter.clear(client_key)
                 session.clear()
                 login_user(
-                    LoginUser(),
+                    LoginUser(account),
                     remember=True,
                     duration=remember_duration,
                 )
                 return redirect("/")
 
             login_rate_limiter.record_failure(client_key)
-            emsg = "密码错误"
+            emsg = "用户名或密码错误"
 
-        return render_template("login.html", emsg=emsg)
+        if not submitted_username and len(accounts) == 1:
+            submitted_username = accounts[0].username
+        return render_template(
+            "login.html",
+            emsg=emsg,
+            login_username=submitted_username,
+        )
 
     @app.route("/logout", methods=["POST"])
     @login_required
@@ -900,7 +998,55 @@ def create_app(test_config=None, start_scheduler=False):
     @app.route("/api/session")
     @login_required
     def api_session():
-        return {"ok": True, "csrf_token": generate_csrf()}
+        return {
+            "ok": True,
+            "csrf_token": generate_csrf(),
+            "account": {"username": current_user.username},
+        }
+
+    @app.route("/api/chart/preferences", methods=["GET", "PUT"])
+    @login_required
+    def api_chart_preferences():
+        if request.method == "GET":
+            preferences, exists, updated_at = load_preferences_for_user(current_user)
+            return {
+                "ok": True,
+                "preferences": preferences,
+                "exists": exists,
+                "updated_at": updated_at,
+            }
+        try:
+            preferences = save_preferences_for_user(
+                current_user,
+                request.get_json(silent=True),
+            )
+        except InvalidAccountPreferences as exc:
+            return {
+                "ok": False,
+                "code": "invalid_chart_preferences",
+                "message": str(exc),
+            }, 400
+        return {"ok": True, "preferences": preferences}
+
+    @app.context_processor
+    def inject_account_context():
+        if not current_user.is_authenticated:
+            return {"account_username": "", "account_preferences_bootstrap": None}
+        try:
+            preferences, exists, updated_at = load_preferences_for_user(current_user)
+        except Exception:
+            app.logger.exception("账号图表偏好读取失败")
+            preferences, exists, updated_at = empty_preferences(), False, None
+        return {
+            "account_username": current_user.username,
+            "account_preferences_bootstrap": {
+                "username": current_user.username,
+                "account_key": current_user.storage_scope[:24],
+                "preferences": preferences,
+                "exists": exists,
+                "updated_at": updated_at,
+            },
+        }
 
     def _runtime_revision() -> str:
         configured = os.environ.get("CHANLUN_BUILD_REVISION", "").strip()
@@ -1414,6 +1560,16 @@ def create_app(test_config=None, start_scheduler=False):
                 if screening_required
                 else None
             ),
+            "realtime_alert_capacity_ready": (
+                screening_component.get("realtime_alert_capacity_ready")
+                if screening_required
+                else None
+            ),
+            "realtime_alert_next_session_ready": (
+                screening_component.get("realtime_alert_next_session_ready")
+                if screening_required
+                else None
+            ),
             "realtime_alert_status": (
                 screening_component.get(
                     "realtime_alert_status",
@@ -1734,13 +1890,6 @@ def create_app(test_config=None, start_scheduler=False):
             _ensure_start_is_current()
             sse_stream_service.start_sse_runtime()
             _ensure_start_is_current()
-            if trading_notification_outbox is not None:
-                trading_notification_outbox.start_background()
-                _ensure_start_is_current()
-            if app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True):
-                decision_support_trading_screening.start_background()
-                _ensure_start_is_current()
-
             if enable_scheduler:
                 if holding_group_monitor is not None:
                     holding_group_monitor.register_job(scheduler)
@@ -1753,6 +1902,17 @@ def create_app(test_config=None, start_scheduler=False):
                 scheduler.start()
 
             _ensure_start_is_current()
+            # Register and start every scheduler before launching long-running
+            # business workers.  A transient owner-file failure during job
+            # registration must not leave a still-unwinding screening worker
+            # for the application-level startup retry to mistake as healthy.
+            if trading_notification_outbox is not None:
+                trading_notification_outbox.start_background()
+                _ensure_start_is_current()
+            if app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True):
+                decision_support_trading_screening.start_background()
+                _ensure_start_is_current()
+
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
             with runtime_lock:
                 if (
@@ -2261,6 +2421,7 @@ def create_app(test_config=None, start_scheduler=False):
         tradingview_capture = TradingViewClientScreenshotRenderer(
             base_url=str(app.config["ALERT_CHART_CAPTURE_BASE_URL"]),
             session_cookie_provider=_alert_capture_session_cookie,
+            timeout_ms=int(app.config["ALERT_CHART_CAPTURE_TIMEOUT_MS"]),
         )
         alert_chart_image_service = AlertChartImageService(
             alert_chart_store,
@@ -2654,7 +2815,7 @@ def create_app(test_config=None, start_scheduler=False):
             priority_monitor_time_budget_seconds=float(
                 app.config.get(
                     "TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
-                    55.0,
+                    58.0,
                 )
             ),
             full_coverage_refresh_enabled=bool(

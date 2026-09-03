@@ -31,6 +31,7 @@ from chanlun.decision_support.trading_system.lifecycle import (
     current_five_minute_setup_points,
     five_minute_setup_is_executable,
     match_one_minute_nesting_witness,
+    match_one_minute_preconfirmation_divergences,
     structural_point_occurrence_id,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
@@ -337,6 +338,7 @@ class EvaluatedSignal:
     thirty_technical_context: SamePeriodTechnicalContext | None = None
     context_assessment: SignalContextAssessment | None = None
     advisory_reason_codes: tuple[str, ...] = ()
+    preconfirmation_divergences: tuple[StructuralPoint, ...] = ()
 
 
 def _point_time(point: StructuralPoint | ProvisionalCandidate) -> datetime:
@@ -569,6 +571,14 @@ class _TechnicalSignalEvaluator:
                 sector_required=sector_required,
             )
             previous_lifecycle = previous_lifecycles.get(setup.setup_id)
+            preconfirmation_divergences = (
+                match_one_minute_preconfirmation_divergences(
+                    setup,
+                    bundle.one_points,
+                    as_of=bundle.as_of,
+                    minimum_tick=self._policy.minimum_tick,
+                )
+            )
             trigger = match_one_minute_nesting_witness(
                 setup,
                 bundle.one_points,
@@ -761,6 +771,9 @@ class _TechnicalSignalEvaluator:
                         thirty_technical_context=bundle.thirty_technical_context,
                         context_assessment=context_assessment,
                         advisory_reason_codes=advisory_reason_codes,
+                        preconfirmation_divergences=(
+                            preconfirmation_divergences
+                        ),
                     )
                 )
                 continue
@@ -871,6 +884,7 @@ class _TechnicalSignalEvaluator:
                     thirty_technical_context=bundle.thirty_technical_context,
                     context_assessment=context_assessment,
                     advisory_reason_codes=advisory_reason_codes,
+                    preconfirmation_divergences=preconfirmation_divergences,
                 )
             )
         return tuple(output)

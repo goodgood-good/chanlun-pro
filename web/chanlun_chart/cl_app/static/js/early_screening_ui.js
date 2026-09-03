@@ -62,11 +62,59 @@
     "approaching", "formed", "armed", "observed", "triggered", "executable",
   ]);
   const REVIEW_PRIORITY_RISK_GATES = new Set(["GREEN", "AMBER", "RED", "UNRESOLVED"]);
+  const CONTEXT_GRADE_ORDER = {
+    A: 0,
+    B: 1,
+    C: 2,
+    UNRESOLVED: 3,
+  };
+  const CONTEXT_GRADE_LABELS = {
+    A: "A级（双周期支持）",
+    B: "B级（环境混合或中性）",
+    C: "C级（逆风观察）",
+    UNRESOLVED: "等级待判定（证据不足）",
+  };
   const CURRENT_SELECTION_LIFECYCLE_STAGES = new Set([
     "observed", "monitoring", "approaching", "triggered", "executable", "active",
   ]);
   const FREQUENCIES = new Set(["d", "30m", "5m", "1m"]);
-  const LAYOUTS = new Set(["focus", "dual", "triple"]);
+  const LAYOUTS = new Set(["focus", "dual", "triple", "quad"]);
+  // These formatters are used for every visible signal card and several filter
+  // predicates. Constructing Intl.DateTimeFormat repeatedly dominated hot-path
+  // selection CPU profiles, so keep one immutable formatter per presentation.
+  const SHORT_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const FULL_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN-u-hc-h23", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const EVIDENCE_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const SHANGHAI_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
   const REALTIME_REVIEW_SCHEMA = "chanlun-realtime-review-inbox";
   const POINT_LABELS = {
     "1buy": "一买",
@@ -164,6 +212,30 @@
     return text(safeSignal.lifecycle_stage, "");
   }
 
+  function contextGradeForSignal(signal) {
+    const safeSignal = isRecord(signal) ? signal : {};
+    const profile = isRecord(safeSignal.execution_profile)
+      ? safeSignal.execution_profile
+      : {};
+    const grade = (
+      text(profile.context_grade, "").trim()
+      || text(safeSignal.context_grade, "UNRESOLVED").trim()
+    ).toUpperCase();
+    return Object.prototype.hasOwnProperty.call(CONTEXT_GRADE_ORDER, grade)
+      ? grade
+      : "UNRESOLVED";
+  }
+
+  function contextGradeLabelForSignal(signal) {
+    const safeSignal = isRecord(signal) ? signal : {};
+    const profile = isRecord(safeSignal.execution_profile)
+      ? safeSignal.execution_profile
+      : {};
+    const supplied = text(profile.context_grade_label, "").trim()
+      || text(safeSignal.context_grade_label, "").trim();
+    return supplied || CONTEXT_GRADE_LABELS[contextGradeForSignal(safeSignal)];
+  }
+
   function isCurrentSelectionSignal(signal) {
     return CURRENT_SELECTION_LIFECYCLE_STAGES.has(
       lifecycleStageForSignal(signal),
@@ -188,18 +260,21 @@
   function signalQueueCountText(visibleSignals, allSignals = visibleSignals) {
     const visible = signalQueueFacts(visibleSignals);
     const total = signalQueueFacts(allSignals);
-    const describe = (facts) => {
-      const parts = [`${facts.structure_clue_count} 条5m结构线索`];
-      if (facts.monitor_position_count > 0) {
-        parts.push(`${facts.monitor_position_count} 个独立监听`);
-      }
-      return parts.join(" · ");
-    };
     if (
       visible.structure_clue_count === total.structure_clue_count
       && visible.monitor_position_count === total.monitor_position_count
-    ) return describe(visible);
-    return `${describe(visible)} / 全部 ${describe(total)}`;
+    ) {
+      return `${visible.structure_clue_count} 条5m线索${
+        visible.monitor_position_count > 0
+          ? ` · ${visible.monitor_position_count} 监听`
+          : ""
+      }`;
+    }
+    return `${visible.structure_clue_count}/${total.structure_clue_count} 条5m线索${
+      total.monitor_position_count > 0
+        ? ` · ${visible.monitor_position_count}/${total.monitor_position_count} 监听`
+        : ""
+    }`;
   }
 
   function setupFormationStateForSignal(signal) {
@@ -502,6 +577,21 @@
   };
   const REASON_LABELS = {
     structural_ranking_only: "仅按缠论结构排序",
+    screening_unavailable: "提前选股服务暂不可用",
+    screening_not_ready: "提前选股服务尚未就绪",
+    screening_health_failed: "提前选股服务健康检查失败，系统将重试",
+    screening_background_error: "后台提前选股最近一次运行异常，系统将重试",
+    screening_refresh_failed: "最近一次提前选股刷新失败，系统将重试",
+    screening_worker_failed: "提前选股工作进程运行失败，系统将重试",
+    screening_worker_not_running: "提前选股工作进程尚未启动",
+    screening_worker_source_revision_mismatch: "工作进程版本与当前页面不一致，等待重新启动",
+    screening_heartbeat_missing: "提前选股工作进程等待首次心跳",
+    screening_heartbeat_stale: "提前选股工作进程心跳已过期，系统将重试",
+    screening_native_gateway_not_ready: "行情计算通道尚未就绪",
+    screening_native_gateway_health_failed: "行情计算通道健康检查失败，系统将重试",
+    screening_snapshot_identity_missing: "当前筛选快照缺少版本标识",
+    screening_snapshot_not_publishable: "当前筛选快照尚未满足发布条件",
+    screening_transport_invalid: "提前选股进程通信数据无效，系统将重试",
     HARD_BLOCKED_NO_TRADE: "当前结构条件不适合纳入操作计划",
     POSITION_RATIO_INPUT_UNRESOLVED: "结构价格或风险参数不足，风险参考待核对",
     STRUCTURAL_RISK_BUDGET_SIZED: "已按5分钟结构锚点至防守位测算风险参考",
@@ -1609,14 +1699,7 @@
     if (!value) return "尚未发布";
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return text(value);
-    return new Intl.DateTimeFormat("zh-CN", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).format(parsed);
+    return SHORT_TIME_FORMATTER.format(parsed);
   }
 
   function fullDateTimeText(value) {
@@ -1624,16 +1707,7 @@
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return text(value, "暂不可用");
     const values = Object.fromEntries(
-      new Intl.DateTimeFormat("zh-CN-u-hc-h23", {
-        timeZone: "Asia/Shanghai",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hourCycle: "h23",
-      }).formatToParts(parsed).map((part) => [part.type, part.value]),
+      FULL_TIME_FORMATTER.formatToParts(parsed).map((part) => [part.type, part.value]),
     );
     return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
   }
@@ -1653,6 +1727,17 @@
       || safe.notification_signal_time
       || safe.signal_time
       || safe.observed_at;
+  }
+
+  function realtimeNotificationOccurredToday(value, observedAt = new Date()) {
+    const safe = isRecord(value) ? value : {};
+    if (safe.realtime_notification !== true) return false;
+    const occurredAt = new Date(realtimeNotificationDisplayTime(safe));
+    const current = observedAt instanceof Date ? observedAt : new Date(observedAt);
+    if (Number.isNaN(occurredAt.getTime()) || Number.isNaN(current.getTime())) {
+      return false;
+    }
+    return shanghaiDateKey(occurredAt) === shanghaiDateKey(current);
   }
 
   function realtimeNotificationTimeLabel(value) {
@@ -2033,15 +2118,7 @@
     if (!value) return "未提供";
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return text(value);
-    return new Intl.DateTimeFormat("zh-CN", {
-      timeZone: "Asia/Shanghai",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).format(parsed);
+    return EVIDENCE_TIME_FORMATTER.format(parsed);
   }
 
   function uniqueText(values) {
@@ -3377,12 +3454,7 @@
   }
 
   function shanghaiDateKey(value) {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Shanghai",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(value);
+    const parts = SHANGHAI_DATE_FORMATTER.formatToParts(value);
     const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
     return `${values.year}-${values.month}-${values.day}`;
   }
@@ -3806,10 +3878,11 @@
     };
   }
 
-  function mergeRealtimeNotifications(signals, notificationSnapshot) {
+  function mergeRealtimeNotifications(signals, notificationSnapshot, options = {}) {
     let rows = (Array.isArray(signals) ? signals : [])
       .filter(isCurrentSelectionSignal)
       .map((signal) => ({ ...signal }));
+    const annotateMatches = !isRecord(options) || options.annotate !== false;
     const events = isRecord(notificationSnapshot)
       && Array.isArray(notificationSnapshot.events)
       ? notificationSnapshot.events
@@ -3867,6 +3940,7 @@
       ));
       if (index >= 0) {
         matched.add(index);
+        if (!annotateMatches) continue;
         rows[index] = {
           ...rows[index],
           market,
@@ -4051,6 +4125,16 @@
       contextualSignals,
       realtimeNotifications,
     );
+    const selectionSignals = annotateSiblingStructureContexts(
+      mergeUsMonitorSignals(
+        mergeRealtimeNotifications(
+          contextualSignals,
+          realtimeNotifications,
+          { annotate: false },
+        ),
+        usMonitor,
+      ),
+    );
     const unifiedSignals = annotateSiblingStructureContexts(
       mergeUsMonitorSignals(notificationSignals, usMonitor),
     );
@@ -4067,10 +4151,22 @@
       manual_attention_signals: manualAttentionSignals,
       sectors: value.sectors.filter(isRecord).map((row) => ({ ...row })),
       signals: contextualSignals,
+      selection_signals: selectionSignals,
       unified_signals: unifiedSignals,
       data_quality: { ...value.data_quality },
       errors: Array.isArray(value.errors) ? value.errors.slice() : [],
     };
+  }
+
+  function signalRowsForSource(snapshot, source = "all") {
+    const safe = isRecord(snapshot) ? snapshot : {};
+    const field = source === "notification"
+      ? "unified_signals"
+      : "selection_signals";
+    const rows = Array.isArray(safe[field])
+      ? safe[field]
+      : Array.isArray(safe.signals) ? safe.signals : [];
+    return rows.slice();
   }
 
   function filterSignals(signals, filters = {}) {
@@ -4103,7 +4199,10 @@
       const sources = Array.isArray(signal.selection_sources)
         ? signal.selection_sources.map((value) => text(value, ""))
         : [];
-      if (source === "notification" && signal.realtime_notification !== true) return false;
+      if (
+        source === "notification"
+        && !realtimeNotificationOccurredToday(signal, filters.observedAt)
+      ) return false;
       if (source === "screening" && signal.synthetic_notification_projection === true) return false;
       if (["attention", "holding"].includes(source) && !sources.some((value) => ["MANUAL_ATTENTION_MONITOR", "HOLDING_MONITOR", "VIRTUAL_HOLDING_MONITOR"].includes(value))) return false;
       if (source === "watchlist" && !sources.some((value) => ["ACTIVE_WATCHLIST_MONITOR", "WATCHLIST_MONITOR", "US_AUXILIARY_MONITOR"].includes(value))) return false;
@@ -4128,6 +4227,33 @@
       return [signal.code, signal.name, sector.sector_name, POINT_LABELS[signal.point_type], signalMarket === "us" ? "美股" : "A股"]
         .map((part) => text(part, "").toLocaleLowerCase("zh-CN"))
         .some((part) => part.includes(query));
+    });
+  }
+
+  function theaterPointSignals(signals, side = "all", query = "") {
+    const requestedSide = ["buy", "sell"].includes(side) ? side : "all";
+    const normalizedQuery = text(query, "").trim().toLocaleLowerCase("zh-CN");
+    return (Array.isArray(signals) ? signals : []).filter((signal) => {
+      if (!isRecord(signal)) return false;
+      const setup = isRecord(signal.setup_5m) ? signal.setup_5m : {};
+      const pointType = text(signal.point_type, text(setup.point_type, ""));
+      if (!POINT_TYPES.includes(pointType)) return false;
+      const signalSide = text(
+        signal.side,
+        pointType.endsWith("buy") ? "buy" : pointType.endsWith("sell") ? "sell" : "",
+      );
+      if (requestedSide !== "all" && signalSide !== requestedSide) return false;
+      if (!normalizedQuery) return true;
+      const sector = isRecord(signal.sector) ? signal.sector : {};
+      return [
+        signal.code,
+        signal.name,
+        sector.sector_name,
+        POINT_LABELS[pointType],
+        inferSignalMarket(signal) === "us" ? "美股" : "A股",
+      ]
+        .map((part) => text(part, "").toLocaleLowerCase("zh-CN"))
+        .some((part) => part.includes(normalizedQuery));
     });
   }
 
@@ -4257,6 +4383,12 @@
       return base;
     };
     return (Array.isArray(signals) ? signals : []).slice().sort((left, right) => {
+      const leftGrade = CONTEXT_GRADE_ORDER[contextGradeForSignal(left)];
+      const rightGrade = CONTEXT_GRADE_ORDER[contextGradeForSignal(right)];
+      if (leftGrade !== rightGrade) return leftGrade - rightGrade;
+      const leftNotification = isRecord(left) && left.realtime_notification === true;
+      const rightNotification = isRecord(right) && right.realtime_notification === true;
+      if (leftNotification !== rightNotification) return leftNotification ? -1 : 1;
       const leftPriority = reviewPriorityForSignal(left);
       const rightPriority = reviewPriorityForSignal(right);
       if (leftPriority !== rightPriority) {
@@ -4498,11 +4630,67 @@
     container.replaceChildren(fragment);
   }
 
-  function signalCard(documentRef, signal, selected, onSelect) {
+  function signalQuotePresentation(quote) {
+    const safeQuote = isRecord(quote) ? quote : {};
+    const rawRate = safeQuote.changePercent ?? safeQuote.rate;
+    const price = Number(safeQuote.price);
+    const rate = Number(rawRate);
+    const hasPrice = safeQuote.price !== null
+      && safeQuote.price !== undefined
+      && safeQuote.price !== "";
+    const hasRate = rawRate !== null && rawRate !== undefined && rawRate !== "";
+    const state = text(safeQuote.status, "loading");
+    if (hasPrice && hasRate && Number.isFinite(price) && price > 0 && Number.isFinite(rate)) {
+      const priceDigits = price < 1 ? 4 : price < 10 ? 3 : 2;
+      const priceLabel = price.toFixed(priceDigits);
+      const rateLabel = `${rate >= 0 ? "+" : ""}${rate.toFixed(2)}%`;
+      const stateSuffix = state === "refreshing"
+        ? "（正在刷新）"
+        : state === "stale"
+          ? "（最新行情暂不可用，显示上次报价）"
+          : state === "closed" ? "（当前休市）" : "";
+      return {
+        available: true,
+        direction: rate > 0 ? "up" : rate < 0 ? "down" : "flat",
+        state,
+        text: `${priceLabel}  ${rateLabel}`,
+        title: `${state === "closed" ? "收盘价" : "最新价"} ${priceLabel} · 今日涨跌幅 ${rateLabel}${stateSuffix}`,
+      };
+    }
+    const unavailableText = {
+      closed: "休市暂无报价",
+      deferred: "行情请求合并中",
+      partial: "该标的行情暂不可用",
+      unavailable: "行情暂不可用",
+    }[state] || "行情读取中";
+    return {
+      available: false,
+      direction: "",
+      state,
+      text: unavailableText,
+      title: unavailableText,
+    };
+  }
+
+  function updateSignalQuoteNode(node, quote) {
+    if (!node) return null;
+    const presentation = signalQuotePresentation(quote);
+    node.textContent = presentation.text;
+    node.dataset.state = presentation.state;
+    if (presentation.direction) node.dataset.direction = presentation.direction;
+    else delete node.dataset.direction;
+    node.setAttribute("aria-label", presentation.title);
+    node.setAttribute("title", presentation.title);
+    return presentation;
+  }
+
+  function signalCard(documentRef, signal, selected, onSelect, options = {}) {
     const card = element(documentRef, "button", `es-signal-card is-${text(signal.side, "neutral")}`);
     card.type = "button";
     card.dataset.signalId = text(signal.signal_id, "");
     card.dataset.code = text(signal.code, "");
+    const contextGradeCode = contextGradeForSignal(signal);
+    card.dataset.contextGrade = contextGradeCode;
     const reviewPriority = reviewPriorityForSignal(signal);
     if (reviewPriority !== null) {
       card.dataset.reviewPriority = String(reviewPriority);
@@ -4517,12 +4705,31 @@
       element(documentRef, "strong", "", text(signal.name, signal.code)),
       element(documentRef, "code", "", text(signal.code)),
     );
+    const quote = element(documentRef, "span", "es-signal-card__quote");
+    quote.dataset.market = inferSignalMarket(signal);
+    quote.dataset.code = text(signal.code, "").trim().toUpperCase();
+    quote.dataset.signalQuote = "";
+    updateSignalQuoteNode(
+      quote,
+      typeof options.quoteForSignal === "function"
+        ? options.quoteForSignal(signal)
+        : { status: "loading" },
+    );
+    identity.append(quote);
     const tags = element(documentRef, "span", "es-signal-card__tags");
+    const gradeBadge = element(
+      documentRef,
+      "em",
+      `is-context-grade is-grade-${contextGradeCode.toLocaleLowerCase("en-US")}`,
+      contextGradeCode === "UNRESOLVED" ? "等级待判定" : `${contextGradeCode}级`,
+    );
+    gradeBadge.setAttribute("title", contextGradeLabelForSignal(signal));
     tags.append(
       element(documentRef, "em", "is-market", inferSignalMarket(signal) === "us" ? "美股" : "A股"),
+      gradeBadge,
       element(documentRef, "b", "", pointLabelForSignal(signal)),
-      element(documentRef, "em", "", signalCardLifecycleLabel(signal)),
-      element(documentRef, "em", "", selectionLabelForSignal(signal)),
+      element(documentRef, "em", "is-lifecycle", signalCardLifecycleLabel(signal)),
+      element(documentRef, "em", "is-selection-source", selectionLabelForSignal(signal)),
     );
     const segmentEvidenceStatus = segmentDifferenceEvidenceStatusForSignal(signal);
     const segmentBoundaryStatus = segmentDifferenceBoundaryStatusForSignal(signal);
@@ -4676,6 +4883,34 @@
     return card;
   }
 
+  function enableSignalListKeyboardNavigation(container, selectedCard = null) {
+    if (!container || typeof container.querySelectorAll !== "function") return;
+    const cards = Array.from(container.querySelectorAll(".es-signal-card"));
+    if (!cards.length) return;
+    const initialCard = selectedCard && cards.includes(selectedCard) ? selectedCard : cards[0];
+    cards.forEach((card, index) => {
+      card.tabIndex = card === initialCard ? 0 : -1;
+      card.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown Home End");
+      card.addEventListener("keydown", (event) => {
+        let targetIndex = index;
+        if (event.key === "ArrowDown") targetIndex = Math.min(cards.length - 1, index + 1);
+        else if (event.key === "ArrowUp") targetIndex = Math.max(0, index - 1);
+        else if (event.key === "Home") targetIndex = 0;
+        else if (event.key === "End") targetIndex = cards.length - 1;
+        else return;
+        event.preventDefault();
+        const targetCard = cards[targetIndex];
+        cards.forEach((candidate) => {
+          candidate.tabIndex = candidate === targetCard ? 0 : -1;
+        });
+        if (typeof targetCard.focus === "function") targetCard.focus({ preventScroll: true });
+        if (typeof targetCard.scrollIntoView === "function") {
+          targetCard.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+      });
+    });
+  }
+
   function renderSignalWorkspace(
     container,
     signals,
@@ -4698,6 +4933,7 @@
         signal,
         text(signal.signal_id, "") === selectedSignalId,
         onSelect,
+        options,
       );
       if (text(signal.signal_id, "") === selectedSignalId) selectedCard = card;
       fragment.append(card);
@@ -4712,9 +4948,11 @@
       fragment.append(loadMore);
     }
     container.replaceChildren(fragment);
+    enableSignalListKeyboardNavigation(container, selectedCard);
     container.dataset.selectedSignalId = selectedCard ? selectedSignalId : "";
     if (
-      selectedCard
+      options.scrollSelectedIntoView !== false
+      && selectedCard
       && typeof selectedCard.getBoundingClientRect === "function"
       && typeof container.getBoundingClientRect === "function"
     ) {
@@ -4724,6 +4962,42 @@
       if (outsideViewport && typeof selectedCard.scrollIntoView === "function") {
         selectedCard.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
+    }
+    return selectedCard;
+  }
+
+  function updateSignalWorkspaceSelection(
+    container,
+    selectedSignalId,
+    options = {},
+  ) {
+    if (!container || typeof container.querySelectorAll !== "function") return null;
+    const selectedId = text(selectedSignalId, "");
+    let selectedCard = null;
+    let firstCard = null;
+    container.querySelectorAll("[data-signal-id]").forEach((card) => {
+      if (!firstCard) firstCard = card;
+      const selected = text(card && card.dataset && card.dataset.signalId, "") === selectedId;
+      if (card.classList && typeof card.classList.toggle === "function") {
+        card.classList.toggle("is-selected", selected);
+      }
+      if (typeof card.setAttribute === "function") {
+        card.setAttribute("aria-pressed", selected ? "true" : "false");
+        card.setAttribute("aria-current", selected ? "true" : "false");
+      }
+      card.tabIndex = selected ? 0 : -1;
+      if (selected) selectedCard = card;
+    });
+    if (!selectedCard && firstCard) firstCard.tabIndex = 0;
+    if (container.dataset) {
+      container.dataset.selectedSignalId = selectedCard ? selectedId : "";
+    }
+    if (
+      options.scrollSelectedIntoView === true
+      && selectedCard
+      && typeof selectedCard.scrollIntoView === "function"
+    ) {
+      selectedCard.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
     return selectedCard;
   }
@@ -4744,12 +5018,35 @@
     return open;
   }
 
+  function setTheaterPickerOpen(rootElement, requested) {
+    if (!rootElement || !rootElement.querySelector) return false;
+    const open = Boolean(requested);
+    const theaterActive = rootElement.dataset.theaterMode === "true";
+    rootElement.dataset.theaterPickerOpen = String(open);
+    const toggle = rootElement.querySelector("[data-theater-picker-toggle]");
+    const signalPicker = rootElement.querySelector("[data-theater-signal-picker]");
+    if (toggle) {
+      const actionLabel = open ? "收起买卖点股票列表" : "展开买卖点股票列表";
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute("aria-label", actionLabel);
+      toggle.setAttribute("title", actionLabel);
+    }
+    if (signalPicker) signalPicker.setAttribute("aria-hidden", String(!theaterActive || !open));
+    setNodeText(
+      rootElement,
+      "[data-theater-picker-label]",
+      open ? "收起列表" : "展开列表",
+    );
+    return open;
+  }
+
   function setTheaterMode(rootElement, bodyElement, requested) {
     if (!rootElement || !rootElement.querySelector) return false;
     const active = Boolean(requested);
     rootElement.dataset.theaterMode = String(active);
     const toggle = rootElement.querySelector("[data-theater-toggle]");
     if (toggle) toggle.setAttribute("aria-pressed", String(active));
+    setTheaterPickerOpen(rootElement, rootElement.dataset.theaterPickerOpen !== "false");
     setNodeText(rootElement, "[data-theater-label]", active ? "退出影院" : "影院模式");
     if (bodyElement && bodyElement.classList) {
       bodyElement.classList.toggle("es-theater-open", active);
@@ -4885,10 +5182,22 @@
 
     const urls = chartUrlsForSignal(signal);
     const embeddedUrls = chartUrlsForSignal(signal, { embedded: true });
-    for (const frequency of ["d", "30m", "5m", "1m"]) {
+    // Start the visually first and heaviest period first. The parent keeps the
+    // batch covered atomically, so beginning 1m last only lengthens the whole
+    // critical path while lighter periods sit idle.
+    for (const frequency of ["1m", "5m", "30m", "d"]) {
       const frame = rootElement.querySelector(`[data-chart-frame="${frequency}"]`);
       const link = rootElement.querySelector(`[data-chart-link="${frequency}"]`);
-      if (frame && frame.getAttribute("src") !== embeddedUrls[frequency]) {
+      if (frame && typeof options.navigateChartFrame === "function") {
+        options.navigateChartFrame(frame, {
+          frequency,
+          url: embeddedUrls[frequency],
+          market: inferSignalMarket(signal),
+          code: text(signal.code, "").trim(),
+          name: text(signal.name, signal.code),
+          signalId: text(signal.signal_id, ""),
+        });
+      } else if (frame && frame.getAttribute("src") !== embeddedUrls[frequency]) {
         frame.setAttribute("src", embeddedUrls[frequency]);
       }
       if (link) link.setAttribute("href", urls[frequency]);
@@ -4934,6 +5243,8 @@
     annotateSiblingStructureContexts,
     chartUrlsForSignal,
     completedWithoutSignalCount,
+    contextGradeForSignal,
+    contextGradeLabelForSignal,
     currentPreciseExecutionReadyForSignal,
     currentSegmentDifferenceReadyForSignal,
     dailyPreselectionDiagnosticsText,
@@ -4975,6 +5286,7 @@
     realtimeNotificationSignal,
     realtimeNotificationDisplayTime,
     realtimeNotificationPriceText,
+    realtimeNotificationOccurredToday,
     realtimeNotificationTimeLabel,
     reviewPriorityForSignal,
     signalAgeSecondsForReview,
@@ -4982,6 +5294,9 @@
     renderChartWorkspace,
     renderSectorWorkspace,
     renderSignalWorkspace,
+    updateSignalWorkspaceSelection,
+    signalQuotePresentation,
+    updateSignalQuoteNode,
     resolveFocusState,
     resolveSelectedSignalId,
     selectionLabelForSignal,
@@ -5005,11 +5320,14 @@
     setChartLayout,
     setEvidencePanelOpen,
     setTheaterMode,
+    setTheaterPickerOpen,
     signalCardLifecycleLabel,
     signalCardTimeText,
+    signalRowsForSource,
     sortSignalsForReview,
     statusLabel,
     text,
     timeText,
+    theaterPointSignals,
   };
 });

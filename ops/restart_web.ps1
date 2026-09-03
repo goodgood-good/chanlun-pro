@@ -40,7 +40,10 @@ $watchdogInstaller = Join-Path $ProjectRoot 'ops\install_web_watchdog.ps1'
 $watchdogStateRoot = Join-Path $ProjectRoot '.cache\chanlun_web_watchdog'
 $watchdogScopePath = Join-Path $watchdogStateRoot 'deployment_scope.json'
 $PreflightTimeoutSec = 30
-$LargeScopePriorityMaxSymbols = 50
+$LargeScopePriorityMaxSymbols = 384
+$LargeScopeMonitorUniverseSymbols = 384
+$LargeScopeCandidateFiveMinuteSymbols = 80
+$FullCoverageBatchSymbols = 240
 $LogDir       = Join-Path $PSScriptRoot 'logs'
 # ----------------------------------------------------------------------------
 
@@ -343,11 +346,34 @@ function Resolve-ProjectPython {
     throw 'Poetry returned no usable Python executable'
 }
 
-function Test-LoginPasswordHash {
+function Test-LoginUsersConfig {
     param([AllowEmptyString()][string]$Value)
 
     if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
-    return $Value.StartsWith('pbkdf2:') -or $Value.StartsWith('scrypt:')
+    try {
+        $accounts = $Value | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+    if ($accounts -isnot [pscustomobject]) { return $false }
+    $properties = @($accounts.PSObject.Properties)
+    if ($properties.Count -eq 0) { return $false }
+    foreach ($property in $properties) {
+        $username = [string]$property.Name
+        $passwordHash = [string]$property.Value
+        if (
+            [string]::IsNullOrWhiteSpace($username) -or
+            $username.Trim().Length -gt 64 -or
+            [string]::IsNullOrWhiteSpace($passwordHash) -or
+            -not (
+                $passwordHash.StartsWith('pbkdf2:') -or
+                $passwordHash.StartsWith('scrypt:')
+            )
+        ) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-WebProcs {
@@ -550,7 +576,7 @@ if ($null -eq (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) 
 
 try {
     $deploymentManagedNames = @(
-        'CHANLUN_LOGIN_PWD',
+        'CHANLUN_LOGIN_USERS',
         'LONGBRIDGE_APP_KEY',
         'LONGBRIDGE_APP_SECRET',
         'LONGBRIDGE_ACCESS_TOKEN'
@@ -595,15 +621,41 @@ try {
     } else {
         # Full-market discovery remains cadence-bounded, while every currently
         # confirmed 5m setup must fit the one-minute locator admission wave.
-        # Production measurements complete 48 symbols in about 40 seconds.  A
-        # 50-symbol wave leaves room for the two mandatory watch/holding symbols
-        # without displacing a pending 1m locator; the runtime still fails closed
-        # on an actual 55-second overrun.
+        # Twelve affinity shards retain 48 hot 1m runtimes each. A 384-symbol
+        # admission ceiling covers the exact locator pool plus mandatory
+        # watch/holding symbols without binding it to the ordinary 240-symbol
+        # five-minute rotation; the absolute 58-second budget still fails
+        # closed on a real throughput shortfall.
         [Environment]::SetEnvironmentVariable(
             'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS',
             [string]$LargeScopePriorityMaxSymbols,
             'Process'
         )
+        [Environment]::SetEnvironmentVariable(
+            'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS',
+            [string]$LargeScopeMonitorUniverseSymbols,
+            'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS',
+            [string]$LargeScopeCandidateFiveMinuteSymbols,
+            'Process'
+        )
+        if ($EnableFullCoverage) {
+            # Full-market rebuilds use a separate, deeper work queue so all
+            # structure processes stay occupied between durable checkpoints.
+            # This does not enlarge the latency-sensitive 5m candidate lane.
+            [Environment]::SetEnvironmentVariable(
+                'CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH',
+                [string]$FullCoverageBatchSymbols,
+                'Process'
+            )
+            [Environment]::SetEnvironmentVariable(
+                'CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH',
+                [string]$FullCoverageBatchSymbols,
+                'Process'
+            )
+        }
     }
     [Environment]::SetEnvironmentVariable(
         'CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE',
@@ -643,8 +695,8 @@ try {
     Log '===== web restart ABORTED ====='
     exit 1
 }
-if (-not (Test-LoginPasswordHash -Value $env:CHANLUN_LOGIN_PWD)) {
-    Log 'ERROR: CHANLUN_LOGIN_PWD 必须是项目当前的 pbkdf2:/scrypt: 哈希；现有服务未停止'
+if (-not (Test-LoginUsersConfig -Value $env:CHANLUN_LOGIN_USERS)) {
+    Log 'ERROR: CHANLUN_LOGIN_USERS 必须是用户名到 pbkdf2:/scrypt: 哈希的 JSON 对象；现有服务未停止'
     Log '===== web restart ABORTED ====='
     exit 1
 }
@@ -661,12 +713,21 @@ if ($largeScopeRequested) {
     $validationDirectory = Join-Path `
         $ProjectRoot `
         'audit\chanlun_trading_system_backtest\research_sample_validation_12'
-    & $PythonExe `
+    $validationOutput = @(& $PythonExe `
         (Join-Path $ProjectRoot 'tools\verify_qmt_validation_gate.py') `
         '--directory' $validationDirectory `
-        '--expected-symbol-count' '12'
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Large-scope startup requires a current passed validation12 gate.'
+        '--expected-symbol-count' '12' 2>&1)
+    $validationExitCode = $LASTEXITCODE
+    if ($validationExitCode -ne 0) {
+        $validationDetail = ($validationOutput | ForEach-Object {
+            ([string]$_).Trim()
+        } | Where-Object { $_ }) -join ' '
+        Log (
+            'ERROR: large-scope validation12 gate rejected startup before service stop: {0}' -f `
+                $validationDetail
+        )
+        Log '===== web restart ABORTED ====='
+        exit 1
     }
     Log 'current validation12 gate verified before large-scope startup'
 }

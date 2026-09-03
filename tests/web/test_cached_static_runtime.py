@@ -15,6 +15,7 @@ from cl_app.handlers.cached_static import CachedStaticFileHandler
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STATIC_ROOT = ROOT / "web/chanlun_chart/cl_app/static"
+DESKTOP_APP = ROOT / "web/chanlun_chart/app.py"
 CHARTING_ROOT = STATIC_ROOT / "charting_library"
 STANDALONE = CHARTING_ROOT / "charting_library.standalone.js"
 SAMEORIGIN = CHARTING_ROOT / "sameorigin.html"
@@ -55,6 +56,40 @@ class TestCachedStaticRuntime(AsyncHTTPTestCase):
         assert response.headers["Content-Type"].startswith("text/html")
 
 
+class TestFullStaticTreeRuntime(AsyncHTTPTestCase):
+    def get_app(self):
+        return Application(
+            [
+                (
+                    r"/static/(.*)",
+                    CachedStaticFileHandler,
+                    {"path": str(STATIC_ROOT)},
+                )
+            ]
+        )
+
+    def test_regular_scripts_and_fonts_bypass_wsgi_with_browser_cache(self):
+        script = self.fetch("/static/js/early_screening.js", method="HEAD")
+        font = self.fetch("/static/font/iconfont.woff2", method="HEAD")
+
+        for response in (script, font):
+            assert response.code == 200
+            assert response.headers["Cache-Control"] == (
+                "public, max-age=300, must-revalidate"
+            )
+        assert script.headers["Content-Type"].startswith("application/javascript")
+        assert font.headers["Content-Type"].startswith("font/woff2")
+
+
+def test_desktop_server_routes_full_static_tree_before_wsgi_fallback():
+    source = DESKTOP_APP.read_text(encoding="utf-8")
+    generic_static = source.index('r"/static/(.*)"')
+    fallback = source.index('(r".*", FallbackHandler')
+
+    assert generic_static < fallback
+    assert '{"path": static_root}' in source[generic_static:fallback]
+
+
 def _wsgi_app():
     return create_app(
         test_config={
@@ -89,6 +124,18 @@ def test_generic_wsgi_sameorigin_matches_official_csp_boundary():
     assert response.headers["Permissions-Policy"]
     assert adjacent.status_code == 200
     assert "Content-Security-Policy" in adjacent.headers
+
+
+def test_conventional_favicon_path_serves_the_product_icon():
+    app = _wsgi_app()
+    try:
+        response = app.test_client().get("/favicon.ico")
+    finally:
+        app.extensions["shutdown_scheduler"]()
+
+    assert response.status_code == 200
+    assert response.mimetype in {"image/x-icon", "image/vnd.microsoft.icon"}
+    assert response.data
 
 def test_generic_wsgi_browser_executes_sameorigin_bootstrap():
     sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright

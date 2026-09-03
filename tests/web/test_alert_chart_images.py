@@ -254,6 +254,7 @@ def test_service_prefers_three_page_native_tradingview_images(
                 "frequency": frequency,
                 "label": label,
                 "lookback_days": days,
+                "studies": ("MACD", "MACD_HTF"),
                 "png": PNG,
             }
             for frequency, label, days in (
@@ -287,10 +288,113 @@ def test_service_prefers_three_page_native_tradingview_images(
     assert len(images) == 3
     assert len({value["url"] for value in images}) == 3
     assert [value["alt"] for value in images] == [
-        "纳指ETF SH.513100 30分钟结构图（含MACD_HTF，至少180天）",
-        "纳指ETF SH.513100 5分钟结构图（含MACD_HTF，至少45天）",
-        "纳指ETF SH.513100 1分钟结构图（含MACD_HTF，至少10天）",
+        "纳指ETF SH.513100 30分钟结构图（含MACD与MACD_HTF，至少180天）",
+        "纳指ETF SH.513100 5分钟结构图（含MACD与MACD_HTF，至少45天）",
+        "纳指ETF SH.513100 1分钟结构图（含MACD与MACD_HTF，至少10天）",
     ]
+
+
+def test_browser_image_missing_standard_macd_falls_back_to_strict_renderer(
+    tmp_path: Path,
+) -> None:
+    store = SignedAlertChartStore(
+        root=tmp_path,
+        public_base_url="http://47.96.40.233:8890",
+        secret=b"0123456789abcdef0123456789abcdef",
+    )
+
+    class State:
+        warmup_ready = False
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def refresh_chart_levels(self):
+            self.warmup_ready = True
+            return True
+
+        @staticmethod
+        def chart_data(frequency):
+            return f"strict:{frequency}"
+
+    def incomplete_browser_renderer(**_context):
+        return tuple(
+            {
+                "frequency": frequency,
+                "label": frequency,
+                "lookback_days": 10,
+                "studies": ("MACD_HTF",),
+                "png": PNG,
+            }
+            for frequency in ("30m", "5m", "1m")
+        )
+
+    rendered = []
+    service = AlertChartImageService(
+        store,
+        state_factory=State,
+        exchange_provider=lambda market: market.value,
+        browser_renderer=incomplete_browser_renderer,
+        renderer=lambda charts: rendered.append(tuple(charts)) or PNG,
+    )
+
+    images = service(
+        {
+            "charts": [
+                {
+                    "market": "a",
+                    "code": "SH.513100",
+                    "name": "纳指ETF",
+                    "artifact_key": "signal:missing-standard-macd",
+                }
+            ]
+        }
+    )
+
+    assert len(rendered) == 1
+    assert [value[1] for value in rendered[0]] == [
+        "strict:30m",
+        "strict:5m",
+        "strict:1m",
+    ]
+    assert len(images) == 1
+    assert "含MACD与MACD_HTF" in images[0]["alt"]
+
+
+def test_browser_timeout_skips_expensive_optional_static_fallback(
+    tmp_path: Path,
+) -> None:
+    store = SignedAlertChartStore(
+        root=tmp_path,
+        public_base_url="http://47.96.40.233:8890",
+        secret=b"0123456789abcdef0123456789abcdef",
+    )
+    state_calls = []
+
+    def timed_out_browser(**_context):
+        raise TimeoutError("capture budget exhausted")
+
+    service = AlertChartImageService(
+        store,
+        browser_renderer=timed_out_browser,
+        state_factory=lambda *args, **kwargs: state_calls.append((args, kwargs)),
+    )
+
+    images = service(
+        {
+            "charts": [
+                {
+                    "market": "a",
+                    "code": "SZ.002905",
+                    "name": "金逸影视",
+                    "artifact_key": "signal:optional-timeout",
+                }
+            ]
+        }
+    )
+
+    assert images == []
+    assert state_calls == []
 
 
 def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
@@ -389,6 +493,7 @@ def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
     assert retried_images == images
     assert len(rendered) == 1
     assert len(resolutions) == 1
+    assert "含MACD与MACD_HTF" in images[0]["alt"]
     assert "已核验5m3buy" in images[0]["alt"]
 
 

@@ -39,6 +39,15 @@ def test_charts_closes_stream_on_dispose():
     assert "_closeSseStream" in CHARTS
 
 
+def test_charts_explicitly_retires_proxy_side_streams():
+    assert "connection_id" in CHARTS
+    assert "channel_id" in CHARTS
+    assert "/tv/stream/close" in CHARTS
+    assert "sendBeacon" in CHARTS
+    assert "pagehide" in CHARTS
+    assert "pageshow" in CHARTS
+
+
 def test_index_injects_sse_flag():
     assert "__CHANLUN_SSE_ENABLED" in INDEX
     assert "enable_sse" in INDEX

@@ -121,6 +121,45 @@ foreach ($target in $fixedTargets) {
         -Category $target.category
 }
 
+# Tooling may create cache/session directories below package roots instead of
+# the repository root. Their names are exact and their contents are always
+# reproducible, so discover them recursively while retaining the same bounded
+# path validation as fixed targets.
+$nestedGeneratedDirectories = @(
+    Get-ChildItem -LiteralPath $repositoryRoot -Directory -Force -Recurse `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @(".omc", ".pytest_cache", ".ruff_cache") }
+)
+foreach ($target in $nestedGeneratedDirectories) {
+    $category = switch ($target.Name) {
+        ".omc" { "agent_session_artifact" }
+        ".pytest_cache" { "test_cache" }
+        ".ruff_cache" { "lint_cache" }
+    }
+    Add-CleanupCandidate -LiteralPath $target.FullName -Category $category
+}
+
+# Static precompression writes ``asset.ext.gz`` beside each source. If the
+# source is later retired, the ignored compressed sibling must disappear too;
+# otherwise it survives normal source cleanup and can be mistaken for a live
+# asset during audits. Never remove a compressed file while its source exists.
+$staticRoot = Join-Path $repositoryRoot "web\chanlun_chart\cl_app\static"
+if (Test-Path -LiteralPath $staticRoot) {
+    $orphanPrecompressedAssets = @(
+        Get-ChildItem -LiteralPath $staticRoot -File -Force -Recurse `
+            -Filter "*.gz" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $sourcePath = $_.FullName.Substring(0, $_.FullName.Length - 3)
+                -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)
+            }
+    )
+    foreach ($target in $orphanPrecompressedAssets) {
+        Add-CleanupCandidate `
+            -LiteralPath $target.FullName `
+            -Category "orphan_precompressed_static"
+    }
+}
+
 if ($PurgeInvalidBacktestFacts) {
     $invalidBacktestTargets = @(
         # A portfolio report and its PIT metadata are inseparable from the

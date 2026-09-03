@@ -129,6 +129,19 @@ test('买卖点使用中文短标签、方向箭头和级别字号', () => {
     render_kind: 'point_approaching', structural_level: 0, level_label: '5m', point_type: '3buy', side: 'buy',
     evidence_codes: ['provisional_center_completion', 'core_boundary_held'],
   });
+  const recursive = api.getStrictPointVisual({
+    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0,
+    level_label: '1m/L0', point_type: '3buy', side: 'buy',
+  });
+  const combinedEvidence = api.getStrictPointVisual({
+    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0,
+    level_label: '1m/L0', point_type: '1sell', side: 'sell',
+    presentation_divergence_kinds: ['consolidation'],
+  });
+  const densityMarker = api.getStrictPointVisual({
+    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0,
+    level_label: '1m/L0', point_type: '2sell', side: 'sell', presentation_density: 'marker',
+  });
 
   assert.equal(confirmed.text, '▲1m·三买');
   assert.equal(confirmed.fontsize, 12);
@@ -141,6 +154,11 @@ test('买卖点使用中文短标签、方向箭头和级别字号', () => {
   assert.equal(approaching.transparency, 45);
   assert.equal(geometryCandidate.text, '▲候选待锁·5m·三买');
   assert.equal(legacyEvidenceOnly.text, '▲接近·5m·三买');
+  assert.equal(recursive.text, '▲三买');
+  assert.equal(combinedEvidence.text, '▼一卖·盘整背驰');
+  assert.equal(densityMarker.text, '二');
+  assert.equal(densityMarker.fullText, '▼二卖');
+  assert.equal(densityMarker.fontsize, 10);
 });
 
 test('盘整背驰和趋势背驰不再使用相同字重', () => {
@@ -151,12 +169,16 @@ test('盘整背驰和趋势背驰不再使用相同字重', () => {
   const trend = api.getStrictDivergenceVisual({
     structural_level: 0, level_label: '5m', kind: 'trend', direction: 'up',
   });
+  const recursive = api.getStrictDivergenceVisual({
+    structural_level: 0, level_label: '1m/L0', kind: 'trend', direction: 'up',
+  });
   assert.equal(consolidation.text, '▲5m·盘整背驰');
   assert.equal(consolidation.fontsize, 12);
   assert.equal(consolidation.bold, false);
   assert.equal(trend.text, '▼5m·趋势背驰');
   assert.equal(trend.fontsize, 13);
   assert.equal(trend.bold, true);
+  assert.equal(recursive.text, '▼趋势背驰');
   assert.notEqual(consolidation.color, trend.color);
 });
 
@@ -171,4 +193,12 @@ test('一键画线默认使用细线并在创建事件中兜底应用', () => {
   assert.match(source, /"linetooltrendline\.linewidth": ONE_CLICK_DRAW_LINE_WIDTH/);
   assert.match(source, /"linetoolrectangle\.linewidth": ONE_CLICK_DRAW_LINE_WIDTH/);
   assert.match(source, /ov\.linewidth = ONE_CLICK_DRAW_LINE_WIDTH/);
+});
+
+test('一键画工具使用原生按钮、完整名称和可触达尺寸', () => {
+  assert.match(source, /doc\.createElement\('button'\)/);
+  assert.match(source, /b\.type = 'button'/);
+  assert.match(source, /b\.setAttribute\('aria-label', b\.title\)/);
+  assert.match(source, /width:28px; height:24px/);
+  assert.doesNotMatch(source, /const b = doc\.createElement\('div'\)/);
 });

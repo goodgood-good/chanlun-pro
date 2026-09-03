@@ -134,6 +134,58 @@ def test_engine_keeps_provisional_five_minute_points_as_approaching() -> None:
     assert evaluated[0].entry.allowed is False
 
 
+def test_engine_exposes_preconfirmation_divergence_without_triggering_setup() -> None:
+    candidate = provisional_point("3buy")
+    candidate = replace(
+        candidate,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_unfinished",
+            structural_level=0,
+            unit_id="segment:5m:forming",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="forming",
+            market_start=candidate.anchor_at - timedelta(minutes=30),
+            market_end=candidate.anchor_at,
+            available_at=candidate.available_at,
+        ),
+    )
+    divergence = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=-5,
+    )
+    divergence = replace(
+        divergence,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id="segment:1m:divergence",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=divergence.anchor_at - timedelta(minutes=1),
+            market_end=divergence.anchor_at,
+            available_at=divergence.available_at,
+        ),
+    )
+
+    [evaluated] = _TechnicalSignalEvaluator().evaluate_symbol(
+        symbol_bundle(
+            five_points=(candidate,),
+            one_points=(divergence,),
+        )
+    )
+
+    assert evaluated.lifecycle.stage == "approaching"
+    assert evaluated.lifecycle.actionable is False
+    assert evaluated.lifecycle.trigger_point_id is None
+    assert evaluated.trigger is None
+    assert evaluated.preconfirmation_divergences == (divergence,)
+    assert evaluated.entry is not None
+    assert evaluated.entry.allowed is False
+
+
 def test_engine_exposes_completed_preview_as_formed_not_approaching() -> None:
     point = replace(
         provisional_point("3buy"),

@@ -121,3 +121,35 @@ test('replace swaps the whole strict object and unavailable clears it', () => {
     'strict_evidence_invalid',
   );
 });
+
+test('embedded numeric deltas restore exact history and MACD columns', () => {
+  const hp = makeHistoryProvider();
+  const payload = response('unchanged', undefined, false);
+  Object.assign(payload, {
+    time_delta: true,
+    t: [1000, 60, 60, 60],
+    c: [10, 11, 12, 13],
+    o: [10, 11, 12, 13],
+    h: [10, 11, 12, 13],
+    l: [10, 11, 12, 13],
+    v: [1, 2, 3, 4],
+    macd_delta_scale: 1_000_000,
+    macd_dif: [null, 123456, -3456, -220000],
+    macd_dea: [0, 100000, 100000, -400000],
+    macd_hist: [0, -100000, 200000, -100000],
+    higher_macd_dif: [0, 10000, 10000, 10000],
+    higher_macd_dea: [0, 20000, 20000, 20000],
+    higher_macd_hist: [0, -10000, -10000, -10000],
+  });
+
+  hp.applyChanlunUpdate(payload, {
+    ...PARAMS,
+    to: 1180,
+  });
+
+  const stored = hp.bars_result.get(KEY);
+  assert.deepEqual(Array.from(stored.times), [1000000, 1060000, 1120000, 1180000]);
+  assert.equal(Number.isNaN(stored.macd_dif[0]), true);
+  assert.deepEqual(Array.from(stored.macd_dif.slice(1)), [0.123456, 0.12, -0.1]);
+  assert.deepEqual(Array.from(stored.higher_macd_hist), [0, -0.01, -0.02, -0.03]);
+});

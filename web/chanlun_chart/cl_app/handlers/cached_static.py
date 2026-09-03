@@ -27,6 +27,9 @@ _MIME_BY_EXT = {
     ".html": "text/html; charset=utf-8",
     ".svg": "image/svg+xml",
     ".map": "application/json; charset=utf-8",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
 }
 
 
@@ -176,8 +179,14 @@ class CachedStaticFileHandler(StaticFileHandler):
             self.set_header("Content-Encoding", "gzip")
 
     def get_content_type(self):
+        base = (
+            self.absolute_path[:-3]
+            if getattr(self, "_serving_gz", False)
+            else self.absolute_path
+        )
+        ext = os.path.splitext(base)[1].lower()
+        if ext in _MIME_BY_EXT:
+            return _MIME_BY_EXT[ext]
         if getattr(self, "_serving_gz", False):
-            base = self.absolute_path[:-3]  # 去掉 .gz
-            ext = os.path.splitext(base)[1].lower()
-            return _MIME_BY_EXT.get(ext, "application/octet-stream")
+            return "application/octet-stream"
         return super().get_content_type()

@@ -61,6 +61,8 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     assert "$premarketTrigger = New-ScheduledTaskTrigger" in installer
     assert "-Weekly" in installer
     assert "08:20" in installer
+    assert "-WindowStyle Hidden" in installer
+    assert "-WorkingDirectory $ProjectRoot" in installer
     assert "deployment_scope.json" in restart
     assert "deployment_scope.json" in watchdog
     assert "Write-WatchdogDeploymentScope" in restart
@@ -279,6 +281,77 @@ def test_watchdog_parses_503_candidate_degradation_without_restart(
     assert heartbeat["recovery_recommended"] is False
     assert "candidate_monitor_warming" in heartbeat["detail"]
     assert "ready endpoint failed" not in heartbeat["detail"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
+def test_watchdog_does_not_restart_during_app_owned_qmt_change(
+    tmp_path: Path,
+) -> None:
+    readiness = _healthy_readiness_payload()
+    readiness["status"] = "not_ready"
+    components = readiness["components"]
+    components["qmt_runtime"].update(
+        {
+            # The last completed observation can remain ready while the app
+            # pauses the gateway for its in-flight daily restart.
+            "ready": True,
+            "operation_in_progress": True,
+            "operation_action": "RESTART",
+            "operation_started_at": "2026-09-03T08:30:02+08:00",
+        }
+    )
+    components["ticks"]["ready"] = False
+    screening = components["trading_screening"]
+    screening["priority_monitor_session_open"] = False
+    screening["priority_monitor_status"] = "not_due"
+    screening["realtime_alert_status"] = "not_due"
+    screening["native_gateway"]["ready"] = False
+    screening["native_gateway"]["market_data_probe"]["ready"] = False
+
+    result, heartbeat = _run_watchdog_once(
+        tmp_path,
+        readiness,
+        readiness_http_status=503,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert heartbeat["status"] == "operational_degraded"
+    assert heartbeat["recovery_recommended"] is False
+    assert "qmt_runtime_restart_in_progress" in heartbeat["detail"]
+    assert "ticks_not_ready" not in heartbeat["detail"]
+    assert "native_gateway_not_ready" not in heartbeat["detail"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
+def test_watchdog_still_recovers_unexplained_native_gateway_failure(
+    tmp_path: Path,
+) -> None:
+    readiness = _healthy_readiness_payload()
+    readiness["status"] = "not_ready"
+    components = readiness["components"]
+    components["ticks"]["ready"] = False
+    components["qmt_runtime"].update(
+        {
+            "operation_in_progress": False,
+            "operation_action": None,
+            "operation_started_at": None,
+        }
+    )
+    screening = components["trading_screening"]
+    screening["native_gateway"]["ready"] = False
+    screening["native_gateway"]["market_data_probe"]["ready"] = False
+
+    result, heartbeat = _run_watchdog_once(
+        tmp_path,
+        readiness,
+        readiness_http_status=503,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert heartbeat["status"] == "readiness_failed"
+    assert heartbeat["recovery_recommended"] is True
+    assert "ticks_not_ready" in heartbeat["detail"]
+    assert "native_gateway_not_ready" in heartbeat["detail"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")

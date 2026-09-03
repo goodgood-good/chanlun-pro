@@ -28,6 +28,7 @@ const template = fs.readFileSync(
   "utf8",
 );
 const controllerSource = fs.readFileSync(path.resolve(__dirname, "../early_screening.js"), "utf8");
+const chartsSource = fs.readFileSync(path.resolve(__dirname, "../charts.js"), "utf8");
 const humanReviewSource = fs.readFileSync(
   path.resolve(__dirname, "../human_review_screening.js"),
   "utf8",
@@ -38,7 +39,37 @@ const markoutAuditSource = fs.readFileSync(
 );
 const dashboardCss = fs.readFileSync(path.resolve(__dirname, "../../css/early_screening.css"), "utf8");
 
+test("chart timeout keeps the incomplete iframe veiled and offers an explicit retry", () => {
+  assert.match(controllerSource, /reloads\s*>=\s*CHART_SWITCH_MAX_RELOADS[\s\S]*?setChartFrameFailure\(frame\)/);
+  assert.match(controllerSource, /card\.dataset\.loading\s*=\s*"true"/);
+  assert.match(controllerSource, /未能完整加载，点击重试/);
+  assert.match(dashboardCss, /\.es-chart-loading\[data-state="error"\]/);
+});
+
+test("chart switching defers snapshot and quote traffic until the atomic batch settles", () => {
+  assert.match(controllerSource, /chartSwitchInFlight:\s*false/);
+  assert.match(
+    controllerSource,
+    /function beginChartFrameBatch\(\)[\s\S]*?state\.chartSwitchInFlight = true[\s\S]*?snapshotRequestController\.abort\(\)[\s\S]*?window\.clearTimeout\(signalQuoteTimer\)/,
+  );
+  assert.match(
+    controllerSource,
+    /function finishChartFrameBatch\(\)[\s\S]*?state\.chartSwitchInFlight = false[\s\S]*?schedulePoll\(\)[\s\S]*?scheduleSignalQuoteRefresh/,
+  );
+  assert.match(
+    controllerSource,
+    /document\.visibilityState === "visible"[\s\S]*?!state\.chartSwitchInFlight[\s\S]*?requestSnapshot\(\)/,
+  );
+  assert.match(controllerSource, /state\.loading \|\| state\.chartSwitchInFlight/);
+  assert.match(controllerSource, /snapshot_request_deferred_for_chart/);
+  assert.match(
+    controllerSource,
+    /revealSettledChartFrameBatch\(\)[\s\S]*?finishChartFrameBatch\(\)/,
+  );
+});
+
 test("live and review requests are bounded and the review queue polls while visible", () => {
+  assert.match(controllerSource, /POLL_INTERVAL_MS\s*=\s*15_000/);
   assert.match(controllerSource, /SNAPSHOT_REQUEST_TIMEOUT_MS\s*=\s*20_000/);
   assert.match(controllerSource, /SNAPSHOT_RECOVERY_RETRY_MS\s*=\s*750/);
   assert.match(controllerSource, /new AbortController\(\)/);
@@ -52,6 +83,11 @@ test("live and review requests are bounded and the review queue polls while visi
   assert.match(controllerSource, /response\.status === 401/);
   assert.match(controllerSource, /snapshot_authentication_required/);
   assert.match(controllerSource, /await waitForSnapshotRetry\(response\)/);
+  assert.match(
+    controllerSource,
+    /snapshot\.presentation_market_data_as_of[\s\S]*?snapshot\.market_data_as_of/,
+  );
+  assert.match(controllerSource, /盘中增量计算截止/);
   assert.match(humanReviewSource, /REQUEST_TIMEOUT_MS\s*=\s*30_000/);
   assert.match(humanReviewSource, /new AbortController\(\)/);
   assert.match(humanReviewSource, /signal:\s*controller\.signal/);
@@ -78,6 +114,22 @@ test("manual attention symbols render bounded cross-market quote price and perce
   assert.doesNotMatch(controllerSource, /quote\.hidden\s*=\s*true/);
   assert.match(dashboardCss, /\.es-holding-card__quote/);
   assert.match(dashboardCss, /font-variant-numeric:\s*tabular-nums/);
+});
+
+test("selection candidates batch latest prices and today's changes without rebuilding charts", () => {
+  assert.match(controllerSource, /SIGNAL_QUOTE_TIMEOUT_MS\s*=\s*8_000/);
+  assert.match(controllerSource, /SIGNAL_QUOTE_BATCH_SIZE\s*=\s*500/);
+  assert.match(controllerSource, /SIGNAL_QUOTE_REFRESH_GUARD_MS\s*=\s*30_000/);
+  assert.match(controllerSource, /signalQuoteCache\.set/);
+  assert.match(controllerSource, /buildSignalQuoteGroups\(signals\)/);
+  assert.match(controllerSource, /filtered\.slice\(0, state\.signalRenderLimit\)/);
+  assert.match(controllerSource, /querySelectorAll\("\[data-signal-quote\]"\)/);
+  assert.match(controllerSource, /Ui\.updateSignalQuoteNode/);
+  assert.match(controllerSource, /Promise\.allSettled\(requests\)/);
+  assert.match(controllerSource, /quoteForSignal:\s*signalQuoteForSignal/);
+  assert.match(dashboardCss, /\.es-signal-card__quote/);
+  assert.match(dashboardCss, /\.es-signal-card__quote\[data-direction="up"\]/);
+  assert.match(dashboardCss, /\.es-signal-card__quote\[data-direction="down"\]/);
 });
 
 function loadUi() {
@@ -329,6 +381,15 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(template, /id="es-us-monitor-other"/);
   assert.match(template, /id="es-us-monitor-updated"/);
   assert.match(template, /id="es-us-monitor-notifications"/);
+  assert.match(template, /data-theater-signal-picker/);
+  assert.match(template, /data-theater-signal-list/);
+  assert.match(template, /data-theater-point-type="buy"/);
+  assert.match(template, /data-theater-point-type="sell"/);
+  assert.match(template, /data-theater-signal-search/);
+  assert.doesNotMatch(template, /data-theater-exit/);
+  assert.equal((template.match(/data-signal-list-toggle/g) || []).length, 1);
+  assert.match(template, /class="es-signal-list-toggle__icon" aria-hidden="true"/);
+  assert.match(template, /aria-label="收起买卖点股票列表"/);
   assert.match(template, /<dt>待机<\/dt><dd id="es-us-monitor-other"/);
   assert.match(template, /class="es-us-monitor-compact__metrics"/);
   assert.match(template, /id="es-sector-catalog-status"/);
@@ -503,7 +564,7 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(template, /id="es-priority-monitor-status"/);
   assert.match(template, /id="es-preselection-diagnostic"/);
   assert.match(template, /id="es-priority-monitor-diagnostic"/);
-  assert.match(template, /收盘后生成候选，盘中跟踪结构变化/);
+  assert.match(template, /收盘生成候选，盘中增量更新结构/);
   assert.match(template, /<dt>今日候选名单<\/dt>/);
   assert.match(dashboardCss, /\.es-status-facts dd\s*\{[^}]*overflow-wrap:\s*anywhere/s);
   assert.match(uiSource, /daily_preselection_ready/);
@@ -518,13 +579,35 @@ test("dashboard exposes sector signal and chart workspaces", () => {
 });
 
 test("desktop layout aligns the signal queue with the chart below a compact sector rail", () => {
+  assert.doesNotMatch(template, /点击标的，右侧四周期图同步切换/);
   assert.match(
     dashboardCss,
     /grid-template-areas:\s*"sector sector"\s*"signals charts"/,
   );
+  const tabletRules = dashboardCss.slice(
+    dashboardCss.indexOf("@media (max-width: 1100px)"),
+    dashboardCss.indexOf("@media (max-width: 900px)"),
+  );
+  const narrowRules = dashboardCss.slice(
+    dashboardCss.indexOf("@media (max-width: 900px)"),
+    dashboardCss.indexOf("@media (max-width: 700px)"),
+  );
+  assert.doesNotMatch(tabletRules, /grid-template-areas/);
+  assert.doesNotMatch(tabletRules, /\.es-chart-workspace\s*\{\s*position:\s*static/);
+  assert.match(
+    narrowRules,
+    /grid-template-areas:\s*"sector"\s*"signals"\s*"charts"/,
+  );
+  assert.match(narrowRules, /\.es-chart-workspace\s*\{\s*position:\s*static/);
   assert.match(
     dashboardCss,
-    /\.es-sector-list\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit, minmax\(250px, 1fr\)\)/,
+    /\.es-sector-list\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(190px,\s*100%\),\s*1fr\)\)[^}]*overflow:\s*visible/s,
+  );
+  const compactSectorList = dashboardCss.match(/\.es-sector-list\s*\{([^}]*)\}/s)?.[1] || "";
+  assert.doesNotMatch(compactSectorList, /max-height:/);
+  assert.match(
+    dashboardCss,
+    /\.es-sector-list\[data-expanded="true"\]\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(230px,\s*1fr\)\)/s,
   );
   assert.match(template, /<details class="es-rule-note">[\s\S]*?<summary>规则与数据口径<\/summary>/);
   const sectorWorkspaceStart = template.indexOf('class="es-workspace es-sector-workspace"');
@@ -534,11 +617,29 @@ test("desktop layout aligns the signal queue with the chart below a compact sect
   assert.ok(sectorWorkspaceStart < lifecycleFilters && lifecycleFilters < signalWorkspaceStart);
   assert.ok(sectorWorkspaceStart < pointFilters && pointFilters < signalWorkspaceStart);
   assert.match(dashboardCss, /\.es-global-filters\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/);
-  assert.match(dashboardCss, /\.es-search\s*\{[^}]*margin:\s*6px 14px/s);
-  assert.match(dashboardCss, /\.es-workspace__header\s*\{[^}]*min-height:\s*64px/s);
-  assert.match(dashboardCss, /\.es-signal-list\s*\{[^}]*padding-top:\s*8px/s);
+  assert.match(dashboardCss, /\.es-search\s*\{[^}]*margin:\s*4px 10px/s);
+  assert.match(dashboardCss, /\.es-signal-channel-bar\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)/s);
+  assert.match(dashboardCss, /\.es-signal-channel-primary\s*\{[^}]*repeat\(2,/s);
+  assert.match(dashboardCss, /\.es-signal-type-filters\s*\{[^}]*repeat\(6,/s);
+  assert.match(dashboardCss, /\.es-signal-workspace\s*\{[^}]*position:\s*sticky[^}]*overflow:\s*hidden/s);
+  assert.match(narrowRules, /\.es-signal-workspace\s*\{[^}]*position:\s*static[^}]*height:\s*auto/s);
+  assert.match(dashboardCss, /\.es-workspace__header\s*\{[^}]*min-height:\s*54px/s);
+  assert.match(dashboardCss, /\.es-workspace__header\s*\{[^}]*flex:\s*0 0 auto/s);
+  assert.match(dashboardCss, /\.es-signal-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto/s);
+  assert.match(dashboardCss, /\.es-signal-list\s*\{[^}]*padding-top:\s*5px/s);
+  assert.match(template, /<details class="es-holdings"[^>]*>[\s\S]*?<summary>/);
+  assert.match(template, /class="es-secondary-stats" hidden aria-hidden="true"/);
+  assert.match(template, /data-chart-frame="1m"[^>]*loading="eager"/);
   assert.match(template, /<details class="es-global-filter-drawer">[\s\S]*?id="es-filter-summary"/);
-  assert.match(template, /<details class="es-chart-display-settings">[\s\S]*?data-layout="focus"/);
+  const chartViewControlsIndex = template.indexOf('class="es-chart-view-controls"');
+  const chartDisplaySettingsIndex = template.indexOf('class="es-chart-display-settings"');
+  const chartDisplaySettingsEnd = template.indexOf("</details>", chartDisplaySettingsIndex);
+  assert.ok(chartViewControlsIndex >= 0 && chartViewControlsIndex < chartDisplaySettingsIndex);
+  assert.match(template.slice(chartViewControlsIndex, chartDisplaySettingsIndex), /data-layout="focus"/);
+  assert.doesNotMatch(
+    template.slice(chartDisplaySettingsIndex, chartDisplaySettingsEnd),
+    /data-layout=/,
+  );
   assert.match(template, /<details class="hr-audit-summary">[\s\S]*?class="hr-summary"/);
   assert.match(controllerSource, /sectorExpanded:\s*false/);
   assert.match(controllerSource, /\{ expanded: state\.sectorExpanded, limit: 10 \}/);
@@ -805,6 +906,7 @@ test("chart workspace exposes a decision path focus controls and decision eviden
     'data-layout="focus"',
     'data-layout="dual"',
     'data-layout="triple"',
+    'data-layout="quad"',
     'data-evidence-group="established"',
     'data-evidence-group="missing"',
     'data-evidence-group="blocking"',
@@ -815,14 +917,14 @@ test("chart workspace exposes a decision path focus controls and decision eviden
   assert.doesNotMatch(template, /data-evidence-30m|data-evidence-5m|data-evidence-1m/);
 });
 
-test("chart workspace puts the real chart before decisions and removes the selection placeholder", () => {
+test("chart workspace presents the decision and timeframe path before the real chart", () => {
   const chartIndex = template.indexOf('class="es-chart-stage"');
   const decisionIndex = template.indexOf('class="es-decision-deck"');
   const pathIndex = template.indexOf('class="es-period-path"');
   const contentTag = template.match(/<div data-chart-content[^>]*>/)?.[0] || "";
 
-  assert.ok(chartIndex >= 0 && chartIndex < decisionIndex);
-  assert.ok(chartIndex < pathIndex);
+  assert.ok(decisionIndex >= 0 && decisionIndex < pathIndex);
+  assert.ok(pathIndex < chartIndex);
   assert.doesNotMatch(template, /data-chart-placeholder/);
   assert.doesNotMatch(template, /从买卖点队列选择一只股票|这里会先给出交易结论/);
   assert.doesNotMatch(contentTag, /\shidden(?:\s|>)/);
@@ -1009,13 +1111,18 @@ test("stock selection opens with all six point channels visible", () => {
     assert.match(quickChannels[0], new RegExp(`data-point-type="${point}"`));
   }
   assert.match(quickChannels[0], /id="es-show-all-signals"[^>]*>全部线索</);
+  assert.match(
+    quickChannels[0],
+    /id="es-show-today-notifications"[^>]*data-signal-source="notification"[^>]*>今日实时通知</,
+  );
   assert.doesNotMatch(
     quickChannels[0].match(/<button id="es-show-all-signals"[^>]*>/)?.[0] || "",
     /data-point-type/,
   );
   assert.match(template, /data-point-type="all"[^>]*>不限买卖点类型</);
   assert.match(controllerSource, /function resetSignalFilters\(segmentState = "all"\)/);
-  assert.match(controllerSource, /Ui\.signalQueueFacts\(allQualifiedSignals\(\)\)/);
+  assert.match(controllerSource, /Ui\.signalQueueFacts\(allQualifiedSignals\("all"\)\)/);
+  assert.match(controllerSource, /Ui\.signalRowsForSource\(state\.snapshot, source\)/);
   assert.match(controllerSource, /state\.segmentState = segmentState/);
   assert.match(controllerSource, /const showAllSignals = byId\("es-show-all-signals"\)/);
   assert.match(humanReviewSource, /alertType:\s*"all"/);
@@ -1511,11 +1618,11 @@ test("pure monitor positions remain browseable without inflating 5m clue counts"
   });
   assert.equal(
     Ui.signalQueueCountText(rows),
-    "1 条5m结构线索 · 1 个独立监听",
+    "1 条5m线索 · 1 监听",
   );
   assert.equal(
     Ui.signalQueueCountText([monitorPosition], rows),
-    "0 条5m结构线索 · 1 个独立监听 / 全部 1 条5m结构线索 · 1 个独立监听",
+    "0/1 条5m线索 · 1/1 监听",
   );
   assert.match(controllerSource, /queueFacts\.structure_clue_count/);
   assert.match(controllerSource, /Ui\.signalQueueCountText\(filtered, selectionScopedSignals\(\)\)/);
@@ -1751,14 +1858,40 @@ test("notification history may annotate only the same still-current structure", 
   const currentRow = annotated.unified_signals.find(
     (row) => row.signal_id === current.signal_id,
   );
+  const selectionRow = annotated.selection_signals.find(
+    (row) => row.signal_id === current.signal_id,
+  );
 
   assert.equal(annotated.unified_signals.length, snapshot.signals.length);
   assert.equal(currentRow.realtime_notification, true);
+  assert.equal(selectionRow.realtime_notification, undefined);
   assert.equal(currentRow.synthetic_notification_projection, undefined);
   assert.equal(currentRow.notification_current_price, 8.12);
   assert.equal(currentRow.notification_current_price_source, "realtime_tick");
   assert.equal(currentRow.notification_current_price_at, current.observed_at);
   assert.match(Ui.realtimeNotificationPriceText(currentRow), /2026-/);
+  assert.deepEqual(
+    Ui.signalRowsForSource(annotated, "all").map((row) => row.signal_id),
+    annotated.selection_signals.map((row) => row.signal_id),
+  );
+  assert.deepEqual(
+    Ui.signalRowsForSource(annotated, "notification").map((row) => row.signal_id),
+    annotated.unified_signals.map((row) => row.signal_id),
+  );
+  assert.deepEqual(
+    Ui.filterSignals(Ui.signalRowsForSource(annotated, "notification"), {
+      source: "notification",
+      observedAt: new Date("2026-07-20T23:59:59+08:00"),
+    }).map((row) => row.signal_id),
+    [current.signal_id],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(Ui.signalRowsForSource(annotated, "notification"), {
+      source: "notification",
+      observedAt: new Date("2026-07-21T00:00:00+08:00"),
+    }),
+    [],
+  );
 
   const invalidated = Ui.normalizeSnapshot({
     ...snapshot,
@@ -1769,6 +1902,10 @@ test("notification history may annotate only the same still-current structure", 
   });
   assert.equal(
     invalidated.unified_signals.some((row) => row.signal_id === current.signal_id),
+    false,
+  );
+  assert.equal(
+    invalidated.selection_signals.some((row) => row.signal_id === current.signal_id),
     false,
   );
   assert.equal(invalidated.realtime_notifications.events.length, 1);
@@ -2104,6 +2241,54 @@ test("filters preserve independent point lifecycle sector and query choices", ()
   );
 });
 
+test("theater picker keeps only actual buy/sell points and supports direction and search", () => {
+  const Ui = loadUi();
+  const signals = Ui.normalizeSnapshot(snapshot).signals;
+  const sell = {
+    ...signals[0],
+    signal_id: "signal-sell",
+    code: "SH.600000",
+    name: "浦发银行",
+    point_type: "3sell",
+    side: "sell",
+  };
+  const setupFallback = {
+    ...signals[0],
+    signal_id: "signal-setup-fallback",
+    code: "SZ.000333",
+    name: "美的集团",
+    point_type: "",
+    side: "buy",
+    setup_5m: { ...signals[0].setup_5m, point_type: "2buy" },
+  };
+  const monitor = {
+    signal_id: "monitor-only",
+    code: "US:AAPL.US",
+    name: "Apple",
+    side: "",
+    point_type: "",
+    setup_5m: {},
+  };
+  const rows = [...signals, sell, setupFallback, monitor];
+
+  assert.deepEqual(
+    Ui.theaterPointSignals(rows).map((row) => row.signal_id),
+    ["signal-1", "signal-2", "signal-sell", "signal-setup-fallback"],
+  );
+  assert.deepEqual(
+    Ui.theaterPointSignals(rows, "sell").map((row) => row.signal_id),
+    ["signal-sell"],
+  );
+  assert.deepEqual(
+    Ui.theaterPointSignals(rows, "buy", "美的").map((row) => row.signal_id),
+    ["signal-setup-fallback"],
+  );
+  assert.deepEqual(
+    Ui.theaterPointSignals(rows, "all", "三卖").map((row) => row.signal_id),
+    ["signal-sell"],
+  );
+});
+
 test("review display sorting keeps confirmed setups ahead of provisional candidates", () => {
   const Ui = loadUi();
   const rows = [
@@ -2179,6 +2364,7 @@ test("review display sorting keeps confirmed setups ahead of provisional candida
 
 test("live selection sorts the filtered rows by review priority descending", () => {
   const Ui = loadUi();
+  const gradeA = { context_grade: "A" };
   const rows = [
     {
       signal_id: "confirmed-low-priority",
@@ -2186,6 +2372,7 @@ test("live selection sorts the filtered rows by review priority descending", () 
       point_type: "1buy",
       lifecycle_stage: "triggered",
       review_priority: 25,
+      execution_profile: gradeA,
       sector: { sector_id: "sector-1" },
     },
     {
@@ -2194,6 +2381,7 @@ test("live selection sorts the filtered rows by review priority descending", () 
       point_type: "3buy",
       lifecycle_stage: "approaching",
       review_priority: 80,
+      execution_profile: gradeA,
       sector: { sector_id: "sector-2" },
     },
     {
@@ -2203,6 +2391,7 @@ test("live selection sorts the filtered rows by review priority descending", () 
       lifecycle_stage: "triggered",
       realtime_notification: true,
       notification_delivery_status: "failed",
+      execution_profile: gradeA,
       sector: { sector_id: "market:us" },
     },
     {
@@ -2229,6 +2418,7 @@ test("live selection sorts the filtered rows by review priority descending", () 
       code: "AAPL.US",
       point_type: "1buy",
       lifecycle_stage: "triggered",
+      execution_profile: gradeA,
       sector: { sector_id: "market:us" },
     },
   ];
@@ -2246,6 +2436,42 @@ test("live selection sorts the filtered rows by review priority descending", () 
   assert.equal(Ui.reviewPriorityForSignal(rows[2]), 110);
   assert.equal(Ui.reviewPriorityForSignal(rows[3]), 85);
   assert.equal(Ui.reviewPriorityForSignal(rows[4]), null);
+});
+
+test("live selection sorts by A B C grade before notification priority", () => {
+  const Ui = loadUi();
+  const row = (signalId, grade, reviewPriority) => ({
+    signal_id: signalId,
+    code: signalId,
+    point_type: "2buy",
+    lifecycle_stage: "triggered",
+    review_priority: reviewPriority,
+    execution_profile: grade ? { context_grade: grade } : {},
+  });
+  const rows = [
+    { ...row("notification-ungraded", null, 1), realtime_notification: true },
+    row("unresolved-urgent", null, 110),
+    row("c-urgent", "C", 100),
+    row("b-lower", "B", 40),
+    row("a-lowest-priority", "A", 10),
+    row("b-higher", "B", 90),
+  ];
+
+  assert.deepEqual(
+    Ui.sortSignalsForReview(rows).map((value) => value.signal_id),
+    [
+      "a-lowest-priority",
+      "b-higher",
+      "b-lower",
+      "c-urgent",
+      "notification-ungraded",
+      "unresolved-urgent",
+    ],
+  );
+  assert.deepEqual(
+    rows.map((value) => Ui.contextGradeForSignal(value)),
+    ["UNRESOLVED", "UNRESOLVED", "C", "B", "A", "B"],
+  );
 });
 
 test("derived review priority keeps recommendation bands stable under rich diagnostics", () => {
@@ -2555,6 +2781,109 @@ test("signal queue and chart publish one shared selected identity", () => {
   assert.equal(chart.root.dataset.selectedCode, selected.code);
 });
 
+test("selection updates only existing cards and chart navigation uses the persistent bridge", () => {
+  const Ui = loadUi();
+  const cards = ["signal-1", "signal-2"].map((signalId) => {
+    const attributes = new Map();
+    const classes = new Set();
+    return {
+      dataset: { signalId },
+      classList: {
+        toggle(name, force) { if (force) classes.add(name); else classes.delete(name); },
+        contains(name) { return classes.has(name); },
+      },
+      setAttribute(name, value) { attributes.set(name, String(value)); },
+      getAttribute(name) { return attributes.get(name) || null; },
+    };
+  });
+  const container = {
+    dataset: {},
+    querySelectorAll: () => cards,
+  };
+
+  const selected = Ui.updateSignalWorkspaceSelection(container, "signal-2");
+  assert.equal(selected, cards[1]);
+  assert.equal(cards[0].classList.contains("is-selected"), false);
+  assert.equal(cards[0].getAttribute("aria-current"), "false");
+  assert.equal(cards[1].classList.contains("is-selected"), true);
+  assert.equal(cards[1].getAttribute("aria-pressed"), "true");
+  assert.equal(cards[0].tabIndex, -1);
+  assert.equal(cards[1].tabIndex, 0);
+  assert.equal(container.dataset.selectedSignalId, "signal-2");
+
+  const view = fakeChartRoot();
+  const navigations = [];
+  Ui.renderChartWorkspace(view.root, snapshot.signals[0], {
+    frequency: "5m",
+    navigateChartFrame(frame, target) { navigations.push({ frame, target }); },
+  });
+  assert.equal(navigations.length, 4);
+  assert.deepEqual(
+    navigations.map((row) => row.target.frequency),
+    ["1m", "5m", "30m", "d"],
+  );
+  assert.equal(navigations[2].target.code, "SZ.000001");
+  assert.match(navigations[2].target.url, /chart_embed=decision-support/);
+  assert.equal(view.node('[data-chart-frame="5m"]').getAttribute("src"), null);
+});
+
+test("signal cards show latest price and today's change with honest quote states", () => {
+  const Ui = loadUi();
+  const signalList = fakeChartRoot();
+  const usSignal = {
+    ...snapshot.signals[0],
+    signal_id: "us-signal",
+    market: "us",
+    code: "aapl.us",
+    name: "Apple",
+  };
+  const card = Ui.renderSignalWorkspace(
+    signalList.root,
+    [usSignal],
+    usSignal.signal_id,
+    null,
+    {
+      quoteForSignal: () => ({ price: 145.26, rate: 1.236, status: "ready" }),
+    },
+  );
+  const identity = card.children.find(
+    (child) => child.className === "es-signal-card__identity",
+  );
+  const quote = identity.children.find(
+    (child) => child.className === "es-signal-card__quote",
+  );
+
+  assert.equal(quote.textContent, "145.26  +1.24%");
+  assert.equal(quote.dataset.market, "us");
+  assert.equal(quote.dataset.code, "AAPL.US");
+  assert.equal(quote.dataset.direction, "up");
+  assert.equal(quote.dataset.state, "ready");
+  assert.equal(quote.getAttribute("title"), "最新价 145.26 · 今日涨跌幅 +1.24%");
+
+  Ui.updateSignalQuoteNode(quote, { price: 8.126, rate: -2, status: "closed" });
+  assert.equal(quote.textContent, "8.126  -2.00%");
+  assert.equal(quote.dataset.direction, "down");
+  assert.match(quote.getAttribute("title"), /^收盘价 8\.126/);
+
+  Ui.updateSignalQuoteNode(quote, { status: "unavailable" });
+  assert.equal(quote.textContent, "行情暂不可用");
+  assert.equal("direction" in quote.dataset, false);
+  assert.deepEqual(
+    Ui.signalQuotePresentation({ price: 10, changePercent: 0, status: "ready" }),
+    {
+      available: true,
+      direction: "flat",
+      state: "ready",
+      text: "10.00  +0.00%",
+      title: "最新价 10.00 · 今日涨跌幅 +0.00%",
+    },
+  );
+  assert.equal(
+    Ui.signalQuotePresentation({ status: "deferred" }).text,
+    "行情请求合并中",
+  );
+});
+
 test("same symbol confirmed and newer forming structures keep both facts explicit", () => {
   const Ui = loadUi();
   const confirmedSell = {
@@ -2774,6 +3103,8 @@ test("analysis layout switch accepts only current layout values", () => {
   assert.equal(root.dataset.currentLayout, "dual");
   assert.equal(Ui.setChartLayout(root, "triple"), "triple");
   assert.equal(root.dataset.layout, "triple");
+  assert.equal(Ui.setChartLayout(root, "quad"), "quad");
+  assert.equal(root.dataset.layout, "quad");
   assert.equal(Ui.setChartLayout(root, "unknown"), "focus");
   assert.equal(root.dataset.currentLayout, "focus");
 });
@@ -2802,16 +3133,50 @@ test("theater mode synchronizes the workspace body and toggle state", () => {
   assert.equal(view.root.dataset.theaterMode, "true");
   assert.equal(view.node("[data-theater-toggle]").getAttribute("aria-pressed"), "true");
   assert.equal(view.node("[data-theater-label]").textContent, "退出影院");
+  assert.equal(view.node("[data-theater-signal-picker]").getAttribute("aria-hidden"), "false");
   assert.equal(body.classList.contains("es-theater-open"), true);
 
   assert.equal(Ui.setTheaterMode(view.root, body, false), false);
   assert.equal(view.root.dataset.theaterMode, "false");
   assert.equal(view.node("[data-theater-toggle]").getAttribute("aria-pressed"), "false");
   assert.equal(view.node("[data-theater-label]").textContent, "影院模式");
+  assert.equal(view.node("[data-theater-signal-picker]").getAttribute("aria-hidden"), "true");
   assert.equal(body.classList.contains("es-theater-open"), false);
 });
 
-test("dashboard CSS implements focus dual triple and responsive evidence layouts", () => {
+test("theater stock picker collapses independently and keeps an accessible restore control", () => {
+  const Ui = loadUi();
+  const view = fakeChartRoot();
+  const body = view.node("body");
+
+  Ui.setTheaterPickerOpen(view.root, true);
+  Ui.setTheaterMode(view.root, body, true);
+  assert.equal(view.root.dataset.theaterPickerOpen, "true");
+  assert.equal(view.node("[data-theater-picker-toggle]").getAttribute("aria-expanded"), "true");
+  assert.equal(view.node("[data-theater-signal-picker]").getAttribute("aria-hidden"), "false");
+  assert.equal(view.node("[data-theater-picker-label]").textContent, "收起列表");
+  assert.equal(
+    view.node("[data-theater-picker-toggle]").getAttribute("aria-label"),
+    "收起买卖点股票列表",
+  );
+
+  assert.equal(Ui.setTheaterPickerOpen(view.root, false), false);
+  assert.equal(view.root.dataset.theaterMode, "true");
+  assert.equal(view.root.dataset.theaterPickerOpen, "false");
+  assert.equal(view.node("[data-theater-picker-toggle]").getAttribute("aria-expanded"), "false");
+  assert.equal(view.node("[data-theater-signal-picker]").getAttribute("aria-hidden"), "true");
+  assert.equal(view.node("[data-theater-picker-label]").textContent, "展开列表");
+  assert.equal(
+    view.node("[data-theater-picker-toggle]").getAttribute("aria-label"),
+    "展开买卖点股票列表",
+  );
+
+  Ui.setTheaterPickerOpen(view.root, true);
+  Ui.setTheaterMode(view.root, body, false);
+  assert.equal(view.node("[data-theater-signal-picker]").getAttribute("aria-hidden"), "true");
+});
+
+test("dashboard CSS implements focus dual triple quad and responsive evidence layouts", () => {
   assert.match(dashboardCss, /\.es-analysis-grid\s*\{[^}]*overflow:\s*clip/s);
   assert.match(dashboardCss, /\.es-us-monitor-compact__summary\s*\{[^}]*display:\s*grid/s);
   assert.match(dashboardCss, /\.es-us-monitor-compact__metrics\s*\{[^}]*repeat\(4,/s);
@@ -2821,16 +3186,67 @@ test("dashboard CSS implements focus dual triple and responsive evidence layouts
   assert.match(dashboardCss, /data-layout="focus"\]\[data-focused-frequency="1m"\]/);
   assert.match(dashboardCss, /data-layout="dual"/);
   assert.match(dashboardCss, /data-layout="triple"/);
+  assert.match(dashboardCss, /data-layout="quad"/);
+  assert.match(dashboardCss, /data-theater-mode="true"\]\s+\.es-analysis-grid\s*\{[^}]*grid-template-columns:/s);
+  assert.match(dashboardCss, /data-theater-mode="true"\]\s+\.es-theater-signal-picker\s*\{[^}]*display:\s*grid/s);
+  assert.match(dashboardCss, /\.es-theater-signal-picker > header\s*\{[^}]*display:\s*block/s);
+  assert.match(dashboardCss, /\.es-theater-signal-list\s+\.es-signal-card__identity\s*\{[^}]*display:\s*grid[^}]*grid-template-areas:/s);
+  assert.match(dashboardCss, /\.es-signal-workspace\s+\.es-signal-card__identity\s*\{[^}]*display:\s*grid[^}]*grid-template-areas:/s);
+  assert.match(dashboardCss, /\.es-signal-workspace\s+\.es-signal-card__tags\s+\.is-selection-source,[\s\S]*?\.es-signal-card__risk\s*\{\s*display:\s*none/s);
+  assert.match(dashboardCss, /data-theater-picker-open="false"\]\s+\.es-analysis-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(dashboardCss, /data-theater-picker-open="false"\]\s+\.es-theater-signal-picker\s*\{[^}]*display:\s*none/s);
+  assert.match(dashboardCss, /data-signal-list-open="false"\][^\{]*\{[\s\S]*?"charts charts"/s);
+  assert.match(dashboardCss, /data-signal-list-open="false"\][^\n]*\.es-signal-workspace\s*\{\s*display:\s*none/s);
+  assert.match(dashboardCss, /\.es-signal-list-toolbar-toggle\s*\{[^}]*display:\s*inline-flex/s);
+  assert.match(dashboardCss, /\.es-signal-list-toolbar-toggle\[aria-expanded="false"\]\s*\{[^}]*color:\s*var\(--es-blue\)/s);
+  assert.match(dashboardCss, /\.es-signal-list-toggle__icon::after\s*\{/s);
+  assert.match(dashboardCss, /data-theater-mode="true"\]\s+\.es-theater-toolbar-exit\s*\{[^}]*display:\s*inline-flex/s);
+  assert.match(dashboardCss, /data-theater-mode="true"\]\s+\.es-period-path\s*\{\s*display:\s*none/s);
+  assert.match(dashboardCss, /data-theater-mode="true"\]\s+\.es-decision-deck\s*\{[^}]*grid-template-columns:/s);
+  assert.doesNotMatch(dashboardCss, /data-theater-mode="true"\]\s+\.es-decision-deck[^\{]*\{[^}]*display:\s*none/s);
+  assert.match(dashboardCss, /data-theater-mode="true"\]\s+\.es-chart-grid\s*\{[^}]*height:\s*100%/s);
+  assert.match(dashboardCss, /@media \(min-width:\s*901px\) and \(max-width:\s*1100px\)/);
+  assert.match(dashboardCss, /@media \(min-width:\s*901px\) and \(max-width:\s*1100px\)[\s\S]*?grid-template-columns:\s*minmax\(280px,\s*300px\)\s+minmax\(0,\s*1fr\)/s);
+  assert.match(dashboardCss, /\.es-theater-signal-list\s+\.es-signal-card__evidence,/);
   assert.match(dashboardCss, /\.es-period-path\s*\{/);
-  assert.match(dashboardCss, /\.es-period-path button > span\s*\{[^}]*font-size:\s*14px/s);
-  assert.match(dashboardCss, /\.es-period-path button > small\s*\{[^}]*font-size:\s*14px/s);
-  assert.match(dashboardCss, /\.es-period-path button > em\s*\{[^}]*font-size:\s*13px/s);
+  assert.match(dashboardCss, /\.es-period-path button > span\s*\{[^}]*font-size:\s*11px/s);
+  assert.match(dashboardCss, /\.es-period-path button > small\s*\{[^}]*font-size:\s*11px/s);
+  assert.match(dashboardCss, /\.es-period-path button > em\s*\{[^}]*font-size:\s*10px/s);
   assert.match(dashboardCss, /\.es-evidence-panel\s*\{/);
+  assert.match(
+    dashboardCss,
+    /\.es-nav a,[\s\S]*\.es-chart-card > header a\s*\{[^}]*min-width:\s*32px[^}]*min-height:\s*32px/s,
+  );
+  assert.match(
+    dashboardCss,
+    /\.es-status-diagnostics:not\(\[open\]\) > \.es-status-facts--diagnostics\s*\{[^}]*display:\s*none/s,
+  );
+  assert.match(
+    dashboardCss,
+    /\.es-dashboard details:not\(\[open\]\) > :not\(summary\)\s*\{[^}]*display:\s*none\s*!important/s,
+  );
+  assert.match(
+    dashboardCss,
+    /\.es-status-facts--diagnostics\s*\{[^}]*width:\s*min\(760px,\s*calc\(100vw - 64px\)\)/s,
+  );
+  assert.match(
+    dashboardCss,
+    /@media \(max-width:\s*1100px\)[\s\S]*?\.es-summary\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(150px,\s*1fr\)\)/s,
+  );
+  assert.match(
+    dashboardCss,
+    /@media \(max-width:\s*700px\)[\s\S]*?\.es-status-facts--primary\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s,
+  );
+  assert.doesNotMatch(dashboardCss, /overflow-x:\s*auto/);
   assert.match(dashboardCss, /data-signal-side="sell"\].*data-tone="action"/);
-  assert.doesNotMatch(dashboardCss, /data-layout="single"|data-layout="split"|data-layout="quad"/);
+  assert.doesNotMatch(dashboardCss, /data-layout="single"|data-layout="split"/);
 });
 
 test("product page never silently truncates decision and audit content", () => {
+  assert.match(
+    dashboardCss,
+    /\.es-holdings-list\s*\{[^}]*minmax\(min\(320px,\s*100%\),\s*1fr\)/s,
+  );
   for (const selector of [
     "\\.es-live-state small",
     "\\.hr-summary dd",
@@ -2839,6 +3255,7 @@ test("product page never silently truncates decision and audit content", () => {
     "\\.es-global-filter-drawer > summary span",
     "\\.es-signal-card__identity strong",
     "\\.es-decision-identity h3",
+    "\\.es-holding-card__identity strong",
   ]) {
     assert.match(
       dashboardCss,
@@ -2863,10 +3280,52 @@ test("product page never silently truncates decision and audit content", () => {
   assert.match(humanReviewSource, /候选报告与参数身份已验证：\$\{text\(candidate\.candidate_id\)\}/);
 });
 
+test("screening mode tabs use roving focus and standard arrow-key navigation", () => {
+  assert.match(template, /data-screening-mode="human-review"[^>]*tabindex="-1"/);
+  assert.doesNotMatch(humanReviewSource, /querySelectorAll\("\[data-screening-mode\]"\)/);
+  assert.match(humanReviewSource, /querySelectorAll\('\[role="tab"\]\[data-screening-mode\]'\)/);
+  assert.match(humanReviewSource, /button\.tabIndex = active \? 0 : -1/);
+  assert.match(humanReviewSource, /event\.key === "ArrowRight"/);
+  assert.match(humanReviewSource, /event\.key === "ArrowLeft"/);
+  assert.match(humanReviewSource, /event\.key === "Home"/);
+  assert.match(humanReviewSource, /event\.key === "End"/);
+  assert.match(humanReviewSource, /target\.focus\(\)/);
+});
+
+test("signal queue uses one tab stop and arrow-key browsing without changing selection", () => {
+  assert.match(uiSource, /function enableSignalListKeyboardNavigation/);
+  assert.match(uiSource, /querySelectorAll\("\.es-signal-card"\)/);
+  assert.match(uiSource, /card\.tabIndex = card === initialCard \? 0 : -1/);
+  assert.match(uiSource, /event\.key === "ArrowDown"/);
+  assert.match(uiSource, /event\.key === "ArrowUp"/);
+  assert.match(uiSource, /event\.key === "Home"/);
+  assert.match(uiSource, /event\.key === "End"/);
+  assert.match(uiSource, /targetCard\.scrollIntoView\(\{ block: "nearest", inline: "nearest" \}\)/);
+  assert.match(uiSource, /container\.replaceChildren\(fragment\);\s*enableSignalListKeyboardNavigation\(container, selectedCard\)/);
+});
+
+test("chart layout radios use one tab stop and standard arrow-key navigation", () => {
+  assert.match(template, /data-layout="dual"[^>]*tabindex="-1"/);
+  assert.match(template, /data-layout="triple"[^>]*tabindex="-1"/);
+  assert.match(template, /data-layout="quad"[^>]*tabindex="-1"/);
+  assert.match(controllerSource, /button\.tabIndex = active \? 0 : -1/);
+  assert.match(controllerSource, /const layoutButtons = \[\.\.\.document\.querySelectorAll/);
+  assert.match(controllerSource, /"ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"/);
+  assert.match(controllerSource, /selectLayout\(layoutButtons\[next\], true\)/);
+});
+
+test("manual attention cards keep both native list and link semantics", () => {
+  assert.match(template, /<ul id="es-holdings-list"/);
+  assert.match(controllerSource, /const item = document\.createElement\("li"\)/);
+  assert.match(controllerSource, /item\.append\(card\)/);
+  assert.doesNotMatch(controllerSource, /card\.setAttribute\("role", "listitem"\)/);
+  assert.match(dashboardCss, /\.es-holdings-list > li\s*\{[^}]*min-width:\s*0/s);
+});
+
 test("narrow product layout keeps all four period cards and complete evidence accessible", () => {
   assert.match(
     dashboardCss,
-    /@media \(max-width:\s*700px\)[\s\S]*\.es-period-path\s*\{[^}]*grid-template-columns:\s*minmax\(200px,\s*78vw\)\s+24px\s+minmax\(200px,\s*78vw\)\s+24px\s+minmax\(200px,\s*78vw\)\s+24px\s+minmax\(200px,\s*78vw\)/,
+    /@media \(max-width:\s*700px\)[\s\S]*\.es-period-path\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*overflow:\s*visible/,
   );
   assert.match(
     dashboardCss,
@@ -2875,6 +3334,39 @@ test("narrow product layout keeps all four period cards and complete evidence ac
   assert.match(
     dashboardCss,
     /@media \(max-width:\s*700px\)[\s\S]*\.es-evidence-panel\s*\{[^}]*position:\s*fixed[^}]*inset:\s*8px[^}]*width:\s*auto/s,
+  );
+});
+
+test("four-period chart controls and cards follow the 1m 5m 30m daily display order", () => {
+  const expectedFrequencies = ["1m", "5m", "30m", "d"];
+  const focusSwitch = template.slice(
+    template.indexOf('class="es-focus-switch"'),
+    template.indexOf('class="es-chart-actions"'),
+  );
+  const chartGrid = template.slice(
+    template.indexOf('class="es-chart-grid"'),
+    template.indexOf('data-chart-resizer="columns"'),
+  );
+
+  for (const source of [focusSwitch, chartGrid]) {
+    const positions = expectedFrequencies.map((frequency) => source.indexOf(
+      source === focusSwitch
+        ? `data-focus-frequency="${frequency}"`
+        : `data-frequency="${frequency}"`,
+    ));
+    assert.ok(positions.every((position) => position >= 0));
+    assert.deepEqual(positions, [...positions].sort((left, right) => left - right));
+  }
+});
+
+test("chart navigation starts the critical 1m period before lighter periods", () => {
+  const renderBody = uiSource.match(
+    /function renderChartWorkspace\(rootElement, signal, options = \{\}\) \{([\s\S]*?)\n  \}/,
+  );
+  assert.ok(renderBody);
+  assert.match(
+    renderBody[1],
+    /for \(const frequency of \["1m", "5m", "30m", "d"\]\)/,
   );
 });
 
@@ -2888,7 +3380,7 @@ test("wide chart workspace keeps decision navigation visible without squeezing c
   assert.match(template, /data-theater-toggle[^>]*disabled/);
   assert.match(
     dashboardCss,
-    /grid-template-columns:\s*clamp\(320px,\s*23vw,\s*440px\)\s+minmax\(0,\s*1fr\)/,
+    /grid-template-columns:\s*clamp\(360px,\s*25vw,\s*430px\)\s+minmax\(0,\s*1fr\)/,
   );
   assert.match(
     dashboardCss,
@@ -2896,7 +3388,11 @@ test("wide chart workspace keeps decision navigation visible without squeezing c
   );
   assert.match(
     dashboardCss,
-    /height:\s*var\(--es-chart-height,\s*clamp\(680px,\s*72vh,\s*920px\)\)/,
+    /height:\s*var\(--es-chart-height,\s*clamp\(760px,\s*78vh,\s*1040px\)\)/,
+  );
+  assert.match(
+    dashboardCss,
+    /data-layout="quad"[^}]*height:\s*var\(--es-chart-height,\s*clamp\(900px,\s*88vh,\s*1120px\)\)/s,
   );
   assert.match(
     dashboardCss,
@@ -3855,7 +4351,6 @@ test("sector radar uses a stable business order for unranked rows", () => {
     ["ranked", "strong", "weak", "quiet", "blocked"],
   );
   assert.match(template, /有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序/);
-  assert.match(template, /人工复核优先级、生命周期、板块结构名次、买卖点类型和代码稳定排序/);
 });
 
 test("sector workspace defaults to top ten while retaining an off-list selection", () => {
@@ -4061,6 +4556,22 @@ test("evidence uses the five minute invalidation as the structural stop fallback
 test("currently emitted screening diagnostics all have human-readable labels", () => {
   const Ui = loadUi();
   const emittedCodes = [
+    "screening_unavailable",
+    "screening_not_ready",
+    "screening_health_failed",
+    "screening_background_error",
+    "screening_refresh_failed",
+    "screening_worker_failed",
+    "screening_worker_not_running",
+    "screening_worker_source_revision_mismatch",
+    "screening_heartbeat_missing",
+    "screening_heartbeat_stale",
+    "screening_native_gateway_not_ready",
+    "screening_native_gateway_health_failed",
+    "screening_snapshot_identity_missing",
+    "screening_snapshot_not_publishable",
+    "screening_transport_invalid",
+    "US_MONITOR_JOB_NOT_REGISTERED",
     "QMT_SECTOR_ELIGIBLE_SCOPE",
     "QMT_SECTOR_TRIGGER",
     "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH",
@@ -4532,7 +5043,16 @@ test("position copy removes legacy account wording from every displayed state", 
   const cardRisk = card.children.find(
     (child) => child.className === "es-signal-card__risk",
   );
+  const cardTags = card.children.find(
+    (child) => child.className === "es-signal-card__tags",
+  );
+  const gradeBadge = cardTags.children.find(
+    (child) => child.className.includes("is-context-grade"),
+  );
   assert.equal(card.classList.contains("is-position-blocked"), true);
+  assert.equal(card.dataset.contextGrade, "B");
+  assert.equal(gradeBadge.textContent, "B级");
+  assert.equal(gradeBadge.getAttribute("title"), "B级（环境混合或中性）");
   assert.match(cardRisk.textContent, /当前价已超过结构锚点的5%追价保护线/);
   assert.doesNotMatch(cardRisk.textContent, /谨慎人工复核/);
 });
@@ -5123,10 +5643,97 @@ test("dashboard controller wires adaptive focus and manual period controls", () 
   assert.match(controllerSource, /state\.focusState = Ui\.resolveFocusState\(state\.focusState, selected\)/);
   assert.match(
     controllerSource,
-    /Ui\.renderChartWorkspace\(chartWorkspace, selected, \{\s*frequency: state\.focusState\.frequency,?\s*\}\)/,
+    /Ui\.renderChartWorkspace\(chartWorkspace, selected, \{\s*frequency: state\.focusState\.frequency,\s*navigateChartFrame,?\s*\}\)/,
   );
+  assert.match(controllerSource, /Ui\.updateSignalWorkspaceSelection\(signalList, nextSignalId\)/);
+  const selectSignalBody = controllerSource.match(
+    /function selectSignal\(signal\) \{([\s\S]*?)\n    \}/,
+  );
+  assert.ok(selectSignalBody);
+  assert.doesNotMatch(selectSignalBody[1], /renderWorkspaces\(/);
+  assert.match(selectSignalBody[1], /renderSelectedChart\(signal\)/);
   assert.match(controllerSource, /\[data-focus-frequency\], \[data-period-node\]/);
   assert.match(controllerSource, /Ui\.manualFocusState\(/);
+});
+
+test("hidden lazy chart frames defer timeout and reactivate when selected", () => {
+  assert.match(
+    controllerSource,
+    /function chartFrameIsVisible\(frame\)[\s\S]*?getClientRects\(\)\.length > 0/,
+  );
+  const timeoutBody = controllerSource.match(
+    /function armChartFrameTimeout\(frame\) \{([\s\S]*?)\n    \}/,
+  );
+  assert.ok(timeoutBody);
+  assert.match(timeoutBody[1], /if \(!chartFrameIsVisible\(frame\)\) return/);
+  assert.match(timeoutBody[1], /\|\| !chartFrameIsVisible\(frame\)/);
+  const navigationBody = controllerSource.match(
+    /function navigateChartFrame\(frame, target\) \{([\s\S]*?)\n    \}/,
+  );
+  assert.ok(navigationBody);
+  assert.match(
+    navigationBody[1],
+    /frame\.dataset\.chartTargetKey === targetKey[\s\S]*?chartFrameIsVisible\(frame\)/,
+  );
+  const flushBody = controllerSource.match(
+    /function flushChartFrameTarget\(frame\) \{([\s\S]*?)\n    \}/,
+  );
+  assert.ok(flushBody);
+  assert.match(flushBody[1], /!chartFrameIsVisible\(frame\)/);
+  assert.match(flushBody[1], /setChartFrameLoading\(frame, true\)/);
+  assert.match(flushBody[1], /armChartFrameTimeout\(frame\)/);
+  assert.doesNotMatch(controllerSource, /CHART_SWITCH_DEBOUNCE_MS|scheduleChartFrameFlush/);
+  assert.match(controllerSource, /CHART_ACTIVITY_MESSAGE\s*=\s*"chanlun:chart-activity"/);
+  assert.match(controllerSource, /function syncChartFrameActivity\(\)/);
+  assert.match(chartsSource, /setEmbeddedChartActive\(active\)/);
+  assert.match(controllerSource, /CHART_STREAM_SESSION_KEY/);
+  assert.match(controllerSource, /stream_channel/);
+  assert.match(chartsSource, /connection_id/);
+  assert.match(chartsSource, /channel_id/);
+  assert.match(chartsSource, /sendBeacon/);
+  assert.match(
+    chartsSource,
+    /_openSseStream\(\) \{[\s\S]*?this\._embeddedRealtimeDeferredRequestId[\s\S]*?if \(!this\._isEmbeddedChartActivityEnabled\(\)\)/,
+  );
+});
+
+test("chart switching keeps the incomplete TradingView canvas behind an atomic loading veil", () => {
+  assert.match(
+    controllerSource,
+    /K线与缠论结构完成后显示/,
+  );
+  assert.match(
+    dashboardCss,
+    /\.es-chart-loading\s*\{[\s\S]*?grid-area:\s*2 \/ 1;[\s\S]*?background:[\s\S]*?#07100e;/,
+  );
+  assert.match(dashboardCss, /\.es-chart-loading\[hidden\]\s*\{\s*display:\s*none;/);
+  assert.match(controllerSource, /function revealSettledChartFrameBatch\(\)/);
+  assert.match(
+    controllerSource,
+    /CHART_REALTIME_RESUME_MESSAGE\s*=\s*"chanlun:chart-realtime-resume"/,
+  );
+  assert.match(controllerSource, /function postChartFrameRealtimeResume\(frame\)/);
+  assert.match(
+    controllerSource,
+    /revealSettledChartFrameBatch[\s\S]*?postChartFrameRealtimeResume\(frame\)/,
+  );
+  assert.match(chartsSource, /deferEmbeddedRealtime\(requestId = 'switch'\)/);
+  assert.match(chartsSource, /resumeEmbeddedRealtime\(requestId = ''\)/);
+  assert.match(
+    controllerSource,
+    /visibleFrames\.every[\s\S]*?chartReadyRequestId[\s\S]*?chartFailedRequestId/,
+  );
+  assert.match(
+    controllerSource,
+    /frame\.dataset\.chartReadyRequestId = frame\.dataset\.chartRequestId \|\| "ready";\s*revealSettledChartFrameBatch\(\)/,
+  );
+  assert.doesNotMatch(
+    controllerSource,
+    /message\.type === CHART_DATA_READY_MESSAGE[\s\S]*?setChartFrameLoading\(frame, false\)[\s\S]*?return;/,
+  );
+  assert.match(chartsSource, /this\._is_switching_interval === true/);
+  assert.match(chartsSource, /this\.debouncedDrawChanlun\.pending\(\)/);
+  assert.match(chartsSource, /this\._defaultViewApplyPending === true/);
 });
 
 test("dashboard controller wires evidence drawer theater mode and escape priority", () => {
@@ -5135,6 +5742,34 @@ test("dashboard controller wires evidence drawer theater mode and escape priorit
   assert.match(controllerSource, /\[data-evidence-toggle\]/);
   assert.match(controllerSource, /\[data-evidence-close\]/);
   assert.match(controllerSource, /\[data-theater-toggle\]/);
+  assert.match(controllerSource, /\[data-theater-picker-toggle\]/);
+  assert.match(controllerSource, /\[data-signal-list-toggle\]/);
+  assert.match(controllerSource, /\[data-theater-toolbar-exit\]/);
+  assert.match(controllerSource, /signalListOpen:\s*saved\.signalListOpen\s*!==\s*false/);
+  assert.match(controllerSource, /signalListOpen:\s*state\.signalListOpen/);
+  assert.match(controllerSource, /function syncSignalListVisibility\(open\)/);
+  assert.match(controllerSource, /function showSignalList\(open, moveFocus = false\)/);
+  assert.match(controllerSource, /Ui\.setTheaterPickerOpen\(chartWorkspace, open\)/);
+  assert.match(controllerSource, /liveWorkspaces\.dataset\.signalListOpen/);
+  assert.match(controllerSource, /signalWorkspace\.setAttribute\("aria-hidden"/);
+  assert.match(controllerSource, /function renderTheaterSignalPicker\(/);
+  assert.match(controllerSource, /Ui\.theaterPointSignals\(/);
+  assert.match(controllerSource, /Ui\.renderSignalWorkspace\(\s*theaterSignalList,/);
+  assert.match(controllerSource, /Ui\.updateSignalWorkspaceSelection\(theaterSignalList,/);
+  assert.match(controllerSource, /\[data-theater-point-type\]/);
+  assert.match(controllerSource, /\[data-theater-signal-search\]/);
+  assert.doesNotMatch(controllerSource, /\[data-theater-exit\]/);
+  assert.match(controllerSource, /function restoreFocusBeforeClosingTheater\(\)/);
+  assert.match(controllerSource, /picker\.contains\(activeElement\)/);
+  assert.match(controllerSource, /\.es-chart-display-settings > summary/);
+  assert.match(controllerSource, /if \(!requested && state\.theaterMode\) restoreFocusBeforeClosingTheater\(\)/);
+  assert.doesNotMatch(controllerSource, /showTheater\(false\);\s*if \(theaterToggle\) theaterToggle\.focus\(\)/);
+  assert.match(controllerSource, /if \(requested && state\.evidenceOpen\) showEvidence\(false\)/);
+  assert.match(controllerSource, /settings\.removeAttribute\("open"\)/);
+  assert.match(controllerSource, /const entryFocus = theaterPickerToggle/);
+  assert.doesNotMatch(controllerSource, /theaterPickerHide/);
+  assert.match(controllerSource, /entryFocus\.focus\(\{ preventScroll:\s*true \}\)/);
+  assert.match(controllerSource, /theaterToolbarExit\.addEventListener\("click", \(\) => \{\s*showTheater\(false\)/);
   assert.match(controllerSource, /event\.key\s*!==\s*"Escape"/);
   assert.match(controllerSource, /if\s*\(state\.evidenceOpen\)/);
   assert.match(controllerSource, /else if\s*\(state\.theaterMode\)/);

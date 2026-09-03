@@ -55,6 +55,85 @@ export const enum Constants {
 	SearchItemsLimit = 30,
 }
 
+type SymbolResolveResponse = ResolveSymbolResponse | UdfErrorResponse;
+
+interface SharedSymbolResolveEntry {
+	createdAt: number;
+	promise: Promise<SymbolResolveResponse>;
+}
+
+interface SharedSymbolResolveHost {
+	location?: { origin?: string };
+	parent?: SharedSymbolResolveHost;
+	__chanlunUdfSharedSymbolResolveCacheV1?: Map<string, SharedSymbolResolveEntry>;
+}
+
+const symbolResolveCacheTtlMs = 5 * 60 * 1000;
+const symbolResolveCacheMaxEntries = 256;
+
+function sharedSymbolResolveHost(): SharedSymbolResolveHost {
+	const current = globalThis as unknown as SharedSymbolResolveHost;
+	try {
+		const candidate = current.parent;
+		if (
+			candidate !== undefined
+			&& candidate !== current
+			&& candidate.location?.origin
+			&& candidate.location.origin === current.location?.origin
+		) {
+			return candidate;
+		}
+	} catch (_error) {
+		// Cross-origin parents are deliberately isolated from this optimization.
+	}
+	return current;
+}
+
+function sharedSymbolResolveResponse(
+	datafeedURL: string,
+	params: RequestParams,
+	request: () => Promise<SymbolResolveResponse>
+): Promise<SymbolResolveResponse> {
+	const host = sharedSymbolResolveHost();
+	let cache = host.__chanlunUdfSharedSymbolResolveCacheV1;
+	if (
+		cache === undefined
+		|| typeof cache.get !== 'function'
+		|| typeof cache.set !== 'function'
+	) {
+		cache = new Map<string, SharedSymbolResolveEntry>();
+		host.__chanlunUdfSharedSymbolResolveCacheV1 = cache;
+	}
+	const normalizedParams = Object.keys(params)
+		.sort()
+		.map((key) => [key, params[key]]);
+	const cacheKey = `${datafeedURL}|${JSON.stringify(normalizedParams)}`;
+	const now = Date.now();
+	const existing = cache.get(cacheKey);
+	if (existing !== undefined && now - existing.createdAt <= symbolResolveCacheTtlMs) {
+		return existing.promise;
+	}
+	if (existing !== undefined) cache.delete(cacheKey);
+
+	const promise = request().then(
+		(response) => {
+			if (response.s !== undefined) cache?.delete(cacheKey);
+			return response;
+		},
+		(error: unknown) => {
+			cache?.delete(cacheKey);
+			throw error;
+		}
+	);
+	cache.set(cacheKey, { createdAt: now, promise });
+	while (cache.size > symbolResolveCacheMaxEntries) {
+		const oldestKey = cache.keys().next().value as string | undefined;
+		if (oldestKey === undefined) break;
+		cache.delete(oldestKey);
+	}
+	return promise;
+}
+
 /**
  * This class implements interaction with UDF-compatible datafeed.
  * See [UDF protocol reference](@docs/connecting_data/UDF.md)
@@ -201,7 +280,11 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 			params.unitId = unitId;
 		}
 
-		this._send<ResolveSymbolResponse | UdfErrorResponse>('symbols', params)
+		sharedSymbolResolveResponse(
+			this._datafeedURL,
+			params,
+			() => this._send<SymbolResolveResponse>('symbols', params)
+		)
 			.then((response: ResolveSymbolResponse | UdfErrorResponse) => {
 				if (response.s !== undefined) {
 					onError('unknown_symbol');
@@ -258,6 +341,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 		symbolResKey: string,
 		response: Record<string, unknown>,
 		resolution: string = '',
+		replayFromSeconds?: number,
 	): void {
 		const t = response.t as number[] | undefined;
 		const c = response.c as number[] | undefined;
@@ -274,7 +358,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 				return null;
 			}
 			const bar: Bar = {
-				time: chartBarTimeSeconds(t[idx], resolution) * 1000,
+				time: chartBarTimeSeconds(t[idx], resolution, symbolResKey) * 1000,
 				open: o ? o[idx] : closeVal,
 				high: h ? h[idx] : closeVal,
 				low: l ? l[idx] : closeVal,
@@ -286,6 +370,28 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 			return bar;
 		};
 		const i = t.length - 1;
+		// An authoritative SSE snapshot can safely repair a small gap without
+		// resetData()+a second full /tv/history request. Replay the already
+		// available bars in chronological order, including the current canvas
+		// tail once so its final OHLC is corrected before newer bars arrive.
+		if (Number.isFinite(replayFromSeconds)) {
+			let start = -1;
+			for (let idx = 0; idx <= i; idx++) {
+				if (chartBarTimeSeconds(t[idx], resolution, symbolResKey) >= Number(replayFromSeconds)) {
+					start = idx;
+					break;
+				}
+			}
+			if (start >= 0) {
+				for (let idx = start; idx <= i; idx++) {
+					const bar = makeBar(idx);
+					if (bar !== null) {
+						this._dataPulseProvider.feedBar(symbolResKey, bar);
+					}
+				}
+				return;
+			}
+		}
 		// 新根出现先补喂倒数第二根(刚收盘那根)最终 OHLC, 再喂末根: 复刻 DataPulseProvider
 		// 轮询的 previousBar 补发。否则该根蜡烛永久停在收盘前 <=8s 旧值(SSE 已把 sub.lastBarTime
 		// 推进到末根, 废掉轮询里 isNewBar 的 previousBar 分支)。feedBar 的 bar.time<lastBarTime

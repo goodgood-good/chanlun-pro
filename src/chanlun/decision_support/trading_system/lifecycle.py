@@ -773,6 +773,123 @@ def match_one_minute_nesting_witness_for_point(
     )
 
 
+def _preconfirmation_divergence_matches_five_minute_setup(
+    setup_point: ProvisionalCandidate,
+    divergence_point: StructuralPoint,
+    *,
+    as_of: datetime,
+    minimum_tick: Decimal | float | str,
+) -> bool:
+    """Match confirmed 1m divergence inside one unconfirmed physical 5m leg.
+
+    This is observation evidence only.  It deliberately accepts a provisional
+    outer setup while retaining the same exact terminal-segment containment,
+    side, price basis and causal-time checks used by the formal post-confirmation
+    locator.  It must never be passed to ``advance_lifecycle`` as a trigger.
+    """
+
+    closed_at = normalize_datetime(as_of, "as_of")
+    setup_reference = setup_point.terminal_segment
+    divergence_reference = divergence_point.terminal_segment
+    setup_state = setup_state_for_point(setup_point)
+    if setup_reference is None or divergence_reference is None:
+        return False
+    setup_interval_start = completed_bar_interval_start(
+        setup_reference.market_start,
+        minutes=5,
+        field="provisional five minute terminal interval start",
+    )
+    divergence_interval_start = completed_bar_interval_start(
+        divergence_reference.market_start,
+        minutes=1,
+        field="one minute divergence interval start",
+    )
+    return bool(
+        setup_state.formation_state in {"forming", "geometry_ready"}
+        and setup_point.status == "provisional"
+        and setup_point.actionable is False
+        and is_five_minute_trade_level(
+            setup_point.source_frequency,
+            setup_point.recursive_level,
+        )
+        and is_one_minute_segment_difference(
+            divergence_point,
+            minimum_tick=minimum_tick,
+        )
+        and divergence_point.divergence_kind in {"trend", "consolidation"}
+        and setup_reference.source_kind is SourceKind.SEGMENT
+        and divergence_reference.source_kind is SourceKind.SEGMENT
+        and (
+            setup_state.formation_state == "forming"
+            and setup_reference.role == "latest_unfinished"
+            and setup_reference.state == "forming"
+            or setup_state.formation_state == "geometry_ready"
+            and setup_reference.role == "latest_completed"
+            and setup_reference.state in {"formed", "locked"}
+        )
+        and divergence_reference.state in {"formed", "locked"}
+        and divergence_point.code == setup_point.code
+        and divergence_point.side == setup_point.side
+        and divergence_point.price_basis_revision == setup_point.price_basis_revision
+        and divergence_point.confirmed_at is not None
+        and setup_point.available_at <= closed_at
+        and setup_reference.available_at <= closed_at
+        and divergence_point.available_at <= closed_at
+        and divergence_reference.available_at <= closed_at
+        and setup_interval_start <= divergence_interval_start
+        and divergence_reference.market_end <= setup_reference.market_end
+    )
+
+
+def match_one_minute_preconfirmation_divergences(
+    setup: TradeSetup,
+    points: tuple[StructuralPoint, ...],
+    *,
+    as_of: datetime,
+    minimum_tick: Decimal | float | str = Decimal("0.01"),
+) -> tuple[StructuralPoint, ...]:
+    """Return every causal 1m divergence inside an unconfirmed 5m setup.
+
+    The returned ledger is notification-only evidence.  Formal lifecycle and
+    execution continue to use ``match_one_minute_nesting_witness`` and therefore
+    still require the 5m setup itself to be confirmed.
+    """
+
+    setup_point = setup.point
+    if not isinstance(setup_point, ProvisionalCandidate):
+        return ()
+    matches_by_occurrence: dict[str, StructuralPoint] = {}
+    for point in points:
+        if not _preconfirmation_divergence_matches_five_minute_setup(
+            setup_point,
+            point,
+            as_of=as_of,
+            minimum_tick=minimum_tick,
+        ):
+            continue
+        occurrence_id = structural_point_occurrence_id(point)
+        previous = matches_by_occurrence.get(occurrence_id)
+        if previous is None or (
+            point.available_at,
+            point.point_id,
+        ) > (
+            previous.available_at,
+            previous.point_id,
+        ):
+            matches_by_occurrence[occurrence_id] = point
+    return tuple(
+        sorted(
+            matches_by_occurrence.values(),
+            key=lambda point: (
+                point.available_at,
+                point.terminal_segment.market_end,
+                structural_point_occurrence_id(point),
+                point.point_id,
+            ),
+        )
+    )
+
+
 def _base_stage(setup: TradeSetup) -> LifecycleStage:
     state = setup_state_for_point(setup.point)
     return {

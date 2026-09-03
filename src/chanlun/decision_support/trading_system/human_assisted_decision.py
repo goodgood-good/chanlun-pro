@@ -840,6 +840,14 @@ def serialize_evaluated_signal(
         "segment_difference_1m": (
             None if trigger is None else point_decision_document(trigger)
         ),
+        # Notification-only evidence: confirmed 1m divergences nested inside an
+        # unconfirmed 5m terminal leg.  This field is intentionally excluded
+        # from ``_SIGNAL_DECISION_FIELDS`` so it cannot alter formal lifecycle,
+        # execution permission, position sizing or immutable decision identity.
+        "preconfirmation_divergences_1m": [
+            point_decision_document(value)
+            for value in item.preconfirmation_divergences
+        ],
         "entry_execution_boundary": (None if boundary is None else boundary.document()),
         "sector": sector_decision_document(item.setup.sector, ordinal=None),
         "structural_stop": (

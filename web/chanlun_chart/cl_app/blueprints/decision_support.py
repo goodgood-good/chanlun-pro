@@ -6,6 +6,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import datetime
 import gzip
+import json
 from pathlib import Path
 from threading import RLock
 from zoneinfo import ZoneInfo
@@ -37,6 +38,8 @@ from ..services.human_review_screening import (
 )
 from ..services.realtime_review_inbox import SCHEMA as REALTIME_REVIEW_SCHEMA
 from ..services.realtime_quotes import isolated_a_share_quote_batch
+from ..services.candidate_chart_cache_warm import schedule_candidate_chart_cache_warm
+from ..services.account_preferences import load_preferences_for_user
 
 
 decision_support_bp = Blueprint("decision_support", __name__)
@@ -1232,6 +1235,28 @@ def early_signals():
     if transport not in {"full", _EARLY_SIGNALS_CATALOG_TRANSPORT}:
         raise DecisionSupportError("trading_screening_transport_invalid", 400)
     data = _trading_screening_snapshot(scope=scope)
+    if current_app.config.get(
+        "ENABLE_CANDIDATE_CHART_CACHE_WARM",
+        not current_app.testing,
+    ):
+        preferred_view = None
+        try:
+            preferences, _exists, _updated_at = load_preferences_for_user(current_user)
+            raw_view = preferences.get("values", {}).get("trading_screening_view")
+            preferred_view = json.loads(raw_view) if isinstance(raw_view, str) else None
+        except Exception:
+            # A preference-store outage must only lose the account-specific
+            # ordering; global candidate warming remains useful and safe.
+            current_app.logger.exception("candidate chart warm preference read failed")
+        try:
+            schedule_candidate_chart_cache_warm(
+                data,
+                preferred_view=preferred_view,
+            )
+        except Exception:
+            # Cache warming is strictly opportunistic. A stale/corrupt persisted
+            # chart must never delay or break the screening response itself.
+            current_app.logger.exception("candidate chart cache warm scheduling failed")
     cache_revision = _early_signals_response_revision(
         data,
         scope=scope,

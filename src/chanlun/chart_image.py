@@ -314,23 +314,45 @@ def _aligned_htf_macd(
     )
 
 
-def _draw_macd_htf(
-    axis,
+def _aligned_macd(
     cl_data: ICL,
     all_bars: Sequence[object],
-    visible_count: int,
-) -> None:
-    from chanlun.core.macd_htf import HIGHER_FREQ_MAP
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]] | None:
+    """返回与来源 K 线严格等长的标准 MACD。"""
 
-    aligned = _aligned_htf_macd(cl_data, all_bars)
-    frequency = cl_data.get_frequency()
-    higher = HIGHER_FREQ_MAP.get(frequency, "高一级")
+    indexes = cl_data.get_idx()
+    result = indexes.get("macd") if isinstance(indexes, Mapping) else None
+    if not isinstance(result, Mapping):
+        return None
+    if any(
+        not isinstance(result.get(name), (list, tuple))
+        or len(result[name]) != len(all_bars)
+        for name in ("dif", "dea", "hist")
+    ):
+        return None
+    return tuple(
+        tuple(_finite(item) for item in result[name])
+        for name in ("dif", "dea", "hist")
+    )
+
+
+def _draw_macd_series(
+    axis,
+    aligned: tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]] | None,
+    *,
+    visible_count: int,
+    label: str,
+    dif_color: str,
+    dea_color: str,
+) -> None:
+    """绘制一块带最新数值和动能强弱配色的 MACD 面板。"""
+
     axis.axhline(0.0, color="#9aa4b2", linewidth=0.55, alpha=0.75, zorder=1)
     if aligned is None:
         axis.text(
             0.01,
-            0.88,
-            f"MACD_HTF {frequency}→{higher}（历史不足）",
+            0.90,
+            f"{label}（历史不足）",
             transform=axis.transAxes,
             ha="left",
             va="top",
@@ -358,18 +380,71 @@ def _draw_macd_htf(
         edgecolor="none",
         zorder=2,
     )
-    axis.plot(positions, dif, color="#2962ff", linewidth=0.9, zorder=3)
-    axis.plot(positions, dea, color="#ff6d00", linewidth=0.9, zorder=3)
+    axis.plot(positions, dif, color=dif_color, linewidth=0.9, zorder=3)
+    axis.plot(positions, dea, color=dea_color, linewidth=0.9, zorder=3)
     axis.text(
         0.01,
         0.92,
-        f"MACD_HTF {frequency}→{higher}  DIF / DEA / 柱",
+        f"{label}  DIF / DEA / 柱",
         transform=axis.transAxes,
         ha="left",
         va="top",
         fontsize=8,
         color="#374151",
         fontproperties=_chinese_font(),
+    )
+    axis.text(
+        0.99,
+        0.92,
+        f"最新  DIF {dif[-1]:.4f}  DEA {dea[-1]:.4f}  柱 {hist[-1]:.4f}",
+        transform=axis.transAxes,
+        ha="right",
+        va="top",
+        fontsize=7.5,
+        color="#4b5563",
+        fontproperties=_chinese_font(),
+    )
+
+
+def _draw_macd(
+    axis,
+    cl_data: ICL,
+    all_bars: Sequence[object],
+    visible_count: int,
+) -> None:
+    config = cl_data.get_config()
+    values = config if isinstance(config, Mapping) else {}
+    fast = int(values.get("idx_macd_fast", 12))
+    slow = int(values.get("idx_macd_slow", 26))
+    signal = int(values.get("idx_macd_signal", 9))
+    _draw_macd_series(
+        axis,
+        _aligned_macd(cl_data, all_bars),
+        visible_count=visible_count,
+        label=f"MACD {fast}/{slow}/{signal}",
+        dif_color="#2962ff",
+        dea_color="#ff6d00",
+    )
+
+
+def _draw_macd_htf(
+    axis,
+    cl_data: ICL,
+    all_bars: Sequence[object],
+    visible_count: int,
+) -> None:
+    from chanlun.core.macd_htf import HIGHER_FREQ_MAP
+
+    aligned = _aligned_htf_macd(cl_data, all_bars)
+    frequency = cl_data.get_frequency()
+    higher = HIGHER_FREQ_MAP.get(frequency, "高一级")
+    _draw_macd_series(
+        axis,
+        aligned,
+        visible_count=visible_count,
+        label=f"MACD_HTF {frequency}→{higher}",
+        dif_color="#7c3aed",
+        dea_color="#ca8a04",
     )
 
 
@@ -401,6 +476,7 @@ def _style_axis(axis) -> None:
 def _draw_chart(
     price_axis,
     macd_axis,
+    macd_htf_axis,
     title: str,
     cl_data: ICL,
     kline_count: int,
@@ -416,10 +492,11 @@ def _draw_chart(
     _draw_candles(price_axis, bars)
     _draw_segments(price_axis, cl_data, times)
     _draw_strict_structure(price_axis, cl_data, times)
-    _draw_macd_htf(macd_axis, cl_data, all_bars, len(bars))
+    _draw_macd(macd_axis, cl_data, all_bars, len(bars))
+    _draw_macd_htf(macd_htf_axis, cl_data, all_bars, len(bars))
 
     price_axis.set_title(
-        f"{title} · {len(bars):,}根",
+        f"{title} · {len(bars):,}根 · 截止 {bars[-1].date.strftime('%m-%d %H:%M')}",
         loc="left",
         fontsize=11,
         fontweight="bold",
@@ -427,19 +504,22 @@ def _draw_chart(
     )
     price_axis.set_xlim(-1, len(bars))
     macd_axis.set_xlim(-1, len(bars))
+    macd_htf_axis.set_xlim(-1, len(bars))
     _style_axis(price_axis)
     _style_axis(macd_axis)
+    _style_axis(macd_htf_axis)
     price_axis.tick_params(axis="x", labelbottom=False)
+    macd_axis.tick_params(axis="x", labelbottom=False)
     positions, labels = _time_ticks(bars)
-    macd_axis.set_xticks(positions)
-    macd_axis.set_xticklabels(labels)
+    macd_htf_axis.set_xticks(positions)
+    macd_htf_axis.set_xticklabels(labels)
 
 
 def render_multi_timeframe_png(
     charts: Iterable[tuple[str, ICL]],
     *,
     width: int = 1200,
-    height_per_chart: int = 580,
+    height_per_chart: int = 720,
     kline_count: int = 1200,
 ) -> bytes:
     """返回一张纵向对齐物理 30m、5m、1m 图表的 PNG 图片。"""
@@ -452,9 +532,9 @@ def render_multi_timeframe_png(
     if (
         isinstance(height_per_chart, bool)
         or not isinstance(height_per_chart, int)
-        or height_per_chart < 360
+        or height_per_chart < 480
     ):
-        raise ValueError("height_per_chart must be at least 360 pixels")
+        raise ValueError("height_per_chart must be at least 480 pixels")
     if isinstance(kline_count, bool) or not isinstance(kline_count, int) or kline_count <= 0:
         raise ValueError("kline_count must be a positive integer")
 
@@ -470,19 +550,24 @@ def render_multi_timeframe_png(
         )
         FigureCanvasAgg(figure)
         grid = figure.add_gridspec(
-            len(values) * 2,
+            len(values) * 3,
             1,
-            height_ratios=[3.45, 1.15] * len(values),
+            height_ratios=[3.45, 1.15, 1.15] * len(values),
         )
         for index, (title, cl_data) in enumerate(values):
-            price_axis = figure.add_subplot(grid[index * 2, 0])
+            price_axis = figure.add_subplot(grid[index * 3, 0])
             macd_axis = figure.add_subplot(
-                grid[index * 2 + 1, 0],
+                grid[index * 3 + 1, 0],
+                sharex=price_axis,
+            )
+            macd_htf_axis = figure.add_subplot(
+                grid[index * 3 + 2, 0],
                 sharex=price_axis,
             )
             _draw_chart(
                 price_axis,
                 macd_axis,
+                macd_htf_axis,
                 title,
                 cl_data,
                 kline_count,

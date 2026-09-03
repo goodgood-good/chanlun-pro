@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadDatafeed(requestUrls) {
+function loadDatafeed(requestUrls, sharedParent = null) {
   const configuration = {
     supports_search: true,
     supported_resolutions: ['1', '5', '30'],
@@ -38,11 +38,42 @@ function loadDatafeed(requestUrls) {
   sandbox.globalThis = sandbox;
   sandbox.self = sandbox;
   sandbox.window = sandbox;
+  sandbox.location = { origin: 'http://test-page' };
+  sandbox.parent = sharedParent || sandbox;
   vm.createContext(sandbox);
   const bundlePath = path.join(__dirname, '..', '..', 'datafeeds', 'udf', 'dist', 'bundle.js');
   vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), sandbox, { filename: 'bundle.js' });
   return sandbox.Datafeeds;
 }
+
+test('same-origin chart frames share one in-flight symbol resolution request', async () => {
+  const requestUrls = [];
+  const sharedParent = { location: { origin: 'http://test-page' } };
+  const firstModule = loadDatafeed(requestUrls, sharedParent);
+  const secondModule = loadDatafeed(requestUrls, sharedParent);
+  const first = new firstModule.UDFCompatibleDatafeed('http://test-datafeed');
+  const second = new secondModule.UDFCompatibleDatafeed('http://test-datafeed');
+  await Promise.all([
+    new Promise((resolve) => first.onReady(resolve)),
+    new Promise((resolve) => second.onReady(resolve)),
+  ]);
+  requestUrls.length = 0;
+
+  const resolveSymbol = (datafeed) => new Promise((resolve, reject) => {
+    datafeed.resolveSymbol('a:qmt-gics3:test', resolve, reject);
+  });
+  const [firstInfo, secondInfo] = await Promise.all([
+    resolveSymbol(first),
+    resolveSymbol(second),
+  ]);
+
+  assert.equal(
+    requestUrls.filter((url) => url.includes('/symbols?')).length,
+    1,
+  );
+  assert.equal(firstInfo.ticker, 'a:qmt-gics3:test');
+  assert.equal(secondInfo.ticker, 'a:qmt-gics3:test');
+});
 
 test('every UDF history request carries the immutable human-review lock', async () => {
   const requestUrls = [];

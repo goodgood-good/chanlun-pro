@@ -5,12 +5,24 @@ TradingView 相关接口蓝图。
 以及图表/模板/画线存取和自定义 Marks 支持。
 """
 import pytz
+import gzip
+import hashlib
 import json
 import math
 import datetime
+import os
 import time
+import threading
+from collections import OrderedDict
+from contextlib import nullcontext
+
+try:
+    import brotli as _brotli
+except ImportError:  # Optional acceleration; gzip remains the portable fallback.
+    _brotli = None
+
 from flask import Blueprint, current_app, request
-from flask_login import login_required
+from flask_login import current_user, login_required
 
 from chanlun import fun
 from chanlun.market import Market
@@ -35,13 +47,171 @@ from ..services.constants import (
 )
 from ..services.last_chart_state import record_user_request
 from ..services.realtime_quotes import isolated_a_share_quote_batch
+from ..services.account_preferences import chart_storage_identity
 
 tv_bp = Blueprint("tv", __name__)
+
+_TV_HISTORY_GZIP_MIN_BYTES = 32 * 1024
+_TV_HISTORY_GZIP_CACHE_CAPACITY = 160
+try:
+    _TV_HISTORY_GZIP_LEVEL = max(
+        1,
+        min(9, int(os.environ.get("CHANLUN_TV_HISTORY_GZIP_LEVEL", "5"))),
+    )
+except (TypeError, ValueError):
+    _TV_HISTORY_GZIP_LEVEL = 5
+try:
+    _TV_HISTORY_BROTLI_QUALITY = max(
+        1,
+        min(11, int(os.environ.get("CHANLUN_TV_HISTORY_BROTLI_QUALITY", "4"))),
+    )
+except (TypeError, ValueError):
+    _TV_HISTORY_BROTLI_QUALITY = 4
+_tv_history_gzip_cache: OrderedDict[bytes, bytes] = OrderedDict()
+_tv_history_gzip_cache_lock = threading.Lock()
+
+# These expanded component records duplicate the IDs, counts and endpoint/core
+# geometry that the embedded chart actually consumes. Keep them in the full
+# standalone/audit contract, but omit them from the four simultaneous embedded
+# charts where transfer and JSON parsing are on the click-critical path.
+_EMBEDDED_STRICT_AUDIT_FIELDS = frozenset(
+    {
+        "overlap_components",
+        "establishment_segments",
+        "middle_three_components",
+    }
+)
+
+
+def _compact_embedded_strict_value(value):
+    if isinstance(value, dict):
+        return {
+            key: _compact_embedded_strict_value(item)
+            for key, item in value.items()
+            if key not in _EMBEDDED_STRICT_AUDIT_FIELDS
+        }
+    if isinstance(value, list):
+        return [_compact_embedded_strict_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_compact_embedded_strict_value(item) for item in value)
+    return value
+
+
+def _project_strict_history_fields_for_embedded(fields, *, embedded: bool):
+    """Return a non-mutating chart projection while preserving the audit API."""
+
+    if not embedded or not isinstance(fields, dict):
+        return fields
+    if fields.get("strict_structure_mode") != "replace":
+        return fields
+    snapshot = fields.get("strict_structure")
+    if not isinstance(snapshot, dict):
+        return fields
+    return {
+        **fields,
+        "strict_structure": _compact_embedded_strict_value(snapshot),
+    }
+
+
+def _gzip_tv_history_response(response):
+    """Compress large UDF history payloads and reuse identical encodings.
+
+    A first chart snapshot is normally several megabytes of repetitive numeric
+    JSON. Prefer Brotli level 4 when the browser advertises it: representative
+    chart payloads are 5-10% smaller than gzip level 5 and encode faster on the
+    current host. Gzip remains the compatibility fallback. The encoding-aware,
+    content-addressed LRU avoids recompressing the ranked working set.
+    """
+
+    response.vary.add("Accept-Encoding")
+    supported_encodings = (
+        ("br", "gzip", "identity")
+        if _brotli is not None
+        else ("gzip", "identity")
+    )
+    selected_encoding = request.accept_encodings.best_match(supported_encodings)
+    if (
+        response.status_code != 200
+        or response.headers.get("Content-Encoding")
+        or selected_encoding not in {"br", "gzip"}
+    ):
+        return response
+    content_type = str(response.content_type or "").lower()
+    if "application/json" not in content_type:
+        return response
+    started = time.perf_counter()
+    try:
+        raw = response.get_data()
+        if len(raw) < _TV_HISTORY_GZIP_MIN_BYTES:
+            return response
+        digest = selected_encoding.encode("ascii") + hashlib.blake2b(
+            raw,
+            digest_size=16,
+        ).digest()
+        with _tv_history_gzip_cache_lock:
+            compressed = _tv_history_gzip_cache.pop(digest, None)
+            if compressed is not None:
+                _tv_history_gzip_cache[digest] = compressed
+        cache_hit = compressed is not None
+        if compressed is None:
+            if selected_encoding == "br":
+                compressed = _brotli.compress(
+                    raw,
+                    mode=_brotli.MODE_TEXT,
+                    quality=_TV_HISTORY_BROTLI_QUALITY,
+                )
+            else:
+                compressed = gzip.compress(
+                    raw,
+                    compresslevel=_TV_HISTORY_GZIP_LEVEL,
+                    mtime=0,
+                )
+            if len(compressed) >= len(raw):
+                return response
+            with _tv_history_gzip_cache_lock:
+                _tv_history_gzip_cache[digest] = compressed
+                while len(_tv_history_gzip_cache) > _TV_HISTORY_GZIP_CACHE_CAPACITY:
+                    _tv_history_gzip_cache.popitem(last=False)
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = selected_encoding
+        response.headers["X-Chart-Compression"] = "hit" if cache_hit else "miss"
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        response.headers.add(
+            "Server-Timing",
+            f"chart-{selected_encoding};dur={elapsed_ms:.1f}",
+        )
+    except Exception as exc:
+        LogUtil.warning(
+            f"[tv_history] {selected_encoding} response skipped: {exc}"
+        )
+    return response
+
+
+@tv_bp.after_request
+def _compress_tv_history_http_response(response):
+    if request.endpoint != "tv.tv_history":
+        return response
+    return _gzip_tv_history_response(response)
+
+
+def _request_chart_storage_identity():
+    """Resolve storage exclusively from the authenticated account.
+
+    TradingView still sends its standard ``user`` query parameter, but it is a
+    client hint rather than an authorization boundary and must never select a
+    database tenant.
+    """
+
+    try:
+        return chart_storage_identity(current_user, request.args.get("client"))
+    except ValueError:
+        return None
 
 # 图表缓存、symbols 预加载、跨周期 MACD 等基础设施均已迁至 services 子包，
 from ..services.chart_cache import (  # noqa: E402
     _build_cache_key,
     _get_chart_cache_entry,
+    _get_chart_cache_entry_ram_only,
     _set_chart_cache_entry,
     cache_lock,
     evaluate_cache_for_tv_history,
@@ -61,6 +231,17 @@ _TV_VALUE_COLUMNS = (
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
 )
 
+_EMBEDDED_MACD_DELTA_SCALE = 1_000_000
+_EMBEDDED_MACD_COLUMNS = (
+    "macd_dif",
+    "macd_dea",
+    "macd_hist",
+    "higher_macd_dif",
+    "higher_macd_dea",
+    "higher_macd_hist",
+)
+_JAVASCRIPT_SAFE_INTEGER = (1 << 53) - 1
+
 
 def _align_value_columns_to_t(cl_chart_data, symbol="", resolution=""):
     """把所有按 bar index 的数值列原地对齐到 len(t)：过长截断、过短右 pad None。
@@ -77,7 +258,118 @@ def _align_value_columns_to_t(cl_chart_data, symbol="", resolution=""):
             )
             cl_chart_data[_col_k] = list(_col[:_n_bars]) + [None] * max(0, _n_bars - len(_col))
 
+
+def _delta_encode_numeric_column(values, *, scale: int):
+    """Losslessly encode bounded numeric values as integer deltas for JSON."""
+
+    previous = 0
+    encoded = []
+    for value in values or []:
+        if value is None:
+            encoded.append(None)
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric):
+            return None
+        scaled = int(round(numeric * scale))
+        delta = scaled - previous
+        if (
+            abs(scaled) > _JAVASCRIPT_SAFE_INTEGER
+            or abs(delta) > _JAVASCRIPT_SAFE_INTEGER
+            or scaled / scale != numeric
+        ):
+            return None
+        encoded.append(delta)
+        previous = scaled
+    return encoded
+
+
+def _history_time_payload(times, *, delta_encoded: bool):
+    source = times or []
+    if not delta_encoded:
+        return {"t": source}
+    encoded = _delta_encode_numeric_column(source, scale=1)
+    if encoded is None:
+        return {"t": source}
+    return {"t": encoded, "time_delta": True}
+
+
+def _history_floor_payload(
+    times,
+    *,
+    embedded: bool,
+    first_data_request: bool,
+    complete_snapshot: bool,
+    countback: int,
+):
+    """Publish the authoritative retained-history floor to embedded charts.
+
+    TradingView probes immediately before the oldest bar after receiving a
+    complete 1m snapshot.  The server already answers that range from the
+    cache floor without consulting the exchange.  Exposing the same boundary
+    lets the datafeed settle that known-empty probe locally, which avoids an
+    extra WAN round trip on every symbol switch.  Countback projections must
+    never advertise a floor because older cached bars still exist there.
+    """
+
+    source = times or []
+    if (
+        not embedded
+        or not first_data_request
+        or not complete_snapshot
+        or countback > 0
+        or not source
+    ):
+        return {}
+    floor = source[0]
+    if isinstance(floor, bool) or not isinstance(floor, int) or floor <= 0:
+        return {}
+    return {"history_floor": floor}
+
+
+def _history_indicator_payload(
+    cl_chart_data,
+    *,
+    embedded: bool,
+    delta_encoded: bool = False,
+):
+    """Project indicator columns onto the transport contract.
+
+    ``macd_area`` was historically copied into every UDF response and every
+    browser-side cache, but no chart, indicator, analysis panel or merge
+    consumer reads it. Omitting it only for embedded multi-chart requests cuts
+    about 9% from the largest compressed response while the standalone UDF
+    contract remains backward compatible.
+    """
+
+    payload = {
+        key: cl_chart_data.get(key, [])
+        for key in _EMBEDDED_MACD_COLUMNS
+    }
+    if embedded and delta_encoded:
+        encoded = {
+            key: _delta_encode_numeric_column(
+                payload[key],
+                scale=_EMBEDDED_MACD_DELTA_SCALE,
+            )
+            for key in _EMBEDDED_MACD_COLUMNS
+        }
+        if all(value is not None for value in encoded.values()):
+            return {
+                **encoded,
+                "macd_delta_scale": _EMBEDDED_MACD_DELTA_SCALE,
+            }
+    if not embedded:
+        payload["macd_area"] = cl_chart_data.get("macd_area", [])
+    return payload
+
 from ..services.user_activity import _mark_user_request  # noqa: E402
+from ..services.candidate_chart_cache_warm import (  # noqa: E402
+    candidate_local_history_ready,
+)
 # stock_list 服务：symbols 预加载、缓存、读取
 from ..services.stock_list import (  # noqa: E402
     get_cached_processed_stock,
@@ -88,6 +380,7 @@ from ..services.chart_compute import (  # noqa: E402
     chart_calc_locks,
     fetch_klines_and_compute_cl_data,
     market_now_trading,
+    slice_chart_data_to_countback,
     slice_chart_data_to_window,
     strict_structure_history_fields,
     _decide_full_snapshot,
@@ -217,6 +510,7 @@ def _drawing_storage_name(chart_id: str, layout_id: str, symbol: str, resolution
 
 
 _USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings"
+_DRAWING_MANIFEST_LIMIT = 1000
 
 
 def _empty_user_drawing_state():
@@ -231,6 +525,93 @@ def _empty_user_drawing_state():
         "schema": _USER_DRAWING_STATE_SCHEMA,
         "sources": {},
         "groups": {},
+    }
+
+
+def _drawing_record_manual_state(record):
+    try:
+        state = _normalize_user_drawing_state(
+            json.loads(str(getattr(record, "content", "") or ""))
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return state if state and state["sources"] else None
+
+
+def _drawing_record_timestamp(record):
+    try:
+        return int(getattr(record, "timestamp", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _drawing_manifest(records, chart_id: str, layout_id: str):
+    """Return a bounded account-scoped list of contexts with manual drawings."""
+
+    newest = {}
+    for record in records or []:
+        symbol = str(getattr(record, "symbol", "") or "")
+        resolution = str(getattr(record, "resolution", "") or "")
+        if not symbol or not resolution:
+            continue
+        expected_name = _drawing_storage_name(
+            chart_id,
+            layout_id,
+            symbol,
+            resolution,
+        )
+        if str(getattr(record, "name", "") or "") != expected_name:
+            continue
+        # GET 对旧格式、损坏记录和空状态都会返回规范空状态；清单也必须采用
+        # 同一语义，否则遗留空行会让前端误以为存在人工画线并继续逐标的读取。
+        if _drawing_record_manual_state(record) is None:
+            continue
+        key = (symbol, resolution)
+        timestamp = _drawing_record_timestamp(record)
+        previous = newest.get(key)
+        if previous is None or timestamp > previous:
+            newest[key] = timestamp
+
+    ordered = sorted(
+        newest,
+        key=lambda item: (-newest[item], item[0], item[1]),
+    )
+    complete = len(ordered) <= _DRAWING_MANIFEST_LIMIT
+    return {
+        "complete": complete,
+        "entries": [
+            {"symbol": symbol, "resolution": resolution}
+            for symbol, resolution in ordered[:_DRAWING_MANIFEST_LIMIT]
+        ],
+    }
+
+
+def _drawing_manifest_all_contexts(records):
+    """Return exact storage names for every non-empty account drawing context."""
+
+    newest = {}
+    for record in records or []:
+        name = str(getattr(record, "name", "") or "")
+        symbol = str(getattr(record, "symbol", "") or "")
+        resolution = str(getattr(record, "resolution", "") or "")
+        if (
+            not name.startswith("drawings_")
+            or not symbol
+            or not resolution
+            or not name.endswith(f"_{symbol}_{resolution}")
+            or _drawing_record_manual_state(record) is None
+        ):
+            continue
+        timestamp = _drawing_record_timestamp(record)
+        previous = newest.get(name)
+        if previous is None or timestamp > previous:
+            newest[name] = timestamp
+
+    ordered = sorted(newest, key=lambda name: (-newest[name], name))
+    complete = len(ordered) <= _DRAWING_MANIFEST_LIMIT
+    return {
+        "complete": complete,
+        "entries": [{"name": name} for name in ordered[:_DRAWING_MANIFEST_LIMIT]],
     }
 
 
@@ -615,6 +996,10 @@ def tv_history():
         symbol = request.args.get("symbol", "")
         resolution = _normalize_resolution(request.args.get("resolution"))
         firstDataRequest = request.args.get("firstDataRequest", "false")
+        embedded_history = request.args.get("embedded") == "1"
+        numeric_delta_history = (
+            embedded_history and request.args.get("numeric_delta") == "1"
+        )
         _from = _normalize_unix_ts(request.args.get("from", "0"))
         _to = _normalize_unix_ts(request.args.get("to", "0"))
         try:
@@ -746,6 +1131,24 @@ def tv_history():
             # 不改行为(非 range 分支自带 stale 兜底)。
             LogUtil.debug(f"[tv_history] false 但非 range from={_from} to={_to} {code} {frequency}")
 
+        if is_range_request and _to > 0:
+            # TradingView requests a small indicator warm-up window immediately
+            # before the oldest bar after an embedded chart receives the complete
+            # cached history.  A stale revalidation or SSE recompute can hold the
+            # per-symbol calculation lock for tens of seconds; waiting for that
+            # lock just to rediscover that the requested window predates the
+            # cache makes the chart add bars long after its loading veil is gone.
+            # A RAM-only snapshot is sufficient for the same no-data boundary
+            # check already repeated inside the calculation lock below.  RAM
+            # misses and overlapping ranges keep the authoritative locked path.
+            _range_floor_entry = _get_chart_cache_entry_ram_only(cache_key)
+            if (
+                _range_floor_entry is not None
+                and _range_floor_entry.get("min_time") is not None
+                and _to <= _range_floor_entry["min_time"]
+            ):
+                return {"s": "no_data"}
+
         # 注意：必须先 get 出 RLock 对象再 with，确保整个临界区内引用持续存在
         # （_SafeLockRegistry 用 WeakValueDictionary 存储锁，无强引用会被 GC）
         # 方向2: 交易时段决定 serve-stale 的过期阈值(盘中短/收盘长)。在锁外算
@@ -754,24 +1157,52 @@ def tv_history():
             False if _review_lock is not None else market_now_trading(market)
         )
         _needs_refresh = False
-        _calc_lock = chart_calc_locks.get(cache_key)
-        with _calc_lock:
-        # 内存未命中时可能同步读取 pickle；将该输入输出放在进程级缓存锁之外，
-        # 每个键的计算锁仍会串行化写入。
-            cache_entry = _get_chart_cache_entry(cache_key)
-            if _review_lock is not None and cache_entry is not None:
-                # 历史复核输入不可变，禁止 live stale-revalidate 用当前行情覆盖它。
-                cache_entry = {**cache_entry, "validated_at": time.time()}
-            with cache_lock:
-                is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
-                    evaluate_cache_for_tv_history(
-                        cache_entry, _from, _to, is_range_request,
-                        market_is_trading=_market_trading,
-                        force_refresh=force_refresh,
-                    )
+
+        # Published cache entries are immutable snapshots. Evaluate one before
+        # touching the per-symbol calculation lock: background revalidation or
+        # SSE work can own that lock for seconds, while a complete snapshot hit
+        # must remain immediately readable. The old lock-first order turned
+        # stale-while-revalidate into wait-for-revalidate.
+        cache_entry = _get_chart_cache_entry(cache_key)
+        if _review_lock is not None and cache_entry is not None:
+            cache_entry = {**cache_entry, "validated_at": time.time()}
+        with cache_lock:
+            is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
+                evaluate_cache_for_tv_history(
+                    cache_entry, _from, _to, is_range_request,
+                    market_is_trading=_market_trading,
+                    force_refresh=force_refresh,
                 )
-                if not is_cache_hit:
-                    cache_miss_reason = miss_reason
+            )
+            if not is_cache_hit:
+                cache_miss_reason = miss_reason
+
+        # Only a genuine miss enters the calculation critical section. Re-read
+        # after acquiring it because another request may have populated the
+        # cache while this request was waiting (double-checked locking).
+        _calc_guard = (
+            nullcontext()
+            if is_cache_hit
+            else chart_calc_locks.get(cache_key)
+        )
+        with _calc_guard:
+            if not is_cache_hit:
+                # A RAM miss may synchronously restore a pickle. Keep that I/O
+                # outside the process-wide cache lock; the per-key lock still
+                # serializes all writes for this chart identity.
+                cache_entry = _get_chart_cache_entry(cache_key)
+                if _review_lock is not None and cache_entry is not None:
+                    cache_entry = {**cache_entry, "validated_at": time.time()}
+                with cache_lock:
+                    is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
+                        evaluate_cache_for_tv_history(
+                            cache_entry, _from, _to, is_range_request,
+                            market_is_trading=_market_trading,
+                            force_refresh=force_refresh,
+                        )
+                    )
+                    if not is_cache_hit:
+                        cache_miss_reason = miss_reason
 
             # D4-F1/F2: 用与 cl_chart_data 同源的 is_full(cache-hit 取本次 entry), 避免 1050 行锁外
             # 重取 entry 产生 TOCTOU(窄 local + 并发全量写 entry → gate 误判 → 前端整体替换丢窗外形态)。
@@ -818,6 +1249,21 @@ def tv_history():
                         else datetime.datetime.now(tz_sh)
                     )
                     kline_args["end_date"] = end_at.strftime("%Y-%m-%d %H:%M:%S")
+                    # The ranked A-share candidate worker has already refreshed
+                    # these symbols into QMT's local store.  Empty and heavily
+                    # stale chart snapshots may therefore rebuild from that
+                    # authoritative local history without queueing behind the
+                    # shared QMT download lane.  The hint expires quickly;
+                    # force-refresh and arbitrary symbols keep the normal
+                    # download path so recovery semantics are never weakened.
+                    if (
+                        market == "a"
+                        and firstDataRequest == "true"
+                        and cache_miss_reason
+                        in {"cache_empty", "cache_stale_snapshot"}
+                        and candidate_local_history_ready(market, code, frequency)
+                    ):
+                        kline_args["args"] = {"skip_download": True}
 
                 _fetch_result = fetch_klines_and_compute_cl_data(
                     market, code, frequency, cl_config,
@@ -842,17 +1288,16 @@ def tv_history():
                     # too_stale(cache_stale_snapshot)分支存在的目的就是防止把陈旧未完成
                     # 笔/线段/中枢泄漏给用户, 若仍用"起点身份并集"合并, 陈旧快照里起点
                     # 已被新行情证伪的形态会被原样保留、和新数据一起返回, 安全网形同虚设。
-                    with cache_lock:
-                        _set_chart_cache_entry(
-                            cache_key,
-                            cl_chart_data,
-                            # cache_empty 已按全量回看拉取(见上方 kline_args 分支),
-                            # 与非范围请求同样是完整快照,标 is_full_snapshot=True。
-                            # ⚠ 不再继承 existing_entry 的 is_full_snapshot:range-miss 是窄窗口结果,
-                            # 继承会把"窄范围 merge 进旧全量"误标成完整快照,令 firstDataRequest 命中
-                            # 只有几根 K 线的假全量(审查 H-1,目前仅靠 tail_gap 改道 prepend 侥幸不触发)。
-                            is_full_snapshot=_src_is_full,
-                        )
+                    _set_chart_cache_entry(
+                        cache_key,
+                        cl_chart_data,
+                        # cache_empty 已按全量回看拉取(见上方 kline_args 分支),
+                        # 与非范围请求同样是完整快照,标 is_full_snapshot=True。
+                        # ⚠ 不再继承 existing_entry 的 is_full_snapshot:range-miss 是窄窗口结果,
+                        # 继承会把"窄范围 merge 进旧全量"误标成完整快照,令 firstDataRequest 命中
+                        # 只有几根 K 线的假全量(审查 H-1,目前仅靠 tail_gap 改道 prepend 侥幸不触发)。
+                        is_full_snapshot=_src_is_full,
+                    )
 
         # 方向1 (stale-while-revalidate): firstDataRequest 命中"过期全量快照"已即时
         # 返回旧快照(秒显), 这里派去重的后台重验证拉全新数据写回缓存, 经现有
@@ -901,6 +1346,21 @@ def tv_history():
                 )
             except Exception as e:
                 LogUtil.error(f"[tv_history] Slice data failed: {e}")
+        elif firstDataRequest == "true" and len(bar_times) > 0:
+            # The library supplies an indicator-aware countback (329 in the
+            # production chart).  Keep the cached/strict computation complete,
+            # but project the HTTP payload to the requested newest window.
+            # Older history is loaded through the normal range-request path.
+            _initial_countback = _safe_int(args.get("countback"), default=0)
+            if _initial_countback > 0:
+                try:
+                    cl_chart_data = slice_chart_data_to_countback(
+                        cl_chart_data,
+                        _initial_countback,
+                        frequency=frequency,
+                    )
+                except Exception as e:
+                    LogUtil.error(f"[tv_history] Countback slice failed: {e}")
 
         # 切片后无数据,返回 no_data 阻止 TradingView 继续向前请求
         if len(cl_chart_data.get("t", [])) == 0:
@@ -935,6 +1395,10 @@ def tv_history():
             ),
             expected_source_closed_at=_resp_t[-1],
         )
+        _strict_history_fields = _project_strict_history_fields_for_embedded(
+            _strict_history_fields,
+            embedded=embedded_history,
+        )
 
         LogUtil.debug(
             f"[DataVerify][Backend] symbol={symbol} resolution={resolution} "
@@ -957,19 +1421,27 @@ def tv_history():
 
         return {
             "s": "ok",
-            "t": cl_chart_data.get("t", []),
+            **_history_time_payload(
+                cl_chart_data.get("t", []),
+                delta_encoded=numeric_delta_history,
+            ),
+            **_history_floor_payload(
+                cl_chart_data.get("t", []),
+                embedded=embedded_history,
+                first_data_request=firstDataRequest == "true",
+                complete_snapshot=_src_is_full,
+                countback=_safe_int(args.get("countback"), default=0),
+            ),
             "c": cl_chart_data.get("c", []),
             "o": cl_chart_data.get("o", []),
             "h": cl_chart_data.get("h", []),
             "l": cl_chart_data.get("l", []),
             "v": cl_chart_data.get("v", []),
-            "macd_dif": cl_chart_data.get("macd_dif", []),
-            "macd_dea": cl_chart_data.get("macd_dea", []),
-            "macd_hist": cl_chart_data.get("macd_hist", []),
-            "macd_area": cl_chart_data.get("macd_area", []),
-            "higher_macd_dif": cl_chart_data.get("higher_macd_dif", []),
-            "higher_macd_dea": cl_chart_data.get("higher_macd_dea", []),
-            "higher_macd_hist": cl_chart_data.get("higher_macd_hist", []),
+            **_history_indicator_payload(
+                cl_chart_data,
+                embedded=embedded_history,
+                delta_encoded=numeric_delta_history,
+            ),
             "fxs": cl_chart_data.get("fxs", []),
             "bis": cl_chart_data.get("bis", []),
             "xds": cl_chart_data.get("xds", []),
@@ -996,8 +1468,10 @@ def tv_time():
 @login_required
 def tv_charts(api_revision):
     del api_revision  # TradingView storage API 路径契约要求保留该段。
-    client_id = str(request.args.get("client"))
-    user_id = str(request.args.get("user"))
+    identity = _request_chart_storage_identity()
+    if identity is None:
+        return {"status": "error", "message": "invalid client"}, 400
+    client_id, user_id = identity
 
     if request.method == "GET":
         chart_id = request.args.get("chart")
@@ -1070,8 +1544,10 @@ def tv_charts(api_revision):
 @login_required
 def tv_study_templates(api_revision):
     del api_revision  # TradingView storage API 路径契约要求保留该段。
-    client_id = str(request.args.get("client"))
-    user_id = str(request.args.get("user"))
+    identity = _request_chart_storage_identity()
+    if identity is None:
+        return {"status": "error", "message": "invalid client"}, 400
+    client_id, user_id = identity
 
     if request.method == "GET":
         template = request.args.get("template")
@@ -1109,12 +1585,25 @@ def tv_study_templates(api_revision):
 @login_required
 def tv_drawings(api_revision):
     del api_revision  # TradingView storage API 路径契约要求保留该段。
-    client_id = str(request.args.get("client"))
-    user_id = str(request.args.get("user"))
+    identity = _request_chart_storage_identity()
+    if identity is None:
+        return {"status": "error", "message": "invalid client"}, 400
+    client_id, user_id = identity
     chart_id = request.args.get("chart", "default")
     layout_id = request.args.get("layout", "default")
     symbol = request.args.get("symbol", "")
     resolution = request.args.get("resolution", "")
+
+    if request.method == "GET" and request.args.get("manifest") == "1":
+        records = db.tv_chart_list("drawing", client_id, user_id)
+        if request.args.get("scope") == "all":
+            manifest = _drawing_manifest_all_contexts(records)
+        else:
+            manifest = _drawing_manifest(records, chart_id, layout_id)
+        return {
+            "status": "ok",
+            "data": manifest,
+        }
 
     drawing_name = _drawing_storage_name(chart_id, layout_id, symbol, resolution)
     if request.method == "POST":

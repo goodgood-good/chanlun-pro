@@ -54,6 +54,10 @@ from chanlun.exchange.exchange import Tick
 NOW = datetime.fromisoformat("2026-07-20T10:02:00+08:00")
 
 
+def test_priority_runtime_cache_covers_configured_affinity_skew() -> None:
+    assert gateway_module._RUNTIME_CACHE_CAPACITY_BY_FREQUENCY["1m"] == 48  # noqa: SLF001
+
+
 def _exact_nesting_pair():
     setup = confirmed_point("2buy")
     setup = replace(
@@ -952,6 +956,80 @@ class RecordingExchange:
         return False
 
 
+def test_realtime_history_preparation_preserves_partial_bounded_batch_success() -> (
+    None
+):
+    class PartialBatchExchange(RecordingExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_calls: list[dict[str, object]] = []
+
+        def prewarm_batch_download(
+            self,
+            codes,
+            frequencies,
+            *,
+            cancel_check,
+            progress_callback,
+            chunk_size,
+            req_counts_by_frequency,
+        ):
+            self.batch_calls.append(
+                {
+                    "codes": tuple(codes),
+                    "frequencies": tuple(frequencies),
+                    "cancel_check": cancel_check,
+                    "progress_callback": progress_callback,
+                    "chunk_size": chunk_size,
+                    "req_counts_by_frequency": dict(req_counts_by_frequency),
+                }
+            )
+            assert cancel_check() is False
+            progress_callback("1m", 1, 2)
+            return {
+                "schema": "chanlun-qmt-batch-download-result",
+                "cancelled": True,
+                "successful_by_base": {
+                    "5m": ("SH.600000", "SZ.000001"),
+                    "1m": ("SH.600000",),
+                },
+                "failed_by_base": {"5m": (), "1m": ("SZ.000001",)},
+            }
+
+    exchange = PartialBatchExchange()
+    gateway = NativeTradingDataGateway(
+        exchange_provider=lambda: exchange,
+        sector_provider=lambda: {"source": "test", "sectors": ()},
+        watchlist_provider=lambda: (),
+        holdings_provider=lambda: (),
+    )
+    deadline = gateway_module.perf_counter() + 30
+    requests = (
+        ("SH.600000", ("5m", "1m")),
+        ("SZ.000001", ("5m", "1m")),
+    )
+
+    result = gateway.prepare_local_history(
+        frequency_requests=requests,
+        as_of=NOW,
+        req_counts_by_frequency={"1m": 16, "5m": 4},
+        cancel_deadline_monotonic=deadline,
+        chunk_size=48,
+    )
+
+    assert result["prepared_frequencies_by_code"] == {
+        "SH.600000": ("5m", "1m"),
+        "SZ.000001": ("5m",),
+    }
+    assert result["batch_download_available"] is True
+    assert len(exchange.batch_calls) == 1
+    call = exchange.batch_calls[0]
+    assert call["codes"] == ("SH.600000", "SZ.000001")
+    assert call["frequencies"] == ("1m", "5m")
+    assert call["chunk_size"] == 48
+    assert call["req_counts_by_frequency"] == {"5m": 4, "1m": 16}
+
+
 class RecordingAnalyzer:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -1380,6 +1458,268 @@ def test_realtime_incremental_refresh_falls_back_when_local_warmup_is_short() ->
     assert "incremental_refresh_days" not in exchange.calls[1][2]
 
 
+def test_realtime_local_first_read_falls_back_when_subscription_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    stale_frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2026-07-20T09:50:00+08:00", "2026-07-20T09:55:00+08:00"]
+            ),
+            "open": [10.0, 10.1],
+            "high": [10.2, 10.3],
+            "low": [9.9, 10.0],
+            "close": [10.1, 10.2],
+            "volume": [1000, 1200],
+        }
+    )
+    stale_frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="stale-local-first",
+    )
+    fresh_frame = stale_frame.copy(deep=True)
+    fresh_frame["date"] = pd.to_datetime(
+        ["2026-07-20T09:55:00+08:00", "2026-07-20T10:00:00+08:00"]
+    )
+    fresh_frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="fresh-exact-fallback",
+    )
+
+    class StaleLocalExchange(RecordingExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.refresh_calls: list[tuple[str, str, str]] = []
+
+        def klines(self, code: str, frequency: str, *, args: dict[str, object]):
+            assert args["req_counts"] == 4
+            self.calls.append((code, frequency, dict(args)))
+            frame = stale_frame if args.get("skip_download") else fresh_frame
+            return frame.copy(deep=True)
+
+        def refresh_live_kline_subscription(
+            self,
+            code: str,
+            frequency: str,
+            *,
+            dividend_type: str,
+        ) -> bool:
+            self.refresh_calls.append((code, frequency, dividend_type))
+            return False
+
+    exchange = StaleLocalExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    analysis = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=datetime.fromisoformat("2026-07-20T10:02:00+08:00"),
+        skip_download=True,
+    )
+
+    assert analysis.closed_at == datetime.fromisoformat(
+        "2026-07-20T10:00:00+08:00"
+    )
+    assert len(exchange.calls) == 2
+    assert exchange.calls[0][2]["skip_download"] is True
+    assert "skip_download" not in exchange.calls[1][2]
+    assert exchange.refresh_calls == [
+        ("SZ.000001", "5m", gateway_module.QMT_STRUCTURE_DIVIDEND_TYPE)
+    ]
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["local_history_subscription_refresh_attempt.5m"] == 1
+    assert counters["local_history_subscription_refresh_failure.5m"] == 1
+    assert counters["local_history_freshness_fallback.5m"] == 1
+
+
+def test_realtime_stale_local_read_refreshes_subscription_before_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    stale_frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2026-07-20T09:50:00+08:00", "2026-07-20T09:55:00+08:00"]
+            ),
+            "open": [10.0, 10.1],
+            "high": [10.2, 10.3],
+            "low": [9.9, 10.0],
+            "close": [10.1, 10.2],
+            "volume": [1000, 1200],
+        }
+    )
+    fresh_frame = stale_frame.copy(deep=True)
+    fresh_frame["date"] = pd.to_datetime(
+        ["2026-07-20T09:55:00+08:00", "2026-07-20T10:00:00+08:00"]
+    )
+    for frame, revision in (
+        (stale_frame, "stale-subscription-cache"),
+        (fresh_frame, "refreshed-subscription-cache"),
+    ):
+        frame.attrs.update(
+            structure_price_quantum="0.01",
+            price_basis_revision=revision,
+        )
+
+    class RefreshableLocalExchange(RecordingExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.refreshed = False
+            self.refresh_calls: list[tuple[str, str, str]] = []
+
+        def klines(self, code: str, frequency: str, *, args: dict[str, object]):
+            assert args["skip_download"] is True
+            self.calls.append((code, frequency, dict(args)))
+            frame = fresh_frame if self.refreshed else stale_frame
+            return frame.copy(deep=True)
+
+        def refresh_live_kline_subscription(
+            self,
+            code: str,
+            frequency: str,
+            *,
+            dividend_type: str,
+        ) -> bool:
+            self.refresh_calls.append((code, frequency, dividend_type))
+            self.refreshed = True
+            return True
+
+    exchange = RefreshableLocalExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    analysis = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=datetime.fromisoformat("2026-07-20T10:02:00+08:00"),
+        skip_download=True,
+    )
+
+    assert analysis.closed_at == datetime.fromisoformat(
+        "2026-07-20T10:00:00+08:00"
+    )
+    assert len(exchange.calls) == 2
+    assert exchange.refresh_calls == [
+        ("SZ.000001", "5m", gateway_module.QMT_STRUCTURE_DIVIDEND_TYPE)
+    ]
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["local_history_subscription_refresh_attempt.5m"] == 1
+    assert counters["local_history_subscription_refresh_success.5m"] == 1
+    assert counters.get("local_history_freshness_fallback.5m", 0) == 0
+
+
+def test_realtime_five_minute_analysis_reuses_the_same_completed_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2026-07-20T09:35:00+08:00", "2026-07-20T09:40:00+08:00"]
+            ),
+            "open": [10.0, 10.1],
+            "high": [10.2, 10.3],
+            "low": [9.9, 10.0],
+            "close": [10.1, 10.2],
+            "volume": [1000, 1200],
+        }
+    )
+    frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="same-five-minute-epoch",
+    )
+    exchange = RecordingExchange(frame)
+    gateway, _analyzer, _unused_exchange = _gateway()
+
+    first = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=datetime.fromisoformat("2026-07-20T09:42:00+08:00"),
+        fast_incremental_refresh=True,
+    )
+    second = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=datetime.fromisoformat("2026-07-20T09:44:00+08:00"),
+        fast_incremental_refresh=True,
+    )
+
+    assert second is first
+    assert len(exchange.calls) == 1
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["completed_epoch_cache_hit.5m"] == 1
+
+
+def test_realtime_local_first_five_minute_analysis_reuses_completed_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priority preparation must not disable completed-5m epoch reuse."""
+
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "5m": 2},
+    )
+    frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2026-07-20T09:35:00+08:00", "2026-07-20T09:40:00+08:00"]
+            ),
+            "open": [10.0, 10.1],
+            "high": [10.2, 10.3],
+            "low": [9.9, 10.0],
+            "close": [10.1, 10.2],
+            "volume": [1000, 1200],
+        }
+    )
+    frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="same-local-first-five-minute-epoch",
+    )
+    exchange = RecordingExchange(frame)
+    gateway, _analyzer, _unused_exchange = _gateway()
+
+    first = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=datetime.fromisoformat("2026-07-20T09:42:00+08:00"),
+        skip_download=True,
+    )
+    second = gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=datetime.fromisoformat("2026-07-20T09:44:00+08:00"),
+        skip_download=True,
+    )
+
+    assert second is first
+    assert len(exchange.calls) == 1
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["completed_epoch_cache_hit.5m"] == 1
+
+
 class StableIncrementalWindowExchange:
     supports_stable_incremental_window = True
 
@@ -1464,12 +1804,132 @@ def test_hot_qmt_runtime_uses_bounded_stable_left_window_for_real_incremental_up
 
     assert exchange.calls[0]["start_date"] is None
     assert exchange.calls[0]["args"]["req_counts"] == 4
-    assert exchange.calls[1]["start_date"] == "2026-07-20 09:35:00"
+    assert exchange.calls[1]["start_date"] == "2026-07-20 09:50:00"
     assert "req_counts" not in exchange.calls[1]["args"]
     counters = gateway.runtime_health_snapshot()["performance"]["counters"]
     assert counters["stable_incremental_window_request.5m"] == 1
     assert counters["structure_full_incremental.5m"] == 1
     assert counters["structure_suffix_incremental.5m"] == 1
+
+
+class OpeningEventStableIncrementalWindowExchange:
+    supports_stable_incremental_window = True
+
+    def __init__(self) -> None:
+        dates = pd.date_range(
+            "2026-07-20T09:30:00+08:00",
+            periods=5,
+            freq="min",
+        )
+        self.frame = pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.00, 10.01, 10.02, 10.03, 10.04],
+                "high": [10.10, 10.11, 10.12, 10.13, 10.14],
+                "low": [9.90, 9.91, 9.92, 9.93, 9.94],
+                "close": [10.01, 10.02, 10.03, 10.04, 10.05],
+                "volume": [10.0, 100.0, 100.0, 100.0, 100.0],
+            }
+        )
+        self.frame.attrs.update(
+            structure_price_quantum="0.01",
+            price_basis_revision="qmt-front-ratio-opening-stable-window",
+            price_basis_provider="qmt",
+            price_basis_adjustment="front_ratio",
+        )
+        self.visible_count = 4
+        self.calls: list[dict[str, object]] = []
+
+    def klines(
+        self,
+        _code: str,
+        _frequency: str,
+        start_date: str | None = None,
+        *,
+        args: dict[str, object],
+    ) -> pd.DataFrame:
+        self.calls.append({"start_date": start_date, "args": dict(args)})
+        frame = self.frame.iloc[: self.visible_count].copy(deep=True)
+        frame.attrs = dict(self.frame.attrs)
+        if start_date is not None:
+            frame = frame.loc[
+                frame["date"] >= pd.Timestamp(start_date, tz="Asia/Shanghai")
+            ].copy()
+            frame.attrs = dict(self.frame.attrs)
+        return frame.reset_index(drop=True)
+
+
+def test_one_minute_stable_window_merges_only_the_authenticated_new_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway_module,
+        "SCREENING_WARMUP_REQUIRED_BARS",
+        {**gateway_module.SCREENING_WARMUP_REQUIRED_BARS, "1m": 2},
+    )
+    exchange = OpeningEventStableIncrementalWindowExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="1m",
+        as_of=datetime.fromisoformat("2026-07-20T09:33:00+08:00"),
+        fast_incremental_refresh=True,
+    )
+    exchange.visible_count = 5
+    gateway._load_analysis(
+        exchange=exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="1m",
+        as_of=datetime.fromisoformat("2026-07-20T09:34:00+08:00"),
+        fast_incremental_refresh=True,
+    )
+
+    assert exchange.calls[1]["start_date"] == "2026-07-20 09:33:00"
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["stable_incremental_window_request.1m"] == 1
+    assert counters["stable_incremental_tail_merge.1m"] == 1
+    assert counters["structure_full_incremental.1m"] == 1
+    assert counters["structure_suffix_incremental.1m"] == 1
+
+
+def test_one_minute_tail_query_retains_qmt_opening_event_dependency() -> None:
+    exchange = OpeningEventStableIncrementalWindowExchange()
+    gateway, _analyzer, _unused_exchange = _gateway()
+    raw = exchange.frame.iloc[:2].copy(deep=True)
+    raw.attrs = dict(exchange.frame.attrs)
+    normalized = gateway_module.normalize_qmt_opening_events_for_completed_minutes(
+        gateway_module._closed_frame(
+            raw,
+            not_after=datetime.fromisoformat("2026-07-20T09:31:00+08:00"),
+            minimum_bars=1,
+        )
+    )
+    states = gateway_module._WarmupRuntimeStates(
+        full=screening_runtime_module.ScreeningRuntimeState(
+            "SZ.000001", "1m", market="a"
+        ),
+        suffix=screening_runtime_module.ScreeningRuntimeState(
+            "SZ.000001", "1m", market="a"
+        ),
+    )
+    states.full.update_from_frame(
+        frame=normalized,
+        as_of=datetime.fromisoformat("2026-07-20T09:31:00+08:00"),
+    )
+    gateway._runtime_states_by_frequency["1m"]["SZ.000001"] = states
+
+    start = gateway._stable_incremental_start(
+        exchange=exchange,
+        code="SZ.000001",
+        frequency="1m",
+    )
+
+    assert start == datetime.fromisoformat("2026-07-20T09:30:00+08:00")
 
 
 def test_serialized_one_minute_runtime_keeps_stable_window_after_l1_eviction(
@@ -1592,7 +2052,7 @@ def test_disk_backed_five_minute_runtime_keeps_stable_window_without_memory_copy
         fast_incremental_refresh=True,
     )
 
-    assert exchange.calls[-1]["start_date"] == "2026-07-20 09:35:00"
+    assert exchange.calls[-1]["start_date"] == "2026-07-20 09:50:00"
     health = gateway.runtime_health_snapshot()
     assert health["serialized_runtime_state_capacities"]["5m"] == 0
     assert health["serialized_runtime_state_entries"]["5m"] == 0
@@ -1705,6 +2165,102 @@ def test_bounded_sector_assessment_limits_work_and_routing_without_clipping_cont
     assert timings["sector_frame_provider.30m"]["count"] == 1
     assert timings["sector_frame_provider.5m"]["count"] == 1
     assert timings["sector_strength_provider"]["count"] == 1
+
+
+def test_parallel_sector_shards_match_single_process_global_policy() -> None:
+    sector_rows = [
+        {
+            "sector_id": f"qmt-gics3:sector-{index}",
+            "name": f"Sector {index}",
+            "source_key": f"GICS3Sector{index}",
+            "member_codes": [
+                f"SH.{600000 + index:06d}",
+                f"SZ.{index + 1:06d}",
+            ],
+        }
+        for index in range(9)
+    ]
+
+    def build_gateway() -> NativeTradingDataGateway:
+        def sector_frame_provider(**kwargs):
+            return _qmt_sector_five_frame(
+                request_bars=kwargs["request_bars"],
+                member_count=len(kwargs["members"]),
+                as_of=kwargs["as_of"],
+            )
+
+        def strength_provider(**kwargs):
+            return {
+                sector_id: SectorStrengthEvidence(
+                    sector_id=sector_id,
+                    observed_at=kwargs["as_of"],
+                    anchor_session=date(2026, 7, 1),
+                    member_count=len(members),
+                    strength=Decimal(index),
+                    rank=index + 1,
+                    source_revision="sha256:parallel-strength-test",
+                    reason_codes=("EQUAL_WEIGHT_MEMBER_MA_CATEGORY_MEAN",),
+                )
+                for index, (sector_id, members) in enumerate(
+                    sorted(kwargs["members_by_sector"].items())
+                )
+            }
+
+        return NativeTradingDataGateway(
+            exchange_provider=RecordingExchange,
+            sector_provider=lambda: {
+                "source": gateway_module.QMT_GICS3_CATALOG_SOURCE,
+                "sectors": sector_rows,
+            },
+            sector_frame_provider=sector_frame_provider,
+            sector_strength_provider=strength_provider,
+            analyzer=RecordingAnalyzer(),
+            config=NativeTradingGatewayConfig(
+                request_bars_by_frequency=(
+                    ("d", 4),
+                    ("30m", 4),
+                    ("5m", 4),
+                    ("1m", 4),
+                ),
+                minimum_bars_by_frequency=(
+                    ("d", 2),
+                    ("30m", 1),
+                    ("5m", 2),
+                    ("1m", 2),
+                ),
+                minimum_sector_members=1,
+            ),
+        )
+
+    single = build_gateway()
+    expected = single.native_sector_assessments(as_of=NOW)
+    expected_members = single.members()
+    expected_bars = single.changed_bars(None)
+
+    parallel = build_gateway()
+    shards = tuple(
+        parallel.native_sector_analysis_shard(
+            as_of=NOW,
+            shard_index=index,
+            shard_count=4,
+        )
+        for index in range(4)
+    )
+    actual = parallel.finalize_native_sector_analysis_shards(
+        as_of=NOW,
+        shards=shards,
+    )
+
+    assert actual == expected
+    assert parallel.members() == expected_members
+    assert parallel.changed_bars(None) == expected_bars
+    assert tuple(
+        sorted(
+            sector_id
+            for shard in shards
+            for sector_id in shard.assigned_sector_ids
+        )
+    ) == tuple(row["sector_id"] for row in sector_rows)
 
 
 @pytest.mark.parametrize(
@@ -2628,8 +3184,9 @@ def test_native_gateway_large_caches_are_lru_bounded() -> None:
 def test_native_gateway_runtime_state_hotset_is_lru_bounded() -> None:
     gateway, _analyzer, _stock_exchange = _gateway()
     gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    capacity = gateway_module._RUNTIME_CACHE_CAPACITY_BY_FREQUENCY["1m"]  # noqa: SLF001
 
-    for index in range(12):
+    for index in range(capacity + 8):
         gateway._analyze_frame(
             code=f"SZ.{index:06d}",
             frequency="1m",
@@ -2638,9 +3195,157 @@ def test_native_gateway_runtime_state_hotset_is_lru_bounded() -> None:
         )
 
     cache = gateway._runtime_states_by_frequency["1m"]
-    assert len(cache) == 8
+    assert len(cache) == capacity
     assert "SZ.000000" not in cache
-    assert tuple(cache) == tuple(f"SZ.{index:06d}" for index in range(4, 12))
+    assert tuple(cache) == tuple(
+        f"SZ.{index:06d}" for index in range(8, capacity + 8)
+    )
+
+
+def test_native_gateway_rebuilds_only_the_cached_locked_time_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway, _analyzer, _stock_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    frame = _frame()
+    expected = gateway._analyze_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=frame,
+        as_of=NOW,
+    )
+    cached = gateway._runtime_states_by_frequency["5m"]["SZ.000001"]
+    production_analyzer = gateway_module.analyze_native_frame_with_warmup
+    calls: list[object] = []
+
+    def fail_cached_then_rebuild(*, runtime_states, **kwargs):
+        calls.append(runtime_states)
+        if len(calls) == 1:
+            raise gateway_module.StrictStructureAnalysisError(
+                "locked unit confirmation time changed"
+            )
+        return production_analyzer(runtime_states=runtime_states, **kwargs)
+
+    monkeypatch.setattr(
+        gateway_module,
+        "analyze_native_frame_with_warmup",
+        fail_cached_then_rebuild,
+    )
+    gateway._analyzer = fail_cached_then_rebuild
+
+    recovered = gateway._analyze_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=frame,
+        as_of=NOW,
+    )
+
+    replacement = gateway._runtime_states_by_frequency["5m"]["SZ.000001"]
+    assert recovered == expected
+    assert calls == [cached, replacement]
+    assert replacement is not cached
+    assert replacement.full.last_update_incremental is False
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["runtime_state_contract_rebuild_attempt.5m"] == 1
+    assert counters["runtime_state_contract_rebuild_success.5m"] == 1
+    assert counters.get("runtime_state_contract_rebuild_failure.5m", 0) == 0
+    assert counters.get("structure_analysis_failure.5m", 0) == 0
+
+
+@pytest.mark.parametrize(
+    ("preload", "message"),
+    (
+        (False, "locked unit confirmation time changed"),
+        (True, "unit directions must alternate"),
+    ),
+)
+def test_native_gateway_does_not_rebuild_unmatched_structure_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    preload: bool,
+    message: str,
+) -> None:
+    gateway, _analyzer, _stock_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    frame = _frame()
+    if preload:
+        gateway._analyze_frame(
+            code="SZ.000001",
+            frequency="5m",
+            frame=frame,
+            as_of=NOW,
+        )
+    calls: list[object] = []
+
+    def fail_structure(*, runtime_states, **_kwargs):
+        calls.append(runtime_states)
+        raise gateway_module.StrictStructureAnalysisError(message)
+
+    monkeypatch.setattr(
+        gateway_module,
+        "analyze_native_frame_with_warmup",
+        fail_structure,
+    )
+    gateway._analyzer = fail_structure
+
+    with pytest.raises(gateway_module.StrictStructureAnalysisError, match=message):
+        gateway._analyze_frame(
+            code="SZ.000001",
+            frequency="5m",
+            frame=frame,
+            as_of=NOW,
+        )
+
+    assert len(calls) == 1
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters.get("runtime_state_contract_rebuild_attempt.5m", 0) == 0
+    assert counters["structure_analysis_failure.5m"] == 1
+
+
+def test_native_gateway_evicts_failed_locked_time_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway, _analyzer, _stock_exchange = _gateway()
+    gateway._analyzer = gateway_module.analyze_native_frame_with_warmup
+    frame = _frame()
+    gateway._analyze_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=frame,
+        as_of=NOW,
+    )
+    calls: list[object] = []
+
+    def fail_structure(*, runtime_states, **_kwargs):
+        calls.append(runtime_states)
+        raise gateway_module.StrictStructureAnalysisError(
+            "locked unit confirmation time changed"
+        )
+
+    monkeypatch.setattr(
+        gateway_module,
+        "analyze_native_frame_with_warmup",
+        fail_structure,
+    )
+    gateway._analyzer = fail_structure
+
+    with pytest.raises(
+        gateway_module.StrictStructureAnalysisError,
+        match="locked unit confirmation time changed",
+    ):
+        gateway._analyze_frame(
+            code="SZ.000001",
+            frequency="5m",
+            frame=frame,
+            as_of=NOW,
+        )
+
+    assert len(calls) == 2
+    assert "SZ.000001" not in gateway._runtime_states_by_frequency["5m"]
+    counters = gateway.runtime_health_snapshot()["performance"]["counters"]
+    assert counters["runtime_state_contract_rebuild_attempt.5m"] == 1
+    assert counters["runtime_state_contract_rebuild_failure.5m"] == 1
+    assert counters.get("runtime_state_contract_rebuild_success.5m", 0) == 0
+    assert counters["structure_analysis_failure.5m"] == 1
 
 
 def test_native_gateway_restores_evicted_one_minute_runtime_from_bounded_l2(

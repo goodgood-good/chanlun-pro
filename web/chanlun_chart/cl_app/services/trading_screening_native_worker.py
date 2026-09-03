@@ -26,6 +26,23 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
 
 
 class _Gateway(Protocol):
+    def native_sector_analysis_shard(
+        self,
+        *,
+        as_of: object,
+        shard_index: int,
+        shard_count: int,
+        admitted_codes: tuple[str, ...] | None = None,
+    ) -> object: ...
+
+    def finalize_native_sector_analysis_shards(
+        self,
+        *,
+        as_of: object,
+        shards: tuple[object, ...],
+        admitted_codes: tuple[str, ...] | None = None,
+    ) -> object: ...
+
     def native_sector_assessments(
         self,
         *,
@@ -163,6 +180,100 @@ def dispatch_gateway_request(
 ) -> object:
     """严格按只读选股白名单分派请求。"""
 
+    if method == "sector_analysis_shard":
+        if set(kwargs) not in (
+            {"as_of", "shard_index", "shard_count"},
+            {"as_of", "shard_index", "shard_count", "admitted_codes"},
+        ):
+            raise ValueError(
+                "sector_analysis_shard requires as_of, shard coordinates and optional admitted_codes"
+            )
+        shard_index = kwargs.get("shard_index")
+        shard_count = kwargs.get("shard_count")
+        if (
+            type(shard_index) is not int
+            or type(shard_count) is not int
+            or shard_count <= 0
+            or not 0 <= shard_index < shard_count
+        ):
+            raise ValueError("sector_analysis_shard coordinates are invalid")
+        admitted_codes_supplied = "admitted_codes" in kwargs
+        admitted_codes = kwargs.get("admitted_codes")
+        if admitted_codes_supplied and (
+            type(admitted_codes) is not tuple
+            or not admitted_codes
+            or len(admitted_codes) != len(set(admitted_codes))
+            or any(
+                type(code) is not str
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in admitted_codes
+            )
+        ):
+            raise ValueError("sector_analysis_shard admitted_codes are invalid")
+        shard = gateway.native_sector_analysis_shard(
+            as_of=kwargs.get("as_of"),
+            shard_index=shard_index,
+            shard_count=shard_count,
+            **(
+                {"admitted_codes": admitted_codes}
+                if admitted_codes_supplied
+                else {}
+            ),
+        )
+        return {
+            "schema": "chanlun-native-sector-analysis-shard",
+            "admitted_codes": admitted_codes if admitted_codes_supplied else None,
+            "shard": shard,
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+    if method == "sector_snapshot_finalize":
+        if set(kwargs) not in (
+            {"as_of", "shards"},
+            {"as_of", "shards", "admitted_codes"},
+        ):
+            raise ValueError(
+                "sector_snapshot_finalize requires as_of, shards and optional admitted_codes"
+            )
+        shards = kwargs.get("shards")
+        if type(shards) is not tuple or not shards:
+            raise ValueError("sector_snapshot_finalize shards are invalid")
+        admitted_codes_supplied = "admitted_codes" in kwargs
+        admitted_codes = kwargs.get("admitted_codes")
+        if admitted_codes_supplied and (
+            type(admitted_codes) is not tuple
+            or not admitted_codes
+            or len(admitted_codes) != len(set(admitted_codes))
+            or any(
+                type(code) is not str
+                or re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", code) is None
+                for code in admitted_codes
+            )
+        ):
+            raise ValueError("sector_snapshot_finalize admitted_codes are invalid")
+        assessments = gateway.finalize_native_sector_analysis_shards(
+            as_of=kwargs.get("as_of"),
+            shards=shards,
+            **(
+                {"admitted_codes": admitted_codes}
+                if admitted_codes_supplied
+                else {}
+            ),
+        )
+        return {
+            "schema": "chanlun-native-sector-snapshot",
+            "admitted_codes": admitted_codes if admitted_codes_supplied else None,
+            "assessments": assessments,
+            "members": gateway.members(),
+            "changed_bars": gateway.changed_bars(None),
+            "symbol_names": {},
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
     if method == "sector_snapshot":
         if set(kwargs) not in ({"as_of"}, {"as_of", "admitted_codes"}):
             raise ValueError(
@@ -248,9 +359,16 @@ def dispatch_gateway_request(
             )
         return gateway.display_quote_snapshot(codes)
     if method == "prepare_local_history":
-        if set(kwargs) != {"frequency_requests", "as_of"}:
+        required = {"frequency_requests", "as_of"}
+        allowed = {
+            *required,
+            "req_counts_by_frequency",
+            "cancel_deadline_monotonic",
+            "chunk_size",
+        }
+        if not required.issubset(kwargs) or not set(kwargs).issubset(allowed):
             raise ValueError(
-                "prepare_local_history requires frequency_requests and as_of"
+                "prepare_local_history received invalid arguments"
             )
         requests = kwargs.get("frequency_requests")
         if type(requests) is not tuple:
@@ -258,6 +376,9 @@ def dispatch_gateway_request(
         return gateway.prepare_local_history(
             frequency_requests=requests,
             as_of=kwargs.get("as_of"),
+            req_counts_by_frequency=kwargs.get("req_counts_by_frequency"),
+            cancel_deadline_monotonic=kwargs.get("cancel_deadline_monotonic"),
+            chunk_size=kwargs.get("chunk_size", 100),
         )
     if method == "structure_bundle":
         code = kwargs.get("code")
@@ -357,6 +478,12 @@ def _build_gateway(connection: Connection, request_id: list[str | None]) -> _Gat
         fact_cache_revision=composite_fact_revision,
     )
     sector_strength = QmtSectorStrengthSource(
+        # Sector structures are now partitioned before this finalizer runs, so
+        # it no longer retains the full catalog's composite frames.  Use that
+        # recovered memory headroom to reduce 5,000-symbol daily history reads
+        # from roughly 80 native round trips/full-GC passes to about 10 while
+        # preserving the exact same normalized bars and fact identity.
+        request_chunk_size=512,
         progress_callback=progress,
         fact_cache_path=daily_cache,
         fact_cache_revision=daily_fact_revision,

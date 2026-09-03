@@ -79,6 +79,35 @@ test('calendar evidence times map to deterministic TradingView coordinates', () 
   );
 });
 
+test('close-labeled intraday evidence maps to its opening chart coordinate', () => {
+  const closeTime = Date.UTC(2026, 6, 30, 3, 30) / 1000;
+  assert.equal(
+    Reconcile.chartTimeCoordinate(closeTime, '5m', true),
+    closeTime - 300,
+  );
+  assert.equal(
+    Reconcile.chartTimeCoordinate(closeTime, '5m', false),
+    closeTime,
+  );
+
+  const item = strictCenter({
+    points: [
+      { time: closeTime - 300, price: 11 },
+      { time: closeTime, price: 10 },
+    ],
+  });
+  const rendered = Reconcile.itemToChartCoordinates(item, '5m', true);
+  assert.deepEqual(
+    rendered.points.map((point) => point.time),
+    [closeTime - 600, closeTime - 300],
+  );
+  assert.deepEqual(
+    item.points.map((point) => point.time),
+    [closeTime - 300, closeTime],
+    'audit evidence must remain immutable',
+  );
+});
+
 test('render-coordinate conversion never mutates strict audit evidence', () => {
   const rawClose = Date.UTC(2026, 6, 31, 7) / 1000;
   const item = strictCenter({

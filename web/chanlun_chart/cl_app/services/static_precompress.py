@@ -1,6 +1,6 @@
 """静态资源预压缩（B2）。
 
-启动期一次性扫描 charting_library / datafeeds 下的 .js/.css 等文本资源，
+启动期一次性扫描整个 static 目录下的 .js/.css 等文本资源，
 为每个文件生成兄弟 .gz。运行时 CachedStaticFileHandler 根据 Accept-Encoding
 透明分发 .gz。
 
@@ -74,13 +74,8 @@ def precompress_directory(root: str) -> tuple[int, int, float]:
 
 
 def precompress_static_assets(static_root: str) -> None:
-    """启动钩子：预压缩 charting_library / datafeeds 两个大头目录。"""
-    targets = [
-        os.path.join(static_root, "charting_library"),
-        os.path.join(static_root, "datafeeds"),
-    ]
-    for t in targets:
-        c, s, e = precompress_directory(t)
-        LogUtil.info(
-            f"[precompress] {os.path.basename(t)}: 压缩={c} 跳过={s} 耗时={e:.2f}s"
-        )
+    """启动钩子：预压缩完整静态树，避免嵌入图重复传输入口脚本。"""
+    c, s, e = precompress_directory(static_root)
+    LogUtil.info(
+        f"[precompress] static: 压缩={c} 跳过={s} 耗时={e:.2f}s"
+    )

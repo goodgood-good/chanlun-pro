@@ -212,6 +212,67 @@ def test_active_owner_suppresses_shifted_forming_preview():
         assert preview.entry_unit_id == result.centers[0].entry_unit.unit_id
 
 
+def test_active_owner_suppresses_shifted_completed_preview_inside_its_core():
+    """A sliding live-tail window cannot manufacture a second completed center.
+
+    This is the reduced SH.601059/5m production sequence from 2026-08-31.  The
+    shifted candidate core (1637, 1657) overlaps the active center core
+    (1640, 1679), while every unit after the shared entry is still unlocked.
+    Those units extend the active center; they do not complete a new center.
+    """
+
+    endpoints = (
+        (1724, 1640),
+        (1640, 1685),
+        (1685, 1634),
+        (1634, 1679),
+        (1679, 1608),
+        (1608, 1688),
+        (1688, 1653),
+        (1653, 1687),
+        (1687, 1621),
+        (1621, 1657),
+        (1657, 1637),
+        (1637, 1698),
+        (1698, 1662),
+    )
+    values = []
+    for index, (start_tick, end_tick) in enumerate(endpoints):
+        value = unit(
+            index,
+            "up" if end_tick > start_tick else "down",
+            start_tick,
+            end_tick,
+        )
+        if index >= 8:
+            value = replace(
+                value,
+                locked=False,
+                confirmed_at=None,
+                forming=index == len(endpoints) - 1,
+            )
+        values.append(value)
+
+    result = calculate_centers(tuple(values), 0, SourceKind.SEGMENT)
+
+    assert len(result.centers) == 1
+    active = result.centers[0]
+    assert active.state is CenterState.ONGOING
+    assert (active.zd_tick, active.zg_tick) == (1640, 1679)
+    assert len(result.previews) == 1
+    projected = result.previews[0]
+    assert projected.state is CenterPreviewState.FORMING
+    assert projected.formal_center_id == active.center_id
+    assert (projected.zd_tick, projected.zg_tick) == (
+        active.zd_tick,
+        active.zg_tick,
+    )
+    assert not any(
+        preview.state is CenterPreviewState.COMPLETED
+        for preview in result.previews
+    )
+
+
 def test_at_most_one_ongoing_center_and_one_forming_preview_per_prefix():
     values = _two_completed_centers() + (
         replace(unit(12, "up", 177, 200), locked=False, confirmed_at=None),

@@ -19,6 +19,7 @@ def candidate_monitor_deadline_perf(
     minute_codes_present: bool,
     force_startup_bootstrap: bool,
     compute_window_open: bool,
+    priority_finalization_reserve_seconds: float = 0.0,
 ) -> float:
     """Return the absolute candidate admission deadline.
 
@@ -45,12 +46,26 @@ def candidate_monitor_deadline_perf(
         )
     ):
         raise TypeError("monitor deadline policy flags must be exact bools")
+    if (
+        isinstance(priority_finalization_reserve_seconds, bool)
+        or not isinstance(priority_finalization_reserve_seconds, (int, float))
+        or not math.isfinite(priority_finalization_reserve_seconds)
+        or priority_finalization_reserve_seconds < 0
+    ):
+        raise ValueError("priority finalization reserve must be non-negative")
     closed_startup_candidate_catchup = bool(
         force_startup_bootstrap and not compute_window_open
     )
+    live_shared_boundary = bool(
+        not closed_startup_candidate_catchup
+        and (minute_codes_present or compute_window_open)
+    )
     return (
-        min(priority_deadline_perf, candidate_budget_deadline_perf)
-        if minute_codes_present and not closed_startup_candidate_catchup
+        min(
+            priority_deadline_perf - priority_finalization_reserve_seconds,
+            candidate_budget_deadline_perf,
+        )
+        if live_shared_boundary
         else candidate_budget_deadline_perf
     )
 

@@ -143,3 +143,84 @@ test('cold history retries one startup timeout and returns the recovered bars', 
   assert.equal(delays.filter((delay) => delay === 750).length, 1);
   assert.equal(result.bars.length, 1);
 });
+
+test('a superseded initial-history abort settles quietly', async () => {
+  const warnings = [];
+  let pendingHistoryReject;
+  let historyAttempts = 0;
+  const sandbox = {
+    console: {
+      ...console,
+      warn: (...args) => warnings.push(args.map(String).join(' ')),
+    },
+    Math, JSON, Array, Object, String, Number, Boolean, Promise, Error, Map, Set,
+    AbortController,
+    fetch: (url, options = {}) => {
+      if (String(url).includes('/config')) {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve(JSON.stringify({
+            supports_search: true,
+            supported_resolutions: ['1', '5', '30', '1D'],
+          })),
+        });
+      }
+      historyAttempts += 1;
+      if (historyAttempts === 1) {
+        return new Promise((_resolve, reject) => {
+          pendingHistoryReject = reject;
+          options.signal.addEventListener('abort', () => {
+            reject(new Error('signal is aborted without reason'));
+          }, { once: true });
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({
+          s: 'ok', update: false,
+          t: [2000], o: [2], h: [2], l: [2], c: [2], v: [2],
+          fxs: [], bis: [], xds: [],
+        })),
+      });
+    },
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  const bundlePath = path.join(
+    __dirname, '..', '..', 'datafeeds', 'udf', 'dist', 'bundle.js'
+  );
+  vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), sandbox, { filename: 'bundle.js' });
+
+  const datafeed = new sandbox.Datafeeds.UDFCompatibleDatafeed('http://test');
+  const history = datafeed._historyProvider;
+  const staleRequest = history.getBars(
+    { ticker: 'a:SZ.000001' },
+    '1',
+    { from: 1000, to: 2000, firstDataRequest: true },
+  );
+  const currentRequest = history.getBars(
+    { ticker: 'a:SZ.000002' },
+    '1',
+    { from: 1000, to: 2000, firstDataRequest: true },
+  );
+
+  const [staleResult, currentResult] = await Promise.allSettled([
+    staleRequest,
+    currentRequest,
+  ]);
+  assert.equal(staleResult.status, 'rejected');
+  assert.equal(currentResult.status, 'fulfilled');
+  assert.equal(currentResult.value.bars.length, 1);
+  assert.equal(historyAttempts, 2);
+  assert.equal(pendingHistoryReject !== undefined, true);
+  assert.equal(
+    warnings.some((message) => message.includes('signal is aborted without reason')),
+    false,
+  );
+});

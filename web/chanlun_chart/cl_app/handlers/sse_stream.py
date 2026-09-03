@@ -7,6 +7,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import threading
 
 import tornado.web
@@ -29,15 +30,67 @@ _RECOMPUTE_TIMEOUT_SECONDS = max(
 _RECOMPUTE_MAX_PENDING = max(
     1, int(getattr(config, "SSE_MAX_PENDING_RECOMPUTES", 8))
 )
+_CONNECTION_LEASE_SECONDS = max(
+    30.0, float(getattr(config, "SSE_CONNECTION_LEASE_SECONDS", 300.0))
+)
+_STREAM_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _runtime_lock = threading.Lock()
 _recompute_slots = threading.BoundedSemaphore(_RECOMPUTE_MAX_PENDING)
 _runtime_inflight = set()
 _runtime_timed_out = set()
 _runtime_closed = False
+# These registries are only touched from Tornado's IOLoop.  They let a chart
+# explicitly retire its old long-poll tunnel before opening the replacement.
+# This matters behind FRP/proxies that can keep the backend TCP side alive even
+# after the browser has already discarded an iframe or EventSource.
+_active_connections_by_id = {}
+_active_connections_by_channel = {}
 
 
 def get_hub() -> SseHub:
     return _hub
+
+
+def _normalize_stream_identifier(value):
+    candidate = str(value or "").strip()
+    if not candidate or not _STREAM_IDENTIFIER_RE.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _supersede_active_channel(client_id, channel_id, replacement=None):
+    if not client_id or not channel_id:
+        return False
+    previous = _active_connections_by_channel.get((client_id, channel_id))
+    if previous is None or previous is replacement:
+        return False
+    previous._supersede()
+    return True
+
+
+def _register_active_connection(handler):
+    connection_id = handler._connection_id
+    client_id = handler._client_id
+    channel_id = handler._channel_id
+    if connection_id:
+        previous = _active_connections_by_id.get(connection_id)
+        if previous is not None and previous is not handler:
+            previous._supersede()
+        _active_connections_by_id[connection_id] = handler
+    if client_id and channel_id:
+        _active_connections_by_channel[(client_id, channel_id)] = handler
+
+
+def _unregister_active_connection(handler):
+    connection_id = getattr(handler, "_connection_id", None)
+    if connection_id and _active_connections_by_id.get(connection_id) is handler:
+        _active_connections_by_id.pop(connection_id, None)
+    channel_key = (
+        getattr(handler, "_client_id", None),
+        getattr(handler, "_channel_id", None),
+    )
+    if all(channel_key) and _active_connections_by_channel.get(channel_key) is handler:
+        _active_connections_by_channel.pop(channel_key, None)
 
 
 async def _run_recompute_bounded(pool, ctx, args):
@@ -155,6 +208,8 @@ def shutdown_sse_runtime():
             if closed is not None and not closed.is_set():
                 closed.set()
     getattr(_hub, "_subs", {}).clear()
+    _active_connections_by_id.clear()
+    _active_connections_by_channel.clear()
     return not any(not future.done() for future in futures)
 
 
@@ -212,6 +267,9 @@ class SseStreamHandler(tornado.web.RequestHandler):
         self._pool = pool
         self._cache_key = None
         self._closed = None
+        self._client_id = None
+        self._channel_id = None
+        self._connection_id = None
 
     async def get(self):
         # 局部 import 避免与 tv blueprint / chart_cache 形成顶层 import 链。
@@ -252,20 +310,45 @@ class SseStreamHandler(tornado.web.RequestHandler):
         client_id = _client_identity(
             self._flask_app, cookie_header, self.request.remote_ip
         )
+        self._client_id = client_id
+        self._channel_id = _normalize_stream_identifier(
+            self.get_argument("channel_id", "")
+        )
+        self._connection_id = _normalize_stream_identifier(
+            self.get_argument("connection_id", "")
+        )
+        # A ChartManager keeps one stable channel id while symbols/resolutions
+        # change.  Retire that channel first so an FRP-held ghost cannot consume
+        # the per-account limit or leave the replacement chart on polling only.
+        _supersede_active_channel(client_id, self._channel_id, replacement=self)
         if not _hub.subscribe(
             self._cache_key, self, start_loop, client_id=client_id
         ):
             self.set_status(503)
             self.finish()
             return
+        _register_active_connection(self)
+
+        # Flush headers immediately.  Besides making EventSource OPEN promptly,
+        # this gives the browser/proxy a heartbeat before the first recompute.
+        await self._send(None)
 
         # H1: 后加入既有循环者,单独补发一次当前权威数据(直接读缓存不重算,近零成本),
         # 否则要等到下次指纹变化才首次收到缠论(多窗口/多设备同标的常见)。
         if joining_existing:
             await self._send_current_snapshot()
 
-        # 不 return, 保持长连接, 直到客户端断开(on_connection_close 唤醒)。
-        await self._closed.wait()
+        # A finite lease is a final safety net for proxies that never propagate
+        # the browser-side FIN. EventSource reconnects automatically after EOF,
+        # while abandoned backend sockets are guaranteed to disappear.
+        try:
+            await asyncio.wait_for(
+                self._closed.wait(), timeout=_CONNECTION_LEASE_SECONDS
+            )
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self._unsub()
 
     def _make_start_loop(self, market, code, frequency, cl_config):
         """返回 start_loop(cache_key)：创建该 key 的 PeriodicCallback 刷新循环。"""
@@ -358,12 +441,45 @@ class SseStreamHandler(tornado.web.RequestHandler):
     def on_connection_close(self):
         self._unsub()
 
+    def _supersede(self):
+        """Retire this stream because the same logical chart opened a new one."""
+        self._unsub()
+
     def _unsub(self):
-        if self._cache_key is not None:
-            _hub.unsubscribe(self._cache_key, self)
-            self._cache_key = None
+        cache_key = self._cache_key
+        self._cache_key = None
+        if cache_key is not None:
+            _hub.unsubscribe(cache_key, self)
+        _unregister_active_connection(self)
         if self._closed is not None and not self._closed.is_set():
             self._closed.set()
+
+
+class SseStreamCloseHandler(tornado.web.RequestHandler):
+    """Best-effort explicit close used by pagehide/EventSource replacement."""
+
+    def initialize(self, flask_app):
+        self._flask_app = flask_app
+
+    def post(self):
+        cookie_header = self.request.headers.get("Cookie")
+        if not is_request_authenticated(self._flask_app, cookie_header):
+            self.set_status(401)
+            self.finish()
+            return
+        connection_id = _normalize_stream_identifier(
+            self.get_argument("connection_id", "")
+        )
+        if connection_id:
+            handler = _active_connections_by_id.get(connection_id)
+            client_id = _client_identity(
+                self._flask_app, cookie_header, self.request.remote_ip
+            )
+            if handler is not None and handler._client_id == client_id:
+                handler._supersede()
+        # Idempotent by design: closing an already-gone connection is success.
+        self.set_status(204)
+        self.finish()
 
 
 def build_routes(flask_app, pool=None):
@@ -371,5 +487,10 @@ def build_routes(flask_app, pool=None):
     if not getattr(config, "ENABLE_SSE_PUSH", False):
         return []
     return [
+        (
+            r"/tv/stream/close",
+            SseStreamCloseHandler,
+            {"flask_app": flask_app},
+        ),
         (r"/tv/stream", SseStreamHandler, {"flask_app": flask_app, "pool": pool}),
     ]

@@ -41,7 +41,6 @@ from .chart_cache import (
     _mark_chart_cache_validated,
     _mark_negative_cache,
     _set_chart_cache_entry,
-    cache_lock,
 )
 
 # ---------------- per-key 锁注册表 ----------------
@@ -178,7 +177,12 @@ def serialize_chart_data_with_strict_runtime(
     )
 
 def compute_and_cache_chart_data(
-    market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
+    market: str,
+    code: str,
+    frequency: str,
+    cl_config: dict,
+    skip_download: bool = False,
+    incremental_refresh_days: int | None = None,
 ) -> bool:
     """全量计算前先取 per-key chart_calc_locks(与 tv_history/_do_revalidate 同锁域), 消除
     预热的 cl_data_to_tv_chart 读取共享 CL 时，可能与用户增量路径的 process_klines 改写
@@ -192,14 +196,24 @@ def compute_and_cache_chart_data(
         return True
     try:
         return _compute_and_cache_chart_data_impl(
-            market, code, frequency, cl_config, skip_download
+            market,
+            code,
+            frequency,
+            cl_config,
+            skip_download,
+            incremental_refresh_days,
         )
     finally:
         _calc_lock.release()
 
 
 def _compute_and_cache_chart_data_impl(
-    market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
+    market: str,
+    code: str,
+    frequency: str,
+    cl_config: dict,
+    skip_download: bool = False,
+    incremental_refresh_days: int | None = None,
 ) -> bool:
     """完整复刻 ``tv_history`` 中 cache miss 后的计算路径，把结果写入 ``chart_data_cache``。
 
@@ -227,8 +241,14 @@ def _compute_and_cache_chart_data_impl(
     }
     # 预热批量预下载后, 让 ex.klines 跳过逐只 download(数据已在本地库)。仅 A股/QMT 的
     # klines 识别 args["skip_download"]; 其他交易所不传此 args, 行为不变。
+    if skip_download and incremental_refresh_days is not None:
+        raise ValueError("skip_download and incremental_refresh_days are mutually exclusive")
     if skip_download:
         kline_args["args"] = {"skip_download": True}
+    elif incremental_refresh_days is not None:
+        kline_args["args"] = {
+            "incremental_refresh_days": incremental_refresh_days,
+        }
 
     with lb_low_priority():
         klines = ex.klines(code, frequency, **kline_args)
@@ -252,13 +272,11 @@ def _compute_and_cache_chart_data_impl(
     )
     if cl_chart_data is None:
         _mark_negative_cache(cache_key)
-        with cache_lock:
-            _mark_chart_cache_validated(cache_key)
+        _mark_chart_cache_validated(cache_key)
         return False
 
     # 完整回看窗口的严格结果是本次唯一权威快照；直接整体替换，避免保留已撤销形态。
-    with cache_lock:
-        _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
+    _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
     return True
 
 
@@ -501,6 +519,34 @@ def slice_chart_data_to_window(
     return sliced
 
 
+def slice_chart_data_to_countback(
+    chart_data: dict,
+    countback: int,
+    frequency: str | None = None,
+) -> dict:
+    """Return only the newest ``countback`` bars and matching basic shapes.
+
+    TradingView already expands ``countBack`` for indicators and requests older
+    ranges when the user scrolls left.  Sending the complete 10k-20k bar cache
+    on every first load wastes JSON encoding, transfer and browser parse time.
+    The authoritative strict snapshot remains outside this projection; this
+    helper only bounds the transport window and never mutates the cached graph.
+    """
+
+    if type(countback) is not int or countback <= 0:
+        return dict(chart_data)
+    bar_times = chart_data.get("t", []) or []
+    if len(bar_times) <= countback:
+        return dict(chart_data)
+    comparison_times = chart_bar_time_coordinates(bar_times, frequency or "")
+    return slice_chart_data_to_window(
+        chart_data,
+        comparison_times[-countback],
+        0,
+        frequency=frequency,
+    )
+
+
 def trim_future_bars(
     chart_data: dict,
     to_ts: int,
@@ -592,8 +638,7 @@ def fetch_klines_and_compute_cl_data(
             cache_key=cache_key,
         )
         if cl_chart_data is None:
-            with cache_lock:
-                _mark_chart_cache_validated(cache_key)
+            _mark_chart_cache_validated(cache_key)
             return None
         display_klines = klines
         used_prepend = True
@@ -605,8 +650,7 @@ def fetch_klines_and_compute_cl_data(
         and len(klines) > 0
         and to_ts < fun.datetime_to_int(klines.iloc[0]["date"])
     ):
-        with cache_lock:
-            _mark_chart_cache_validated(cache_key)
+        _mark_chart_cache_validated(cache_key)
         return None
 
     if cl_chart_data is None:
@@ -623,8 +667,7 @@ def fetch_klines_and_compute_cl_data(
             f"{(_time.time() - serialize_started) * 1000:.0f}ms"
         )
         if cl_chart_data is None:
-            with cache_lock:
-                _mark_chart_cache_validated(cache_key)
+            _mark_chart_cache_validated(cache_key)
             return None
 
     return {

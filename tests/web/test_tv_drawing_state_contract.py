@@ -213,3 +213,143 @@ def test_invalid_current_record_is_not_restored(app, monkeypatch):
         "data": {"schema": SCHEMA, "sources": {}, "groups": {}},
     }
     assert writes == []
+
+
+def test_drawing_manifest_lists_only_matching_layout_contexts(app, monkeypatch):
+    records = [
+        SimpleNamespace(
+            name="drawings_default_default_US:AAPL.US_all",
+            symbol="US:AAPL.US",
+            resolution="all",
+            timestamp=20,
+            content=json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "sources": {"manual-latest": {"type": "LineToolTrendLine"}},
+                    "groups": {},
+                }
+            ),
+        ),
+        # Legacy duplicate rows collapse to one newest context.
+        SimpleNamespace(
+            name="drawings_default_default_US:AAPL.US_all",
+            symbol="US:AAPL.US",
+            resolution="all",
+            timestamp=10,
+            content=json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "sources": {"manual-old": {"type": "LineToolTrendLine"}},
+                    "groups": {},
+                }
+            ),
+        ),
+        # A different saved layout must not affect the default-layout negative cache.
+        SimpleNamespace(
+            name="drawings_other_default_US:MSFT.US_all",
+            symbol="US:MSFT.US",
+            resolution="all",
+            timestamp=30,
+            content=json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "sources": {"other-layout": {"type": "LineToolTrendLine"}},
+                    "groups": {},
+                }
+            ),
+        ),
+        # Current-schema empty rows and legacy payloads behave exactly like a
+        # missing row and therefore must not defeat the front-end negative cache.
+        SimpleNamespace(
+            name="drawings_default_default_US:NVDA.US_all",
+            symbol="US:NVDA.US",
+            resolution="all",
+            timestamp="invalid",
+            content=json.dumps({"schema": SCHEMA, "sources": {}, "groups": {}}),
+        ),
+        SimpleNamespace(
+            name="drawings_default_default_US:TSLA.US_all",
+            symbol="US:TSLA.US",
+            resolution="all",
+            timestamp=40,
+            content=json.dumps({"sources": {"legacy": {"type": "LineToolTrendLine"}}}),
+        ),
+    ]
+    monkeypatch.setattr(
+        tv.db,
+        "tv_chart_list",
+        lambda chart_type, client_id, user_id: records,
+    )
+
+    response = app.test_client().get(URL + "&manifest=1")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "data": {
+            "complete": True,
+            "entries": [{"symbol": "US:AAPL.US", "resolution": "all"}],
+        },
+    }
+
+
+def test_drawing_manifest_all_contexts_uses_exact_nonempty_storage_names(
+    app,
+    monkeypatch,
+):
+    manual_state = json.dumps(
+        {
+            "schema": SCHEMA,
+            "sources": {"manual": {"type": "LineToolTrendLine"}},
+            "groups": {},
+        }
+    )
+    records = [
+        SimpleNamespace(
+            name="drawings_default_default_US:AAPL.US_all",
+            symbol="US:AAPL.US",
+            resolution="all",
+            timestamp=20,
+            content=manual_state,
+        ),
+        SimpleNamespace(
+            name="drawings_undefined_1_A:SZ.001270_all",
+            symbol="A:SZ.001270",
+            resolution="all",
+            timestamp=30,
+            content=manual_state,
+        ),
+        SimpleNamespace(
+            name="drawings_undefined_1_A:SZ.000001_all",
+            symbol="A:SZ.000001",
+            resolution="all",
+            timestamp=40,
+            content=json.dumps({"schema": SCHEMA, "sources": {}, "groups": {}}),
+        ),
+        SimpleNamespace(
+            name="malformed-name",
+            symbol="US:MSFT.US",
+            resolution="all",
+            timestamp=50,
+            content=manual_state,
+        ),
+    ]
+    monkeypatch.setattr(
+        tv.db,
+        "tv_chart_list",
+        lambda chart_type, client_id, user_id: records,
+    )
+
+    response = app.test_client().get(URL + "&manifest=1&scope=all")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "data": {
+            "complete": True,
+            "entries": [
+                {"name": "drawings_undefined_1_A:SZ.001270_all"},
+                {"name": "drawings_default_default_US:AAPL.US_all"},
+            ],
+        },
+    }

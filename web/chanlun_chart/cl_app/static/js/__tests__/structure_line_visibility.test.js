@@ -84,8 +84,12 @@ test('相邻周期共享同一绝对结构级别颜色', () => {
 test('实际绘制和菜单色块共用同一基础结构样式', () => {
   assert.ok(source.includes("const biLineStyle = getBaseStructureStyle(currentInterval, 'bis')"));
   assert.ok(source.includes("const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds')"));
-  assert.ok(source.includes('ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), biLineStyle)'));
-  assert.ok(source.includes('ChartUtils.createLineShape(this.chart, baseStructureRenderItem(item), xdLineStyle)'));
+  assert.ok(source.includes('const item = baseStructureRenderItem(rawItem)'));
+  assert.ok(source.includes('ChartUtils.createPathShape(this.chart, item, biLineStyle)'));
+  assert.ok(source.includes('ChartUtils.createPathShape(this.chart, item, xdLineStyle)'));
+  assert.ok(source.includes('shape: "path"'), '批量基础结构必须使用不会自动首尾闭合的开放路径');
+  assert.ok(!source.includes('createPolylineShape('), '基础结构不得恢复会产生首尾伪连线的多边形图元');
+  assert.ok(!source.includes("_shapeKind: 'polyline'"));
   assert.ok(source.includes('if (!baseStructureLineIsUnfinished(item)) return item;'));
   assert.ok(source.includes('linestyle: CHART_CONFIG.LINE_STYLES.DASHED'));
   assert.ok(source.includes('color: getDynamicColor(interval, elementType)'));

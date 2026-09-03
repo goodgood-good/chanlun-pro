@@ -410,6 +410,19 @@ test('US quote batches use the same bounded primary-provider timeout', () => {
   );
 });
 
+test('US quotes render when the provider uses an equivalent prefix code', () => {
+  const h = loadZiXuan([{ market: 'us', code: 'AAPL.US' }]);
+
+  h.ZiXuan.stocks_update_rate();
+  completeSuccess(h.ajaxCalls[0], {
+    ok: true,
+    market_state: 'open',
+    ticks: [{ code: 'US.AAPL', price: 201.5, rate: 1.25 }],
+  });
+
+  assert.equal(h.replacements(), 1);
+});
+
 test('manual quote refresh preserves rendered prices and skips table reconstruction', () => {
   const h = loadZiXuan([{ market: 'a', code: 'SH.600000' }]);
   h.ZiXuan.stocks_update_rate();

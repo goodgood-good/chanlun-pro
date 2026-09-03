@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 from zoneinfo import ZoneInfo
 
@@ -37,8 +37,13 @@ from cl_app.services.trading_screening_native_worker import (
     dispatch_gateway_request,
 )
 from cl_app.services.trading_screening_gateway import (
+    NativeSectorAnalysisShard,
     SectorAnalysisExclusion,
     SectorAssessmentBatch,
+    _native_sector_shard_slot,
+)
+from chanlun.exchange.qmt_screening_sector_source import (
+    QMT_GICS_HIERARCHY_CATALOG_SOURCE,
 )
 from cl_app.services.realtime_quotes import (
     AShareDisplayQuoteBatch,
@@ -1126,6 +1131,15 @@ class _BundleTransport:
 
     def request(self, method: str, **kwargs: object) -> object:
         self.calls.append((method, kwargs))
+        if method == "prepare_local_history":
+            requests = kwargs["frequency_requests"]
+            assert type(requests) is tuple
+            return {
+                "schema": "chanlun-screening-local-history-preparation",
+                "as_of": kwargs["as_of"].isoformat(),
+                "prepared_frequencies_by_code": dict(requests),
+                "batch_download_available": True,
+            }
         assert method == "structure_bundle"
         return self.bundle
 
@@ -1136,6 +1150,8 @@ class _BundleTransport:
         deadline_monotonic: float,
         **kwargs: object,
     ) -> object:
+        if method == "prepare_local_history":
+            return self.request(method, **kwargs)
         return self.request(
             method,
             deadline_monotonic=deadline_monotonic,
@@ -1152,6 +1168,7 @@ class _BundleTransport:
 class _HistoryPreparationTransport:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.deadlines: list[float] = []
 
     def set_progress_callback(self, callback) -> None:
         self.progress_callback = callback
@@ -1167,6 +1184,16 @@ class _HistoryPreparationTransport:
             "prepared_frequencies_by_code": dict(requests),
             "batch_download_available": True,
         }
+
+    def request_until(
+        self,
+        method: str,
+        *,
+        deadline_monotonic: float,
+        **kwargs: object,
+    ) -> object:
+        self.deadlines.append(deadline_monotonic)
+        return self.request(method, **kwargs)
 
     def health_snapshot(self):
         return {"ready": True}
@@ -1216,7 +1243,7 @@ def test_process_proxy_preserves_canonical_history_preparation_contract() -> Non
         )
 
 
-def test_process_proxy_realtime_history_preparation_never_starts_batch_download() -> None:
+def test_process_proxy_realtime_history_preparation_uses_local_first_scope() -> None:
     as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
     requests = (
         ("SH.600000", ("d", "30m", "5m", "1m")),
@@ -1226,31 +1253,57 @@ def test_process_proxy_realtime_history_preparation_never_starts_batch_download(
     proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
         transport=transport
     )
+    priority_deadline = time.monotonic() + 60
 
     priority = proxy.prepare_priority_local_history(
         frequency_requests=requests,
         as_of=as_of,
+        deadline_monotonic=priority_deadline,
     )
 
     assert transport.calls == []
+    assert transport.deadlines == []
+    assert priority["batch_download_available"] is False
     assert priority["prepared_frequencies_by_code"] == {
-        "SH.600000": ("d", "30m"),
-        "SZ.000001": ("d", "30m"),
+        "SH.600000": ("d", "30m", "5m", "1m"),
+        "SZ.000001": ("d", "30m", "5m"),
     }
     assert proxy._prepared_local_frequencies("SH.600000", as_of) == (  # noqa: SLF001
         "d",
         "30m",
+        "5m",
+        "1m",
     )
 
     candidate = proxy.prepare_candidate_local_history_until(
+        frequency_requests=(("SH.600000", ("5m",)),),
+        as_of=as_of,
+        deadline_monotonic=time.monotonic() + 30,
+    )
+
+    assert transport.calls == []
+    assert transport.deadlines == []
+    assert candidate["prepared_frequencies_by_code"] == {
+        "SH.600000": ("d", "30m", "5m")
+    }
+
+
+def test_process_proxy_realtime_preparation_does_not_consume_compute_reserve() -> None:
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    transport = _HistoryPreparationTransport()
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport
+    )
+
+    result = proxy.prepare_candidate_local_history_until(
         frequency_requests=(("SH.600000", ("5m",)),),
         as_of=as_of,
         deadline_monotonic=time.monotonic() + 1,
     )
 
     assert transport.calls == []
-    assert candidate["prepared_frequencies_by_code"] == {
-        "SH.600000": ("d", "30m")
+    assert result["prepared_frequencies_by_code"] == {
+        "SH.600000": ("d", "30m", "5m")
     }
 
 
@@ -1314,7 +1367,7 @@ def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
     ]
 
 
-def test_process_proxy_candidate_refreshes_only_missing_intraday_frequencies() -> None:
+def test_process_proxy_candidate_uses_batch_prepared_intraday_frequencies() -> None:
     as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
     sector = SectorAssessment(
         sector_id="unclassified",
@@ -1342,6 +1395,7 @@ def test_process_proxy_candidate_refreshes_only_missing_intraday_frequencies() -
     proxy.prepare_priority_local_history(
         frequency_requests=(("SH.600000", ("d", "30m", "5m", "1m")),),
         as_of=as_of,
+        deadline_monotonic=time.monotonic() + 60,
     )
     deadline = time.monotonic() + 1
 
@@ -1356,13 +1410,184 @@ def test_process_proxy_candidate_refreshes_only_missing_intraday_frequencies() -
 
     assert result is bundle
     request_kwargs = transport.calls[-1][1]
-    assert request_kwargs["local_history_frequencies"] == ("d", "30m")
-    assert request_kwargs["incremental_refresh_frequencies"] == ("5m", "1m")
+    assert request_kwargs["local_history_frequencies"] == (
+        "d",
+        "30m",
+        "5m",
+        "1m",
+    )
+    assert request_kwargs["incremental_refresh_frequencies"] == ()
     # The lane deadline controls admission.  Once admitted, a candidate gets a
     # bounded execution window so a cold first request does not destroy the
     # process and all of its newly restored incremental state.
     assert request_kwargs["deadline_monotonic"] >= deadline
     assert request_kwargs["deadline_monotonic"] - time.monotonic() > 70
+
+    formal_deadline = time.monotonic() + 30
+    formal_result = (
+        proxy.monitor_candidate_structure_bundle_with_risk_cutoff_until(
+            "SH.600000",
+            as_of=as_of,
+            sector=sector,
+            frequencies=("5m",),
+            risk_evidence_cutoff=as_of,
+            deadline_monotonic=formal_deadline,
+        )
+    )
+
+    assert formal_result is bundle
+    formal_request_kwargs = transport.calls[-1][1]
+    # Formal 5m monitoring shares the one-minute SLA boundary exactly; it must
+    # not inherit the cold background candidate's 75-second execution window.
+    assert formal_request_kwargs["deadline_monotonic"] == formal_deadline
+
+
+def test_priority_structure_phase_drains_and_blocks_ordinary_requests() -> None:
+    as_of = datetime(2026, 7, 29, 9, 47, tzinfo=ZoneInfo("Asia/Shanghai"))
+    sector = SectorAssessment(
+        sector_id="unclassified",
+        sector_name="未分类",
+        eligible=False,
+        hard_block=True,
+        regime="hostile",
+        rank_components=(),
+        reason_codes=("test",),
+    )
+    bundle = SymbolStructureBundle(
+        code="SH.600000",
+        as_of=as_of,
+        sector=sector,
+        thirty_direction="neutral",
+        thirty_points=(),
+        five_points=(),
+        one_points=(),
+        opposite_points=(),
+    )
+    first_ordinary_started = Event()
+    release_first_ordinary = Event()
+    second_ordinary_started = Event()
+    call_lock = Lock()
+    structure_calls: list[str] = []
+
+    class AdmissionTransport(_BundleTransport):
+        def request(self, method: str, **kwargs: object) -> object:
+            if method != "structure_bundle":
+                return super().request(method, **kwargs)
+            code = kwargs["code"]
+            assert isinstance(code, str)
+            with call_lock:
+                structure_calls.append(code)
+                call_index = len(structure_calls)
+            if call_index == 1:
+                first_ordinary_started.set()
+                assert release_first_ordinary.wait(timeout=5)
+            if code == "SZ.000001":
+                second_ordinary_started.set()
+            return self.bundle
+
+    transport = AdmissionTransport(bundle)
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport
+    )
+    errors: list[BaseException] = []
+
+    def candidate(code: str) -> None:
+        try:
+            proxy.candidate_structure_bundle_with_risk_cutoff_until(
+                code,
+                as_of=as_of,
+                sector=sector,
+                frequencies=("5m",),
+                risk_evidence_cutoff=as_of,
+                deadline_monotonic=time.monotonic() + 30,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion handoff
+            errors.append(exc)
+
+    first = Thread(target=candidate, args=("SH.600000",), daemon=True)
+    first.start()
+    assert first_ordinary_started.wait(timeout=5)
+
+    phase_entered = Event()
+
+    def begin_phase() -> None:
+        try:
+            proxy.begin_priority_structure_phase(
+                deadline_monotonic=time.monotonic() + 5
+            )
+            phase_entered.set()
+        except BaseException as exc:  # pragma: no cover - assertion handoff
+            errors.append(exc)
+
+    phase = Thread(target=begin_phase, daemon=True)
+    phase.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        worker_pool = proxy.health_snapshot()["structure_worker_pool"]
+        if worker_pool["priority_phase_active"] is True:
+            break
+        time.sleep(0.01)
+    else:  # pragma: no cover - deterministic timeout assertion
+        raise AssertionError("priority phase did not become active")
+    assert phase_entered.is_set() is False
+
+    second = Thread(target=candidate, args=("SZ.000001",), daemon=True)
+    second.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        worker_pool = proxy.health_snapshot()["structure_worker_pool"]
+        if worker_pool["ordinary_structure_waiter_count"] == 1:
+            break
+        time.sleep(0.01)
+    else:  # pragma: no cover - deterministic timeout assertion
+        raise AssertionError("ordinary request did not wait for priority phase")
+    assert second_ordinary_started.is_set() is False
+
+    release_first_ordinary.set()
+    first.join(timeout=5)
+    phase.join(timeout=5)
+    assert not first.is_alive()
+    assert not phase.is_alive()
+    assert phase_entered.is_set() is True
+
+    assert proxy.priority_structure_bundle_with_risk_cutoff_until(
+        "BJ.430001",
+        as_of=as_of,
+        sector=sector,
+        frequencies=("1m", "5m"),
+        risk_evidence_cutoff=as_of,
+        deadline_monotonic=time.monotonic() + 5,
+    ) is bundle
+    assert structure_calls == ["SH.600000", "BJ.430001"]
+    assert second_ordinary_started.is_set() is False
+    assert second.is_alive()
+
+    assert proxy.monitor_candidate_structure_bundle_with_risk_cutoff_until(
+        "SZ.300001",
+        as_of=as_of,
+        sector=sector,
+        frequencies=("5m",),
+        risk_evidence_cutoff=as_of,
+        deadline_monotonic=time.monotonic() + 5,
+    ) is bundle
+    assert structure_calls == ["SH.600000", "BJ.430001", "SZ.300001"]
+    assert second_ordinary_started.is_set() is False
+    assert second.is_alive()
+
+    proxy.end_priority_structure_phase()
+    second.join(timeout=5)
+    assert not second.is_alive()
+    assert structure_calls == [
+        "SH.600000",
+        "BJ.430001",
+        "SZ.300001",
+        "SZ.000001",
+    ]
+    assert errors == []
+    worker_pool = proxy.health_snapshot()["structure_worker_pool"]
+    assert worker_pool["priority_phase_active"] is False
+    assert worker_pool["ordinary_structure_request_count"] == 0
+    assert worker_pool["ordinary_structure_waiter_count"] == 0
 
 
 def test_process_proxy_allows_fail_closed_unclassified_structure_without_sector_cache() -> None:
@@ -1538,6 +1763,38 @@ class _AtomicGateway:
             errors=(),
         )
 
+    def native_sector_analysis_shard(
+        self,
+        *,
+        as_of,
+        shard_index,
+        shard_count,
+        admitted_codes=None,
+    ):
+        assert as_of == self.as_of
+        self.calls.append(f"shard:{shard_index}/{shard_count}")
+        self.admitted_scope_calls.append(admitted_codes)
+        return ("native-sector-shard", shard_index, shard_count)
+
+    def finalize_native_sector_analysis_shards(
+        self,
+        *,
+        as_of,
+        shards,
+        admitted_codes=None,
+    ):
+        assert as_of == self.as_of
+        assert shards == (("native-sector-shard", 0, 1),)
+        self.calls.append("finalize")
+        self.admitted_scope_calls.append(admitted_codes)
+        return SectorAssessmentBatch(
+            assessments=(self.assessment,),
+            discovered_count=1,
+            completed_count=1,
+            failure_counts=(),
+            errors=(),
+        )
+
     def members(self):
         self.calls.append("members")
         return {self.assessment.sector_id: ("SH.600000",)}
@@ -1588,6 +1845,22 @@ def test_worker_builds_one_atomic_sector_snapshot() -> None:
         "changed_bars",
     ]
     assert gateway.admitted_scope_calls == [None]
+
+    shard_envelope = dispatch_gateway_request(
+        gateway,
+        method="sector_analysis_shard",
+        kwargs={"as_of": as_of, "shard_index": 0, "shard_count": 1},
+    )
+    assert shard_envelope["schema"] == "chanlun-native-sector-analysis-shard"
+    assert shard_envelope["shard"] == ("native-sector-shard", 0, 1)
+    finalized = dispatch_gateway_request(
+        gateway,
+        method="sector_snapshot_finalize",
+        kwargs={"as_of": as_of, "shards": (shard_envelope["shard"],)},
+    )
+    assert finalized["schema"] == "chanlun-native-sector-snapshot"
+    assert finalized["assessments"].completed_count == 1
+    assert gateway.calls[-3:] == ["finalize", "members", "changed_bars"]
 
     scoped_gateway = _AtomicGateway(as_of=as_of)
     admitted = ("SH.600000",)
@@ -2042,6 +2315,183 @@ def test_atomic_sector_snapshot_never_occupies_reserved_priority_worker() -> Non
     assert batch.completed_count == 1
     assert priority.calls == []
     assert candidate.calls == [("sector_snapshot", {"as_of": as_of})]
+
+
+def test_wide_pool_builds_sector_shards_concurrently_and_keeps_live_lanes_free() -> None:
+    as_of = datetime(2026, 7, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    catalog_revision = "sha256:" + "a" * 64
+    catalog_ids = tuple(f"qmt-gics3:TEST{value:02d}" for value in range(24))
+    all_started = Event()
+    release = Event()
+    state_lock = Lock()
+    started_count = 0
+    expected_shard_count = 4
+
+    class ParallelSectorTransport(_AtomicTransport):
+        def __init__(self, *, build_worker: bool) -> None:
+            super().__init__(_atomic_snapshot(as_of))
+            self.build_worker = build_worker
+
+        def request(self, method: str, **kwargs: object) -> object:
+            nonlocal started_count
+            self.calls.append((method, kwargs))
+            if method == "sector_analysis_shard":
+                assert self.build_worker is True
+                shard_index = kwargs["shard_index"]
+                shard_count = kwargs["shard_count"]
+                assert type(shard_index) is int
+                assert shard_count == expected_shard_count
+                assigned = tuple(
+                    sector_id
+                    for sector_id in catalog_ids
+                    if _native_sector_shard_slot(sector_id, shard_count)
+                    == shard_index
+                )
+                with state_lock:
+                    started_count += 1
+                    if started_count == expected_shard_count:
+                        all_started.set()
+                assert release.wait(timeout=5)
+                assessments = tuple(
+                    SectorAssessment(
+                        sector_id=sector_id,
+                        sector_name=sector_id,
+                        eligible=True,
+                        hard_block=False,
+                        regime="neutral",
+                        rank_components=(),
+                        reason_codes=("parallel_test",),
+                    )
+                    for sector_id in assigned
+                )
+                return {
+                    "schema": "chanlun-native-sector-analysis-shard",
+                    "admitted_codes": None,
+                    "shard": NativeSectorAnalysisShard(
+                        shard_index=shard_index,
+                        shard_count=shard_count,
+                        admitted_codes=None,
+                        catalog_source=QMT_GICS_HIERARCHY_CATALOG_SOURCE,
+                        catalog_revision=catalog_revision,
+                        catalog_sector_ids=catalog_ids,
+                        assigned_sector_ids=assigned,
+                        assessments=assessments,
+                        completed_count=len(assigned),
+                        errors=(),
+                        exclusions=(),
+                        members={
+                            sector_id: ("SH.600000",) for sector_id in assigned
+                        },
+                        analysis_members={
+                            sector_id: ("SH.600000",) for sector_id in assigned
+                        },
+                        latest_bars=tuple(
+                            BarKey(sector_id, "5m", as_of)
+                            for sector_id in assigned
+                        ),
+                        parent_relations=(),
+                    ),
+                    "minimum_market_data_frequency": "1m",
+                    "tick_data_used": False,
+                    "real_account_access": False,
+                    "real_order_transport": False,
+                }
+            if method == "sector_snapshot_finalize":
+                shards = kwargs["shards"]
+                assert type(shards) is tuple
+                assessments = tuple(
+                    sorted(
+                        (
+                            assessment
+                            for shard in shards
+                            for assessment in shard.assessments
+                        ),
+                        key=lambda item: item.sector_id,
+                    )
+                )
+                bars = tuple(
+                    sorted(
+                        (bar for shard in shards for bar in shard.latest_bars),
+                        key=lambda item: (
+                            item.closed_at,
+                            item.code,
+                            item.frequency,
+                        ),
+                    )
+                )
+                return {
+                    "schema": "chanlun-native-sector-snapshot",
+                    "admitted_codes": None,
+                    "assessments": SectorAssessmentBatch(
+                        assessments=assessments,
+                        discovered_count=len(assessments),
+                        completed_count=len(assessments),
+                        failure_counts=(),
+                        errors=(),
+                        catalog_revision=catalog_revision,
+                    ),
+                    "members": {
+                        sector_id: ("SH.600000",) for sector_id in catalog_ids
+                    },
+                    "changed_bars": bars,
+                    "symbol_names": {},
+                    "minimum_market_data_frequency": "1m",
+                    "tick_data_used": False,
+                    "real_account_access": False,
+                    "real_order_transport": False,
+                }
+            raise AssertionError(f"unexpected request: {method}")
+
+    priority = ParallelSectorTransport(build_worker=False)
+    reserved_candidate = ParallelSectorTransport(build_worker=False)
+    builders = tuple(
+        ParallelSectorTransport(build_worker=True)
+        for _value in range(expected_shard_count)
+    )
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=priority,
+        sector_cache_scope_mode="FULL_MARKET",
+    )
+    proxy._structure_transports = (  # type: ignore[assignment]  # noqa: SLF001
+        priority,
+        reserved_candidate,
+        *builders,
+    )
+    result: list[SectorAssessmentBatch] = []
+    errors: list[BaseException] = []
+
+    def build() -> None:
+        try:
+            result.append(proxy.native_sector_assessments(as_of=as_of))
+        except BaseException as exc:  # pragma: no cover - assertion handoff
+            errors.append(exc)
+
+    thread = Thread(target=build, daemon=True)
+    thread.start()
+    assert all_started.wait(timeout=5)
+    assert proxy._structure_transports_for_lane("priority_burst") == (  # noqa: SLF001
+        priority,
+        reserved_candidate,
+    )
+    assert proxy._structure_transports_for_lane("candidate") == (  # noqa: SLF001
+        reserved_candidate,
+    )
+    release.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert result[0].completed_count == len(catalog_ids)
+    assert priority.calls == []
+    assert reserved_candidate.calls == []
+    assert all(
+        transport.calls[0][0] == "sector_analysis_shard"
+        for transport in builders
+    )
+    assert [method for method, _kwargs in builders[0].calls] == [
+        "sector_analysis_shard",
+        "sector_snapshot_finalize",
+    ]
 
 
 def test_candidate_lane_uses_free_shard_during_atomic_sector_snapshot() -> None:
@@ -3158,9 +3608,11 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         },
     )
 
-    expected_workers = min(4, max(1, (os.cpu_count() or 4) // 4))
+    expected_workers = min(12, max(1, ((os.cpu_count() or 4) * 3) // 4))
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
-    assert app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == 4
+    assert (
+        app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == expected_workers
+    )
     assert app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"] is False
     assert app.config["TRADING_SCREENING_VALIDATION_COHORT_SIZE"] == 12
     assert app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"] == 20
@@ -3176,7 +3628,7 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     assert app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"] == 12
     assert app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"] == 210.0
     assert app.config["TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS"] == 4096
-    assert app.config["TRADING_SCREENING_NATIVE_MAX_RSS_MB"] == 1536
+    assert app.config["TRADING_SCREENING_NATIVE_MAX_RSS_MB"] == 1280
     gateway = app.extensions["decision_support_trading_screening_gateway"]
     assert len(gateway._structure_transports) == expected_workers  # noqa: SLF001
     assert gateway._transport not in gateway._structure_transports  # noqa: SLF001
@@ -3226,9 +3678,20 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
     assert worker_pool["candidate_released_worker_count"] == max(
         1, expected_workers - 1
     )
+    if expected_workers > 1:
+        gateway._sector_snapshot_in_flight.set()  # noqa: SLF001
+        busy_worker_pool = gateway.health_snapshot()["structure_worker_pool"]
+        assert busy_worker_pool["priority_burst_worker_count"] == (
+            expected_workers - 1
+        )
+        assert (
+            busy_worker_pool["priority_burst_sector_snapshot_exclusion_active"]
+            is True
+        )
+        gateway._sector_snapshot_in_flight.clear()  # noqa: SLF001
 
 
-def test_app_large_scope_defaults_to_sustainable_five_minute_capacity(
+def test_app_large_scope_defaults_to_full_realtime_locator_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE", "1")
@@ -3253,7 +3716,36 @@ def test_app_large_scope_defaults_to_sustainable_five_minute_capacity(
     )
 
     assert app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"] is True
-    assert app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"] == 60
+    assert app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"] == 384
+
+
+def test_app_full_coverage_uses_bounded_multiwave_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE", "1")
+    monkeypatch.setenv("CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED", "1")
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
+        raising=False,
+    )
+
+    app = create_app(
+        start_scheduler=False,
+        test_config={
+            "TESTING": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "WTF_CSRF_ENABLED": False,
+            "TRADING_SCREENING_BACKGROUND_ENABLED": False,
+        },
+    )
+
+    assert app.config["TRADING_SCREENING_SYMBOLS_PER_REFRESH"] == 240
+    assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 240
+    assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 48
 
 
 def test_structure_worker_pool_uses_sticky_symbol_routing_inside_each_lane() -> None:
@@ -3428,10 +3920,40 @@ def test_structure_worker_pool_co_locates_classified_sector_symbols() -> None:
     )
     assert len(set(priority_burst_keys)) == len(priority_burst_keys)
     assert gateway._structure_transports_for_lane("priority_burst") == workers  # noqa: SLF001
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "monitor_candidate"
+    ) == workers
     assert {
         id(gateway._structure_transport(key, lane="priority_burst"))  # noqa: SLF001
         for key in priority_burst_keys
     } == {id(worker) for worker in workers}
+    gateway._sector_snapshot_in_flight.set()  # noqa: SLF001
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "priority_burst"
+    ) == (workers[0], workers[2])
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "monitor_candidate"
+    ) == (workers[0], workers[2])
+    gateway._parallel_sector_snapshot_in_flight.set()  # noqa: SLF001
+    gateway._parallel_sector_busy_transport_ids = {  # noqa: SLF001
+        id(workers[2])
+    }
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "priority_burst"
+    ) == workers[:2]
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "monitor_candidate"
+    ) == workers[:2]
+    gateway._parallel_sector_busy_transport_ids.clear()  # noqa: SLF001
+    gateway._parallel_sector_busy_transport_ids.add(id(workers[1]))  # noqa: SLF001
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "priority_burst"
+    ) == (workers[0], workers[2])
+    assert gateway._structure_transports_for_lane(  # noqa: SLF001
+        "monitor_candidate"
+    ) == (workers[0], workers[2])
+    gateway._parallel_sector_snapshot_in_flight.clear()  # noqa: SLF001
+    gateway._sector_snapshot_in_flight.clear()  # noqa: SLF001
     candidate_keys = tuple(
         gateway._lane_structure_affinity_key(  # noqa: SLF001
             f"SH.{600000 + index:06d}",
@@ -3555,6 +4077,7 @@ def test_configured_coverage_affinity_overrides_only_coverage_sector_routes() ->
     audit = gateway.configure_coverage_sector_affinity(
         members_by_sector=members,
     )
+    installed_slots = gateway.coverage_sector_affinity_slots()
     moved_sector = next(
         sector_id
         for sector_id in sector_ids
@@ -3586,6 +4109,11 @@ def test_configured_coverage_affinity_overrides_only_coverage_sector_routes() ->
     )
 
     assert audit["moved_sector_count"] > 0
+    assert installed_slots == (
+        gateway._coverage_sector_affinity_plan.worker_by_sector  # noqa: SLF001
+    )
+    installed_slots.clear()
+    assert gateway.coverage_sector_affinity_slots()
     assert coverage_worker is not workers[2]
     assert candidate_worker in workers[1:]
     assert gateway.health_snapshot()["structure_worker_pool"][

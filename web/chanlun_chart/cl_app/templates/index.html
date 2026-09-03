@@ -71,7 +71,7 @@
         </div>
       </aside>
     {% endif %}
-    <a class="cp-skip-link" href="#chart_menu">跳到结构解盘侧栏</a>
+    <a id="chart_menu_skip_link" class="cp-skip-link" href="#chart_menu">跳到结构解盘侧栏</a>
     <form id="logout-form" method="post" action="/logout" style="display: none">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
     </form>
@@ -97,6 +97,13 @@
                 <strong>正在建立行情与结构工作区</strong>
                 <small>载入 K 线、笔、线段、中枢与递归结构数据…</small>
               </div>
+            </div>
+          </div>
+          <div id="tv_chart_transition" class="ca-chart-transition" data-state="idle" hidden>
+            <div class="ca-chart-transition__card" role="status" aria-live="polite">
+              <span class="ca-chart-transition__spinner" aria-hidden="true"></span>
+              <strong id="tv_chart_transition_title">正在切换图表</strong>
+              <small id="tv_chart_transition_detail">K 线、指标与缠论结构全部稳定后统一显示</small>
             </div>
           </div>
         </div>
@@ -167,6 +174,8 @@
           #chart_menu_inline_collapse:focus-visible,
           #toggle-menu:focus-visible,
           #symbols_list_wrap:focus-visible,
+          #bkgn_table_wrap:focus-visible,
+          #bkgn_table_wrap .layui-table-body tr:focus-visible,
           #bkgn_stock_wrap:focus-visible {
             outline: 2px solid #1e9fff;
             outline-offset: 2px;
@@ -191,6 +200,7 @@
         <div
           class="layui-col-xs2 layui-col-sm2 layui-col-md2"
           id="chart_menu"
+          tabindex="-1"
           style="
             position: fixed;
             top: 0;
@@ -206,6 +216,11 @@
                 <span class="ca-sidebar-eyebrow">STRUCTURE WORKBENCH</span>
                 <h2 class="ca-sidebar-title">缠论结构解盘</h2>
                 <p class="ca-sidebar-subtitle">同周期事实 · 双中枢定位 · 条件验证</p>
+                <p class="ca-account-context" title="当前登录账号">
+                  <i class="layui-icon layui-icon-username" aria-hidden="true"></i>
+                  <span>{{ account_username }}</span>
+                  <small>布局已同步</small>
+                </p>
               </div>
               <div class="ca-sidebar-actions">
                 <button
@@ -254,7 +269,7 @@
                 </div>
               </div>
               <div class="layui-form-item">
-                <div id="code_search" class="xm-select-demo"></div>
+                <div id="code_search" class="xm-select-demo" aria-label="搜索并切换标的"></div>
               </div>
             </form>
           </div>
@@ -633,10 +648,13 @@
                     </button>
                   </div>
 
-                  <div class="zx-watch-table" aria-label="当前分组标的列表">
+                  <div id="zixuan_stock_wrap" class="zx-watch-table" tabindex="0" role="region"
+                    aria-label="当前分组标的列表；使用方向键选择，按 Enter 切换主图，按 Shift+F10 打开操作菜单"
+                    aria-describedby="zixuan_watch_hint">
                     <table class="layui-hide" id="table_zixuan_list"></table>
                   </div>
-                  <p class="zx-watch-hint">同一分组可包含不同市场；“人工关注组”会进入优先监听。点击行切换主图，右键可排序、标色或移出分组；跨市场标的会自动对齐对应市场。</p>
+                  <p id="zixuan_watch_hint" class="zx-watch-hint">同一分组可包含不同市场；“人工关注组”会进入优先监听。点击行切换主图，右键可排序、标色或移出分组；也可用方向键选择，按 Enter 切换主图，按 Shift+F10 打开操作菜单；跨市场标的会自动对齐对应市场。</p>
+                  <p id="zixuan_keyboard_status" class="cp-sr-only" aria-live="polite"></p>
                 </section>
               </div>
             </div>
@@ -743,14 +761,17 @@
               <div class="layui-colla-content" style="padding: 0">
                 <p class="ca-tool-intro">先选板块，再从成分股中切换主图；支持 ↑ / ↓ 连续浏览。仅 A 股市场提供板块数据。</p>
                 <style>
-                  .symbol-code-link { color: #1e9fff; cursor: pointer; font-weight: 500; }
-                  .bkgn-total-tip { color: #888; font-size: 12px; }
+                  .symbol-code-link { color: var(--ca-blue); cursor: pointer; font-weight: 500; }
+                  .bkgn-total-tip { color: var(--ca-text-muted); font-size: 12px; }
                   .bkgn-layer-header {
                     display: flex; align-items: center; justify-content: space-between;
                     padding: 6px 10px; cursor: pointer; user-select: none;
-                    background: #f7f7f7; border-radius: 2px; font-size: 13px;
+                    color: var(--ca-text-secondary); background: var(--ca-surface-soft);
+                    border-radius: 2px; font-size: 13px;
                   }
-                  .bkgn-layer-header:hover { background: #efefef; }
+                  button.bkgn-layer-header { width: 100%; border: 0; font: inherit; text-align: left; }
+                  .bkgn-layer-header:hover { background: var(--ca-blue-soft); }
+                  .bkgn-layer-header:focus-visible { outline: 2px solid var(--ca-blue); outline-offset: 2px; }
                   .bkgn-layer-header .caret { transition: transform 0.15s; }
                   .bkgn-layer-header.is-collapsed .caret { transform: rotate(-90deg); }
                   .bkgn-search-row { display: flex; gap: 4px; margin-bottom: 6px; }
@@ -760,10 +781,11 @@
                   }
                 </style>
                 <div id="bkgn_layer" style="padding: 6px 10px 0 10px;">
-                  <div class="bkgn-layer-header" id="bkgn_layer_toggle">
+                  <button type="button" class="bkgn-layer-header" id="bkgn_layer_toggle"
+                    aria-expanded="true" aria-controls="bkgn_layer_body">
                     <span><i class="layui-icon layui-icon-triangle-d caret"></i> 板块列表</span>
                     <span id="bkgn_total_tip" class="bkgn-total-tip"></span>
-                  </div>
+                  </button>
                   <div id="bkgn_layer_body" style="padding-top: 6px;">
                     <div class="bkgn-search-row">
                       <input
@@ -784,11 +806,15 @@
                         <i class="layui-icon layui-icon-refresh"></i> 清空
                       </button>
                     </div>
-                    <table
-                      class="layui-hide"
-                      id="bkgn_table"
-                      lay-filter="bkgn_table"
-                      style="width: 100%;"></table>
+                    <div id="bkgn_table_wrap" tabindex="0" role="region"
+                      aria-label="板块列表；使用上下方向键选择，按 Enter 加载成分股">
+                      <table
+                        class="layui-hide"
+                        id="bkgn_table"
+                        lay-filter="bkgn_table"
+                        style="width: 100%;"></table>
+                    </div>
+                    <p id="bkgn_keyboard_status" class="cp-sr-only" aria-live="polite"></p>
                   </div>
                 </div>
                 <hr style="margin: 8px 0;" />
@@ -955,12 +981,39 @@
     var chart_widgets = [];
 
     function change_chart_ticker(_market, _code) {
-      var market = _market;
-      var code = _code;
+      var market = String(_market || "").trim().toLowerCase();
+      var code = String(_code || "").trim();
+      if (!market || !code) return;
       Utils.set_local_data("market", market);
       Utils.set_local_data(market + "_code", code);
+      var targetCode = code.toUpperCase();
+      var widgetsToSwitch = [];
       layui.each(chart_widgets, function (i, w) {
-        w.activeChart().setSymbol(market + ":" + code);
+        try {
+          var chart = w && typeof w.activeChart === "function" ? w.activeChart() : null;
+          if (!chart || typeof chart.setSymbol !== "function") return;
+          var current = typeof chart.symbol === "function" ? String(chart.symbol() || "") : "";
+          var separator = current.indexOf(":");
+          var currentMarket = separator >= 0 ? current.slice(0, separator).toLowerCase() : market;
+          var currentCode = (separator >= 0 ? current.slice(separator + 1) : current).toUpperCase();
+          if (currentMarket === market && currentCode === targetCode) return;
+          widgetsToSwitch.push(chart);
+        } catch (_) { /* 单张未就绪图表不阻断其余图表 */ }
+      });
+      if (widgetsToSwitch.length > 0 && window.ChartTransition) {
+        window.ChartTransition.begin({ market: market, code: code, expected: widgetsToSwitch.length });
+      }
+      widgetsToSwitch.forEach(function (chart) {
+        try {
+          var result = chart.setSymbol(market + ":" + code);
+          if (result && typeof result.catch === "function") {
+            result.catch(function () {
+              if (window.ChartTransition) window.ChartTransition.fail("切换请求失败，请重新选择标的");
+            });
+          }
+        } catch (_) {
+          if (window.ChartTransition) window.ChartTransition.fail("切换请求失败，请重新选择标的");
+        }
       });
       if (!window.__CHANLUN_EMBEDDED_CHART) ZiXuan.render_zixuan_opts();
     }
@@ -985,7 +1038,9 @@
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/sse_gap.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_structure_reconcile.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_transition.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/charts.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/embedded_chart_bridge.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_line_states.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/macd_stats.js') }}?asset={{ static_asset_token }}"></script>
@@ -1726,7 +1781,11 @@
               });
             } else if (["single", "horizontal-2", "horizontal-7-3", "vertical-2", "three", "four"].indexOf(item.id) !== -1) {
               Utils.set_local_data("chart_layout_type", item.id);
-              location.reload();
+              if (window.AccountPreferences && typeof window.AccountPreferences.reloadAfterSave === "function") {
+                window.AccountPreferences.reloadAfterSave();
+              } else {
+                location.reload();
+              }
             } else if (item.id === 8) {
               let theme = Utils.get_local_data("theme");
               if (theme === "Light") {
@@ -1734,7 +1793,11 @@
               } else {
                 Utils.set_local_data("theme", "Light");
               }
-              location.reload();
+              if (window.AccountPreferences && typeof window.AccountPreferences.reloadAfterSave === "function") {
+                window.AccountPreferences.reloadAfterSave();
+              } else {
+                location.reload();
+              }
             }
           },
         });
@@ -1763,7 +1826,12 @@
         form.on("select(select_market)", function (data) {
           var market = data.value;
           Utils.set_local_data("market", market);
-          location.assign("/?market=" + encodeURIComponent(market));
+          var target = "/?market=" + encodeURIComponent(market);
+          if (window.AccountPreferences && typeof window.AccountPreferences.navigateAfterSave === "function") {
+            window.AccountPreferences.navigateAfterSave(target, false);
+          } else {
+            location.assign("/?market=" + encodeURIComponent(market));
+          }
         });
 
       });
@@ -1919,22 +1987,36 @@
       var MIN_WIDTH = 300;       // 最小宽度（拖拽时），避免核心文字被压成单字列
       var MAX_RATIO = 0.6;       // 最大占视口比例（防止把图表拖没）
       var ABS_MAX_WIDTH = 900;   // 绝对上限
-      var MOBILE_BREAKPOINT = 760;
-      var MOBILE_MAX_WIDTH = 420; // 手机端使用覆盖式侧栏，保留图表完整工作区
+      var OVERLAY_BREAKPOINT = 980;
+      var OVERLAY_MAX_WIDTH = 420; // 手机与竖屏平板使用覆盖式侧栏，保留图表完整工作区
+
+      function preferenceGet(key) {
+        if (window.AccountPreferences && typeof window.AccountPreferences.getItem === 'function') {
+          return window.AccountPreferences.getItem(key);
+        }
+        return window.localStorage.getItem(key);
+      }
+      function preferenceSet(key, value) {
+        if (window.AccountPreferences && typeof window.AccountPreferences.setItem === 'function') {
+          window.AccountPreferences.setItem(key, value);
+          return;
+        }
+        window.localStorage.setItem(key, value);
+      }
 
       function readStoredWidth() {
         try {
-          var raw = window.localStorage.getItem(STORAGE_KEY);
+          var raw = preferenceGet(STORAGE_KEY);
           if (!raw) return null;
           var n = parseInt(raw, 10);
           return isNaN(n) ? null : n;
         } catch (_) { return null; }
       }
       function writeStoredWidth(px) {
-        try { window.localStorage.setItem(STORAGE_KEY, String(px)); } catch (_) {}
+        try { preferenceSet(STORAGE_KEY, String(px)); } catch (_) {}
       }
       function readCollapsed() {
-        try { return window.localStorage.getItem(COLLAPSE_KEY) === '1'; }
+        try { return preferenceGet(COLLAPSE_KEY) === '1'; }
         catch (_) { return false; }
       }
       function requestsInitialCollapse() {
@@ -1945,11 +2027,11 @@
         }
       }
       function writeCollapsed(v) {
-        try { window.localStorage.setItem(COLLAPSE_KEY, v ? '1' : '0'); } catch (_) {}
+        try { preferenceSet(COLLAPSE_KEY, v ? '1' : '0'); } catch (_) {}
       }
       function clampWidth(px) {
-        if (window.innerWidth <= MOBILE_BREAKPOINT) {
-          return Math.min(window.innerWidth, MOBILE_MAX_WIDTH);
+        if (window.innerWidth <= OVERLAY_BREAKPOINT) {
+          return Math.min(window.innerWidth, OVERLAY_MAX_WIDTH);
         }
         var max = Math.min(ABS_MAX_WIDTH, Math.floor(window.innerWidth * MAX_RATIO));
         if (px < MIN_WIDTH) px = MIN_WIDTH;
@@ -1960,26 +2042,35 @@
         var expanded = String(!collapsed);
         var expandBtn = document.getElementById('chart_menu_toggle');
         var collapseBtn = document.getElementById('chart_menu_inline_collapse');
+        var skipLink = document.getElementById('chart_menu_skip_link');
         if (expandBtn) {
-              var expandLabel = collapsed ? '展开结构解盘侧栏' : '收起结构解盘侧栏';
+          var expandLabel = collapsed ? '展开结构解盘侧栏' : '收起结构解盘侧栏';
           expandBtn.setAttribute('aria-expanded', expanded);
           expandBtn.setAttribute('aria-label', expandLabel);
           expandBtn.title = expandLabel;
         }
         if (collapseBtn) {
-              var collapseLabel = collapsed ? '展开结构解盘侧栏' : '收起结构解盘侧栏';
+          var collapseLabel = collapsed ? '展开结构解盘侧栏' : '收起结构解盘侧栏';
           collapseBtn.setAttribute('aria-expanded', expanded);
           collapseBtn.setAttribute('aria-label', collapseLabel);
           collapseBtn.title = collapseLabel;
         }
-      }      // 应用宽度到 DOM。collapsed=true 时右栏隐藏；展开状态由右栏内嵌的按钮控制收起，
+        if (skipLink) {
+          skipLink.tabIndex = collapsed ? -1 : 0;
+          if (collapsed) skipLink.setAttribute('aria-hidden', 'true');
+          else skipLink.removeAttribute('aria-hidden');
+        }
+      }
+
+      // 应用宽度到 DOM。collapsed=true 时右栏隐藏；展开状态由右栏内嵌的按钮控制收起，
       // 收起后由屏幕右侧贴边的 #chart_menu_toggle 控制展开。
       function applyWidth(px, collapsed) {
         var menu = document.getElementById('chart_menu');
         var container = document.getElementById('chart_container');
         var handle = document.getElementById('chart_resize_handle');
-        syncAccessibleState(collapsed);
         if (!menu || !container || !handle) return;
+        var expandBtn = document.getElementById('chart_menu_toggle');
+        syncAccessibleState(collapsed);
 
         if (collapsed) {
           menu.style.width = '0px';
@@ -1989,10 +2080,24 @@
           container.style.maxWidth = '100%';
           document.body.classList.add('chart-menu-collapsed');
           document.body.classList.remove('chart-menu-overlay');
+          if (
+            expandBtn
+            && typeof menu.contains === 'function'
+            && menu.contains(document.activeElement)
+            && typeof expandBtn.focus === 'function'
+          ) {
+            expandBtn.focus();
+          }
+          menu.inert = true;
+          menu.setAttribute('inert', '');
+          menu.setAttribute('aria-hidden', 'true');
         } else {
-          var mobileOverlay = window.innerWidth <= MOBILE_BREAKPOINT;
+          menu.inert = false;
+          menu.removeAttribute('inert');
+          menu.removeAttribute('aria-hidden');
+          var mobileOverlay = window.innerWidth <= OVERLAY_BREAKPOINT;
           var appliedWidth = mobileOverlay
-            ? Math.min(window.innerWidth, MOBILE_MAX_WIDTH)
+            ? Math.min(window.innerWidth, OVERLAY_MAX_WIDTH)
             : px;
           menu.style.width = appliedWidth + 'px';
           menu.style.maxWidth = appliedWidth + 'px';
@@ -2009,7 +2114,9 @@
             document.body.classList.remove('chart-menu-overlay');
           }
         }
-      }      // 通知 TV 图表自适应：触发 window resize（多数 widget 会监听）
+      }
+
+      // 通知 TV 图表自适应：触发 window resize（多数 widget 会监听）
       // 同时如果项目里暴露了 chart_widgets，调用其 resize
       function notifyResize() {
         try { window.dispatchEvent(new Event('resize')); } catch (_) {}
@@ -2062,6 +2169,8 @@
       function onCollapse() {
         applyWidth(0, true);
         writeCollapsed(true);
+        var expandBtn = document.getElementById('chart_menu_toggle');
+        if (expandBtn && typeof expandBtn.focus === 'function') expandBtn.focus();
         notifyResize();
       }
       // 展开：贴边小条按钮触发
@@ -2069,6 +2178,8 @@
         var stored = readStoredWidth();
         applyWidth(clampWidth(stored || DEFAULT_WIDTH), false);
         writeCollapsed(false);
+        var collapseBtn = document.getElementById('chart_menu_inline_collapse');
+        if (collapseBtn && typeof collapseBtn.focus === 'function') collapseBtn.focus();
         notifyResize();
       }
 
@@ -2102,7 +2213,7 @@
           var cur = parseInt(document.getElementById('chart_menu').style.width, 10);
           if (cur && !isNaN(cur)) {
             var clamped = clampWidth(cur);
-            if (clamped !== cur) applyWidth(clamped, false);
+            applyWidth(clamped, false);
           }
         });
       }

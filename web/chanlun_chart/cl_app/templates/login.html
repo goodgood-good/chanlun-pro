@@ -42,10 +42,24 @@
         <div class="cp-login-card">
           <span class="cp-eyebrow">SECURE WORKSPACE</span>
           <h2 id="login-title">进入工作台</h2>
-          <p>请输入访问密码；登录后，本设备 30 天内无需重复输入。</p>
+          <p>使用你的账号进入工作台；图表布局与显示偏好会跟随账号保存。</p>
 
           <form class="layui-form" action="/login" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <div class="layui-form-item">
+              <label class="cp-field-label" for="LAY-user-login-username">账号</label>
+              <input
+                type="text"
+                name="username"
+                id="LAY-user-login-username"
+                value="{{ login_username|default('') }}"
+                autocomplete="username"
+                maxlength="64"
+                required
+                autofocus
+                placeholder="请输入账号"
+                class="layui-input" />
+            </div>
             <div class="layui-form-item">
               <label class="cp-field-label" for="LAY-user-login-password">访问密码</label>
               <input
@@ -54,7 +68,6 @@
                 id="LAY-user-login-password"
                 autocomplete="current-password"
                 required
-                autofocus
                 placeholder="请输入访问密码"
                 class="layui-input" />
             </div>

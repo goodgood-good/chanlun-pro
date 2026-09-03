@@ -5,6 +5,8 @@ from datetime import timedelta
 
 import pytest
 
+from chanlun.core.strict_structure.current_events import TerminalSegmentReference
+from chanlun.core.strict_structure.models import SourceKind
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeGateBundle,
     HigherTimeframeGateEvidence,
@@ -68,6 +70,70 @@ def test_confirmed_buy_without_one_minute_remains_visible_but_not_executable() -
     assert document["execution_profile"]["precise_execution_ready"] is False
     assert "one_minute_not_confirmed" in document["decision_reasons"]
     assert validate_signal_decision_document(document) == document["decision_document_id"]
+
+
+def test_preconfirmation_divergence_is_observable_but_not_formal_decision() -> None:
+    base = deterministic_bundle()
+    candidate = provisional_point("3buy")
+    candidate = replace(
+        candidate,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_unfinished",
+            structural_level=0,
+            unit_id="segment:5m:forming",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="forming",
+            market_start=candidate.anchor_at - timedelta(minutes=30),
+            market_end=candidate.anchor_at,
+            available_at=candidate.available_at,
+        ),
+    )
+    divergence = confirmed_point(
+        "1buy",
+        frequency="1m",
+        minutes_after=-5,
+    )
+    divergence = replace(
+        divergence,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_completed",
+            structural_level=0,
+            unit_id="segment:1m:divergence",
+            source_kind=SourceKind.SEGMENT,
+            direction="down",
+            state="locked",
+            market_start=divergence.anchor_at - timedelta(minutes=1),
+            market_end=divergence.anchor_at,
+            available_at=divergence.available_at,
+        ),
+    )
+    bundle = replace(
+        base,
+        five_points=(candidate,),
+        one_points=(divergence,),
+        opposite_points=(),
+        entry_execution_boundaries=(),
+    )
+
+    [document] = HumanAssistedDecisionCore().decision_documents(bundle)
+
+    assert document["lifecycle_stage"] == "approaching"
+    assert document["segment_difference_1m"] is None
+    assert len(document["preconfirmation_divergences_1m"]) == 1
+    assert document["preconfirmation_divergences_1m"][0]["point_id"] == (
+        divergence.point_id
+    )
+    assert document["entry_allowed"] is False
+    assert document["exit_allowed"] is False
+    assert document["execution_profile"]["structure_signal_confirmed"] is False
+    assert document["execution_profile"]["segment_difference_status"] == (
+        "STRUCTURE_PENDING"
+    )
+    assert signal_decision_document_id(document) == document["decision_document_id"]
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
 
 
 def test_current_five_minute_buy_keeps_waiting_for_one_minute_after_eleven_minutes() -> None:

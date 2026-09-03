@@ -53,6 +53,7 @@ _XTDATA_NATIVE_LOCK = threading.RLock()
 # only the mutating download lane across processes; read-only QMT calls retain
 # their existing parallelism.
 _QMT_DOWNLOAD_INTERPROCESS_LOCK_TIMEOUT_SECONDS = 30.0
+_QMT_LIVE_SUBSCRIPTION_INITIAL_CALLBACK_WAIT_SECONDS = 0.5
 
 
 def _qmt_download_interprocess_lock_path() -> Path:
@@ -106,6 +107,14 @@ class ExchangeQMT(Exchange):
         # 避免多线程同时进入 all_stocks() 各自跑全量扫描，以及类属性多实例共享穿透。
         self.g_all_stocks: list = []
         self._all_stocks_lock = threading.Lock()
+        # A subscription is process-local and keeps MiniQMT's in-memory K-line
+        # cache continuous without mutating the shared on-disk history store.
+        # Native screening shards are long lived and own stable symbol
+        # affinity, so each (symbol, period, adjustment) is subscribed once.
+        self._live_kline_subscription_lock = threading.Lock()
+        self._live_kline_subscriptions: dict[
+            tuple[str, str, str], tuple[int, threading.Event, object]
+        ] = {}
 
         # get_market_data 周期映射；"y" 已移除，xtquant 不支持年线 period，传入会触发 BSON 断言崩溃
         self.frequency_map = {
@@ -157,6 +166,101 @@ class ExchangeQMT(Exchange):
         }
         for _freq, _days in QMT_LOOKBACK_OVERRIDE_DAYS.items():
             self.DEFAULT_LOOKBACK[_freq] = timedelta(days=_days)
+
+    def _ensure_live_kline_subscription(
+        self,
+        *,
+        qmt_code: str,
+        period: str,
+        dividend_type: str,
+        force_refresh: bool = False,
+    ) -> bool:
+        """Keep one process-local intraday stream current without downloading.
+
+        MiniQMT's documented subscription path places the requested historical
+        prefix in the client cache and then keeps pushing new bars.  Waiting for
+        the first callback closes the startup race where an immediate local
+        read could otherwise still end at the last on-disk download.  Failure
+        remains soft: the caller reads the local store and the strict gateway
+        will use its exact-symbol download fallback if freshness is not proven.
+        """
+
+        if period not in {"1m", "5m"}:
+            return False
+        key = (qmt_code, period, dividend_type)
+        with self._live_kline_subscription_lock:
+            existing = self._live_kline_subscriptions.pop(key, None) if force_refresh else (
+                self._live_kline_subscriptions.get(key)
+            )
+            if force_refresh and existing is not None:
+                unsubscribe = getattr(xtdata, "unsubscribe_quote", None)
+                if callable(unsubscribe):
+                    try:
+                        with _XTDATA_NATIVE_LOCK:
+                            unsubscribe(existing[0])
+                    except Exception as exc:
+                        LogUtil.warning(
+                            "[ExchangeQMT.live_subscription] unsubscribe failed "
+                            f"code={qmt_code} period={period} err={exc}"
+                        )
+                existing = None
+            if existing is None:
+                subscribe = getattr(xtdata, "subscribe_quote2", None)
+                if not callable(subscribe):
+                    return False
+                ready = threading.Event()
+
+                def on_quote(_payload: object) -> None:
+                    ready.set()
+
+                try:
+                    with _XTDATA_NATIVE_LOCK:
+                        sequence = subscribe(
+                            qmt_code,
+                            period,
+                            start_time=datetime.datetime.now(self.tz).strftime(
+                                "%Y%m%d"
+                            ),
+                            end_time="",
+                            count=-1,
+                            dividend_type=dividend_type,
+                            callback=on_quote,
+                        )
+                except Exception as exc:
+                    LogUtil.warning(
+                        "[ExchangeQMT.live_subscription] subscribe failed "
+                        f"code={qmt_code} period={period} err={exc}"
+                    )
+                    return False
+                if type(sequence) is not int or sequence <= 0:
+                    LogUtil.warning(
+                        "[ExchangeQMT.live_subscription] subscribe rejected "
+                        f"code={qmt_code} period={period} sequence={sequence!r}"
+                    )
+                    return False
+                existing = (sequence, ready, on_quote)
+                self._live_kline_subscriptions[key] = existing
+        return existing[1].wait(
+            timeout=_QMT_LIVE_SUBSCRIPTION_INITIAL_CALLBACK_WAIT_SECONDS
+        )
+
+    def refresh_live_kline_subscription(
+        self,
+        code: str,
+        frequency: str,
+        *,
+        dividend_type: str = QMT_STRUCTURE_DIVIDEND_TYPE,
+    ) -> bool:
+        """Force one non-downloading refresh after a strict stale-bar check."""
+
+        if frequency not in {"1m", "5m"}:
+            return False
+        return self._ensure_live_kline_subscription(
+            qmt_code=self.code_to_qmt(code),
+            period=self.frequency_map[frequency],
+            dividend_type=dividend_type,
+            force_refresh=True,
+        )
 
     def code_to_tdx(self, code: str):
         _c = code.split(".")
@@ -570,6 +674,17 @@ class ExchangeQMT(Exchange):
             ).strftime("%Y%m%d")
             download_query_start = max(query_start, recent_start)
         price_basis_factors = None
+        if (
+            _skip_dl
+            and not research_exact_end
+            and not end_date
+            and qmt_read_period in {"1m", "5m"}
+        ):
+            self._ensure_live_kline_subscription(
+                qmt_code=qmt_code,
+                period=qmt_read_period,
+                dividend_type=dividend_type,
+            )
         download_guard = (
             nullcontext()
             if _skip_dl

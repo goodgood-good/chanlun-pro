@@ -61,6 +61,7 @@ function loadChartManager() {
   src += '\n;var __ICI_EXPORT = (typeof getInitialChartInterval !== "undefined") ? getInitialChartInterval : null;';
   src += '\n;var __SLLC_EXPORT = (typeof shouldLoadLastChart !== "undefined") ? shouldLoadLastChart : null;';
   src += '\n;var __RDS_EXPORT = (typeof requestedDefaultStudies !== "undefined") ? requestedDefaultStudies : null;';
+  src += '\n;var __CWVO_EXPORT = (typeof chartWidgetViewportOptions !== "undefined") ? chartWidgetViewportOptions : null;';
   vm.runInContext(src, sb, { filename: 'charts.js' });
   return {
     ChartManager: sb.__CM_EXPORT,
@@ -69,6 +70,7 @@ function loadChartManager() {
     initialChartInterval: sb.__ICI_EXPORT,
     shouldLoadLastChart: sb.__SLLC_EXPORT,
     requestedDefaultStudies: sb.__RDS_EXPORT,
+    chartWidgetViewportOptions: sb.__CWVO_EXPORT,
     sb,
   };
 }
@@ -101,6 +103,53 @@ function spyWidget() {
   };
   return { widget, calls };
 }
+
+test('widget startup uses only schema-valid theme and time-scale options', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
+  assert.match(source, /theme:\s*normalizeChartTheme\(Utils\.get_local_data\("theme"\)\)/);
+  assert.match(source, /time_scale:\s*\{\s*min_bar_spacing:/);
+  assert.doesNotMatch(source, /max_bar_spacing/);
+});
+
+test('embedded cross-market symbol changes reuse the current chart page', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const writes = [];
+  let navigations = 0;
+  let watchlistRenders = 0;
+  sb.Utils.get_market = () => 'a';
+  sb.Utils.set_local_data = (key, value) => writes.push([key, value]);
+  sb.location.assign = () => { navigations += 1; };
+  sb.ZiXuan = { render_zixuan_opts: () => { watchlistRenders += 1; } };
+  sb.__CHANLUN_EMBEDDED_CHART = true;
+
+  const manager = Object.create(ChartManager.prototype);
+  let clears = 0;
+  manager.clear_draw_chanlun = () => { clears += 1; };
+  manager.reloadDrawingsForCurrentContext = () => {};
+  manager._openSseStream = () => {};
+  manager.handleSymbolChange({ ticker: 'US:AAPL.US' });
+
+  assert.equal(navigations, 0);
+  assert.equal(clears, 1);
+  assert.equal(watchlistRenders, 0);
+  assert.deepEqual(writes, [['market', 'us'], ['us_code', 'AAPL.US']]);
+});
+
+test('standalone cross-market symbol changes retain the full-page navigation fallback', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const writes = [];
+  const targets = [];
+  sb.Utils.get_market = () => 'a';
+  sb.Utils.set_local_data = (key, value) => writes.push([key, value]);
+  sb.location.assign = (target) => targets.push(target);
+  sb.__CHANLUN_EMBEDDED_CHART = false;
+
+  const manager = Object.create(ChartManager.prototype);
+  manager.handleSymbolChange({ ticker: 'US:MSFT.US' });
+
+  assert.deepEqual(writes, [['market', 'us']]);
+  assert.deepEqual(targets, ['/?market=us']);
+});
 
 function makeReconcileManager(ChartManager) {
   const cm = Object.create(ChartManager.prototype);
@@ -152,6 +201,10 @@ function makeDataReadyManager(ChartManager) {
   cm._dataReadyProbeGeneration = null;
   cm._dataReadyProbeIdentity = null;
   cm._initialLoadDone = false;
+  cm._strictStructureStatus = { state: 'ready', code: null };
+  cm._strictStructureSnapshot = { render_revision: 'fixture' };
+  cm._strictStructureContextToken = 'a:sh.600000|5|fixture';
+  cm._strictReconcileComplete = () => true;
   cm.chart = {
     symbol: () => symbol,
     resolution: () => resolution,
@@ -219,6 +272,113 @@ test('分型只使用已加载真实K线坐标，日线收盘时刻会规整到�
   assert.equal(rendered.length, 1, '对应K线尚未加载的分型不得交给TV吸附');
   assert.deepEqual(rendered[0].points.map((point) => point.time), [chartTime, chartTime]);
   assert.deepEqual(source[0].points.map((point) => point.time), [rawClose, rawClose], '不得修改后端原始证据');
+});
+
+test('A股日内结构统一从收盘身份映射到开盘坐标且不修改原证据', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'a:SZ.001270', interval: '5' }),
+  };
+  const closeTime = Date.UTC(2026, 6, 30, 3, 30) / 1000;
+  const source = [{
+    points: [
+      { time: closeTime - 300, price: 11 },
+      { time: closeTime, price: 10 },
+    ],
+  }];
+
+  assert.equal(cm._centerChartTimeCoordinate(closeTime, '5'), closeTime - 300);
+  const rendered = cm._baseStructureRenderList(source, '5');
+  assert.deepEqual(
+    rendered[0].points.map((point) => point.time),
+    [closeTime - 600, closeTime - 300],
+  );
+  assert.deepEqual(
+    source[0].points.map((point) => point.time),
+    [closeTime - 300, closeTime],
+  );
+
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'currency_spot:BTC/USDT', interval: '5' }),
+  };
+  assert.equal(cm._centerChartTimeCoordinate(closeTime, '5'), closeTime);
+});
+
+test('dense base structures are rendered as bounded open paths instead of one line-tool per segment', () => {
+  const { ChartManager, ChartUtils } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'currency_spot:BTC/USDT', interval: '5' }),
+  };
+  const source = [];
+  for (let index = 0; index < 130; index += 1) {
+    source.push({
+      state: 'completed',
+      locked: true,
+      linestyle: 0,
+      points: [
+        { time: 1_700_000_000 + index * 300, price: 10 + (index % 2) },
+        { time: 1_700_000_000 + (index + 1) * 300, price: 10 + ((index + 1) % 2) },
+      ],
+    });
+  }
+  source.push({
+    state: 'forming',
+    locked: false,
+    linestyle: 1,
+    points: [
+      { time: 1_700_000_000 + 130 * 300, price: 10 },
+      { time: 1_700_000_000 + 131 * 300, price: 11 },
+    ],
+  });
+
+  const batches = cm._baseStructurePathRenderList(source, '5', 0);
+  assert.deepEqual(batches.map((item) => item.segmentCount), [64, 64, 2, 1]);
+  assert.deepEqual(batches.map((item) => item.points.length), [65, 65, 3, 2]);
+  assert.equal(batches.at(-1).linestyle, 2, 'forming tail remains visually dashed');
+
+  let created = null;
+  ChartUtils.createPathShape({
+    createMultipointShape(points, options) {
+      created = { points, options };
+      return 'path-1';
+    },
+  }, batches[0], { color: '#123456', linewidth: 2 });
+  assert.equal(created.options.shape, 'path');
+  assert.equal(created.options.overrides['linetoolpath.lineColor'], '#123456');
+  assert.equal(created.options.overrides['linetoolpath.lineWidth'], 2);
+  assert.equal(created.options.overrides['linetoolpath.leftEnd'], 0);
+  assert.equal(created.options.overrides['linetoolpath.rightEnd'], 0);
+  assert.equal('filled' in created.options.overrides, false, '开放路径不得携带多边形闭合状态');
+});
+
+test('稳定重绘已覆盖几何校验时取消旧验证定时器但保留新创建验证', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm._verifyRebuildTimer = 99;
+  cm._verifyRebuildVersion = 4;
+  cm._verifyRebuildScheduledAt = -300;
+  cm._strictPendingCreates = new Map();
+  cm._strictReconcileComplete = () => true;
+  cm._defaultViewFallbackTimer = null;
+  cm._defaultViewAttemptTimer = null;
+  cm._defaultViewRetryTimer = null;
+  cm._defaultViewApplySettleTimer = null;
+  cm._defaultViewApplyPending = false;
+
+  assert.equal(cm._cancelCoveredVerifyRebuild(4, -300), true);
+  assert.equal(cm._verifyRebuildTimer, null);
+
+  cm._verifyRebuildTimer = 100;
+  cm._verifyRebuildVersion = 5;
+  cm._verifyRebuildScheduledAt = -300;
+  assert.equal(
+    cm._cancelCoveredVerifyRebuild(4, -300),
+    false,
+    'redraw-created strict geometry increments the version and still needs deferred verification',
+  );
+  assert.equal(cm._verifyRebuildTimer, 100);
 });
 
 test('drawChartElements 为分型接入真实K线规整与创建后锚点校验', () => {
@@ -412,6 +572,319 @@ test('当前代际 dataReady 后只消费一次首次待绘制请求', () => {
   assert.equal(fx.cm._initialLoadDone, true);
 });
 
+test('embedded data-ready waits until automatic drawings are stably complete', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0;
+  let nextTimerId = 1;
+  const timers = new Map();
+  const notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  sb.clearTimeout = (id) => timers.delete(id);
+  sb.__CHANLUN_EMBEDDED_CHART = true;
+  sb.EmbeddedChartBridge = {
+    notifyDataReady(identity) { notifications.push(identity); },
+  };
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._automaticShapeCreateCount = 1;
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = { count: 0, timer: null };
+  fx.cm._verifyRebuildTimer = null;
+  fx.cm._sweepOrphanTimer = null;
+  fx.setReady(true);
+
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+  assert.equal(notifications.length, 0);
+
+  function runUntil(target) {
+    while (true) {
+      const next = [...timers.entries()]
+        .sort((left, right) => left[1].due - right[1].due)[0];
+      if (!next || next[1].due > target) break;
+      timers.delete(next[0]);
+      now = next[1].due;
+      next[1].callback();
+    }
+    now = target;
+  }
+
+  runUntil(700);
+  assert.equal(notifications.length, 0, 'pending shapes must keep the parent loading state');
+  fx.cm._automaticShapeCreateCount = 0;
+  runUntil(950);
+  assert.equal(notifications.length, 1);
+  assert.deepEqual(notifications[0], { symbol: 'A:SH.600000', interval: '5' });
+});
+
+test('embedded stable-ready has no fixed latency once every tracked phase is idle', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0;
+  let nextTimerId = 1;
+  const timers = new Map();
+  const notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  sb.clearTimeout = (id) => timers.delete(id);
+  sb.__CHANLUN_EMBEDDED_CHART = true;
+  sb.EmbeddedChartBridge = {
+    notifyDataReady(identity) { notifications.push(identity); },
+  };
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = { count: 0, timer: null };
+  fx.setReady(true);
+
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+  while (timers.size > 0 && now < 200) {
+    const next = [...timers.entries()].sort((left, right) => left[1].due - right[1].due)[0];
+    timers.delete(next[0]);
+    now = next[1].due;
+    next[1].callback();
+  }
+
+  assert.equal(now, 100);
+  assert.equal(notifications.length, 1, 'idle chart should report after only the quiet window');
+});
+
+test('standalone stable-ready keeps the transition veil until strict drawing work is idle', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0;
+  let nextTimerId = 1;
+  const timers = new Map();
+  const notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  sb.clearTimeout = (id) => timers.delete(id);
+  sb.__CHANLUN_EMBEDDED_CHART = false;
+  sb.ChartTransition = {
+    markReady(identity) { notifications.push(identity); },
+  };
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = { count: 0, timer: null };
+  fx.setReady(true);
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+
+  while (timers.size > 0 && now < 200) {
+    const next = [...timers.entries()].sort((left, right) => left[1].due - right[1].due)[0];
+    timers.delete(next[0]);
+    now = next[1].due;
+    next[1].callback();
+  }
+
+  assert.equal(notifications.length, 1);
+  assert.deepEqual(notifications[0], {
+    symbol: 'A:SH.600000',
+    interval: '5',
+    managerId: 'chart-manager-1',
+  });
+});
+
+test('stable-ready waits for supplemental history requests and their idle window', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0;
+  let nextTimerId = 1;
+  let historyPending = true;
+  const timers = new Map();
+  const notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  sb.clearTimeout = (id) => timers.delete(id);
+  sb.__CHANLUN_EMBEDDED_CHART = false;
+  sb.ChartTransition = {
+    markReady(identity) { notifications.push(identity); },
+  };
+  fx.cm.udf_datafeed = {
+    _historyProvider: {
+      hasPendingHistoryWork(quietMs) {
+        assert.equal(quietMs, 120);
+        return historyPending;
+      },
+    },
+  };
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = { count: 0, timer: null };
+  fx.setReady(true);
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+
+  const runUntil = (target) => {
+    while (true) {
+      const next = [...timers.entries()].sort((left, right) => left[1].due - right[1].due)[0];
+      if (!next || next[1].due > target) break;
+      timers.delete(next[0]);
+      now = next[1].due;
+      next[1].callback();
+    }
+    now = target;
+  };
+  runUntil(800);
+  assert.equal(notifications.length, 0, 'an in-flight older-history page must retain the veil');
+
+  historyPending = false;
+  runUntil(1_000);
+  assert.equal(notifications.length, 1, 'the veil may clear only after history and drawing quiet periods');
+});
+
+test('embedded stable-ready never reveals bars before strict structure is ready', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0;
+  let nextTimerId = 1;
+  const timers = new Map();
+  const notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  sb.clearTimeout = (id) => timers.delete(id);
+  sb.__CHANLUN_EMBEDDED_CHART = true;
+  sb.EmbeddedChartBridge = {
+    notifyDataReady(identity) { notifications.push(identity); },
+  };
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = { count: 0, timer: null };
+  fx.cm._strictStructureStatus = { state: 'waiting', code: null };
+  fx.cm._strictStructureSnapshot = null;
+  fx.cm._strictStructureContextToken = null;
+  fx.setReady(true);
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+
+  const runUntil = (target) => {
+    while (true) {
+      const next = [...timers.entries()].sort((left, right) => left[1].due - right[1].due)[0];
+      if (!next || next[1].due > target) break;
+      timers.delete(next[0]);
+      now = next[1].due;
+      next[1].callback();
+    }
+    now = target;
+  };
+  runUntil(500);
+  assert.equal(notifications.length, 0, 'K-lines alone must not remove the parent veil');
+
+  fx.cm._strictStructureStatus = { state: 'ready', code: null };
+  fx.cm._strictStructureSnapshot = { render_revision: 'strict-ready' };
+  fx.cm._strictStructureContextToken = 'a:sh.600000|5|strict-ready';
+  runUntil(700);
+  assert.equal(notifications.length, 1);
+});
+
+test('embedded stable-ready includes drawing restore viewport and debounced redraw work', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0;
+  let nextTimerId = 1;
+  let debouncePending = true;
+  const timers = new Map();
+  const notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  sb.clearTimeout = (id) => timers.delete(id);
+  sb.__CHANLUN_EMBEDDED_CHART = true;
+  sb.EmbeddedChartBridge = {
+    notifyDataReady(identity) { notifications.push(identity); },
+  };
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = { count: 0, timer: null };
+  fx.cm._is_switching_interval = true;
+  fx.cm._defaultViewApplyPending = true;
+  fx.cm.debouncedDrawChanlun.pending = () => debouncePending;
+  fx.setReady(true);
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+
+  const runUntil = (target) => {
+    while (true) {
+      const next = [...timers.entries()].sort((left, right) => left[1].due - right[1].due)[0];
+      if (!next || next[1].due > target) break;
+      timers.delete(next[0]);
+      now = next[1].due;
+      next[1].callback();
+    }
+    now = target;
+  };
+  runUntil(400);
+  assert.equal(notifications.length, 0);
+
+  fx.cm._is_switching_interval = false;
+  fx.cm._defaultViewApplyPending = false;
+  debouncePending = false;
+  runUntil(600);
+  assert.equal(notifications.length, 1);
+});
+
+test('initial Chanlun draw waits for the final viewport and then runs exactly once', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.setReady(true);
+  fx.cm._defaultViewAttemptTimer = 71;
+
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+
+  assert.equal(fx.calls.draw, 0, 'the old viewport must never receive an initial full draw');
+  assert.equal(fx.cm._pendingChanlunDrawGeneration, 0);
+  assert.equal(fx.cm._initialLoadDone, false);
+
+  fx.cm._defaultViewAttemptTimer = null;
+  assert.equal(fx.cm._resumePendingInitialDraw(), true);
+  assert.equal(fx.calls.draw, 1);
+  assert.equal(fx.calls.debounced, 0);
+  assert.equal(fx.cm._pendingChanlunDrawGeneration, null);
+});
+
+test('context reset cancels an old embedded stable-ready report', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  const queued = new Map();
+  let timerId = 0;
+  let notified = 0;
+  sb.__CHANLUN_EMBEDDED_CHART = true;
+  sb.EmbeddedChartBridge = { notifyDataReady() { notified += 1; } };
+  sb.setTimeout = (callback) => {
+    timerId += 1;
+    queued.set(timerId, callback);
+    return timerId;
+  };
+  sb.clearTimeout = (id) => queued.delete(id);
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.setReady(true);
+
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+  fx.cm._resetDataReadyContext();
+  for (const callback of queued.values()) callback();
+
+  assert.equal(notified, 0);
+});
+
 test('周期切换后旧 dataReady 回调不得绘制到新代际', () => {
   const { ChartManager } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
@@ -445,6 +918,147 @@ test('当前代际已就绪时后续 bars-ready 继续合并为防抖重绘', ()
   fx.cm.handleBarsReadyEvent(barsReadyEvent());
   assert.equal(fx.calls.draw, 1);
   assert.equal(fx.calls.debounced, 1, '后续更新使用现有防抖入口');
+});
+
+test('完全相同的 bars-ready 快照不会延长嵌入图表稳定等待', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  const snapshot = {
+    render_revision: 'render-1',
+    snapshot_revision: 'snapshot-1',
+    structure_revision: 'structure-1',
+    source_closed_at: 1_700_000_300,
+  };
+  const chartData = {
+    from: 1_700_000_000,
+    visibleRange: { from: 1_700_000_000, to: 1_700_000_600 },
+    barsResult: {
+      bars: [{ time: 1_700_000_000_000 }, { time: 1_700_000_300_000 }],
+      fxs: [],
+      bis: [],
+      xds: [],
+      strict_structure_mode: 'replace',
+      strict_structure: snapshot,
+    },
+  };
+  let cancelled = 0;
+  fx.cm.cl_show_config = {};
+  fx.cm._strictStructureSnapshot = snapshot;
+  fx.cm.getChartData = () => chartData;
+  fx.cm.debouncedDrawChanlun.cancel = () => { cancelled += 1; };
+  fx.cm._tvDataReadyGeneration = 0;
+  fx.cm._tvDataReadyIdentity = 'a:sh.600000|5';
+  fx.cm._lastCompletedRenderSignature = fx.cm._chartRenderInputSignature(chartData, '5');
+  fx.setReady(true);
+
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+
+  assert.equal(fx.calls.debounced, 0);
+  assert.equal(cancelled, 1, '重复尾帧应取消同内容的防抖任务');
+
+  chartData.barsResult.xds = [{
+    points: [
+      { time: 1_700_000_300, price: 1 },
+      { time: 1_700_000_600, price: 2 },
+    ],
+  }];
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.debounced, 1, '结构输入变化后仍必须重绘');
+});
+
+test('绘制输入指纹把 replace 与同一份 unchanged 严格快照视为等价', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const snapshot = {
+    render_revision: 'render-1',
+    snapshot_revision: 'snapshot-1',
+    structure_revision: 'structure-1',
+    source_closed_at: 1_700_000_300,
+  };
+  cm.cl_show_config = { bi: true, xd: true };
+  cm._strictStructureSnapshot = snapshot;
+  cm.getCurrentChartIdentity = () => ({ symbol: 'A:SH.600000', interval: '5' });
+  const chartData = {
+    from: 1_700_000_000,
+    visibleRange: { from: 1_700_000_000, to: 1_700_000_600 },
+    barsResult: {
+      bars: [{ time: 1_700_000_000_000 }, { time: 1_700_000_300_000 }],
+      fxs: [{ text: 'ding', points: [{ time: 1_700_000_300, price: 12 }] }],
+      bis: [],
+      xds: [],
+      strict_structure_mode: 'replace',
+      strict_structure: snapshot,
+    },
+  };
+  const replaceSignature = cm._chartRenderInputSignature(chartData, '5');
+  chartData.barsResult.strict_structure_mode = 'unchanged';
+  delete chartData.barsResult.strict_structure;
+
+  assert.equal(cm._chartRenderInputSignature(chartData, '5'), replaceSignature);
+  chartData.barsResult.bars.unshift({ time: 1_600_000_000_000 });
+  chartData.barsResult.fxs.unshift({
+    text: 'di',
+    points: [{ time: 1_600_000_000, price: 8 }],
+  });
+  chartData.barsResult.bis.unshift({
+    points: [
+      { time: 1_600_000_000, price: 8 },
+      { time: 1_600_000_300, price: 9 },
+    ],
+  });
+  assert.equal(
+    cm._chartRenderInputSignature(chartData, '5'),
+    replaceSignature,
+    '仅扩展到可视区外的历史不得触发无效重绘',
+  );
+  chartData.visibleRange.to += 300;
+  assert.notEqual(
+    cm._chartRenderInputSignature(chartData, '5'),
+    replaceSignature,
+    '真实视窗变化不能被去重',
+  );
+});
+
+test('一次完整绘制会取消已被当前输入覆盖的防抖重绘', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.setTimeout = (callback) => { callback(); return 1; };
+  const cm = Object.create(ChartManager.prototype);
+  const chartData = {
+    from: 1_700_000_000,
+    visibleRange: { from: 1_700_000_000, to: 1_700_000_600 },
+    barsResult: {
+      bars: [{ time: 1_700_000_000_000 }, { time: 1_700_000_300_000 }],
+      fxs: [], bis: [], xds: [], strict_structure_mode: 'unavailable',
+    },
+  };
+  let cancelled = 0;
+  cm._disposed = false;
+  cm._intervalGeneration = 0;
+  cm._intervalSwitchSeq = 0;
+  cm._dataContextGeneration = 0;
+  cm._tvDataReadyGeneration = 0;
+  cm._tvDataReadyIdentity = 'a:sh.600000|5';
+  cm._lastCompletedRenderSignature = null;
+  cm.cl_show_config = {};
+  cm.chart = { dataReady: () => true, getVisibleRange: () => chartData.visibleRange };
+  cm.widget = { symbolInterval: () => ({ symbol: 'A:SH.600000', interval: '5' }) };
+  cm.getCurrentChartIdentity = () => ({ symbol: 'A:SH.600000', interval: '5' });
+  cm.getChartData = () => chartData;
+  cm.drawChartElements = () => {};
+  cm.markDrawingMutationStart = () => {};
+  cm.markDrawingMutationEnd = () => {};
+  cm.debouncedDrawChanlun = () => {};
+  cm.debouncedDrawChanlun.pending = () => true;
+  cm.debouncedDrawChanlun.cancel = () => { cancelled += 1; };
+
+  await cm.draw_chanlun();
+
+  assert.equal(cancelled, 1);
+  assert.equal(cm._latestAppliedBarTime, 1_700_000_300_000);
+  assert.equal(
+    cm._lastCompletedRenderSignature,
+    cm._chartRenderInputSignature(chartData, '5'),
+  );
 });
 
 test('vm 能加载真实 charts.js 并取出 ChartManager', () => {
@@ -522,6 +1136,31 @@ test('CSP 模式禁用 blob iframe 并使用同源 TradingView 启动页', () =>
   assert.ok(disabledFeatures.includes('use_blob_for_iframe_loading'));
 });
 
+test('embedded 1m keeps the complete default range across responsive resizes', () => {
+  const { chartWidgetViewportOptions, sb } = loadChartManager();
+  assert.equal(typeof chartWidgetViewportOptions, 'function');
+
+  sb.window.__CHANLUN_EMBEDDED_CHART = true;
+  const embeddedOneMinute = chartWidgetViewportOptions('1');
+  assert.equal(embeddedOneMinute.minBarSpacing, 0.01);
+  assert.ok(
+    embeddedOneMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
+  );
+
+  const embeddedFiveMinute = chartWidgetViewportOptions('5');
+  assert.equal(embeddedFiveMinute.minBarSpacing, 0.05);
+  assert.ok(
+    !embeddedFiveMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
+  );
+
+  sb.window.__CHANLUN_EMBEDDED_CHART = false;
+  const standaloneOneMinute = chartWidgetViewportOptions('1');
+  assert.equal(standaloneOneMinute.minBarSpacing, 0.05);
+  assert.ok(
+    !standaloneOneMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
+  );
+});
+
 test('URL 启动周期覆盖共享 localStorage，避免多 iframe 周期互相污染', () => {
   const { initialChartInterval, shouldLoadLastChart, sb } = loadChartManager();
   assert.equal(typeof initialChartInterval, 'function');
@@ -542,11 +1181,15 @@ test('行情页把 URL 周期保留为当前 iframe 的内存启动配置', () =
   assert.match(template, /intervals:\s*selectedIntervals\.slice\(\)/);
 });
 
-test('MACD_HTF 是每张新图默认指标且 URL 只接受白名单并去重', () => {
+test('MACD_HTF 默认启用且通知 URL 可同时请求标准 MACD', () => {
   const { requestedDefaultStudies } = loadChartManager();
   assert.equal(typeof requestedDefaultStudies, 'function');
   assert.deepEqual(Array.from(requestedDefaultStudies('')), ['MACD_HTF']);
   assert.deepEqual(Array.from(requestedDefaultStudies('?default_study=unknown')), ['MACD_HTF']);
+  assert.deepEqual(
+    Array.from(requestedDefaultStudies('?default_study=MACD&default_study=MACD_HTF')),
+    ['MACD_HTF', 'MACD'],
+  );
   assert.deepEqual(
     Array.from(requestedDefaultStudies(
       '?default_study=MACD_HTF&default_study=unknown&default_study=MACD_HTF',
@@ -734,6 +1377,129 @@ test('_maybeWidenDefaultView: 5 分钟正式走势、30 分钟与日线使用扩
 
     assert.deepEqual(applied, [{ from: latest - spanDays * day, to: latest }]);
   }
+});
+
+test('_maybeWidenDefaultView: 选股嵌入图的 1m 展示全部已加载数据且独立图仍保持两日', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const latest = 1_784_691_000;
+  const day = 86_400;
+  const symbol = 'a:SH.513100';
+  const bars = [
+    { time: (latest - 30 * day) * 1000 },
+    { time: latest * 1000 },
+  ];
+  sb.setTimeout = (callback) => { callback(); return 0; };
+
+  for (const { embedded, expectedRange } of [
+    {
+      embedded: true,
+      expectedRange: { from: latest - 30 * day, to: latest },
+    },
+    {
+      embedded: false,
+      expectedRange: { from: latest - 2 * day, to: latest },
+    },
+  ]) {
+    sb.window.__CHANLUN_EMBEDDED_CHART = embedded;
+    const cm = makeManager(
+      ChartManager,
+      null,
+      new Map([[`${symbol.toLowerCase()}1`, { bars }]]),
+    );
+    const applied = [];
+    cm._viewSetFor = null;
+    cm.widget = {
+      symbolInterval: () => ({ symbol, interval: '1' }),
+    };
+    cm.chart = {
+      getVisibleRange: () => ({ from: latest - day, to: latest }),
+      setVisibleRange: (range) => { applied.push(range); },
+    };
+
+    cm._maybeWidenDefaultView();
+
+    assert.deepEqual(applied, [expectedRange]);
+  }
+});
+
+test('_maybeApplyCausalFocus: 选股嵌入图的 1m 审计视窗同样覆盖五日', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null, new Map());
+  const focusAt = 1_735_891_200;
+  const applied = [];
+  sb.window.__CHANLUN_EMBEDDED_CHART = true;
+  sb.window.__chanlunReviewChartLock = {
+    candidate_id: `sha256:${'1'.repeat(64)}`,
+    source_sha256: `sha256:${'2'.repeat(64)}`,
+    review_as_of: focusAt + 10 * 86_400,
+    focus_at: focusAt,
+    symbol: 'SH.000001',
+    chart_interval: '1',
+    lock_kind: 'RISK_POINT_AUDIT',
+  };
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '1' }),
+  };
+  cm.chart = {
+    setVisibleRange: (range) => { applied.push(range); },
+    createMultipointShape: () => 'audit-marker-1m',
+  };
+  sb.setTimeout = (callback) => { callback(); return 0; };
+
+  assert.equal(cm._maybeApplyCausalFocus(), true);
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0].to - applied[0].from, 5 * 86_400);
+});
+
+test('_maybeWidenDefaultView: TradingView 切标的瞬态拒绝会被消费并重试', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const latest = 1_784_691_000;
+  const earliest = latest - 120 * 86_400;
+  const symbol = 'a:SH.600203';
+  const callbacks = [];
+  const applied = [];
+  let attempts = 0;
+  sb.setTimeout = (callback) => {
+    callbacks.push(callback);
+    return callbacks.length;
+  };
+  const cm = makeManager(
+    ChartManager,
+    null,
+    new Map([[`${symbol.toLowerCase()}5`, {
+      bars: [{ time: earliest * 1000 }, { time: latest * 1000 }],
+    }]]),
+  );
+  cm._dataContextGeneration = 7;
+  cm._viewSetFor = null;
+  cm._viewSetGeneration = null;
+  cm.widget = {
+    symbolInterval: () => ({ symbol, interval: '5' }),
+  };
+  cm.chart = {
+    getVisibleRange: () => ({ from: latest - 86_400, to: latest }),
+    setVisibleRange: (range) => {
+      attempts += 1;
+      applied.push(range);
+      return attempts === 1
+        ? Promise.reject(new Error('Value is null'))
+        : Promise.resolve();
+    },
+  };
+
+  cm._maybeWidenDefaultView();
+  callbacks.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(callbacks.length, 1, '拒绝后应安排一次有界重试');
+  callbacks.shift()();
+  assert.equal(callbacks.length, 1, '重试先重新核对最新图表上下文');
+  callbacks.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(applied[0], applied[1]);
+  assert.equal(cm._viewSetFor, `${symbol}|5`);
+  assert.equal(cm._viewSetGeneration, 7);
 });
 
 test('_maybeApplyCausalFocus: 风险点审计锁聚焦锚点且不越过因果截止', () => {
@@ -924,12 +1690,52 @@ test('_doReset: 无 activeChart → 不 reset 且不污染记账', () => {
 // resKey = 'a:SH.000001'(→'a:sh.000001') + '5' = 'a:sh.0000015'
 const RES_KEY = 'a:sh.0000015';
 
+test('embedded symbol switches release SSE connection slots until the parent batch resumes', () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.window.__CHANLUN_EMBEDDED_CHART = true;
+  const widget = {
+    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '5' }),
+  };
+  const cm = makeManager(ChartManager, widget, new Map());
+  let closeCalls = 0;
+  cm._disposed = false;
+  cm._embeddedChartActive = true;
+  cm._embeddedRealtimeDeferredRequestId = null;
+  cm._embeddedRealtimeFallbackTimer = null;
+  cm._sse = { close() { closeCalls += 1; } };
+  cm._sseConnectionId = null;
+  cm._sseChannelId = 'test-channel';
+  cm._sseHealthTimer = null;
+  cm._sseFallbackInterval = null;
+  delete sb.__lastES;
+
+  assert.equal(cm.deferEmbeddedRealtime('chart-41'), true);
+  assert.equal(closeCalls, 1);
+  assert.equal(cm._embeddedRealtimeDeferredRequestId, 'chart-41');
+  cm._openSseStream();
+  assert.equal(sb.__lastES, undefined, 'deferred switch must not reopen EventSource');
+
+  assert.equal(cm.resumeEmbeddedRealtime('chart-40'), false);
+  assert.equal(sb.__lastES, undefined, 'stale parent request must not resume realtime');
+  assert.equal(cm.resumeEmbeddedRealtime('chart-41'), true);
+  assert.ok(sb.__lastES, 'matching batch completion resumes the new symbol stream');
+  assert.equal(cm._embeddedRealtimeDeferredRequestId, null);
+});
+
+test('standalone charts never enter the embedded realtime defer protocol', () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.window.__CHANLUN_EMBEDDED_CHART = false;
+  const cm = makeManager(ChartManager, null, new Map());
+  assert.equal(cm.deferEmbeddedRealtime('chart-1'), false);
+  assert.equal(cm.resumeEmbeddedRealtime('chart-1'), false);
+});
+
 function openStream(cm, sb) {
   cm._sse = null; cm._sseGotData = false; cm._sseHealthTimer = null; cm._sseFallbackInterval = null;
   cm.widget.symbolInterval = () => ({ symbol: 'a:SH.000001', interval: '5' });
   const applyCalls = [], feedCalls = [];
   cm.udf_datafeed._historyProvider.applyChanlunUpdate = (data) => { applyCalls.push(data); };
-  cm.udf_datafeed.feedRealtimeBar = (k) => { feedCalls.push(k); };
+  cm.udf_datafeed.feedRealtimeBar = (...args) => { feedCalls.push(args); };
   cm._openSseStream();
   const es = sb.__lastES;
   const fire = (obj) => es._listeners['chanlun']({ data: JSON.stringify(obj) });
@@ -1001,6 +1807,27 @@ test('onmessage: 断档帧(SSE 领先多根) → gap-detect reset', () => {
   fire({ s: 'ok', t, c: t.map(() => 1) });
   assert.equal(calls.resetData, 1, 'gap 断档 → reset');
   assert.equal(applyCalls.length, 0, 'gap 帧 return');
+});
+
+test('onmessage: authoritative SSE snapshot replays a small gap without reset', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const { widget, calls } = spyWidget();
+  const map = new Map(); map.set(RES_KEY, { bars: [{ time: 1000000 }] });
+  const cm = makeManager(ChartManager, widget, map);
+  sb._setNowSec(10000);
+  const { fire, applyCalls, feedCalls } = openStream(cm, sb);
+  const t = []; for (let i = 0; i <= 6; i++) t.push(1000 + i * 300);
+
+  fire({
+    s: 'ok', full_snapshot: true, t,
+    o: t.map(() => 1), h: t.map(() => 1), l: t.map(() => 1),
+    c: t.map(() => 1), v: t.map(() => 1),
+  });
+
+  assert.equal(calls.resetData, 0);
+  assert.equal(applyCalls.length, 1);
+  assert.equal(feedCalls.length, 1);
+  assert.equal(feedCalls[0][3], 1000);
 });
 
 // ── H1 force_refresh(阶段E): _doReset 置一次性标志,datafeed 下次 firstDataRequest 绕过缓存重算 ──

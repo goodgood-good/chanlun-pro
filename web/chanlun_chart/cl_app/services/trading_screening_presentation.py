@@ -86,6 +86,7 @@ _PRESENTATION_SETUP_FIELDS = (
     "anchor_at",
     "confirmed_at",
     "available_at",
+    "price_basis_revision",
     "center_ordinal",
     "contains_forming_segment",
     "contains_unlocked_segment",
@@ -117,6 +118,20 @@ _PRESENTATION_TRIGGER_FIELDS = (
     "divergence_kind",
     "evidence_codes",
     "missing_conditions",
+)
+_PRESENTATION_PRECONFIRMATION_DIVERGENCE_FIELDS = (
+    *_PRESENTATION_TRIGGER_FIELDS,
+    "actionable",
+    "price_basis_revision",
+    "terminal_segment_role",
+    "terminal_segment_level",
+    "terminal_segment_id",
+    "terminal_segment_source_kind",
+    "terminal_segment_direction",
+    "terminal_segment_state",
+    "terminal_segment_start_at",
+    "terminal_segment_end_at",
+    "terminal_segment_available_at",
 )
 _PRESENTATION_SIGNAL_WARMUP_FIELDS = (
     "converged",
@@ -213,6 +228,10 @@ def presentation_signal_document(
         None
         if raw_trigger is None
         else _presentation_fields(raw_trigger, _PRESENTATION_TRIGGER_FIELDS) or {}
+    )
+    document["preconfirmation_divergences_1m"] = _presentation_rows(
+        signal.get("preconfirmation_divergences_1m"),
+        _PRESENTATION_PRECONFIRMATION_DIVERGENCE_FIELDS,
     )
     raw_warmup = signal.get("warmup")
     warmup = _presentation_fields(raw_warmup, _PRESENTATION_SIGNAL_WARMUP_FIELDS) or {}

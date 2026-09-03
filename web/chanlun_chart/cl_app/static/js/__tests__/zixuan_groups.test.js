@@ -155,6 +155,13 @@ test('watchlist surface exposes direct group creation and operational status', (
   assert.match(css, /\.zx-watch-panel\s*\{/);
   assert.match(css, /@container\s+zx-watch/);
   assert.match(css, /prefers-reduced-motion/);
+  assert.match(css, /\.zx-watch-table\s*\{[^}]*overflow:\s*hidden/s);
+  assert.match(css, /\.zx-watch-table \.layui-table-body\s*\{[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.zx-group-picker \.zx-secondary-button\s*\{[^}]*width:\s*auto/s);
+  const source = read(path.join(staticRoot, 'js', 'zixuan.js'));
+  assert.match(source, /function formatQuotePrice\(value, market\)/);
+  assert.match(source, /priceLine\.textContent = formatQuotePrice\(price, market\)/);
+  assert.match(source, /title:\s*"涨跌\/现价"[\s\S]*?width:\s*92/);
 });
 
 test('creating a group normalizes its name, selects it, and loads its stocks', () => {

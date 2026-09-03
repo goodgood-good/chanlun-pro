@@ -145,10 +145,16 @@ class ExchangeBinance(Exchange):
                 )
                 # 退市/下架: 增量零 bar 返回 None, 用库中现有数据兜底, 不喂 None 给 insert
                 if online_klines is None or len(online_klines) == 0:
-                    online_klines = pd.DataFrame(columns=db_klines.columns)
+                    # Avoid concatenating an empty/all-NA frame.  Besides doing
+                    # no useful work, pandas is deprecating the dtype inference
+                    # used by that path.  A missing increment means the cached
+                    # history itself is the complete result for this request.
+                    klines = db_klines.copy()
                 else:
                     self.db_exchange.insert_klines(code, frequency, online_klines)
-            klines = pd.concat([db_klines, online_klines], ignore_index=True)
+                    klines = pd.concat(
+                        [db_klines, online_klines], ignore_index=True
+                    )
             klines.drop_duplicates(subset=["date"], keep="last", inplace=True)
             klines = klines.sort_values(by="date", ascending=True)
             klines = normalize_binance_kline_frame(

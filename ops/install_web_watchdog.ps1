@@ -27,9 +27,12 @@ try {
 $token = ([BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
 $taskName = 'ChanlunProWebWatchdog-{0}' -f $token.Substring(0, 12)
 $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ProjectRoot "{1}" -WebPort {2}' -f `
+$arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ProjectRoot "{1}" -WebPort {2}' -f `
     $watchdogScript, $ProjectRoot, $WebPort
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
+$action = New-ScheduledTaskAction `
+    -Execute "$PSHOME\powershell.exe" `
+    -Argument $arguments `
+    -WorkingDirectory $ProjectRoot
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $premarketTime = [datetime]::Today.Add([TimeSpan]::ParseExact(
     $PremarketStart,

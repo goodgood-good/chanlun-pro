@@ -305,19 +305,17 @@ def test_every_non_a_holding_is_routed_to_its_own_market(tmp_path):
         assert title.endswith("5分钟一类卖点")
         assert len(lines) == 1
         assert "5分钟一类卖点" in lines[0]
-        assert "2026-08-04 10:00:00" in lines[0]
-        assert "时间：操作确认 2026-08-04 10:00:00" in lines[0]
-        assert "监听发现 2026-08-04 10:01:00" in lines[0]
+        assert "时效：日期 2026-08-04｜操作确认 10:00:00" in lines[0]
+        assert "监听发现 10:01:00" in lines[0]
         assert "最近1分钟收盘价：10.000" in lines[0]
-        assert "同级或更高级别卖点按完整退出规则复核" in lines[0]
+        assert "再决定完整退出或段差减仓" in lines[0]
         assert "1分钟区间套定位" in lines[0]
-        assert "1分钟区间套定位未完成（不影响5分钟主信号）" in lines[0]
+        assert "1分钟区间套定位：待出现" in lines[0]
         assert "关系未确认前不生成退出比例" in lines[0]
         assert "25%" not in lines[0]
-        assert "30分钟向下" in lines[0]
-        assert lines[0].startswith("结论：先核对卖点与持有结构级别")
-        assert "关系未确认前不执行" in lines[0]
-        assert "5分钟卖出结构失效价" in lines[0]
+        assert "30分钟=向下" in lines[0]
+        assert lines[0].startswith("结论：暂不执行；先核对卖点与持有结构级别")
+        assert "失效：5分钟失效价" in lines[0]
         assert "退出比例由卖点与持有结构级别关系决定" in lines[0]
         assert "参考卖出比例" not in lines[0]
         assert "辅助结构线索" not in lines[0]
@@ -449,7 +447,7 @@ def test_buy_position_copy_is_an_unadjusted_structural_risk_upper_bound() -> Non
     )
 
     assert line == (
-        "风险参考：结构模型比例上限 1.5%（模型比较值；不构成执行许可）"
+        "风险参考：结构模型比例上限 1.5%（模型比较值；非仓位建议）"
     )
     assert "只可下调" not in line
 
@@ -506,7 +504,7 @@ def test_recursive_us_notification_separates_every_event_time() -> None:
     assert "最近1分钟收盘价：581.250" in line
     assert "1分钟区间套定位：一类买点（趋势背驰）" in line
     assert "区间套定位：一类买点（趋势背驰）（L0）" not in line
-    assert "末端线段审计锁待完成；后续K线仍须持续复核" in line
+    assert "末端结构未封存，后续K线继续复核" in line
 
 
 def test_notification_labels_five_minute_price_fallback_honestly() -> None:
@@ -517,6 +515,57 @@ def test_notification_labels_five_minute_price_fallback_honestly() -> None:
 
     assert "最近5分钟收盘价：10.000" in line
     assert "最近1分钟收盘价" not in line
+
+
+def test_cross_market_notification_uses_the_same_compact_decision_hierarchy() -> None:
+    event = _strict_sell("QCOM.US", "高通", "2026-08-15T22:20:00+08:00")
+
+    line = monitor_module._notification_line(event)
+    blocks = line.splitlines()
+
+    assert [block.split("：", 1)[0] for block in blocks] == [
+        "结论",
+        "标的",
+        "判断",
+        "执行",
+        "失效",
+        "风险参考",
+        "时效",
+        "说明",
+    ]
+    assert "依据：" not in line
+    assert "结构状态：" not in line
+    assert line.count("暂不可用（突破卖出结构失效）") == 1
+    time_block = next(block for block in blocks if block.startswith("时效："))
+    assert time_block.count("2026-08-15") == 1
+    assert len(line) <= 350
+
+
+@pytest.mark.parametrize(
+    ("side", "price", "defense", "expected"),
+    (
+        ("buy", 10.0, 9.5, "距向下失效 5.00%"),
+        ("buy", 9.4, 9.5, "已跌破失效价 1.06%"),
+        ("sell", 10.0, 10.2, "距向上失效 2.00%"),
+        ("sell", 10.3, 10.2, "已突破失效价 0.97%"),
+    ),
+)
+def test_cross_market_invalidation_distance_has_direction_and_state(
+    side: str,
+    price: float,
+    defense: float,
+    expected: str,
+) -> None:
+    line = monitor_module._event_invalidation_line(
+        SimpleNamespace(
+            side=side,
+            price=price,
+            structure_invalidation_price=defense,
+        )
+    )
+
+    assert line is not None
+    assert expected in line
 
 
 def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
@@ -534,10 +583,10 @@ def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
     assert "1分钟卖出精确定位补充" in title
     assert "5分钟一类卖点＋1分钟二类卖点" in title
     assert "状态：1分钟区间套定位新出现，仅补充精确位置" in line
-    assert "5分钟操作确认 2026-08-04 10:00:00" in line
-    assert "1分钟定位可用 2026-08-04 10:01:00" in line
-    assert "仅用于精确时点复核" in line
-    assert "跨市场监听不生成认证价格上限" in line
+    assert "时效：日期 2026-08-04｜5分钟操作确认 10:00:00" in line
+    assert "1分钟定位可用 10:01:00" in line
+    assert "仅复核时点，不改变原5分钟判断" in line
+    assert "不生成认证卖出价" in line
     assert "不得把5分钟锚点当作执行价" in line
     assert monitor_module._notification_bucket(event) == "segment_sell"
     assert monitor_module._delivery_identity(event) == event.delivery_identity
@@ -563,7 +612,7 @@ def test_segment_enrichment_uses_detection_time_for_transport_retry_ttl(
         detected_at="2026-08-04T10:01:30+08:00",
     )
 
-    assert "监听发现 2026-08-04 10:01:30（延迟 1分30秒）" in line
+    assert "监听发现 10:01:30（延迟 1分30秒）" in line
 
     now = [datetime(2026, 8, 4, 10, 1, tzinfo=CN)]
     service, _notifier, _exchange_calls = _service(
@@ -1179,7 +1228,7 @@ def test_big_down_context_warning_is_a_transition_not_a_sell_signal(tmp_path):
     assert all(
         title.startswith("买卖通知｜环境风险提示｜人工关注｜")
         and "30分钟环境转弱风险（不是买卖点）" in title
-        and "等待5分钟卖点达到操作确认后再决定卖出" in lines[0]
+        and "这不是卖点，等待5分钟卖点确认" in lines[0]
         for title, lines in notifier.messages
     )
 

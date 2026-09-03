@@ -43,3 +43,31 @@ test('feedRealtimeBar 新根出现时先 finalize 前一根(不丢刚收盘最�
   // T2 也应收到
   assert.ok(received.some(b => b.time === 6000 * 1000 && b.close === 25), 'T2 应收到');
 });
+
+test('feedRealtimeBar replays every missing bar from an authoritative SSE snapshot', () => {
+  const { UDFCompatibleDatafeed } = loadDatafeeds();
+  const df = new UDFCompatibleDatafeed('http://test');
+  const received = [];
+  const symbolInfo = { ticker: 'A:SH.513100', name: 'A:SH.513100' };
+  df.subscribeBars(symbolInfo, '5', (bar) => received.push(bar), 'guid-replay', () => {});
+  const key = symbolInfo.ticker.toLowerCase() + '5';
+
+  df.feedRealtimeBar(
+    key,
+    {
+      t: [4000, 4300, 4600, 4900],
+      o: [1, 2, 3, 4], h: [1, 2, 3, 4], l: [1, 2, 3, 4],
+      c: [1, 2, 3, 4], v: [1, 1, 1, 1],
+    },
+    '5',
+    4000,
+  );
+
+  assert.deepEqual(
+    received.map((bar) => bar.time),
+    // replayFromSeconds is already a TradingView opening coordinate. A-share
+    // source bars are close-labelled, so raw 4000 belongs to chart time 3700
+    // and is correctly outside the replay window that starts at 4000.
+    [4300, 4600, 4900].map((value) => (value - 300) * 1000),
+  );
+});

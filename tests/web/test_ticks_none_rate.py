@@ -86,6 +86,33 @@ def test_ticks_healthy_batch_unaffected(client, monkeypatch):
     assert "errmsg" not in j
     assert j["ticks"][0]["rate"] == 2.5
 
+
+def test_us_ticks_map_equivalent_provider_code_back_to_requested_identity(
+    client, monkeypatch
+):
+    class VariantCodeExchange:
+        def ticks(self, _codes):
+            return {"US.AAPL": _tick("US.AAPL", 201.5, 1.25)}
+
+        def now_trading(self, _market=None):
+            return True
+
+    monkeypatch.setattr(
+        other_mod,
+        "get_exchange",
+        lambda _market: VariantCodeExchange(),
+    )
+
+    response = client.post(
+        "/ticks",
+        data={"market": "us", "codes": json.dumps(["AAPL.US"])},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["ticks"] == [
+        {"code": "AAPL.US", "price": 201.5, "rate": 1.25}
+    ]
+
 # ============================================================================
 # 终检R14-C1 (MED): /ticks 对 Tick.last/rate 缺 math.isfinite 校验, NaN 使整批响应
 # 变非法 JSON(裸 NaN token 打断前端严格 JSON.parse → 含健康标的全批刷新失败)。

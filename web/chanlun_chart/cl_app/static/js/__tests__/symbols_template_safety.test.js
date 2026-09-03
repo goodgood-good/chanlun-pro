@@ -19,13 +19,18 @@ function createElement(tagName) {
     href: '',
     target: '',
     rel: '',
+    ariaLabel: '',
     textContent: '',
+    setAttribute(name, value) {
+      if (name === 'aria-label') this.ariaLabel = String(value);
+    },
     get outerHTML() {
       const attrs = [
         this.className && `class="${escapeHtml(this.className)}"`,
         this.href && `href="${escapeHtml(this.href)}"`,
         this.target && `target="${escapeHtml(this.target)}"`,
         this.rel && `rel="${escapeHtml(this.rel)}"`,
+        this.ariaLabel && `aria-label="${escapeHtml(this.ariaLabel)}"`,
       ].filter(Boolean).join(' ');
       return `<${tag}${attrs ? ` ${attrs}` : ''}>${escapeHtml(this.textContent)}</${tag}>`;
     },
@@ -86,4 +91,5 @@ test('symbols code link renders untrusted code as text while preserving its rout
   assert.match(html, /href="\/\?market=a&amp;code=%3Cimg%20src%3Dx/);
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noopener"/);
+  assert.match(html, /aria-label="在新标签打开 &lt;img src=x onerror=alert\(1\)&gt; 行情工作台"/);
 });

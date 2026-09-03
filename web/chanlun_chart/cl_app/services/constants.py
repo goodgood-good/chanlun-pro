@@ -366,12 +366,19 @@ def shutdown_market_metadata_loaders(timeout=0.0):
         stopped = loader.shutdown(remaining) and stopped
     return stopped
 
-# 各个市场的交易时间
+# 各个市场的常规交易时间。TradingView 会用这里的 session 计算首屏
+# countback 与可视区内应存在的 K 线数量；股票市场若误写成 24x7，会把夜间、
+# 周末也当成应有数据并连续向前补页，表现为切换标的后长时间分批补全。
+# 多时段以逗号分隔，未显式写星期时 TradingView 默认周一至周五。
 market_session = {
-    "a": "24x7",
-    "hk": "24x7",
+    # QMT 的 A 股分钟线使用收盘时间标识，前端统一换算为开盘坐标；每天
+    # 第一根 09:30 原始分钟线因此位于 09:29。把集合竞价分钟单列为一个
+    # 子时段，使 1m 能保留该柱，同时让常规时段仍从 09:30 起算；若把上午
+    # 整段直接写成 09:29-1130，TV 会把 5m/30m 上午锚点统一吸附早 1 分钟。
+    "a": "0929-0930,0930-1130,1300-1500",
+    "hk": "0930-1200,1300-1600",
     "fx": "24x7",
-    "us": "24x7",
+    "us": "0930-1600",
     "futures": "24x7",
     "ny_futures": "24x7",
     "currency": "24x7",

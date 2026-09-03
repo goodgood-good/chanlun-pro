@@ -1,0 +1,24 @@
+serverAddr = "{{ .Envs.CHANLUN_FRP_POOL_SERVER_ADDR }}"
+serverPort = {{ .Envs.CHANLUN_FRP_POOL_SERVER_PORT }}
+
+auth.method = "token"
+auth.token = "{{ .Envs.CHANLUN_FRP_POOL_TOKEN }}"
+
+log.to = "{{ .Envs.CHANLUN_FRP_POOL_LOG_FILE }}"
+log.level = "info"
+log.maxDays = 7
+
+transport.protocol = "tcp"
+transport.heartbeatInterval = 5
+transport.heartbeatTimeout = 20
+transport.tcpMuxKeepaliveInterval = 30
+transport.poolCount = 5
+
+[[proxies]]
+name = "{{ .Envs.CHANLUN_FRP_POOL_PROXY_NAME }}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 9900
+remotePort = 8890
+loadBalancer.group = "chanlun-web-pool-v1"
+loadBalancer.groupKey = "chanlun-web-pool-v1"

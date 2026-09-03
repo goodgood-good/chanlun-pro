@@ -3,6 +3,7 @@
 用 AsyncHTTPTestCase(随机端口, 不碰生产 9900) + mock 掉真实数据源重算,
 验证 Tornado SSE 运行时: async get 保持长连接、首次立即推、SSE 帧格式。
 """
+import json
 import unittest.mock as mock
 import os
 
@@ -25,7 +26,11 @@ class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
         self._password = "sse-flow-test-password"
         self._login_env = mock.patch.dict(
             os.environ,
-            {"CHANLUN_LOGIN_PWD": generate_password_hash(self._password)},
+            {
+                "CHANLUN_LOGIN_USERS": json.dumps(
+                    {"sse-user": generate_password_hash(self._password)}
+                )
+            },
         )
         self._login_env.start()
         super().setUp()
@@ -52,7 +57,7 @@ class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
         with self.flask_app.test_client() as c:
             r = c.post(
                 "/login",
-                data={"password": self._password},
+                data={"username": "sse-user", "password": self._password},
                 follow_redirects=False,
             )
         sc = r.headers.get("Set-Cookie") or ""

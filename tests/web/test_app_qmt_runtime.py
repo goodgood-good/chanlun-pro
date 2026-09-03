@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,6 +22,33 @@ from cl_app.services import app_qmt_runtime
 
 CN = ZoneInfo("Asia/Shanghai")
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_atomic_json_retries_transient_windows_share_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "owner.json"
+    target.write_text('{"generation":1}\n', encoding="utf-8")
+    original_replace = app_qmt_runtime.os.replace
+    attempts = 0
+
+    def flaky_replace(source: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            error = PermissionError("temporarily opened without delete sharing")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        original_replace(source, destination)
+
+    monkeypatch.setattr(app_qmt_runtime.os, "name", "nt")
+    monkeypatch.setattr(app_qmt_runtime.os, "replace", flaky_replace)
+
+    app_qmt_runtime._atomic_json(target, {"generation": 2})
+
+    assert attempts == 2
+    assert json.loads(target.read_text(encoding="utf-8")) == {"generation": 2}
 
 
 class FakeScheduler:
@@ -191,6 +219,62 @@ def test_startup_ensures_missing_qmt_then_registers_owned_jobs(
 
     controller.stop()
     assert not controller.owner_path.exists()
+
+
+def test_snapshot_exposes_in_flight_runtime_change(tmp_path: Path) -> None:
+    clock = MutableClock(datetime(2026, 8, 3, 8, 30, tzinfo=CN))
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingRunner:
+        def __call__(self, command, **_kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            payload = _observation(
+                action="Restart",
+                ready=True,
+                started_at="2026-08-03T08:30:05+08:00",
+                changed=True,
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+
+    scheduler = FakeScheduler()
+    controller = AppQmtRuntimeController(
+        scheduler=scheduler,
+        repository_root=ROOT,
+        clock=clock,
+        runner=BlockingRunner(),
+        helper_script=ROOT / "ops" / "manage_qmt_runtime.ps1",
+        state_path=tmp_path / "state.json",
+        owner_path=tmp_path / "owner.json",
+        warmup_seconds=0,
+    )
+    operation = threading.Thread(
+        target=controller._operate,
+        args=("Restart",),
+        kwargs={"notify_change": False},
+    )
+    operation.start()
+    assert started.wait(timeout=5)
+    try:
+        during = controller.snapshot()
+        assert during["operation_in_progress"] is True
+        assert during["operation_action"] == "RESTART"
+        assert during["operation_started_at"] == "2026-08-03T08:30:00.000000+08:00"
+    finally:
+        release.set()
+        operation.join(timeout=5)
+
+    assert not operation.is_alive()
+    after = controller.snapshot()
+    assert after["operation_in_progress"] is False
+    assert after["operation_action"] is None
+    assert after["operation_started_at"] is None
 
 
 def test_catchup_restarts_an_old_qmt_but_adopts_a_fresh_start(

@@ -3,12 +3,15 @@
 通知负责报告已经确认的结构事实，不把“买卖点已出现”偷换成“已经具备下单
 资格”。三程序、月周日风险门、板块门和执行边界仍决定正式准入状态，并在
 通知正文中明确披露。
+
+正文固定采用结论、标的、判断、执行、失效、风险、时效、背景的决策优先顺序；
+同一价格或结构证据只在最接近其用途的位置披露，避免重复信息淹没操作边界。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import hashlib
 import json
@@ -50,7 +53,6 @@ from chanlun.decision_support.trading_system.screening_warmup import (
 from .realtime_review_inbox import (
     a_share_notification_event,
     segment_difference_boundary_status,
-    segment_difference_evidence_status,
 )
 
 
@@ -71,6 +73,15 @@ _NOTIFIABLE_TRANSITIONS = {
     ("active", "closed"),
 }
 _NOTIFICATION_RETRY_TTL = timedelta(minutes=10)
+_APPROACHING_DIGEST_COOLDOWN = timedelta(minutes=15)
+_APPROACHING_DIGEST_MAX_ITEMS = 8
+_APPROACHING_OCCURRENCE_LIMIT = 16_384
+_PRECONFIRMATION_DIVERGENCE_DIGEST_MAX_ITEMS = 8
+_PRECONFIRMATION_DIVERGENCE_OCCURRENCE_LIMIT = 16_384
+_PRECONFIRMATION_DIVERGENCE_FIELD = "preconfirmation_divergences_1m"
+_NOTIFICATION_PRECONFIRMATION_DIVERGENCE_FIELD = (
+    "notification_preconfirmation_divergence_1m"
+)
 _SEGMENT_ENRICHED_STAGE = "segment_enriched"
 _SEGMENT_ATTACHABLE_STAGES = frozenset({"triggered", "executable", "active"})
 _EVIDENCE_NOTIFICATION_STAGES = frozenset(
@@ -82,11 +93,14 @@ _EVIDENCE_NOTIFICATION_STAGES = frozenset(
 _PENDING_TRIGGER_MAX_AGE = timedelta.max
 _AUDIT_RECORD_LIMIT = 500
 _SUPPRESSED_FINGERPRINT_LIMIT = 16_384
+_SCREENING_COMPLETION_RECORD_LIMIT = 400
+_SCREENING_COMPLETION_CLOSE_HOUR = 15
+_SCREENING_COMPLETION_EVENT_SCHEMA = "chanlun-daily-screening-completion-v1"
 _STAGE_LABELS = {
     "observed": "结构观察",
     "approaching": "即将确认",
     "formed": "5分钟几何候选待锁定确认",
-    "armed": "旧版等待态",
+    "armed": "等待操作确认",
     "triggered": "5分钟操作确认",
     "executable": "强提示待人工复核",
     "active": "结构持续跟踪",
@@ -273,6 +287,188 @@ def _trigger_occurrence_event_id(key: tuple[str, ...]) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _approaching_occurrence_key(
+    signal: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """Identify one forming 5m structure without using its rolling bar time.
+
+    A provisional point is rebuilt on every completed 5-minute bar.  Its
+    ``point_id`` and ``available_at`` therefore change even while the same
+    unfinished terminal segment is being observed.  The terminal-segment
+    identity is the durable user-facing occurrence and prevents a reminder on
+    every bar.
+    """
+
+    if _stage(signal) != "approaching":
+        return None
+    setup = _mapping(signal.get("setup_5m"))
+    point_type = str(setup.get("point_type") or signal.get("point_type") or "")
+    side = str(signal.get("side") or setup.get("side") or "")
+    source_frequency = str(setup.get("source_frequency") or "")
+    recursive_level = setup.get("recursive_level", signal.get("recursive_level"))
+    terminal_segment_id = str(setup.get("terminal_segment_id") or "").strip()
+    terminal_segment_start_at = _time_identity(
+        setup.get("terminal_segment_start_at")
+    )
+    terminal_segment_end_at = _time_identity(setup.get("terminal_segment_end_at"))
+    if (
+        not str(signal.get("code") or "").strip()
+        or side not in {"buy", "sell"}
+        or not point_type
+        or source_frequency != "5m"
+        or isinstance(recursive_level, bool)
+        or not isinstance(recursive_level, int)
+        or not is_five_minute_trade_level(source_frequency, recursive_level)
+        or not terminal_segment_id
+        or not terminal_segment_start_at
+        or not terminal_segment_end_at
+    ):
+        return None
+    return (
+        str(signal.get("code")),
+        side,
+        source_frequency,
+        str(recursive_level),
+        point_type,
+        terminal_segment_id,
+        terminal_segment_start_at,
+        terminal_segment_end_at,
+    )
+
+
+def _approaching_occurrence_event_id(key: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-approaching-occurrence",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _approaching_digest_event_id(
+    occurrence_ids: Sequence[str],
+    *,
+    created_at: datetime,
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-approaching-digest",
+            "strategy_id": STRATEGY_ID,
+            "created_at": created_at.isoformat(timespec="minutes"),
+            "occurrence_ids": sorted(occurrence_ids),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _preconfirmation_divergence_rows(
+    signal: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    raw = signal.get(_PRECONFIRMATION_DIVERGENCE_FIELD)
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(value for value in raw if isinstance(value, Mapping))
+
+
+def _preconfirmation_divergence_occurrence_key(
+    signal: Mapping[str, object],
+    divergence: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    setup = _mapping(signal.get("setup_5m"))
+    side = str(signal.get("side") or setup.get("side") or "")
+    setup_segment_id = str(setup.get("terminal_segment_id") or "").strip()
+    setup_segment_start = _time_identity(setup.get("terminal_segment_start_at"))
+    divergence_level = divergence.get("recursive_level")
+    divergence_segment_id = str(
+        divergence.get("terminal_segment_id") or ""
+    ).strip()
+    divergence_segment_start = _time_identity(
+        divergence.get("terminal_segment_start_at")
+    )
+    divergence_segment_end = _time_identity(
+        divergence.get("terminal_segment_end_at")
+    )
+    divergence_anchor = _time_identity(divergence.get("anchor_at"))
+    divergence_available = _time_identity(
+        divergence.get("available_at") or divergence.get("confirmed_at")
+    )
+    if (
+        _stage(signal) not in {"approaching", "formed"}
+        or not str(signal.get("code") or "").strip()
+        or side not in {"buy", "sell"}
+        or not setup_segment_id
+        or not setup_segment_start
+        or divergence.get("source_frequency") != "1m"
+        or isinstance(divergence_level, bool)
+        or not isinstance(divergence_level, int)
+        or divergence_level < 0
+        or not divergence_segment_id
+        or not divergence_segment_start
+        or not divergence_segment_end
+        or not divergence_anchor
+        or not divergence_available
+    ):
+        return None
+    return (
+        str(signal.get("code")),
+        side,
+        str(setup.get("price_basis_revision") or ""),
+        setup_segment_id,
+        setup_segment_start,
+        str(divergence.get("point_type") or ""),
+        str(divergence.get("divergence_kind") or ""),
+        str(divergence_level),
+        divergence_segment_id,
+        divergence_segment_start,
+        divergence_segment_end,
+        divergence_anchor,
+        divergence_available,
+    )
+
+
+def _preconfirmation_divergence_occurrence_event_id(
+    key: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-preconfirmation-divergence-occurrence",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _preconfirmation_divergence_digest_event_id(
+    occurrence_ids: Sequence[str],
+    *,
+    created_at: datetime,
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-preconfirmation-divergence-digest",
+            "strategy_id": STRATEGY_ID,
+            "created_at": created_at.isoformat(timespec="minutes"),
+            "occurrence_ids": sorted(occurrence_ids),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def _segment_occurrence_key(
     signal: Mapping[str, object],
     new_stage: str,
@@ -396,6 +592,26 @@ def _notification_evidence_time(
     """
 
     signal_at = _signal_time(signal)
+    preconfirmation_divergence = _mapping(
+        signal.get(_NOTIFICATION_PRECONFIRMATION_DIVERGENCE_FIELD)
+    )
+    if preconfirmation_divergence:
+        divergence_at = next(
+            (
+                parsed
+                for key in ("available_at", "confirmed_at")
+                if (
+                    parsed := _parse_time(preconfirmation_divergence.get(key))
+                )
+                is not None
+            ),
+            None,
+        )
+        if signal_at is None:
+            return divergence_at
+        if divergence_at is None:
+            return signal_at
+        return max(signal_at, divergence_at)
     if new_stage != _SEGMENT_ENRICHED_STAGE:
         return signal_at
     segment_at = _segment_time(signal)
@@ -438,6 +654,7 @@ def _notification_eligibility_reason(
     old_stage: str | None,
     new_stage: str,
     require_decision_identity: bool = False,
+    evaluated_at: object | None = None,
 ) -> str | None:
     """只允许当前、可验证的 5 分钟正式买卖点进入通知通道。
 
@@ -543,7 +760,186 @@ def _notification_eligibility_reason(
         return "SIGNAL_TIME_UNAVAILABLE"
     if observed_at < event_at:
         return "SIGNAL_FROM_FUTURE"
+    if new_stage == _SEGMENT_ENRICHED_STAGE:
+        checked_at = _parse_time(evaluated_at)
+        if checked_at is None or checked_at < observed_at:
+            checked_at = observed_at
+        boundary_status = segment_difference_boundary_status(
+            signal,
+            trigger=segment,
+            evaluated_at=checked_at,
+        )
+        # A sell locator has no buy-entry TTL and is intentionally reported as
+        # ``not_applicable``. Buy-side enrichment is a realtime notification,
+        # not a historical-fact replay: once its short execution boundary has
+        # expired (or cannot be attested), retain it in the structural snapshot
+        # but never enqueue DingTalk delivery or strict chart rendering.
+        if boundary_status not in {"current", "not_applicable"}:
+            return (
+                "ONE_MINUTE_SEGMENT_EVIDENCE_EXPIRED"
+                if boundary_status == "expired"
+                else "ONE_MINUTE_SEGMENT_EVIDENCE_NOT_CURRENT"
+            )
 
+    return None
+
+
+def _approaching_digest_eligibility_reason(
+    signal: Mapping[str, object],
+    *,
+    observed_at: datetime,
+) -> str | None:
+    """Validate a current forming structure without promoting it to a signal."""
+
+    if _stage(signal) != "approaching":
+        return "NOT_APPROACHING"
+    side = str(signal.get("side") or "")
+    if side not in {"buy", "sell"}:
+        return "SIGNAL_SIDE_INVALID"
+    setup = _mapping(signal.get("setup_5m"))
+    if (
+        setup.get("status") != "provisional"
+        or setup.get("actionable") is not False
+        or setup.get("source_frequency") != "5m"
+        or setup.get("side") != side
+        or setup.get("point_id") != signal.get("point_id")
+        or setup.get("terminal_segment_role") != "latest_unfinished"
+        or setup.get("terminal_segment_state") != "forming"
+    ):
+        return "FIVE_MINUTE_APPROACHING_STRUCTURE_INVALID"
+    recursive_level = setup.get("recursive_level")
+    if type(recursive_level) is not int or not is_five_minute_trade_level(
+        "5m", recursive_level
+    ):
+        return "FIVE_MINUTE_OPERATION_LEVEL_INVALID"
+    if signal.get("physical_timeframe_recursive") is not True:
+        return "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING"
+    if five_minute_warmup_converged(_mapping(signal.get("warmup"))) is not True:
+        return "WARMUP_NOT_CONVERGED"
+    event_at = _parse_time(
+        setup.get("available_at")
+        or setup.get("confirmed_at")
+        or signal.get("observed_at")
+    )
+    monitor_observed_at = _parse_time(
+        signal.get("monitor_observed_at") or signal.get("observed_at")
+    )
+    if event_at is None or monitor_observed_at is None:
+        return "SIGNAL_TIME_UNAVAILABLE"
+    local_now = observed_at.astimezone(CN)
+    if (
+        event_at.date() != local_now.date()
+        or monitor_observed_at.date() != local_now.date()
+    ):
+        return "APPROACHING_SIGNAL_NOT_CURRENT_SESSION"
+    if monitor_observed_at < event_at or local_now < event_at:
+        return "SIGNAL_FROM_FUTURE"
+    if _approaching_occurrence_key(signal) is None:
+        return "APPROACHING_OCCURRENCE_IDENTITY_INVALID"
+    return None
+
+
+def _preconfirmation_divergence_eligibility_reason(
+    signal: Mapping[str, object],
+    divergence: Mapping[str, object],
+    *,
+    observed_at: datetime,
+) -> str | None:
+    """Validate a 1m divergence without promoting its unfinished 5m parent."""
+
+    stage = _stage(signal)
+    if stage not in {"approaching", "formed"}:
+        return "FIVE_MINUTE_STRUCTURE_ALREADY_CONFIRMED_OR_TERMINAL"
+    side = str(signal.get("side") or "")
+    if side not in {"buy", "sell"}:
+        return "SIGNAL_SIDE_INVALID"
+    setup = _mapping(signal.get("setup_5m"))
+    expected_terminal_states = {
+        "approaching": ("latest_unfinished", frozenset({"forming"})),
+        "formed": ("latest_completed", frozenset({"formed", "locked"})),
+    }
+    expected_role, expected_states = expected_terminal_states[stage]
+    if (
+        setup.get("status") != "provisional"
+        or setup.get("actionable") is not False
+        or setup.get("source_frequency") != "5m"
+        or setup.get("side") != side
+        or setup.get("point_id") != signal.get("point_id")
+        or setup.get("terminal_segment_role") != expected_role
+        or setup.get("terminal_segment_state") not in expected_states
+        or setup.get("terminal_segment_source_kind") != "segment"
+        or isinstance(signal.get("segment_difference_1m"), Mapping)
+    ):
+        return "FIVE_MINUTE_PRECONFIRMATION_STRUCTURE_INVALID"
+    recursive_level = setup.get("recursive_level")
+    if type(recursive_level) is not int or not is_five_minute_trade_level(
+        "5m", recursive_level
+    ):
+        return "FIVE_MINUTE_OPERATION_LEVEL_INVALID"
+    if signal.get("physical_timeframe_recursive") is not True:
+        return "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING"
+    if five_minute_warmup_converged(_mapping(signal.get("warmup"))) is not True:
+        return "WARMUP_NOT_CONVERGED"
+    execution_profile = _mapping(signal.get("execution_profile"))
+    if execution_profile and (
+        execution_profile.get("structure_signal_confirmed") is not False
+        or execution_profile.get("segment_difference_status") != "STRUCTURE_PENDING"
+        or execution_profile.get("segment_difference_ready") is not False
+        or execution_profile.get("precise_execution_ready") is not False
+    ):
+        return "PRECONFIRMATION_EXECUTION_CONTRACT_INVALID"
+    if (
+        not is_one_minute_segment_difference_document(
+            divergence,
+            expected_side=side,
+        )
+        or divergence.get("divergence_kind") not in {"trend", "consolidation"}
+        or divergence.get("terminal_segment_role") != "latest_completed"
+        or divergence.get("terminal_segment_source_kind") != "segment"
+        or divergence.get("terminal_segment_state") not in {"formed", "locked"}
+        or divergence.get("price_basis_revision")
+        != setup.get("price_basis_revision")
+    ):
+        return "ONE_MINUTE_PRECONFIRMATION_DIVERGENCE_INVALID"
+    setup_start = _parse_time(setup.get("terminal_segment_start_at"))
+    setup_end = _parse_time(setup.get("terminal_segment_end_at"))
+    divergence_start = _parse_time(divergence.get("terminal_segment_start_at"))
+    divergence_end = _parse_time(divergence.get("terminal_segment_end_at"))
+    if (
+        setup_start is None
+        or setup_end is None
+        or divergence_start is None
+        or divergence_end is None
+        or setup_start - timedelta(minutes=5)
+        > divergence_start - timedelta(minutes=1)
+        or divergence_end > setup_end
+    ):
+        return "ONE_MINUTE_PRECONFIRMATION_LINEAGE_NOT_NESTED"
+    setup_available_at = _parse_time(setup.get("available_at"))
+    divergence_available_at = _parse_time(
+        divergence.get("available_at") or divergence.get("confirmed_at")
+    )
+    monitor_observed_at = _parse_time(
+        signal.get("monitor_observed_at") or signal.get("observed_at")
+    )
+    if (
+        setup_available_at is None
+        or divergence_available_at is None
+        or monitor_observed_at is None
+    ):
+        return "SIGNAL_TIME_UNAVAILABLE"
+    local_now = observed_at.astimezone(CN)
+    if (
+        setup_available_at.date() != local_now.date()
+        or divergence_available_at.date() != local_now.date()
+        or monitor_observed_at.date() != local_now.date()
+    ):
+        return "PRECONFIRMATION_DIVERGENCE_NOT_CURRENT_SESSION"
+    jointly_known_at = max(setup_available_at, divergence_available_at)
+    if monitor_observed_at < jointly_known_at or local_now < jointly_known_at:
+        return "SIGNAL_FROM_FUTURE"
+    if _preconfirmation_divergence_occurrence_key(signal, divergence) is None:
+        return "PRECONFIRMATION_DIVERGENCE_IDENTITY_INVALID"
     return None
 
 
@@ -731,6 +1127,43 @@ def _notification_time_text(value: object) -> str:
     return parsed.astimezone(CN).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _notification_timeline_parts(
+    items: tuple[tuple[str, object], ...],
+) -> list[str]:
+    """同一交易日只展示一次日期，跨日时保留每个完整时刻。"""
+
+    parsed = [_parse_time(value) for _label, value in items]
+    if all(value is not None for value in parsed):
+        localized = [value.astimezone(CN) for value in parsed if value is not None]
+        dates = {value.date() for value in localized}
+        if len(dates) == 1:
+            return [
+                f"日期 {localized[0].strftime('%Y-%m-%d')}",
+                *[
+                    f"{label} {value.strftime('%H:%M:%S')}"
+                    for (label, _raw), value in zip(items, localized, strict=True)
+                ],
+            ]
+    return [
+        f"{label} {_notification_time_text(value)}"
+        for label, value in items
+    ]
+
+
+def _notification_deadline_text(value: object, *, reference: object) -> str:
+    deadline = _parse_time(value)
+    reference_time = _parse_time(reference)
+    if deadline is None:
+        return "暂不可用"
+    deadline = deadline.astimezone(CN)
+    if (
+        reference_time is not None
+        and reference_time.astimezone(CN).date() == deadline.date()
+    ):
+        return f"当日 {deadline.strftime('%H:%M:%S')}"
+    return deadline.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _terminal_segment_text(setup: Mapping[str, object]) -> str:
     role = str(setup.get("terminal_segment_role") or "")
     if role not in {"latest_unfinished", "latest_completed"}:
@@ -861,6 +1294,8 @@ def _risk_gate_summary(signal: Mapping[str, object]) -> str:
     )
     if not any(value not in (None, "") for _label, value in values):
         return "风险门待核验"
+    if all(str(value or "") == "GREEN" for _label, value in values):
+        return "全部通过"
     return "／".join(
         f"{label}{labels.get(str(value or ''), '待核验')}"
         for label, value in values
@@ -875,17 +1310,33 @@ def _judgment_checklist_line(
     new_stage: str,
     detected_at: object | None = None,
 ) -> str:
+    setup = _mapping(signal.get("setup_5m"))
     side = str(
         signal.get("side")
-        or _mapping(signal.get("setup_5m")).get("side")
+        or setup.get("side")
         or ""
     )
+    setup_level = _recursive_level_text(
+        setup.get("recursive_level")
+        if "recursive_level" in setup
+        else signal.get("recursive_level")
+    )
     if new_stage == "invalidated":
-        five_minute = "已失效"
+        five_minute = f"{setup_point}（{setup_level}）已失效"
     elif new_stage == "closed":
-        five_minute = "跟踪结束"
+        five_minute = f"{setup_point}（{setup_level}）跟踪结束"
     else:
-        five_minute = f"已确认（{setup_point}）"
+        five_minute = f"{setup_point}（{setup_level}）已确认"
+
+    terminal_state = (
+        "原结构已失效"
+        if new_stage == "invalidated"
+        else "跟踪已结束"
+        if new_stage == "closed"
+        else "已封存"
+        if setup.get("lock_state") == "locked"
+        else "未封存，仍随新K更新"
+    )
 
     trigger = _mapping(signal.get("segment_difference_1m"))
     boundary_status = segment_difference_boundary_status(
@@ -893,20 +1344,90 @@ def _judgment_checklist_line(
         trigger=trigger,
         evaluated_at=detected_at,
     )
-    if not trigger:
+    if new_stage == "invalidated":
+        one_minute = "原定位已作废"
+    elif new_stage == "closed":
+        one_minute = "跟踪已结束"
+    elif not trigger:
         one_minute = "待出现"
     elif side == "sell":
-        one_minute = f"已确认（{trigger_evidence}，仅精确定位）"
+        one_minute = f"{trigger_evidence}已确认（仅精确定位）"
     elif boundary_status == "current":
-        one_minute = f"已确认（{trigger_evidence}，窗口有效）"
+        one_minute = f"{trigger_evidence}已确认（窗口有效）"
     elif boundary_status == "expired":
-        one_minute = f"历史已确认（{trigger_evidence}，窗口已过）"
+        one_minute = f"{trigger_evidence}历史已确认（窗口已过）"
     else:
-        one_minute = f"已确认（{trigger_evidence}，执行边界缺失）"
-    return (
-        f"判断：5分钟主信号={five_minute}｜"
-        f"1分钟精确定位={one_minute}｜风险门={_risk_gate_summary(signal)}"
+        one_minute = f"{trigger_evidence}已确认（执行边界缺失）"
+    risk_gate = (
+        "不再适用"
+        if new_stage in {"invalidated", "closed"}
+        else _risk_gate_summary(signal)
     )
+    return (
+        f"判断：5分钟={five_minute}｜末端结构={terminal_state}｜"
+        f"1分钟区间套定位：{one_minute}｜风险门={risk_gate}"
+    )
+
+
+def _execution_price_snapshot(
+    signal: Mapping[str, object],
+    setup: Mapping[str, object],
+) -> str:
+    """把执行所需的行情来源、价格时点和结构偏离压缩到一个短语。"""
+
+    current = _positive_float(signal.get("current_price"))
+    anchor = _positive_float(_structure_anchor_value(setup))
+    source_label = _current_price_label(signal.get("current_price_source"))
+    rendered = f"{source_label}：{_current_price_text(signal.get('current_price'))}"
+    price_at = _notification_time_text(signal.get("current_price_at"))
+    if price_at != "暂不可用":
+        rendered += f"（获取 {price_at}）"
+    if current is not None and anchor is not None:
+        drift = (current - anchor) / anchor * 100
+        rendered += f"｜较5分钟锚点 {drift:+.2f}%"
+    return rendered
+
+
+def _execution_defense_snapshot(
+    signal: Mapping[str, object],
+    setup: Mapping[str, object],
+) -> str:
+    current = _positive_float(signal.get("current_price"))
+    defense = _positive_float(_defense_price_value(setup))
+    rendered = f"失效：5分钟失效价 {_defense_price_text(signal, setup)}"
+    raw_values = signal.get("notification_defense_prices")
+    distinct_values = (
+        {
+            str(value).strip()
+            for value in raw_values
+            if value is not None and str(value).strip()
+        }
+        if isinstance(raw_values, (list, tuple, set, frozenset))
+        else set()
+    )
+    # 共振通知可能同时披露多个结构边界；这时单一距离没有明确归属，宁可省略。
+    if len(distinct_values) > 1:
+        return rendered
+    if current is None or defense is None:
+        return rendered
+    side = str(signal.get("side") or setup.get("side") or "")
+    if side not in {"buy", "sell"}:
+        return rendered
+    if side == "buy":
+        distance = (current - defense) / current * 100
+        distance_text = (
+            f"距向下失效 {distance:.2f}%"
+            if distance >= 0
+            else f"已跌破失效价 {abs(distance):.2f}%"
+        )
+    else:
+        distance = (defense - current) / current * 100
+        distance_text = (
+            f"距向上失效 {distance:.2f}%"
+            if distance >= 0
+            else f"已突破失效价 {abs(distance):.2f}%"
+        )
+    return f"{rendered}｜{distance_text}"
 
 
 def _execution_boundary_line(
@@ -917,18 +1438,22 @@ def _execution_boundary_line(
     detected_at: object | None = None,
 ) -> str:
     side = str(signal.get("side") or setup.get("side") or "")
-    defense = _current_price_text(_defense_price_value(setup))
     if new_stage == "invalidated":
-        return "执行边界：原5分钟结构已失效；旧1分钟定位与旧比例同时作废"
+        price = _execution_price_snapshot(signal, setup)
+        return (
+            f"执行：停止使用原结构｜{price}｜"
+            "旧1分钟定位与旧模型比例同时作废"
+        )
     if new_stage == "closed":
-        return "执行边界：本次结构跟踪已结束；旧边界不得继续使用"
+        return "执行：本次结构跟踪已结束；旧边界不得继续使用"
+    price = _execution_price_snapshot(signal, setup)
     if side == "sell":
         return (
-            f"执行边界：5分钟卖出结构失效价 {defense}（向上突破则取消原判断）｜"
-            "1分钟只确定精确卖出时点｜退出比例由卖点与持有结构级别关系决定"
+            f"执行：{price}｜1分钟只定位卖出时点｜"
+            "退出规则由卖点与持有结构级别关系决定"
         )
     if side != "buy":
-        return "执行边界：待人工核对"
+        return "执行：待人工核对"
 
     state, price_cap = _buy_entry_guidance_state(
         signal,
@@ -936,8 +1461,7 @@ def _execution_boundary_line(
     )
     if state == "waiting":
         return (
-            f"执行边界：等待同向1分钟区间套；未定位前不执行｜"
-            f"5分钟失效价 {defense}"
+            f"执行：等待同向1分钟区间套，未定位前不执行｜{price}"
         )
     if state == "expired":
         old_cap = (
@@ -946,27 +1470,32 @@ def _execution_boundary_line(
             else ""
         )
         return (
-            f"执行边界：旧1分钟买入上限{old_cap}已过期，仅保留审计；"
-            f"等待新的1分钟区间套｜5分钟失效价 {defense}"
+            f"执行：旧1分钟买入上限{old_cap}已过期，本次比例0%；"
+            f"等待新的1分钟区间套｜{price}"
         )
     if state == "unavailable":
         return (
-            "执行边界：1分钟确认K最高价缺失，精确买入上限不可用；"
-            f"5分钟锚点不得替代｜5分钟失效价 {defense}"
+            f"执行：1分钟确认K最高价缺失，买入上限不可用；"
+            f"5分钟锚点不得替代｜{price}"
         )
 
     boundary = _entry_execution_boundary(signal)
-    valid_until = _notification_time_text(boundary.get("entry_valid_until"))
+    valid_until = _notification_deadline_text(
+        boundary.get("entry_valid_until"),
+        reference=(
+            detected_at
+            or signal.get("monitor_observed_at")
+            or signal.get("observed_at")
+            or boundary.get("confirmation_bar_closed_at")
+        ),
+    )
     current_price = _positive_float(signal.get("current_price"))
     source = str(signal.get("current_price_source") or "")
     if current_price is None:
         price_condition = "实时价待核对"
     else:
         relation = "≤" if price_cap is not None and current_price <= price_cap else ">"
-        source_label = _current_price_label(source)
-        price_condition = (
-            f"{source_label} {_current_price_text(current_price)}{relation}上限"
-        )
+        price_condition = f"{relation}上限"
         if state == "price_above_cap":
             price_condition += "，禁止追价"
         elif source == "realtime_tick":
@@ -974,9 +1503,8 @@ def _execution_boundary_line(
         else:
             price_condition += "，仅作预检；执行前须核实时价"
     return (
-        "执行边界：1分钟确认K最高价／买入上限 "
-        f"{_current_price_text(price_cap)}｜有效至 {valid_until}｜"
-        f"{price_condition}｜5分钟失效价 {defense}"
+        f"执行：{price}｜1分钟买入上限 {_current_price_text(price_cap)}｜"
+        f"有效至 {valid_until}｜{price_condition}"
     )
 
 
@@ -1094,35 +1622,6 @@ def _elapsed_text(start: object, end: object) -> str:
     if remainder == 0:
         return f"{minutes}分钟"
     return f"{minutes}分{remainder}秒"
-
-
-def _price_risk_line(
-    signal: Mapping[str, object],
-    setup: Mapping[str, object],
-) -> str:
-    current = _positive_float(signal.get("current_price"))
-    anchor = _positive_float(_structure_anchor_value(setup))
-    defense = _positive_float(_defense_price_value(setup))
-    source_label = _current_price_label(signal.get("current_price_source"))
-    price_at = _notification_time_text(signal.get("current_price_at"))
-    price_time = f"（获取 {price_at}）" if price_at != "暂不可用" else ""
-    parts = [
-        f"{source_label}：{_current_price_text(signal.get('current_price'))}{price_time}",
-        f"结构锚点：{_current_price_text(_structure_anchor_value(setup))}",
-    ]
-    if current is not None and anchor is not None:
-        drift = (current - anchor) / anchor * 100
-        parts[1] += f"（{drift:+.2f}%）"
-    parts.append(f"防守价：{_defense_price_text(signal, setup)}")
-    if current is not None and defense is not None:
-        side = str(signal.get("side") or setup.get("side") or "")
-        distance = (
-            (current - defense) / current * 100
-            if side == "buy"
-            else (defense - current) / current * 100
-        )
-        parts.append(f"距防守位：{distance:+.2f}%")
-    return "价格：" + "｜".join(parts)
 
 
 def _display_percent(value: object) -> tuple[str, str | None]:
@@ -1303,37 +1802,39 @@ def _action_advice(
         )
         if side == "buy" and entry_state == "price_above_cap":
             return (
-                "操作：1分钟区间套仍在有效期内，但当前可见价格已超过买入上限 "
-                f"{_current_price_text(entry_price_cap)}；不追价，等待价格重新满足边界"
-                "或新的1分钟区间套"
+                "操作：禁止追价；当前价已超过1分钟买入上限 "
+                f"{_current_price_text(entry_price_cap)}，等待价格重新满足边界"
+                "或新的1分钟定位"
             )
         if side == "buy" and entry_state == "unavailable":
             return (
-                "操作：1分钟区间套已出现，但确认K最高价缺失；"
-                "5分钟锚点不能替代买入上限，暂不执行"
+                "操作：暂不执行；1分钟定位已确认，但买入上限缺失，"
+                "5分钟锚点不能替代"
             )
         if boundary_status == "current":
+            if side == "sell":
+                return (
+                    "操作：复核卖出；1分钟精确定位已确认，"
+                    "须先核对卖点与持有结构级别"
+                )
             return (
-                "操作：1分钟区间套已完成且定位窗口有效，现已升级为精确执行候选；"
-                "仅在实时价不高于1分钟买入上限、原5分钟结构仍有效且风险门无阻断时，"
-                "在其他交易软件手工决定"
+                "操作：可人工复核买入；1分钟定位窗口有效，"
+                "须满足下方全部执行与风险边界"
             )
         if boundary_status == "expired":
             return (
-                "操作：1分钟区间套证据已出现，但定位窗口已过，精确执行资格关闭；"
-                "不追价，等待新的1分钟区间套"
+                "操作：暂不执行；1分钟定位窗口已过，不追价，等待新的1分钟区间套"
             )
         if boundary_status == "unavailable":
             return (
-                "操作：1分钟区间套证据已出现，但精确执行边界缺失；"
-                "暂不生成执行比例，等待边界恢复或新的1分钟区间套"
+                "操作：暂不执行；1分钟定位已确认但执行边界缺失，"
+                "等待边界恢复或新的1分钟定位"
             )
         if boundary_status == "not_applicable":
             return (
-                "操作：1分钟卖出区间套已完成；核对原5分钟卖点与持有结构级别后，"
-                "在其他交易软件手工决定"
+                "操作：复核卖出；1分钟定位已确认，先核对5分钟卖点与持有结构级别"
             )
-        return "操作：1分钟区间套状态待核对；未确认前不生成精确执行比例"
+        return "操作：暂不执行；1分钟定位状态待核对"
 
     point = str(point_type or "").strip()
     if not side:
@@ -1356,25 +1857,21 @@ def _action_advice(
     }
     if side == "buy":
         if entry_state == "waiting":
-            return (
-                "操作：5分钟买点已确认；等待同向1分钟区间套给出精确位置和买入上限，"
-                "当前不执行、不生成买入比例"
-            )
+            return "操作：暂不执行；5分钟买点已确认，等待同向1分钟区间套定位"
         if entry_state == "expired":
             return (
-                "操作：5分钟买点仍保留，但旧1分钟定位窗口已过；"
-                "不追价，等待新的1分钟区间套"
+                "操作：暂不执行；旧1分钟定位已过期，不追价，等待新的1分钟区间套"
             )
         if entry_state == "unavailable":
             return (
-                "操作：1分钟区间套已出现，但精确买入上限缺失；"
-                "5分钟锚点不能替代，暂不执行"
+                "操作：暂不执行；1分钟定位已确认但买入上限缺失，"
+                "5分钟锚点不能替代"
             )
         if entry_state == "price_above_cap":
             return (
-                "操作：当前可见价格已超过1分钟买入上限 "
-                f"{_current_price_text(entry_price_cap)}；不追价，"
-                "仅在定位有效期内价格重新满足边界时复核，否则等待新的1分钟区间套"
+                "操作：禁止追价；当前价已超过1分钟买入上限 "
+                f"{_current_price_text(entry_price_cap)}，等待价格重新满足边界"
+                "或新的1分钟定位"
             )
         if (
             operational.get("status") == "NOT_ACTIONABLE"
@@ -1382,8 +1879,7 @@ def _action_advice(
             in operational_reasons
         ):
             return (
-                "操作：5分钟买点已确认并已提醒；等待1分钟区间套精确定位，"
-                "当前不生成买入比例"
+                "操作：等待1分钟定位；5分钟买点已确认，当前不生成买入比例"
             )
         if operational.get("status") == "BLOCKED":
             if operational_reasons & {
@@ -1391,48 +1887,43 @@ def _action_advice(
                 "CURRENT_PRICE_AT_OR_BELOW_STRUCTURAL_STOP",
             }:
                 return (
-                    "操作：5分钟买点已达到操作确认，但当前价格已触发0%保护；"
-                    "不追价，等待新的5分钟结构，仅在其他交易软件手工复核"
+                    "操作：禁止买入；当前价格已触发0%保护，不追价，"
+                    "等待新的5分钟结构"
                 )
-            return (
-                "操作：本条买入不纳入操作计划；"
-                f"{_blocked_position_reason_text(signal, operational)}"
+            return "操作：本条买入不纳入操作计划；" + _blocked_position_reason_text(
+                signal,
+                operational,
             )
         if operational.get("status") == "UNRESOLVED":
             if signal.get("realtime_quote_status") == "unavailable":
                 return (
-                    "操作：5分钟买点已达到操作确认，但实时价格未取得；"
-                    "不使用已完成K线价格生成买入比例，等待实时价格证据后再复核"
+                    "操作：仅观察；实时价格未取得，不使用已完成K线价格生成买入比例"
                 )
             return (
-                "操作：5分钟买点已达到操作确认，但结构价格或防守信息不足；"
-                "暂不生成买入比例，补齐证据后再复核"
+                "操作：仅观察；结构价格或防守信息不足，补齐证据后再复核"
             )
         if recommendation == "CAUTION" or (
             not recommendation and signal.get("entry_allowed") is not True
         ):
             return (
-                "操作：5分钟技术买点已达到操作确认，需手工复核逆风环境和提示证据后，"
-                "在其他交易软件手工决定；本系统不会自动下单"
+                "操作：仅观察；5分钟买点已确认，需手工复核逆风环境和提示证据"
             )
         if recommendation == "BLOCKED":
-            return (
-                "操作：本条买入不纳入操作计划；"
-                f"{_blocked_position_reason_text(signal, operational)}"
+            return "操作：本条买入不纳入操作计划；" + _blocked_position_reason_text(
+                signal,
+                operational,
             )
-        action = "买入"
         if point.startswith("1buy"):
-            condition = "确认反转后"
+            condition = "一买反转已确认"
         elif point.startswith("2buy"):
-            condition = "回踩不破后"
+            condition = "二买回踩不破已确认"
         elif point.startswith("3buy"):
-            condition = "回抽确认后"
+            condition = "三买回抽已确认"
         else:
-            condition = "人工确认后"
+            condition = "5分钟买点已确认"
         return (
-            f"操作：{condition}，并在定位有效期内确认实时价不高于1分钟买入上限 "
-            f"{_current_price_text(entry_price_cap)}、风险门无阻断且5分钟结构未失效后，"
-            f"在其他交易软件手工分批{action}；本系统不会自动下单"
+            f"操作：可人工复核分批买入；{condition}，"
+            "须满足下方全部执行与风险边界"
         )
     if side == "sell":
         if (
@@ -1441,36 +1932,32 @@ def _action_advice(
             in operational_reasons
         ):
             return (
-                "操作：5分钟卖点已确认并已提醒；等待1分钟区间套精确定位，"
-                "当前不生成退出比例"
+                "操作：等待1分钟定位；5分钟卖点已确认，当前不生成退出比例"
             )
         if signal.get("exit_allowed") is not True:
             return (
-                "操作：结构卖出提醒已达到操作确认；请核对卖点级别与结构仍然有效，"
-                "再在其他交易软件手工决定；本系统不会自动下单"
+                "操作：结构卖出提醒已确认；请核对卖点级别与结构仍然有效"
             )
         if "SAME_OR_HIGHER_STRUCTURE_FULL_EXIT" in operational_reasons:
             return (
-                "操作：卖点与持有结构已判定为同级或更高级别；"
-                "优先按完整退出规则人工复核，并确认5分钟卖出结构未向上失效；"
-                "本系统不会自动下单"
+                "操作：优先按完整退出规则人工复核；卖点与持有结构为同级或更高级别，"
+                "并确认5分钟卖出结构未向上失效"
             )
         if "LOWER_STRUCTURE_SEGMENT_DIFFERENCE_REDUCTION" in operational_reasons:
             return (
-                "操作：当前卖点属于低级别或不同结构；仅按段差减仓规则人工复核，"
-                "不得误当作完整退出；本系统不会自动下单"
+                "操作：仅复核段差减仓；当前卖点属于低级别或不同结构，"
+                "不得作为完整退出"
             )
         if operational.get("status") == "CONDITIONAL":
             return (
-                "操作：先核对当前卖点与持有结构的级别关系；"
-                "同级或更高级别复核完整退出，低级别或不同结构只作段差处理；"
-                "关系未确认前不执行"
+                "操作：暂不执行；先核对卖点与持有结构级别，"
+                "再决定完整退出或段差减仓"
             )
         if point.startswith("3sell"):
-            return "操作：优先检查退出条件"
+            return "操作：复核退出；优先检查三卖退出条件"
         if point.startswith("2sell"):
-            return "操作：反弹未转强时优先复核卖出条件"
-        return "操作：优先复核卖出或退出条件"
+            return "操作：复核卖出；反弹未转强时优先检查退出条件"
+        return "操作：复核卖出或退出条件"
     return "操作：人工复核后再操作"
 
 
@@ -1509,8 +1996,8 @@ def _position_recommendation_line(
         if side == "buy":
             return (
                 f"风险参考：结构模型比例上限 {displayed}%"
-                f"（按当前价至5分钟防守位{model_note}；"
-                "仅作结构模型比较）"
+                f"（按当前价至5分钟失效价{model_note}；"
+                "非仓位建议）"
             )
         if side == "sell":
             reasons = {
@@ -1531,11 +2018,7 @@ def _position_recommendation_line(
                 + f"（{relation}；仅作结构模型比较）"
             )
     if status == "CONDITIONAL" and side == "sell":
-        return (
-            "风险参考：卖点与目标结构的级别关系待人工核对；同级或更高级别卖点"
-            "按完整退出规则复核，低级别或不同结构仅作段差处理；"
-            "关系未确认前不生成退出比例"
-        )
+        return "风险参考：卖点与目标结构级别待核对；关系未确认前不生成退出比例"
     if status == "BLOCKED" and side == "buy":
         return (
             "风险参考：本条买入不纳入操作计划（"
@@ -1707,6 +2190,272 @@ def _operation_status_text(
     return "待人工复核"
 
 
+def _approaching_digest_sort_key(
+    signal: Mapping[str, object],
+) -> tuple[object, ...]:
+    sources = signal.get("selection_sources")
+    source_values = (
+        sources if isinstance(sources, (list, tuple, set, frozenset)) else ()
+    )
+    manual_attention = bool(
+        {str(value) for value in source_values} & _MANUAL_ATTENTION_SOURCES
+    )
+    side = str(
+        signal.get("side") or _mapping(signal.get("setup_5m")).get("side") or ""
+    )
+    point_type = str(
+        _mapping(signal.get("setup_5m")).get("point_type")
+        or signal.get("point_type")
+        or ""
+    )
+    event_at = _parse_time(
+        _mapping(signal.get("setup_5m")).get("available_at")
+        or signal.get("observed_at")
+    )
+    return (
+        not manual_attention,
+        side != "sell",
+        _SETUP_POINT_ORDER.get(point_type, 99),
+        -(event_at.timestamp() if event_at is not None else 0.0),
+        str(signal.get("code") or ""),
+    )
+
+
+def _preconfirmation_divergence_sort_key(
+    signal: Mapping[str, object],
+) -> tuple[object, ...]:
+    divergence = _mapping(
+        signal.get(_NOTIFICATION_PRECONFIRMATION_DIVERGENCE_FIELD)
+    )
+    side = str(
+        signal.get("side") or _mapping(signal.get("setup_5m")).get("side") or ""
+    )
+    point_type = str(divergence.get("point_type") or "")
+    available_at = _parse_time(
+        divergence.get("available_at") or divergence.get("confirmed_at")
+    )
+    return (
+        side != "sell",
+        _SETUP_POINT_ORDER.get(point_type, 99),
+        -(available_at.timestamp() if available_at is not None else 0.0),
+        str(signal.get("code") or ""),
+        str(divergence.get("point_id") or ""),
+    )
+
+
+def format_preconfirmation_divergence_digest(
+    signals: Sequence[Mapping[str, object]],
+    *,
+    total_count: int | None = None,
+    buy_count: int | None = None,
+    sell_count: int | None = None,
+    detected_at: object | None = None,
+) -> tuple[str, list[str]]:
+    """Render confirmed 1m divergences whose 5m parent is not yet confirmed."""
+
+    candidates = tuple(
+        sorted(signals, key=_preconfirmation_divergence_sort_key)
+    )
+    if not candidates:
+        raise ValueError("preconfirmation divergence digest requires candidates")
+    total = len(candidates) if total_count is None else int(total_count)
+    if total < len(candidates):
+        raise ValueError(
+            "preconfirmation divergence total cannot be smaller than its rows"
+        )
+    computed_buy = sum(
+        str(value.get("side") or _mapping(value.get("setup_5m")).get("side"))
+        == "buy"
+        for value in candidates
+    )
+    computed_sell = sum(
+        str(value.get("side") or _mapping(value.get("setup_5m")).get("side"))
+        == "sell"
+        for value in candidates
+    )
+    buys = computed_buy if buy_count is None else int(buy_count)
+    sells = computed_sell if sell_count is None else int(sell_count)
+    if buys < 0 or sells < 0 or buys + sells != total:
+        raise ValueError("preconfirmation divergence side counts are invalid")
+
+    visible = candidates[:_PRECONFIRMATION_DIVERGENCE_DIGEST_MAX_ITEMS]
+    title = f"买卖通知｜1分钟背驰预警·5分钟未确认｜{total}个"
+    lines = [
+        (
+            f"结论：发现 {total} 个已确认的1分钟背驰；对应5分钟结构仍未确认，"
+            "这是提前观察，不是正式买卖点，不可据此操作"
+        ),
+        (
+            f"范围：买入方向 {buys}｜卖出方向 {sells}｜"
+            f"本条展示 {len(visible)} 个"
+        ),
+    ]
+    for index, signal in enumerate(visible, start=1):
+        setup = _mapping(signal.get("setup_5m"))
+        divergence = _mapping(
+            signal.get(_NOTIFICATION_PRECONFIRMATION_DIVERGENCE_FIELD)
+        )
+        code = _text(signal.get("code"), "代码待核对")
+        name = _text(signal.get("name"), code)
+        identity = code if name == code else f"{name}（{code}）"
+        divergence_label = _point_label(
+            divergence.get("point_type"),
+            "背驰点",
+        )
+        divergence_kind = _DIVERGENCE_LABELS.get(
+            str(divergence.get("divergence_kind") or ""),
+            "背驰",
+        )
+        setup_label = _point_label(
+            setup.get("point_type") or signal.get("point_type"),
+            "结构候选",
+        )
+        available_at = _parse_time(
+            divergence.get("available_at") or divergence.get("confirmed_at")
+        )
+        available_text = (
+            available_at.astimezone(CN).strftime("%H:%M")
+            if available_at is not None
+            else "时间待核对"
+        )
+        five_minute_state = (
+            "几何候选待确认"
+            if _stage(signal) == "formed"
+            else "形成中"
+        )
+        lines.append(
+            f"预警{index}：{identity}｜1分钟{divergence_label}（{divergence_kind}）"
+            f"｜确认 {available_text}｜对应5分钟{setup_label}{five_minute_state}"
+        )
+    omitted = total - len(visible)
+    if omitted:
+        lines.append(
+            f"其余：还有 {omitted} 个1分钟背驰预警，请在早盘筛选页查看"
+        )
+    detected = _parse_time(detected_at) or _parse_time(
+        candidates[0].get("monitor_observed_at")
+        or candidates[0].get("observed_at")
+    )
+    lines.extend(
+        [
+            (
+                "等待：5分钟结构正式确认后，系统会另发正式买卖通知；"
+                "若5分钟结构失效，本预警不构成买卖点"
+            ),
+            (
+                "时效：汇总于 "
+                + (
+                    detected.astimezone(CN).strftime("%Y-%m-%d %H:%M:%S")
+                    if detected is not None
+                    else "暂不可用"
+                )
+                + "｜同一1分钟背驰发生点只通知一次"
+            ),
+            "说明：仅供人工观察；系统不会自动下单",
+        ]
+    )
+    return title, lines
+
+
+def format_approaching_digest(
+    signals: Sequence[Mapping[str, object]],
+    *,
+    total_count: int | None = None,
+    buy_count: int | None = None,
+    sell_count: int | None = None,
+    detected_at: object | None = None,
+) -> tuple[str, list[str]]:
+    """Render one bounded, explicitly non-actionable forming-structure digest."""
+
+    candidates = tuple(sorted(signals, key=_approaching_digest_sort_key))
+    if not candidates:
+        raise ValueError("approaching digest requires at least one candidate")
+    total = len(candidates) if total_count is None else int(total_count)
+    if total < len(candidates):
+        raise ValueError("approaching digest total cannot be smaller than its rows")
+    computed_buy = sum(
+        str(value.get("side") or _mapping(value.get("setup_5m")).get("side"))
+        == "buy"
+        for value in candidates
+    )
+    computed_sell = sum(
+        str(value.get("side") or _mapping(value.get("setup_5m")).get("side"))
+        == "sell"
+        for value in candidates
+    )
+    buys = computed_buy if buy_count is None else int(buy_count)
+    sells = computed_sell if sell_count is None else int(sell_count)
+    if buys < 0 or sells < 0 or buys + sells != total:
+        raise ValueError("approaching digest side counts are invalid")
+
+    visible = candidates[:_APPROACHING_DIGEST_MAX_ITEMS]
+    title = f"买卖通知｜结构预警·尚未确认｜{total}个候选"
+    lines = [
+        (
+            f"结论：发现 {total} 个5分钟结构接近形成；"
+            "全部尚未确认，不是正式买卖点，不可据此操作"
+        ),
+        (
+            f"范围：买入候选 {buys}｜卖出候选 {sells}｜"
+            f"本条展示 {len(visible)} 个"
+        ),
+    ]
+    for index, signal in enumerate(visible, start=1):
+        setup = _mapping(signal.get("setup_5m"))
+        code = _text(signal.get("code"), "代码待核对")
+        name = _text(signal.get("name"), code)
+        identity = code if name == code else f"{name}（{code}）"
+        point = _point_label(
+            setup.get("point_type") or signal.get("point_type"),
+            "结构候选",
+        )
+        event_at = _parse_time(
+            setup.get("available_at")
+            or setup.get("confirmed_at")
+            or signal.get("observed_at")
+        )
+        observed_text = (
+            event_at.astimezone(CN).strftime("%H:%M")
+            if event_at is not None
+            else "时间待核对"
+        )
+        sector = _text(_mapping(signal.get("sector")).get("sector_name"), "")
+        sector_text = f"｜{sector}" if sector else ""
+        lines.append(
+            f"候选{index}：{identity}｜5分钟{point}｜形成中｜{observed_text}"
+            f"{sector_text}"
+        )
+    omitted = total - len(visible)
+    if omitted:
+        lines.append(
+            f"其余：还有 {omitted} 个候选，请在早盘筛选页查看；"
+            "摘要不替代正式通知"
+        )
+    detected = _parse_time(detected_at) or _parse_time(
+        candidates[0].get("monitor_observed_at")
+        or candidates[0].get("observed_at")
+    )
+    lines.extend(
+        [
+            (
+                "等待：只有5分钟结构正式确认后，系统才会另发正式买卖通知；"
+                "候选失效不代表卖点"
+            ),
+            (
+                "时效：汇总于 "
+                + (
+                    detected.astimezone(CN).strftime("%Y-%m-%d %H:%M:%S")
+                    if detected is not None
+                    else "暂不可用"
+                )
+                + "｜同一结构只预警一次｜15分钟内最多一条摘要"
+            ),
+            "说明：仅用于确认实时监控正在工作；系统不会自动下单",
+        ]
+    )
+    return title, lines
+
+
 def format_notification(
     signal: Mapping[str, object],
     old_stage: str,
@@ -1720,15 +2469,6 @@ def format_notification(
     recommendation = str(execution_profile.get("recommendation") or "")
     setup = _mapping(signal.get("setup_5m"))
     trigger = _mapping(signal.get("segment_difference_1m"))
-    segment_evidence_status = segment_difference_evidence_status(
-        signal,
-        trigger=trigger,
-    )
-    segment_boundary_status = segment_difference_boundary_status(
-        signal,
-        trigger=trigger,
-        evaluated_at=detected_at,
-    )
     sector = _mapping(signal.get("sector"))
     code = _text(signal.get("code"))
     name = _text(signal.get("name"), code)
@@ -1854,66 +2594,27 @@ def format_notification(
             new_stage=new_stage,
         )
     confirmed_at_value = setup.get("confirmed_at") or available_at_value
-    confirmed_at = _notification_time_text(confirmed_at_value)
-    available_at = _notification_time_text(available_at_value)
-    discovered_at = _notification_time_text(
-        detected_at or signal.get("observed_at") or available_at_value
-    )
-    setup_level = _recursive_level_text(
-        setup.get("recursive_level")
-        if "recursive_level" in setup
-        else signal.get("recursive_level")
-    )
-    trigger_structure = (
-        (f"1分钟区间套定位：{trigger_evidence}已确认；精确买入位置仍有效")
-        if trigger.get("point_type")
-        and segment_evidence_status == "present"
-        and segment_boundary_status == "current"
-        else (
-            f"1分钟区间套定位：{trigger_evidence}历史证据保留；"
-            "买入精确定位窗口已过"
-        )
-        if trigger.get("point_type")
-        and segment_evidence_status == "present"
-        and segment_boundary_status == "expired"
-        else (
-            f"1分钟区间套定位：{trigger_evidence}历史证据保留；"
-            "买入精确定位边界不可用"
-        )
-        if trigger.get("point_type")
-        and segment_evidence_status == "present"
-        and segment_boundary_status == "unavailable"
-        else (
-            f"1分钟区间套定位：{trigger_evidence}已确认；"
-            "卖出精确位置已确认"
-        )
-        if trigger.get("point_type")
-        and segment_evidence_status == "present"
-        and segment_boundary_status == "not_applicable"
-        else (f"1分钟区间套定位：{trigger_evidence}证据已记录；精确定位边界待核对")
-        if trigger.get("point_type") and segment_evidence_status == "present"
-        else "1分钟区间套：暂未出现（5分钟信号保留，精确执行尚未解锁）"
-    )
     detected_at_value = (
         detected_at or signal.get("monitor_observed_at") or signal.get("observed_at")
     )
-    confirmation_caption = (
-        "操作确认（末端结构已封存）"
-        if setup.get("lock_state") == "locked"
-        else "操作确认（末端结构仍会随新K更新）"
-    )
     if new_stage == _SEGMENT_ENRICHED_STAGE:
-        time_parts = [
-            f"1分钟定位确认 {_notification_time_text(_segment_time(signal))}",
-            f"原5分钟{confirmation_caption} {confirmed_at}",
+        timeline_items = [
+            ("1分钟定位确认", _segment_time(signal)),
+            ("原5分钟确认", confirmed_at_value),
         ]
     else:
-        time_parts = [f"{confirmation_caption} {confirmed_at}"]
-        if available_at != confirmed_at:
-            time_parts.append(f"信号可用 {available_at}")
-    time_parts.append(
-        f"监听发现：{discovered_at}（延迟 "
-        f"{_elapsed_text(event_available_at_value, detected_at_value)}）"
+        confirmation_label = (
+            "原5分钟确认"
+            if new_stage in {"invalidated", "closed"}
+            else "5分钟确认"
+        )
+        timeline_items = [(confirmation_label, confirmed_at_value)]
+        if _time_identity(available_at_value) != _time_identity(confirmed_at_value):
+            timeline_items.append(("信号可用", available_at_value))
+    timeline_items.append(("监听发现", detected_at_value or available_at_value))
+    time_parts = _notification_timeline_parts(tuple(timeline_items))
+    time_parts[-1] += (
+        f"（延迟 {_elapsed_text(event_available_at_value, detected_at_value)}）"
     )
     operation_status = _operation_status_text(
         signal,
@@ -1931,10 +2632,11 @@ def format_notification(
         new_stage=new_stage,
         detected_at=detected_at,
     )
+    identity = code if name == code else f"{name}（{code}）"
     lines = [
         "结论：" + action_advice.removeprefix("操作："),
         (
-            f"股票：{name}｜状态：{operation_status}｜"
+            f"标的：{identity}｜状态：{operation_status}｜"
             f"进度：{old_stage_label}→{new_stage_label}"
         ),
         _judgment_checklist_line(
@@ -1950,27 +2652,329 @@ def format_notification(
             new_stage=new_stage,
             detected_at=detected_at,
         ),
-        _price_risk_line(signal, setup),
-        _position_recommendation_line(
-            signal,
-            detected_at=detected_at,
-            new_stage=new_stage,
+    ]
+    if new_stage != "closed":
+        lines.append(_execution_defense_snapshot(signal, setup))
+    lines.extend(
+        [
+            _position_recommendation_line(
+                signal,
+                detected_at=detected_at,
+                new_stage=new_stage,
+            ),
+            "时效：" + "｜".join(time_parts),
+            (
+                f"背景：{context_text}｜"
+                f"环境：{_text(execution_profile.get('context_grade_label'), '待判定')}｜"
+                f"板块：{_text(sector.get('sector_name'))}"
+            ),
+        ]
+    )
+    terminal_segment = _terminal_segment_text(setup)
+    if terminal_segment != "末端线段：血缘暂不可用":
+        lines.append(terminal_segment)
+    technical_parts = [
+        _same_period_context_text(source, label).replace("：", " ", 1)
+        for source, label in ((daily_context, "日线"), (context, "30分钟"))
+        if _mapping(source.get("same_period_technical_evidence"))
+    ]
+    if technical_parts:
+        lines.append("技术：" + "｜".join(technical_parts))
+    lines.append(
+        "说明：仅供人工复核；如需操作，请在其他交易软件手工决定并完成；"
+        "系统不会自动下单"
+    )
+    return title, lines
+
+
+def _valid_screening_session(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.isoformat() == value
+
+
+def screening_completion_event_id(market_data_session: str) -> str:
+    """Return the stable once-per-market-session completion identity."""
+
+    if not _valid_screening_session(market_data_session):
+        raise ValueError("market_data_session must be an ISO date")
+    payload = json.dumps(
+        {
+            "schema": _SCREENING_COMPLETION_EVENT_SCHEMA,
+            "strategy_id": STRATEGY_ID,
+            "market_data_session": market_data_session,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _screening_deferred_exclusions_are_complete(
+    manifest: Mapping[str, object],
+    audit: Mapping[str, object],
+    *,
+    discovered_count: int,
+    completed_count: int,
+    excluded_count: int,
+    next_epoch_retry_count: int,
+) -> bool:
+    """Authenticate deterministic exclusions carried into the next data epoch.
+
+    A completed coverage cycle may legitimately exclude a suspended symbol or
+    one without the frozen minimum history.  Those symbols remain in the
+    next-market-data-epoch queue, but they are resolved dispositions for the
+    current cycle rather than failed or pending work.  Accept that state only
+    when the canonical manifest proves the relationship one-for-one.
+    """
+
+    if next_epoch_retry_count == 0:
+        return True
+    raw_discovered = manifest.get("discovered_codes")
+    raw_completed = manifest.get("completed_codes")
+    raw_excluded = manifest.get("excluded_codes")
+    raw_failed = manifest.get("failed_codes")
+    raw_exclusions = manifest.get("exclusions")
+    raw_pending = manifest.get("pending_frequencies")
+    raw_backoff = manifest.get("backoff_frequencies")
+    raw_deferred = manifest.get("deferred_frequencies")
+    if (
+        not isinstance(raw_discovered, list)
+        or not isinstance(raw_completed, list)
+        or not isinstance(raw_excluded, list)
+        or raw_failed != []
+        or not isinstance(raw_exclusions, list)
+        or raw_pending != {}
+        or raw_backoff != {}
+        or not isinstance(raw_deferred, Mapping)
+        or audit.get("retry_symbol_count") != next_epoch_retry_count
+    ):
+        return False
+
+    def canonical_codes(values: list[object]) -> tuple[str, ...] | None:
+        if any(not isinstance(value, str) or not value for value in values):
+            return None
+        codes = tuple(str(value) for value in values)
+        return codes if codes == tuple(sorted(set(codes))) else None
+
+    discovered = canonical_codes(raw_discovered)
+    completed = canonical_codes(raw_completed)
+    excluded = canonical_codes(raw_excluded)
+    if (
+        discovered is None
+        or completed is None
+        or excluded is None
+        or len(discovered) != discovered_count
+        or len(completed) != completed_count
+        or len(excluded) != excluded_count
+        or len(excluded) != next_epoch_retry_count
+        or set(discovered) != set(completed) | set(excluded)
+        or set(completed) & set(excluded)
+        or set(raw_deferred) != set(excluded)
+    ):
+        return False
+
+    valid_frequencies = {"d", "30m", "5m", "1m"}
+    for code, frequencies in raw_deferred.items():
+        if (
+            not isinstance(code, str)
+            or not isinstance(frequencies, list)
+            or not frequencies
+            or any(
+                not isinstance(value, str) or value not in valid_frequencies
+                for value in frequencies
+            )
+            or frequencies != list(dict.fromkeys(frequencies))
+        ):
+            return False
+
+    exclusion_fields = {
+        "code",
+        "exclusion_type",
+        "eligibility",
+        "reason_code",
+        "retry_policy",
+        "deterministic_for_coverage_epoch",
+        "remote_error_type",
+        "reason",
+    }
+    exclusion_codes: list[str] = []
+    for document in raw_exclusions:
+        if not isinstance(document, Mapping) or set(document) != exclusion_fields:
+            return False
+        code = document.get("code")
+        if (
+            not isinstance(code, str)
+            or not code
+            or document.get("exclusion_type") != "stock_analysis_exclusion"
+            or not isinstance(document.get("eligibility"), str)
+            or not document.get("eligibility")
+            or not isinstance(document.get("reason_code"), str)
+            or not document.get("reason_code")
+            or document.get("retry_policy") != "NEXT_MARKET_DATA_EPOCH"
+            or document.get("deterministic_for_coverage_epoch") is not True
+            or not isinstance(document.get("remote_error_type"), str)
+            or not document.get("remote_error_type")
+            or not isinstance(document.get("reason"), str)
+            or not document.get("reason")
+        ):
+            return False
+        exclusion_codes.append(code)
+    return tuple(exclusion_codes) == excluded
+
+
+def _screening_completion_details(
+    snapshot: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Validate and summarize one genuinely completed daily selection cycle."""
+
+    audit = _mapping(snapshot.get("scan_audit"))
+    quality = _mapping(snapshot.get("data_quality"))
+    manifest = _mapping(snapshot.get("coverage_manifest"))
+    market_data_as_of = _parse_time(snapshot.get("market_data_as_of"))
+    coverage_epoch_id = snapshot.get("coverage_epoch_id")
+    raw_signals = snapshot.get("signals")
+    failure_codes = quality.get("failure_codes")
+    errors = snapshot.get("errors")
+    if (
+        snapshot.get("available") is not True
+        or snapshot.get("scan_state") != "complete"
+        or snapshot.get("last_batch_state") != "complete"
+        or snapshot.get("full_coverage_state") != "complete"
+        or snapshot.get("read_only") is not True
+        or snapshot.get("no_order_execution") is not True
+        or manifest.get("complete") is not True
+        or audit.get("coverage_cycle_complete") is not True
+        or audit.get("monitoring_only_refresh") is not False
+        or quality.get("complete") is not True
+        or quality.get("stale") is not False
+        or not isinstance(failure_codes, (list, tuple))
+        or bool(failure_codes)
+        or not isinstance(errors, (list, tuple))
+        or bool(errors)
+        or market_data_as_of is None
+        or market_data_as_of.hour < _SCREENING_COMPLETION_CLOSE_HOUR
+        or not isinstance(coverage_epoch_id, str)
+        or not coverage_epoch_id
+        or not isinstance(raw_signals, list)
+        or any(not isinstance(value, Mapping) for value in raw_signals)
+    ):
+        return None
+
+    count_fields = {
+        "discovered_symbol_count": audit.get("discovered_symbol_count"),
+        "completed_symbol_count": audit.get(
+            "coverage_cycle_completed_symbol_count"
         ),
-        "时间：" + "｜".join(time_parts),
-        _terminal_segment_text(setup),
+        "excluded_symbol_count": audit.get(
+            "coverage_cycle_excluded_symbol_count"
+        ),
+        "failed_symbol_count": audit.get("coverage_cycle_failed_symbol_count"),
+        "pending_symbol_count": audit.get("pending_symbol_count"),
+        "immediate_pending_symbol_count": audit.get(
+            "immediate_pending_symbol_count"
+        ),
+        "backoff_retry_symbol_count": audit.get("backoff_retry_symbol_count"),
+        "next_epoch_retry_symbol_count": audit.get(
+            "next_epoch_retry_symbol_count"
+        ),
+    }
+    if any(type(value) is not int or value < 0 for value in count_fields.values()):
+        return None
+    if (
+        count_fields["failed_symbol_count"] != 0
+        or count_fields["pending_symbol_count"] != 0
+        or count_fields["immediate_pending_symbol_count"] != 0
+        or count_fields["backoff_retry_symbol_count"] != 0
+        or count_fields["discovered_symbol_count"]
+        != count_fields["completed_symbol_count"]
+        + count_fields["excluded_symbol_count"]
+        or not _screening_deferred_exclusions_are_complete(
+            manifest,
+            audit,
+            discovered_count=count_fields["discovered_symbol_count"],
+            completed_count=count_fields["completed_symbol_count"],
+            excluded_count=count_fields["excluded_symbol_count"],
+            next_epoch_retry_count=count_fields["next_epoch_retry_symbol_count"],
+        )
+    ):
+        return None
+
+    signals = tuple(dict(value) for value in raw_signals)
+    sides = tuple(
+        str(value.get("side") or _mapping(value.get("setup_5m")).get("side"))
+        for value in signals
+    )
+    if any(value not in {"buy", "sell"} for value in sides):
+        return None
+    return {
+        "market_data_session": market_data_as_of.date().isoformat(),
+        "market_data_as_of": market_data_as_of,
+        "coverage_epoch_id": coverage_epoch_id,
+        **count_fields,
+        "selected_symbol_count": len(
+            {
+                str(value.get("code"))
+                for value in signals
+                if isinstance(value.get("code"), str) and value.get("code")
+            }
+        ),
+        "signal_count": len(signals),
+        "buy_count": sides.count("buy"),
+        "sell_count": sides.count("sell"),
+    }
+
+
+def format_screening_completion(
+    snapshot: Mapping[str, object],
+    *,
+    completed_at: object,
+) -> tuple[str, list[str]]:
+    """Render a concise, explicitly non-actionable daily completion receipt."""
+
+    details = _screening_completion_details(snapshot)
+    completion_time = _parse_time(completed_at)
+    if details is None:
+        raise ValueError("screening snapshot is not a complete daily selection")
+    if completion_time is None:
+        raise ValueError("completed_at must be timezone-aware")
+    session = str(details["market_data_session"])
+    title = f"买卖通知｜每日选股完成｜{session}"
+    next_epoch_retry_text = (
+        f"｜下周期复查 {details['next_epoch_retry_symbol_count']} 只"
+        if details["next_epoch_retry_symbol_count"]
+        else ""
+    )
+    lines = [
+        f"结论：{session} 日终选股已完成，本轮完整结果已生成。",
         (
-            f"依据：5分钟{setup_point}（{setup_level}）｜{context_text}｜"
-            f"{trigger_structure}"
+            "范围："
+            f"发现 {details['discovered_symbol_count']} 只｜"
+            f"完成 {details['completed_symbol_count']} 只｜"
+            f"排除 {details['excluded_symbol_count']} 只｜"
+            f"失败 {details['failed_symbol_count']} 只｜待处理 0 只"
+            f"{next_epoch_retry_text}"
         ),
         (
-            f"环境：{_text(execution_profile.get('context_grade_label'), '待判定')}｜"
-            f"板块：{_text(sector.get('sector_name'))}"
+            "结果："
+            f"入选标的 {details['selected_symbol_count']} 只｜"
+            f"结构 {details['signal_count']} 个｜"
+            f"买入方向 {details['buy_count']} 个｜"
+            f"卖出方向 {details['sell_count']} 个"
         ),
         (
-            "技术："
-            + _same_period_context_text(daily_context, "日线").replace("：", " ", 1)
-            + "｜"
-            + _same_period_context_text(context, "30分钟").replace("：", " ", 1)
+            "时间："
+            f"行情截止 {_notification_time_text(details['market_data_as_of'])}｜"
+            f"任务完成 {_notification_time_text(completion_time)}"
+        ),
+        (
+            "说明：这是选股任务完成回执，不是买卖建议；具体买卖点仍以独立实时通知为准；"
+            "系统不会自动下单"
         ),
     ]
     return title, lines
@@ -2022,6 +3026,34 @@ class SignalNotificationDispatcher:
         self._event_audit = list(state["event_audit"])
         self._suppressed_fingerprints = dict.fromkeys(state["suppressed_fingerprints"])
         self._pending_trigger_events = dict(state["pending_trigger_events"])
+        self._approaching_alerted_occurrences = dict(
+            state["approaching_alerted_occurrences"]
+        )
+        self._last_approaching_digest_at = state["last_approaching_digest_at"]
+        pending_approaching_digest = state["pending_approaching_digest"]
+        self._pending_approaching_digest = (
+            None
+            if pending_approaching_digest is None
+            else dict(pending_approaching_digest)
+        )
+        self._preconfirmation_divergence_alerted_occurrences = dict(
+            state["preconfirmation_divergence_alerted_occurrences"]
+        )
+        pending_preconfirmation_divergence_digest = state[
+            "pending_preconfirmation_divergence_digest"
+        ]
+        self._pending_preconfirmation_divergence_digest = (
+            None
+            if pending_preconfirmation_divergence_digest is None
+            else dict(pending_preconfirmation_divergence_digest)
+        )
+        self._screening_completion_sessions = dict(
+            state["screening_completion_sessions"]
+        )
+        self._pending_screening_completions = {
+            str(session): dict(value)
+            for session, value in state["pending_screening_completions"].items()
+        }
 
     def set_quote_provider(
         self,
@@ -2134,6 +3166,13 @@ class SignalNotificationDispatcher:
             "event_audit": (),
             "suppressed_fingerprints": (),
             "pending_trigger_events": {},
+            "approaching_alerted_occurrences": {},
+            "last_approaching_digest_at": None,
+            "pending_approaching_digest": None,
+            "preconfirmation_divergence_alerted_occurrences": {},
+            "pending_preconfirmation_divergence_digest": None,
+            "screening_completion_sessions": {},
+            "pending_screening_completions": {},
         }
 
         def invalid(reason: str) -> dict[str, object]:
@@ -2166,7 +3205,17 @@ class SignalNotificationDispatcher:
             }
         )
         optional_state_fields = frozenset(
-            {"suppressed_fingerprints", "delivered_segment_evidence_ids"}
+            {
+                "suppressed_fingerprints",
+                "delivered_segment_evidence_ids",
+                "approaching_alerted_occurrences",
+                "last_approaching_digest_at",
+                "pending_approaching_digest",
+                "preconfirmation_divergence_alerted_occurrences",
+                "pending_preconfirmation_divergence_digest",
+                "screening_completion_sessions",
+                "pending_screening_completions",
+            }
         )
         if (
             not isinstance(payload, Mapping)
@@ -2310,6 +3359,348 @@ class SignalNotificationDispatcher:
                 normalized_pending["document"] = dict(value["document"])
             pending_trigger_events[event_id] = normalized_pending
 
+        raw_approaching_alerted = payload.get(
+            "approaching_alerted_occurrences",
+            {},
+        )
+        if (
+            not isinstance(raw_approaching_alerted, Mapping)
+            or len(raw_approaching_alerted) > _APPROACHING_OCCURRENCE_LIMIT
+            or any(
+                not isinstance(event_id, str)
+                or not event_id.startswith("sha256:")
+                or len(event_id) != 71
+                or _parse_time(alerted_at) is None
+                for event_id, alerted_at in raw_approaching_alerted.items()
+            )
+        ):
+            return invalid("APPROACHING_ALERTED_OCCURRENCES_INVALID")
+        approaching_alerted_occurrences = {
+            str(event_id): str(alerted_at)
+            for event_id, alerted_at in raw_approaching_alerted.items()
+        }
+        last_approaching_digest_at = payload.get("last_approaching_digest_at")
+        if (
+            last_approaching_digest_at is not None
+            and _parse_time(last_approaching_digest_at) is None
+        ):
+            return invalid("LAST_APPROACHING_DIGEST_AT_INVALID")
+        raw_pending_approaching_digest = payload.get("pending_approaching_digest")
+        pending_approaching_digest: dict[str, object] | None = None
+        if raw_pending_approaching_digest is not None:
+            required_pending_digest_fields = {
+                "event_id",
+                "occurrence_ids",
+                "created_at",
+                "documents",
+                "total_count",
+                "buy_count",
+                "sell_count",
+            }
+            raw_occurrence_ids = (
+                raw_pending_approaching_digest.get("occurrence_ids")
+                if isinstance(raw_pending_approaching_digest, Mapping)
+                else None
+            )
+            raw_documents = (
+                raw_pending_approaching_digest.get("documents")
+                if isinstance(raw_pending_approaching_digest, Mapping)
+                else None
+            )
+            digest_event_id = (
+                raw_pending_approaching_digest.get("event_id")
+                if isinstance(raw_pending_approaching_digest, Mapping)
+                else None
+            )
+            total_count = (
+                raw_pending_approaching_digest.get("total_count")
+                if isinstance(raw_pending_approaching_digest, Mapping)
+                else None
+            )
+            buy_count = (
+                raw_pending_approaching_digest.get("buy_count")
+                if isinstance(raw_pending_approaching_digest, Mapping)
+                else None
+            )
+            sell_count = (
+                raw_pending_approaching_digest.get("sell_count")
+                if isinstance(raw_pending_approaching_digest, Mapping)
+                else None
+            )
+            if (
+                not isinstance(raw_pending_approaching_digest, Mapping)
+                or set(raw_pending_approaching_digest)
+                != required_pending_digest_fields
+                or not isinstance(digest_event_id, str)
+                or not digest_event_id.startswith("sha256:")
+                or len(digest_event_id) != 71
+                or _parse_time(raw_pending_approaching_digest.get("created_at"))
+                is None
+                or not isinstance(raw_occurrence_ids, list)
+                or not raw_occurrence_ids
+                or len(raw_occurrence_ids) > _APPROACHING_OCCURRENCE_LIMIT
+                or any(
+                    not isinstance(value, str)
+                    or not value.startswith("sha256:")
+                    or len(value) != 71
+                    for value in raw_occurrence_ids
+                )
+                or raw_occurrence_ids != sorted(set(raw_occurrence_ids))
+                or not isinstance(raw_documents, list)
+                or not raw_documents
+                or len(raw_documents) > _APPROACHING_DIGEST_MAX_ITEMS
+                or any(not isinstance(value, Mapping) for value in raw_documents)
+                or type(total_count) is not int
+                or total_count != len(raw_occurrence_ids)
+                or type(buy_count) is not int
+                or type(sell_count) is not int
+                or buy_count < 0
+                or sell_count < 0
+                or buy_count + sell_count != total_count
+            ):
+                return invalid("PENDING_APPROACHING_DIGEST_INVALID")
+            pending_approaching_digest = {
+                "event_id": digest_event_id,
+                "occurrence_ids": list(raw_occurrence_ids),
+                "created_at": str(raw_pending_approaching_digest["created_at"]),
+                "documents": [dict(value) for value in raw_documents],
+                "total_count": total_count,
+                "buy_count": buy_count,
+                "sell_count": sell_count,
+            }
+
+        raw_preconfirmation_divergence_alerted = payload.get(
+            "preconfirmation_divergence_alerted_occurrences",
+            {},
+        )
+        if (
+            not isinstance(raw_preconfirmation_divergence_alerted, Mapping)
+            or len(raw_preconfirmation_divergence_alerted)
+            > _PRECONFIRMATION_DIVERGENCE_OCCURRENCE_LIMIT
+            or any(
+                not isinstance(event_id, str)
+                or not event_id.startswith("sha256:")
+                or len(event_id) != 71
+                or _parse_time(alerted_at) is None
+                for event_id, alerted_at in (
+                    raw_preconfirmation_divergence_alerted.items()
+                )
+            )
+        ):
+            return invalid(
+                "PRECONFIRMATION_DIVERGENCE_ALERTED_OCCURRENCES_INVALID"
+            )
+        preconfirmation_divergence_alerted_occurrences = {
+            str(event_id): str(alerted_at)
+            for event_id, alerted_at in (
+                raw_preconfirmation_divergence_alerted.items()
+            )
+        }
+        raw_pending_preconfirmation_divergence_digest = payload.get(
+            "pending_preconfirmation_divergence_digest"
+        )
+        pending_preconfirmation_divergence_digest: dict[str, object] | None = None
+        if raw_pending_preconfirmation_divergence_digest is not None:
+            required_pending_divergence_fields = {
+                "event_id",
+                "occurrence_ids",
+                "created_at",
+                "documents",
+                "total_count",
+                "buy_count",
+                "sell_count",
+            }
+            raw_divergence_occurrence_ids = (
+                raw_pending_preconfirmation_divergence_digest.get("occurrence_ids")
+                if isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                else None
+            )
+            raw_divergence_documents = (
+                raw_pending_preconfirmation_divergence_digest.get("documents")
+                if isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                else None
+            )
+            divergence_digest_event_id = (
+                raw_pending_preconfirmation_divergence_digest.get("event_id")
+                if isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                else None
+            )
+            divergence_total_count = (
+                raw_pending_preconfirmation_divergence_digest.get("total_count")
+                if isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                else None
+            )
+            divergence_buy_count = (
+                raw_pending_preconfirmation_divergence_digest.get("buy_count")
+                if isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                else None
+            )
+            divergence_sell_count = (
+                raw_pending_preconfirmation_divergence_digest.get("sell_count")
+                if isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                else None
+            )
+            if (
+                not isinstance(
+                    raw_pending_preconfirmation_divergence_digest,
+                    Mapping,
+                )
+                or set(raw_pending_preconfirmation_divergence_digest)
+                != required_pending_divergence_fields
+                or not isinstance(divergence_digest_event_id, str)
+                or not divergence_digest_event_id.startswith("sha256:")
+                or len(divergence_digest_event_id) != 71
+                or _parse_time(
+                    raw_pending_preconfirmation_divergence_digest.get("created_at")
+                )
+                is None
+                or not isinstance(raw_divergence_occurrence_ids, list)
+                or not raw_divergence_occurrence_ids
+                or len(raw_divergence_occurrence_ids)
+                > _PRECONFIRMATION_DIVERGENCE_OCCURRENCE_LIMIT
+                or any(
+                    not isinstance(value, str)
+                    or not value.startswith("sha256:")
+                    or len(value) != 71
+                    for value in raw_divergence_occurrence_ids
+                )
+                or raw_divergence_occurrence_ids
+                != sorted(set(raw_divergence_occurrence_ids))
+                or not isinstance(raw_divergence_documents, list)
+                or not raw_divergence_documents
+                or len(raw_divergence_documents)
+                > _PRECONFIRMATION_DIVERGENCE_DIGEST_MAX_ITEMS
+                or any(
+                    not isinstance(value, Mapping)
+                    for value in raw_divergence_documents
+                )
+                or type(divergence_total_count) is not int
+                or divergence_total_count != len(raw_divergence_occurrence_ids)
+                or type(divergence_buy_count) is not int
+                or type(divergence_sell_count) is not int
+                or divergence_buy_count < 0
+                or divergence_sell_count < 0
+                or divergence_buy_count + divergence_sell_count
+                != divergence_total_count
+            ):
+                return invalid(
+                    "PENDING_PRECONFIRMATION_DIVERGENCE_DIGEST_INVALID"
+                )
+            pending_preconfirmation_divergence_digest = {
+                "event_id": divergence_digest_event_id,
+                "occurrence_ids": list(raw_divergence_occurrence_ids),
+                "created_at": str(
+                    raw_pending_preconfirmation_divergence_digest["created_at"]
+                ),
+                "documents": [
+                    dict(value) for value in raw_divergence_documents
+                ],
+                "total_count": divergence_total_count,
+                "buy_count": divergence_buy_count,
+                "sell_count": divergence_sell_count,
+            }
+
+        raw_screening_completion_sessions = payload.get(
+            "screening_completion_sessions",
+            {},
+        )
+        if (
+            not isinstance(raw_screening_completion_sessions, Mapping)
+            or len(raw_screening_completion_sessions)
+            > _SCREENING_COMPLETION_RECORD_LIMIT
+            or any(
+                not _valid_screening_session(session)
+                or _parse_time(accepted_at) is None
+                for session, accepted_at in raw_screening_completion_sessions.items()
+            )
+        ):
+            return invalid("SCREENING_COMPLETION_SESSIONS_INVALID")
+        screening_completion_sessions = {
+            str(session): str(accepted_at)
+            for session, accepted_at in raw_screening_completion_sessions.items()
+        }
+
+        raw_pending_screening_completions = payload.get(
+            "pending_screening_completions",
+            {},
+        )
+        if (
+            not isinstance(raw_pending_screening_completions, Mapping)
+            or len(raw_pending_screening_completions)
+            > _SCREENING_COMPLETION_RECORD_LIMIT
+        ):
+            return invalid("PENDING_SCREENING_COMPLETIONS_INVALID")
+        pending_screening_completions: dict[str, dict[str, object]] = {}
+        pending_completion_fields = {
+            "event_id",
+            "created_at",
+            "market_data_as_of",
+            "coverage_epoch_id",
+            "title",
+            "lines",
+        }
+        for session, raw_completion in raw_pending_screening_completions.items():
+            market_data_as_of = (
+                _parse_time(raw_completion.get("market_data_as_of"))
+                if isinstance(raw_completion, Mapping)
+                else None
+            )
+            event_id = (
+                raw_completion.get("event_id")
+                if isinstance(raw_completion, Mapping)
+                else None
+            )
+            lines = (
+                raw_completion.get("lines")
+                if isinstance(raw_completion, Mapping)
+                else None
+            )
+            if (
+                not _valid_screening_session(session)
+                or session in screening_completion_sessions
+                or not isinstance(raw_completion, Mapping)
+                or set(raw_completion) != pending_completion_fields
+                or event_id != screening_completion_event_id(str(session))
+                or _parse_time(raw_completion.get("created_at")) is None
+                or market_data_as_of is None
+                or market_data_as_of.date().isoformat() != session
+                or market_data_as_of.hour < _SCREENING_COMPLETION_CLOSE_HOUR
+                or not isinstance(raw_completion.get("coverage_epoch_id"), str)
+                or not raw_completion.get("coverage_epoch_id")
+                or not isinstance(raw_completion.get("title"), str)
+                or not raw_completion.get("title")
+                or not isinstance(lines, list)
+                or not lines
+                or any(not isinstance(value, str) or not value for value in lines)
+            ):
+                return invalid("PENDING_SCREENING_COMPLETION_INVALID")
+            pending_screening_completions[str(session)] = {
+                "event_id": str(event_id),
+                "created_at": str(raw_completion["created_at"]),
+                "market_data_as_of": str(raw_completion["market_data_as_of"]),
+                "coverage_epoch_id": str(raw_completion["coverage_epoch_id"]),
+                "title": str(raw_completion["title"]),
+                "lines": list(lines),
+            }
+
         return {
             "delivered_event_ids": delivered,
             "delivered_segment_evidence_ids": delivered_segment_evidence,
@@ -2325,6 +3716,17 @@ class SignalNotificationDispatcher:
             "event_audit": event_audit,
             "suppressed_fingerprints": suppressed_fingerprints,
             "pending_trigger_events": pending_trigger_events,
+            "approaching_alerted_occurrences": approaching_alerted_occurrences,
+            "last_approaching_digest_at": last_approaching_digest_at,
+            "pending_approaching_digest": pending_approaching_digest,
+            "preconfirmation_divergence_alerted_occurrences": (
+                preconfirmation_divergence_alerted_occurrences
+            ),
+            "pending_preconfirmation_divergence_digest": (
+                pending_preconfirmation_divergence_digest
+            ),
+            "screening_completion_sessions": screening_completion_sessions,
+            "pending_screening_completions": pending_screening_completions,
         }
 
     def _now(self) -> datetime:
@@ -2360,6 +3762,25 @@ class SignalNotificationDispatcher:
                     "event_audit": self._event_audit[-_AUDIT_RECORD_LIMIT:],
                     "suppressed_fingerprints": list(self._suppressed_fingerprints),
                     "pending_trigger_events": self._pending_trigger_events,
+                    "approaching_alerted_occurrences": dict(
+                        sorted(self._approaching_alerted_occurrences.items())
+                    ),
+                    "last_approaching_digest_at": self._last_approaching_digest_at,
+                    "pending_approaching_digest": self._pending_approaching_digest,
+                    "preconfirmation_divergence_alerted_occurrences": dict(
+                        sorted(
+                            self._preconfirmation_divergence_alerted_occurrences.items()
+                        )
+                    ),
+                    "pending_preconfirmation_divergence_digest": (
+                        self._pending_preconfirmation_divergence_digest
+                    ),
+                    "screening_completion_sessions": dict(
+                        sorted(self._screening_completion_sessions.items())
+                    ),
+                    "pending_screening_completions": dict(
+                        sorted(self._pending_screening_completions.items())
+                    ),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -2484,6 +3905,43 @@ class SignalNotificationDispatcher:
                 "suppressed_fingerprint_count": len(self._suppressed_fingerprints),
                 "event_audit_record_count": len(self._event_audit),
                 "pending_trigger_event_count": len(self._pending_trigger_events),
+                "approaching_alerted_occurrence_count": len(
+                    self._approaching_alerted_occurrences
+                ),
+                "approaching_digest_pending": (
+                    self._pending_approaching_digest is not None
+                ),
+                "last_approaching_digest_at": self._last_approaching_digest_at,
+                "approaching_digest_cooldown_seconds": int(
+                    _APPROACHING_DIGEST_COOLDOWN.total_seconds()
+                ),
+                "preconfirmation_divergence_alerted_occurrence_count": len(
+                    self._preconfirmation_divergence_alerted_occurrences
+                ),
+                "preconfirmation_divergence_digest_pending": (
+                    self._pending_preconfirmation_divergence_digest is not None
+                ),
+                "screening_completion_session_count": len(
+                    self._screening_completion_sessions
+                ),
+                "last_screening_completion_session": (
+                    max(self._screening_completion_sessions)
+                    if self._screening_completion_sessions
+                    else None
+                ),
+                "last_screening_completion_at": (
+                    self._screening_completion_sessions[
+                        max(self._screening_completion_sessions)
+                    ]
+                    if self._screening_completion_sessions
+                    else None
+                ),
+                "pending_screening_completion_count": len(
+                    self._pending_screening_completions
+                ),
+                "pending_screening_completion_sessions": sorted(
+                    self._pending_screening_completions
+                ),
                 "credentials_exposed": False,
                 "real_account_accessed": False,
                 "real_order_transport_enabled": False,
@@ -2531,7 +3989,9 @@ class SignalNotificationDispatcher:
         reason: str | None = None,
     ) -> None:
         setup = _mapping(document.get("setup_5m"))
-        trigger = _mapping(document.get("segment_difference_1m"))
+        trigger = _mapping(document.get("segment_difference_1m")) or _mapping(
+            document.get(_NOTIFICATION_PRECONFIRMATION_DIVERGENCE_FIELD)
+        )
         raw_reasons = document.get("decision_reasons")
         reasons = (
             raw_reasons
@@ -2653,6 +4113,619 @@ class SignalNotificationDispatcher:
             and _segment_occurrence_event_id(occurrence)
             in self._delivered_segment_evidence
         )
+
+    def dispatch_screening_completion(
+        self,
+        previous: Mapping[str, object],
+        current: Mapping[str, object],
+    ) -> None:
+        """Queue one durable completion receipt per closed market-data session."""
+
+        with self._lock:
+            if self._state_load_error is not None or self._notifier is None:
+                return
+            now = self._now()
+            current_details = _screening_completion_details(current)
+            previous_details = _screening_completion_details(previous)
+            if current_details is not None:
+                session = str(current_details["market_data_session"])
+                previous_session = (
+                    str(previous_details["market_data_session"])
+                    if previous_details is not None
+                    else None
+                )
+                event_id = screening_completion_event_id(session)
+                if (
+                    previous_session != session
+                    and session not in self._screening_completion_sessions
+                    and event_id not in self._delivered
+                    and session not in self._pending_screening_completions
+                ):
+                    title, lines = format_screening_completion(
+                        current,
+                        completed_at=now,
+                    )
+                    self._pending_screening_completions[session] = {
+                        "event_id": event_id,
+                        "created_at": now.isoformat(),
+                        "market_data_as_of": _time_identity(
+                            current_details["market_data_as_of"]
+                        ),
+                        "coverage_epoch_id": str(
+                            current_details["coverage_epoch_id"]
+                        ),
+                        "title": title,
+                        "lines": lines,
+                    }
+                    try:
+                        # Write the exact receipt before crossing the transport
+                        # boundary. A crash can then only replay the same event
+                        # id and message through the durable outbox.
+                        self._persist()
+                    except OSError:
+                        self._pending_screening_completions.pop(session, None)
+                        raise
+
+            for session in sorted(self._pending_screening_completions):
+                pending = self._pending_screening_completions.get(session)
+                if pending is None:
+                    continue
+                event_id = str(pending["event_id"])
+                if (
+                    event_id in self._delivered
+                    or session in self._screening_completion_sessions
+                ):
+                    self._delivered.add(event_id)
+                    self._screening_completion_sessions.setdefault(
+                        session,
+                        now.isoformat(),
+                    )
+                    self._pending_screening_completions.pop(session, None)
+                    self._persist()
+                    continue
+                try:
+                    send_rich = getattr(self._notifier, "send_rich", None)
+                    if callable(send_rich):
+                        sent = bool(
+                            send_rich(
+                                str(pending["title"]),
+                                list(pending["lines"]),
+                                {
+                                    "artifact_key": event_id,
+                                    "require_evidence_match": False,
+                                    "delivery_priority": 80,
+                                    "charts": [],
+                                    "notification_kind": (
+                                        "daily_screening_completion"
+                                    ),
+                                    "market_data_session": session,
+                                },
+                            )
+                        )
+                    else:
+                        sent = bool(
+                            self._notifier.send(
+                                str(pending["title"]),
+                                list(pending["lines"]),
+                            )
+                        )
+                except Exception as exc:
+                    sent = False
+                    failure_reason = type(exc).__name__
+                else:
+                    failure_reason = None if sent else "NOTIFIER_RETURNED_FALSE"
+                if not sent:
+                    self._failure_count += 1
+                    self._last_failure_at = self._now().isoformat()
+                    self._last_failure_reason = failure_reason
+                    self._persist()
+                    return
+
+                accepted_at = self._now().isoformat()
+                self._delivered.add(event_id)
+                self._screening_completion_sessions[session] = accepted_at
+                self._pending_screening_completions.pop(session, None)
+                while (
+                    len(self._screening_completion_sessions)
+                    > _SCREENING_COMPLETION_RECORD_LIMIT
+                ):
+                    self._screening_completion_sessions.pop(
+                        min(self._screening_completion_sessions)
+                    )
+                self._success_count += 1
+                self._last_success_at = accepted_at
+                self._last_success_event_id = event_id
+                self._persist()
+
+    def _dispatch_preconfirmation_divergence_digest_locked(
+        self,
+        current: Mapping[str, object],
+    ) -> None:
+        """Durably deliver new 1m divergences under unconfirmed 5m setups."""
+
+        now = self._now()
+        pending = self._pending_preconfirmation_divergence_digest
+        if pending is None:
+            raw_rows = current.get("signals", ())
+            rows = raw_rows if isinstance(raw_rows, (list, tuple)) else ()
+            candidates_by_occurrence: dict[str, dict[str, object]] = {}
+            for document in rows:
+                if not isinstance(document, Mapping):
+                    continue
+                for divergence in _preconfirmation_divergence_rows(document):
+                    if (
+                        _preconfirmation_divergence_eligibility_reason(
+                            document,
+                            divergence,
+                            observed_at=now,
+                        )
+                        is not None
+                    ):
+                        continue
+                    occurrence = _preconfirmation_divergence_occurrence_key(
+                        document,
+                        divergence,
+                    )
+                    if occurrence is None:
+                        continue
+                    occurrence_id = (
+                        _preconfirmation_divergence_occurrence_event_id(occurrence)
+                    )
+                    if (
+                        occurrence_id
+                        in self._preconfirmation_divergence_alerted_occurrences
+                    ):
+                        continue
+                    notification_document = dict(document)
+                    notification_document[
+                        _NOTIFICATION_PRECONFIRMATION_DIVERGENCE_FIELD
+                    ] = dict(divergence)
+                    candidates_by_occurrence.setdefault(
+                        occurrence_id,
+                        notification_document,
+                    )
+            if not candidates_by_occurrence:
+                return
+            ordered = tuple(
+                sorted(
+                    candidates_by_occurrence.items(),
+                    key=lambda item: _preconfirmation_divergence_sort_key(item[1]),
+                )
+            )
+            occurrence_ids = sorted(candidates_by_occurrence)
+            documents = [
+                dict(document)
+                for _occurrence_id, document in ordered[
+                    :_PRECONFIRMATION_DIVERGENCE_DIGEST_MAX_ITEMS
+                ]
+            ]
+            buy_count = sum(
+                str(
+                    document.get("side")
+                    or _mapping(document.get("setup_5m")).get("side")
+                )
+                == "buy"
+                for document in candidates_by_occurrence.values()
+            )
+            sell_count = len(occurrence_ids) - buy_count
+            event_id = _preconfirmation_divergence_digest_event_id(
+                occurrence_ids,
+                created_at=now,
+            )
+            pending = {
+                "event_id": event_id,
+                "occurrence_ids": occurrence_ids,
+                "created_at": now.isoformat(),
+                "documents": documents,
+                "total_count": len(occurrence_ids),
+                "buy_count": buy_count,
+                "sell_count": sell_count,
+            }
+            self._pending_preconfirmation_divergence_digest = pending
+            try:
+                self._persist()
+            except OSError:
+                self._pending_preconfirmation_divergence_digest = None
+                raise
+
+        event_id = str(pending["event_id"])
+        occurrence_ids = tuple(str(value) for value in pending["occurrence_ids"])
+        documents = tuple(
+            dict(value)
+            for value in pending["documents"]
+            if isinstance(value, Mapping)
+        )
+        created_at = _parse_time(pending["created_at"])
+        if created_at is None or not documents:
+            self._state_load_error = (
+                "PENDING_PRECONFIRMATION_DIVERGENCE_DIGEST_INVALID"
+            )
+            return
+        representative = dict(documents[0])
+        representative["notification_digest_count"] = int(pending["total_count"])
+        representative["notification_digest_kind"] = (
+            "preconfirmation_divergence"
+        )
+        title, lines = format_preconfirmation_divergence_digest(
+            documents,
+            total_count=int(pending["total_count"]),
+            buy_count=int(pending["buy_count"]),
+            sell_count=int(pending["sell_count"]),
+            detected_at=created_at,
+        )
+        review_recorded = self._record_review_notification(
+            event_id=event_id,
+            document=representative,
+            old_stage="approaching",
+            new_stage="approaching",
+            delivery_status="pending",
+            detected_at=created_at,
+        )
+        if not review_recorded:
+            self._failure_count += 1
+            self._last_failure_at = now.isoformat()
+            self._last_failure_reason = "REVIEW_INBOX_RECORD_FAILED"
+            self._record_audit(
+                status="failed",
+                event_id=event_id,
+                old_stage="approaching",
+                new_stage="approaching",
+                document=representative,
+                reason="REVIEW_INBOX_RECORD_FAILED",
+            )
+            self._persist()
+            return
+
+        expires_at = now + _NOTIFICATION_RETRY_TTL
+        try:
+            send_rich = getattr(self._notifier, "send_rich", None)
+            if callable(send_rich):
+                sent = bool(
+                    send_rich(
+                        title,
+                        lines,
+                        {
+                            "artifact_key": event_id,
+                            "require_evidence_match": False,
+                            "delivery_priority": 8,
+                            "expires_at": expires_at.isoformat(),
+                            "charts": [],
+                        },
+                    )
+                )
+            elif self._notifier is not None:
+                sent = bool(self._notifier.send(title, lines))
+            else:
+                sent = False
+        except Exception as exc:
+            sent = False
+            failure_reason = type(exc).__name__
+        else:
+            failure_reason = None if sent else "NOTIFIER_RETURNED_FALSE"
+        if not sent:
+            self._failure_count += 1
+            self._last_failure_at = now.isoformat()
+            self._last_failure_reason = failure_reason
+            self._record_audit(
+                status="failed",
+                event_id=event_id,
+                old_stage="approaching",
+                new_stage="approaching",
+                document=representative,
+                reason=failure_reason,
+            )
+            self._record_review_notification(
+                event_id=event_id,
+                document=representative,
+                old_stage="approaching",
+                new_stage="approaching",
+                delivery_status="failed",
+                detected_at=created_at,
+                delivery_reason=failure_reason,
+            )
+            self._persist()
+            return
+
+        delivered_at = now.isoformat()
+        self._delivered.add(event_id)
+        for occurrence_id in occurrence_ids:
+            self._preconfirmation_divergence_alerted_occurrences[
+                occurrence_id
+            ] = delivered_at
+        if (
+            len(self._preconfirmation_divergence_alerted_occurrences)
+            > _PRECONFIRMATION_DIVERGENCE_OCCURRENCE_LIMIT
+        ):
+            retained = sorted(
+                self._preconfirmation_divergence_alerted_occurrences.items(),
+                key=lambda item: (item[1], item[0]),
+            )[-_PRECONFIRMATION_DIVERGENCE_OCCURRENCE_LIMIT:]
+            self._preconfirmation_divergence_alerted_occurrences = dict(retained)
+        self._pending_preconfirmation_divergence_digest = None
+        self._success_count += 1
+        self._last_success_at = delivered_at
+        self._last_success_event_id = event_id
+        deferred_delivery = bool(
+            getattr(self._notifier, "delivery_deferred", False) is True
+        )
+        self._record_audit(
+            status="queued" if deferred_delivery else "delivered",
+            event_id=event_id,
+            old_stage="approaching",
+            new_stage="approaching",
+            document=representative,
+        )
+        if not deferred_delivery:
+            self._record_review_notification(
+                event_id=event_id,
+                document=representative,
+                old_stage="approaching",
+                new_stage="approaching",
+                delivery_status=(
+                    "simulated"
+                    if getattr(self._notifier, "dry_run", False) is True
+                    else "delivered"
+                ),
+                detected_at=created_at,
+            )
+        self._persist()
+
+    def dispatch_approaching_digest(
+        self,
+        current: Mapping[str, object],
+    ) -> None:
+        """Send one durable, rate-limited digest for current forming structures.
+
+        This channel deliberately does not reuse ``dispatch_changes``.  A
+        rolling provisional point is not a buy/sell event and must never enter
+        the formal trigger/invalidated lifecycle.  The full current monitor
+        snapshot is supplied once per completed monitoring round so all newly
+        visible structures can be coalesced into one bounded message.
+        """
+
+        with self._lock:
+            if self._state_load_error is not None:
+                return
+            self._dispatch_preconfirmation_divergence_digest_locked(current)
+            if self._pending_preconfirmation_divergence_digest is not None:
+                return
+            now = self._now()
+            pending = self._pending_approaching_digest
+            if pending is None:
+                last_digest_at = _parse_time(self._last_approaching_digest_at)
+                if (
+                    last_digest_at is not None
+                    and timedelta(0) <= now - last_digest_at
+                    < _APPROACHING_DIGEST_COOLDOWN
+                ):
+                    return
+                raw_rows = current.get("signals", ())
+                rows = (
+                    raw_rows
+                    if isinstance(raw_rows, (list, tuple))
+                    else ()
+                )
+                candidates_by_occurrence: dict[
+                    str,
+                    Mapping[str, object],
+                ] = {}
+                for document in rows:
+                    if not isinstance(document, Mapping):
+                        continue
+                    if any(
+                        _preconfirmation_divergence_eligibility_reason(
+                            document,
+                            divergence,
+                            observed_at=now,
+                        )
+                        is None
+                        for divergence in _preconfirmation_divergence_rows(document)
+                    ):
+                        # The stronger 1m-divergence warning already explains
+                        # that this 5m structure is unconfirmed.  Do not follow
+                        # it with a weaker generic approaching reminder.
+                        continue
+                    if (
+                        _approaching_digest_eligibility_reason(
+                            document,
+                            observed_at=now,
+                        )
+                        is not None
+                    ):
+                        continue
+                    occurrence = _approaching_occurrence_key(document)
+                    if occurrence is None:
+                        continue
+                    occurrence_id = _approaching_occurrence_event_id(occurrence)
+                    if occurrence_id in self._approaching_alerted_occurrences:
+                        continue
+                    candidates_by_occurrence.setdefault(occurrence_id, document)
+                if not candidates_by_occurrence:
+                    return
+                ordered = tuple(
+                    sorted(
+                        candidates_by_occurrence.items(),
+                        key=lambda item: _approaching_digest_sort_key(item[1]),
+                    )
+                )
+                occurrence_ids = sorted(candidates_by_occurrence)
+                documents = [
+                    dict(document)
+                    for _occurrence_id, document in ordered[
+                        :_APPROACHING_DIGEST_MAX_ITEMS
+                    ]
+                ]
+                buy_count = sum(
+                    str(
+                        document.get("side")
+                        or _mapping(document.get("setup_5m")).get("side")
+                    )
+                    == "buy"
+                    for document in candidates_by_occurrence.values()
+                )
+                sell_count = len(occurrence_ids) - buy_count
+                event_id = _approaching_digest_event_id(
+                    occurrence_ids,
+                    created_at=now,
+                )
+                pending = {
+                    "event_id": event_id,
+                    "occurrence_ids": occurrence_ids,
+                    "created_at": now.isoformat(),
+                    "documents": documents,
+                    "total_count": len(occurrence_ids),
+                    "buy_count": buy_count,
+                    "sell_count": sell_count,
+                }
+                # Persist the exact digest before crossing the external outbox
+                # boundary.  A crash can then only replay the same event id;
+                # the durable outbox deduplicates that retry.
+                self._pending_approaching_digest = pending
+                try:
+                    self._persist()
+                except OSError:
+                    self._pending_approaching_digest = None
+                    raise
+
+            event_id = str(pending["event_id"])
+            occurrence_ids = tuple(str(value) for value in pending["occurrence_ids"])
+            documents = tuple(
+                dict(value)
+                for value in pending["documents"]
+                if isinstance(value, Mapping)
+            )
+            created_at = _parse_time(pending["created_at"])
+            if created_at is None or not documents:
+                # This is unreachable after state validation, but preserves the
+                # fail-closed boundary if in-process state is corrupted.
+                self._state_load_error = "PENDING_APPROACHING_DIGEST_INVALID"
+                return
+            representative = dict(documents[0])
+            representative["notification_digest_count"] = int(
+                pending["total_count"]
+            )
+            representative["notification_digest_kind"] = "approaching"
+            title, lines = format_approaching_digest(
+                documents,
+                total_count=int(pending["total_count"]),
+                buy_count=int(pending["buy_count"]),
+                sell_count=int(pending["sell_count"]),
+                detected_at=created_at,
+            )
+            review_recorded = self._record_review_notification(
+                event_id=event_id,
+                document=representative,
+                old_stage="observed",
+                new_stage="approaching",
+                delivery_status="pending",
+                detected_at=created_at,
+            )
+            if not review_recorded:
+                self._failure_count += 1
+                self._last_failure_at = now.isoformat()
+                self._last_failure_reason = "REVIEW_INBOX_RECORD_FAILED"
+                self._record_audit(
+                    status="failed",
+                    event_id=event_id,
+                    old_stage="observed",
+                    new_stage="approaching",
+                    document=representative,
+                    reason="REVIEW_INBOX_RECORD_FAILED",
+                )
+                self._persist()
+                return
+            expires_at = now + _NOTIFICATION_RETRY_TTL
+            try:
+                send_rich = getattr(self._notifier, "send_rich", None)
+                if callable(send_rich):
+                    sent = bool(
+                        send_rich(
+                            title,
+                            lines,
+                            {
+                                "artifact_key": event_id,
+                                "require_evidence_match": False,
+                                "delivery_priority": 20,
+                                "expires_at": expires_at.isoformat(),
+                                "charts": [],
+                            },
+                        )
+                    )
+                elif self._notifier is not None:
+                    sent = bool(self._notifier.send(title, lines))
+                else:
+                    sent = False
+            except Exception as exc:
+                sent = False
+                failure_reason = type(exc).__name__
+            else:
+                failure_reason = None if sent else "NOTIFIER_RETURNED_FALSE"
+            if not sent:
+                self._failure_count += 1
+                self._last_failure_at = now.isoformat()
+                self._last_failure_reason = failure_reason
+                self._record_audit(
+                    status="failed",
+                    event_id=event_id,
+                    old_stage="observed",
+                    new_stage="approaching",
+                    document=representative,
+                    reason=failure_reason,
+                )
+                self._record_review_notification(
+                    event_id=event_id,
+                    document=representative,
+                    old_stage="observed",
+                    new_stage="approaching",
+                    delivery_status="failed",
+                    detected_at=created_at,
+                    delivery_reason=failure_reason,
+                )
+                self._persist()
+                return
+
+            delivered_at = now.isoformat()
+            self._delivered.add(event_id)
+            for occurrence_id in occurrence_ids:
+                self._approaching_alerted_occurrences[occurrence_id] = delivered_at
+            if (
+                len(self._approaching_alerted_occurrences)
+                > _APPROACHING_OCCURRENCE_LIMIT
+            ):
+                retained = sorted(
+                    self._approaching_alerted_occurrences.items(),
+                    key=lambda item: (item[1], item[0]),
+                )[-_APPROACHING_OCCURRENCE_LIMIT:]
+                self._approaching_alerted_occurrences = dict(retained)
+            self._pending_approaching_digest = None
+            self._last_approaching_digest_at = delivered_at
+            self._success_count += 1
+            self._last_success_at = delivered_at
+            self._last_success_event_id = event_id
+            deferred_delivery = bool(
+                getattr(self._notifier, "delivery_deferred", False) is True
+            )
+            self._record_audit(
+                status="queued" if deferred_delivery else "delivered",
+                event_id=event_id,
+                old_stage="observed",
+                new_stage="approaching",
+                document=representative,
+            )
+            if not deferred_delivery:
+                self._record_review_notification(
+                    event_id=event_id,
+                    document=representative,
+                    old_stage="observed",
+                    new_stage="approaching",
+                    delivery_status=(
+                        "simulated"
+                        if getattr(self._notifier, "dry_run", False) is True
+                        else "delivered"
+                    ),
+                    detected_at=created_at,
+                )
+            self._persist()
 
     def dispatch_changes(
         self,
@@ -2808,6 +4881,7 @@ class SignalNotificationDispatcher:
                     old_stage=old_stage,
                     new_stage=new_stage,
                     require_decision_identity=require_decision_identity,
+                    evaluated_at=dispatch_now,
                 )
                 if rejection is not None:
                     if pending_event_id is not None:
@@ -2935,6 +5009,30 @@ class SignalNotificationDispatcher:
                     )
                 )
                 _signal_id, old_stage, new_stage, document = candidates[0]
+                # Pending payloads are restored into ``grouped`` before the
+                # current snapshot is traversed. Revalidate the selected
+                # payload at the irreversible send boundary as well: otherwise
+                # an enrichment which expired while waiting for a webhook retry
+                # could survive the current-row rejection and still render/send
+                # from the already-populated pending group.
+                rejection = _notification_eligibility_reason(
+                    document,
+                    old_stage=old_stage,
+                    new_stage=new_stage,
+                    require_decision_identity=require_decision_identity,
+                    evaluated_at=dispatch_now,
+                )
+                if rejection is not None:
+                    self._pending_trigger_events.pop(event_id, None)
+                    self._record_suppressed(
+                        event_id=event_id,
+                        old_stage=old_stage,
+                        new_stage=new_stage,
+                        document=document,
+                        reason=rejection,
+                    )
+                    dirty_state = True
+                    continue
                 setup_point_types = tuple(
                     sorted(
                         {
@@ -3269,6 +5367,10 @@ __all__ = [
     "SCHEMA",
     "STRATEGY_ID",
     "SignalNotificationDispatcher",
+    "format_approaching_digest",
+    "format_preconfirmation_divergence_digest",
+    "format_screening_completion",
     "format_notification",
     "notification_event_id",
+    "screening_completion_event_id",
 ]

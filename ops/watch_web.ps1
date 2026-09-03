@@ -304,9 +304,28 @@ function Test-WebHealth {
     $configurationFailures = [Collections.Generic.List[string]]::new()
     $operationalFailures = [Collections.Generic.List[string]]::new()
     $components = $health.components
+    $qmtRuntime = $components.qmt_runtime
     $screening = $components.trading_screening
     $nativeGateway = $screening.native_gateway
     $notification = $screening.notification_delivery
+    $qmtOperationAction = ([string]$qmtRuntime.operation_action).Trim().ToUpperInvariant()
+    $qmtRuntimeChangeInProgress = (
+        $qmtRuntime.operation_in_progress -eq $true -and
+        $qmtOperationAction -in @('ENSURE', 'RESTART')
+    )
+
+    if ($qmtRuntimeChangeInProgress) {
+        # AppQmtRuntimeController deliberately closes the native market-data
+        # gateway while it owns a bounded Ensure/Restart. During that interval
+        # /livez, the scheduler and background workers remain healthy; restarting
+        # the whole Web process would only erase hot chart/screening caches and
+        # race the same QMT operation. The controller's minute monitor owns
+        # recovery if the bounded operation itself fails.
+        $operationalFailures.Add(
+            'qmt_runtime_{0}_in_progress' -f `
+                $qmtOperationAction.ToLowerInvariant()
+        )
+    }
 
     if ($components.scheduler.ready -ne $true) {
         $recoverableFailures.Add('scheduler_not_ready')
@@ -314,10 +333,16 @@ function Test-WebHealth {
     if ($components.runtime.ready -ne $true) {
         $recoverableFailures.Add('background_runtime_not_ready')
     }
-    if ($components.qmt_runtime.ready -ne $true) {
+    if (
+        $qmtRuntime.ready -ne $true -and
+        -not $qmtRuntimeChangeInProgress
+    ) {
         $recoverableFailures.Add('qmt_runtime_not_ready')
     }
-    if ($components.ticks.ready -ne $true) {
+    if (
+        $components.ticks.ready -ne $true -and
+        -not $qmtRuntimeChangeInProgress
+    ) {
         $recoverableFailures.Add('ticks_not_ready')
     }
     if ($screening.worker_alive -ne $true) {
@@ -330,10 +355,16 @@ function Test-WebHealth {
     ) {
         $recoverableFailures.Add('trading_screening_heartbeat_stale')
     }
-    if ($nativeGateway.ready -ne $true) {
+    if (
+        $nativeGateway.ready -ne $true -and
+        -not $qmtRuntimeChangeInProgress
+    ) {
         $recoverableFailures.Add('native_gateway_not_ready')
     }
-    if ($nativeGateway.market_data_probe.ready -ne $true) {
+    if (
+        $nativeGateway.market_data_probe.ready -ne $true -and
+        -not $qmtRuntimeChangeInProgress
+    ) {
         $recoverableFailures.Add('native_market_data_probe_not_ready')
     }
 
@@ -446,6 +477,15 @@ function Test-WebHealth {
         } else {
             $recoverableFailures.Add('realtime_alert_not_ready')
         }
+    }
+    if (
+        $screening.priority_monitor_compute_window_open -eq $true -and
+        $screening.realtime_alert_capacity_ready -eq $false
+    ) {
+        # Pre-open and lunch are precisely when a warm-up/capacity deficit can
+        # still be repaired before the next due 1m bar. Restarting would throw
+        # away hot runtimes, so surface this as an operational SLO failure only.
+        $operationalFailures.Add('realtime_alert_capacity_insufficient')
     }
 
     $allFailures = @($startupFailures) + @($recoverableFailures) + `
