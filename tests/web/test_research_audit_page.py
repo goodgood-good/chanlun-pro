@@ -480,7 +480,7 @@ def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) ->
     assert "chanlun_source_faithful" in html
     assert "未达到实盘标准" in html
     assert "30m 大级别结构" in html
-    assert "5m 操作确认买卖级别" in html
+    assert "5m 正式确认买卖级别" in html
     assert "1m 区间套级别" in html
     assert "一、二、三类买卖点独立" in html
     assert "一、二、三类统一" in html

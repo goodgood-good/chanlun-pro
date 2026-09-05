@@ -4976,6 +4976,12 @@ def live_signal_human_review_alert(
             lifecycle_stage=str(stage),
             monitor_only=signal.get("monitor_only") is True,
             five_minute_trade_signal_fresh=five_minute_trade_signal_fresh,
+            point_type=str(setup.get("point_type") or signal.get("point_type")),
+            center_ordinal=(
+                int(setup["center_ordinal"])
+                if type(setup.get("center_ordinal")) is int
+                else None
+            ),
             parameters=parameters,
         ),
         # 这是 5 分钟正式买卖点的因果结构锚点，不是行情报价或成交承诺。

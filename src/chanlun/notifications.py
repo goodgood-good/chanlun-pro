@@ -1,9 +1,10 @@
 """Notification helpers shared by runtime tasks."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import threading
@@ -41,6 +42,7 @@ class DingTalkWebhookNotifier:
             Callable[[Mapping[str, object]], Sequence[Mapping[str, str] | str]]
             | None
         ) = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("timeout must be positive")
@@ -50,6 +52,8 @@ class DingTalkWebhookNotifier:
             raise TypeError("dry_run_collector must be callable")
         if rich_content_provider is not None and not callable(rich_content_provider):
             raise TypeError("rich_content_provider must be callable")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
         if (
             isinstance(dedupe_max_records, bool)
             or not isinstance(dedupe_max_records, int)
@@ -66,6 +70,7 @@ class DingTalkWebhookNotifier:
         )
         self._dedupe_max_records = dedupe_max_records
         self._rich_content_provider = rich_content_provider
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._dedupe_lock = threading.RLock()
         self._volatile_delivered: set[str] = set()
 
@@ -252,6 +257,60 @@ class DingTalkWebhookNotifier:
     def send(self, title: str, lines: list[str] | str) -> bool:
         return self._send_content(title, lines)
 
+    def _delivery_deadline_passed(
+        self,
+        context: Mapping[str, object],
+    ) -> bool:
+        raw_deadline = context.get("expires_at")
+        if raw_deadline in (None, ""):
+            return False
+        try:
+            deadline = datetime.fromisoformat(str(raw_deadline))
+        except ValueError:
+            fun.get_logger().warning(
+                "[notify] rich notification expiry is invalid"
+            )
+            return True
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            fun.get_logger().warning(
+                "[notify] rich notification expiry is not timezone-aware"
+            )
+            return True
+        now = self._clock()
+        if not isinstance(now, datetime):
+            raise TypeError("notification clock must return datetime")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("notification clock must be timezone-aware")
+        remaining = deadline.astimezone(timezone.utc) - now.astimezone(timezone.utc)
+        raw_margin = context.get("minimum_delivery_margin_seconds", 0)
+        if (
+            isinstance(raw_margin, bool)
+            or not isinstance(raw_margin, (int, float))
+            or raw_margin < 0
+        ):
+            fun.get_logger().warning(
+                "[notify] rich notification delivery margin is invalid"
+            )
+            return True
+        margin_seconds = float(raw_margin)
+        if not isfinite(margin_seconds):
+            fun.get_logger().warning(
+                "[notify] rich notification delivery margin is not finite"
+            )
+            return True
+        try:
+            margin = timedelta(seconds=margin_seconds)
+        except OverflowError:
+            fun.get_logger().warning(
+                "[notify] rich notification delivery margin is too large"
+            )
+            return True
+        return (
+            remaining <= timedelta(0)
+            if margin_seconds == 0
+            else remaining < margin
+        )
+
     def send_rich(
         self,
         title: str,
@@ -260,14 +319,22 @@ class DingTalkWebhookNotifier:
     ) -> bool:
         """Send one Markdown alert with optional chart images.
 
-        Ordinary chart rendering remains optional. Evidence-bound alerts are
-        different: the image is part of the claimed evidence, so a missing
-        image fails closed and leaves the caller's durable queue available for
-        retry instead of recording a chartless delivery as successful.
+        Ordinary chart rendering remains optional unless the producer marks it
+        as required. Evidence-bound alerts are always required: the image is
+        part of the claimed evidence, so a missing image fails closed and
+        leaves the caller's durable queue available for retry instead of
+        recording a chartless delivery as successful.
         """
 
         images: Sequence[Mapping[str, str] | str] = ()
         evidence_required = context.get("require_evidence_match") is True
+        chart_required = evidence_required or context.get("require_chart") is True
+        if self._delivery_deadline_passed(context):
+            fun.get_logger().warning(
+                "[notify] rich notification deadline or delivery margin "
+                "failed before chart rendering"
+            )
+            return False
         if self._rich_content_provider is not None:
             try:
                 images = self._rich_content_provider(context)
@@ -276,16 +343,25 @@ class DingTalkWebhookNotifier:
                     "[notify] chart enrichment failed: "
                     f"{type(exc).__name__}: {str(exc)[:160]}"
                 )
-                if evidence_required:
+                if chart_required:
                     return False
-            if evidence_required and not images:
+            if chart_required and not images:
                 fun.get_logger().warning(
-                    "[notify] evidence-bound chart enrichment returned no image"
+                    "[notify] required chart enrichment returned no image"
                 )
                 return False
-        elif evidence_required:
+        elif chart_required:
             fun.get_logger().warning(
-                "[notify] evidence-bound chart provider is unavailable"
+                "[notify] required chart provider is unavailable"
+            )
+            return False
+        # Strict chart generation may consume most of a short 1m execution
+        # window.  Recheck immediately before transport so an alert cannot
+        # start its webhook request after the producer's absolute deadline.
+        if self._delivery_deadline_passed(context):
+            fun.get_logger().warning(
+                "[notify] rich notification deadline or delivery margin "
+                "failed during chart rendering"
             )
             return False
         return self._send_content(title, lines, images=images)

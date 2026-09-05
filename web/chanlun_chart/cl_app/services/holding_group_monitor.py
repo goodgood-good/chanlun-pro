@@ -1370,7 +1370,7 @@ def _notification_line(
         parts.append(_notification_position_line(event))
         timeline_items: list[tuple[str, object]] = [
             (
-                "5分钟操作确认",
+                "5分钟正式点确认",
                 getattr(event, "setup_confirmed_time", "") or confirmed_time,
             )
             if segment_update
@@ -1910,19 +1910,25 @@ class HoldingGroupMonitorService:
             return False
         try:
             send_rich = getattr(self._notifier, "send_rich", None)
+            if charts and not callable(send_rich):
+                self._runtime_ledger.record_failure(
+                    "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
+                )
+                return False
             delivered = bool(
                 send_rich(
                     title,
                     lines,
                     {
                         "charts": list(charts),
+                        "require_chart": bool(charts),
                         "delivery_priority": delivery_priority,
                         "require_evidence_match": any(
                             value.get("evidence_required") is True for value in charts
                         ),
                     },
                 )
-                if callable(send_rich) and charts
+                if charts
                 else self._notifier.send(title, lines)
             )
         except Exception as exc:

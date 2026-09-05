@@ -9,8 +9,11 @@ from chanlun.decision_support.trading_system.lifecycle import (
     advance_lifecycle,
     build_setup,
     current_five_minute_setup_points,
+    five_minute_setup_center_priority_rank,
     five_minute_setup_is_current,
     five_minute_setup_is_executable,
+    five_minute_setup_is_in_policy_scope,
+    five_minute_setup_is_in_selection_scope,
     lifecycle_stage_from_signal,
     match_one_minute_nesting_witness,
     match_one_minute_preconfirmation_divergences,
@@ -75,6 +78,21 @@ def _strict_provisional(point):
             available_at=point.available_at,
         ),
     )
+
+
+def test_later_center_third_points_are_ranked_research_only() -> None:
+    first = confirmed_point("3buy", center_ordinal=1)
+    second = confirmed_point("3buy", center_ordinal=2)
+
+    assert five_minute_setup_is_in_selection_scope(first) is True
+    assert five_minute_setup_is_in_selection_scope(second) is True
+    assert five_minute_setup_is_in_policy_scope(first) is True
+    assert five_minute_setup_is_in_policy_scope(second) is False
+    assert five_minute_setup_center_priority_rank("3buy", 1) == 0
+    assert five_minute_setup_center_priority_rank("3buy", 2) == 1
+    assert five_minute_setup_center_priority_rank("3buy", 3) == 2
+    assert five_minute_setup_center_priority_rank("3buy", None) > 3
+    assert five_minute_setup_center_priority_rank("2buy", None) == 0
 
 
 def test_unconfirmed_five_minute_setup_retains_nested_one_minute_divergences() -> None:
@@ -894,6 +912,36 @@ def test_signal_identity_survives_repeated_observation() -> None:
 
     assert repeated.signal_id == first.signal_id
     assert repeated.stage == first.stage == "triggered"
+
+
+def test_executable_projection_restores_to_durable_triggered_state() -> None:
+    setup_point = _strict_setup(confirmed_point("2buy"))
+    setup = build_setup(
+        setup_point,
+        neutral_context("30m"),
+        eligible_sector(),
+    )
+    witness = _strict_witness(
+        confirmed_point("1buy", frequency="1m", minutes_after=-1)
+    )
+    triggered = advance_lifecycle(None, setup, witness, as_of=AS_OF)
+    projected = replace(
+        triggered,
+        stage="executable",
+        reason_codes=("execution_constraints_passed",),
+    )
+
+    refreshed = advance_lifecycle(
+        projected,
+        setup,
+        witness,
+        as_of=AS_OF + timedelta(minutes=1),
+    )
+
+    assert refreshed.stage == "triggered"
+    assert refreshed.reason_codes == ("five_minute_trade_signal_confirmed",)
+    assert refreshed.trigger_point_id == witness.point_id
+    assert refreshed.observed_at == triggered.observed_at
 
 
 def test_terminal_tail_remains_current_for_display_after_execution_expiry() -> None:

@@ -137,12 +137,7 @@ def terminal_segment_windows(
         if len(forming) > 1 or (forming and forming[0] is not level.units[-1]):
             raise ValueError("only the terminal strict unit may still be forming")
         completed = next(
-            (
-                unit
-                for unit in reversed(level.units)
-                if not unit.forming
-                and (unit.locked or unit.formed_at is not None)
-            ),
+            (unit for unit in reversed(level.units) if not unit.forming),
             None,
         )
         windows.append(

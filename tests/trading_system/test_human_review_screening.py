@@ -1254,6 +1254,28 @@ def test_review_priority_is_a_transparent_ordering_rule() -> None:
     ) == 36
 
 
+def test_review_priority_decreases_for_each_later_third_point_center() -> None:
+    common = {
+        "confidence": "MEDIUM",
+        "exact_green": False,
+        "market_risk_gate": "GREEN",
+        "sector_risk_gate": "GREEN",
+        "symbol_risk_gate": "GREEN",
+        "warning_count": 0,
+        "position_status": "CONDITIONAL",
+        "side": "buy",
+        "lifecycle_stage": "triggered",
+        "point_type": "3buy",
+    }
+
+    first_center = review_priority(**common, center_ordinal=1)
+    second_center = review_priority(**common, center_ordinal=2)
+    third_center = review_priority(**common, center_ordinal=3)
+
+    assert first_center > second_center > third_center
+    assert first_center - second_center == second_center - third_center == 1
+
+
 def test_review_priority_escalates_confirmed_sell_and_manual_attention() -> None:
     common = {
         "confidence": "LOW",

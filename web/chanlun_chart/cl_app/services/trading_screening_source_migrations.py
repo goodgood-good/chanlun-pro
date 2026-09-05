@@ -142,6 +142,72 @@ _REVIEWED_PRIORITY_MONITOR_STATE_SOURCE_TRANSITIONS: frozenset[
             "sha256:e3f2bb6ffc56a16901582a22b4759a1e3df720670b3fb01126191043248e51d3",
             "sha256:7343aa38677a66b48f5777404c8698c3f92c8318701241cffa4f4742ee18418b",
         ),
+        # Separate confirmed 1m execution locators from best-effort forming
+        # previews and reserve the formal 5m lane before those previews.  This
+        # changes only revisit order and runtime health counters; persisted
+        # signal documents and observations retain their exact contract.
+        (
+            "sha256:76f359c61c65b6d441eb502438635dbafeb5518243b63725baba72676d431536",
+            "sha256:a011876bdb97bd5ab1437d707f69a9a03aa755fcf9ba4485514299ce4918e3c7",
+        ),
+        # Cap exact 1m locator completion before the chart/transport window and
+        # expose the separate cadence/completion SLAs.  The authenticated
+        # signal documents and observations are unchanged, so retain and
+        # re-sign the existing priority queue.
+        (
+            "sha256:a011876bdb97bd5ab1437d707f69a9a03aa755fcf9ba4485514299ce4918e3c7",
+            "sha256:60711db42ebec83796c43293dc4711bd4847515bf9a06232fdf1897717b6b19f",
+        ),
+        # Calibrate the completion cap to measured full-pool throughput while
+        # retaining the independently enforced enqueue and transport margins.
+        # This changes scheduling capacity only; queued observations and
+        # decisions remain byte-compatible.
+        (
+            "sha256:60711db42ebec83796c43293dc4711bd4847515bf9a06232fdf1897717b6b19f",
+            "sha256:884694c8cbf286983e38d1dc34c10549759700a6049092972f4e5eb2ca3ee8b5",
+        ),
+        # Keep monitor confirmations and code-level tombstones authoritative
+        # after their refresh-health SLA expires.  This is a presentation-only
+        # reconciliation change; persisted decisions and observations retain
+        # their exact contract and can be re-signed without recomputation.
+        (
+            "sha256:884694c8cbf286983e38d1dc34c10549759700a6049092972f4e5eb2ca3ee8b5",
+            "sha256:1f3e8d9b2febca63b017c9b33e05a903afd85e6edd84dfdc7ed91a275b0b5300",
+        ),
+        # Keep every still-visible buy setup in the recurring 5m retirement
+        # lane after its optional execution/1m window expires. This changes
+        # only which authenticated subjects are revisited; retained documents
+        # and observations remain valid and the deployment recheck drains any
+        # setup whose successor segment has already completed.
+        (
+            "sha256:1f3e8d9b2febca63b017c9b33e05a903afd85e6edd84dfdc7ed91a275b0b5300",
+            "sha256:947ea6cdaad25a0c7cc9efc06fe6b7ac643cdc3a964848712263c3106c7475d1",
+        ),
+        # Reserve and publish each due first-center 5m confirmation before
+        # ordinary candidate work, remove later-center research rows from the
+        # realtime lanes, and report the measured 1m completion shortfall.
+        # These changes affect scheduling/health only; authenticated monitor
+        # documents and observations remain valid and are re-signed exactly.
+        (
+            "sha256:29e891d4b19e2d9e28f4d4cb9ea27d743c60ef122ebdd230eb6514cc9957cfc4",
+            "sha256:1311089e29c2ed3666f4f68c569e65d44c2522af3e67adce9a19c5841596787e",
+        ),
+        # A code may carry an older confirmed 1m locator and a newer forming
+        # 5m point at the same time. Run the cheap authoritative 5m pass first,
+        # publish it immediately, and only then spend capacity on 1m precision.
+        # This changes scheduling and health accounting only; authenticated
+        # documents and observations remain byte-compatible.
+        (
+            "sha256:1311089e29c2ed3666f4f68c569e65d44c2522af3e67adce9a19c5841596787e",
+            "sha256:014230479f4dec1cf228fd34b85c82f07f34c49c4bd7ce46b17e657b115f82e6",
+        ),
+        # The due-formal phase precedes every 1m phase, so it can use the
+        # formerly reserved twelfth structure shard without changing any
+        # market input, decision document, or persisted observation.
+        (
+            "sha256:014230479f4dec1cf228fd34b85c82f07f34c49c4bd7ce46b17e657b115f82e6",
+            "sha256:a2c29f203a70a28acf957615cd0146038644047f85802ebdc04f165fc775d183",
+        ),
     }
 )
 _REVIEWED_COMPOSABLE_ORCHESTRATION_SOURCE_ROWS = frozenset(
@@ -252,6 +318,70 @@ _REVIEWED_COMPOSABLE_ORCHESTRATION_SOURCE_ROWS = frozenset(
             "web/chanlun_chart/cl_app/services/trading_screening.py",
             "sha256:5f5305a74353dcb637f71ea24f13913902cb29cb31cf18c1422bbeeba83a8e30",
             "sha256:8dae5e9e3172bac95e10a6d6581b6842185bfaa0983516c4267f4fa02a472679",
+        ),
+        # Give every due authoritative 5m confirmation its own reserved phase
+        # before any unconfirmed 1m divergence preview.  The fixed-bundle
+        # decision and durable monitor payload are unchanged.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:8dae5e9e3172bac95e10a6d6581b6842185bfaa0983516c4267f4fa02a472679",
+            "sha256:a48e23095707a8af7d9aed6ebaf5060a45cb0fa3cc0d657185708fea602d5ada",
+        ),
+        # Bound locator completion to the part of the minute that still leaves
+        # the alert renderer and transport usable. This is physical scheduling
+        # only and preserves every fixed-bundle structure and decision byte.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:a48e23095707a8af7d9aed6ebaf5060a45cb0fa3cc0d657185708fea602d5ada",
+            "sha256:0dfd5633fba1706221b932273d8a68362a0f60cd1e985620397bbf13d1614098",
+        ),
+        # Match the physical locator cap to demonstrated live throughput;
+        # notification admission and final transport margins are unchanged.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:0dfd5633fba1706221b932273d8a68362a0f60cd1e985620397bbf13d1614098",
+            "sha256:83b8077319afa8132102fc03d5f3928e2f75408b8918b6d4499f00dd552feefe",
+        ),
+        # Separate lane freshness health from the durable page projection so
+        # an aged incremental observation cannot resurrect an older candidate.
+        # No fixed-bundle structure or decision document bytes are changed.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:83b8077319afa8132102fc03d5f3928e2f75408b8918b6d4499f00dd552feefe",
+            "sha256:329ecf80a2abd8f6906936decfb875c8ad7f8d95e096403f7ef48b18fb3266fa",
+        ),
+        # Split bounded 1m execution freshness from the durable 5m structural
+        # retirement lane. Fixed-bundle structures and decision documents are
+        # unchanged; only recurring monitor admission is widened.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:329ecf80a2abd8f6906936decfb875c8ad7f8d95e096403f7ef48b18fb3266fa",
+            "sha256:dc75b7067929580e4a7d5f1ebb723361367198741381ccce9ab6beca47c4c59a",
+        ),
+        # Keep the already-authenticated center-ordinal decision documents
+        # while tightening only realtime admission, phase precedence and
+        # capacity telemetry. No fixed-bundle decision byte is rewritten.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:ca85d71a650428d8c53f5d1ee4cb6335b70c8fb755ec724244277b636ae9e30e",
+            "sha256:4e9f4845d1d1b2e0fad0acf4b6f3fea10eda0d81242cf537c955cbb5cb9fce14",
+        ),
+        # Enforce the already documented formal-confirmation priority across
+        # codes that also own an older 1m locator. The fixed-bundle engine and
+        # persisted decision contract are unchanged; only phase admission and
+        # its measured completion accounting move.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:4e9f4845d1d1b2e0fad0acf4b6f3fea10eda0d81242cf537c955cbb5cb9fce14",
+            "sha256:a61821c5513c686a29b2b7611ef18d9343ab105f691724a92e82618774ad38ee",
+        ),
+        # The now-leading formal confirmation phase uses all structure shards;
+        # the following 1m phase remains serialized behind it. This is an exact
+        # scheduler-only transition and leaves authenticated payloads intact.
+        (
+            "web/chanlun_chart/cl_app/services/trading_screening.py",
+            "sha256:a61821c5513c686a29b2b7611ef18d9343ab105f691724a92e82618774ad38ee",
+            "sha256:51d913f12394091116369a697508041e44a5bc73de6384a079597ab49e04c7d5",
         ),
         # Completed-epoch reuse and a larger decoded runtime L1 alter only the
         # physical cache path; strict frame and decision bytes are identical.

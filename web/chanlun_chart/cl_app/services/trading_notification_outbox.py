@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+from math import isfinite
 import os
 from pathlib import Path
 import threading
@@ -74,6 +75,21 @@ def _context_event_id(context: Mapping[str, object]) -> str | None:
         if isinstance(value, str) and value.startswith("sha256:") and len(value) == 71:
             return value
     return None
+
+
+def _minimum_delivery_margin(
+    context: Mapping[str, object],
+) -> timedelta | None:
+    raw = context.get("minimum_delivery_margin_seconds", 0)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+        return None
+    seconds = float(raw)
+    if not isfinite(seconds):
+        return None
+    try:
+        return timedelta(seconds=seconds)
+    except OverflowError:
+        return None
 
 
 class DurableTradingNotificationOutbox:
@@ -284,6 +300,7 @@ class DurableTradingNotificationOutbox:
                 and all(isinstance(value, str) for value in lines)
             )
             and isinstance(raw.get("context"), Mapping)
+            and _minimum_delivery_margin(raw["context"]) is not None
             and _parse_aware(raw.get("queued_at")) is not None
             and type(raw.get("attempt_count")) is int
             and int(raw.get("attempt_count", -1)) >= 0
@@ -319,7 +336,22 @@ class DurableTradingNotificationOutbox:
         now: datetime,
     ) -> bool:
         expires_at = cls._expires_at(event)
-        return expires_at is not None and expires_at <= now
+        if expires_at is None:
+            return False
+        context = event.get("context")
+        margin = (
+            _minimum_delivery_margin(context)
+            if isinstance(context, Mapping)
+            else None
+        )
+        if margin is None:
+            return True
+        remaining = expires_at - now
+        return (
+            remaining <= timedelta(0)
+            if margin == timedelta(0)
+            else remaining < margin
+        )
 
     @staticmethod
     def _delivery_priority(event: Mapping[str, object]) -> int:
@@ -365,6 +397,8 @@ class DurableTradingNotificationOutbox:
             normalized_context.get("expires_at") is not None
             and _parse_aware(normalized_context.get("expires_at")) is None
         ):
+            return False
+        if _minimum_delivery_margin(normalized_context) is None:
             return False
         event_id = _context_event_id(normalized_context) or _fallback_event_id(
             normalized_title,
@@ -520,13 +554,21 @@ class DurableTradingNotificationOutbox:
         elif not sent:
             try:
                 send_rich = getattr(self._notifier, "send_rich", None)
-                if callable(send_rich) and event["context"]:
+                context = event["context"]
+                chart_required = bool(
+                    isinstance(context, Mapping)
+                    and context.get("require_chart") is True
+                )
+                if chart_required and not callable(send_rich):
+                    sent = False
+                    failure_reason = "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
+                elif callable(send_rich) and context:
                     sent = bool(
-                        send_rich(event["title"], event["lines"], event["context"])
+                        send_rich(event["title"], event["lines"], context)
                     )
                 else:
                     sent = bool(self._notifier.send(event["title"], event["lines"]))
-                if not sent:
+                if not sent and failure_reason is None:
                     failure_reason = "NOTIFIER_RETURNED_FALSE"
             except Exception as exc:
                 failure_reason = f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -643,9 +685,20 @@ class DurableTradingNotificationOutbox:
                     if raw.get("transport_status") is not None
                     else self._expires_at(raw)
                 )
+                context = raw.get("context")
+                margin = (
+                    _minimum_delivery_margin(context)
+                    if isinstance(context, Mapping)
+                    else None
+                )
+                delivery_cutoff = (
+                    expires_at - margin
+                    if expires_at is not None and margin is not None
+                    else expires_at
+                )
                 due_times.extend(
                     value
-                    for value in (next_attempt, expires_at)
+                    for value in (next_attempt, delivery_cutoff)
                     if value is not None
                 )
         if not due_times:

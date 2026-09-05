@@ -61,7 +61,7 @@ def test_empty_strict_snapshot_stays_empty_on_every_frequency() -> None:
 
 
 @pytest.mark.parametrize("point_type", ("3buy", "3sell"))
-def test_later_center_third_point_is_excluded_from_selection(
+def test_later_center_third_point_is_retained_as_research_only_selection(
     point_type: str,
 ) -> None:
     side = "buy" if point_type == "3buy" else "sell"
@@ -96,4 +96,14 @@ def test_later_center_third_point_is_excluded_from_selection(
     decisions = _TechnicalSignalEvaluator(TradingPolicy()).evaluate_symbol(bundle)
 
     assert five[0].center_ordinal == 2
-    assert decisions == ()
+    assert len(decisions) == 1
+    [decision] = decisions
+    assert decision.setup.point == five[0]
+    if side == "buy":
+        assert decision.entry is not None
+        assert decision.entry.allowed is False
+        assert "three_buy_not_first_center" in decision.entry.reason_codes
+    else:
+        assert decision.exit is not None
+        assert decision.exit.allowed is False
+        assert decision.exit.reason_codes == ("three_sell_not_first_center",)

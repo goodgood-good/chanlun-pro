@@ -247,6 +247,43 @@ def test_sell_exit_is_not_blocked_by_sector_state() -> None:
     assert decision.action == "exit_full"
 
 
+def test_later_center_three_sell_remains_research_only() -> None:
+    five_sell = _strict_setup(
+        confirmed_point(
+            "3sell",
+            frequency="5m",
+            tower="formal",
+            level=0,
+            center_ordinal=2,
+            stop=10.2,
+            center_zd=10.1,
+            center_zg=10.3,
+        )
+    )
+    setup = build_setup(five_sell, supportive_context("30m"), eligible_sector())
+    one_sell = _strict_witness(
+        confirmed_point(
+            "1sell",
+            frequency="1m",
+            minutes_after=-1,
+            available_minutes_after=2,
+        )
+    )
+    lifecycle = advance_lifecycle(None, setup, one_sell, as_of=AS_OF)
+
+    decision = evaluate_exit_policy(
+        lifecycle,
+        setup,
+        one_sell,
+        held_tower="formal",
+        held_level=0,
+    )
+
+    assert decision.allowed is False
+    assert decision.action == "none"
+    assert decision.reason_codes == ("three_sell_not_first_center",)
+
+
 def test_default_sell_exit_requires_one_minute_nesting_witness() -> None:
     five_sell = _strict_setup(
         confirmed_point("2sell", frequency="5m", tower="formal", level=0)

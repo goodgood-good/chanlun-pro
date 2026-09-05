@@ -19,6 +19,9 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 from chanlun.cl_utils import query_cl_chart_config
+from chanlun.decision_support.trading_system.lifecycle import (
+    five_minute_setup_center_priority_rank,
+)
 from chanlun.tools.log_util import LogUtil
 
 from .chart_cache import (
@@ -368,6 +371,12 @@ def _review_priority(
         + sum(gate == "GREEN" for gate in gates)
         - (2 if signal.get("monitor_only") is True else 0)
     )
+    setup = signal.get("setup_5m")
+    setup = setup if isinstance(setup, Mapping) else {}
+    center_ordinal = setup.get("center_ordinal")
+    point_type = _text(setup.get("point_type") or signal.get("point_type"))
+    if point_type in {"3buy", "3sell"} and type(center_ordinal) is int:
+        score -= max(0, center_ordinal - 1)
     return float(min(maximum, max(minimum, score)))
 
 
@@ -392,6 +401,12 @@ def _signal_sort_key(
     grade = _text(profile.get("context_grade") or signal.get("context_grade"))
     grade = grade.upper() if grade else "UNRESOLVED"
     priority = _review_priority(signal)
+    setup = signal.get("setup_5m")
+    setup = setup if isinstance(setup, Mapping) else {}
+    center_priority_rank = five_minute_setup_center_priority_rank(
+        setup.get("point_type") or signal.get("point_type"),
+        setup.get("center_ordinal"),
+    )
     sector = signal.get("sector")
     sector = sector if isinstance(sector, Mapping) else {}
     try:
@@ -404,6 +419,7 @@ def _signal_sort_key(
         1 if priority is None else 0,
         0.0 if priority is None else -priority,
         _review_stage_rank(signal),
+        center_priority_rank,
         sector_rank,
         _POINT_ORDER.get(_text(signal.get("point_type")), 99),
         _text(signal.get("code")).upper(),

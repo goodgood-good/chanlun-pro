@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from chanlun.core.strict_structure.current_events import (
     current_strict_point_evidence,
     terminal_segment_windows,
 )
+from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind
 from chanlun.decision_support.trading_system.screening_runtime import (
     screening_evidence_from_frame,
 )
@@ -95,6 +97,123 @@ def test_candidate_stays_current_when_unfinished_segment_becomes_latest_complete
     assert window.latest_completed is not None
     assert third_buy.anchor_unit_id == window.latest_completed.unit_id
     assert current_strict_events(evidence).points == ()
+
+
+def test_third_buy_exits_current_events_after_successor_segment_completes() -> None:
+    frame = _frame()
+    confirmation_time = pd.Timestamp("2025-12-16 01:45:00+00:00")
+    confirmation_prefix = frame.loc[frame["date"] <= confirmation_time].copy()
+    confirmation_prefix.attrs.update(frame.attrs)
+    confirmation = _evidence(confirmation_prefix)
+    confirmed_window = terminal_segment_windows(confirmation.structure)[0]
+    third_buy = next(
+        point
+        for point in current_strict_point_evidence(
+            confirmation.structure,
+            (*confirmation.confirmed_points, *confirmation.approaching_points),
+        )
+        if point.point_type == "3buy"
+    )
+    assert confirmed_window.latest_completed is not None
+    assert third_buy.anchor_unit_id == confirmed_window.latest_completed.unit_id
+
+    advanced = _evidence(frame)
+    advanced_window = terminal_segment_windows(advanced.structure)[0]
+    assert advanced_window.latest_completed is not None
+    assert (
+        advanced_window.latest_completed.market_end
+        > confirmed_window.latest_completed.market_end
+    )
+    assert current_strict_point_evidence(advanced.structure, (third_buy,)) == ()
+
+
+def test_geometrically_completed_successor_retires_prior_point_before_late_lock() -> (
+    None
+):
+    """A solid successor segment is current even before ``formed_at`` arrives."""
+
+    started_at = datetime(2026, 9, 1, 9, 35, tzinfo=timezone.utc)
+
+    def unit(
+        unit_id: str,
+        *,
+        direction: str,
+        start_tick: int,
+        end_tick: int,
+        market_start: datetime,
+        market_end: datetime,
+        available_at: datetime,
+        forming: bool = False,
+        formed_at: datetime | None = None,
+    ) -> ConstituentUnit:
+        return ConstituentUnit(
+            unit_id=unit_id,
+            structural_level=0,
+            source_kind=SourceKind.SEGMENT,
+            price_basis_revision="test-current-geometric-successor",
+            direction=direction,  # type: ignore[arg-type]
+            start_tick=start_tick,
+            end_tick=end_tick,
+            low_tick=min(start_tick, end_tick) - 1,
+            high_tick=max(start_tick, end_tick) + 1,
+            market_start=market_start,
+            market_end=market_end,
+            confirmed_at=None,
+            available_at=available_at,
+            locked=False,
+            child_ids=(f"{unit_id}-child",),
+            forming=forming,
+            formed_at=formed_at,
+        )
+
+    prior = unit(
+        "prior-third-buy-anchor",
+        direction="down",
+        start_tick=110,
+        end_tick=100,
+        market_start=started_at,
+        market_end=started_at + timedelta(hours=1),
+        available_at=started_at + timedelta(hours=2),
+        formed_at=started_at + timedelta(hours=2),
+    )
+    successor = unit(
+        "solid-successor-without-late-lock",
+        direction="up",
+        start_tick=100,
+        end_tick=120,
+        market_start=prior.market_end,
+        market_end=started_at + timedelta(hours=3),
+        available_at=started_at + timedelta(hours=4),
+    )
+    forming_tail = unit(
+        "forming-tail",
+        direction="down",
+        start_tick=120,
+        end_tick=115,
+        market_start=successor.market_end,
+        market_end=started_at + timedelta(hours=4),
+        available_at=started_at + timedelta(hours=4),
+        forming=True,
+    )
+    structure = SimpleNamespace(
+        levels=(
+            SimpleNamespace(
+                structural_level=0,
+                units=(prior, successor, forming_tail),
+            ),
+        )
+    )
+    old_third_buy = SimpleNamespace(
+        structural_level=0,
+        anchor_unit_id=prior.unit_id,
+    )
+
+    window = terminal_segment_windows(structure)[0]
+    assert window.latest_completed is not None
+    assert window.latest_completed.unit_id == successor.unit_id
+    assert window.latest_completed.state == "formed"
+    assert successor.formed_at is None
+    assert current_strict_point_evidence(structure, (old_third_buy,)) == ()
 
 
 def test_current_divergence_tracks_a_terminal_segment_point() -> None:

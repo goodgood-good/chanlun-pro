@@ -27,6 +27,93 @@ _PRE_CLEANUP_SOURCE_ID = (
 _CLEANUP_SOURCE_ID = (
     "sha256:7343aa38677a66b48f5777404c8698c3f92c8318701241cffa4f4742ee18418b"
 )
+_PREVIOUS_LIVE_SOURCE_ID = (
+    "sha256:884694c8cbf286983e38d1dc34c10549759700a6049092972f4e5eb2ca3ee8b5"
+)
+_PRE_RETIREMENT_SOURCE_ID = (
+    "sha256:1f3e8d9b2febca63b017c9b33e05a903afd85e6edd84dfdc7ed91a275b0b5300"
+)
+_PRE_GEOMETRIC_RETIREMENT_SOURCE_ID = (
+    "sha256:947ea6cdaad25a0c7cc9efc06fe6b7ac643cdc3a964848712263c3106c7475d1"
+)
+_PRE_CENTER_PRIORITY_SOURCE_ID = (
+    "sha256:9ab666f86ad972a5cd5cf10ee6130e5041509d655ef0f3aca5705123274d1610"
+)
+_PRE_CENTER_ORDINAL_SOURCE_ID = (
+    "sha256:9a78033b161f1e53feeee33732bd4fbb44ab8a12d200e7fedb658e1516f3742f"
+)
+_PRE_TIMELINESS_SOURCE_ID = (
+    "sha256:29e891d4b19e2d9e28f4d4cb9ea27d743c60ef122ebdd230eb6514cc9957cfc4"
+)
+_TIMELINESS_SOURCE_ID = (
+    "sha256:1311089e29c2ed3666f4f68c569e65d44c2522af3e67adce9a19c5841596787e"
+)
+_CONFIRMATION_FIRST_SOURCE_ID = (
+    "sha256:014230479f4dec1cf228fd34b85c82f07f34c49c4bd7ce46b17e657b115f82e6"
+)
+_LIVE_SOURCE_ID = (
+    "sha256:a2c29f203a70a28acf957615cd0146038644047f85802ebdc04f165fc775d183"
+)
+_FULL_FORMAL_WORKER_SOURCE_ROW = (
+    "web/chanlun_chart/cl_app/services/trading_screening.py",
+    "sha256:a61821c5513c686a29b2b7611ef18d9343ab105f691724a92e82618774ad38ee",
+    "sha256:51d913f12394091116369a697508041e44a5bc73de6384a079597ab49e04c7d5",
+)
+_CONFIRMATION_FIRST_SOURCE_ROW = (
+    "web/chanlun_chart/cl_app/services/trading_screening.py",
+    "sha256:4e9f4845d1d1b2e0fad0acf4b6f3fea10eda0d81242cf537c955cbb5cb9fce14",
+    "sha256:a61821c5513c686a29b2b7611ef18d9343ab105f691724a92e82618774ad38ee",
+)
+_TIMELINESS_SOURCE_ROW = (
+    "web/chanlun_chart/cl_app/services/trading_screening.py",
+    "sha256:ca85d71a650428d8c53f5d1ee4cb6335b70c8fb755ec724244277b636ae9e30e",
+    "sha256:4e9f4845d1d1b2e0fad0acf4b6f3fea10eda0d81242cf537c955cbb5cb9fce14",
+)
+_CENTER_ORDINAL_SOURCE_ROW = (
+    "src/chanlun/core/strict_structure/point_rules.py",
+    "sha256:27180b509076cfe61d92cfd34bda4aa698000b6d2597bd0f5ed1f2835a60b97e",
+    "sha256:9ea876748ca13604517270f9164c72d0abc10e9bbf30a7f3e7cd4710c0625272",
+)
+_CENTER_PRIORITY_SOURCE_ROWS = {
+    "src/chanlun/decision_support/trading_system/execution_policy.py": (
+        "sha256:efbd8b6707d33a83f25b79279f90b9a1876caec1bb9c1995c714bd22c03716ae",
+        "sha256:13e3297e82338081a164db8321a8ba4f7138baa80e0c4e756745414d833f5964",
+    ),
+    "src/chanlun/decision_support/trading_system/human_review_screening.py": (
+        "sha256:a3b2ae6413df5b286f41b9e8c0b32c1dcbe060e16f0a3962e63e8a6b93da053c",
+        "sha256:0f994564a6e34fe30d0c70daa15fbf1cf23990b6bee13e3f32ff90a3205066da",
+    ),
+    "src/chanlun/decision_support/trading_system/lifecycle.py": (
+        "sha256:c998aad9bc2d30029ec03a582d029626b96d779766474c3607c759a5bc5b6ddf",
+        "sha256:61f6e58a7b8a3d7542254b4744d24b1a6426ae7505785d0d47931ee24d3b2bc3",
+    ),
+    "src/chanlun/decision_support/trading_system/live_human_review.py": (
+        "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26",
+        "sha256:13fc05df4d0ddeac625e0f4a373b2387982495974969151ac6e0100173086834",
+    ),
+    "web/chanlun_chart/cl_app/services/trading_screening.py": (
+        "sha256:dc75b7067929580e4a7d5f1ebb723361367198741381ccce9ab6beca47c4c59a",
+        "sha256:ca85d71a650428d8c53f5d1ee4cb6335b70c8fb755ec724244277b636ae9e30e",
+    ),
+}
+_CURRENT_RELEASE_SOURCE_ROWS = {
+    "src/chanlun/core/strict_structure/current_events.py": (
+        "sha256:5a22e2a4f94d235fafbbea1226d65051bcd94eaa601765298e684c6da29a82be",
+        "sha256:87ca3f59e4449f71592f35832c906c6a9c5d619f8d0c054f6d6b976d994f82a2",
+    ),
+    "src/chanlun/decision_support/trading_system/human_assisted_decision.py": (
+        "sha256:7243771da4add19b9c445ac69c596bbfb4f46ae01d8da22433a21b59e536f6c2",
+        "sha256:266df45d22f1fd85fb64e07fb4e220ae3684477913e865112b790e4a60b4ccb7",
+    ),
+    "src/chanlun/decision_support/trading_system/lifecycle.py": (
+        "sha256:033bffaeccb76055a077f71595894525f419abccd2e5d5622ac9e9424db1c54d",
+        "sha256:c998aad9bc2d30029ec03a582d029626b96d779766474c3607c759a5bc5b6ddf",
+    ),
+    "web/chanlun_chart/cl_app/services/trading_screening.py": (
+        "sha256:8dae5e9e3172bac95e10a6d6581b6842185bfaa0983516c4267f4fa02a472679",
+        "sha256:dc75b7067929580e4a7d5f1ebb723361367198741381ccce9ab6beca47c4c59a",
+    ),
+}
 _CLEANUP_SOURCE_ROWS = {
     "src/chanlun/core/strict_structure/strength.py": (
         "sha256:b6eea83b5b04013e07daf15b8e561c579f071dfa5421309d78729ad6e2b0e53f",
@@ -47,11 +134,110 @@ _CLEANUP_SOURCE_ROWS = {
 }
 
 
+def pre_timeliness_decision_source_snapshot() -> dict[str, object]:
+    """Reconstruct the release before realtime scheduling hardening."""
+
+    snapshot = copy.deepcopy(_live_decision_source_snapshot())
+    assert snapshot["aggregate_sha256"] == _LIVE_SOURCE_ID
+    rows = {row["path"]: row for row in snapshot["files"]}
+    path, previous_digest, current_digest = _FULL_FORMAL_WORKER_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    rows[path]["sha256"] = previous_digest
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _CONFIRMATION_FIRST_SOURCE_ID
+    path, previous_digest, current_digest = _CONFIRMATION_FIRST_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    rows[path]["sha256"] = previous_digest
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _TIMELINESS_SOURCE_ID
+    path, previous_digest, current_digest = _TIMELINESS_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    rows[path]["sha256"] = previous_digest
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _PRE_TIMELINESS_SOURCE_ID
+    return snapshot
+
+
+def pre_center_ordinal_decision_source_snapshot() -> dict[str, object]:
+    """Reconstruct the release before the semantic center-ordinal fix."""
+
+    snapshot = pre_timeliness_decision_source_snapshot()
+    rows = {row["path"]: row for row in snapshot["files"]}
+    path, previous_digest, current_digest = _CENTER_ORDINAL_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    rows[path]["sha256"] = previous_digest
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _PRE_CENTER_ORDINAL_SOURCE_ID
+    return snapshot
+
+
+def pre_center_priority_decision_source_snapshot() -> dict[str, object]:
+    """Reconstruct the last release before center-aware research ranking."""
+
+    snapshot = pre_center_ordinal_decision_source_snapshot()
+    rows = {row["path"]: row for row in snapshot["files"]}
+    for path, (previous_digest, current_digest) in (
+        _CENTER_PRIORITY_SOURCE_ROWS.items()
+    ):
+        assert rows[path]["sha256"] == current_digest
+        rows[path]["sha256"] = previous_digest
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _PRE_CENTER_PRIORITY_SOURCE_ID
+    return snapshot
+
+
+def cleanup_decision_source_snapshot() -> dict[str, object]:
+    """Reconstruct the release before execution and live-scheduler changes."""
+
+    snapshot = pre_center_priority_decision_source_snapshot()
+    assert snapshot["aggregate_sha256"] == _PRE_CENTER_PRIORITY_SOURCE_ID
+    rows = {row["path"]: row for row in snapshot["files"]}
+    for path, (previous_digest, current_digest) in (
+        _CURRENT_RELEASE_SOURCE_ROWS.items()
+    ):
+        assert rows[path]["sha256"] == current_digest
+        rows[path]["sha256"] = previous_digest
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _CLEANUP_SOURCE_ID
+    return snapshot
+
+
+def pre_geometric_retirement_decision_source_snapshot() -> dict[str, object]:
+    """Reconstruct the scheduler release before the terminal-window fix."""
+
+    snapshot = pre_center_priority_decision_source_snapshot()
+    assert snapshot["aggregate_sha256"] == _PRE_CENTER_PRIORITY_SOURCE_ID
+    row = next(
+        row
+        for row in snapshot["files"]
+        if row["path"] == "src/chanlun/core/strict_structure/current_events.py"
+    )
+    row["sha256"] = (
+        "sha256:5a22e2a4f94d235fafbbea1226d65051bcd94eaa601765298e684c6da29a82be"
+    )
+    snapshot["aggregate_sha256"] = sha256_json(
+        {"schema": snapshot["schema"], "files": snapshot["files"]}
+    )
+    assert snapshot["aggregate_sha256"] == _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+    return snapshot
+
+
 def pre_cleanup_decision_source_snapshot() -> dict[str, object]:
     """Reconstruct the authenticated release immediately before dead-code cleanup."""
 
-    snapshot = copy.deepcopy(_live_decision_source_snapshot())
-    assert snapshot["aggregate_sha256"] == _CLEANUP_SOURCE_ID
+    snapshot = cleanup_decision_source_snapshot()
     rows = {row["path"]: row for row in snapshot["files"]}
     for path, (previous_digest, current_digest) in _CLEANUP_SOURCE_ROWS.items():
         assert rows[path]["sha256"] == current_digest
@@ -249,7 +435,7 @@ def test_latest_scheduler_transition_requires_all_coordinated_source_rows() -> N
 
 
 def test_dead_code_cleanup_requires_all_authenticated_source_rows() -> None:
-    current = _live_decision_source_snapshot()
+    current = cleanup_decision_source_snapshot()
     cached = pre_cleanup_decision_source_snapshot()
     kwargs = {
         "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
@@ -285,6 +471,18 @@ def test_dead_code_cleanup_requires_all_authenticated_source_rows() -> None:
         current_source_revision=(
             "sha256:c7f38b622c9f5d88402ff8621a513cdd606a5d8d74c9d141810c7144600a041e"
         ),
+    )
+
+
+def test_execution_projection_change_is_not_an_orchestration_migration() -> None:
+    cached = cleanup_decision_source_snapshot()
+    current = _live_decision_source_snapshot()
+
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+        cached_decision_source_snapshot=cached,
+        current_decision_source_snapshot=current,
     )
 
 
@@ -347,6 +545,10 @@ def test_priority_monitor_state_migration_allows_only_reviewed_forward_paths() -
     cleanup_release = (
         "sha256:7343aa38677a66b48f5777404c8698c3f92c8318701241cffa4f4742ee18418b"
     )
+    execution_projection_release = (
+        "sha256:76f359c61c65b6d441eb502438635dbafeb5518243b63725baba72676d431536"
+    )
+    formal_confirmation_scheduler_release = _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
 
     assert priority_monitor_state_source_migration_allowed(
         cached_decision_source_snapshot_id=opening_release,
@@ -424,6 +626,20 @@ def test_priority_monitor_state_migration_allows_only_reviewed_forward_paths() -
         cached_decision_source_snapshot_id=opening_release,
         current_decision_source_snapshot_id=affinity_stream_release,
     )
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=execution_projection_release,
+        current_decision_source_snapshot_id=formal_confirmation_scheduler_release,
+    )
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=_PREVIOUS_LIVE_SOURCE_ID,
+        current_decision_source_snapshot_id=(
+            _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+        ),
+    )
+    assert not priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cleanup_release,
+        current_decision_source_snapshot_id=formal_confirmation_scheduler_release,
+    )
     assert not priority_monitor_state_source_migration_allowed(
         cached_decision_source_snapshot_id=continuity_release,
         current_decision_source_snapshot_id=intraday_release,
@@ -435,6 +651,214 @@ def test_priority_monitor_state_migration_allows_only_reviewed_forward_paths() -
     assert not priority_monitor_state_source_migration_allowed(
         cached_decision_source_snapshot_id="not-a-source-id",
         current_decision_source_snapshot_id=current,
+    )
+
+
+def test_aged_monitor_projection_migration_preserves_authenticated_state() -> None:
+    current = pre_geometric_retirement_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    screening_row = next(
+        row
+        for row in cached["files"]
+        if row["path"]
+        == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    screening_row["sha256"] = (
+        "sha256:83b8077319afa8132102fc03d5f3928e2f75408b8918b6d4499f00dd552feefe"
+    )
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert current["aggregate_sha256"] == _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+    assert cached["aggregate_sha256"] == _PREVIOUS_LIVE_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert orchestration_source_migration_allowed(**kwargs)
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
+def test_retirement_monitor_upgrade_preserves_state_and_rechecks_aged_rows() -> None:
+    current = pre_geometric_retirement_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    screening_row = next(
+        row
+        for row in cached["files"]
+        if row["path"]
+        == "web/chanlun_chart/cl_app/services/trading_screening.py"
+    )
+    screening_row["sha256"] = (
+        "sha256:329ecf80a2abd8f6906936decfb875c8ad7f8d95e096403f7ef48b18fb3266fa"
+    )
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert current["aggregate_sha256"] == _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+    assert cached["aggregate_sha256"] == _PRE_RETIREMENT_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert orchestration_source_migration_allowed(**kwargs)
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
+def test_timeliness_upgrade_preserves_authenticated_runtime_state() -> None:
+    current = _live_decision_source_snapshot()
+    cached = pre_timeliness_decision_source_snapshot()
+
+    assert current["aggregate_sha256"] == _LIVE_SOURCE_ID
+    assert cached["aggregate_sha256"] == _PRE_TIMELINESS_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert orchestration_source_migration_allowed(**kwargs)
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
+def test_full_formal_worker_upgrade_preserves_authenticated_runtime_state() -> None:
+    current = _live_decision_source_snapshot()
+    cached = copy.deepcopy(current)
+    rows = {row["path"]: row for row in cached["files"]}
+    path, previous_digest, current_digest = _FULL_FORMAL_WORKER_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    rows[path]["sha256"] = previous_digest
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert current["aggregate_sha256"] == _LIVE_SOURCE_ID
+    assert cached["aggregate_sha256"] == _CONFIRMATION_FIRST_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert orchestration_source_migration_allowed(**kwargs)
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
+def test_confirmation_first_upgrade_preserves_authenticated_runtime_state() -> None:
+    current = copy.deepcopy(_live_decision_source_snapshot())
+    rows = {row["path"]: row for row in current["files"]}
+    path, previous_digest, current_digest = _FULL_FORMAL_WORKER_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    rows[path]["sha256"] = previous_digest
+    current["aggregate_sha256"] = sha256_json(
+        {"schema": current["schema"], "files": current["files"]}
+    )
+    cached = copy.deepcopy(current)
+    path, previous_digest, current_digest = _CONFIRMATION_FIRST_SOURCE_ROW
+    assert rows[path]["sha256"] == current_digest
+    cached_rows = {row["path"]: row for row in cached["files"]}
+    cached_rows[path]["sha256"] = previous_digest
+    cached["aggregate_sha256"] = sha256_json(
+        {"schema": cached["schema"], "files": cached["files"]}
+    )
+
+    assert current["aggregate_sha256"] == _CONFIRMATION_FIRST_SOURCE_ID
+    assert cached["aggregate_sha256"] == _TIMELINESS_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert orchestration_source_migration_allowed(**kwargs)
+    assert priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+    )
+    assert not orchestration_source_migration_allowed(
+        cached_decision_source_snapshot_id=current["aggregate_sha256"],
+        current_decision_source_snapshot_id=cached["aggregate_sha256"],
+        cached_decision_source_snapshot=current,
+        current_decision_source_snapshot=cached,
+    )
+
+
+def test_geometric_successor_retirement_rejects_stale_decision_state() -> None:
+    current = _live_decision_source_snapshot()
+    cached = pre_geometric_retirement_decision_source_snapshot()
+
+    assert current["aggregate_sha256"] == _LIVE_SOURCE_ID
+    assert cached["aggregate_sha256"] == _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert not orchestration_source_migration_allowed(**kwargs)
+    assert not priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
+    )
+
+
+def test_center_ordinal_fix_rejects_stale_decision_state() -> None:
+    current = _live_decision_source_snapshot()
+    cached = pre_center_ordinal_decision_source_snapshot()
+
+    assert current["aggregate_sha256"] == _LIVE_SOURCE_ID
+    assert cached["aggregate_sha256"] == _PRE_CENTER_ORDINAL_SOURCE_ID
+    kwargs = {
+        "cached_decision_source_snapshot_id": cached["aggregate_sha256"],
+        "current_decision_source_snapshot_id": current["aggregate_sha256"],
+        "cached_decision_source_snapshot": cached,
+        "current_decision_source_snapshot": current,
+    }
+    assert not orchestration_source_migration_allowed(**kwargs)
+    assert not priority_monitor_state_source_migration_allowed(
+        cached_decision_source_snapshot_id=cached["aggregate_sha256"],
+        current_decision_source_snapshot_id=current["aggregate_sha256"],
     )
 
 

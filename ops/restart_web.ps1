@@ -42,7 +42,7 @@ $watchdogScopePath = Join-Path $watchdogStateRoot 'deployment_scope.json'
 $PreflightTimeoutSec = 30
 $LargeScopePriorityMaxSymbols = 384
 $LargeScopeMonitorUniverseSymbols = 384
-$LargeScopeCandidateFiveMinuteSymbols = 80
+$LargeScopeCandidateFiveMinuteSymbols = 128
 $FullCoverageBatchSymbols = 240
 $LogDir       = Join-Path $PSScriptRoot 'logs'
 # ----------------------------------------------------------------------------
@@ -624,8 +624,9 @@ try {
         # Twelve affinity shards retain 48 hot 1m runtimes each. A 384-symbol
         # admission ceiling covers the exact locator pool plus mandatory
         # watch/holding symbols without binding it to the ordinary 240-symbol
-        # five-minute rotation; the absolute 58-second budget still fails
-        # closed on a real throughput shortfall.
+        # five-minute rotation; the 128-symbol 5m ceiling also fits the current
+        # first-center forming set at a new bar boundary. The absolute
+        # 58-second budget still fails closed on a real throughput shortfall.
         [Environment]::SetEnvironmentVariable(
             'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS',
             [string]$LargeScopePriorityMaxSymbols,
@@ -713,11 +714,22 @@ if ($largeScopeRequested) {
     $validationDirectory = Join-Path `
         $ProjectRoot `
         'audit\chanlun_trading_system_backtest\research_sample_validation_12'
-    $validationOutput = @(& $PythonExe `
-        (Join-Path $ProjectRoot 'tools\verify_qmt_validation_gate.py') `
-        '--directory' $validationDirectory `
-        '--expected-symbol-count' '12' 2>&1)
-    $validationExitCode = $LASTEXITCODE
+    # Windows PowerShell promotes native stderr to ``NativeCommandError`` when
+    # the script-wide ErrorActionPreference is Stop.  A rejected gate is an
+    # expected, controlled preflight result: capture its complete traceback and
+    # exit code so the operator sees the actual rejection while the old service
+    # remains untouched.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $validationOutput = @(& $PythonExe `
+            (Join-Path $ProjectRoot 'tools\verify_qmt_validation_gate.py') `
+            '--directory' $validationDirectory `
+            '--expected-symbol-count' '12' 2>&1)
+        $validationExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($validationExitCode -ne 0) {
         $validationDetail = ($validationOutput | ForEach-Object {
             ([string]$_).Trim()

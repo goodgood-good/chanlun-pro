@@ -173,6 +173,13 @@ def evaluate_exit_policy(
             "none",
             ("lifecycle_not_actionable",),
         )
+    if not five_minute_setup_is_in_policy_scope(point):
+        return ExitDecision(
+            False,
+            lifecycle.signal_id,
+            "none",
+            ("three_sell_not_first_center",),
+        )
     if (
         policy.require_one_minute_segment_difference_for_precise_execution
         and not _valid_one_minute_segment_difference(

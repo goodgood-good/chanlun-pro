@@ -287,6 +287,7 @@ class AlertChartImageService:
     def __call__(self, context: Mapping[str, object]) -> Sequence[Mapping[str, str]]:
         raw_items = context.get("charts")
         items = raw_items if isinstance(raw_items, (list, tuple)) else ()
+        chart_required = context.get("require_chart") is True
         output: list[dict[str, str]] = []
         seen_symbols: set[tuple[str, str]] = set()
         with self._lock:
@@ -434,7 +435,14 @@ class AlertChartImageService:
                         }
                     )
                     continue
-                if self._browser_renderer is not None:
+                # Durable trade alerts must not spend their delivery window on
+                # the best-effort browser capture path.  Production evidence
+                # showed that its total timeout could expire and then silently
+                # turn the alert into text-only delivery.  Required auxiliary
+                # charts use the same deterministic three-frequency composite
+                # as evidence-bound alerts; optional UI enrichment may still
+                # prefer the native TradingView screenshots below.
+                if self._browser_renderer is not None and not chart_required:
                     try:
                         captures = tuple(
                             self._browser_renderer(

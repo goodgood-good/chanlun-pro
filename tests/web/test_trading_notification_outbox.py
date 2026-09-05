@@ -64,11 +64,45 @@ class AdvancingTransport(RecordingTransport):
         self.clock.advance(self.seconds)
         return True
 
+
+class PlainTransport:
+    available = True
+    dry_run = False
+
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, list[str] | str]] = []
+
+    def send(self, title: str, lines: list[str] | str) -> bool:
+        self.messages.append((title, lines))
+        return True
+
+
 def event_context(event_id: str) -> dict[str, object]:
     return {
         "require_evidence_match": True,
         "charts": [{"artifact_key": event_id, "code": "SZ.000001"}],
     }
+
+
+def test_required_chart_never_falls_back_to_plain_transport(tmp_path: Path) -> None:
+    transport = PlainTransport()
+    outbox = DurableTradingNotificationOutbox(
+        transport,
+        state_path=tmp_path / "required-chart-outbox.json",
+    )
+    event_id = f"sha256:{'7' * 64}"
+    context = {
+        **event_context(event_id),
+        "require_chart": True,
+    }
+
+    assert outbox.send_rich("买卖通知", ["必须带图"], context) is True
+    assert outbox.deliver_pending_once() is True
+
+    assert transport.messages == []
+    health = outbox.health_snapshot()
+    assert health["pending_event_count"] == 1
+    assert health["last_failure_reason"] == "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
 
 
 def signal_document(stage: str) -> dict[str, object]:
@@ -311,6 +345,53 @@ def test_dispatcher_records_pending_until_outbox_transport_succeeds(
     assert outbox.deliver_pending_once() is True
     assert inbox.snapshot()["events"][0]["delivery_status"] == "delivered"
     assert dispatcher.health_snapshot()["delivered_event_count"] == 1
+
+
+def test_executable_alert_outbox_expires_at_one_minute_boundary(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock()
+    transport = RecordingTransport()
+    inbox = RealtimeReviewInbox(tmp_path / "precision-review.json", clock=clock)
+
+    def observe(event_id: str, status: str, reason: str | None) -> None:
+        inbox.update_delivery([event_id], status=status, reason=reason)
+
+    outbox = DurableTradingNotificationOutbox(
+        transport,
+        state_path=tmp_path / "precision-outbox.json",
+        clock=clock,
+        delivery_observer=observe,
+    )
+    dispatcher = SignalNotificationDispatcher(
+        outbox,
+        state_path=tmp_path / "precision-dispatcher.json",
+        clock=clock,
+        review_inbox=inbox,
+    )
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [signal_document("executable")]},
+    )
+
+    persisted = json.loads(
+        (tmp_path / "precision-outbox.json").read_text(encoding="utf-8")
+    )
+    queued = next(iter(persisted["pending_events"].values()))
+    assert queued["context"]["expires_at"] == "2026-08-15T10:02:00+08:00"
+    assert queued["context"]["minimum_delivery_margin_seconds"] == 10
+    assert queued["context"]["charts"][0]["frequency"] == "1m"
+
+    # Chart time was reserved by the producer before enqueue. Once queued, only
+    # the final transport reserve applies; expire below that ten-second bound.
+    clock.advance(21)
+    assert outbox.deliver_pending_once() is True
+
+    assert transport.messages == []
+    [event] = inbox.snapshot()["events"]
+    assert event["delivery_status"] == "expired"
+    assert event["delivery_reason"] == "NOTIFICATION_DELIVERY_EXPIRED"
 
 
 def test_review_projection_failure_retries_without_resending_transport(

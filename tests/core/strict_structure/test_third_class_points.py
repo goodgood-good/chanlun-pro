@@ -3,15 +3,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from chanlun.core.strict_structure.identity import build_center_id
 from chanlun.core.strict_structure.center_machine import close_center_at_divergence
-from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.identity import build_center_id, stable_structure_id
 from chanlun.core.strict_structure.models import (
+    CenterPreview,
+    CenterPreviewState,
     DivergenceEvidence,
     SourceKind,
     StrictPointStatus,
     StrictPointVariant,
 )
+from chanlun.core.strict_structure.point_rules import preview_center_ordinal
 from chanlun.core.strict_structure.signals import center_ordinals
 from tests.core.strict_structure.helpers import (
     completed_down_center,
@@ -127,6 +129,73 @@ def test_center_ordinal_restarts_after_divergence_decomposition_boundary():
     assert ordinals[(first.center_id, "up")] == 1
     assert ordinals[(terminal.center_id, "up")] == 2
     assert ordinals[(post_boundary.center_id, "up")] == 1
+
+
+def test_center_ordinal_tracks_rising_cores_when_envelopes_still_overlap():
+    first = completed_up_center(0, zd_tick=100, zg_tick=110)
+    second = completed_up_center(10, zd_tick=111, zg_tick=121)
+    third = completed_up_center(20, zd_tick=122, zg_tick=132)
+
+    # 601298 一类的走势里，中枢核心持续抬高，但组成单元的外围仍会重叠。
+    assert second.dd_tick <= first.gg_tick
+    assert third.dd_tick <= second.gg_tick
+
+    ordinals = center_ordinals((first, second, third))
+
+    assert ordinals[(first.center_id, "up")] == 1
+    assert ordinals[(second.center_id, "up")] == 2
+    assert ordinals[(third.center_id, "up")] == 3
+
+
+def test_center_ordinal_tracks_falling_cores_when_envelopes_still_overlap():
+    first = completed_down_center(0, zd_tick=122, zg_tick=132)
+    second = completed_down_center(10, zd_tick=111, zg_tick=121)
+    third = completed_down_center(20, zd_tick=100, zg_tick=110)
+
+    assert second.gg_tick >= first.dd_tick
+    assert third.gg_tick >= second.dd_tick
+
+    ordinals = center_ordinals((first, second, third))
+
+    assert ordinals[(first.center_id, "down")] == 1
+    assert ordinals[(second.center_id, "down")] == 2
+    assert ordinals[(third.center_id, "down")] == 3
+
+
+def test_completed_preview_continues_ordinal_by_rising_core():
+    first = completed_up_center(0, zd_tick=100, zg_tick=110)
+    second = completed_up_center(10, zd_tick=111, zg_tick=121)
+    third = completed_up_center(20, zd_tick=122, zg_tick=132)
+    entry = unit(29, "down", 138, 127)
+    body = (
+        unit(30, "up", 127, 148),
+        unit(31, "down", 148, 133),
+        unit(32, "up", 133, 143),
+    )
+    leave = unit(33, "up", 143, 153)
+    return_unit = unit(34, "down", 153, 145)
+    preview = CenterPreview(
+        structural_level=0,
+        source_kind=SourceKind.SEGMENT,
+        price_basis_revision=first.price_basis_revision,
+        entry_unit_id=entry.unit_id,
+        unit_ids=tuple(item.unit_id for item in body),
+        state=CenterPreviewState.COMPLETED,
+        zd_tick=133,
+        zg_tick=143,
+        available_at=return_unit.available_at,
+        completion_leave_unit_id=leave.unit_id,
+        completion_return_unit_id=return_unit.unit_id,
+        establishment_leave_unit_id=leave.unit_id,
+    )
+    level = SimpleNamespace(
+        center_result=SimpleNamespace(centers=(first, second, third)),
+        decomposition_boundaries=(),
+        units=(entry, *body, leave, return_unit),
+    )
+
+    assert min(item.low_tick for item in body) <= third.gg_tick
+    assert preview_center_ordinal(level, preview, direction="up") == 4
 
 
 def test_stroke_observation_center_is_never_formal_third_class_point():

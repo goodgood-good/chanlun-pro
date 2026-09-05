@@ -217,6 +217,65 @@ def test_persisted_one_minute_boundary_reports_expired_at_current_bundle_time() 
     ]
 
 
+def test_persisted_executable_is_recomputed_and_downgrades_when_blocked() -> None:
+    core = HumanAssistedDecisionCore()
+    base = deterministic_bundle()
+    [initial] = core.decision_documents(base)
+    legacy_executable = {**initial, "lifecycle_stage": "executable"}
+
+    lifecycle, trigger = lifecycle_state_from_signal_document(legacy_executable)
+
+    assert lifecycle.stage == "triggered"
+    assert trigger is not None
+    blocked_bundle = replace(
+        base,
+        previous_lifecycles=(lifecycle,),
+        previous_trigger_points=(trigger,),
+        opposite_points=(confirmed_point("1sell", minutes_after=295),),
+    )
+    [blocked] = core.decision_documents(
+        blocked_bundle,
+        previous_stages={str(initial["signal_id"]): "executable"},
+    )
+
+    assert blocked["entry_allowed"] is False
+    assert blocked["exit_allowed"] is False
+    assert blocked["lifecycle_stage"] == "triggered"
+    assert blocked["execution_profile"]["recommendation"] == "BLOCKED"
+    assert validate_signal_decision_document(blocked) == blocked[
+        "decision_document_id"
+    ]
+
+
+def test_active_position_is_not_projected_back_to_executable() -> None:
+    core = HumanAssistedDecisionCore()
+    base = deterministic_bundle()
+    [evaluated] = core.evaluate_symbol(base)
+    assert evaluated.trigger is not None
+    active_lifecycle = replace(
+        evaluated.lifecycle,
+        stage="active",
+        reason_codes=("position_active",),
+        actionable=True,
+    )
+    active_bundle = replace(
+        base,
+        previous_lifecycles=(active_lifecycle,),
+        previous_trigger_points=(evaluated.trigger,),
+    )
+
+    [document] = core.decision_documents(
+        active_bundle,
+        previous_stages={active_lifecycle.signal_id: "active"},
+    )
+
+    assert document["entry_allowed"] is True
+    assert document["lifecycle_stage"] == "active"
+    assert validate_signal_decision_document(document) == document[
+        "decision_document_id"
+    ]
+
+
 def _gate(
     subject: str,
     gate: str,

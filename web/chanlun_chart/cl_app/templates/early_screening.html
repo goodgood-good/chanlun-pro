@@ -74,7 +74,7 @@
           <span id="es-status-dot" class="es-status-dot is-loading" aria-hidden="true"></span>
           <div>
             <strong id="es-status">正在读取最新快照</strong>
-            <small id="es-status-detail">等待日线 / 30m 环境、5m 操作确认与1m区间套精确定位数据</small>
+            <small id="es-status-detail">等待日线 / 30m 环境、5m 正式点确认与1m区间套精确定位数据</small>
           </div>
         </div>
         <dl class="es-status-facts es-status-facts--primary">
@@ -107,7 +107,7 @@
           <i aria-hidden="true">→</i>
           <article><span>02 · 策略环境</span><strong>30m 环境分级</strong><p>同周期均线、分型和走势用于判断顺风、混合或逆风；逆风只降级为谨慎复核。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>03 · 操作确认</span><strong>5m 买卖点确认</strong><p>最新未完成线段只进入提前观察；最新已完成线段上的一、二、三类买卖点在首个因果形成时刻达到操作确认，末端结构是否封存单独展示。</p></article>
+          <article><span>03 · 正式确认</span><strong>5m 买卖点确认</strong><p>最新未完成线段只进入提前观察；最新已完成线段上的一、二、三类买卖点在首个因果形成时刻正式确认，末端结构是否封存单独展示。</p></article>
           <i aria-hidden="true">→</i>
           <article><span>04 · 精确执行</span><strong>1m 区间套定位</strong><p>1分钟买卖点不创造主信号，也不阻止5分钟结构首报；但必须形成同向区间套后，才升级为精确执行候选并生成结构比例参考。</p></article>
         </section>
@@ -116,7 +116,7 @@
       <section class="es-summary" aria-label="实时快照摘要">
         <article><span>合格板块</span><strong id="es-sector-count">0</strong><small id="es-sector-scope">合格板块成员进入股票扫描</small></article>
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>可含未完成线段，仅供提前观察</small></article>
-        <article class="is-trigger"><span>当前 5m 操作确认</span><strong id="es-triggered-count">0</strong><small>5分钟是交易级别，决定主信号是否成立；1分钟定位可在首报后补充</small></article>
+        <article class="is-trigger"><span>当前 5m 正式点确认</span><strong id="es-triggered-count">0</strong><small>5分钟是交易级别，决定主信号是否成立；1分钟定位可在首报后补充</small></article>
         <article class="is-segment"><span>当前 1 分钟区间套定位</span><strong id="es-segment-count">0</strong><small id="es-segment-scope">仅统计当前5分钟操作候选中，同向1分钟区间套已经形成且精确位置仍有效的买卖点；不累计历史证据</small><button id="es-show-current-segments" class="es-summary-action" type="button">查看当前定位</button></article>
         <article class="is-action"><span>当前精确执行就绪</span><strong id="es-precise-count">0</strong><small>在1分钟完成精确定位后，还必须通过买入/卖出操作许可与风险门；1分钟不生成独立交易信号</small></article>
       </section>
@@ -127,7 +127,7 @@
           <span>全部当前 5m 结构线索 <b id="es-total-qualified-count">0</b></span>
           <span>审计已锁定 <b id="es-audit-locked-count">0</b></span>
           <span>操作许可通过 <b id="es-executable-count">0</b></span>
-          <span>5m 操作确认分布 <b id="es-confirmed-point-distribution">一买 0 · 一卖 0 · 二买 0 · 二卖 0 · 三买 0 · 三卖 0</b></span>
+          <span>5m 正式点确认分布 <b id="es-confirmed-point-distribution">一买 0 · 一卖 0 · 二买 0 · 二卖 0 · 三买 0 · 三卖 0</b></span>
           <span>提前候选分布 <b id="es-candidate-point-distribution">一买 0 · 一卖 0 · 二买 0 · 二卖 0 · 三买 0 · 三卖 0</b></span>
           <span>失效与结束状态仅保留在人工复核历史，不进入当前选股</span>
         </div>
@@ -205,7 +205,7 @@
           <div><dt>信号复用</dt><dd id="hr-signal-lifecycle-status">终态买卖点不可复用</dd></div>
           <div><dt>区间套规则</dt><dd id="hr-tactical-execution-status">5分钟确认结构信号；1分钟同向区间套解锁精确执行候选，本系统仍不自动下单</dd></div>
           <div><dt>执行边界</dt><dd id="hr-entry-price-boundary-status">买入只在1分钟定位窗口有效时生成结构比例参考</dd></div>
-          <div><dt>退出规则</dt><dd id="hr-strategic-exit-persistence-status">5分钟同级或更高级别卖点达到操作确认后，由人工核对结构退出规则</dd></div>
+          <div><dt>退出规则</dt><dd id="hr-strategic-exit-persistence-status">5分钟同级或更高级别卖点正式确认后，由人工核对结构退出规则</dd></div>
           <div><dt>5日筛选观察</dt><dd id="hr-markout-5">尚未积累 · 不可评价</dd></div>
           <div><dt>10日筛选观察</dt><dd id="hr-markout-10">尚未积累 · 不可评价</dd></div>
           <div><dt>20日筛选观察</dt><dd id="hr-markout-20">尚未积累 · 不可评价</dd></div>
@@ -239,8 +239,8 @@
               <select id="hr-alert-filter" aria-label="提醒类型">
                 <option value="all" selected>全部提醒</option>
                 <option value="REALTIME_NOTIFICATION">实时买卖点通知</option>
-                <option value="POSSIBLE_5M_TRADE_BUY">5分钟操作确认买点</option>
-                <option value="POSSIBLE_5M_TRADE_SELL">5分钟操作确认卖点</option>
+                <option value="POSSIBLE_5M_TRADE_BUY">5分钟正式买点确认</option>
+                <option value="POSSIBLE_5M_TRADE_SELL">5分钟正式卖点确认</option>
               </select>
               <select id="hr-review-filter" aria-label="复核状态">
                 <option value="all">全部状态</option>
@@ -327,7 +327,7 @@
 
           <details class="es-rule-note">
             <summary>规则与数据口径</summary>
-            <p>板块按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。板块按点时成分的中长期相对结构排序，有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序，不按当日涨跌追强。板块数字仅统计当前5分钟结构线索；板块选择只筛 A 股，美股线索不参与板块门且会继续保留。日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线；日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟操作确认决定主信号和首报，1分钟同向区间套决定是否进入精确执行候选；结构、复权或行情证据失真时关闭操作资格。</p>
+            <p>板块按 QMT GICS3 父行业门控，优先采用 GICS4 子行业结构与长期强弱；子行业数据不足时回退父行业，子行业结构明确不利时不回退。板块按点时成分的中长期相对结构排序，有效结构名次优先；未排名板块再按非阻断、有当前线索、横向强度和名称排序，不按当日涨跌追强。板块数字仅统计当前5分钟结构线索；板块选择只筛 A 股，美股线索不参与板块门且会继续保留。日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线；日线和30分钟证据不足时标记“待判定”，不伪造环境结论；5分钟正式点确认决定主信号和首报，1分钟同向区间套与当前风控共同决定精确执行条件是否满足；结构、复权、行情证据失真或1分钟定位失去时效时关闭操作资格。</p>
           </details>
 
           <details class="es-global-filter-drawer">
@@ -389,8 +389,8 @@
                   <button type="button" data-lifecycle="observed" aria-pressed="false">结构观察</button>
                   <button type="button" data-lifecycle="monitoring" aria-pressed="false">实时监听</button>
                   <button type="button" data-lifecycle="approaching" aria-pressed="false">即将确认</button>
-                  <button type="button" data-lifecycle="triggered" aria-pressed="false">5分钟操作确认</button>
-                  <button type="button" data-lifecycle="executable" aria-pressed="false">强提示待复核</button>
+                  <button type="button" data-lifecycle="triggered" aria-pressed="false">5分钟正式点确认</button>
+                  <button type="button" data-lifecycle="executable" aria-pressed="false">当前精确执行</button>
                   <button type="button" data-lifecycle="active" aria-pressed="false">结构跟踪</button>
                 </div>
               </fieldset>
@@ -422,7 +422,7 @@
             <div>
               <p class="es-eyebrow">5m结构线索 + 独立监听 · 人工复核</p>
               <h2 id="es-signal-title">买卖点与监听队列</h2>
-              <p class="es-workspace-subtitle">按环境等级与复核优先级排序，选择标的后右侧同步切换。</p>
+            <p class="es-workspace-subtitle">按环境等级、复核优先级与中枢序号排序；同等条件下第一中枢优先，选择标的后右侧同步切换。</p>
             </div>
             <span class="es-signal-header__actions">
               <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
@@ -434,6 +434,11 @@
             <div class="es-filter-buttons es-point-filters es-signal-channel-primary">
               <button id="es-show-all-signals" class="is-active" type="button" aria-pressed="true" data-count="0">全部线索</button>
               <button id="es-show-today-notifications" type="button" data-signal-source="notification" aria-pressed="false" data-count="0">今日实时通知</button>
+              <button id="es-show-monitoring-queue" type="button" data-review-stage="tracking" aria-pressed="false" data-count="0">监听队列</button>
+            </div>
+            <span class="es-signal-filter-label">用途</span>
+            <div class="es-filter-buttons es-signal-purpose-filters">
+              <button id="es-hide-research-only" type="button" aria-pressed="false" data-count="0">隐藏仅研究</button>
             </div>
             <span class="es-signal-filter-label">类型</span>
             <div class="es-filter-buttons es-point-filters es-signal-type-filters">
@@ -594,7 +599,7 @@
               </button>
               <i aria-hidden="true">→</i>
               <button type="button" data-period-node="5m" data-tone="unknown" aria-pressed="true">
-                <span><b>03</b>5m 操作确认</span>
+                <span><b>03</b>5m 正式点确认</span>
                 <strong data-period-state="5m">未知</strong>
                 <small data-period-summary="5m">等待操作级别设置</small>
                 <em data-period-boundary="5m">失效价未提供</em>
@@ -694,11 +699,11 @@
         <div>
           <article><strong>板块先行</strong><p>板块和个股都按缠论结构计算；涨跌幅、上涨家数不参与方向判断。</p></article>
           <article><strong>六类点独立</strong><p>一买看背驰反转，二买看首次回试确认，三买看离开中枢后的延续；卖点按对称规则独立处理。</p></article>
-          <article><strong>第一中枢约束</strong><p>三买只取第一中枢；序号未知或后续中枢一律关闭。</p></article>
-          <article><strong>周期分工</strong><p>日线与30分钟负责环境分级，5分钟负责操作确认买卖点和结构首报，末端结构是否封存另行标示；1分钟同向区间套负责精确执行定位，不是通知闸门，但未完成时不生成执行比例。</p></article>
+          <article><strong>中枢优先级</strong><p>三类买卖点按同向中枢序号排序，第一中枢优先；第二及后续中枢保留为低优先级研究线索，但不进入执行和实时通知通道，序号未知仍关闭。</p></article>
+          <article><strong>周期分工</strong><p>日线与30分钟负责环境分级，5分钟负责正式确认买卖点和结构首报，末端结构是否封存另行标示；1分钟同向区间套负责精确执行定位，不是结构首报闸门，但未完成或已过期时不生成执行比例。</p></article>
           <article><strong>均线与分型</strong><p>MA5、MA10和分型必须来自各自物理周期的已完成K线；一类点仅作背景，二类点关注MA5收复/跌破，三类点关注MA5与MA10排列，均不能改写缠论买卖点事实。</p></article>
-          <article><strong>因果边界</strong><p>图上只有最新未完成线段使用一条虚线，其买卖点只显示“接近”。最新线段完成并形成可操作买卖点几何后，按首次因果形成时刻达到5分钟操作确认；后续只继续固化结构证据，不重复通知。</p></article>
-          <article><strong>当前结构</strong><p>当前选股只接受最新已完成线段上的操作确认买卖点和最新未完成线段的接近状态；旧线段、失效、结束及旧版迁移状态均不进入当前列表。</p></article>
+          <article><strong>因果边界</strong><p>图上只有最新未完成线段使用一条虚线，其买卖点只显示“接近”。最新线段完成并形成可操作买卖点几何后，按首次因果形成时刻达到5分钟正式点确认；后续重算的内部 ID 或滚动尾端不构成新通知，只有新的物理发生点才重新提醒。</p></article>
+          <article><strong>当前结构</strong><p>当前选股只接受最新已完成线段上的正式确认买卖点和最新未完成线段的接近状态；旧线段、失效、结束及旧版迁移状态均不进入当前列表。</p></article>
         </div>
       </details>
     </main>

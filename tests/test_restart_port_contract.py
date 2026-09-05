@@ -361,6 +361,14 @@ def test_restart_logs_large_scope_gate_failure_before_stopping_service():
 
     assert validation < failure_log < stop_phase
     assert "$validationExitCode = $LASTEXITCODE" in source
+    gate_capture_start = source.index(
+        "$previousErrorActionPreference = $ErrorActionPreference",
+        source.index("if ($largeScopeRequested)"),
+    )
+    gate_capture = source[gate_capture_start:failure_log]
+    assert "$previousErrorActionPreference = $ErrorActionPreference" in gate_capture
+    assert "$ErrorActionPreference = 'Continue'" in gate_capture
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in gate_capture
     assert "===== web restart ABORTED =====" in source[failure_log:stop_phase]
 
 

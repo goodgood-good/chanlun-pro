@@ -3,6 +3,8 @@ https:// 前缀)必须按类契约 warning+返回 False, 不得让 urllib Reques
 逃逸——逃逸会击穿 live_monitor 主循环(:2408 无 try 兜底)致常驻实盘进程盘中首个信号猝死,
 且先于 broker.fill_pending/queue_events 交易循环同死(新R3-F1-NOTIF-3)。"""
 
+from datetime import datetime, timedelta, timezone
+
 from chanlun.notifications import DingTalkWebhookNotifier
 
 
@@ -90,6 +92,48 @@ def test_rich_notification_uses_one_markdown_payload_with_image(monkeypatch):
     ]["text"]
 
 
+def test_rich_notification_rechecks_margin_after_chart_before_webhook(
+    monkeypatch,
+):
+    import urllib.request
+
+    requests = []
+    warnings = []
+    now = [datetime(2026, 9, 4, 10, 0, tzinfo=timezone.utc)]
+
+    def render(_context):
+        now[0] += timedelta(seconds=20)
+        return [{"url": "https://example.invalid/chart.png", "alt": "证据图"}]
+
+    def unexpected_request(request, timeout):
+        requests.append((request, timeout))
+        return _DingTalkSuccess()
+
+    monkeypatch.setattr(urllib.request, "urlopen", unexpected_request)
+    monkeypatch.setattr(
+        "chanlun.notifications.fun.get_logger",
+        lambda: type("Logger", (), {"warning": warnings.append})(),
+    )
+    notifier = DingTalkWebhookNotifier(
+        "https://example.invalid/send",
+        rich_content_provider=render,
+        clock=lambda: now[0],
+    )
+
+    assert notifier.send_rich(
+        "买卖通知",
+        ["精确执行提醒"],
+        {
+            "require_evidence_match": True,
+            "expires_at": (now[0] + timedelta(seconds=40)).isoformat(),
+            "minimum_delivery_margin_seconds": 30,
+        },
+    ) is False
+
+    assert requests == []
+    assert any("failed during chart rendering" in value for value in warnings)
+
+
 def test_rich_notification_chart_failure_falls_back_to_one_text(monkeypatch):
     import json
     import urllib.request
@@ -119,6 +163,36 @@ def test_rich_notification_chart_failure_falls_back_to_one_text(monkeypatch):
     assert len(requests) == 1
     payload = json.loads(requests[0].data.decode("utf-8"))
     assert payload["msgtype"] == "text"
+
+
+def test_required_chart_failure_stays_pending_without_transport(monkeypatch):
+    import urllib.request
+
+    requests = []
+
+    def fail_chart(_context):
+        raise RuntimeError("renderer unavailable")
+
+    def unexpected_request(request, timeout):
+        requests.append((request, timeout))
+        return _DingTalkSuccess()
+
+    monkeypatch.setattr(urllib.request, "urlopen", unexpected_request)
+    monkeypatch.setattr(
+        "chanlun.notifications.fun.get_logger",
+        lambda: type("Logger", (), {"warning": lambda _self, _message: None})(),
+    )
+    notifier = DingTalkWebhookNotifier(
+        "https://example.invalid/send",
+        rich_content_provider=fail_chart,
+    )
+
+    assert notifier.send_rich(
+        "买卖通知",
+        ["SZ.000001"],
+        {"require_chart": True, "charts": [{"code": "SZ.000001"}]},
+    ) is False
+    assert requests == []
 
 
 def test_evidence_bound_chart_failure_stays_pending_without_transport(monkeypatch):

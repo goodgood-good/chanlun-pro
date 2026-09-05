@@ -363,7 +363,7 @@ def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
     )
     assert "$LargeScopePriorityMaxSymbols = 384" in restart
     assert "$LargeScopeMonitorUniverseSymbols = 384" in restart
-    assert "$LargeScopeCandidateFiveMinuteSymbols = 80" in restart
+    assert "$LargeScopeCandidateFiveMinuteSymbols = 128" in restart
     assert "} else {" in reset_body
     assert (
         "'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS'" in reset_body

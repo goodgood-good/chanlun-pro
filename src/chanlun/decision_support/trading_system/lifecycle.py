@@ -31,6 +31,8 @@ from chanlun.decision_support.trading_system.five_minute_setup_state import (
 
 
 STRUCTURE_INVALIDATED_REASON_CODE = "structure_invalidated"
+_THIRD_CLASS_POINT_TYPES = frozenset({"3buy", "3sell"})
+_UNKNOWN_CENTER_PRIORITY_RANK = 10**6
 
 
 def five_minute_setup_expires_at(
@@ -137,19 +139,67 @@ def five_minute_setup_family_lane(
 def five_minute_setup_is_in_policy_scope(
     point: StructuralPoint | ProvisionalCandidate,
 ) -> bool:
-    """Return whether a 5m setup belongs to the frozen production scope.
+    """Return whether a 5m setup belongs to the execution/notification scope.
 
-    The current screening contract admits only the first center-relative third
-    point on both sides. Later-center third buys and third sells remain chart
-    evidence, but cannot enter selection, notification, review or replay lanes.
-    Keeping this rule symmetric prevents sell distributions from including a
-    broader structural population than buy distributions.
+    Current selection may retain a known later-center third point as a
+    lower-priority research candidate.  Execution, realtime notification and
+    replay stay restricted to the first center on both sides.  Keeping this
+    rule symmetric prevents a research-only row from silently widening the
+    executable buy or sell population.
     """
 
     return (
-        point.point_type not in {"3buy", "3sell"}
+        point.point_type not in _THIRD_CLASS_POINT_TYPES
         or point.center_ordinal == 1
     )
+
+
+def five_minute_setup_document_is_in_policy_scope(
+    point: Mapping[str, object],
+) -> bool:
+    """Apply the first-center execution rule to a serialized setup."""
+
+    point_type = point.get("point_type")
+    return bool(
+        point_type not in _THIRD_CLASS_POINT_TYPES
+        or (
+            type(point.get("center_ordinal")) is int
+            and point.get("center_ordinal") == 1
+        )
+    )
+
+
+def five_minute_setup_is_in_selection_scope(
+    point: StructuralPoint | ProvisionalCandidate,
+) -> bool:
+    """Admit known later-center third points for ranked human research."""
+
+    return bool(
+        point.point_type not in _THIRD_CLASS_POINT_TYPES
+        or (
+            type(point.center_ordinal) is int
+            and point.center_ordinal > 0
+        )
+    )
+
+
+def five_minute_setup_center_priority_rank(
+    point_type: object,
+    center_ordinal: object,
+) -> int:
+    """Return a lower-is-better structural maturity rank for selection.
+
+    Non-third points and first-center third points keep the existing top rank.
+    Each later center moves a third point one rank lower.  Malformed or legacy
+    third-point ordinals fail closed behind every known center instead of being
+    mistaken for a first-center opportunity.
+    """
+
+    if point_type not in _THIRD_CLASS_POINT_TYPES:
+        return 0
+    if type(center_ordinal) is not int or center_ordinal <= 0:
+        return _UNKNOWN_CENTER_PRIORITY_RANK
+    return center_ordinal - 1
 
 
 def _five_minute_terminal_segment_lane(
@@ -298,7 +348,7 @@ def current_five_minute_setup_points(
             point.recursive_level,
         ):
             continue
-        if not five_minute_setup_is_in_policy_scope(point):
+        if not five_minute_setup_is_in_selection_scope(point):
             continue
         if isinstance(point, StructuralPoint) and not point.confirmed:
             continue
@@ -941,14 +991,23 @@ def lifecycle_state_from_signal_document(
         )
     else:
         raise ValueError("signal lifecycle trigger is invalid")
+    # ``executable`` is a projection of the *current* execution constraints,
+    # not a monotonic structural lifecycle state.  Persisted documents are
+    # therefore restored at their durable 5m state and re-evaluated against
+    # the current price, risk and 1m boundary below.  Otherwise one successful
+    # evaluation would make ``executable`` sticky after the boundary expired
+    # or a hard block appeared.
+    restored_stage: LifecycleStage = (
+        "triggered" if stage == "executable" else stage
+    )
     lifecycle = SignalLifecycle(
         signal_id=signal_id,
         setup_id=setup_id,
-        stage=stage,  # type: ignore[arg-type]
+        stage=restored_stage,
         observed_at=observed_at,
         trigger_point_id=None if trigger is None else trigger.point_id,
-        reason_codes=_reason_codes(stage),  # type: ignore[arg-type]
-        actionable=stage in {"triggered", "executable", "active"},
+        reason_codes=_reason_codes(restored_stage),
+        actionable=restored_stage in {"triggered", "active"},
     )
     return lifecycle, trigger
 
@@ -1047,19 +1106,42 @@ def advance_lifecycle(
         and previous.stage in {"triggered", "executable", "active"}
         and not invalidated
     ):
+        durable_stage: LifecycleStage = (
+            "triggered" if previous.stage == "executable" else previous.stage
+        )
         # The first exact nesting witness fixes the setup's execution boundary.
         # A later witness is audit evidence only and cannot open another window.
         if previous.trigger_point_id is not None:
-            return previous
+            if durable_stage == previous.stage:
+                return previous
+            return SignalLifecycle(
+                signal_id=signal_id,
+                setup_id=setup.setup_id,
+                stage=durable_stage,
+                observed_at=previous.observed_at,
+                trigger_point_id=previous.trigger_point_id,
+                reason_codes=_reason_codes(durable_stage),
+                actionable=True,
+            )
         if valid_trigger is None:
-            return previous
+            if durable_stage == previous.stage:
+                return previous
+            return SignalLifecycle(
+                signal_id=signal_id,
+                setup_id=setup.setup_id,
+                stage=durable_stage,
+                observed_at=previous.observed_at,
+                trigger_point_id=None,
+                reason_codes=_reason_codes(durable_stage),
+                actionable=True,
+            )
         return SignalLifecycle(
             signal_id=signal_id,
             setup_id=setup.setup_id,
-            stage=previous.stage,
+            stage=durable_stage,
             observed_at=observed_at,
             trigger_point_id=valid_trigger.point_id,
-            reason_codes=previous.reason_codes,
+            reason_codes=_reason_codes(durable_stage),
             actionable=True,
         )
     target: LifecycleStage = (

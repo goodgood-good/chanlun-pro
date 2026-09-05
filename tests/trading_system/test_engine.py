@@ -205,7 +205,7 @@ def test_engine_exposes_completed_preview_as_formed_not_approaching() -> None:
     assert evaluated[0].lifecycle.actionable is False
 
 
-def test_newer_provisional_candidate_does_not_hide_current_confirmed_setup() -> None:
+def test_newer_later_center_candidate_coexists_with_current_confirmed_setup() -> None:
     confirmed = confirmed_point("3buy", center_ordinal=1)
     provisional = replace(
         provisional_point("3buy"),
@@ -219,8 +219,12 @@ def test_newer_provisional_candidate_does_not_hide_current_confirmed_setup() -> 
         symbol_bundle(five_points=(confirmed, provisional))
     )
 
-    assert len(evaluated) == 1
-    assert evaluated[0].setup.point == confirmed
+    assert len(evaluated) == 2
+    assert {item.setup.point for item in evaluated} == {confirmed, provisional}
+    later = next(item for item in evaluated if item.setup.point == provisional)
+    assert later.lifecycle.stage == "approaching"
+    assert later.entry is not None
+    assert later.entry.allowed is False
     assert provisional.center_ordinal == 2
 
 

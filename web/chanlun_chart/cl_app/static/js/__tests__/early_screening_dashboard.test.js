@@ -619,7 +619,7 @@ test("desktop layout aligns the signal queue with the chart below a compact sect
   assert.match(dashboardCss, /\.es-global-filters\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/);
   assert.match(dashboardCss, /\.es-search\s*\{[^}]*margin:\s*4px 10px/s);
   assert.match(dashboardCss, /\.es-signal-channel-bar\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)/s);
-  assert.match(dashboardCss, /\.es-signal-channel-primary\s*\{[^}]*repeat\(2,/s);
+  assert.match(dashboardCss, /\.es-signal-channel-primary\s*\{[^}]*repeat\(3,/s);
   assert.match(dashboardCss, /\.es-signal-type-filters\s*\{[^}]*repeat\(6,/s);
   assert.match(dashboardCss, /\.es-signal-workspace\s*\{[^}]*position:\s*sticky[^}]*overflow:\s*hidden/s);
   assert.match(narrowRules, /\.es-signal-workspace\s*\{[^}]*position:\s*static[^}]*height:\s*auto/s);
@@ -1103,20 +1103,36 @@ test("stock selection opens with all six point channels visible", () => {
   assert.match(controllerSource, /localStorage\.removeItem\(STORAGE_KEY\)/);
   assert.match(controllerSource, /saved\.selectionScope\s*===\s*"sector-trigger"[\s\S]*?"all-qualified"/);
   assert.match(template, /class="es-signal-channel-bar"/);
-  const quickChannels = template.match(
-    /class="es-signal-channel-bar"[\s\S]*?<\/div>\s*<\/div>/,
-  );
-  assert.ok(quickChannels);
+  const quickChannelStart = template.indexOf('class="es-signal-channel-bar"');
+  const quickChannelEnd = template.indexOf('<label class="es-search">', quickChannelStart);
+  const quickChannels = template.slice(quickChannelStart, quickChannelEnd);
+  assert.ok(quickChannelStart >= 0 && quickChannelEnd > quickChannelStart);
   for (const point of ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]) {
-    assert.match(quickChannels[0], new RegExp(`data-point-type="${point}"`));
+    assert.match(quickChannels, new RegExp(`data-point-type="${point}"`));
   }
-  assert.match(quickChannels[0], /id="es-show-all-signals"[^>]*>全部线索</);
+  assert.match(quickChannels, /id="es-show-all-signals"[^>]*>全部线索</);
   assert.match(
-    quickChannels[0],
+    quickChannels,
     /id="es-show-today-notifications"[^>]*data-signal-source="notification"[^>]*>今日实时通知</,
   );
+  assert.match(
+    quickChannels,
+    /id="es-show-monitoring-queue"[^>]*data-review-stage="tracking"[^>]*>监听队列</,
+  );
+  assert.match(
+    quickChannels,
+    /id="es-hide-research-only"[^>]*aria-pressed="false"[^>]*>隐藏仅研究</,
+  );
+  assert.match(
+    dashboardCss,
+    /\.es-signal-channel-primary\s*\{[^}]*grid-template-columns:\s*repeat\(3,/,
+  );
+  assert.match(
+    dashboardCss,
+    /\.es-signal-channel-primary button::after\s*\{[^}]*display:\s*block/,
+  );
   assert.doesNotMatch(
-    quickChannels[0].match(/<button id="es-show-all-signals"[^>]*>/)?.[0] || "",
+    quickChannels.match(/<button id="es-show-all-signals"[^>]*>/)?.[0] || "",
     /data-point-type/,
   );
   assert.match(template, /data-point-type="all"[^>]*>不限买卖点类型</);
@@ -1137,11 +1153,11 @@ test("stock selection opens with all six point channels visible", () => {
   );
   assert.match(
     template,
-    /value="POSSIBLE_5M_TRADE_BUY">5分钟操作确认买点/,
+    /value="POSSIBLE_5M_TRADE_BUY">5分钟正式买点确认/,
   );
   assert.match(
     humanReviewSource,
-    /POSSIBLE_5M_TRADE_SELL:\s*"5分钟操作确认卖点"/,
+    /POSSIBLE_5M_TRADE_SELL:\s*"5分钟正式卖点确认"/,
   );
   assert.match(
     humanReviewSource,
@@ -2007,14 +2023,14 @@ test("expired one-minute segment stays visible only as historical audit evidence
   assert.equal(candidate.realtime_notification_setup_lock_state, "pending");
   assert.equal(
     HumanUi.realtimeNotificationSetupLockLabel(candidate),
-    "5分钟操作确认已完成；末端结构仍会随新K更新，不影响当前复核",
+    "5分钟正式点确认已完成；末端结构仍会随新K更新，不影响当前复核",
   );
   assert.equal(
     HumanUi.realtimeNotificationSetupLockLabel({
       ...candidate,
       realtime_notification_setup_lock_state: "locked",
     }),
-    "5分钟操作确认已完成；末端结构已封存",
+    "5分钟正式点确认已完成；末端结构已封存",
   );
   assert.ok(candidate.warning_codes.includes("ONE_MINUTE_SEGMENT_BOUNDARY_EXPIRED"));
   assert.deepEqual(HumanUi.realtimeNotificationSegmentPeriod(candidate), [
@@ -2311,6 +2327,7 @@ test("review display sorting keeps confirmed setups ahead of provisional candida
       code: "SZ.000001",
       point_type: "3buy",
       lifecycle_stage: "triggered",
+      setup_5m: { point_type: "3buy", center_ordinal: 1 },
       sector: { sector_id: "sector-2" },
     },
     {
@@ -2318,6 +2335,7 @@ test("review display sorting keeps confirmed setups ahead of provisional candida
       code: "SZ.000004",
       point_type: "3buy",
       lifecycle_stage: "armed",
+      setup_5m: { point_type: "3buy", center_ordinal: 1 },
       sector: { sector_id: "sector-1" },
     },
     {
@@ -2332,7 +2350,7 @@ test("review display sorting keeps confirmed setups ahead of provisional candida
       code: "SH.688132",
       point_type: "3buy",
       lifecycle_stage: "observed",
-      setup_5m: { status: "confirmed", point_type: "3buy" },
+      setup_5m: { status: "confirmed", point_type: "3buy", center_ordinal: 1 },
       sector: { sector_id: "sector-1" },
     },
     {
@@ -2340,7 +2358,7 @@ test("review display sorting keeps confirmed setups ahead of provisional candida
       code: "SH.688132",
       point_type: "3buy",
       lifecycle_stage: "formed",
-      setup_5m: { status: "provisional", point_type: "3buy" },
+      setup_5m: { status: "provisional", point_type: "3buy", center_ordinal: 1 },
       sector: { sector_id: "sector-1" },
     },
   ];
@@ -2436,6 +2454,107 @@ test("live selection sorts the filtered rows by review priority descending", () 
   assert.equal(Ui.reviewPriorityForSignal(rows[2]), 110);
   assert.equal(Ui.reviewPriorityForSignal(rows[3]), 85);
   assert.equal(Ui.reviewPriorityForSignal(rows[4]), null);
+});
+
+test("live selection ranks earlier third-point centers ahead of later centers", () => {
+  const Ui = loadUi();
+  const shared = {
+    point_type: "3buy",
+    side: "buy",
+    lifecycle_stage: "triggered",
+    review_priority: 50,
+    execution_profile: { context_grade: "A" },
+  };
+  const rows = [
+    {
+      ...shared,
+      signal_id: "second-center",
+      code: "SZ.000002",
+      setup_5m: { point_type: "3buy", center_ordinal: 2 },
+      sector: { sector_id: "stronger-sector" },
+    },
+    {
+      ...shared,
+      signal_id: "first-center",
+      code: "SZ.000001",
+      setup_5m: { point_type: "3buy", center_ordinal: 1 },
+      sector: { sector_id: "weaker-sector" },
+    },
+  ];
+
+  assert.deepEqual(
+    Ui.sortSignalsForReview(rows, [
+      { sector_id: "stronger-sector", rank: 1 },
+      { sector_id: "weaker-sector", rank: 2 },
+    ]).map((row) => row.signal_id),
+    ["first-center", "second-center"],
+  );
+  assert.equal(Ui.centerPriorityRankForSignal(rows[1]), 0);
+  assert.equal(Ui.centerPriorityRankForSignal(rows[0]), 1);
+});
+
+test("research-only filter hides only later-center third points and composes", () => {
+  const Ui = loadUi();
+  const row = (signalId, pointType, centerOrdinal, stage = "triggered") => ({
+    signal_id: signalId,
+    code: signalId,
+    name: signalId,
+    point_type: pointType,
+    side: pointType.endsWith("buy") ? "buy" : "sell",
+    lifecycle_stage: stage,
+    setup_5m: { point_type: pointType, center_ordinal: centerOrdinal },
+  });
+  const rows = [
+    row("first-three-buy", "3buy", 1),
+    row("second-three-buy", "3buy", 2),
+    row("third-three-sell", "3sell", 3),
+    row("ordinary-two-buy", "2buy", null),
+    row("tracking-research", "3buy", 4, "active"),
+  ];
+
+  assert.equal(Ui.laterCenterThirdPointResearchOnly(rows[0]), false);
+  assert.equal(Ui.laterCenterThirdPointResearchOnly(rows[1]), true);
+  assert.deepEqual(
+    Ui.filterSignals(rows, { hideResearchOnly: true }).map((row) => row.signal_id),
+    ["first-three-buy", "ordinary-two-buy"],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(rows, {
+      hideResearchOnly: true,
+      reviewStage: "tracking",
+      query: "tracking",
+    }).map((row) => row.signal_id),
+    [],
+  );
+  assert.deepEqual(
+    Ui.filterSignals(rows, { reviewStage: "tracking" }).map((row) => row.signal_id),
+    ["tracking-research"],
+  );
+});
+
+test("derived review priority applies the same later-center penalty", () => {
+  const Ui = loadUi();
+  const signal = (ordinal) => ({
+    point_type: "3buy",
+    side: "buy",
+    lifecycle_stage: "triggered",
+    entry_allowed: false,
+    setup_5m: { point_type: "3buy", center_ordinal: ordinal },
+    execution_profile: { recommendation: "CAUTION", context_grade: "A" },
+    position_recommendation: { status: "CONDITIONAL", side: "buy" },
+    higher_timeframe_risk: {
+      market_gate: "GREEN",
+      sector_gate: "GREEN",
+      symbol_gate: "GREEN",
+    },
+    warmup: { converged: true },
+    selection_sources: [],
+  });
+
+  assert.equal(
+    Ui.reviewPriorityForSignal(signal(1)) - Ui.reviewPriorityForSignal(signal(2)),
+    1,
+  );
 });
 
 test("live selection sorts by A B C grade before notification priority", () => {
@@ -2569,7 +2688,7 @@ test("confirmed sell review is urgent and manual attention adds account-free pri
   assert.ok(Ui.reviewPriorityForSignal(laterManualAttention) >= 90);
   assert.match(
     Ui.decisionSummaryForSignal(laterManualAttention).title,
-    /5分钟二卖.*操作确认/,
+    /5分钟二卖.*正式确认/,
   );
 });
 
@@ -2779,6 +2898,37 @@ test("signal queue and chart publish one shared selected identity", () => {
   ));
   assert.equal(chart.root.dataset.signalId, selected.signal_id);
   assert.equal(chart.root.dataset.selectedCode, selected.code);
+});
+
+test("third-point cards expose the center ordinal and mute later centers", () => {
+  const Ui = loadUi();
+  const signalList = fakeChartRoot();
+  const laterCenter = {
+    ...snapshot.signals[1],
+    signal_id: "later-center-card",
+    point_type: "3buy",
+    setup_5m: {
+      ...snapshot.signals[1].setup_5m,
+      point_type: "3buy",
+      center_ordinal: 2,
+    },
+  };
+
+  const card = Ui.renderSignalWorkspace(
+    signalList.root,
+    [laterCenter],
+    laterCenter.signal_id,
+  );
+  const tags = card.children.find(
+    (child) => child.className === "es-signal-card__tags",
+  );
+  const centerBadge = tags.children.find(
+    (child) => child.textContent === "第2中枢·仅研究",
+  );
+
+  assert.equal(card.dataset.centerOrdinal, "2");
+  assert.ok(centerBadge);
+  assert.match(centerBadge.className, /is-center-later/);
 });
 
 test("selection updates only existing cards and chart navigation uses the persistent bridge", () => {
@@ -3450,13 +3600,13 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
     approaching: "即将确认",
     formed: "几何候选待确认",
     armed: "旧版等待态",
-    triggered: "5分钟操作确认",
-    executable: "强提示待人工复核",
+    triggered: "5分钟正式点确认",
+    executable: "当前精确执行条件满足",
     active: "结构持续跟踪",
     invalidated: "结构已失效",
     closed: "跟踪已结束",
   });
-  assert.equal(Ui.lifecycleLabel("triggered"), "5分钟操作确认");
+  assert.equal(Ui.lifecycleLabel("triggered"), "5分钟正式点确认");
   assert.equal(Ui.lifecycleLabel("unexpected-stage"), "未知状态");
   assert.match(template, /data-lifecycle="approaching"/);
   assert.doesNotMatch(template, /data-lifecycle="formed"/);
@@ -3764,10 +3914,10 @@ test("the current lifecycle field is authoritative", () => {
   };
   assert.equal(Ui.pointLabelForSignal(confirmedPending), "三买操作确认");
   assert.equal(Ui.pointLabelForSignal(confirmedLocked), "三买操作确认");
-  assert.equal(Ui.periodPathForSignal(confirmedPending)[2].state, "5分钟操作确认");
+  assert.equal(Ui.periodPathForSignal(confirmedPending)[2].state, "5分钟正式点确认");
   assert.equal(
     Ui.periodPathForSignal(confirmedLocked)[2].state,
-    "5分钟操作确认·末端已封存",
+    "5分钟正式点确认·末端已封存",
   );
   assert.match(
     Ui.periodPathForSignal(confirmedPending)[2].summary,
@@ -3776,7 +3926,7 @@ test("the current lifecycle field is authoritative", () => {
   assert.doesNotMatch(Ui.pointLabelForSignal(confirmedPending), /复核中|待确认/);
   assert.equal(
     Ui.decisionSummaryForSignal(explicitFormed).title,
-    "5分钟三买几何候选，尚未达到操作确认",
+    "5分钟三买几何候选，尚未正式确认",
   );
   assert.equal(Ui.periodPathForSignal(explicitFormed)[2].state, "候选待锁定");
   assert.match(Ui.periodPathForSignal(explicitFormed)[2].summary, /^三买候选待锁定 ·/);
@@ -3832,13 +3982,13 @@ test("the current lifecycle field is authoritative", () => {
   };
   assert.equal(
     Ui.decisionSummaryForSignal(hardBlockedFormedSell).title,
-    "5分钟三卖几何候选，尚未达到操作确认",
+    "5分钟三卖几何候选，尚未正式确认",
   );
   assert.equal(Ui.decisionSummaryForSignal(hardBlockedFormedSell).tone, "blocked");
   const formedSellGroups = Ui.evidenceGroupsForSignal(hardBlockedFormedSell);
   assert.ok(formedSellGroups.established.some((line) => line.includes("三卖离开/回抽几何已出现")));
   assert.ok(formedSellGroups.blocking.some((line) => line.includes("高周期同源数据完整性")));
-  assert.ok(formedSellGroups.missing.some((line) => line.includes("卖点尚未达到操作确认")));
+  assert.ok(formedSellGroups.missing.some((line) => line.includes("卖点尚未正式确认")));
 
   const invalidatedFormed = { ...explicitFormed, lifecycle_stage: "invalidated" };
   assert.equal(Ui.pointLabelForSignal(invalidatedFormed), "三买候选已失效");
@@ -4233,31 +4383,48 @@ test("signal cards keep current 5m structures current regardless of age", () => 
   const staleBuy = {
     lifecycle_stage: "executable",
     side: "buy",
+    entry_allowed: true,
+    exit_allowed: false,
     setup_5m: { available_at: "2026-08-14T09:40:00+08:00" },
     observed_at: "2026-08-21T10:38:00+08:00",
   };
-  const staleSell = { ...staleBuy, side: "sell" };
+  const staleSell = {
+    ...staleBuy,
+    side: "sell",
+    entry_allowed: false,
+    exit_allowed: true,
+  };
 
   assert.equal(
     Ui.signalCardLifecycleLabel(staleBuy, new Date("2026-08-21T10:38:00+08:00")),
-    "强提示待人工复核",
+    "当前精确执行条件满足",
   );
   assert.equal(
     Ui.signalCardLifecycleLabel(staleSell, new Date("2026-08-21T10:38:00+08:00")),
-    "强提示待人工复核",
+    "当前精确执行条件满足",
   );
   assert.equal(
     Ui.signalCardLifecycleLabel({
       lifecycle_stage: "executable",
       side: "buy",
+      entry_allowed: true,
       setup_5m: { terminal_segment_end_at: "2026-08-14T09:40:00+08:00" },
       observed_at: "2026-08-21T10:38:00+08:00",
     }, new Date("2026-08-21T10:38:00+08:00")),
-    "强提示待人工复核",
+    "当前精确执行条件满足",
+  );
+  assert.equal(
+    Ui.signalCardLifecycleLabel({
+      lifecycle_stage: "executable",
+      side: "buy",
+      entry_allowed: false,
+      exit_allowed: false,
+    }),
+    "5分钟正式点确认",
   );
   assert.equal(
     Ui.signalCardLifecycleLabel({ ...staleBuy, setup_5m: { available_at: "2026-08-21T10:35:00+08:00" } }, new Date("2026-08-21T10:38:00+08:00")),
-    "强提示待人工复核",
+    "当前精确执行条件满足",
   );
   assert.equal(
     Ui.signalCardTimeText({ setup_5m: { available_at: "SIGNAL_AT" }, observed_at: "LATEST" }),
@@ -4391,7 +4558,7 @@ test("signal lifecycle selects the analysis-first default chart and honest decis
   assert.equal(Ui.defaultFrequencyForSignal({ lifecycle_stage: "unknown" }), "5m");
 
   assert.equal(Ui.decisionSummaryForSignal(snapshot.signals[0]).title, "5分钟一买结构仍在形成");
-  assert.equal(Ui.decisionSummaryForSignal(snapshot.signals[1]).title, "强提示待人工复核");
+  assert.equal(Ui.decisionSummaryForSignal(snapshot.signals[1]).title, "当前精确执行条件满足");
   assert.deepEqual(
     Ui.decisionSummaryForSignal({ lifecycle_stage: "armed", setup_5m: {} }),
     {
@@ -4683,12 +4850,12 @@ test("new execution profile keeps adverse context advisory and visible", () => {
 
   assert.equal(
     Ui.decisionSummaryForSignal(signal).title,
-    "5分钟二买操作确认，末端结构已封存，谨慎人工复核",
+    "5分钟二买正式确认，末端结构已封存，谨慎人工复核",
   );
   const daily = Ui.periodPathForSignal(signal)[0];
   assert.equal(daily.state, "逆风提示");
   assert.equal(daily.tone, "waiting");
-  assert.equal(daily.boundary, "仅降低环境等级，不否定5分钟操作确认");
+  assert.equal(daily.boundary, "仅降低环境等级，不否定5分钟正式点确认");
   assert.match(daily.summary, /MA5 9 \/ MA10 10/);
   assert.match(daily.summary, /顶分型已确认/);
   const groups = Ui.evidenceGroupsForSignal(signal);

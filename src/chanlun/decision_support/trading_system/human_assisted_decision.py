@@ -783,12 +783,19 @@ def serialize_evaluated_signal(
     entry_allowed = item.entry is not None and item.entry.allowed
     exit_allowed = item.exit is not None and item.exit.allowed
     lifecycle_stage = item.lifecycle.stage
-    if (entry_allowed or exit_allowed) and previous_stage in {
-        "triggered",
-        "executable",
-        "active",
-    }:
-        lifecycle_stage = "executable"
+    if lifecycle_stage in {"triggered", "executable"}:
+        # Executability is a current snapshot, not a sticky lifecycle
+        # promotion.  Preserve the deliberate observation boundary between
+        # the durable 5m confirmation and a currently valid precise-execution
+        # projection, but immediately project back to triggered when today's
+        # constraints no longer permit entry/exit.  Active positions remain
+        # active.
+        lifecycle_stage = (
+            "executable"
+            if (entry_allowed or exit_allowed)
+            and previous_stage in {"triggered", "executable"}
+            else "triggered"
+        )
     decision_reasons = tuple(
         dict.fromkeys(
             (

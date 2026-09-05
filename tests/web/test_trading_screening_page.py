@@ -966,10 +966,10 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "日线、30分钟、5分钟、1分钟均只使用决策时已经完成的K线" in html
     assert "日线和30分钟证据不足时标记“待判定”" in html
     assert (
-        "5分钟操作确认决定主信号和首报，1分钟同向区间套决定是否进入精确执行候选"
+        "5分钟正式点确认决定主信号和首报，1分钟同向区间套与当前风控共同决定精确执行条件是否满足"
         in html
     )
-    assert "结构、复权或行情证据失真时关闭操作资格" in html
+    assert "结构、复权、行情证据失真或1分钟定位失去时效时关闭操作资格" in html
     assert "日线与30分钟负责环境分级" in html
     assert "周线和月线不参与当前执行判断" not in html
     assert "未来除权改写既有排序" not in html
@@ -981,6 +981,11 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert 'data-signal-source="notification"' in html
     assert 'data-review-stage="notified"' in html
     assert 'data-lifecycle="monitoring"' in html
+    assert (
+        'id="es-show-monitoring-queue" type="button" '
+        'data-review-stage="tracking"' in html
+    )
+    assert ">监听队列</button>" in html
     assert 'id="es-filter-reset"' in html
     assert 'id="es-us-monitor" class="es-us-monitor-compact"' in html
     assert 'id="es-us-monitor-list"' not in html
@@ -1013,7 +1018,8 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "实时模式图表会随市场继续更新" in html
     assert "不可作为历史因果复核" in html
     assert "请切换“人工复核选股”" in html
-    assert "三买只取第一中枢" in html
+    assert "三类买卖点按同向中枢序号排序" in html
+    assert "第二及后续中枢保留为低优先级研究线索" in html
     assert "历史研究/审计成果" in html
     assert "实时信号辅助 · 手工交易" in html
     assert "信号通知 · 无委托 · 人工确认" in html

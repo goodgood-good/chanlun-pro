@@ -4,7 +4,7 @@
   "technical_mode": "HUMAN_REVIEW_SCREENING",
   "signal_alignment_contract_id": "PHYSICAL_5M_TRADE_LEVEL_1M_INTERVAL_NESTING_SEGMENT_DIFFERENCE_V6",
   "signal_alignment_parameter_set_id": "sha256:4cd2602f4016c5df28ad684cbea8a0ebb5806f521ea4bc02ec8848a6a901c21b",
-  "human_review_screening_parameter_set_id": "sha256:d88f9a3084d516ff1f125915c7f63b3c76bbf00cd316e43bdea789f0e770c3c1",
+  "human_review_screening_parameter_set_id": "sha256:f81a7086cea96d9d0d0baee010fd1aa3c4241b2eeae12c49c6ea5f3f019647a5",
   "selection_path": "INDIVIDUAL_THREE_PROGRAM",
   "three_program_mode": "REQUIRED_SIGNED_POINT_IN_TIME",
   "strategic_frequency": "30m",

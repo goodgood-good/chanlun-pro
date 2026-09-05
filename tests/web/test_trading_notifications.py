@@ -14,6 +14,8 @@ from chanlun.decision_support.trading_system.position_recommendation import (
 from cl_app.services.realtime_review_inbox import RealtimeReviewInbox
 from cl_app.services.trading_notifications import (
     SignalNotificationDispatcher,
+    _legacy_trigger_occurrence_event_id,
+    _notification_eligibility_reason,
     format_approaching_digest,
     format_notification,
     format_preconfirmation_divergence_digest,
@@ -120,6 +122,41 @@ def snapshot(stage: str | None) -> dict[str, object]:
     return {"signals": [] if stage is None else [signal_document(stage)]}
 
 
+def test_later_center_third_point_is_research_only_for_notifications() -> None:
+    signal = signal_document("triggered")
+    signal["setup_5m"] = {
+        **signal["setup_5m"],
+        "center_ordinal": 2,
+    }
+
+    assert _notification_eligibility_reason(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    ) == "LATER_CENTER_THIRD_POINT_RESEARCH_ONLY"
+
+
+def test_later_center_research_never_enters_approaching_or_divergence_digests(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "later-center-research-digests.json",
+    )
+    approaching = approaching_document()
+    approaching["setup_5m"]["center_ordinal"] = 2
+    divergence = preconfirmation_divergence_document(2)
+    divergence["setup_5m"]["center_ordinal"] = 3
+
+    dispatcher.dispatch_approaching_digest({"signals": [approaching, divergence]})
+
+    assert sender.messages == []
+    health = dispatcher.health_snapshot()
+    assert health["approaching_alerted_occurrence_count"] == 0
+    assert health["preconfirmation_divergence_alerted_occurrence_count"] == 0
+
+
 def shared_trigger_signal(signal_id: str, setup_point_type: str) -> dict[str, object]:
     signal = signal_document("triggered")
     signal["signal_id"] = signal_id
@@ -147,6 +184,8 @@ def approaching_document(
     available_at: str = "2026-07-20T10:00:00+08:00",
     observed_at: str = "2026-07-20T10:01:30+08:00",
     terminal_segment_id: str | None = None,
+    terminal_segment_start_at: str = "2026-07-20T09:30:00+08:00",
+    terminal_segment_end_at: str = "2026-07-20T09:55:00+08:00",
 ) -> dict[str, object]:
     signal = signal_document("approaching")
     code = f"SZ.{index:06d}"
@@ -174,9 +213,11 @@ def approaching_document(
         "lock_state": "pending",
         "terminal_segment_id": terminal_segment_id or f"terminal:{index}",
         "terminal_segment_role": "latest_unfinished",
+        "terminal_segment_source_kind": "segment",
+        "terminal_segment_direction": "down",
         "terminal_segment_state": "forming",
-        "terminal_segment_start_at": "2026-07-20T09:30:00+08:00",
-        "terminal_segment_end_at": "2026-07-20T09:55:00+08:00",
+        "terminal_segment_start_at": terminal_segment_start_at,
+        "terminal_segment_end_at": terminal_segment_end_at,
     }
     return signal
 
@@ -239,6 +280,24 @@ class RecordingNotifier:
     def send(self, title: str, lines: list[str]) -> bool:
         self.messages.append((title, lines))
         return self.results.pop(0) if self.results else True
+
+    def send_rich(
+        self,
+        title: str,
+        lines: list[str],
+        context: dict[str, object],
+    ) -> bool:
+        del context
+        return self.send(title, lines)
+
+
+class PlainRecordingNotifier:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, list[str]]] = []
+
+    def send(self, title: str, lines: list[str]) -> bool:
+        self.messages.append((title, lines))
+        return True
 
 
 class RichRecordingNotifier(RecordingNotifier):
@@ -602,7 +661,7 @@ def test_preconfirmation_divergence_notifies_once_without_promoting_five_minute(
     assert health["approaching_alerted_occurrence_count"] == 0
 
 
-def test_preconfirmation_divergence_has_priority_and_no_chart_capture(
+def test_preconfirmation_divergence_has_priority_and_required_chart_capture(
     tmp_path: Path,
 ) -> None:
     sender = RichRecordingNotifier()
@@ -619,9 +678,33 @@ def test_preconfirmation_divergence_has_priority_and_no_chart_capture(
     _title, _lines, context = sender.rich_messages[0]
     assert context["artifact_key"].startswith("sha256:")
     assert context["require_evidence_match"] is False
+    assert context["require_chart"] is True
     assert context["delivery_priority"] == 8
-    assert context["charts"] == []
+    assert len(context["charts"]) == 1
+    assert context["charts"][0]["code"] == "SZ.000001"
+    assert context["charts"][0]["evidence_required"] is False
     assert context["expires_at"] == "2026-07-20T10:11:30+08:00"
+
+
+def test_preconfirmation_required_chart_never_uses_plain_transport(
+    tmp_path: Path,
+) -> None:
+    sender = PlainRecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "preconfirmation-plain-transport.json",
+    )
+
+    dispatcher.dispatch_approaching_digest(
+        {"signals": [preconfirmation_divergence_document()]}
+    )
+
+    assert sender.messages == []
+    health = dispatcher.health_snapshot()
+    assert health["preconfirmation_divergence_digest_pending"] is True
+    assert health["last_failure_reason"] == (
+        "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
+    )
 
 
 def test_preconfirmation_divergence_accepts_locked_unconfirmed_five_minute_geometry(
@@ -730,6 +813,47 @@ def test_preconfirmation_divergence_dedupe_survives_restart(
     assert restarted_sender.messages == []
     assert (
         restarted.health_snapshot()[
+            "preconfirmation_divergence_alerted_occurrence_count"
+        ]
+        == 1
+    )
+
+
+def test_preconfirmation_dedupe_ignores_rebuilt_internal_ids_and_availability(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "preconfirmation-rebuild.json",
+    )
+    initial = preconfirmation_divergence_document()
+    rebuilt = preconfirmation_divergence_document()
+    rebuilt["signal_id"] = "signal:rebuilt-parent"
+    rebuilt["point_id"] = "approaching:rebuilt-parent"
+    rebuilt["setup_5m"] = {
+        **rebuilt["setup_5m"],
+        "point_id": "approaching:rebuilt-parent",
+        "terminal_segment_id": "terminal:rebuilt-parent",
+        "terminal_segment_end_at": "2026-07-20T10:00:00+08:00",
+    }
+    [divergence] = rebuilt["preconfirmation_divergences_1m"]
+    rebuilt_divergence = {
+        **divergence,
+        "point_id": "divergence:rebuilt",
+        "terminal_segment_id": "terminal:1m:rebuilt",
+        "available_at": "2026-07-20T10:01:15+08:00",
+        "confirmed_at": "2026-07-20T10:01:15+08:00",
+        "terminal_segment_available_at": "2026-07-20T10:01:15+08:00",
+    }
+    rebuilt["preconfirmation_divergences_1m"] = [rebuilt_divergence]
+
+    dispatcher.dispatch_approaching_digest({"signals": [initial]})
+    dispatcher.dispatch_approaching_digest({"signals": [rebuilt]})
+
+    assert len(sender.messages) == 1
+    assert (
+        dispatcher.health_snapshot()[
             "preconfirmation_divergence_alerted_occurrence_count"
         ]
         == 1
@@ -868,7 +992,7 @@ def test_approaching_digest_is_compact_explicit_and_deduplicated(
     assert health["approaching_digest_pending"] is False
 
 
-def test_approaching_digest_uses_a_chart_free_low_priority_outbox_event(
+def test_approaching_digest_uses_a_required_chart_low_priority_outbox_event(
     tmp_path: Path,
 ) -> None:
     sender = RichRecordingNotifier()
@@ -885,8 +1009,11 @@ def test_approaching_digest_uses_a_chart_free_low_priority_outbox_event(
     _title, _lines, context = sender.rich_messages[0]
     assert context["artifact_key"].startswith("sha256:")
     assert context["require_evidence_match"] is False
+    assert context["require_chart"] is True
     assert context["delivery_priority"] == 20
-    assert context["charts"] == []
+    assert len(context["charts"]) == 1
+    assert context["charts"][0]["code"] == "SZ.000001"
+    assert context["charts"][0]["evidence_required"] is False
     assert context["expires_at"] == "2026-07-20T10:11:30+08:00"
 
 
@@ -935,7 +1062,10 @@ def test_approaching_occurrence_dedupe_survives_restart_and_rolling_point_ids(
         1,
         available_at="2026-07-20T10:15:00+08:00",
         observed_at="2026-07-20T10:16:00+08:00",
-        terminal_segment_id="terminal:stable",
+        # A converged rebuild may replace the graph hash and extend the
+        # unfinished tail without creating a new user-facing occurrence.
+        terminal_segment_id="terminal:rebuilt",
+        terminal_segment_end_at="2026-07-20T10:15:00+08:00",
     )
     restarted_sender = RecordingNotifier()
     restarted = SignalNotificationDispatcher(
@@ -947,6 +1077,19 @@ def test_approaching_occurrence_dedupe_survives_restart_and_rolling_point_ids(
 
     assert restarted_sender.messages == []
     assert restarted.health_snapshot()["approaching_alerted_occurrence_count"] == 1
+
+    genuinely_new = approaching_document(
+        1,
+        available_at="2026-07-20T10:18:00+08:00",
+        observed_at="2026-07-20T10:19:00+08:00",
+        terminal_segment_id="terminal:new-lane",
+        terminal_segment_start_at="2026-07-20T10:05:00+08:00",
+        terminal_segment_end_at="2026-07-20T10:15:00+08:00",
+    )
+    restarted.dispatch_approaching_digest({"signals": [genuinely_new]})
+
+    assert len(restarted_sender.messages) == 1
+    assert restarted.health_snapshot()["approaching_alerted_occurrence_count"] == 2
 
 
 def test_failed_approaching_digest_retries_the_same_persisted_event(
@@ -1080,7 +1223,7 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
         for term in ("账户", "现金", "持仓", "虚拟", "组合热度")
     )
     assert rendered.count("非仓位建议") == 1
-    assert "进度：等待操作确认→5分钟操作确认" in rendered
+    assert "进度：等待操作确认→5分钟正式点确认" in rendered
     assert "计划风险倍数" not in rendered
     assert "结构层级" not in rendered
 
@@ -1433,8 +1576,10 @@ def test_a_share_lunch_break_does_not_expire_a_fresh_confirmed_point(
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
     assert "新买点·待人工确认" in title
-    assert "结构模型比例上限" in "\n".join(lines)
-    assert "买点已超过10分钟" not in "\n".join(lines)
+    rendered = "\n".join(lines)
+    assert "结构模型比例上限" in rendered
+    assert "监听发现 13:01:00（延迟 1分钟）" in rendered
+    assert "买点已超过10分钟" not in rendered
     assert dispatcher.health_snapshot()["suppressed_count"] == 0
 
 
@@ -1595,7 +1740,9 @@ def test_local_human_review_inbox_does_not_depend_on_external_transport(
 
     event = inbox.snapshot()["events"][0]
     assert event["delivery_status"] == "failed"
-    assert event["delivery_reason"] == "NOTIFIER_RETURNED_FALSE"
+    assert event["delivery_reason"] == (
+        "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
+    )
     health = dispatcher.health_snapshot()
     assert health["configured"] is False
     assert health["review_inbox_configured"] is True
@@ -1627,6 +1774,7 @@ def test_dispatcher_passes_stable_a_share_chart_context(tmp_path: Path) -> None:
     assert chart["frequency"] == "5m"
     assert chart["evidence_required"] is True
     assert context["delivery_priority"] == 3
+    assert context["require_chart"] is True
     assert sender.rich_messages[0][2]["require_evidence_match"] is True
 
 
@@ -1659,7 +1807,7 @@ def test_stage_stable_new_one_minute_segment_sends_enrichment_notification(
     rendered = "\n".join(lines)
     assert "1分钟精确定位新出现" in title
     assert "5分钟三类买点＋1分钟区间套一类买点" in title
-    assert "进度：5分钟操作确认→1分钟区间套定位补充" in rendered
+    assert "进度：5分钟正式点确认→1分钟区间套定位补充" in rendered
     assert "时效：日期 2026-07-20｜1分钟定位确认 10:01:00" in rendered
     assert "监听发现 10:01:30（延迟 30秒）" in rendered
     assert "结论：可人工复核买入；1分钟定位窗口有效" in rendered
@@ -1831,6 +1979,232 @@ def test_expired_segment_enrichment_is_not_a_realtime_notification(
     )
 
 
+def test_executable_without_current_permission_is_suppressed(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "blocked-executable.json",
+    )
+    current = signal_document("executable")
+    current["entry_allowed"] = False
+    current["exit_allowed"] = False
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [current]},
+    )
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
+        "CURRENT_EXECUTION_PERMISSION_MISSING"
+    )
+
+
+def test_executable_buy_requires_safe_delivery_margin(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "executable-delivery-margin.json",
+    )
+    current = signal_document("executable")
+    current["entry_execution_boundary"] = {
+        **current["entry_execution_boundary"],
+        "entry_valid_until": "2026-07-20T10:01:50+08:00",
+    }
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [current]},
+    )
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
+        "ONE_MINUTE_SEGMENT_DELIVERY_MARGIN_INSUFFICIENT"
+    )
+
+
+def test_executable_margin_is_rechecked_after_realtime_quote(
+    tmp_path: Path,
+) -> None:
+    now = [TEST_NOW]
+    quote_calls: list[str] = []
+
+    def slow_quote(code: str) -> dict[str, object]:
+        quote_calls.append(code)
+        now[0] += timedelta(seconds=6)
+        return {"last": 10.20}
+
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "post-quote-delivery-margin.json",
+        clock=lambda: now[0],
+        quote_provider=slow_quote,
+    )
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [signal_document("executable")]},
+    )
+
+    assert quote_calls == ["SZ.000001"]
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
+        "ONE_MINUTE_SEGMENT_DELIVERY_MARGIN_INSUFFICIENT"
+    )
+
+
+def test_executable_margin_is_rechecked_after_review_persistence(
+    tmp_path: Path,
+) -> None:
+    now = [TEST_NOW]
+
+    class SlowReviewInbox:
+        def __init__(self) -> None:
+            self.events: list[object] = []
+
+        def record(self, event: object) -> None:
+            now[0] += timedelta(seconds=6)
+            self.events.append(event)
+
+    inbox = SlowReviewInbox()
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "post-review-delivery-margin.json",
+        clock=lambda: now[0],
+        review_inbox=inbox,
+    )
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [signal_document("executable")]},
+    )
+
+    assert sender.messages == []
+    assert len(inbox.events) == 2
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
+        "ONE_MINUTE_SEGMENT_DELIVERY_MARGIN_INSUFFICIENT"
+    )
+
+
+def test_executable_precision_alert_uses_one_minute_chart_and_real_deadline(
+    tmp_path: Path,
+) -> None:
+    sender = RichRecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "executable-precision-context.json",
+    )
+    current = signal_document("executable")
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [current]},
+    )
+
+    assert len(sender.rich_messages) == 1
+    title, _lines, context = sender.rich_messages[0]
+    assert "1分钟精确执行条件满足" in title
+    assert context["expires_at"] == "2026-07-20T10:02:00+08:00"
+    assert context["minimum_delivery_margin_seconds"] == 10
+    assert context["charts"][0]["frequency"] == "1m"
+    assert context["charts"][0]["evidence_id"] == (
+        "trigger:stable-1m-1buy"
+    )
+
+
+def test_stale_sell_precision_locator_is_not_replayed(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "stale-sell-precision.json",
+    )
+    current = signal_document("executable")
+    current.update({"side": "sell", "entry_allowed": False, "exit_allowed": True})
+    current["setup_5m"] = {
+        **current["setup_5m"],
+        "point_type": "3sell",
+        "side": "sell",
+        "available_at": "2026-07-20T09:58:00+08:00",
+        "confirmed_at": "2026-07-20T09:58:00+08:00",
+    }
+    current["point_type"] = "3sell"
+    current["segment_difference_1m"] = {
+        **current["segment_difference_1m"],
+        "point_type": "1sell",
+        "side": "sell",
+        "available_at": "2026-07-20T09:59:00+08:00",
+        "confirmed_at": "2026-07-20T09:59:00+08:00",
+    }
+    current.pop("entry_execution_boundary", None)
+    previous = {**current, "lifecycle_stage": "triggered"}
+
+    dispatcher.dispatch_changes(
+        {"signals": [previous]},
+        {"signals": [current]},
+    )
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == (
+        "ONE_MINUTE_SEGMENT_EVIDENCE_EXPIRED"
+    )
+
+
+def test_sell_precision_ttl_counts_a_share_market_minutes_across_lunch(
+    tmp_path: Path,
+) -> None:
+    now = datetime.fromisoformat("2026-07-20T13:00:30+08:00")
+    sender = RichRecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "sell-lunch-market-time.json",
+        clock=lambda: now,
+    )
+    current = signal_document("executable")
+    current.update(
+        {
+            "side": "sell",
+            "point_type": "3sell",
+            "entry_allowed": False,
+            "exit_allowed": True,
+            "observed_at": now.isoformat(),
+            "monitor_observed_at": now.isoformat(),
+        }
+    )
+    current["setup_5m"] = {
+        **current["setup_5m"],
+        "point_type": "3sell",
+        "side": "sell",
+        "confirmed_at": "2026-07-20T11:25:00+08:00",
+        "available_at": "2026-07-20T11:25:00+08:00",
+    }
+    current["segment_difference_1m"] = {
+        **current["segment_difference_1m"],
+        "point_type": "1sell",
+        "side": "sell",
+        "confirmed_at": "2026-07-20T11:29:00+08:00",
+        "available_at": "2026-07-20T11:29:00+08:00",
+    }
+    current.pop("entry_execution_boundary", None)
+
+    dispatcher.dispatch_changes(
+        {"signals": [{**current, "lifecycle_stage": "triggered"}]},
+        {"signals": [current]},
+    )
+
+    assert len(sender.rich_messages) == 1
+    _title, _lines, context = sender.rich_messages[0]
+    assert context["expires_at"] == "2026-07-20T13:01:00+08:00"
+    assert context["minimum_delivery_margin_seconds"] == 10
+
+
 def test_pending_segment_enrichment_is_revalidated_before_retry(
     tmp_path: Path,
 ) -> None:
@@ -1989,6 +2363,40 @@ def test_stale_before_snapshot_cannot_repeat_segment_carried_by_trigger(
     assert restarted_dispatcher.health_snapshot()["delivered_event_count"] == 1
 
 
+def test_late_repeat_of_delivered_segment_does_not_pollute_suppression_audit(
+    tmp_path: Path,
+) -> None:
+    now = [TEST_NOW]
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered-segment-repeat.json",
+        clock=lambda: now[0],
+    )
+    current = signal_document("triggered")
+    previous = _without_one_minute_segment(current)
+
+    dispatcher.dispatch_changes(
+        {"signals": [previous]},
+        {"signals": [current]},
+    )
+    now[0] = TEST_NOW.replace(second=50)
+    dispatcher.dispatch_changes(
+        {"signals": [previous]},
+        {"signals": [current]},
+    )
+
+    assert len(sender.messages) == 1
+    health = dispatcher.health_snapshot()
+    assert health["delivered_event_count"] == 1
+    assert health["suppressed_count"] == 0
+    assert health["last_suppressed_reason"] is None
+    persisted = json.loads(
+        (tmp_path / "delivered-segment-repeat.json").read_text(encoding="utf-8")
+    )
+    assert [row["status"] for row in persisted["event_audit"]] == ["delivered"]
+
+
 @pytest.mark.parametrize(
     ("previous_stage", "current_stage"),
     (("triggered", "executable"), ("executable", "active")),
@@ -2111,6 +2519,10 @@ def test_semantic_trigger_dedupe_survives_restart_and_changed_setup_id(
     second["setup_5m"] = {
         **second["setup_5m"],
         "point_id": "setup:rebuilt-same-5m-event",
+        # Availability is causal metadata from this reconstruction, not the
+        # physical point occurrence identity.
+        "available_at": "2026-07-20T10:00:15+08:00",
+        "confirmed_at": "2026-07-20T10:00:15+08:00",
     }
     second["segment_difference_1m"] = {
         **second["segment_difference_1m"],
@@ -2129,6 +2541,56 @@ def test_semantic_trigger_dedupe_survives_restart_and_changed_setup_id(
 
     assert len(first_sender.messages) == 1
     assert second_sender.messages == []
+
+
+def test_v1_trigger_ledger_migrates_without_replaying_rebuilt_point(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "legacy-trigger-ledger.json"
+    first = shared_trigger_signal("signal:first-lane", "1buy")
+    first["setup_5m"] = {
+        **first["setup_5m"],
+        "terminal_segment_end_at": first["setup_5m"]["anchor_at"],
+    }
+    first_sender = RecordingNotifier()
+    SignalNotificationDispatcher(
+        first_sender,
+        state_path=state_path,
+    ).dispatch_changes(
+        {"signals": [{**first, "lifecycle_stage": "armed"}]},
+        {"signals": [first]},
+    )
+    legacy_id = _legacy_trigger_occurrence_event_id(first, "triggered")
+    assert legacy_id is not None
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    persisted["delivered_event_ids"] = [legacy_id]
+    persisted["last_success_event_id"] = legacy_id
+    persisted["event_audit"][-1]["event_id"] = legacy_id
+    state_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    rebuilt = shared_trigger_signal("signal:rebuilt-lane", "1buy")
+    rebuilt["point_id"] = "setup:rebuilt"
+    rebuilt["setup_5m"] = {
+        **rebuilt["setup_5m"],
+        "point_id": "setup:rebuilt",
+        "available_at": "2026-07-20T10:00:15+08:00",
+        "confirmed_at": "2026-07-20T10:00:15+08:00",
+        "terminal_segment_end_at": rebuilt["setup_5m"]["anchor_at"],
+    }
+    second_sender = RecordingNotifier()
+    SignalNotificationDispatcher(
+        second_sender,
+        state_path=state_path,
+    ).dispatch_changes(
+        {"signals": [{**rebuilt, "lifecycle_stage": "armed"}]},
+        {"signals": [rebuilt]},
+    )
+
+    assert first_sender.messages
+    assert second_sender.messages == []
+    migrated = json.loads(state_path.read_text(encoding="utf-8"))
+    assert legacy_id not in migrated["delivered_event_ids"]
+    assert len(migrated["delivered_event_ids"]) == 1
 
 
 def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
@@ -2395,12 +2857,54 @@ def test_late_detection_keeps_current_setup_waiting_for_one_minute_locator(
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
     rendered = "\n".join(lines)
-    assert title.startswith("买卖通知｜买点确认·等待1分钟定位｜")
+    assert title.startswith("买卖通知｜买点确认·延迟发现｜")
     assert "结构模型比例上限" not in rendered
     assert "风险参考：暂不计算" in rendered
     assert "等待同向1分钟区间套" in rendered
     assert "监听发现 10:10:51（延迟 10分51秒）" in rendered
     assert "发现时效" not in rendered
+
+
+def test_late_sell_confirmation_is_not_presented_as_a_new_sell_point(
+    tmp_path: Path,
+) -> None:
+    now = datetime(
+        2026,
+        7,
+        20,
+        10,
+        20,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    )
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "late-sell-confirmation.json",
+        clock=lambda: now,
+    )
+    delayed = _without_one_minute_segment(signal_document("triggered"))
+    delayed.update(
+        {
+            "side": "sell",
+            "point_type": "3sell",
+            "entry_allowed": False,
+            "exit_allowed": False,
+            "observed_at": now.isoformat(),
+        }
+    )
+    delayed["setup_5m"] = {
+        **delayed["setup_5m"],
+        "point_type": "3sell",
+        "side": "sell",
+    }
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [delayed]})
+
+    assert len(sender.messages) == 1
+    title, lines = sender.messages[0]
+    assert "卖点确认·延迟发现" in title
+    assert "新卖点" not in title
+    assert "监听发现 10:20:00（延迟 20分钟）" in "\n".join(lines)
 
 
 def test_late_detection_starts_a_new_transport_retry_window(
@@ -2820,8 +3324,8 @@ def test_suppression_dedupe_survives_audit_window_and_restart(tmp_path: Path) ->
         ("approaching", "即将确认"),
         ("formed", "5分钟几何候选待锁定确认"),
         ("armed", "等待操作确认"),
-        ("triggered", "5分钟操作确认"),
-        ("executable", "强提示待人工复核"),
+        ("triggered", "5分钟正式点确认"),
+        ("executable", "当前精确执行条件满足"),
         ("active", "结构持续跟踪"),
         ("invalidated", "结构已失效"),
         ("closed", "跟踪已结束"),
@@ -3158,6 +3662,32 @@ def test_realtime_quote_failure_keeps_buy_alert_but_fails_closed_ratio(
         "REALTIME_PRICE_UNAVAILABLE"
     ]
     assert event["position_recommendation"]["recommended_percent"] is None
+
+
+def test_executable_quote_failure_is_not_labeled_as_currently_executable(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+
+    def unavailable_quote(_code: str):
+        raise RuntimeError("quote unavailable")
+
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "executable-quote-failure.json",
+        quote_provider=unavailable_quote,
+    )
+
+    dispatcher.dispatch_changes(snapshot("triggered"), snapshot("executable"))
+
+    assert len(sender.messages) == 1
+    title, lines = sender.messages[0]
+    rendered = "\n".join(lines)
+    assert "1分钟定位·实时价格待核验" in title
+    assert "1分钟精确执行条件满足" not in title
+    assert "实时价格未取得" in rendered
+    assert "当前价格条件" in rendered
+    assert "进度：5分钟正式点确认→1分钟定位有效·实时价格待核验" in rendered
 
 
 @pytest.mark.parametrize("old_stage", ("armed", "triggered"))

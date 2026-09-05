@@ -2883,13 +2883,328 @@ def _previous_runtime_policy_source_snapshot(
     return previous
 
 
+_GEOMETRIC_RETIREMENT_SOURCE_ID = (
+    "sha256:9ab666f86ad972a5cd5cf10ee6130e5041509d655ef0f3aca5705123274d1610"
+)
+_CENTER_PRIORITY_SOURCE_ID = (
+    "sha256:9a78033b161f1e53feeee33732bd4fbb44ab8a12d200e7fedb658e1516f3742f"
+)
+_CENTER_ORDINAL_SOURCE_ID = (
+    "sha256:29e891d4b19e2d9e28f4d4cb9ea27d743c60ef122ebdd230eb6514cc9957cfc4"
+)
+_TIMELINESS_SOURCE_ID = (
+    "sha256:1311089e29c2ed3666f4f68c569e65d44c2522af3e67adce9a19c5841596787e"
+)
+_CONFIRMATION_FIRST_SOURCE_ID = (
+    "sha256:014230479f4dec1cf228fd34b85c82f07f34c49c4bd7ce46b17e657b115f82e6"
+)
+_LIVE_SOURCE_ID = (
+    "sha256:a2c29f203a70a28acf957615cd0146038644047f85802ebdc04f165fc775d183"
+)
+_PRE_GEOMETRIC_RETIREMENT_SOURCE_ID = (
+    "sha256:947ea6cdaad25a0c7cc9efc06fe6b7ac643cdc3a964848712263c3106c7475d1"
+)
+_CENTER_PRIORITY_SOURCE_ROWS = {
+    "src/chanlun/decision_support/trading_system/execution_policy.py": (
+        "sha256:efbd8b6707d33a83f25b79279f90b9a1876caec1bb9c1995c714bd22c03716ae",
+        "sha256:13e3297e82338081a164db8321a8ba4f7138baa80e0c4e756745414d833f5964",
+    ),
+    "src/chanlun/decision_support/trading_system/human_review_screening.py": (
+        "sha256:a3b2ae6413df5b286f41b9e8c0b32c1dcbe060e16f0a3962e63e8a6b93da053c",
+        "sha256:0f994564a6e34fe30d0c70daa15fbf1cf23990b6bee13e3f32ff90a3205066da",
+    ),
+    "src/chanlun/decision_support/trading_system/lifecycle.py": (
+        "sha256:c998aad9bc2d30029ec03a582d029626b96d779766474c3607c759a5bc5b6ddf",
+        "sha256:61f6e58a7b8a3d7542254b4744d24b1a6426ae7505785d0d47931ee24d3b2bc3",
+    ),
+    "src/chanlun/decision_support/trading_system/live_human_review.py": (
+        "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26",
+        "sha256:13fc05df4d0ddeac625e0f4a373b2387982495974969151ac6e0100173086834",
+    ),
+    "web/chanlun_chart/cl_app/services/trading_screening.py": (
+        "sha256:dc75b7067929580e4a7d5f1ebb723361367198741381ccce9ab6beca47c4c59a",
+        "sha256:ca85d71a650428d8c53f5d1ee4cb6335b70c8fb755ec724244277b636ae9e30e",
+    ),
+}
+
+
+def _pre_timeliness_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Reconstruct the release before realtime scheduling hardening."""
+
+    previous = copy.deepcopy(current)
+    if previous["aggregate_sha256"] == _LIVE_SOURCE_ID:
+        rows = {row["path"]: row for row in previous["files"]}
+        path = "web/chanlun_chart/cl_app/services/trading_screening.py"
+        assert rows[path]["sha256"] == (
+            "sha256:51d913f12394091116369a697508041e44a5bc73de6384a079597ab49e04c7d5"
+        )
+        rows[path]["sha256"] = (
+            "sha256:a61821c5513c686a29b2b7611ef18d9343ab105f691724a92e82618774ad38ee"
+        )
+        previous["aggregate_sha256"] = sha256_json(
+            {"schema": previous["schema"], "files": previous["files"]}
+        )
+    if previous["aggregate_sha256"] == _CONFIRMATION_FIRST_SOURCE_ID:
+        rows = {row["path"]: row for row in previous["files"]}
+        path = "web/chanlun_chart/cl_app/services/trading_screening.py"
+        assert rows[path]["sha256"] == (
+            "sha256:a61821c5513c686a29b2b7611ef18d9343ab105f691724a92e82618774ad38ee"
+        )
+        rows[path]["sha256"] = (
+            "sha256:4e9f4845d1d1b2e0fad0acf4b6f3fea10eda0d81242cf537c955cbb5cb9fce14"
+        )
+        previous["aggregate_sha256"] = sha256_json(
+            {"schema": previous["schema"], "files": previous["files"]}
+        )
+    assert previous["aggregate_sha256"] == _TIMELINESS_SOURCE_ID
+    rows = {row["path"]: row for row in previous["files"]}
+    path = "web/chanlun_chart/cl_app/services/trading_screening.py"
+    assert rows[path]["sha256"] == (
+        "sha256:4e9f4845d1d1b2e0fad0acf4b6f3fea10eda0d81242cf537c955cbb5cb9fce14"
+    )
+    rows[path]["sha256"] = (
+        "sha256:ca85d71a650428d8c53f5d1ee4cb6335b70c8fb755ec724244277b636ae9e30e"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == _CENTER_ORDINAL_SOURCE_ID
+    return previous
+
+
+def _pre_center_ordinal_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Reconstruct the release before core-based center ordinals."""
+
+    previous = copy.deepcopy(current)
+    if previous["aggregate_sha256"] in {
+        _LIVE_SOURCE_ID,
+        _CONFIRMATION_FIRST_SOURCE_ID,
+        _TIMELINESS_SOURCE_ID,
+    }:
+        previous = _pre_timeliness_source_snapshot(previous)
+    assert previous["aggregate_sha256"] == _CENTER_ORDINAL_SOURCE_ID
+    rows = {row["path"]: row for row in previous["files"]}
+    path = "src/chanlun/core/strict_structure/point_rules.py"
+    assert rows[path]["sha256"] == (
+        "sha256:9ea876748ca13604517270f9164c72d0abc10e9bbf30a7f3e7cd4710c0625272"
+    )
+    rows[path]["sha256"] = (
+        "sha256:27180b509076cfe61d92cfd34bda4aa698000b6d2597bd0f5ed1f2835a60b97e"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == _CENTER_PRIORITY_SOURCE_ID
+    return previous
+
+
+def _pre_center_priority_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Reconstruct the release before center-aware research ranking."""
+
+    previous = copy.deepcopy(current)
+    assert previous["aggregate_sha256"] == _CENTER_PRIORITY_SOURCE_ID
+    rows = {row["path"]: row for row in previous["files"]}
+    for path, (previous_digest, current_digest) in (
+        _CENTER_PRIORITY_SOURCE_ROWS.items()
+    ):
+        assert rows[path]["sha256"] == current_digest
+        rows[path]["sha256"] = previous_digest
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == _GEOMETRIC_RETIREMENT_SOURCE_ID
+    return previous
+
+
+def _pre_geometric_retirement_source_snapshot(
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Reconstruct the last release before geometric segment retirement."""
+
+    previous = copy.deepcopy(current)
+    if previous["aggregate_sha256"] in {
+        _LIVE_SOURCE_ID,
+        _CONFIRMATION_FIRST_SOURCE_ID,
+        _TIMELINESS_SOURCE_ID,
+        _CENTER_ORDINAL_SOURCE_ID,
+    }:
+        previous = _pre_center_ordinal_source_snapshot(previous)
+    if previous["aggregate_sha256"] == _CENTER_PRIORITY_SOURCE_ID:
+        previous = _pre_center_priority_source_snapshot(previous)
+    rows = {row["path"]: row for row in previous["files"]}
+    assert previous["aggregate_sha256"] == _GEOMETRIC_RETIREMENT_SOURCE_ID
+    assert rows[
+        "src/chanlun/core/strict_structure/current_events.py"
+    ]["sha256"] == (
+        "sha256:87ca3f59e4449f71592f35832c906c6a9c5d619f8d0c054f6d6b976d994f82a2"
+    )
+    rows["src/chanlun/core/strict_structure/current_events.py"]["sha256"] = (
+        "sha256:5a22e2a4f94d235fafbbea1226d65051bcd94eaa601765298e684c6da29a82be"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+    return previous
+
+
+def _install_historical_decision_source(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: dict[str, object],
+) -> None:
+    """Run one migration fixture against its historical target release."""
+
+    source = copy.deepcopy(snapshot)
+    source_id = source["aggregate_sha256"]
+    assert isinstance(source_id, str)
+    monkeypatch.setattr(
+        trading_screening_subject,
+        "_current_review_decision_source",
+        lambda _project_root: (copy.deepcopy(source), source_id),
+    )
+
+
+def test_center_ordinal_semantic_upgrade_quarantines_prior_snapshot(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    first = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    first.refresh_now()
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    prior_source = _pre_center_ordinal_source_snapshot(
+        persisted["decision_source_snapshot"]
+    )
+    persisted["decision_source_snapshot"] = prior_source
+    persisted["decision_source_snapshot_id"] = prior_source[
+        "aggregate_sha256"
+    ]
+    persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        persisted
+    )
+    cache_path.write_text(json.dumps(persisted), encoding="utf-8")
+    first._persist_cache_scope_sidecar(cache_path, persisted)
+    for generation in first._generation_paths():
+        first._cache_scope_sidecar_path(generation).unlink(missing_ok=True)
+        generation.unlink()
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    assert restarted.snapshot()["scan_state"] == "not_started"
+    assert restarted.snapshot()["signals"] == []
+    assert restarted.health_snapshot()["quarantined_cache_reason"] == (
+        "DECISION_SOURCE_REVISION_MISMATCH"
+    )
+
+
 def _deployed_scheduler_source_snapshot(
     current: dict[str, object],
 ) -> dict[str, object]:
     """Strip the latest coordinated scheduler suffix for historical fixtures."""
 
     previous = copy.deepcopy(current)
+    if previous["aggregate_sha256"] in {
+        _LIVE_SOURCE_ID,
+        _CONFIRMATION_FIRST_SOURCE_ID,
+        _TIMELINESS_SOURCE_ID,
+        _CENTER_ORDINAL_SOURCE_ID,
+        _CENTER_PRIORITY_SOURCE_ID,
+        _GEOMETRIC_RETIREMENT_SOURCE_ID,
+    }:
+        previous = _pre_geometric_retirement_source_snapshot(previous)
     rows = {row["path"]: row for row in previous["files"]}
+    assert previous["aggregate_sha256"] == _PRE_GEOMETRIC_RETIREMENT_SOURCE_ID
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:dc75b7067929580e4a7d5f1ebb723361367198741381ccce9ab6beca47c4c59a"
+    )
+    rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
+        "sha256:329ecf80a2abd8f6906936decfb875c8ad7f8d95e096403f7ef48b18fb3266fa"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == (
+        "sha256:1f3e8d9b2febca63b017c9b33e05a903afd85e6edd84dfdc7ed91a275b0b5300"
+    )
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:329ecf80a2abd8f6906936decfb875c8ad7f8d95e096403f7ef48b18fb3266fa"
+    )
+    rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
+        "sha256:83b8077319afa8132102fc03d5f3928e2f75408b8918b6d4499f00dd552feefe"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == (
+        "sha256:884694c8cbf286983e38d1dc34c10549759700a6049092972f4e5eb2ca3ee8b5"
+    )
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:83b8077319afa8132102fc03d5f3928e2f75408b8918b6d4499f00dd552feefe"
+    )
+    rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
+        "sha256:0dfd5633fba1706221b932273d8a68362a0f60cd1e985620397bbf13d1614098"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == (
+        "sha256:60711db42ebec83796c43293dc4711bd4847515bf9a06232fdf1897717b6b19f"
+    )
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:0dfd5633fba1706221b932273d8a68362a0f60cd1e985620397bbf13d1614098"
+    )
+    rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
+        "sha256:a48e23095707a8af7d9aed6ebaf5060a45cb0fa3cc0d657185708fea602d5ada"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == (
+        "sha256:a011876bdb97bd5ab1437d707f69a9a03aa755fcf9ba4485514299ce4918e3c7"
+    )
+    assert rows[
+        "web/chanlun_chart/cl_app/services/trading_screening.py"
+    ]["sha256"] == (
+        "sha256:a48e23095707a8af7d9aed6ebaf5060a45cb0fa3cc0d657185708fea602d5ada"
+    )
+    rows["web/chanlun_chart/cl_app/services/trading_screening.py"]["sha256"] = (
+        "sha256:8dae5e9e3172bac95e10a6d6581b6842185bfaa0983516c4267f4fa02a472679"
+    )
+    previous["aggregate_sha256"] = sha256_json(
+        {"schema": previous["schema"], "files": previous["files"]}
+    )
+    assert previous["aggregate_sha256"] == (
+        "sha256:76f359c61c65b6d441eb502438635dbafeb5518243b63725baba72676d431536"
+    )
     cleanup_rows = {
         "src/chanlun/core/strict_structure/strength.py": (
             "sha256:b6eea83b5b04013e07daf15b8e561c579f071dfa5421309d78729ad6e2b0e53f",
@@ -2909,7 +3224,7 @@ def _deployed_scheduler_source_snapshot(
         ),
     }
     assert previous["aggregate_sha256"] == (
-        "sha256:7343aa38677a66b48f5777404c8698c3f92c8318701241cffa4f4742ee18418b"
+        "sha256:76f359c61c65b6d441eb502438635dbafeb5518243b63725baba72676d431536"
     )
     for path, (pre_cleanup_digest, current_digest) in cleanup_rows.items():
         assert rows[path]["sha256"] == current_digest
@@ -2918,7 +3233,7 @@ def _deployed_scheduler_source_snapshot(
         {"schema": previous["schema"], "files": previous["files"]}
     )
     assert previous["aggregate_sha256"] == (
-        "sha256:e3f2bb6ffc56a16901582a22b4759a1e3df720670b3fb01126191043248e51d3"
+        "sha256:2c5c53cab8c17e12718395d2b51ed0f1e85ba4ab35d444c7bf75b90d607fd6ef"
     )
     expected_current = {
         "web/chanlun_chart/cl_app/services/trading_screening.py": (
@@ -2957,7 +3272,7 @@ def _deployed_scheduler_source_snapshot(
         {"schema": previous["schema"], "files": previous["files"]}
     )
     assert previous["aggregate_sha256"] == (
-        "sha256:0ec384b6f28c96b77d4a5ca9901c10420c31a63a7fde8c44bd383d953d5d9cf5"
+        "sha256:1022702acbf4a2d4fae21e0c0106dcc4ff4f44b3c17fa62867b56a7704d68523"
     )
     return previous
 
@@ -3183,8 +3498,9 @@ def test_superseded_bundle_source_migration_is_orchestration_only(
         clock=lambda: AS_OF,
         notifier=None,
     )
-    current = service._decision_source_snapshot
-    assert isinstance(current, dict)
+    live = service._decision_source_snapshot
+    assert isinstance(live, dict)
+    current = _pre_geometric_retirement_source_snapshot(live)
     previous = _previous_superseded_bundle_source_snapshot(current)
 
     assert orchestration_source_migration_allowed(
@@ -3237,7 +3553,7 @@ def test_context_risk_role_source_change_requires_decision_recompute(
         == "src/chanlun/decision_support/trading_system/live_human_review.py"
     )
     assert current_review_row["sha256"] == (
-        "sha256:eaa58c37fea3ab49d7bd642297c10d4119410dd67b9487b01030a115fb359f26"
+        "sha256:13fc05df4d0ddeac625e0f4a373b2387982495974969151ac6e0100173086834"
     )
     review_row["sha256"] = (
         "sha256:4b5223d73c250f293940556ec858622b4e44fc8762fb2ff9e8893320dbb0bb56"
@@ -3487,6 +3803,7 @@ def test_reviewed_full_market_monitor_capacity_upgrade_reuses_complete_snapshot(
 
 def test_incomplete_retry_source_migration_reuses_clean_complete_snapshot(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
     symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
@@ -3503,8 +3820,10 @@ def test_incomplete_retry_source_migration_reuses_clean_complete_snapshot(
     assert published["coverage_manifest"]["excluded_codes"] == ["SZ.000002"]
 
     persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-    current_source = persisted["decision_source_snapshot"]
-    current_source_id = persisted["decision_source_snapshot_id"]
+    current_source = _pre_geometric_retirement_source_snapshot(
+        persisted["decision_source_snapshot"]
+    )
+    current_source_id = current_source["aggregate_sha256"]
     previous_source = _previous_incomplete_retry_source_snapshot(current_source)
     previous_source_id = previous_source["aggregate_sha256"]
     assert incomplete_retry_reconciliation_source_migration_allowed(
@@ -3538,6 +3857,7 @@ def test_incomplete_retry_source_migration_reuses_clean_complete_snapshot(
 
     migrated_market = PositiveStatusTradingMarketData()
     migrated_planner = RecordingPlanner(symbols)
+    _install_historical_decision_source(monkeypatch, current_source)
     migrated = TradingScreeningService(
         market_data=migrated_market,
         sector_catalog=RecordingSectorCatalog(),
@@ -3859,15 +4179,20 @@ def test_incomplete_retry_migration_prunes_fanout_and_finishes_exact_symbol(
         }
     )
     previous_source = _previous_incomplete_retry_source_snapshot(
-        persisted["decision_source_snapshot"]
+        _pre_geometric_retirement_source_snapshot(
+            persisted["decision_source_snapshot"]
+        )
     )
     previous_source_id = previous_source["aggregate_sha256"]
-    current_source_id = persisted["decision_source_snapshot_id"]
+    current_source = _pre_geometric_retirement_source_snapshot(
+        persisted["decision_source_snapshot"]
+    )
+    current_source_id = current_source["aggregate_sha256"]
     assert incomplete_retry_reconciliation_source_migration_allowed(
         cached_decision_source_snapshot_id=previous_source_id,
         current_decision_source_snapshot_id=current_source_id,
         cached_decision_source_snapshot=previous_source,
-        current_decision_source_snapshot=persisted["decision_source_snapshot"],
+        current_decision_source_snapshot=current_source,
     )
     persisted["decision_source_snapshot_id"] = previous_source_id
     persisted["decision_source_snapshot"] = previous_source
@@ -3882,6 +4207,7 @@ def test_incomplete_retry_migration_prunes_fanout_and_finishes_exact_symbol(
 
     market = CurrentSessionSuspendedMarketData()
     planner = RecordingPlanner(symbols)
+    _install_historical_decision_source(monkeypatch, current_source)
     restarted = TradingScreeningService(
         market_data=market,
         sector_catalog=RecordingSectorCatalog(),
@@ -3915,6 +4241,7 @@ def test_incomplete_retry_migration_prunes_fanout_and_finishes_exact_symbol(
 
 def test_completed_retry_residue_migration_repairs_only_exact_symbols(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
     symbols = tuple(f"SZ.{index:06d}" for index in range(1, 6))
@@ -3958,8 +4285,10 @@ def test_completed_retry_residue_migration_repairs_only_exact_symbols(
         "stale": False,
         "failure_codes": ["stock_scan_partial"],
     }
-    current_source = persisted["decision_source_snapshot"]
-    current_source_id = persisted["decision_source_snapshot_id"]
+    current_source = _pre_geometric_retirement_source_snapshot(
+        persisted["decision_source_snapshot"]
+    )
+    current_source_id = current_source["aggregate_sha256"]
     previous_source = _previous_completed_retry_residue_source_snapshot(
         current_source
     )
@@ -4000,6 +4329,7 @@ def test_completed_retry_residue_migration_repairs_only_exact_symbols(
 
     market.structure_bundle = stale_structure_bundle
     planner = RecordingPlanner(symbols)
+    _install_historical_decision_source(monkeypatch, current_source)
     restarted = TradingScreeningService(
         market_data=market,
         sector_catalog=RecordingSectorCatalog(),
@@ -7810,6 +8140,10 @@ def test_presentation_snapshot_retains_latest_intraday_changes_during_lunch(
     with service._state_lock:
         caught_up_snapshot = copy.deepcopy(service._snapshot)
         caught_up_snapshot["market_data_as_of"] = lunch_cutoff.isoformat()
+        caught_up_snapshot["scanned_at"] = (
+            monitor_observed_at + timedelta(minutes=1)
+        ).isoformat()
+        caught_up_snapshot["generated_at"] = caught_up_snapshot["scanned_at"]
         service._snapshot = caught_up_snapshot
     caught_up = service.presentation_snapshot()
     assert caught_up["presentation_data_mode"] == "FROZEN_FULL_MARKET_SNAPSHOT"
@@ -7863,6 +8197,118 @@ def test_presentation_snapshot_retains_latest_intraday_changes_during_lunch(
     assert partial["priority_live_overlay"]["active"] is True
     assert partial["priority_live_overlay"]["market_session_open"] is True
     assert partial["priority_live_overlay"]["retained_latest"] is False
+
+
+def test_presentation_snapshot_never_resurrects_candidate_after_monitor_confirmation(
+    tmp_path: Path,
+) -> None:
+    observed_at = [AS_OF]
+    service = TradingScreeningService(
+        market_data=ActionableMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at[0],
+        notifier=None,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    frozen = service.refresh_now()
+    [confirmed_signal] = frozen["signals"]
+    code = str(confirmed_signal["code"])
+
+    archived_candidate = copy.deepcopy(confirmed_signal)
+    archived_candidate.update(
+        {
+            "name": "昨日候选",
+            "signal_id": "archived-candidate",
+            "point_id": "archived-candidate-point",
+            "setup_id": "archived-candidate-setup",
+            "lifecycle_stage": "approaching",
+        }
+    )
+    archived_candidate["setup_5m"].update(
+        {
+            "point_id": "archived-candidate-point",
+            "status": "provisional",
+            "formation_state": "forming",
+            "actionable": False,
+            "confirmed_at": None,
+        }
+    )
+    with service._state_lock:
+        archived_snapshot = copy.deepcopy(service._snapshot)
+        archived_snapshot["signals"] = [archived_candidate]
+        archived_snapshot["snapshot_content_sha256"] = "sha256:" + "a" * 64
+        service._snapshot = archived_snapshot
+        service._presentation_cache = None
+        service._presentation_cache_sha256 = None
+
+    monitor_observed_at = (AS_OF + timedelta(days=1)).replace(
+        hour=10,
+        minute=2,
+        second=0,
+        microsecond=0,
+    )
+    # Advance beyond both the 1m and 5m lane-age SLAs.  Refresh health may now
+    # be stale, but the completed 10:00 market fact is still newer than the
+    # previous day's immutable snapshot and therefore remains authoritative.
+    observed_at[0] = monitor_observed_at.replace(hour=10, minute=20)
+    latest_confirmation = copy.deepcopy(confirmed_signal)
+    latest_confirmation.update(
+        {
+            "name": "今日确认",
+            "signal_id": "latest-confirmation",
+            "monitor_observed_at": monitor_observed_at.isoformat(),
+            "observation_lane": "CANDIDATE_CURRENT_5M",
+            "realtime_observation": False,
+        }
+    )
+    with service._background_lock:
+        service._priority_monitor_latest_documents = {
+            str(latest_confirmation["signal_id"]): latest_confirmation,
+        }
+        service._priority_monitor_code_observations = {
+            code: (
+                monitor_observed_at,
+                trading_screening_subject.CANDIDATE_MONITOR_LANE_5M,
+            ),
+        }
+        service._priority_monitor_last_at = monitor_observed_at
+        service._priority_monitor_runtime_verified = True
+        service._priority_monitor_presentation_revision = "sha256:" + "b" * 64
+
+    presentation = service.presentation_snapshot()
+
+    [visible] = presentation["signals"]
+    assert visible["name"] == "今日确认"
+    assert visible["lifecycle_stage"] == "triggered"
+    assert visible["setup_5m"]["status"] == "confirmed"
+    assert visible["setup_5m"]["formation_state"] == "confirmed"
+    assert presentation["presentation_data_mode"] == "INTRADAY_INCREMENTAL"
+    assert presentation["presentation_market_data_as_of"] == (
+        monitor_observed_at.replace(minute=0).isoformat()
+    )
+    assert presentation["presentation_updated_at"] == (
+        monitor_observed_at.isoformat()
+    )
+    overlay = presentation["candidate_live_overlay"]
+    assert overlay["active"] is True
+    assert overlay["live"] is False
+    assert overlay["fresh_code_count"] == 0
+    assert overlay["authoritative_code_count"] == 1
+    assert overlay["retained_stale_code_count"] == 1
+    [still_archived] = service.snapshot()["signals"]
+    assert still_archived["setup_5m"]["status"] == "provisional"
+
+    # A later successful monitor pass with no signal is an equally durable
+    # tombstone; expiry of its refresh-health SLA must not revive the candidate.
+    with service._background_lock:
+        service._priority_monitor_latest_documents = {}
+        service._priority_monitor_presentation_revision = "sha256:" + "c" * 64
+    removed = service.presentation_snapshot()
+    assert removed["signals"] == []
+    assert removed["candidate_live_overlay"]["authoritative_code_count"] == 1
 
 
 def test_presentation_snapshot_replaces_stale_embedded_backtest_verdict(
@@ -9121,7 +9567,7 @@ def test_restarted_priority_monitor_restores_continuation_signal_documents(
     assert restarted._priority_monitor_runtime_verified is False
 
 
-def test_deployed_priority_state_source_migration_restores_and_rewrites(
+def test_decision_semantic_upgrade_rejects_deployed_priority_state(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
@@ -9165,9 +9611,7 @@ def test_deployed_priority_state_source_migration_restores_and_rewrites(
     first._persist_priority_monitor_state()
 
     current_source_id = first._decision_source_snapshot_id
-    assert current_source_id == (
-        "sha256:7343aa38677a66b48f5777404c8698c3f92c8318701241cffa4f4742ee18418b"
-    )
+    assert current_source_id == _LIVE_SOURCE_ID
     deployed_source_id = (
         "sha256:2d70261f1ab2c3160cbd74161f54d85f114cfbbbdfdfea7653ca3495656c08c3"
     )
@@ -9187,16 +9631,17 @@ def test_deployed_priority_state_source_migration_restores_and_rewrites(
         config=config,
     )
 
-    assert restarted._priority_monitor_last_at == observed_at
-    assert restarted._candidate_monitor_five_universe == (code,)
-    assert set(restarted._priority_monitor_latest_documents) == {signal_id}
-    assert restarted.health_snapshot()["priority_monitor_source_migrated_from"] == (
-        deployed_source_id
-    )
-    rewritten = json.loads(state_path.read_text(encoding="utf-8"))
-    assert rewritten["decision_source_snapshot_id"] == current_source_id
-    assert rewritten["content_sha256"] == (
-        restarted._priority_monitor_state_sha256(rewritten)
+    # Executability changed from a sticky lifecycle promotion to a current
+    # projection.  An old authenticated queue is therefore not a transport-
+    # only migration candidate: it must be rebuilt under the new rules.
+    assert restarted._priority_monitor_last_at is None
+    assert restarted._candidate_monitor_five_universe == ()
+    assert restarted._priority_monitor_latest_documents == {}
+    assert restarted.health_snapshot()["priority_monitor_source_migrated_from"] is None
+    untouched = json.loads(state_path.read_text(encoding="utf-8"))
+    assert untouched["decision_source_snapshot_id"] == deployed_source_id
+    assert untouched["content_sha256"] == first._priority_monitor_state_sha256(
+        untouched
     )
 
 
@@ -9313,6 +9758,10 @@ def test_priority_monitor_continuation_survives_preopen_restart_and_notifies_loc
         def send(self, title, lines) -> bool:
             self.messages.append((title, list(lines)))
             return True
+
+        def send_rich(self, title, lines, context) -> bool:
+            del context
+            return self.send(title, lines)
 
     sender = RecordingSender()
     dispatcher = SignalNotificationDispatcher(
@@ -9782,13 +10231,15 @@ def test_candidate_batch_groups_by_sector_without_changing_due_membership() -> N
     assert set(grouped) == set(codes)
 
 
-def test_priority_burst_uses_all_workers_before_formal_five_minute_lane() -> None:
+def test_due_formal_and_priority_phases_use_all_workers() -> None:
     production = TradingScreeningConfig(stock_worker_count=3)
     single_worker = TradingScreeningConfig(stock_worker_count=1)
 
     assert production.effective_priority_worker_count == 3
+    assert production.effective_formal_confirmation_worker_count == 3
     assert production.effective_candidate_worker_count == 2
     assert single_worker.effective_priority_worker_count == 1
+    assert single_worker.effective_formal_confirmation_worker_count == 1
     assert single_worker.effective_candidate_worker_count == 1
 
 
@@ -10859,24 +11310,36 @@ def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
     }
 
     service._run_priority_monitor(previous=previous, observed_at=observed_at)
+    first_health = service.health_snapshot()
+    assert first_health["priority_monitor_formal_confirmation_due_count"] == 1
+    assert first_health["priority_monitor_formal_confirmation_scheduled_count"] == 1
+    assert (
+        first_health[
+            "priority_monitor_formal_confirmation_capacity_deferred_count"
+        ]
+        == 0
+    )
     service._run_priority_monitor(
         previous=previous,
         observed_at=observed_at + timedelta(minutes=1),
     )
 
     assert market.bundle_frequency_requests == [
+        # A known forming setup is checked on the new physical 5m cutoff
+        # before any older 1m locator or ordinary cadence work.
+        (symbols[1], ("5m",)),
         (symbols[0], ("30m", "5m", "1m")),
-        (symbols[1], ("30m", "5m")),
+        (symbols[2], ("30m", "5m")),
     ]
     service._clock = lambda: observed_at + timedelta(minutes=1)
     health = service.health_snapshot()
     assert health["priority_monitor_last_codes"] == []
     assert health["candidate_monitor_status"] == "warming"
     # 已消失的旧信号不会复活，但支持性板块发现范围仍继续按 5m 节奏轮转。
-    assert health["candidate_monitor_five_minute"]["current_count"] == 2
-    assert health["candidate_monitor_five_minute"]["missing_count"] == 2
-    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [symbols[1]]
-    assert health["candidate_monitor_thirty_minute"]["last_batch_codes"] == [symbols[1]]
+    assert health["candidate_monitor_five_minute"]["current_count"] == 3
+    assert health["candidate_monitor_five_minute"]["missing_count"] == 1
+    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [symbols[2]]
+    assert health["candidate_monitor_thirty_minute"]["last_batch_codes"] == [symbols[2]]
     restarted = TradingScreeningService(
         market_data=RecordingMarketData(),
         sector_catalog=catalog,
@@ -10887,8 +11350,8 @@ def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
         notifier=None,
         config=service._config,
     )
-    assert set(restarted._candidate_monitor_five_last_success_at) == set(symbols[:2])
-    assert set(restarted._candidate_monitor_thirty_last_success_at) == set(symbols[:2])
+    assert set(restarted._candidate_monitor_five_last_success_at) == set(symbols[:3])
+    assert set(restarted._candidate_monitor_thirty_last_success_at) == set(symbols[:3])
     assert restarted._priority_monitor_runtime_verified is False
 
 
@@ -11252,6 +11715,225 @@ def test_live_admission_phase_protects_priority_and_formal_five_minute_work(
         ("evaluate_candidate", symbols[2]),
         ("evaluate_candidate", symbols[3]),
     }
+
+
+def test_due_formal_five_minute_confirmation_preempts_optional_one_minute_probe(
+    tmp_path: Path,
+) -> None:
+    due_code = "SZ.000001"
+    optional_code = "SZ.000002"
+    market = RecordingMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog((due_code, optional_code)),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            admitted_universe_codes=(due_code, optional_code),
+        ),
+    )
+
+    def forming_document(code: str) -> dict[str, object]:
+        return {
+            "signal_id": f"approaching-{code}",
+            "point_id": f"forming-{code}",
+            "code": code,
+            "side": "buy",
+            "point_type": "2buy",
+            "lifecycle_stage": "approaching",
+            "physical_timeframe_recursive": True,
+            "segment_difference_1m": None,
+            "setup_5m": {
+                "point_id": f"forming-{code}",
+                "side": "buy",
+                "status": "provisional",
+                "actionable": False,
+                "source_frequency": "5m",
+                "recursive_level": 0,
+                "available_at": (AS_OF - timedelta(minutes=5)).isoformat(),
+                "terminal_segment_role": "latest_unfinished",
+                "terminal_segment_state": "forming",
+                "terminal_segment_source_kind": "segment",
+            },
+        }
+
+    service._candidate_monitor_five_last_success_at = {
+        due_code: AS_OF - timedelta(minutes=6),
+        optional_code: AS_OF,
+    }
+    service._candidate_monitor_thirty_last_success_at = {
+        due_code: AS_OF,
+        optional_code: AS_OF,
+    }
+
+    service._run_priority_monitor(
+        previous={
+            "signals": [
+                forming_document(due_code),
+                forming_document(optional_code),
+            ]
+        },
+        observed_at=AS_OF,
+    )
+
+    assert market.bundle_frequency_requests == [
+        (due_code, ("5m",)),
+        (optional_code, ("5m", "1m")),
+    ]
+    health = service.health_snapshot()
+    assert health["priority_monitor_locator_pool_count"] == 0
+    assert health["priority_monitor_preconfirmation_pool_count"] == 2
+    assert health["priority_monitor_preconfirmation_formal_five_count"] == 1
+    assert health["priority_monitor_preconfirmation_scheduled_count"] == 1
+    assert health["priority_monitor_preconfirmation_attempted_count"] == 1
+    assert (
+        health["priority_monitor_preconfirmation_deadline_deferred_count"] == 0
+    )
+
+
+def test_new_formal_buy_is_promoted_to_same_round_one_minute_precision(
+    tmp_path: Path,
+) -> None:
+    code = "SZ.000001"
+    forming_base = provisional_point("2buy", code=code)
+    forming = replace(
+        forming_base,
+        terminal_segment=TerminalSegmentReference(
+            role="latest_unfinished",
+            structural_level=0,
+            unit_id="segment:5m:forming-before-confirmation",
+            source_kind="segment",
+            direction="down",
+            state="forming",
+            market_start=forming_base.anchor_at - timedelta(minutes=30),
+            market_end=forming_base.anchor_at,
+            available_at=forming_base.available_at,
+        ),
+    )
+    confirmed_setup = _current_terminal_point(
+        confirmed_point("2buy", code=code, minutes_after=295)
+    )
+    precision_witness = _current_terminal_point(
+        confirmed_point(
+            "1buy",
+            code=code,
+            frequency="1m",
+            minutes_after=294,
+            available_minutes_after=2,
+        ),
+        terminal_minutes=1,
+    )
+
+    def structure_bundle(*, confirmed: bool, include_one_minute: bool = False):
+        return SymbolStructureBundle(
+            code=code,
+            as_of=AS_OF,
+            sector=eligible_sector(),
+            thirty_direction="neutral",
+            thirty_points=(),
+            five_points=((confirmed_setup,) if confirmed else (forming,)),
+            one_points=((precision_witness,) if include_one_minute else ()),
+            opposite_points=(),
+        )
+
+    engine = HumanAssistedDecisionCore(formal_selection_required=False)
+    [previous_document] = engine.decision_documents(
+        structure_bundle(confirmed=False)
+    )
+    older_locator = {
+        "signal_id": "older-confirmed-locator",
+        "point_id": "older-confirmed-point",
+        "code": code,
+        "side": "buy",
+        "point_type": "1buy",
+        "lifecycle_stage": "triggered",
+        "segment_difference_1m": None,
+        "setup_5m": {
+            "point_id": "older-confirmed-point",
+            "point_type": "1buy",
+            "side": "buy",
+            "status": "confirmed",
+            "actionable": True,
+            "source_frequency": "5m",
+            "recursive_level": 0,
+            "anchor_at": (AS_OF - timedelta(minutes=10)).isoformat(),
+            "available_at": (AS_OF - timedelta(minutes=10)).isoformat(),
+            "confirmed_at": (AS_OF - timedelta(minutes=10)).isoformat(),
+            "terminal_segment_role": "latest_completed",
+            "terminal_segment_state": "completed",
+            "terminal_segment_source_kind": "segment",
+        },
+    }
+
+    class NewlyConfirmedMarket(RecordingMarketData):
+        def structure_bundle(
+            self,
+            requested_code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            del as_of, sector
+            assert requested_code == code
+            requested_frequencies = tuple(frequencies)
+            self.bundle_codes.append(requested_code)
+            self.bundle_frequency_requests.append(
+                (requested_code, requested_frequencies)
+            )
+            return structure_bundle(
+                confirmed=True,
+                include_one_minute="1m" in requested_frequencies,
+            )
+
+    market = NewlyConfirmedMarket()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog((code,)),
+        engine=engine,
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            admitted_universe_codes=(code,),
+        ),
+    )
+    service._candidate_monitor_five_last_success_at = {
+        code: AS_OF - timedelta(minutes=6)
+    }
+    service._candidate_monitor_thirty_last_success_at = {code: AS_OF}
+
+    service._run_priority_monitor(
+        # The code deliberately belongs to both queues: an older confirmed
+        # point still needs 1m precision while a newer point awaits its first
+        # post-cutoff 5m confirmation. The 5m request must remain first.
+        previous={"signals": [older_locator, previous_document]},
+        observed_at=AS_OF,
+    )
+
+    assert market.bundle_frequency_requests == [
+        (code, ("5m",)),
+        (code, ("5m", "1m")),
+    ]
+    [latest] = service._priority_monitor_latest_documents.values()
+    assert latest["segment_difference_1m"]["point_id"] == (
+        precision_witness.point_id
+    )
+    assert latest["observation_lane"] == "PRIORITY_CURRENT_1M"
+    health = service.health_snapshot()
+    assert health["priority_monitor_same_round_precision_scheduled_count"] == 1
+    assert health["priority_monitor_same_round_precision_attempted_count"] == 1
+    assert health["priority_monitor_same_round_precision_completed_count"] == 1
+    assert health[
+        "priority_monitor_same_round_precision_deadline_deferred_count"
+    ] == 0
 
 
 def test_candidate_time_budget_defers_unstarted_codes_without_marking_success(
@@ -12019,7 +12701,6 @@ def test_candidate_waiting_for_first_trade_retries_on_next_five_minute_epoch(
             admitted_universe_codes=(code,),
         ),
     )
-
     service._run_priority_monitor(
         previous=service.snapshot(),
         observed_at=observed_at,
@@ -12178,6 +12859,7 @@ def test_optional_segment_rotation_beyond_locator_sla_is_capacity_failure(
     assert market.bundle_codes == list(codes[:2])
     assert health["priority_monitor_configured_rotation_seconds"] == 120
     assert health["priority_monitor_locator_sla_seconds"] == 60
+    assert health["priority_monitor_locator_completion_sla_seconds"] == 35
     assert health["priority_monitor_locator_capacity_sufficient"] is False
     assert health["priority_monitor_locator_configured_capacity_sufficient"] is False
     assert health["realtime_alert_capacity_ready"] is False
@@ -12236,6 +12918,9 @@ def test_large_scope_priority_wave_covers_48_current_locators(
     assert health["priority_monitor_locator_admission_deferred_count"] == 0
     assert health["priority_monitor_immediate_universe_count"] == 48
     assert health["priority_monitor_scheduled_count"] == 48
+    assert health["priority_monitor_locator_required_symbols_per_second"] == (
+        pytest.approx(48 / 35, abs=1e-6)
+    )
     assert health["priority_monitor_configured_rotation_seconds"] == 60
     assert health["priority_monitor_locator_capacity_sufficient"] is True
     assert health["priority_monitor_locator_runtime_verified"] is True
@@ -12614,6 +13299,19 @@ def test_priority_locator_admits_final_wave_proven_to_fit_before_deadline(
     assert health["priority_monitor_locator_runtime_verified"] is True
 
 
+def test_priority_locator_deadline_is_capped_before_alert_delivery_window() -> None:
+    assert trading_screening_subject._one_minute_locator_deadline_perf(
+        round_started_perf=100.0,
+        priority_work_deadline_perf=150.0,
+        formal_confirmation_reserve_seconds=15.0,
+    ) == pytest.approx(135.0)
+    assert trading_screening_subject._one_minute_locator_deadline_perf(
+        round_started_perf=100.0,
+        priority_work_deadline_perf=120.0,
+        formal_confirmation_reserve_seconds=5.0,
+    ) == pytest.approx(115.0)
+
+
 def test_priority_locator_final_hot_symbol_is_not_blocked_by_fixed_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -12738,10 +13436,14 @@ def test_closed_session_bounded_bootstrap_is_not_reported_as_degraded(
     previous = {
         "signals": [
             {
-                "signal_id": f"armed-{code}",
+                "signal_id": f"triggered-{code}",
                 "code": code,
                 "point_type": "1buy",
-                "lifecycle_stage": "armed",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "point_type": "1buy",
+                    "anchor_at": (closed_at - timedelta(minutes=5)).isoformat(),
+                },
             }
             for code in codes
         ]
@@ -12758,6 +13460,12 @@ def test_closed_session_bounded_bootstrap_is_not_reported_as_degraded(
     assert health["priority_monitor_status"] == "not_due"
     assert health["priority_monitor_ready"] is True
     assert health["priority_monitor_last_error_count"] == 0
+    # Closed-session bootstrap does not create a currently-due alert error,
+    # but its measured physical shortfall must remain visible for the next
+    # session instead of being misreported as an empty deferred list.
+    assert health["priority_monitor_locator_deferred_codes"] == list(codes[1:])
+    assert health["priority_monitor_locator_observed_capacity_sufficient"] is False
+    assert health["realtime_alert_next_session_ready"] is False
 
 
 def test_formal_thirty_minute_candidate_runs_before_rule_recheck_backlog(
@@ -12928,6 +13636,105 @@ def test_priority_signal_candidates_treat_buy_and_sell_symmetrically() -> None:
     assert urgent == ("BUY_EXECUTABLE", "SELL_ONLY", "BUY_ARMED")
 
 
+def test_priority_signal_candidates_rank_first_center_before_later_center() -> None:
+    rows = (
+        {
+            "code": "A_SECOND_CENTER",
+            "point_type": "3buy",
+            "lifecycle_stage": "triggered",
+            "setup_5m": {"point_type": "3buy", "center_ordinal": 2},
+        },
+        {
+            "code": "Z_FIRST_CENTER",
+            "point_type": "3buy",
+            "lifecycle_stage": "triggered",
+            "setup_5m": {"point_type": "3buy", "center_ordinal": 1},
+        },
+        {
+            "code": "B_THIRD_CENTER_SELL",
+            "point_type": "3sell",
+            "lifecycle_stage": "triggered",
+            "setup_5m": {"point_type": "3sell", "center_ordinal": 3},
+        },
+    )
+
+    assert _priority_signal_candidate_codes(rows) == (
+        "Z_FIRST_CENTER",
+        "A_SECOND_CENTER",
+        "B_THIRD_CENTER_SELL",
+    )
+
+
+def test_priority_signal_candidates_keep_in_policy_forming_work_ahead_of_research() -> None:
+    rows = (
+        {
+            "code": "LATER_TRIGGERED",
+            "point_type": "3buy",
+            "lifecycle_stage": "triggered",
+            "setup_5m": {"point_type": "3buy", "center_ordinal": 2},
+        },
+        {
+            "code": "FIRST_APPROACHING",
+            "point_type": "3buy",
+            "lifecycle_stage": "approaching",
+            "setup_5m": {"point_type": "3buy", "center_ordinal": 1},
+        },
+    )
+
+    assert _priority_signal_candidate_codes(rows) == (
+        "FIRST_APPROACHING",
+        "LATER_TRIGGERED",
+    )
+
+
+def test_candidate_worker_striping_never_crosses_confirmation_phase() -> None:
+    formal = ("FORMAL_A", "FORMAL_B")
+    ordinary = ("ORDINARY_A", "ORDINARY_B", "ORDINARY_C")
+
+    ordered = trading_screening_subject._candidate_phase_precedence_order(
+        formal,
+        ordinary,
+        sector_by_code={},
+        worker_count=3,
+    )
+
+    assert set(ordered[: len(formal)]) == set(formal)
+    assert set(ordered[len(formal) :]) == set(ordinary)
+
+
+def test_formal_confirmation_lane_is_due_once_per_new_five_minute_cutoff() -> None:
+    observed_at = datetime(2026, 7, 20, 10, 1, tzinfo=AS_OF.tzinfo)
+    first = {
+        "code": "FIRST_CENTER",
+        "point_type": "3buy",
+        "lifecycle_stage": "approaching",
+        "setup_5m": {"point_type": "3buy", "center_ordinal": 1},
+    }
+    later = {
+        "code": "LATER_CENTER",
+        "point_type": "3buy",
+        "lifecycle_stage": "approaching",
+        "setup_5m": {"point_type": "3buy", "center_ordinal": 2},
+    }
+    non_third = {
+        "code": "SECOND_BUY",
+        "point_type": "2buy",
+        "lifecycle_stage": "formed",
+        "setup_5m": {"point_type": "2buy", "center_ordinal": None},
+    }
+
+    due = trading_screening_subject._formal_five_minute_confirmation_due_codes(
+        (later, first, non_third),
+        last_success_at={
+            "FIRST_CENTER": observed_at.replace(hour=9, minute=59),
+            "SECOND_BUY": observed_at,
+        },
+        observed_at=observed_at,
+    )
+
+    assert due == ("FIRST_CENTER",)
+
+
 def test_signal_candidate_admission_pins_current_setups_and_rotates_completed_window() -> (
     None
 ):
@@ -13000,6 +13807,7 @@ def test_segment_monitor_includes_unconfirmed_buy_and_sell_in_one_minute_lane(
     rearmed_code = "SZ.000004"
     current_locator_code = "SZ.000005"
     forming_sell_code = "SZ.000006"
+    retirement_code = "SZ.000007"
     codes = (
         fresh_code,
         stale_code,
@@ -13007,6 +13815,7 @@ def test_segment_monitor_includes_unconfirmed_buy_and_sell_in_one_minute_lane(
         rearmed_code,
         current_locator_code,
         forming_sell_code,
+        retirement_code,
     )
     market = RecordingMarketData()
     service = TradingScreeningService(
@@ -13044,6 +13853,22 @@ def test_segment_monitor_includes_unconfirmed_buy_and_sell_in_one_minute_lane(
                     (stale_code, observed_at - timedelta(minutes=11)),
                 )
             ),
+            {
+                "signal_id": f"triggered-{retirement_code}",
+                "code": retirement_code,
+                "side": "buy",
+                "point_type": "3buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {
+                    "status": "confirmed",
+                    "anchor_at": (observed_at - timedelta(days=5)).isoformat(),
+                    "available_at": (observed_at - timedelta(days=5)).isoformat(),
+                    "confirmed_at": (observed_at - timedelta(days=5)).isoformat(),
+                    "terminal_segment_role": "latest_completed",
+                    "terminal_segment_state": "formed",
+                    "terminal_segment_source_kind": "segment",
+                },
+            },
             {
                 "signal_id": f"approaching-{forming_code}",
                 "point_id": f"candidate-{forming_code}",
@@ -13118,6 +13943,15 @@ def test_segment_monitor_includes_unconfirmed_buy_and_sell_in_one_minute_lane(
             ),
         ]
     }
+    # Make every other 5m row current so the never-observed retirement row is
+    # the deterministic due item in this round. It must receive a 5m structural
+    # pass without being promoted back into the expired 1m execution lane.
+    service._candidate_monitor_five_last_success_at = {
+        code: observed_at for code in codes if code != retirement_code
+    }
+    service._candidate_monitor_thirty_last_success_at = {
+        code: observed_at for code in codes
+    }
 
     service._run_priority_monitor(previous=previous, observed_at=observed_at)
 
@@ -13128,13 +13962,17 @@ def test_segment_monitor_includes_unconfirmed_buy_and_sell_in_one_minute_lane(
     assert "1m" in requests[forming_sell_code]
     assert "1m" not in requests.get(rearmed_code, ())
     assert "1m" not in requests.get(current_locator_code, ())
+    assert requests[retirement_code] == ("5m",)
     health = service.health_snapshot()
-    assert health["candidate_monitor_five_minute"]["universe_count"] == 6
-    assert health["priority_monitor_immediate_universe_count"] == 4
+    assert health["candidate_monitor_five_minute"]["universe_count"] == 7
+    assert health["priority_monitor_immediate_universe_count"] == 2
+    assert health["priority_monitor_preconfirmation_pool_count"] == 2
+    assert health["priority_monitor_preconfirmation_scheduled_count"] == 2
+    assert health["priority_monitor_preconfirmation_attempted_count"] == 2
     assert "priority_monitor_rearmed_segment_universe_count" not in health
     assert "priority_monitor_expired_segment_universe_count" not in health
     assert "priority_monitor_segment_difference_universe_count" not in health
-    assert health["priority_monitor_scheduled_count"] == 4
+    assert health["priority_monitor_scheduled_count"] == 2
 
 
 def test_validation_scope_caps_old_snapshot_locator_universe(
@@ -13290,6 +14128,32 @@ def test_segment_monitor_membership_requires_execution_fresh_setup_anchor() -> N
     )
 
 
+def test_retirement_monitor_keeps_aged_confirmation_until_structural_recheck() -> (
+    None
+):
+    signal = {
+        "lifecycle_stage": "triggered",
+        "setup_5m": {
+            "status": "confirmed",
+            "terminal_segment_role": "latest_completed",
+            "terminal_segment_state": "formed",
+        },
+    }
+
+    assert (
+        trading_screening_subject._current_five_minute_setup_requires_retirement_monitor(
+            signal
+        )
+        is True
+    )
+    assert (
+        trading_screening_subject._current_five_minute_setup_requires_retirement_monitor(
+            {**signal, "lifecycle_stage": "invalidated"}
+        )
+        is False
+    )
+
+
 def test_first_one_minute_witness_never_reopens_after_boundary_expiry() -> None:
     observed_at = datetime(2026, 7, 20, 10, 2, tzinfo=AS_OF.tzinfo)
     base = {
@@ -13346,6 +14210,19 @@ def test_first_one_minute_witness_never_reopens_after_boundary_expiry() -> None:
             observed_at,
         )
         is True
+    )
+    assert (
+        trading_screening_subject._one_minute_segment_requires_monitor(
+            {
+                "side": "buy",
+                "point_type": "3buy",
+                "lifecycle_stage": "triggered",
+                "setup_5m": {"point_type": "3buy", "center_ordinal": 2},
+                "segment_difference_1m": None,
+            },
+            observed_at,
+        )
+        is False
     )
 
 
@@ -13750,6 +14627,10 @@ def test_priority_monitor_notification_is_early_and_idempotent(
             self.messages.append((title, list(lines)))
             return True
 
+        def send_rich(self, title, lines, context) -> bool:
+            del context
+            return self.send(title, lines)
+
     sender = RecordingSender()
     dispatcher = SignalNotificationDispatcher(
         sender,
@@ -13963,6 +14844,10 @@ def test_unconfirmed_five_minute_candidate_fetches_one_minute_and_notifies_diver
             self.messages.append((title, lines))
             return True
 
+        def send_rich(self, title, lines, context) -> bool:
+            del context
+            return self.send(title, lines)
+
     market = PreconfirmationMarket()
     sender = RecordingSender()
     dispatcher = SignalNotificationDispatcher(
@@ -13983,6 +14868,10 @@ def test_unconfirmed_five_minute_candidate_fetches_one_minute_and_notifies_diver
             admitted_universe_codes=(code,),
         ),
     )
+    # The current 5m bar has already been observed.  Preconfirmation is allowed
+    # to use the remaining 1m budget only when no formal 5m read is due.
+    service._candidate_monitor_five_last_success_at = {code: AS_OF}
+    service._candidate_monitor_thirty_last_success_at = {code: AS_OF}
 
     service._run_priority_monitor(
         previous={"signals": [previous_document]},
@@ -14275,6 +15164,10 @@ def test_fresh_five_minute_candidate_notifies_without_one_minute_segment(
             self.messages.append((title, lines))
             return True
 
+        def send_rich(self, title, lines, context) -> bool:
+            del context
+            return self.send(title, lines)
+
     sender = RecordingSender()
     dispatcher = SignalNotificationDispatcher(
         sender,
@@ -14366,6 +15259,7 @@ def test_partial_coverage_epoch_resumes_after_service_restart(
 
 def test_worker_queue_stripe_upgrade_resumes_authenticated_partial_coverage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
     symbols = ("SZ.000001", "SZ.000002", "SZ.000003")
@@ -14387,9 +15281,12 @@ def test_worker_queue_stripe_upgrade_resumes_authenticated_partial_coverage(
     )
 
     persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-    current_source_id = persisted["decision_source_snapshot_id"]
-    previous_source = _deployed_scheduler_source_snapshot(
+    current_source = _pre_geometric_retirement_source_snapshot(
         persisted["decision_source_snapshot"]
+    )
+    current_source_id = current_source["aggregate_sha256"]
+    previous_source = _deployed_scheduler_source_snapshot(
+        current_source
     )
     screening_row = next(
         row
@@ -14429,6 +15326,7 @@ def test_worker_queue_stripe_upgrade_resumes_authenticated_partial_coverage(
 
     second_market = RecordingMarketData()
     second_planner = RecordingPlanner(("SHOULD.NOT.REPLAN",))
+    _install_historical_decision_source(monkeypatch, current_source)
     second_service = TradingScreeningService(
         market_data=second_market,
         sector_catalog=RecordingSectorCatalog(),
@@ -15588,6 +16486,14 @@ def test_lunch_catchup_prewarms_one_minute_locators_without_notifications(
             }
         ]
     }
+    # Lunch warmup remains useful for a not-yet-due forming setup, but an
+    # overdue setup must take the authoritative 5m path instead.
+    service._candidate_monitor_five_last_success_at = {
+        "SZ.000001": lunch,
+    }
+    service._candidate_monitor_thirty_last_success_at = {
+        "SZ.000001": lunch,
+    }
 
     assert service._priority_monitor_due(lunch) is True
     service._run_priority_monitor(previous=previous, observed_at=lunch)
@@ -15947,7 +16853,12 @@ def test_background_loop_does_not_repeat_night_scan_and_wakes_at_preopen(
         while time.monotonic() < deadline and len(catalog.assessment_calls) < 1:
             time.sleep(0.01)
         assert len(catalog.assessment_calls) == 1
-        time.sleep(0.18)
+        deadline = time.monotonic() + 1.0
+        while (
+            time.monotonic() < deadline
+            and service.health_snapshot()["refresh_suppressed"] is not True
+        ):
+            time.sleep(0.01)
         assert len(catalog.assessment_calls) == 1
         assert service.health_snapshot()["refresh_suppressed"] is True
 

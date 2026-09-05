@@ -41,6 +41,9 @@ class _Notifier:
         self.messages.append((title, list(lines)))
         return self.results.pop(0) if self.results else True
 
+    def send_rich(self, title, lines, _context) -> bool:
+        return self.send(title, lines)
+
 
 class _RichNotifier(_Notifier):
     def __init__(self) -> None:
@@ -243,6 +246,38 @@ def test_production_defaults_use_strict_physical_timeframe_authority(tmp_path):
 
     assert service._state_factory is StrictPhysicalMonitorState
     assert service._event_collector is collect_strict_monitor_events
+
+
+def test_required_holding_alert_chart_never_falls_back_to_plain_send(tmp_path):
+    class PlainNotifier:
+        available = True
+
+        def __init__(self) -> None:
+            self.messages = []
+
+        def send(self, title, lines) -> bool:
+            self.messages.append((title, lines))
+            return True
+
+    notifier = PlainNotifier()
+    service, _notifier, _calls = _service(
+        tmp_path,
+        [],
+        notifier=notifier,
+    )
+
+    assert service._deliver(
+        "买卖通知",
+        ["必须带图"],
+        event_count=1,
+        charts=({"code": "SZ.000001", "frequency": "5m"},),
+    ) is False
+    assert notifier.messages == []
+    assert service.health_snapshot()["notification_delivery"][
+        "last_failure_reason"
+    ] == (
+        "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
+    )
 
 
 def test_first_slow_warmup_publishes_us_universe_before_completion(tmp_path):
@@ -583,7 +618,7 @@ def test_segment_enrichment_notification_is_distinct_and_uses_one_minute_chart(
     assert "1分钟卖出精确定位补充" in title
     assert "5分钟一类卖点＋1分钟二类卖点" in title
     assert "状态：1分钟区间套定位新出现，仅补充精确位置" in line
-    assert "时效：日期 2026-08-04｜5分钟操作确认 10:00:00" in line
+    assert "时效：日期 2026-08-04｜5分钟正式点确认 10:00:00" in line
     assert "1分钟定位可用 10:01:00" in line
     assert "仅复核时点，不改变原5分钟判断" in line
     assert "不生成认证卖出价" in line

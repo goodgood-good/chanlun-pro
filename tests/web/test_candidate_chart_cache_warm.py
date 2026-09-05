@@ -64,6 +64,77 @@ def test_candidate_targets_follow_review_order_and_deduplicate_symbols():
     )
 
 
+def test_candidate_targets_rank_first_center_before_later_center():
+    shared = {
+        "market": "a",
+        "lifecycle_stage": "triggered",
+        "point_type": "3buy",
+        "execution_profile": {"context_grade": "A"},
+        "review_priority": 50,
+    }
+    snapshot = {
+        "sectors": [
+            {"sector_id": "STRONGER"},
+            {"sector_id": "WEAKER"},
+        ],
+        "signals": [
+            {
+                **shared,
+                "code": "SH.600001",
+                "setup_5m": {"point_type": "3buy", "center_ordinal": 2},
+                "sector": {"sector_id": "STRONGER"},
+            },
+            {
+                **shared,
+                "code": "SH.600002",
+                "setup_5m": {"point_type": "3buy", "center_ordinal": 1},
+                "sector": {"sector_id": "WEAKER"},
+            },
+        ],
+    }
+
+    assert warm.candidate_chart_targets(snapshot) == (
+        ("a", "SH.600002"),
+        ("a", "SH.600001"),
+    )
+
+
+def test_derived_review_priority_penalizes_each_later_third_point_center():
+    def signal(center_ordinal):
+        return {
+            "side": "buy",
+            "point_type": "3buy",
+            "lifecycle_stage": "triggered",
+            "entry_allowed": False,
+            "setup_5m": {
+                "point_type": "3buy",
+                "center_ordinal": center_ordinal,
+            },
+            "execution_profile": {
+                "recommendation": "CAUTION",
+                "context_grade": "A",
+            },
+            "position_recommendation": {
+                "status": "CONDITIONAL",
+                "side": "buy",
+            },
+            "higher_timeframe_risk": {
+                "market_gate": "GREEN",
+                "sector_gate": "GREEN",
+                "symbol_gate": "GREEN",
+            },
+            "warmup": {"converged": True},
+            "selection_sources": [],
+        }
+
+    first = warm._review_priority(signal(1))
+    second = warm._review_priority(signal(2))
+    third = warm._review_priority(signal(3))
+
+    assert first is not None and second is not None and third is not None
+    assert first - second == second - third == 1
+
+
 def test_candidate_targets_prioritize_the_account_visible_point_filter():
     snapshot = {
         "signals": [

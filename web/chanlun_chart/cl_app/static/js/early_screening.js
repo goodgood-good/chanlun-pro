@@ -99,6 +99,7 @@
       reviewStage: ["forming", "notified", "tracking"].includes(saved.reviewStage)
         ? saved.reviewStage
         : "all",
+      hideResearchOnly: saved.hideResearchOnly === true,
       segmentState: ["present", "current", "historical", "absent"].includes(saved.segmentState)
         ? saved.segmentState
         : "all",
@@ -219,6 +220,7 @@
           market: state.market,
           signalSource: state.signalSource,
           reviewStage: state.reviewStage,
+          hideResearchOnly: state.hideResearchOnly,
           segmentState: state.segmentState,
           selectionScope: state.selectionScope,
           layout: state.layout,
@@ -268,6 +270,7 @@
       state.market = "all";
       state.signalSource = "all";
       state.reviewStage = "all";
+      state.hideResearchOnly = false;
       state.segmentState = segmentState;
       state.selectionScope = "all-qualified";
       state.sectorId = "all";
@@ -287,6 +290,7 @@
         && state.market === "all"
         && state.signalSource === "all"
         && state.reviewStage === "all"
+        && state.hideResearchOnly === false
         && state.segmentState === "all"
         && state.selectionScope === "all-qualified"
         && state.sectorId === "all"
@@ -1161,6 +1165,7 @@
         market: state.market,
         source: state.signalSource,
         reviewStage: state.reviewStage,
+        hideResearchOnly: state.hideResearchOnly,
         segmentState: state.segmentState,
         query: state.query,
       });
@@ -1195,6 +1200,7 @@
           market: state.market,
           source: requestedSource,
           reviewStage: state.reviewStage,
+          hideResearchOnly: state.hideResearchOnly,
           segmentState: state.segmentState,
           query: state.query,
           ...overrides,
@@ -1232,6 +1238,19 @@
         button.dataset.count = String(count);
         button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);
       });
+      const researchOnlyToggle = byId("es-hide-research-only");
+      if (researchOnlyToggle) {
+        const included = countWith({ hideResearchOnly: false });
+        const excluded = countWith({ hideResearchOnly: true });
+        const researchOnlyCount = Math.max(0, included - excluded);
+        researchOnlyToggle.dataset.count = String(researchOnlyCount);
+        researchOnlyToggle.setAttribute(
+          "aria-label",
+          state.hideResearchOnly
+            ? `恢复显示 ${researchOnlyCount} 条后续中枢仅研究线索`
+            : `隐藏 ${researchOnlyCount} 条后续中枢仅研究线索`,
+        );
+      }
     }
 
     function syncFilterSummary() {
@@ -1249,7 +1268,7 @@
         .find((button) => button.dataset.segmentState === state.segmentState);
       setText(
         "es-filter-summary",
-        `${market ? market.textContent.trim() : "全部市场"} · ${source ? source.textContent.trim() : "全部来源"} · ${reviewStage ? reviewStage.textContent.trim() : "全部任务"} · ${segmentState ? segmentState.textContent.trim() : "全部定位状态"} · ${lifecycle ? lifecycle.textContent.trim() : "全部状态"} · ${pointType ? pointType.textContent.trim() : "全部买卖点"}`,
+        `${market ? market.textContent.trim() : "全部市场"} · ${source ? source.textContent.trim() : "全部来源"} · ${reviewStage ? reviewStage.textContent.trim() : "全部任务"} · ${state.hideResearchOnly ? "已隐藏仅研究" : "包含仅研究"} · ${segmentState ? segmentState.textContent.trim() : "全部定位状态"} · ${lifecycle ? lifecycle.textContent.trim() : "全部状态"} · ${pointType ? pointType.textContent.trim() : "全部买卖点"}`,
       );
     }
 
@@ -1772,6 +1791,7 @@
         state.market,
         state.signalSource,
         state.reviewStage,
+        state.hideResearchOnly,
         state.segmentState,
         state.selectionScope,
         state.sectorId,
@@ -1848,6 +1868,7 @@
           market: state.market,
           source: state.signalSource,
           reviewStage: state.reviewStage,
+          hideResearchOnly: state.hideResearchOnly,
           segmentState: state.segmentState,
           selectionScope: state.selectionScope,
           sectorId: state.sectorId,
@@ -1860,6 +1881,17 @@
       syncButtons("[data-signal-source]", "signalSource", state.signalSource);
       syncButtons("[data-review-stage]", "reviewStage", state.reviewStage);
       syncButtons("[data-segment-state]", "segmentState", state.segmentState);
+      const researchOnlyToggle = byId("es-hide-research-only");
+      if (researchOnlyToggle) {
+        researchOnlyToggle.classList.toggle("is-active", state.hideResearchOnly);
+        researchOnlyToggle.setAttribute(
+          "aria-pressed",
+          state.hideResearchOnly ? "true" : "false",
+        );
+        researchOnlyToggle.firstChild.textContent = state.hideResearchOnly
+          ? "显示仅研究"
+          : "隐藏仅研究";
+      }
       syncButtons(".es-layout-switch [data-layout]", "layout", state.layout);
       syncFilterCounts();
       syncFilterSummary();
@@ -2015,6 +2047,12 @@
         saveView();
         renderWorkspaces();
       });
+    });
+    const researchOnlyToggle = byId("es-hide-research-only");
+    if (researchOnlyToggle) researchOnlyToggle.addEventListener("click", () => {
+      state.hideResearchOnly = !state.hideResearchOnly;
+      saveView();
+      renderWorkspaces();
     });
     document.querySelectorAll("[data-segment-state]").forEach((button) => {
       button.addEventListener("click", () => {

@@ -62,6 +62,7 @@
     "approaching", "formed", "armed", "observed", "triggered", "executable",
   ]);
   const REVIEW_PRIORITY_RISK_GATES = new Set(["GREEN", "AMBER", "RED", "UNRESOLVED"]);
+  const LATER_CENTER_THIRD_POINT_PRIORITY_PENALTY = 1;
   const CONTEXT_GRADE_ORDER = {
     A: 0,
     B: 1,
@@ -134,8 +135,8 @@
     approaching: "即将确认",
     formed: "几何候选待确认",
     armed: "旧版等待态",
-    triggered: "5分钟操作确认",
-    executable: "强提示待人工复核",
+    triggered: "5分钟正式点确认",
+    executable: "当前精确执行条件满足",
     active: "结构持续跟踪",
     invalidated: "结构已失效",
     closed: "跟踪已结束",
@@ -209,7 +210,16 @@
 
   function lifecycleStageForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
-    return text(safeSignal.lifecycle_stage, "");
+    const stage = text(safeSignal.lifecycle_stage, "");
+    // Executable is a current projection.  Fail closed for legacy/stale
+    // snapshots that retained the label after both execution permissions were
+    // withdrawn; the durable 5m fact remains triggered.
+    if (
+      stage === "executable"
+      && safeSignal.entry_allowed !== true
+      && safeSignal.exit_allowed !== true
+    ) return "triggered";
+    return stage;
   }
 
   function contextGradeForSignal(signal) {
@@ -606,9 +616,9 @@
     LEGACY_STRUCTURAL_RISK_INPUT_UNRESOLVED: "历史通知的结构价格或风险参数不完整",
     directional_points_expired: "方向性买卖点已超过当前有效窗口",
     stock_one_minute_segment_difference_only: "个股1分钟数据只用于区间套精确买卖位置确认",
-    core_confirmed_point: "核心买卖点已达到操作确认",
-    five_minute_geometric_point_formed: "旧版含义：5分钟离开/回抽几何已出现；仍未达到操作确认",
-    five_minute_geometric_candidate_awaiting_confirmation: "5分钟仅出现非交易几何候选，尚未达到操作确认",
+    core_confirmed_point: "核心买卖点已正式确认",
+    five_minute_geometric_point_formed: "旧版含义：5分钟离开/回抽几何已出现；仍未正式确认",
+    five_minute_geometric_candidate_awaiting_confirmation: "5分钟仅出现非交易几何候选，尚未正式确认",
     one_minute_not_confirmed: "5分钟买点已确认，等待1分钟区间套精确定位",
     one_minute_sell_not_confirmed: "5分钟卖点已确认，等待1分钟区间套精确定位",
     confirmed_sell_with_down_structure: "下跌结构中的卖点已确认",
@@ -627,13 +637,13 @@
     unfinished_segment_lock: "末端结构仍会随新K更新",
     formal_center_confirmation: "中枢证据继续固化",
     lower_or_unrelated_structure_risk: "较低或无关结构存在风险",
-    sell_not_confirmed: "5分钟卖点尚未达到操作确认",
+    sell_not_confirmed: "5分钟卖点尚未正式确认",
     top_fractal_confirmed: "顶分型确认",
     bottom_fractal_confirmed: "底分型确认",
-    five_minute_not_confirmed: "5分钟买卖点尚未达到操作确认",
-    setup_not_confirmed: "5分钟设置尚未达到操作确认",
-    five_minute_setup_formed_awaiting_lock: "旧版几何候选，尚未达到操作确认",
-    five_minute_geometry_candidate_awaiting_confirmation: "5分钟仅为几何候选，尚未达到操作确认",
+    five_minute_not_confirmed: "5分钟买卖点尚未正式确认",
+    setup_not_confirmed: "5分钟设置尚未正式确认",
+    five_minute_setup_formed_awaiting_lock: "旧版几何候选，尚未正式确认",
+    five_minute_geometry_candidate_awaiting_confirmation: "5分钟仅为几何候选，尚未正式确认",
     CANDIDATE_MONITOR_ERRORS: "候选轮换最近一轮存在计算错误",
     CANDIDATE_MONITOR_RUNTIME_UNVERIFIED: "候选轮换尚未完成本进程验证",
     PRESELECTION_CLOSE_CUTOFF_INCOMPLETE: "盘中尚未形成完整收盘候选快照",
@@ -653,6 +663,7 @@
     NON_TRADING_SESSION_NOT_DUE: "当前不在A股分钟监听时段",
     mixed_or_transition_structure: "结构处于混合或过渡状态",
     three_buy_not_first_center: "三买不属于当前走势第一中枢",
+    three_sell_not_first_center: "三卖不属于当前走势第一中枢",
     no_active_position: "旧版卖点缺少目标结构级别，需人工核对",
     external_position_unknown_manual_review: "旧版卖点缺少目标结构级别，需人工核对",
     sell_structure_relation_requires_manual_review: "需人工核对卖点与目标结构的级别关系",
@@ -2332,7 +2343,7 @@
       title = "跟踪已关闭";
     } else if (stage === "formed") {
       tone = recommendation === "BLOCKED" ? "blocked" : "waiting";
-      title = `5分钟${pointLabel}几何候选，尚未达到操作确认`;
+      title = `5分钟${pointLabel}几何候选，尚未正式确认`;
     } else if (stage === "approaching") {
       tone = recommendation === "BLOCKED" ? "blocked" : "waiting";
       title = `5分钟${pointLabel}结构仍在形成`;
@@ -2355,17 +2366,17 @@
     } else if (recommendation === "CAUTION") {
       tone = "waiting";
       title = setupLockState === "pending"
-        ? `5分钟${pointLabel}已达到操作确认，需人工复核环境`
+        ? `5分钟${pointLabel}已正式确认，需人工复核环境`
         : setupLockState === "locked"
-          ? `5分钟${pointLabel}操作确认，末端结构已封存，谨慎人工复核`
-          : `5分钟${pointLabel}已达到操作确认，结构证据状态待核对`;
+          ? `5分钟${pointLabel}正式确认，末端结构已封存，谨慎人工复核`
+          : `5分钟${pointLabel}已正式确认，结构证据状态待核对`;
     } else if (recommendation === "READY") {
       tone = "action";
       title = setupLockState === "pending"
-        ? `5分钟${pointLabel}已达到操作确认，待人工复核`
+        ? `5分钟${pointLabel}已正式确认，待人工复核`
         : setupLockState === "locked"
-          ? `5分钟${pointLabel}操作确认，末端结构已封存，待人工复核`
-          : `5分钟${pointLabel}已达到操作确认，结构证据状态待核对`;
+          ? `5分钟${pointLabel}正式确认，末端结构已封存，待人工复核`
+          : `5分钟${pointLabel}已正式确认，结构证据状态待核对`;
     } else if (recommendation === "WAITING_STRUCTURE") {
       tone = "waiting";
       title = `5分钟${pointLabel}结构仍在形成`;
@@ -2374,13 +2385,13 @@
       || recommendation === "FORMED_AWAITING_LOCK"
     ) {
       tone = "waiting";
-      title = `5分钟${pointLabel}仅为几何候选，尚未达到操作确认`;
-    } else if (allowed || stage === "executable") {
+      title = `5分钟${pointLabel}仅为几何候选，尚未正式确认`;
+    } else if (allowed) {
       tone = "action";
-      title = "强提示待人工复核";
+      title = "当前精确执行条件满足";
     } else if (stage === "triggered") {
       tone = "waiting";
-      title = "5分钟操作确认，等待人工复核";
+      title = "5分钟正式点确认，等待1分钟定位或人工复核";
     } else if (stage === "armed") {
       tone = "waiting";
       title = "旧版等待态，下一次计算将迁移";
@@ -2564,7 +2575,7 @@
         boundary: blocked
           ? reasonLabel(reasons[0])
           : adverse && executionProfile
-            ? "仅降低环境等级，不否定5分钟操作确认"
+            ? "仅降低环境等级，不否定5分钟正式点确认"
             : known ? "没有关键限制" : "环境证据未提供",
         evidence: reasons.map(reasonLabel),
       };
@@ -2581,14 +2592,14 @@
         : formationState === "geometry_ready" ? "候选已失效" : "已失效";
       setupTone = "blocked";
     } else if (formationState === "confirmed") {
-      // 周期节点的主状态仍然只回答 5 分钟买卖点是否已达到操作确认。
+      // 周期节点的主状态仍然只回答 5 分钟买卖点是否已正式确认。
       // 锁定进度属于证据审计状态，放在下方摘要中，避免把 pending 误读成
       // “买卖点还没有确认”，也避免全列表出现同一条醒目的复核中提示。
       setupState = lockState === "locked"
-        ? "5分钟操作确认·末端已封存"
+        ? "5分钟正式点确认·末端已封存"
         : lockState === "pending"
-          ? "5分钟操作确认"
-          : "5分钟操作确认·证据状态待核对";
+          ? "5分钟正式点确认"
+          : "5分钟正式点确认·证据状态待核对";
       setupTone = "supportive";
     } else if (formationState === "geometry_ready") {
       setupState = setup.contains_unlocked_segment === true
@@ -3159,7 +3170,7 @@
         : prefixedLabels("30分钟", contextCodes)),
       ...prefixedLabels("5分钟", setupConfirmedEvidence),
       ...(formationState === "geometry_ready"
-        ? [`5分钟：${POINT_LABELS[safeSignal.point_type] || "买卖点"}离开/回抽几何已出现（仅候选，尚未达到操作确认）`]
+        ? [`5分钟：${POINT_LABELS[safeSignal.point_type] || "买卖点"}离开/回抽几何已出现（仅候选，尚未正式确认）`]
         : []),
       ...prefixedLabels("1分钟", triggerEvidence),
       ...(higherRisk.market_gate === "GREEN"
@@ -3206,14 +3217,14 @@
     const nextByStage = {
       observed: "等待 5分钟形成可审计买卖点设置",
       approaching: "等待 5分钟设置闭合并确认",
-      formed: "仅出现买卖点几何候选；等待达到操作确认",
-      armed: "旧版等待态；下一次计算按5分钟操作确认迁移",
+      formed: "仅出现买卖点几何候选；等待正式点确认",
+      armed: "旧版等待态；下一次计算按5分钟正式点确认迁移",
       triggered: lockState === "pending"
-        ? "5分钟操作确认已成立；等待1分钟区间套后进入精确执行候选"
+        ? "5分钟正式点确认已成立；等待1分钟区间套后进入精确执行候选"
         : lockState === "locked"
-          ? "5分钟买卖点操作确认且末端结构已封存；等待1分钟区间套精确定位"
-          : "5分钟操作确认已记录、结构证据状态待核对；等待1分钟区间套精确定位",
-      executable: "人工复核中枢、走势类型、级别与买卖点",
+          ? "5分钟买卖点正式确认且末端结构已封存；等待1分钟区间套精确定位"
+          : "5分钟正式点确认已记录、结构证据状态待核对；等待1分钟区间套精确定位",
+      executable: "当前精确执行条件满足；仍须人工复核后手工操作",
       active: "跟踪反向买卖点与结构止损",
       invalidated: "信号已失效，等待新的结构设置",
       closed: "本次跟踪已经结束",
@@ -4177,6 +4188,7 @@
     const source = text(filters.source, "all");
     const reviewStage = text(filters.reviewStage, "all");
     const segmentState = text(filters.segmentState, "all");
+    const hideResearchOnly = filters.hideResearchOnly === true;
     const query = text(filters.query, "").trim().toLocaleLowerCase("zh-CN");
     return (Array.isArray(signals) ? signals : []).filter((signal) => {
       if (!isRecord(signal)) return false;
@@ -4211,6 +4223,7 @@
       if (reviewStage === "notified" && !["triggered", "executable"].includes(stage)) return false;
       if (reviewStage === "tracking" && !["monitoring", "active"].includes(stage)) return false;
       if (reviewStage === "closed" && !["invalidated", "closed"].includes(stage)) return false;
+      if (hideResearchOnly && laterCenterThirdPointResearchOnly(signal)) return false;
       const segmentEvidenceStatus = segmentDifferenceEvidenceStatusForSignal(signal);
       const segmentBoundaryStatus = segmentDifferenceBoundaryStatusForSignal(signal);
       if (segmentState === "present" && segmentEvidenceStatus !== "present") return false;
@@ -4255,6 +4268,34 @@
         .map((part) => text(part, "").toLocaleLowerCase("zh-CN"))
         .some((part) => part.includes(normalizedQuery));
     });
+  }
+
+  function thirdClassCenterOrdinalForSignal(signal) {
+    if (!isRecord(signal)) return null;
+    const setup = isRecord(signal.setup_5m) ? signal.setup_5m : {};
+    const pointType = text(setup.point_type || signal.point_type, "");
+    if (!["3buy", "3sell"].includes(pointType)) return null;
+    const raw = setup.center_ordinal;
+    const ordinal = typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && raw.trim()
+        ? Number(raw)
+        : Number.NaN;
+    return Number.isInteger(ordinal) && ordinal > 0 ? ordinal : null;
+  }
+
+  function laterCenterThirdPointResearchOnly(signal) {
+    const ordinal = thirdClassCenterOrdinalForSignal(signal);
+    return ordinal !== null && ordinal > 1;
+  }
+
+  function centerPriorityRankForSignal(signal) {
+    if (!isRecord(signal)) return Number.MAX_SAFE_INTEGER;
+    const setup = isRecord(signal.setup_5m) ? signal.setup_5m : {};
+    const pointType = text(setup.point_type || signal.point_type, "");
+    if (!["3buy", "3sell"].includes(pointType)) return 0;
+    const ordinal = thirdClassCenterOrdinalForSignal(signal);
+    return ordinal === null ? Number.MAX_SAFE_INTEGER : ordinal - 1;
   }
 
   function reviewPriorityForSignal(signal, observedAt = new Date()) {
@@ -4349,12 +4390,18 @@
     }[stage] || 0;
     const gateAdjustment = gates.filter((gate) => gate === "GREEN").length;
     const reviewPenalty = signal.monitor_only === true ? 2 : 0;
+    const centerOrdinal = thirdClassCenterOrdinalForSignal(signal);
+    const centerPenalty = centerOrdinal === null
+      ? 0
+      : Math.max(0, centerOrdinal - 1)
+        * LATER_CENTER_THIRD_POINT_PRIORITY_PENALTY;
     const score = band.base
       + REVIEW_PRIORITY_CONFIDENCE[confidence]
       + (exactGreen ? 2 : 0)
       + stageAdjustment
       + gateAdjustment
-      - reviewPenalty;
+      - reviewPenalty
+      - centerPenalty;
     return Math.min(band.max, Math.max(band.min, score));
   }
 
@@ -4399,6 +4446,9 @@
       const leftStage = reviewRank(left);
       const rightStage = reviewRank(right);
       if (leftStage !== rightStage) return leftStage - rightStage;
+      const leftCenterRank = centerPriorityRankForSignal(left);
+      const rightCenterRank = centerPriorityRankForSignal(right);
+      if (leftCenterRank !== rightCenterRank) return leftCenterRank - rightCenterRank;
       const leftSector = isRecord(left && left.sector) ? left.sector : {};
       const rightSector = isRecord(right && right.sector) ? right.sector : {};
       const leftRank = ranks.get(text(leftSector.sector_id, "")) ?? Number.MAX_SAFE_INTEGER;
@@ -4695,6 +4745,10 @@
     if (reviewPriority !== null) {
       card.dataset.reviewPriority = String(reviewPriority);
     }
+    const centerOrdinal = thirdClassCenterOrdinalForSignal(signal);
+    if (centerOrdinal !== null) {
+      card.dataset.centerOrdinal = String(centerOrdinal);
+    }
     card.classList.toggle("is-selected", selected);
     card.setAttribute("aria-pressed", selected ? "true" : "false");
     card.setAttribute("aria-current", selected ? "true" : "false");
@@ -4728,6 +4782,12 @@
       element(documentRef, "em", "is-market", inferSignalMarket(signal) === "us" ? "美股" : "A股"),
       gradeBadge,
       element(documentRef, "b", "", pointLabelForSignal(signal)),
+      ...(centerOrdinal === null ? [] : [element(
+        documentRef,
+        "em",
+        `is-center-ordinal${centerOrdinal > 1 ? " is-center-later" : ""}`,
+        `第${centerOrdinal}中枢${centerOrdinal > 1 ? "·仅研究" : ""}`,
+      )]),
       element(documentRef, "em", "is-lifecycle", signalCardLifecycleLabel(signal)),
       element(documentRef, "em", "is-selection-source", selectionLabelForSignal(signal)),
     );
@@ -5242,6 +5302,7 @@
     SCHEMA,
     annotateSiblingStructureContexts,
     chartUrlsForSignal,
+    centerPriorityRankForSignal,
     completedWithoutSignalCount,
     contextGradeForSignal,
     contextGradeLabelForSignal,
@@ -5260,6 +5321,7 @@
     hardBlockSummaryForSignal,
     lifecycleLabel,
     lifecycleStageForSignal,
+    laterCenterThirdPointResearchOnly,
     isCurrentSelectionSignal,
     signalQueueCountText,
     signalQueueFacts,
@@ -5267,6 +5329,7 @@
     setupLockStateForSignal,
     terminalSegmentRange,
     terminalSegmentSummary,
+    thirdClassCenterOrdinalForSignal,
     manualFocusState,
     mergeRealtimeNotifications,
     mergeUsMonitorSignals,

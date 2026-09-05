@@ -174,6 +174,7 @@ class HumanReviewScreeningParameters:
     exact_green_bonus: int = 2
     green_risk_gate_bonus: int = 1
     monitor_only_penalty: int = 2
+    later_center_third_point_penalty: int = 1
     diagnostic_count_affects_priority: bool = False
     automated_order_authorized: bool = False
     human_confirmation_required: bool = True
@@ -204,6 +205,8 @@ class HumanReviewScreeningParameters:
             raise ValueError("human review priority bands changed")
         if self.diagnostic_count_affects_priority:
             raise ValueError("diagnostic volume cannot affect review priority")
+        if self.later_center_third_point_penalty != 1:
+            raise ValueError("later-center third-point priority penalty changed")
         if (
             self.automated_order_authorized
             or not self.human_confirmation_required
@@ -2587,6 +2590,8 @@ def review_priority(
     lifecycle_stage: str | None = None,
     monitor_only: bool = False,
     five_minute_trade_signal_fresh: bool | None = None,
+    point_type: str | None = None,
+    center_ordinal: int | None = None,
     parameters: HumanReviewScreeningParameters | None = None,
 ) -> int:
     """Return a stable review-urgency score, never a synthetic trade score.
@@ -2609,6 +2614,10 @@ def review_priority(
         raise ValueError("five-minute review signal freshness is invalid")
     if any(not isinstance(value, str) or not value for value in selection_sources):
         raise ValueError("human review selection sources are invalid")
+    if center_ordinal is not None and (
+        type(center_ordinal) is not int or center_ordinal <= 0
+    ):
+        raise ValueError("human review center ordinal is invalid")
 
     actionable_sell_review = bool(
         side == "sell"
@@ -2658,6 +2667,11 @@ def review_priority(
     )
     score += dict(values.lifecycle_bonuses).get(lifecycle_stage, 0)
     score -= values.monitor_only_penalty if monitor_only else 0
+    if point_type in {"3buy", "3sell"} and center_ordinal is not None:
+        score -= (
+            max(0, center_ordinal - 1)
+            * values.later_center_third_point_penalty
+        )
     return min(maximum, max(minimum, score))
 
 

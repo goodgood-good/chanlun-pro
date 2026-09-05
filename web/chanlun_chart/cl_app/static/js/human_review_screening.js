@@ -4,8 +4,8 @@
   const POLL_INTERVAL_MS = 60_000;
   const REQUEST_TIMEOUT_MS = 30_000;
   const ALERT_LABELS = {
-    POSSIBLE_5M_TRADE_BUY: "5分钟操作确认买点",
-    POSSIBLE_5M_TRADE_SELL: "5分钟操作确认卖点",
+    POSSIBLE_5M_TRADE_BUY: "5分钟正式买点确认",
+    POSSIBLE_5M_TRADE_SELL: "5分钟正式卖点确认",
     POSSIBLE_30M_BUY: "旧档案：30分钟买点",
     POSSIBLE_30M_EXIT: "旧档案：30分钟退出",
     POSSIBLE_SELL_REVIEW: "旧档案：卖点级别待判断",
@@ -39,7 +39,7 @@
     HUMAN_CONFIRM_SAME_LEVEL_AND_CENTER_DECOMPOSITION: "结合同级别分解与中枢分解",
     HUMAN_CONFIRM_30M_TREND_TYPE: "确认 30m 走势类型",
     HUMAN_CONFIRM_BUY_OR_SELL_POINT: "确认具体一、二、三类买卖点",
-    HUMAN_CONFIRM_5M_TRADE_POINT: "核对 5分钟操作确认买卖点及对应结构证据",
+    HUMAN_CONFIRM_5M_TRADE_POINT: "核对5分钟正式买卖点及对应结构证据",
     HUMAN_CONFIRM_1M_SEGMENT_DIFFERENCE: "核对 1分钟区间套精确位置",
     HUMAN_CONFIRM_5M_TACTICAL_CONTEXT: "旧档案：确认 5分钟短差上下文",
     HUMAN_CONFIRM_HIGHER_TIMEFRAME_RISK: "核对日线与30分钟环境",
@@ -514,9 +514,9 @@
       candidate && candidate.realtime_notification_setup_lock_state,
       "unknown",
     );
-    if (state === "locked") return "5分钟操作确认已完成；末端结构已封存";
-    if (state === "pending") return "5分钟操作确认已完成；末端结构仍会随新K更新，不影响当前复核";
-    return "5分钟操作确认已记录；末端结构封存状态未保存，可结合当前图表核对";
+    if (state === "locked") return "5分钟正式点确认已完成；末端结构已封存";
+    if (state === "pending") return "5分钟正式点确认已完成；末端结构仍会随新K更新，不影响当前复核";
+    return "5分钟正式点确认已记录；末端结构封存状态未保存，可结合当前图表核对";
   }
 
   function realtimeNotificationSegmentPeriod(candidate, evaluatedAt = new Date()) {
@@ -1842,7 +1842,7 @@
         setStatus(
           "ready",
           "盘中实时复核候选已验证并归档",
-          `${focusReviewCount} 条当前重点提醒 · 30分钟环境/5分钟操作确认/结构证据/1分钟区间套精确定位 · 候选报告自身零订单/零成交`,
+          `${focusReviewCount} 条当前重点提醒 · 30分钟环境/5分钟正式点确认/结构证据/1分钟区间套精确定位 · 候选报告自身零订单/零成交`,
         );
       }
       if (
@@ -2080,7 +2080,7 @@
       setNodeText(
         "[data-decision-detail]",
         realtime
-          ? `结构达到操作确认于 ${fullDateTimeText(candidate.realtime_notification_confirmed_time)}；${realtimeNotificationSetupLockLabel(candidate)}。信号可用于 ${fullDateTimeText(candidate.realtime_notification_available_time)}，监听发现于 ${fullDateTimeText(candidate.realtime_notification_detected_at)}，${realtimeNotificationTimeLabel(candidate)}为 ${fullDateTimeText(candidate.review_available_at)}；${realtimeNotificationPriceText(candidate)}。这里打开当前实时图表，不会产生订单。`
+          ? `结构正式确认于 ${fullDateTimeText(candidate.realtime_notification_confirmed_time)}；${realtimeNotificationSetupLockLabel(candidate)}。信号可用于 ${fullDateTimeText(candidate.realtime_notification_available_time)}，监听发现于 ${fullDateTimeText(candidate.realtime_notification_detected_at)}，${realtimeNotificationTimeLabel(candidate)}为 ${fullDateTimeText(candidate.review_available_at)}；${realtimeNotificationPriceText(candidate)}。这里打开当前实时图表，不会产生订单。`
           : `图表已锁定在 ${timeText(candidate.review_available_at)}，不会产生订单。`,
       );
       const decision = chartWorkspace.querySelector("[data-decision-card]");
@@ -2088,7 +2088,7 @@
 
       const periods = realtime ? {
         "30m": ["人工核对", `发生时大级别方向 ${text(candidate.big_direction, "未知")}`, "当前图表会继续更新"],
-        "5m": [candidate.realtime_notification_setup_lock_state === "locked" ? "操作确认·末端已封存" : "操作确认", `通知来源 ${text(candidate.realtime_notification_source_frequency)}；${realtimeNotificationSetupLockLabel(candidate)}`, realtimeNotificationPriceText(candidate)],
+        "5m": [candidate.realtime_notification_setup_lock_state === "locked" ? "正式点确认·末端已封存" : "正式点确认", `通知来源 ${text(candidate.realtime_notification_source_frequency)}；${realtimeNotificationSetupLockLabel(candidate)}`, realtimeNotificationPriceText(candidate)],
         "1m": realtimeNotificationSegmentPeriod(candidate),
       } : {
         "30m": ["环境核对", "确认走势方向与风险环境", `可见至 ${timeText(candidate.review_available_at)}`],
@@ -2120,7 +2120,7 @@
           : `结构锚点价：${text(candidate.reference_price)}`,
         ...(realtime ? [
           `结构锚点：${fullDateTimeText(candidate.realtime_notification_anchor_time)}`,
-          `操作确认：${fullDateTimeText(candidate.realtime_notification_confirmed_time)}`,
+          `正式确认：${fullDateTimeText(candidate.realtime_notification_confirmed_time)}`,
           `5分钟证据状态：${realtimeNotificationSetupLockLabel(candidate)}`,
           `信号可用：${fullDateTimeText(candidate.realtime_notification_available_time)}`,
           `监听发现：${fullDateTimeText(candidate.realtime_notification_detected_at)}`,

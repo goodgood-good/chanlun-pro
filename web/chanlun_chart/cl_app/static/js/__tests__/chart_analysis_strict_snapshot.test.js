@@ -459,7 +459,7 @@ test('provisional third-class geometry is reported as a candidate awaiting lock'
   assert.equal(summary.centerPreviews[0].tradable, false);
   assert.equal(
     summary.centerPreviews[0].qualification,
-    '离开/回抽几何已出现；仍是候选，尚未达到操作确认',
+    '离开/回抽几何已出现；仍是候选，尚未正式确认',
   );
   assert.equal(summary.xdZone.status, '三类卖点候选待锁定');
   assert.equal(summary.xdZone.tone, 'forming');
@@ -500,7 +500,7 @@ test('operational third-class confirmation updates the center explanation too', 
   );
   assert.equal(summary.xdZone.status, '已完成');
   assert.equal(summary.xdZone.tone, 'complete');
-  assert.match(summary.xdZone.qualification, /三类卖点已达到操作确认/);
+  assert.match(summary.xdZone.qualification, /三类卖点已正式确认/);
   assert.match(summary.xdZone.qualification, /末端结构仍会随新K更新/);
 });
 

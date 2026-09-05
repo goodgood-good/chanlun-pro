@@ -95,7 +95,7 @@ def center_ordinals(
     centers: tuple[TrendCenter, ...],
     decomposition_boundaries=(),
 ) -> dict[tuple[str, str], int]:
-    """在背驰边界切分的严格走势序列内为中枢编号。"""
+    """在背驰边界切分的严格走势序列内，按中枢核心位置编号。"""
 
     values = tuple(centers)
     if len({center.center_id for center in values}) != len(values):
@@ -120,7 +120,17 @@ def center_ordinals(
             if previous.center_id in boundary_center_ids:
                 up_run = down_run = 1
             else:
-                relation = classify_center_relation(previous, center)
+                # 先复用正式关系校验，确保两个中枢同级、同源且时序合法。
+                # 序号表达的是不可变 ZD/ZG 核心的连续抬高/降低；正式走势
+                # 关系仍由 center_relation 按更严格的 DD/GG 外围完全分离判定。
+                classify_center_relation(previous, center)
+                relation = (
+                    CenterRelation.UP_TREND
+                    if center.zd_tick > previous.zg_tick
+                    else CenterRelation.DOWN_TREND
+                    if center.zg_tick < previous.zd_tick
+                    else CenterRelation.UPGRADE
+                )
                 if relation is CenterRelation.UP_TREND:
                     up_run += 1
                     down_run = 1
@@ -184,13 +194,13 @@ def preview_center_ordinal(
     }:
         return 1
 
-    preview_dd_tick = min(unit.low_tick for unit in body)
-    preview_gg_tick = max(unit.high_tick for unit in body)
+    if preview.zd_tick is None or preview.zg_tick is None:
+        raise ValueError("中枢预览缺少来源有效的核心区间")
     relation = (
         "up"
-        if preview_dd_tick > previous.gg_tick
+        if preview.zd_tick > previous.zg_tick
         else "down"
-        if preview_gg_tick < previous.dd_tick
+        if preview.zg_tick < previous.zd_tick
         else "upgrade"
     )
     if relation != direction:

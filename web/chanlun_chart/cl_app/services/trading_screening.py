@@ -83,6 +83,8 @@ from chanlun.decision_support.trading_system.live_review_materialization import 
     resolve_live_review_materialization_receipt,
 )
 from chanlun.decision_support.trading_system.lifecycle import (
+    five_minute_setup_center_priority_rank,
+    five_minute_setup_document_is_in_policy_scope,
     lifecycle_state_from_signal_document,
     lifecycle_stage_from_signal,
 )
@@ -248,8 +250,15 @@ PRIORITY_MONITOR_BAR_READY_OFFSET_SECONDS = 2
 # lane exists to report.  A sub-minute tolerance rejects that previous bar while
 # retaining a small clock/publication allowance for the current close.
 PRIORITY_MONITOR_MAX_STRUCTURE_LAG_SECONDS = 30
-# 买入区间套边界只保留到下一根合法 1m K 线，任何多轮轮转都无法满足它。
+# Every current locator must still be revisited once per completed 1m bar.
 ONE_MINUTE_LOCATOR_SLA_SECONDS = 60
+# Within that cadence, completion has to leave enough time to enqueue a
+# deterministic chart and retain the transport margin. Treating the full bar
+# cadence as the phase-completion SLA made those contracts incompatible.
+# Complete the current-bar locator while at least the notification enqueue
+# margin remains in a 60-second bar.  Keeping this separate from the 60-second
+# rotation SLA prevents a fast partial pass from being reported as healthy.
+ONE_MINUTE_LOCATOR_COMPLETION_SLA_SECONDS = 35
 PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor-v2-continuation"
 CANDIDATE_MONITOR_CONTRACT_ID = (
     "bar-cadence-live-candidate-monitor-v5-validation-liveness"
@@ -266,6 +275,11 @@ PRIORITY_MONITOR_PUBLISH_BATCH_SIZE = 8
 CANDIDATE_NOTIFICATION_PUBLISH_BATCH_SIZE = 4
 MONITOR_ADMISSION_MIN_GUARD_SECONDS = 5.0
 PRIORITY_MONITOR_FINALIZATION_RESERVE_SECONDS = 8.0
+# The authoritative due-5m phase now runs first. Keep its former reserve as the
+# boundary between the 35-second locator completion target and the remaining
+# notification/finalization window: even after a fast formal pass, locators may
+# not consume the time needed to persist and enqueue the confirmed event.
+FORMAL_FIVE_MINUTE_CONFIRMATION_RESERVE_SECONDS = 15.0
 PRIORITY_MONITOR_CLOCK_POLL_SECONDS = 0.5
 PRIORITY_MONITOR_PERSIST_BATCH_SIZE = 64
 _CANDIDATE_MONITOR_LANES = frozenset(
@@ -275,6 +289,20 @@ _CANDIDATE_MONITOR_LANES = frozenset(
         CANDIDATE_MONITOR_LANE_30M,
     }
 )
+
+
+def _one_minute_locator_deadline_perf(
+    *,
+    round_started_perf: float,
+    priority_work_deadline_perf: float,
+    formal_confirmation_reserve_seconds: float,
+) -> float:
+    """Keep locator completion inside both the round and alert-time SLA."""
+
+    return min(
+        priority_work_deadline_perf - formal_confirmation_reserve_seconds,
+        round_started_perf + ONE_MINUTE_LOCATOR_COMPLETION_SLA_SECONDS,
+    )
 
 
 def _remove_orphan_atomic_temporaries(target: Path) -> None:
@@ -1280,12 +1308,13 @@ _PRIORITY_SIGNAL_STAGE_RANK = {
 }
 
 _PRECONFIRMATION_DIVERGENCE_STAGES = frozenset({"approaching", "formed"})
+_CONFIRMED_ONE_MINUTE_LOCATOR_STAGES = frozenset(
+    {"triggered", "executable", "active"}
+)
 _ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES = frozenset(
     {
         *_PRECONFIRMATION_DIVERGENCE_STAGES,
-        "triggered",
-        "executable",
-        "active",
+        *_CONFIRMED_ONE_MINUTE_LOCATOR_STAGES,
     }
 )
 _CURRENT_SELECTION_LIFECYCLE_STAGES = frozenset(
@@ -1332,6 +1361,29 @@ def _current_five_minute_setup_requires_segment_monitor(
             return False
     except (TypeError, ValueError):
         return False
+    return _is_current_selection_signal(signal)
+
+
+def _current_five_minute_setup_requires_retirement_monitor(
+    signal: Mapping[str, object],
+) -> bool:
+    """Return whether a visible setup still needs a structural retirement pass.
+
+    The fixed setup-age window bounds execution and optional 1m precision work;
+    it does not prove that the setup's terminal 5m segment is still one of the
+    two live-tail segments.  Only a later successful 5m structure observation
+    can provide that proof.  Keep every visible lifecycle row in the recurring
+    5m lane until such an observation either reproduces it or publishes a
+    code-level tombstone.  Otherwise an aged confirmed third buy can leave the
+    monitor immediately before its successor segment completes and remain on
+    the selection page indefinitely.
+    """
+
+    stage = lifecycle_stage_from_signal(signal)
+    if stage in {"observed", "approaching", "formed", "armed"}:
+        # Bounded legacy/migration rows still need one authoritative 5m pass
+        # even when their old lifecycle vocabulary is not page-visible.
+        return True
     return _is_current_selection_signal(signal)
 
 
@@ -1428,6 +1480,11 @@ def _one_minute_segment_requires_monitor(
     side = _signal_side(signal)
     if side not in {"buy", "sell"}:
         return False
+    setup = signal.get("setup_5m")
+    if isinstance(setup, Mapping) and not five_minute_setup_document_is_in_policy_scope(
+        setup
+    ):
+        return False
     stage = lifecycle_stage_from_signal(signal)
     if stage in _PRECONFIRMATION_DIVERGENCE_STAGES:
         return _preconfirmation_divergence_requires_monitor(signal)
@@ -1454,6 +1511,8 @@ def _preconfirmation_divergence_requires_monitor(
         return False
     setup = signal.get("setup_5m")
     if not isinstance(setup, Mapping):
+        return False
+    if not five_minute_setup_document_is_in_policy_scope(setup):
         return False
     side = _signal_side(signal)
     expected_role, expected_states = expected_lineage[stage]
@@ -1515,7 +1574,7 @@ def _priority_signal_candidate_codes(
     自选标的由强制通道继续跟踪卖点，未持仓卖点仍保留在完整覆盖和审计快照中。
     """
 
-    best_rank: dict[str, tuple[int, str]] = {}
+    best_rank: dict[str, tuple[int, int, int, str]] = {}
     for group in signal_groups:
         for row in group:
             code = row.get("code")
@@ -1532,11 +1591,69 @@ def _priority_signal_candidate_codes(
                 or (allowed_stages is not None and stage not in allowed_stages)
             ):
                 continue
-            rank = (_PRIORITY_SIGNAL_STAGE_RANK.get(stage, 10**6), code)
+            setup = row.get("setup_5m")
+            setup = setup if isinstance(setup, Mapping) else {}
+            rank = (
+                0
+                if five_minute_setup_document_is_in_policy_scope(setup)
+                else 1,
+                _PRIORITY_SIGNAL_STAGE_RANK.get(stage, 10**6),
+                five_minute_setup_center_priority_rank(
+                    setup.get("point_type") or point_type,
+                    setup.get("center_ordinal"),
+                ),
+                code,
+            )
             previous = best_rank.get(code)
             if previous is None or rank < previous:
                 best_rank[code] = rank
     return tuple(sorted(best_rank, key=best_rank.__getitem__))
+
+
+def _formal_five_minute_confirmation_due_codes(
+    signals: tuple[Mapping[str, object], ...],
+    *,
+    last_success_at: Mapping[str, datetime],
+    observed_at: datetime,
+    excluded_codes: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Return in-policy forming setups not checked after the latest 5m close.
+
+    The ordinary candidate cadence spreads work across five one-minute rounds.
+    That is safe for discovery, but it can leave a known forming setup on the
+    pre-close bar for almost five minutes after its confirmation bar completed.
+    Known first-center execution/notification setups therefore get one prompt
+    authoritative pass per new physical 5m cutoff; later-center research rows
+    remain on the ordinary retirement cadence.
+    """
+
+    cutoff = _latest_expected_a_share_five_minute_cutoff(observed_at)
+    if cutoff is None:
+        return ()
+    candidates = _priority_signal_candidate_codes(
+        tuple(
+            row
+            for row in signals
+            if isinstance(row.get("setup_5m"), Mapping)
+            and five_minute_setup_document_is_in_policy_scope(row["setup_5m"])
+        ),
+        excluded_codes=excluded_codes,
+        allowed_stages=_PRECONFIRMATION_DIVERGENCE_STAGES,
+    )
+    due: list[str] = []
+    for code in candidates:
+        last_at = last_success_at.get(code)
+        if last_at is None:
+            due.append(code)
+            continue
+        try:
+            last = normalize_datetime(last_at, f"{code} formal 5m last_success_at")
+        except (TypeError, ValueError):
+            due.append(code)
+            continue
+        if last < cutoff:
+            due.append(code)
+    return tuple(due)
 
 
 def _merge_authoritative_monitor_documents(
@@ -2205,6 +2322,30 @@ def _priority_affinity_striped_codes(
     )
 
 
+def _candidate_phase_precedence_order(
+    *phases: tuple[str, ...],
+    sector_by_code: Mapping[str, SectorAssessment],
+    worker_count: int,
+) -> tuple[str, ...]:
+    """Stripe each candidate phase without crossing its priority boundary."""
+
+    ordered: list[str] = []
+    for phase_codes in phases:
+        grouped = _group_candidate_batch_by_sector(
+            phase_codes,
+            sector_by_code=sector_by_code,
+        )
+        ordered.extend(
+            _priority_affinity_striped_codes(
+                grouped,
+                sector_by_code=sector_by_code,
+                worker_count=worker_count,
+                symbol_striping=True,
+            )
+        )
+    return tuple(dict.fromkeys(ordered))
+
+
 def _priority_affinity_worker_buckets(
     codes: tuple[str, ...],
     *,
@@ -2821,6 +2962,12 @@ class TradingScreeningConfig:
         """为正式 5m 候选返回不包含 1m 保障分片的并行数。"""
 
         return max(1, self.stock_worker_count - 1)
+
+    @property
+    def effective_formal_confirmation_worker_count(self) -> int:
+        """让截止确认在进入 1m 定位前独占全部结构分片。"""
+
+        return self.stock_worker_count
 
     @property
     def effective_priority_worker_count(self) -> int:
@@ -5623,6 +5770,17 @@ class TradingScreeningService:
         self._priority_monitor_immediate_deferred_count = 0
         self._priority_monitor_locator_pool_count = 0
         self._priority_monitor_locator_admission_deferred_count = 0
+        self._priority_monitor_preconfirmation_pool_count = 0
+        self._priority_monitor_preconfirmation_admission_deferred_count = 0
+        self._priority_monitor_preconfirmation_selected_count = 0
+        self._priority_monitor_preconfirmation_formal_five_count = 0
+        self._priority_monitor_preconfirmation_scheduled_count = 0
+        self._priority_monitor_preconfirmation_attempted_count = 0
+        self._priority_monitor_preconfirmation_deadline_deferred_count = 0
+        self._priority_monitor_same_round_precision_scheduled_count = 0
+        self._priority_monitor_same_round_precision_attempted_count = 0
+        self._priority_monitor_same_round_precision_completed_count = 0
+        self._priority_monitor_same_round_precision_deadline_deferred_count = 0
         self._candidate_monitor_suspended_session: date | None = None
         self._candidate_monitor_current_session_suspended_codes: tuple[str, ...] = ()
         self._candidate_monitor_suspension_probe_status = "not_observed"
@@ -5633,7 +5791,12 @@ class TradingScreeningService:
         self._priority_monitor_locator_last_scheduled_count = 0
         self._priority_monitor_locator_last_attempted_count = 0
         self._priority_monitor_locator_last_completed_count = 0
+        self._priority_monitor_locator_last_deferred_codes: tuple[str, ...] = ()
         self._priority_monitor_locator_runtime_verified = False
+        self._priority_monitor_formal_confirmation_due_count = 0
+        self._priority_monitor_formal_confirmation_scheduled_count = 0
+        self._priority_monitor_formal_confirmation_capacity_deferred_count = 0
+        self._priority_monitor_formal_confirmation_deadline_deferred_count = 0
         self._priority_monitor_sector_source_mode: str | None = None
         self._priority_monitor_sector_as_of: datetime | None = None
         self._priority_monitor_sector_coverage_epoch_id: str | None = None
@@ -6691,6 +6854,7 @@ class TradingScreeningService:
         locator_scheduled_count: int | None = None,
         locator_attempted_count: int | None = None,
         locator_completed_count: int | None = None,
+        locator_deferred_codes: tuple[str, ...] | None = None,
         locator_runtime_verified: bool | None = None,
         round_complete: bool = True,
         round_failed: bool = False,
@@ -6742,6 +6906,11 @@ class TradingScreeningService:
                 or locator_completed_count > locator_attempted_count
             ):
                 raise ValueError("priority locator metrics are invalid")
+        if locator_deferred_codes is not None and (
+            len(locator_deferred_codes) != len(set(locator_deferred_codes))
+            or any(not isinstance(code, str) or not code for code in locator_deferred_codes)
+        ):
+            raise ValueError("priority locator deferred codes are invalid")
         compact_documents = None
         if documents is not None:
             compact_documents = tuple(
@@ -6885,6 +7054,9 @@ class TradingScreeningService:
                 )
                 self._priority_monitor_locator_last_completed_count = int(
                     locator_completed_count
+                )
+                self._priority_monitor_locator_last_deferred_codes = tuple(
+                    locator_deferred_codes or ()
                 )
                 self._priority_monitor_locator_runtime_verified = bool(
                     locator_runtime_verified
@@ -7386,10 +7558,7 @@ class TradingScreeningService:
                 _signal_side(row) == "buy"
                 or _preconfirmation_divergence_requires_monitor(row)
             )
-            and _current_five_minute_setup_requires_segment_monitor(
-                row,
-                observed_at,
-            )
+            and _current_five_minute_setup_requires_retirement_monitor(row)
         )
         # Compute the exact 1m execution lane before the broader 5m admission.
         # A bounded candidate window may rotate already-enriched setups, but it
@@ -7401,7 +7570,11 @@ class TradingScreeningService:
             if _current_five_minute_setup_requires_segment_monitor(row, observed_at)
             and _one_minute_segment_requires_monitor(row, observed_at)
         )
-        locator_signal_pool = _priority_signal_candidate_codes(
+        # A formally confirmed 5m point that still lacks its immutable 1m
+        # witness is execution-critical.  A forming 5m setup may also benefit
+        # from a 1m divergence preview, but that preview is strictly best-effort:
+        # it must never delay the next authoritative 5m confirmation pass.
+        precision_locator_signal_pool = _priority_signal_candidate_codes(
             pending_segment_documents,
             excluded_codes=frozenset(
                 (
@@ -7413,7 +7586,29 @@ class TradingScreeningService:
                     *candidate_locator_epoch_excluded_codes,
                 )
             ),
-            allowed_stages=_ONE_MINUTE_SEGMENT_IMMEDIATE_STAGES,
+            allowed_stages=_CONFIRMED_ONE_MINUTE_LOCATOR_STAGES,
+        )
+        preconfirmation_locator_signal_pool = _priority_signal_candidate_codes(
+            pending_segment_documents,
+            excluded_codes=frozenset(
+                (
+                    *excluded_codes,
+                    *mandatory_scope,
+                    *nonmonitorable_mandatory_codes,
+                    *candidate_suspended_codes,
+                    *candidate_cadence_epoch_excluded_codes,
+                    *candidate_locator_epoch_excluded_codes,
+                )
+            ),
+            allowed_stages=_PRECONFIRMATION_DIVERGENCE_STAGES,
+        )
+        locator_signal_pool = tuple(
+            dict.fromkeys(
+                (
+                    *precision_locator_signal_pool,
+                    *preconfirmation_locator_signal_pool,
+                )
+            )
         )
         signal_candidate_codes = _priority_signal_candidate_codes(
             recurring_signal_documents,
@@ -7558,63 +7753,59 @@ class TradingScreeningService:
                     admitted_signal_code_set,
                 )
             )
-        # Unconfirmed 5m buy/sell setups enter the exact 1m lane so a divergence
-        # can be observed before formal 5m confirmation. A confirmed 5m buy stays
-        # only until its first causal segment-difference witness is attached;
-        # that execution boundary is immutable. Holdings and explicit watchlist
-        # symbols retain their independent mandatory 1m observation lane.
-        immediate_signal_universe = tuple(
-            code for code in locator_signal_pool if code in admitted_signal_code_set
+        # Split exact execution locators from speculative preconfirmation work.
+        # Both remain pinned in the bounded 5m universe, but only an already
+        # confirmed point participates in the fail-closed one-minute SLA.
+        precision_locator_universe = tuple(
+            code
+            for code in precision_locator_signal_pool
+            if code in admitted_signal_code_set
+        )
+        preconfirmation_locator_universe = tuple(
+            code
+            for code in preconfirmation_locator_signal_pool
+            if code in admitted_signal_code_set
         )
         locator_admission_deferred_codes = tuple(
-            code for code in locator_signal_pool if code not in admitted_signal_code_set
+            code
+            for code in precision_locator_signal_pool
+            if code not in admitted_signal_code_set
         )
-        urgent_signal_universe = immediate_signal_universe
-        urgent_signal_codes = _take_rotating_priority_batch(
-            immediate_signal_universe,
-            previous_codes=previous_priority_codes,
-            max_symbols=max(
-                0,
-                self._config.max_monitor_symbols_per_refresh
-                - len(monitorable_mandatory_codes),
-            ),
-            last_success_at=priority_one_minute_last_success_at,
+        preconfirmation_admission_deferred_codes = tuple(
+            code
+            for code in preconfirmation_locator_signal_pool
+            if code not in admitted_signal_code_set
         )
-        selected_immediate_codes = urgent_signal_codes
-        priority_worker_count = self._config.effective_priority_worker_count
-        # 午休不具备实时通知资格，但仍应轮换预热完整 1m 定位池。服务若在
-        # 上午盘中重启，旧逻辑把 minute_codes 置空，导致 13:00 第一轮从零
-        # 重放数千根 K 线并耗尽 55 秒预算；午休预热可让下午只做增量更新。
-        minute_codes = tuple(
-            dict.fromkeys(
-                (
-                    *_priority_affinity_striped_codes(
-                        monitorable_mandatory_codes,
-                        sector_by_code=sector_by_code,
-                        worker_count=priority_worker_count,
-                        symbol_striping=True,
-                    ),
-                    *_priority_affinity_striped_codes(
-                        selected_immediate_codes,
-                        sector_by_code=sector_by_code,
-                        worker_count=priority_worker_count,
-                        symbol_striping=True,
-                    ),
-                )
-            )
-        )
+        urgent_signal_universe = precision_locator_universe
         optional_segment_capacity = max(
             0,
             self._config.max_monitor_symbols_per_refresh
             - len(monitorable_mandatory_codes),
         )
+        urgent_signal_codes = _take_rotating_priority_batch(
+            precision_locator_universe,
+            previous_codes=previous_priority_codes,
+            max_symbols=optional_segment_capacity,
+            last_success_at=priority_one_minute_last_success_at,
+        )
+        selected_immediate_codes = urgent_signal_codes
+        preconfirmation_capacity = max(
+            0,
+            optional_segment_capacity - len(selected_immediate_codes),
+        )
+        selected_preconfirmation_codes = _take_rotating_priority_batch(
+            preconfirmation_locator_universe,
+            previous_codes=previous_priority_codes,
+            max_symbols=preconfirmation_capacity,
+            last_success_at=priority_one_minute_last_success_at,
+        )
         configured_rotation_seconds = (
             0
-            if not immediate_signal_universe
+            if not precision_locator_universe
             else None
             if optional_segment_capacity <= 0
             else (
-                (len(immediate_signal_universe) + optional_segment_capacity - 1)
+                (len(precision_locator_universe) + optional_segment_capacity - 1)
                 // optional_segment_capacity
             )
             * self._config.priority_monitor_interval_seconds
@@ -7622,17 +7813,35 @@ class TradingScreeningService:
         with self._background_lock:
             self._priority_monitor_mandatory_count = len(mandatory_codes)
             self._priority_monitor_immediate_universe_count = len(
-                immediate_signal_universe
+                precision_locator_universe
             )
             self._priority_monitor_tracking_universe_count = len(urgent_signal_universe)
-            self._priority_monitor_scheduled_count = len(minute_codes)
             self._priority_monitor_configured_rotation_seconds = (
                 configured_rotation_seconds
             )
-            self._priority_monitor_locator_pool_count = len(locator_signal_pool)
+            self._priority_monitor_locator_pool_count = len(
+                precision_locator_signal_pool
+            )
             self._priority_monitor_locator_admission_deferred_count = len(
                 locator_admission_deferred_codes
             )
+            self._priority_monitor_preconfirmation_pool_count = len(
+                preconfirmation_locator_signal_pool
+            )
+            self._priority_monitor_preconfirmation_admission_deferred_count = len(
+                preconfirmation_admission_deferred_codes
+            )
+            self._priority_monitor_preconfirmation_selected_count = len(
+                selected_preconfirmation_codes
+            )
+            self._priority_monitor_preconfirmation_formal_five_count = 0
+            self._priority_monitor_preconfirmation_scheduled_count = 0
+            self._priority_monitor_preconfirmation_attempted_count = 0
+            self._priority_monitor_preconfirmation_deadline_deferred_count = 0
+            self._priority_monitor_same_round_precision_scheduled_count = 0
+            self._priority_monitor_same_round_precision_attempted_count = 0
+            self._priority_monitor_same_round_precision_completed_count = 0
+            self._priority_monitor_same_round_precision_deadline_deferred_count = 0
         # 持仓、自选和当前仍有效的买卖点候选始终排在最前；冻结的支持性板块成员也必须进入
         # 5 分钟发现轮转。验证模式再使用剩余槽位持续观察精确准入的小样本，避免修改阶段
         # 出现 0/0 的真空验证。只在 30 分钟通道观察它们会让刚形成的正式 5m 点晚于通知
@@ -7670,18 +7879,177 @@ class TradingScreeningService:
                 self._candidate_monitor_thirty_last_success_at
             )
             previous_five_codes = tuple(self._candidate_monitor_last_five_codes)
-        regular_five_codes = _take_due_candidate_batch(
-            regular_five_universe,
-            last_success_at=five_last_success_at,
-            observed_at=observed_at,
-            target_seconds=self._config.five_minute_candidate_target_seconds,
-            monitor_interval_seconds=self._config.priority_monitor_interval_seconds,
-            max_symbols=(self._config.max_five_minute_candidate_symbols_per_refresh),
-            execution_grace_seconds=(
-                self._config.candidate_monitor_time_budget_seconds
+        regular_five_code_set = set(regular_five_universe)
+        formal_confirmation_due_universe = tuple(
+            code
+            for code in _formal_five_minute_confirmation_due_codes(
+                current_signal_documents,
+                last_success_at=five_last_success_at,
+                observed_at=observed_at,
+                excluded_codes=frozenset(
+                    (
+                        *excluded_codes,
+                        *nonmonitorable_mandatory_codes,
+                        *candidate_suspended_codes,
+                        *candidate_cadence_epoch_excluded_codes,
+                    )
+                ),
+            )
+            if code in regular_five_code_set
+        )
+        formal_confirmation_due_code_set = set(formal_confirmation_due_universe)
+        formal_confirmation_scheduled_codes = formal_confirmation_due_universe[
+            : self._config.max_five_minute_candidate_symbols_per_refresh
+        ]
+        formal_confirmation_capacity_deferred_codes = (
+            formal_confirmation_due_universe[
+                self._config.max_five_minute_candidate_symbols_per_refresh :
+            ]
+        )
+        remaining_regular_five_capacity = max(
+            0,
+            self._config.max_five_minute_candidate_symbols_per_refresh
+            - len(formal_confirmation_scheduled_codes),
+        )
+        regular_cadence_five_codes = (
+            _take_due_candidate_batch(
+                regular_five_universe,
+                last_success_at=five_last_success_at,
+                observed_at=observed_at,
+                target_seconds=self._config.five_minute_candidate_target_seconds,
+                monitor_interval_seconds=(
+                    self._config.priority_monitor_interval_seconds
+                ),
+                max_symbols=remaining_regular_five_capacity,
+                execution_grace_seconds=(
+                    self._config.candidate_monitor_time_budget_seconds
+                ),
+                excluded_codes=frozenset(
+                    (*excluded_codes, *formal_confirmation_due_code_set)
+                ),
+                previous_monitor_at=previous_monitor_at,
+            )
+            if remaining_regular_five_capacity > 0
+            else ()
+        )
+        regular_five_codes = tuple(
+            dict.fromkeys(
+                (
+                    *formal_confirmation_scheduled_codes,
+                    *regular_cadence_five_codes,
+                )
+            )
+        )
+        with self._background_lock:
+            self._priority_monitor_formal_confirmation_due_count = len(
+                formal_confirmation_due_universe
+            )
+            self._priority_monitor_formal_confirmation_scheduled_count = len(
+                formal_confirmation_scheduled_codes
+            )
+            self._priority_monitor_formal_confirmation_capacity_deferred_count = len(
+                formal_confirmation_capacity_deferred_codes
+            )
+            self._priority_monitor_formal_confirmation_deadline_deferred_count = 0
+        # A forming setup that is due for its 5m cadence is promoted out of the
+        # speculative 1m lane for this round.  Its cheap authoritative 5m read
+        # runs before any remaining divergence previews; only a not-yet-due
+        # setup may spend leftover time on preconfirmation.
+        preconfirmation_formal_five_codes = tuple(
+            code
+            for code in regular_five_codes
+            if code in set(preconfirmation_locator_universe)
+        )
+        preconfirmation_formal_five_code_set = set(
+            preconfirmation_formal_five_codes
+        )
+        optional_preconfirmation_minute_codes = tuple(
+            code
+            for code in selected_preconfirmation_codes
+            if code not in preconfirmation_formal_five_code_set
+        )
+        priority_worker_count = self._config.effective_priority_worker_count
+        # 午休不具备实时通知资格，但关键定位仍会预热。形成中预警只使用正式
+        # 5m 通道完成后的剩余时间，不再把下午第一轮拖入大规模 1m 冷启动。
+        # 同一代码可能同时携带一个旧的已确认点和一个新的形成中点。旧实现会因
+        # 它已在 1m 队列中而跳过前置 5m 确认，导致完整 5m+1m 请求先耗尽本轮
+        # 时限，新点直到下一轮甚至更晚才确认。先记住完整关键集合，再把本轮有
+        # 新 5m 截止点的代码交给正式确认相位；确认后仍需 1m 的代码会在同轮重新
+        # 加入精确定位相位。
+        scheduled_critical_minute_codes = tuple(
+            dict.fromkeys(
+                (
+                    *_priority_affinity_striped_codes(
+                        monitorable_mandatory_codes,
+                        sector_by_code=sector_by_code,
+                        worker_count=priority_worker_count,
+                        symbol_striping=True,
+                    ),
+                    *_priority_affinity_striped_codes(
+                        selected_immediate_codes,
+                        sector_by_code=sector_by_code,
+                        worker_count=priority_worker_count,
+                        symbol_striping=True,
+                    ),
+                )
+            )
+        )
+        formal_priority_minute_code_set = set(
+            scheduled_critical_minute_codes
+        ).intersection(formal_confirmation_due_code_set)
+        critical_minute_codes = tuple(
+            code
+            for code in scheduled_critical_minute_codes
+            if code not in formal_priority_minute_code_set
+        )
+        optional_preconfirmation_minute_codes = _priority_affinity_striped_codes(
+            optional_preconfirmation_minute_codes,
+            sector_by_code=sector_by_code,
+            worker_count=priority_worker_count,
+            symbol_striping=True,
+        )
+        minute_codes = tuple(
+            dict.fromkeys(
+                (
+                    *critical_minute_codes,
+                    *optional_preconfirmation_minute_codes,
+                )
+            )
+        )
+        critical_minute_code_set = set(critical_minute_codes)
+        optional_preconfirmation_minute_code_set = set(
+            optional_preconfirmation_minute_codes
+        )
+        minute_code_set = set(minute_codes)
+        with self._background_lock:
+            self._priority_monitor_scheduled_count = len(
+                scheduled_critical_minute_codes
+            )
+            self._priority_monitor_preconfirmation_formal_five_count = len(
+                preconfirmation_formal_five_codes
+            )
+            self._priority_monitor_preconfirmation_scheduled_count = len(
+                optional_preconfirmation_minute_codes
+            )
+        formal_five_work_pending = any(
+            code not in critical_minute_code_set
+            and code not in optional_preconfirmation_minute_code_set
+            for code in regular_five_codes
+        )
+        formal_confirmation_reserve_seconds = (
+            min(
+                FORMAL_FIVE_MINUTE_CONFIRMATION_RESERVE_SECONDS,
+                self._config.priority_monitor_time_budget_seconds / 4,
+            )
+            if formal_five_work_pending and critical_minute_codes
+            else 0.0
+        )
+        critical_locator_deadline_perf = _one_minute_locator_deadline_perf(
+            round_started_perf=priority_round_started_perf,
+            priority_work_deadline_perf=priority_work_deadline_perf,
+            formal_confirmation_reserve_seconds=(
+                formal_confirmation_reserve_seconds
             ),
-            excluded_codes=excluded_codes,
-            previous_monitor_at=previous_monitor_at,
         )
         # 规则迁移积压只使用正式候选完成后的一个物理波次。它不承担盘中 SLA，
         # 不能把数百个代码一次塞进 50 秒分钟预算并反复回收原生进程；完整覆盖会
@@ -7749,7 +8117,6 @@ class TradingScreeningService:
                 )
             )
         )
-        minute_code_set = set(minute_codes)
         five_code_set = set(five_codes)
         five_universe_set = set(regular_five_universe)
         regular_candidate_scope_set = five_universe_set | thirty_universe_set
@@ -7830,7 +8197,12 @@ class TradingScreeningService:
                 sources.append("PREVIOUS_SIGNAL_MONITOR")
             return tuple(sources or ("INCREMENTAL_SCAN_SCOPE",))
 
-        def evaluate(code: str, *, work_lane_override: str | None = None):
+        def evaluate(
+            code: str,
+            *,
+            work_lane_override: str | None = None,
+            requested_frequencies_override: tuple[str, ...] | None = None,
+        ):
             sector = sector_by_code.get(
                 code,
                 SectorAssessment(
@@ -7847,7 +8219,12 @@ class TradingScreeningService:
                 requested_frequencies = tuple(
                     frequency
                     for frequency in SCREENING_STRUCTURE_FREQUENCIES
-                    if frequency in frequencies_by_code[code]
+                    if frequency
+                    in (
+                        frequencies_by_code[code]
+                        if requested_frequencies_override is None
+                        else requested_frequencies_override
+                    )
                 )
                 bundle = self._structure_bundle_with_causal_risk(
                     code,
@@ -7856,13 +8233,19 @@ class TradingScreeningService:
                     frequencies=requested_frequencies,
                     risk_evidence_cutoff=sector_as_of,
                     deadline_monotonic=(
-                        priority_work_deadline_perf
-                        if code in minute_code_set
+                        critical_locator_deadline_perf
+                        if code in critical_minute_code_set
+                        or code in same_round_precision_code_set
                         else candidate_deadline_perf
                     ),
                     work_lane=(
                         work_lane_override
-                        or ("priority" if code in minute_code_set else "candidate")
+                        or (
+                            "priority"
+                            if code in minute_code_set
+                            or code in same_round_precision_code_set
+                            else "candidate"
+                        )
                     ),
                 )
                 bundle = replace(
@@ -7941,6 +8324,23 @@ class TradingScreeningService:
         priority_preparation_errors: list[dict[str, object]] = []
         candidate_preparation_errors: list[dict[str, object]] = []
         decision_rule_recheck_preparation_errors: list[dict[str, object]] = []
+        if realtime_notification_eligible and formal_confirmation_capacity_deferred_codes:
+            candidate_preparation_errors.append(
+                {
+                    "error_type": "formal_five_minute_confirmation_capacity_error",
+                    "reason_code": (
+                        "FORMAL_FIVE_MINUTE_CONFIRMATION_CAPACITY_INSUFFICIENT"
+                    ),
+                    "reason": (
+                        f"due={len(formal_confirmation_due_universe)} "
+                        f"scheduled={len(formal_confirmation_scheduled_codes)} "
+                        f"deferred={len(formal_confirmation_capacity_deferred_codes)}"
+                    ),
+                    "deferred_codes": list(
+                        formal_confirmation_capacity_deferred_codes
+                    ),
+                }
+            )
         # 1分钟区间套不参与5分钟主信号成立，却是精确执行的必要证据。容量
         # 故障不能抹掉5分钟信号或首报链路，但必须关闭精确执行并在健康状态中
         # 明确失败；静默轮转到下一分钟时，原定位窗口已经没有执行意义。
@@ -7969,8 +8369,8 @@ class TradingScreeningService:
                         "ONE_MINUTE_LOCATOR_ADMISSION_CAPACITY_INSUFFICIENT"
                     ),
                     "reason": (
-                        f"locator_pool={len(locator_signal_pool)} "
-                        f"admitted={len(immediate_signal_universe)} "
+                        f"locator_pool={len(precision_locator_signal_pool)} "
+                        f"admitted={len(precision_locator_universe)} "
                         f"deferred={len(locator_admission_deferred_codes)}"
                     ),
                     "deferred_codes": list(locator_admission_deferred_codes),
@@ -7987,9 +8387,14 @@ class TradingScreeningService:
             if not phase_codes:
                 return
             try:
+                minute_history_phase = phase in {
+                    "priority_1m",
+                    "same_round_precision_1m",
+                    "optional_preconfirmation_1m",
+                }
                 bounded_preparer = None
                 priority_preparer = None
-                if phase == "priority_1m":
+                if minute_history_phase:
                     priority_preparer = getattr(
                         self._market_data,
                         "prepare_priority_local_history",
@@ -8034,7 +8439,7 @@ class TradingScreeningService:
                             or frequency in {"d", "30m", "5m"}
                         ),
                     )
-                    if phase == "priority_1m"
+                    if minute_history_phase
                     else (code, ("5m",))
                     for code in sorted(phase_codes)
                 )
@@ -8043,11 +8448,15 @@ class TradingScreeningService:
                     "as_of": observed_at,
                 }
                 if (
-                    phase == "priority_1m"
+                    minute_history_phase
                     and priority_preparer is not None
                     and prepare is priority_preparer
                 ):
-                    kwargs["deadline_monotonic"] = priority_work_deadline_perf
+                    kwargs["deadline_monotonic"] = (
+                        critical_locator_deadline_perf
+                        if phase == "priority_1m"
+                        else candidate_deadline_perf
+                    )
                 elif bounded_preparer is not None and prepare is bounded_preparer:
                     kwargs["deadline_monotonic"] = candidate_deadline_perf
                 prepare(
@@ -8081,6 +8490,7 @@ class TradingScreeningService:
         results: list[tuple[str, tuple[dict[str, object], ...], Exception | None]] = []
         results_lock = Lock()
         phase_metrics: dict[str, tuple[int, float]] = {}
+        same_round_precision_code_set: set[str] = set()
         notification_dispatch_lock = Lock()
         partial_results: list[
             tuple[str, tuple[dict[str, object], ...], Exception | None]
@@ -8246,7 +8656,10 @@ class TradingScreeningService:
         ) -> None:
             with results_lock:
                 results.append(result)
-            if result[0] in minute_code_set:
+            if (
+                result[0] in minute_code_set
+                or result[0] in same_round_precision_code_set
+            ):
                 partial_results.append(result)
                 if len(partial_results) >= PRIORITY_MONITOR_PUBLISH_BATCH_SIZE:
                     publish_completed_minute_results()
@@ -8269,8 +8682,15 @@ class TradingScreeningService:
             phase: str,
             admission_deadline_perf: float | None = None,
             work_lane_override: str | None = None,
+            requested_frequencies_override: tuple[str, ...] | None = None,
         ) -> tuple[str, ...]:
             phase_started_perf = time.perf_counter()
+            minute_phase = phase in {
+                "priority_1m",
+                "same_round_precision_1m",
+                "optional_preconfirmation_1m",
+            }
+            deadline_stream_phase = minute_phase or phase == "formal_confirmation_5m"
             if not phase_codes:
                 with results_lock:
                     phase_metrics[phase] = (0, 0.0)
@@ -8292,26 +8712,24 @@ class TradingScreeningService:
                     )
                 return ()
             phase_worker_limit = (
-                self._config.effective_priority_worker_count
-                if phase == "priority_1m"
+                self._config.effective_formal_confirmation_worker_count
+                if phase == "formal_confirmation_5m"
+                else self._config.effective_priority_worker_count
+                if minute_phase
                 else self._config.effective_candidate_worker_count
             )
             if (
-                phase == "priority_1m"
+                deadline_stream_phase
                 and admission_deadline_perf is not None
                 and phase_worker_limit > 1
                 and len(phase_codes) > phase_worker_limit * 2
             ):
-                # A global wave barrier turns the cost of every 12-symbol wave
-                # into the slowest symbol in that wave. Across a large live
-                # locator pool those tail latencies accumulate until the hard
-                # minute deadline, even though most native shards have spent
-                # much of the interval idle. Run one stable serial stream per
-                # native affinity shard instead: each process still receives at
-                # most one request at a time and every symbol keeps its warm
-                # process-local state, while a slow shard no longer stalls the
-                # other eleven. Results return through one consumer so partial
-                # state publication and notification ordering stay serialized.
+                # A global wave barrier turns each wave into the slowest symbol
+                # in that wave. Across either a large locator pool or the known
+                # due-confirmation set, those tails accumulate until the hard
+                # alert deadline while other native shards sit idle. Run one
+                # stable serial stream per affinity shard; results still return
+                # through one consumer so publication ordering stays serialized.
                 worker_buckets = tuple(
                     values
                     for values in _priority_affinity_worker_buckets(
@@ -8339,6 +8757,8 @@ class TradingScreeningService:
                     for code in bucket:
                         phase_budget_seconds = (
                             self._config.priority_monitor_time_budget_seconds
+                            if phase in {"priority_1m", "formal_confirmation_5m"}
+                            else self._config.candidate_monitor_time_budget_seconds
                         )
                         admission_guard_seconds = min(
                             MONITOR_ADMISSION_MIN_GUARD_SECONDS,
@@ -8371,7 +8791,7 @@ class TradingScreeningService:
                             )
                         now_perf = time.perf_counter()
                         if now_perf >= admission_deadline_perf or (
-                            attempted_bucket
+                            (attempted_bucket or phase != "priority_1m")
                             and admission_deadline_perf - now_perf
                             <= admission_guard_seconds
                         ):
@@ -8382,6 +8802,9 @@ class TradingScreeningService:
                             evaluate(
                                 code,
                                 work_lane_override=work_lane_override,
+                                requested_frequencies_override=(
+                                    requested_frequencies_override
+                                ),
                             )
                         )
                         request_elapsed_seconds = max(
@@ -8398,7 +8821,7 @@ class TradingScreeningService:
                 attempted_set: set[str] = set()
                 with ThreadPoolExecutor(
                     max_workers=len(worker_buckets),
-                    thread_name_prefix="TradingPriority1mShard",
+                    thread_name_prefix="TradingDeadlineShard",
                 ) as executor:
                     pending_futures = {
                         executor.submit(evaluate_priority_bucket, bucket)
@@ -8453,7 +8876,7 @@ class TradingScreeningService:
                     # the interval remainder is reserved for publication and
                     # the next bar-aligned launch. Ordinary candidates keep the
                     # wider variance guard because they cannot consume it.
-                    wave_guard_multiplier = 1.0 if phase == "priority_1m" else 1.25
+                    wave_guard_multiplier = 1.0 if minute_phase else 1.25
                     admission_guard_seconds = max(
                         admission_guard_seconds,
                         previous_wave_elapsed_seconds * wave_guard_multiplier,
@@ -8486,6 +8909,9 @@ class TradingScreeningService:
                             evaluate(
                                 code,
                                 work_lane_override=work_lane_override,
+                                requested_frequencies_override=(
+                                    requested_frequencies_override
+                                ),
                             )
                         )
                     previous_wave_elapsed_seconds = (
@@ -8496,7 +8922,7 @@ class TradingScreeningService:
                     max_workers=worker_count,
                     thread_name_prefix=(
                         "TradingPriority1m"
-                        if phase == "priority_1m"
+                        if minute_phase
                         else "TradingCandidateCadence"
                     ),
                 ) as executor:
@@ -8505,6 +8931,9 @@ class TradingScreeningService:
                             evaluate,
                             code,
                             work_lane_override=work_lane_override,
+                            requested_frequencies_override=(
+                                requested_frequencies_override
+                            ),
                         ): code
                         for code in wave
                     }
@@ -8521,34 +8950,37 @@ class TradingScreeningService:
         # the groups across the candidate shards.  This keeps the shared sector
         # build local while allowing the formal 5m lane to use every non-priority
         # worker.
-        candidate_codes = _priority_affinity_striped_codes(
+        candidate_codes = _candidate_phase_precedence_order(
             tuple(
-                dict.fromkeys(
-                    code
-                    for phase_codes in (
-                        regular_five_codes,
-                        thirty_codes,
-                        rule_recheck_codes,
-                    )
-                    for code in _group_candidate_batch_by_sector(
-                        tuple(
-                            value
-                            for value in phase_codes
-                            if value not in minute_code_set
-                        ),
-                        sector_by_code=sector_by_code,
-                    )
-                )
+                code
+                for code in formal_confirmation_scheduled_codes
+                if code not in minute_code_set
+            ),
+            tuple(
+                code
+                for code in regular_cadence_five_codes
+                if code not in minute_code_set
+            ),
+            tuple(code for code in thirty_codes if code not in minute_code_set),
+            tuple(
+                code for code in rule_recheck_codes if code not in minute_code_set
             ),
             sector_by_code=sector_by_code,
             worker_count=self._config.effective_candidate_worker_count,
-            symbol_striping=True,
         )
         regular_candidate_code_set = (
             set(regular_five_codes) | set(thirty_codes)
         ).difference(minute_code_set)
         formal_five_candidate_code_set = set(regular_five_codes).difference(
             minute_code_set
+        )
+        formal_confirmation_candidate_code_set = set(
+            formal_confirmation_scheduled_codes
+        ).difference(minute_code_set)
+        formal_confirmation_candidate_codes = tuple(
+            code
+            for code in candidate_codes
+            if code in formal_confirmation_candidate_code_set
         )
         formal_five_candidate_codes = tuple(
             code for code in candidate_codes if code in formal_five_candidate_code_set
@@ -8564,9 +8996,9 @@ class TradingScreeningService:
         # 低频轮换按结构工作进程数分波，只在本分钟预算内接纳新波次。达到绝对
         # 截止点时只回收对应隔离分片；其余代码保持到期并在下一轮继续，且绝不能
         # 被记成已观察。上方物理波次上限确保一次性规则积压不会常态触碰该边界。
-        # 精确 1m 区间套先独占全部结构分片，完成并发布后，普通 5m/30m 候选
-        # 才能使用非保留分片。两个阶段共用本轮绝对截止点，不能因串行化把下一次
-        # 一分钟监听推迟到第二个预算窗口；候选只使用优先阶段留下的安全余量。
+        # 已知待确认点先用最小 5m 请求跨过通知边界，随后精确 1m 区间套独占
+        # 全部结构分片；普通 5m/30m 候选最后使用剩余时间。所有阶段共用本轮
+        # 绝对截止点，不能因串行化把下一次一分钟监听推迟到第二个预算窗口。
         begin_priority_phase = getattr(
             self._market_data,
             "begin_priority_structure_phase",
@@ -8578,57 +9010,258 @@ class TradingScreeningService:
             None,
         )
         priority_phase_entered = False
-        attempted_minute_codes: tuple[str, ...] = ()
+        attempted_critical_minute_codes: tuple[str, ...] = ()
+        attempted_same_round_precision_codes: tuple[str, ...] = ()
+        attempted_optional_preconfirmation_codes: tuple[str, ...] = ()
+        successful_same_round_precision_codes: set[str] = set()
+        attempted_formal_confirmation_codes: tuple[str, ...] = ()
         attempted_formal_five_codes: tuple[str, ...] = ()
+        formal_confirmation_successful_codes: set[str] = set()
+        locator_observation_elapsed_seconds = 0.0
+
+        def precision_codes_from_results(
+            attempted_codes: tuple[str, ...],
+            phase_results: tuple[
+                tuple[str, tuple[dict[str, object], ...], Exception | None], ...
+            ],
+            *,
+            allow_preconfirmation_codes: frozenset[str] = frozenset(),
+        ) -> tuple[str, ...]:
+            successful_rows = {
+                code: rows
+                for code, rows, exc in phase_results
+                if exc is None
+            }
+            return tuple(
+                code
+                for code in attempted_codes
+                if any(
+                    _one_minute_segment_requires_monitor(row, observed_at)
+                    and (
+                        lifecycle_stage_from_signal(row)
+                        in _CONFIRMED_ONE_MINUTE_LOCATOR_STAGES
+                        or code in allow_preconfirmation_codes
+                    )
+                    for row in successful_rows.get(code, ())
+                )
+            )
+
+        candidate_budget_deadline_perf = (
+            time.perf_counter()
+            + self._config.candidate_monitor_time_budget_seconds
+        )
+        candidate_deadline_perf = candidate_monitor_deadline_perf(
+            priority_deadline_perf=priority_deadline_perf,
+            candidate_budget_deadline_perf=candidate_budget_deadline_perf,
+            minute_codes_present=bool(
+                scheduled_critical_minute_codes
+                or optional_preconfirmation_minute_codes
+            ),
+            force_startup_bootstrap=force_startup_bootstrap,
+            compute_window_open=_priority_monitor_compute_window_open(observed_at),
+            priority_finalization_reserve_seconds=min(
+                priority_finalization_reserve_seconds,
+                self._config.priority_monitor_time_budget_seconds,
+            ),
+        )
         try:
             if (
-                minute_codes
+                (formal_five_candidate_codes or minute_codes)
                 and callable(begin_priority_phase)
                 and callable(end_priority_phase)
             ):
                 begin_priority_phase(
-                    deadline_monotonic=priority_work_deadline_perf
+                    deadline_monotonic=candidate_deadline_perf
                 )
                 priority_phase_entered = True
-            attempted_minute_codes = evaluate_phase(
-                minute_codes,
-                phase="priority_1m",
-                admission_deadline_perf=priority_work_deadline_perf,
+            with results_lock:
+                formal_confirmation_result_start = len(results)
+            attempted_formal_confirmation_codes = evaluate_phase(
+                formal_confirmation_candidate_codes,
+                phase="formal_confirmation_5m",
+                admission_deadline_perf=candidate_deadline_perf,
+                work_lane_override="monitor_candidate",
+                requested_frequencies_override=("5m",),
             )
-            publish_completed_minute_results()
-            candidate_budget_deadline_perf = (
-                time.perf_counter()
-                + self._config.candidate_monitor_time_budget_seconds
-            )
-            candidate_deadline_perf = candidate_monitor_deadline_perf(
-                priority_deadline_perf=priority_deadline_perf,
-                candidate_budget_deadline_perf=candidate_budget_deadline_perf,
-                minute_codes_present=bool(minute_codes),
-                force_startup_bootstrap=force_startup_bootstrap,
-                compute_window_open=_priority_monitor_compute_window_open(observed_at),
-                priority_finalization_reserve_seconds=min(
-                    priority_finalization_reserve_seconds,
-                    self._config.priority_monitor_time_budget_seconds,
+            with results_lock:
+                formal_confirmation_results = tuple(
+                    results[formal_confirmation_result_start:]
+                )
+            formal_confirmation_successful_codes = {
+                code
+                for code, _rows, exc in formal_confirmation_results
+                if exc is None
+            }
+            publish_completed_candidate_results()
+
+            # A due formal observation is always cheaper and more urgent than
+            # its 1m refinement. Only after its current 5m document is known do
+            # we spend 1m capacity, and then only where the refreshed document
+            # still needs a locator (or a mandatory preconfirmation preview).
+            formal_precision_codes = precision_codes_from_results(
+                attempted_formal_confirmation_codes,
+                formal_confirmation_results,
+                allow_preconfirmation_codes=frozenset(
+                    formal_priority_minute_code_set
                 ),
             )
-            if (
-                formal_five_candidate_codes
-                and not priority_phase_entered
-                and callable(begin_priority_phase)
-                and callable(end_priority_phase)
+            same_round_precision_code_set.update(formal_precision_codes)
+            for code in formal_precision_codes:
+                frequencies_by_code[code].update(("5m", "1m"))
+                lanes_by_code[code] = CANDIDATE_MONITOR_LANE_1M
+            with results_lock:
+                formal_precision_result_start = len(results)
+            attempted_formal_precision_codes = evaluate_phase(
+                formal_precision_codes,
+                phase="same_round_precision_1m",
+                admission_deadline_perf=critical_locator_deadline_perf,
+                work_lane_override="priority",
+            )
+            with results_lock:
+                formal_precision_results = tuple(
+                    results[formal_precision_result_start:]
+                )
+            successful_formal_precision_codes = {
+                code
+                for code, _rows, exc in formal_precision_results
+                if exc is None
+            }
+            successful_same_round_precision_codes.update(
+                successful_formal_precision_codes
+            )
+            minute_code_set.update(successful_formal_precision_codes)
+            for code in successful_formal_precision_codes:
+                lanes_by_code[code] = CANDIDATE_MONITOR_LANE_1M
+            for code in set(formal_precision_codes).difference(
+                successful_formal_precision_codes
             ):
-                begin_priority_phase(deadline_monotonic=candidate_deadline_perf)
-                priority_phase_entered = True
-            attempted_formal_five_codes = evaluate_phase(
-                formal_five_candidate_codes,
+                lanes_by_code[code] = CANDIDATE_MONITOR_LANE_5M
+            publish_completed_minute_results()
+
+            with results_lock:
+                critical_minute_result_start = len(results)
+            attempted_critical_minute_codes = evaluate_phase(
+                critical_minute_codes,
+                phase="priority_1m",
+                admission_deadline_perf=critical_locator_deadline_perf,
+            )
+            with results_lock:
+                critical_minute_results = tuple(
+                    results[critical_minute_result_start:]
+                )
+            publish_completed_minute_results()
+            if scheduled_critical_minute_codes:
+                locator_observation_elapsed_seconds = max(
+                    0.0,
+                    time.perf_counter() - priority_round_started_perf,
+                )
+
+            ordinary_five_candidate_codes = tuple(
+                code
+                for code in formal_five_candidate_codes
+                if code not in formal_confirmation_candidate_code_set
+            )
+            with results_lock:
+                ordinary_five_result_start = len(results)
+            attempted_ordinary_five_codes = evaluate_phase(
+                ordinary_five_candidate_codes,
                 phase="candidate_cadence",
                 admission_deadline_perf=candidate_deadline_perf,
                 work_lane_override="monitor_candidate",
             )
+            with results_lock:
+                ordinary_five_results = tuple(results[ordinary_five_result_start:])
             publish_completed_candidate_results()
+            attempted_formal_five_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *attempted_formal_confirmation_codes,
+                        *attempted_ordinary_five_codes,
+                    )
+                )
+            )
+            ordinary_precision_codes = precision_codes_from_results(
+                attempted_ordinary_five_codes,
+                ordinary_five_results,
+            )
+            same_round_precision_code_set.update(ordinary_precision_codes)
+            for code in ordinary_precision_codes:
+                frequencies_by_code[code].update(("5m", "1m"))
+                lanes_by_code[code] = CANDIDATE_MONITOR_LANE_1M
+            with results_lock:
+                ordinary_precision_result_start = len(results)
+            attempted_ordinary_precision_codes = evaluate_phase(
+                ordinary_precision_codes,
+                phase="same_round_precision_1m",
+                admission_deadline_perf=critical_locator_deadline_perf,
+                work_lane_override="priority",
+            )
+            with results_lock:
+                ordinary_precision_results = tuple(
+                    results[ordinary_precision_result_start:]
+                )
+            successful_ordinary_precision_codes = {
+                code
+                for code, _rows, exc in ordinary_precision_results
+                if exc is None
+            }
+            successful_same_round_precision_codes.update(
+                successful_ordinary_precision_codes
+            )
+            for code in set(ordinary_precision_codes).difference(
+                successful_ordinary_precision_codes
+            ):
+                lanes_by_code[code] = CANDIDATE_MONITOR_LANE_5M
+            attempted_same_round_precision_codes = tuple(
+                dict.fromkeys(
+                    (
+                        *attempted_formal_precision_codes,
+                        *attempted_ordinary_precision_codes,
+                    )
+                )
+            )
+            # Only a successful 1m reevaluation may advance the durable
+            # observation lane.  If it fails, retain the already-published 5m
+            # confirmation and retry its exact locator on the next round.
+            minute_code_set.update(successful_same_round_precision_codes)
+            for code in successful_same_round_precision_codes:
+                lanes_by_code[code] = CANDIDATE_MONITOR_LANE_1M
+            all_same_round_precision_codes = tuple(
+                dict.fromkeys((*formal_precision_codes, *ordinary_precision_codes))
+            )
+            same_round_precision_deadline_deferred_codes = tuple(
+                code
+                for code in all_same_round_precision_codes
+                if code not in set(attempted_same_round_precision_codes)
+            )
+            with self._background_lock:
+                self._priority_monitor_same_round_precision_scheduled_count = len(
+                    all_same_round_precision_codes
+                )
+                self._priority_monitor_same_round_precision_attempted_count = len(
+                    attempted_same_round_precision_codes
+                )
+                self._priority_monitor_same_round_precision_completed_count = len(
+                    successful_same_round_precision_codes
+                )
+                self._priority_monitor_same_round_precision_deadline_deferred_count = (
+                    len(same_round_precision_deadline_deferred_codes)
+                )
+            publish_completed_minute_results()
+            attempted_optional_preconfirmation_codes = evaluate_phase(
+                optional_preconfirmation_minute_codes,
+                phase="optional_preconfirmation_1m",
+                admission_deadline_perf=candidate_deadline_perf,
+            )
+            publish_completed_minute_results()
         finally:
             if priority_phase_entered:
                 end_priority_phase()
+        attempted_minute_codes = (
+            attempted_critical_minute_codes
+            + attempted_same_round_precision_codes
+            + attempted_optional_preconfirmation_codes
+        )
         attempted_candidate_tail_codes = evaluate_phase(
             candidate_tail_codes,
             phase="candidate_cadence",
@@ -8642,17 +9275,51 @@ class TradingScreeningService:
             attempted_formal_five_codes + attempted_candidate_tail_codes
         )
         publish_completed_candidate_results()
-        attempted_minute_code_set = set(attempted_minute_codes)
+        attempted_critical_minute_code_set = set(attempted_critical_minute_codes)
+        attempted_formal_precision_code_set = set(
+            attempted_formal_precision_codes
+        )
+        successful_critical_minute_code_set = {
+            code
+            for code, _rows, exc in critical_minute_results
+            if exc is None
+        }
+        formal_priority_resolved_without_minute_codes = (
+            formal_priority_minute_code_set
+            .intersection(formal_confirmation_successful_codes)
+            .difference(formal_precision_codes)
+        )
+        locator_resolved_or_attempted_code_set = set(
+            attempted_critical_minute_code_set
+        ).union(
+            attempted_formal_precision_code_set,
+            formal_priority_resolved_without_minute_codes,
+        )
+        attempted_optional_preconfirmation_code_set = set(
+            attempted_optional_preconfirmation_codes
+        )
         configured_locator_deferred_codes = tuple(
             code
-            for code in immediate_signal_universe
+            for code in precision_locator_universe
             if code not in set(selected_immediate_codes)
         )
         deadline_locator_deferred_codes = tuple(
             code
             for code in selected_immediate_codes
-            if code not in attempted_minute_code_set
+            if code not in locator_resolved_or_attempted_code_set
         )
+        optional_preconfirmation_deadline_deferred_codes = tuple(
+            code
+            for code in optional_preconfirmation_minute_codes
+            if code not in attempted_optional_preconfirmation_code_set
+        )
+        with self._background_lock:
+            self._priority_monitor_preconfirmation_attempted_count = len(
+                attempted_optional_preconfirmation_codes
+            )
+            self._priority_monitor_preconfirmation_deadline_deferred_count = len(
+                optional_preconfirmation_deadline_deferred_codes
+            )
         if realtime_notification_eligible and configured_locator_deferred_codes:
             priority_preparation_errors.append(
                 {
@@ -8661,7 +9328,7 @@ class TradingScreeningService:
                         "ONE_MINUTE_LOCATOR_CONFIGURED_CAPACITY_INSUFFICIENT"
                     ),
                     "reason": (
-                        f"locator_universe={len(immediate_signal_universe)} "
+                        f"locator_universe={len(precision_locator_universe)} "
                         f"selected={len(selected_immediate_codes)} "
                         f"deferred={len(configured_locator_deferred_codes)} "
                         f"rotation_seconds={configured_rotation_seconds} "
@@ -8680,7 +9347,8 @@ class TradingScreeningService:
                         f"attempted={len(selected_immediate_codes) - len(deadline_locator_deferred_codes)} "
                         f"deferred={len(deadline_locator_deferred_codes)} "
                         f"budget_seconds={self._config.priority_monitor_time_budget_seconds} "
-                        f"sla_seconds={ONE_MINUTE_LOCATOR_SLA_SECONDS}"
+                        "completion_sla_seconds="
+                        f"{ONE_MINUTE_LOCATOR_COMPLETION_SLA_SECONDS}"
                     ),
                     "deferred_codes": list(deadline_locator_deferred_codes),
                 }
@@ -8688,7 +9356,7 @@ class TradingScreeningService:
         deferred_mandatory_codes = tuple(
             code
             for code in monitorable_mandatory_codes
-            if code not in attempted_minute_code_set
+            if code not in locator_resolved_or_attempted_code_set
         )
         if realtime_notification_eligible and deferred_mandatory_codes:
             priority_preparation_errors.append(
@@ -8701,6 +9369,43 @@ class TradingScreeningService:
                         f"attempted_mandatory="
                         f"{len(monitorable_mandatory_codes) - len(deferred_mandatory_codes)} "
                         f"deferred_mandatory={len(deferred_mandatory_codes)}"
+                    ),
+                }
+            )
+        formal_confirmation_deadline_failed_codes = {
+            code
+            for code, _rows, exc in formal_confirmation_results
+            if exc is not None
+            and getattr(exc, "reason_code", None)
+            == "CANDIDATE_MONITOR_TIME_BUDGET_EXHAUSTED"
+        }
+        attempted_formal_confirmation_code_set = set(
+            attempted_formal_confirmation_codes
+        ).difference(formal_confirmation_deadline_failed_codes)
+        formal_confirmation_deadline_deferred_codes = tuple(
+            code
+            for code in formal_confirmation_scheduled_codes
+            if code not in attempted_formal_confirmation_code_set
+        )
+        with self._background_lock:
+            self._priority_monitor_formal_confirmation_deadline_deferred_count = len(
+                formal_confirmation_deadline_deferred_codes
+            )
+        if realtime_notification_eligible and formal_confirmation_deadline_deferred_codes:
+            candidate_preparation_errors.append(
+                {
+                    "error_type": "formal_five_minute_confirmation_time_budget_error",
+                    "reason_code": (
+                        "FORMAL_FIVE_MINUTE_CONFIRMATION_TIME_BUDGET_EXHAUSTED"
+                    ),
+                    "reason": (
+                        f"scheduled={len(formal_confirmation_scheduled_codes)} "
+                        f"attempted="
+                        f"{len(formal_confirmation_scheduled_codes) - len(formal_confirmation_deadline_deferred_codes)} "
+                        f"deferred={len(formal_confirmation_deadline_deferred_codes)}"
+                    ),
+                    "deferred_codes": list(
+                        formal_confirmation_deadline_deferred_codes
                     ),
                 }
             )
@@ -8737,7 +9442,10 @@ class TradingScreeningService:
             if code not in completed_recheck_attempts
         )
 
-        documents: list[dict[str, object]] = []
+        successful_rows_by_code: dict[
+            str,
+            tuple[dict[str, object], ...],
+        ] = {}
         errors: list[dict[str, object]] = [
             *errors_during_publish,
             *priority_preparation_errors,
@@ -8749,7 +9457,11 @@ class TradingScreeningService:
         )
         for code, rows, exc in results:
             if exc is None:
-                documents.extend(rows)
+                # A newly confirmed 5m buy can be reevaluated with 1m evidence
+                # in the same round.  The later successful result is the
+                # authoritative whole-code snapshot even when it is empty; do
+                # not resurrect the earlier formal-only row at final commit.
+                successful_rows_by_code[code] = rows
                 continue
             error = _stock_analysis_error_document(code, exc)
             if code in minute_code_set:
@@ -8771,6 +9483,11 @@ class TradingScreeningService:
                 decision_rule_recheck_errors.append(error)
             else:
                 candidate_errors.append(error)
+        documents = [
+            document
+            for rows in successful_rows_by_code.values()
+            for document in rows
+        ]
         candidate_stale_codes = tuple(
             sorted(
                 {
@@ -8912,7 +9629,7 @@ class TradingScreeningService:
             )
         )
         authoritative_codes = tuple(
-            sorted(code for code, _rows, exc in results if exc is None)
+            sorted({code for code, _rows, exc in results if exc is None})
         )
         for code in authoritative_codes:
             candidate_symbol_exclusions.pop(code, None)
@@ -8923,7 +9640,10 @@ class TradingScreeningService:
         notification_authoritative_codes = tuple(
             code
             for code in authoritative_codes
-            if code not in candidate_notification_published_codes
+            if (
+                code not in candidate_notification_published_codes
+                or code in successful_same_round_precision_codes
+            )
             and (
                 code in minute_code_set
                 or (
@@ -8975,28 +9695,51 @@ class TradingScreeningService:
             for code in codes
             if code in scheduled_recheck_code_set and code in attempted_codes
         )
-        _locator_metric_attempted, locator_elapsed_seconds = phase_metrics.get(
-            "priority_1m",
-            (0, 0.0),
+        locator_scheduled_code_set = set(scheduled_critical_minute_codes)
+        locator_attempted_code_set = locator_resolved_or_attempted_code_set.intersection(
+            locator_scheduled_code_set
         )
-        locator_completed_count = sum(
-            1 for code, _rows, exc in results if code in minute_code_set and exc is None
+        locator_completed_code_set = (
+            successful_critical_minute_code_set
+            | successful_formal_precision_codes
+            | formal_priority_resolved_without_minute_codes
+        ).intersection(locator_scheduled_code_set)
+        locator_phase_error_documents = tuple(
+            _stock_analysis_error_document(code, exc)
+            for phase_results, eligible_codes in (
+                (formal_confirmation_results, formal_priority_minute_code_set),
+                (formal_precision_results, locator_scheduled_code_set),
+                (critical_minute_results, locator_scheduled_code_set),
+            )
+            for code, _rows, exc in phase_results
+            if code in eligible_codes and exc is not None
         )
         locator_runtime_failures = tuple(
             error
-            for error in minute_stock_errors
+            for error in locator_phase_error_documents
             if error.get("failure_class") != "MARKET_DATA_REJECTION"
         )
         locator_runtime_verified = bool(
-            minute_codes
-            and attempted_minute_code_set == minute_code_set
+            locator_scheduled_code_set
+            and locator_attempted_code_set == locator_scheduled_code_set
             and not locator_admission_deferred_codes
             and not configured_locator_deferred_codes
             and not deadline_locator_deferred_codes
             and not deferred_mandatory_codes
             and not priority_capacity_insufficient
-            and locator_elapsed_seconds <= ONE_MINUTE_LOCATOR_SLA_SECONDS
+            and locator_observation_elapsed_seconds
+            <= ONE_MINUTE_LOCATOR_COMPLETION_SLA_SECONDS
             and not locator_runtime_failures
+        )
+        locator_deferred_codes = tuple(
+            dict.fromkeys(
+                (
+                    *locator_admission_deferred_codes,
+                    *configured_locator_deferred_codes,
+                    *deadline_locator_deferred_codes,
+                    *deferred_mandatory_codes,
+                )
+            )
         )
         self._record_priority_monitor_result(
             observed_at=observed_at,
@@ -9020,10 +9763,11 @@ class TradingScreeningService:
             decision_rule_recheck_attempted_codes=attempted_recheck_codes,
             decision_rule_recheck_deferred_codes=deferred_recheck_codes,
             decision_rule_recheck_errors=tuple(decision_rule_recheck_errors),
-            locator_elapsed_seconds=locator_elapsed_seconds,
-            locator_scheduled_count=len(minute_codes),
-            locator_attempted_count=len(attempted_minute_code_set),
-            locator_completed_count=locator_completed_count,
+            locator_elapsed_seconds=locator_observation_elapsed_seconds,
+            locator_scheduled_count=len(locator_scheduled_code_set),
+            locator_attempted_count=len(locator_attempted_code_set),
+            locator_completed_count=len(locator_completed_code_set),
+            locator_deferred_codes=locator_deferred_codes,
             locator_runtime_verified=locator_runtime_verified,
         )
         if (
@@ -10144,18 +10888,6 @@ class TradingScreeningService:
             ):
                 # 当前规则的监听状态已记录同一来源，包含已经出队后的准确剩余集合。
                 return
-        raw_cutoff = snapshot.get("market_data_as_of")
-        if raw_cutoff is None and isinstance(
-            snapshot.get("coverage_manifest"), Mapping
-        ):
-            raw_cutoff = snapshot["coverage_manifest"].get("market_data_as_of")
-        try:
-            snapshot_cutoff = normalize_datetime(
-                datetime.fromisoformat(str(raw_cutoff)),
-                "rule recheck snapshot cutoff",
-            )
-        except (TypeError, ValueError):
-            snapshot_cutoff = None
         codes = {
             str(signal["code"])
             for signal in raw_signals
@@ -10163,15 +10895,7 @@ class TradingScreeningService:
             and isinstance(signal.get("code"), str)
             and re.fullmatch(r"^(?:SH|SZ|BJ)\.\d{6}$", str(signal["code"])) is not None
             and _signal_side(signal) == "buy"
-            and _is_current_selection_signal(signal)
-            and (
-                lifecycle_stage_from_signal(signal) == "approaching"
-                or snapshot_cutoff is None
-                or _current_five_minute_setup_requires_segment_monitor(
-                    signal,
-                    snapshot_cutoff,
-                )
-            )
+            and _current_five_minute_setup_requires_retirement_monitor(signal)
         }
         codes = set(
             _project_codes_to_configured_scope(
@@ -11133,13 +11857,17 @@ class TradingScreeningService:
             and _candidate_trading_elapsed_seconds(value[0], observed_at)
             <= lane_max_age_seconds[value[1]]
         }
-        observation_market_data_cutoffs = {
+        all_observation_market_data_cutoffs = {
             code: (
                 _latest_expected_a_share_minute_cutoff(value[0])
                 if value[1] == CANDIDATE_MONITOR_LANE_1M
                 else _latest_expected_a_share_five_minute_cutoff(value[0])
             )
-            for code, value in eligible_code_observations.items()
+            for code, value in code_observations.items()
+        }
+        observation_market_data_cutoffs = {
+            code: all_observation_market_data_cutoffs[code]
+            for code in eligible_code_observations
         }
         latest_observation_market_data_as_of = max(
             (
@@ -11178,37 +11906,24 @@ class TradingScreeningService:
         fresh_code_observations = (
             eligible_code_observations if overlay_active else {}
         )
-        overlay_applied = bool(overlay_active and fresh_code_observations)
-        overlay_observed_at = (
-            max(value[0] for value in fresh_code_observations.values())
-            if fresh_code_observations
-            else None
-        )
-        presentation_market_data_as_of = snapshot_market_data_as_of
-        if (
-            overlay_applied
-            and latest_observation_market_data_as_of is not None
-            and (
-                presentation_market_data_as_of is None
-                or latest_observation_market_data_as_of
-                > presentation_market_data_as_of
-            )
-        ):
-            presentation_market_data_as_of = latest_observation_market_data_as_of
+        fresh_overlay_applied = bool(overlay_active and fresh_code_observations)
         fresh_codes = set(fresh_code_observations)
         priority_documents = tuple(
             value
             for value in priority_documents
-            if value.get("code") in fresh_codes and _is_current_selection_signal(value)
+            if _is_current_selection_signal(value)
+        )
+        fresh_priority_documents = tuple(
+            value for value in priority_documents if value.get("code") in fresh_codes
         )
         minute_documents = tuple(
             value
-            for value in priority_documents
+            for value in fresh_priority_documents
             if value.get("realtime_observation") is True
         )
         candidate_documents = tuple(
             value
-            for value in priority_documents
+            for value in fresh_priority_documents
             if value.get("realtime_observation") is not True
         )
         with self._state_lock:
@@ -11239,6 +11954,75 @@ class TradingScreeningService:
                     decision_source_snapshot_id=(self._decision_source_snapshot_id),
                 )
                 snapshot_available = False
+            effective_snapshot_market_data_as_of: datetime | None = None
+            effective_snapshot_scanned_at: datetime | None = None
+            if snapshot_scope_valid:
+                raw_effective_market_data_as_of = snapshot.get("market_data_as_of")
+                try:
+                    effective_snapshot_market_data_as_of = (
+                        normalize_datetime(
+                            datetime.fromisoformat(raw_effective_market_data_as_of),
+                            "presentation snapshot market_data_as_of",
+                        )
+                        if isinstance(raw_effective_market_data_as_of, str)
+                        else None
+                    )
+                except ValueError:
+                    effective_snapshot_market_data_as_of = None
+                effective_snapshot_scanned_at = self._cached_scanned_at(snapshot)
+            # A successful monitor observation is a code-level authoritative
+            # fact until an immutable full snapshot reaches the same completed
+            # market-data cutoff and is published after that observation.  Its
+            # refresh-age SLA only describes lane health; it must never make
+            # yesterday's candidate reappear after today's confirmation (or
+            # tombstone).
+            authoritative_market_data_cutoffs = {
+                code: cutoff
+                for code, cutoff in all_observation_market_data_cutoffs.items()
+                if self._config.priority_monitoring_enabled
+                and cutoff is not None
+                and (
+                    effective_snapshot_market_data_as_of is None
+                    or cutoff > effective_snapshot_market_data_as_of
+                    or (
+                        cutoff == effective_snapshot_market_data_as_of
+                        and (
+                            effective_snapshot_scanned_at is None
+                            or code_observations[code][0]
+                            > effective_snapshot_scanned_at
+                        )
+                    )
+                )
+            }
+            authoritative_codes = set(authoritative_market_data_cutoffs)
+            stale_authoritative_codes = authoritative_codes.difference(fresh_codes)
+            overlay_applied = bool(authoritative_codes)
+            overlay_observed_at = (
+                max(code_observations[code][0] for code in authoritative_codes)
+                if authoritative_codes
+                else None
+            )
+            latest_authoritative_market_data_as_of = max(
+                authoritative_market_data_cutoffs.values(),
+                default=None,
+            )
+            presentation_market_data_as_of = effective_snapshot_market_data_as_of
+            if (
+                latest_authoritative_market_data_as_of is not None
+                and (
+                    presentation_market_data_as_of is None
+                    or latest_authoritative_market_data_as_of
+                    > presentation_market_data_as_of
+                )
+            ):
+                presentation_market_data_as_of = (
+                    latest_authoritative_market_data_as_of
+                )
+            retained_latest_overlay = bool(
+                overlay_applied
+                and not priority_market_session_open
+                and not startup_bootstrap_overlay
+            )
             source_sha256 = snapshot.get("snapshot_content_sha256")
             validated_source_sha256 = (
                 self._validated_snapshot_sha256 if snapshot_scope_valid else None
@@ -11247,6 +12031,8 @@ class TradingScreeningService:
                 f"{source_sha256}|{priority_revision}|live={priority_live}"
                 f"|overlay={overlay_applied}"
                 f"|fresh={sha256_json(tuple(sorted(fresh_code_observations)))}"
+                "|authoritative="
+                f"{sha256_json(tuple(sorted(authoritative_market_data_cutoffs.items())))}"
                 f"|market_data={presentation_market_data_as_of}"
                 f"|sector_batch={id(presentation_sector_batch)}"
                 f"|validated={validated_source_sha256}"
@@ -11380,11 +12166,11 @@ class TradingScreeningService:
             if isinstance(raw_signals, (list, tuple))
             else []
         )
-        if overlay_active and fresh_codes:
+        if overlay_applied:
             projected_signals = [
                 value
                 for value in projected_signals
-                if value.get("code") not in fresh_codes
+                if value.get("code") not in authoritative_codes
             ]
             signals_by_id = {
                 str(value["signal_id"]): value
@@ -11392,6 +12178,8 @@ class TradingScreeningService:
                 if isinstance(value.get("signal_id"), str)
             }
             for value in priority_documents:
+                if value.get("code") not in authoritative_codes:
+                    continue
                 projected = _presentation_signal_document(value)
                 signals_by_id[str(projected["signal_id"])] = projected
             projected_signals = sorted(
@@ -11465,9 +12253,12 @@ class TradingScreeningService:
             "max_age_seconds": priority_max_age_seconds,
             "signal_count": (
                 len(minute_documents)
-                if overlay_applied
+                if fresh_overlay_applied
                 else 0
             ),
+            "fresh_code_count": len(fresh_code_observations),
+            "authoritative_code_count": len(authoritative_codes),
+            "retained_stale_code_count": len(stale_authoritative_codes),
             "error_count": len(priority_errors),
             "notification_dispatcher_configured": self._notifier is not None,
             "archival_snapshot_unchanged": True,
@@ -11477,7 +12268,7 @@ class TradingScreeningService:
             "contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
             "enabled": self._config.priority_monitoring_enabled,
             "active": overlay_applied,
-            "live": overlay_applied,
+            "live": fresh_overlay_applied,
             "retained_latest": bool(
                 overlay_applied
                 and retained_latest_overlay
@@ -11491,6 +12282,8 @@ class TradingScreeningService:
                 else presentation_market_data_as_of.isoformat()
             ),
             "fresh_code_count": len(fresh_code_observations),
+            "authoritative_code_count": len(authoritative_codes),
+            "retained_stale_code_count": len(stale_authoritative_codes),
             "signal_count": len(candidate_documents),
             "error_count": len(candidate_errors),
             "symbol_exclusion_count": len(candidate_symbol_exclusions),
@@ -12027,6 +12820,39 @@ class TradingScreeningService:
             priority_monitor_locator_admission_deferred_count = (
                 self._priority_monitor_locator_admission_deferred_count
             )
+            priority_monitor_preconfirmation_pool_count = (
+                self._priority_monitor_preconfirmation_pool_count
+            )
+            priority_monitor_preconfirmation_admission_deferred_count = (
+                self._priority_monitor_preconfirmation_admission_deferred_count
+            )
+            priority_monitor_preconfirmation_selected_count = (
+                self._priority_monitor_preconfirmation_selected_count
+            )
+            priority_monitor_preconfirmation_formal_five_count = (
+                self._priority_monitor_preconfirmation_formal_five_count
+            )
+            priority_monitor_preconfirmation_scheduled_count = (
+                self._priority_monitor_preconfirmation_scheduled_count
+            )
+            priority_monitor_preconfirmation_attempted_count = (
+                self._priority_monitor_preconfirmation_attempted_count
+            )
+            priority_monitor_preconfirmation_deadline_deferred_count = (
+                self._priority_monitor_preconfirmation_deadline_deferred_count
+            )
+            priority_monitor_same_round_precision_scheduled_count = (
+                self._priority_monitor_same_round_precision_scheduled_count
+            )
+            priority_monitor_same_round_precision_attempted_count = (
+                self._priority_monitor_same_round_precision_attempted_count
+            )
+            priority_monitor_same_round_precision_completed_count = (
+                self._priority_monitor_same_round_precision_completed_count
+            )
+            priority_monitor_same_round_precision_deadline_deferred_count = (
+                self._priority_monitor_same_round_precision_deadline_deferred_count
+            )
             candidate_monitor_suspended_session = (
                 self._candidate_monitor_suspended_session
             )
@@ -12057,8 +12883,23 @@ class TradingScreeningService:
             priority_monitor_locator_last_completed_count = (
                 self._priority_monitor_locator_last_completed_count
             )
+            priority_monitor_locator_last_deferred_codes = tuple(
+                self._priority_monitor_locator_last_deferred_codes
+            )
             priority_monitor_locator_runtime_verified = (
                 self._priority_monitor_locator_runtime_verified
+            )
+            priority_monitor_formal_confirmation_due_count = (
+                self._priority_monitor_formal_confirmation_due_count
+            )
+            priority_monitor_formal_confirmation_scheduled_count = (
+                self._priority_monitor_formal_confirmation_scheduled_count
+            )
+            priority_monitor_formal_confirmation_capacity_deferred_count = (
+                self._priority_monitor_formal_confirmation_capacity_deferred_count
+            )
+            priority_monitor_formal_confirmation_deadline_deferred_count = (
+                self._priority_monitor_formal_confirmation_deadline_deferred_count
             )
             decision_rule_recheck_source_sha256 = (
                 self._decision_rule_recheck_source_snapshot_sha256
@@ -12212,6 +13053,50 @@ class TradingScreeningService:
             )
             priority_monitor_scheduled_count = min(
                 priority_monitor_scheduled_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_pool_count = min(
+                priority_monitor_preconfirmation_pool_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_admission_deferred_count = min(
+                priority_monitor_preconfirmation_admission_deferred_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_selected_count = min(
+                priority_monitor_preconfirmation_selected_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_formal_five_count = min(
+                priority_monitor_preconfirmation_formal_five_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_scheduled_count = min(
+                priority_monitor_preconfirmation_scheduled_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_attempted_count = min(
+                priority_monitor_preconfirmation_attempted_count,
+                len(admitted_universe),
+            )
+            priority_monitor_preconfirmation_deadline_deferred_count = min(
+                priority_monitor_preconfirmation_deadline_deferred_count,
+                len(admitted_universe),
+            )
+            priority_monitor_same_round_precision_scheduled_count = min(
+                priority_monitor_same_round_precision_scheduled_count,
+                len(admitted_universe),
+            )
+            priority_monitor_same_round_precision_attempted_count = min(
+                priority_monitor_same_round_precision_attempted_count,
+                len(admitted_universe),
+            )
+            priority_monitor_same_round_precision_completed_count = min(
+                priority_monitor_same_round_precision_completed_count,
+                len(admitted_universe),
+            )
+            priority_monitor_same_round_precision_deadline_deferred_count = min(
+                priority_monitor_same_round_precision_deadline_deferred_count,
                 len(admitted_universe),
             )
             candidate_monitor_supportive_eligible_count = min(
@@ -12582,20 +13467,25 @@ class TradingScreeningService:
             )
         priority_monitor_locator_deferred_codes = tuple(
             dict.fromkeys(
-                code
-                for error in priority_monitor_last_errors
-                if error.get("reason_code")
-                in {
-                    "ONE_MINUTE_LOCATOR_ADMISSION_CAPACITY_INSUFFICIENT",
-                    "ONE_MINUTE_LOCATOR_CONFIGURED_CAPACITY_INSUFFICIENT",
-                    "ONE_MINUTE_LOCATOR_TIME_BUDGET_EXHAUSTED",
-                }
-                for code in (
-                    error.get("deferred_codes")
-                    if isinstance(error.get("deferred_codes"), list)
-                    else []
+                (
+                    *priority_monitor_locator_last_deferred_codes,
+                    *(
+                        code
+                        for error in priority_monitor_last_errors
+                        if error.get("reason_code")
+                        in {
+                            "ONE_MINUTE_LOCATOR_ADMISSION_CAPACITY_INSUFFICIENT",
+                            "ONE_MINUTE_LOCATOR_CONFIGURED_CAPACITY_INSUFFICIENT",
+                            "ONE_MINUTE_LOCATOR_TIME_BUDGET_EXHAUSTED",
+                        }
+                        for code in (
+                            error.get("deferred_codes")
+                            if isinstance(error.get("deferred_codes"), list)
+                            else []
+                        )
+                        if isinstance(code, str)
+                    ),
                 )
-                if isinstance(code, str)
             )
         )
         if priority_monitor_locator_last_observed_at is None:
@@ -12625,9 +13515,9 @@ class TradingScreeningService:
             else None
         )
         priority_monitor_locator_required_symbols_per_second = (
-            priority_monitor_locator_pool_count
-            / self._config.priority_monitor_time_budget_seconds
-            if priority_monitor_locator_pool_count > 0
+            priority_monitor_locator_last_scheduled_count
+            / ONE_MINUTE_LOCATOR_COMPLETION_SLA_SECONDS
+            if priority_monitor_locator_last_scheduled_count > 0
             else 0.0
         )
         priority_monitor_locator_configured_capacity_sufficient = bool(
@@ -12651,6 +13541,10 @@ class TradingScreeningService:
                 and priority_monitor_locator_observed_symbols_per_second
                 >= priority_monitor_locator_required_symbols_per_second
             )
+        priority_monitor_locator_capacity_sufficient = bool(
+            priority_monitor_locator_configured_capacity_sufficient
+            and priority_monitor_locator_observed_capacity_sufficient is not False
+        )
         five_candidate_coverage = _candidate_lane_coverage(
             candidate_monitor_five_universe,
             last_success_at=candidate_monitor_five_last_success_at,
@@ -13209,8 +14103,11 @@ class TradingScreeningService:
                 priority_monitor_configured_rotation_seconds
             ),
             "priority_monitor_locator_sla_seconds": ONE_MINUTE_LOCATOR_SLA_SECONDS,
+            "priority_monitor_locator_completion_sla_seconds": (
+                ONE_MINUTE_LOCATOR_COMPLETION_SLA_SECONDS
+            ),
             "priority_monitor_locator_capacity_sufficient": bool(
-                priority_monitor_locator_configured_capacity_sufficient
+                priority_monitor_locator_capacity_sufficient
             ),
             "priority_monitor_locator_configured_capacity_sufficient": (
                 priority_monitor_locator_configured_capacity_sufficient
@@ -13227,6 +14124,43 @@ class TradingScreeningService:
             ),
             "priority_monitor_locator_admission_deferred_count": (
                 priority_monitor_locator_admission_deferred_count
+            ),
+            "priority_monitor_preconfirmation_pool_count": (
+                priority_monitor_preconfirmation_pool_count
+            ),
+            "priority_monitor_preconfirmation_admission_deferred_count": (
+                priority_monitor_preconfirmation_admission_deferred_count
+            ),
+            "priority_monitor_preconfirmation_selected_count": (
+                priority_monitor_preconfirmation_selected_count
+            ),
+            "priority_monitor_preconfirmation_formal_five_count": (
+                priority_monitor_preconfirmation_formal_five_count
+            ),
+            "priority_monitor_preconfirmation_scheduled_count": (
+                priority_monitor_preconfirmation_scheduled_count
+            ),
+            "priority_monitor_preconfirmation_attempted_count": (
+                priority_monitor_preconfirmation_attempted_count
+            ),
+            "priority_monitor_preconfirmation_deadline_deferred_count": (
+                priority_monitor_preconfirmation_deadline_deferred_count
+            ),
+            "priority_monitor_same_round_precision_scheduled_count": (
+                priority_monitor_same_round_precision_scheduled_count
+            ),
+            "priority_monitor_same_round_precision_attempted_count": (
+                priority_monitor_same_round_precision_attempted_count
+            ),
+            "priority_monitor_same_round_precision_completed_count": (
+                priority_monitor_same_round_precision_completed_count
+            ),
+            "priority_monitor_same_round_precision_deadline_deferred_count": (
+                priority_monitor_same_round_precision_deadline_deferred_count
+            ),
+            "formal_five_minute_confirmation_reserve_seconds": min(
+                FORMAL_FIVE_MINUTE_CONFIRMATION_RESERVE_SECONDS,
+                self._config.priority_monitor_time_budget_seconds / 4,
             ),
             "priority_monitor_locator_runtime_verified": (
                 priority_monitor_locator_runtime_verified
@@ -13264,6 +14198,18 @@ class TradingScreeningService:
             ),
             "priority_monitor_locator_deferred_codes": list(
                 priority_monitor_locator_deferred_codes
+            ),
+            "priority_monitor_formal_confirmation_due_count": (
+                priority_monitor_formal_confirmation_due_count
+            ),
+            "priority_monitor_formal_confirmation_scheduled_count": (
+                priority_monitor_formal_confirmation_scheduled_count
+            ),
+            "priority_monitor_formal_confirmation_capacity_deferred_count": (
+                priority_monitor_formal_confirmation_capacity_deferred_count
+            ),
+            "priority_monitor_formal_confirmation_deadline_deferred_count": (
+                priority_monitor_formal_confirmation_deadline_deferred_count
             ),
             "priority_monitor_last_error_count": len(priority_monitor_last_errors),
             "priority_monitor_sector_source_mode": (

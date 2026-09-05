@@ -22,6 +22,7 @@ import threading
 from zoneinfo import ZoneInfo
 
 from chanlun.decision_support.trading_system.lifecycle import (
+    five_minute_setup_document_is_in_policy_scope,
     is_one_minute_segment_difference_document,
     lifecycle_stage_from_signal,
 )
@@ -73,6 +74,16 @@ _NOTIFIABLE_TRANSITIONS = {
     ("active", "closed"),
 }
 _NOTIFICATION_RETRY_TTL = timedelta(minutes=10)
+# Admission must leave enough time for the measured deterministic chart render
+# plus transport.  The durable outbox's final margin covers transport only;
+# reusing this larger value after rendering used to reserve the chart budget a
+# second time and reject otherwise deliverable 1m confirmations.
+_NOTIFICATION_ENQUEUE_MARGIN = timedelta(seconds=25)
+_NOTIFICATION_TRANSPORT_MARGIN = timedelta(seconds=10)
+# Sell locators do not carry the buy-side price TTL, but a 1m timing alert is
+# still a realtime fact rather than an indefinitely replayable observation.
+_ONE_MINUTE_SELL_NOTIFICATION_TTL = timedelta(minutes=2)
+_DELAYED_FORMAL_NOTIFICATION_THRESHOLD = timedelta(minutes=10)
 _APPROACHING_DIGEST_COOLDOWN = timedelta(minutes=15)
 _APPROACHING_DIGEST_MAX_ITEMS = 8
 _APPROACHING_OCCURRENCE_LIMIT = 16_384
@@ -96,13 +107,16 @@ _SUPPRESSED_FINGERPRINT_LIMIT = 16_384
 _SCREENING_COMPLETION_RECORD_LIMIT = 400
 _SCREENING_COMPLETION_CLOSE_HOUR = 15
 _SCREENING_COMPLETION_EVENT_SCHEMA = "chanlun-daily-screening-completion-v1"
+_REQUIRED_CHART_TRANSPORT_UNAVAILABLE = (
+    "REQUIRED_CHART_TRANSPORT_UNAVAILABLE"
+)
 _STAGE_LABELS = {
     "observed": "结构观察",
     "approaching": "即将确认",
     "formed": "5分钟几何候选待锁定确认",
     "armed": "等待操作确认",
-    "triggered": "5分钟操作确认",
-    "executable": "强提示待人工复核",
+    "triggered": "5分钟正式点确认",
+    "executable": "当前精确执行条件满足",
     "active": "结构持续跟踪",
     "invalidated": "结构已失效",
     "closed": "跟踪已结束",
@@ -141,6 +155,16 @@ _MANUAL_ATTENTION_SOURCES = frozenset(
 _SETUP_POINT_ORDER = {
     point_type: index for index, point_type in enumerate(POINT_REVIEW_ORDER)
 }
+
+
+class _RequiredChartTransportUnavailable(RuntimeError):
+    """The notification transport cannot preserve the required chart."""
+
+
+def _notification_delivery_exception_reason(exc: Exception) -> str:
+    if isinstance(exc, _RequiredChartTransportUnavailable):
+        return _REQUIRED_CHART_TRANSPORT_UNAVAILABLE
+    return type(exc).__name__
 
 
 def _signals_by_id(snapshot: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -234,11 +258,133 @@ def _defense_price_value(
     return setup.get("invalidation_price")
 
 
+def _identity_number(value: object) -> str:
+    """Return a stable textual number for notification occurrence keys."""
+
+    if value is None or isinstance(value, bool) or str(value).strip() == "":
+        return ""
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value).strip()
+    if not parsed.is_finite():
+        return str(value).strip()
+    if parsed == 0:
+        return "0"
+    return format(parsed.normalize(), "f")
+
+
+def _physical_point_occurrence_key(
+    point: Mapping[str, object],
+    *,
+    code: object,
+    fallback_side: object = "",
+) -> tuple[str, ...] | None:
+    """Mirror the trading core's stable physical-point identity.
+
+    Internal graph hashes and ``available_at`` describe a reconstruction, not
+    a new market occurrence.  Price/center geometry stays in the key because a
+    changed executable boundary is a genuinely different setup.
+    """
+
+    normalized_code = str(code or "").strip()
+    side = str(point.get("side") or fallback_side or "").strip()
+    source_frequency = str(point.get("source_frequency") or "").strip()
+    point_type = str(point.get("point_type") or "").strip()
+    recursive_level = point.get("recursive_level")
+    anchor_at = _time_identity(point.get("anchor_at"))
+    if (
+        not normalized_code
+        or side not in {"buy", "sell"}
+        or not source_frequency
+        or not point_type
+        or type(recursive_level) is not int
+        or recursive_level < 0
+        or not anchor_at
+    ):
+        return None
+    detail = json.dumps(
+        {
+            "price_basis_revision": str(
+                point.get("price_basis_revision") or ""
+            ).strip(),
+            "variant": str(point.get("variant") or "").strip(),
+            "tower": str(point.get("tower") or "").strip(),
+            "anchor_price": _identity_number(
+                point.get("anchor_price")
+                or point.get("structure_anchor_price")
+            ),
+            "invalidation_price": _identity_number(
+                point.get("invalidation_price")
+                or point.get("structure_invalidation_price")
+            ),
+            "center_zd": _identity_number(point.get("center_zd")),
+            "center_zg": _identity_number(point.get("center_zg")),
+            "center_ordinal": str(point.get("center_ordinal") or "").strip(),
+            "divergence_kind": str(
+                point.get("divergence_kind") or ""
+            ).strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        normalized_code,
+        side,
+        source_frequency,
+        str(recursive_level),
+        point_type,
+        anchor_at,
+        detail,
+    )
+
+
 def _trigger_occurrence_key(
     signal: Mapping[str, object],
     new_stage: str,
 ) -> tuple[str, ...] | None:
     """以 5 分钟正式点识别一次买卖信号，不依赖可选 1 分钟区间套定位。"""
+
+    if new_stage not in {"triggered", "executable"}:
+        return None
+    setup = _mapping(signal.get("setup_5m"))
+    key = _physical_point_occurrence_key(
+        setup,
+        code=signal.get("code"),
+        fallback_side=signal.get("side"),
+    )
+    if key is None or not is_five_minute_trade_level(
+        str(setup.get("source_frequency") or ""),
+        setup.get("recursive_level"),
+    ):
+        return None
+    # Concurrent center interpretations at one market anchor are rendered as
+    # one alert (with all distinct defense prices).  The final JSON detail in
+    # the physical key still differentiates them for lifecycle matching, but
+    # is deliberately excluded from the transport grouping identity.
+    return key[:-1]
+
+
+def _trigger_occurrence_event_id(key: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-notification-trigger-occurrence-v2",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_trigger_occurrence_event_id(
+    signal: Mapping[str, object],
+    new_stage: str,
+) -> str | None:
+    """Return the pre-v2 id so a deployment cannot replay a delivered point."""
 
     if new_stage not in {"triggered", "executable"}:
         return None
@@ -253,27 +399,21 @@ def _trigger_occurrence_key(
     if (
         not point_type
         or not source_frequency
-        or isinstance(recursive_level, bool)
-        or not isinstance(recursive_level, int)
+        or type(recursive_level) is not int
         or not anchor_at
         or not available_at
+        or not is_five_minute_trade_level(source_frequency, recursive_level)
     ):
         return None
-    if not is_five_minute_trade_level(source_frequency, recursive_level):
-        return None
-    side = str(signal.get("side") or setup.get("side") or "")
-    return (
+    key = (
         str(signal.get("code") or ""),
-        side,
+        str(signal.get("side") or setup.get("side") or ""),
         source_frequency,
         str(recursive_level),
         point_type,
         anchor_at,
         available_at,
     )
-
-
-def _trigger_occurrence_event_id(key: tuple[str, ...]) -> str:
     payload = json.dumps(
         {
             "schema": "chanlun-signal-notification-trigger-occurrence",
@@ -306,11 +446,16 @@ def _approaching_occurrence_key(
     side = str(signal.get("side") or setup.get("side") or "")
     source_frequency = str(setup.get("source_frequency") or "")
     recursive_level = setup.get("recursive_level", signal.get("recursive_level"))
-    terminal_segment_id = str(setup.get("terminal_segment_id") or "").strip()
     terminal_segment_start_at = _time_identity(
         setup.get("terminal_segment_start_at")
     )
-    terminal_segment_end_at = _time_identity(setup.get("terminal_segment_end_at"))
+    terminal_role = str(setup.get("terminal_segment_role") or "").strip()
+    terminal_source = str(
+        setup.get("terminal_segment_source_kind") or ""
+    ).strip()
+    terminal_direction = str(
+        setup.get("terminal_segment_direction") or ""
+    ).strip()
     if (
         not str(signal.get("code") or "").strip()
         or side not in {"buy", "sell"}
@@ -319,24 +464,74 @@ def _approaching_occurrence_key(
         or isinstance(recursive_level, bool)
         or not isinstance(recursive_level, int)
         or not is_five_minute_trade_level(source_frequency, recursive_level)
-        or not terminal_segment_id
         or not terminal_segment_start_at
-        or not terminal_segment_end_at
+        or terminal_role != "latest_unfinished"
+        or terminal_source != "segment"
+        or terminal_direction != ("down" if side == "buy" else "up")
     ):
         return None
     return (
         str(signal.get("code")),
         side,
+        str(setup.get("price_basis_revision") or ""),
         source_frequency,
         str(recursive_level),
         point_type,
-        terminal_segment_id,
+        terminal_role,
+        terminal_source,
+        terminal_direction,
         terminal_segment_start_at,
-        terminal_segment_end_at,
     )
 
 
 def _approaching_occurrence_event_id(key: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-approaching-occurrence-v2",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_approaching_occurrence_event_id(
+    signal: Mapping[str, object],
+) -> str | None:
+    setup = _mapping(signal.get("setup_5m"))
+    point_type = str(setup.get("point_type") or signal.get("point_type") or "")
+    side = str(signal.get("side") or setup.get("side") or "")
+    source_frequency = str(setup.get("source_frequency") or "")
+    recursive_level = setup.get("recursive_level", signal.get("recursive_level"))
+    terminal_id = str(setup.get("terminal_segment_id") or "").strip()
+    terminal_start = _time_identity(setup.get("terminal_segment_start_at"))
+    terminal_end = _time_identity(setup.get("terminal_segment_end_at"))
+    if (
+        _stage(signal) != "approaching"
+        or not str(signal.get("code") or "").strip()
+        or side not in {"buy", "sell"}
+        or not point_type
+        or source_frequency != "5m"
+        or type(recursive_level) is not int
+        or not is_five_minute_trade_level(source_frequency, recursive_level)
+        or not terminal_id
+        or not terminal_start
+        or not terminal_end
+    ):
+        return None
+    key = (
+        str(signal.get("code")),
+        side,
+        source_frequency,
+        str(recursive_level),
+        point_type,
+        terminal_id,
+        terminal_start,
+        terminal_end,
+    )
     payload = json.dumps(
         {
             "schema": "chanlun-signal-approaching-occurrence",
@@ -384,6 +579,67 @@ def _preconfirmation_divergence_occurrence_key(
 ) -> tuple[str, ...] | None:
     setup = _mapping(signal.get("setup_5m"))
     side = str(signal.get("side") or setup.get("side") or "")
+    setup_segment_start = _time_identity(setup.get("terminal_segment_start_at"))
+    setup_role = str(setup.get("terminal_segment_role") or "").strip()
+    setup_source = str(
+        setup.get("terminal_segment_source_kind") or ""
+    ).strip()
+    setup_direction = str(
+        setup.get("terminal_segment_direction") or ""
+    ).strip()
+    divergence_key = _physical_point_occurrence_key(
+        divergence,
+        code=signal.get("code"),
+        fallback_side=side,
+    )
+    if (
+        _stage(signal) not in {"approaching", "formed"}
+        or not str(signal.get("code") or "").strip()
+        or side not in {"buy", "sell"}
+        or not setup_segment_start
+        or setup_role not in {"latest_unfinished", "latest_completed"}
+        or setup_source != "segment"
+        or setup_direction != ("down" if side == "buy" else "up")
+        or divergence_key is None
+        or divergence.get("source_frequency") != "1m"
+    ):
+        return None
+    return (
+        str(signal.get("code")),
+        side,
+        str(setup.get("price_basis_revision") or ""),
+        setup_role,
+        setup_source,
+        setup_direction,
+        setup_segment_start,
+        *divergence_key,
+    )
+
+
+def _preconfirmation_divergence_occurrence_event_id(
+    key: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": (
+                "chanlun-signal-preconfirmation-divergence-occurrence-v2"
+            ),
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_preconfirmation_divergence_occurrence_event_id(
+    signal: Mapping[str, object],
+    divergence: Mapping[str, object],
+) -> str | None:
+    setup = _mapping(signal.get("setup_5m"))
+    side = str(signal.get("side") or setup.get("side") or "")
     setup_segment_id = str(setup.get("terminal_segment_id") or "").strip()
     setup_segment_start = _time_identity(setup.get("terminal_segment_start_at"))
     divergence_level = divergence.get("recursive_level")
@@ -407,8 +663,7 @@ def _preconfirmation_divergence_occurrence_key(
         or not setup_segment_id
         or not setup_segment_start
         or divergence.get("source_frequency") != "1m"
-        or isinstance(divergence_level, bool)
-        or not isinstance(divergence_level, int)
+        or type(divergence_level) is not int
         or divergence_level < 0
         or not divergence_segment_id
         or not divergence_segment_start
@@ -417,7 +672,7 @@ def _preconfirmation_divergence_occurrence_key(
         or not divergence_available
     ):
         return None
-    return (
+    key = (
         str(signal.get("code")),
         side,
         str(setup.get("price_basis_revision") or ""),
@@ -432,11 +687,6 @@ def _preconfirmation_divergence_occurrence_key(
         divergence_anchor,
         divergence_available,
     )
-
-
-def _preconfirmation_divergence_occurrence_event_id(
-    key: tuple[str, ...],
-) -> str:
     payload = json.dumps(
         {
             "schema": "chanlun-signal-preconfirmation-divergence-occurrence",
@@ -479,6 +729,42 @@ def _segment_occurrence_key(
         return None
     setup_key = _signal_semantic_key(signal)
     trigger = _mapping(signal.get("segment_difference_1m"))
+    trigger_key = _physical_point_occurrence_key(
+        trigger,
+        code=signal.get("code"),
+        fallback_side=signal.get("side"),
+    )
+    if (
+        any(not value for value in setup_key)
+        or trigger_key is None
+        or trigger.get("source_frequency") != "1m"
+    ):
+        return None
+    return (*setup_key, *trigger_key)
+
+
+def _segment_occurrence_event_id(key: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-notification-segment-occurrence-v2",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_segment_occurrence_event_id(
+    signal: Mapping[str, object],
+    new_stage: str,
+) -> str | None:
+    if new_stage != _SEGMENT_ENRICHED_STAGE:
+        return None
+    setup_key = _legacy_signal_semantic_key(signal)
+    trigger = _mapping(signal.get("segment_difference_1m"))
     trigger_type = str(trigger.get("point_type") or "")
     trigger_side = str(trigger.get("side") or "")
     trigger_frequency = str(trigger.get("source_frequency") or "")
@@ -489,17 +775,16 @@ def _segment_occurrence_key(
     )
     if (
         any(not value for value in setup_key)
-        or trigger_type == ""
+        or not trigger_type
         or trigger_side not in {"buy", "sell"}
         or trigger_frequency != "1m"
-        or isinstance(trigger_level, bool)
-        or not isinstance(trigger_level, int)
+        or type(trigger_level) is not int
         or trigger_level < 0
         or not trigger_anchor
         or not trigger_available
     ):
         return None
-    return (
+    key = (
         *setup_key,
         trigger_side,
         trigger_frequency,
@@ -508,9 +793,6 @@ def _segment_occurrence_key(
         trigger_anchor,
         trigger_available,
     )
-
-
-def _segment_occurrence_event_id(key: tuple[str, ...]) -> str:
     payload = json.dumps(
         {
             "schema": "chanlun-signal-notification-segment-occurrence",
@@ -612,14 +894,52 @@ def _notification_evidence_time(
         if divergence_at is None:
             return signal_at
         return max(signal_at, divergence_at)
-    if new_stage != _SEGMENT_ENRICHED_STAGE:
+    if new_stage not in {_SEGMENT_ENRICHED_STAGE, "executable"}:
         return signal_at
     segment_at = _segment_time(signal)
+    if new_stage == "executable" and segment_at is None:
+        return signal_at
     if signal_at is None:
         return segment_at
     if segment_at is None:
         return signal_at
     return max(signal_at, segment_at)
+
+
+def _one_minute_sell_notification_deadline(
+    signal: Mapping[str, object],
+    event_at: datetime,
+) -> datetime:
+    """Expire sell timing in market minutes, without charging the A-share lunch."""
+
+    if _signal_market(signal) != "a":
+        return event_at + _ONE_MINUTE_SELL_NOTIFICATION_TTL
+    local_event = event_at.astimezone(CN)
+    session_day = local_event.date()
+    day_start = datetime.combine(
+        session_day,
+        datetime.min.time(),
+        tzinfo=CN,
+    )
+    morning_start = day_start.replace(hour=9, minute=30)
+    morning_end = day_start.replace(hour=11, minute=30)
+    afternoon_start = day_start.replace(hour=13)
+    afternoon_end = day_start.replace(hour=15)
+    if local_event < morning_start:
+        return morning_start + _ONE_MINUTE_SELL_NOTIFICATION_TTL
+    if local_event < morning_end:
+        morning_candidate = local_event + _ONE_MINUTE_SELL_NOTIFICATION_TTL
+        if morning_candidate <= morning_end:
+            return morning_candidate
+        return afternoon_start + (morning_candidate - morning_end)
+    if local_event < afternoon_start:
+        return afternoon_start + _ONE_MINUTE_SELL_NOTIFICATION_TTL
+    if local_event < afternoon_end:
+        return min(
+            local_event + _ONE_MINUTE_SELL_NOTIFICATION_TTL,
+            afternoon_end,
+        )
+    return local_event
 
 
 def _notification_expires_at(
@@ -645,6 +965,22 @@ def _notification_expires_at(
     discovered = _parse_time(detected_at)
     retry_started_at = event_at if discovered is None else discovered
     expires_at = retry_started_at + _NOTIFICATION_RETRY_TTL
+    segment = _recorded_segment(signal)
+    precision_event = bool(
+        segment
+        and new_stage in {"executable", _SEGMENT_ENRICHED_STAGE}
+    )
+    if precision_event and str(signal.get("side") or "") == "buy":
+        boundary_deadline = _parse_time(
+            _entry_execution_boundary(signal).get("entry_valid_until")
+        )
+        if boundary_deadline is not None:
+            expires_at = min(expires_at, boundary_deadline)
+    elif precision_event and str(signal.get("side") or "") == "sell":
+        expires_at = min(
+            expires_at,
+            _one_minute_sell_notification_deadline(signal, event_at),
+        )
     return expires_at.isoformat()
 
 
@@ -664,6 +1000,9 @@ def _notification_eligibility_reason(
     缺失时不能压掉 5 分钟通知，但必须保持“等待区间套”、不得生成执行比例。
     """
 
+    setup = _mapping(signal.get("setup_5m"))
+    if setup and not five_minute_setup_document_is_in_policy_scope(setup):
+        return "LATER_CENTER_THIRD_POINT_RESEARCH_ONLY"
     if new_stage in {"invalidated", "closed"}:
         return None
     if new_stage not in _EVIDENCE_NOTIFICATION_STAGES:
@@ -681,7 +1020,6 @@ def _notification_eligibility_reason(
         except (TypeError, ValueError):
             return "SIGNAL_DECISION_DOCUMENT_INVALID"
 
-    setup = _mapping(signal.get("setup_5m"))
     if (
         setup.get("status") != "confirmed"
         or setup.get("source_frequency") != "5m"
@@ -736,7 +1074,7 @@ def _notification_eligibility_reason(
     if five_minute_warmup_converged(warmup) is not True:
         return "WARMUP_NOT_CONVERGED"
     segment = _mapping(signal.get("segment_difference_1m"))
-    if new_stage == _SEGMENT_ENRICHED_STAGE and not segment:
+    if new_stage in {"executable", _SEGMENT_ENRICHED_STAGE} and not segment:
         return "ONE_MINUTE_SEGMENT_EVIDENCE_MISSING"
     if segment and not is_one_minute_segment_difference_document(
         segment,
@@ -749,6 +1087,11 @@ def _notification_eligibility_reason(
         "active",
     }:
         return "FIVE_MINUTE_SIGNAL_NOT_ACTIVE_FOR_SEGMENT_ENRICHMENT"
+    if new_stage == "executable" and not bool(
+        signal.get("entry_allowed") is True
+        or signal.get("exit_allowed") is True
+    ):
+        return "CURRENT_EXECUTION_PERMISSION_MISSING"
     event_at = _notification_evidence_time(
         signal,
         new_stage=new_stage,
@@ -760,7 +1103,7 @@ def _notification_eligibility_reason(
         return "SIGNAL_TIME_UNAVAILABLE"
     if observed_at < event_at:
         return "SIGNAL_FROM_FUTURE"
-    if new_stage == _SEGMENT_ENRICHED_STAGE:
+    if new_stage in {"executable", _SEGMENT_ENRICHED_STAGE}:
         checked_at = _parse_time(evaluated_at)
         if checked_at is None or checked_at < observed_at:
             checked_at = observed_at
@@ -780,6 +1123,23 @@ def _notification_eligibility_reason(
                 if boundary_status == "expired"
                 else "ONE_MINUTE_SEGMENT_EVIDENCE_NOT_CURRENT"
             )
+        if side == "buy":
+            valid_until = _parse_time(
+                _entry_execution_boundary(signal).get("entry_valid_until")
+            )
+            if valid_until is None:
+                return "ONE_MINUTE_SEGMENT_EVIDENCE_NOT_CURRENT"
+            if valid_until - checked_at < _NOTIFICATION_ENQUEUE_MARGIN:
+                return "ONE_MINUTE_SEGMENT_DELIVERY_MARGIN_INSUFFICIENT"
+        else:
+            sell_deadline = _one_minute_sell_notification_deadline(
+                signal,
+                event_at,
+            )
+            if checked_at > sell_deadline:
+                return "ONE_MINUTE_SEGMENT_EVIDENCE_EXPIRED"
+            if sell_deadline - checked_at < _NOTIFICATION_ENQUEUE_MARGIN:
+                return "ONE_MINUTE_SEGMENT_DELIVERY_MARGIN_INSUFFICIENT"
 
     return None
 
@@ -797,6 +1157,8 @@ def _approaching_digest_eligibility_reason(
     if side not in {"buy", "sell"}:
         return "SIGNAL_SIDE_INVALID"
     setup = _mapping(signal.get("setup_5m"))
+    if setup and not five_minute_setup_document_is_in_policy_scope(setup):
+        return "LATER_CENTER_THIRD_POINT_RESEARCH_ONLY"
     if (
         setup.get("status") != "provisional"
         or setup.get("actionable") is not False
@@ -854,6 +1216,8 @@ def _preconfirmation_divergence_eligibility_reason(
     if side not in {"buy", "sell"}:
         return "SIGNAL_SIDE_INVALID"
     setup = _mapping(signal.get("setup_5m"))
+    if setup and not five_minute_setup_document_is_in_policy_scope(setup):
+        return "LATER_CENTER_THIRD_POINT_RESEARCH_ONLY"
     expected_terminal_states = {
         "approaching": ("latest_unfinished", frozenset({"forming"})),
         "formed": ("latest_completed", frozenset({"formed", "locked"})),
@@ -943,7 +1307,9 @@ def _preconfirmation_divergence_eligibility_reason(
     return None
 
 
-def _signal_semantic_key(signal: Mapping[str, object]) -> tuple[str, ...]:
+def _legacy_signal_semantic_key(
+    signal: Mapping[str, object],
+) -> tuple[str, ...]:
     setup = _mapping(signal.get("setup_5m"))
     return (
         str(signal.get("code") or ""),
@@ -960,6 +1326,18 @@ def _signal_semantic_key(signal: Mapping[str, object]) -> tuple[str, ...]:
         _time_identity(setup.get("anchor_at") or setup.get("available_at")),
         _time_identity(setup.get("available_at") or setup.get("confirmed_at")),
     )
+
+
+def _signal_semantic_key(signal: Mapping[str, object]) -> tuple[str, ...]:
+    setup = _mapping(signal.get("setup_5m"))
+    key = _physical_point_occurrence_key(
+        setup,
+        code=signal.get("code"),
+        fallback_side=signal.get("side"),
+    )
+    # Keep a non-empty invalid sentinel because callers use this value as a
+    # dictionary key while validating partially migrated snapshots.
+    return ("",) if key is None else key
 
 
 def _terminal_occurrence_key(
@@ -989,6 +1367,41 @@ def _terminal_occurrence_event_id(key: tuple[str, ...]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_terminal_occurrence_event_id(
+    signal: Mapping[str, object],
+    new_stage: str,
+) -> str | None:
+    if new_stage not in {"invalidated", "closed"}:
+        return None
+    semantic_key = _legacy_signal_semantic_key(signal)
+    if any(not value for value in semantic_key):
+        return None
+    key = (new_stage, *semantic_key)
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-notification-terminal-occurrence",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_occurrence_event_ids(
+    signal: Mapping[str, object],
+    new_stage: str,
+) -> frozenset[str]:
+    values = (
+        _legacy_segment_occurrence_event_id(signal, new_stage),
+        _legacy_trigger_occurrence_event_id(signal, new_stage),
+        _legacy_terminal_occurrence_event_id(signal, new_stage),
+    )
+    return frozenset(value for value in values if value is not None)
 
 
 def _notification_group_key(
@@ -1232,6 +1645,13 @@ def _entry_execution_boundary(
     return _mapping(signal.get("entry_execution_boundary"))
 
 
+def _notification_execution_evaluated_at(
+    signal: Mapping[str, object],
+    fallback: object | None,
+) -> object | None:
+    return signal.get("notification_execution_evaluated_at") or fallback
+
+
 def _buy_entry_guidance_state(
     signal: Mapping[str, object],
     *,
@@ -1251,9 +1671,10 @@ def _buy_entry_guidance_state(
     )
     if side != "buy":
         return "not_applicable", None
+    evaluated_at = _notification_execution_evaluated_at(signal, detected_at)
     boundary_status = segment_difference_boundary_status(
         signal,
-        evaluated_at=detected_at,
+        evaluated_at=evaluated_at,
     )
     if boundary_status == "absent":
         return "waiting", None
@@ -1268,9 +1689,15 @@ def _buy_entry_guidance_state(
     if (
         price_cap is None
         or _parse_time(boundary.get("confirmation_bar_closed_at")) is None
-        or _parse_time(boundary.get("entry_valid_until")) is None
+        or (valid_until := _parse_time(boundary.get("entry_valid_until"))) is None
     ):
         return "unavailable", None
+    checked_at = _parse_time(evaluated_at)
+    if (
+        checked_at is not None
+        and valid_until - checked_at < _NOTIFICATION_ENQUEUE_MARGIN
+    ):
+        return "delivery_margin_insufficient", price_cap
     current_price = _positive_float(signal.get("current_price"))
     if current_price is not None and current_price > price_cap:
         return "price_above_cap", price_cap
@@ -1342,7 +1769,10 @@ def _judgment_checklist_line(
     boundary_status = segment_difference_boundary_status(
         signal,
         trigger=trigger,
-        evaluated_at=detected_at,
+        evaluated_at=_notification_execution_evaluated_at(
+            signal,
+            detected_at,
+        ),
     )
     if new_stage == "invalidated":
         one_minute = "原定位已作废"
@@ -1352,6 +1782,11 @@ def _judgment_checklist_line(
         one_minute = "待出现"
     elif side == "sell":
         one_minute = f"{trigger_evidence}已确认（仅精确定位）"
+    elif _buy_entry_guidance_state(
+        signal,
+        detected_at=detected_at,
+    )[0] == "delivery_margin_insufficient":
+        one_minute = f"{trigger_evidence}已确认（剩余时间不足）"
     elif boundary_status == "current":
         one_minute = f"{trigger_evidence}已确认（窗口有效）"
     elif boundary_status == "expired":
@@ -1473,6 +1908,11 @@ def _execution_boundary_line(
             f"执行：旧1分钟买入上限{old_cap}已过期，本次比例0%；"
             f"等待新的1分钟区间套｜{price}"
         )
+    if state == "delivery_margin_insufficient":
+        return (
+            "执行：1分钟定位剩余时间不足以安全送达，本次比例0%；"
+            f"等待新的1分钟区间套｜{price}"
+        )
     if state == "unavailable":
         return (
             f"执行：1分钟确认K最高价缺失，买入上限不可用；"
@@ -1528,6 +1968,7 @@ def _notification_position_recommendation(
     )
     boundary_blocked = entry_guidance_state in {
         "expired",
+        "delivery_margin_insufficient",
         "unavailable",
         "price_above_cap",
     }
@@ -1608,12 +2049,71 @@ def _notification_position_recommendation(
         return canonical
 
 
-def _elapsed_text(start: object, end: object) -> str:
+def _a_share_intraday_elapsed(
+    started: datetime,
+    ended: datetime,
+) -> timedelta:
+    """Measure same-day delay in A-share trading time, excluding lunch."""
+
+    local_start = started.astimezone(CN)
+    local_end = ended.astimezone(CN)
+    if local_end < local_start or local_start.date() != local_end.date():
+        return local_end - local_start
+    session_day = local_start.date()
+    total = timedelta(0)
+    for session_start, session_end in (
+        (
+            datetime.combine(session_day, datetime.min.time(), tzinfo=CN).replace(
+                hour=9,
+                minute=30,
+            ),
+            datetime.combine(session_day, datetime.min.time(), tzinfo=CN).replace(
+                hour=11,
+                minute=30,
+            ),
+        ),
+        (
+            datetime.combine(session_day, datetime.min.time(), tzinfo=CN).replace(
+                hour=13,
+            ),
+            datetime.combine(session_day, datetime.min.time(), tzinfo=CN).replace(
+                hour=15,
+            ),
+        ),
+    ):
+        overlap_start = max(local_start, session_start)
+        overlap_end = min(local_end, session_end)
+        if overlap_end > overlap_start:
+            total += overlap_end - overlap_start
+    return total
+
+
+def _notification_delay(
+    signal: Mapping[str, object],
+    start: datetime,
+    end: datetime,
+) -> timedelta:
+    if _signal_market(signal) == "a":
+        return _a_share_intraday_elapsed(start, end)
+    return end - start
+
+
+def _elapsed_text(
+    start: object,
+    end: object,
+    *,
+    signal: Mapping[str, object] | None = None,
+) -> str:
     started = _parse_time(start)
     ended = _parse_time(end)
     if started is None or ended is None:
         return "暂不可用"
-    seconds = int((ended - started).total_seconds())
+    elapsed = (
+        ended - started
+        if signal is None
+        else _notification_delay(signal, started, ended)
+    )
+    seconds = int(elapsed.total_seconds())
     if seconds < 0:
         return "时序异常"
     minutes, remainder = divmod(seconds, 60)
@@ -1682,6 +2182,34 @@ def _signal_market(signal: Mapping[str, object]) -> str:
     if code.startswith("HK.") or code.endswith(".HK"):
         return "hk"
     return "a"
+
+
+def _auxiliary_notification_charts(
+    documents: Sequence[Mapping[str, object]],
+    *,
+    artifact_key: str,
+) -> list[dict[str, object]]:
+    """Build one deterministic chart request for every visible digest symbol."""
+
+    output: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for document in documents:
+        code = str(document.get("code") or "").strip()
+        market = _signal_market(document)
+        identity = (market, code)
+        if not code or identity in seen:
+            continue
+        seen.add(identity)
+        output.append(
+            {
+                "market": market,
+                "code": code,
+                "name": _text(document.get("name"), code),
+                "artifact_key": f"{artifact_key}:chart:{len(output) + 1}",
+                "evidence_required": False,
+            }
+        )
+    return output
 
 
 def _defense_price_text(
@@ -1795,10 +2323,15 @@ def _action_advice(
         signal,
         detected_at=detected_at,
     )
-    if new_stage == _SEGMENT_ENRICHED_STAGE:
+    if new_stage in {"executable", _SEGMENT_ENRICHED_STAGE} and _recorded_segment(
+        signal
+    ):
         boundary_status = segment_difference_boundary_status(
             signal,
-            evaluated_at=detected_at,
+            evaluated_at=_notification_execution_evaluated_at(
+                signal,
+                detected_at,
+            ),
         )
         if side == "buy" and entry_state == "price_above_cap":
             return (
@@ -1810,6 +2343,16 @@ def _action_advice(
             return (
                 "操作：暂不执行；1分钟定位已确认，但买入上限缺失，"
                 "5分钟锚点不能替代"
+            )
+        if side == "buy" and entry_state == "delivery_margin_insufficient":
+            return (
+                "操作：暂不执行；1分钟定位剩余时间不足以安全送达，"
+                "等待新的1分钟区间套"
+            )
+        if side == "buy" and entry_state == "price_unavailable":
+            return (
+                "操作：仅观察；1分钟定位仍有效，但实时价格未取得，"
+                "不能确认当前价格条件"
             )
         if boundary_status == "current":
             if side == "sell":
@@ -1861,6 +2404,11 @@ def _action_advice(
         if entry_state == "expired":
             return (
                 "操作：暂不执行；旧1分钟定位已过期，不追价，等待新的1分钟区间套"
+            )
+        if entry_state == "delivery_margin_insufficient":
+            return (
+                "操作：暂不执行；1分钟定位剩余时间不足以安全送达，"
+                "等待新的1分钟区间套"
             )
         if entry_state == "unavailable":
             return (
@@ -1975,6 +2523,8 @@ def _position_recommendation_line(
         return "风险参考：暂不计算（等待1分钟区间套给出精确买入位置）"
     if entry_state == "expired":
         return "风险参考：本次执行比例 0%（旧1分钟定位窗口已过）"
+    if entry_state == "delivery_margin_insufficient":
+        return "风险参考：本次执行比例 0%（1分钟定位剩余时间不足以安全送达）"
     if entry_state == "unavailable":
         return "风险参考：本次执行比例 0%（1分钟确认K最高价缺失）"
     if entry_state == "price_above_cap":
@@ -2131,7 +2681,9 @@ def _operation_status_text(
         return "已失效，不再按原结构操作"
     if new_stage == "closed":
         return "跟踪结束"
-    if new_stage == _SEGMENT_ENRICHED_STAGE:
+    if new_stage in {"executable", _SEGMENT_ENRICHED_STAGE} and _recorded_segment(
+        signal
+    ):
         entry_state, _entry_price_cap = _buy_entry_guidance_state(
             signal,
             detected_at=detected_at,
@@ -2140,9 +2692,16 @@ def _operation_status_text(
             return "1分钟定位有效，但价格超过买入上限"
         if entry_state == "unavailable":
             return "1分钟定位已确认，但执行上限缺失"
+        if entry_state == "delivery_margin_insufficient":
+            return "1分钟定位已确认，但剩余时间不足以安全送达"
+        if entry_state == "price_unavailable":
+            return "1分钟定位仍有效，但实时价格条件未核验"
         boundary_status = segment_difference_boundary_status(
             signal,
-            evaluated_at=detected_at,
+            evaluated_at=_notification_execution_evaluated_at(
+                signal,
+                detected_at,
+            ),
         )
         if boundary_status == "current":
             return "1分钟区间套已确认，精确执行候选已解锁"
@@ -2160,6 +2719,8 @@ def _operation_status_text(
             return "5分钟信号已确认，等待1分钟区间套"
         if entry_state == "expired":
             return "5分钟信号保留，1分钟定位窗口已过"
+        if entry_state == "delivery_margin_insufficient":
+            return "5分钟信号保留，1分钟定位剩余时间不足"
         if entry_state == "unavailable":
             return "5分钟信号保留，1分钟执行上限缺失"
         if entry_state == "price_above_cap":
@@ -2524,27 +3085,61 @@ def format_notification(
         signal,
         detected_at=detected_at,
     )
+    if new_stage == "executable" and side == "buy":
+        if entry_guidance_state == "price_above_cap":
+            new_stage_label = "1分钟定位有效·当前价格超限"
+        elif entry_guidance_state == "price_unavailable":
+            new_stage_label = "1分钟定位有效·实时价格待核验"
+    event_time = _notification_evidence_time(signal, new_stage=new_stage)
+    detected_time = _parse_time(
+        detected_at
+        or signal.get("monitor_observed_at")
+        or signal.get("observed_at")
+    )
+    delayed_formal = bool(
+        new_stage == "triggered"
+        and event_time is not None
+        and detected_time is not None
+        and _notification_delay(signal, event_time, detected_time)
+        >= _DELAYED_FORMAL_NOTIFICATION_THRESHOLD
+    )
+    precision_stage = bool(
+        trigger
+        and new_stage in {"executable", _SEGMENT_ENRICHED_STAGE}
+    )
     if new_stage in {"invalidated", "closed"}:
         headline = new_stage_label
         notification_kind = "信号失效" if new_stage == "invalidated" else "跟踪结束"
-    elif new_stage == _SEGMENT_ENRICHED_STAGE:
+    elif precision_stage:
         headline = f"5分钟{setup_point}＋1分钟区间套{trigger_evidence}"
         notification_kind = (
             "1分钟定位已过期"
             if side == "buy" and entry_guidance_state == "expired"
+            else "1分钟定位剩余时间不足"
+            if side == "buy"
+            and entry_guidance_state == "delivery_margin_insufficient"
             else "1分钟执行边界缺失"
             if side == "buy" and entry_guidance_state == "unavailable"
             else "1分钟定位·禁止追价"
             if side == "buy" and entry_guidance_state == "price_above_cap"
+            else "1分钟定位·实时价格待核验"
+            if side == "buy" and entry_guidance_state == "price_unavailable"
+            else "1分钟精确执行条件满足"
+            if new_stage == "executable"
             else "1分钟精确定位新出现"
         )
     else:
         headline = f"5分钟{setup_point}"
         notification_kind = (
-            "买点确认·等待1分钟定位"
+            ("买点确认·延迟发现" if side == "buy" else "卖点确认·延迟发现")
+            if delayed_formal
+            else "买点确认·等待1分钟定位"
             if side == "buy" and entry_guidance_state == "waiting"
             else "买点确认·1分钟定位过期"
             if side == "buy" and entry_guidance_state == "expired"
+            else "买点确认·定位时间不足"
+            if side == "buy"
+            and entry_guidance_state == "delivery_margin_insufficient"
             else "买点确认·执行边界缺失"
             if side == "buy" and entry_guidance_state == "unavailable"
             else "买点确认·禁止追价"
@@ -2588,7 +3183,7 @@ def format_notification(
         or signal.get("observed_at")
     )
     event_available_at_value = available_at_value
-    if new_stage == _SEGMENT_ENRICHED_STAGE:
+    if precision_stage:
         event_available_at_value = _notification_evidence_time(
             signal,
             new_stage=new_stage,
@@ -2597,7 +3192,7 @@ def format_notification(
     detected_at_value = (
         detected_at or signal.get("monitor_observed_at") or signal.get("observed_at")
     )
-    if new_stage == _SEGMENT_ENRICHED_STAGE:
+    if precision_stage:
         timeline_items = [
             ("1分钟定位确认", _segment_time(signal)),
             ("原5分钟确认", confirmed_at_value),
@@ -2614,8 +3209,27 @@ def format_notification(
     timeline_items.append(("监听发现", detected_at_value or available_at_value))
     time_parts = _notification_timeline_parts(tuple(timeline_items))
     time_parts[-1] += (
-        f"（延迟 {_elapsed_text(event_available_at_value, detected_at_value)}）"
+        "（延迟 "
+        + _elapsed_text(
+            event_available_at_value,
+            detected_at_value,
+            signal=signal,
+        )
+        + "）"
     )
+    execution_evaluated_at_value = signal.get(
+        "notification_execution_evaluated_at"
+    )
+    if (
+        execution_evaluated_at_value
+        and _time_identity(execution_evaluated_at_value)
+        != _time_identity(detected_at_value)
+    ):
+        time_parts.extend(
+            _notification_timeline_parts(
+                (("发送前核验", execution_evaluated_at_value),)
+            )
+        )
     operation_status = _operation_status_text(
         signal,
         side=side,
@@ -3103,15 +3717,15 @@ class SignalNotificationDispatcher:
                 enriched["current_price"] = live_price
                 enriched["current_price_source"] = "realtime_tick"
                 enriched["realtime_quote_status"] = "verified"
-                enriched["current_price_at"] = (
-                    detected_at.isoformat()
-                    if isinstance(detected_at, datetime)
-                    else str(detected_at or "")
-                )
+                enriched["current_price_at"] = self._now().isoformat()
+        execution_evaluated_at = self._now()
+        enriched["notification_execution_evaluated_at"] = (
+            execution_evaluated_at.isoformat()
+        )
         enriched["notification_position_recommendation"] = dict(
             _notification_position_recommendation(
                 enriched,
-                detected_at=detected_at,
+                detected_at=execution_evaluated_at,
                 new_stage=new_stage,
             )
         )
@@ -4095,9 +4709,57 @@ class SignalNotificationDispatcher:
         document: Mapping[str, object],
     ) -> bool:
         occurrence = _trigger_occurrence_key(document, "triggered")
-        return bool(
-            occurrence is not None
-            and _trigger_occurrence_event_id(occurrence) in self._delivered
+        if occurrence is None:
+            return False
+        current_id = _trigger_occurrence_event_id(occurrence)
+        legacy_ids = _legacy_occurrence_event_ids(document, "triggered")
+        matched_legacy_ids = legacy_ids & self._delivered
+        matched_audit_ids = (
+            self._audit_trigger_delivery_event_ids(document) & self._delivered
+        )
+        exists = (
+            current_id in self._delivered
+            or bool(matched_legacy_ids)
+            or bool(matched_audit_ids)
+        )
+        if exists:
+            self._delivered.difference_update(
+                matched_legacy_ids | matched_audit_ids
+            )
+            self._delivered.add(current_id)
+        return exists
+
+    def _audit_trigger_delivery_event_ids(
+        self,
+        document: Mapping[str, object],
+    ) -> frozenset[str]:
+        """Bridge a v1 id whose reconstruction-only availability time moved.
+
+        Old ledgers retained the transport id and a bounded audit row, but not
+        the full occurrence key.  A confirmed 5m terminal end is the formal
+        point anchor, so code/side/class/anchor is exactly the grouping identity
+        used by v2.  Do not guess when any of those fields is absent.
+        """
+
+        setup = _mapping(document.get("setup_5m"))
+        code = str(document.get("code") or "")
+        side = str(document.get("side") or setup.get("side") or "")
+        point_type = str(
+            setup.get("point_type") or document.get("point_type") or ""
+        )
+        anchor = _time_identity(setup.get("anchor_at"))
+        if not code or side not in {"buy", "sell"} or not point_type or not anchor:
+            return frozenset()
+        return frozenset(
+            str(row["event_id"])
+            for row in reversed(self._event_audit)
+            if row.get("status") in {"queued", "delivered"}
+            and row.get("new_stage") in {"triggered", "executable"}
+            and isinstance(row.get("event_id"), str)
+            and str(row.get("code") or "") == code
+            and str(row.get("side") or "") == side
+            and str(row.get("setup_point_type") or "") == point_type
+            and _time_identity(row.get("terminal_segment_end_at")) == anchor
         )
 
     def _delivered_segment_evidence_exists(
@@ -4108,11 +4770,22 @@ class SignalNotificationDispatcher:
             document,
             _SEGMENT_ENRICHED_STAGE,
         )
-        return bool(
-            occurrence is not None
-            and _segment_occurrence_event_id(occurrence)
-            in self._delivered_segment_evidence
+        if occurrence is None:
+            return False
+        current_id = _segment_occurrence_event_id(occurrence)
+        legacy_id = _legacy_segment_occurrence_event_id(
+            document,
+            _SEGMENT_ENRICHED_STAGE,
         )
+        exists = current_id in self._delivered_segment_evidence or bool(
+            legacy_id is not None
+            and legacy_id in self._delivered_segment_evidence
+        )
+        if exists:
+            if legacy_id is not None:
+                self._delivered_segment_evidence.discard(legacy_id)
+            self._delivered_segment_evidence.add(current_id)
+        return exists
 
     def dispatch_screening_completion(
         self,
@@ -4249,6 +4922,7 @@ class SignalNotificationDispatcher:
             raw_rows = current.get("signals", ())
             rows = raw_rows if isinstance(raw_rows, (list, tuple)) else ()
             candidates_by_occurrence: dict[str, dict[str, object]] = {}
+            migrated_occurrences = False
             for document in rows:
                 if not isinstance(document, Mapping):
                     continue
@@ -4271,10 +4945,22 @@ class SignalNotificationDispatcher:
                     occurrence_id = (
                         _preconfirmation_divergence_occurrence_event_id(occurrence)
                     )
-                    if (
-                        occurrence_id
-                        in self._preconfirmation_divergence_alerted_occurrences
+                    legacy_occurrence_id = (
+                        _legacy_preconfirmation_divergence_occurrence_event_id(
+                            document,
+                            divergence,
+                        )
+                    )
+                    alerted = self._preconfirmation_divergence_alerted_occurrences
+                    if occurrence_id in alerted or (
+                        legacy_occurrence_id is not None
+                        and legacy_occurrence_id in alerted
                     ):
+                        if occurrence_id not in alerted:
+                            alerted[occurrence_id] = alerted.pop(
+                                legacy_occurrence_id
+                            )
+                            migrated_occurrences = True
                         continue
                     notification_document = dict(document)
                     notification_document[
@@ -4285,6 +4971,8 @@ class SignalNotificationDispatcher:
                         notification_document,
                     )
             if not candidates_by_occurrence:
+                if migrated_occurrences:
+                    self._persist()
                 return
             ordered = tuple(
                 sorted(
@@ -4379,27 +5067,28 @@ class SignalNotificationDispatcher:
         expires_at = now + _NOTIFICATION_RETRY_TTL
         try:
             send_rich = getattr(self._notifier, "send_rich", None)
-            if callable(send_rich):
-                sent = bool(
-                    send_rich(
-                        title,
-                        lines,
-                        {
-                            "artifact_key": event_id,
-                            "require_evidence_match": False,
-                            "delivery_priority": 8,
-                            "expires_at": expires_at.isoformat(),
-                            "charts": [],
-                        },
-                    )
+            if not callable(send_rich):
+                raise _RequiredChartTransportUnavailable
+            sent = bool(
+                send_rich(
+                    title,
+                    lines,
+                    {
+                        "artifact_key": event_id,
+                        "require_evidence_match": False,
+                        "require_chart": True,
+                        "delivery_priority": 8,
+                        "expires_at": expires_at.isoformat(),
+                        "charts": _auxiliary_notification_charts(
+                            documents,
+                            artifact_key=event_id,
+                        ),
+                    },
                 )
-            elif self._notifier is not None:
-                sent = bool(self._notifier.send(title, lines))
-            else:
-                sent = False
+            )
         except Exception as exc:
             sent = False
-            failure_reason = type(exc).__name__
+            failure_reason = _notification_delivery_exception_reason(exc)
         else:
             failure_reason = None if sent else "NOTIFIER_RETURNED_FALSE"
         if not sent:
@@ -4509,6 +5198,7 @@ class SignalNotificationDispatcher:
                     str,
                     Mapping[str, object],
                 ] = {}
+                migrated_occurrences = False
                 for document in rows:
                     if not isinstance(document, Mapping):
                         continue
@@ -4537,10 +5227,24 @@ class SignalNotificationDispatcher:
                     if occurrence is None:
                         continue
                     occurrence_id = _approaching_occurrence_event_id(occurrence)
-                    if occurrence_id in self._approaching_alerted_occurrences:
+                    legacy_occurrence_id = (
+                        _legacy_approaching_occurrence_event_id(document)
+                    )
+                    alerted = self._approaching_alerted_occurrences
+                    if occurrence_id in alerted or (
+                        legacy_occurrence_id is not None
+                        and legacy_occurrence_id in alerted
+                    ):
+                        if occurrence_id not in alerted:
+                            alerted[occurrence_id] = alerted.pop(
+                                legacy_occurrence_id
+                            )
+                            migrated_occurrences = True
                         continue
                     candidates_by_occurrence.setdefault(occurrence_id, document)
                 if not candidates_by_occurrence:
+                    if migrated_occurrences:
+                        self._persist()
                     return
                 ordered = tuple(
                     sorted(
@@ -4637,27 +5341,28 @@ class SignalNotificationDispatcher:
             expires_at = now + _NOTIFICATION_RETRY_TTL
             try:
                 send_rich = getattr(self._notifier, "send_rich", None)
-                if callable(send_rich):
-                    sent = bool(
-                        send_rich(
-                            title,
-                            lines,
-                            {
-                                "artifact_key": event_id,
-                                "require_evidence_match": False,
-                                "delivery_priority": 20,
-                                "expires_at": expires_at.isoformat(),
-                                "charts": [],
-                            },
-                        )
+                if not callable(send_rich):
+                    raise _RequiredChartTransportUnavailable
+                sent = bool(
+                    send_rich(
+                        title,
+                        lines,
+                        {
+                            "artifact_key": event_id,
+                            "require_evidence_match": False,
+                            "require_chart": True,
+                            "delivery_priority": 20,
+                            "expires_at": expires_at.isoformat(),
+                            "charts": _auxiliary_notification_charts(
+                                documents,
+                                artifact_key=event_id,
+                            ),
+                        },
                     )
-                elif self._notifier is not None:
-                    sent = bool(self._notifier.send(title, lines))
-                else:
-                    sent = False
+                )
             except Exception as exc:
                 sent = False
-                failure_reason = type(exc).__name__
+                failure_reason = _notification_delivery_exception_reason(exc)
             else:
                 failure_reason = None if sent else "NOTIFIER_RETURNED_FALSE"
             if not sent:
@@ -4755,6 +5460,60 @@ class SignalNotificationDispatcher:
             ] = {}
             dirty_state = False
             dispatch_now = self._now()
+
+            def delivered_group_seen(
+                event_id: str,
+                candidates: list[tuple[str, str, str, Mapping[str, object]]],
+            ) -> bool:
+                """Normalize and discard a group already accepted for delivery.
+
+                This check must run before freshness validation. A partial
+                publication can replay the same immutable occurrence after its
+                one-minute window has narrowed; recording that replay as a new
+                suppression would falsely make a successful notification look
+                late in runtime health.
+                """
+
+                nonlocal dirty_state
+                legacy_event_ids = {
+                    notification_event_id(candidate[0], candidate[1], candidate[2])
+                    for candidate in candidates
+                }
+                legacy_event_ids.update(
+                    legacy_id
+                    for candidate in candidates
+                    for legacy_id in _legacy_occurrence_event_ids(
+                        candidate[3],
+                        candidate[2],
+                    )
+                )
+                audit_delivery_ids = frozenset(
+                    audit_id
+                    for candidate in candidates
+                    for audit_id in (
+                        self._audit_trigger_delivery_event_ids(candidate[3])
+                        if candidate[2] in {"triggered", "executable"}
+                        else ()
+                    )
+                )
+                matched_audit_ids = audit_delivery_ids & self._delivered
+                if not (
+                    event_id in self._delivered
+                    or bool(legacy_event_ids & self._delivered)
+                    or bool(matched_audit_ids)
+                ):
+                    return False
+                previous_delivered = set(self._delivered)
+                self._delivered.difference_update(
+                    legacy_event_ids | matched_audit_ids
+                )
+                self._delivered.add(event_id)
+                if self._delivered != previous_delivered:
+                    dirty_state = True
+                if self._pending_trigger_events.pop(event_id, None) is not None:
+                    dirty_state = True
+                return True
+
             for event_id, pending in tuple(self._pending_trigger_events.items()):
                 pending_document = pending.get("document")
                 if not isinstance(pending_document, Mapping):
@@ -4862,6 +5621,9 @@ class SignalNotificationDispatcher:
                 if pending is None:
                     pending_event_id = canonical_event_id
                     pending = self._pending_trigger_events.get(pending_event_id)
+                candidate = (signal_id, old_stage, new_stage, document)
+                if delivered_group_seen(canonical_event_id, [candidate]):
+                    continue
                 if new_stage == "invalidated" and not self._delivered_trigger_exists(
                     document
                 ):
@@ -4899,14 +5661,7 @@ class SignalNotificationDispatcher:
                     )
                     dirty_state = True
                     continue
-                grouped.setdefault(group_key, []).append(
-                    (
-                        signal_id,
-                        old_stage,
-                        new_stage,
-                        document,
-                    )
-                )
+                grouped.setdefault(group_key, []).append(candidate)
 
             authoritative_raw = current.get("notification_authoritative_codes", ())
             authoritative_codes = (
@@ -4980,18 +5735,7 @@ class SignalNotificationDispatcher:
                 key=_notification_group_dispatch_priority,
             ):
                 event_id = _notification_group_event_id(group_key)
-                legacy_event_ids = {
-                    notification_event_id(candidate[0], candidate[1], candidate[2])
-                    for candidate in candidates
-                }
-                if event_id in self._delivered or bool(
-                    legacy_event_ids & self._delivered
-                ):
-                    if event_id not in self._delivered:
-                        self._delivered.add(event_id)
-                        dirty_state = True
-                    if self._pending_trigger_events.pop(event_id, None) is not None:
-                        dirty_state = True
+                if delivered_group_seen(event_id, candidates):
                     continue
                 persisted_pending = self._pending_trigger_events.get(event_id)
                 candidates.sort(
@@ -5135,6 +5879,32 @@ class SignalNotificationDispatcher:
                     detected_at=dispatch_now,
                     new_stage=new_stage,
                 )
+                send_boundary_time = (
+                    _parse_time(
+                        notification_document.get(
+                            "notification_execution_evaluated_at"
+                        )
+                    )
+                    or self._now()
+                )
+                rejection = _notification_eligibility_reason(
+                    notification_document,
+                    old_stage=old_stage,
+                    new_stage=new_stage,
+                    require_decision_identity=require_decision_identity,
+                    evaluated_at=send_boundary_time,
+                )
+                if rejection is not None:
+                    self._pending_trigger_events.pop(event_id, None)
+                    self._record_suppressed(
+                        event_id=event_id,
+                        old_stage=old_stage,
+                        new_stage=new_stage,
+                        document=notification_document,
+                        reason=rejection,
+                    )
+                    dirty_state = True
+                    continue
                 title, lines = format_notification(
                     notification_document,
                     old_stage,
@@ -5175,78 +5945,146 @@ class SignalNotificationDispatcher:
                     )
                     self._persist()
                     continue
+                # The durable review write is part of the delivery path and
+                # may itself consume a short 1m window.  Recheck after it, not
+                # merely before it, so even a plain notifier cannot start a
+                # transport request with an expired/unsafe execution message.
+                transport_now = self._now()
+                transport_rejection = _notification_eligibility_reason(
+                    notification_document,
+                    old_stage=old_stage,
+                    new_stage=new_stage,
+                    require_decision_identity=require_decision_identity,
+                    evaluated_at=transport_now,
+                )
+                precision_delivery = bool(
+                    _recorded_segment(notification_document)
+                    and new_stage in {"executable", _SEGMENT_ENRICHED_STAGE}
+                )
+                deadline_rejection = None
+                if expires_at is not None:
+                    remaining = expires_at - transport_now
+                    if remaining <= timedelta(0):
+                        deadline_rejection = "NOTIFICATION_DELIVERY_EXPIRED"
+                    elif (
+                        precision_delivery
+                        and remaining < _NOTIFICATION_ENQUEUE_MARGIN
+                    ):
+                        deadline_rejection = (
+                            "ONE_MINUTE_SEGMENT_DELIVERY_MARGIN_INSUFFICIENT"
+                        )
+                final_rejection = transport_rejection or deadline_rejection
+                if final_rejection is not None:
+                    expired_recorded = self._record_review_notification(
+                        event_id=event_id,
+                        document=notification_document,
+                        old_stage=old_stage,
+                        new_stage=new_stage,
+                        delivery_status="expired",
+                        detected_at=detected_time,
+                        delivery_reason=final_rejection,
+                    )
+                    if not expired_recorded:
+                        self._failure_count += 1
+                        self._last_failure_at = self._now().isoformat()
+                        self._last_failure_reason = "REVIEW_INBOX_RECORD_FAILED"
+                        self._pending_trigger_events[event_id] = {
+                            "old_stage": old_stage,
+                            "new_stage": new_stage,
+                            "queued_at": dispatch_now.isoformat(),
+                            "detected_at": detected_time.isoformat(),
+                            "document": notification_document,
+                        }
+                        self._persist()
+                        continue
+                    self._pending_trigger_events.pop(event_id, None)
+                    self._record_suppressed(
+                        event_id=event_id,
+                        old_stage=old_stage,
+                        new_stage=new_stage,
+                        document=notification_document,
+                        reason=final_rejection,
+                    )
+                    self._persist()
+                    dirty_state = False
+                    continue
                 try:
                     send_rich = getattr(self._notifier, "send_rich", None)
-                    if callable(send_rich):
-                        code = _text(notification_document.get("code"), "")
-                        name = _text(notification_document.get("name"), code)
-                        setup = _mapping(notification_document.get("setup_5m"))
-                        segment = _mapping(
-                            notification_document.get("segment_difference_1m")
-                        )
-                        chart_evidence = (
-                            segment if new_stage == _SEGMENT_ENRICHED_STAGE else setup
-                        )
-                        chart_frequency = (
-                            "1m" if new_stage == _SEGMENT_ENRICHED_STAGE else "5m"
-                        )
-                        context = {
-                            "require_evidence_match": new_stage
-                            in _EVIDENCE_NOTIFICATION_STAGES,
-                            "delivery_priority": (
-                                _notification_document_delivery_priority(
-                                    notification_document,
-                                    new_stage,
-                                )
-                            ),
-                            "expires_at": (
-                                None if expires_at is None else expires_at.isoformat()
-                            ),
-                            "charts": [
-                                {
-                                    "market": _signal_market(notification_document),
-                                    "code": code,
-                                    "name": name,
-                                    "artifact_key": event_id,
-                                    "observed_at": _text(
-                                        notification_document.get("observed_at"),
-                                        "",
-                                    ),
-                                    "point_type": _text(
-                                        chart_evidence.get("point_type"),
-                                        "",
-                                    ),
-                                    "signal_time": _text(
-                                        chart_evidence.get("available_at")
-                                        or chart_evidence.get("confirmed_at"),
-                                        "",
-                                    ),
-                                    "evidence_id": _text(
-                                        chart_evidence.get("point_id"),
-                                        "",
-                                    ),
-                                    "recursive_level": chart_evidence.get(
-                                        "recursive_level"
-                                    ),
-                                    "anchor_time": _text(
-                                        chart_evidence.get("anchor_at"),
-                                        "",
-                                    ),
-                                    "frequency": chart_frequency,
-                                    "evidence_required": new_stage
-                                    in _EVIDENCE_NOTIFICATION_STAGES,
-                                }
-                            ],
-                        }
-                        sent = bool(send_rich(title, lines, context))
-                    elif self._notifier is not None:
-                        sent = bool(self._notifier.send(title, lines))
-                    else:
-                        sent = False
+                    if not callable(send_rich):
+                        raise _RequiredChartTransportUnavailable
+                    code = _text(notification_document.get("code"), "")
+                    name = _text(notification_document.get("name"), code)
+                    setup = _mapping(notification_document.get("setup_5m"))
+                    segment = _mapping(
+                        notification_document.get("segment_difference_1m")
+                    )
+                    precision_chart = bool(
+                        segment
+                        and new_stage
+                        in {"executable", _SEGMENT_ENRICHED_STAGE}
+                    )
+                    chart_evidence = segment if precision_chart else setup
+                    chart_frequency = "1m" if precision_chart else "5m"
+                    context = {
+                        "require_evidence_match": new_stage
+                        in _EVIDENCE_NOTIFICATION_STAGES,
+                        "require_chart": True,
+                        "delivery_priority": (
+                            _notification_document_delivery_priority(
+                                notification_document,
+                                new_stage,
+                            )
+                        ),
+                        "expires_at": (
+                            None if expires_at is None else expires_at.isoformat()
+                        ),
+                        "minimum_delivery_margin_seconds": (
+                            int(_NOTIFICATION_TRANSPORT_MARGIN.total_seconds())
+                            if precision_chart
+                            else 0
+                        ),
+                        "charts": [
+                            {
+                                "market": _signal_market(notification_document),
+                                "code": code,
+                                "name": name,
+                                "artifact_key": event_id,
+                                "observed_at": _text(
+                                    notification_document.get("observed_at"),
+                                    "",
+                                ),
+                                "point_type": _text(
+                                    chart_evidence.get("point_type"),
+                                    "",
+                                ),
+                                "signal_time": _text(
+                                    chart_evidence.get("available_at")
+                                    or chart_evidence.get("confirmed_at"),
+                                    "",
+                                ),
+                                "evidence_id": _text(
+                                    chart_evidence.get("point_id"),
+                                    "",
+                                ),
+                                "recursive_level": chart_evidence.get(
+                                    "recursive_level"
+                                ),
+                                "anchor_time": _text(
+                                    chart_evidence.get("anchor_at"),
+                                    "",
+                                ),
+                                "frequency": chart_frequency,
+                                "evidence_required": new_stage
+                                in _EVIDENCE_NOTIFICATION_STAGES,
+                            }
+                        ],
+                    }
+                    sent = bool(send_rich(title, lines, context))
                 except Exception as exc:
+                    failure_reason = _notification_delivery_exception_reason(exc)
                     self._failure_count += 1
                     self._last_failure_at = self._now().isoformat()
-                    self._last_failure_reason = type(exc).__name__
+                    self._last_failure_reason = failure_reason
                     self._pending_trigger_events[event_id] = {
                         "old_stage": old_stage,
                         "new_stage": new_stage,
@@ -5265,7 +6103,7 @@ class SignalNotificationDispatcher:
                         old_stage=old_stage,
                         new_stage=new_stage,
                         document=notification_document,
-                        reason=type(exc).__name__,
+                        reason=failure_reason,
                     )
                     self._record_review_notification(
                         event_id=event_id,
@@ -5274,7 +6112,7 @@ class SignalNotificationDispatcher:
                         new_stage=new_stage,
                         delivery_status="failed",
                         detected_at=detected_time,
-                        delivery_reason=type(exc).__name__,
+                        delivery_reason=failure_reason,
                     )
                     self._persist()
                     # Persist this occurrence and continue with independent

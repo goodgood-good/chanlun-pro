@@ -397,6 +397,62 @@ def test_browser_timeout_skips_expensive_optional_static_fallback(
     assert state_calls == []
 
 
+def test_required_auxiliary_chart_bypasses_browser_and_uses_static_renderer(
+    tmp_path: Path,
+) -> None:
+    store = SignedAlertChartStore(
+        root=tmp_path,
+        public_base_url="http://47.96.40.233:8890",
+        secret=b"0123456789abcdef0123456789abcdef",
+    )
+    browser_calls = []
+    rendered = []
+
+    class State:
+        warmup_ready = False
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def refresh_chart_levels(self):
+            self.warmup_ready = True
+
+        @staticmethod
+        def chart_data(frequency):
+            return f"strict:{frequency}"
+
+    service = AlertChartImageService(
+        store,
+        browser_renderer=lambda **kwargs: browser_calls.append(kwargs),
+        state_factory=State,
+        exchange_provider=lambda market: market.value,
+        renderer=lambda charts: rendered.append(tuple(charts)) or PNG,
+    )
+
+    images = service(
+        {
+            "require_chart": True,
+            "charts": [
+                {
+                    "market": "a",
+                    "code": "SZ.002905",
+                    "name": "金逸影视",
+                    "artifact_key": "signal:required-chart",
+                }
+            ],
+        }
+    )
+
+    assert browser_calls == []
+    assert len(rendered) == 1
+    assert [value[1] for value in rendered[0]] == [
+        "strict:30m",
+        "strict:5m",
+        "strict:1m",
+    ]
+    assert len(images) == 1
+
+
 def test_evidence_bound_alert_uses_verified_strict_snapshot_not_browser(
     tmp_path: Path,
 ) -> None:

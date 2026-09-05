@@ -248,8 +248,8 @@
     if (phase === 'OPERATIONAL_THIRD_CLASS_POINT') {
       return {
         status: '已完成',
-        qualification: `${scope}${pointLabel}已达到操作确认；末端结构仍会随新K更新`,
-        evidence: `${scope}${pointLabel}已按最新完成线段达到操作确认`,
+        qualification: `${scope}${pointLabel}已正式确认；末端结构仍会随新K更新`,
+        evidence: `${scope}${pointLabel}已按最新完成线段正式确认`,
         requirement: '操作确认已满足；末端结构尚未封存',
         associatedPoint: `${scope}${pointLabel}（操作确认，末端结构未封存）`,
         tone: 'complete',
@@ -270,7 +270,7 @@
         status: `${pointLabel}候选待锁定`,
         qualification: `${scope}${pointLabel}的离开与首次回抽几何已出现，但所在线段尚未锁定`,
         evidence: `${scope}${pointLabel}仅为非交易几何候选`,
-        requirement: '尚未达到操作确认；不得把几何候选当作可操作买卖点',
+        requirement: '尚未正式确认；不得把几何候选当作可操作买卖点',
         associatedPoint: `${scope}${pointLabel}（候选待锁定）`,
         tone: 'forming',
       };
@@ -280,7 +280,7 @@
         status: '观察证据',
         qualification: `${scope}中枢观察不产生买卖点`,
         evidence: '仅保留非交易结构观察',
-        requirement: '等待同级别结构达到操作确认',
+        requirement: '等待同级别结构正式确认',
         associatedPoint: '无可交易关联买卖点',
         tone: 'neutral',
       };
@@ -1326,7 +1326,7 @@
           item.operational_confirmation === true
             ? '买卖点操作确认已完成；末端结构仍会随新K更新'
             : item.state === 'completed'
-            ? '离开/回抽几何已出现；仍是候选，尚未达到操作确认'
+            ? '离开/回抽几何已出现；仍是候选，尚未正式确认'
             : '形成中预览，不可直接交易',
         ));
       });
