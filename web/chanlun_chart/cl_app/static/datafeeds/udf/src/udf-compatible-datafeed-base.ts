@@ -34,7 +34,7 @@ import {
 } from './history-provider';
 
 import { DataPulseProvider } from './data-pulse-provider';
-import { chartBarTimeSeconds } from './bar-time';
+import { chartBarTimeSeconds, resolveBarTimeLabel } from './bar-time';
 import { IQuotesProvider } from './iquotes-provider';
 import { IRequester } from './irequester';
 import { QuotesPulseProvider } from './quotes-pulse-provider';
@@ -150,7 +150,6 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	private readonly _quotesPulseProvider: QuotesPulseProvider;
 
 	private readonly _requester: IRequester;
-	private readonly _reviewResolveParams: Readonly<RequestParams>;
 
 	private _subscribersResetCallbacks: Record<string, () => void> = {};
 
@@ -164,19 +163,6 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	) {
 		this._datafeedURL = datafeedURL;
 		this._requester = requester;
-		const reviewResolveParams: RequestParams = {};
-		const suppliedParams = options.historyParams || {};
-		for (const key of [
-			'review_candidate_id',
-			'review_source_sha256',
-			'review_as_of',
-		]) {
-			const value = suppliedParams[key];
-			if (value !== undefined && value !== null && value !== '') {
-				reviewResolveParams[key] = value;
-			}
-		}
-		this._reviewResolveParams = Object.freeze(reviewResolveParams);
 		this._historyProvider = new HistoryProvider(
 			datafeedURL,
 			this._requester,
@@ -270,7 +256,6 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 		}
 
 		const params: RequestParams = {
-			...this._reviewResolveParams,
 			symbol: symbolName,
 		};
 		if (currencyCode !== undefined) {
@@ -352,13 +337,14 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 		const h = response.h as number[] | undefined;
 		const l = response.l as number[] | undefined;
 		const v = response.v as number[] | undefined;
+		const barTimeLabel = resolveBarTimeLabel(response.bar_time_label, resolution, symbolResKey);
 		const makeBar = (idx: number): Bar | null => {
 			const closeVal = c[idx];
 			if (closeVal === undefined || closeVal === null) {
 				return null;
 			}
 			const bar: Bar = {
-				time: chartBarTimeSeconds(t[idx], resolution, symbolResKey) * 1000,
+				time: chartBarTimeSeconds(t[idx], resolution, symbolResKey, barTimeLabel) * 1000,
 				open: o ? o[idx] : closeVal,
 				high: h ? h[idx] : closeVal,
 				low: l ? l[idx] : closeVal,
@@ -377,7 +363,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 		if (Number.isFinite(replayFromSeconds)) {
 			let start = -1;
 			for (let idx = 0; idx <= i; idx++) {
-				if (chartBarTimeSeconds(t[idx], resolution, symbolResKey) >= Number(replayFromSeconds)) {
+				if (chartBarTimeSeconds(t[idx], resolution, symbolResKey, barTimeLabel) >= Number(replayFromSeconds)) {
 					start = idx;
 					break;
 				}

@@ -104,35 +104,52 @@ function spyWidget() {
   return { widget, calls };
 }
 
+test('returning to an aborted symbol resets only its failed chart cache once, without forced recomputation', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const calls = [], timers = [];
+  sb.setTimeout = callback => { timers.push(callback); return timers.length; };
+  const { widget } = spyWidget();
+  widget.resetCache = () => calls.push('cache');
+  const cm = makeManager(ChartManager, widget);
+  cm.chart = {resetData: () => calls.push('data')};
+  cm.getCurrentChartIdentity = () => ({symbol:'us:AAPL.US',interval:'1'});
+  const failed = new Set(['us:AAPL.US|1']);
+  const hp = cm.udf_datafeed._historyProvider;
+  hp.hasInitialHistoryFailure = (symbol,res) => failed.has(`${symbol}|${res}`);
+  hp.consumeInitialHistoryFailure = (symbol,res) => failed.delete(`${symbol}|${res}`);
+  assert.equal(cm._retryFailedInitialHistory(), true);
+  assert.deepEqual(calls, [], 'do not reset inside TradingView symbol-change delivery');
+  timers.shift()();
+  assert.deepEqual(calls, ['cache','data']);
+  assert.equal(cm._retryFailedInitialHistory(), false);
+  assert.equal(hp._forceRefreshOnce, undefined);
+  assert.equal(hp._refreshIfStaleOnce, undefined);
+});
+
+test('switching away before a queued failed-history retry preserves its marker and leaves the new chart alone', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const timers = [];
+  sb.setTimeout = callback => { timers.push(callback); return timers.length; };
+  const {widget, calls} = spyWidget();
+  const cm = makeManager(ChartManager, widget);
+  let symbol='us:AAPL.US', consumed=0;
+  cm.getCurrentChartIdentity = () => ({symbol,interval:'1'});
+  cm.chart = widget.activeChart();
+  cm.udf_datafeed._historyProvider.hasInitialHistoryFailure = () => true;
+  cm.udf_datafeed._historyProvider.consumeInitialHistoryFailure = () => { consumed++; return true; };
+  cm._retryFailedInitialHistory();
+  symbol='us:TSLA.US';
+  cm._resetDataReadyContext();
+  timers[0]();
+  assert.equal(consumed,0);
+  assert.deepEqual(calls,{resetCache:0,resetData:0});
+});
+
 test('widget startup uses only schema-valid theme and time-scale options', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
   assert.match(source, /theme:\s*normalizeChartTheme\(Utils\.get_local_data\("theme"\)\)/);
   assert.match(source, /time_scale:\s*\{\s*min_bar_spacing:/);
   assert.doesNotMatch(source, /max_bar_spacing/);
-});
-
-test('embedded cross-market symbol changes reuse the current chart page', () => {
-  const { ChartManager, sb } = loadChartManager();
-  const writes = [];
-  let navigations = 0;
-  let watchlistRenders = 0;
-  sb.Utils.get_market = () => 'a';
-  sb.Utils.set_local_data = (key, value) => writes.push([key, value]);
-  sb.location.assign = () => { navigations += 1; };
-  sb.ZiXuan = { render_zixuan_opts: () => { watchlistRenders += 1; } };
-  sb.__CHANLUN_EMBEDDED_CHART = true;
-
-  const manager = Object.create(ChartManager.prototype);
-  let clears = 0;
-  manager.clear_draw_chanlun = () => { clears += 1; };
-  manager.reloadDrawingsForCurrentContext = () => {};
-  manager._openSseStream = () => {};
-  manager.handleSymbolChange({ ticker: 'US:AAPL.US' });
-
-  assert.equal(navigations, 0);
-  assert.equal(clears, 1);
-  assert.equal(watchlistRenders, 0);
-  assert.deepEqual(writes, [['market', 'us'], ['us_code', 'AAPL.US']]);
 });
 
 test('standalone cross-market symbol changes retain the full-page navigation fallback', () => {
@@ -142,7 +159,7 @@ test('standalone cross-market symbol changes retain the full-page navigation fal
   sb.Utils.get_market = () => 'a';
   sb.Utils.set_local_data = (key, value) => writes.push([key, value]);
   sb.location.assign = (target) => targets.push(target);
-  sb.__CHANLUN_EMBEDDED_CHART = false;
+
 
   const manager = Object.create(ChartManager.prototype);
   manager.handleSymbolChange({ ticker: 'US:MSFT.US' });
@@ -303,6 +320,33 @@ test('A股日内结构统一从收盘身份映射到开盘坐标且不修改原�
     symbolInterval: () => ({ symbol: 'currency_spot:BTC/USDT', interval: '5' }),
   };
   assert.equal(cm._centerChartTimeCoordinate(closeTime, '5'), closeTime);
+});
+
+test('explicit US bar labels align base paths, fractals and SSE replay without changing source anchors', () => {
+  const { ChartManager } = loadChartManager();
+  const close = Date.UTC(2026, 6, 30, 20) / 1000;
+  const cm = Object.create(ChartManager.prototype);
+  cm.widget = { symbolInterval: () => ({ symbol: 'us:AAPL.US', interval: '30' }) };
+  const stored = { bar_time_label: 'end' };
+  cm.udf_datafeed = { _historyProvider: { bars_result: new Map([['us:aapl.us30', stored]]) } };
+  const source = [{ points: [{ time: close - 1800, price: 332.86 }, { time: close, price: 334.449 }] }];
+  const rendered = cm._baseStructureRenderList(source, '30');
+  assert.equal(rendered[0].points[1].time, close - 1800);
+  assert.equal(rendered[0].points[1].source_time, close);
+  assert.equal(source[0].points[1].time, close);
+  const fractals = cm._fractalRenderList([{ text: 'ding', points: [{ time: close, price: 334.449 }] }],
+    [{ time: (close - 1800) * 1000 }], { from: close - 3600, to: close }, '30');
+  assert.equal(fractals[0].points[0].time, close - 1800);
+  assert.equal(cm._authoritativeSseReplayStart({ full_snapshot: true, t: [close - 1800, close],
+    bar_time_label: 'end' }, close - 1800, '30'), null,
+  'one matching bar is not a two-bar replay after chart-coordinate conversion');
+  stored.bar_time_label = 'start';
+  assert.equal(cm._centerChartTimeCoordinate(close - 1800, '30'), close - 1800);
+  delete stored.bar_time_label;
+  assert.throws(() => cm._centerChartTimeCoordinate(close, '30'), /history_bar_time_label_missing/);
+  cm.widget = { symbolInterval: () => ({ symbol: 'currency_spot:BTC/USDT', interval: '30' }) };
+  assert.equal(cm._centerChartTimeCoordinate(close, '30'), close,
+    'old symbol metadata cannot leak into the next symbol');
 });
 
 test('dense base structures are rendered as bounded open paths instead of one line-tool per segment', () => {
@@ -572,7 +616,7 @@ test('当前代际 dataReady 后只消费一次首次待绘制请求', () => {
   assert.equal(fx.cm._initialLoadDone, true);
 });
 
-test('embedded data-ready waits until automatic drawings are stably complete', () => {
+test('chart data-ready waits until automatic drawings are stably complete', () => {
   const { ChartManager, sb } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   let now = 0;
@@ -586,9 +630,9 @@ test('embedded data-ready waits until automatic drawings are stably complete', (
     return id;
   };
   sb.clearTimeout = (id) => timers.delete(id);
-  sb.__CHANLUN_EMBEDDED_CHART = true;
-  sb.EmbeddedChartBridge = {
-    notifyDataReady(identity) { notifications.push(identity); },
+
+  sb.ChartTransition = {
+    markReady(identity) { notifications.push(identity); },
   };
   fx.cm._activeDrawingMutations = new Set();
   fx.cm._automaticShapeCreateCount = 1;
@@ -614,14 +658,14 @@ test('embedded data-ready waits until automatic drawings are stably complete', (
   }
 
   runUntil(700);
-  assert.equal(notifications.length, 0, 'pending shapes must keep the parent loading state');
+  assert.equal(notifications.length, 0, 'pending shapes must keep the chart loading state');
   fx.cm._automaticShapeCreateCount = 0;
   runUntil(950);
   assert.equal(notifications.length, 1);
-  assert.deepEqual(notifications[0], { symbol: 'A:SH.600000', interval: '5' });
+  assert.deepEqual(notifications[0], { symbol: 'A:SH.600000', interval: '5', managerId: fx.cm.instanceId });
 });
 
-test('embedded stable-ready has no fixed latency once every tracked phase is idle', () => {
+test('chart stable-ready has no fixed latency once every tracked phase is idle', () => {
   const { ChartManager, sb } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   let now = 0;
@@ -635,9 +679,9 @@ test('embedded stable-ready has no fixed latency once every tracked phase is idl
     return id;
   };
   sb.clearTimeout = (id) => timers.delete(id);
-  sb.__CHANLUN_EMBEDDED_CHART = true;
-  sb.EmbeddedChartBridge = {
-    notifyDataReady(identity) { notifications.push(identity); },
+
+  sb.ChartTransition = {
+    markReady(identity) { notifications.push(identity); },
   };
   fx.cm._activeDrawingMutations = new Set();
   fx.cm._strictPendingCreates = new Map();
@@ -670,7 +714,7 @@ test('standalone stable-ready keeps the transition veil until strict drawing wor
     return id;
   };
   sb.clearTimeout = (id) => timers.delete(id);
-  sb.__CHANLUN_EMBEDDED_CHART = false;
+
   sb.ChartTransition = {
     markReady(identity) { notifications.push(identity); },
   };
@@ -695,58 +739,76 @@ test('standalone stable-ready keeps the transition veil until strict drawing wor
   });
 });
 
-test('stable-ready waits for supplemental history requests and their idle window', () => {
-  const { ChartManager, sb } = loadChartManager();
-  const fx = makeDataReadyManager(ChartManager);
-  let now = 0;
-  let nextTimerId = 1;
-  let historyPending = true;
-  const timers = new Map();
-  const notifications = [];
-  sb.performance.now = () => now;
-  sb.setTimeout = (callback, delay = 0) => {
-    const id = nextTimerId++;
-    timers.set(id, { callback, due: now + Number(delay || 0) });
-    return id;
-  };
-  sb.clearTimeout = (id) => timers.delete(id);
-  sb.__CHANLUN_EMBEDDED_CHART = false;
-  sb.ChartTransition = {
-    markReady(identity) { notifications.push(identity); },
-  };
-  fx.cm.udf_datafeed = {
-    _historyProvider: {
-      hasPendingHistoryWork(quietMs) {
-        assert.equal(quietMs, 120);
-        return historyPending;
-      },
-    },
-  };
-  fx.cm._activeDrawingMutations = new Set();
-  fx.cm._strictPendingCreates = new Map();
-  fx.cm._reconcileRetry = { count: 0, timer: null };
-  fx.setReady(true);
-  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+for (const state of ['loading', 'error']) {
+  test(`standalone candles are visible when structure is ${state}`, () => {
+    const { ChartManager, sb } = loadChartManager();
+    const fx = makeDataReadyManager(ChartManager);
+    let now = 0;
+    let nextTimerId = 1;
+    const timers = new Map();
+    const notifications = [];
+    sb.performance.now = () => now;
+    sb.setTimeout = (callback, delay = 0) => {
+      const id = nextTimerId++;
+      timers.set(id, { callback, due: now + Number(delay || 0) });
+      return id;
+    };
+    sb.clearTimeout = (id) => timers.delete(id);
 
-  const runUntil = (target) => {
-    while (true) {
-      const next = [...timers.entries()].sort((left, right) => left[1].due - right[1].due)[0];
-      if (!next || next[1].due > target) break;
+    sb.ChartTransition = { markReady(identity) { notifications.push(identity); } };
+    fx.cm._activeDrawingMutations = new Set();
+    fx.cm._strictPendingCreates = new Map();
+    fx.cm._reconcileRetry = { count: 0, timer: null };
+    fx.cm._strictStructureStatus = { state, code: 'strict_structure_pending' };
+    fx.cm._strictStructureSnapshot = null;
+    fx.cm._strictStructureContextToken = null;
+    fx.setReady(true);
+    fx.cm.handleDataReady(0, 'a:sh.600000|5');
+    while (timers.size > 0 && now < 200) {
+      const next = [...timers.entries()].sort((a, b) => a[1].due - b[1].due)[0];
       timers.delete(next[0]);
       now = next[1].due;
       next[1].callback();
     }
-    now = target;
-  };
-  runUntil(800);
-  assert.equal(notifications.length, 0, 'an in-flight older-history page must retain the veil');
+    assert.equal(notifications.length, 1);
+    assert.equal(fx.cm._strictStructureSnapshot, null, 'visibility must not fabricate structure');
+  });
+}
 
-  historyPending = false;
-  runUntil(1_000);
-  assert.equal(notifications.length, 1, 'the veil may clear only after history and drawing quiet periods');
+test('standalone ready candles are visible while background history can continue', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  let now = 0, nextId = 1;
+  const timers = new Map(), notifications = [];
+  sb.performance.now = () => now;
+  sb.setTimeout = (callback, delay = 0) => {
+    const id = nextId++; timers.set(id, {callback, due: now + delay}); return id;
+  };
+  sb.clearTimeout = id => timers.delete(id);
+
+  sb.ChartTransition = {markReady: identity => notifications.push(identity)};
+  fx.cm.udf_datafeed = {_historyProvider: {
+    hasPendingHistoryWork: () => true,
+  }};
+  fx.cm._activeDrawingMutations = new Set();
+  fx.cm._strictPendingCreates = new Map();
+  fx.cm._reconcileRetry = {count: 0, timer: null};
+  fx.setReady(true);
+  fx.cm.handleDataReady(0, 'a:sh.600000|5');
+  const runUntil = target => {
+    while (timers.size) {
+      const next = [...timers].sort((a,b)=>a[1].due-b[1].due)[0];
+      if (next[1].due > target) break;
+      timers.delete(next[0]); now=next[1].due; next[1].callback();
+    }
+    now=target;
+  };
+  runUntil(200);
+  assert.equal(notifications.length, 1);
+  assert.equal(fx.cm._drawingWorkPending(), true, 'the diagnostic check can still include background history');
 });
 
-test('embedded stable-ready never reveals bars before strict structure is ready', () => {
+test('chart stable-ready never reveals bars before strict structure is ready', () => {
   const { ChartManager, sb } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   let now = 0;
@@ -760,9 +822,9 @@ test('embedded stable-ready never reveals bars before strict structure is ready'
     return id;
   };
   sb.clearTimeout = (id) => timers.delete(id);
-  sb.__CHANLUN_EMBEDDED_CHART = true;
-  sb.EmbeddedChartBridge = {
-    notifyDataReady(identity) { notifications.push(identity); },
+
+  sb.ChartTransition = {
+    markReady(identity) { notifications.push(identity); },
   };
   fx.cm._activeDrawingMutations = new Set();
   fx.cm._strictPendingCreates = new Map();
@@ -784,7 +846,7 @@ test('embedded stable-ready never reveals bars before strict structure is ready'
     now = target;
   };
   runUntil(500);
-  assert.equal(notifications.length, 0, 'K-lines alone must not remove the parent veil');
+  assert.equal(notifications.length, 0, 'K-lines alone must not remove the chart veil');
 
   fx.cm._strictStructureStatus = { state: 'ready', code: null };
   fx.cm._strictStructureSnapshot = { render_revision: 'strict-ready' };
@@ -793,7 +855,7 @@ test('embedded stable-ready never reveals bars before strict structure is ready'
   assert.equal(notifications.length, 1);
 });
 
-test('embedded stable-ready includes drawing restore viewport and debounced redraw work', () => {
+test('chart stable-ready includes drawing restore viewport and debounced redraw work', () => {
   const { ChartManager, sb } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   let now = 0;
@@ -808,9 +870,9 @@ test('embedded stable-ready includes drawing restore viewport and debounced redr
     return id;
   };
   sb.clearTimeout = (id) => timers.delete(id);
-  sb.__CHANLUN_EMBEDDED_CHART = true;
-  sb.EmbeddedChartBridge = {
-    notifyDataReady(identity) { notifications.push(identity); },
+
+  sb.ChartTransition = {
+    markReady(identity) { notifications.push(identity); },
   };
   fx.cm._activeDrawingMutations = new Set();
   fx.cm._strictPendingCreates = new Map();
@@ -860,14 +922,14 @@ test('initial Chanlun draw waits for the final viewport and then runs exactly on
   assert.equal(fx.cm._pendingChanlunDrawGeneration, null);
 });
 
-test('context reset cancels an old embedded stable-ready report', () => {
+test('context reset cancels an old chart stable-ready report', () => {
   const { ChartManager, sb } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   const queued = new Map();
   let timerId = 0;
   let notified = 0;
-  sb.__CHANLUN_EMBEDDED_CHART = true;
-  sb.EmbeddedChartBridge = { notifyDataReady() { notified += 1; } };
+
+  sb.ChartTransition = { markReady() { notified += 1; } };
   sb.setTimeout = (callback) => {
     timerId += 1;
     queued.set(timerId, callback);
@@ -949,6 +1011,7 @@ test('完全相同的 bars-ready 快照不会延长嵌入图表稳定等待', ()
   fx.cm._tvDataReadyGeneration = 0;
   fx.cm._tvDataReadyIdentity = 'a:sh.600000|5';
   fx.cm._lastCompletedRenderSignature = fx.cm._chartRenderInputSignature(chartData, '5');
+  fx.cm._initialLoadDone = true;
   fx.setReady(true);
 
   fx.cm.handleBarsReadyEvent(barsReadyEvent());
@@ -966,6 +1029,84 @@ test('完全相同的 bars-ready 快照不会延长嵌入图表稳定等待', ()
   assert.equal(fx.calls.debounced, 1, '结构输入变化后仍必须重绘');
 });
 
+test('history and SSE object-key order cannot schedule a duplicate render, while revisions and geometry still can', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  const snapshot = { render_revision: 'r1', snapshot_revision: 's1', structure_revision: 'c1', source_closed_at: 1_700_000_600 };
+  const data = {
+    from: 1_700_000_000,
+    visibleRange: { from: 1_700_000_000, to: 1_700_000_600 },
+    barsResult: {
+      bars: [{ time: 1_700_000_000_000 }, { time: 1_700_000_300_000 }, { time: 1_700_000_600_000 }],
+      fxs: [{ text: 'ding', points: [{ price: 12, time: 1_700_000_300 }] }],
+      bis: [{ state: 'formed', linestyle: '0', points: [{ price: 10, time: 1_700_000_300 }, { price: 12, time: 1_700_000_600 }] }],
+      xds: [{ state: 'formed', linestyle: '0', points: [{ price: 10, time: 1_700_000_300 }, { price: 13, time: 1_700_000_600 }] }],
+      strict_structure_mode: 'replace', strict_structure: snapshot,
+    },
+  };
+  fx.cm.cl_show_config = { fx: true, bi: true, xd: true };
+  fx.cm.getChartData = () => data;
+  fx.cm._tvDataReadyGeneration = 0;
+  fx.cm._tvDataReadyIdentity = 'a:sh.600000|5';
+  fx.cm._initialLoadDone = true;
+  fx.setReady(true);
+  fx.cm._lastCompletedRenderSignature = fx.cm._chartRenderInputSignature(data, '5');
+  const reorder = value => Array.isArray(value) ? value.map(reorder)
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reorder(item)]))
+      : value;
+  data.barsResult = reorder(data.barsResult);
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.debounced, 0, 'identical coordinates received through SSE must not add 300ms of idle waiting');
+
+  for (const change of [
+    () => { data.barsResult.xds[0].points[0].price += 0.01; },
+    () => { data.barsResult.xds[0].state = 'locked'; },
+    () => { data.barsResult.strict_structure.snapshot_revision = 's2'; },
+    () => { data.visibleRange.to += 300; },
+    () => { fx.cm.cl_show_config.fx = false; },
+  ]) {
+    const previous = fx.calls.debounced;
+    change();
+    fx.cm.handleBarsReadyEvent(barsReadyEvent());
+    assert.equal(fx.calls.debounced, previous + 1, 'real historical, structure, viewport or display changes must redraw');
+    fx.cm._lastCompletedRenderSignature = fx.cm._chartRenderInputSignature(data, '5');
+  }
+});
+
+test('orphan cleanup waits only while creation or an unreferenced automatic shape can remain', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const timers = new Map();
+  let serial = 0;
+  sb.setTimeout = callback => { const id = ++serial; timers.set(id, callback); return id; };
+  sb.clearTimeout = id => timers.delete(id);
+  cm._reconcileOwnedIds = new Set(['stroke', 'center']);
+  cm.obj_charts = { stock: { bis: [{ id: 'stroke' }] } };
+  cm._strictContainers = new Map([['centers', [{ id: 'center' }]]]);
+  cm._strictPendingCreates = new Map();
+  cm._pendingRemovalIds = new Set();
+  cm._automaticShapeCreateCount = 0;
+  cm._scheduleOrphanSweep();
+  assert.equal(timers.size, 0, 'all automatic entities are accounted for; no cleanup timer is needed');
+
+  cm._automaticShapeCreateCount = 1;
+  cm._scheduleOrphanSweep();
+  assert.equal(timers.size, 1, 'an unfinished shape may still become an orphan');
+  cm._automaticShapeCreateCount = 0;
+  cm._scheduleOrphanSweep();
+  assert.equal(timers.size, 0, 'a later verified draw covers the older deferred sweep');
+
+  cm._reconcileOwnedIds.add('orphan');
+  const removed = [];
+  cm.chart = { getAllShapes: () => ['stroke', 'center', 'orphan', 'manual'].map(id => ({ id })) };
+  cm.safeRemove = id => removed.push(id);
+  cm._scheduleOrphanSweep();
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();
+  assert.deepEqual(removed, ['orphan'], 'preserve referenced structures and user drawings');
+});
+
 test('绘制输入指纹把 replace 与同一份 unchanged 严格快照视为等价', () => {
   const { ChartManager } = loadChartManager();
   const cm = Object.create(ChartManager.prototype);
@@ -977,7 +1118,7 @@ test('绘制输入指纹把 replace 与同一份 unchanged 严格快照视为等
   };
   cm.cl_show_config = { bi: true, xd: true };
   cm._strictStructureSnapshot = snapshot;
-  cm.getCurrentChartIdentity = () => ({ symbol: 'A:SH.600000', interval: '5' });
+  cm.getCurrentChartIdentity = () => ({ symbol: 'A:SH.600000', interval: '5', managerId: undefined });
   const chartData = {
     from: 1_700_000_000,
     visibleRange: { from: 1_700_000_000, to: 1_700_000_600 },
@@ -1042,7 +1183,7 @@ test('一次完整绘制会取消已被当前输入覆盖的防抖重绘', async
   cm.cl_show_config = {};
   cm.chart = { dataReady: () => true, getVisibleRange: () => chartData.visibleRange };
   cm.widget = { symbolInterval: () => ({ symbol: 'A:SH.600000', interval: '5' }) };
-  cm.getCurrentChartIdentity = () => ({ symbol: 'A:SH.600000', interval: '5' });
+  cm.getCurrentChartIdentity = () => ({ symbol: 'A:SH.600000', interval: '5', managerId: undefined });
   cm.getChartData = () => chartData;
   cm.drawChartElements = () => {};
   cm.markDrawingMutationStart = () => {};
@@ -1136,24 +1277,24 @@ test('CSP 模式禁用 blob iframe 并使用同源 TradingView 启动页', () =>
   assert.ok(disabledFeatures.includes('use_blob_for_iframe_loading'));
 });
 
-test('embedded 1m keeps the complete default range across responsive resizes', () => {
+test('lowest-center 1m keeps the complete default range across responsive resizes', () => {
   const { chartWidgetViewportOptions, sb } = loadChartManager();
   assert.equal(typeof chartWidgetViewportOptions, 'function');
 
-  sb.window.__CHANLUN_EMBEDDED_CHART = true;
-  const embeddedOneMinute = chartWidgetViewportOptions('1');
-  assert.equal(embeddedOneMinute.minBarSpacing, 0.01);
+  sb.document.body = {dataset: {chartFocus: 'lowest-center'}};
+  const focusedOneMinute = chartWidgetViewportOptions('1');
+  assert.equal(focusedOneMinute.minBarSpacing, 0.01);
   assert.ok(
-    embeddedOneMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
+    focusedOneMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
   );
 
-  const embeddedFiveMinute = chartWidgetViewportOptions('5');
-  assert.equal(embeddedFiveMinute.minBarSpacing, 0.05);
+  const focusedFiveMinute = chartWidgetViewportOptions('5');
+  assert.equal(focusedFiveMinute.minBarSpacing, 0.05);
   assert.ok(
-    !embeddedFiveMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
+    !focusedFiveMinute.enabledFeatures.includes('lock_visible_time_range_on_resize'),
   );
 
-  sb.window.__CHANLUN_EMBEDDED_CHART = false;
+  sb.document.body = {dataset: {}};
   const standaloneOneMinute = chartWidgetViewportOptions('1');
   assert.equal(standaloneOneMinute.minBarSpacing, 0.05);
   assert.ok(
@@ -1179,6 +1320,32 @@ test('行情页把 URL 周期保留为当前 iframe 的内存启动配置', () =
   );
   assert.match(template, /window\.__chanlunUrlBootstrap\s*=/);
   assert.match(template, /intervals:\s*selectedIntervals\.slice\(\)/);
+});
+
+test('single frequency links bootstrap the requested interval before any saved chart loads', () => {
+  const template = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'templates', 'index.html'), 'utf8');
+  const bootstrap = template.match(/\(function applyUrlSymbolParams\(\) \{[\s\S]*?\n    \}\)\(\);/)[0];
+  function launch(search) {
+    const settings = { a_interval_1: '30' };
+    const sandbox = { URLSearchParams, initial_market:'a', location:{search},
+      Utils:{set_local_data(key,value){settings[key]=value;}} };
+    sandbox.window=sandbox;
+    vm.runInNewContext(bootstrap, sandbox);
+    return {bootstrap:sandbox.__chanlunUrlBootstrap,settings};
+  }
+  for (const [frequency,interval] of [['1m','1'],['5m','5'],['30m','30']]) {
+    const result=launch(`?market=a&code=SH.600088&frequency=${frequency}&layout=single`);
+    assert.equal(result.bootstrap.layout,'single');
+    assert.deepEqual(Array.from(result.bootstrap.intervals),[interval]);
+    assert.equal(result.settings.a_interval_1,interval);
+  }
+  assert.equal(launch('?frequency=1m').bootstrap.layout,'single');
+  assert.deepEqual(Array.from(launch('?layout=single&frequency=1m&intervals=5').bootstrap.intervals),['5']);
+  for (const search of ['?frequency=bad','?layout=three&frequency=1m','?frequency=__proto__']) {
+    const result=launch(search);
+    assert.equal(result.bootstrap,undefined);
+    assert.equal(result.settings.a_interval_1,'30');
+  }
 });
 
 test('MACD_HTF 默认启用且通知 URL 可同时请求标准 MACD', () => {
@@ -1390,17 +1557,17 @@ test('_maybeWidenDefaultView: 选股嵌入图的 1m 展示全部已加载数据�
   ];
   sb.setTimeout = (callback) => { callback(); return 0; };
 
-  for (const { embedded, expectedRange } of [
+  for (const { focused, expectedRange } of [
     {
-      embedded: true,
+      focused: true,
       expectedRange: { from: latest - 30 * day, to: latest },
     },
     {
-      embedded: false,
+      focused: false,
       expectedRange: { from: latest - 2 * day, to: latest },
     },
   ]) {
-    sb.window.__CHANLUN_EMBEDDED_CHART = embedded;
+    sb.document.body = {dataset: focused ? {chartFocus: 'lowest-center'} : {}};
     const cm = makeManager(
       ChartManager,
       null,
@@ -1422,34 +1589,7 @@ test('_maybeWidenDefaultView: 选股嵌入图的 1m 展示全部已加载数据�
   }
 });
 
-test('_maybeApplyCausalFocus: 选股嵌入图的 1m 审计视窗同样覆盖五日', () => {
-  const { ChartManager, sb } = loadChartManager();
-  const cm = makeManager(ChartManager, null, new Map());
-  const focusAt = 1_735_891_200;
-  const applied = [];
-  sb.window.__CHANLUN_EMBEDDED_CHART = true;
-  sb.window.__chanlunReviewChartLock = {
-    candidate_id: `sha256:${'1'.repeat(64)}`,
-    source_sha256: `sha256:${'2'.repeat(64)}`,
-    review_as_of: focusAt + 10 * 86_400,
-    focus_at: focusAt,
-    symbol: 'SH.000001',
-    chart_interval: '1',
-    lock_kind: 'RISK_POINT_AUDIT',
-  };
-  cm.widget = {
-    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '1' }),
-  };
-  cm.chart = {
-    setVisibleRange: (range) => { applied.push(range); },
-    createMultipointShape: () => 'audit-marker-1m',
-  };
-  sb.setTimeout = (callback) => { callback(); return 0; };
 
-  assert.equal(cm._maybeApplyCausalFocus(), true);
-  assert.equal(applied.length, 1);
-  assert.equal(applied[0].to - applied[0].from, 5 * 86_400);
-});
 
 test('_maybeWidenDefaultView: TradingView 切标的瞬态拒绝会被消费并重试', async () => {
   const { ChartManager, sb } = loadChartManager();
@@ -1502,102 +1642,11 @@ test('_maybeWidenDefaultView: TradingView 切标的瞬态拒绝会被消费并�
   assert.equal(cm._viewSetGeneration, 7);
 });
 
-test('_maybeApplyCausalFocus: 风险点审计锁聚焦锚点且不越过因果截止', () => {
-  const { ChartManager, sb } = loadChartManager();
-  const cm = makeManager(ChartManager, null, new Map());
-  const focusAt = 1_735_891_200;
-  const reviewAsOf = focusAt + 10 * 86_400;
-  const applied = [];
-  const markers = [];
-  sb.window.__chanlunReviewChartLock = {
-    candidate_id: `sha256:${'1'.repeat(64)}`,
-    source_sha256: `sha256:${'2'.repeat(64)}`,
-    review_as_of: reviewAsOf,
-    focus_at: focusAt,
-    symbol: 'SH.000001',
-    chart_interval: '30',
-    lock_kind: 'RISK_POINT_AUDIT',
-  };
-  cm.widget = {
-    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '30' }),
-  };
-  cm.chart = {
-    setVisibleRange: (range) => { applied.push(range); },
-    createMultipointShape: (points, options) => {
-      markers.push({ points, options });
-      return 'audit-marker-1';
-    },
-  };
-  sb.setTimeout = (callback) => { callback(); return 0; };
 
-  assert.equal(cm._maybeApplyCausalFocus(), true);
-  assert.equal(applied.length, 1);
-  assert.ok(applied[0].from < focusAt);
-  assert.ok(applied[0].to > focusAt);
-  assert.ok(applied[0].to <= reviewAsOf);
-  assert.equal(markers.length, 1);
-  assert.deepEqual(markers[0].points, [{ time: focusAt }]);
-  assert.equal(Object.hasOwn(markers[0].points[0], 'price'), false);
-  assert.equal(markers[0].options.shape, 'vertical_line');
-  assert.match(markers[0].options.text, /无价格锚点/);
-  assert.equal(cm._maybeApplyCausalFocus(), true);
-  assert.equal(applied.length, 1, '同一稳定点只聚焦一次');
-  assert.equal(markers.length, 1, '同一稳定点只创建一条审计竖线');
-});
 
-test('_maybeApplyCausalFocus: QMT GICS3 复合代码保留内部冒号并可定位', () => {
-  const { ChartManager, sb } = loadChartManager();
-  const cm = makeManager(ChartManager, null, new Map());
-  const focusAt = 1_735_891_200;
-  const sector = `qmt-gics3:${'a'.repeat(64)}`;
-  sb.window.__chanlunReviewChartLock = {
-    candidate_id: `sha256:${'1'.repeat(64)}`,
-    source_sha256: `sha256:${'2'.repeat(64)}`,
-    review_as_of: focusAt + 86_400,
-    focus_at: focusAt,
-    symbol: sector,
-    chart_interval: '30',
-    lock_kind: 'RISK_POINT_AUDIT',
-  };
-  cm.widget = {
-    symbolInterval: () => ({ symbol: `a:${sector}`, interval: '30' }),
-  };
-  let markerPoint = null;
-  cm.chart = {
-    setVisibleRange: () => {},
-    createMultipointShape: (points) => {
-      markerPoint = points[0];
-      return 'sector-marker';
-    },
-  };
-  sb.setTimeout = (callback) => { callback(); return 0; };
 
-  assert.equal(cm._maybeApplyCausalFocus(), true);
-  assert.deepEqual(markerPoint, { time: focusAt });
-});
 
-test('_maybeApplyCausalFocus: 标的或周期与风险点锁不一致时不得聚焦', () => {
-  const { ChartManager, sb } = loadChartManager();
-  const cm = makeManager(ChartManager, null, new Map());
-  sb.window.__chanlunReviewChartLock = {
-    candidate_id: `sha256:${'1'.repeat(64)}`,
-    source_sha256: `sha256:${'2'.repeat(64)}`,
-    review_as_of: 1_735_891_200,
-    focus_at: 1_735_804_800,
-    symbol: 'SH.000001',
-    chart_interval: '30',
-    lock_kind: 'RISK_POINT_AUDIT',
-  };
-  cm.chart = { setVisibleRange: () => assert.fail('不应聚焦不匹配图表') };
-  cm.widget = {
-    symbolInterval: () => ({ symbol: 'a:SH.000002', interval: '30' }),
-  };
-  assert.equal(cm._maybeApplyCausalFocus(), false);
-  cm.widget = {
-    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '5' }),
-  };
-  assert.equal(cm._maybeApplyCausalFocus(), false);
-});
+
 
 test('_doReset: 首次 → 调 resetCache+resetData, 记账 backoff=0', () => {
   const { ChartManager, sb } = loadChartManager();
@@ -1690,46 +1739,6 @@ test('_doReset: 无 activeChart → 不 reset 且不污染记账', () => {
 // resKey = 'a:SH.000001'(→'a:sh.000001') + '5' = 'a:sh.0000015'
 const RES_KEY = 'a:sh.0000015';
 
-test('embedded symbol switches release SSE connection slots until the parent batch resumes', () => {
-  const { ChartManager, sb } = loadChartManager();
-  sb.window.__CHANLUN_EMBEDDED_CHART = true;
-  const widget = {
-    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '5' }),
-  };
-  const cm = makeManager(ChartManager, widget, new Map());
-  let closeCalls = 0;
-  cm._disposed = false;
-  cm._embeddedChartActive = true;
-  cm._embeddedRealtimeDeferredRequestId = null;
-  cm._embeddedRealtimeFallbackTimer = null;
-  cm._sse = { close() { closeCalls += 1; } };
-  cm._sseConnectionId = null;
-  cm._sseChannelId = 'test-channel';
-  cm._sseHealthTimer = null;
-  cm._sseFallbackInterval = null;
-  delete sb.__lastES;
-
-  assert.equal(cm.deferEmbeddedRealtime('chart-41'), true);
-  assert.equal(closeCalls, 1);
-  assert.equal(cm._embeddedRealtimeDeferredRequestId, 'chart-41');
-  cm._openSseStream();
-  assert.equal(sb.__lastES, undefined, 'deferred switch must not reopen EventSource');
-
-  assert.equal(cm.resumeEmbeddedRealtime('chart-40'), false);
-  assert.equal(sb.__lastES, undefined, 'stale parent request must not resume realtime');
-  assert.equal(cm.resumeEmbeddedRealtime('chart-41'), true);
-  assert.ok(sb.__lastES, 'matching batch completion resumes the new symbol stream');
-  assert.equal(cm._embeddedRealtimeDeferredRequestId, null);
-});
-
-test('standalone charts never enter the embedded realtime defer protocol', () => {
-  const { ChartManager, sb } = loadChartManager();
-  sb.window.__CHANLUN_EMBEDDED_CHART = false;
-  const cm = makeManager(ChartManager, null, new Map());
-  assert.equal(cm.deferEmbeddedRealtime('chart-1'), false);
-  assert.equal(cm.resumeEmbeddedRealtime('chart-1'), false);
-});
-
 function openStream(cm, sb) {
   cm._sse = null; cm._sseGotData = false; cm._sseHealthTimer = null; cm._sseFallbackInterval = null;
   cm.widget.symbolInterval = () => ({ symbol: 'a:SH.000001', interval: '5' });
@@ -1741,6 +1750,157 @@ function openStream(cm, sb) {
   const fire = (obj) => es._listeners['chanlun']({ data: JSON.stringify(obj) });
   return { es, fire, applyCalls, feedCalls };
 }
+
+test('standalone and inaccessible-parent charts retain the original transport and legacy close endpoint', () => {
+  for (const parent of [null, { get location() { throw new Error('cross-origin parent'); } }]) {
+    const { ChartManager, sb } = loadChartManager();
+    sb.location.origin = 'http://localhost:9900';
+    sb.parent = parent;
+    const cm = makeManager(ChartManager, {
+      symbolInterval: () => ({ symbol: 'a:SZ.301004', interval: '30' }),
+    });
+    cm._sseChannelId = 'standalone-test';
+    cm._openSseStream();
+    assert.ok(sb.__lastES.url.startsWith('/tv/stream?'));
+    const id = cm._sseConnectionId;
+    const closes = [];
+    cm._notifySseStreamClosed = value => closes.push(value);
+    cm._closeSseStream();
+    assert.deepEqual(closes, [id]);
+  }
+});
+
+test('hidden page releases its SSE and fallback timers without clearing valid chart evidence', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const { widget, calls } = spyWidget();
+  const map = new Map([[RES_KEY, { bars: [{ time: 1000000 }] }]]);
+  const cm = makeManager(ChartManager, widget, map);
+  const snapshot = { render_revision: 'already-validated' };
+  cm._strictStructureSnapshot = snapshot;
+  const { es, fire, applyCalls } = openStream(cm, sb);
+  let closes = 0;
+  es.close = () => { closes += 1; };
+  const cleared = [];
+  sb.clearTimeout = id => cleared.push(['timeout', id]);
+  sb.clearInterval = id => cleared.push(['interval', id]);
+  cm._sseHealthTimer = 91;
+  cm._sseFallbackInterval = 92;
+
+  sb.document.visibilityState = 'hidden';
+  cm._handlePageVisibilityChange();
+  assert.equal(closes, 1);
+  assert.equal(cm._sse, null);
+  assert.deepEqual(cleared, [['timeout', 91], ['interval', 92]]);
+  assert.equal(cm._strictStructureSnapshot, snapshot);
+  assert.equal(cm.udf_datafeed._historyProvider.bars_result, map);
+  assert.equal(calls.resetData, 0);
+  assert.equal(cm._needResetOnNextData, false);
+  // Already-queued callbacks from the closed stream must not invent a network
+  // outage or deliver old data after visibility/context changes.
+  es.onerror();
+  fire({ s: 'ok', t: [700, 1000], c: [1, 1] });
+  assert.equal(cm._disconnectedSinceMs, null);
+  assert.equal(applyCalls.length, 0);
+});
+
+test('hidden startup cannot reopen SSE or fast fallback', () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.document.visibilityState = 'hidden';
+
+  const cm = makeManager(ChartManager, {
+    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '5' }),
+  }, new Map());
+  let intervals = 0;
+  sb.setInterval = () => { intervals += 1; return 99; };
+  cm.udf_datafeed._dataPulseProvider = { _updateData() {} };
+
+  cm._openSseStream(); // Includes pageshow/online entry paths while hidden.
+  cm._startSseFallback();
+  assert.equal(sb.__lastES, undefined);
+  assert.equal(intervals, 0);
+  sb.document.visibilityState = 'visible';
+  cm._handlePageVisibilityChange();
+  assert.ok(sb.__lastES);
+  const firstStream = sb.__lastES;
+  firstStream.readyState = 0;
+  cm._handlePageVisibilityChange();
+  assert.equal(sb.__lastES, firstStream, 'a connecting stream must not be restarted');
+});
+
+for (const scenario of [
+  { name: 'unchanged close', t: [700, 1000], full: true, resets: 0, replay: undefined },
+  { name: 'small authoritative gap', t: [1000, 1300, 1600], full: true, resets: 0, replay: 1000 },
+  { name: 'gap without a complete replay', t: [1000, 1300, 1600], full: false, resets: 1 },
+]) {
+  test(`visible page reconnects and handles the actual first frame: ${scenario.name}`, () => {
+    const { ChartManager, sb } = loadChartManager();
+    const { widget, calls } = spyWidget();
+    const cm = makeManager(ChartManager, widget, new Map([[RES_KEY, { bars: [{ time: 1000000 }] }]]));
+    const { es, applyCalls, feedCalls } = openStream(cm, sb);
+    sb.document.visibilityState = 'hidden';
+    cm._handlePageVisibilityChange();
+    sb._setNowSec(10000); // A long hidden period is not itself an outage proof.
+    sb.document.visibilityState = 'visible';
+    cm._handlePageVisibilityChange();
+    const resumed = sb.__lastES;
+    assert.notEqual(resumed, es);
+    assert.equal(calls.resetData, 0, 'visibility alone must not clear the chart');
+    assert.equal(cm._needResetOnNextData, false);
+    const t = scenario.t;
+    resumed._listeners.chanlun({ data: JSON.stringify({
+      s: 'ok', bar_time_label: 'start', full_snapshot: scenario.full, t,
+      o: t.map(() => 1), h: t.map(() => 1), l: t.map(() => 1),
+      c: t.map(() => 1), v: t.map(() => 1),
+    }) });
+    assert.equal(calls.resetData, scenario.resets);
+    assert.equal(applyCalls.length, scenario.resets ? 0 : 1);
+    if (!scenario.resets) assert.equal(feedCalls[0][3], scenario.replay);
+  });
+}
+
+test('SSE-disabled visible pages retain polling refresh and hidden pages do not reset', () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.__CHANLUN_SSE_ENABLED = false;
+  const { widget, calls } = spyWidget();
+  const cm = makeManager(ChartManager, widget, new Map());
+  sb.document.visibilityState = 'hidden';
+  cm._handlePageVisibilityChange();
+  assert.equal(calls.resetData, 0);
+  sb.document.visibilityState = 'visible';
+  cm._handlePageVisibilityChange();
+  assert.equal(calls.resetData, 1);
+  assert.equal(sb.__lastES, undefined);
+});
+
+test('queued fallback tick stops on hidden visibility without issuing another history pulse', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, {}, new Map());
+  let callback;
+  let pulses = 0;
+  let clears = 0;
+  sb.setInterval = cb => { callback = cb; return 91; };
+  sb.clearInterval = () => { clears += 1; };
+  cm.udf_datafeed._dataPulseProvider = { _updateData() { pulses += 1; } };
+  sb.document.visibilityState = 'visible';
+  cm._startSseFallback();
+  sb.document.visibilityState = 'hidden';
+  callback();
+  assert.equal(pulses, 0);
+  assert.equal(clears, 1);
+  assert.equal(cm._sseFallbackInterval, null);
+});
+
+test('disposed pages cannot resume SSE on visibility', () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.document.visibilityState = 'visible';
+
+  const cm = makeManager(ChartManager, {
+    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '5' }),
+  }, new Map());
+  cm._disposed = true;
+  cm._handlePageVisibilityChange();
+  assert.equal(sb.__lastES, undefined);
+});
 
 test('onmessage: 正常帧(无断网/无 gap) → 走 apply+feed, 不 reset', () => {
   const { ChartManager, sb } = loadChartManager();
@@ -1830,8 +1990,8 @@ test('onmessage: authoritative SSE snapshot replays a small gap without reset', 
   assert.equal(feedCalls[0][3], 1000);
 });
 
-// ── H1 force_refresh(阶段E): _doReset 置一次性标志,datafeed 下次 firstDataRequest 绕过缓存重算 ──
-test('_doReset: 置一次性 force_refresh 标志(H1) 且 resetData 仍同步(不破坏时序)', () => {
+// 自动修复共享刚完成的服务端快照，手工强制刷新独立保留。
+test('_doReset: requests one stale-aware repair and keeps resetData synchronous', () => {
   const { ChartManager } = loadChartManager();
   const { widget, calls } = spyWidget();
   const cm = makeManager(ChartManager, widget);
@@ -1839,7 +1999,8 @@ test('_doReset: 置一次性 force_refresh 标志(H1) 且 resetData 仍同步(�
   const did = cm._doReset('k', 'reconnect', 5000);
   assert.equal(did, 1);
   assert.equal(calls.resetData, 1, 'resetData 仍同步调用(时序不变,不破坏现有 _doReset 测试)');
-  assert.equal(cm.udf_datafeed._historyProvider._forceRefreshOnce, true, '置一次性 force_refresh 标志');
+  assert.equal(cm.udf_datafeed._historyProvider._refreshIfStaleOnce, true);
+  assert.equal(cm.udf_datafeed._historyProvider._forceRefreshOnce, undefined);
 });
 
 test('_doReset: 无 udf_datafeed 时置标志不抛错(容错)', () => {

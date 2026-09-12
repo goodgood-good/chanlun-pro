@@ -9,12 +9,13 @@ from typing import Dict, List, Union
 import pandas as pd
 import numpy as np
 import pytz
-from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from tenacity import Retrying, stop_after_attempt, wait_exponential, retry_if_exception
 
-from longbridge.openapi import Config, QuoteContext, TradeContext, Market, Period, \
-    AdjustType, OrderSide, OrderType, TimeInForceType, SecurityListCategory, TradeSessions, OpenApiException
+from longbridge.openapi import (
+    Config, Market, Period, AdjustType, SecurityListCategory, TradeSessions,
+    OpenApiException,
+)
 
 # 缠论软件开发工具包导入。
 from chanlun import fun
@@ -23,6 +24,7 @@ from chanlun.exchange import Exchange, SINGLE_SYMBOL_STOCK_INFO
 from chanlun.exchange.exchange import Tick
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
+from chanlun.exchange.longbridge_quote import QuoteContextBridge
 from chanlun.exchange.lb_priority import lb_low_priority, _lb_call_priority  # noqa: F401  (lb_low_priority 供 web 层 prewarm 标记)
 from chanlun.exchange.kline_precision import (
     normalize_kline_precision,
@@ -133,13 +135,28 @@ def _normalize_longbridge_ohlc_geometry(
 
 def _build_longbridge_config() -> Config:
     """按当前长桥 SDK 与 LONGBRIDGE_* 环境变量构建配置。"""
+    if _get_env_bool("CHANLUN_LONGBRIDGE_DIRECT_QUOTES", False):
+        # Scope the proxy bypass to the broker's official quote endpoints.
+        # Preserve all other process routing, including other market providers.
+        hosts = (
+            "openapi.longbridge.com", "openapi-quote.longbridge.com",
+            "openapi.longbridge.cn", "openapi-quote.longbridge.cn",
+        )
+        existing = [
+            value.strip()
+            for key in ("NO_PROXY", "no_proxy")
+            for value in os.environ.get(key, "").split(",")
+            if value.strip()
+        ]
+        bypass = ",".join(dict.fromkeys((*existing, *hosts)))
+        os.environ["NO_PROXY"] = bypass
+        os.environ["no_proxy"] = bypass
     app_key = _get_env("LONGBRIDGE_APP_KEY")
     app_secret = _get_env("LONGBRIDGE_APP_SECRET")
     access_token = _get_env("LONGBRIDGE_ACCESS_TOKEN")
 
     http_url = _get_env("LONGBRIDGE_HTTP_URL")
     quote_ws_url = _get_env("LONGBRIDGE_QUOTE_WS_URL")
-    trade_ws_url = _get_env("LONGBRIDGE_TRADE_WS_URL")
     enable_overnight = _get_env_bool("LONGBRIDGE_ENABLE_OVERNIGHT", False)
     enable_print_quote_packages = _get_env_bool(
         "LONGBRIDGE_PRINT_QUOTE_PACKAGES", True
@@ -155,7 +172,6 @@ def _build_longbridge_config() -> Config:
             access_token,
             http_url=http_url,
             quote_ws_url=quote_ws_url,
-            trade_ws_url=trade_ws_url,
             enable_overnight=enable_overnight,
             enable_print_quote_packages=enable_print_quote_packages,
             log_path=log_path,
@@ -252,21 +268,46 @@ def time_logger(func):
     return wrapper
 
 
+def _candlestick_frame(candles):
+    """Normalize full SDK pages before applying any requested window."""
+    by_time = {}
+    for candle in candles:
+        previous = by_time.get(candle.timestamp)
+        if previous is None or float(candle.volume) >= float(previous.volume):
+            by_time[candle.timestamp] = candle
+    data = [(c.timestamp, float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume))
+            for c in by_time.values()]
+    frame = pd.DataFrame(data, columns=["date", "open", "high", "low", "close", "volume"])
+    if not data:
+        return frame
+    if isinstance(data[0][0], (int, float)):
+        frame["date"] = pd.to_datetime(frame["date"], unit="s", utc=True).dt.tz_convert("Asia/Shanghai")
+    else:
+        frame["date"] = pd.to_datetime(frame["date"])
+        frame["date"] = (frame["date"].dt.tz_localize("Asia/Shanghai") if frame["date"].dt.tz is None
+                         else frame["date"].dt.tz_convert("Asia/Shanghai"))
+    return frame
+
+
 @fun.singleton
 class ExchangeChangQiao(Exchange):
     """
     长桥交易所实现 - 高性能并发优化版
     """
 
+    # Keep the SDK's opening-boundary timestamps.  Consumers that require a
+    # completed boundary must normalize once, including delegated US history.
+    kline_time_label = "start"
+    supports_canonical_minute_history = True
+
     stock_info_query_scope = SINGLE_SYMBOL_STOCK_INFO
 
     def __init__(self):
         # 这里只构建配置对象，不在构造时立刻连网。
-        # 真正访问长桥时再懒加载 QuoteContext / TradeContext，避免应用启动阶段因网络问题直接失败。
+        # 真正访问行情时再建立连接，避免应用启动阶段因网络问题直接失败。
         self.config = _build_longbridge_config()
         self._quote_context = None
         self._quote_context_lock = threading.Lock()  # 保护 _quote_context 引用的读写
-        self._trade_context = None
         # 历史 bug：原来用单一字段 stock_list_cache 缓存 all_stocks 结果，且 all_stocks 写死
         # 只查 Market.US 的列表。配合 @fun.singleton（A/HK/US 共享同一实例），结果是任何
         # market 调 all_stocks 都返回同一份美股数据，导致 web 搜索框 A 股/港股全是美股标的。
@@ -305,6 +346,9 @@ class ExchangeChangQiao(Exchange):
             if inst is None:
                 return
             try:
+                context = inst._quote_context
+                if context is not None:
+                    context.close()
                 inst.executor.shutdown(wait=False, cancel_futures=True)
                 inst._quote_call_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
@@ -339,19 +383,18 @@ class ExchangeChangQiao(Exchange):
     _REBUILD_MIN_INTERVAL = 30.0  # 秒
     _last_rebuild_ts = None  # 上次重建的 time.monotonic()；类属性默认，实例首次重建时写
 
-    def _quote_ctx(self) -> QuoteContext:
+    def _quote_ctx(self) -> QuoteContextBridge:
         """懒加载 QuoteContext 并返回当前实例（加锁保护引用读写）。"""
         with self._quote_context_lock:
             if self._quote_context is None:
-                self._quote_context = QuoteContext(self.config)
+                self._quote_context = QuoteContextBridge(self.config)
             return self._quote_context
 
     def _rebuild_quote_ctx(self) -> None:
         """重建 QuoteContext。在检测到调用永久阻塞（超时）后调用。
 
-        del old 触发 Rust 侧 Drop：command_rx 发送端关闭
-        → Core::run() 检测到 recv() 返回 None → 任务正常退出。
-        旧线程池线程若仍在 Rust 层阻塞，最多再等 REQUEST_TIMEOUT(30s) 后释放。
+        关闭旧桥接器会取消未完成的异步请求，并在其事件线程释放 SDK 上下文。
+        等待这些请求的工作线程随之退出；重建仍保留退避，避免并发重连风暴。
         """
         old_executor = None
         with self._quote_context_lock:
@@ -363,14 +406,15 @@ class ExchangeChangQiao(Exchange):
                 return
             old = self._quote_context
             old_executor = self._quote_call_executor
-            self._quote_context = QuoteContext(self.config)
+            self._quote_context = QuoteContextBridge(self.config)
             # 同时换掉 _quote_call 专用池：真正卡死(永不返回)的 longbridge 调用会占住该池
             # 的 worker 泄漏，换新池让后续调用拿到干净 worker，不被僵尸占满。
             self._quote_call_executor = ThreadPoolExecutor(
                 max_workers=16, thread_name_prefix="lb-qcall"
             )
             self._last_rebuild_ts = now
-            del old
+        if old is not None:
+            old.close()
         # 锁外 shutdown 旧池(不 wait，里面可能有卡死线程；cancel 掉还没开始的排队任务)
         if old_executor is not None:
             try:
@@ -399,6 +443,14 @@ class ExchangeChangQiao(Exchange):
             # 关键：future.result(timeout=) 抛的是 concurrent.futures.TimeoutError，
             # Python<3.11 它不是 builtin TimeoutError(OSError 子类)。两个都列上，
             # 否则超时捕获不到 → _rebuild_quote_ctx() 永不执行、连接半死无法自愈。
+            # The async SDK releases Python while its first handshake is in
+            # progress, so the existing 2s/5s caller deadlines now work. Keep
+            # that single handshake alive through a bounded startup grace;
+            # immediately rebuilding it on every short status timeout would
+            # prevent a cold connection from ever completing.
+            context = self._quote_context
+            if context is not None and context.connecting:
+                raise
             LogUtil.error(
                 f"[lb] QuoteContext call timed out after {t}s, rebuilding ctx"
             )
@@ -437,12 +489,6 @@ class ExchangeChangQiao(Exchange):
             name="lb-quote-watchdog",
         )
         t.start()
-
-    def _trade_ctx(self) -> TradeContext:
-        # TradeContext 同样使用懒加载，避免只查行情时也初始化交易连接。
-        if self._trade_context is None:
-            self._trade_context = TradeContext(self.config)
-        return self._trade_context
 
     def default_code(self) -> str:
         return "TSLA.US"
@@ -762,7 +808,11 @@ class ExchangeChangQiao(Exchange):
             )
             call_timeout = self._QUOTE_CALL_TIMEOUT
 
+        attempt_number = 0
+
         def _do_call():
+            nonlocal attempt_number
+            attempt_number += 1
             tracker = LbQuotaTracker.instance()
             limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
             if limit <= 0 and not getattr(self, "_quota_limit_zero_warned", False):
@@ -780,7 +830,18 @@ class ExchangeChangQiao(Exchange):
 
             # prewarm/批量走独立低优先令牌桶，不与交互请求争抢同一个 3~6 QPS 额度
             limiter = self.prewarm_rate_limiter if priority == "prewarm" else self.rate_limiter
+            quota_started = time.perf_counter()
             limiter.wait()
+            quota_done = time.perf_counter()
+            context = self._quote_ctx()
+            # A first history response needs the initial authenticated socket.
+            # Allow the remainder of its single 20s handshake budget instead
+            # of issuing duplicate pages every 5s while that socket connects.
+            # Connected requests retain their original 5s/8s deadlines.
+            timeout = call_timeout
+            if isinstance(context, QuoteContextBridge):
+                timeout = max(timeout, context.connection_wait_seconds)
+            connecting = isinstance(context, QuoteContextBridge) and context.connecting
             result = self._quote_call(
                 lambda: self._quote_ctx().history_candlesticks_by_offset(
                     symbol=symbol,
@@ -791,8 +852,12 @@ class ExchangeChangQiao(Exchange):
                     time=time_cursor,
                     trade_sessions=trade_sessions
                 ),
-                timeout=call_timeout,
+                timeout=timeout,
             )
+            LogUtil.info(f"[history_page] {symbol} period={period} attempt={attempt_number} "
+                         f"quota={(quota_done - quota_started) * 1000:.0f}ms "
+                         f"request={(time.perf_counter() - quota_done) * 1000:.0f}ms "
+                         f"connecting={connecting} rows={len(result)}")
             # 记录本次成功的 symbol 进入本月配额集合
             tracker.add_symbol(symbol)
             return result
@@ -902,6 +967,31 @@ class ExchangeChangQiao(Exchange):
 
     @time_logger  # 开启耗时监控
     def klines(
+            self, code: str, frequency: str, start_date: str = None,
+            end_date: str = None, args=None,
+    ) -> pd.DataFrame:
+        query_args = dict(args or {})
+        # Reuse only this adapter's regular-session US history. Other markets,
+        # explicit ranges and nonstandard query options retain the original path.
+        if (self._market_of_code(code) == "us" and frequency in {"1m", "5m", "30m"}
+                and start_date is None
+                and not (set(query_args) - {"_canonical_closed_minute_as_of", "_bypass_history_cache"})):
+            from chanlun.exchange.closed_history_cache import load_closed_us_history
+            observed = pd.Timestamp(datetime.now(pytz.timezone("Asia/Shanghai")))
+            end = observed if end_date is None else pd.Timestamp(_parse_kline_boundary(
+                end_date, tz=pytz.timezone("Asia/Shanghai"), end_of_day=True,
+            ))
+            if query_args.get("_canonical_closed_minute_as_of") is not None:
+                end = min(end, pd.Timestamp(query_args["_canonical_closed_minute_as_of"]))
+            return load_closed_us_history(
+                code=code, frequency=frequency, observed=observed, end=end,
+                canonical=frequency == "1m" and "_canonical_closed_minute_as_of" in query_args,
+                force=bool(query_args.get("_bypass_history_cache")),
+                loader=lambda: self._fetch_klines(code, frequency, start_date, end_date, query_args),
+            )
+        return self._fetch_klines(code, frequency, start_date, end_date, query_args)
+
+    def _fetch_klines(
             self,
             code: str,
             frequency: str,
@@ -1027,6 +1117,7 @@ class ExchangeChangQiao(Exchange):
                 break
 
         # 6. 收集结果 + 源级完整性闸门(C1)
+        LogUtil.info(f"[history_source] {code} {frequency} cache=miss pages={len(tasks)}")
         all_candles = []
         failed = []  # [(seg_start, seg_end)] 真失败段(该段可能带洞)
         win = {f: (s, e) for f, s, e in tasks}
@@ -1055,7 +1146,7 @@ class ExchangeChangQiao(Exchange):
 
         # 完整性闸门:仍有失败段 → 本次拉取带洞不可信,返回空 DataFrame 且标 attrs['fetch_incomplete'],
         # 绝不把带洞结果当权威落盘(C1)。attrs 让 web 层区分「异常空→短退避 30s 自愈」与「真空→5min
-        # 负缓存」(见 chart_compute/sse_refresh);回测/monitor 忽略 attrs → 视同现状"拉取失败返空",契约不变。
+        # 负缓存」(见 chart_compute/sse_refresh)。
         if failed:
             LogUtil.error(f"[cq] {code} {frequency} 拉取不完整 failed={failed}, 拒绝返回带洞数据")
             _incomplete = pd.DataFrame()
@@ -1067,52 +1158,43 @@ class ExchangeChangQiao(Exchange):
 
         # *** 7. 向量化构建 DataFrame (核心修复) ***
         try:
-            # 同 timestamp 去重:实时进行中 bar 可能被多个分段各拉到一次(OHLC/volume 不同),
-            # as_completed 完成顺序不确定 → 原 {ts:c} 字典推导保留"最后 extend 进来"的那个 = 末根
-            # K 线不确定时，同一时间戳取成交量最大者；进行中 K 线的成交量单调增加，最大值即最新值。
-            # 快照,结果确定。历史 bar 各 ts 唯一,行为不变。
-            _by_ts = {}
-            for c in all_candles:
-                _prev = _by_ts.get(c.timestamp)
-                if _prev is None or float(c.volume) >= float(_prev.volume):
-                    _by_ts[c.timestamp] = c
-            unique_candles = _by_ts.values()
-            if not unique_candles:
-                return pd.DataFrame()
-
-            data = [
-                (c.timestamp, float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume))
-                for c in unique_candles
-            ]
-
-            df = pd.DataFrame(data, columns=["date", "open", "high", "low", "close", "volume"])
-
-            # === 时间处理逻辑 ===
-            if len(data) > 0:
-                first_ts = data[0][0]
-
-                # 区分 Unix Timestamp 和 Datetime Object
-                if isinstance(first_ts, (int, float)):
-                    # Unix Timestamp: 必须指定 unit='s' 和 utc=True，然后转上海
-                    df["date"] = pd.to_datetime(df["date"], unit='s', utc=True)
-                    df["date"] = df["date"].dt.tz_convert("Asia/Shanghai")
-                else:
-                    # 已经是 Datetime 对象
-                    df["date"] = pd.to_datetime(df["date"])
-
-                    if df["date"].dt.tz is None:
-                        # Naive 时间数值已是本地时间，用 tz_localize 贴标签而非转换数值。
-                        df["date"] = df["date"].dt.tz_localize("Asia/Shanghai")
-                    else:
-                        # 如果自带时区，则转换为上海时间
-                        df["date"] = df["date"].dt.tz_convert("Asia/Shanghai")
-            # ==========================
+            df = _candlestick_frame(all_candles)
+            canonical_cutoff = None
+            canonical_as_of = args.get("_canonical_closed_minute_as_of")
+            if canonical_as_of is not None and frequency == "1m" and start_date is None:
+                observed = min(pd.Timestamp(canonical_as_of), pd.Timestamp(end_dt), pd.Timestamp(now_dt))
+                closed = df.loc[df["date"] + pd.Timedelta(minutes=1) <= observed]
+                if closed.empty:
+                    return pd.DataFrame()
+                canonical_cutoff = closed["date"].max() + pd.Timedelta(minutes=1)
+                canonical_start = canonical_cutoff - get_lookback_timedelta("1m")
+                # The final full SDK page often already includes the missing
+                # head beyond the wall-clock window. Reuse that exact page.
+                # If it does not cover the closed-end lookback, fetch ONLY the
+                # uncovered head; never assume a holiday/weekend contains no bars.
+                covered_start = min(pd.Timestamp(start_dt), df["date"].min())
+                if canonical_start < covered_start:
+                    try:
+                        extra, status = self._fetch_segment_data(
+                            lb_symbol, period, adjust, covered_start.to_pydatetime(),
+                            canonical_start.to_pydatetime(), priority,
+                        )
+                    except Exception:
+                        extra, status = (), "failed"
+                    if status not in {"complete", "reached_origin"}:
+                        incomplete = pd.DataFrame()
+                        incomplete.attrs["fetch_incomplete"] = True
+                        return incomplete
+                    df = _candlestick_frame((*all_candles, *extra))
+                start_dt, end_dt = canonical_start, canonical_cutoff
 
             # 下界过滤 >= start_dt；上界仅历史查询时限制 <= end_dt，
             # 查实时增量时不过滤，避免本地时钟微小差异丢掉最新 K 线。
             mask = df["date"] >= start_dt
             if is_history_query:
                 mask = mask & (df["date"] <= end_dt)
+            if canonical_cutoff is not None:
+                mask &= df["date"] + pd.Timedelta(minutes=1) <= canonical_cutoff
 
             df = df.loc[mask]
 
@@ -1145,6 +1227,8 @@ class ExchangeChangQiao(Exchange):
                     ohlc_geometry_repair_count=repair_count,
                     ohlc_geometry_max_adjustment=max_adjustment,
                 )
+            if canonical_cutoff is not None:
+                df.attrs["canonical_minute_cutoff"] = canonical_cutoff.isoformat()
             return df
 
         except Exception as e:
@@ -1230,76 +1314,6 @@ class ExchangeChangQiao(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-    def balance(self):
-        """
-        获取账户余额
-        """
-        try:
-            balances = self._trade_ctx().account_balance()
-            if not balances:
-                return {}
-            b = balances[0]
-            return {
-                "total_cash": float(b.total_cash),
-                "max_finance_amount": float(b.max_finance_amount),
-                "currency": b.currency,
-            }
-        except Exception as e:
-            LogUtil.error(f"Error in balance: {e}")
-            return {}
-
-    def positions(self, code: str = ""):
-        """
-        获取持仓
-        """
-        try:
-            resp = self._trade_ctx().stock_positions()
-            positions = []
-            for channel in resp.channels:
-                for p in channel.positions:
-                    pos = {
-                        "code": p.symbol,
-                        "qty": p.quantity,
-                        "can_sell_qty": p.available_quantity,
-                        "cost_price": float(p.cost_price),
-                    }
-                    positions.append(pos)
-            if code:
-                positions = [p for p in positions if p["code"] == code]
-            return positions
-        except Exception as e:
-            LogUtil.error(f"Error in positions: {e}")
-            raise RuntimeError("Longbridge position query failed") from e
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        """
-        下单
-        """
-        side = OrderSide.Buy if o_type.lower() == "buy" else OrderSide.Sell
-        order_type = OrderType.MO
-        price = None
-
-        if args and "price" in args:
-            price = Decimal(str(args["price"]))
-            order_type = OrderType.LO
-
-        qty = Decimal(str(amount))
-
-        try:
-            resp = self._trade_ctx().submit_order(
-                symbol=code,
-                order_type=order_type,
-                side=side,
-                submitted_quantity=qty,
-                time_in_force=TimeInForceType.Day,
-                submitted_price=price,
-            )
-            return resp.order_id
-        except Exception as e:
-            LogUtil.error(f"Error in order: {e}")
-            return None
-
 
 class ExchangeChangQiaoMarketView:
     """把共享长桥连接绑定到不可变市场，避免 HK/US 互相覆盖默认市场。"""

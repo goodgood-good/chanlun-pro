@@ -122,7 +122,8 @@ def test_endpoint_reads_disk_cache_outside_global_cache_lock(client, monkeypatch
     assert observed == [False]
 
 
-def test_complete_cache_hit_never_waits_for_calculation_lock(client, monkeypatch):
+@pytest.mark.parametrize("automatic_repair", [False, True])
+def test_complete_cache_hit_never_waits_for_calculation_lock(client, monkeypatch, automatic_repair):
     """A readable snapshot stays interactive while background refresh owns its lock."""
 
     _seed_entry(validated_at=time.time())
@@ -135,13 +136,14 @@ def test_complete_cache_hit_never_waits_for_calculation_lock(client, monkeypatch
 
     monkeypatch.setattr(tv_mod, "chart_calc_locks", _UnexpectedLockRegistry())
 
-    response = client.get(_url())
+    response = client.get(_url() + ("&refresh_if_stale=1" if automatic_repair else ""))
 
     assert response.status_code == 200
     assert response.get_json()["s"] == "ok"
 
 
-def test_cache_miss_rechecks_after_waiting_for_calculation_lock(client, monkeypatch):
+@pytest.mark.parametrize("automatic_repair", [False, True])
+def test_cache_miss_rechecks_after_waiting_for_calculation_lock(client, monkeypatch, automatic_repair):
     """A concurrent fill wins while waiting; the follower must not recompute it."""
 
     cfg = query_cl_chart_config(MARKET, CODE)
@@ -154,7 +156,9 @@ def test_cache_miss_rechecks_after_waiting_for_calculation_lock(client, monkeypa
     def _read_entry(_cache_key):
         assert _cache_key == key
         reads.append(_cache_key)
-        return None if len(reads) == 1 else filled_entry
+        if len(reads) == 1:
+            return {**filled_entry, "validated_at": time.time() - 90} if automatic_repair else None
+        return filled_entry
 
     class _Lock:
         def __enter__(self):
@@ -178,7 +182,7 @@ def test_cache_miss_rechecks_after_waiting_for_calculation_lock(client, monkeypa
         lambda *_a, **_k: pytest.fail("the second cache check should win"),
     )
 
-    response = client.get(_url())
+    response = client.get(_url() + ("&refresh_if_stale=1" if automatic_repair else ""))
 
     assert response.status_code == 200
     assert response.get_json()["s"] == "ok"

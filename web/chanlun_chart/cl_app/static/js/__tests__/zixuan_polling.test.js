@@ -164,7 +164,6 @@ function loadZiXuan(customNodes, options) {
     Array,
     Object,
     Date: FakeDate,
-    __CHANLUN_EMBEDDED_CHART: options.embeddedChart === true,
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -198,22 +197,6 @@ function loadZiXuan(customNodes, options) {
     },
   };
 }
-
-test('decision-support embedded charts never start auxiliary watchlist work', () => {
-  const h = loadZiXuan(undefined, { embeddedChart: true });
-
-  assert.equal(h.ZiXuan.load_groups(), false);
-  assert.equal(h.ZiXuan.render_zixuan_opts(), false);
-  assert.equal(h.ZiXuan.render_zixuan_stocks(), false);
-  assert.equal(h.ZiXuan.refresh_rates(), false);
-  assert.equal(h.ZiXuan.stocks_update_rate(), false);
-  assert.equal(h.ZiXuan.init_zixuan_opts(), false);
-  assert.equal(h.ZiXuan.set_rate_polling_active(true), false);
-  assert.equal(h.ajaxCalls.length, 0);
-  assert.equal(h.timers.length, 0);
-  assert.equal(h.intervalCalls.length, 0);
-  assert.equal(h.visibilityListenerCount(), 0);
-});
 
 test('a page loaded while hidden waits for visibility before requesting quotes', () => {
   const h = loadZiXuan(undefined, { visibilityState: 'hidden' });
@@ -363,6 +346,33 @@ test('one global group batches quotes by each member market', () => {
   assert.equal(h.timers.length, 0, 'wait for every market batch');
   completeSuccess(h.ajaxCalls[1], { ok: true, market_state: 'closed', ticks: [] });
   assert.deepEqual(h.timers.map((timer) => timer.delay), [3000]);
+});
+
+test('cross-market quotes reserve chart connections and prioritize the active market', () => {
+  const markets = ['a', 'hk', 'fx', 'us', 'ny_futures', 'currency_spot'];
+  const h = loadZiXuan(markets.map(market => ({ market, code: 'TEST' })));
+  h.setIdentity('us', 'TEST');
+  h.ZiXuan.stocks_update_rate();
+  assert.equal(h.ajaxCalls.length, 2);
+  assert.equal(h.ajaxCalls[0].data.market, 'us');
+  for (let completed = 0; completed < markets.length; completed++) {
+    assert.ok(h.ajaxCalls.length - completed <= 2, 'at most two live quote requests');
+    completeSuccess(h.ajaxCalls[completed], {ok:true, market_state:'open', ticks:[]});
+  }
+  assert.deepEqual(h.ajaxCalls.map(call => call.data.market).sort(), markets.sort());
+  assert.deepEqual(h.timers.map(timer => timer.delay), [3000]);
+});
+
+test('hiding a watchlist discards unstarted quote batches and can resume', () => {
+  const h = loadZiXuan(['a','us','hk','fx'].map(market => ({market, code:'TEST'})));
+  h.ZiXuan.stocks_update_rate();
+  h.ZiXuan.set_rate_polling_active(false);
+  completeSuccess(h.ajaxCalls[0], {ok:true, market_state:'open', ticks:[]});
+  completeSuccess(h.ajaxCalls[1], {ok:true, market_state:'open', ticks:[]});
+  assert.equal(h.ajaxCalls.length, 2);
+  assert.equal(h.timers.length, 0);
+  h.ZiXuan.set_rate_polling_active(true);
+  assert.equal(h.ajaxCalls.length, 4);
 });
 
 test('a closed market keeps its last quote without joining every open-market poll', () => {
@@ -614,23 +624,6 @@ test('index collapse handler owns the watchlist polling lifecycle', () => {
   assert.match(
     template,
     /if \(ca_title === "自选组"\) \{\s*ZiXuan\.set_rate_polling_active\(is_open\);\s*\}/,
-  );
-});
-
-test('index derives decision-support embed mode before auxiliary workbench startup', () => {
-  const template = fs.readFileSync(
-    path.join(__dirname, '..', '..', '..', 'templates', 'index.html'),
-    'utf8',
-  );
-
-  assert.match(template, /window\.__CHANLUN_EMBEDDED_CHART\s*=\s*false/);
-  assert.match(
-    template,
-    /params\.get\("chart_embed"\)[^;]+===\s*"decision-support"/,
-  );
-  assert.match(
-    template,
-    /if \(!window\.__CHANLUN_EMBEDDED_CHART\) SymbolsPanel\.init\(\)/,
   );
 });
 

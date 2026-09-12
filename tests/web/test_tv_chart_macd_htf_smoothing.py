@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 
 from chanlun.cl_utils import cl_data_to_tv_chart
 from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
-from tests.trading_system.strict_helpers import strict_evidence_result
+from chanlun.core.strict_structure.center_machine import calculate_centers
+from chanlun.core.strict_structure.models import SourceKind
 
 
 class _StrictChartCD:
     def __init__(self) -> None:
-        self.evidence = strict_evidence_result()
+        self.evidence = SimpleNamespace(source_closed_at=datetime(2026,8,5,7,0,tzinfo=timezone.utc), price_basis_revision="test-raw", symbol="SH.600088", source_frequency="5m")
         self._strict_htf_macd_by_level = {
             0: {
                 "dif": [10.0, -5.0, 2.0, 100.0, -100.0, 8.0, 50.0, 4.0],
@@ -40,11 +43,29 @@ class _StrictChartCD:
     def get_xds(self):
         return []
 
-    def get_strict_evidence(self):
-        return self.evidence
+    def get_native_centers(self):
+        return calculate_centers((), 0, SourceKind.SEGMENT)
+
+    def get_code(self):
+        return self.evidence.symbol
+
+    def get_frequency(self):
+        return self.evidence.source_frequency
+
+    def _strict_as_of(self):
+        return self.evidence.source_closed_at
+
+    def _strict_price_quantum(self):
+        return Decimal("0.01")
+
+    def _strict_price_basis_revision(self):
+        return self.evidence.price_basis_revision
+
+    def _strict_config_revision(self):
+        return "test-native-v2"
 
 
-def test_tv_payload_smooths_htf_without_mutating_strict_evidence() -> None:
+def test_tv_payload_smooths_htf_without_mutating_runtime_macd() -> None:
     cd = _StrictChartCD()
     strict_dif = list(cd._strict_htf_macd_by_level[0]["dif"])
     closed_at = cd.evidence.source_closed_at

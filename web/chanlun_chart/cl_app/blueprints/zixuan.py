@@ -13,7 +13,7 @@
 
 import re
 
-from flask import Blueprint, Response, current_app, render_template, request
+from flask import Blueprint, Response, render_template, request
 from flask_login import login_required
 from werkzeug.utils import secure_filename
 
@@ -21,7 +21,7 @@ from chanlun.market import Market
 from chanlun.exchange import get_exchange, resolve_bounded_stock_info
 from chanlun.tools.log_util import LogUtil
 from chanlun.zixuan import ZiXuan
-from ..services.trading_screening_scope import admit_explicit_validation_codes
+from ..services.symbol_scope import admit_explicit_validation_codes
 
 
 zixuan_bp = Blueprint("zixuan", __name__)
@@ -35,28 +35,6 @@ _VALID_MARKETS = frozenset(market.value for market in Market)
 _NORMALIZED_A_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 
 
-def _notify_instrument_scope_changed(market: str) -> None:
-    """Best-effort wake-up after a successful watchlist membership edit."""
-
-    try:
-        if market == "a":
-            screening = current_app.extensions.get(
-                "decision_support_trading_screening"
-            )
-            notify = getattr(screening, "notify_instrument_scope_changed", None)
-            if callable(notify):
-                notify()
-        monitor = current_app.extensions.get("holding_group_monitor")
-        refresh = getattr(monitor, "request_refresh", None)
-        if callable(refresh):
-            refresh()
-    except Exception:
-        # 持久化已经成功；轮询仍是保证正确性的回退机制，因此调度器瞬时失败
-        # 不能把用户已成功的编辑变成 HTTP 500 响应。
-        current_app.logger.warning(
-            "live monitor wake-up failed after watchlist edit",
-            exc_info=True,
-        )
 
 
 def _normalize_group_name(value):
@@ -190,8 +168,6 @@ def opt_zixuan_group(market):
     zx = ZiXuan(market)
     if opt == "DEL":
         deleted = zx.del_zx_group(zx_group)
-        if deleted:
-            _notify_instrument_scope_changed(market)
         return {
             "ok": deleted,
             "group": zx_group,
@@ -299,7 +275,6 @@ def opt_zixuan_import():
         ]
         if not zx.replace_zx_stocks(zx_group, existing + list(imported.values())):
             return {"ok": False, "msg": "导入失败"}, 409
-        _notify_instrument_scope_changed(market)
 
     return {"ok": True, "msg": f"成功导入 {len(imported)} 条记录"}
 
@@ -330,7 +305,5 @@ def set_stock_zixuan():
     else:
         res = False
 
-    if res and opt in {"ADD", "DEL"}:
-        _notify_instrument_scope_changed(market)
 
     return {"ok": res}

@@ -203,24 +203,6 @@ def test_stroke_observation_uses_same_five_role_gate() -> None:
     assert establish_center(values, 0, SourceKind.STROKE_OBSERVATION) is not None
 
 
-def test_recursive_center_still_uses_three_completed_trend_types() -> None:
-    entry = unit(-1, "down", 130, 90, source_kind=SourceKind.TREND_TYPE)
-    body = (
-        unit(0, "up", 90, 120, source_kind=SourceKind.TREND_TYPE),
-        unit(1, "down", 120, 100, source_kind=SourceKind.TREND_TYPE),
-        unit(2, "up", 100, 115, source_kind=SourceKind.TREND_TYPE),
-    )
-
-    center = establish_center(
-        body, 0, SourceKind.TREND_TYPE, entry_unit=entry
-    )
-    without_entry = establish_center(body, 0, SourceKind.TREND_TYPE)
-
-    assert center is not None and without_entry is not None
-    assert center.entry_unit is entry
-    assert center.core_units == body
-    assert center.establishment_leave_unit is None
-    assert center.center_id == without_entry.center_id
 
 
 def test_sixth_outside_return_completes_without_joining_body() -> None:

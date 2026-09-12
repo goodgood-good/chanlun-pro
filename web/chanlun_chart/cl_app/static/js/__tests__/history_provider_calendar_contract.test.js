@@ -44,14 +44,14 @@ function loadDatafeed(
   return { datafeed, historyProvider: datafeed._historyProvider };
 }
 
-test('every embedded first request asks for complete current history atomically', async () => {
+test('every atomic_initial first request asks for complete current history atomically', async () => {
   for (const resolution of ['1D', '30', '5', '1']) {
     const pending = [];
     const fetchImpl = (url) => new Promise((resolve) => {
       pending.push({ url, resolve });
     });
     const { historyProvider } = loadDatafeed(fetchImpl, {
-      historyParams: { embedded: 1 },
+      historyParams: { atomic_initial: 1 },
     });
     const sourceClose = Date.UTC(2026, 7, 31, 7) / 1000;
     const request = historyProvider.getBars(
@@ -66,8 +66,7 @@ test('every embedded first request asks for complete current history atomically'
     );
     const historyRequest = pending.find((item) => item.url.includes('/history?'));
     const parsed = new URL(historyRequest.url);
-    assert.equal(parsed.searchParams.get('embedded'), '1');
-    assert.equal(parsed.searchParams.get('numeric_delta'), '1');
+    assert.equal(parsed.searchParams.get('atomic_initial'), '1');
     assert.equal(
       parsed.searchParams.get('countback'),
       null,
@@ -76,22 +75,23 @@ test('every embedded first request asks for complete current history atomically'
 
     historyRequest.resolve({
       ok: true,
-      text: async () => JSON.stringify(response([sourceClose], `embedded-${resolution}`)),
+      text: async () => JSON.stringify(response([sourceClose], `atomic_initial-${resolution}`)),
     });
     await request;
   }
 });
 
-test('embedded complete-history floor settles older probes without another request', async () => {
+test('atomic_initial complete-history floor settles older probes without another request', async () => {
   const pending = [];
   const fetchImpl = (url) => new Promise((resolve) => {
     pending.push({ url, resolve });
   });
   const { historyProvider } = loadDatafeed(fetchImpl, {
-    historyParams: { embedded: 1 },
+    historyParams: { atomic_initial: 1 },
   });
   const symbolInfo = { ticker: 'a:SH.603610', name: 'a:SH.603610' };
   const floor = 1_700_000_000;
+  const chartFloor = floor - 60;
   const initial = historyProvider.getBars(symbolInfo, '1', {
     from: floor,
     to: floor + 120,
@@ -99,7 +99,7 @@ test('embedded complete-history floor settles older probes without another reque
     firstDataRequest: true,
   });
   const initialRequest = pending.find((item) => item.url.includes('/history?'));
-  const payload = response([floor, floor + 60, floor + 120], 'embedded-floor');
+  const payload = response([floor, floor + 60, floor + 120], 'atomic_initial-floor');
   payload.history_floor = floor;
   initialRequest.resolve({
     ok: true,
@@ -110,7 +110,7 @@ test('embedded complete-history floor settles older probes without another reque
   const requestCount = pending.filter((item) => item.url.includes('/history?')).length;
   const older = await historyProvider.getBars(symbolInfo, '1', {
     from: floor - 1_800,
-    to: floor,
+    to: chartFloor,
     countBack: 31,
     firstDataRequest: false,
   });
@@ -323,6 +323,58 @@ test('weekly and monthly bars use their period-start chart coordinates', () => {
   );
 });
 
+test('explicit US close labels preserve raw evidence and align history and SSE at 19:30', () => {
+  const { datafeed, historyProvider } = loadDatafeed();
+  const close = Date.UTC(2026, 6, 30, 20) / 1000;
+  const payload = { ...response([close - 1800, close], 'us-close'), bar_time_label: 'end' };
+  const before = JSON.stringify(payload);
+  const received = [];
+  datafeed.subscribeBars({ ticker: 'us:AAPL.US', name: 'us:AAPL.US' }, '30',
+    (bar) => received.push(bar), 'us-close', () => {});
+  const result = historyProvider.applyChanlunUpdate(payload, params('us:AAPL.US', '30'));
+  const stored = historyProvider.bars_result.get('us:aapl.us30');
+  assert.equal(result.bar_time_label, 'end');
+  assert.equal(stored.bar_time_label, 'end');
+  assert.deepEqual(Array.from(stored.times), [close - 1800, close].map(t => t * 1000));
+  assert.equal(stored.bars.at(-1).time, Date.UTC(2026, 6, 30, 19, 30));
+  assert.equal(stored.strict_structure.source_closed_at, close);
+  datafeed.feedRealtimeBar('us:aapl.us30', payload, '30', close - 1800);
+  assert.deepEqual(received.map(b => b.time), [Date.UTC(2026, 6, 30, 19, 30)]);
+  assert.equal(JSON.stringify(payload), before, 'transport and availability evidence stays raw');
+});
+
+test('explicit start labels do not shift US history or override a provider with an A-market guess', () => {
+  const { historyProvider } = loadDatafeed();
+  const open = Date.UTC(2026, 6, 30, 19, 30) / 1000;
+  for (const symbol of ['us:AAPL.US', 'a:SH.600000']) {
+    historyProvider.applyChanlunUpdate({ ...response([open], 'start'), bar_time_label: 'start' },
+      params(symbol, '30'));
+    const stored = historyProvider.bars_result.get(`${symbol.toLowerCase()}30`);
+    assert.equal(stored.bar_time_label, 'start');
+    assert.equal(stored.bars[0].time, open * 1000);
+  }
+});
+
+test('US minute missing or invalid labels fail before cache mutation; delta cannot mix label conventions', () => {
+  const { datafeed, historyProvider } = loadDatafeed();
+  const close = Date.UTC(2026, 6, 30, 20) / 1000;
+  for (const resolution of ['1', '5', '30']) {
+    assert.throws(() => historyProvider.applyChanlunUpdate(response([close], 'missing'),
+      params('us:AAPL.US', resolution)), /history_bar_time_label_missing/);
+  }
+  assert.equal(historyProvider.bars_result.size, 0);
+  assert.throws(() => datafeed.feedRealtimeBar('us:aapl.us30', response([close], 'missing'), '30'),
+    /history_bar_time_label_missing/);
+  const payload = { ...response([close], 'close'), bar_time_label: 'end' };
+  historyProvider.applyChanlunUpdate(payload, params('us:AAPL.US', '30'));
+  const original = JSON.stringify(historyProvider.bars_result.get('us:aapl.us30'));
+  assert.throws(() => historyProvider.applyChanlunUpdate({ ...payload, bar_time_label: 'unknown' },
+    params('us:AAPL.US', '30')), /history_bar_time_label_invalid/);
+  assert.throws(() => historyProvider.applyChanlunUpdate({ ...payload, update: true, bar_time_label: 'start' },
+    params('us:AAPL.US', '30', 'false')), /history_bar_time_label_changed/);
+  assert.equal(JSON.stringify(historyProvider.bars_result.get('us:aapl.us30')), original);
+});
+
 test('SSE realtime bars use the same calendar coordinate as history bars', () => {
   const { datafeed } = loadDatafeed();
   const received = [];
@@ -454,7 +506,7 @@ test('a current first request cannot return a snapshot older than the aggregate 
     pending.push({ url, resolve });
   });
   const { historyProvider } = loadDatafeed(fetchImpl, {
-    historyParams: { embedded: 1 },
+    historyParams: { atomic_initial: 1 },
   });
   const symbolInfo = { ticker: 'a:SH.513100', name: 'a:SH.513100' };
   const earlier = Date.UTC(2026, 6, 22, 7) / 1000;
@@ -483,5 +535,35 @@ test('a current first request cannot return a snapshot older than the aggregate 
 
   assert.equal(result.strict_structure.render_revision, 'latest');
   assert.equal(result.bars.at(-1).time, Date.UTC(2026, 6, 23));
-  assert.equal(historyProvider._completeHistoryFloorByKey.get('a:sh.5131001d'), earlier);
+  assert.equal(historyProvider._completeHistoryFloorByKey.get('a:sh.5131001d'), Date.UTC(2026, 6, 22) / 1000);
+});
+
+test('standalone complete floors use chart opening time and do not discard the first US candle', async () => {
+  const pending = [];
+  const { historyProvider } = loadDatafeed(url => new Promise(resolve => pending.push({url, resolve})), {
+    historyParams: { atomic_initial: 1 },
+  });
+  const symbolInfo = { ticker: 'us:AAPL.US' }, floor = 1_700_000_040;
+  const initial = historyProvider.getBars(symbolInfo, '1', {
+    from: floor - 60, to: floor + 120, countBack: 329, firstDataRequest: true,
+  });
+  const payload = {...response([floor, floor + 60], 'us-floor'), bar_time_label: 'end', history_floor: floor};
+  const first = pending.find(item => item.url.includes('/history?'));
+  assert.equal(new URL(first.url).searchParams.get('countback'), null);
+  first.resolve({ok: true, text: async () => JSON.stringify(payload)});
+  await initial;
+  const older = await historyProvider.getBars(symbolInfo, '1', {
+    from: floor - 1800, to: floor - 60, firstDataRequest: false,
+  });
+  assert.equal(older.meta.noData, true);
+  assert.equal(pending.filter(item => item.url.includes('/history?')).length, 1);
+  const includesFirstBar = historyProvider.getBars(symbolInfo, '1', {
+    from: floor - 1800, to: floor, firstDataRequest: false,
+  });
+  const requests = pending.filter(item => item.url.includes('/history?'));
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ok: true, text: async () => JSON.stringify({
+    ...response([floor], 'first-bar'), bar_time_label: 'end', update: true,
+  })});
+  assert.equal((await includesFirstBar).bars[0].time, (floor - 60) * 1000);
 });

@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from chanlun.core.cl import CL
-from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
+from chanlun.cl_utils.price_metadata import strict_cl_config
 
 
 FREQUENCY = "1m"
@@ -27,7 +27,7 @@ def _config(*, basis: str = "test-incremental-raw") -> dict[str, object]:
 
 def _generate_klines(count: int, seed: int) -> pd.DataFrame:
     rng = np.random.RandomState(seed)
-    start = pd.Timestamp("2024-01-01 09:30:00")
+    start = pd.Timestamp("2024-01-01 09:30:00", tz="Asia/Shanghai")
     rows: list[dict[str, object]] = []
     price = 100.0
     previous_high, previous_low = price + 0.3, price - 0.3
@@ -69,17 +69,8 @@ def _line_signature(lines) -> tuple[tuple[object, ...], ...]:
 
 
 def _strict_signature(cd: CL) -> tuple[object, ...]:
-    evidence = cd.get_strict_evidence()
-    return (
-        _line_signature(cd.get_bis()),
-        _line_signature(cd.get_xds()),
-        evidence.structure_revision,
-        evidence.structure,
-        evidence.stroke_center_observations,
-        evidence.confirmed_points,
-        evidence.approaching_points,
-        evidence.divergences,
-    )
+    return (_line_signature(cd.get_bis()), _line_signature(cd.get_xds()), cd.get_native_centers())
+
 
 
 @pytest.mark.parametrize("seed", (3, 11, 29, 101))

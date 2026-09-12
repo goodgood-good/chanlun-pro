@@ -16,8 +16,8 @@ def test_readiness_runner_reuses_a_recent_deep_snapshot() -> None:
     class _FlaskApp:
         pass
 
-    def health_snapshot(kind, market, forward_session):
-        calls.append((kind, market, forward_session))
+    def health_snapshot(kind, market):
+        calls.append((kind, market))
         return {"status": "ready", "market": market}, 200
 
     flask_app = _FlaskApp()
@@ -34,12 +34,12 @@ def test_readiness_runner_reuses_a_recent_deep_snapshot() -> None:
             cache_ttl_seconds=5,
             stale_if_busy_seconds=30,
         )
-        first = runner.submit("a", None).result(timeout=1)
-        second = runner.submit("a", None).result(timeout=1)
+        first = runner.submit("a").result(timeout=1)
+        second = runner.submit("a").result(timeout=1)
 
         assert first[0]["status"] == "ready"
         assert second[0]["readiness_snapshot_cached"] is True
-        assert calls == [("readyz", "a", None)]
+        assert calls == [("readyz", "a")]
     finally:
         executor.shutdown(wait=True, cancel_futures=True)
 
@@ -49,12 +49,11 @@ class TestNativeHealthHandler(AsyncHTTPTestCase):
         class _FlaskApp:
             extensions = {
                 "health_snapshot": staticmethod(
-                    lambda kind, market, forward_session: (
+                    lambda kind, market: (
                         {
                             "status": "not_ready",
                             "kind": kind,
                             "market": market,
-                            "forward_session": forward_session,
                         },
                         503,
                     )
@@ -73,14 +72,8 @@ class TestNativeHealthHandler(AsyncHTTPTestCase):
             "status": "not_ready",
             "kind": "readyz",
             "market": "a",
-            "forward_session": None,
         }
 
-    def test_forward_session_reaches_the_shared_health_snapshot(self):
-        response = self.fetch("/readyz?market=a&forward_session=2026-07-30")
-
-        assert response.code == 503
-        assert json.loads(response.body)["forward_session"] == "2026-07-30"
 
 
 class TestNativeHealthIsolation(AsyncHTTPTestCase):
@@ -93,7 +86,7 @@ class TestNativeHealthIsolation(AsyncHTTPTestCase):
 
         flask_app = _FlaskApp()
 
-        def health_snapshot(kind, market, forward_session):
+        def health_snapshot(kind, market):
             if kind == "livez":
                 return {"status": "alive", "revision": "test"}, 200
             if kind == "healthz":
@@ -103,7 +96,6 @@ class TestNativeHealthIsolation(AsyncHTTPTestCase):
             return {
                 "status": "ready",
                 "market": market,
-                "forward_session": forward_session,
             }, 200
 
         flask_app.extensions = {"health_snapshot": health_snapshot}

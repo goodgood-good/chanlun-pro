@@ -23,6 +23,7 @@ def compute_signature(chart_data: dict) -> str:
         return "0"
     t = chart_data.get("t") or []
     parts = [f"t:{len(t)}:{t[-1] if t else ''}"]
+    parts.append(f"bar_time_label:{chart_data.get('bar_time_label', '')}")
     # 末根 K 线 OHLC 纳入指纹:使"末根价格在不改变形态计数时变动"(盘中绝大多数 tick)也被检测到,
     # 与 prepend 的“末根 OHLC 全等才跳过”判据对齐，消除“算了不推”导致的盘中实时停滞。
     # 末根一动即推,但被 SSE_REFRESH_MS(8s)周期天然限流,不会每 tick 刷屏。

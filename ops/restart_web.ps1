@@ -1,8 +1,7 @@
 ﻿# ============================================================================
 # restart_web.ps1
 #
-# 重启 chanlun-pro 网页应用。应用进程通过 app_qmt_runtime.py 管理 QMT 生命周期；
-# 部署脚本本身不修改 QMT。
+# 重启行情与中枢图表应用；QMT 行情客户端独立管理。
 # ============================================================================
 
 [CmdletBinding()]
@@ -10,11 +9,11 @@ param(
     [switch]$PreflightOnly,
     [switch]$SkipWatchdog,
     [switch]$OpenBrowser,
-    [switch]$EnableLargeScreeningScope,
-    [switch]$EnableLargeHoldingMonitorScope,
+
+
     [switch]$EnableFullSymbolCatalog,
-    [switch]$EnableFullCoverage,
-    [switch]$ForceFullCoverageUntilComplete,
+
+
     [ValidateRange(30, 1800)]
     [int]$WebReadinessTimeoutSeconds = 1800
 )
@@ -22,12 +21,6 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy_common.ps1')
 
-if ($EnableFullCoverage -and -not $EnableLargeScreeningScope) {
-    throw '-EnableFullCoverage requires -EnableLargeScreeningScope'
-}
-if ($ForceFullCoverageUntilComplete -and -not $EnableFullCoverage) {
-    throw '-ForceFullCoverageUntilComplete requires -EnableFullCoverage'
-}
 
 # -------------------------------- 配置 ---------------------------------------
 $ProjectRoot  = Split-Path -Parent $PSScriptRoot
@@ -40,10 +33,6 @@ $watchdogInstaller = Join-Path $ProjectRoot 'ops\install_web_watchdog.ps1'
 $watchdogStateRoot = Join-Path $ProjectRoot '.cache\chanlun_web_watchdog'
 $watchdogScopePath = Join-Path $watchdogStateRoot 'deployment_scope.json'
 $PreflightTimeoutSec = 30
-$LargeScopePriorityMaxSymbols = 384
-$LargeScopeMonitorUniverseSymbols = 384
-$LargeScopeCandidateFiveMinuteSymbols = 128
-$FullCoverageBatchSymbols = 240
 $LogDir       = Join-Path $PSScriptRoot 'logs'
 # ----------------------------------------------------------------------------
 
@@ -62,13 +51,8 @@ function Write-WatchdogDeploymentScope {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][int]$Port,
-        [bool]$LargeScreeningScopeEnabled,
-        [bool]$LargeHoldingMonitorScopeEnabled,
-        [bool]$FullSymbolCatalogEnabled,
-        [bool]$FullCoverageEnabled,
-        [bool]$ForcedFullCoverageEnabled
+        [bool]$FullSymbolCatalogEnabled
     )
-
     $parent = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
@@ -78,31 +62,16 @@ function Write-WatchdogDeploymentScope {
         project_root = $ProjectRoot
         web_port = $Port
         updated_at = (Get-Date).ToString('o')
-        enable_large_screening_scope = $LargeScreeningScopeEnabled
-        enable_large_holding_monitor_scope = $LargeHoldingMonitorScopeEnabled
         enable_full_symbol_catalog = $FullSymbolCatalogEnabled
-        enable_full_coverage = $FullCoverageEnabled
-        force_full_coverage_until_complete = $ForcedFullCoverageEnabled
     }
     $temporary = '{0}.{1}.tmp' -f $Path, $PID
     try {
-        [IO.File]::WriteAllText(
-            $temporary,
-            (($payload | ConvertTo-Json -Depth 3 -Compress) + [Environment]::NewLine),
-            (New-Object Text.UTF8Encoding($false))
-        )
+        [IO.File]::WriteAllText($temporary, ($payload | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
         Move-Item -LiteralPath $temporary -Destination $Path -Force
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
-    Log (
-        'persisted watchdog deployment scope: large={0}; holding={1}; catalog={2}; coverage={3}; force={4}' -f `
-            $LargeScreeningScopeEnabled,
-            $LargeHoldingMonitorScopeEnabled,
-            $FullSymbolCatalogEnabled,
-            $FullCoverageEnabled,
-            $ForcedFullCoverageEnabled
-    )
+    Log ('persisted catalog scope: full={0}' -f $FullSymbolCatalogEnabled)
 }
 
 function Open-WebApplication([string]$Uri) {
@@ -181,11 +150,9 @@ function Register-LimitedWebLaunchTask {
         [Parameter(Mandatory = $true)][string]$TaskName,
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [bool]$LargeScopeEnabled = $false,
-        [bool]$LargeHoldingMonitorScopeEnabled = $false,
-        [bool]$FullSymbolCatalogEnabled = $false,
-        [bool]$FullCoverageEnabled = $false,
-        [bool]$ForcedFullCoverageEnabled = $false
+
+
+        [bool]$FullSymbolCatalogEnabled = $false
     )
 
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -200,17 +167,11 @@ function Register-LimitedWebLaunchTask {
         '-SkipWatchdog',
         ('-WebReadinessTimeoutSeconds {0}' -f $TimeoutSeconds)
     )
-    if ($LargeScopeEnabled) { $argumentParts += '-EnableLargeScreeningScope' }
-    if ($LargeHoldingMonitorScopeEnabled) {
-        $argumentParts += '-EnableLargeHoldingMonitorScope'
-    }
+
     if ($FullSymbolCatalogEnabled) {
         $argumentParts += '-EnableFullSymbolCatalog'
     }
-    if ($FullCoverageEnabled) { $argumentParts += '-EnableFullCoverage' }
-    if ($ForcedFullCoverageEnabled) {
-        $argumentParts += '-ForceFullCoverageUntilComplete'
-    }
+
     $arguments = $argumentParts -join ' '
     $action = New-ScheduledTaskAction `
         -Execute 'powershell.exe' `
@@ -597,94 +558,7 @@ try {
         $(if ($EnableFullSymbolCatalog) { '1' } else { '0' }),
         'Process'
     )
-    # A normal restart is always a validation restart.  Stale process, user or
-    # .env values cannot reactivate broad/full processing; operators must use
-    # the independent explicit switches above for this invocation.
-    if (-not $EnableLargeScreeningScope) {
-        $boundedScreeningNumericNames = @(
-            'CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE',
-            'CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS',
-            'CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS',
-            'CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK',
-            'CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH',
-            'CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH',
-            'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS'
-        )
-        foreach ($name in $boundedScreeningNumericNames) {
-            [Environment]::SetEnvironmentVariable($name, '12', 'Process')
-        }
-        [Environment]::SetEnvironmentVariable(
-            'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS',
-            '20',
-            'Process'
-        )
-    } else {
-        # Full-market discovery remains cadence-bounded, while every currently
-        # confirmed 5m setup must fit the one-minute locator admission wave.
-        # Twelve affinity shards retain 48 hot 1m runtimes each. A 384-symbol
-        # admission ceiling covers the exact locator pool plus mandatory
-        # watch/holding symbols without binding it to the ordinary 240-symbol
-        # five-minute rotation; the 128-symbol 5m ceiling also fits the current
-        # first-center forming set at a new bar boundary. The absolute
-        # 58-second budget still fails closed on a real throughput shortfall.
-        [Environment]::SetEnvironmentVariable(
-            'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS',
-            [string]$LargeScopePriorityMaxSymbols,
-            'Process'
-        )
-        [Environment]::SetEnvironmentVariable(
-            'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS',
-            [string]$LargeScopeMonitorUniverseSymbols,
-            'Process'
-        )
-        [Environment]::SetEnvironmentVariable(
-            'CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS',
-            [string]$LargeScopeCandidateFiveMinuteSymbols,
-            'Process'
-        )
-        if ($EnableFullCoverage) {
-            # Full-market rebuilds use a separate, deeper work queue so all
-            # structure processes stay occupied between durable checkpoints.
-            # This does not enlarge the latency-sensitive 5m candidate lane.
-            [Environment]::SetEnvironmentVariable(
-                'CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH',
-                [string]$FullCoverageBatchSymbols,
-                'Process'
-            )
-            [Environment]::SetEnvironmentVariable(
-                'CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH',
-                [string]$FullCoverageBatchSymbols,
-                'Process'
-            )
-        }
-    }
-    [Environment]::SetEnvironmentVariable(
-        'CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE',
-        $(if ($EnableLargeScreeningScope) { '1' } else { '0' }),
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED',
-        $(if ($EnableFullCoverage) { '1' } else { '0' }),
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE',
-        $(if ($ForceFullCoverageUntilComplete) { '1' } else { '0' }),
-        'Process'
-    )
-    if (-not $EnableLargeHoldingMonitorScope) {
-        [Environment]::SetEnvironmentVariable(
-            'CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS',
-            '12',
-            'Process'
-        )
-    }
-    [Environment]::SetEnvironmentVariable(
-        'CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED',
-        $(if ($EnableLargeHoldingMonitorScope) { '1' } else { '0' }),
-        'Process'
-    )
+    $env:CHANLUN_CHART_ONLY = '1'
     Import-UserEnvironmentFallback -Names @(
         'LONGBRIDGE_APP_KEY',
         'LONGBRIDGE_APP_SECRET',
@@ -702,47 +576,6 @@ if (-not (Test-LoginUsersConfig -Value $env:CHANLUN_LOGIN_USERS)) {
     exit 1
 }
 Log ('project Python = {0}' -f $PythonExe)
-
-$largeScopeRequested = (
-    $EnableLargeScreeningScope -or
-    $EnableLargeHoldingMonitorScope -or
-    $EnableFullSymbolCatalog -or
-    $EnableFullCoverage -or
-    $ForceFullCoverageUntilComplete
-)
-if ($largeScopeRequested) {
-    $validationDirectory = Join-Path `
-        $ProjectRoot `
-        'audit\chanlun_trading_system_backtest\research_sample_validation_12'
-    # Windows PowerShell promotes native stderr to ``NativeCommandError`` when
-    # the script-wide ErrorActionPreference is Stop.  A rejected gate is an
-    # expected, controlled preflight result: capture its complete traceback and
-    # exit code so the operator sees the actual rejection while the old service
-    # remains untouched.
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $validationOutput = @(& $PythonExe `
-            (Join-Path $ProjectRoot 'tools\verify_qmt_validation_gate.py') `
-            '--directory' $validationDirectory `
-            '--expected-symbol-count' '12' 2>&1)
-        $validationExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if ($validationExitCode -ne 0) {
-        $validationDetail = ($validationOutput | ForEach-Object {
-            ([string]$_).Trim()
-        } | Where-Object { $_ }) -join ' '
-        Log (
-            'ERROR: large-scope validation12 gate rejected startup before service stop: {0}' -f `
-                $validationDetail
-        )
-        Log '===== web restart ABORTED ====='
-        exit 1
-    }
-    Log 'current validation12 gate verified before large-scope startup'
-}
 
 $webPort = 9900
 if (-not [string]::IsNullOrWhiteSpace($env:CHANLUN_WEB_PORT)) {
@@ -933,12 +766,7 @@ if (Test-CurrentProcessElevated) {
             -TaskName $handoffTaskName `
             -ScriptPath $PSCommandPath `
             -TimeoutSeconds $WebReadinessTimeoutSeconds `
-            -LargeScopeEnabled $EnableLargeScreeningScope.IsPresent `
-            -LargeHoldingMonitorScopeEnabled `
-                $EnableLargeHoldingMonitorScope.IsPresent `
-            -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent `
-            -FullCoverageEnabled $EnableFullCoverage.IsPresent `
-            -ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent
+            -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent
     } catch {
         Abort-AfterWebStop -Reason (
             'failed to register limited-token Web launch handoff: {0}' -f `
@@ -1032,13 +860,7 @@ if (Test-CurrentProcessElevated) {
             Write-WatchdogDeploymentScope `
                 -Path $watchdogScopePath `
                 -Port $webPort `
-                -LargeScreeningScopeEnabled $EnableLargeScreeningScope.IsPresent `
-                -LargeHoldingMonitorScopeEnabled `
-                    $EnableLargeHoldingMonitorScope.IsPresent `
-                -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent `
-                -FullCoverageEnabled $EnableFullCoverage.IsPresent `
-                -ForcedFullCoverageEnabled `
-                    $ForceFullCoverageUntilComplete.IsPresent
+                -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent
         } catch {
             Log ('ERROR: unable to persist watchdog deployment scope: {0}' -f $_.Exception.Message)
             Log '===== web restart ABORTED ====='
@@ -1173,12 +995,7 @@ try {
     Write-WatchdogDeploymentScope `
         -Path $watchdogScopePath `
         -Port $webPort `
-        -LargeScreeningScopeEnabled $EnableLargeScreeningScope.IsPresent `
-        -LargeHoldingMonitorScopeEnabled `
-            $EnableLargeHoldingMonitorScope.IsPresent `
-        -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent `
-        -FullCoverageEnabled $EnableFullCoverage.IsPresent `
-        -ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent
+        -FullSymbolCatalogEnabled $EnableFullSymbolCatalog.IsPresent
 } catch {
     Log ('ERROR: unable to persist watchdog deployment scope: {0}' -f $_.Exception.Message)
     Log '===== web restart ABORTED ====='
@@ -1235,21 +1052,11 @@ if (-not $SkipWatchdog) {
         '-WebPort',
         [string]$webPort
     )
-    if ($EnableLargeScreeningScope) {
-        $watchdogArguments += '-EnableLargeScreeningScope'
-    }
-    if ($EnableLargeHoldingMonitorScope) {
-        $watchdogArguments += '-EnableLargeHoldingMonitorScope'
-    }
+
     if ($EnableFullSymbolCatalog) {
         $watchdogArguments += '-EnableFullSymbolCatalog'
     }
-    if ($EnableFullCoverage) {
-        $watchdogArguments += '-EnableFullCoverage'
-    }
-    if ($ForceFullCoverageUntilComplete) {
-        $watchdogArguments += '-ForceFullCoverageUntilComplete'
-    }
+
     $watchdogProcess = Start-Process `
         -FilePath 'powershell.exe' `
         -ArgumentList $watchdogArguments `

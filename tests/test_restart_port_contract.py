@@ -348,28 +348,6 @@ def test_restart_rejects_invalid_login_environment_before_stopping_service():
     assert "现有服务未停止" in source
 
 
-def test_restart_logs_large_scope_gate_failure_before_stopping_service():
-    source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
-    ).read_text(encoding="utf-8")
-
-    validation = source.index("$validationOutput = @(& $PythonExe")
-    failure_log = source.index(
-        "ERROR: large-scope validation12 gate rejected startup before service stop"
-    )
-    stop_phase = source.index("# --- 1. ")
-
-    assert validation < failure_log < stop_phase
-    assert "$validationExitCode = $LASTEXITCODE" in source
-    gate_capture_start = source.index(
-        "$previousErrorActionPreference = $ErrorActionPreference",
-        source.index("if ($largeScopeRequested)"),
-    )
-    gate_capture = source[gate_capture_start:failure_log]
-    assert "$previousErrorActionPreference = $ErrorActionPreference" in gate_capture
-    assert "$ErrorActionPreference = 'Continue'" in gate_capture
-    assert "$ErrorActionPreference = $previousErrorActionPreference" in gate_capture
-    assert "===== web restart ABORTED =====" in source[failure_log:stop_phase]
 
 
 def test_poetry_python_resolution_tolerates_informational_stderr_only():

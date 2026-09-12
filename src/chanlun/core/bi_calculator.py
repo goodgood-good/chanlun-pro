@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from bisect import bisect_right
 from typing import List, Optional
 
 from chanlun.core.types import FX, BI, CLKline
@@ -69,7 +70,7 @@ class BiCalculator:
 
     对内采用“已确认笔 + 当前待定笔”的状态机，每次在最新缠论 K 线上重放，
     优先保证结果正确与全量/增量一致性。
-    生产规则只允许严格笔。
+    生产规则采用作者 2007-09-18 修订的成笔条件。
     """
 
     def __init__(self):
@@ -77,7 +78,6 @@ class BiCalculator:
         self.fxs: List[FX] = []
         self.confirmed_bis: List[BI] = []
         self.pending_bi: Optional[BI] = None
-        self.bi_index: int = 0
         self.cl_klines: List[CLKline] = []
         self._last_kline_snapshot: Optional[tuple] = None
         # 由 CL_Kline_Process 提供的单调数据代次。只有调用方提供可信代次时，
@@ -108,25 +108,21 @@ class BiCalculator:
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
         """检查两个分型是否能构成有效的一笔。
 
-        顶底之间必须间隔足够的独立（包含处理后）缠论 K 线，即合并
-        缠论 K 线坐标 ``fx.k.index`` 距离至少为 4。
+        L077 的价格区间条件仍成立。2007-09-18 附文修订距离条件：
+        三 K 分型不能共用合并 K 线（中心距离至少 3）；两个极值所在
+        原始 K 线之间至少 3 根 K 线（原始坐标距离至少 4）。
+        不可把原始距离偷换成合并距离，也不可只比较两个分型的 val。
         """
         if fx1.type == fx2.type:
             return False
 
-        if fx2.k.index <= fx1.k.index:
+        if (fx2.k.index - fx1.k.index) < 3:
             return False
-        if (fx2.k.index - fx1.k.index) < 4:
+        if (fx2.k.k_index - fx1.k.k_index) < 4:
             return False
 
-        if fx1.type == 'ding':
-            if fx2.val >= fx1.val:
-                return False
-        else:
-            if fx2.val <= fx1.val:
-                return False
-
-        return True
+        top, bottom = (fx1, fx2) if fx1.type == 'ding' else (fx2, fx1)
+        return top.k.h > bottom.k.h and top.k.l > bottom.k.l
 
     @staticmethod
     def _is_more_extreme(new_fx: FX, old_fx: FX) -> bool:
@@ -192,9 +188,11 @@ class BiCalculator:
     def _first_following_endpoint_witness(self, bi: BI):
         """重放第一个使后续笔成立的更晚分型。"""
 
-        for candidate in self.fxs:
-            if candidate.k.index <= bi._end.k.index:
-                continue
+        # 分型按中心 K 线递增保存。跳过已过去的前缀，仍依次检查每一个后续
+        # 候选，保留最早确认见证（不能直接取最终下一笔的端点）。
+        start = bisect_right(self.fxs, bi._end.k.index, key=lambda fx: fx.k.index)
+        for position in range(start, len(self.fxs)):
+            candidate = self.fxs[position]
             if candidate.type == bi._end.type:
                 continue
             if not self._check_stroke_validity(bi._end, candidate):
@@ -236,7 +234,6 @@ class BiCalculator:
         else:
             self._prev_pending_pos = -1
 
-        self.bi_index = nconf + (1 if self.pending_bi is not None else 0)
         self.bis = list(self.confirmed_bis)
         if self.pending_bi is not None:
             self.bis.append(self.pending_bi)
@@ -285,6 +282,11 @@ class BiCalculator:
                 if fx.type == last.type:
                     # 情形①：同类，保留更极端者
                     if self._is_more_extreme(fx, last):
+                        # 更极端的中心 K 可能同时变宽，已经不满足与上一
+                        # 端点的价格区间关系。替换必须仍是一笔；不能先弹出
+                        # 有效端点，再因新端点无效而撤销前一笔的确认见证。
+                        if len(stack) >= 2 and not self._check_stroke_validity(stack[-2], fx):
+                            break
                         stack.pop()
                         if len(stack) < stable:
                             stable = len(stack)
@@ -395,7 +397,6 @@ class BiCalculator:
             self.confirmed_bis = []
             self.pending_bi = None
             self.bis = []
-            self.bi_index = 0
             self._last_kline_snapshot = None
             self._last_source_revision = None
             self._last_processed_kline_count = 0

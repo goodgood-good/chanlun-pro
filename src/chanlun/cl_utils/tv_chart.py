@@ -1,4 +1,5 @@
 import logging
+from time import perf_counter, thread_time
 from typing import Union
 
 import numpy as np
@@ -8,9 +9,12 @@ from chanlun import fun
 from chanlun.core.macd import MACD
 from chanlun.core.macd_htf import interpolate_causal_htf_for_chart
 from chanlun.core.types import Kline
+from chanlun.core.strict_structure.geometry_replay import with_geometry_replay
+from chanlun.tools.log_util import LogUtil
 
 
 
+@with_geometry_replay
 def cl_data_to_tv_chart(
     frame: pd.DataFrame,
     config: dict,
@@ -20,9 +24,9 @@ def cl_data_to_tv_chart(
     frequency: str,
     strict_runtime,
 ) -> Union[dict, None]:
-    """Serialize bars and structure from one mandatory strict chart runtime."""
+    """Display native bars, strokes, segments and their centers."""
 
-    from chanlun.cl_utils.strict_chart import build_strict_structure_snapshot
+    from chanlun.cl_utils.strict_chart import build_center_snapshot
 
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("chart frame must be a pandas DataFrame")
@@ -196,7 +200,7 @@ def cl_data_to_tv_chart(
         "xds": xd_chart_data,
     }
 
-    if not runtime_available:
+    if strict_runtime.error_code is not None or strict_runtime.cd is None:
         result["strict_structure_mode"] = "unavailable"
         result["strict_structure_error"] = {
             "code": strict_runtime.error_code or "strict_evidence_invalid"
@@ -205,21 +209,14 @@ def cl_data_to_tv_chart(
 
     error_code = "strict_evidence_invalid"
     try:
-        evidence = strict_cd.get_strict_evidence()
-        strict_structure = build_strict_structure_snapshot(
-            evidence,
-            interval=frequency,
+        structure_started = perf_counter()
+        cpu_started = thread_time()
+        strict_structure = build_center_snapshot(
+            strict_runtime.cd, interval=frequency, display_bar_closed_at=tuple(kline_ts),
         )
-        if (
-            strict_structure["symbol"] != code
-            or strict_structure["source_frequency"] != frequency
-            or strict_structure["display_frequency"] != frequency
-            or strict_structure["source_closed_at"] != kline_ts[-1]
-        ):
+        if strict_structure["symbol"] != code or strict_structure["source_frequency"] != frequency:
             error_code = "strict_context_mismatch"
-            raise ValueError(
-                "strict snapshot context does not match displayed bars"
-            )
+            raise ValueError("center source does not match the displayed symbol and interval")
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "strict chart structure unavailable "
@@ -236,5 +233,15 @@ def cl_data_to_tv_chart(
     else:
         result["strict_structure_mode"] = "replace"
         result["strict_structure"] = strict_structure
+        structure_finished = perf_counter()
+        cpu_finished = thread_time()
+        if structure_finished - structure_started >= 1:
+            LogUtil.info(
+                "[strict_chart_cost] %s:%s %s bars=%d segments=%d "
+                "total_ms=%.0f total_cpu_ms=%.0f",
+                market, code, frequency, len(kline_ts), len(xd_chart_data),
+                (structure_finished - structure_started) * 1000,
+                (cpu_finished - cpu_started) * 1000,
+            )
 
     return result

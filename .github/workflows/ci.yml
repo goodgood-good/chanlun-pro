@@ -53,7 +53,7 @@ jobs:
           # cannot be resolved by pip-audit on Linux. Audit every registry dependency.
           grep -v -E '(@ file:|package/.*\.whl)' /tmp/req-all.txt > /tmp/req.txt
       - name: Audit dependencies (CVE scan)
-        # 审计 Web/AI/通知/回测/监控部署画像；发现漏洞时阻断，不再假通过。
+        # 检查当前 Web 与行情适配器的锁定依赖。
         # Poetry 在互斥 extras 中可能锁定同一包的不同版本；这里逐项审计全部已固定
         # 版本，不让 pip 再次解析并错误地把互斥画像合并安装。
         run: |
@@ -127,7 +127,7 @@ jobs:
           poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
       - name: Install test profile dependencies
         # tests/exchange/test_usmart.py 在收集阶段直接导入 Crypto，必须安装 usmart 画像。
-        run: poetry install --extras monitor --extras usmart
+        run: poetry install --extras usmart
       - name: Install Playwright browser
         run: poetry run playwright install chromium
       - name: Run tests

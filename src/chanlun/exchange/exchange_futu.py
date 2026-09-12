@@ -13,7 +13,6 @@ except ImportError as _e:
     ) from _e
 
 g_ctx = None
-g_ttx = None
 
 
 def CTX():
@@ -31,23 +30,6 @@ def CTX():
         if ret == RET_OK and sub_data["own_used"] >= 90:
             g_ctx.unsubscribe_all()
     return g_ctx
-
-
-def TTX() -> [OpenSecTradeContext, None]:
-    """
-    返回富途交易对象
-    """
-    global g_ttx
-    if config.FUTU_HOST == "":
-        return None
-    if g_ttx is None:
-        g_ttx = OpenSecTradeContext(
-            filter_trdmarket=TrdMarket.HK,
-            host=config.FUTU_HOST,
-            port=config.FUTU_PORT,
-            security_firm=SecurityFirm.FUTUSECURITIES,
-        )
-    return g_ttx
 
 
 @fun.singleton
@@ -301,70 +283,3 @@ class ExchangeFutu(Exchange):
             )
 
         return stocks
-
-    def balance(self):
-        ret, account = TTX().accinfo_query()
-        if ret == RET_OK:
-            return {
-                "power": account.iloc[0]["power"],
-                "max_power_short": account.iloc[0]["max_power_short"],
-                "net_cash_power": account.iloc[0]["net_cash_power"],
-                "total_assets": account.iloc[0]["total_assets"],
-                "cash": account.iloc[0]["cash"],
-                "market_val": account.iloc[0]["market_val"],
-                "long_mv": account.iloc[0]["long_mv"],
-                "short_mv": account.iloc[0]["short_mv"],
-            }
-        return None
-
-    def positions(self, code=""):
-        ret, poss = TTX().position_list_query(code=code)
-        if ret == RET_OK:
-            return [
-                {
-                    "code": _p[1]["code"],
-                    "name": _p[1]["stock_name"],
-                    "type": _p[1]["position_side"],
-                    "amount": _p[1]["qty"],
-                    "can_sell_amount": _p[1]["can_sell_qty"],
-                    "price": _p[1]["cost_price"],
-                    "profit": _p[1]["pl_ratio"],
-                    "profit_val": _p[1]["pl_val"],
-                }
-                for _p in poss.iterrows()
-                if _p[1]["qty"] != 0.0
-            ]
-
-        raise RuntimeError(f"Futu position query failed: {poss}")
-
-    def order(self, code, o_type, amount, args=None):
-        order_type_map = {"buy": TrdSide.BUY, "sell": TrdSide.SELL}
-        TTX().unlock_trade(config.FUTU_UNLOCK_PWD)  # 先解锁交易
-        ret, data = TTX().place_order(
-            price=0,
-            qty=amount,
-            code=code,
-            order_type=OrderType.MARKET,
-            trd_side=order_type_map[o_type],
-        )
-        if ret == RET_OK:
-            time.sleep(5)  # 等待交易所确认，避免立即查询拿到"待成交"状态
-            ret, o = TTX().order_list_query(order_id=data.iloc[0]["order_id"])
-            if ret == RET_OK:
-                return {
-                    "id": o.iloc[0]["order_id"],
-                    "code": o.iloc[0]["code"],
-                    "name": o.iloc[0]["stock_name"],
-                    "type": o.iloc[0]["trd_side"],
-                    "order_type": o.iloc[0]["order_type"],
-                    "order_status": o.iloc[0]["order_status"],
-                    "price": o.iloc[0]["price"],
-                    "amount": o.iloc[0]["qty"],
-                    "dealt_amount": o.iloc[0]["dealt_qty"],
-                    "dealt_avg_price": o.iloc[0]["dealt_avg_price"],
-                }
-            print("Order Get Order Error : ", o)
-        else:
-            print("Order Error : ", data)
-
-        return False

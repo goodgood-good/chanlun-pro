@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadClConfigApi() {
+function loadClConfigApi({ focus = false } = {}) {
   const store = new Map();
   const sandbox = {
     console,
@@ -76,7 +76,7 @@ function loadClConfigApi() {
     getElementById: () => null,
     querySelector: () => null,
     querySelectorAll: () => [],
-    body: { appendChild() {} },
+    body: { appendChild() {}, dataset: focus ? {chartFocus:'lowest-center'} : {} },
   };
   vm.createContext(sandbox);
   let source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
@@ -86,11 +86,11 @@ function loadClConfigApi() {
   load: loadClShowConfig,
   save: saveClShowConfig,
   resolve: resolveClConfigForResolution,
-  levels: recursiveDisplayLevels,
   normalize: normalizeClShowConfig,
   enabled: strictItemEnabled,
   ChartManager,
   DEFAULT: CL_SHOW_DEFAULT,
+  requestedStudies: requestedDefaultStudies,
 };`;
   vm.runInContext(source, sandbox, { filename: 'charts.js' });
   return { api: sandbox.__CL_API, store };
@@ -108,6 +108,14 @@ function makeManager(ChartManager, id) {
   return manager;
 }
 
+
+
+for (const [interval, lowest] of [['1', 0], ['5', 1], ['30', 2]]) {
+
+}
+
+
+
 test('resolution keys are canonical and isolated by chart period', () => {
   const { api } = loadClConfigApi();
   assert.equal(api.resolutionKey('1D'), '1d');
@@ -121,7 +129,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v5');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v7');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -132,60 +140,7 @@ test('only the current display schema is accepted', () => {
   );
 });
 
-test('production defaults show strokes segments and only current-period signals', () => {
-  const { api } = loadClConfigApi();
-  const config = api.normalize(null, '5');
 
-  assert.equal(config.fx, false);
-  assert.equal(config.bi, true);
-  assert.equal(config.xd, true);
-  assert.equal(config.center_observation, false);
-  assert.equal(config.center_all, true);
-  assert.equal(config.center_L0, true);
-  assert.equal(config.center_L1, false);
-  assert.equal(config.center_L2, false);
-  assert.equal(Object.hasOwn(config, 'center_provisional'), false);
-  assert.equal(config.trend_all, false);
-  assert.equal(config.trend_L0, false);
-  assert.equal(config.trend_L1, false);
-  assert.equal(config.trend_L2, false);
-  assert.equal(Object.hasOwn(config, 'pending_movement'), false);
-  assert.equal(config.point_all, true);
-  assert.equal(config.point_L0, true);
-  assert.equal(config.point_L1, false);
-  assert.equal(config.point_L2, false);
-  assert.equal(config.divergence_all, true);
-  assert.equal(config.divergence_consolidation_L0, true);
-  assert.equal(config.divergence_trend_L0, true);
-  assert.equal(config.divergence_consolidation_L1, false);
-  assert.equal(config.divergence_trend_L1, false);
-  assert.equal(config.divergence_consolidation_L2, false);
-  assert.equal(config.divergence_trend_L2, false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'formal_center', structural_level: 0,
-  }), true);
-  assert.equal(api.enabled(config, {
-    render_kind: 'center_preview', structural_level: 0,
-  }), true);
-  assert.equal(api.enabled(config, {
-    render_kind: 'center_projection', structural_level: 0,
-  }), true);
-  assert.equal(api.enabled(config, {
-    render_kind: 'strict_trend', structural_level: 0,
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'pending_movement', structural_level: 0,
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'formal_center', structural_level: 1,
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'point_confirmed', structural_level: 1, point_type: '1buy',
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'strict_divergence', structural_level: 1, kind: 'trend',
-  }), false);
-});
 
 test('stored non-current or malformed configuration is removed', () => {
   const { api, store } = loadClConfigApi();
@@ -212,79 +167,13 @@ test('stored non-current or malformed configuration is removed', () => {
   assert.equal(store.has(key), false);
 });
 
-test('current schema retains only current fields and period levels', () => {
-  const { api } = loadClConfigApi();
-  const config = api.normalize({
-    ...api.DEFAULT,
-    fx: false,
-    center_L0: false,
-    point_L1: false,
-    center_provisional: false,
-    pending_movement: false,
-    removed_switch: true,
-  }, '5');
 
-  assert.equal(config.fx, false);
-  assert.equal(config.center_L0, false);
-  assert.equal(config.center_L1, false);
-  assert.equal(config.center_L2, false);
-  assert.equal(config.point_L0, true);
-  assert.equal(config.point_L1, false);
-  assert.equal(config.point_L2, false);
-  assert.equal(Object.hasOwn(config, 'center_L3'), false);
-  assert.equal(Object.hasOwn(config, 'point_L3'), false);
-  assert.equal(Object.hasOwn(config, 'removed_switch'), false);
-  assert.equal(Object.hasOwn(config, 'center_provisional'), false);
-  assert.equal(Object.hasOwn(config, 'pending_movement'), false);
-});
 
-test('recursive display levels are derived from the active period', () => {
-  const { api } = loadClConfigApi();
-  assert.deepEqual(Array.from(api.levels('1')).map((item) => item.label), [
-    '1m', '5m', '30m', '日线',
-  ]);
-  assert.deepEqual(Array.from(api.levels('5')).map((item) => item.label), [
-    '5m', '30m', '日线',
-  ]);
-  assert.deepEqual(Array.from(api.levels('30')).map((item) => item.label), [
-    '30m', '日线',
-  ]);
-  assert.deepEqual(Array.from(api.levels('1D')).map((item) => item.label), ['日线']);
-});
 
-test('current center trend point and divergence gates remain independent', () => {
-  const { api } = loadClConfigApi();
-  const config = currentConfig(api, {
-    center_all: false,
-    center_L1: true,
-    trend_all: true,
-    trend_L1: false,
-    point_all: true,
-    point_1buy: false,
-    point_L1: false,
-    divergence_all: true,
-    divergence_consolidation_L1: false,
-    divergence_trend_L1: true,
-  });
 
-  assert.equal(api.enabled(config, { render_kind: 'formal_center', structural_level: 1 }), false);
-  assert.equal(api.enabled(config, { render_kind: 'strict_trend', structural_level: 1 }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'point_confirmed', structural_level: 0, point_type: '1buy',
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'point_confirmed', structural_level: 1, point_type: '2buy',
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'point_approaching', structural_level: 0, point_type: '2buy',
-  }), true);
-  assert.equal(api.enabled(config, {
-    render_kind: 'strict_divergence', structural_level: 1, kind: 'consolidation',
-  }), false);
-  assert.equal(api.enabled(config, {
-    render_kind: 'strict_divergence', structural_level: 1, kind: 'trend',
-  }), true);
-});
+
+
+
 
 test('resolution switching persists each period under the current schema', () => {
   const { api } = loadClConfigApi();
@@ -302,4 +191,13 @@ test('resolution switching persists each period under the current schema', () =>
   assert.equal(manager.cl_show_config.fx, false);
   manager._applyResolutionConfig('30');
   assert.equal(manager.cl_show_config.fx, true);
+});
+
+test('native settings migrate v6 without restoring retired layers', () => {
+ const {api}=loadClConfigApi();
+ const config=api.normalize({schema:'chanlun-chart-config-v6',bi:false,xd:true,center_all:true,point_all:true,trend_L1:true},'5');
+ assert.deepEqual(JSON.parse(JSON.stringify(config)),{schema:'chanlun-chart-config-v7',fx:false,bi:false,xd:true,center_all:true,center_L0:true});
+ assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:0}),true);
+ assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:1}),false);
+ assert.equal(api.enabled(config,{render_kind:'strict_trend',structural_level:0}),false);
 });

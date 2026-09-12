@@ -39,6 +39,7 @@ from chanlun.persistence.file_db import fdb
 from chanlun.tools.daemon_executor import DaemonExecutor
 from chanlun.tools.cache_identity import source_fingerprint
 from chanlun.tools.log_util import LogUtil
+from .chart_producer_identity import chart_producer_revision
 
 # ---------------- 状态 ----------------
 
@@ -244,7 +245,11 @@ def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) ->
     源码指纹覆盖当前计算与序列化实现，字段或语义变化都会自然生成
     新 key；无需维护第二套手工版本号。
     """
-    return (f"{source_fingerprint()}_{market}_{code}_{frequency}"
+    provider = ""
+    if market == "us":
+        from chanlun import config
+        provider = f"_provider{_stable_hash(getattr(config, 'EXCHANGE_US', None))[:8]}"
+    return (f"{source_fingerprint()}_chart{chart_producer_revision()}{provider}_{market}_{code}_{frequency}"
             f"_{_stable_hash(cl_config)}")
 
 
@@ -350,6 +355,11 @@ def _get_chart_cache_entry_ram_only(cache_key: str):
         return _normalize_cache_entry(chart_data_cache.get(cache_key))
 
 
+def _source_history_expired(cache_entry, now):
+    deadline = (cache_entry.get("data") or {}).get("_history_source_valid_until")
+    return isinstance(deadline, (int, float)) and not now < deadline
+
+
 def _entry_freshness(cache_entry: dict, mode: str) -> str:
     """统一的 cache entry 新鲜度判定。
 
@@ -364,6 +374,8 @@ def _entry_freshness(cache_entry: dict, mode: str) -> str:
     """
     if not isinstance(cache_entry, dict):
         return "unknown"
+    if _source_history_expired(cache_entry, time.time()):
+        return "stale"
     validated_at = cache_entry.get("validated_at")
     if not isinstance(validated_at, (int, float)) or validated_at <= 0:
         return "unknown"
@@ -405,6 +417,10 @@ def _first_request_freshness(
         # 时效无法验证：保守走同步重算。
         return "too_stale"
     now = time.time() if now is None else now
+    # A chart rebuilt from a 59-minute-old source must not receive another
+    # hour of freshness. A tail-only refresh cannot validate adjusted history.
+    if _source_history_expired(cache_entry, now):
+        return "too_stale"
     age = now - validated_at
     if market_is_trading:
         soft, hard = _SNAPSHOT_STALE_AFTER_TRADING, _SNAPSHOT_SERVE_STALE_MAX_TRADING
@@ -426,6 +442,7 @@ def evaluate_cache_for_tv_history(
     market_is_trading: bool = True,
     now: float = None,
     force_refresh: bool = False,
+    refresh_if_stale: bool = False,
 ) -> tuple:
     """评估 chart_data_cache entry 是否能满足 tv_history 当前请求。
 
@@ -463,9 +480,16 @@ def evaluate_cache_for_tv_history(
     # 绕过而非删除缓存:重算失败时旧 entry 仍在(下次正常请求仍可 serve),符合 C1"绝不丢好缓存"。
     if cache_entry is None:
         return False, None, "cache_empty", False
+    pending_data = cache_entry.get("data", {})
+    if pending_data.get("_initial_structure_build_id"):
+        from .chart_initial_build import is_initial_build_active
+
+        if is_initial_build_active(pending_data.get("_initial_structure_cache_key")):
+            return True, pending_data, None, False
+        return False, None, "cache_pending_abandoned", False
     # H1(阶段E,F-2):force_refresh 无条件 MISS,放在 cache_entry is None 之后——空缓存仍报
     # cache_empty(语义更准),有缓存才报 cache_force_refresh。绕过而非删缓存(符合 C1"绝不丢好缓存")。
-    if force_refresh:
+    if force_refresh or (refresh_if_stale and not _cache_entry_recently_validated(cache_entry)):
         return False, None, "cache_force_refresh", False
     cached_data = cache_entry.get("data", {})
     cache_min_time = cache_entry.get("min_time")
@@ -613,6 +637,16 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
     临界区内做 O(1) 赋值；多 MiB 图对象的持久化快照复制移到锁外，避免一个
     候选预热写入把所有交互式 ``/tv/history`` 命中串行阻塞。
     """
+    with cache_lock:
+        current = _normalize_cache_entry(chart_data_cache.get(cache_key))
+        if (current is not None and current["data"] is cl_chart_data
+                and current.get("is_full_snapshot") == is_full_snapshot
+                and current.get(_RESIDENT_WEIGHT_FIELD)):
+            # The exact immutable payload has just been revalidated. Preserve
+            # its arrays and weight; do not serialize/copy/write it again.
+            refreshed = {**current, "validated_at": time.time()}
+            _put_chart_cache_ram(cache_key, refreshed, prepared_weight=current[_RESIDENT_WEIGHT_FIELD])
+            return refreshed
     entry = _build_chart_cache_entry(cl_chart_data, is_full_snapshot=is_full_snapshot)
     prepared_weight = _chart_cache_entry_weight(entry)
     # Persist the already-paid estimate.  Restoring a multi-megabyte snapshot
@@ -627,7 +661,9 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
     # nested chart arrays are replaced as a whole on refresh, never mutated in
     # place.  A concurrent validation can therefore only make this disk snapshot
     # newer, not tear its data graph.
-    _persist_chart_cache_async(cache_key, entry)
+    # A pending calculation has no durable result; a process restart must retry it.
+    if not cl_chart_data.get("_initial_structure_build_id"):
+        _persist_chart_cache_async(cache_key, entry)
     return entry
 
 
@@ -741,7 +777,7 @@ def _klines_fetch_incomplete(klines) -> bool:
     """cq 源级完整性闸门信号：拉取带洞时返回空 DataFrame 且 attrs['fetch_incomplete']=True(C1)。
 
     web 层据此走短退避(_TRANSIENT_NEGATIVE_TTL_SECONDS)而非真空 5min 负缓存,避免数据源暂时失败
-    被当作真实空数据抑制五分钟而无法自愈。回测与监控不读取此标记，K 线契约不变。
+    被当作真实空数据抑制五分钟而无法自愈。
     """
     attrs = getattr(klines, "attrs", None)
     return bool(attrs) and attrs.get("fetch_incomplete") is True

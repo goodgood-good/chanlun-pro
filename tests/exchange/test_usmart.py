@@ -69,6 +69,26 @@ def test_usmart_kline_timestamp_contract_is_explicitly_end_labelled():
     assert ExchangeUSmart.kline_time_label == "end"
 
 
+@pytest.mark.parametrize("value, expected", [("0", False), ("false", False), ("1", True)])
+def test_quote_proxy_is_explicitly_configurable_without_changing_global_routing(monkeypatch, value, expected):
+    monkeypatch.setenv("CHANLUN_USMART_TRUST_ENV_PROXY", value)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    client = USmartClient()
+    try:
+        assert client.session.trust_env is expected
+        import os
+        assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:9"
+    finally:
+        client.session.close()
+
+
+def test_injected_quote_session_keeps_its_transport_policy(monkeypatch):
+    monkeypatch.setenv("CHANLUN_USMART_TRUST_ENV_PROXY", "0")
+    session = _Session()
+    session.trust_env = True
+    assert USmartClient(session=session).session.trust_env is True
+
+
 def test_quote_request_uses_exact_signed_body_and_required_headers(rsa_keys):
     session = _Session(_Response({"code": 0, "msg": "success", "data": {"status": 7}}))
     client = USmartClient(
@@ -260,7 +280,7 @@ def test_us_kline_uses_configured_long_history_backend_without_mixing_sources(
 ):
     expected = pd.DataFrame(
         {
-            "date": [pd.Timestamp("2026-08-06 16:00", tz="US/Eastern")],
+            "date": [pd.Timestamp("2026-08-06 15:59", tz="US/Eastern")],
             "frequency": ["1m"],
             "code": ["TSLA.US"],
             "open": [320.0],
@@ -273,6 +293,8 @@ def test_us_kline_uses_configured_long_history_backend_without_mixing_sources(
     expected.attrs["price_basis_provider"] = "longbridge"
 
     class _HistoryExchange:
+        kline_time_label = "start"
+
         def __init__(self):
             self.calls = []
 
@@ -300,18 +322,22 @@ def test_us_kline_uses_configured_long_history_backend_without_mixing_sources(
         "TSLA.US",
         "1m",
         start_date="2026-07-07 00:00:00",
-        end_date="2026-08-06 23:59:59",
+        end_date="2026-08-06T16:00:00-04:00",
         args={"right": "qfq", "count": 1000},
     )
 
-    assert actual is expected
+    assert actual is not expected
+    assert actual.iloc[0]["date"] == pd.Timestamp("2026-08-06 16:00", tz="US/Eastern")
+    assert expected.iloc[0]["date"] == pd.Timestamp("2026-08-06 15:59", tz="US/Eastern")
+    pd.testing.assert_frame_equal(actual.drop(columns="date"), expected.drop(columns="date"))
+    assert actual.attrs == expected.attrs
     assert actual.attrs["price_basis_provider"] == "longbridge"
     assert history.calls == [
         (
             "TSLA.US",
             "1m",
-            "2026-07-07 00:00:00",
-            "2026-08-06 23:59:59",
+            "2026-07-06T11:59:00-04:00",
+            "2026-08-06T16:00:00-04:00",
             {"right": "qfq", "count": 1000},
         )
     ]
@@ -347,6 +373,7 @@ def test_us_kline_falls_back_to_usmart_when_longbridge_credentials_are_partial(
     frame = exchange.klines(
         "TSLA.US",
         "1m",
+        end_date="2026-08-10T16:00:00-04:00",
         args={"right": "qfq", "count": 1000},
     )
 

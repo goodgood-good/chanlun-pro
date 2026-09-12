@@ -1,3 +1,0 @@
-# Minimal real-data structure smoke cohort. Keep stable across rule edits.
-SZ.003005
-SH.600183

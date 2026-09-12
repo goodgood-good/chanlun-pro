@@ -9,6 +9,7 @@ from chanlun.market import Market
 from chanlun.tools.log_util import LogUtil
 
 from .sse_signature import compute_signature
+from .chart_bar_time import attach_chart_bar_time_label
 
 
 def decide_push(prev_sig, chart_data):
@@ -24,17 +25,37 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
     from .kline_recompute import prepend_klines_and_replace_cache
     from .chart_cache import (
         _TRANSIENT_NEGATIVE_TTL_SECONDS,
+        _get_chart_cache_entry_ram_only,
+        _cache_entry_recently_validated,
         _is_negatively_cached,
         _klines_fetch_incomplete,
         _mark_negative_cache,
     )
     try:
+        # The history request owns initial publication. Starting a full SSE
+        # rebuild with no displayed snapshot can take the chart lock first and
+        # block the first candles behind the entire structure calculation.
+        entry = _get_chart_cache_entry_ram_only(cache_key)
+        if entry is None or (entry.get("data") or {}).get("_initial_structure_build_id"):
+            return None
+        if (
+            entry.get("is_full_snapshot")
+            and entry["data"].get("strict_structure_mode") == "replace"
+            and _cache_entry_recently_validated(entry)
+        ):
+            # History, initial builds, and revalidation already fetched this
+            # closed source. Deliver their snapshot immediately; do not start
+            # another full quote/structure job on the stream's first tick.
+            return entry["data"]
         # 负缓存:退市/新上市等空数据标的 5min 内不再反复拉数据源(审查 L1)。与 tv_history
         # 共享同一负缓存,口径一致;只有 client 连着才会走到这,故不会无谓占用。
         if _is_negatively_cached(cache_key):
             return None
         ex = get_exchange(Market(market))
         klines = ex.klines(code, frequency)
+        klines = attach_chart_bar_time_label(
+            klines, market=market, frequency=frequency, exchange=ex,
+        )
         if _klines_fetch_incomplete(klines):
             # 拉取存在缺口时短暂退避并保留旧缓存，三十秒内自愈，不受真实空数据的
             # 五分钟负缓存抑制。

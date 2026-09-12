@@ -9,10 +9,10 @@ import pytest
 if "tqsdk" not in sys.modules:
     _tq = types.ModuleType("tqsdk")
     _objs = types.ModuleType("tqsdk.objs")
-    for _n in ("Account", "Position", "Quote"):
+    for _n in ("Quote",):
         setattr(_objs, _n, type(_n, (), {}))
     _tq.objs = _objs
-    for _n in ("TqApi", "TqAccount", "TqAuth", "TqKq"):
+    for _n in ("TqApi", "TqAuth"):
         setattr(_tq, _n, type(_n, (), {}))
     sys.modules["tqsdk"] = _tq
     sys.modules["tqsdk.objs"] = _objs

@@ -65,9 +65,9 @@ from ..services.chart_cache import (
 from ..services.chart_compute import compute_and_cache_chart_data, market_now_trading
 from ..services.constants import market_types, resolution_maps
 from ..services.stock_list import get_cached_processed_stocks
-from ..services.trading_screening_scope import (
+from ..services.symbol_scope import (
     DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
-    ScreeningScopeAuthorizationError,
+    SymbolScopeError,
     admit_explicit_validation_codes,
     parse_explicit_scope_limit,
 )
@@ -1337,7 +1337,7 @@ def symbols_prewarm():
             request_value("codes"),
             max_symbols=scope_limit,
         )
-    except ScreeningScopeAuthorizationError as exc:
+    except SymbolScopeError as exc:
         return jsonify(
             {"ok": False, "code": exc.reason_code, "msg": str(exc)}
         ), 403

@@ -359,15 +359,6 @@ class ExchangeBinanceSpot(Exchange):
 
         return res_ticks
 
-    def balance(self):
-        raise RuntimeWarning("交易接口未实现")
-
-    def positions(self, code: str = ""):
-        raise RuntimeWarning("交易接口未实现")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        raise RuntimeWarning("交易接口未实现")
-
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")
 

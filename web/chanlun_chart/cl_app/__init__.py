@@ -8,8 +8,6 @@ import pathlib
 import pytz
 import secrets
 import subprocess
-from collections.abc import Mapping
-from types import MappingProxyType
 from apscheduler.events import (
     EVENT_ALL,
     EVENT_EXECUTOR_ADDED,
@@ -28,12 +26,10 @@ from apscheduler.events import (
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import (
     Flask,
-    abort,
     g,
     redirect,
     render_template,
     request,
-    send_file,
     session,
 )
 from flask_login import (
@@ -47,8 +43,6 @@ from flask_login import (
 from flask_wtf.csrf import CSRFError, generate_csrf
 from chanlun import config, fun
 from chanlun.security import (
-    get_dingtalk_keyword,
-    get_dingtalk_webhook,
     get_flask_secret_key,
     get_login_accounts,
     get_web_host,
@@ -56,23 +50,6 @@ from chanlun.security import (
     normalize_login_username,
     validate_web_security_config,
     verify_login_password,
-)
-from chanlun.decision_support.trading_system.trading_session import (
-    DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH,
-    authoritative_trading_session_evidence,
-    official_trading_session_evidence,
-)
-from chanlun.decision_support.trading_system.decision_source_provenance import (
-    calculate_forward_application_source_revision,
-    content_addressed_source_revision_from_build,
-)
-from .services.job_names import job_display_name
-from .services.trading_screening_scope import (
-    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS,
-    DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
-    DEFAULT_VALIDATION_COHORT_SIZE,
-    admit_screening_universe,
-    validate_screening_scope_configuration,
 )
 
 __all__ = ["create_app"]
@@ -82,27 +59,12 @@ _TASK_HISTORY_LIMIT = 500
 _TASK_TERMINAL_STATES = {"已完成", "执行异常", "未执行", "删除作业"}
 _SHARED_RUNTIME_OWNER_LOCK = threading.RLock()
 _SHARED_RUNTIME_OWNER: object | None = None
-_MAX_NATIVE_STRUCTURE_WORKERS = 12
-_DEFAULT_NATIVE_STRUCTURE_WORKERS = min(
-    _MAX_NATIVE_STRUCTURE_WORKERS,
-    max(1, ((os.cpu_count() or 4) * 3) // 4),
-)
-_FULL_COVERAGE_BATCH_SYMBOLS = 240
-_LIVE_CANDIDATE_BATCH_SYMBOLS = 48
-
-
 def _configured_login_accounts():
     """Resolve the configured named Web accounts."""
 
     return get_login_accounts()
 
 
-def _human_review_historical_report() -> pathlib.Path:
-    """返回当前系统唯一的历史人工复核快照路径。"""
-    repository_root = pathlib.Path(__file__).resolve().parents[3]
-    return (
-        repository_root / ".cache" / "chanlun_human_review" / "human_review_screen.json"
-    )
 
 
 def _trim_task_history(task_map, limit: int = _TASK_HISTORY_LIMIT) -> None:
@@ -126,9 +88,7 @@ def _scheduler_task_snapshot(scheduler):
     snapshot = []
     for task in task_map.values():
         row = dict(task)
-        # 任务编号属于稳定协议；名称只负责面向用户展示。按编号重新映射可以
-        # 同时覆盖升级前已经写入任务注册表的旧英文名称。
-        row["name"] = job_display_name(row.get("id"), row.get("name"))
+        row["name"] = str(row.get("name") or "").strip() or "--"
         snapshot.append(row)
     return snapshot
 
@@ -146,33 +106,12 @@ def create_app(test_config=None, start_scheduler=False):
         "yes",
         "on",
     }
-    large_screening_scope_enabled = (
-        os.environ.get("CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE", "0")
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"}
-    )
-    full_coverage_enabled = (
-        os.environ.get(
-            "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
-            "0",
-        )
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"}
-    )
-    default_screening_batch_symbols = (
-        _FULL_COVERAGE_BATCH_SYMBOLS
-        if large_screening_scope_enabled and full_coverage_enabled
-        else DEFAULT_VALIDATION_COHORT_SIZE
-    )
-    default_candidate_five_minute_symbols = (
-        _LIVE_CANDIDATE_BATCH_SYMBOLS
-        if large_screening_scope_enabled
-        else DEFAULT_VALIDATION_COHORT_SIZE
-    )
     app.config.from_mapping(
         WEB_HOST=get_web_host(),
+        CHART_ONLY_MODE=(
+            os.environ.get("CHANLUN_CHART_ONLY", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ),
         VALIDATE_WEB_SECURITY=True,
         SCHEDULER_ENABLED=bool(start_scheduler),
         SESSION_COOKIE_HTTPONLY=True,
@@ -204,389 +143,40 @@ def create_app(test_config=None, start_scheduler=False):
             .lower()
             in {"1", "true", "yes", "on"}
         ),
-        TRADING_SCREENING_SNAPSHOT_PATH=None,
-        TRADING_SCREENING_BACKGROUND_ENABLED=True,
-        TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
-        TRADING_SCREENING_VALIDATION_COHORT_SIZE=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
-            )
-        ),
-        TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
-                str(
-                    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS
-                    if large_screening_scope_enabled
-                    else DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS
-                ),
-            )
-        ),
-        TRADING_SCREENING_ALLOW_LARGE_SCOPE=large_screening_scope_enabled,
         # 生产实时选股只发技术/手工买卖提醒，不读取正式研究账本。正式研究材料仍可在
         # 离线研究和回放入口使用，但不能成为生产监听的隐藏依赖。
-        TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED=False,
-        TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS",
-                "3600",
-            )
-        ),
         # 开发与策略验证默认不运行全市场预选。只有最终验收/生产运行显式设置环境变量
         # 为 1 才开启盘后完整覆盖，避免每次代码修改都重新处理五千余只标的。
-        TRADING_SCREENING_FULL_COVERAGE_ENABLED=full_coverage_enabled,
         # 仅供一次明确运维启动使用：在当前逻辑的完整快照发布前绕过常规盘后窗口。
         # 环境变量不写入项目配置，完成后即使进程仍存活也会自动恢复时段闸门。
-        TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE=(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
-                "0",
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        ),
-        TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                str(default_candidate_five_minute_symbols),
-            )
-        ),
-        TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
-            )
-        ),
-        TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
-            )
-        ),
-        TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
-        TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS=1800,
-        TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
-        TRADING_SCREENING_INCOMPLETE_CHECKPOINT_INTERVAL_SECONDS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_INCOMPLETE_CHECKPOINT_INTERVAL_SECONDS",
-                "120",
-            )
-        ),
-        TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS=float(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
-                "58",
-            )
-        ),
         # 低频候选必须在下一次 1m 监听到期前停止接纳新任务；剩余标的下一轮继续。
-        TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS=float(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS",
-                "50",
-            )
-        ),
         # 系统本地且独立于市场的自选组用于声明手工持仓；它只是一项监听事实，不能由成员
         # 关系推断券商/账户访问权或下单能力。
-        TRADING_SCREENING_MANUAL_HOLDING_GROUP=os.environ.get(
-            "CHANLUN_TRADING_SCREENING_MANUAL_HOLDING_GROUP",
-            "我的持仓",
-        ).strip(),
         # 只有明确的人工关注组进入分钟级优先监听。旧版通用选股生成的结果组不再被
         # 隐式并入；它们仍保留在自选数据库中，且不影响独立的全市场收盘后扫描。
-        TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS=tuple(
-            value.strip()
-            for value in os.environ.get(
-                "CHANLUN_TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS",
-                "我的关注",
-            ).split(",")
-            if value.strip()
-        ),
-        HOLDING_GROUP_MONITOR_ENABLED=True,
-        HOLDING_GROUP_MONITOR_INTERVAL_SECONDS=int(
-            os.environ.get("CHANLUN_HOLDING_GROUP_MONITOR_INTERVAL_SECONDS", "60")
-        ),
-        HOLDING_GROUP_MONITOR_START_DELAY_SECONDS=int(
-            os.environ.get("CHANLUN_HOLDING_GROUP_MONITOR_START_DELAY_SECONDS", "8")
-        ),
-        HOLDING_GROUP_MONITOR_WORKERS=int(
-            os.environ.get(
-                "CHANLUN_HOLDING_GROUP_MONITOR_WORKERS",
-                str(max(2, min(8, (os.cpu_count() or 4) // 2))),
-            )
-        ),
-        HOLDING_GROUP_MONITOR_MAX_SYMBOLS=int(
-            os.environ.get(
-                "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS",
-                str(DEFAULT_VALIDATION_COHORT_SIZE),
-            )
-        ),
         # This gate is independent from A-share screening authorization.
-        HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED=(
-            os.environ.get(
-                "CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED",
-                "0",
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        ),
-        ALERT_CHART_PUBLIC_BASE_URL=str(
-            os.environ.get("CHANLUN_ALERT_CHART_PUBLIC_BASE_URL")
-            or getattr(config, "ALERT_CHART_PUBLIC_BASE_URL", "")
-            or ""
-        )
-        .strip()
-        .rstrip("/"),
-        ALERT_CHART_TTL_SECONDS=int(
-            os.environ.get("CHANLUN_ALERT_CHART_TTL_SECONDS", str(30 * 24 * 60 * 60))
-        ),
-        ALERT_CHART_CAPTURE_BASE_URL=str(
-            os.environ.get(
-                "CHANLUN_ALERT_CHART_CAPTURE_BASE_URL",
-                "http://127.0.0.1:9900",
-            )
-        )
-        .strip()
-        .rstrip("/"),
-        ALERT_CHART_CAPTURE_TIMEOUT_MS=int(
-            os.environ.get("CHANLUN_ALERT_CHART_CAPTURE_TIMEOUT_MS", "10000")
-        ),
-        ALERT_CHART_ROOT=(config.get_data_path() / "monitor" / "dingtalk_chart_images"),
-        TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
-                str(default_screening_batch_symbols),
-            )
-        ),
         # 修改与策略验证阶段每轮仍只处理 12 只。仅在大范围和完整覆盖两个独立
         # 授权同时开启时使用固定 240 只批次，让十二个结构进程各自保持约二十个
         # 连续任务，摊薄每轮发布和长尾等待；盘中 5m 实时候选仍独立限制为 48 只。
-        TRADING_SCREENING_SYMBOLS_PER_REFRESH=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
-                str(default_screening_batch_symbols),
-            )
-        ),
         # Scheduling the full armed/triggered universe is cheap; the absolute
         # round deadline still limits how much native work may actually start.
-        TRADING_SCREENING_PRIORITY_MAX_SYMBOLS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
-                str(
-                    DEFAULT_LARGE_SCOPE_MONITOR_UNIVERSE_SYMBOLS
-                    if large_screening_scope_enabled
-                    else DEFAULT_VALIDATION_COHORT_SIZE
-                ),
-            )
-        ),
-        TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
-        TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS=45.0,
         # QMT 的历史补数 RPC 在正常情况下也可能接近 150 秒才返回，结构进程必须给它
         # 留出完整窗口；过早终止会触发 30 秒退避，并让同批后续标的被连带记为不可用。
         # Web 与实时 Tick 已隔离且实时请求繁忙时不排队，因此这里延长等待不会拖死网页。
-        TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS=float(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS",
-                "210",
-            )
-        ),
-        TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
         # 原生结构库的长期内存不会完全归还给 Windows。当前候选池约两千只，过早在
         # 1024 次请求回收会使进程永远无法走完一次缓存轮回；默认允许覆盖完整候选池。
         # 32-GiB 生产机上 1536 MiB × 12 会与 MiniQMT 一起触发系统提交耗尽，因此在
         # 1280 MiB 的安全请求边界提前回收；显式环境变量仍可按更大主机容量调高。
-        TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS",
-                "4096",
-            )
-        ),
-        TRADING_SCREENING_NATIVE_MAX_RSS_MB=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_NATIVE_MAX_RSS_MB",
-                "1280",
-            )
-        ),
         # QMT 本地 RPC 以等待为主，结构进程按四分之三逻辑 CPU 扩张以覆盖等待
         # 时间；上限十二个并保留其余 CPU 给 Web、实时监听和 QMT。另有控制进程。
-        TRADING_SCREENING_STOCK_WORKERS=int(
-            min(
-                _MAX_NATIVE_STRUCTURE_WORKERS,
-                max(
-                    1,
-                    int(
-                        os.environ.get(
-                            "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
-                            str(_DEFAULT_NATIVE_STRUCTURE_WORKERS),
-                        )
-                    ),
-                ),
-            )
-        ),
-        TRADING_SCREENING_FULL_COVERAGE_WORKERS=int(
-            os.environ.get(
-                "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_WORKERS",
-                str(_DEFAULT_NATIVE_STRUCTURE_WORKERS),
-            )
-        ),
-        FORWARD_SCHEDULER_MONITOR_ENABLED=True,
-        FORWARD_SCHEDULER_MONITOR_TTL_SECONDS=30.0,
         # app.py 是前向业务调度的唯一所有者。
-        FORWARD_SCHEDULER_MODE=os.environ.get("CHANLUN_FORWARD_SCHEDULER_MODE", "APP")
-        .strip()
-        .upper(),
-        FORWARD_QMT_LOCAL_DATA_DIR=os.environ.get(
-            "CHANLUN_QMT_LOCAL_DATA_DIR", ""
-        ).strip(),
         # app.py 也是交互式 QMT 运行时的唯一所有者。
-        QMT_RUNTIME_MODE=os.environ.get("CHANLUN_QMT_RUNTIME_MODE", "APP")
-        .strip()
-        .upper(),
-        QMT_RUNTIME_HELPER=os.environ.get("CHANLUN_QMT_RUNTIME_HELPER", "").strip(),
-        QMT_RUNTIME_STARTUP_TIMEOUT_SECONDS=120,
-        QMT_RUNTIME_WARMUP_SECONDS=90,
-        QMT_RUNTIME_RECOVERY_COOLDOWN_SECONDS=300,
-        QMT_RUNTIME_OBSERVATION_MAX_AGE_SECONDS=180,
-        TRADING_SESSION_OFFICIAL_CALENDAR_PATH=(DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH),
-        HUMAN_REVIEW_HISTORICAL_REPORT=(_human_review_historical_report()),
-        HUMAN_REVIEW_FORWARD_ROOT=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_human_review_forward"
-        ),
-        HUMAN_REVIEW_FEEDBACK_LEDGER=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_human_review"
-            / "feedback_ledger.json"
-        ),
-        HUMAN_REVIEW_PAPER_LEDGER=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_human_review"
-            / "paper_ledger.json"
-        ),
-        HUMAN_REVIEW_PARAMETER_SNAPSHOT=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / "config"
-            / "decision_support"
-            / "human_review_parameters.json"
-        ),
-        HUMAN_REVIEW_LIVE_ARCHIVE_ROOT=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_human_review"
-            / "live_screens"
-        ),
-        REALTIME_REVIEW_INBOX=(
-            config.get_data_path()
-            / "monitor"
-            / "realtime_review_inbox.json"
-        ),
-        TRADING_NOTIFICATION_OUTBOX_ENABLED=True,
-        TRADING_NOTIFICATION_OUTBOX_PATH=(
-            config.get_data_path()
-            / "decision_support"
-            / "trading_notification_outbox.json"
-        ),
-        TRADING_NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS=5.0,
-        TRADING_NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS=300.0,
-        HUMAN_REVIEW_FORWARD_MARKOUT=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_human_review_forward"
-            / "forward_review_markout.json"
-        ),
-        HUMAN_REVIEW_FORWARD_WARMUP_LINEAGE=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_human_review_forward"
-            / "forward_warmup_structure_lineage_rollup.json"
-        ),
-        QMT_SECTOR_CAPTURE_LEDGER=(
-            pathlib.Path(__file__).resolve().parents[3]
-            / ".cache"
-            / "chanlun_qmt_sector_ledger"
-            / "qmt_gics3_catalog_ledger.json"
-        ),
     )
     if test_config:
         app.config.update(test_config)
-    if app.testing and (
-        not test_config or "TRADING_SCREENING_BACKGROUND_ENABLED" not in test_config
-    ):
-        # 运行时测试必须显式启用，以保持默认应用工厂无副作用，并防止无关测试扫描真实市场。
-        app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = False
-    if app.testing and (
-        not test_config
-        or "TRADING_SCREENING_NATIVE_PROCESS_ISOLATION" not in test_config
-    ):
-        app.config["TRADING_SCREENING_NATIVE_PROCESS_ISOLATION"] = False
-    if app.testing and (
-        not test_config or "FORWARD_SCHEDULER_MONITOR_ENABLED" not in test_config
-    ):
-        # 读取 Windows 任务计划程序必须由集成测试显式启用；通用应用工厂测试保持
-        # 与主机无关且无副作用。
-        app.config["FORWARD_SCHEDULER_MONITOR_ENABLED"] = False
-    if app.testing and (not test_config or "FORWARD_SCHEDULER_MODE" not in test_config):
-        # 单元测试必须显式启用拥有进程的调度器。
-        app.config["FORWARD_SCHEDULER_MODE"] = "DISABLED"
-    if app.testing and (not test_config or "QMT_RUNTIME_MODE" not in test_config):
-        # 主机进程控制始终由集成测试显式启用。
-        app.config["QMT_RUNTIME_MODE"] = "DISABLED"
-    if app.testing and (
-        not test_config or "TRADING_SESSION_OFFICIAL_CALENDAR_PATH" not in test_config
-    ):
-        # 单元测试须显式启用不可变年度工件，以保留注入日历提供器的测试，并防止真实磁盘
-        # 工件静默替换夹具证据。
-        app.config["TRADING_SESSION_OFFICIAL_CALENDAR_PATH"] = None
-    # Scope authorization is validated before gateways, cache hydration or any
-    # possible market-data provider is constructed.  A stale shell/.env value
-    # therefore fails closed instead of beginning a broad run during startup.
-    validate_screening_scope_configuration(
-        validation_cohort_size=int(
-            app.config["TRADING_SCREENING_VALIDATION_COHORT_SIZE"]
-        ),
-        max_admitted_universe_symbols=int(
-            app.config["TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"]
-        ),
-        large_scope_authorized=bool(
-            app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"]
-        ),
-        full_coverage_enabled=bool(
-            app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"]
-        ),
-        force_full_coverage_until_complete=bool(
-            app.config["TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE"]
-        ),
-        per_refresh_limits={
-            "candidate_5m": int(
-                app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"]
-            ),
-            "candidate_30m": int(
-                app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"]
-            ),
-            "symbols_per_refresh": int(
-                app.config["TRADING_SCREENING_SYMBOLS_PER_REFRESH"]
-            ),
-            "total_symbols_per_refresh": int(
-                app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"]
-            ),
-            "priority_symbols": int(
-                app.config["TRADING_SCREENING_PRIORITY_MAX_SYMBOLS"]
-            ),
-        },
-    )
-    # Validate the independent cross-market monitor bound before any gateway,
-    # cache hydration or scheduled market-data work can be constructed.
-    admit_screening_universe(
-        max_symbols=int(app.config["HOLDING_GROUP_MONITOR_MAX_SYMBOLS"]),
-        large_scope_authorized=bool(
-            app.config["HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED"]
-        ),
-    )
+    from .services.chart_only import apply_chart_only_mode
+
+    apply_chart_only_mode(app.config)
     if https_enabled:
         app.config["SESSION_COOKIE_SECURE"] = True
         app.config["REMEMBER_COOKIE_SECURE"] = True
@@ -608,40 +198,13 @@ def create_app(test_config=None, start_scheduler=False):
                 max_workers=8,
                 max_pending=64,
             ),
-            # 三条运行通道互不借用线程：慢速前向复核或 QMT 维护不能挤掉
-            # 每分钟持仓/关注监听。
-            "realtime_monitor": RestartableDaemonPoolExecutor(
-                max_workers=2,
-                max_pending=4,
-            ),
-            "qmt_runtime": RestartableDaemonPoolExecutor(
-                max_workers=2,
-                max_pending=4,
-            ),
-            "forward_research": RestartableDaemonPoolExecutor(
-                max_workers=2,
-                max_pending=8,
-            ),
         },
     )
     scheduler.my_task_list = {}
     scheduler.my_task_lock = threading.RLock()
-    from .services.research_runtime_attestation import (
-        build_scheduler_attestation,
-    )
 
-    app.extensions["research_required_job_executors"] = MappingProxyType({})
 
-    def research_scheduler_attestation():
-        required_job_executors = app.extensions["research_required_job_executors"]
-        if type(required_job_executors) is not MappingProxyType:
-            raise RuntimeError("research required-job mapping must be immutable")
-        return build_scheduler_attestation(
-            scheduler,
-            required_job_executors,
-        )
 
-    app.extensions["research_scheduler_attestation"] = research_scheduler_attestation
 
     def run_tasks_listener(event):
         state_map = {
@@ -692,10 +255,11 @@ def create_app(test_config=None, start_scheduler=False):
     from .services import constants as constants_service
     from .services import stock_list as stock_list_service
     from .services import readiness as readiness_service
+    from .services import chart_initial_build as chart_initial_build_service
 
     # Install the independent identity-catalog admission before a preload
     # thread, synchronous search fallback, or disk hydration can run.
-    symbol_catalog_scope = stock_list_service.configure_symbol_catalog(
+    stock_list_service.configure_symbol_catalog(
         validation_codes=app.config.get("SYMBOL_CATALOG_VALIDATION_CODES"),
         full_catalog_authorized=app.config.get(
             "SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED", False
@@ -717,10 +281,7 @@ def create_app(test_config=None, start_scheduler=False):
     readiness_registry = readiness_service.ReadinessRegistry()
     metadata_warmup_thread = None
 
-    from .xuangu_tasks import XuanguTasks
 
-    _xuangu_tasks = XuanguTasks(scheduler)
-    holding_group_monitor = None
 
     __log = fun.get_logger()
 
@@ -848,10 +409,8 @@ def create_app(test_config=None, start_scheduler=False):
             "/ticks",
             "/tv/",
             "/symbols/",
-            "/decision-support/",
             "/get_zixuan_",
             "/get_stock_zixuan/",
-            "/xuangu/task_list/",
             "/a/bkgn_",
             "/get_cl_config/",
         )
@@ -902,12 +461,6 @@ def create_app(test_config=None, start_scheduler=False):
             hashlib.sha256,
         ).hexdigest()
         return f"cl_pro:{storage_scope_for_username(account.username)[:24]}:{digest}"
-
-    def _current_login_user_id() -> str:
-        accounts = _configured_login_accounts()
-        if not accounts:
-            return "cl_pro:unconfigured"
-        return _login_session_user_id(accounts[0])
 
     class LoginUser(UserMixin):
         def __init__(self, account, user_id=None) -> None:
@@ -1054,13 +607,6 @@ def create_app(test_config=None, start_scheduler=False):
             return configured
         project_root = pathlib.Path(__file__).resolve().parents[3]
         try:
-            # 直接通过 ``app.py`` 或 PyCharm 启动是本项目正常生产所有者。就绪状态和持久化
-            # 原生事实缓存应绑定精确工作树，而非只报告 HEAD；不能仅因包装器未设置环境变量
-            # 就禁用缓存。
-            return calculate_forward_application_source_revision(project_root)
-        except (OSError, RuntimeError):
-            pass
-        try:
             completed = subprocess.run(
                 ["git", "-C", str(project_root), "rev-parse", "HEAD"],
                 check=True,
@@ -1074,7 +620,7 @@ def create_app(test_config=None, start_scheduler=False):
 
     build_revision = _runtime_revision()
 
-    def _readyz_snapshot(market, forward_session=None):
+    def _readyz_snapshot(market):
         market = (market or "a").strip().lower()
         if market not in market_types:
             return {
@@ -1177,329 +723,6 @@ def create_app(test_config=None, start_scheduler=False):
                 "error": None,
             }
 
-        qmt_runtime_required = bool(
-            scheduler_required
-            and market == "a"
-            and str(app.config.get("QMT_RUNTIME_MODE", "APP")).upper() == "APP"
-        )
-        if qmt_runtime_required:
-            qmt_runtime_probe = app.extensions.get("app_qmt_runtime")
-            try:
-                if qmt_runtime_probe is None or not hasattr(
-                    qmt_runtime_probe, "snapshot"
-                ):
-                    raise RuntimeError("app-owned QMT runtime unavailable")
-                qmt_runtime_component = dict(qmt_runtime_probe.snapshot())
-                qmt_runtime_component["required"] = True
-            except Exception as exc:
-                app.logger.exception("readiness QMT runtime snapshot failed")
-                qmt_runtime_component = {
-                    "schema": "chanlun-qmt-runtime-readiness",
-                    "contract_id": ("chanlun-qmt-runtime/app-runtime-contract"),
-                    "execution_owner": "APP_RUNTIME",
-                    "required": True,
-                    "ready": False,
-                    "status": "not_ready",
-                    "reason_code": "QMT_RUNTIME_OBSERVATION_UNAVAILABLE",
-                    "reason_codes": ["QMT_RUNTIME_OBSERVATION_UNAVAILABLE"],
-                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    "real_account_accessed": False,
-                    "real_order_transport_enabled": False,
-                    "automated_order_authorized": False,
-                    "live_status": "LIVE_DISABLED",
-                }
-        else:
-            qmt_runtime_component = {
-                "schema": "chanlun-qmt-runtime-readiness",
-                "contract_id": "chanlun-qmt-runtime/app-runtime-contract",
-                "execution_owner": None,
-                "required": False,
-                "ready": True,
-                "status": "disabled",
-                "reason_code": "QMT_RUNTIME_MANAGEMENT_DISABLED",
-                "reason_codes": [],
-                "real_account_accessed": False,
-                "real_order_transport_enabled": False,
-                "automated_order_authorized": False,
-                "live_status": "LIVE_DISABLED",
-            }
-
-        screening_required = bool(
-            scheduler_required
-            and runtime_component.get("status") == "running"
-            and market == "a"
-            and app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True)
-        )
-        if screening_required:
-            screening_service = app.extensions.get("decision_support_trading_screening")
-            try:
-                if screening_service is None or not hasattr(
-                    screening_service, "health_snapshot"
-                ):
-                    raise RuntimeError("trading screening service unavailable")
-                screening_component = dict(screening_service.health_snapshot())
-                screening_component["required"] = True
-                screening_component["ready"] = bool(screening_component.get("ready"))
-                screening_component["status"] = (
-                    "ready" if screening_component["ready"] else "not_ready"
-                )
-            except Exception as exc:
-                app.logger.exception("readiness trading screening snapshot failed")
-                screening_component = {
-                    "required": True,
-                    "ready": False,
-                    "status": "not_ready",
-                    "last_error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    "reasons": ["screening_health_failed"],
-                }
-        else:
-            screening_component = {
-                "required": False,
-                "ready": True,
-                "status": "disabled",
-                "reasons": [],
-            }
-
-        holding_monitor_required = bool(
-            scheduler_required
-            and runtime_component.get("status") == "running"
-            and app.config.get("HOLDING_GROUP_MONITOR_ENABLED", True)
-        )
-        if holding_monitor_required:
-            monitor_service = app.extensions.get("holding_group_monitor")
-            try:
-                if monitor_service is None or not callable(
-                    getattr(monitor_service, "health_snapshot", None)
-                ):
-                    raise RuntimeError("holding group monitor unavailable")
-                holding_monitor_component = dict(monitor_service.health_snapshot())
-                holding_monitor_component["required"] = True
-            except Exception as exc:
-                app.logger.exception("holding monitor readiness snapshot failed")
-                holding_monitor_component = {
-                    "schema": "chanlun-holding-group-monitor",
-                    "required": True,
-                    "ready": False,
-                    "status": "not_ready",
-                    "reason_code": "HOLDING_MONITOR_HEALTH_UNAVAILABLE",
-                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    "real_account_accessed": False,
-                    "real_order_transport_enabled": False,
-                    "automated_order_authorized": False,
-                    "live_status": "LIVE_DISABLED",
-                }
-        else:
-            holding_monitor_component = {
-                "schema": "chanlun-holding-group-monitor",
-                "required": False,
-                "ready": True,
-                "status": "disabled",
-                "reason_code": "HOLDING_MONITOR_DISABLED",
-                "real_account_accessed": False,
-                "real_order_transport_enabled": False,
-                "automated_order_authorized": False,
-                "live_status": "LIVE_DISABLED",
-            }
-
-        forward_scheduler_required = bool(
-            screening_required
-            and app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
-            and str(app.config.get("FORWARD_SCHEDULER_MODE", "APP")).upper() == "APP"
-        )
-        forward_scheduler_contract_id = "chanlun-forward-scheduler/app-runtime-contract"
-        if forward_scheduler_required:
-            forward_scheduler_probe = app.extensions.get("forward_scheduler_probe")
-            try:
-                if forward_scheduler_probe is None or not hasattr(
-                    forward_scheduler_probe, "snapshot"
-                ):
-                    raise RuntimeError("forward scheduler probe unavailable")
-                forward_scheduler_component = dict(forward_scheduler_probe.snapshot())
-                forward_scheduler_component["required"] = True
-            except Exception as exc:
-                app.logger.exception("forward scheduler observation failed")
-                forward_scheduler_component = {
-                    "schema": ("chanlun-forward-scheduler-readiness"),
-                    "contract_id": (forward_scheduler_contract_id),
-                    "required": True,
-                    "ready": False,
-                    "status": "unresolved",
-                    "reason_code": ("SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"),
-                    "reason_codes": ["SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"],
-                    "tasks": [],
-                    "task_count": 0,
-                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    "real_account_accessed": False,
-                    "real_order_transport_enabled": False,
-                    "automated_order_authorized": False,
-                    "live_status": "LIVE_DISABLED",
-                }
-        else:
-            forward_scheduler_component = {
-                "schema": "chanlun-forward-scheduler-readiness",
-                "contract_id": (forward_scheduler_contract_id),
-                "required": False,
-                "ready": True,
-                "status": "disabled",
-                "reason_code": "FORWARD_SCHEDULER_MONITOR_DISABLED",
-                "reason_codes": [],
-                "tasks": [],
-                "task_count": 0,
-                "real_account_accessed": False,
-                "real_order_transport_enabled": False,
-                "automated_order_authorized": False,
-                "live_status": "LIVE_DISABLED",
-            }
-
-        if screening_required:
-            screening_review_ready = bool(
-                screening_component.get(
-                    "screening_review_ready",
-                    screening_component.get("screening_review_ready", False),
-                )
-            )
-            screening_review_reason = str(
-                screening_component.get(
-                    "screening_review_reason_code",
-                    screening_component.get(
-                        "screening_review_reason_code",
-                        "SCREENING_REVIEW_READINESS_UNAVAILABLE",
-                    ),
-                )
-            )
-            human_review_service = app.extensions.get("decision_support_human_review")
-            try:
-                capture_probe = getattr(
-                    human_review_service,
-                    "forward_archive_capture_readiness_nonblocking",
-                    None,
-                )
-                if not callable(capture_probe):
-                    capture_probe = getattr(
-                        human_review_service,
-                        "forward_archive_capture_readiness",
-                    )
-                capture_component = dict(capture_probe(session=forward_session))
-            except Exception as exc:
-                app.logger.exception("forward archive capture readiness failed")
-                capture_component = {
-                    "required": None,
-                    "requirement_resolved": False,
-                    "trading_session_status": "UNRESOLVED",
-                    "trading_session_reason_code": (
-                        "TRADING_SESSION_EVIDENCE_UNAVAILABLE"
-                    ),
-                    "ready": False,
-                    "status": "not_ready",
-                    "reason_code": "SECTOR_CAPTURE_READINESS_UNAVAILABLE",
-                    "session": (
-                        None if forward_session is None else forward_session.isoformat()
-                    ),
-                    "receipt_proven": False,
-                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    "real_account_accessed": False,
-                    "real_order_transport_enabled": False,
-                    "live_status": "LIVE_DISABLED",
-                }
-            sector_capture_ready = bool(capture_component.get("ready"))
-            sector_capture_reason = str(
-                capture_component.get("reason_code")
-                or "SECTOR_CAPTURE_READINESS_UNAVAILABLE"
-            )
-            forward_archive_ready = screening_review_ready and sector_capture_ready
-            forward_archive_reason = (
-                screening_review_reason
-                if not screening_review_ready
-                else sector_capture_reason
-            )
-            forward_archive_component = {
-                **capture_component,
-                "required": capture_component.get("required"),
-                "requirement_resolved": capture_component.get(
-                    "requirement_resolved",
-                    capture_component.get("required") is not None,
-                ),
-                "ready": forward_archive_ready,
-                "status": "ready" if forward_archive_ready else "not_ready",
-                "reason_code": (
-                    "READY" if forward_archive_ready else forward_archive_reason
-                ),
-                "screening_review_ready": screening_review_ready,
-                "screening_review_reason_code": screening_review_reason,
-                "sector_capture_ready": sector_capture_ready,
-                "sector_capture_reason_code": sector_capture_reason,
-            }
-            try:
-                delivery_probe = getattr(
-                    human_review_service,
-                    "forward_delivery_readiness_nonblocking",
-                    None,
-                )
-                if not callable(delivery_probe):
-                    delivery_probe = getattr(
-                        human_review_service,
-                        "forward_delivery_readiness",
-                    )
-                forward_delivery_component = dict(
-                    delivery_probe(session=forward_session)
-                )
-            except Exception as exc:
-                app.logger.exception("forward delivery readiness failed")
-                forward_delivery_component = {
-                    "required": None,
-                    "requirement_resolved": False,
-                    "trading_session_status": "UNRESOLVED",
-                    "trading_session_reason_code": (
-                        "TRADING_SESSION_EVIDENCE_UNAVAILABLE"
-                    ),
-                    "ready": False,
-                    "status": "not_ready",
-                    "reason_code": "FORWARD_DELIVERY_READINESS_UNAVAILABLE",
-                    "session": (
-                        None if forward_session is None else forward_session.isoformat()
-                    ),
-                    "capture_ready": False,
-                    "evaluation_ready": False,
-                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    "real_account_accessed": False,
-                    "real_order_transport_enabled": False,
-                    "paper_status": "REVIEW_REQUIRED",
-                    "live_status": "LIVE_DISABLED",
-                }
-        else:
-            forward_archive_component = {
-                "required": False,
-                "ready": True,
-                "status": "disabled",
-                "reason_code": "SCREENING_DISABLED",
-                "session": (
-                    None if forward_session is None else forward_session.isoformat()
-                ),
-                "screening_review_ready": False,
-                "screening_review_reason_code": "SCREENING_DISABLED",
-                "sector_capture_ready": False,
-                "sector_capture_reason_code": "SCREENING_DISABLED",
-                "receipt_proven": False,
-                "real_account_accessed": False,
-                "real_order_transport_enabled": False,
-                "live_status": "LIVE_DISABLED",
-            }
-            forward_delivery_component = {
-                "required": False,
-                "ready": False,
-                "status": "disabled",
-                "reason_code": "SCREENING_DISABLED",
-                "session": (
-                    None if forward_session is None else forward_session.isoformat()
-                ),
-                "capture_ready": False,
-                "evaluation_ready": False,
-                "real_account_accessed": False,
-                "real_order_transport_enabled": False,
-                "paper_status": "REVIEW_REQUIRED",
-                "live_status": "LIVE_DISABLED",
-            }
-
         reasons = []
         if not metadata_component["ready"]:
             reasons.append("metadata_not_ready")
@@ -1521,126 +744,32 @@ def create_app(test_config=None, start_scheduler=False):
                 reasons.append("runtime_not_running")
         if scheduler_required and not scheduler_ready:
             reasons.append("scheduler_not_running")
-        if qmt_runtime_required and not qmt_runtime_component["ready"]:
-            reasons.append("qmt_runtime_not_ready")
-        if screening_required and not screening_component["ready"]:
-            reasons.append("trading_screening_not_ready")
-        # 持仓预警属于只读研究观察面。其失败必须在独立组件中完整暴露，
-        # 但不能让图表 Web/QMT 本身被宣告不可用；这与 forward research
-        # 证据的就绪口径一致。
-
         ready = not reasons
-        selection_ready = (
-            bool(screening_component.get("selection_ready"))
-            if screening_required
-            else None
-        )
         payload = {
             "status": "ready" if ready else "not_ready",
             "runtime_ready": ready,
-            # ``status``/``runtime_ready`` only attest that the Web/QMT process
-            # can serve work.  Realtime alert SLOs are reported separately so a
-            # healthy process with a candidate backlog is never mistaken for a
-            # fully operational alert pipeline (or restarted to repair backlog).
             "status_scope": "PROCESS_RUNTIME",
-            # 选股完整性不改变 Web/QMT 进程的 HTTP 就绪码，但必须在顶层明确暴露。
-            "selection_ready": selection_ready,
-            "selection_status": (
-                screening_component.get("selection_status")
-                if screening_required
-                else "disabled"
-            ),
-            "selection_reason_code": (
-                screening_component.get("selection_reason_code")
-                if screening_required
-                else "SCREENING_DISABLED"
-            ),
-            "realtime_alert_ready": (
-                screening_component.get("realtime_alert_ready")
-                if screening_required
-                else None
-            ),
-            "realtime_alert_capacity_ready": (
-                screening_component.get("realtime_alert_capacity_ready")
-                if screening_required
-                else None
-            ),
-            "realtime_alert_next_session_ready": (
-                screening_component.get("realtime_alert_next_session_ready")
-                if screening_required
-                else None
-            ),
-            "realtime_alert_status": (
-                screening_component.get(
-                    "realtime_alert_status",
-                    "unavailable",
-                )
-                if screening_required
-                else "disabled"
-            ),
-            "realtime_alert_reason_code": (
-                screening_component.get(
-                    "realtime_alert_reason_code",
-                    "REALTIME_ALERT_READINESS_UNAVAILABLE",
-                )
-                if screening_required
-                else "SCREENING_DISABLED"
-            ),
             "revision": build_revision,
             "pid": os.getpid(),
             "market": market,
             "components": {
                 "scheduler": scheduler_component,
                 "runtime": runtime_component,
-                "qmt_runtime": qmt_runtime_component,
                 "metadata": metadata_component,
                 "symbols": symbols_component,
                 "ticks": ticks_component,
-                "trading_screening": screening_component,
-                "holding_group_monitor": holding_monitor_component,
-                "forward_scheduler": forward_scheduler_component,
-                "forward_archive": forward_archive_component,
-                "forward_delivery": forward_delivery_component,
             },
             "reasons": reasons,
         }
         return payload, 200 if ready else 503
 
-    def health_snapshot(kind, market="a", forward_session=None):
+    def health_snapshot(kind, market="a"):
         if kind == "livez":
             return {"status": "alive", "revision": build_revision}, 200
         if kind == "healthz":
             return {"status": "ok", "revision": build_revision}, 200
         if kind == "readyz":
-            parsed_forward_session = forward_session
-            if isinstance(forward_session, str):
-                try:
-                    parsed_forward_session = datetime.date.fromisoformat(
-                        forward_session
-                    )
-                    if parsed_forward_session.isoformat() != forward_session:
-                        raise ValueError("forward session is not canonical")
-                except ValueError:
-                    return {
-                        "status": "not_ready",
-                        "revision": build_revision,
-                        "pid": os.getpid(),
-                        "market": market,
-                        "components": {},
-                        "reasons": ["invalid_forward_session"],
-                    }, 400
-            elif forward_session is not None and not isinstance(
-                forward_session, datetime.date
-            ):
-                return {
-                    "status": "not_ready",
-                    "revision": build_revision,
-                    "pid": os.getpid(),
-                    "market": market,
-                    "components": {},
-                    "reasons": ["invalid_forward_session"],
-                }, 400
-            return _readyz_snapshot(market, parsed_forward_session)
+            return _readyz_snapshot(market)
         return {"status": "not_found", "revision": build_revision}, 404
 
     @app.route("/livez")
@@ -1656,7 +785,6 @@ def create_app(test_config=None, start_scheduler=False):
         return health_snapshot(
             "readyz",
             request.args.get("market") or "a",
-            request.args.get("forward_session"),
         )
 
     @app.route("/")
@@ -1664,34 +792,6 @@ def create_app(test_config=None, start_scheduler=False):
     def index_show():
         requested_market = (request.args.get("market") or "a").strip().lower()
         initial_market = requested_market if requested_market in market_types else "a"
-        review_chart_lock = None
-        review_values = {
-            "candidate_id": str(request.args.get("review_candidate_id") or ""),
-            "source_sha256": str(request.args.get("review_source_sha256") or ""),
-            "review_as_of": str(request.args.get("review_as_of") or ""),
-        }
-        if any(review_values.values()):
-            if not all(review_values.values()):
-                abort(404)
-            service = app.extensions.get("decision_support_human_review")
-            validator = getattr(service, "validate_chart_lock", None)
-            try:
-                if not callable(validator):
-                    raise ValueError("human review service unavailable")
-                review_chart_lock = validator(
-                    candidate_id=review_values["candidate_id"],
-                    source_sha256=review_values["source_sha256"],
-                    review_as_of=int(review_values["review_as_of"]),
-                )
-            except (TypeError, ValueError, RuntimeError) as exc:
-                app.logger.debug("人工复核图表锁校验失败：%r", exc)
-                abort(404)
-            requested_code = str(request.args.get("code") or "")
-            if initial_market != "a" or requested_code != review_chart_lock.get(
-                "symbol"
-            ):
-                abort(404)
-
         selected_default_codes = market_default_codes.cached_snapshot()
         selected_frequencies = market_frequencys.cached_snapshot()
         selected_default_codes.update(market_default_codes.snapshot((initial_market,)))
@@ -1702,32 +802,27 @@ def create_app(test_config=None, start_scheduler=False):
             market_default_codes=selected_default_codes,
             market_frequencys=selected_frequencies,
             initial_market=initial_market,
-            enable_sse=(config.ENABLE_SSE_PUSH and review_chart_lock is None),
-            review_chart_lock=review_chart_lock,
+            enable_sse=config.ENABLE_SSE_PUSH,
         )
 
     from .blueprints.tv import tv_bp
     from .blueprints.zixuan import zixuan_bp
     from .blueprints.jobs import jobs_bp
-    from .blueprints.xuangu import xuangu_bp
     from .blueprints.setting import setting_bp
     from .blueprints.bkgn import bkgn_bp
     from .blueprints.other import other_bp
     from .blueprints.options import options_bp
     from .blueprints.symbols import symbols_bp
-    from .blueprints.decision_support import decision_support_bp
 
     for blueprint in (
         tv_bp,
         zixuan_bp,
         jobs_bp,
-        xuangu_bp,
         setting_bp,
         bkgn_bp,
         other_bp,
         options_bp,
         symbols_bp,
-        decision_support_bp,
     ):
         app.register_blueprint(blueprint)
 
@@ -1760,8 +855,6 @@ def create_app(test_config=None, start_scheduler=False):
     }
     # 在 QMT 与正式交易日提供器创建后再构造。生命周期闭包有意引用这个后绑定控制器，
     # 使应用工厂在 ``start_runtime_services()`` 前保持无副作用。
-    app_forward_scheduler = None
-    app_qmt_runtime = None
 
     def _probe_ticks(market):
         default_code = (
@@ -1772,24 +865,6 @@ def create_app(test_config=None, start_scheduler=False):
         )
         if not default_code:
             raise RuntimeError("default market code is not ready")
-        isolated_quote_reader = getattr(trading_gateway, "realtime_ticks", None)
-        if market == "a" and callable(isolated_quote_reader):
-            # Readiness is a lightweight dependency check, not a mandatory
-            # trading observation.  Use the shared, non-queuing quote worker;
-            # the reserved priority structure worker may legitimately spend
-            # many minutes rebuilding the post-close sector snapshot.
-            batch = isolated_quote_reader((default_code,))
-            if getattr(batch, "market_open", None) is False:
-                return {"__market_closed__": True}
-            ticks_reader = getattr(batch, "ticks", None)
-            values = ticks_reader() if callable(ticks_reader) else None
-            if isinstance(values, Mapping) and default_code in values:
-                return {default_code: values[default_code]}
-            return {}
-        if market == "a" and app.config.get(
-            "TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True
-        ):
-            raise RuntimeError("isolated A-share tick probe is unavailable")
         from chanlun.exchange import get_exchange, market_now_trading
         from chanlun.market import Market
 
@@ -1809,6 +884,9 @@ def create_app(test_config=None, start_scheduler=False):
     def start_runtime_services(enable_scheduler=True):
         global _SHARED_RUNTIME_OWNER
         nonlocal metadata_warmup_thread
+        if app.config.get("CHART_ONLY_MODE", False):
+            # Desktop/WSGI callers cannot implicitly resume paused producers.
+            enable_scheduler = False
         with runtime_lock:
             if runtime_state["status"] == "running":
                 if runtime_state["scheduler_enabled"] != bool(enable_scheduler):
@@ -1852,20 +930,11 @@ def create_app(test_config=None, start_scheduler=False):
                 raise RuntimeError("runtime services are stopping")
 
         try:
-            if app_qmt_runtime is not None:
-                # 必须先建立 QMT，再允许元数据、逐笔或原生筛选进程消费其本地运行时。
-                app_qmt_runtime.startup()
-                _ensure_start_is_current()
-            native_gateway_startup = getattr(trading_gateway, "startup", None)
-            if callable(native_gateway_startup):
-                # 恢复的覆盖快照可能让所有扫描当前都未到期。若没有显式且不依赖请求的握手，
-                # 惰性原生进程会一直停止，/readyz 会把本来健康的应用误报为不可用，直到下个
-                # 市场事件碰巧唤醒它。
-                native_gateway_startup()
-                _ensure_start_is_current()
             constants_service.start_market_metadata_loaders()
             _ensure_start_is_current()
             chart_cache_service.start_chart_cache_runtime()
+            _ensure_start_is_current()
+            chart_initial_build_service.start_initial_build_runtime()
             _ensure_start_is_current()
             file_db_service.start_pickle_writes()
             _ensure_start_is_current()
@@ -1891,28 +960,11 @@ def create_app(test_config=None, start_scheduler=False):
             sse_stream_service.start_sse_runtime()
             _ensure_start_is_current()
             if enable_scheduler:
-                if holding_group_monitor is not None:
-                    holding_group_monitor.register_job(scheduler)
-                if app_qmt_runtime is not None:
-                    app_qmt_runtime.register_jobs()
-                if app_forward_scheduler is not None:
-                    app_forward_scheduler.register_jobs()
                 with runtime_lock:
                     runtime_state["scheduler_start_attempted"] = True
                 scheduler.start()
 
             _ensure_start_is_current()
-            # Register and start every scheduler before launching long-running
-            # business workers.  A transient owner-file failure during job
-            # registration must not leave a still-unwinding screening worker
-            # for the application-level startup retry to mistake as healthy.
-            if trading_notification_outbox is not None:
-                trading_notification_outbox.start_background()
-                _ensure_start_is_current()
-            if app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True):
-                decision_support_trading_screening.start_background()
-                _ensure_start_is_current()
-
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
             with runtime_lock:
                 if (
@@ -1996,28 +1048,7 @@ def create_app(test_config=None, start_scheduler=False):
                     raise
 
             _cleanup("scheduler", _shutdown_scheduler_resources)
-            if app_forward_scheduler is not None:
-                _cleanup("app-forward-scheduler", app_forward_scheduler.stop)
-            if app_qmt_runtime is not None:
-                _cleanup("app-qmt-runtime", app_qmt_runtime.stop)
-            _cleanup(
-                "trading-screening",
-                lambda: decision_support_trading_screening.shutdown_background(
-                    wait=True, timeout=1.0
-                ),
-            )
-            if trading_notification_outbox is not None:
-                _cleanup(
-                    "trading-notification-outbox",
-                    lambda: trading_notification_outbox.shutdown_background(
-                        wait=True,
-                        timeout=2.0,
-                    ),
-                )
-            native_gateway_close = getattr(trading_gateway, "close", None)
-            if callable(native_gateway_close):
-                _cleanup("trading-screening-native-gateway", native_gateway_close)
-
+            _cleanup("chart-initial-build", chart_initial_build_service.shutdown_initial_build_runtime)
             def _handles_for(key):
                 value = runtime_state.get(key)
                 if isinstance(value, (list, tuple)):
@@ -2097,1023 +1128,18 @@ def create_app(test_config=None, start_scheduler=False):
     def shutdown_scheduler():
         shutdown_runtime_services()
 
-    def _trading_screening_clock():
-        configured = app.config.get("TRADING_SCREENING_CLOCK")
-        if callable(configured):
-            return configured()
-        return datetime.datetime.now(pytz.timezone("Asia/Shanghai"))
-
-    from chanlun.decision_support.trading_system.human_assisted_decision import (
-        HumanAssistedDecisionCore,
-    )
-    from chanlun.notifications import DingTalkWebhookNotifier
-
-    from .services.research_audit import (
-        ResearchAuditUnavailable,
-        build_research_audit_snapshot,
-    )
-    from .services.trading_notifications import SignalNotificationDispatcher
-    from .services.trading_notification_outbox import (
-        DurableTradingNotificationOutbox,
-    )
-    from .services.trading_screening import (
-        TradingScreeningConfig,
-        TradingScreeningService,
-    )
-    from .services.trading_screening_gateway import NativeTradingDataGateway
-    from .services.trading_screening_process import (
-        NativeTradingDataGatewayProcessProxy,
-        NativeWorkerProcessConfig,
-        native_sector_snapshot_cache_revision,
-    )
-    from .services.human_review_screening import HumanReviewScreeningService
-    from .services.holding_group_monitor import (
-        HoldingGroupMonitorConfig,
-        HoldingGroupMonitorService,
-        build_non_a_monitor_universe,
-    )
-    from .services.realtime_review_inbox import RealtimeReviewInbox
-
-    def _trading_screening_exchange():
-        from chanlun.exchange import Market, get_exchange
-
-        return get_exchange(Market.A)
-
-    def _trading_screening_instrument_types(
-        codes: tuple[str, ...],
-    ) -> dict[str, str]:
-        """只读启动期恢复的唯一 A 股证券目录，不触发原生或磁盘调用。"""
-
-        return stock_list_service.get_cached_a_instrument_types(codes)
-
-    def _trading_screening_symbol_names(
-        codes: tuple[str, ...],
-    ) -> dict[str, str | None]:
-        """只读启动期恢复的证券名称，避免候选追赶与页面行情争抢 QMT。"""
-
-        return stock_list_service.get_cached_a_symbol_names(codes)
-
-    def _trading_screening_watchlist():
-        from chanlun.persistence.db import db
-
-        configured_groups = app.config.get(
-            "TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS",
-            ("我的关注",),
-        )
-        if isinstance(configured_groups, str):
-            configured_groups = tuple(
-                value.strip()
-                for value in configured_groups.split(",")
-                if value.strip()
-            )
-        priority_groups = {
-            str(value).strip()
-            for value in configured_groups
-            if str(value).strip()
-        }
-        values = []
-        for group in db.zx_get_global_groups():
-            group_name = str(group.zx_group).strip()
-            if group_name not in priority_groups:
-                continue
-            for stock in db.zx_get_global_group_stocks(group_name):
-                if stock.market != "a":
-                    continue
-                values.append(
-                    {
-                        "code": stock.stock_code,
-                        "name": stock.stock_name,
-                        "group": group_name,
-                    }
-                )
-        return values
-
-    decision_support_human_review: HumanReviewScreeningService | None = None
-
-    def _trading_screening_manual_holdings_snapshot():
-        from chanlun.persistence.db import db
-        from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP
-
-        holding_group = str(
-            app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP")
-            or MANUAL_HOLDING_ZX_GROUP
-        ).strip()
-        rows = db.zx_get_global_group_stocks(holding_group)
-        positions = [
-            {
-                "market": str(row.market or ""),
-                "code": str(row.stock_code or ""),
-                "name": str(row.stock_name or row.stock_code or ""),
-                "monitoring_scope": (
-                    "A_SHARE_STRICT_DECISION_CORE"
-                    if row.market == "a"
-                    else "NON_A_AUXILIARY_STRUCTURE_RADAR"
-                ),
-                "decision_mode": (
-                    "UNIFIED_HUMAN_ASSISTED_DECISION_CORE"
-                    if row.market == "a"
-                    else "STRICT_STRUCTURE_OBSERVATION_ONLY"
-                ),
-            }
-            for row in rows
-            if row.market and row.stock_code
-        ]
-        positions.sort(key=lambda row: (row["market"], row["code"]))
-        a_share_priority_count = sum(
-            row["monitoring_scope"] == "A_SHARE_STRICT_DECISION_CORE"
-            for row in positions
-        )
-        auxiliary_count = sum(
-            row["monitoring_scope"] == "NON_A_AUXILIARY_STRUCTURE_RADAR"
-            for row in positions
-        )
-        covered_count = a_share_priority_count + auxiliary_count
-        return {
-            "schema": "chanlun-local-manual-holdings",
-            "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
-            "group_name": holding_group,
-            "group_scope": "GLOBAL_ACROSS_MARKETS",
-            "available": True,
-            "status": "ready",
-            "positions": positions,
-            "declared_count": len(positions),
-            "priority_monitor_count": a_share_priority_count,
-            "cross_market_monitor_count": auxiliary_count,
-            "covered_monitor_count": covered_count,
-            "unsupported_market_count": len(positions) - covered_count,
-            "quantity_available": False,
-            "cost_basis_available": False,
-            "sellable_quantity_available": False,
-            "real_account_accessed": False,
-            "real_order_transport_enabled": False,
-            "automated_order_authorized": False,
-            "live_status": "LIVE_DISABLED",
-        }
-
-    if not callable(
-        app.config.get("TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER")
-    ):
-        app.config["TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"] = (
-            _trading_screening_manual_holdings_snapshot
-        )
-
-    def _trading_screening_holdings():
-        configured = app.config.get("TRADING_SCREENING_HOLDINGS_PROVIDER")
-        if callable(configured):
-            return configured()
-        manual_snapshot = _trading_screening_manual_holdings_snapshot()
-        manually_declared = tuple(
-            row["code"] for row in manual_snapshot["positions"] if row["market"] == "a"
-        )
-        service = decision_support_human_review
-        virtual = () if service is None else service.virtual_holding_codes()
-        return tuple(dict.fromkeys((*manually_declared, *virtual)))
-
-    def _non_a_monitor_universe():
-        """Read only admitted non-A groups and bound every database query.
-
-        Holdings remain mandatory and are read with one overflow sentinel row.
-        Explicit priority groups are optional and only read far enough to fill
-        the remaining admission slots.  The monitor service still performs the
-        authoritative admission before any exchange or structure access.
-        """
-
-        from chanlun.market import Market
-        from chanlun.persistence.db import db
-        from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP
-
-        holding_group = str(
-            app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP")
-            or MANUAL_HOLDING_ZX_GROUP
-        ).strip()
-        configured_groups = app.config.get(
-            "TRADING_SCREENING_PRIORITY_WATCHLIST_GROUPS",
-            ("我的关注",),
-        )
-        if isinstance(configured_groups, str):
-            configured_groups = configured_groups.split(",")
-        optional_groups = tuple(
-            dict.fromkeys(
-                str(value).strip()
-                for value in configured_groups
-                if str(value).strip() and str(value).strip() != holding_group
-            )
-        )
-        max_symbols = app.config.get(
-            "HOLDING_GROUP_MONITOR_MAX_SYMBOLS",
-            DEFAULT_VALIDATION_COHORT_SIZE,
-        )
-        if type(max_symbols) is not int or max_symbols <= 0:
-            raise ValueError(
-                "HOLDING_GROUP_MONITOR_MAX_SYMBOLS must be a positive integer"
-            )
-
-        def serialize(rows):
-            return [
-                {
-                    "market": str(stock.market),
-                    "code": str(stock.stock_code),
-                    "name": str(stock.stock_name or stock.stock_code),
-                }
-                for stock in rows
-            ]
-
-        non_a_markets = tuple(
-            market.value for market in Market if market.value != Market.A.value
-        )
-        holding_rows = serialize(
-            db.zx_get_global_group_stocks(
-                holding_group,
-                limit=max_symbols + 1,
-                markets=non_a_markets,
-            )
-        )
-        group_members: dict[str, list[dict[str, object]]] = {
-            holding_group: holding_rows
-        }
-        admitted_identities = {
-            (str(row["market"]).strip().lower(), str(row["code"]).strip())
-            for row in holding_rows
-            if str(row["market"]).strip() and str(row["code"]).strip()
-        }
-        remaining = max(0, max_symbols - len(admitted_identities))
-        for group_name in optional_groups:
-            if remaining <= 0:
-                break
-            optional_rows = serialize(
-                db.zx_get_global_group_stocks(
-                    group_name,
-                    limit=remaining,
-                    markets=(Market.US.value,),
-                )
-            )
-            group_members[group_name] = optional_rows
-            admitted_identities.update(
-                (str(row["market"]).strip().lower(), str(row["code"]).strip())
-                for row in optional_rows
-                if str(row["market"]).strip() and str(row["code"]).strip()
-            )
-            remaining = max(0, max_symbols - len(admitted_identities))
-
-        return build_non_a_monitor_universe(
-            group_members,
-            holding_group=holding_group,
-            expanded_watchlist_markets=frozenset({Market.US.value}),
-        )
-
-    trading_screening_dingtalk_webhook = str(
-        app.config.get("TRADING_SCREENING_DINGTALK_WEBHOOK")
-        or ("" if app.config.get("TESTING") else get_dingtalk_webhook())
-        or ""
-    ).strip()
-    trading_screening_dingtalk_keyword = str(
-        app.config.get("TRADING_SCREENING_DINGTALK_KEYWORD")
-        or ("" if app.config.get("TESTING") else get_dingtalk_keyword())
-        or "买卖通知"
-    ).strip()
-    dry_run_value = app.config.get(
-        "TRADING_SCREENING_NOTIFICATION_DRY_RUN",
-        os.environ.get("CHANLUN_NOTIFICATION_DRY_RUN", ""),
-    )
-    trading_screening_dry_run = (
-        dry_run_value
-        if type(dry_run_value) is bool
-        else str(dry_run_value).strip().lower() in {"1", "true", "yes", "on"}
-    )
-    alert_chart_image_service = None
-    alert_chart_public_base_url = str(
-        app.config.get("ALERT_CHART_PUBLIC_BASE_URL") or ""
-    ).strip()
-    if alert_chart_public_base_url:
-        from .services.alert_chart_images import (
-            AlertChartImageService,
-            SignedAlertChartStore,
-        )
-        from .services.tradingview_chart_capture import (
-            TradingViewClientScreenshotRenderer,
-        )
-
-        signing_secret = hmac.new(
-            app.secret_key
-            if isinstance(app.secret_key, bytes)
-            else str(app.secret_key).encode("utf-8"),
-            b"chanlun-alert-chart-public-route",
-            hashlib.sha256,
-        ).digest()
-        alert_chart_store = SignedAlertChartStore(
-            root=pathlib.Path(app.config["ALERT_CHART_ROOT"]),
-            public_base_url=alert_chart_public_base_url,
-            secret=signing_secret,
-            ttl_seconds=int(app.config["ALERT_CHART_TTL_SECONDS"]),
-        )
-
-        def _alert_capture_session_cookie() -> str:
-            serializer = app.session_interface.get_signing_serializer(app)
-            if serializer is None:
-                raise RuntimeError("alert capture session signer is unavailable")
-            return serializer.dumps(
-                {
-                    "_user_id": _current_login_user_id(),
-                    "_fresh": True,
-                }
-            )
-
-        tradingview_capture = TradingViewClientScreenshotRenderer(
-            base_url=str(app.config["ALERT_CHART_CAPTURE_BASE_URL"]),
-            session_cookie_provider=_alert_capture_session_cookie,
-            timeout_ms=int(app.config["ALERT_CHART_CAPTURE_TIMEOUT_MS"]),
-        )
-        alert_chart_image_service = AlertChartImageService(
-            alert_chart_store,
-            browser_renderer=tradingview_capture,
-        )
-        app.extensions["alert_chart_image_store"] = alert_chart_store
-        app.extensions["alert_chart_image_service"] = alert_chart_image_service
-
-        @app.get("/public/alert-chart/<artifact_id>.png")
-        def public_alert_chart(artifact_id: str):
-            image_path = alert_chart_store.resolve(
-                artifact_id,
-                expires=request.args.get("expires"),
-                signature=request.args.get("signature"),
-            )
-            if image_path is None:
-                abort(404)
-            response = send_file(
-                image_path,
-                mimetype="image/png",
-                as_attachment=False,
-                conditional=True,
-                max_age=3600,
-            )
-            response.headers["Cache-Control"] = "public, max-age=3600, immutable"
-            response.headers["X-Robots-Tag"] = "noindex, noarchive"
-            return response
-
-    raw_trading_notifier = (
-        DingTalkWebhookNotifier(
-            webhook=trading_screening_dingtalk_webhook,
-            keyword=trading_screening_dingtalk_keyword,
-            dry_run=trading_screening_dry_run,
-            # 最终应用级传输闸门同时覆盖严格 A 股信号和辅助跨市场监听；只持久化消息哈希，
-            # 绝不保存机器人凭据或消息正文。
-            dedupe_state_path=(
-                config.get_data_path() / "monitor" / "dingtalk_outbound_dedupe.json"
-            ),
-            rich_content_provider=alert_chart_image_service,
-        )
-        if trading_screening_dingtalk_webhook or trading_screening_dry_run
-        else None
-    )
-    realtime_review_inbox = RealtimeReviewInbox(
-        pathlib.Path(app.config["REALTIME_REVIEW_INBOX"]),
-        clock=_trading_screening_clock,
-    )
-    trading_notification_outbox = None
-    trading_notification_transport = raw_trading_notifier
-    if raw_trading_notifier is not None and app.config.get(
-        "TRADING_NOTIFICATION_OUTBOX_ENABLED",
-        True,
-    ):
-
-        def _update_realtime_review_delivery(
-            event_id: str,
-            status: str,
-            reason: str | None,
-        ) -> None:
-            realtime_review_inbox.update_delivery(
-                [event_id],
-                status=status,
-                reason=reason,
-            )
-
-        trading_notification_outbox = DurableTradingNotificationOutbox(
-            raw_trading_notifier,
-            state_path=pathlib.Path(
-                app.config["TRADING_NOTIFICATION_OUTBOX_PATH"]
-            ),
-            clock=_trading_screening_clock,
-            delivery_observer=_update_realtime_review_delivery,
-            retry_base_seconds=float(
-                app.config["TRADING_NOTIFICATION_OUTBOX_RETRY_BASE_SECONDS"]
-            ),
-            retry_max_seconds=float(
-                app.config["TRADING_NOTIFICATION_OUTBOX_RETRY_MAX_SECONDS"]
-            ),
-        )
-        trading_notification_transport = trading_notification_outbox
-    if app.config.get("HOLDING_GROUP_MONITOR_ENABLED", True):
-        holding_group_monitor = HoldingGroupMonitorService(
-            # 提供器每次运行都查询全局分组，因此美股自选修改会在一个监听间隔内生效，
-            # 无需重启应用；A 股仍完全由严格决策核心处理。
-            positions_provider=_non_a_monitor_universe,
-            notifier=raw_trading_notifier,
-            state_root=(config.get_data_path() / "monitor"),
-            config=HoldingGroupMonitorConfig(
-                interval_seconds=int(
-                    app.config["HOLDING_GROUP_MONITOR_INTERVAL_SECONDS"]
-                ),
-                start_delay_seconds=int(
-                    app.config["HOLDING_GROUP_MONITOR_START_DELAY_SECONDS"]
-                ),
-                max_workers=int(app.config["HOLDING_GROUP_MONITOR_WORKERS"]),
-                max_symbols=int(app.config["HOLDING_GROUP_MONITOR_MAX_SYMBOLS"]),
-                large_scope_authorized=bool(
-                    app.config["HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED"]
-                ),
-                op_level="5m",
-                mid_level="1m",
-                big_level="30m",
-            ),
-            review_inbox=realtime_review_inbox,
-        )
-    # 本地人工复核收件箱不依赖钉钉是否配置；外部传输不可用时仍运行严格
-    # 生命周期分发器并保留事件，只把外部投递状态标为 unavailable/failed。
-    trading_notification_dispatcher = SignalNotificationDispatcher(
-        trading_notification_transport,
-        state_path=(
-            config.get_data_path()
-            / "decision_support"
-            / "trading_notification_state.json"
-        ),
-        review_inbox=realtime_review_inbox,
-    )
-    trading_gateway = app.config.get("TRADING_SCREENING_GATEWAY")
-    if trading_gateway is None:
-        if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True):
-            # 手工或非正式启动保持禁用缓存。正式启动把持久化板块快照绑定到完整且独立于界面的
-            # 原生生产器：交易、结构或 QMT 变化会使其失效，仅模板或 JavaScript 部署不会
-            # 强制执行 10–15 分钟板块重放。
-            sector_cache_revision = native_sector_snapshot_cache_revision(
-                build_revision
-            )
-            trading_gateway = NativeTradingDataGatewayProcessProxy(
-                watchlist_provider=_trading_screening_watchlist,
-                holdings_provider=_trading_screening_holdings,
-                instrument_type_provider=_trading_screening_instrument_types,
-                symbol_name_provider=_trading_screening_symbol_names,
-                log_path=(
-                    config.get_data_path()
-                    / "decision_support"
-                    / "trading_screening_native_worker.log"
-                ),
-                process_config=NativeWorkerProcessConfig(
-                    startup_timeout_seconds=float(
-                        app.config["TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS"]
-                    ),
-                    native_idle_timeout_seconds=float(
-                        app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"]
-                    ),
-                    restart_backoff_seconds=float(
-                        app.config["TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS"]
-                    ),
-                    max_completed_requests_per_process=int(
-                        app.config[
-                            "TRADING_SCREENING_NATIVE_MAX_COMPLETED_REQUESTS"
-                        ]
-                    ),
-                    max_worker_rss_bytes=(
-                        int(app.config["TRADING_SCREENING_NATIVE_MAX_RSS_MB"])
-                        * 1024
-                        * 1024
-                    ),
-                ),
-                sector_cache_path=(
-                    config.get_data_path()
-                    / "decision_support"
-                    / "trading_screening_sector_snapshot.json"
-                    if sector_cache_revision is not None
-                    else None
-                ),
-                sector_cache_revision=sector_cache_revision,
-                sector_cache_scope_mode=(
-                    "FULL_MARKET"
-                    if app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"]
-                    else (
-                        "LARGE_SCOPE"
-                        if app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"]
-                        else "VALIDATION_COHORT"
-                    )
-                ),
-                sector_cache_scope_limit=(
-                    None
-                    if app.config["TRADING_SCREENING_FULL_COVERAGE_ENABLED"]
-                    else (
-                        int(
-                            app.config[
-                                "TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS"
-                            ]
-                        )
-                        if app.config["TRADING_SCREENING_ALLOW_LARGE_SCOPE"]
-                        else int(
-                            app.config[
-                                "TRADING_SCREENING_VALIDATION_COHORT_SIZE"
-                            ]
-                        )
-                    )
-                ),
-                sector_cache_admitted_codes=tuple(
-                    symbol_catalog_scope["admitted_codes"]
-                ),
-                worker_environment={"CHANLUN_BUILD_REVISION": build_revision},
-                structure_worker_count=int(
-                    app.config["TRADING_SCREENING_STOCK_WORKERS"]
-                ),
-                runtime_state_cache_secret=(
-                    hmac.new(
-                        (
-                            app.secret_key
-                            if isinstance(app.secret_key, bytes)
-                            else str(app.secret_key).encode("utf-8")
-                        ),
-                        b"chanlun-screening-runtime-state-cache/persistent-secret-v1",
-                        hashlib.sha256,
-                    ).digest()
-                    if content_addressed_source_revision_from_build(build_revision)
-                    is not None
-                    else None
-                ),
-            )
-        else:
-            from chanlun.decision_support.trading_system.higher_timeframe_gate import (
-                QmtHigherTimeframeGateSource,
-            )
-            from chanlun.exchange.qmt_screening_sector_source import (
-                QmtSectorCompositeSource,
-                QmtSectorStrengthSource,
-                build_qmt_gics_hierarchy_sector_catalog,
-                qmt_trading_session_evidence,
-                qmt_trading_sessions,
-            )
-
-            sector_frames = QmtSectorCompositeSource()
-            sector_strength = QmtSectorStrengthSource()
-            higher_timeframe = QmtHigherTimeframeGateSource(
-                exchange_provider=_trading_screening_exchange,
-                sector_frame_provider=sector_frames.frame,
-                trading_calendar_provider=qmt_trading_sessions,
-            )
-            trading_gateway = NativeTradingDataGateway(
-                exchange_provider=_trading_screening_exchange,
-                sector_provider=build_qmt_gics_hierarchy_sector_catalog,
-                sector_frame_provider=sector_frames.frame,
-                sector_strength_provider=sector_strength.strengths,
-                higher_timeframe_provider=higher_timeframe.gates,
-                trading_session_provider=qmt_trading_session_evidence,
-                instrument_type_provider=_trading_screening_instrument_types,
-                watchlist_provider=_trading_screening_watchlist,
-                holdings_provider=_trading_screening_holdings,
-            )
-    official_calendar_path = app.config.get("TRADING_SESSION_OFFICIAL_CALENDAR_PATH")
-    qmt_calendar_provider = getattr(
-        trading_gateway,
-        "trading_session_evidence",
-        None,
-    )
-    if not callable(qmt_calendar_provider):
-        raise TypeError("trading screening calendar provider is unavailable")
-
-    def _a_share_notification_quote(code: str):
-        quote_provider = getattr(
-            trading_gateway,
-            "priority_realtime_ticks",
-            trading_gateway.realtime_ticks,
-        )
-        batch = quote_provider((code,))
-        tick = batch.ticks().get(code)
-        if tick is None:
-            raise RuntimeError("realtime quote is unavailable")
-        return tick
-
-    trading_notification_dispatcher.set_quote_provider(
-        _a_share_notification_quote
-    )
-    if official_calendar_path is None:
-        trading_session_provider = qmt_calendar_provider
-
-        def readiness_trading_session_provider(*, session, observed_at):
-            raise RuntimeError("official trading calendar unavailable")
-
-    else:
-
-        def trading_session_provider(*, session, observed_at):
-            return authoritative_trading_session_evidence(
-                session=session,
-                observed_at=observed_at,
-                calendar_path=pathlib.Path(official_calendar_path),
-                fallback_provider=qmt_calendar_provider,
-            )
-
-        def readiness_trading_session_provider(*, session, observed_at):
-            evidence = official_trading_session_evidence(
-                session=session,
-                observed_at=observed_at,
-                calendar_path=pathlib.Path(official_calendar_path),
-            )
-            if evidence is None:
-                raise RuntimeError("session is outside official calendar coverage")
-            return evidence
-
-    if (
-        app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
-        and not app.config.get("TESTING", False)
-        and content_addressed_source_revision_from_build(build_revision) is not None
-    ):
-        # 在后台标的池扫描占用串行原生进程前，预热近期不可变正式/QMT 日历判定。这样既让
-        # 就绪检查不阻塞，也不会把上个交易日漏掉的采集/评估投递掩盖成“日历不可用”。
-        calendar_provider = trading_session_provider
-        if callable(calendar_provider):
-            calendar_observed_at = _trading_screening_clock()
-            try:
-                if (
-                    not isinstance(calendar_observed_at, datetime.datetime)
-                    or calendar_observed_at.tzinfo is None
-                    or calendar_observed_at.utcoffset() is None
-                ):
-                    raise ValueError(
-                        "trading calendar warmup clock must be timezone-aware"
-                    )
-                calendar_observed_at = calendar_observed_at.astimezone(
-                    datetime.timezone(datetime.timedelta(hours=8))
-                )
-                for days_ago in range(1, 11):
-                    calendar_session = calendar_observed_at.date() - datetime.timedelta(
-                        days=days_ago
-                    )
-                    evidence = calendar_provider(
-                        session=calendar_session,
-                        observed_at=calendar_observed_at,
-                    )
-                    if (
-                        isinstance(evidence, Mapping)
-                        and evidence.get("classification") == "UNRESOLVED"
-                    ):
-                        break
-            except Exception as exc:
-                app.logger.warning(
-                    "trading calendar warmup unavailable: %s: %s",
-                    type(exc).__name__,
-                    str(exc)[:160],
-                )
-    audit_root = app.config.get(
-        "RESEARCH_AUDIT_ROOT",
-        pathlib.Path(__file__).resolve().parents[3],
-    )
-    try:
-        audit_snapshot = build_research_audit_snapshot(audit_root)
-        backtest_verdict = {
-            **audit_snapshot["verdict"],
-            "evidence_grade": audit_snapshot["data_evidence"]["grade"],
-        }
-    except ResearchAuditUnavailable:
-        backtest_verdict = {
-            "live_ready": False,
-            "status": "evidence_unavailable",
-            "evidence_grade": "invalid",
-        }
-    # 生产实时监听不读取 selection_research.json。该账本只属于离线研究/回放，
-    # 技术买入提醒由实时严格 5m 正式结构决定；30m/日线用于环境分级。
-    # 1m 不参与信号是否成立的判断，但必须完成区间套后才解锁精确执行候选。
-    app.config["TRADING_SCREENING_FORMAL_RESEARCH_REQUIRED"] = False
-    formal_research_required = False
-    selection_research = ()
-    configured_screening_snapshot_path = app.config.get(
-        "TRADING_SCREENING_SNAPSHOT_PATH"
-    )
-    trading_screening_snapshot_path = (
-        pathlib.Path(configured_screening_snapshot_path)
-        if configured_screening_snapshot_path
-        else (
-            config.get_data_path()
-            / "decision_support"
-            / "trading_screening_snapshot.json"
-        )
-    )
-    decision_support_trading_screening = TradingScreeningService(
-        market_data=trading_gateway,
-        sector_catalog=trading_gateway,
-        engine=HumanAssistedDecisionCore(
-            formal_selection_required=formal_research_required,
-        ),
-        cache_path=trading_screening_snapshot_path,
-        human_review_archive_root=pathlib.Path(
-            app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
-        ),
-        selection_research=selection_research,
-        clock=_trading_screening_clock,
-        notifier=trading_notification_dispatcher,
-        config=TradingScreeningConfig(
-            refresh_interval_seconds=int(
-                app.config.get("TRADING_SCREENING_REFRESH_SECONDS", 60)
-            ),
-            priority_monitoring_enabled=bool(
-                app.config.get(
-                    "TRADING_SCREENING_PRIORITY_MONITOR_ENABLED",
-                    True,
-                )
-            ),
-            priority_monitor_time_budget_seconds=float(
-                app.config.get(
-                    "TRADING_SCREENING_PRIORITY_TIME_BUDGET_SECONDS",
-                    58.0,
-                )
-            ),
-            full_coverage_refresh_enabled=bool(
-                app.config.get(
-                    "TRADING_SCREENING_FULL_COVERAGE_ENABLED",
-                    False,
-                )
-            ),
-            force_full_coverage_until_complete=bool(
-                app.config.get(
-                    "TRADING_SCREENING_FORCE_FULL_COVERAGE_UNTIL_COMPLETE",
-                    False,
-                )
-            ),
-            max_five_minute_candidate_symbols_per_refresh=int(
-                app.config.get(
-                    "TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            max_thirty_minute_candidate_symbols_per_refresh=int(
-                app.config.get(
-                    "TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            supportive_discovery_max_sector_rank=int(
-                app.config.get(
-                    "TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            max_symbols_per_refresh=int(
-                app.config.get(
-                    "TRADING_SCREENING_SYMBOLS_PER_REFRESH",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            max_monitor_symbols_per_refresh=int(
-                app.config.get(
-                    "TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            max_total_symbols_per_refresh=int(
-                app.config.get(
-                    "TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            validation_cohort_size=int(
-                app.config.get(
-                    "TRADING_SCREENING_VALIDATION_COHORT_SIZE",
-                    DEFAULT_VALIDATION_COHORT_SIZE,
-                )
-            ),
-            max_admitted_universe_symbols=int(
-                app.config.get(
-                    "TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS",
-                    DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
-                )
-            ),
-            large_scope_authorized=bool(
-                app.config.get("TRADING_SCREENING_ALLOW_LARGE_SCOPE", False)
-            ),
-            admitted_universe_codes=tuple(
-                symbol_catalog_scope.get("admitted_codes", ())
-            ),
-            priority_monitor_interval_seconds=int(
-                app.config.get(
-                    "TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS",
-                    60,
-                )
-            ),
-            candidate_monitor_time_budget_seconds=float(
-                app.config.get(
-                    "TRADING_SCREENING_CANDIDATE_TIME_BUDGET_SECONDS",
-                    50.0,
-                )
-            ),
-            five_minute_candidate_target_seconds=int(
-                app.config.get(
-                    "TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS",
-                    300,
-                )
-            ),
-            thirty_minute_candidate_target_seconds=int(
-                app.config.get(
-                    "TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS",
-                    1800,
-                )
-            ),
-            incomplete_checkpoint_interval_seconds=int(
-                app.config.get(
-                    "TRADING_SCREENING_INCOMPLETE_CHECKPOINT_INTERVAL_SECONDS",
-                    120,
-                )
-            ),
-            max_structure_age_seconds=int(
-                app.config.get("TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS", 3600)
-            ),
-            stock_worker_count=(
-                int(app.config["TRADING_SCREENING_STOCK_WORKERS"])
-                if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
-                else 1
-            ),
-            full_coverage_worker_count=(
-                int(app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"])
-                if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
-                else 1
-            ),
-        ),
-        backtest_verdict=backtest_verdict,
-    )
-    repository_root = pathlib.Path(__file__).resolve().parents[3]
-    from .services.app_qmt_runtime import AppQmtRuntimeController
-    from .services.app_forward_scheduler import (
-        AppForwardSchedulerController,
-        discover_qmt_local_data_dir,
-        evaluation_readiness_from_health,
-    )
-
-    qmt_runtime_mode = str(app.config.get("QMT_RUNTIME_MODE", "APP")).strip().upper()
-    if qmt_runtime_mode not in {"APP", "DISABLED"}:
-        raise ValueError("QMT_RUNTIME_MODE must be APP or DISABLED")
-    if qmt_runtime_mode == "APP":
-
-        def _prepare_qmt_runtime_change(action):
-            native_gateway_close = getattr(trading_gateway, "close", None)
-            if not callable(native_gateway_close):
-                return
-            try:
-                native_gateway_close()
-            except Exception:
-                app.logger.exception(
-                    "failed to quiesce native screening before QMT %s",
-                    action,
-                )
-
-        def _resume_after_qmt_runtime_change(action):
-            try:
-                decision_support_trading_screening.ensure_refresh()
-            except Exception:
-                app.logger.exception(
-                    "failed to wake native screening after QMT %s",
-                    action,
-                )
-
-        configured_helper = str(app.config.get("QMT_RUNTIME_HELPER") or "").strip()
-        app_qmt_runtime = AppQmtRuntimeController(
-            scheduler=scheduler,
-            repository_root=repository_root,
-            clock=_trading_screening_clock,
-            helper_script=(
-                pathlib.Path(configured_helper) if configured_helper else None
-            ),
-            before_change=_prepare_qmt_runtime_change,
-            after_change=_resume_after_qmt_runtime_change,
-            startup_timeout_seconds=int(
-                app.config.get("QMT_RUNTIME_STARTUP_TIMEOUT_SECONDS", 120)
-            ),
-            warmup_seconds=int(app.config.get("QMT_RUNTIME_WARMUP_SECONDS", 90)),
-            recovery_cooldown_seconds=int(
-                app.config.get("QMT_RUNTIME_RECOVERY_COOLDOWN_SECONDS", 300)
-            ),
-            observation_max_age_seconds=int(
-                app.config.get("QMT_RUNTIME_OBSERVATION_MAX_AGE_SECONDS", 180)
-            ),
-        )
-
-    forward_scheduler_mode = (
-        str(app.config.get("FORWARD_SCHEDULER_MODE", "APP")).strip().upper()
-    )
-    if forward_scheduler_mode not in {"APP", "DISABLED"}:
-        raise ValueError("FORWARD_SCHEDULER_MODE must be APP or DISABLED")
-    forward_scheduler_probe = None
-    if forward_scheduler_mode == "APP":
-
-        def _app_forward_capture_readiness(*, session, observed_at):
-            payload, _status = health_snapshot(
-                "readyz",
-                market="a",
-                forward_session=session,
-            )
-            delivery = payload.get("components", {}).get("forward_delivery", {})
-            return {
-                # 板块回执只是输入；采纳或成功必须证明前向账本自身包含 CAPTURE 事件。
-                "ready": bool(delivery.get("capture_ready")),
-                "reason_code": str(
-                    delivery.get("reason_code")
-                    or "FORWARD_CAPTURE_DELIVERY_UNAVAILABLE"
-                ),
-                "observed_at": observed_at.isoformat(),
-            }
-
-        def _app_forward_evaluation_readiness(*, session, observed_at):
-            """复用此前由 PowerShell 轮询的完全相同就绪事实。"""
-
-            payload, _status = health_snapshot(
-                "readyz",
-                market="a",
-                forward_session=session,
-            )
-            return evaluation_readiness_from_health(
-                payload,
-                session=session,
-                observed_at=observed_at,
-            )
-
-        try:
-            forward_qmt_data_dir = discover_qmt_local_data_dir(
-                app.config.get("FORWARD_QMT_LOCAL_DATA_DIR") or None
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            # 保持网页可用，但虚拟入场闸门关闭失败；控制器快照在配置修复前持续携带精确的
-            # QMT 缺失原因。
-            app.logger.error(
-                "app-owned forward QMT data directory unresolved: %s",
-                str(exc)[:200],
-            )
-            forward_qmt_data_dir = None
-        app_forward_scheduler = AppForwardSchedulerController(
-            scheduler=scheduler,
-            repository_root=repository_root,
-            forward_root=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_ROOT"]),
-            qmt_local_data_dir=forward_qmt_data_dir,
-            trading_session_provider=trading_session_provider,
-            capture_readiness_provider=_app_forward_capture_readiness,
-            evaluation_readiness_provider=(_app_forward_evaluation_readiness),
-            parameter_snapshot=pathlib.Path(
-                app.config["HUMAN_REVIEW_PARAMETER_SNAPSHOT"]
-            ),
-            clock=_trading_screening_clock,
-        )
-        forward_scheduler_probe = app_forward_scheduler
-    decision_support_human_review = HumanReviewScreeningService(
-        repository_root=repository_root,
-        historical_report=pathlib.Path(app.config["HUMAN_REVIEW_HISTORICAL_REPORT"]),
-        forward_root=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_ROOT"]),
-        feedback_ledger=pathlib.Path(app.config["HUMAN_REVIEW_FEEDBACK_LEDGER"]),
-        sector_ledger=pathlib.Path(app.config["QMT_SECTOR_CAPTURE_LEDGER"]),
-        paper_ledger=pathlib.Path(app.config["HUMAN_REVIEW_PAPER_LEDGER"]),
-        parameter_snapshot=pathlib.Path(app.config["HUMAN_REVIEW_PARAMETER_SNAPSHOT"]),
-        live_screening_snapshot=trading_screening_snapshot_path,
-        live_archive_root=pathlib.Path(app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]),
-        forward_markout_report=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_MARKOUT"]),
-        forward_warmup_lineage_report=pathlib.Path(
-            app.config["HUMAN_REVIEW_FORWARD_WARMUP_LINEAGE"]
-        ),
-        sector_capture_due=datetime.time(9, 10),
-        trading_session_provider=trading_session_provider,
-        readiness_trading_session_provider=readiness_trading_session_provider,
-        forward_scheduler_provider=(
-            forward_scheduler_probe.snapshot
-            if app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
-            and forward_scheduler_probe is not None
-            # 禁用就绪或界面观测绝不能变成新虚拟意图的语义绕过。通用测试禁用依赖主机的
-            # 监听，因此注入确定性无效观测而不启动 PowerShell，再由共享校验器关闭虚拟链。
-            else lambda **_kwargs: {}
-        ),
-        candidate_scope_provider=(
-            decision_support_trading_screening.admitted_universe_codes
-        ),
-        candidate_scope_admission_provider=(
-            decision_support_trading_screening.admit_archive_universe_codes
-        ),
-    )
-
-    app.extensions.update(
-        {
-            "scheduler": scheduler,
-            "xuangu_tasks": _xuangu_tasks,
-            "holding_group_monitor": holding_group_monitor,
-            "realtime_review_inbox": realtime_review_inbox,
-            "trading_notification_outbox": trading_notification_outbox,
-            "readiness": readiness_registry,
-            "metadata_warmup_thread": metadata_warmup_thread,
-            "login_rate_limiter": login_rate_limiter,
-            "health_snapshot": health_snapshot,
-            "runtime_status": runtime_status,
-            "start_runtime_services": start_runtime_services,
-            "shutdown_runtime_services": shutdown_runtime_services,
-            "shutdown_scheduler": shutdown_scheduler,
-            "decision_support_trading_screening": (decision_support_trading_screening),
-            "decision_support_trading_screening_gateway": trading_gateway,
-            "a_share_realtime_quotes": getattr(
-                trading_gateway,
-                "display_quote_snapshot",
-                getattr(trading_gateway, "realtime_ticks", None),
-            ),
-            "decision_support_human_review": decision_support_human_review,
-            "forward_scheduler_probe": forward_scheduler_probe,
-            "app_forward_scheduler": app_forward_scheduler,
-            "app_qmt_runtime": app_qmt_runtime,
-        }
-    )
+    app.extensions.update({
+        "scheduler": scheduler,
+        "readiness": readiness_registry,
+        "metadata_warmup_thread": metadata_warmup_thread,
+        "login_rate_limiter": login_rate_limiter,
+        "health_snapshot": health_snapshot,
+        "runtime_status": runtime_status,
+        "start_runtime_services": start_runtime_services,
+        "shutdown_runtime_services": shutdown_runtime_services,
+        "shutdown_scheduler": shutdown_scheduler,
+    })
     if scheduler_enabled:
         start_runtime_services(enable_scheduler=True)
         atexit.register(shutdown_runtime_services)
-
     return app

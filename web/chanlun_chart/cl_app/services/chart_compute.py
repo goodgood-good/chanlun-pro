@@ -13,10 +13,10 @@ Tier 4 P3 重构：从 blueprints/tv.py 抽出 ``compute_and_cache_chart_data`` 
 import bisect
 import datetime
 import threading
-import time
 import weakref
 from threading import RLock
 
+import pandas as pd
 import pytz
 
 from chanlun import fun
@@ -31,7 +31,9 @@ from chanlun.exchange import (
     market_now_trading as exchange_market_now_trading,
 )
 from chanlun.exchange.kline_completion import drop_unclosed_last_bar
+from chanlun.exchange.price_basis import copy_price_basis_metadata
 from chanlun.tools.log_util import LogUtil
+from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
 
 from .chart_cache import (
     _TRANSIENT_NEGATIVE_TTL_SECONDS,
@@ -42,6 +44,8 @@ from .chart_cache import (
     _mark_negative_cache,
     _set_chart_cache_entry,
 )
+from .chart_bar_time import attach_chart_bar_time_label, chart_bar_time_fields
+from .chart_market_state import ChartMarketStateCache
 
 # ---------------- per-key 锁注册表 ----------------
 
@@ -85,40 +89,43 @@ chart_calc_locks = _SafeLockRegistry()
 
 # ---------------- 交易时段状态 (TTL 缓存) ----------------
 
-# market → (is_trading, sampled_at)。tv_history 每请求判一次交易时段(方向2),
-# 用短 TTL 缓存避免反复构造 exchange / 调 now_trading。
-_trading_state_cache: dict = {}
-_trading_state_lock = threading.Lock()
-_TRADING_STATE_TTL = 30.0  # 秒
+_chart_market_state_cache = ChartMarketStateCache()
 
 
 def market_now_trading(market: str, now: float = None) -> bool:
-    """返回该 market 当前是否处于交易时段(带 30s TTL 缓存)。
+    """供图表缓存选择刷新阈值，最多等待市场状态查询 50ms。
 
-    供 chart_cache serve-stale 阈值选择(方向2): 盘中短阈值更快后台刷新, 收盘
-    长阈值少折腾静态数据。exchange 构造 / now_trading 异常时保守按"交易中"
-    (True)返回 → 走短阈值、更倾向刷新到最新, 不让一次异常把图表钉死在旧快照。
-
-    Args:
-        market: 市场代码(a/us/hk/...)。
-        now: 当前时间戳(秒); None 取 time.time()(单测可注入以验证 TTL)。
+    每市场复用一个未完成查询，30秒TTL从实际完成采样计时。待查、异常、
+    未知状态和已过期的关闭状态均按True选择更短刷新阈值；不作为交易许可。
+    ``now``仅为测试保留逻辑时钟锚点，完成采样仍计入实际经过的时间。
     """
-    now = time.time() if now is None else now
-    with _trading_state_lock:
-        cached = _trading_state_cache.get(market)
-        if cached is not None and (now - cached[1]) < _TRADING_STATE_TTL:
-            return cached[0]
     try:
-        ex = get_exchange(Market(market))
-        trading = bool(exchange_market_now_trading(ex, market))
-    except Exception:
-        trading = True  # 保守: 不确定 → 当作交易中(短阈值, 更勤刷新)
-    with _trading_state_lock:
-        _trading_state_cache[market] = (trading, now)
-    return trading
+        selected_market = Market(market)
+    except (TypeError, ValueError):
+        return True
+    exchange_provider = get_exchange
+    state_provider = exchange_market_now_trading
+    return _chart_market_state_cache.read(
+        selected_market.value,
+        lambda: state_provider(exchange_provider(selected_market), selected_market.value),
+        now=now,
+    )
 
 
 # ---------------- chart data 合并（纯函数）----------------
+
+def _with_history_source_deadline(payload, attrs):
+    """Keep the original source deadline when a chart is rebuilt from cached bars."""
+    field = "_history_source_valid_until"
+    if not isinstance(payload, dict) or payload.get(field) == attrs.get(field):
+        return payload
+    result = dict(payload)
+    if field in attrs:
+        result[field] = attrs[field]
+    else:
+        result.pop(field, None)
+    return result
+
 
 def serialize_chart_data_with_strict_runtime(
     *,
@@ -129,15 +136,22 @@ def serialize_chart_data_with_strict_runtime(
     chart_config,
     strict_runtime=None,
 ):
-    """Serialize one chart from one strict runtime and one closed-bar prefix."""
+    """Serialize only the displayed interval, ending at its latest closed bar."""
 
+    if display_klines is not None and market == "us" and display_frequency in {"1m", "5m", "30m"} and (
+        "bar_time_label" not in display_klines.attrs
+    ):
+        display_klines = attach_chart_bar_time_label(
+            display_klines, market=market, frequency=display_frequency,
+            exchange=get_exchange(Market(market)),
+        )
     source_attrs = dict(getattr(display_klines, "attrs", {}))
     completed_klines = display_klines
     while completed_klines is not None and len(completed_klines) > 0:
         closed_prefix = drop_unclosed_last_bar(
             completed_klines,
             display_frequency,
-            time_label="end",
+            time_label=source_attrs.get("bar_time_label", "end"),
         )
         if len(closed_prefix) == len(completed_klines):
             break
@@ -162,19 +176,19 @@ def serialize_chart_data_with_strict_runtime(
 
     if strict_runtime is None:
         strict_runtime = build_strict_chart_cd(
-            market=market,
-            code=code,
-            frequency=display_frequency,
-            frame=completed_klines,
+            market=market, code=code, frequency=display_frequency, frame=completed_klines,
         )
-    return cl_data_to_tv_chart(
-        completed_klines,
-        chart_config,
-        market=market,
-        code=code,
-        frequency=display_frequency,
-        strict_runtime=strict_runtime,
+    result = cl_data_to_tv_chart(
+        completed_klines, chart_config, market=market, code=code,
+        frequency=display_frequency, strict_runtime=strict_runtime,
     )
+    if result is not None:
+        result["price_basis"] = dict(
+            copy_price_basis_metadata(completed_klines, pd.DataFrame()).attrs
+        )
+        result.update(chart_bar_time_fields(completed_klines.attrs))
+    return _with_history_source_deadline(result, source_attrs)
+
 
 def compute_and_cache_chart_data(
     market: str,
@@ -252,6 +266,9 @@ def _compute_and_cache_chart_data_impl(
 
     with lb_low_priority():
         klines = ex.klines(code, frequency, **kline_args)
+    klines = attach_chart_bar_time_label(
+        klines, market=market, frequency=frequency, exchange=ex,
+    )
     if _klines_fetch_incomplete(klines):
         LogUtil.warning(
             f"[compute] {market}:{code}:{frequency} 拉取不完整,短退避保留旧缓存"
@@ -287,8 +304,7 @@ _CHART_ARRAY_FIELDS = (
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
 )
 
-# 分型、笔、段是严格快照之外需要按窗口裁切的基础图元。中枢、走势、背驰和
-# 三类买卖点只存在于原子化 ``strict_structure``，不再保留第二套顶层传输字段。
+# 分型、笔、线段按显示窗口裁切；本周期中枢由 ``strict_structure`` 原子快照传输。
 _CHART_SHAPE_FIELDS = ("fxs", "bis", "xds")
 
 
@@ -508,7 +524,7 @@ def slice_chart_data_to_window(
         else len(bar_times)
     )
 
-    sliced: dict = {}
+    sliced: dict = chart_bar_time_fields(chart_data)
     for field in _CHART_ARRAY_FIELDS:
         arr = chart_data.get(field) or []
         sliced[field] = arr[start_idx:end_idx] if arr else []
@@ -576,7 +592,7 @@ def trim_future_bars(
     if resp_end >= len(times):
         return dict(chart_data)
 
-    trimmed: dict = {}
+    trimmed: dict = chart_bar_time_fields(chart_data)
     for field in _CHART_ARRAY_FIELDS:
         arr = chart_data.get(field) or []
         trimmed[field] = arr[:resp_end] if arr else []
@@ -584,6 +600,81 @@ def trim_future_bars(
     for field in _CHART_SHAPE_FIELDS:
         trimmed[field] = chart_data.get(field, []) or []
     return trimmed
+
+
+def _initial_candles_with_deferred_structure(
+    *, market, code, frequency, frame, cl_config, cache_key,
+):
+    """Publish candles now; compute the same full structure under the chart lock."""
+    import copy
+    import uuid
+    from .chart_cache import _get_chart_cache_entry_ram_only
+    from .chart_initial_build import (
+        PENDING_CODE, initial_builds_accepting_results, submit_initial_build,
+    )
+    from .kline_recompute import recompute_chart_data_from_klines
+
+    frozen = frame.copy(deep=True)
+    attrs = dict(frozen.attrs)
+    while not frozen.empty:
+        closed = drop_unclosed_last_bar(
+            frozen, frequency, time_label=attrs.get("bar_time_label", "end"),
+        )
+        if len(closed) == len(frozen):
+            break
+        frozen = closed
+    if frozen.empty:
+        return None
+    frozen = frozen.copy(deep=True)
+    frozen.attrs.update(attrs)
+    settings = copy.deepcopy(cl_config)
+    preview = cl_data_to_tv_chart(
+        frozen, settings, market=market, code=code, frequency=frequency,
+        strict_runtime=StrictChartRuntimeResult.unavailable(PENDING_CODE, ""),
+    )
+    preview["price_basis"] = dict(copy_price_basis_metadata(frozen, pd.DataFrame()).attrs)
+    preview.update(chart_bar_time_fields(frozen.attrs))
+    preview = _with_history_source_deadline(preview, frozen.attrs)
+    build_id = uuid.uuid4().hex
+    preview["_initial_structure_build_id"] = build_id
+    preview["_initial_structure_cache_key"] = cache_key
+
+    def still_current():
+        entry = _get_chart_cache_entry_ram_only(cache_key)
+        return (
+            initial_builds_accepting_results() and entry is not None
+            and entry["data"].get("_initial_structure_build_id") == build_id
+        )
+
+    def build():
+        # tv_history owns this lock until it has published the candle preview.
+        # A late worker cannot replace another request's newer chart snapshot.
+        with chart_calc_locks.get(cache_key):
+            if not still_current():
+                return
+            try:
+                result = recompute_chart_data_from_klines(
+                    market=market, code=code, frequency=frequency,
+                    klines=frozen, cl_config=settings, cache_key=cache_key,
+                )
+                if result is None:
+                    raise ValueError("empty structure result")
+            except Exception as exc:
+                LogUtil.warning(
+                    f"[chart_initial_build] {market}:{code} {frequency} {type(exc).__name__}"
+                )
+                result = {**preview, "strict_structure_error": {"code": "strict_initial_build_failed"}}
+                result.pop("_initial_structure_build_id", None)
+                result.pop("_initial_structure_cache_key", None)
+            if still_current():
+                result["_completed_structure_build_id"] = build_id
+                _set_chart_cache_entry(cache_key, result, is_full_snapshot=True)
+
+    if not submit_initial_build(cache_key, build):
+        preview.pop("_initial_structure_build_id", None)
+        preview.pop("_initial_structure_cache_key", None)
+        preview["strict_structure_error"] = {"code": "strict_initial_build_busy"}
+    return preview
 
 
 def fetch_klines_and_compute_cl_data(
@@ -596,10 +687,14 @@ def fetch_klines_and_compute_cl_data(
     cache_miss_reason: str,
     cache_key: str,
     to_ts: int,
+    force_refresh: bool = False,
+    progressive: bool = False,
 ):
     """Fetch bars and compute one strict chart snapshot for a cache miss."""
 
-    from .kline_recompute import prepend_klines_and_replace_cache
+    from .kline_recompute import (
+        prepend_klines_and_replace_cache, recompute_chart_data_from_klines,
+    )
 
     ex = get_exchange(Market(market))
     fetched_frequency = frequency
@@ -607,7 +702,18 @@ def fetch_klines_and_compute_cl_data(
     import time as _time
 
     fetch_started = _time.time()
-    klines = ex.klines(code, fetched_frequency, **kline_args)
+    if market == "us" and cache_miss_reason == "cache_force_refresh":
+        kline_args = {**kline_args, "args": {
+            **(kline_args.get("args") or {}), "_bypass_history_cache": True,
+        }}
+    canonical_fetch = getattr(ex, "canonical_closed_minute_history", None)
+    if fetched_frequency == "1m" and not kline_args.get("start_date") and callable(canonical_fetch):
+        klines = canonical_fetch(code, **kline_args)
+    else:
+        klines = ex.klines(code, fetched_frequency, **kline_args)
+    klines = attach_chart_bar_time_label(
+        klines, market=market, frequency=fetched_frequency, exchange=ex,
+    )
     LogUtil.info(
         f"[fetch_klines] {market}:{code} {fetched_frequency} ex.klines="
         f"{(_time.time() - fetch_started) * 1000:.0f}ms rows="
@@ -655,12 +761,22 @@ def fetch_klines_and_compute_cl_data(
 
     if cl_chart_data is None:
         serialize_started = _time.time()
-        cl_chart_data = serialize_chart_data_with_strict_runtime(
+        if progressive and not is_range_request:
+            cl_chart_data = _initial_candles_with_deferred_structure(
+                market=market, code=code, frequency=frequency, frame=display_klines,
+                cl_config=cl_config, cache_key=cache_key,
+            )
+            if cl_chart_data is None:
+                return None
+            return {"cl_chart_data": cl_chart_data, "cache_already_written": False,
+                    "is_full_snapshot": True}
+        cl_chart_data = recompute_chart_data_from_klines(
             market=market,
             code=code,
-            display_frequency=frequency,
-            display_klines=display_klines,
-            chart_config=cl_config,
+            frequency=frequency,
+            klines=display_klines,
+            cl_config=cl_config,
+            cache_key=cache_key,
         )
         LogUtil.info(
             f"[first_load] {market}:{code} {frequency} strict_extract="

@@ -440,15 +440,6 @@ class ExchangeTDXFutures(Exchange):
         # 通达信期货日线时间后对齐，统一设为 23:00 与分钟线区分
         return dt.replace(hour=23, minute=0)
 
-    def balance(self):
-        raise Exception("交易所不支持")
-
-    def positions(self, code: str = ""):
-        raise Exception("交易所不支持")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        raise Exception("交易所不支持")
-
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")
 

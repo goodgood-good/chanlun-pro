@@ -1,47 +1,27 @@
 """
-统一的密钥/凭证安全工具：
+Web 登录与会话密钥工具：
 
 - ``get_flask_secret_key()``：返回 Flask 会话密钥；按 env > config > 持久化文件 顺序解析。
-- ``get_fernet()`` / ``encrypt_str`` / ``decrypt_str``：基于 Flask 密钥派生的对称加密，
-  用于把飞书 app_secret 等敏感配置加密落库。
-- ``mask_secret()``：用于前端回显时遮蔽中间字符。
 - ``verify_login_password()``：只校验 Werkzeug ``pbkdf2:``/``scrypt:`` 哈希。
-
-约束：
-- 不抛出运行时致命异常；密钥派生失败时退化为可读的 ValueError。
-- 无当前密文前缀的 secret 一律失效关闭，不进入生产调用。
 """
 
 from __future__ import annotations
 
-import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
-import hashlib
 import ipaddress
 import json
 import os
-from pathlib import Path
 import secrets
 import time
-from typing import Mapping, Optional
+from typing import Mapping
 import unicodedata
-from urllib.parse import parse_qs, urlsplit
-
-from cryptography.fernet import Fernet, InvalidToken
 
 from chanlun import config
 
 
-_FERNET_SALT = b"chanlun_pro_fs_keys"  # 固定 salt：保证同一 SECRET_KEY 派生出稳定的 Fernet 密钥
 _SECRET_FILE_NAME = ".flask_secret_key"
 _PASSWORD_HASH_PREFIXES = ("pbkdf2:", "scrypt:")
-_RUNTIME_CREDENTIALS_SCHEMA = "chanlun-runtime-credentials"
-_RUNTIME_CREDENTIALS_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "config"
-    / "runtime_credentials.local.json"
-)
 
 
 def normalize_login_username(value: object) -> str:
@@ -275,126 +255,6 @@ def get_flask_secret_key() -> str:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-
-
-def get_fernet() -> Fernet:
-    """从 Flask SECRET_KEY 派生 Fernet 实例（PBKDF2-HMAC-SHA256，固定 salt）。"""
-    secret = get_flask_secret_key().encode("utf-8")
-    derived = hashlib.pbkdf2_hmac("sha256", secret, _FERNET_SALT, 100_000, dklen=32)
-    return Fernet(base64.urlsafe_b64encode(derived))
-
-
-_ENC_PREFIX = "enc::fernet::"
-
-
-def encrypt_str(plaintext: Optional[str]) -> str:
-    """加密字符串；空值原样返回空字符串。带版本前缀以便日后轮换。"""
-    if not plaintext:
-        return ""
-    token = get_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
-    return _ENC_PREFIX + token
-
-
-def decrypt_str(value: Optional[str]) -> str:
-    """
-    解密字符串：
-    - 空值返回空字符串
-    - 带 ``enc::fernet::`` 前缀按密文解密
-    - 无当前密文前缀时返回空值，禁止明文 secret 进入生产调用
-    """
-    if not value:
-        return ""
-    if not value.startswith(_ENC_PREFIX):
-        return ""
-    token = value[len(_ENC_PREFIX):]
-    try:
-        return get_fernet().decrypt(token.encode("ascii")).decode("utf-8")
-    except (InvalidToken, ValueError):
-        return ""  # 密钥变更等导致解密失败：返回空，调用方将走默认配置
-
-
-def _is_valid_dingtalk_webhook(value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    return bool(
-        parsed.scheme == "https"
-        and parsed.hostname == "oapi.dingtalk.com"
-        and parsed.path == "/robot/send"
-        and parse_qs(parsed.query).get("access_token")
-    )
-
-
-def get_dingtalk_webhook(
-    credentials_path: os.PathLike[str] | str | None = None,
-) -> str:
-    """Resolve the sole DingTalk webhook from environment or local config.
-
-    ``CHANLUN_DINGTALK_WEBHOOK`` has explicit precedence. Missing or malformed
-    local credentials fail closed.  The default file is deliberately ignored by
-    Git; ``CHANLUN_RUNTIME_CREDENTIALS_PATH`` may point outside the repository.
-    """
-
-    configured = os.environ.get("CHANLUN_DINGTALK_WEBHOOK")
-    if configured is not None:
-        normalized = configured.strip()
-        return normalized if _is_valid_dingtalk_webhook(normalized) else ""
-
-    configured_path = os.environ.get("CHANLUN_RUNTIME_CREDENTIALS_PATH")
-    path = Path(credentials_path) if credentials_path is not None else (
-        Path(configured_path).expanduser()
-        if configured_path and configured_path.strip()
-        else _RUNTIME_CREDENTIALS_PATH
-    )
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return ""
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema") != _RUNTIME_CREDENTIALS_SCHEMA
-        or not isinstance(payload.get("dingtalk_webhook"), str)
-    ):
-        return ""
-    webhook = payload["dingtalk_webhook"].strip()
-    return webhook if _is_valid_dingtalk_webhook(webhook) else ""
-
-
-def get_dingtalk_keyword(
-    credentials_path: os.PathLike[str] | str | None = None,
-) -> str:
-    """Resolve the robot's required custom keyword from the same contract."""
-
-    configured = os.environ.get("CHANLUN_DINGTALK_KEYWORD")
-    if configured is not None:
-        return configured.strip()
-    configured_path = os.environ.get("CHANLUN_RUNTIME_CREDENTIALS_PATH")
-    path = Path(credentials_path) if credentials_path is not None else (
-        Path(configured_path).expanduser()
-        if configured_path and configured_path.strip()
-        else _RUNTIME_CREDENTIALS_PATH
-    )
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return ""
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema") != _RUNTIME_CREDENTIALS_SCHEMA
-        or not isinstance(payload.get("dingtalk_keyword"), str)
-    ):
-        return ""
-    return payload["dingtalk_keyword"].strip()
-
-
-def mask_secret(value: Optional[str], head: int = 2, tail: int = 2) -> str:
-    """前端回显遮蔽：保留首尾少量字符，中间用 ``*`` 代替；过短则全部遮蔽。"""
-    if not value:
-        return ""
-    if len(value) <= head + tail:
-        return "*" * len(value)
-    return f"{value[:head]}{'*' * (len(value) - head - tail)}{value[-tail:]}"
 
 
 def verify_login_password(submitted: str, expected: str) -> bool:

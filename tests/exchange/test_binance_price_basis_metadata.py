@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
-from chanlun.decision_support.trading_system.runtime_config import (
+from chanlun.cl_utils.price_metadata import (
     strict_snapshot_price_metadata,
 )
 from chanlun.exchange.exchange_binance import ExchangeBinance

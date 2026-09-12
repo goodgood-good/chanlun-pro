@@ -23,7 +23,7 @@ def _should_suppress(
     countback: object = "2",
     requested_to_offset_seconds: int = 60,
     force_refresh: bool = False,
-    review_locked: bool = False,
+    regular_us_history: bool = False,
 ) -> bool:
     return subject._should_suppress_realtime_history_poll(
         market=market,
@@ -32,7 +32,7 @@ def _should_suppress(
         requested_to=int(observed_at.timestamp()) + requested_to_offset_seconds,
         observed_at=observed_at,
         force_refresh=force_refresh,
-        review_locked=review_locked,
+        regular_us_history=regular_us_history,
     )
 
 
@@ -74,7 +74,6 @@ def test_a_share_realtime_poll_including_close_grace_is_preserved(
         {"countback": "invalid"},
         {"requested_to_offset_seconds": -3600},
         {"force_refresh": True},
-        {"review_locked": True},
     ),
 )
 def test_non_polling_or_uncertain_requests_fail_open(overrides: dict[str, object]) -> None:
@@ -118,3 +117,19 @@ def test_route_returns_no_data_before_chart_or_exchange_work(monkeypatch) -> Non
 
     assert response.status_code == 200
     assert response.get_json() == {"s": "no_data"}
+
+
+@pytest.mark.parametrize("at,closed", [
+    ("2026-09-12T02:00:00-04:00", True),
+    ("2026-09-14T09:19:00-04:00", True),
+    ("2026-09-14T09:20:00-04:00", False),
+    ("2026-09-14T16:20:00-04:00", False),
+    ("2026-09-14T16:21:00-04:00", True),
+    ("2026-12-14T09:25:00-05:00", False),
+])
+def test_known_regular_us_history_respects_local_session_and_grace(at, closed):
+    observed = datetime.datetime.fromisoformat(at)
+    assert _should_suppress(observed, market="us", regular_us_history=True) is closed
+    assert not _should_suppress(observed, market="us", regular_us_history=True, force_refresh=True)
+    assert not _should_suppress(observed, market="us", regular_us_history=True, first_data_request="true")
+    assert not _should_suppress(observed, market="us", regular_us_history=False)

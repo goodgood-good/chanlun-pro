@@ -56,12 +56,3 @@ def test_chart_uses_same_origin_iframe_under_nonce_csp():
     assert '"iframe_loading_same_origin"' in enabled.group(1)
     assert "enabled_features: viewportOptions.enabledFeatures" in source
     assert 'location.assign("/?market="' in source
-
-
-def test_xuangu_memos_are_rendered_as_text_and_copy_matches_atomic_publish():
-    source = (ROOT / "web/chanlun_chart/cl_app/templates/xuangu_list.html").read_text(
-        encoding="utf-8"
-    )
-    assert ".html(task_infos" not in source
-    assert source.count(".text(task_infos") == 4
-    assert "失败时保留原组" in source

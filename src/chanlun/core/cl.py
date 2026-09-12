@@ -1,14 +1,8 @@
 # -*- coding: utf-8 -*-
-"""单一权威的缠论运行时。
-
-``CL`` 只构建生产基础结构（包含处理后的 K 线、分型、笔、线段与 MACD），并由此
-生成严格递归证据。中枢、背驰和三类买卖点不在 ``BI``/``XD`` 对象上保留可变旁路，
-本运行时也不存在第二套计算器。
-"""
+"""本周期缠论运行时：K 线、分型、笔、线段、MACD 与线段中枢。"""
 
 from __future__ import annotations
 
-from collections import OrderedDict
 import datetime
 import threading
 from functools import wraps
@@ -101,7 +95,7 @@ def _production_config(config: dict | None) -> dict[str, object]:
 class CL(ICL):
     """以唯一严格证据为权威的生产缠论状态。"""
 
-    _PICKLE_SCHEMA = "chanlun-strict-cl"
+    _PICKLE_SCHEMA = "chanlun-native-center-cl-v3"
     _PICKLE_STATE_FIELDS = frozenset(
         {
             "code",
@@ -117,7 +111,6 @@ class CL(ICL):
             "_strict_htf_macd_by_level",
             "_strict_htf_macd_calculators",
             "_strict_structure_memo",
-            "_strict_center_prefix_cache",
             "_strict_unit_registry",
             "_strict_price_quantum_value",
         }
@@ -154,7 +147,6 @@ class CL(ICL):
             int, CausalPartialHigherMACDCalculator
         ] = {}
         self._strict_structure_memo: dict[object, object] = {}
-        self._strict_center_prefix_cache: OrderedDict[object, object] = OrderedDict()
         self._strict_unit_registry = None
         self._strict_price_quantum_value = None
         self._strict_evidence_lock = threading.RLock()
@@ -185,7 +177,7 @@ class CL(ICL):
 
     @_strict_runtime_locked
     def process_validated_incremental_klines(self, klines: pd.DataFrame):
-        """处理已由唯一选股运行时认证过历史前缀的完整行情帧。
+        """处理已由图表缓存核对过历史前缀的完整行情帧。
 
         该入口只省略图表高周期 MACD 对同一旧前缀的重复逐行比较；K 线、包含、笔、
         线段和严格结构仍走与 ``process_klines`` 完全相同的生产计算。调用方若发现
@@ -234,9 +226,7 @@ class CL(ICL):
     ) -> None:
         """更新仅供图表显示的首个高周期 MACD 覆盖层。
 
-        严格结构强度不读取此序列。所有递归结构层均在本 ``CL`` 的原生 MACD
-        上按单元覆盖的精确来源 K 线区间测量；这里只保留现有图表消费者所需的
-        单层覆盖，避免把结构递归错误映射成固定物理周期链。
+        此序列只用于指标展示，不参与笔、线段或本周期中枢的构造。
         """
 
         fast = int(self.config["idx_macd_fast"])
@@ -364,136 +354,28 @@ class CL(ICL):
         return value
 
     @_strict_runtime_locked
-    def get_strict_structure_levels(self):
-        from chanlun.core.strict_structure.level_catalog import recursive_level_labels
-        from chanlun.core.strict_structure.models import SourceKind
-        from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
-        from chanlun.core.strict_structure.strength import MacdStrengthProvider
-        from chanlun.core.strict_structure.unit_adapter import adapt_lines
-
-        self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("formal")
-        if cached is not None:
-            return cached
-        price_basis_revision = self._strict_price_basis_revision()
-        price_quantum = self._strict_price_quantum()
-        units = adapt_lines(
-            self.get_xds(),
-            0,
-            SourceKind.SEGMENT,
-            price_quantum,
-            self._strict_as_of(),
-            self._strict_registry(),
-        )
-        labels = recursive_level_labels(self.get_frequency())
-        engine = StrictRecursiveEngine(max_levels=len(labels))
-        # 保持只覆写 ``max_levels`` 的研究/测试适配器兼容；缓存是运行时加速附件，
-        # 不属于递归引擎的策略构造参数。
-        engine.center_prefix_cache = self._strict_center_prefix_cache
-        result = engine.calculate(
-            units,
-            price_basis_revision=price_basis_revision,
-            strength=MacdStrengthProvider(self),
-        )
-        self._strict_structure_memo["formal"] = result
-        return result
-
-    @_strict_runtime_locked
-    def get_stroke_observation_centers(self):
+    @_strict_contract_boundary
+    def get_native_centers(self):
+        """Calculate centers from the segments of this chart's own interval."""
         from chanlun.core.strict_structure.center_machine import calculate_centers
         from chanlun.core.strict_structure.models import SourceKind
         from chanlun.core.strict_structure.unit_adapter import adapt_lines
 
         self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("stroke_observation")
+        cached = self._strict_structure_memo.get("native_centers")
         if cached is not None:
             return cached
-        self._strict_price_basis_revision()
         units = adapt_lines(
-            self.get_bis(),
-            0,
-            SourceKind.STROKE_OBSERVATION,
-            self._strict_price_quantum(),
-            self._strict_as_of(),
-            self._strict_registry(),
+            self.get_xds(), 0, SourceKind.SEGMENT,
+            self._strict_price_quantum(), self._strict_as_of(),
+            self._strict_registry(), constituent_lines=self.get_bis(),
         )
-        result = calculate_centers(units, 0, SourceKind.STROKE_OBSERVATION)
-        self._strict_structure_memo["stroke_observation"] = result
-        return result
-
-    def _strict_evidence_assembler(self):
-        from chanlun.core.strict_structure.evidence_assembler import (
-            StrictEvidenceAssembler,
-        )
-        from chanlun.core.strict_structure.strength import MacdStrengthProvider
-
-        cached = self._strict_structure_memo.get("evidence_assembler")
-        if cached is not None:
-            return cached
-        assembler = StrictEvidenceAssembler(
-            symbol=self.get_code(),
-            source_frequency=self.get_frequency(),
-            source_closed_at=self._strict_as_of(),
-            price_basis_revision=self._strict_price_basis_revision(),
-            structure_price_quantum=self._strict_price_quantum(),
-            strict_config_revision=self._strict_config_revision(),
-            structure=self.get_strict_structure_levels(),
-            strength=MacdStrengthProvider(self),
-            projection_cache=self._strict_center_prefix_cache,
-        )
-        self._strict_structure_memo["evidence_assembler"] = assembler
-        return assembler
-
-    @_strict_runtime_locked
-    def get_strict_points(self):
-        self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("confirmed_points")
-        if cached is not None:
-            return cached
-        result = self._strict_evidence_assembler().confirmed_points()
-        self._strict_structure_memo["confirmed_points"] = result
-        return result
-
-    @_strict_runtime_locked
-    def get_strict_approaching_points(self):
-        self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("approaching_points")
-        if cached is not None:
-            return cached
-        result = self._strict_evidence_assembler().approaching_points()
-        self._strict_structure_memo["approaching_points"] = result
-        return result
-
-    @_strict_runtime_locked
-    def get_strict_divergences(self):
-        self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("divergences")
-        if cached is not None:
-            return cached
-        result = self._strict_evidence_assembler().divergences()
-        self._strict_structure_memo["divergences"] = result
-        return result
-
-    @_strict_runtime_locked
-    @_strict_contract_boundary
-    def get_strict_evidence(self):
-        self._validate_strict_structure_metadata()
-        strict_config_revision = self._strict_config_revision()
-        cached = self._strict_structure_memo.get("evidence")
-        if cached is not None:
-            if cached.strict_config_revision != strict_config_revision:
-                raise ValueError("strict config revision changed within CL lifecycle")
-            return cached
-        result = self._strict_evidence_assembler().evidence(
-            stroke_center_observations=self.get_stroke_observation_centers(),
-        )
-        self._strict_structure_memo["evidence"] = result
+        result = calculate_centers(units, 0, SourceKind.SEGMENT)
+        self._strict_structure_memo["native_centers"] = result
         return result
 
     @_strict_runtime_locked
     def release_strict_evidence_cache(self) -> None:
-        """释放可由当前笔、线段和 MACD 状态确定性重建的严格证据备忘录。"""
-
         self._strict_structure_memo.clear()
 
 

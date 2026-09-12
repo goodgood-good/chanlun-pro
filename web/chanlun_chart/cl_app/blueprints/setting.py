@@ -9,29 +9,15 @@ from flask import Blueprint, render_template, request
 from flask_login import login_required
 
 from chanlun.persistence.db import db
-from chanlun.security import decrypt_str, encrypt_str, mask_secret
 
 
 setting_bp = Blueprint("setting", __name__)
-
-# 前端"未修改"占位符：保存时若提交值等于该占位符则保留原密文不更新。
-_SECRET_PLACEHOLDER = "__keep__"
-
 
 @setting_bp.route("/setting", methods=["GET"])
 @login_required
 def setting():
     proxy = db.cache_get("req_proxy")
-    fs_setting = db.cache_get("fs_keys") or {}
-    # 只读取当前加密协议；无前缀内容失效关闭。
-    fs_app_secret_plain = decrypt_str(fs_setting.get("fs_app_secret"))
     set_config = {
-        "fs_app_id": fs_setting.get("fs_app_id", ""),
-        # 仅向前端回显遮蔽后的值，避免页面源码泄露完整 secret。
-        "fs_app_secret_mask": mask_secret(fs_app_secret_plain),
-        "fs_app_secret_placeholder": _SECRET_PLACEHOLDER,
-        "fs_app_secret_set": bool(fs_app_secret_plain),
-        "fs_user_id": fs_setting.get("fs_user_id", ""),
         "proxy_host": proxy["host"] if proxy is not None else "",
         "proxy_port": proxy["port"] if proxy is not None else "",
     }
@@ -44,9 +30,6 @@ def setting_save():
     required_fields = (
         "proxy_host",
         "proxy_port",
-        "fs_app_id",
-        "fs_app_secret",
-        "fs_user_id",
     )
     missing_fields = [name for name in required_fields if name not in request.form]
     if missing_fields:
@@ -73,20 +56,6 @@ def setting_save():
         "port": proxy_port,
     }
 
-    submitted_secret = request.form.get("fs_app_secret", "")
-    existing = db.cache_get("fs_keys") or {}
-    if submitted_secret == _SECRET_PLACEHOLDER:
-        # 用户未修改：重新封装当前可解密的 secret；无效内容会被清空。
-        existing_secret_plain = decrypt_str(existing.get("fs_app_secret"))
-        encrypted_secret = encrypt_str(existing_secret_plain)
-    else:
-        encrypted_secret = encrypt_str(submitted_secret)
-
-    fs_keys = {
-        "fs_app_id": request.form["fs_app_id"].strip(),
-        "fs_app_secret": encrypted_secret,
-        "fs_user_id": request.form["fs_user_id"].strip(),
-    }
-    db.cache_set_many({"req_proxy": proxy, "fs_keys": fs_keys})
+    db.cache_set_many({"req_proxy": proxy})
 
     return {"ok": True}

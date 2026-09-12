@@ -381,15 +381,6 @@ class ExchangeTDXNYFutures(Exchange):
         # 通达信日线后对齐，统一设为 00:00
         return dt.replace(hour=0, minute=0)
 
-    def balance(self):
-        raise Exception("交易所不支持")
-
-    def positions(self, code: str = ""):
-        raise Exception("交易所不支持")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        raise Exception("交易所不支持")
-
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")
 

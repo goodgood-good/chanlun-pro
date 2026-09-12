@@ -79,10 +79,6 @@ DB_USER = 'root'
 DB_PWD = ''  # 数据库密码；建议改为从环境变量读取，例如 os.environ.get('DB_PWD', '')
 DB_DATABASE = 'chanlun_klines'
 
-# Redis 配置，不使用可将 REDIS_HOST 设置为空字符串（基本不用）
-REDIS_HOST = ''  # 127.0.0.1
-REDIS_PORT = 6379
-
 # 各个市场的交易所设置（只适用于WEB页面的行情展示）
 # db 表示读取数据库中的行情，适用于在国外或其他原因，tdx 无法正常使用的情况
 
@@ -104,14 +100,10 @@ EXCHANGE_US = "usmart"  # 美股市场
 EXCHANGE_FX = "tdx_fx"  # 外汇市场
 
 
-# 掘金设置 https://www.myquant.cn/docs2/faq/#%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8-linux-%E7%89%88%E6%9C%AC%E7%9A%84-python-sdk
-GM_SERVER_ADDR = '127.0.0.1:7001'
-GM_TOKEN = '******'
 
 # 富途API配置（不使用请将 FUTU_HOST 留空）
 FUTU_HOST = ''
 FUTU_PORT = 11111
-FUTU_UNLOCK_PWD = ''
 
 # uSMART 盈立证券 Open API（A 股 / 港股 / 美股行情）
 # 凭证只从环境变量或项目根 .env 读取；USMART_TOKEN 与“手机号 + 登录密码自动登录”
@@ -137,56 +129,6 @@ USMART_KLINE_MAX_PAGES = os.environ.get('USMART_KLINE_MAX_PAGES', '10')
 # 天勤账号配置
 TQ_USER = ''
 TQ_PWD = ''
-TQ_SP_NAME = 'simnow'
-TQ_SP_ACCOUNT = ''
-TQ_SP_PWD = ''
-
-# 币安私有账户/交易配置；仅展示现货公共行情时无需填写
-BINANCE_APIKEY = ''
-BINANCE_SECRET = ''
-
-# 飞书消息配置 (项目中新的消息推送使用飞书，user_id 是唯一的，不同的市场可以配置不同的机器人，没有设置则使用 default 的机器人)
-# 配置获取方法，在 web 页面的系统设置中有教程
-FEISHU_KEYS = {
-    "default": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "a": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "us": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "hk": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "fx": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "futures": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "ny_futures": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "currency_spot": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "currency": {
-        "app_id": "cli_********",
-        "app_secret": "TlQXy9Y7********",
-    },
-    "user_id": "86********",
-    "enable_img": False,
-}
 
 # 启动时预加载 symbols 的市场列表
 # 不在列表中的市场首次访问时才会按需加载, 仍可正常使用; 列表越短启动越快。

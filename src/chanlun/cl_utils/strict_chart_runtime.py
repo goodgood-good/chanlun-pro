@@ -8,7 +8,7 @@ import pandas as pd
 
 from chanlun.core.cl import CL
 from chanlun.core.types import ICL
-from chanlun.decision_support.trading_system.runtime_config import (
+from chanlun.cl_utils.price_metadata import (
     strict_snapshot_price_metadata,
     strict_cl_config,
 )

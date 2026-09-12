@@ -29,7 +29,6 @@ def check_env(
 
     try:
         pymysql = importer("pymysql")
-        redis = importer("redis")
     except Exception as exc:
         output(f"依赖导入失败：{exc}")
         return False
@@ -69,21 +68,6 @@ def check_env(
                     proxy_connection.close()
                 except Exception:
                     pass
-
-    # 检查 Redis
-    try:
-        if getattr(config, "REDIS_HOST", "") != "":
-            R = redis.Redis(
-                host=config.REDIS_HOST,
-                port=config.REDIS_PORT,
-                decode_responses=True,
-                socket_connect_timeout=3,
-                socket_timeout=3,
-            )
-            R.get("check")
-    except Exception:
-        output("Redis 连接失败，请检查是否有安装并启动 Redis 服务端，并且配置正确")
-        output("Redis 不是必须的，不使用可以忽略")
 
     # 检查 MySQL
     db_connection = None

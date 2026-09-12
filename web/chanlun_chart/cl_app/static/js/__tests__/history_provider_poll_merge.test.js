@@ -69,6 +69,110 @@ const RESOLUTION = '5';
 const BASE_PARAMS = { symbol: SYMBOL, resolution: RESOLUTION };
 const RESULT_KEY = SYMBOL.toLowerCase() + RESOLUTION.toLowerCase();
 
+function initialBuildFixture(history) {
+  const preview = {
+    ...response({ times: [1000, 1500, 2000], prices: [10, 12, 13], strictMode: 'unavailable' }),
+    initial_structure_build_id: 'build-one',
+    strict_structure_error: { code: 'strict_structure_pending' },
+  };
+  history.applyChanlunUpdate(preview, BASE_PARAMS);
+  const patch = {
+    schema: 'chanlun-structure-patch-v1', build_id: 'build-one',
+    source_count: 3, source_first: 1000, source_last: 2000, bar_time_label: 'end',
+    fxs: [], bis: [segment(1000, 10, 2000, 13, 0)], xds: [],
+    strict_structure_mode: 'replace',
+    strict_structure: { schema: 'chanlun-chart-structure', source_closed_at: 2000 },
+  };
+  for (const column of ['macd_dif', 'macd_dea', 'macd_hist',
+    'higher_macd_dif', 'higher_macd_dea', 'higher_macd_hist']) patch[column] = [null, 0, 1];
+  return { preview, patch };
+}
+
+test('completed build installs structure and indicators without replacing candles or time coordinates', () => {
+  const history = makeDatafeed()._historyProvider;
+  const { preview, patch } = initialBuildFixture(history);
+  const before = history.bars_result.get(RESULT_KEY);
+  assert.equal(history.applyStructurePatch(patch, BASE_PARAMS), true);
+  const after = history.bars_result.get(RESULT_KEY);
+  assert.strictEqual(after.bars, before.bars);
+  assert.strictEqual(after.times, before.times);
+  assert.equal(after.strict_structure_mode, 'replace');
+  assert.equal(after.bis.length, 1);
+  assert.ok(Number.isNaN(after.higher_macd_dif[0]));
+  assert.deepEqual(after.higher_macd_dif.slice(1), [0, 1]);
+  assert.equal(after.initial_structure_build_id, undefined);
+  // A slower request carrying the original preview must not undo completion.
+  history.applyChanlunUpdate(preview, BASE_PARAMS);
+  assert.strictEqual(history.bars_result.get(RESULT_KEY), after);
+});
+
+test('A-share structure patches use the same implicit closing labels as the initial history response', () => {
+  const history = makeDatafeed()._historyProvider;
+  const { patch } = initialBuildFixture(history);
+  delete patch.bar_time_label;
+  const before = history.bars_result.get(RESULT_KEY);
+  assert.equal(before.bar_time_label, 'end');
+  assert.equal(history.applyStructurePatch(patch, BASE_PARAMS), true);
+  const after = history.bars_result.get(RESULT_KEY);
+  assert.strictEqual(after.times, before.times);
+  assert.strictEqual(after.bars, before.bars);
+  assert.equal(after.strict_structure_mode, 'replace');
+});
+
+test('US patches still require explicit matching time labels and reject invalid labels atomically', () => {
+  const history = makeDatafeed()._historyProvider;
+  const { preview, patch } = initialBuildFixture(history);
+  const params = { symbol: 'us:QQQ.US', resolution: '5' };
+  history.applyChanlunUpdate({ ...preview, bar_time_label: 'start' }, params);
+  const before = history.bars_result.get('us:qqq.us5');
+  for (const label of [undefined, null, 'invalid', 'end']) {
+    assert.equal(history.applyStructurePatch({ ...patch, bar_time_label: label }, params), false);
+    assert.strictEqual(history.bars_result.get('us:qqq.us5'), before);
+  }
+  assert.equal(history.applyStructurePatch({ ...patch, bar_time_label: 'start' }, params), true);
+});
+
+test('a patch for another build, changed candle frame or truncated indicator is rejected atomically', () => {
+  for (const change of [
+    { build_id: 'older-build' }, { source_count: 2 }, { source_last: 1999 },
+    { bar_time_label: 'start' }, { macd_hist: [1] }, { strict_structure_mode: 'unchanged' },
+  ]) {
+    const history = makeDatafeed()._historyProvider;
+    const { patch } = initialBuildFixture(history);
+    const before = history.bars_result.get(RESULT_KEY);
+    assert.equal(history.applyStructurePatch({ ...patch, ...change }, BASE_PARAMS), false);
+    assert.strictEqual(history.bars_result.get(RESULT_KEY), before);
+    assert.equal(before.strict_structure_error.code, 'strict_structure_pending');
+  }
+});
+
+test('a candle update invalidates the previous initial build even if its last timestamp is unchanged', () => {
+  const history = makeDatafeed()._historyProvider;
+  const { patch } = initialBuildFixture(history);
+  history.applyChanlunUpdate(response({ times: [2000], prices: [14], update: true }), BASE_PARAMS);
+  assert.equal(history.applyStructurePatch(patch, BASE_PARAMS), false);
+  assert.equal(history.bars_result.get(RESULT_KEY).bars.at(-1).close, 14);
+});
+
+test('indicator columns share identical ordering across overlap, duplicate timestamps and missing new values', () => {
+  const history = makeDatafeed()._historyProvider;
+  const columns = ['macd_dif', 'macd_dea', 'macd_hist',
+    'higher_macd_dif', 'higher_macd_dea', 'higher_macd_hist'];
+  const first = response({ times: [1000, 2000], prices: [10, 20] });
+  const next = response({ times: [500, 1000, 1000, 2500], prices: [5, 11, 12, 25], update: true });
+  columns.forEach((column, i) => {
+    first[column] = [i + 1, i + 2];
+    next[column] = [i + 3, i + 4, null, i + 5];
+  });
+  history.applyChanlunUpdate(first, BASE_PARAMS);
+  history.applyChanlunUpdate(next, BASE_PARAMS);
+  const result = history.bars_result.get(RESULT_KEY);
+  assert.deepEqual(result.times, [500000, 1000000, 2000000, 2500000]);
+  columns.forEach((column, i) => {
+    assert.deepEqual(result[column], [i + 3, NaN, i + 2, i + 5]);
+  });
+});
+
 test('authoritative current window removes a disproved completed stroke', () => {
   const history = makeDatafeed()._historyProvider;
   const removed = segment(1000, 10, 1500, 12, 0);

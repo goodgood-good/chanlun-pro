@@ -288,11 +288,11 @@ def test_invalid_early_lock_does_not_poison_registry(fake_done_line):
 
 
 def test_line_adapter_rejects_recursive_trend_source_kind(fake_done_line):
-    with pytest.raises(ValueError, match="line adapter does not build trend-type units"):
+    with pytest.raises(ValueError, match="not a valid SourceKind"):
         adapt_lines(
             [fake_done_line],
             1,
-            SourceKind.TREND_TYPE,
+            "trend_type",
             Decimal("0.01"),
             BASE + timedelta(hours=2),
             UnitLockRegistry("test-raw"),

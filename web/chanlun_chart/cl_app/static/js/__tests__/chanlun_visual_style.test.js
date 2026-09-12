@@ -34,9 +34,6 @@ function loadStyleApi(theme = 'Light') {
     this.api = {
       getSignalColor,
       getCenterVisualStyle,
-      getTrendVisualStyle,
-      getStrictPointVisual,
-      getStrictDivergenceVisual,
     };
   `, context);
   return context.api;
@@ -65,140 +62,28 @@ test('方向性小标记在浅色和深色画布都有足够对比度', () => {
   }
 });
 
-test('中枢用线宽表达权重并用线型和透明度表达完成状态', () => {
-  const api = loadStyleApi();
-  const pen = api.getCenterVisualStyle('pen', { state: 'completed' });
-  const frequency = api.getCenterVisualStyle('frequency', { state: 'completed' });
-  const formal = api.getCenterVisualStyle('formal', { state: 'completed' });
-  const ongoing = api.getCenterVisualStyle('formal', { state: 'ongoing' });
-  const completedPreview = api.getCenterVisualStyle('preview', { state: 'completed' });
-  const formingPreview = api.getCenterVisualStyle('preview', { state: 'forming' });
-  const projection = api.getCenterVisualStyle('projection', { state: 'ongoing' });
 
-  assert.equal(pen.linewidth, 1);
-  assert.equal(frequency.linewidth, 1);
-  assert.equal(formal.linewidth, 1);
-  assert.equal(ongoing.linestyle, 2);
-  assert.equal(formal.linestyle, 0);
-  assert.equal(formal.transparency, 92);
-  assert.equal(ongoing.transparency, 96);
-  assert.equal(completedPreview.linewidth, 1);
-  assert.equal(completedPreview.transparency, 96);
-  assert.equal(formingPreview.transparency, 100);
-  assert.equal(projection.linestyle, 2);
-  assert.ok(formal.transparency < completedPreview.transparency, '正式中枢必须比预览更醒目');
-});
 
-test('走势类型保持同级颜色但弱于基础结构线', () => {
-  const api = loadStyleApi();
-  const completed = api.getTrendVisualStyle({ state: 'completed', direction_status: 'ended' });
-  const forming = api.getTrendVisualStyle({ state: 'forming', direction_status: 'formal' });
-  const candidate = api.getTrendVisualStyle({ state: 'completed', direction_status: 'geometric_candidate' });
-  const reversal = api.getTrendVisualStyle({ state: 'forming', direction_status: 'awaiting_reversal_support' });
-  const consolidation = api.getTrendVisualStyle({ state: 'forming', direction_status: 'consolidation' });
-  assert.equal(completed.linewidth, 1);
-  assert.equal(completed.linestyle, 2);
-  assert.equal(completed.transparency, 46);
-  assert.equal(forming.linestyle, 2);
-  assert.equal(forming.transparency, 30);
-  assert.equal(candidate.linestyle, 2);
-  assert.equal(candidate.transparency, 50);
-  assert.equal(reversal.linestyle, 1);
-  assert.equal(reversal.transparency, 62);
-  assert.equal(consolidation.linestyle, 1);
-  assert.equal(consolidation.transparency, 70);
-});
 
-test('买卖点使用中文短标签、方向箭头和级别字号', () => {
-  const api = loadStyleApi();
-  const confirmed = api.getStrictPointVisual({
-    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0, level_label: '1m', point_type: '3buy', side: 'buy',
-  });
-  const higher = api.getStrictPointVisual({
-    render_kind: 'point_confirmed', structural_level: 2, level_label: '30m', point_type: '2sell', side: 'sell',
-  });
-  const approaching = api.getStrictPointVisual({
-    render_kind: 'point_approaching', structural_level: 0, level_label: '1m', point_type: '1buy', side: 'buy',
-  });
-  const geometryCandidate = api.getStrictPointVisual({
-    render_kind: 'point_approaching', structural_level: 0, level_label: '5m', point_type: '3buy', side: 'buy',
-    formation_state: 'geometry_ready', lock_state: 'pending',
-    evidence_codes: ['provisional_center_completion', 'core_boundary_held'],
-  });
-  const legacyEvidenceOnly = api.getStrictPointVisual({
-    render_kind: 'point_approaching', structural_level: 0, level_label: '5m', point_type: '3buy', side: 'buy',
-    evidence_codes: ['provisional_center_completion', 'core_boundary_held'],
-  });
-  const recursive = api.getStrictPointVisual({
-    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0,
-    level_label: '1m/L0', point_type: '3buy', side: 'buy',
-  });
-  const combinedEvidence = api.getStrictPointVisual({
-    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0,
-    level_label: '1m/L0', point_type: '1sell', side: 'sell',
-    presentation_divergence_kinds: ['consolidation'],
-  });
-  const densityMarker = api.getStrictPointVisual({
-    render_kind: 'point_confirmed', formation_state: 'confirmed', structural_level: 0,
-    level_label: '1m/L0', point_type: '2sell', side: 'sell', presentation_density: 'marker',
-  });
 
-  assert.equal(confirmed.text, '▲1m·三买');
-  assert.equal(confirmed.fontsize, 12);
-  assert.equal(confirmed.bold, true);
-  assert.equal(higher.text, '▼30m·二卖');
-  assert.equal(higher.fontsize, 13);
-  assert.equal(approaching.text, '▲接近·1m·一买');
-  assert.equal(approaching.fontsize, 11);
-  assert.equal(approaching.bold, false);
-  assert.equal(approaching.transparency, 45);
-  assert.equal(geometryCandidate.text, '▲候选待锁·5m·三买');
-  assert.equal(legacyEvidenceOnly.text, '▲接近·5m·三买');
-  assert.equal(recursive.text, '▲三买');
-  assert.equal(combinedEvidence.text, '▼一卖·盘整背驰');
-  assert.equal(densityMarker.text, '二');
-  assert.equal(densityMarker.fullText, '▼二卖');
-  assert.equal(densityMarker.fontsize, 10);
-});
 
-test('盘整背驰和趋势背驰不再使用相同字重', () => {
-  const api = loadStyleApi();
-  const consolidation = api.getStrictDivergenceVisual({
-    structural_level: 0, level_label: '5m', kind: 'consolidation', direction: 'down',
-  });
-  const trend = api.getStrictDivergenceVisual({
-    structural_level: 0, level_label: '5m', kind: 'trend', direction: 'up',
-  });
-  const recursive = api.getStrictDivergenceVisual({
-    structural_level: 0, level_label: '1m/L0', kind: 'trend', direction: 'up',
-  });
-  assert.equal(consolidation.text, '▲5m·盘整背驰');
-  assert.equal(consolidation.fontsize, 12);
-  assert.equal(consolidation.bold, false);
-  assert.equal(trend.text, '▼5m·趋势背驰');
-  assert.equal(trend.fontsize, 13);
-  assert.equal(trend.bold, true);
-  assert.equal(recursive.text, '▼趋势背驰');
-  assert.notEqual(consolidation.color, trend.color);
-});
 
-test('设置菜单展示实际方向色而非错误的背驰级别色', () => {
-  assert.ok(source.includes("_dualSwatch(getSignalColor('buy'), getSignalColor('sell'), '向上背驰 / 向下背驰')"));
-  assert.ok(source.includes("_swatch(getSignalColor(item.key.endsWith('buy') ? 'buy' : 'sell'))"));
-  assert.ok(source.includes("_dualSwatch(getSignalColor('fractalTop'), getSignalColor('fractalBottom'), '顶分型 / 底分型')"));
-});
 
-test('一键画线默认使用细线并在创建事件中兜底应用', () => {
-  assert.match(source, /const ONE_CLICK_DRAW_LINE_WIDTH = 1;/);
-  assert.match(source, /"linetooltrendline\.linewidth": ONE_CLICK_DRAW_LINE_WIDTH/);
-  assert.match(source, /"linetoolrectangle\.linewidth": ONE_CLICK_DRAW_LINE_WIDTH/);
-  assert.match(source, /ov\.linewidth = ONE_CLICK_DRAW_LINE_WIDTH/);
-});
 
-test('一键画工具使用原生按钮、完整名称和可触达尺寸', () => {
-  assert.match(source, /doc\.createElement\('button'\)/);
-  assert.match(source, /b\.type = 'button'/);
-  assert.match(source, /b\.setAttribute\('aria-label', b\.title\)/);
-  assert.match(source, /width:28px; height:24px/);
-  assert.doesNotMatch(source, /const b = doc\.createElement\('div'\)/);
+
+
+
+
+
+
+
+
+
+
+test('native centers remain solid and visually distinguish completion',()=>{
+ const api=loadStyleApi();
+ const ongoing=api.getCenterVisualStyle('formal',{state:'ongoing'});
+ const complete=api.getCenterVisualStyle('formal',{state:'completed',third_class_confirmed:true});
+ assert.equal(ongoing.linestyle,0);assert.equal(complete.linestyle,0);
+ assert.ok(complete.transparency<ongoing.transparency);
 });

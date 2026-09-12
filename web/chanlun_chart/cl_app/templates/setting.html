@@ -19,7 +19,7 @@
         <div class="cp-page-header-copy">
           <span class="cp-eyebrow">SYSTEM INTEGRATION</span>
           <h1>系统设置</h1>
-          <p>集中管理消息通知与网络代理。密钥字段不会在页面中回显明文。</p>
+          <p>配置行情数据请求的网络代理。</p>
         </div>
         <div class="cp-page-header-actions">
           <div class="cp-context-card">
@@ -30,47 +30,10 @@
       </header>
 
       <form class="layui-form setting_form cp-section-grid" lay-filter="setting_form" role="form">
-        <section class="cp-section-card" aria-labelledby="notification-title">
-          <div class="cp-section-heading">
-            <div class="cp-heading-with-index">
-              <span class="cp-section-index">01</span>
-              <div>
-                <h2 id="notification-title">消息通知</h2>
-                <p>配置飞书自建应用，用于发送行情监控和预警消息。</p>
-              </div>
-            </div>
-          </div>
-          <div class="cp-form-grid cp-form-grid--single">
-            <div class="layui-form-item">
-              <label class="layui-form-label" for="fs_app_id">飞书 App ID</label>
-              <div class="layui-input-block">
-                <input id="fs_app_id" type="text" name="fs_app_id" value="{{ fs_app_id }}"
-                  placeholder="请输入飞书 App ID" autocomplete="off" class="layui-input" />
-              </div>
-            </div>
-            <div class="layui-form-item">
-              <label class="layui-form-label" for="fs_app_secret">飞书 App Secret</label>
-              <div class="layui-input-block">
-                <input id="fs_app_secret" type="password" name="fs_app_secret"
-                  value="{% if fs_app_secret_set %}{{ fs_app_secret_placeholder }}{% endif %}"
-                  placeholder="{% if fs_app_secret_set %}已配置（{{ fs_app_secret_mask }}），如需修改请直接覆盖{% else %}请输入飞书 App Secret{% endif %}"
-                  autocomplete="new-password" class="layui-input" />
-              </div>
-            </div>
-            <div class="layui-form-item">
-              <label class="layui-form-label" for="fs_user_id">飞书 User ID</label>
-              <div class="layui-input-block">
-                <input id="fs_user_id" type="text" name="fs_user_id" value="{{ fs_user_id }}"
-                  placeholder="请输入飞书 User ID" autocomplete="off" class="layui-input" />
-              </div>
-            </div>
-          </div>
-        </section>
-
         <section class="cp-section-card" aria-labelledby="proxy-title">
           <div class="cp-section-heading">
             <div class="cp-heading-with-index">
-              <span class="cp-section-index">02</span>
+              <span class="cp-section-index">01</span>
               <div>
                 <h2 id="proxy-title">网络代理</h2>
                 <p>仅在数据源需要代理访问时填写，留空表示直连。</p>
@@ -103,32 +66,10 @@
           <button class="layui-btn cp-button" lay-submit lay-filter="setting_save" type="submit">
             保存系统配置
           </button>
-          <span class="cp-help-text">保存后对后续通知与数据请求生效。</span>
+          <span class="cp-help-text">保存后对后续数据请求生效。</span>
         </div>
       </form>
 
-      <section class="cp-section-card" aria-labelledby="guide-title">
-        <div class="cp-section-heading">
-          <div class="cp-heading-with-index">
-            <span class="cp-section-index">03</span>
-            <div>
-              <h2 id="guide-title">配置指南</h2>
-              <p>完成飞书机器人授权并取得应用凭证。</p>
-            </div>
-          </div>
-        </div>
-        <ol class="cp-guide">
-          <li>打开<a href="https://open.feishu.cn/" target="_blank" rel="noopener">飞书开放平台</a>并登录。</li>
-          <li>在开发者后台创建“企业自建应用”，添加机器人能力。</li>
-          <li>在权限管理中开通 <code>contact:user.employee_id</code> 与 <code>im:message</code>。</li>
-          <li>创建版本并发布应用，然后从“凭证与基础信息”复制 App ID 与 App Secret。</li>
-          <li>通过飞书 API 调试台按手机号查询 User ID，并填入上方字段。</li>
-        </ol>
-        <div class="cp-note cp-note--warning">
-          <span aria-hidden="true">!</span>
-          <div><strong>消息发送条件</strong><br />只有监控任务产生警报且飞书配置完整时，系统才会发送消息。</div>
-        </div>
-      </section>
     </main>
 
     <script nonce="{{ csp_nonce }}">

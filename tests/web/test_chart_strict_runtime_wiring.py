@@ -19,10 +19,11 @@ def test_serializer_builds_strict_runtime_from_exact_display_frame(
         }
     )
     strict_runtime = object()
-    captured = {}
+    frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="test-raw")
+    captured = {"builds": []}
 
     def build(**kwargs):
-        captured["build"] = kwargs
+        captured["builds"].append(kwargs)
         return strict_runtime
 
     def serialize(processed_frame, config, **kwargs):
@@ -41,13 +42,20 @@ def test_serializer_builds_strict_runtime_from_exact_display_frame(
         chart_config=config,
     )
 
-    assert result == {"strict_structure_mode": "replace"}
-    assert captured["build"] == {
+    assert result == {
+        "strict_structure_mode": "replace",
+        "price_basis": {
+            "structure_price_quantum": "0.01",
+            "price_basis_revision": "test-raw",
+        },
+    }
+    assert captured["builds"][0] == {
         "market": "a",
         "code": "SH.600926",
         "frequency": "30m",
         "frame": frame,
     }
+    assert len(captured["builds"]) == 1
     processed_frame, serialized_config, kwargs = captured["serialize"]
     assert processed_frame is frame
     assert serialized_config is config

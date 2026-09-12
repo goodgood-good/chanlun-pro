@@ -7,23 +7,15 @@ import pytest
 
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
-    establish_center,
 )
 from chanlun.core.strict_structure.identity import stable_structure_id
-from chanlun.core.strict_structure.models import (
-    CenterEvidence,
-    CenterState,
-    ConstituentUnit,
-    SourceKind,
-    _historical_divergence_center_is_causal_prefix,
-)
+from chanlun.core.strict_structure.models import CenterEvidence, ConstituentUnit, SourceKind
 from tests.core.strict_structure.helpers import (
     BASE,
     TEST_PRICE_BASIS,
     completed_up_center,
     ongoing_center,
     unit,
-    valid_three_center_seed,
 )
 
 
@@ -141,33 +133,6 @@ def test_ongoing_center_pending_leave_must_stay_external_to_body():
         replace(value, pending_leave_unit=value.body_units[-1])
 
 
-def test_recursive_trend_center_rejects_non_alternating_departure():
-    seed = tuple(
-        replace(item, source_kind=SourceKind.TREND_TYPE)
-        for item in valid_three_center_seed()
-    )
-    entry = replace(
-        unit(-1, "up", 90, seed[0].start_tick),
-        source_kind=SourceKind.TREND_TYPE,
-    )
-    value = establish_center(
-        seed,
-        0,
-        SourceKind.TREND_TYPE,
-        entry_unit=entry,
-    )
-    assert value is not None
-    downward_leave = replace(
-        unit(4, "down", seed[-1].end_tick, 95),
-        source_kind=SourceKind.TREND_TYPE,
-    )
-
-    with pytest.raises(ValueError, match="center transition must alternate"):
-        advance_center(
-            value,
-            downward_leave,
-            frozenset({seed[-1].unit_id}),
-        )
 
 
 def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():
@@ -319,70 +284,3 @@ def test_center_evidence_preserves_external_roles_and_excludes_return():
     assert evidence.completion_return_unit_id not in evidence.body_unit_ids
     assert evidence.completed_at == value.completed_at
     assert evidence.tradable is True
-
-
-def test_absorbed_divergence_snapshot_accepts_earlier_physical_completion():
-    pending = ongoing_center()
-    completed = completed_up_center()
-    snapshot = replace(
-        pending,
-        state=CenterState.DIVERGENCE_CLOSED,
-        available_at=completed.available_at + timedelta(minutes=5),
-        boundary_divergence_id="absorbed-divergence",
-        boundary_anchor_unit_id=pending.pending_leave_unit.unit_id,
-    )
-    units = {
-        item.unit_id: item
-        for item in (
-            completed.entry_unit,
-            *completed.body_units,
-            completed.completion_leave_unit,
-            completed.completion_return_unit,
-        )
-        if item is not None
-    }
-
-    assert _historical_divergence_center_is_causal_prefix(
-        snapshot,
-        completed,
-        units,
-    )
-
-
-def test_absorbed_divergence_departure_can_become_failed_before_completion():
-    pending = ongoing_center()
-    first_return = unit(
-        5,
-        "down",
-        pending.pending_leave_unit.end_tick,
-        110,
-    )
-    extended, _ = advance_center(pending, first_return)
-    later_leave = unit(6, "up", first_return.end_tick, 135)
-    leaving, _ = advance_center(extended, later_leave)
-    later_return = unit(7, "down", later_leave.end_tick, 120)
-    completed, _ = advance_center(leaving, later_return)
-    snapshot = replace(
-        pending,
-        state=CenterState.DIVERGENCE_CLOSED,
-        boundary_divergence_id="absorbed-divergence",
-        boundary_anchor_unit_id=pending.pending_leave_unit.unit_id,
-    )
-    units = {
-        item.unit_id: item
-        for item in (
-            completed.entry_unit,
-            *completed.body_units,
-            *completed.failed_departure_units,
-            completed.completion_leave_unit,
-            completed.completion_return_unit,
-        )
-        if item is not None
-    }
-
-    assert completed.failed_departure_units == (pending.pending_leave_unit,)
-    assert _historical_divergence_center_is_causal_prefix(
-        snapshot,
-        completed,
-        units,
-    )

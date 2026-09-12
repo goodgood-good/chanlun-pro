@@ -36,7 +36,7 @@
   }
 
   function install(env = globalThis) {
-    if (!env || env.__CHANLUN_EMBEDDED_CHART === true || !env.document) return null;
+    if (!env || !env.document) return null;
     if (env[STATE_KEY]) return env[STATE_KEY];
 
     const overlay = env.document.getElementById("tv_chart_transition");
@@ -79,7 +79,7 @@
       overlay.dataset.state = "loading";
       if (area) area.setAttribute("aria-busy", "true");
       if (title) title.textContent = `正在切换至 ${text(value.label) || target.code}`;
-      if (detail) detail.textContent = "K 线、指标与缠论结构全部稳定后统一显示";
+      if (detail) detail.textContent = "正在加载 K 线，线段和中枢随后补充";
       if (typeof env.setTimeout === "function") {
         const key = target.key;
         state.timeout = env.setTimeout(() => {
@@ -87,7 +87,7 @@
           if (!state.active || !state.target || state.target.key !== key) return;
           overlay.dataset.state = "delayed";
           if (title) title.textContent = `${target.code} 加载时间较长`;
-          if (detail) detail.textContent = "仍在等待完整结构，请稍候或重新选择标的";
+          if (detail) detail.textContent = "正在等待行情数据，请稍候或重新选择标的";
         }, MAX_WAIT_MS);
       }
       return true;
@@ -125,6 +125,26 @@
       state.finish();
       return true;
     };
+
+    if (typeof env.addEventListener === 'function') {
+      env.addEventListener('chanlun-history-error', (event) => {
+        const detail = event && event.detail;
+        const identity = normalizeIdentity(detail);
+        if (!identity) return;
+        if (!state.active) {
+          // An initial page has no symbol-switch transition yet. Match the
+          // live chart owner before opening feedback for its first request.
+          const manager = Object.values(env.__cm || {}).find(cm => cm.instanceId === detail.managerId);
+          let context = null;
+          try { context = manager && manager.widget.symbolInterval(); } catch (_) { return; }
+          const current = normalizeIdentity(context);
+          if (!current || current.key !== identity.key || String(context.interval) !== String(detail.resolution)) return;
+          state.begin(identity);
+        }
+        if (!state.target || identity.key !== state.target.key) return;
+        state.fail(detail.message);
+      });
+    }
 
     return state;
   }

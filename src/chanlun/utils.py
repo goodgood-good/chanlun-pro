@@ -1,11 +1,10 @@
 """
-消息推送与配置工具：钉钉/飞书消息发送，代理/凭证配置读取（DB 缓存优先）。
+行情 SDK 输出过滤与代理配置读取（DB 缓存优先）。
 """
 
-import json
 import sys
 import threading
-from typing import Dict, Union
+from typing import Dict
 
 from chanlun import config
 from chanlun.persistence.db import db
@@ -65,113 +64,3 @@ def config_get_proxy() -> Dict[str, str]:
     if db_proxy is not None and db_proxy.get("host") and db_proxy.get("port"):
         return db_proxy
     return {"host": config.PROXY_HOST, "port": config.PROXY_PORT}
-
-
-def config_get_feishu_keys(market: str) -> Dict[str, str]:
-    """
-    Get Feishu app credentials and target user.
-
-    DB cache `fs_keys` overrides defaults if present and complete.
-    """
-    from chanlun.security import decrypt_str
-    db_fs_key = db.cache_get("fs_keys")
-    if db_fs_key is not None:
-        # fs_app_secret 在 Web 设置页按唯一当前格式加密落库，这里严格解密。
-        app_secret_plain = decrypt_str(db_fs_key.get("fs_app_secret"))
-        if (
-            db_fs_key.get("fs_app_id")
-            and app_secret_plain
-            and db_fs_key.get("fs_user_id")
-        ):
-            return {
-                "app_id": db_fs_key["fs_app_id"],
-                "app_secret": app_secret_plain,
-                "user_id": db_fs_key["fs_user_id"],
-            }
-    keys = config.FEISHU_KEYS.get("default", {}).copy()
-    if market in config.FEISHU_KEYS.keys():
-        keys = config.FEISHU_KEYS[market].copy()
-    keys["user_id"] = config.FEISHU_KEYS["user_id"]
-    return keys
-
-
-def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
-    """
-    发送飞书消息（富文本 post）。
-    """
-    import lark_oapi as lark  # 延迟导入可选依赖
-    from lark_oapi.api.im.v1 import (
-        CreateMessageRequest,
-        CreateMessageRequestBody,
-        CreateMessageResponse,
-    )
-    fs_key = config_get_feishu_keys(market)
-    if (
-        fs_key is None
-        or fs_key["app_id"] == ""
-        or fs_key["app_secret"] == ""
-        or fs_key["user_id"] == ""
-    ):
-        return True  # 未配置时不执行操作
-    # 创建client
-    client = (
-        lark.Client.builder()
-        .app_id(fs_key["app_id"])
-        .app_secret(fs_key["app_secret"])
-        .log_level(lark.LogLevel.WARNING)
-        .build()
-    )
-    # 飞书消息格式参考：https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json
-    if isinstance(contents, str):
-        msg_content = {
-            "zh_cn": {
-                "title": title,
-                "content": [[{"tag": "text", "text": f"{contents} \n"}]],
-            }
-        }
-    else:
-        msg_content = {
-            "zh_cn": {
-                "title": title,
-                "content": [[]],
-            }
-        }
-        for _c in contents:
-            if _c.startswith("img_"):  # 支持图片消息
-                msg_content["zh_cn"]["content"][0].append(
-                    {"tag": "img", "image_key": f"{_c}"}
-                )
-            else:
-                msg_content["zh_cn"]["content"][0].append(
-                    {"tag": "text", "text": f"{_c} \n"}
-                )
-
-    msg_content = json.dumps(msg_content, ensure_ascii=False)
-    # 构造请求对象
-    request: CreateMessageRequest = (
-        CreateMessageRequest.builder()
-        .receive_id_type("user_id")
-        .request_body(
-            CreateMessageRequestBody.builder()
-            .receive_id(fs_key["user_id"])
-            .msg_type("post")
-            .content(msg_content)
-            .build()
-        )
-        .build()
-    )
-
-    # 发起请求
-    try:
-        response: CreateMessageResponse = client.im.v1.message.create(request)
-    except Exception as exc:
-        # lark sdk 内部已经做了重试与超时控制，这里再兜一层，避免飞书侧异常打断主流程。
-        lark.logger.error(f"client.im.v1.message.create raised: {exc}")
-        return False
-    # 处理失败返回：必须返回 False，让调用方知道发送未成功，可补救（如重试 / 落库）。
-    if not response.success():
-        lark.logger.error(
-            f"client.im.v1.message.create failed, code: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}"
-        )
-        return False
-    return True

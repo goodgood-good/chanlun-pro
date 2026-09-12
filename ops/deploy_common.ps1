@@ -53,16 +53,7 @@ function Get-ApplicationSourceRevision {
         throw 'deployment git revision is empty'
     }
 
-    # 此列表必须与 tools/run_forward_paper.py::FORWARD_PIPELINE_TOOL_PATHS
-    # 逐字节一致。这些子进程会从磁盘执行决策或时点代码，因此属于部署应用身份；
-    # 无关维护工具不属于该身份。
-    $forwardPipelineTools = @(
-        'tools/audit_qmt_warmup_convergence.py',
-        'tools/run_forward_paper.py',
-        'tools/snapshot_qmt_gics3_sector_ledger.py',
-        'tools/snapshot_qmt_pit_metadata.py'
-    )
-    $sourcePaths = @('src', 'web/chanlun_chart', 'ops', 'windows_run.bat') + $forwardPipelineTools
+    $sourcePaths = @('src', 'web/chanlun_chart', 'ops', 'windows_run.bat')
     $paths = @(& git -C $Root -c core.quotePath=false ls-files --cached --others --exclude-standard -- @sourcePaths 2>$null)
     if ($LASTEXITCODE -ne 0) {
         throw 'unable to enumerate application source files'
@@ -72,8 +63,8 @@ function Get-ApplicationSourceRevision {
         $paths += $runtimeConfig
     }
     $paths = [string[]]@($paths | Sort-Object -Unique)
-    # Sort-Object 受区域规则影响，而 Python 前向程序使用序数排序。显式比较器确保
-    # 部署、验证与前向证据在不同运行时得到同一个源码身份。
+    # Sort-Object 受区域规则影响，显式使用序数排序。显式比较器确保
+    # 部署与验证在不同运行时得到同一个源码身份。
     [Array]::Sort($paths, [StringComparer]::Ordinal)
     $existing = @($paths | Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf })
     # 不把路径名通过管道送入原生程序。Windows PowerShell 5.1 可能在标准输入前加

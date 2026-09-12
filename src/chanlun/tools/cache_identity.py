@@ -23,6 +23,7 @@ def _fingerprint_files() -> list[pathlib.Path]:
         package / "cl_utils" / "tv_chart.py",
         package / "cl_utils" / "strict_chart.py",
         package / "cl_utils" / "strict_chart_runtime.py",
+        package / "cl_utils" / "price_metadata.py",
         package / "cl_utils" / "chart_config.py",
     ]
     files += sorted((package / "exchange").glob("*.py"))

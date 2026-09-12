@@ -60,7 +60,7 @@ def test_chart_preferences_do_not_control_the_core_calculator(monkeypatch) -> No
     cd = CL("SH.600519", "5m", market="a")
 
     assert "bi_type" not in result
-    assert cd.get_config()["stroke_rule"] == "strict-cl-k-distance"
+    assert cd.get_config()["stroke_rule"] == "source-fractal-nonshared-raw-distance-v2"
 
 
 def test_options_and_file_cache_share_one_persisted_key_contract() -> None:

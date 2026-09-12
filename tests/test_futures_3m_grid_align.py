@@ -2,7 +2,7 @@
 与兄弟频率 2m/5m 一致(新R6-E1)。修复前 exchange.py:560 网格对齐列表漏 '3m' → 3m 保留
 resample 的 date='last'(源末根时间戳), 实时进行中 bin 会随续 1m bar 到来逐分钟漂移
 (同已修 us_tdx 10m date=last 漂移致 SSE merge 累积假 bar, 86024fa8)。
-gm/tq 版 convert_futures_kline_frequency(exchange.py:362 shift 列表)明确含 '3m', 坐实笔误。"""
+本用例验证通达信期货 3m 合成的时间边界。"""
 
 import pandas as pd
 

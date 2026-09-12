@@ -63,6 +63,77 @@ def test_extract_chart_payload_recovers_strict_price_basis_metadata() -> None:
     assert frame.attrs["price_basis_revision"] == "sha256:basis"
 
 
+@pytest.mark.parametrize("mode", ["replace", "unavailable"])
+def test_extract_recovers_display_basis_independently_of_structure(mode) -> None:
+    payload = _chart_data()
+    payload["strict_structure_mode"] = mode
+    attrs = dict(_klines().attrs, ohlc_geometry_repair_count=2)
+    payload["price_basis"] = dict(attrs, unrelated_cache_field="not a price basis")
+
+    frame = kline_recompute.extract_klines_df_from_chart_data(payload)
+
+    assert frame.attrs == attrs
+    merged = kline_recompute.merge_klines_df(frame, _klines())
+    assert merged.attrs == _klines().attrs
+    assert payload["price_basis"]["ohlc_geometry_repair_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "basis",
+    [[], {}, {"price_basis_revision": "sha256:basis"},
+     dict(_klines().attrs, structure_price_quantum="NaN"),
+     dict(_klines().attrs, price_basis_provider=""),
+     dict(_klines().attrs, price_basis_revision="sha256:other")],
+)
+def test_extract_rejects_invalid_or_conflicting_explicit_metadata(basis) -> None:
+    payload = _chart_data()
+    payload["price_basis"] = basis
+    with pytest.raises(kline_recompute.PriceBasisMismatchError):
+        kline_recompute.extract_klines_df_from_chart_data(payload)
+
+
+def test_unavailable_structure_without_saved_basis_remains_unknown() -> None:
+    payload = _chart_data()
+    payload["strict_structure_mode"] = "unavailable"
+    frame = kline_recompute.extract_klines_df_from_chart_data(payload)
+    assert frame.attrs == {}
+    with pytest.raises(kline_recompute.PriceBasisMismatchError, match="unknown"):
+        kline_recompute.merge_klines_df(frame, _klines())
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [("structure_price_quantum", "0.1"),
+     ("price_basis_provider", "other"),
+     ("price_basis_adjustment", "none")],
+)
+def test_same_revision_does_not_override_explicit_source_conflict(name, value) -> None:
+    cached, new = _klines(), _klines()
+    cached.attrs[name] = value
+    with pytest.raises(kline_recompute.PriceBasisMismatchError, match=name):
+        kline_recompute.merge_klines_df(cached, new)
+
+
+def test_decimal_equivalent_quantum_remains_the_same_basis() -> None:
+    cached, new = _klines(), _klines()
+    cached.attrs["structure_price_quantum"] = "0.010"
+    assert kline_recompute.merge_klines_df(cached, new).attrs == new.attrs
+
+
+def test_actual_unavailable_chart_serialization_preserves_basis_for_refresh() -> None:
+    frame = _klines()
+    payload = chart_compute.serialize_chart_data_with_strict_runtime(
+        market="a", code="SH.600926", display_frequency="1m",
+        display_klines=frame, chart_config={},
+        strict_runtime=StrictChartRuntimeResult.unavailable("test_unavailable", "test"),
+    )
+    assert payload["strict_structure_mode"] == "unavailable"
+    assert payload["price_basis"] == frame.attrs
+    recovered = kline_recompute.extract_klines_df_from_chart_data(payload)
+    assert recovered.attrs == frame.attrs
+    assert kline_recompute.merge_klines_df(recovered, frame).attrs == frame.attrs
+
+
 def test_merge_same_price_basis_preserves_new_metadata() -> None:
     cached = _klines()
     new = _klines(prices=(10.0, 12.0, 13.0))
@@ -124,6 +195,40 @@ def test_prepend_rejects_unsafe_basis_mix_and_invalidates_cache(
             kline_recompute._cl_pool.pop(cache_key, None)
 
 
+def test_prepend_invalidates_conflicting_saved_basis_before_recompute(monkeypatch):
+    payload = _chart_data()
+    payload["price_basis"] = dict(_klines().attrs, price_basis_revision="sha256:other")
+    deleted = []
+    monkeypatch.setattr(chart_cache, "_get_chart_cache_entry", lambda key: {"data": payload})
+    monkeypatch.setattr(chart_cache, "_delete_chart_cache_entry", deleted.append)
+    monkeypatch.setattr(
+        kline_recompute, "recompute_chart_data_from_klines",
+        lambda *args, **kwargs: pytest.fail("invalid cached basis must not be recomputed"),
+    )
+    assert kline_recompute.prepend_klines_and_replace_cache(
+        "a", "SH.600926", "1m", {}, _klines(), "conflicting-basis",
+    ) is None
+    assert deleted == ["conflicting-basis"]
+
+
+def test_prepend_can_reuse_bars_with_saved_basis_when_structure_unavailable(monkeypatch):
+    payload = _chart_data()
+    payload["strict_structure_mode"] = "unavailable"
+    payload["price_basis"] = dict(_klines().attrs)
+    monkeypatch.setattr(chart_cache, "_get_chart_cache_entry", lambda key: {"data": payload})
+    monkeypatch.setattr(
+        chart_cache, "_delete_chart_cache_entry",
+        lambda key: pytest.fail("complete matching basis must not be invalidated"),
+    )
+    monkeypatch.setattr(
+        kline_recompute, "recompute_chart_data_from_klines",
+        lambda *args, **kwargs: pytest.fail("identical bars need no price recompute"),
+    )
+    assert kline_recompute.prepend_klines_and_replace_cache(
+        "a", "SH.600926", "1m", {}, _klines(), "known-display-basis",
+    ) is payload
+
+
 def test_delete_chart_cache_entry_clears_ram_and_disk(monkeypatch) -> None:
     cache_key = "price-basis-delete-test"
     deleted = []
@@ -175,7 +280,10 @@ def test_recompute_serializes_exact_frame_through_strict_bridge(monkeypatch) -> 
         frame,
     )
 
-    assert result == {"t": [1000, 1060]}
+    assert {key: value for key, value in result.items() if key != "_chart_payload_token"} == {
+        "t": [1000, 1060],
+    }
+    assert result["_chart_payload_token"]
     assert captured["processed"] is frame
     serialized = captured["serialize"]
     assert serialized["market"] == "a"

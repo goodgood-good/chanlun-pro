@@ -34,7 +34,6 @@ function loadUtils(initialSelectedItems, options = {}) {
     default_vals: { market: 'a' },
     URLSearchParams,
     location: { search: options.search || '' },
-    __CHANLUN_EMBEDDED_CHART: options.embedded === true,
     AccountPreferences: options.accountPreferences,
     JSON,
     Array,
@@ -84,35 +83,4 @@ test('watchlist search uses the safe selected item reader', () => {
 
   assert.doesNotMatch(source, /JSON\.parse\(localStorage\.getItem/);
   assert.equal((source.match(/Utils\.get_selected_items\(\)/g) || []).length, 2);
-});
-
-test('embedded chart settings stay in an iframe-local overlay', () => {
-  const h = loadUtils(undefined, {
-    embedded: true,
-    tvChart: { a_code: 'SH.600000' },
-  });
-
-  h.Utils.set_local_data('a_code', 'SZ.000001');
-  h.Utils.set_local_data('a_interval_1', '1');
-
-  assert.equal(h.Utils.get_local_data('a_code'), 'SZ.000001');
-  assert.equal(h.Utils.get_local_data('a_interval_1'), '1');
-  assert.deepEqual(h.layuiWrites, []);
-});
-
-test('embedded chart can read account defaults without mutating shared layui data', () => {
-  const h = loadUtils(undefined, {
-    search: '?chart_embed=decision-support',
-    accountPreferences: {
-      getItem(key) {
-        return key === 'tv_chart'
-          ? JSON.stringify({ market: 'us', us_code: 'MSFT.US' })
-          : null;
-      },
-    },
-  });
-
-  assert.equal(h.Utils.get_local_data('market'), 'us');
-  assert.equal(h.Utils.get_local_data('us_code'), 'MSFT.US');
-  assert.deepEqual(h.layuiWrites, []);
 });

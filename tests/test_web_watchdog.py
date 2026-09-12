@@ -28,11 +28,7 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     assert "ops\\watch_web.ps1" in restart
     assert "-SkipWatchdog" in watchdog
     for switch in (
-        "EnableLargeScreeningScope",
-        "EnableLargeHoldingMonitorScope",
         "EnableFullSymbolCatalog",
-        "EnableFullCoverage",
-        "ForceFullCoverageUntilComplete",
     ):
         assert f"[switch]${switch}" in watchdog
         assert f"$watchdogArguments += '-{switch}'" in restart
@@ -49,11 +45,8 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     assert "Split-Path -Parent $PSScriptRoot" in watchdog
     assert "Split-Path -Parent $PSScriptRoot" in installer
     assert "/readyz?market=" in watchdog
-    assert "priority_monitor_ready" in watchdog
-    assert "priority_monitor_starting" in watchdog
     assert "operational_degraded" in watchdog
     assert "application PID changed" in watchdog
-    assert "outbox_worker_alive" in watchdog
     assert "[int]$LivenessTimeoutSeconds = 15" in watchdog
     assert "-TimeoutSec $LivenessTimeoutSeconds" in watchdog
     assert "[int]$ReadinessTimeoutSeconds = 15" in watchdog
@@ -71,107 +64,9 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     assert "chanlun-web-watchdog-deployment-scope-v1" in watchdog
 
 
-def _healthy_readiness_payload() -> dict[str, object]:
-    return {
-        "status": "ready",
-        "runtime_ready": True,
-        "pid": 1234,
-        "revision": "test-revision",
-        "components": {
-            "scheduler": {"ready": True},
-            "runtime": {"ready": True},
-            "qmt_runtime": {"ready": True, "operationally_verified": True},
-            "ticks": {"ready": True},
-            "trading_screening": {
-                "runtime_ready": True,
-                "runtime_status": "ready",
-                "worker_alive": True,
-                "heartbeat_age_seconds": 1,
-                "heartbeat_max_age_seconds": 180,
-                "priority_monitor_session_open": True,
-                "priority_monitor_ready": True,
-                "priority_monitor_status": "verified",
-                "priority_monitor_age_seconds": 10,
-                "realtime_alert_ready": True,
-                "realtime_alert_status": "ready",
-                "candidate_monitor_status": "cadence_overdue",
-                "notification_dispatcher_configured": True,
-                "notification_delivery": {
-                    "configured": True,
-                    "status": "verified",
-                    "outbox_worker_alive": True,
-                },
-                "native_gateway": {
-                    "ready": True,
-                    "market_data_probe": {"ready": True},
-                },
-            },
-        },
-    }
-
-
-def _run_watchdog_once(
-    tmp_path: Path,
-    readiness: dict[str, object],
-    *,
-    readiness_http_status: int = 200,
-) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            response = (
-                readiness
-                if self.path.startswith("/readyz")
-                else {"status": "alive", "pid": 1234, "revision": "test-revision"}
-            )
-            payload = json.dumps(response).encode("utf-8")
-            self.send_response(
-                readiness_http_status
-                if self.path.startswith("/readyz")
-                else 200
-            )
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, *_args):
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        ops = tmp_path / "ops"
-        ops.mkdir()
-        (ops / "restart_web.ps1").write_text("exit 0\n", encoding="utf-8")
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(WATCHDOG),
-                "-ProjectRoot",
-                str(tmp_path),
-                "-WebPort",
-                str(server.server_port),
-                "-Once",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    heartbeat = json.loads(
-        (tmp_path / ".cache" / "chanlun_web_watchdog" / "heartbeat.json").read_text(
-            encoding="utf-8-sig"
-        )
-    )
-    return result, heartbeat
+def _healthy_readiness_payload():
+    return {"status":"ready", "runtime_ready":True,"pid":1234,"revision":"test-revision", "reasons":[],
+            "components": {name: {"required":True,"ready":True} for name in ("scheduler","runtime","metadata","symbols","ticks")}}
 
 
 @pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
@@ -232,424 +127,28 @@ def test_watchdog_once_records_a_healthy_liveness_probe(tmp_path: Path) -> None:
     assert heartbeat["status"] == "healthy"
     assert heartbeat["consecutive_failures"] == 0
     assert heartbeat["health_uri"].endswith("/readyz?market=a")
-    assert heartbeat["realtime_session_open"] is True
     # Candidate discovery lag is observable but must not restart a healthy
     # holdings/watchlist notification lane.
-    assert heartbeat["candidate_monitor_status"] == "cadence_overdue"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_exposes_candidate_cadence_without_restart_recommendation(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    screening = readiness["components"]["trading_screening"]
-    screening["realtime_alert_ready"] = False
-    screening["realtime_alert_status"] = "candidate_monitor_degraded"
-    screening["candidate_monitor_status"] = "cadence_overdue"
-
-    result, heartbeat = _run_watchdog_once(tmp_path, readiness)
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "operational_degraded"
-    assert heartbeat["recovery_recommended"] is False
-    assert heartbeat["priority_monitor_status"] == "verified"
-    assert heartbeat["candidate_monitor_status"] == "cadence_overdue"
-    assert heartbeat["realtime_alert_status"] == "candidate_monitor_degraded"
-    assert "candidate_monitor_cadence_overdue" in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_parses_503_candidate_degradation_without_restart(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    readiness["status"] = "not_ready"
-    screening = readiness["components"]["trading_screening"]
-    screening["realtime_alert_ready"] = False
-    screening["realtime_alert_status"] = "candidate_monitor_degraded"
-    screening["candidate_monitor_status"] = "warming"
-
-    result, heartbeat = _run_watchdog_once(
-        tmp_path,
-        readiness,
-        readiness_http_status=503,
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "operational_degraded"
-    assert heartbeat["recovery_recommended"] is False
-    assert "candidate_monitor_warming" in heartbeat["detail"]
-    assert "ready endpoint failed" not in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_does_not_restart_during_app_owned_qmt_change(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    readiness["status"] = "not_ready"
-    components = readiness["components"]
-    components["qmt_runtime"].update(
-        {
-            # The last completed observation can remain ready while the app
-            # pauses the gateway for its in-flight daily restart.
-            "ready": True,
-            "operation_in_progress": True,
-            "operation_action": "RESTART",
-            "operation_started_at": "2026-09-03T08:30:02+08:00",
-        }
-    )
-    components["ticks"]["ready"] = False
-    screening = components["trading_screening"]
-    screening["priority_monitor_session_open"] = False
-    screening["priority_monitor_status"] = "not_due"
-    screening["realtime_alert_status"] = "not_due"
-    screening["native_gateway"]["ready"] = False
-    screening["native_gateway"]["market_data_probe"]["ready"] = False
-
-    result, heartbeat = _run_watchdog_once(
-        tmp_path,
-        readiness,
-        readiness_http_status=503,
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "operational_degraded"
-    assert heartbeat["recovery_recommended"] is False
-    assert "qmt_runtime_restart_in_progress" in heartbeat["detail"]
-    assert "ticks_not_ready" not in heartbeat["detail"]
-    assert "native_gateway_not_ready" not in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_still_recovers_unexplained_native_gateway_failure(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    readiness["status"] = "not_ready"
-    components = readiness["components"]
-    components["ticks"]["ready"] = False
-    components["qmt_runtime"].update(
-        {
-            "operation_in_progress": False,
-            "operation_action": None,
-            "operation_started_at": None,
-        }
-    )
-    screening = components["trading_screening"]
-    screening["native_gateway"]["ready"] = False
-    screening["native_gateway"]["market_data_probe"]["ready"] = False
-
-    result, heartbeat = _run_watchdog_once(
-        tmp_path,
-        readiness,
-        readiness_http_status=503,
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "readiness_failed"
-    assert heartbeat["recovery_recommended"] is True
-    assert "ticks_not_ready" in heartbeat["detail"]
-    assert "native_gateway_not_ready" in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_does_not_restart_live_post_close_snapshot_rebuild(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    readiness["status"] = "not_ready"
-    readiness["runtime_ready"] = False
-    screening = readiness["components"]["trading_screening"]
-    screening.update(
-        {
-            "runtime_ready": False,
-            "runtime_status": "not_ready",
-            "worker_alive": True,
-            "heartbeat_age_seconds": 1,
-            "heartbeat_max_age_seconds": 180,
-            "priority_monitor_session_open": False,
-            "priority_monitor_ready": True,
-            "priority_monitor_status": "not_due",
-            "realtime_alert_ready": True,
-            "realtime_alert_status": "not_due",
-            "candidate_monitor_status": "not_due",
-        }
-    )
-
-    result, heartbeat = _run_watchdog_once(
-        tmp_path,
-        readiness,
-        readiness_http_status=503,
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "operational_degraded"
-    assert heartbeat["recovery_recommended"] is False
-    assert "trading_screening_not_ready" in heartbeat["detail"]
-    assert "ready endpoint failed" not in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_gives_current_process_priority_attestation_startup_budget(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    screening = readiness["components"]["trading_screening"]
-    screening["priority_monitor_ready"] = False
-    screening["priority_monitor_status"] = "awaiting_runtime_verification"
-    screening["realtime_alert_ready"] = False
-    screening["realtime_alert_status"] = "priority_monitor_degraded"
-
-    result, heartbeat = _run_watchdog_once(tmp_path, readiness)
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "startup_readiness_failed"
-    assert heartbeat["recovery_recommended"] is True
-    assert heartbeat["priority_monitor_status"] == "awaiting_runtime_verification"
-    assert "priority_monitor_starting" in heartbeat["detail"]
-    assert "realtime_alert_not_ready" not in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_does_not_restart_for_completed_priority_data_degradation(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    screening = readiness["components"]["trading_screening"]
-    screening["priority_monitor_ready"] = False
-    screening["priority_monitor_status"] = "degraded"
-    screening["priority_monitor_age_seconds"] = 10
-    screening["priority_monitor_last_failure_reason_counts"] = {
-        "STRUCTURE_BUNDLE_STALE": 1
-    }
-    screening["realtime_alert_ready"] = False
-    screening["realtime_alert_status"] = "priority_monitor_degraded"
-
-    result, heartbeat = _run_watchdog_once(tmp_path, readiness)
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "operational_degraded"
-    assert heartbeat["recovery_recommended"] is False
-    assert "priority_monitor_degraded" in heartbeat["detail"]
-    assert "realtime_alert_not_ready" not in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_once_rejects_a_stale_priority_monitor(tmp_path: Path) -> None:
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            if self.path.startswith("/readyz"):
-                response = _healthy_readiness_payload()
-                screening = response["components"]["trading_screening"]
-                screening["priority_monitor_ready"] = False
-                screening["priority_monitor_status"] = "stale"
-                screening["priority_monitor_age_seconds"] = 240
-            else:
-                response = {
-                    "status": "alive",
-                    "pid": 1234,
-                    "revision": "test-revision",
-                }
-            payload = json.dumps(response).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, *_args):
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        ops = tmp_path / "ops"
-        ops.mkdir()
-        (ops / "restart_web.ps1").write_text("exit 0\n", encoding="utf-8")
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(WATCHDOG),
-                "-ProjectRoot",
-                str(tmp_path),
-                "-WebPort",
-                str(server.server_port),
-                "-Once",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    heartbeat = json.loads(
-        (tmp_path / ".cache" / "chanlun_web_watchdog" / "heartbeat.json").read_text(
-            encoding="utf-8-sig"
-        )
-    )
-    assert heartbeat["status"] == "readiness_failed"
-    assert heartbeat["recovery_recommended"] is True
-    assert "priority_monitor_not_ready" in heartbeat["detail"]
 
 
-@pytest.mark.parametrize(
-    (
-        "configured",
-        "delivery_status",
-        "outbox_worker_alive",
-        "failure_threshold",
-        "expected_status",
-        "expected_recovery",
-        "expected_reason",
-    ),
-    [
-        (
-            True,
-            "degraded",
-            True,
-            1,
-            "configuration_failed",
-            False,
-            "notification_delivery_degraded",
-        ),
-        (
-            False,
-            "unavailable",
-            True,
-            1,
-            "configuration_failed",
-            False,
-            "notification_dispatcher_not_configured",
-        ),
-        (
-            True,
-            "unavailable",
-            False,
-            6,
-            "readiness_failed",
-            True,
-            "outbox_worker_not_alive",
-        ),
-    ],
-)
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_classifies_notification_failures_without_restart_loops(
-    tmp_path: Path,
-    configured: bool,
-    delivery_status: str,
-    outbox_worker_alive: bool,
-    failure_threshold: int,
-    expected_status: str,
-    expected_recovery: bool,
-    expected_reason: str,
-) -> None:
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            if self.path.startswith("/readyz"):
-                response = _healthy_readiness_payload()
-                screening = response["components"]["trading_screening"]
-                screening["realtime_alert_ready"] = False
-                screening["notification_dispatcher_configured"] = configured
-                screening["notification_delivery"].update(
-                    {
-                        "configured": configured,
-                        "status": delivery_status,
-                        "outbox_worker_alive": outbox_worker_alive,
-                    }
-                )
-            else:
-                response = {
-                    "status": "alive",
-                    "pid": 1234,
-                    "revision": "test-revision",
-                }
-            payload = json.dumps(response).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, *_args):
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        ops = tmp_path / "ops"
-        ops.mkdir()
-        (ops / "restart_web.ps1").write_text("exit 0\n", encoding="utf-8")
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(WATCHDOG),
-                "-ProjectRoot",
-                str(tmp_path),
-                "-WebPort",
-                str(server.server_port),
-                "-ReadinessFailureThreshold",
-                str(failure_threshold),
-                "-Once",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    heartbeat = json.loads(
-        (tmp_path / ".cache" / "chanlun_web_watchdog" / "heartbeat.json").read_text(
-            encoding="utf-8-sig"
-        )
-    )
-    assert heartbeat["status"] == expected_status
-    assert heartbeat["recovery_recommended"] is expected_recovery
-    assert expected_reason in heartbeat["detail"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
-def test_watchdog_does_not_restart_before_first_notification_delivery(
-    tmp_path: Path,
-) -> None:
-    readiness = _healthy_readiness_payload()
-    screening = readiness["components"]["trading_screening"]
-    screening["realtime_alert_ready"] = False
-    screening["realtime_alert_status"] = "notification_unverified"
-    screening["notification_delivery"].update(
-        {
-            "configured": True,
-            "operationally_verified": False,
-            "status": "awaiting_first_delivery",
-            "reason_code": "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED",
-            "outbox_worker_alive": True,
-        }
-    )
-
-    result, heartbeat = _run_watchdog_once(tmp_path, readiness)
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert heartbeat["status"] == "operational_degraded"
-    assert heartbeat["recovery_recommended"] is False
-    assert "realtime_alert_notification_unverified" in heartbeat["detail"]
-    assert "realtime_alert_not_ready" not in heartbeat["detail"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")
@@ -748,11 +247,7 @@ def test_scheduled_watchdog_recovery_uses_persisted_deployment_scope(
         """param(
     [switch]$SkipWatchdog,
     [int]$WebReadinessTimeoutSeconds,
-    [switch]$EnableLargeScreeningScope,
-    [switch]$EnableLargeHoldingMonitorScope,
-    [switch]$EnableFullSymbolCatalog,
-    [switch]$EnableFullCoverage,
-    [switch]$ForceFullCoverageUntilComplete
+    [switch]$EnableFullSymbolCatalog
 )
 $PSBoundParameters.Keys |
     Sort-Object |
@@ -777,11 +272,7 @@ exit 0
                 "project_root": str(tmp_path),
                 "web_port": unavailable_port,
                 "updated_at": "2026-08-29T00:00:00+08:00",
-                "enable_large_screening_scope": True,
-                "enable_large_holding_monitor_scope": True,
                 "enable_full_symbol_catalog": True,
-                "enable_full_coverage": True,
-                "force_full_coverage_until_complete": True,
             }
         ),
         encoding="utf-8",
@@ -817,11 +308,7 @@ exit 0
         received_parameters.read_text(encoding="utf-8-sig").splitlines()
     )
     assert {
-        "EnableLargeScreeningScope",
-        "EnableLargeHoldingMonitorScope",
         "EnableFullSymbolCatalog",
-        "EnableFullCoverage",
-        "ForceFullCoverageUntilComplete",
         "SkipWatchdog",
         "WebReadinessTimeoutSeconds",
     } <= received

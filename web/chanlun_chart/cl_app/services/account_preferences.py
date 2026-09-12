@@ -72,12 +72,6 @@ _DISPLAY_CONFIG_KEY = re.compile(r"^cl_show_config_([1-4])_([A-Za-z0-9_]{1,10})$
 _DRAWING_MODE_KEY = re.compile(r"^cl_independent_drawings_([1-4])$")
 _MAX_PREFERENCE_BYTES = 128 * 1024
 _PREFERENCE_SAVE_LOCK = RLock()
-_SCREENING_POINT_TYPES = {
-    "all", "buy", "sell", "1buy", "2buy", "3buy", "1sell", "2sell", "3sell"
-}
-_SCREENING_LIFECYCLES = {
-    "all", "observed", "monitoring", "approaching", "triggered", "executable", "active"
-}
 
 
 class InvalidAccountPreferences(ValueError):
@@ -186,66 +180,18 @@ def _normalize_display_config(key: str, raw: object) -> str:
                 raise InvalidAccountPreferences(f"{key} schema is too long")
         elif type(value) is not bool:
             raise InvalidAccountPreferences(f"{key} values must be booleans")
-    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _normalize_trading_screening_view(raw: object) -> str:
-    parsed, _ = _json_string(raw, key="trading_screening_view")
-    if not isinstance(parsed, dict):
-        raise InvalidAccountPreferences("trading_screening_view must contain an object")
-    contract = parsed.get("contract")
-    if not isinstance(contract, str) or not contract or len(contract) > 160:
-        raise InvalidAccountPreferences("trading_screening_view contract is invalid")
-
-    allowed_values = {
-        "pointType": _SCREENING_POINT_TYPES,
-        "lifecycle": _SCREENING_LIFECYCLES,
-        "market": {"all", "a", "us"},
-        "signalSource": {"all", "screening", "notification", "attention", "watchlist"},
-        "reviewStage": {"all", "forming", "notified", "tracking"},
-        "segmentState": {"all", "present", "current", "historical", "absent"},
-        "selectionScope": {"all-qualified", "sector-trigger"},
-        "layout": {"focus", "dual", "triple", "quad"},
-    }
-    normalized: dict[str, object] = {"contract": contract}
-    for key, accepted in allowed_values.items():
-        value = parsed.get(key)
-        if value in accepted:
-            normalized[key] = value
-
-    signal_list_open = parsed.get("signalListOpen")
-    if type(signal_list_open) is bool:
-        normalized["signalListOpen"] = signal_list_open
-
-    sizing = parsed.get("chartSizing")
-    if isinstance(sizing, dict):
-        heights = sizing.get("heights")
-        normalized_heights: dict[str, int | None] = {}
-        if isinstance(heights, dict):
-            for layout in ("focus", "dual", "triple", "quad"):
-                value = heights.get(layout)
-                if value is None:
-                    normalized_heights[layout] = None
-                elif type(value) in {int, float} and 520 <= value <= 1200:
-                    normalized_heights[layout] = round(value)
-        normalized_sizing: dict[str, object] = {"heights": normalized_heights}
-        for key, minimum, maximum in (
-            ("dualRatio", 30, 70),
-            ("tripleMainRatio", 55, 80),
-            ("tripleSideRatio", 25, 75),
-        ):
-            value = sizing.get(key)
-            if type(value) in {int, float} and minimum <= value <= maximum:
-                normalized_sizing[key] = round(value)
-        normalized["chartSizing"] = normalized_sizing
+    if parsed["schema"] not in {"chanlun-chart-config-v6", "chanlun-chart-config-v7"}:
+        raise InvalidAccountPreferences(f"{key} has an unsupported display schema")
+    normalized = {"schema": "chanlun-chart-config-v7"}
+    normalized.update({name: parsed[name] for name in ("fx", "bi", "xd", "center_all", "center_L0") if name in parsed})
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 
 
 def _normalize_value(key: str, raw: object) -> str:
     if key == "tv_chart":
         return _normalize_tv_chart(raw)
-    if key == "trading_screening_view":
-        return _normalize_trading_screening_view(raw)
     if key == "chart_menu_width":
         try:
             width = int(str(raw))
@@ -254,7 +200,7 @@ def _normalize_value(key: str, raw: object) -> str:
         if not 240 <= width <= 900:
             raise InvalidAccountPreferences("chart_menu_width is out of range")
         return str(width)
-    if key in {"chart_menu_collapsed", "chart_analysis_overview_collapsed"}:
+    if key == "chart_menu_collapsed":
         if str(raw) not in {"0", "1"}:
             raise InvalidAccountPreferences(f"{key} must be 0 or 1")
         return str(raw)
@@ -274,7 +220,6 @@ def _is_supported_preference_key(key: object) -> bool:
             key
             in {
                 "tv_chart",
-                "trading_screening_view",
                 "chart_menu_width",
                 "chart_menu_collapsed",
                 "chart_analysis_overview_collapsed",

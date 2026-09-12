@@ -541,7 +541,8 @@ body {
     pointer-events: none;
 }
 
-.strict-structure-status[data-state="waiting"] {
+.strict-structure-status[data-state="waiting"],
+.strict-structure-status[data-state="loading"] {
     border-color: rgba(37, 99, 166, 0.3);
     background: rgba(244, 249, 255, 0.96);
     color: #255f98;

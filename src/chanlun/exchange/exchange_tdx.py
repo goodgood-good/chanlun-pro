@@ -549,15 +549,6 @@ class ExchangeTDX(Exchange):
                 stocks.append(_stock)
         return stocks
 
-    def balance(self):
-        raise Exception("交易所不支持")
-
-    def positions(self, code: str = ""):
-        raise Exception("交易所不支持")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        raise Exception("交易所不支持")
-
     def xdxr(self, market: int, project_code: str, code: str):
         """
         读取除权除息信息

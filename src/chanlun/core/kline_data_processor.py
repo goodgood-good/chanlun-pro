@@ -103,7 +103,7 @@ class KlineDataProcessor:
                 return []
         vol = self._finite_volume(volume)
         # 审计 D4-HIGH-2: OHLC NaN/Inf 兜底,与 _convert(:177-184)的 ffill 根因防护对齐。
-        # 本快路径是 live/walk-forward 主入口(cl.py:177 / live_backtest:980),原仅 volume 有
+        # 本快路径用于 CL 追加和修订行情数据，原仅 volume 有
         # pd.isna 兜底, OHLC 裸 float() → 坏 bar 把 NaN 灌进 klines → bi/xd `.val` 比较静默失效
         # (nan>x 与 nan<x 皆 False)+ MACD inc≠batch。坏值前向填充上一根(无前根则用本 bar 任一
         # 有限 OHLC bfill,全非有限则丢弃该 bar,免填 0 造假跳变)。干净数据零改变。
@@ -247,7 +247,7 @@ class KlineDataProcessor:
             sanitized = numeric_ohlc.replace(
                 [float("inf"), float("-inf")], float("nan")
             )
-            # 禁止沿时间轴 bfill：首根坏数据若从未来价格反填，会造成回测前视偏差，
+            # 禁止沿时间轴 bfill：首根坏数据若从未来价格反填，会改变先前已知的价格，
             # 且与逐根 process_kline_values 的“无前根则丢弃”语义不一致。
             sanitized = sanitized.ffill()
             if self.klines:

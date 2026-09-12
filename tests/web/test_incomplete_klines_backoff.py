@@ -78,6 +78,8 @@ def test_compute_true_empty_uses_300s(monkeypatch):
 
 def _patch_sse(monkeypatch, ex_ret):
     spy = []
+    # Refresh operates only after history has published its initial snapshot.
+    monkeypatch.setattr(cache_mod, "_get_chart_cache_entry_ram_only", lambda key: {"data": {"t": [1]}})
     # recompute_chart_data 内 `from .chart_cache import ...`，patch 源模块即被局部 import 取到。
     monkeypatch.setattr(cache_mod, "_is_negatively_cached", lambda key: False)
     monkeypatch.setattr(

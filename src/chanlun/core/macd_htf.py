@@ -215,7 +215,7 @@ class CausalPartialHigherMACDCalculator:
     def _update_validated_increment(self, klines: List[Kline]) -> Optional[dict]:
         """消费调用方已经逐行认证过的“旧末根修订 + 追加”尾段。
 
-        生产选股状态在进入这里前已经比较完整 OHLCV 前缀，并在滑窗、历史修订或
+        图表运行时在进入这里前已经比较完整 OHLCV 前缀，并在滑窗、历史修订或
         价格基准变化时新建整个 ``CL``。因此无需让每一级高周期 MACD 再各自扫描一遍
         上万根历史；这里仍校验长度、旧末根时间和桶身份，任何不一致立即全量重建。
         """

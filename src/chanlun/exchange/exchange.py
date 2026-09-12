@@ -94,7 +94,7 @@ class Tick:
 
 
 class Exchange(ABC):
-    """各数据源/交易所适配器的抽象基类，定义统一行情与交易接口。"""
+    """行情适配器的抽象基类，统一 K 线、报价、标的和板块查询。"""
 
     # Secure default: an adapter must explicitly prove that ``stock_info`` is
     # one-code I/O.  Legacy implementations often call ``all_stocks`` inside.
@@ -159,19 +159,6 @@ class Exchange(ABC):
 
         返回格式：[{'code': 'SH.000001', 'name': '上证指数'}]
         """
-
-    @abstractmethod
-    def balance(self):
-        """获取账户资产信息（仅交易型适配器实现，行情型抛异常）。"""
-
-    @abstractmethod
-    def positions(self, code: str = ""):
-        """获取当前持仓信息（仅交易型适配器实现，行情型抛异常）。"""
-
-    @abstractmethod
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        """下单接口（仅交易型适配器实现，行情型抛异常）。"""
-
 
 def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
     """将沪深 A 股 K 线合成到指定周期，时间戳向后对齐（bar 结束时刻）。
@@ -388,191 +375,6 @@ def convert_currency_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
     ]
 
 
-def convert_futures_kline_frequency(
-    klines: pd.DataFrame, to_f: str, process_exchange_type="gm"
-) -> pd.DataFrame:
-    """将国内期货 K 线合成到指定周期，时间戳前对齐（bar 开始时刻）。
-
-    :param klines: 原始 K 线，需含 date/code/open/high/low/close/volume 列
-    :param to_f: 目标周期，如 '5m'/'30m'/'60m'/'d'
-    :param process_exchange_type: 'gm' 掘金/天勤口径，其他值按标准 30min 边界处理；
-        二者在 10:15-10:30 休市期的合并方式不同，导致 30m/60m 边界有差异。
-    """
-    period_maps = {
-        "1m": "1min",
-        "2m": "2min",
-        "3m": "3min",
-        "5m": "5min",
-        "6m": "6min",
-        "10m": "10min",
-        "15m": "15min",
-        "d": "D",
-        "w": "W",
-        "m": "M",
-    }
-    code = klines.iloc[0]["code"]
-
-    if to_f in period_maps.keys():
-        klines.insert(0, column="date_index", value=klines["date"])
-        klines.set_index("date_index", inplace=True)
-        period_type = period_maps[to_f]
-        agg_dict = {
-            "code": "first",
-            "date": "first",
-            "open": "first",
-            "close": "last",
-            "high": "max",
-            "low": "min",
-            "volume": "sum",
-        }
-        if "position" in klines.columns:
-            agg_dict["position"] = "last"
-        period_klines = klines.resample(period_type, label="right", closed="left").agg(
-            agg_dict
-        )
-
-        if to_f in ["1m", "3m", "5m", "6m", "10m", "15m"]:
-            period_klines["date"] = period_klines.index
-            period_klines["date"] = period_klines["date"] - pd.to_timedelta(
-                period_maps[to_f]
-            )
-
-        period_klines.dropna(inplace=True)
-        period_klines.reset_index(inplace=True)
-        period_klines.drop("date_index", axis=1, inplace=True)
-        return period_klines[["code", "date", "open", "close", "high", "low", "volume"]]
-
-    # 10:15-10:30 为期货休市，掘金把该段并入前一个 bar 凑足分钟数，天勤则按自然 30min 边界切割
-    if process_exchange_type == "gm":
-        freq_config_maps = {
-            # 掘金口径：凑够符合分钟数的数据（夜盘 22:00/22:30 分段起点曾误写为 21:00/21:30 致区间过宽、
-            # last-wins 覆盖使 21:00/21:30 目标 bar 丢失，已修正各分段起点对齐 bin 标签）
-            "30m": {
-                "09:00:00": ["09:00:00", "09:29:59"],
-                "09:30:00": ["09:30:00", "09:59:59"],
-                "10:00:00": ["10:00:00", "10:44:59"],
-                "10:45:00": ["10:45:00", "11:14:59"],
-                "11:15:00": ["11:15:00", "13:44:59"],
-                "13:45:00": ["13:45:00", "14:14:59"],
-                "14:15:00": ["14:15:00", "14:44:59"],
-                "14:45:00": ["14:45:00", "14:59:59"],
-                "21:00:00": ["21:00:00", "21:29:59"],
-                "21:30:00": ["21:30:00", "21:59:59"],
-                "22:00:00": ["22:00:00", "22:29:59"],
-                "22:30:00": ["22:30:00", "22:59:59"],
-                "23:00:00": ["23:00:00", "23:29:59"],
-                "23:30:00": ["23:30:00", "23:59:59"],
-                "00:00:00": ["00:00:00", "00:29:59"],
-                "00:30:00": ["00:30:00", "00:59:59"],
-                "01:00:00": ["01:00:00", "01:29:59"],
-                "01:30:00": ["01:30:00", "01:59:59"],
-                "02:00:00": ["02:00:00", "02:29:59"],
-                "02:30:00": ["02:30:00", "02:59:59"],
-            },
-            "60m": {
-                "09:00:00": ["09:00:00", "09:59:59"],
-                "10:00:00": ["10:00:00", "11:14:59"],
-                "11:15:00": ["11:15:00", "14:14:59"],
-                "14:15:00": ["14:15:00", "14:59:59"],
-                "21:00:00": ["21:00:00", "21:59:59"],
-                "22:00:00": ["22:00:00", "22:59:59"],
-                "23:00:00": ["23:00:00", "23:59:59"],
-                "00:00:00": ["00:00:00", "00:59:59"],
-                "01:00:00": ["01:00:00", "01:59:59"],
-                "02:00:00": ["02:00:00", "02:59:59"],
-            },
-        }
-    else:
-        freq_config_maps = {
-            "30m": {
-                "09:00:00": ["09:00:00", "09:29:59"],
-                "09:30:00": ["09:30:00", "09:59:59"],
-                "10:00:00": ["10:00:00", "10:29:59"],
-                "10:30:00": ["10:30:00", "10:59:59"],
-                "11:00:00": ["11:00:00", "11:29:59"],
-                "11:30:00": ["11:30:00", "11:59:59"],
-                "13:00:00": ["13:00:00", "13:29:59"],
-                "13:30:00": ["13:30:00", "13:59:59"],
-                "14:00:00": ["14:00:00", "14:29:59"],
-                "14:30:00": ["14:30:00", "14:59:59"],
-                "21:00:00": ["21:00:00", "21:29:59"],
-                "21:30:00": ["21:30:00", "21:59:59"],
-                "22:00:00": ["22:00:00", "22:29:59"],
-                "22:30:00": ["22:30:00", "22:59:59"],
-                "23:00:00": ["23:00:00", "23:29:59"],
-                "23:30:00": ["23:30:00", "23:59:59"],
-                "00:00:00": ["00:00:00", "00:29:59"],
-                "00:30:00": ["00:30:00", "00:59:59"],
-                "01:00:00": ["01:00:00", "01:29:59"],
-                "01:30:00": ["01:30:00", "01:59:59"],
-                "02:00:00": ["02:00:00", "02:29:59"],
-                "02:30:00": ["02:30:00", "02:59:59"],
-            },
-            "60m": {
-                "09:00:00": ["09:00:00", "09:59:59"],
-                "10:00:00": ["10:00:00", "10:59:59"],
-                "11:00:00": ["11:00:00", "11:59:59"],
-                "13:00:00": ["13:00:00", "13:59:59"],
-                "14:00:00": ["14:00:00", "15:00:00"],
-                "21:00:00": ["21:00:00", "21:59:59"],
-                "22:00:00": ["22:00:00", "22:59:59"],
-                "23:00:00": ["23:00:00", "23:59:59"],
-                "00:00:00": ["00:00:00", "00:59:59"],
-                "01:00:00": ["01:00:00", "01:59:59"],
-                "02:00:00": ["02:00:00", "02:59:59"],
-            },
-        }
-
-    if to_f not in freq_config_maps.keys():
-        raise Exception(f"不支持的转换周期：{to_f}")
-
-    klines["new_dt"] = pd.Series(dtype="datetime64[ns, Asia/Shanghai]")
-    # 夜盘跨零点：00:00 的 bar 实际属于前一日夜盘最后一根，减 1 分钟归入正确分段
-    mask = (klines["date"].dt.hour == 0) & (klines["date"].dt.minute == 0)
-    klines.loc[mask, "date"] = klines.loc[mask, "date"] - pd.Timedelta(minutes=1)
-
-    date_only = klines["date"].dt.normalize()
-    for new_time_str, range_time_str in freq_config_maps[to_f].items():
-        start_time_str, end_time_str = range_time_str
-        start_time = pd.to_timedelta(start_time_str)
-        end_time = pd.to_timedelta(end_time_str)
-
-        range_start_dt = date_only + start_time
-
-        if end_time_str == "00:00:00":
-            range_end_dt = date_only + pd.Timedelta(days=1)
-        else:
-            range_end_dt = date_only + end_time
-        if end_time_str == "00:00:00":
-            target_new_dt = date_only + pd.Timedelta(days=1)
-        else:
-            target_new_dt = date_only + pd.to_timedelta(new_time_str)
-
-        mask = (klines["date"] >= range_start_dt) & (klines["date"] <= range_end_dt)
-        klines.loc[mask, "new_dt"] = target_new_dt
-
-    if klines["new_dt"].isnull().any():
-        failed_dates = klines.loc[klines["new_dt"].isnull(), "date"]
-        raise Exception(
-            f"期货周期转换时间范围错误，{code} - {to_f} 以下时间未能匹配配置： {failed_dates.tolist()}"
-        )
-    agg_config = {
-        "code": "first",
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    }
-    if "position" in klines.columns:
-        agg_config["position"] = "last"
-    klines_groups = klines.groupby(by=["new_dt"]).agg(agg_config)
-    klines_groups["date"] = klines_groups.index
-    klines_groups.reset_index(drop=True, inplace=True)
-
-    return klines_groups[["code", "date", "open", "close", "high", "low", "volume"]]
-
-
 def convert_tdx_futures_kline_frequency(
     klines: pd.DataFrame, to_f: str
 ) -> pd.DataFrame:
@@ -778,49 +580,6 @@ def convert_tdx_futures_kline_frequency(
     return klines_groups[
         ["date", "frequency", "code", "high", "low", "open", "close", "volume"]
     ]
-
-
-def convert_us_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """将美股 K 线（IB/盈透证券口径）合成到指定周期，时间戳前对齐（bar 开始时刻）。"""
-    period_maps = {
-        "2m": "2min",
-        "5m": "5min",
-        "10m": "10min",
-        "15m": "15min",
-        "30m": "30min",
-        "60m": "1H",
-        "120m": "2H",
-        "d": "D",
-        "w": "W",
-        "m": "M",
-    }
-    if len(klines) == 0:
-        return None
-    klines.insert(0, column="date_index", value=klines["date"])
-    klines.set_index("date_index", inplace=True)
-    period_type = period_maps[to_f]
-    agg_dict = {
-        "code": "first",
-        "date": "first",
-        "open": "first",
-        "close": "last",
-        "high": "max",
-        "low": "min",
-        "volume": "sum",
-    }
-
-    if to_f in ["w"]:  # IB 周线取周末最后一根的时间戳
-        agg_dict["date"] = "last"
-
-    period_klines = klines.resample(period_type, label="right", closed="left").agg(
-        agg_dict
-    )
-
-    period_klines.dropna(inplace=True)
-    period_klines.reset_index(inplace=True)
-    period_klines.drop("date_index", axis=1, inplace=True)
-
-    return period_klines[["code", "date", "open", "close", "high", "low", "volume"]]
 
 
 def convert_overseas_tdx_kline_frequency(

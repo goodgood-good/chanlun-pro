@@ -90,6 +90,23 @@ def test_recompute_when_new_bar_appended(monkeypatch, spy_recompute):
     assert result == {"t": [], "recomputed": True}
 
 
+def test_tail_merge_preserves_full_history_validation_deadline(monkeypatch):
+    cached = _chart_data([1000, 1060], [10, 11])
+    cached["_history_source_valid_until"] = 2000.0
+    monkeypatch.setattr(chart_cache, "_get_chart_cache_entry", lambda key: {"data": cached})
+    monkeypatch.setattr(chart_cache, "_set_chart_cache_entry", lambda *args, **kwargs: None)
+    def recompute(market, code, frequency, config, frame, **kwargs):
+        assert len(frame) == 3
+        assert frame.attrs["_history_source_valid_until"] == 2000.0
+        return {"t": []}
+    monkeypatch.setattr(kline_recompute, "recompute_chart_data_from_klines", recompute)
+    new = _klines_df([1060, 1120], [11, 12])
+    new.attrs["_history_source_valid_until"] = 3000.0
+    assert kline_recompute.prepend_klines_and_replace_cache(
+        "a", "X", "1m", {}, new, "a:X:1m",
+    ) == {"t": []}
+
+
 def test_corrupt_entry_rejects_narrow_overwrite(monkeypatch, spy_recompute):
     """web-B2: cached entry 有 bar 但列长不一致(半坏)-> extract 返空 -> 不得用窄 new_klines
     merge 出窄结果并以 is_full_snapshot=True 写入(污染后续 firstDataRequest 只返回几根 K 线)。
@@ -122,7 +139,9 @@ def test_volume_only_change_refreshes_without_recompute(monkeypatch, spy_recompu
     )
     result = kline_recompute.prepend_klines_and_replace_cache("a", "X", "1m", {}, new, "a:X:1m")
     assert spy_recompute == []  # OHLC 未变 -> 不重算
-    assert result["v"][-1] == 999  # 但成交量已就地刷新(非冻结在 10)
+    assert result["v"][-1] == 999
+    assert cached["v"][-1] == 10  # Already-published readers remain immutable.
+    assert result is not cached
 
 
 def test_volume_refresh_is_native_python_json_serializable(monkeypatch, spy_recompute):

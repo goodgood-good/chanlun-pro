@@ -4,17 +4,6 @@
   var SCHEMA = "chanlun-account-chart-preferences/v1";
   var CACHE_PREFIX = "chanlun_account_preferences_v1:";
   var bootstrap = root.__CHANLUN_ACCOUNT_PREFERENCES__;
-  // Decision-support charts are URL-driven views inside four same-origin
-  // iframes.  localStorage is shared by the parent and every iframe, so an
-  // embedded chart must never apply or persist its temporary symbol/interval
-  // as the account workspace.  Detect this before index.html initializes its
-  // body-level flag; account_preferences.js is loaded from <head>.
-  var embeddedReadOnly = false;
-  try {
-    embeddedReadOnly = new URLSearchParams(
-      (root.location && root.location.search) || ""
-    ).get("chart_embed") === "decision-support";
-  } catch (_) { /* an unavailable URL parser keeps the normal page behavior */ }
   var enabled = !!(
     bootstrap &&
     bootstrap.account_key &&
@@ -48,10 +37,8 @@
 
   function isApprovedKey(key) {
     return key === "tv_chart" ||
-      key === "trading_screening_view" ||
       key === "chart_menu_width" ||
       key === "chart_menu_collapsed" ||
-      key === "chart_analysis_overview_collapsed" ||
       /^cl_show_config_[1-4]_[A-Za-z0-9_]{1,10}$/.test(key) ||
       /^cl_independent_drawings_[1-4]$/.test(key);
   }
@@ -70,10 +57,8 @@
   function localApprovedKeys() {
     var keys = [
       "tv_chart",
-      "trading_screening_view",
       "chart_menu_width",
       "chart_menu_collapsed",
-      "chart_analysis_overview_collapsed"
     ];
     try {
       for (var i = 0; i < root.localStorage.length; i += 1) {
@@ -196,7 +181,6 @@
   function setItem(key, value) {
     if (!isApprovedKey(key)) return storageSet(key, value);
     var normalized = String(value);
-    if (embeddedReadOnly) return true;
     storageSet(key, normalized);
     if (!enabled) return true;
     if (values[key] === normalized) return true;
@@ -209,7 +193,6 @@
   }
 
   function removeItem(key) {
-    if (embeddedReadOnly && isApprovedKey(key)) return true;
     storageRemove(key);
     if (!enabled || !isApprovedKey(key) || !Object.prototype.hasOwnProperty.call(values, key)) {
       return true;
@@ -275,30 +258,22 @@
     } else if (bootstrap.exists === true) {
       values = serverValues;
     }
-    if (!embeddedReadOnly) {
-      applyAccountValues(values);
-      writeAccountCache(dirty);
-      if (dirty) scheduleSave();
-    }
+    applyAccountValues(values);
+    writeAccountCache(dirty);
+    if (dirty) scheduleSave();
 
-    if (!embeddedReadOnly && typeof root.addEventListener === "function") {
+    if (typeof root.addEventListener === "function") {
       root.addEventListener("pagehide", function () { flush(); });
     }
   }
 
   function getItem(key) {
-    if (
-      embeddedReadOnly &&
-      isApprovedKey(key) &&
-      Object.prototype.hasOwnProperty.call(values, key)
-    ) return values[key];
     return storageGet(key);
   }
 
   root.AccountPreferences = {
     schema: SCHEMA,
     enabled: enabled,
-    readOnly: embeddedReadOnly,
     username: enabled ? String(bootstrap.username || "") : "",
     isApprovedKey: isApprovedKey,
     getItem: getItem,

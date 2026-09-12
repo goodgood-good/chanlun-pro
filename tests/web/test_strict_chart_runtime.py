@@ -5,7 +5,7 @@ from decimal import Decimal
 import pandas as pd
 
 from chanlun.cl_utils import strict_chart_runtime
-from chanlun.decision_support.trading_system.runtime_config import (
+from chanlun.cl_utils.price_metadata import (
     strict_cl_config,
 )
 

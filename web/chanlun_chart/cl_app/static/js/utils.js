@@ -1,36 +1,4 @@
 var Utils = (function () {
-  function is_embedded_chart() {
-    if (window.__CHANLUN_EMBEDDED_CHART === true) return true;
-    try {
-      return new URLSearchParams(window.location.search || "")
-        .get("chart_embed") === "decision-support";
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function embedded_settings() {
-    if (!window.__chanlunEmbeddedChartSettings) {
-      window.__chanlunEmbeddedChartSettings = Object.create(null);
-    }
-    return window.__chanlunEmbeddedChartSettings;
-  }
-
-  function account_tv_chart_value(key) {
-    if (!window.AccountPreferences || typeof window.AccountPreferences.getItem !== "function") {
-      return undefined;
-    }
-    try {
-      var raw = window.AccountPreferences.getItem("tv_chart");
-      var parsed = raw ? JSON.parse(raw) : null;
-      return parsed && Object.prototype.hasOwnProperty.call(parsed, key)
-        ? parsed[key]
-        : undefined;
-    } catch (e) {
-      return undefined;
-    }
-  }
-
   function get_selected_items() {
     try {
       let raw = localStorage.getItem(Utils.get_market() + "_selectedItems");
@@ -48,12 +16,6 @@ var Utils = (function () {
 
   return {
     get_local_data: function (key) {
-      if (is_embedded_chart()) {
-        var overlay = embedded_settings();
-        if (Object.prototype.hasOwnProperty.call(overlay, key)) return overlay[key];
-        var accountValue = account_tv_chart_value(key);
-        if (accountValue !== undefined) return accountValue;
-      }
       if (layui.data("tv_chart")) {
         let val = layui.data("tv_chart")[key];
         if (val === undefined) {
@@ -64,10 +26,6 @@ var Utils = (function () {
       return default_vals[key];
     },
     set_local_data: function (key, val) {
-      if (is_embedded_chart()) {
-        embedded_settings()[key] = val;
-        return;
-      }
       layui.data("tv_chart", {
         key: key,
         value: val,

@@ -13,8 +13,8 @@ pip install poetry
 if errorlevel 1 goto :fail
 
 REM 2. Install dependencies (core only by default).
-REM    Optional extras: us / hk / cn-extra / futures / ai / notify / backtest / monitor / charts
-REM    e.g.  poetry install --extras us --extras hk
+REM    Optional extras: hk / usmart / cn-extra / futures
+REM    e.g.  poetry install --extras hk --extras usmart
 REM          poetry install --all-extras
 echo 2. Installing dependencies...
 poetry install

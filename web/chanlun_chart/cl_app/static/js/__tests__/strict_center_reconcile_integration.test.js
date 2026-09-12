@@ -11,6 +11,7 @@ const BASE = 1700000000;
 const DAILY_BAR_AT = 1784649600;
 const DAILY_CLOSE_AT = 1784703600;
 
+
 function loadChartManager(runtimeOverrides = {}) {
   const sandbox = {
     console, Math, JSON, Intl, Array, Object, String, Number, Boolean, RegExp,
@@ -53,8 +54,9 @@ function loadChartManager(runtimeOverrides = {}) {
   vm.createContext(sandbox);
   let source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
   source += '\n;globalThis.__STRICT_CM = ChartManager;';
+  source += '\n;globalThis.__STRICT_CONFIG = normalizeClShowConfig;';
   source += '\n;globalThis.__STRICT_DYNAMIC_COLOR = getDynamicColor;';
-  source += '\n;globalThis.__STRICT_VISUAL_API = { getSignalColor, getCenterVisualStyle, getTrendVisualStyle, getStrictPointVisual, getStrictDivergenceVisual };';
+  source += '\n;globalThis.__STRICT_VISUAL_API = { getSignalColor, getCenterVisualStyle };';
   vm.runInContext(source, sandbox, { filename: 'charts.js' });
   return { ChartManager: sandbox.__STRICT_CM, sandbox };
 }
@@ -96,194 +98,14 @@ function center(revision = 1, overrides = {}) {
   };
 }
 
-function centerPreview(overrides = {}) {
-  return {
-    schema: 'chanlun-chart-center',
-    render_kind: 'center_preview',
-    center_id: 'preview-center-1',
-    preview_id: 'preview-center-1',
-    render_id: `preview-center-1@forming@${BASE + 600}`,
-    body_revision: 0,
-    structural_level: 0,
-    source_kind: 'segment',
-    state: 'forming',
-    tradable: false,
-    points: [
-      { time: BASE + 100, price: 11 },
-      { time: BASE + 600, price: 10 },
-    ],
-    core: { zd_tick: 1000, zg_tick: 1100, zd_price: 10, zg_price: 11 },
-    entry_unit_id: 'u1',
-    establishment_leave_unit_id: 'u5',
-    initial_exit_unit_id: 'u5',
-    lifecycle_role_count: 5,
-    minimum_lifecycle_role_count: 5,
-    core_component_count: 3,
-    overlap_component_count: 5,
-    establishment_component_count: 5,
-    establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
-    core_unit_ids: ['u2', 'u3', 'u4'],
-    initial_unit_ids: ['u2', 'u3', 'u4'],
-    body_unit_ids: ['u2', 'u3', 'u4'],
-    extension_unit_ids: [],
-    pending_leave_unit_id: 'u5',
-    completion_leave_unit_id: null,
-    completion_return_unit_id: null,
-    completion_direction: null,
-    completed_at: null,
-    available_at: BASE + 600,
-    ...overrides,
-  };
-}
-
-function centerProjection(overrides = {}) {
-  return {
-    schema: 'chanlun-chart-center',
-    render_kind: 'center_projection',
-    center_id: 'center-1',
-    render_id: `center-1@1@ongoing@projection@${BASE + 600}`,
-    body_revision: 1,
-    structural_level: 0,
-    source_kind: 'segment',
-    state: 'ongoing',
-    tradable: false,
-    points: [
-      { time: BASE + 100, price: 11 },
-      { time: BASE + 600, price: 10 },
-    ],
-    source_center_render_id: 'center-1@1@ongoing',
-    entry_unit_id: 'u1',
-    establishment_leave_unit_id: 'u5',
-    initial_exit_unit_id: 'u5',
-    lifecycle_role_count: 5,
-    minimum_lifecycle_role_count: 5,
-    core_component_count: 3,
-    overlap_component_count: 5,
-    establishment_component_count: 5,
-    establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
-    core_unit_ids: ['u2', 'u3', 'u4'],
-    initial_unit_ids: ['u2', 'u3', 'u4'],
-    body_unit_ids: ['u2', 'u3', 'u4'],
-    extension_unit_ids: [],
-    available_at: BASE + 500,
-    ...overrides,
-  };
-}
-
-function divergence(kind = 'trend', overrides = {}) {
-  return {
-    schema: 'chanlun-chart-divergence',
-    render_kind: 'strict_divergence',
-    render_id: `${kind}-divergence-1`,
-    divergence_id: `${kind}-divergence-1`,
-    kind,
-    direction: 'down',
-    structural_level: 0,
-    source_kind: 'segment',
-    price_basis_revision: 'raw-test',
-    compare_unit_id: 'u1',
-    signal_unit_id: 'u5',
-    comparison_width: 1,
-    compare_leg_unit_ids: ['u1'],
-    signal_leg_unit_ids: ['u5'],
-    anchor_at: BASE + 500,
-    anchor_tick: 1000,
-    anchor_price: 10,
-    confirmed_at: BASE + 500,
-    available_at: BASE + 500,
-    metrics: {
-      is_divergent: true,
-      strength_source: 'macd',
-      strength_decay_count: 1,
-    },
-    tradable: true,
-    points: [{ time: BASE + 500, price: 10 }],
-    ...overrides,
-  };
-}
-
-function pendingMovement(overrides = {}) {
-  return {
-    schema: 'chanlun-chart-pending-movement',
-    render_kind: 'pending_movement',
-    partition_id: 'sha256:pending-entire-stream',
-    render_id: 'sha256:pending-entire-stream',
-    structural_level: 0,
-    source_kind: 'segment',
-    price_basis_revision: 'raw-test',
-    state: 'pending',
-    classification: 'unresolved',
-    role: 'entire_stream',
-    direction: 'up',
-    geometric_direction: 'up',
-    semantic_direction: null,
-    direction_status: 'pending',
-    formal_direction_confirmed: false,
-    tradable: false,
-    recursive_eligible: false,
-    divergence_eligible: false,
-    left_trend_id: null,
-    right_trend_id: null,
-    left_boundary_unit_id: null,
-    right_boundary_unit_id: null,
-    points: [
-      { time: BASE + 100, price: 10 },
-      { time: BASE + 500, price: 10.8 },
-    ],
-    constituent_unit_ids: ['u6', 'u7'],
-    confirmed_at: null,
-    available_at: BASE + 500,
-    ...overrides,
-  };
-}
 
 function snapshot(overrides = {}) {
-  const value = {
-    schema: 'chanlun-chart-structure',
-    symbol: 'SH.600519',
-    source_frequency: '5m',
-    display_frequency: '5m',
-    source_closed_at: BASE + 600,
-    price_basis_revision: 'raw-test',
-    structure_price_quantum: '0.01',
-    strict_config_revision: 'strict-config-test',
-    structure_revision: 'sha256:structure-1',
-    snapshot_revision: 'sha256:snapshot-1',
-    render_revision: 'sha256:render-1',
-    formal_direction: {
-      direction: 'neutral',
-      structural_level: null,
-      trend_id: null,
-      support_point_id: null,
-      reason_codes: ['current_suffix_has_no_formal_trend'],
-    },
-    stroke_center_observations: [],
-    levels: [{
-      structural_level: 0,
-      label: '5m',
-      origin: 'current_chart_recursive',
-      centers: [center()],
-      center_previews: [],
-      center_projections: [],
-      current_trends: [],
-      pending_movements: [],
-      completed_trend_snapshots: [],
-      confirmed_points: [],
-      approaching_points: [],
-      divergences: [],
-    }],
-    ...overrides,
-  };
-  value.levels = value.levels.map((level) => ({
-    formal_direction: {
-      direction: 'neutral',
-      structural_level: null,
-      trend_id: null,
-      support_point_id: null,
-      reason_codes: ['current_suffix_has_no_formal_trend'],
-    },
-    ...level,
-  }));
+  const value = {schema:'chanlun-chart-structure', analysis_scope:'native_centers',
+    symbol:'SH.600519', source_frequency:'5m', display_frequency:'5m', source_closed_at:BASE+600,
+    price_basis_revision:'raw-test', structure_price_quantum:'0.01', strict_config_revision:'strict-config-test',
+    structure_revision:'sha256:structure-1',snapshot_revision:'sha256:snapshot-1',render_revision:'sha256:render-1',
+    levels:[{structural_level:0,label:'5m',origin:'native_segments',centers:[center()]}], ...overrides};
+  if (!value.levels.length) value.levels=[{structural_level:0,label:value.display_frequency,origin:'native_segments',centers:[]}];
   return value;
 }
 
@@ -306,6 +128,7 @@ function chartData(mode = 'replace', strict = snapshot(), bars = null) {
     visibleRange: { from: BASE + 50, to: BASE + 550 },
   };
 }
+
 
 function dailyChartData(rawCloseAt = DAILY_CLOSE_AT) {
   const data = chartData('replace', snapshot({
@@ -369,6 +192,10 @@ function scopeContext(cm) {
     price_basis_revision: 'raw-test',
   };
 }
+
+
+// UI contract fixture only. Production proof-DAG fixtures are tested separately.
+
 
 test('visible range shrink and expand rebuild only the clipped crossing center', () => {
   const { cm, calls } = manager();
@@ -767,7 +594,7 @@ test('daily strict center renders on calendar coordinates without retry deletion
     levels: [{
       structural_level: 0,
       label: 'd',
-      origin: 'current_chart_recursive',
+      origin: 'native_segments',
       centers: [center(1, {
         points: [
           { time: rawStart, price: 2.2 },
@@ -819,6 +646,7 @@ test('daily snapshot rejects a stale raw history close even when chart bar time 
   );
 });
 
+
 test('same-context strict unavailable briefly retains the last good entity as stale', () => {
   const { cm, calls } = manager();
   cm._drawStrictStructure(chartData(), '5');
@@ -864,6 +692,110 @@ test('strict failure without a same-context snapshot clears and enters recovery'
   assert.equal(cm._strictStructureStatus.code, 'strict_evidence_invalid');
 });
 
+test('pending initial structure keeps candles and polls without forcing another build', async () => {
+  const timers = new Map();
+  let nextTimer = 0;
+  let stage = 'pending';
+  let resets = 0;
+  const requests = [];
+  const { cm } = manager('chart-manager-1', {
+    AbortController,
+    setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    fetch: async (url) => { requests.push(url); return {ok:true, json:async()=>({state:stage})}; },
+  });
+  cm._currentDataIdentityKey = () => 'us:AAPL.US|1';
+  cm._strictStructureReadyForCurrentContext = () => false;
+  cm.widget = {symbolInterval:()=>({symbol:'us:AAPL.US', interval:'1'}), resetCache() {}};
+  cm.chart.resetData = () => { resets++; };
+  cm._requestChanlunDrawWhenReady = () => {};
+  cm.udf_datafeed = {_historyProvider:{}};
+  cm._strictUnavailable('strict_structure_pending');
+  assert.equal(cm._strictStructureStatus.state, 'loading');
+  assert.equal(resets, 0);
+  async function tick() {
+    const [id, value] = [...timers.entries()].find(([_id, t])=>t.delay < 5000);
+    timers.delete(id);
+    await value.callback();
+  }
+  await tick();
+  assert.equal(resets, 0);
+  assert.equal(cm.udf_datafeed._historyProvider._forceRefreshOnce, undefined);
+  stage = 'complete';
+  await tick();
+  assert.equal(resets, 1);
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(url=>url.startsWith('/tv/structure-status?')));
+  assert.equal(cm.udf_datafeed._historyProvider._forceRefreshOnce, undefined);
+  // A repeated preview render during the cache reload must not restart it.
+  const reloadGeneration=cm._dataContextGeneration;
+  cm.handleSymbolChange({ticker:'US:AAPL.US'});
+  assert.equal(cm._dataContextGeneration,reloadGeneration);
+  cm._strictUnavailable('strict_structure_pending');
+  assert.equal(resets, 1);
+  assert.equal([...timers.values()].filter(t=>t.delay < 5000).length, 0);
+  // If that history response is lost, retry the status read without a forced
+  // calculation. A user context change can still cancel this watchdog.
+  const [watchId,watch] = [...timers.entries()].find(([_id,t])=>t.delay === 5000);
+  timers.delete(watchId);
+  await watch.callback();
+  assert.equal([...timers.values()].filter(t=>t.delay < 5000).length, 1);
+  cm._resetDataReadyContext();
+  assert.equal(timers.size, 0);
+  assert.equal(cm._strictInitialReloadIdentity, null);
+});
+
+test('a completed initial patch redraws structures and indicators without resetting history', async () => {
+  const timers = [];
+  const calls = { reset: 0, patch: 0, indicator: 0, draw: 0 };
+  const patch = { build_id: 'current-build' };
+  const { cm } = manager('chart-manager-1', {
+    AbortController,
+    setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; },
+    clearTimeout() {},
+    fetch: async url => {
+      assert.ok(url.includes('build_id=current-build'));
+      return { ok: true, json: async () => ({state:'complete', patch}) };
+    },
+  });
+  cm._currentDataIdentityKey = () => 'us:qqq.us|1';
+  cm._strictStructureReadyForCurrentContext = () => false;
+  cm.widget = {symbolInterval: () => ({symbol:'us:QQQ.US', interval:'1'}), resetCache() { calls.reset++; }};
+  cm.chart.resetData = () => calls.reset++;
+  cm.udf_datafeed = {_historyProvider: {
+    bars_result: new Map([['us:qqq.us1', {initial_structure_build_id:'current-build'}]]),
+    applyStructurePatch(value) { assert.strictEqual(value, patch); calls.patch++; return true; },
+  }};
+  cm._refreshPatchedIndicators = () => calls.indicator++;
+  cm._requestChanlunDrawWhenReady = options => { assert.equal(options.immediate, true); calls.draw++; };
+  cm._pollInitialStructure();
+  await timers.find(t => t.delay < 5000).callback();
+  assert.deepEqual(calls, {reset:0, patch:1, indicator:1, draw:1});
+  assert.equal(cm._strictRecoveryTimer, null);
+});
+
+test('a pending status response cannot reset a chart after the user switches symbols', async () => {
+  const timers = [];
+  let completeResponse;
+  let identity = 'us:AAPL.US|1';
+  let resets = 0;
+  const { cm } = manager('chart-manager-1', {
+    AbortController,
+    setTimeout(callback, delay) { timers.push({callback,delay}); return timers.length; },
+    clearTimeout() {},
+    fetch: () => new Promise(resolve=>{ completeResponse=resolve; }),
+  });
+  cm._currentDataIdentityKey = () => identity;
+  cm._strictStructureReadyForCurrentContext = () => false;
+  cm.widget = {symbolInterval:()=>({symbol:'us:AAPL.US', interval:'1'}), resetCache(){resets++;}};
+  cm._pollInitialStructure();
+  const pending = timers.find(t=>t.delay < 5000).callback();
+  identity = 'a:SH.600088|1';
+  completeResponse({ok:true, json:async()=>({state:'complete'})});
+  await pending;
+  assert.equal(resets, 0);
+});
+
 test('strict unavailable for a different symbol clears the prior symbol entities', () => {
   const { cm, calls } = manager();
   cm._drawStrictStructure(chartData(), '5');
@@ -901,10 +833,10 @@ test('history pagination unchanged keeps the authoritative snapshot and entity i
   assert.equal([...cm._strictContainers.values()][0][0].id, originalId);
 });
 
-test('ongoing center is dashed and third-point completed center is solid', () => {
+test('native ongoing and completed centers use solid outlines', () => {
   const ongoing = manager('chart-manager-ongoing');
   ongoing.cm._drawStrictStructure(chartData(), '5');
-  assert.equal(ongoing.calls.create[0].options.overrides.linestyle, 2);
+  assert.equal(ongoing.calls.create[0].options.overrides.linestyle, 0);
 
   const completed = manager('chart-manager-completed');
   const completedSnapshot = snapshot({
@@ -924,203 +856,6 @@ test('ongoing center is dashed and third-point completed center is solid', () =>
   assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
 });
 
-test('forming center preview is non-tradable and renders as a thin dashed box', () => {
-  const { cm, calls } = manager('chart-manager-preview');
-  const item = centerPreview();
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [],
-      center_previews: [item],
-    }],
-  });
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.equal(grouped.length, 1);
-  assert.equal(grouped[0].tradable, false);
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].options.shape, 'rectangle');
-  assert.equal(calls.create[0].options.overrides.linestyle, 2);
-  assert.equal(calls.create[0].options.overrides.linewidth, 1);
-  assert.equal(calls.create[0].options.overrides.transparency, 100);
-});
-
-test('geometrically completed preview stays non-tradable but renders solid', () => {
-  const { cm, calls } = manager('chart-manager-completed-preview');
-  const item = centerPreview({
-    state: 'completed',
-    render_id: 'preview-1@completed@u7',
-    completion_leave_unit_id: 'u5',
-    completion_return_unit_id: 'u6',
-    completion_direction: 'up',
-  });
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [],
-      center_previews: [item],
-    }],
-  });
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].options.overrides.linestyle, 0);
-  assert.equal(calls.create[0].options.overrides.linewidth, 1);
-  assert.equal(calls.create[0].options.overrides.transparency, 96);
-  assert.equal(item.tradable, false);
-});
-
-test('active center projection replaces its shorter formal box with one box', () => {
-  const { cm, calls } = manager('chart-manager-active-projection');
-  const projection = centerProjection();
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [center()],
-      center_projections: [projection],
-    }],
-  });
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.equal(grouped.length, 1);
-  assert.equal(grouped[0].render_kind, 'center_projection');
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.deepEqual(
-    calls.create[0].points.map((point) => point.time),
-    [BASE + 100, BASE + 500],
-  );
-  assert.deepEqual(projection.points.map((point) => point.time), [BASE + 100, BASE + 600]);
-});
-
-test('overlapping provisional center supersedes an ongoing formal center that owns the same units', () => {
-  const { cm } = manager('chart-manager-later-preview');
-  const preview = centerPreview({
-    points: [
-      { time: BASE + 300, price: 10.8 },
-      { time: BASE + 600, price: 9.8 },
-    ],
-  });
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [center()],
-      center_previews: [preview],
-      center_projections: [centerProjection()],
-    }],
-  });
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_preview']);
-});
-
-test('boundary-sharing forming preview is hidden without active completion evidence', () => {
-  const { cm } = manager('chart-manager-boundary-preview');
-  const formal = center(3, {
-    points: [
-      { time: BASE + 100, price: 10.2 },
-      { time: BASE + 500, price: 9.8 },
-    ],
-    body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8'],
-    extension_unit_ids: ['u4', 'u5', 'u6', 'u7', 'u8'],
-  });
-  const preview = centerPreview({
-    points: [
-      { time: BASE + 500, price: 11.2 },
-      { time: BASE + 700, price: 10.8 },
-    ],
-    entry_unit_id: 'u8',
-    establishment_leave_unit_id: 'u12',
-    initial_exit_unit_id: 'u12',
-    establishment_segment_ids: ['u8', 'u9', 'u10', 'u11', 'u12'],
-    pending_leave_unit_id: 'u12',
-    core_unit_ids: ['u9', 'u10', 'u11'],
-    initial_unit_ids: ['u9', 'u10', 'u11'],
-    body_unit_ids: ['u9', 'u10', 'u11'],
-  });
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [formal],
-      center_previews: [preview],
-      center_projections: [centerProjection()],
-    }],
-  });
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_projection']);
-});
-
-test('completed active preview permits one adjacent boundary-sharing preview', () => {
-  const { cm } = manager('chart-manager-completed-boundary-preview');
-  const completed = centerPreview({
-    state: 'completed',
-    render_id: `preview-center-completed@completed@${BASE + 600}`,
-    completion_leave_unit_id: 'u5',
-    completion_return_unit_id: 'u6',
-  });
-  const adjacent = centerPreview({
-    center_id: 'preview-center-adjacent',
-    preview_id: 'preview-center-adjacent',
-    render_id: `preview-center-adjacent@forming@${BASE + 800}`,
-    points: [
-      { time: BASE + 500, price: 11.2 },
-      { time: BASE + 800, price: 10.8 },
-    ],
-    entry_unit_id: 'u5',
-    establishment_leave_unit_id: 'u9',
-    initial_exit_unit_id: 'u9',
-    establishment_segment_ids: ['u5', 'u6', 'u7', 'u8', 'u9'],
-    pending_leave_unit_id: 'u9',
-    core_unit_ids: ['u6', 'u7', 'u8'],
-    initial_unit_ids: ['u6', 'u7', 'u8'],
-    body_unit_ids: ['u6', 'u7', 'u8'],
-    available_at: BASE + 800,
-  });
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [center()],
-      center_previews: [completed, adjacent],
-      center_projections: [],
-    }],
-  });
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_preview', 'center_preview']);
-  assert.deepEqual(grouped.map((item) => item.state), ['completed', 'forming']);
-});
-
-test('disjoint forming preview is hidden while formal center remains unresolved', () => {
-  const { cm } = manager('chart-manager-disjoint-preview');
-  const preview = centerPreview({
-    entry_unit_id: 'u6',
-    establishment_leave_unit_id: 'u10',
-    initial_exit_unit_id: 'u10',
-    establishment_segment_ids: ['u6', 'u7', 'u8', 'u9', 'u10'],
-    pending_leave_unit_id: 'u10',
-    core_unit_ids: ['u7', 'u8', 'u9'],
-    initial_unit_ids: ['u7', 'u8', 'u9'],
-    body_unit_ids: ['u7', 'u8', 'u9'],
-  });
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [center()],
-      center_previews: [preview],
-      center_projections: [centerProjection()],
-    }],
-  });
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_projection']);
-});
 
 test('safeRemove retains ownership until TradingView confirms the entity disappeared', async () => {
   const { cm } = manager('chart-manager-remove-verification');
@@ -1159,319 +894,27 @@ test('orphan sweep does not inspect TradingView-owned shapes outside debug mode'
   assert.equal(detailReads, 0);
 });
 
-test('locking the five-role center replaces its preview with a formal ongoing center', () => {
-  const { cm, calls } = manager('chart-manager-preview-confirmed');
-  const previewSnapshot = snapshot({
-    render_revision: 'sha256:render-preview',
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [],
-      center_previews: [centerPreview()],
-    }],
-  });
-  const formalSnapshot = snapshot({
-    render_revision: 'sha256:render-formal',
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [center()],
-      center_previews: [],
-    }],
-  });
 
-  cm._drawStrictStructure(chartData('replace', previewSnapshot), '5');
-  const previewShapeId = calls.create[0].id;
-  cm._drawStrictStructure(chartData('replace', formalSnapshot), '5');
-
-  assert.equal(calls.create.length, 2);
-  assert.deepEqual(calls.remove, [previewShapeId]);
-  assert.equal(calls.create[1].options.overrides.linestyle, 2);
-});
-
-test('unresolved movement renders as a faint dashed non-tradable trend partition', () => {
-  const { cm, calls } = manager('chart-manager-pending-movement');
-  const strict = snapshot({
-    levels: [{
-      ...snapshot().levels[0],
-      centers: [],
-      pending_movements: [pendingMovement()],
-    }],
-  });
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].options.shape, 'trend_line');
-  assert.equal(calls.create[0].options.overrides.linestyle, 2);
-  assert.equal(calls.create[0].options.overrides.transparency, 82);
-});
-
-test('stroke observation is dashed only while ongoing and solid when completed', () => {
-  const observation = (state) => center(1, {
-    render_kind: 'center_observation',
-    source_kind: 'stroke_observation',
-    state,
-    tradable: false,
-    render_id: `stroke-center-1@1@${state}`,
-  });
-
-  const ongoing = manager('chart-manager-observation-ongoing');
-  ongoing.cm.cl_show_config.center_observation = true;
-  ongoing.cm._drawStrictStructure(chartData('replace', snapshot({
-    stroke_center_observations: [observation('ongoing')],
-    levels: [],
-  })), '5');
-  assert.equal(ongoing.calls.create[0].options.overrides.linestyle, 2);
-
-  const completed = manager('chart-manager-observation-completed');
-  completed.cm.cl_show_config.center_observation = true;
-  completed.cm._drawStrictStructure(chartData('replace', snapshot({
-    stroke_center_observations: [observation('completed')],
-    levels: [],
-  })), '5');
-  assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
-});
-
-test('coincident consolidation and trend divergences render as one explicit label', () => {
-  const { cm, calls } = manager('chart-manager-divergence');
-  const strict = snapshot();
-  strict.levels[0].divergences = [divergence('consolidation'), divergence('trend')];
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  const texts = calls.create.map((entry) => entry.options.text).filter(Boolean);
-  assert.deepEqual(texts, ['▲5m·盘整/趋势背驰']);
-  const combined = calls.create.find((entry) => entry.options.text?.includes('盘整/趋势背驰'));
-  assert.equal(combined.options.overrides.fontsize, 13);
-  assert.equal(combined.options.overrides.bold, true);
-});
-
-test('coincident point and divergence evidence render as one non-overlapping label', () => {
-  const { cm, calls } = manager('chart-manager-coincident-labels');
-  const strict = snapshot();
-  strict.levels[0] = {
-    ...strict.levels[0],
-    label: '1m/L0',
-    centers: [],
-    confirmed_points: [{
-      schema: 'chanlun-chart-point',
-      render_kind: 'point_confirmed',
-      render_id: '1buy-confirmed',
-      point_id: '1buy-confirmed',
-      structural_level: 0,
-      point_type: '1buy',
-      side: 'buy',
-      status: 'confirmed',
-      formation_state: 'confirmed',
-      lock_state: 'locked',
-      contains_forming_segment: false,
-      contains_unlocked_segment: false,
-      points: [{ time: BASE + 500, price_tick: 1000, price: 10 }],
-    }],
-    divergences: [divergence('consolidation'), divergence('trend')],
-  };
-
-  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.equal(grouped.length, 1);
-  assert.equal(grouped[0].render_kind, 'point_confirmed');
-  assert.deepEqual(
-    Array.from(grouped[0].presentation_divergence_kinds),
-    ['consolidation', 'trend'],
-  );
-  assert.deepEqual(grouped[0].points, [{ time: BASE + 500, price_tick: 1000, price: 10 }]);
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].options.text, '▲一买·盘整/趋势背驰');
-  assert.deepEqual(calls.create[0].points, { time: BASE + 500, price_tick: 1000, price: 10 });
-});
-
-test('nearby labels become compact markers only while their screen boxes collide', () => {
-  const { cm, calls } = manager('chart-manager-density-labels');
-  const attachedTitles = [];
-  const makePoint = (pointType, offset, price) => ({
-    schema: 'chanlun-chart-point',
-    render_kind: 'point_confirmed',
-    render_id: `${pointType}-confirmed`,
-    point_id: `${pointType}-confirmed`,
-    structural_level: 0,
-    point_type: pointType,
-    side: pointType.endsWith('buy') ? 'buy' : 'sell',
-    status: 'confirmed',
-    formation_state: 'confirmed',
-    lock_state: 'locked',
-    contains_forming_segment: false,
-    contains_unlocked_segment: false,
-    points: [{ time: BASE + offset, price }],
-  });
-  const strict = snapshot();
-  strict.levels[0] = {
-    ...strict.levels[0],
-    centers: [],
-    confirmed_points: [makePoint('1buy', 480, 10), makePoint('2buy', 500, 10.01)],
-  };
-  Object.assign(cm.chart, {
-    getVisibleRange: () => ({ from: BASE, to: BASE + 1000 }),
-    getVisiblePriceRange: () => ({ from: 9, to: 11 }),
-    getTimeScale: () => ({ width: () => 100 }),
-    getPanes: () => [{ hasMainSeries: () => true, getHeight: () => 100 }],
-    getShapeById: (id) => {
-      const created = calls.create.find((entry) => entry.id === id);
-      return {
-        getPoints: () => [created.points],
-        setProperties: (properties) => attachedTitles.push(properties.title),
-      };
-    },
-  });
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.deepEqual(calls.create.map((entry) => entry.options.text), ['一', '二']);
-  assert.deepEqual(calls.create.map((entry) => entry.options.title), ['▲5m·一买', '▲5m·二买']);
-  assert.equal(calls.create.every((entry) => entry.options.overrides.fontsize === 10), true);
-  assert.deepEqual(attachedTitles, ['▲5m·一买', '▲5m·二买']);
-});
-
-test('chart resize re-evaluates label density once and observer cleanup is complete', () => {
-  let resizeCallback = null;
-  let observedHost = null;
-  let disconnected = false;
-  class FakeResizeObserver {
-    constructor(callback) { resizeCallback = callback; }
-    observe(host) { observedHost = host; }
-    disconnect() { disconnected = true; }
+test('formal center validation accepts opposite external exits and rejects an exit inside the core', () => {
+  const { sandbox } = loadChartManager();
+  for (const reverse of [false, true]) {
+    const ticks = [80, 120, 90, 115, 100, 110, 70].map(p => reverse ? 200 - p : p);
+    const units = ticks.slice(1).map((end, index) => ({
+      unit_id: `u${index + 1}`, direction: end > ticks[index] ? 'up' : 'down',
+      start_tick: ticks[index], end_tick: end,
+      low_tick: Math.min(ticks[index], end), high_tick: Math.max(ticks[index], end),
+    }));
+    const core = units.slice(1, 4), leave = units[5];
+    const item = center(1, { core_formed: true, frame_qualified: true,
+      frame_missing_conditions: [], center_ended: false, third_class_confirmed: false,
+      center_end_available_at: null, available_at: BASE + 600,
+      entering_segment: units[0], leaving_segment: leave, middle_three_components: core,
+      core: { zd_tick: Math.max(...core.map(u => u.low_tick)), zg_tick: Math.min(...core.map(u => u.high_tick)) },
+      establishment_leave_unit_id: 'u6', initial_exit_unit_id: 'u6', frame_leave_unit_id: 'u6',
+      establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u6'],
+    });
+    assert.doesNotThrow(() => sandbox.validateStrictCenterRenderContract(item, 0));
+    leave.end_tick = reverse ? item.core.zg_tick : item.core.zd_tick;
+    assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /independent entry or leave/);
   }
-  const { cm, sandbox } = manager('chart-manager-density-resize', {
-    ResizeObserver: FakeResizeObserver,
-  });
-  const host = { clientWidth: 400, clientHeight: 300 };
-  const timers = [];
-  sandbox.document.getElementById = () => host;
-  sandbox.setTimeout = (callback) => { timers.push(callback); return timers.length; };
-  sandbox.clearTimeout = () => {};
-  cm._strictLabelResizeObserver = null;
-  cm._strictLabelResizeTimer = null;
-  cm._strictLabelViewportSignature = null;
-  cm._initialLoadDone = true;
-  let refreshes = 0;
-  cm._refreshStrictLabelDensity = () => { refreshes += 1; return true; };
-
-  assert.equal(cm._installStrictLabelDensityObserver(), true);
-  assert.equal(observedHost, host);
-  resizeCallback([{ contentRect: { width: 400, height: 300 } }]);
-  assert.equal(timers.length, 0);
-  resizeCallback([{ contentRect: { width: 900, height: 600 } }]);
-  assert.equal(timers.length, 1);
-  timers[0]();
-  assert.equal(refreshes, 1);
-  resizeCallback([{ contentRect: { width: 900, height: 600 } }]);
-  assert.equal(timers.length, 1);
-
-  cm._disconnectStrictLabelDensityObserver();
-  assert.equal(disconnected, true);
-  assert.equal(cm._strictLabelResizeObserver, null);
-  assert.equal(cm._strictLabelViewportSignature, null);
-});
-
-test('六类确认点和接近点都进入主图且保持各自状态样式', () => {
-  const { cm, calls, sandbox } = manager('chart-manager-point-style');
-  const strict = snapshot();
-  strict.levels[0].centers = [];
-  const types = ['1buy', '2buy', '3buy', '1sell', '2sell', '3sell'];
-  const point = (pointType, status, index) => ({
-    schema: 'chanlun-chart-point',
-    render_kind: status === 'confirmed' ? 'point_confirmed' : 'point_approaching',
-    render_id: `${pointType}-${status}`,
-    point_id: `${pointType}-${status}`,
-    structural_level: 0,
-    point_type: pointType,
-    side: pointType.endsWith('buy') ? 'buy' : 'sell',
-    status,
-    formation_state: status === 'confirmed'
-      ? 'confirmed'
-      : pointType === '3sell' ? 'geometry_ready' : 'forming',
-    lock_state: status === 'confirmed' ? 'locked' : 'pending',
-    contains_forming_segment: status === 'approaching' && pointType !== '3sell',
-    contains_unlocked_segment: status === 'approaching',
-    points: [{ time: BASE + 100 + index * 10, price: 10 + index / 10 }],
-  });
-  strict.levels[0].confirmed_points = types.map((type, index) => point(type, 'confirmed', index));
-  strict.levels[0].approaching_points = types.map((type, index) => point(type, 'approaching', index + 6));
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 12);
-  assert.deepEqual(
-    calls.create.map((entry) => entry.options.text).sort(),
-    [
-      '▲5m·一买', '▲5m·二买', '▲5m·三买',
-      '▼5m·一卖', '▼5m·二卖', '▼5m·三卖',
-      '▲接近·5m·一买', '▲接近·5m·二买', '▲接近·5m·三买',
-      '▼接近·5m·一卖', '▼接近·5m·二卖', '▼候选待锁·5m·三卖',
-    ].sort(),
-  );
-  const confirmedBuy = calls.create.find((entry) => entry.options.text === '▲5m·一买');
-  const approachingSell = calls.create.find((entry) => entry.options.text === '▼接近·5m·一卖');
-  assert.equal(confirmedBuy.options.overrides.fontsize, 12);
-  assert.equal(confirmedBuy.options.overrides.bold, true);
-  assert.equal(approachingSell.options.overrides.fontsize, 11);
-  assert.equal(approachingSell.options.overrides.bold, false);
-  assert.equal(approachingSell.options.overrides.transparency, 45);
-  assert.equal(confirmedBuy.options.overrides.color, sandbox.__STRICT_VISUAL_API.getSignalColor('buy', 'light'));
-  assert.equal(approachingSell.options.overrides.color, sandbox.__STRICT_VISUAL_API.getSignalColor('sell', 'light'));
-});
-
-test('最新已完成线段的操作确认点不再画成接近一买', () => {
-  const { cm, calls } = manager('chart-manager-operational-confirmation');
-  const strict = snapshot();
-  strict.levels[0].centers = [];
-  strict.levels[0].confirmed_points = [{
-    schema: 'chanlun-chart-point',
-    render_kind: 'point_confirmed',
-    render_id: '1buy-operational-confirmed',
-    point_id: '1buy-operational-confirmed',
-    structural_level: 0,
-    point_type: '1buy',
-    side: 'buy',
-    status: 'confirmed',
-    strict_status: 'approaching',
-    operational_confirmation: true,
-    confirmation_basis: 'latest_completed_geometry',
-    formation_state: 'confirmed',
-    lock_state: 'pending',
-    contains_forming_segment: false,
-    contains_unlocked_segment: true,
-    terminal_segment_role: 'latest_completed',
-    terminal_segment_state: 'formed',
-    points: [{ time: BASE + 500, price: 10 }],
-  }];
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.equal(calls.create[0].options.text, '▲5m·一买');
-  assert.equal(calls.create[0].options.overrides.bold, true);
-  assert.equal(calls.create[0].options.overrides.transparency, 0);
-});
-
-test('主图拒绝旧买卖点别名而不是静默归类', () => {
-  const { cm, calls } = manager('chart-manager-old-point-alias');
-  const strict = snapshot();
-  strict.levels[0].centers = [];
-  strict.levels[0].confirmed_points = [{
-    schema: 'chanlun-chart-point',
-    render_kind: 'point_confirmed',
-    render_id: 'old-l2buy',
-    point_id: 'old-l2buy',
-    structural_level: 0,
-    point_type: 'l2buy',
-    side: 'buy',
-    status: 'confirmed',
-    points: [{ time: BASE + 500, price: 10 }],
-  }];
-
-  cm._drawStrictStructure(chartData('replace', strict), '5');
-
-  assert.equal(calls.create.length, 0);
-  assert.equal(cm._strictStructureSnapshot, null);
 });

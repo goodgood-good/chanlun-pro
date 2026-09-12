@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8').replace(/\r\n/g, '\n');
 
 function extractFunction(name) {
   const start = source.indexOf(`function ${name}(`);
@@ -91,43 +91,7 @@ function fakeDocument(frames = []) {
   };
 }
 
-test('缠论显示菜单使用固定分组顺序和严格递归层级', () => {
-  const titles = ['基础结构', '中枢控制', '走势类型', '买卖点', '背驰', '画线设置'];
-  const indexes = titles.map((title) => source.indexOf(`_grpTitle('${title}'`));
-  assert.ok(indexes.every((index) => index >= 0), `missing titles: ${indexes}`);
-  assert.deepEqual([...indexes].sort((a, b) => a - b), indexes);
 
-  for (const label of [
-    '笔中枢',
-    '中枢总开关',
-    '走势类型总开关',
-    '买卖点总开关',
-    '背驰总开关',
-    '盘整背驰',
-    '趋势背驰',
-    '独立周期画线',
-  ]) {
-    assert.ok(source.includes(label), `missing menu label: ${label}`);
-  }
-  assert.ok(source.includes('const _displayLevels = recursiveDisplayLevels(_curInterval)'));
-  assert.ok(source.includes('key: `center_L${item.level}`'));
-  assert.ok(source.includes('key: `trend_L${item.level}`'));
-  assert.ok(source.includes('key: `point_L${item.level}`'));
-  assert.ok(source.includes('key: `divergence_consolidation_L${item.level}`'));
-  assert.ok(source.includes('key: `divergence_trend_L${item.level}`'));
-  for (const removedKey of ['center_1m', 'center_5m', 'center_30m', 'center_d']) {
-    assert.equal(source.includes(removedKey), false);
-  }
-  assert.equal(source.includes('严格递归中枢总开关'), false);
-  assert.ok(source.includes("_cbRow('center_all', '中枢总开关')"));
-  assert.ok(source.includes("_grpTitle('背驰', '由当前 K 线递归产生')"));
-  assert.equal(source.includes('形成中 / 投影（非正式）'), false);
-  assert.equal(source.includes('待定尾段（非正式）'), false);
-  assert.equal(source.includes("_cbRow('center_provisional'"), false);
-  assert.equal(source.includes("_cbRow('pending_movement'"), false);
-  assert.ok(source.includes('const _pointLevels = _displayLevels.map'));
-  assert.ok(source.includes('..._pointLevels.map((item) => item.key)'));
-});
 
 test('菜单不暴露接近触发、中枢投影或未完成结构复选框', () => {
   assert.equal(source.includes('接近触发（未确认）'), false);
@@ -140,7 +104,6 @@ test('菜单不暴露接近触发、中枢投影或未完成结构复选框', ()
 test('显示设置浮层保留纵向拖动空间并在内部滚动', () => {
   assert.ok(source.includes('width:min(440px,calc(100vw - 16px));min-width:0;'));
   assert.ok(source.includes('max-width:calc(100vw - 16px);max-height:min(72vh,680px);overflow:auto;'));
-  assert.ok(source.includes('grid-template-columns:repeat(2,minmax(0,1fr))'));
 });
 
 test('显示设置入口与弹窗提供键盘和对话框语义', () => {

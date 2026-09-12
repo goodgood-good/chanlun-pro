@@ -112,18 +112,10 @@ class ExchangeDB(Exchange):
             return dict(BINANCE_SUPPORTED_FREQUENCIES)
         return {"d": "D", "30m": "30m"}
 
-    def query_last_datetime(self, code, frequency) -> Union[None, str]:
-        """查询指定标的和周期在数据库中的最后一条 K 线时间，用于增量同步判断。"""
-        return db.klines_last_datetime(self.market, code, frequency)
-
     def insert_klines(self, code, frequency, klines):
         """批量写入 K 线数据到数据库。"""
         db.klines_insert(self.market, code, frequency, klines)
         return True
-
-    def del_klines_by_code_freq(self, code, freq):
-        db.klines_delete(self.market, code, frequency=freq)
-        return
 
     def klines(
         self,
@@ -241,13 +233,4 @@ class ExchangeDB(Exchange):
         pass
 
     def plate_stocks(self, code: str):
-        pass
-
-    def balance(self):
-        pass
-
-    def positions(self, code: str = ""):
-        pass
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
         pass

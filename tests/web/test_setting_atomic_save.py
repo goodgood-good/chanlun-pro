@@ -19,10 +19,9 @@ class _SettingsDB:
         return True
 
 
-def test_setting_save_persists_proxy_and_fs_keys_in_one_atomic_call(monkeypatch):
+def test_setting_save_persists_proxy_in_one_atomic_call(monkeypatch):
     fake_db = _SettingsDB()
     monkeypatch.setattr(setting_module, "db", fake_db)
-    monkeypatch.setattr(setting_module, "encrypt_str", lambda value: f"encrypted:{value}")
     app = Flask(__name__)
 
     with app.test_request_context(
@@ -31,9 +30,6 @@ def test_setting_save_persists_proxy_and_fs_keys_in_one_atomic_call(monkeypatch)
         data={
             "proxy_host": "127.0.0.1",
             "proxy_port": "8080",
-            "fs_app_id": "app-id",
-            "fs_app_secret": "secret",
-            "fs_user_id": "user-id",
         },
     ):
         response = setting_module.setting_save.__wrapped__()
@@ -42,11 +38,6 @@ def test_setting_save_persists_proxy_and_fs_keys_in_one_atomic_call(monkeypatch)
     assert fake_db.many_calls == [
         {
             "req_proxy": {"host": "127.0.0.1", "port": "8080"},
-            "fs_keys": {
-                "fs_app_id": "app-id",
-                "fs_app_secret": "encrypted:secret",
-                "fs_user_id": "user-id",
-            },
         }
     ]
 
@@ -62,7 +53,7 @@ def test_setting_save_rejects_missing_fields_before_reading_or_writing_db(monkey
     with app.test_request_context(
         "/setting/save",
         method="POST",
-        data={"proxy_host": "", "proxy_port": ""},
+        data={"proxy_host": ""},
     ):
         payload, status = setting_module.setting_save.__wrapped__()
 
@@ -70,7 +61,7 @@ def test_setting_save_rejects_missing_fields_before_reading_or_writing_db(monkey
     assert payload == {
         "ok": False,
         "msg": "缺少表单字段",
-        "fields": ["fs_app_id", "fs_app_secret", "fs_user_id"],
+        "fields": ["proxy_port"],
     }
 
 
@@ -85,9 +76,6 @@ def test_setting_save_rejects_incomplete_or_invalid_proxy_before_writing(monkeyp
     monkeypatch.setattr(setting_module, "db", _ReadOnlyDB())
     app = Flask(__name__)
     base_form = {
-        "fs_app_id": "",
-        "fs_app_secret": "",
-        "fs_user_id": "",
     }
 
     for proxy, expected_message in (

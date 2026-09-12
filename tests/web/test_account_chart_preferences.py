@@ -51,34 +51,9 @@ def _preferences(layout, theme, width):
             ),
             "chart_menu_width": str(width),
             "chart_menu_collapsed": "0",
-            "trading_screening_view": json.dumps(
-                {
-                    "contract": "CANONICAL_SIX_POINT_CHANNELS_V8_EXPLICIT_ALL_SIGNALS",
-                    "pointType": "all",
-                    "lifecycle": "all",
-                    "market": "us" if layout == "four" else "a",
-                    "signalSource": "notification" if layout == "four" else "all",
-                    "reviewStage": "all",
-                    "segmentState": "all",
-                    "selectionScope": "all-qualified",
-                    "layout": "quad" if layout == "four" else "focus",
-                    "signalListOpen": layout != "four",
-                    "chartSizing": {
-                        "heights": {
-                            "focus": None,
-                            "dual": 720,
-                            "triple": 820,
-                            "quad": 920,
-                        },
-                        "dualRatio": 50,
-                        "tripleMainRatio": 67,
-                        "tripleSideRatio": 50,
-                    },
-                }
-            ),
             "cl_show_config_1_30": json.dumps(
                 {
-                    "schema": "chanlun-chart-config-v5",
+                    "schema": "chanlun-chart-config-v7",
                     "bi": layout != "four",
                 }
             ),
@@ -120,15 +95,8 @@ def test_chart_preferences_are_isolated_between_accounts(app):
     assert json.loads(alice_values["tv_chart"])["chart_layout_type"] == "four"
     assert json.loads(alice_values["tv_chart"])["currency_interval_1"] == "720"
     assert alice_values["chart_menu_width"] == "520"
-    alice_screening_view = json.loads(alice_values["trading_screening_view"])
-    assert alice_screening_view["layout"] == "quad"
-    assert alice_screening_view["signalListOpen"] is False
-    assert alice_screening_view["chartSizing"]["heights"]["quad"] == 920
     assert json.loads(bob_values["tv_chart"])["chart_layout_type"] == "single"
     assert bob_values["chart_menu_width"] == "340"
-    bob_screening_view = json.loads(bob_values["trading_screening_view"])
-    assert bob_screening_view["layout"] == "focus"
-    assert bob_screening_view["signalListOpen"] is True
 
 
 def test_tradingview_storage_ignores_client_supplied_user_and_uses_session(app):
@@ -223,16 +191,10 @@ def test_key_merge_prevents_stale_tabs_from_overwriting_unrelated_preferences(ap
         # This snapshot intentionally still contains the old width.
         "values": {
             **original["values"],
-            "trading_screening_view": json.dumps(
-                {
-                    "contract": "CANONICAL_SIX_POINT_CHANNELS_V8_EXPLICIT_ALL_SIGNALS",
-                    "layout": "dual",
-                    "pointType": "all",
-                }
-            ),
+            "chart_menu_collapsed": "1",
         },
         "merge": True,
-        "changed_keys": ["trading_screening_view"],
+        "changed_keys": ["chart_menu_collapsed"],
     }
 
     assert client.put("/api/chart/preferences", json=first_tab).status_code == 200
@@ -240,4 +202,4 @@ def test_key_merge_prevents_stale_tabs_from_overwriting_unrelated_preferences(ap
     values = client.get("/api/chart/preferences").get_json()["preferences"]["values"]
 
     assert values["chart_menu_width"] == "520"
-    assert json.loads(values["trading_screening_view"])["layout"] == "dual"
+    assert values["chart_menu_collapsed"] == "1"

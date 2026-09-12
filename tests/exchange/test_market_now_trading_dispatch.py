@@ -35,9 +35,6 @@ def test_market_sensitive_callers_use_shared_dispatcher():
         "web/chanlun_chart/cl_app/blueprints/other.py": (
             "market_now_trading(ex, market)",
         ),
-        "web/chanlun_chart/cl_app/services/holding_group_monitor.py": (
-            "market_now_trading(exchange, market)",
-        ),
     }
     for rel, needles in expected.items():
         source = (root / rel).read_text(encoding="utf-8")

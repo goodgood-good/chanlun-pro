@@ -74,6 +74,96 @@ def test_reuse_when_prefix_stable(mock_cl):
     assert mock_cl[0].validated_incremental_calls == 1
 
 
+def test_identical_full_frame_skips_processing_but_serializes_again(mock_cl):
+    frame = _klines_df([1000, 1060], [10, 11])
+    first = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, frame, cache_key="a:SYN:1m",
+    )
+    second = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, frame.copy(), cache_key="a:SYN:1m",
+    )
+    assert second == first
+    assert second is not first
+    assert len(mock_cl) == 1
+    assert mock_cl[0].validated_incremental_calls == 0
+
+
+def test_unchanged_published_frame_reuses_payload_and_skips_another_disk_write(mock_cl, monkeypatch):
+    from cl_app.services import chart_cache
+    frame = _klines_df([1000, 1060], [10, 11])
+    writes = []
+    monkeypatch.setattr(chart_cache, "_persist_chart_cache_async", lambda *args: writes.append(args))
+    key = "test-published-payload"
+    try:
+        first = recompute_chart_data_from_klines("a", "SYN", "1m", {}, frame, cache_key=key)
+        chart_cache._set_chart_cache_entry(key, first, is_full_snapshot=True)
+        monkeypatch.setattr(chart_compute, "serialize_chart_data_with_strict_runtime",
+                            lambda **kwargs: pytest.fail("unchanged published payload was serialized"))
+        second = recompute_chart_data_from_klines("a", "SYN", "1m", {}, frame.copy(), cache_key=key)
+        assert second is first
+        chart_cache._set_chart_cache_entry(key, second, is_full_snapshot=True)
+        assert len(writes) == 1
+    finally:
+        with chart_cache.cache_lock:
+            chart_cache.chart_data_cache.pop(key, None)
+
+
+@pytest.mark.parametrize("field", ["date", "open", "high", "low", "close", "volume"])
+def test_last_bar_fact_change_still_processes_reused_runtime(mock_cl, field):
+    frame = _klines_df([1000, 1060], [10, 11])
+    first = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, frame, cache_key="a:SYN:1m",
+    )
+    changed = frame.copy()
+    if field == "date":
+        changed.loc[1, field] += pd.Timedelta(seconds=1)
+    else:
+        changed.loc[1, field] += 1
+    second = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, changed, cache_key="a:SYN:1m",
+    )
+    assert second["id"] == first["id"]
+    assert mock_cl[0].validated_incremental_calls == 1
+
+
+@pytest.mark.parametrize("field", ["date", "open", "high", "low", "close", "volume"])
+def test_middle_bar_fact_change_rebuilds_runtime(mock_cl, field):
+    frame = _klines_df([1000, 1060, 1120], [10, 11, 12])
+    first = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, frame, cache_key="a:SYN:1m",
+    )
+    changed = frame.copy()
+    if field == "date":
+        changed.loc[1, field] += pd.Timedelta(seconds=1)
+    else:
+        changed.loc[1, field] += 1
+    second = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, changed, cache_key="a:SYN:1m",
+    )
+    assert second["id"] != first["id"]
+    assert len(mock_cl) == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("price_basis_revision", "sha256:changed"),
+     ("structure_price_quantum", "0.1"),
+     ("price_basis_provider", "changed"),
+     ("price_basis_adjustment", "changed")],
+)
+def test_identical_prices_do_not_reuse_different_basis(mock_cl, field, value):
+    frame = _klines_df([1000, 1060], [10, 11])
+    first = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, frame, cache_key="a:SYN:1m",
+    )
+    changed = frame.copy()
+    changed.attrs[field] = value
+    second = recompute_chart_data_from_klines(
+        "a", "SYN", "1m", {}, changed, cache_key="a:SYN:1m",
+    )
+    assert second["id"] != first["id"]
+
+
 def test_new_runtime_when_first_date_changes(mock_cl):
     first = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, _klines_df([1000, 1060], [10, 11]),
@@ -186,6 +276,62 @@ def test_incremental_equals_full_end_to_end():
             assert incremental == full, f"prefix {size}: incremental != full"
     finally:
         kline_recompute.reset_cl_pool()
+
+
+def test_identical_closed_frame_preserves_actual_native_center_memo(monkeypatch):
+    kline_recompute.reset_cl_pool()
+    key = "a:SYNMEMO:1m"
+    frame = _synth_klines(240)
+    try:
+        first = recompute_chart_data_from_klines(
+            "a", "SYNMEMO", "1m", {}, frame, cache_key=key,
+        )
+        cd = kline_recompute._cl_pool[key]["cl"]
+        center_memo = cd._strict_structure_memo["native_centers"]
+        assert center_memo is not None
+        calls = []
+        original = cd.process_validated_incremental_klines
+
+        def process(updated):
+            calls.append(updated)
+            return original(updated)
+
+        monkeypatch.setattr(cd, "process_validated_incremental_klines", process)
+        second = recompute_chart_data_from_klines(
+            "a", "SYNMEMO", "1m", {}, frame.copy(), cache_key=key,
+        )
+        assert calls == []
+        assert second == first
+        assert cd._strict_structure_memo["native_centers"] is center_memo
+    finally:
+        kline_recompute.reset_cl_pool()
+
+
+def test_source_deadline_is_replaced_without_mutating_or_reserializing_published_data(monkeypatch):
+    from cl_app.services import chart_cache
+    key = "source-deadline-reuse"
+    frame = _synth_klines(240)
+    frame.attrs["_history_source_valid_until"] = 100_000.0
+    monkeypatch.setattr(chart_cache, "_persist_chart_cache_async", lambda *args: None)
+    kline_recompute.reset_cl_pool()
+    try:
+        first = recompute_chart_data_from_klines("a", "SYNMEMO", "1m", {}, frame, cache_key=key)
+        chart_cache._set_chart_cache_entry(key, first, is_full_snapshot=True)
+        assert first["_history_source_valid_until"] == 100_000.0
+        monkeypatch.setattr(chart_compute, "serialize_chart_data_with_strict_runtime",
+                            lambda **kwargs: pytest.fail("only source validation changed"))
+        frame.attrs["_history_source_valid_until"] = 103_600.0
+        renewed = recompute_chart_data_from_klines("a", "SYNMEMO", "1m", {}, frame, cache_key=key)
+        assert first["_history_source_valid_until"] == 100_000.0
+        assert renewed["_history_source_valid_until"] == 103_600.0
+        assert renewed["strict_structure"] is first["strict_structure"]
+        del frame.attrs["_history_source_valid_until"]
+        fresh = recompute_chart_data_from_klines("a", "SYNMEMO", "1m", {}, frame, cache_key=key)
+        assert "_history_source_valid_until" not in fresh
+    finally:
+        kline_recompute.reset_cl_pool()
+        with chart_cache.cache_lock:
+            chart_cache.chart_data_cache.pop(key, None)
 
 
 def test_incremental_equals_full_on_mid_bar_revision():

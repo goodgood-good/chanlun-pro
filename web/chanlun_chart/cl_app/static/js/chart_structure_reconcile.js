@@ -24,36 +24,18 @@
     return range;
   }
 
+
+
+
+
   function logicalKey(item) {
-    if (!item || typeof item !== "object") {
-      throw new Error("strict render item is required");
-    }
-    const kind = requireString(item.render_kind, "render_kind");
-    let identifier;
-    if (kind === "center_preview") {
-      identifier = item.preview_id;
-    } else if (
-      kind === "formal_center" ||
-      kind === "center_projection" ||
-      kind === "center_observation"
-    ) {
-      identifier = item.center_id;
-    } else if (kind === "strict_trend") {
-      identifier = item.trend_id;
-    } else if (kind === "pending_movement") {
-      identifier = item.partition_id;
-    } else if (
-      kind === "point_confirmed" ||
-      kind === "point_approaching"
-    ) {
-      identifier = item.point_id;
-    } else if (kind === "strict_divergence") {
-      identifier = item.divergence_id;
-    } else {
-      throw new Error(`unsupported strict render_kind: ${kind}`);
-    }
-    return `${kind}:${requireString(identifier, `${kind} identity`)}`;
+    if (!item || item.render_kind !== 'formal_center') throw new Error('unsupported native center shape');
+    return 'formal_center:' + requireString(item.center_id, 'center_id');
   }
+
+
+
+
 
   function renderKey(item) {
     return requireString(item && item.render_id, "render_id");
@@ -162,7 +144,7 @@
 
   function requiresExactTimeAnchors(item) {
     return item && (
-      item.render_kind === "strict_trend" ||
+      item.render_kind === "strict_trend" || item.render_kind === "trend_observation" ||
       item.render_kind === "pending_movement"
     );
   }
@@ -255,14 +237,53 @@
         render_kind: item.render_kind,
         points: item.points,
         state: item.state,
+        center_state: item.center_state,
+        core_formed: item.core_formed,
+        frame_qualified: item.frame_qualified,
+        frame_missing_conditions: item.frame_missing_conditions,
+        center_ended: item.center_ended,
+        frame_leave_unit_id: item.frame_leave_unit_id,
+        frame_context_id: item.frame_context_id,
+        native_bracket_center: item.native_bracket_center,
+        upgrade_origin: item.upgrade_origin,
+        upgrade_context_id: item.upgrade_context_id,
+        upgrade_parent_center_id: item.upgrade_parent_center_id,
+        upgrade_source_unit_ids: item.upgrade_source_unit_ids,
+        upgrade_source_components: item.upgrade_source_components,
+        construction_context_id: item.construction_context_id,
+
+        directional_ownership_pending: item.directional_ownership_pending,
+        lifecycle_range_end: item.lifecycle_range_end,
+        frame_body_unit_ids: item.frame_body_unit_ids,
+        lifecycle_followup: item.lifecycle_followup,
+        lifecycle_leaving_segment: item.lifecycle_leaving_segment,
+        center_end_available_at: item.center_end_available_at,
+        third_class_confirmed: item.third_class_confirmed,
+        completion_leave_unit_id: item.completion_leave_unit_id,
+        completion_return_unit_id: item.completion_return_unit_id,
+        completion_phase: item.completion_phase,
+        independently_completed: item.independently_completed,
+        completion_kind: item.completion_kind,
         direction: item.direction,
         semantic_direction: item.semantic_direction,
         direction_status: item.direction_status,
         point_type: item.point_type,
+        display_label: item.display_label,
+        level_label: item.level_label,
+
+        point_qualification: item.point_qualification,
+        initial_function: item.initial_function,
+        qualification_basis: item.qualification_basis,
+        qualification_note: item.qualification_note,
         kind: item.kind,
         variant: item.variant,
         tradable: item.tradable,
+        presentation_rule: item.presentation_rule,
+
+
+
         linestyle: item.linestyle,
+        pending_frame_observation: item.pending_frame_observation,
       }),
     );
   }
@@ -383,6 +404,10 @@
     itemToChartCoordinates,
     planReconcile,
     renderKey,
+
+
+
+
     scopeKey,
   };
 });

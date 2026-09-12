@@ -286,29 +286,3 @@ class ExchangeBaostock(Exchange):
         :return:
         """
         raise Exception("当前交易所接口不支持")
-
-    def balance(self):
-        """
-        账户资产信息
-        :return:
-        """
-        raise Exception("账户资产接口不支持")
-
-    def positions(self, code: str = ""):
-        """
-        当前账户持仓信息
-        :param code:
-        :return:
-        """
-        raise Exception("账户资产接口不支持")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        """
-        下单接口
-        :param args:
-        :param code:
-        :param o_type:
-        :param amount:
-        :return:
-        """
-        raise Exception("账户资产接口不支持")

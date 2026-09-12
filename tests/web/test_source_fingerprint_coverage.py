@@ -25,6 +25,6 @@ def test_source_fingerprint_covers_strict_structure_sources():
         for path in _fingerprint_files()
     }
     assert any(path.endswith("core/strict_structure/models.py") for path in paths)
-    assert any(path.endswith("core/strict_structure/signals.py") for path in paths)
+    assert any(path.endswith("core/strict_structure/center_machine.py") for path in paths)
     assert any(path.endswith("cl_utils/strict_chart.py") for path in paths)
     assert any(path.endswith("cl_utils/strict_chart_runtime.py") for path in paths)

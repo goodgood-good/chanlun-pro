@@ -49,3 +49,44 @@ test('空列表 → -1', () => {
   assert.equal(pickPreferredWidgetIndex([], '5'), -1);
   assert.equal(pickPreferredWidgetIndex(null, '5'), -1);
 });
+
+test('actual MACD study reads the matching close-labeled bar at its opening chart coordinate', () => {
+  const oldWindow = global.window;
+  const close = Date.UTC(2026, 6, 30, 20);
+  const stored = { bar_time_label: 'end', times: [close - 1800000, close],
+    macd_dif: [11, 22], macd_dea: [1, 2], macd_hist: [10, 20] };
+  const df = { _historyProvider: { bars_result: new Map([['us:aapl.us30', stored]]) } };
+  global.window = { ChanlunTVRegistry: { widgets: new Map(), datafeeds: new Map([['chart1', df]]) } };
+  try {
+    const study = new (Idx.idx({}).constructor)();
+    const context = { symbol: { ticker: 'us:AAPL.US', interval: '30', time: close - 1800000 } };
+    assert.deepEqual(study.main(context, () => {}), [20, 0, 22, 2]);
+    stored.bar_time_label = 'start';
+    assert.deepEqual(study.main(context, () => {}), [10, 0, 11, 1]);
+    assert.deepEqual(stored.times, [close - 1800000, close]);
+  } finally { global.window = oldWindow; }
+});
+
+test('MACD scans an unavailable higher column once and picks up a newly installed column', () => {
+  const oldWindow = global.window;
+  const close = Date.UTC(2026, 6, 30, 20);
+  let scanned = 0;
+  const unavailable = new Proxy([NaN, NaN], {get(target, key, receiver) {
+    if (/^[0-9]+$/.test(String(key))) scanned++;
+    return Reflect.get(target, key, receiver);
+  }});
+  const stored = {bar_time_label:'end', times:[close-1800000, close],
+    macd_dif:[11,22], macd_dea:[1,2], macd_hist:[10,20], higher_macd_dif:unavailable};
+  const df = {_historyProvider:{bars_result:new Map([['us:aapl.us30', stored]])}};
+  global.window = {ChanlunTVRegistry:{widgets:new Map(), datafeeds:new Map([['chart1',df]])}};
+  try {
+    const study = new (Idx.idx({}).constructor)();
+    const context = {symbol:{ticker:'us:AAPL.US', interval:'30', time:close-1800000}};
+    for (let i=0; i<50; i++) assert.deepEqual(study.main(context, () => {}), [20,0,22,2]);
+    assert.equal(scanned, 2);
+    stored.higher_macd_dif = [110,220];
+    stored.higher_macd_dea = [10,20];
+    stored.higher_macd_hist = [100,200];
+    assert.deepEqual(study.main(context, () => {}), [200,0,220,20]);
+  } finally { global.window = oldWindow; }
+});

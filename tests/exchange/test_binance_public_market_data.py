@@ -11,6 +11,7 @@ from chanlun.exchange.exchange_binance_common import (
     BINANCE_SYNTHETIC_FREQUENCIES,
 )
 from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot
+import chanlun.exchange.exchange_binance as futures_module
 import chanlun.exchange.exchange_binance_spot as spot_module
 
 
@@ -18,43 +19,50 @@ def _real_cls(wrapper):
     return getattr(wrapper, "__wrapped__", wrapper)
 
 
-class _FakeSpotClient:
+class _FakeClient:
     def __init__(self):
         self.urls = {"api": {"public": "https://api.binance.com/api/v3"}}
 
 
-def test_spot_constructor_is_public_only_and_spot_only(monkeypatch):
+@pytest.mark.parametrize("module,adapter,constructor,expected_options", [
+    (spot_module, ExchangeBinanceSpot, "binance", {
+        "defaultType": "spot",
+        "fetchCurrencies": False,
+        "fetchMarkets": {"types": ["spot"]},
+    }),
+    (futures_module, ExchangeBinance, "binanceusdm", {"fetchCurrencies": False}),
+])
+def test_constructor_uses_public_market_data(
+    monkeypatch, module, adapter, constructor, expected_options,
+):
     captured = {}
-    client = _FakeSpotClient()
+    client = _FakeClient()
 
     def fake_binance(params):
         captured.update(params)
         return client
 
     monkeypatch.setattr(
-        spot_module,
+        module,
         "config_get_proxy",
         lambda: {"host": "127.0.0.1", "port": 10808},
     )
-    monkeypatch.setattr(spot_module.ccxt, "binance", fake_binance, raising=False)
-    monkeypatch.setattr(spot_module, "ExchangeDB", lambda _market: object())
+    monkeypatch.setattr(module.ccxt, constructor, fake_binance, raising=False)
+    monkeypatch.setattr(module, "ExchangeDB", lambda _market: object())
 
-    cls = _real_cls(ExchangeBinanceSpot)
+    cls = _real_cls(adapter)
     instance = object.__new__(cls)
     cls.__init__(instance)
 
-    assert captured["options"] == {
-        "defaultType": "spot",
-        "fetchCurrencies": False,
-        "fetchMarkets": {"types": ["spot"]},
-    }
+    assert captured["options"] == expected_options
     assert captured["proxies"] == {
         "http": "http://127.0.0.1:10808",
         "https": "http://127.0.0.1:10808",
     }
     assert "apiKey" not in captured
     assert "secret" not in captured
-    assert client.urls["api"]["public"] == BINANCE_SPOT_PUBLIC_API_URL
+    if module is spot_module:
+        assert client.urls["api"]["public"] == BINANCE_SPOT_PUBLIC_API_URL
 
 
 def test_spot_and_futures_expose_the_same_complete_kline_set():

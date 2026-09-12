@@ -15,6 +15,7 @@
 末根刷新/新增根只算增量而非每次全量重建。复用判定见该函数与 _cl_pool 注释。
 """
 import hashlib
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -28,7 +29,11 @@ from chanlun.exchange.price_basis import (
     copy_price_basis_metadata,
     merge_price_basis_metadata,
 )
+from chanlun.cl_utils.price_metadata import (
+    strict_snapshot_price_metadata,
+)
 from chanlun.tools.log_util import LogUtil
+from .chart_bar_time import chart_bar_time_fields
 
 # 限制并发"全量重算"数量：缠论重算 CPU 密集，多窗口同时全量重算争 CPU/GIL。曾试 1=
 # 完全串行, 但日志证明适得其反——一个慢 full(拉取期 52s)会把后续重算堵在队列上
@@ -78,15 +83,41 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
         "close": c,
         "volume": v,
     })
+    try:
+        frame.attrs.update(chart_bar_time_fields(chart_data))
+    except ValueError as exc:
+        raise PriceBasisMismatchError("invalid cached bar time label") from exc
     strict_structure = chart_data.get("strict_structure")
-    if (
+    strict_basis = strict_structure if (
         chart_data.get("strict_structure_mode") == "replace"
         and isinstance(strict_structure, dict)
-    ):
-        for name in ("structure_price_quantum", "price_basis_revision"):
-            value = strict_structure.get(name)
-            if value is not None:
-                frame.attrs[name] = value
+    ) else None
+    # Displayed bars remain usable when common-minute structure is unavailable.
+    # Their price basis comes from the displayed source frame, independently of
+    # structure success.  Never infer its provider/adjustment from a new fetch.
+    basis = chart_data.get("price_basis", strict_basis)
+    if basis is not None:
+        if not isinstance(basis, dict):
+            raise PriceBasisMismatchError("invalid cached chart price basis")
+        source = pd.DataFrame()
+        source.attrs.update(basis)
+        copy_price_basis_metadata(source, frame)
+        try:
+            recovered = strict_snapshot_price_metadata(frame)
+            for name in ("price_basis_provider", "price_basis_adjustment"):
+                if name in frame.attrs:
+                    value = frame.attrs[name]
+                    if not isinstance(value, str) or not value or value != value.strip():
+                        raise ValueError(f"invalid {name}")
+            if "price_basis" in chart_data and strict_basis is not None:
+                source.attrs.clear()
+                source.attrs.update(strict_basis)
+                if recovered != strict_snapshot_price_metadata(source):
+                    raise ValueError("display and structure price basis differ")
+        except ValueError as exc:
+            raise PriceBasisMismatchError(
+                f"invalid cached chart price basis: {exc}"
+            ) from exc
     return frame
 
 
@@ -149,12 +180,34 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     # 即“无法比较无时区与带时区的时间戳”。
     cached = _ensure_tz_aware(cached)
     new = _ensure_tz_aware(new)
+    old_label = cached.attrs.get("bar_time_label")
+    new_label = new.attrs.get("bar_time_label")
+    if old_label != new_label and (old_label is not None or new_label is not None):
+        raise PriceBasisMismatchError("chart bar time label changed or is unknown")
+
+    # The revision authenticates the source price epoch.  Explicit metadata
+    # contradicting that epoch is still invalid, even with a copied revision.
+    for name in (
+        "structure_price_quantum", "price_basis_provider", "price_basis_adjustment",
+    ):
+        old_value, new_value = cached.attrs.get(name), new.attrs.get(name)
+        if old_value is not None and new_value is not None and old_value != new_value:
+            if name == "structure_price_quantum":
+                try:
+                    if (strict_snapshot_price_metadata(cached).structure_price_quantum
+                            == strict_snapshot_price_metadata(new).structure_price_quantum):
+                        continue
+                except ValueError:
+                    pass
+            raise PriceBasisMismatchError(f"price basis metadata changed: {name}")
 
     # new 后到,使其在 drop_duplicates(keep='last') 下覆盖 cached 的同 date 行
     combined = pd.concat([cached, new], ignore_index=True)
     combined = combined.drop_duplicates(subset=["date"], keep="last")
     combined = combined.sort_values("date").reset_index(drop=True)
-    return merge_price_basis_metadata(cached, new, combined)
+    merged = merge_price_basis_metadata(cached, new, combined)
+    merged.attrs.update(chart_bar_time_fields(new.attrs))
+    return merged
 
 
 # ── 持久 CL 实例池(增量重算) ──────────────────────────────────────────
@@ -244,7 +297,7 @@ def recompute_chart_data_from_klines(
         closed_prefix = drop_unclosed_last_bar(
             completed_klines,
             display_frequency,
-            time_label="end",
+            time_label=source_attrs.get("bar_time_label", "end"),
         )
         if len(closed_prefix) == len(completed_klines):
             break
@@ -260,29 +313,57 @@ def recompute_chart_data_from_klines(
     runtime_key = "|".join(
         (
             market,
+            code,
             display_frequency,
             str(display_klines.attrs.get("price_basis_revision")),
             str(display_klines.attrs.get("structure_price_quantum")),
+            str(display_klines.attrs.get("price_basis_provider")),
+            str(display_klines.attrs.get("price_basis_adjustment")),
+            str(display_klines.attrs.get("bar_time_label")),
         )
     )
     first_date = int(display_klines.iloc[0]["date"].timestamp())
     n = len(display_klines)
+    fingerprint_started = time.perf_counter()
+    full_fp = _klines_prefix_fp(display_klines, n)
     cd = None
     reused = False
+    unchanged = False
     if cache_key is not None:
         with _cl_pool_lock:
             entry = _cl_pool.get(cache_key)
-            if (
-                entry is not None
-                and entry["config_key"] == runtime_key
-                and entry["first_date"] == first_date
-                and n >= entry["n"]
-                and _klines_prefix_fp(display_klines, entry["n"] - 1)
-                == entry.get("prefix_fp")
+        # The caller holds the per-chart lock. Hashing a large history must not
+        # hold the pool dictionary lock and delay unrelated symbols.
+        if (
+            entry is not None
+            and entry["config_key"] == runtime_key
+            and entry["first_date"] == first_date
+            and n >= entry["n"]
+        ):
+            unchanged = bool(n == entry["n"] and full_fp and full_fp == entry.get("full_fp"))
+            if unchanged or (
+                entry.get("prefix_fp")
+                and _klines_prefix_fp(display_klines, entry["n"] - 1) == entry["prefix_fp"]
             ):
                 cd = entry["cl"]
                 reused = True
-                _cl_pool.move_to_end(cache_key)
+                with _cl_pool_lock:
+                    if _cl_pool.get(cache_key) is entry:
+                        _cl_pool.move_to_end(cache_key)
+    fingerprint_ms = (time.perf_counter() - fingerprint_started) * 1000
+    serialization_key = json.dumps({
+        "config": cl_config,
+        "price_basis": copy_price_basis_metadata(display_klines, pd.DataFrame()).attrs,
+        "bar_time": chart_bar_time_fields(display_klines.attrs),
+    }, sort_keys=True, default=str)
+    if unchanged and reused and entry.get("serialization_key") == serialization_key:
+        from .chart_cache import _get_chart_cache_entry_ram_only
+        published = _get_chart_cache_entry_ram_only(cache_key)
+        if (published is not None and entry.get("payload_token")
+                and published["data"].get("_chart_payload_token") == entry["payload_token"]):
+            LogUtil.info(f"[recompute] {market}:{code} {frequency} klines={n} "
+                         f"same payload=reused fingerprint={fingerprint_ms:.0f}ms")
+            return _chart_compute._with_history_source_deadline(published["data"], source_attrs)
 
     wait_started = time.time()
     with _recompute_sem:
@@ -295,6 +376,10 @@ def recompute_chart_data_from_klines(
                 frame=display_klines,
             )
             cd = strict_runtime.cd
+        elif unchanged:
+            # Reprocessing the same closed frame clears the strict branch memo
+            # and turns an idle refresh into another cold recursive analysis.
+            strict_runtime = StrictChartRuntimeResult.success(cd)
         else:
             # The immutable prefix was already authenticated above by its exact
             # timestamp/OHLCV fingerprint.  Use the core's certified fast path so every
@@ -313,6 +398,7 @@ def recompute_chart_data_from_klines(
                 cd.process_klines(display_klines)
             strict_runtime = StrictChartRuntimeResult.success(cd)
 
+        process_done = time.time()
         result = _chart_compute.serialize_chart_data_with_strict_runtime(
             market=market,
             code=code,
@@ -322,15 +408,25 @@ def recompute_chart_data_from_klines(
             strict_runtime=strict_runtime,
         )
     done_at = time.time()
+    payload_token = None
+    if isinstance(result, dict) and cd is not None and full_fp:
+        payload_token = hashlib.sha256(json.dumps(
+            (runtime_key, full_fp, serialization_key), separators=(",", ":"),
+        ).encode()).hexdigest()
+        result["_chart_payload_token"] = payload_token
 
     if cache_key is not None and cd is not None:
+        prefix_fp = entry["prefix_fp"] if unchanged and reused else _klines_prefix_fp(display_klines, n - 1)
         with _cl_pool_lock:
             _cl_pool[cache_key] = {
                 "cl": cd,
                 "config_key": runtime_key,
                 "first_date": first_date,
                 "n": n,
-                "prefix_fp": _klines_prefix_fp(display_klines, n - 1),
+                "prefix_fp": prefix_fp,
+                "full_fp": full_fp,
+                "serialization_key": serialization_key,
+                "payload_token": payload_token,
             }
             _cl_pool.move_to_end(cache_key)
             while len(_cl_pool) > _CL_POOL_MAX:
@@ -338,9 +434,12 @@ def recompute_chart_data_from_klines(
 
     LogUtil.info(
         f"[recompute] {market}:{code} {display_frequency} klines={n} "
-        f"{'inc' if reused else 'full'} "
+        f"{'same' if unchanged else 'inc' if reused else 'full'} "
         f"wait={(calc_started - wait_started) * 1000:.0f}ms "
-        f"calc={(done_at - calc_started) * 1000:.0f}ms"
+        f"calc={(done_at - calc_started) * 1000:.0f}ms "
+        f"fingerprint={fingerprint_ms:.0f}ms "
+        f"process={(process_done - calc_started) * 1000:.0f}ms "
+        f"serialize={(done_at - process_done) * 1000:.0f}ms"
     )
     return result
 
@@ -392,23 +491,28 @@ def prepend_klines_and_replace_cache(
     # 局部 import 避免和 chart_compute 形成 import 链
     from . import chart_cache as _chart_cache
 
-    cached_df = pd.DataFrame()
-    cached_entry = _chart_cache._get_chart_cache_entry(cache_key)
-    if cached_entry is not None:
-        _cached_data = cached_entry.get("data") or {}
-        cached_df = extract_klines_df_from_chart_data(_cached_data)
-        # web-B2: entry 有 bar(t 非空)但反构建得空(列长不一致的半坏 entry)-> 拿不到全量缓存。
-        # 若继续: 窄 new_klines merge 出窄结果并以 is_full_snapshot=True 写入 -> 污染后续
-        # firstDataRequest(命中"假全量"只返回几根 K 线)。extract 声明"回退全量", 故拒绝用窄
-        # 数据覆盖: 返回 None(本次 no_data, 前端保持现状), 坏 entry 交下次 miss/freshness 全量重拉。
-        if _cached_data.get("t") and len(cached_df) == 0:
-            LogUtil.warning(
-                f"[prepend] cached entry 反构建失败(疑列长不一致半坏), 拒绝窄数据覆盖 {cache_key}"
-            )
-            return None
-
     try:
+        cached_df = pd.DataFrame()
+        cached_entry = _chart_cache._get_chart_cache_entry(cache_key)
+        if cached_entry is not None:
+            _cached_data = cached_entry.get("data") or {}
+            cached_df = extract_klines_df_from_chart_data(_cached_data)
+            # A corrupt full cache must not be replaced by a narrow refresh.
+            if _cached_data.get("t") and len(cached_df) == 0:
+                LogUtil.warning(
+                    f"[prepend] cached entry 反构建失败(疑列长不一致半坏), 拒绝窄数据覆盖 {cache_key}"
+                )
+                return None
         merged = merge_klines_df(cached_df, new_klines)
+        # A range/tail merge still contains the old source prefix. It cannot
+        # renew that prefix's full-history validation deadline.
+        deadline_field = "_history_source_valid_until"
+        deadlines = [value for value in (
+            (cached_entry.get("data") or {}).get(deadline_field) if cached_entry else None,
+            getattr(new_klines, "attrs", {}).get(deadline_field),
+        ) if isinstance(value, (int, float))]
+        if deadlines and merged is not None:
+            merged.attrs[deadline_field] = min(deadlines)
     except PriceBasisMismatchError as exc:
         LogUtil.warning(
             f"[prepend] price basis mismatch; invalidate cache "
@@ -452,10 +556,18 @@ def prepend_klines_and_replace_cache(
                 == _klines_prefix_fp(merged, len(merged) - 1)
             ):
                 _data = cached_entry.get("data")
-                # web-B1: OHLC 未变但末根成交量在累积(涨跌停/平价 tick 段)-> 缠论结构只依赖
-                # OHLC 故不重算(省 CPU), 但就地 O(1) 刷新缓存末根成交量, 避免成交量柱冻结。
+                # Volume-only updates preserve geometry, but must publish a new
+                # value column so in-flight readers keep their original frame.
                 if _data and _data.get("v") and _co["volume"] != _mo["volume"]:
-                    _data["v"][-1] = float(_mo["volume"])  # 原生 python(非 numpy 标量), 防 int64 源 json.dumps 崩
+                    _data = {**_data, "v": [*_data["v"][:-1], float(_mo["volume"])]}
+                    for field in ("_chart_payload_token", "_completed_structure_build_id",
+                                  "_initial_structure_build_id", "_initial_structure_cache_key"):
+                        _data.pop(field, None)
+                    _chart_cache._set_chart_cache_entry(
+                        cache_key, _data, is_full_snapshot=cached_entry.get("is_full_snapshot", True),
+                    )
+                else:
+                    _chart_cache._mark_chart_cache_validated(cache_key)
                 return _data
         except (KeyError, IndexError):
             pass

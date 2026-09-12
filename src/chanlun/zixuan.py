@@ -65,15 +65,6 @@ class ZiXuan(object):
         self.zx_names = [_zx["name"] for _zx in self.zixuan_list]
         return True
 
-    def query_all_zs_stocks(self):
-        """
-        查询自选分组下所有的代码信息
-        """
-        return [
-            {"zx_name": zx_name, "stocks": self.zx_stocks(zx_name)}
-            for zx_name in self.zx_names
-        ]
-
     def zx_stocks(self, zx_group) -> List[Dict[str, object]]:
         """
         根据自选名称，获取其中的 代码列表

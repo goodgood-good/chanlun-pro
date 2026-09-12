@@ -14,14 +14,14 @@ import {
 } from "./helpers";
 
 import { IRequester } from "./irequester";
-import { chartBarTimeSeconds } from "./bar-time";
+import { BarTimeLabel, chartBarTimeSeconds, resolveBarTimeLabel } from "./bar-time";
 
 type StrictStructureMode = "replace" | "unchanged" | "unavailable";
 
-// 冷态 1m/5m 历史需要分页取数并计算结构，服务端实测可超过通用请求的 15 秒上限。
+// 冷态历史需要取数并计算完整结构，服务端实测含数据队列等待可达 146 秒。
 // 只放宽周期切换触发的首个完整快照；配置、报价与实时增量仍由 Requester 的
 // 15 秒默认值约束，避免故障时所有请求长时间悬挂。
-const DEFAULT_INITIAL_HISTORY_TIMEOUT_MS = 45_000;
+const DEFAULT_INITIAL_HISTORY_TIMEOUT_MS = 180_000;
 // 首次冷态请求若刚好撞上服务启动或缓存落盘，服务端可能在客户端超时后不久完成。
 // 自动重试一次即可命中刚生成的缓存，避免图表永久停在“这里没有数据”等待手动刷新。
 const INITIAL_HISTORY_RETRY_DELAY_MS = 750;
@@ -59,6 +59,7 @@ interface StrictStructureError {
 }
 
 interface HistoryFullDataResponse extends UdfOkResponse {
+  bar_time_label?: BarTimeLabel;
   history_floor?: number;
   macd_delta_scale?: number;
   time_delta?: boolean;
@@ -82,6 +83,7 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   strict_structure_mode?: StrictStructureMode;
   strict_structure?: Record<string, unknown>;
   strict_structure_error?: StrictStructureError;
+  initial_structure_build_id?: string;
 }
 interface HistoryNoDataResponse extends UdfResponse {
   s: "no_data";
@@ -118,6 +120,9 @@ interface TextPoint {
 }
 
 export interface GetBarsResult {
+  initial_structure_build_id?: string;
+  completed_structure_build_id?: string;
+  bar_time_label?: BarTimeLabel;
   bars: Bar[];
   meta: HistoryMetadata;
   times?: number[];
@@ -172,7 +177,7 @@ export interface HistoryProviderOptions {
    */
   historyParams?: Readonly<RequestParams>;
   /**
-   * 周期切换/首次打开时完整历史快照的有界等待时间。默认 45 秒。
+   * 周期切换/首次打开时完整历史快照的有界等待时间。默认 180 秒。
    * 该值不会影响配置、报价或 firstDataRequest=false 的实时增量请求。
    */
   initialHistoryTimeoutMs?: number;
@@ -189,12 +194,14 @@ export class HistoryProvider {
   private _fullRequestSerial: number = 0;
   private readonly _latestFullRequestByKey: Map<string, number> = new Map();
   private readonly _completeHistoryFloorByKey: Map<string, number> = new Map();
+  private readonly _failedInitialHistory: Set<string> = new Set();
   private _activeHistoryRequests: number = 0;
   private _lastHistorySettledAt: number = 0;
   public bars_result: Map<string, GetBarsResult>;
   // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
   // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
   public _forceRefreshOnce: boolean = false;
+  public _refreshIfStaleOnce: boolean = false;
 
   public constructor(
     datafeedUrl: string,
@@ -245,6 +252,28 @@ export class HistoryProvider {
 
   private _resultKey(symbol: unknown, resolution: unknown): string {
     return String(symbol || "").toLowerCase() + String(resolution || "").toLowerCase();
+  }
+
+  public hasInitialHistoryFailure(symbol: string, resolution: string): boolean {
+    return this._failedInitialHistory.has(this._resultKey(symbol, resolution));
+  }
+
+  public consumeInitialHistoryFailure(symbol: string, resolution: string): boolean {
+    return this._failedInitialHistory.delete(this._resultKey(symbol, resolution));
+  }
+
+  private _rememberInitialHistoryFailure(requestParams: RequestParams, generation?: number): void {
+    const key = this._resultKey(requestParams.symbol, requestParams.resolution);
+    if (generation === undefined || this._latestFullRequestByKey.get(key) !== generation) return;
+    // TradingView retains a failed/aborted first request in its own symbol
+    // cache. It may never call getBars when that symbol is selected again.
+    // Keep this separate from bars_result: an SSE frame cannot repair that
+    // failed TradingView cache, even when our aggregate has valid candles.
+    this._failedInitialHistory.delete(key);
+    this._failedInitialHistory.add(key);
+    while (this._failedInitialHistory.size > this._barsResultMaxSize) {
+      this._failedInitialHistory.delete(this._failedInitialHistory.values().next().value!);
+    }
   }
 
   private _beginFullRequest(requestParams: RequestParams): number {
@@ -352,6 +381,22 @@ export class HistoryProvider {
     } catch (e) { /* SSR 或测试环境无 window 时静默忽略 */ }
   }
 
+  private _emitInitialHistoryError(
+    requestParams: RequestParams,
+    requestGeneration: number | undefined,
+    message: string
+  ): void {
+    if (requestGeneration === undefined || !this._fullRequestIsCurrent(requestParams, requestGeneration)) return;
+    try {
+      window.dispatchEvent(new CustomEvent('chanlun-history-error', { detail: {
+        symbol: String(requestParams["symbol"] || '').toLowerCase(),
+        resolution: String(requestParams["resolution"] || '').toLowerCase(),
+        managerId: this._options.managerId || null,
+        message,
+      } }));
+    } catch (_) { /* Non-browser consumers still receive the normal result. */ }
+  }
+
   private async _requestHistoryWithStartupRetry(
     requestParams: RequestParams,
     requestTimeoutMs: number | undefined,
@@ -411,16 +456,10 @@ export class HistoryProvider {
       from: periodParams.from,
       to: periodParams.to,
     };
-    if (String(this._historyParams.embedded || "") === "1") {
-      requestParams.numeric_delta = 1;
-    }
     if (periodParams.countBack !== undefined) {
       const atomicFullInitialHistory = (
         periodParams.firstDataRequest === true
-        && (
-          String(this._historyParams.embedded || "") === "1"
-          || String(this._historyParams.atomic_initial || "") === "1"
-        )
+        && String(this._historyParams.atomic_initial || "") === "1"
       );
       // 原子展示页面不能先接收 countback 短帧，再于遮罩解除后补齐历史。
       // 首次请求不传 countback，使 /tv/history 在同一响应里返回当前完整缓存；
@@ -440,6 +479,10 @@ export class HistoryProvider {
       requestParams.force_refresh = 1;
       this._forceRefreshOnce = false;
     }
+    if (periodParams.firstDataRequest && this._refreshIfStaleOnce) {
+      requestParams.refresh_if_stale = 1;
+      this._refreshIfStaleOnce = false;
+    }
 
     if (symbolInfo.currency_code !== undefined) {
       requestParams.currencyCode = symbolInfo.currency_code;
@@ -456,7 +499,7 @@ export class HistoryProvider {
     const completeHistoryFloor = this._completeHistoryFloorByKey.get(resKey);
     if (
       periodParams.firstDataRequest !== true &&
-      String(this._historyParams.embedded || "") === "1" &&
+      String(this._historyParams.atomic_initial || "") === "1" &&
       completeHistoryFloor !== undefined &&
       Number.isFinite(Number(periodParams.from)) &&
       Number.isFinite(Number(periodParams.to)) &&
@@ -496,6 +539,11 @@ export class HistoryProvider {
             requestParams,
             requestGeneration
           );
+          if (initialResponse.s === 'no_data') {
+            this._rememberInitialHistoryFailure(requestParams, requestGeneration);
+            this._emitInitialHistoryError(requestParams, requestGeneration,
+              '暂未获取到 K 线，请检查标的和行情连接后重新加载数据。');
+          }
 
           if (
             this._limitedServerResponse &&
@@ -513,6 +561,7 @@ export class HistoryProvider {
             requestGeneration
           ));
         } catch (e: unknown) {
+          this._rememberInitialHistoryFailure(requestParams, requestGeneration);
           const reasonString =
             e instanceof Error || typeof e === "string"
               ? getErrorMessage(e)
@@ -527,6 +576,8 @@ export class HistoryProvider {
               `HistoryProvider: getBars() failed, error=${reasonString}`
             );
           }
+          this._emitInitialHistoryError(requestParams, requestGeneration,
+            'K 线请求失败，请检查行情连接后重新加载数据。');
           reject(reasonString);
         }
       }
@@ -628,6 +679,64 @@ export class HistoryProvider {
     return this._processHistoryResponse(response, requestParams);
   }
 
+  /** Install a completed build only into its original, unchanged candle frame. */
+  public applyStructurePatch(
+    patch: Partial<HistoryFullDataResponse> & {
+      schema?: string; build_id?: string; source_count?: number;
+      source_first?: number; source_last?: number;
+    },
+    requestParams: RequestParams
+  ): boolean {
+    const resKey = this._resultKey(requestParams.symbol, requestParams.resolution);
+    const current = this.bars_result.get(resKey);
+    const times = current?.times || [];
+    let barTimeLabel: BarTimeLabel;
+    try {
+      // Apply the same source-time contract as /history: QMT A-share frames
+      // omit this field and use closing labels; US intraday provenance remains required.
+      barTimeLabel = resolveBarTimeLabel(
+        patch.bar_time_label, String(requestParams.resolution), String(requestParams.symbol)
+      );
+    } catch (_) {
+      return false;
+    }
+    if (!current || !patch.build_id || patch.schema !== 'chanlun-structure-patch-v1'
+        || current.initial_structure_build_id !== patch.build_id
+        || times.length === 0 || times.length !== patch.source_count
+        || times[0] !== Number(patch.source_first) * 1000
+        || times[times.length - 1] !== Number(patch.source_last) * 1000
+        || current.bar_time_label !== barTimeLabel
+        || !Array.isArray(patch.fxs) || !Array.isArray(patch.bis) || !Array.isArray(patch.xds)) return false;
+    if (patch.strict_structure_mode === 'replace') {
+      if (patch.strict_structure?.schema !== 'chanlun-chart-structure'
+          || patch.strict_structure.source_closed_at !== patch.source_last) return false;
+    } else if (patch.strict_structure_mode !== 'unavailable' || !patch.strict_structure_error?.code) {
+      return false;
+    }
+    // Decode and validate every column before publishing any part of the patch.
+    const indicators: Partial<GetBarsResult> = {};
+    const columns = ['macd_dif', 'macd_dea', 'macd_hist',
+      'higher_macd_dif', 'higher_macd_dea', 'higher_macd_hist'] as const;
+    for (const name of columns) {
+      if (!Array.isArray(patch[name])) return false;
+      const values = decodeNumericDeltaColumn(patch[name]!, patch.macd_delta_scale, name);
+      if (values.length !== 0 && values.length !== times.length) return false;
+      indicators[name] = values.length ? values.map(value => value ?? NaN) : times.map(() => NaN);
+    }
+    const next = {
+      ...current, ...indicators,
+      fxs: patch.fxs, bis: patch.bis, xds: patch.xds,
+      strict_structure_mode: patch.strict_structure_mode,
+      strict_structure: patch.strict_structure,
+      strict_structure_error: patch.strict_structure_error,
+      completed_structure_build_id: patch.build_id,
+    };
+    delete next.initial_structure_build_id;
+    this.bars_result.set(resKey, next);
+    this._emitBarsReady(resKey, requestParams);
+    return true;
+  }
+
   private _processHistoryResponse(
     response: HistoryResponse | UdfErrorResponse,
     requestParams: RequestParams,
@@ -639,6 +748,7 @@ export class HistoryProvider {
 
     const bars: Bar[] = [];
     let resultTimes: number[] | undefined;
+    let resultBarTimeLabel: BarTimeLabel | undefined;
     const meta: HistoryMetadata = {
       noData: false,
     };
@@ -651,6 +761,8 @@ export class HistoryProvider {
 	  const symbol = String(requestParams["symbol"] || "");
 
       const fullResponse = response as HistoryFullDataResponse;
+      const barTimeLabel = resolveBarTimeLabel(fullResponse.bar_time_label, resolution, symbol);
+      resultBarTimeLabel = barTimeLabel;
       const responseTimes = decodeNumericDeltaColumn(
         fullResponse.t,
         fullResponse.time_delta === true ? 1 : undefined,
@@ -666,7 +778,7 @@ export class HistoryProvider {
 
       for (let i = 0; i < responseTimes.length; ++i) {
         const barValue: Bar = {
-          time: chartBarTimeSeconds(responseTimes[i], resolution, symbol) * 1000,
+          time: chartBarTimeSeconds(responseTimes[i], resolution, symbol, barTimeLabel) * 1000,
           close: response.c[i],
           open: response.o[i],
           high: response.h[i],
@@ -679,6 +791,10 @@ export class HistoryProvider {
       // 设置保存的key
       // 保存数据
       let obj_res = this.bars_result.get(res_key);
+      if (obj_res?.bar_time_label !== undefined && obj_res.bar_time_label !== barTimeLabel
+          && response.update !== false) {
+        throw new Error("history_bar_time_label_changed");
+      }
 
       // 2026-07 修复(前端幽灵形态)：判断本次响应是否为"右侧最新窗口"的权威回答。
       // TradingView 对同一 res_key 的非首次请求(update!=false)只有两种来源：
@@ -717,7 +833,7 @@ export class HistoryProvider {
           windowTo === undefined ||
           !Number.isInteger(sourceTime)
         ) return false;
-        const chartTime = chartBarTimeSeconds(sourceTime as number, resolution, symbol);
+        const chartTime = chartBarTimeSeconds(sourceTime as number, resolution, symbol, barTimeLabel);
         return chartTime >= windowFrom && chartTime <= windowTo;
       };
 
@@ -743,25 +859,25 @@ export class HistoryProvider {
         fullResponse.higher_macd_hist || [], macdScale, "higher_macd_hist"
       );
 
-      const mergeAlignedArrays = (existingTimes: number[] = [], existingArr: number[] = [], newTimes: number[] = [], newArr: number[] = []) => {
-          const map = new Map<number, number>();
-          existingTimes.forEach((t, i) => {
-              let val = existingArr[i];
-              if (val === null || val === undefined) val = NaN;
-              map.set(t, val);
-          });
-          newTimes.forEach((t, i) => {
-              let val = newArr[i];
-              if (val === null || val === undefined) val = NaN;
-              map.set(t, val);
-          });
-          const allTimes = Array.from(new Set([...existingTimes, ...newTimes])).sort((a, b) => a - b);
+      // All indicator columns share the same source timestamps. Resolve overlap,
+      // duplicate timestamps and ordering once; new values (including missing
+      // values) still replace old values at the same timestamp.
+      const indicatorColumns = (existing: GetBarsResult | undefined) => {
+          const positions = new Map<number, number>();
+          (existing?.times || []).forEach((t, i) => positions.set(t, -i - 1));
+          raw_times.forEach((t, i) => positions.set(t, i));
+          const times = Array.from(positions.keys()).sort((a, b) => a - b);
+          const indices = times.map(t => positions.get(t)!);
+          const align = (oldValues: number[] = [], newValues: number[] = []) =>
+              indices.map(i => (i < 0 ? oldValues[-i - 1] : newValues[i]) ?? NaN);
           return {
-              times: allTimes,
-              values: allTimes.map(t => {
-                  const v = map.get(t);
-                  return (v === undefined || v === null) ? NaN : v;
-              })
+              times,
+              macd_dif: align(existing?.macd_dif, macd_dif),
+              macd_dea: align(existing?.macd_dea, macd_dea),
+              macd_hist: align(existing?.macd_hist, macd_hist),
+              higher_macd_dif: align(existing?.higher_macd_dif, higher_macd_dif),
+              higher_macd_dea: align(existing?.higher_macd_dea, higher_macd_dea),
+              higher_macd_hist: align(existing?.higher_macd_hist, higher_macd_hist),
           };
       };
 
@@ -783,7 +899,12 @@ export class HistoryProvider {
         incomingLastRawMs !== undefined &&
         existingLastRawMs !== undefined &&
         incomingLastRawMs < existingLastRawMs;
-      const canWriteCache = generationIsCurrent && !isRegressiveFullSnapshot;
+      const isCompletedBuildPreview = Boolean(fullResponse.initial_structure_build_id
+        && obj_res?.completed_structure_build_id === fullResponse.initial_structure_build_id);
+      const canWriteCache = generationIsCurrent && !isRegressiveFullSnapshot && !isCompletedBuildPreview;
+      if (generationIsCurrent && requestGeneration !== undefined) {
+        this._failedInitialHistory.delete(res_key);
+      }
       if (
         canWriteCache &&
         requestGeneration !== undefined &&
@@ -792,30 +913,20 @@ export class HistoryProvider {
         responseTimes.length > 0 &&
         historyFloor === responseTimes[0]
       ) {
-        this._completeHistoryFloorByKey.set(res_key, historyFloor);
+        this._completeHistoryFloorByKey.set(res_key,
+          chartBarTimeSeconds(historyFloor, resolution, symbol, barTimeLabel));
       }
 
       if (canWriteCache && (response.update == false || obj_res == undefined)) {
-        const difObj = mergeAlignedArrays([], [], raw_times, macd_dif);
-        const deaObj = mergeAlignedArrays([], [], raw_times, macd_dea);
-        const histObj = mergeAlignedArrays([], [], raw_times, macd_hist);
-        const hDifObj = mergeAlignedArrays([], [], raw_times, higher_macd_dif);
-        const hDeaObj = mergeAlignedArrays([], [], raw_times, higher_macd_dea);
-        const hHistObj = mergeAlignedArrays([], [], raw_times, higher_macd_hist);
-
         this.bars_result.set(res_key, {
+          initial_structure_build_id: fullResponse.initial_structure_build_id,
+          bar_time_label: barTimeLabel,
           // TradingView mutates calendar Bar objects after getBars returns.
           // Keep an independent cache graph so chart-only normalization cannot
           // corrupt merge keys or strict loaded-range coordinates.
           bars: bars.map((bar) => ({ ...bar })),
           meta: meta,
-          times: difObj.times,
-          macd_dif: difObj.values,
-          macd_dea: deaObj.values,
-          macd_hist: histObj.values,
-          higher_macd_dif: hDifObj.values,
-          higher_macd_dea: hDeaObj.values,
-          higher_macd_hist: hHistObj.values,
+          ...indicatorColumns(undefined),
           fxs: (response as HistoryFullDataResponse).fxs,
           bis: (response as HistoryFullDataResponse).bis,
           xds: (response as HistoryFullDataResponse).xds,
@@ -826,6 +937,7 @@ export class HistoryProvider {
         this._pruneBarsResult();
         this._emitBarsReady(res_key, requestParams);
       } else if (canWriteCache && obj_res !== undefined) {
+        obj_res.bar_time_label = barTimeLabel;
         // 更新存在的数据
         // 更新逻辑，找到大于等于返回的第一个时间的所有数据；
         // 保留小于返回的第一个时间的所有数据；
@@ -976,25 +1088,16 @@ export class HistoryProvider {
           });
         };
 
-        // 更新所有数据
-        obj_res.fxs = updateTextPoints(
-          obj_res.fxs,
-          (response as HistoryFullDataResponse).fxs
-        );
-        obj_res.bis = updateLineSegments(
-          obj_res.bis,
-          (response as HistoryFullDataResponse).bis
-        );
-        obj_res.xds = updateLineSegments(
-          obj_res.xds,
-          (response as HistoryFullDataResponse).xds
-        );
         // SSE 全量快照直接整体替换基础图元。K线 bars/MACD 仍走下面增量合并
         // 保持视图不重置、随末根推进。scroll 等部分响应不带 full_snapshot, 仍走上面的合并(兜底)。
         if ((response as HistoryFullDataResponse).full_snapshot) {
           obj_res.fxs = (response as HistoryFullDataResponse).fxs || [];
           obj_res.bis = (response as HistoryFullDataResponse).bis || [];
           obj_res.xds = (response as HistoryFullDataResponse).xds || [];
+        } else {
+          obj_res.fxs = updateTextPoints(obj_res.fxs, fullResponse.fxs);
+          obj_res.bis = updateLineSegments(obj_res.bis, fullResponse.bis);
+          obj_res.xds = updateLineSegments(obj_res.xds, fullResponse.xds);
         }
         // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
         // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动。保留旧 bars 中早于新数据
@@ -1009,21 +1112,8 @@ export class HistoryProvider {
           obj_res.bars = Array.from(barByTime.values()).sort((a, b) => a.time - b.time);
         }
 
-        const oldTimes = obj_res.times || [];
-        const difObj = mergeAlignedArrays(oldTimes, obj_res.macd_dif, raw_times, macd_dif);
-        const deaObj = mergeAlignedArrays(oldTimes, obj_res.macd_dea, raw_times, macd_dea);
-        const histObj = mergeAlignedArrays(oldTimes, obj_res.macd_hist, raw_times, macd_hist);
-        const hDifObj = mergeAlignedArrays(oldTimes, obj_res.higher_macd_dif, raw_times, higher_macd_dif);
-        const hDeaObj = mergeAlignedArrays(oldTimes, obj_res.higher_macd_dea, raw_times, higher_macd_dea);
-        const hHistObj = mergeAlignedArrays(oldTimes, obj_res.higher_macd_hist, raw_times, higher_macd_hist);
-
-        obj_res.times = difObj.times;
-        obj_res.macd_dif = difObj.values;
-        obj_res.macd_dea = deaObj.values;
-        obj_res.macd_hist = histObj.values;
-        obj_res.higher_macd_dif = hDifObj.values;
-        obj_res.higher_macd_dea = hDeaObj.values;
-        obj_res.higher_macd_hist = hHistObj.values;
+        Object.assign(obj_res, indicatorColumns(obj_res));
+        obj_res.initial_structure_build_id = fullResponse.initial_structure_build_id;
 
         const strictMode = (response as HistoryFullDataResponse).strict_structure_mode;
         if (strictMode === "replace") {
@@ -1051,8 +1141,9 @@ export class HistoryProvider {
             };
         } else if (strictMode === "unchanged") {
           const cachedStrict = obj_res.strict_structure;
-          const mergedLastRawMs = obj_res.times.length > 0
-            ? obj_res.times[obj_res.times.length - 1]
+          const mergedTimes = obj_res.times || [];
+          const mergedLastRawMs = mergedTimes.length > 0
+            ? mergedTimes[mergedTimes.length - 1]
             : undefined;
           const cachedSourceClosedAt = Number(cachedStrict?.source_closed_at);
           const cachedSnapshotStillAtomic = Boolean(
@@ -1089,6 +1180,7 @@ export class HistoryProvider {
     }
 
     const result = {
+      bar_time_label: resultBarTimeLabel,
       bars: bars,
       meta: meta,
       times: resultTimes,

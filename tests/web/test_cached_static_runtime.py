@@ -69,7 +69,7 @@ class TestFullStaticTreeRuntime(AsyncHTTPTestCase):
         )
 
     def test_regular_scripts_and_fonts_bypass_wsgi_with_browser_cache(self):
-        script = self.fetch("/static/js/early_screening.js", method="HEAD")
+        script = self.fetch("/static/js/chart_analysis.js", method="HEAD")
         font = self.fetch("/static/font/iconfont.woff2", method="HEAD")
 
         for response in (script, font):

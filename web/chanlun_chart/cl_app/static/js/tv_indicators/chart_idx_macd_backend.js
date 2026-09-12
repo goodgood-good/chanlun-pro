@@ -180,14 +180,14 @@ var TvIdxMACDBackend = (function () {
                 }
               }
             },
-            inputs: {},
+            inputs: { data_revision: 0 },
           },
           styles: {
             plot_hist: { title: "Histogram", histogramBase: 0 },
             plot_dif: { title: "MACD", histogramBase: 0 },
             plot_dea: { title: "Signal", histogramBase: 0 },
           },
-          inputs: [],
+          inputs: [{ id: 'data_revision', name: 'Data revision', type: 'integer', defval: 0, isHidden: true }],
           format: { type: "price", precision: 4 },
         },
         constructor: function () {
@@ -275,9 +275,15 @@ var TvIdxMACDBackend = (function () {
 
               if (barsResult && barsResult.times) {
                 // 判断是否有跨周期 MACD 数据
-                const hasHigherMacd = barsResult.higher_macd_dif &&
-                  barsResult.higher_macd_dif.length > 0 &&
-                  !barsResult.higher_macd_dif.every(function (v) { return isNaN(v) || v === null; });
+                // History updates replace indicator arrays. Scan once per array,
+                // rather than once per historical bar while the study is rebuilt.
+                if (this._higherMacdValues !== barsResult.higher_macd_dif) {
+                  this._higherMacdValues = barsResult.higher_macd_dif;
+                  this._hasHigherMacd = Boolean(this._higherMacdValues?.some(
+                    function (v) { return v !== null && !isNaN(v); }
+                  ));
+                }
+                const hasHigherMacd = this._hasHigherMacd;
 
                 var src_dif = hasHigherMacd ? barsResult.higher_macd_dif : barsResult.macd_dif;
                 var src_dea = hasHigherMacd ? barsResult.higher_macd_dea : barsResult.macd_dea;
@@ -288,6 +294,15 @@ var TvIdxMACDBackend = (function () {
                   let searchTime = currentTime;
                   if (dataTime < 10000000000 && searchTime > 10000000000) {
                     searchTime = Math.floor(searchTime / 1000);
+                  }
+
+                  // Bars use opening chart coordinates; backend MACD arrays keep
+                  // the exact source labels. End-labeled feeds need the matching
+                  // close identity, otherwise the study reads the previous bar.
+                  const minutes = /^([1-9][0-9]*)$/.exec(String(rawInterval));
+                  if (barsResult.bar_time_label === 'end' && minutes
+                      && String(rawInterval) !== '1440') {
+                    searchTime += Number(minutes[1]) * 60 * (dataTime < 10000000000 ? 1 : 1000);
                   }
 
                   const alignedIndex = smartSearch(barsResult.times, searchTime, rawInterval);

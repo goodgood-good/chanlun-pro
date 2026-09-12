@@ -216,33 +216,20 @@ class XdCalculator:
 
     # ----------------------------------------------------------
     def _find_strict_start(self, all_bis: List[BI]) -> int:
-        """按唯一现行规则扫描关键笔起点。
+        """在所给历史窗口内选最早的局部方向起点，随后独立识别线段。
 
-        条件: bi[i].start/end 同时是 (bi[i], bi[i+2], bi[i+4]) 中的方向极值
-        ——up 笔取最低, down 笔取最高——并且 bi[i] 与 bi[i+2] 有重叠。
-
-        Returns:
-            int: 找到的起点位置 (>= 0); 未找到返回 -1。
-
+        初始三笔须重叠，且首笔起点是这三笔的方向起始极值。第 78 课允许
+        先选观察高低点；这里选最早满足条件者属于工程约定，不声明窗口之前
+        已有完整走势。第 81 课的 0—9 图允许 3 低于 1，不能再附加首笔终点
+        低于后两根同向笔的五笔单调条件。后继段仍须通过原段破坏规则识别。
         """
-        for i in range(len(all_bis) - 4):
+        for i in range(len(all_bis) - 2):
             bi_i = all_bis[i]
             bi_i2 = all_bis[i + 2]
-            bi_i4 = all_bis[i + 4]
-            if bi_i.type == 'up':
-                is_extreme = (
-                    bi_i.start.val < bi_i2.start.val
-                    and bi_i.start.val < bi_i4.start.val
-                    and bi_i.end.val < bi_i2.end.val
-                    and bi_i.end.val < bi_i4.end.val
-                )
-            else:  # 向下
-                is_extreme = (
-                    bi_i.start.val > bi_i2.start.val
-                    and bi_i.start.val > bi_i4.start.val
-                    and bi_i.end.val > bi_i2.end.val
-                    and bi_i.end.val > bi_i4.end.val
-                )
+            is_extreme = (
+                bi_i.start.val <= bi_i2.start.val if bi_i.type == 'up'
+                else bi_i.start.val >= bi_i2.start.val
+            )
             if is_extreme and _overlap(bi_i, bi_i2):
                 return i
         return -1
@@ -278,8 +265,8 @@ class XdCalculator:
                     #
                     # 这在实时边缘意味着「反向段仍在形成」，等新的一笔即可；但同一个
                     # 条件出现在历史笔上时，直接 break 会把其后全部笔（可能数万根）
-                    # 一次性交给 _emit_pending 打成一条巨型未完成尾段，线段中枢、
-                    # 走势类型、递归层级与买卖点因而全部截断在该点，且再多数据也
+                    # 一次性交给 _emit_pending 打成一条巨型未完成尾段，后续线段与
+                    # 本周期中枢因而全部截断在该点，且再多数据也
                     # 不会恢复（实测 510300 自 2020-03-10 起线段恒为 973 段）。
                     #
                     # 因此只有真正处在活动边缘——其后已不足以再构成任何一段——才
@@ -586,26 +573,21 @@ class XdCalculator:
         def _broke(b, level) -> bool:
             return (b.low < level - 1e-9) if seg_type == 'up' else (b.high > level + 1e-9)
 
-        rb1 = None
-        for j in range(check, n):
-            b = all_bis[j]
-            if _same_new_extreme(b):
-                return None
-            if b.type == cs_bi_type and _broke(b, seg_anchor):
-                rb1 = j
-                break
-        if rb1 is None:
+        # 这里补的是当前第一笔破坏后的相邻三笔，不能越过已经存在的
+        # 特征序列转折，向未来任意寻找两根突破笔。原来的全尾部搜索曾在
+        # BI 100 到来后用它覆盖 BI 98 已确认的另一条分型路径，导致更早
+        # 线段的锁定时刻从 05:06 改写到 05:49。
+        rb1, rb2 = check, check + 2
+        if rb2 >= n:
+            return None
+        if all_bis[rb1].type != cs_bi_type or not _broke(all_bis[rb1], seg_anchor):
+            return None
+        if _same_new_extreme(all_bis[rb1 + 1]):
             return None
         rb1_end = all_bis[rb1].low if seg_type == 'up' else all_bis[rb1].high
-        rb2 = None
-        for j in range(rb1 + 1, n):
-            b = all_bis[j]
-            if _same_new_extreme(b):
-                return None
-            if b.type == cs_bi_type and _broke(b, rb1_end):
-                rb2 = j
-                break
-        if rb2 is None:
+        if all_bis[rb2].type != cs_bi_type or not _broke(all_bis[rb2], rb1_end):
+            return None
+        if not _overlap(all_bis[rb1], all_bis[rb2]):
             return None
         peak_idx = self._extreme_idx(all_bis, seg_start, rb1 - 1, seg_type)
         real_end = max(peak_idx, seg_start + 2)
@@ -693,7 +675,19 @@ class XdCalculator:
         # 调用方必须传入由 _build_segments 维护的增量缓存。
         # 这把每次 _try_end 的 cs 笔收集成本从 O(seg_len) 降到 O(1)，
         # 在 90天 1min 数据这种长段场景下消除 O(n²) 退化。
-        seg_cs_bis = seg_cs_bis_cache
+        # Lesson 81, replies of 2007-09-19 (12, 56, 78): an intervening
+        # lower high in an up segment, or higher low in a down segment, is
+        # not a new candidate pivot of that original segment. Using its
+        # reverse stroke as the left shoulder can manufacture a type-2 gap.
+        # This applies only before the prospective boundary; its reverse
+        # side and the second feature sequence retain their own inclusion.
+        seg_cs_bis = []
+        for bi in seg_cs_bis_cache:
+            if not seg_cs_bis or (
+                bi.high > seg_cs_bis[-1].high if seg_type == 'up'
+                else bi.low < seg_cs_bis[-1].low
+            ):
+                seg_cs_bis.append(bi)
         if not seg_cs_bis:
             _log.debug(lambda:"    _try_end: 段内无CS笔 → 跳过")
             return None
@@ -830,10 +824,10 @@ class XdCalculator:
             _log.debug(lambda:f"    _try_end: 笔数{end_bi_idx - seg_start + 1}<3 → 返回None")
             return None
 
-        # ---- 步骤6.5: 端点校正到段内真峰谷（标准化口径 + 当下性）----
-        # 把端点钉成段内极值是「标准化」口径：供下游以线段为基础的分析（中枢/走势类型/买卖点，
-        #   即本仓 XD 的全部消费方）把线段当成无内部结构的基本部件。它不是原始线段端点的划分
-        #   规则（原始线段端点可非极值）；本仓所有消费方均属此类分析，故此标准化口径正确。
+        # ---- 步骤6.5: 当前候选区间内的方向极值端点校正 ----
+        # 此步骤限制吸收搜索造成的候选端点漂移，不等于第 78 课的完整标准化。
+        # 后者还可能把相邻两段的共享节点移到后一原段内部，并需要单独保存
+        # 原段证据与派生几何。不能由本地端点校正推定所有下游递归已符合原文。
         # 此校正同时消除当下性漂移（真 bug，勿退回到校正前）：_resolve_pivot_bi 给出的是
         # 「吸收漂移」后的局部顶/底：当反向特征序列分型在段首峰出现前还凑不齐时，主循环 Step3
         # 吸收会把 seg_end/check 推过真峰，使 _try_end 据此算出的端点落在真峰之后的较低同向笔 →

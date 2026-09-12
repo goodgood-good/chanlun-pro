@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from typing import Any, Dict, List, Mapping, Union
 
 import pandas as pd
@@ -31,6 +32,10 @@ except ImportError as _crypto_import_error:
 
 from chanlun import config
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.kline_completion import (
+    drop_unclosed_last_bar,
+    normalize_completed_bar_labels,
+)
 from chanlun.exchange.kline_precision import (
     normalize_kline_precision,
     resolve_structure_price_quantum,
@@ -226,6 +231,12 @@ class USmartClient:
         )
         self.timeout = _positive_number(timeout_value, 8)
         self.session = session or requests.Session()
+        if session is None:
+            # Quote routing is independent of the user's browser/VPN proxy.
+            # Explicitly supplied sessions retain their own transport settings.
+            self.session.trust_env = os.environ.get(
+                "CHANLUN_USMART_TRUST_ENV_PROXY", "1"
+            ).strip().lower() in {"1", "true", "yes", "on"}
 
         self._signer: USmartSigner | None = None
         self._signer_lock = threading.Lock()
@@ -476,6 +487,29 @@ class ExchangeUSmart(Exchange):
         self._all_stocks: List[Dict[str, Any]] | None = None
         self._stock_by_code: Dict[str, Dict[str, Any]] = {}
         self._all_stocks_lock = threading.Lock()
+        self._canonical_minute_owner = uuid.uuid4().hex
+
+    def canonical_closed_minute_history(self, code, start_date=None, end_date=None, args=None):
+        """One complete closed-end query for a newly opened minute chart."""
+        from chanlun.exchange.minute_source_receipt import seal_minute_source
+
+        query_args = dict(args or {})
+        backend = self._configured_us_history_exchange("1m", self._right_type(query_args))
+        if start_date is not None or getattr(backend, "supports_canonical_minute_history", False) is not True:
+            return self.klines(code, "1m", start_date=start_date, end_date=end_date, args=query_args)
+        frame = self.klines(code, "1m", end_date=end_date,
+                            args={**query_args, "_canonical_closed_minute": True})
+        if frame is not None and not frame.empty:
+            # klines has already normalized this delegate's opening labels to
+            # the uSMART adapter's closing-label contract. Declare it before
+            # sealing, while preserving any explicit contradictory metadata.
+            frame.attrs.setdefault("bar_time_label", self.kline_time_label)
+        return seal_minute_source(frame, owner=self._canonical_minute_owner, code=code, args=query_args)
+
+    def can_reuse_closed_minute_history(self, code, frame, args=None):
+        from chanlun.exchange.minute_source_receipt import matches_minute_source
+
+        return matches_minute_source(frame, owner=self._canonical_minute_owner, code=code, args=dict(args or {}))
 
     def default_code(self) -> str:
         return {
@@ -677,19 +711,75 @@ class ExchangeUSmart(Exchange):
         if frequency not in _FREQUENCY_TYPES:
             raise ValueError(f"uSMART does not support frequency {frequency!r}")
         args = dict(args or {})
+        canonical_minute = args.pop("_canonical_closed_minute", False) is True
         right_type = self._right_type(args)
         history_exchange = self._configured_us_history_exchange(
             frequency,
             right_type,
         )
         if history_exchange is not None:
-            return history_exchange.klines(
+            # This adapter promises completed labels even when its selected
+            # history provider uses opening labels.  Never mix the conventions
+            # across the display bars and their common 1m structure source.
+            source_label = getattr(history_exchange, "kline_time_label", "start")
+            # These are the chart's shared-source periods, including shortened
+            # US sessions.  Calendar/other periods keep their existing adapter
+            # contract; a partial hourly final candle needs separate evidence.
+            minutes = {"1m": 1, "5m": 5, "30m": 30}.get(frequency)
+            if minutes is None:
+                return history_exchange.klines(
+                    code, frequency, start_date=start_date,
+                    end_date=end_date, args=args,
+                )
+            if source_label not in {"start", "end"}:
+                raise ValueError("history exchange kline_time_label must be start or end")
+            start_bound = (
+                _to_local_timestamp(start_date, self.tz)
+                if start_date is not None else None
+            )
+            end_bound = (
+                _to_local_timestamp(end_date, self.tz, end_of_day=True)
+                if end_date is not None else None
+            )
+            if start_bound is not None and end_bound is not None and start_bound > end_bound:
+                raise ValueError("start_date must not be later than end_date")
+            source_start = start_bound
+            if source_start is not None and source_label == "start":
+                source_start -= pd.Timedelta(minutes=minutes)
+            # Freeze completion before the provider request. A multi-page
+            # download may cross a minute boundary after its tail was read;
+            # elapsed download time cannot turn that partial bar into a close.
+            observed = pd.Timestamp.now(tz=self.tz)
+            history_args = args
+            if (canonical_minute and frequency == "1m" and start_bound is None
+                    and getattr(history_exchange, "supports_canonical_minute_history", False) is True):
+                history_args = {**args, "_canonical_closed_minute_as_of": (
+                    observed if end_bound is None else min(observed, end_bound)
+                ).isoformat()}
+            frame = history_exchange.klines(
                 code,
                 frequency,
-                start_date=start_date,
-                end_date=end_date,
-                args=args,
+                start_date=None if source_start is None else source_start.isoformat(),
+                end_date=None if end_bound is None else end_bound.isoformat(),
+                args=history_args,
             )
+            if frame is None or frame.empty:
+                return frame
+            cutoff = observed if end_bound is None else min(observed, end_bound)
+            frame = drop_unclosed_last_bar(
+                frame, frequency, time_label=source_label, as_of=cutoff,
+            )
+            frame = normalize_completed_bar_labels(
+                frame, frequency, time_label=source_label,
+            )
+            # Defensive range checks also handle an inclusive SDK cursor.  A
+            # candle opening at end_bound closes later and cannot enter here.
+            mask = frame["date"] <= cutoff
+            if start_bound is not None:
+                mask &= frame["date"] >= start_bound
+            result = frame.loc[mask].copy().reset_index(drop=True)
+            result.attrs = dict(frame.attrs)
+            return result
         page_size = _positive_number(
             args.get("count", getattr(config, "USMART_KLINE_PAGE_SIZE", 1000)),
             1000,
@@ -884,16 +974,6 @@ class ExchangeUSmart(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("uSMART 基础行情接口不支持板块查询")
-
-    def balance(self):
-        raise Exception("uSMART 行情适配器不支持账户查询")
-
-    def positions(self, code: str = ""):
-        raise Exception("uSMART 行情适配器不支持持仓查询")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        raise Exception("uSMART 行情适配器不支持交易")
-
 
 __all__ = [
     "ExchangeUSmart",

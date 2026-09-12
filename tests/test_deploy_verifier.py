@@ -309,94 +309,6 @@ def test_operations_default_to_readiness_probe():
     assert "poetry run python" not in windows_run
 
 
-def test_normal_restart_forces_bounded_screening_numeric_scope_after_dotenv():
-    restart = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
-    windows_run = WINDOWS_RUN.read_text(encoding="utf-8")
-    numeric_scope_names = (
-        "CHANLUN_TRADING_SCREENING_VALIDATION_COHORT_SIZE",
-        "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
-        "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
-        "CHANLUN_TRADING_SCREENING_SUPPORTIVE_DISCOVERY_MAX_SECTOR_RANK",
-        "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
-        "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
-        "CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS",
-    )
-
-    dotenv_call = restart.index("Import-ProjectDotEnv -Path")
-    symbol_catalog_codes = restart.index(
-        "'CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES'", dotenv_call
-    )
-    symbol_catalog_authorization = restart.index(
-        "'CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED'",
-        symbol_catalog_codes,
-    )
-    bounded_gate = restart.index(
-        "if (-not $EnableLargeScreeningScope) {", dotenv_call
-    )
-    large_scope_flag = restart.index(
-        "'CHANLUN_TRADING_SCREENING_ALLOW_LARGE_SCOPE'", bounded_gate
-    )
-    reset_body = restart[bounded_gate:large_scope_flag]
-
-    assert (
-        dotenv_call
-        < symbol_catalog_codes
-        < symbol_catalog_authorization
-        < bounded_gate
-        < large_scope_flag
-    )
-    assert "[switch]$EnableFullSymbolCatalog" in restart
-    assert "$EnableFullSymbolCatalog.IsPresent" in restart
-    assert "-FullSymbolCatalogEnabled" in restart
-    assert "-EnableFullSymbolCatalog" in windows_run
-    assert 'set "CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED=' not in windows_run
-    assert (
-        "[Environment]::SetEnvironmentVariable($name, '12', 'Process')"
-        in reset_body
-    )
-    for name in numeric_scope_names:
-        assert f"'{name}'" in reset_body
-        assert f'set "{name}=' not in windows_run
-    assert (
-        "'CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS'"
-        in reset_body
-    )
-    assert "$LargeScopePriorityMaxSymbols = 384" in restart
-    assert "$LargeScopeMonitorUniverseSymbols = 384" in restart
-    assert "$LargeScopeCandidateFiveMinuteSymbols = 128" in restart
-    assert "} else {" in reset_body
-    assert (
-        "'CHANLUN_TRADING_SCREENING_PRIORITY_MAX_SYMBOLS'" in reset_body
-        and "[string]$LargeScopePriorityMaxSymbols" in reset_body
-    )
-    assert (
-        "'CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS'" in reset_body
-        and "[string]$LargeScopeCandidateFiveMinuteSymbols" in reset_body
-    )
-    assert 'set "CHANLUN_TRADING_SCREENING_MAX_ADMITTED_UNIVERSE_SYMBOLS=' not in windows_run
-
-    holding_gate = restart.index(
-        "if (-not $EnableLargeHoldingMonitorScope) {", dotenv_call
-    )
-    holding_authorization = restart.index(
-        "'CHANLUN_HOLDING_GROUP_MONITOR_LARGE_SCOPE_AUTHORIZED'",
-        holding_gate,
-    )
-    assert "[switch]$EnableLargeHoldingMonitorScope" in restart
-    assert (
-        "'CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS'"
-        in restart[holding_gate:holding_authorization]
-    )
-    assert "-LargeHoldingMonitorScopeEnabled" in restart
-    assert "$EnableLargeHoldingMonitorScope.IsPresent" in restart
-    assert "-LargeScopeEnabled $EnableLargeScreeningScope.IsPresent" in restart
-    assert "-FullCoverageEnabled $EnableFullCoverage.IsPresent" in restart
-    assert (
-        "-ForcedFullCoverageEnabled $ForceFullCoverageUntilComplete.IsPresent"
-        in restart
-    )
-    assert 'set "CHANLUN_HOLDING_GROUP_MONITOR_MAX_SYMBOLS=' not in windows_run
-    assert "-EnableLargeHoldingMonitorScope" in windows_run
 
 
 def test_restart_replaces_watchdog_with_current_scope_after_deploy_verification():
@@ -495,28 +407,6 @@ def test_restart_source_manifest_uses_real_tab_delimiters():
     assert "[Array]::Sort($paths, [StringComparer]::Ordinal)" in helper
 
 
-@pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
-def test_restart_and_forward_runner_compute_the_same_source_revision():
-    from chanlun.decision_support.trading_system.decision_source_provenance import (
-        calculate_forward_application_source_revision,
-    )
-
-    helper = str(ROOT / "ops" / "deploy_common.ps1").replace("'", "''")
-    root = str(ROOT).replace("'", "''")
-    command = (
-        f". '{helper}';"
-        f"Get-ApplicationSourceRevision -Root '{root}'"
-    )
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", command],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    output = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
-    assert output[-1] == calculate_forward_application_source_revision(ROOT)
 
 
 def test_windows_launcher_delegates_python_resolution_to_managed_restart():

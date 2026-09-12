@@ -1,4 +1,4 @@
-"""真实行情回归：严格笔允许距离合格的次高/次低分型成笔。"""
+"""真实行情回归：修订距离允许相邻非共用分型成笔。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _signature(cd: CL) -> list[tuple[int, int, str, bool]]:
     ]
 
 
-def test_qqq_30m_near_lower_bottom_does_not_block_later_secondary_bottom():
+def test_qqq_30m_near_lower_bottom_is_eligible_under_revised_raw_distance():
     cd = CL("QQQ.US", "30m", strict_base_config(), market="us")
     cd.process_klines(_qqq_prefix())
 
@@ -39,11 +39,14 @@ def test_qqq_30m_near_lower_bottom_does_not_block_later_secondary_bottom():
     }
     assert bottoms[11] == 591.101
     assert bottoms[14] == 597.153
+    first = cd.get_bis()[0]
+    assert first.end.k.index - first.start.k.index == 3
+    assert first.end.k.k_index - first.start.k.k_index == 4
     assert _signature(cd)[:4] == [
-        (8, 14, "down", True),
-        (14, 28, "up", True),
-        (28, 40, "down", True),
-        (40, 44, "up", False),
+        (8, 11, "down", True),
+        (11, 16, "up", True),
+        (16, 19, "down", True),
+        (19, 28, "up", True),
     ]
 
 

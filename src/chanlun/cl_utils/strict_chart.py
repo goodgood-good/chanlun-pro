@@ -1,72 +1,29 @@
-"""把唯一严格结构证据原子化序列化为图表快照。"""
+"""Serialize the native segment centers of one displayed interval."""
 
 from __future__ import annotations
-
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterable
-
 from chanlun.core.strict_structure.identity import stable_structure_id
-from chanlun.core.strict_structure.formal_state import (
-    FormalDirectionState,
-    resolve_formal_direction,
-    resolve_level_formal_direction,
-    semantic_trend_direction,
+from chanlun.core.strict_structure.center_frame import (
+    center_frame_evidence,
+    center_frame_leave,
 )
-from chanlun.core.strict_structure.current_events import (
-    TerminalSegmentReference,
-    terminal_segment_reference,
-)
-from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
-    CenterPreview,
-    CenterPreviewState,
-    CenterState,
     ConstituentUnit,
-    DivergenceEvidence,
-    PendingMovementPartition,
     SourceKind,
-    StrictEvidenceResult,
-    StrictPointEvidence,
-    StrictPointStatus,
     TrendCenter,
-    TrendKind,
-    TrendState,
-    TrendType,
-    center_seed_size,
 )
-from chanlun.decision_support.trading_system.five_minute_setup_state import (
-    classify_five_minute_setup_state,
-)
-from chanlun.decision_support.trading_system.operational_point_graph import (
-    OperationalConfirmationBasis,
-    OperationalPointProjection,
-    resolve_current_operational_point_graph,
-)
-
 
 CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure"
 CHART_CENTER_SCHEMA = "chanlun-chart-center"
-_ACTIVE_CENTER_STATES = frozenset({CenterState.ONGOING})
-
-
-def _preview_lifecycle_role_count(preview: CenterPreview) -> int:
-    leave_present = (
-        preview.pending_leave_unit_id is not None
-        or preview.completion_leave_unit_id is not None
-    )
-    return (
-        int(preview.entry_unit_id is not None)
-        + len(preview.unit_ids)
-        + int(leave_present)
-    )
+COMPLETED_CENTER_DISPLAY_POLICY = "directional_completed_core_and_frame_v2"
 
 
 def _unique_units_in_time_order(
     units: Iterable[ConstituentUnit],
 ) -> tuple[ConstituentUnit, ...]:
     """按市场时间返回不重复的中心角色证据。"""
-
     by_id: dict[str, ConstituentUnit] = {}
     for unit in units:
         by_id.setdefault(unit.unit_id, unit)
@@ -78,13 +35,8 @@ def _unique_units_in_time_order(
     )
 
 
-def _center_overlap_units(
-    center: TrendCenter,
-) -> tuple[ConstituentUnit, ...]:
+def _center_overlap_units(center: TrendCenter) -> tuple[ConstituentUnit, ...]:
     """返回与冻结核心存在正宽重叠的全部中心生命周期角色。"""
-
-    if center.source_kind is SourceKind.TREND_TYPE:
-        return center.body_units
     candidates = _unique_units_in_time_order(
         (
             *((center.entry_unit,) if center.entry_unit is not None else ()),
@@ -103,44 +55,16 @@ def _center_overlap_units(
         )
     )
     return tuple(
-        item
-        for item in candidates
-        if max(item.low_tick, center.zd_tick) < min(item.high_tick, center.zg_tick)
-    )
-
-
-def _renderable_center_preview(preview: CenterPreview) -> bool:
-    """物理预览至少须有进入段与三段核心，正式角色则必须达到五段。"""
-
-    if preview.state not in (
-        CenterPreviewState.FORMING,
-        CenterPreviewState.COMPLETED,
-    ):
-        return False
-    required_body_count = center_seed_size(preview.source_kind)
-    if (
-        len(preview.unit_ids) < required_body_count
-        or preview.zd_tick is None
-        or preview.zg_tick is None
-    ):
-        return False
-    if preview.source_kind is not SourceKind.TREND_TYPE:
-        role_count = _preview_lifecycle_role_count(preview)
-        if preview.establishment_leave_unit_id is None:
-            if preview.state is not CenterPreviewState.FORMING or role_count != 4:
-                return False
-        elif role_count < 5:
-            return False
-    return (
-        preview.zd_tick <= preview.zg_tick
-        if preview.source_kind is SourceKind.TREND_TYPE
-        else preview.zd_tick < preview.zg_tick
+        (
+            item
+            for item in candidates
+            if max(item.low_tick, center.zd_tick) < min(item.high_tick, center.zg_tick)
+        )
     )
 
 
 def aware_datetime_to_epoch_seconds(value: datetime) -> int:
     """把带时区时间精确转换为 UTC Unix 秒坐标。"""
-
     if not isinstance(value, datetime):
         raise TypeError("chart time must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
@@ -156,7 +80,6 @@ def _optional_epoch(value: datetime | None) -> int | None:
 
 def _unit_audit_payload(unit: ConstituentUnit) -> dict[str, object]:
     """序列化一个严格单元，供中枢进入、离开证据审计展示。"""
-
     if not isinstance(unit, ConstituentUnit):
         raise TypeError("center audit unit must be a ConstituentUnit")
     return {
@@ -180,17 +103,27 @@ def _center_lifecycle_payload(
     completed: bool,
     provisional: bool = False,
     observation: bool = False,
+    departure_direction: str | None = None,
+    independent_leave: bool = True,
 ) -> dict[str, object]:
     """序列化唯一的同级离开、回返生命周期契约。"""
-
     leave = completion_leave if completed else pending_leave
     expected_point_type = (
-        None if leave is None else "3buy" if leave.direction == "up" else "3sell"
+        None
+        if leave is None
+        else "3buy"
+        if (departure_direction or leave.direction) == "up"
+        else "3sell"
     )
     if observation:
         phase = "NON_TRADABLE_OBSERVATION"
         point_type = None
         point_status = None
+    elif not independent_leave:
+        phase = "SHARED_CORE_EXIT_INTERPRETATION"
+        point_type = None
+        expected_point_type = None
+        point_status = "interpretation_only"
     elif completed and provisional:
         phase = "GEOMETRIC_THIRD_CLASS_POINT"
         point_type = expected_point_type
@@ -215,23 +148,41 @@ def _center_lifecycle_payload(
     }
 
 
+def _center_frame_payload(center: TrendCenter) -> dict[str, object]:
+    frame = center_frame_evidence(center)
+    return {
+        "third_class_confirmation_rule": "independent_leave_after_three_core_children",
+        "minimum_third_class_role_count": 5,
+        "third_class_confirmed": center.third_class_confirmed,
+        "core_formed": frame["core_formed"],
+        "frame_qualified": frame["frame_qualified"],
+        "frame_missing_conditions": list(frame["frame_missing_conditions"]),
+        "frame_leave_unit_id": frame["frame_leave_unit_id"],
+        "frame_available_at": aware_datetime_to_epoch_seconds(frame["available_at"]),
+        "center_ended": center.third_class_confirmed,
+        "center_end_available_at": _optional_epoch(
+            center.completion_available_at if center.third_class_confirmed else None
+        ),
+        "center_end_rule": "independent_completed_lower_leave_and_first_outside_return",
+    }
+
+
 def _center_payload(
-    center: TrendCenter,
-    *,
-    render_kind: str,
-    tradable: bool,
+    center: TrendCenter, *, render_kind: str, tradable: bool
 ) -> dict[str, object]:
     if not isinstance(center, TrendCenter):
         raise TypeError("center must be a TrendCenter")
     if not center.has_minimum_physical_roles:
-        raise ValueError("physical chart center requires five complete roles")
-    if (
-        center.zd_tick > center.zg_tick
-        if center.source_kind is SourceKind.TREND_TYPE
-        else center.zd_tick >= center.zg_tick
-    ):
+        raise ValueError("chart center lacks its declared formation evidence")
+    if center.zd_tick >= center.zg_tick:
         raise ValueError("formal chart center violates source overlap contract")
-    leaving_unit = center.completion_leave_unit or center.pending_leave_unit
+    leaving_unit = center_frame_leave(center)
+    from chanlun.core.strict_structure.center_frame import (
+        directional_frame_end,
+        directional_ownership_pending,
+    )
+
+    frame_end = directional_frame_end(center)
     establishment_units = center.establishment_units
     overlap_units = _center_overlap_units(center)
     failed_revision = (
@@ -243,20 +194,25 @@ def _center_payload(
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": render_kind,
         "center_id": center.center_id,
-        "render_id": (
-            f"{center.center_id}@{center.body_revision}{failed_revision}"
-            f"@{center.state.value}"
-        ),
+        "render_id": f"{center.center_id}@{center.body_revision}{failed_revision}@{center.state.value}",
         "body_revision": center.body_revision,
         "structural_level": center.structural_level,
         "source_kind": center.source_kind.value,
+        "formation_rule": center.formation_rule,
+        "boundary_contact": center.boundary_contact,
         "state": center.state.value,
-        "tradable": bool(tradable and center.physically_completed),
+        "tradable": bool(tradable and center.third_class_confirmed),
+        **_center_frame_payload(center),
         **_center_lifecycle_payload(
             pending_leave=center.pending_leave_unit,
             completion_leave=center.completion_leave_unit,
             completed=center.physically_completed,
-            observation=(center.source_kind is SourceKind.STROKE_OBSERVATION),
+            observation=center.source_kind is SourceKind.STROKE_OBSERVATION,
+            departure_direction=center.departure_direction(center.lifecycle_leave_unit)
+            if center.lifecycle_leave_unit
+            else None,
+            independent_leave=center.lifecycle_leave_unit is None
+            or center.has_independent_third_class_leave(center.lifecycle_leave_unit),
         ),
         "points": [
             {
@@ -266,88 +222,84 @@ def _center_payload(
                 "price_tick": center.zg_tick,
             },
             {
-                "time": aware_datetime_to_epoch_seconds(
-                    center.display_range_end_market_time
-                ),
+                "time": aware_datetime_to_epoch_seconds(frame_end),
                 "price_tick": center.zd_tick,
             },
         ],
         "display_range": {
             "start_role": "middle_three_first_start",
-            "end_role": (
-                "body_tail_end" if center.extension_units else "middle_three_last_end"
-            ),
+            "end_role": "directional_leave_start_ownership_pending"
+            if directional_ownership_pending(center)
+            else "body_tail_end"
+            if center.extension_units
+            else "middle_three_last_end",
             "includes_entry": False,
             "includes_leave": False,
             "price_core_source": "middle_three_intersection",
         },
+        "directional_ownership_pending": directional_ownership_pending(center),
+        "lifecycle_range_end": aware_datetime_to_epoch_seconds(
+            center.display_range_end_market_time
+        ),
+        "frame_body_unit_ids": [
+            u.unit_id
+            for u in sorted(
+                (*center.body_units, *center.failed_departure_units),
+                key=lambda unit: unit.market_start,
+            )
+            if u.market_end <= frame_end
+        ],
         "core": {"zd_tick": center.zd_tick, "zg_tick": center.zg_tick},
         "envelope": {"dd_tick": center.dd_tick, "gg_tick": center.gg_tick},
-        "entry_unit_id": (
-            None if center.entry_unit is None else center.entry_unit.unit_id
-        ),
+        "entry_unit_id": None
+        if center.entry_unit is None
+        else center.entry_unit.unit_id,
         "entry_role": None if center.entry_unit is None else "external_entry",
         "lifecycle_role_count": center.lifecycle_role_count,
-        "minimum_lifecycle_role_count": (
-            3 if center.source_kind is SourceKind.TREND_TYPE else 5
-        ),
+        "minimum_lifecycle_role_count": 5,
         "core_component_count": 3,
         "overlap_component_count": len(overlap_units),
         "establishment_component_count": len(establishment_units),
         "establishment_segment_ids": [unit.unit_id for unit in establishment_units],
         "middle_three_component_ids": [unit.unit_id for unit in center.core_units],
         "core_unit_ids": [unit.unit_id for unit in center.core_units],
-        "establishment_leave_unit_id": (
-            None
-            if center.establishment_leave_unit is None
-            else center.establishment_leave_unit.unit_id
-        ),
-        "initial_exit_unit_id": (
-            None
-            if center.establishment_leave_unit is None
-            else center.establishment_leave_unit.unit_id
-        ),
+        "establishment_leave_unit_id": None
+        if center.establishment_leave_unit is None
+        else center.establishment_leave_unit.unit_id,
+        "initial_exit_unit_id": None
+        if center.establishment_leave_unit is None
+        else center.establishment_leave_unit.unit_id,
         "initial_unit_ids": [unit.unit_id for unit in center.initial_units],
         "body_unit_ids": [unit.unit_id for unit in center.body_units],
         "extension_unit_ids": [unit.unit_id for unit in center.extension_units],
         "failed_departure_unit_ids": [
             unit.unit_id for unit in center.failed_departure_units
         ],
-        "pending_leave_unit_id": (
-            None
-            if center.pending_leave_unit is None
-            else center.pending_leave_unit.unit_id
-        ),
-        "completion_leave_unit_id": (
-            None
-            if center.completion_leave_unit is None
-            else center.completion_leave_unit.unit_id
-        ),
-        "completion_return_unit_id": (
-            None
-            if center.completion_return_unit is None
-            else center.completion_return_unit.unit_id
-        ),
+        "pending_leave_unit_id": None
+        if center.pending_leave_unit is None
+        else center.pending_leave_unit.unit_id,
+        "completion_leave_unit_id": None
+        if center.completion_leave_unit is None
+        else center.completion_leave_unit.unit_id,
+        "completion_return_unit_id": None
+        if center.completion_return_unit is None
+        else center.completion_return_unit.unit_id,
         "completion_direction": center.completion_direction,
-        "boundary_divergence_id": center.boundary_divergence_id,
-        "boundary_anchor_unit_id": center.boundary_anchor_unit_id,
+        "boundary_divergence_id": None,
+        "boundary_anchor_unit_id": None,
         "superseded_by_center_id": center.superseded_by_center_id,
-        "superseded_at": (
-            None
-            if center.superseded_at is None
-            else aware_datetime_to_epoch_seconds(center.superseded_at)
-        ),
+        "superseded_at": None
+        if center.superseded_at is None
+        else aware_datetime_to_epoch_seconds(center.superseded_at),
         "supersession_bridge_unit_ids": [
             item.unit_id for item in center.supersession_bridge_units
         ],
         "supersession_bridge_units": [
             _unit_audit_payload(item) for item in center.supersession_bridge_units
         ],
-        "entering_segment": (
-            None
-            if center.entry_unit is None
-            else _unit_audit_payload(center.entry_unit)
-        ),
+        "entering_segment": None
+        if center.entry_unit is None
+        else _unit_audit_payload(center.entry_unit),
         "middle_three_components": [
             _unit_audit_payload(unit) for unit in center.core_units
         ],
@@ -355,14 +307,15 @@ def _center_payload(
         "establishment_segments": [
             _unit_audit_payload(unit) for unit in establishment_units
         ],
-        "leaving_segment": (
-            None if leaving_unit is None else _unit_audit_payload(leaving_unit)
-        ),
-        "completion_return_segment": (
-            None
-            if center.completion_return_unit is None
-            else _unit_audit_payload(center.completion_return_unit)
-        ),
+        "leaving_segment": None
+        if leaving_unit is None
+        else _unit_audit_payload(leaving_unit),
+        "lifecycle_leaving_segment": None
+        if center.lifecycle_leave_unit is None
+        else _unit_audit_payload(center.lifecycle_leave_unit),
+        "completion_return_segment": None
+        if center.completion_return_unit is None
+        else _unit_audit_payload(center.completion_return_unit),
         "established_market_time": aware_datetime_to_epoch_seconds(
             center.established_market_time
         ),
@@ -374,954 +327,11 @@ def _center_payload(
 
 def strict_center_to_chart_dict(center: TrendCenter) -> dict[str, object]:
     """在不改变来源几何的前提下序列化正式中枢。"""
-
     if center.source_kind is SourceKind.STROKE_OBSERVATION:
         raise ValueError("formal serializer rejects stroke observation")
     if not center.tradable:
         raise ValueError("formal chart center must be tradable")
-    return _center_payload(
-        center,
-        render_kind="formal_center",
-        tradable=True,
-    )
-
-
-def center_observation_to_chart_dict(
-    center: TrendCenter,
-) -> dict[str, object]:
-    """序列化明确不可交易的笔中枢观察。"""
-
-    if center.source_kind is not SourceKind.STROKE_OBSERVATION:
-        raise ValueError("center observation requires stroke_observation source")
-    return _center_payload(
-        center,
-        render_kind="center_observation",
-        tradable=False,
-    )
-
-
-def active_center_projection_to_chart_dict(
-    center: TrendCenter,
-    source_closed_at: datetime,
-) -> dict[str, object]:
-    """构建唯一活动框，但不把框体延伸到离开段。"""
-
-    if center.source_kind is SourceKind.STROKE_OBSERVATION:
-        raise ValueError("formal center projection rejects stroke observation")
-    if center.state not in _ACTIVE_CENTER_STATES:
-        raise ValueError("center projection requires an active center")
-    if not center.has_minimum_physical_roles:
-        raise ValueError("physical center projection requires five complete roles")
-    closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
-    lifecycle_end_epoch = aware_datetime_to_epoch_seconds(
-        center.display_range_end_market_time
-    )
-    if closed_epoch < lifecycle_end_epoch:
-        raise ValueError("source close cannot precede center lifecycle end")
-    display_start_epoch = aware_datetime_to_epoch_seconds(
-        center.display_range_start_market_time
-    )
-    leaving_unit = center.pending_leave_unit
-    overlap_units = _center_overlap_units(center)
-    failed_revision = (
-        ""
-        if not center.failed_departure_units
-        else f"@failed{len(center.failed_departure_units)}"
-    )
-    return {
-        "schema": CHART_CENTER_SCHEMA,
-        "render_kind": "center_projection",
-        "center_id": center.center_id,
-        "render_id": (
-            f"{center.center_id}@{center.body_revision}{failed_revision}"
-            f"@{center.state.value}"
-            f"@projection@{closed_epoch}"
-        ),
-        "body_revision": center.body_revision,
-        "structural_level": center.structural_level,
-        "source_kind": center.source_kind.value,
-        "state": center.state.value,
-        "tradable": False,
-        **_center_lifecycle_payload(
-            pending_leave=center.pending_leave_unit,
-            completion_leave=None,
-            completed=False,
-        ),
-        "points": [
-            {"time": display_start_epoch, "price_tick": center.zg_tick},
-            {"time": lifecycle_end_epoch, "price_tick": center.zd_tick},
-        ],
-        "display_range": {
-            "start_role": "middle_three_first_start",
-            "end_role": (
-                "body_tail_end" if center.extension_units else "middle_three_last_end"
-            ),
-            "includes_entry": False,
-            "includes_leave": False,
-            "price_core_source": "middle_three_intersection",
-        },
-        "core": {"zd_tick": center.zd_tick, "zg_tick": center.zg_tick},
-        "envelope": {"dd_tick": center.dd_tick, "gg_tick": center.gg_tick},
-        "entry_unit_id": (
-            None if center.entry_unit is None else center.entry_unit.unit_id
-        ),
-        "entry_role": None if center.entry_unit is None else "external_entry",
-        "lifecycle_role_count": center.lifecycle_role_count,
-        "minimum_lifecycle_role_count": (
-            3 if center.source_kind is SourceKind.TREND_TYPE else 5
-        ),
-        "core_component_count": 3,
-        "overlap_component_count": len(overlap_units),
-        "establishment_component_count": len(center.establishment_units),
-        "establishment_segment_ids": [
-            unit.unit_id for unit in center.establishment_units
-        ],
-        "core_unit_ids": [unit.unit_id for unit in center.core_units],
-        "establishment_leave_unit_id": (
-            None
-            if center.establishment_leave_unit is None
-            else center.establishment_leave_unit.unit_id
-        ),
-        "initial_exit_unit_id": (
-            None
-            if center.establishment_leave_unit is None
-            else center.establishment_leave_unit.unit_id
-        ),
-        "initial_unit_ids": [unit.unit_id for unit in center.initial_units],
-        "body_unit_ids": [unit.unit_id for unit in center.body_units],
-        "extension_unit_ids": [unit.unit_id for unit in center.extension_units],
-        "failed_departure_unit_ids": [
-            unit.unit_id for unit in center.failed_departure_units
-        ],
-        "pending_leave_unit_id": (
-            None if leaving_unit is None else leaving_unit.unit_id
-        ),
-        "completion_leave_unit_id": None,
-        "completion_return_unit_id": None,
-        "entering_segment": (
-            None
-            if center.entry_unit is None
-            else _unit_audit_payload(center.entry_unit)
-        ),
-        "middle_three_component_ids": [unit.unit_id for unit in center.core_units],
-        "middle_three_components": [
-            _unit_audit_payload(unit) for unit in center.core_units
-        ],
-        "overlap_components": [_unit_audit_payload(unit) for unit in overlap_units],
-        "establishment_segments": [
-            _unit_audit_payload(unit) for unit in center.establishment_units
-        ],
-        "leaving_segment": (
-            None if leaving_unit is None else _unit_audit_payload(leaving_unit)
-        ),
-        "source_center_render_id": (
-            f"{center.center_id}@{center.body_revision}@{center.state.value}"
-        ),
-        "available_at": aware_datetime_to_epoch_seconds(center.available_at),
-    }
-
-
-def strict_center_preview_to_chart_dict(
-    preview: CenterPreview,
-    units: tuple[ConstituentUnit, ...],
-    source_closed_at: datetime,
-) -> dict[str, object]:
-    """序列化一个不可交易的临时中枢生命周期。"""
-
-    if not isinstance(preview, CenterPreview):
-        raise TypeError("preview must be a CenterPreview")
-    if not _renderable_center_preview(preview):
-        raise ValueError("chart center preview requires a source-valid center core")
-
-    values = tuple(units)
-    by_id = {item.unit_id: item for item in values}
-    if len(by_id) != len(values):
-        raise ValueError("chart center preview units require unique ids")
-    try:
-        entry = None if preview.entry_unit_id is None else by_id[preview.entry_unit_id]
-        body = tuple(by_id[item_id] for item_id in preview.unit_ids)
-        failed_departures = tuple(
-            by_id[item_id] for item_id in preview.failed_departure_unit_ids
-        )
-        pending_leave = (
-            None
-            if preview.pending_leave_unit_id is None
-            else by_id[preview.pending_leave_unit_id]
-        )
-        completion_leave = (
-            None
-            if preview.completion_leave_unit_id is None
-            else by_id[preview.completion_leave_unit_id]
-        )
-        completion_return = (
-            None
-            if preview.completion_return_unit_id is None
-            else by_id[preview.completion_return_unit_id]
-        )
-        establishment_leave = (
-            None
-            if preview.establishment_leave_unit_id is None
-            else by_id[preview.establishment_leave_unit_id]
-        )
-    except KeyError as exc:
-        raise ValueError("chart center preview unit is absent from level") from exc
-    core_units = body[:3]
-    seed_width = center_seed_size(preview.source_kind)
-    initial_units = body[:seed_width]
-    transition_units = (
-        *body,
-        *failed_departures,
-        *((pending_leave,) if pending_leave is not None else ()),
-        *((completion_leave,) if completion_leave is not None else ()),
-        *((completion_return,) if completion_return is not None else ()),
-    )
-    transition_ids = tuple(item.unit_id for item in transition_units)
-    if len(transition_ids) != len(set(transition_ids)):
-        raise ValueError("chart center preview transition ownership must be unique")
-    ordered_transitions = tuple(
-        sorted(
-            transition_units,
-            key=lambda item: (item.market_start, item.market_end, item.unit_id),
-        )
-    )
-    body_ids = {item.unit_id for item in body}
-    failed_ids = {item.unit_id for item in failed_departures}
-    if not ordered_transitions or ordered_transitions[0] != body[0]:
-        raise ValueError(
-            "chart center preview transition history must start at its body"
-        )
-    if tuple(item for item in ordered_transitions if item.unit_id in body_ids) != body:
-        raise ValueError("chart center preview body order conflicts with transitions")
-    if (
-        tuple(item for item in ordered_transitions if item.unit_id in failed_ids)
-        != failed_departures
-    ):
-        raise ValueError(
-            "chart center preview failed history order conflicts with transitions"
-        )
-    lifecycle_tail = ordered_transitions[-1]
-    lifecycle_units = (
-        *((entry,) if entry is not None else ()),
-        *ordered_transitions,
-    )
-    if any(
-        item.structural_level != preview.structural_level
-        or item.source_kind is not preview.source_kind
-        or item.price_basis_revision != preview.price_basis_revision
-        for item in lifecycle_units
-    ):
-        raise ValueError("chart center preview unit context mismatch")
-    unlocked_seen = False
-    for item in lifecycle_units:
-        if not item.locked:
-            unlocked_seen = True
-        elif unlocked_seen:
-            raise ValueError("chart center preview units must have a locked prefix")
-    for previous, current in zip(lifecycle_units, lifecycle_units[1:]):
-        if (
-            (
-                preview.source_kind is SourceKind.SEGMENT
-                and previous.direction == current.direction
-            )
-            or previous.end_tick != current.start_tick
-            or current.market_start < previous.market_end
-        ):
-            raise ValueError("chart center preview lifecycle is disconnected")
-    expected_zd = max(item.low_tick for item in core_units)
-    expected_zg = min(item.high_tick for item in core_units)
-    if (preview.zd_tick, preview.zg_tick) != (expected_zd, expected_zg):
-        raise ValueError("chart center preview core does not match its seed")
-        # 每个线段成分都必须与冻结核心形成正宽度重叠。递归走势类型继续沿用原有
-        # 闭区间相等规则；完成回抽有意不计入 ``body``。
-    if any(
-        (
-            max(item.low_tick, preview.zd_tick) > min(item.high_tick, preview.zg_tick)
-            if preview.source_kind is SourceKind.TREND_TYPE
-            else max(item.low_tick, preview.zd_tick)
-            >= min(item.high_tick, preview.zg_tick)
-        )
-        for item in body
-    ):
-        raise ValueError("chart center preview body must positively overlap its core")
-    transition_offsets = {
-        item.unit_id: offset for offset, item in enumerate(ordered_transitions)
-    }
-    for failed in failed_departures:
-        touches_core = max(failed.low_tick, preview.zd_tick) <= min(
-            failed.high_tick,
-            preview.zg_tick,
-        )
-        ends_outside = (
-            failed.end_tick > preview.zg_tick
-            if failed.direction == "up"
-            else failed.end_tick < preview.zd_tick
-        )
-        offset = transition_offsets[failed.unit_id]
-        if offset + 1 >= len(ordered_transitions):
-            raise ValueError("chart center preview failed departure requires a return")
-        ret = ordered_transitions[offset + 1]
-        return_overlaps = (
-            max(ret.low_tick, preview.zd_tick) <= min(ret.high_tick, preview.zg_tick)
-            if preview.source_kind is SourceKind.TREND_TYPE
-            else max(ret.low_tick, preview.zd_tick)
-            < min(ret.high_tick, preview.zg_tick)
-        )
-        if not touches_core or not ends_outside or not return_overlaps:
-            raise ValueError(
-                "chart center preview failed departure geometry is invalid"
-            )
-    if source_closed_at < lifecycle_tail.market_end:
-        raise ValueError("source close cannot precede center preview tail")
-    if preview.state is CenterPreviewState.COMPLETED:
-        if completion_leave is None or completion_return is None:
-            raise ValueError("completed chart preview requires leave and return units")
-        if (
-            completion_leave.end_tick <= preview.zg_tick
-            if completion_leave.direction == "up"
-            else completion_leave.end_tick >= preview.zd_tick
-        ):
-            raise ValueError("completed chart preview leave geometry is invalid")
-        return_stays_outside = (
-            completion_return.direction == "down"
-            and completion_return.low_tick >= preview.zg_tick
-            if completion_leave.direction == "up"
-            else completion_return.direction == "up"
-            and completion_return.high_tick <= preview.zd_tick
-        )
-        if not return_stays_outside:
-            raise ValueError(
-                "completed chart preview return must stay outside its core"
-            )
-    else:
-        if completion_leave is not None or completion_return is not None:
-            raise ValueError("forming chart preview cannot retain completion evidence")
-
-    leaving_unit = (
-        completion_leave
-        if preview.state is CenterPreviewState.COMPLETED
-        else pending_leave
-    )
-    if leaving_unit is not None:
-        if max(leaving_unit.low_tick, preview.zd_tick) > min(
-            leaving_unit.high_tick, preview.zg_tick
-        ):
-            raise ValueError("chart center preview leave must touch its core")
-    establishment_units = (
-        tuple(initial_units)
-        if preview.source_kind is SourceKind.TREND_TYPE
-        else (
-            *((entry,) if entry is not None else ()),
-            *initial_units,
-            *((establishment_leave,) if establishment_leave is not None else ()),
-        )
-    )
-    establishment_maturity_unit = (
-        initial_units[-1]
-        if preview.source_kind is SourceKind.TREND_TYPE
-        else establishment_leave
-    )
-    establishment_locked = (
-        establishment_maturity_unit is not None
-        and all(item.locked for item in establishment_units)
-        and (
-            preview.source_kind is SourceKind.TREND_TYPE
-            or len(establishment_units) == 5
-        )
-    )
-    overlap_units = (
-        tuple(core_units)
-        if preview.source_kind is SourceKind.TREND_TYPE
-        else tuple(
-            item
-            for item in _unique_units_in_time_order(
-                (
-                    *((entry,) if entry is not None else ()),
-                    *body,
-                    *(
-                        (establishment_leave,)
-                        if establishment_leave is not None
-                        else ()
-                    ),
-                    *failed_departures,
-                    *((leaving_unit,) if leaving_unit is not None else ()),
-                )
-            )
-            if max(item.low_tick, preview.zd_tick)
-            < min(item.high_tick, preview.zg_tick)
-        )
-    )
-    if preview.source_kind is not SourceKind.TREND_TYPE and any(
-        max(item.low_tick, preview.zd_tick) >= min(item.high_tick, preview.zg_tick)
-        for item in overlap_units
-    ):
-        raise ValueError(
-            "physical chart preview roles must positively overlap its core"
-        )
-    preview_id = stable_structure_id(
-        "chanlun-center-preview",
-        preview.price_basis_revision,
-        preview.structural_level,
-        preview.source_kind.value,
-        preview.entry_unit_id,
-        preview.unit_ids[:seed_width],
-        preview.establishment_leave_unit_id,
-        preview.zd_tick,
-        preview.zg_tick,
-    )
-    formal_center_id = preview.formal_center_id
-    closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
-    completed = preview.state is CenterPreviewState.COMPLETED
-    failed_revision = (
-        "" if not failed_departures else f"@failed{len(failed_departures)}"
-    )
-    end_epoch = (
-        aware_datetime_to_epoch_seconds(leaving_unit.market_start)
-        if leaving_unit is not None
-        else aware_datetime_to_epoch_seconds(body[-1].market_end)
-    )
-    return {
-        "schema": CHART_CENTER_SCHEMA,
-        "render_kind": "center_preview",
-        # ``center_id`` follows the source-specific immutable establishment
-        # identity.  Physical previews require all five roles to be locked.
-        "center_id": formal_center_id,
-        "preview_id": preview_id,
-        "render_id": (
-            f"{preview_id}@{preview.state.value}@{len(body) - seed_width}"
-            f"{failed_revision}"
-            f"@{preview.completion_return_unit_id or closed_epoch}"
-        ),
-        "body_revision": len(body) - seed_width,
-        "structural_level": preview.structural_level,
-        "source_kind": preview.source_kind.value,
-        "state": preview.state.value,
-        "tradable": False,
-        **_center_lifecycle_payload(
-            pending_leave=pending_leave,
-            completion_leave=completion_leave,
-            completed=completed,
-            provisional=completed,
-        ),
-        "points": [
-            {
-                "time": aware_datetime_to_epoch_seconds(core_units[0].market_start),
-                "price_tick": preview.zg_tick,
-            },
-            {"time": end_epoch, "price_tick": preview.zd_tick},
-        ],
-        "display_range": {
-            "start_role": "middle_three_first_start",
-            "end_role": ("body_tail_end" if len(body) > 3 else "middle_three_last_end"),
-            "includes_entry": False,
-            "includes_leave": False,
-            "price_core_source": "middle_three_intersection",
-        },
-        "core": {"zd_tick": preview.zd_tick, "zg_tick": preview.zg_tick},
-        "envelope": {
-            "dd_tick": min(item.low_tick for item in body),
-            "gg_tick": max(item.high_tick for item in body),
-        },
-        "entry_unit_id": None if entry is None else entry.unit_id,
-        "entry_role": None if entry is None else "external_entry",
-        "lifecycle_role_count": _preview_lifecycle_role_count(preview),
-        "minimum_lifecycle_role_count": (
-            3 if preview.source_kind is SourceKind.TREND_TYPE else 5
-        ),
-        "core_component_count": 3,
-        "overlap_component_count": len(overlap_units),
-        "establishment_component_count": len(establishment_units),
-        "establishment_segment_ids": [item.unit_id for item in establishment_units],
-        "middle_three_component_ids": [item.unit_id for item in core_units],
-        "core_unit_ids": [item.unit_id for item in core_units],
-        "establishment_leave_unit_id": (
-            None if establishment_leave is None else establishment_leave.unit_id
-        ),
-        "initial_exit_unit_id": (
-            None if establishment_leave is None else establishment_leave.unit_id
-        ),
-        "initial_unit_ids": [item.unit_id for item in initial_units],
-        "body_unit_ids": [item.unit_id for item in body],
-        "extension_unit_ids": [item.unit_id for item in body[seed_width:]],
-        "failed_departure_unit_ids": [item.unit_id for item in failed_departures],
-        "pending_leave_unit_id": (
-            leaving_unit.unit_id
-            if (not completed and leaving_unit is not None)
-            else None
-        ),
-        "completion_leave_unit_id": (
-            None if completion_leave is None else completion_leave.unit_id
-        ),
-        "completion_return_unit_id": (
-            None if completion_return is None else completion_return.unit_id
-        ),
-        "completion_direction": (
-            None if completion_leave is None else completion_leave.direction
-        ),
-        "entering_segment": (None if entry is None else _unit_audit_payload(entry)),
-        "middle_three_components": [_unit_audit_payload(item) for item in core_units],
-        "overlap_components": [_unit_audit_payload(item) for item in overlap_units],
-        "establishment_segments": [
-            _unit_audit_payload(item) for item in establishment_units
-        ],
-        "leaving_segment": (
-            None if leaving_unit is None else _unit_audit_payload(leaving_unit)
-        ),
-        "completion_return_segment": (
-            None
-            if completion_return is None
-            else _unit_audit_payload(completion_return)
-        ),
-        "established_market_time": (
-            aware_datetime_to_epoch_seconds(establishment_maturity_unit.market_end)
-            if establishment_locked and establishment_maturity_unit is not None
-            else None
-        ),
-        "established_at": _optional_epoch(
-            establishment_maturity_unit.confirmed_at
-            if establishment_locked and establishment_maturity_unit is not None
-            else None
-        ),
-        # 几何完成但回返单元未锁定时没有正式确认时间。这里必须保持空值，
-        # 防止消费者把盘中三类形态误当成已确认交易信号。
-        "completed_at": None,
-        "available_at": aware_datetime_to_epoch_seconds(preview.available_at),
-    }
-
-
-def _formal_direction_payload(
-    state: FormalDirectionState,
-) -> dict[str, object]:
-    """把正式方向状态转为稳定、可审计的图表字段。"""
-
-    return {
-        "direction": state.direction,
-        "structural_level": state.structural_level,
-        "trend_id": state.trend_id,
-        "support_point_id": state.support_point_id,
-        "reason_codes": list(state.reason_codes),
-    }
-
-
-def _trend_direction_status(
-    trend: TrendType,
-    formal_direction: FormalDirectionState | None,
-) -> str:
-    """区分几何走势、正式方向、待确认反转和已经结束的走势。"""
-
-    if trend.kind is TrendKind.CONSOLIDATION:
-        return "consolidation"
-    is_formal_target = (
-        formal_direction is not None
-        and formal_direction.structural_level == trend.structural_level
-        and formal_direction.trend_id == trend.trend_id
-    )
-    if is_formal_target and formal_direction.direction in {"up", "down"}:
-        return "formal"
-    if is_formal_target and (
-        "direction_change_lacks_first_or_second_point" in formal_direction.reason_codes
-    ):
-        return "awaiting_reversal_support"
-    if trend.state is not TrendState.FORMING or trend.terminal_divergence is not None:
-        return "ended"
-    return "geometric_candidate"
-
-
-def strict_trend_to_chart_dict(
-    trend: TrendType,
-    *,
-    formal_direction: FormalDirectionState | None = None,
-) -> dict[str, object]:
-    """序列化一条严格走势，并显式标明它是否属于正式方向。"""
-
-    if not isinstance(trend, TrendType):
-        raise TypeError("走势必须是 TrendType")
-    if formal_direction is not None and not isinstance(
-        formal_direction,
-        FormalDirectionState,
-    ):
-        raise TypeError("正式方向必须是 FormalDirectionState")
-    terminal_id = trend.terminal_unit.unit_id
-    first_unit_direction = trend.constituent_units[0].direction
-    terminal_unit_direction = trend.constituent_units[-1].direction
-    constituent_unit_count = len(trend.constituent_units)
-    direction_aligned = (
-        first_unit_direction == trend.direction
-        and terminal_unit_direction == trend.direction
-        and constituent_unit_count % 2 == 1
-    )
-    direction_status = _trend_direction_status(trend, formal_direction)
-    is_formal_target = (
-        formal_direction is not None
-        and formal_direction.structural_level == trend.structural_level
-        and formal_direction.trend_id == trend.trend_id
-    )
-    semantic_direction = semantic_trend_direction(trend)
-    return {
-        "schema": "chanlun-chart-trend",
-        "render_kind": "strict_trend",
-        "trend_id": trend.trend_id,
-        "render_id": (
-            f"{trend.trend_id}@{trend.state.value}@{terminal_id}@{direction_status}"
-        ),
-        "structural_level": trend.structural_level,
-        "source_kind": trend.terminal_unit.source_kind.value,
-        "state": trend.state.value,
-        "kind": trend.kind.value,
-        # direction 保留递归结构所需的首尾几何方向；正式走势方向只能读取
-        # semantic_direction 与 direction_status，二者不得互相替代。
-        "direction": trend.direction,
-        "geometric_direction": trend.direction,
-        "semantic_direction": semantic_direction,
-        "direction_status": direction_status,
-        "formal_direction_confirmed": direction_status == "formal",
-        "formal_support_point_id": (
-            formal_direction.support_point_id if is_formal_target else None
-        ),
-        "direction_reason_codes": (
-            list(formal_direction.reason_codes) if is_formal_target else []
-        ),
-        "tradable": trend.terminal_unit.source_kind
-        is not SourceKind.STROKE_OBSERVATION,
-        "points": [
-            {
-                "time": aware_datetime_to_epoch_seconds(trend.market_start),
-                "price_tick": trend.start_tick,
-            },
-            {
-                "time": aware_datetime_to_epoch_seconds(trend.market_end),
-                "price_tick": trend.end_tick,
-            },
-        ],
-        "range": {"low_tick": trend.low_tick, "high_tick": trend.high_tick},
-        "center_ids": [center.center_id for center in trend.centers],
-        "constituent_unit_ids": [unit.unit_id for unit in trend.constituent_units],
-        "constituent_unit_count": constituent_unit_count,
-        "first_unit_direction": first_unit_direction,
-        "terminal_unit_direction": terminal_unit_direction,
-        "direction_aligned": direction_aligned,
-        "completion_witness_unit_ids": [
-            unit.unit_id for unit in trend.completion_witness_units
-        ],
-        "confirmed_at": _optional_epoch(trend.confirmed_at),
-        "available_at": aware_datetime_to_epoch_seconds(trend.available_at),
-    }
-
-
-def pending_movement_to_chart_dict(
-    partition: PendingMovementPartition,
-) -> dict[str, object]:
-    """Serialize a non-formal movement without promoting it to ``TrendType``."""
-
-    if not isinstance(partition, PendingMovementPartition):
-        raise TypeError("partition must be a PendingMovementPartition")
-    first = partition.constituent_units[0]
-    last = partition.constituent_units[-1]
-    return {
-        "schema": "chanlun-chart-pending-movement",
-        "render_kind": "pending_movement",
-        "partition_id": partition.partition_id,
-        "render_id": partition.partition_id,
-        "structural_level": partition.structural_level,
-        "source_kind": partition.source_kind.value,
-        "price_basis_revision": partition.price_basis_revision,
-        "state": partition.state,
-        "classification": partition.classification,
-        "role": partition.role.value,
-        "direction": partition.direction,
-        "geometric_direction": partition.direction,
-        "semantic_direction": None,
-        "direction_status": "pending",
-        "formal_direction_confirmed": False,
-        "tradable": partition.tradable,
-        "recursive_eligible": partition.recursive_eligible,
-        "divergence_eligible": partition.divergence_eligible,
-        "boundary_policy": "exclusive_unit_ownership",
-        "left_trend_id": partition.left_trend_id,
-        "right_trend_id": partition.right_trend_id,
-        "left_boundary_unit_id": partition.left_boundary_unit_id,
-        "right_boundary_unit_id": partition.right_boundary_unit_id,
-        "points": [
-            {
-                "time": aware_datetime_to_epoch_seconds(first.market_start),
-                "price_tick": first.start_tick,
-            },
-            {
-                "time": aware_datetime_to_epoch_seconds(last.market_end),
-                "price_tick": last.end_tick,
-            },
-        ],
-        "range": {
-            "low_tick": min(item.low_tick for item in partition.constituent_units),
-            "high_tick": max(item.high_tick for item in partition.constituent_units),
-        },
-        "constituent_unit_ids": [item.unit_id for item in partition.constituent_units],
-        "confirmed_at": None,
-        "available_at": aware_datetime_to_epoch_seconds(partition.available_at),
-    }
-
-
-def strict_divergence_to_chart_dict(
-    divergence: DivergenceEvidence,
-) -> dict[str, object]:
-    """序列化一条级别明确、彼此独立的正式背驰证据。"""
-
-    if not isinstance(divergence, DivergenceEvidence):
-        raise TypeError("divergence must be a DivergenceEvidence")
-    if divergence.source_kind is SourceKind.STROKE_OBSERVATION:
-        raise ValueError("formal divergence rejects stroke observation")
-    metrics = {
-        "price_extreme_confirmed": divergence.price_extreme_confirmed,
-        "histogram_area_decayed": divergence.histogram_area_decayed,
-        "histogram_peak_decayed": divergence.histogram_peak_decayed,
-        "dif_extreme_decayed": divergence.dif_extreme_decayed,
-        "strength_source": divergence.strength_source,
-        "is_divergent": divergence.is_divergent,
-        "strength_decay_count": divergence.strength_decay_count,
-    }
-    return {
-        "schema": "chanlun-chart-divergence",
-        "render_kind": "strict_divergence",
-        "render_id": divergence.divergence_id,
-        "divergence_id": divergence.divergence_id,
-        "kind": divergence.kind,
-        "direction": divergence.direction,
-        "structural_level": divergence.structural_level,
-        "source_kind": divergence.source_kind.value,
-        "price_basis_revision": divergence.price_basis_revision,
-        "compare_unit_id": divergence.compare_unit_id,
-        "signal_unit_id": divergence.signal_unit_id,
-        "comparison_width": divergence.comparison_width,
-        "compare_leg_unit_ids": list(divergence.compare_leg_unit_ids),
-        "signal_leg_unit_ids": list(divergence.signal_leg_unit_ids),
-        "anchor_at": aware_datetime_to_epoch_seconds(divergence.anchor_at),
-        "anchor_tick": divergence.anchor_tick,
-        "confirmed_at": aware_datetime_to_epoch_seconds(divergence.confirmed_at),
-        "available_at": aware_datetime_to_epoch_seconds(divergence.available_at),
-        "metrics": metrics,
-        "tradable": True,
-        "points": [
-            {
-                "time": aware_datetime_to_epoch_seconds(divergence.anchor_at),
-                "price_tick": divergence.anchor_tick,
-            }
-        ],
-    }
-
-
-def _divergence_payload(point: StrictPointEvidence) -> dict[str, object] | None:
-    divergence = point.divergence
-    if divergence is None:
-        return None
-    payload = strict_divergence_to_chart_dict(divergence)
-    return {
-        key: value
-        for key, value in payload.items()
-        if key not in {"schema", "render_kind", "render_id", "tradable", "points"}
-    }
-
-
-def strict_point_to_chart_dict(
-    point: StrictPointEvidence,
-    *,
-    terminal_segment: TerminalSegmentReference | None = None,
-    operational_confirmed_at: datetime | None = None,
-    operational_confirmation_basis: OperationalConfirmationBasis | None = None,
-    projected_parent_point_ids: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """序列化严格点，并显式区分操作确认与防重绘审计锁。
-
-    严格核心的 ``approaching`` 表示锚定线段尚未完成最终防重绘锁；交易层则在
-    最新已完成线段首次保留完整几何时就确认操作点。图表必须展示与选股相同的
-    操作状态，同时通过 ``strict_status`` 和 ``lock_state`` 保留底层审计事实。
-    """
-
-    if not isinstance(point, StrictPointEvidence):
-        raise TypeError("point must be StrictPointEvidence")
-    if terminal_segment is not None and (
-        terminal_segment.structural_level != point.structural_level
-        or terminal_segment.unit_id != point.anchor_unit_id
-    ):
-        raise ValueError("chart point terminal segment lineage mismatch")
-    operational_confirmation = operational_confirmed_at is not None
-    if operational_confirmation != (operational_confirmation_basis is not None):
-        raise ValueError("operational chart confirmation basis is incomplete")
-    if operational_confirmation and point.status is not StrictPointStatus.APPROACHING:
-        raise ValueError("operational chart confirmation requires approaching evidence")
-    if operational_confirmation_basis == "latest_completed_geometry" and (
-        terminal_segment is None
-        or terminal_segment.role != "latest_completed"
-        or terminal_segment.state not in {"formed", "locked"}
-    ):
-        raise ValueError("latest geometry confirmation requires terminal lineage")
-    if operational_confirmation_basis == "dependency_chain_geometry" and (
-        terminal_segment is not None
-    ):
-        raise ValueError("dependency geometry cannot claim current terminal lineage")
-    if not operational_confirmation and projected_parent_point_ids:
-        raise ValueError("projected parent ids require operational confirmation")
-    if operational_confirmation and (
-        operational_confirmed_at < point.anchor_at
-        or operational_confirmed_at > point.available_at
-    ):
-        raise ValueError("operational chart confirmation time is invalid")
-
-    strict_status = point.status.value
-    status = "confirmed" if operational_confirmation else strict_status
-    evidence_revision = "sha256:" + stable_structure_id(
-        "chanlun-chart-point-evidence",
-        point.point_id,
-        strict_status,
-        status,
-        operational_confirmed_at,
-        operational_confirmation_basis,
-        projected_parent_point_ids,
-        (
-            None
-            if terminal_segment is None
-            else (
-                terminal_segment.role,
-                terminal_segment.structural_level,
-                terminal_segment.unit_id,
-                terminal_segment.state,
-                terminal_segment.available_at,
-            )
-        ),
-        point.variant.value,
-        point.available_at,
-        point.evidence_codes,
-        point.missing_conditions,
-        point.related_point_ids,
-        point.small_to_large_carrier_unit_ids,
-    )
-    render_kind = "point_confirmed" if status == "confirmed" else "point_approaching"
-    render_id = (
-        point.point_id
-        if point.status is StrictPointStatus.CONFIRMED
-        else f"{point.point_id}@{evidence_revision}"
-    )
-    setup_terminal_role = (
-        "dependency_completed"
-        if operational_confirmation_basis == "dependency_chain_geometry"
-        else None
-        if terminal_segment is None
-        else terminal_segment.role
-    )
-    setup_terminal_state = (
-        "formed"
-        if operational_confirmation_basis == "dependency_chain_geometry"
-        else None
-        if terminal_segment is None
-        else terminal_segment.state
-    )
-    setup_state = classify_five_minute_setup_state(
-        point_type=point.point_type,
-        status="confirmed" if status == "confirmed" else "provisional",
-        evidence_codes=point.evidence_codes,
-        missing_conditions=point.missing_conditions,
-        terminal_segment_role=setup_terminal_role,
-        terminal_segment_state=setup_terminal_state,
-    )
-    evidence_codes = tuple(point.evidence_codes)
-    if (
-        operational_confirmation
-        and "geometry_confirmed_before_audit_lock" not in evidence_codes
-    ):
-        evidence_codes = (*evidence_codes, "geometry_confirmed_before_audit_lock")
-    if (
-        operational_confirmation_basis == "dependency_chain_geometry"
-        and "dependency_chain_geometry_confirmation" not in evidence_codes
-    ):
-        evidence_codes = (*evidence_codes, "dependency_chain_geometry_confirmation")
-    if (
-        projected_parent_point_ids
-        and "operational_parent_geometry_confirmed" not in evidence_codes
-    ):
-        evidence_codes = (*evidence_codes, "operational_parent_geometry_confirmed")
-    return {
-        "schema": "chanlun-chart-point",
-        "render_kind": render_kind,
-        "render_id": render_id,
-        "point_id": point.point_id,
-        "point_type": point.point_type,
-        "side": point.side,
-        "status": status,
-        "strict_status": strict_status,
-        "operational_confirmation": operational_confirmation,
-        "confirmation_basis": (
-            operational_confirmation_basis
-            if operational_confirmation
-            else "strict_audit_lock"
-            if point.status is StrictPointStatus.CONFIRMED
-            else None
-        ),
-        "formation_state": setup_state.formation_state,
-        "lock_state": setup_state.lock_state,
-        "actionable": setup_state.actionable,
-        "contains_forming_segment": setup_state.contains_forming_segment,
-        "contains_unlocked_segment": setup_state.contains_unlocked_segment,
-        "terminal_segment_role": setup_terminal_role,
-        "terminal_segment_state": setup_terminal_state,
-        "variant": point.variant.value,
-        "structural_level": point.structural_level,
-        "source_kind": point.source_kind.value,
-        "price_basis_revision": point.price_basis_revision,
-        "anchor_unit_id": point.anchor_unit_id,
-        "anchor_at": aware_datetime_to_epoch_seconds(point.anchor_at),
-        "confirmed_at": _optional_epoch(
-            operational_confirmed_at if operational_confirmation else point.confirmed_at
-        ),
-        "available_at": aware_datetime_to_epoch_seconds(point.available_at),
-        "anchor_tick": point.anchor_tick,
-        "invalidation_tick": point.invalidation_tick,
-        "center_id": point.center_id,
-        "center_zd_tick": point.center_zd_tick,
-        "center_zg_tick": point.center_zg_tick,
-        "center_ordinal": point.center_ordinal,
-        "parent_point_id": point.parent_point_id,
-        "divergence": _divergence_payload(point),
-        "evidence_codes": list(evidence_codes),
-        "missing_conditions": list(point.missing_conditions),
-        "related_point_ids": list(point.related_point_ids),
-        "operational_parent_point_ids": list(projected_parent_point_ids),
-        "small_to_large_carrier_unit_ids": list(point.small_to_large_carrier_unit_ids),
-        "evidence_revision": evidence_revision,
-        "tradable": setup_state.actionable,
-        "points": [
-            {
-                "time": aware_datetime_to_epoch_seconds(point.anchor_at),
-                "price_tick": point.anchor_tick,
-            }
-        ],
-    }
-
-
-def _operational_third_class_center_payload(
-    payload: dict[str, object],
-    *,
-    point: StrictPointEvidence,
-    confirmed_at: datetime,
-) -> dict[str, object]:
-    """把同一三类点的中枢说明同步为操作确认，不改写审计锁事实。"""
-
-    if point.point_type not in {"3buy", "3sell"}:
-        raise ValueError("operational center projection requires a third-class point")
-    if (
-        payload.get("center_id") != point.center_id
-        or payload.get("completion_point_type") != point.point_type
-        or payload.get("completion_phase") != "GEOMETRIC_THIRD_CLASS_POINT"
-    ):
-        return payload
-    return {
-        **payload,
-        "completion_phase": "OPERATIONAL_THIRD_CLASS_POINT",
-        "completion_point_status": "confirmed",
-        "tradable": True,
-        "operational_confirmation": True,
-        "confirmation_basis": "latest_completed_geometry",
-        "audit_lock_state": "pending",
-        "operational_point_id": point.point_id,
-        "operational_confirmed_at": aware_datetime_to_epoch_seconds(confirmed_at),
-    }
+    return _center_payload(center, render_kind="formal_center", tradable=True)
 
 
 def _canonical_quantum(value: Decimal) -> str:
@@ -1344,7 +354,7 @@ def _with_prices(value: object, quantum: Decimal) -> object:
         return [_with_prices(item, quantum) for item in value]
     if not isinstance(value, dict):
         return value
-    result = {key: _with_prices(item, quantum) for key, item in value.items()}
+    result = {key: _with_prices(item, quantum) for (key, item) in value.items()}
     tick_price_names = {
         "price_tick": "price",
         "anchor_tick": "anchor_price",
@@ -1367,413 +377,65 @@ def _with_prices(value: object, quantum: Decimal) -> object:
     return result
 
 
-def _visible(values: Iterable[object], source_closed_at: datetime) -> tuple:
-    return tuple(
-        item for item in values if getattr(item, "available_at") <= source_closed_at
-    )
-
-
-def _sorted_payloads(values: Iterable[dict[str, object]], id_name: str) -> list:
-    return sorted(
-        values,
-        key=lambda item: (
-            int(item.get("available_at", 0)),
-            str(item.get(id_name, "")),
-            str(item.get("render_id", "")),
-        ),
-    )
-
-
-def _ordered_current_trend_payloads(
-    values: Iterable[dict[str, object]],
-) -> list[dict[str, object]]:
-    """Preserve the model's connected causal movement order.
-
-    ``available_at`` is evidence visibility time, not a market-order key.  Two
-    adjacent movements can become available together; sorting that tie by the
-    stable trend id can reverse them and manufacture a same-direction or
-    disconnected chart chain.
-    """
-
-    payloads = list(values)
-    for previous, current in zip(payloads, payloads[1:]):
-        previous_points = previous.get("points")
-        current_points = current.get("points")
-        if (
-            previous.get("direction") == current.get("direction")
-            or not isinstance(previous_points, list)
-            or not previous_points
-            or not isinstance(current_points, list)
-            or not current_points
-            or previous_points[-1].get("price_tick")
-            != current_points[0].get("price_tick")
-            or int(current_points[0].get("time", 0))
-            < int(previous_points[-1].get("time", 0))
-        ):
-            raise ValueError(
-                "serialized current trends must preserve one alternating causal chain"
-            )
-    return payloads
-
-
-def _revision(namespace: str, *parts: object) -> str:
-    return "sha256:" + stable_structure_id(namespace, *parts)
-
-
-def build_strict_structure_snapshot(
-    evidence: StrictEvidenceResult,
-    *,
-    interval: str,
-) -> dict[str, object]:
-    """构建唯一权威且不依赖可视窗口的严格图表快照。"""
-
-    if not isinstance(evidence, StrictEvidenceResult):
-        raise TypeError("evidence must be StrictEvidenceResult")
-    if not isinstance(interval, str) or not interval.strip():
-        raise ValueError("interval is required")
-    if interval != evidence.source_frequency:
-        raise ValueError("display interval must equal strict source frequency")
-    if evidence.structure.price_basis_revision != evidence.price_basis_revision:
-        raise ValueError("strict structure price basis mismatch")
-    quantum = evidence.structure_price_quantum
-    quantum_text = _canonical_quantum(quantum)
-    source_closed_epoch = aware_datetime_to_epoch_seconds(evidence.source_closed_at)
-    labels = recursive_level_labels(interval)
-    formal_direction = resolve_formal_direction(evidence)
-    formal_direction_payload = _formal_direction_payload(formal_direction)
-
-    confirmed_by_level: dict[
-        int,
-        list[
-            tuple[
-                StrictPointEvidence,
-                TerminalSegmentReference | None,
-                OperationalPointProjection | None,
-            ]
-        ],
-    ] = {}
-    approaching_by_level: dict[
-        int,
-        list[
-            tuple[
-                StrictPointEvidence,
-                TerminalSegmentReference | None,
-                OperationalPointProjection | None,
-            ]
-        ],
-    ] = {}
-    divergences_by_level: dict[int, list[DivergenceEvidence]] = {}
-    operational_graph = resolve_current_operational_point_graph(
-        evidence.structure,
-        confirmed_points=evidence.confirmed_points,
-        approaching_points=evidence.approaching_points,
-        source_frequency=evidence.source_frequency,
-    )
-    for point in _visible(evidence.confirmed_points, evidence.source_closed_at):
-        reference = terminal_segment_reference(
-            evidence.structure,
-            structural_level=point.structural_level,
-            unit_id=point.anchor_unit_id,
-        )
-        confirmed_by_level.setdefault(point.structural_level, []).append(
-            (point, reference, None)
-        )
-    for point in _visible(evidence.approaching_points, evidence.source_closed_at):
-        projection = operational_graph.get(point.point_id)
-        reference = (
-            projection.terminal_segment
-            if projection is not None
-            else terminal_segment_reference(
-                evidence.structure,
-                structural_level=point.structural_level,
-                unit_id=point.anchor_unit_id,
+def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int, ...]):
+    if interval != cd.get_frequency():
+        raise ValueError("native center interval must match its source bars")
+    cutoff = aware_datetime_to_epoch_seconds(cd._strict_as_of())
+    if (
+        not display_bar_closed_at
+        or display_bar_closed_at[-1] != cutoff
+        or any(
+            (
+                left >= right
+                for (left, right) in zip(
+                    display_bar_closed_at, display_bar_closed_at[1:]
+                )
             )
         )
-        target = confirmed_by_level if projection is not None else approaching_by_level
-        target.setdefault(point.structural_level, []).append(
-            (point, reference, projection)
-        )
-    for divergence in _visible(evidence.divergences, evidence.source_closed_at):
-        divergences_by_level.setdefault(
-            divergence.structural_level,
-            [],
-        ).append(divergence)
-
-    known_levels = {level.structural_level for level in evidence.structure.levels}
-    point_levels = set(confirmed_by_level) | set(approaching_by_level)
-    if not point_levels.issubset(known_levels):
-        raise ValueError("strict point level is absent from structure snapshot")
-    if not set(divergences_by_level).issubset(known_levels):
-        raise ValueError("strict divergence level is absent from structure snapshot")
-    if any(
-        type(level.structural_level) is not int
-        or level.structural_level < 0
-        or level.structural_level >= len(labels)
-        for level in evidence.structure.levels
     ):
-        raise ValueError("strict structure level is outside display catalog")
-
-    levels: list[dict[str, object]] = []
-    for level in evidence.structure.levels:
-        level_formal_direction = resolve_level_formal_direction(
-            evidence,
-            level.structural_level,
-        )
-        level_formal_direction_payload = _formal_direction_payload(
-            level_formal_direction
-        )
-        centers = _visible(
-            level.center_result.centers,
-            evidence.source_closed_at,
-        )
-        center_previews = tuple(
-            preview
-            for preview in _visible(
-                level.center_result.previews,
-                evidence.source_closed_at,
-            )
-            if _renderable_center_preview(preview)
-        )
-        current_trends = _visible(
-            level.trend_types,
-            evidence.source_closed_at,
-        )
-        pending_movements = _visible(
-            level.pending_movements,
-            evidence.source_closed_at,
-        )
-        completed_trends = _visible(
-            level.completed_trends,
-            evidence.source_closed_at,
-        )
-        center_payloads = _sorted_payloads(
-            (strict_center_to_chart_dict(center) for center in centers),
-            "center_id",
-        )
-        preview_payloads = _sorted_payloads(
-            (
-                strict_center_preview_to_chart_dict(
-                    preview,
-                    level.units,
-                    evidence.source_closed_at,
-                )
-                for preview in center_previews
-            ),
-            "preview_id",
-        )
-        operational_thirds = tuple(
-            (point, projection.confirmed_at)
-            for point, _reference, projection in confirmed_by_level.get(
-                level.structural_level,
-                (),
-            )
-            if projection is not None and point.point_type in {"3buy", "3sell"}
-        )
-        for point, operational_at in operational_thirds:
-            center_payloads = [
-                _operational_third_class_center_payload(
-                    payload,
-                    point=point,
-                    confirmed_at=operational_at,
-                )
-                for payload in center_payloads
-            ]
-            preview_payloads = [
-                _operational_third_class_center_payload(
-                    payload,
-                    point=point,
-                    confirmed_at=operational_at,
-                )
-                for payload in preview_payloads
-            ]
-        active_center = (
-            centers[-1]
-            if centers and centers[-1].state in _ACTIVE_CENTER_STATES
-            else None
-        )
-        projections = _sorted_payloads(
-            ()
-            if active_center is None or preview_payloads
-            else (
-                active_center_projection_to_chart_dict(
-                    active_center,
-                    evidence.source_closed_at,
-                ),
-            ),
-            "center_id",
-        )
-        current_payloads = _ordered_current_trend_payloads(
-            (
-                strict_trend_to_chart_dict(
-                    trend,
-                    formal_direction=level_formal_direction,
-                )
-                for trend in current_trends
-            )
-        )
-        pending_payloads = _sorted_payloads(
-            (
-                pending_movement_to_chart_dict(partition)
-                for partition in pending_movements
-            ),
-            "partition_id",
-        )
-        completed_payloads = _sorted_payloads(
-            (
-                strict_trend_to_chart_dict(
-                    trend,
-                    formal_direction=level_formal_direction,
-                )
-                for trend in completed_trends
-            ),
-            "trend_id",
-        )
-        confirmed_payloads = _sorted_payloads(
-            (
-                strict_point_to_chart_dict(
-                    point,
-                    terminal_segment=reference,
-                    operational_confirmed_at=(
-                        None if projection is None else projection.confirmed_at
-                    ),
-                    operational_confirmation_basis=(
-                        None if projection is None else projection.confirmation_basis
-                    ),
-                    projected_parent_point_ids=(
-                        ()
-                        if projection is None
-                        else projection.projected_parent_point_ids
-                    ),
-                )
-                for point, reference, projection in confirmed_by_level.get(
-                    level.structural_level,
-                    (),
-                )
-            ),
-            "point_id",
-        )
-        approaching_payloads = _sorted_payloads(
-            (
-                strict_point_to_chart_dict(
-                    point,
-                    terminal_segment=reference,
-                    operational_confirmed_at=(
-                        None if projection is None else projection.confirmed_at
-                    ),
-                    operational_confirmation_basis=(
-                        None if projection is None else projection.confirmation_basis
-                    ),
-                    projected_parent_point_ids=(
-                        ()
-                        if projection is None
-                        else projection.projected_parent_point_ids
-                    ),
-                )
-                for point, reference, projection in approaching_by_level.get(
-                    level.structural_level,
-                    (),
-                )
-            ),
-            "point_id",
-        )
-        divergence_payloads = _sorted_payloads(
-            (
-                strict_divergence_to_chart_dict(divergence)
-                for divergence in divergences_by_level.get(
-                    level.structural_level,
-                    (),
-                )
-            ),
-            "divergence_id",
-        )
-        levels.append(
-            {
-                "structural_level": level.structural_level,
-                "label": labels[level.structural_level],
-                "origin": "current_chart_recursive",
-                "formal_direction": level_formal_direction_payload,
-                "centers": center_payloads,
-                "center_projections": projections,
-                "center_previews": preview_payloads,
-                "current_trends": current_payloads,
-                "pending_movements": pending_payloads,
-                "completed_trend_snapshots": completed_payloads,
-                "confirmed_points": confirmed_payloads,
-                "approaching_points": approaching_payloads,
-                "divergences": divergence_payloads,
-            }
-        )
-
-    observations = _sorted_payloads(
-        (
-            center_observation_to_chart_dict(center)
-            for center in _visible(
-                evidence.stroke_center_observations.centers,
-                evidence.source_closed_at,
-            )
-        ),
-        "center_id",
+        raise ValueError("display bars must be ordered and end at the source cutoff")
+    quantum = cd._strict_price_quantum()
+    result = cd.get_native_centers()
+    centers = [
+        _with_prices(strict_center_to_chart_dict(center), quantum)
+        for center in result.centers
+        if center.available_at <= cd._strict_as_of()
+    ]
+    revision = stable_structure_id(
+        "native-center-snapshot-v2",
+        cd.get_code(),
+        interval,
+        cd._strict_config_revision(),
+        cutoff,
+        centers,
     )
-    snapshot_revision = _revision(
-        "chanlun-chart-snapshot",
-        evidence.structure_revision,
-        source_closed_epoch,
-    )
-    render_extras = {
-        "formal_direction": formal_direction_payload,
-        "stroke_center_observations": observations,
-        "level_extras": [
+    return {
+        "schema": CHART_STRUCTURE_SCHEMA,
+        "analysis_scope": "native_centers",
+        "symbol": cd.get_code(),
+        "source_frequency": interval,
+        "display_frequency": interval,
+        "source_closed_at": cutoff,
+        "price_basis_revision": cd._strict_price_basis_revision(),
+        "structure_price_quantum": _canonical_quantum(quantum),
+        "strict_config_revision": cd._strict_config_revision(),
+        "structure_revision": revision,
+        "snapshot_revision": revision,
+        "render_revision": revision,
+        "levels": [
             {
-                "structural_level": level["structural_level"],
-                "formal_direction": level["formal_direction"],
-                "center_projections": level["center_projections"],
-                "center_previews": level["center_previews"],
-                "pending_movements": level["pending_movements"],
-                "operational_confirmed_points": [
-                    point
-                    for point in level["confirmed_points"]
-                    if point.get("operational_confirmation") is True
-                ],
-                "approaching_points": level["approaching_points"],
+                "structural_level": 0,
+                "label": interval,
+                "origin": "native_segments",
+                "centers": centers,
             }
-            for level in levels
         ],
     }
-    render_revision = _revision(
-        "chanlun-chart-render",
-        snapshot_revision,
-        render_extras,
-    )
-    snapshot = {
-        "schema": CHART_STRUCTURE_SCHEMA,
-        "symbol": evidence.symbol,
-        "source_frequency": evidence.source_frequency,
-        "display_frequency": interval,
-        "price_basis_revision": evidence.price_basis_revision,
-        "structure_price_quantum": quantum_text,
-        "strict_config_revision": evidence.strict_config_revision,
-        "source_closed_at": source_closed_epoch,
-        "structure_revision": evidence.structure_revision,
-        "snapshot_revision": snapshot_revision,
-        "render_revision": render_revision,
-        "formal_direction": formal_direction_payload,
-        "stroke_center_observations": observations,
-        "levels": levels,
-    }
-    return _with_prices(snapshot, quantum)
 
 
 __all__ = [
-    "CHART_CENTER_SCHEMA",
     "CHART_STRUCTURE_SCHEMA",
-    "active_center_projection_to_chart_dict",
-    "aware_datetime_to_epoch_seconds",
-    "build_strict_structure_snapshot",
-    "center_observation_to_chart_dict",
-    "pending_movement_to_chart_dict",
-    "strict_center_preview_to_chart_dict",
+    "CHART_CENTER_SCHEMA",
+    "build_center_snapshot",
     "strict_center_to_chart_dict",
-    "strict_divergence_to_chart_dict",
-    "strict_point_to_chart_dict",
-    "strict_trend_to_chart_dict",
 ]

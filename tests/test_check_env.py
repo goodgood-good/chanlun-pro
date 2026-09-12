@@ -1,7 +1,5 @@
 from types import SimpleNamespace
 
-import pytest
-
 import check_env as check_env_module
 
 
@@ -10,17 +8,10 @@ class _CloseableConnection:
         pass
 
 
-class _RedisClient:
-    def get(self, _key):
-        return None
-
-
 def _modules(*, db_connect=None, config_overrides=None):
     config_values = {
         "PROXY_HOST": "",
         "PROXY_PORT": 0,
-        "REDIS_HOST": "",
-        "REDIS_PORT": 0,
         "DB_TYPE": "sqlite",
         "DB_HOST": "",
         "DB_PORT": 0,
@@ -33,7 +24,6 @@ def _modules(*, db_connect=None, config_overrides=None):
         "pymysql": SimpleNamespace(
             connect=db_connect or (lambda **_kwargs: _CloseableConnection())
         ),
-        "redis": SimpleNamespace(Redis=lambda **_kwargs: _RedisClient()),
         "chanlun.core.cl": object(),
         "chanlun.config": SimpleNamespace(**config_values),
     }
@@ -69,9 +59,8 @@ def test_unsupported_python_is_hard_failure_without_environment_ok():
     assert "环境OK" not in messages
 
 
-@pytest.mark.parametrize("failed_module", ["pymysql", "redis"])
-def test_missing_dependency_is_hard_failure_without_environment_ok(failed_module):
-    result, messages = _run_check(_modules(), failed_module=failed_module)
+def test_missing_dependency_is_hard_failure_without_environment_ok():
+    result, messages = _run_check(_modules(), failed_module="pymysql")
 
     assert result is False
     assert "环境OK" not in messages

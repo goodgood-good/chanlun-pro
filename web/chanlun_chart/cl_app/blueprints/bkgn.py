@@ -11,7 +11,7 @@ from flask_login import login_required
 from chanlun.market import Market
 from chanlun.exchange import get_exchange, resolve_bounded_stock_info
 from chanlun.exchange.stocks_bkgn import StocksBKGN
-from ..services.trading_screening_scope import admit_explicit_validation_codes
+from ..services.symbol_scope import admit_explicit_validation_codes
 
 
 bkgn_bp = Blueprint("bkgn", __name__)

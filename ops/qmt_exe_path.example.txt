@@ -1,0 +1,5 @@
+# Copy this file to ops/qmt_exe_path.txt and set the QMT launcher path.
+# Use the desktop shortcut target, ending in bin.x64\XtItClient.exe.
+# XtItClient.exe performs login and starts the quote clients.
+# Do not point directly to XtMiniQmt.exe or miniquote.exe.
+# The first non-comment line is used; paths may contain spaces.

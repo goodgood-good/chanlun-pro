@@ -74,7 +74,7 @@ class ICL(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def get_strict_evidence(self):
+    def get_native_centers(self):
         pass
 
 

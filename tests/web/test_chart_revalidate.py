@@ -8,7 +8,18 @@ stale-while-revalidate 的后台刷新:同一 cache_key 在飞(inflight)时重�
 import threading
 import time
 
+import pytest
+
 from cl_app.services import chart_revalidate
+
+
+@pytest.fixture(autouse=True)
+def revalidation_lifecycle():
+    # App shutdown tests deliberately close this process-global runtime. Each
+    # revalidation test must own its lifecycle instead of depending on order.
+    chart_revalidate.start_revalidation_runtime()
+    yield
+    assert chart_revalidate.shutdown_revalidation(wait=True, timeout=3.0)
 
 
 def _wait_until(pred, timeout=2.0):

@@ -5,7 +5,7 @@ from decimal import Decimal
 import pandas as pd
 
 from chanlun.cl_utils import build_strict_chart_cd, cl_data_to_tv_chart
-from chanlun.decision_support.trading_system.runtime_config import (
+from chanlun.cl_utils.price_metadata import (
     strict_cl_config,
 )
 from chanlun.exchange.price_basis import (
@@ -63,28 +63,8 @@ def test_qmt_frame_reaches_the_single_strict_chart_pipeline() -> None:
     assert strict["price_basis_revision"] == metadata.price_basis_revision
     assert strict["structure_price_quantum"] == "0.01"
     assert strict["source_closed_at"] == int(frame.iloc[-1]["date"].timestamp())
-    assert strict["formal_direction"]["direction"] in {"up", "down", "neutral"}
-    assert strict["formal_direction"]["reason_codes"]
-    for level in strict["levels"]:
-        assert level["formal_direction"]["direction"] in {"up", "down", "neutral"}
-        assert level["formal_direction"]["reason_codes"]
-        for trend in level["current_trends"] + level["completed_trend_snapshots"]:
-            assert trend["geometric_direction"] == trend["direction"]
-            assert trend["semantic_direction"] in {"up", "down", None}
-            assert trend["direction_status"] in {
-                "formal",
-                "awaiting_reversal_support",
-                "consolidation",
-                "ended",
-                "geometric_candidate",
-            }
-            assert trend["formal_direction_confirmed"] is (
-                trend["direction_status"] == "formal"
-            )
+    assert strict["analysis_scope"] == "native_centers"
+    assert len(strict["levels"]) == 1
+    assert strict["levels"][0]["origin"] == "native_segments"
+    assert "formal_direction" not in strict
     assert payload["c"][-1] == float(frame.iloc[-1]["close"])
-    assert all(
-        center["source_kind"] == "stroke_observation"
-        and center["tradable"] is False
-        and center["completion_phase"] == "NON_TRADABLE_OBSERVATION"
-        for center in strict["stroke_center_observations"]
-    )

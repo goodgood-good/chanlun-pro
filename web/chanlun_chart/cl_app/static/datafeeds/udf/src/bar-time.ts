@@ -37,6 +37,24 @@ function marketFromSymbol(symbol: string): string {
 	return matched ? matched[1].toLowerCase() : "";
 }
 
+export type BarTimeLabel = "start" | "end";
+
+export function resolveBarTimeLabel(
+	value: unknown, resolution: string, symbol: string = ""
+): BarTimeLabel {
+	if (value === "start" || value === "end") return value;
+	if (value !== undefined) throw new Error("history_bar_time_label_invalid");
+	const market = marketFromSymbol(symbol);
+	const duration = calendarResolution(resolution) === null
+		? intradayResolutionSeconds(resolution) : null;
+	// US minute feeds can be either CQ opening labels or USmart closing labels.
+	// Missing provenance must not silently choose either coordinate convention.
+	if (market === "us" && duration !== null && [60, 300, 1800].includes(duration)) {
+		throw new Error("history_bar_time_label_missing");
+	}
+	return market === "a" ? "end" : "start";
+}
+
 /**
  * Convert a raw market-close timestamp to the coordinate TradingView expects.
  *
@@ -46,7 +64,8 @@ function marketFromSymbol(symbol: string): string {
 export function chartBarTimeSeconds(
 	sourceTime: number,
 	resolution: string,
-	symbol: string = ""
+	symbol: string = "",
+	barTimeLabel?: unknown
 ): number {
 	if (!Number.isInteger(sourceTime)) {
 		throw new Error("history bar time must be epoch seconds");
@@ -59,7 +78,7 @@ export function chartBarTimeSeconds(
 		// and normalize only the Bar sent to the chart. Other providers (for
 		// example Binance) already return opening timestamps and must not shift.
 		const duration = intradayResolutionSeconds(resolution);
-		return marketFromSymbol(symbol) === "a" && duration !== null
+		return resolveBarTimeLabel(barTimeLabel, resolution, symbol) === "end" && duration !== null
 			? sourceTime - duration
 			: sourceTime;
 	}

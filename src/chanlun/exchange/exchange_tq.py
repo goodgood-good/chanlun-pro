@@ -9,7 +9,7 @@ import pytz
 
 try:
     import tqsdk
-    from tqsdk.objs import Account, Position, Quote
+    from tqsdk.objs import Quote
 except ImportError as _e:
     raise ImportError(
         "ExchangeTq requires extras: pip install 'chanlun-pro[futures]' "
@@ -30,13 +30,7 @@ class ExchangeTq(Exchange):
 
     g_all_stocks = []
     g_api: tqsdk.TqApi = None
-    g_account: tqsdk.TqAccount = None
-    g_account_enable: bool = False
-
-    def __init__(self, use_simulate_account=True):
-        # True=快期模拟账号（无需实盘配置），False=读 config 中的实盘账号
-        self.use_simulate_account = use_simulate_account
-
+    def __init__(self):
         # 行情订阅命令队列，由主线程 append，thread_run_tasks 消费
         self.command_tasks: List[str] = []
         self.past_commands = []
@@ -136,40 +130,12 @@ class ExchangeTq(Exchange):
                 reset_api()
                 time.sleep(5)
 
-    def get_api(self, use_account=False):
-        """
-        获取 天勤API 对象
-        use_account : 标记是否使用账户对象，在特殊时间，账户是无法登录的，这时候只能使用行情服务，使用账户则会报错
-        """
-        # 这时候使用账户模式，但是账户并不可用，尝试关闭 API，并重新创建 账户 API 连接
-        if (
-            use_account is True
-            and self.g_account_enable is False
-            and self.g_api is not None
-        ):
-            self.g_api.close()
-            self.g_api = None
-
+    def get_api(self):
+        """复用行情连接；账户操作不属于本适配器的功能。"""
         if self.g_api is None:
-            account = self.get_account()
-            if use_account and account is None:
-                raise Exception(
-                    "使用实盘账户操作，但是并没有配置实盘账户，请检查实盘配置"
-                )
-            try:
-                self.g_api = tqsdk.TqApi(
-                    account=account, auth=tqsdk.TqAuth(config.TQ_USER, config.TQ_PWD)
-                )
-                self.g_account_enable = True
-            except Exception as e:
-                print(
-                    "初始化默认的天勤 API 报错，重新尝试初始化无账户的 API：", {str(e)}
-                )
-                self.g_api = tqsdk.TqApi(
-                    auth=tqsdk.TqAuth(config.TQ_USER, config.TQ_PWD)
-                )
-                self.g_account_enable = False
-
+            self.g_api = tqsdk.TqApi(
+                auth=tqsdk.TqAuth(config.TQ_USER, config.TQ_PWD)
+            )
         return self.g_api
 
     def close_api(self):
@@ -177,21 +143,6 @@ class ExchangeTq(Exchange):
             self.g_api.close()
             self.g_api = None
         return True
-
-    def get_account(self):
-        """返回账户对象：模拟模式用快期 TqKq，实盘模式用 config 里配置的期货公司账号。"""
-        if self.use_simulate_account:
-            if self.g_account is None:
-                self.g_account = tqsdk.TqKq()
-            return self.g_account
-
-        if config.TQ_SP_ACCOUNT == "":
-            return None
-        if self.g_account is None:
-            self.g_account = tqsdk.TqAccount(
-                config.TQ_SP_NAME, config.TQ_SP_ACCOUNT, config.TQ_SP_PWD
-            )
-        return self.g_account
 
     def all_stocks(self):
         """
@@ -356,173 +307,6 @@ class ExchangeTq(Exchange):
         ):
             return True
         return False
-
-    def balance(self) -> Account:
-        """
-        获取账户资产
-        """
-        api = self.get_api(use_account=True)
-        if self.g_account_enable is False:
-            raise Exception("账户链接失败，暂时不可用，请稍后尝试")
-
-        account = api.get_account()
-        api.wait_update(time.time() + 2)
-        return account
-
-    def positions(self, code: str = None) -> Dict[str, Position]:
-        """
-        获取持仓
-        """
-        api = self.get_api(use_account=True)
-        if self.g_account_enable is False:
-            raise Exception("账户链接失败，暂时不可用，请稍后尝试")
-
-        positions = api.get_position(symbol=code)
-        api.wait_update(time.time() + 2)
-        if isinstance(positions, Position):
-            if positions["pos_long"] != 0 or positions["pos_short"] != 0:
-                return {code: positions}
-            else:
-                return {}
-        else:
-            return {
-                _code: positions[_code]
-                for _code in positions.keys()
-                if positions[_code]["pos_long"] != 0
-                or positions[_code]["pos_short"] != 0
-            }
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        """
-        下单接口，默认使用盘口的买一卖一价格成交，知道所有手数成交后返回
-        """
-        if args is None:
-            args = {}
-
-        if o_type == "open_long":
-            direction = "BUY"
-            offset = "OPEN"
-        elif o_type == "open_short":
-            direction = "SELL"
-            offset = "OPEN"
-        elif o_type == "close_long":
-            direction = "SELL"
-            offset = "CLOSE"
-        elif o_type == "close_short":
-            direction = "BUY"
-            offset = "CLOSE"
-        else:
-            raise Exception("期货下单类型错误")
-
-        api = self.get_api(use_account=True)
-        if self.g_account_enable is False:
-            raise Exception("账户链接失败，暂时不可用，请稍后尝试")
-
-        if offset == "CLOSE":
-            _pos_map = self.positions(code)
-            if code not in _pos_map:
-                # 无持仓(已平/竞态/重复平仓): 优雅返回而非 {}[code] KeyError 崩溃
-                return False
-            pos = _pos_map[code]
-            if direction == "BUY":  # 平空
-                if pos.pos_short < amount:
-                    amount = pos.pos_short  # 修正为实际空仓数量
-
-                # 上期所/原油(INE.sc) 区分平昨/平今，优先平昨仓
-                if "SHFE" in code or "INE.sc" in code:
-                    if pos.pos_short_his >= amount:
-                        offset = "CLOSE"
-                    elif pos.pos_short_today >= amount:
-                        offset = "CLOSETODAY"
-                    else:
-                        return False
-            else:  # 平多
-                if pos.pos_long < amount:
-                    amount = pos.pos_long  # 修正为实际多仓数量
-
-                if "SHFE" in code or "INE.sc" in code:
-                    if pos.pos_long_his >= amount:
-                        offset = "CLOSE"
-                    elif pos.pos_long_today >= amount:
-                        offset = "CLOSETODAY"
-                    else:
-                        return False
-
-        order = None
-        # H4: 累计真实成交量与成交额, 返回实际成交而非原始请求量。
-        filled_total = 0.0          # 累计成交手数
-        turnover_total = 0.0        # 累计成交额 (用于算加权均价)
-        last_order_id = None
-
-        amount_left = amount
-        while amount_left > 0:
-            quote = api.get_quote(code)
-            api.wait_update(time.time() + 2)
-            price = quote.ask_price1 if direction == "BUY" else quote.bid_price1
-            if price is None:
-                continue
-            order = api.insert_order(
-                code,
-                direction=direction,
-                offset=offset,
-                volume=int(amount_left),
-                limit_price=price,
-            )
-            api.wait_update(time.time() + 5)
-            last_order_id = order.order_id
-
-            # 本轮成交量 = 本轮委托量 - 剩余未成交量
-            this_filled = max(0, int(order.volume_orign) - int(order.volume_left))
-            if this_filled > 0:
-                filled_total += this_filled
-                # 优先用本轮成交均价 trade_price; 缺失时回退挂单价
-                fill_price = order.trade_price if order.trade_price else price
-                turnover_total += this_filled * fill_price
-
-            if order.status == "FINISHED":
-                if order.is_error:
-                    print(f"下单失败，原因：{order.last_msg}")
-                    # 已有部分成交时不能返回 False (会丢已成交记录), 跳出按实际成交返回
-                    if filled_total <= 0:
-                        return False
-                    break
-                # FINISHED 且无错: 可能全成, 也可能券商终止剩余 → 用 volume_left 判
-                if int(order.volume_left) > 0:
-                    # 仍有未成交且订单已 FINISHED (非续挂场景), 继续下一轮补单
-                    amount_left = int(order.volume_left)
-                    continue
-                break
-            else:
-                # 超时未完全成交：撤单，用 volume_left 继续挂新单
-                self.cancel_order(order)
-                if order.is_error:
-                    print(f"下单失败，原因：{order.last_msg}")
-                    if filled_total <= 0:
-                        return False
-                    break
-                amount_left = int(order.volume_left)
-
-        if order is None or filled_total <= 0:
-            return False
-
-        avg_price = turnover_total / filled_total if filled_total > 0 else order.trade_price
-        return {"id": last_order_id, "price": avg_price, "amount": filled_total}
-
-    def cancel_order(self, order):
-        """
-        取消订单，直到订单取消成功
-        """
-        api = self.get_api(use_account=True)
-        if self.g_account_enable is False:
-            raise Exception("账户链接失败，暂时不可用，请稍后尝试")
-
-        while True:
-            api.cancel_order(order)
-            api.wait_update(time.time() + 2)
-            if order.status == "FINISHED":
-                break
-
-        return None
 
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")

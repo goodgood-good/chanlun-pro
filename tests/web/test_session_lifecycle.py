@@ -163,7 +163,7 @@ def test_api_request_returns_json_401_after_authentication_expires(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("path", ["/xuangu/task_add"])
+@pytest.mark.parametrize("path", [])
 def test_ajax_post_endpoints_share_json_authentication_contract(monkeypatch, path):
     password = ["first-password"]
     app = _make_app(monkeypatch, password)

@@ -31,7 +31,7 @@ from chanlun import config
 from chanlun.market import Market
 from chanlun.exchange import get_exchange, resolve_bounded_stock_info
 from chanlun.tools.log_util import LogUtil
-from .trading_screening_scope import (
+from .symbol_scope import (
     DEFAULT_VALIDATION_COHORT_SIZE,
     admit_explicit_validation_codes,
 )
@@ -267,83 +267,6 @@ def get_cached_processed_stock(exchange: str, code: str):
             if stock.get("code") == normalized_code:
                 return stock.copy()
     return None
-
-
-def get_cached_a_instrument_types(codes: tuple[str, ...]) -> dict[str, str]:
-    """从已恢复的唯一 A 股证券目录读取精确类型，不触发 QMT 或磁盘 I/O。
-
-    目录由显式准入标的的身份查询生成并原子持久化。缺失、冲突或
-    非现行类型一律返回 ``unresolved_cn``，让选股范围按失败关闭处理。
-    """
-
-    if type(codes) is not tuple or any(
-        type(code) is not str or _A_STOCK_CODE.fullmatch(code) is None
-        for code in codes
-    ):
-        raise TypeError("codes must be an exact normalized A-share tuple")
-    if len(codes) != len(set(codes)) or tuple(sorted(codes)) != codes:
-        raise ValueError("codes must be unique and sorted")
-    requested = set(codes)
-    resolved: dict[str, str] = {}
-    conflicts: set[str] = set()
-    with _stock_cache_lock:
-        cached = tuple(stock_cache.get("a") or ())
-    for row in cached:
-        if not isinstance(row, dict):
-            continue
-        code = row.get("code")
-        kind = row.get("type")
-        if code not in requested or kind not in _KNOWN_A_INSTRUMENT_TYPES:
-            continue
-        previous = resolved.get(code)
-        if previous is not None and previous != kind:
-            conflicts.add(code)
-            continue
-        resolved[code] = kind
-    return {
-        code: (
-            "unresolved_cn"
-            if code in conflicts or code not in resolved
-            else resolved[code]
-        )
-        for code in codes
-    }
-
-
-def get_cached_a_symbol_names(codes: tuple[str, ...]) -> dict[str, str | None]:
-    """从已恢复的 A 股证券目录读取名称，不触发 QMT 或磁盘 I/O。"""
-
-    if type(codes) is not tuple or any(
-        type(code) is not str or _A_STOCK_CODE.fullmatch(code) is None
-        for code in codes
-    ):
-        raise TypeError("codes must be an exact normalized A-share tuple")
-    if len(codes) != len(set(codes)) or tuple(sorted(codes)) != codes:
-        raise ValueError("codes must be unique and sorted")
-    requested = set(codes)
-    resolved: dict[str, str] = {}
-    conflicts: set[str] = set()
-    with _stock_cache_lock:
-        cached = tuple(stock_cache.get("a") or ())
-    for row in cached:
-        if not isinstance(row, dict):
-            continue
-        code = row.get("code")
-        raw_name = row.get("name")
-        if code not in requested or not isinstance(raw_name, str):
-            continue
-        name = raw_name.strip()
-        if not name:
-            continue
-        previous = resolved.get(code)
-        if previous is not None and previous != name:
-            conflicts.add(code)
-            continue
-        resolved[code] = name
-    return {
-        code: None if code in conflicts else resolved.get(code)
-        for code in codes
-    }
 
 
 def get_symbol_readiness(exchange: str):

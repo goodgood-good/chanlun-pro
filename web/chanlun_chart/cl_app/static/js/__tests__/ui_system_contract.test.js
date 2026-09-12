@@ -20,10 +20,7 @@ const fullPages = [
   'symbols.html',
   'jobs.html',
   'options.html',
-  'xuangu_list.html',
   'zixuan.html',
-  'early_screening.html',
-  'research_audit.html',
 ];
 
 function template(name) {
@@ -69,11 +66,10 @@ test('shared UI stylesheet defines tokens, accessible focus, responsive layout a
 
 test('operational pages use explicit task-oriented sections', () => {
   const expected = {
-    'setting.html': ['系统设置', '消息通知', '网络代理', '配置指南'],
+    'setting.html': ['系统设置', '网络代理'],
     'symbols.html': ['标的中心', '筛选标的', '标的列表'],
     'jobs.html': ['任务运行状态', '调度任务'],
     'options.html': ['图表显示配置', '配置范围', '基础结构'],
-    'xuangu_list.html': ['统一选股任务', '任务与方向', '数据范围', '结果写入'],
   };
 
   for (const [name, labels] of Object.entries(expected)) {
@@ -86,43 +82,20 @@ test('operational pages use explicit task-oriented sections', () => {
   }
 });
 
-test('login, research and workbench surfaces share product identity without losing their roles', () => {
+test('login and workbench surfaces share product identity without losing their roles', () => {
   const login = template('login.html');
   const index = template('index.html');
-  const screening = template('early_screening.html');
-  const audit = template('research_audit.html');
 
   assert.match(login, /CHANLUN PRO/);
   assert.match(login, /行情结构研究工作台/);
   assert.match(login, /autocomplete=["']current-password["']/);
   assert.match(login, /autocomplete=["']username["']/);
   assert.match(index, /行情与结构工作台/);
-  assert.match(screening, /cp-product-nav/);
-  assert.match(audit, /cp-product-nav/);
-  assert.match(audit, /历史研究 \/ 审计成果/);
 });
 
-test('visible workbench copy uses the user-facing anti-repaint review term', () => {
-  for (const name of ['index.html', 'early_screening.html', 'research_audit.html']) {
-    const source = template(name);
-    assert.doesNotMatch(source, /审计锁/, `${name} exposes obsolete internal lock wording`);
-  }
-  assert.match(template('index.html'), /末端结构封存状态/);
-  assert.match(template('research_audit.html'), /末端结构封存状态/);
-});
 
-test('decision-support pages never imply that a real account is connected', () => {
-  assert.doesNotMatch(
-    template('early_screening.html'),
-    /账户|现金|持仓|仓位|组合热度/,
-    'early screening exposes account-dependent wording',
-  );
-  assert.doesNotMatch(
-    template('research_audit.html'),
-    /账户/,
-    'research audit implies account integration instead of historical replay',
-  );
-});
+
+
 
 test('long configuration choices wrap inside their grid card without horizontal overflow', () => {
   const css = fs.readFileSync(cssPath, 'utf8');
@@ -141,14 +114,12 @@ test('operational empty states and compact chart options remain intentional', ()
   const jobs = template('jobs.html');
   const options = template('options.html');
   const symbols = template('symbols.html');
-  const screener = template('xuangu_list.html');
 
   assert.match(jobs, /cp-empty-state/);
   assert.match(jobs, /暂时没有已注册的调度任务/);
   assert.match(options, /cp-page--compact/);
   assert.match(options, /cp-actions--sticky/);
   assert.match(symbols, /aria-label', '跳转页码'/);
-  assert.match(screener, /\{\{ market_label \}\}/);
 });
 
 test('mobile table pagination wraps the direct-page control instead of clipping it', () => {

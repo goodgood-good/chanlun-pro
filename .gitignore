@@ -1,6 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-#*.py[cod]
+*.py[cod]
 *$py.class
 
 # Git worktrees (isolated workspaces for feature branches)
@@ -143,50 +143,31 @@ dmypy.json
 cython_debug/
 
 
-src/chanlun_ai
-src/chanlun_strategy
-src/core
-web/chanlun_kcm
 web/chanlun_chart/cl_app/static/datafeeds/udf/node_modules
-src/Kronos
 
 .idea
 .virtual_documents
 **/__pycache__
 **/.ipynb_checkpoints
 **/logs
-/pm2
-/pm2/log/
 data
-# The pinned annual A-share calendar and its authoritative source receipt are
-# executable causal inputs, not runtime market-data caches.
-!src/chanlun/decision_support/trading_system/data/
-!src/chanlun/decision_support/trading_system/data/a_share_trading_calendar_2026.json
-!src/chanlun/decision_support/trading_system/data/a_share_trading_calendar_2026.source.json
-# 裸 data 命中任意层级同名目录; recursive_bt/data 是源码包必须豁免,
-# 否则该包新增 .py 被 git 静默忽略不入库(R1-C16)。
-!src/chanlun/recursive_bt/data/
-predict
 **/.pytest_cache
 .vscode
 
 
 # 配置文件排除
 /src/chanlun/config.py
-# 运行时通知凭据只保留在本机；提交安全模板而不提交真实 Webhook。
+# 本地私密凭据不入库。
 /config/runtime_credentials.local.json
+# 本机 QMT 路径；可从示例复制后配置。
+/ops/qmt_exe_path.txt
 # 私有代码排除
-web/chanlun_web/charts/static/datafeeds/udf/node_modules
-web/chanlun_chart/app/static/datafeeds/udf/node_modules
 **/my
 my_**.py
 my_**.ipynb
-src/cl_vnpy/.vntrader
-src/cl_myquant/gmcache
-# 无用的排除
-/my_debug
 
-# Codex / OMC 临时产物（保留 .omc/scientist/ 等已跟踪目录）
+# 本地开发工具临时产物
+/.codex/
 .codex_debug_venv/
 .omc/state/
 .omc/sessions/
@@ -202,43 +183,17 @@ web/chanlun_chart/cl_app/static/charting_library/bundles/*.gz
 # 不应入库的电子书
 *.epub
 
-# output/ 全部为构建产物(电子书 azw3/epub、原文提取 txt、知乎素材等, ~2GB),
-# 整体不入库——防误 git add -A 把未被 *.epub 覆盖的大文件(~1GB azw3 等)计划提交。
+# 临时输出不入库。
 /output/
 
 # 真实标的 K 线 fixture 与本地 baseline（机器本地数据，包含隐私且体积较大）
 tests/fixtures/klines/
 tests/core/baselines.local.json
 *.gz
-*.md
-# Keep the unique trading specification and formal audit reports visible.
-# The large lesson corpus stays protected by its tree-hash manifest.
+# 原文资料保留在本地，当前应用不处理这些文件。
 /audit/chanlun_lesson_corpus/
-# Full-market QMT checkpoints and immutable PIT reference captures remain local.
-# Large-scope work is explicit and gated by the current validation12 report.
-/audit/chanlun_trading_system_backtest/full_market_explicit/
-/audit/chanlun_trading_system_backtest/pit_reference/
-/audit/chanlun_trading_system_backtest/research_sample_*/
-!audit/chanlun_live_strategy/*.md
-!audit/chanlun_live_integration/*.md
-!audit/chanlun_trading_system_forward_paper/*.md
-# 知识库配图(1061张~100MB)由 docx 经 tools/build_kb.py 再生, 不入库
-knowledge_base/images/
 */.omc/
 /tmp/
 
-# P3/P4 本地验收件（probe 脚本 + 审阅图，不入库）
-scripts_local/
-zs_branch_review.html
-zslx_branch_review.html
-recursive_branch_review.html
-beichi_nest_review.html
-beichi_nest_demo.html
-bs_branch_review.html
-interval_nest_review.html
-bs2_branch_review.html
-bs3_branch_review.html
-bs_turn_review.html
-
-# 126MB 原文 docx：隐私+体积，不入库
+# 本地原文文档不入库。
 docs/*.docx

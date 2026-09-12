@@ -7,7 +7,7 @@ import pytz
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 from tzlocal import get_localzone
 
-from chanlun import config, fun
+from chanlun import fun
 from chanlun.exchange.exchange import Exchange, Tick, convert_currency_kline_frequency
 from chanlun.exchange.exchange_binance_common import (
     BINANCE_KLINE_TIMEFRAMES,
@@ -37,10 +37,6 @@ class ExchangeBinance(Exchange):
                 "https": f"http://{proxy['host']}:{proxy['port']}",
                 "http": f"http://{proxy['host']}:{proxy['port']}",
             }
-
-        if config.BINANCE_APIKEY != "":
-            params["apiKey"] = config.BINANCE_APIKEY
-            params["secret"] = config.BINANCE_SECRET
 
         # binanceusdm：币安 U 本位合约（永续/交割），区别于现货 ccxt.binance
         self.exchange = ccxt.binanceusdm(params)
@@ -351,74 +347,6 @@ class ExchangeBinance(Exchange):
             )
 
         return res_ticks
-
-    def balance(self):
-        b = self.exchange.fetch_balance()
-        balances = {
-            "total": b["USDT"]["total"],
-            "free": b["USDT"]["free"],
-            "used": b["USDT"]["used"],
-            "profit": b["info"]["totalUnrealizedProfit"],
-        }
-        for asset in b["info"]["assets"]:
-            balances[asset["asset"]] = {
-                "total": asset["availableBalance"],
-                "profit": asset["unrealizedProfit"],
-            }
-        return balances
-
-    def positions(self, code: str = ""):
-        try:
-            position = self.exchange.fetch_positions(
-                symbols=[code] if code != "" else None
-            )
-        except Exception as e:
-            if "precision" in str(e):
-                self.__init__()
-                position = self.exchange.fetch_positions(
-                    symbols=[code] if code != "" else None
-                )
-            else:
-                raise e
-        # 持仓字段：symbol/entryPrice/contracts/side(long|short)/leverage/
-        # 收益率字段依次为未实现盈亏、初始保证金和百分比。
-        # symbol 含 ":USDT" 后缀，统一去掉以对齐项目内部 code 格式
-        res_poss = []
-        for p in position:
-            if p["entryPrice"] != 0.0:
-                p["symbol"] = p["symbol"].replace(":USDT", "")
-                res_poss.append(p)
-        return res_poss
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        trade_maps = {
-            "open_long": {"side": "BUY", "positionSide": "LONG"},
-            "open_short": {"side": "SELL", "positionSide": "SHORT"},
-            "close_long": {"side": "SELL", "positionSide": "LONG"},
-            "close_short": {"side": "BUY", "positionSide": "SHORT"},
-        }
-        if "open" in o_type:
-            self.exchange.set_leverage(args["leverage"], symbol=code)
-        res = self.exchange.create_order(
-            symbol=code,
-            type="MARKET",
-            side=trade_maps[o_type]["side"],
-            amount=amount,
-            params={"positionSide": trade_maps[o_type]["positionSide"]},
-        )
-        # N5: 市价单 ccxt price 常为 None(成交均价在 average)、amount=请求量(成交量在 filled)。
-        # 规范化为真实成交口径，避免上层收到 None 价格或请求量而非实际成交量。
-        # None 算术 TypeError(仿 tqsdk H4 的 filled 口径)。
-        if isinstance(res, dict):
-            _price = res.get("average")
-            if _price is None:
-                _price = res.get("price")
-            res["price"] = _price if _price is not None else 0
-            _filled = res.get("filled")
-            if _filled is None:
-                _filled = res.get("amount", amount)
-            res["amount"] = _filled
-        return res
 
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")

@@ -46,7 +46,7 @@ def test_create_app_accepts_its_own_csrf_token(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("path", ["/xuangu/task_add"])
+@pytest.mark.parametrize("path", [])
 def test_ajax_post_endpoints_share_json_csrf_contract(path):
     app = create_app(
         {

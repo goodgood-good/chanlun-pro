@@ -98,7 +98,7 @@ class NativeHealthHandler(RequestHandler):
         # 存活身份本身是常数时间快照。即使深度就绪检查仍在后台运行，也能返回
         # 当前版本与进程号，供运维区分“进程已死”和“依赖暂时繁忙”。
         identity, _status = self._flask_app.extensions["health_snapshot"](
-            "healthz", market, None
+            "healthz", market
         )
         return {
             "status": "not_ready",
@@ -112,18 +112,16 @@ class NativeHealthHandler(RequestHandler):
     async def get(self):
         kind = self.request.path.strip("/")
         market = self.get_query_argument("market", "a")
-        forward_session = self.get_query_argument("forward_session", None)
         snapshot = self._flask_app.extensions["health_snapshot"]
         if kind != "readyz" or self._readiness_runner is None:
-            payload, status_code = snapshot(kind, market, forward_session)
+            payload, status_code = snapshot(kind, market)
             self._finish_json(payload, status_code)
             return
 
-        future = self._readiness_runner.submit(market, forward_session)
+        future = self._readiness_runner.submit(market)
         if future is None:
             cached = self._readiness_runner.cached_result(
                 market,
-                forward_session,
                 allow_stale=True,
             )
             if cached is not None:
@@ -143,7 +141,6 @@ class NativeHealthHandler(RequestHandler):
         except asyncio.TimeoutError:
             cached = self._readiness_runner.cached_result(
                 market,
-                forward_session,
                 allow_stale=True,
             )
             if cached is not None:
@@ -181,14 +178,13 @@ class NativeReadinessRunner:
         self._executor = executor
         self._lock = threading.Lock()
         self._in_flight = None
-        self._in_flight_key = None
         self._cache_ttl_seconds = float(cache_ttl_seconds)
         self._stale_if_busy_seconds = float(stale_if_busy_seconds)
         self._cached = {}
 
     @staticmethod
-    def _key(market, forward_session):
-        return str(market), None if forward_session is None else str(forward_session)
+    def _key(market):
+        return str(market)
 
     @staticmethod
     def _completed_future(value):
@@ -222,11 +218,9 @@ class NativeReadinessRunner:
             return
         with self._lock:
             self._cached[key] = (time.monotonic(), value)
-            if self._in_flight is future:
-                self._in_flight_key = None
 
-    def cached_result(self, market, forward_session, *, allow_stale=False):
-        key = self._key(market, forward_session)
+    def cached_result(self, market, *, allow_stale=False):
+        key = self._key(market)
         with self._lock:
             cached = self._cached.get(key)
             if cached is None:
@@ -242,13 +236,13 @@ class NativeReadinessRunner:
                 return None
             return self._cached_payload(value, age)
 
-    def submit(self, market, forward_session):
+    def submit(self, market):
         """复用短时快照；过期后单飞提交一次新的深度检查。"""
 
-        cached = self.cached_result(market, forward_session)
+        cached = self.cached_result(market)
         if cached is not None:
             return self._completed_future(cached)
-        key = self._key(market, forward_session)
+        key = self._key(market)
         with self._lock:
             if self._in_flight is not None and not self._in_flight.done():
                 return None
@@ -256,10 +250,8 @@ class NativeReadinessRunner:
                 self._snapshot,
                 "readyz",
                 market,
-                forward_session,
             )
             self._in_flight = future
-            self._in_flight_key = key
         future.add_done_callback(
             lambda completed, cache_key=key: self._capture(cache_key, completed)
         )
@@ -410,7 +402,9 @@ def _start_runtime_with_retry(
     maximum = max(delay, float(max_delay))
     while not cancel_event.is_set():
         try:
-            app.extensions["start_runtime_services"](enable_scheduler=True)
+            app.extensions["start_runtime_services"](
+                enable_scheduler=not app.config.get("CHART_ONLY_MODE", False)
+            )
         except Exception as exc:
             app.config["RUNTIME_BOOTSTRAP_ERROR"] = str(exc)[:200]
             LogUtil.exception("应用后台组件启动失败，稍后重试")
@@ -549,7 +543,7 @@ def main() -> int:
         server.bind(web_port, web_host)
         server.start(1)
         io_loop = IOLoop.current()
-        app.config["SCHEDULER_ENABLED"] = True
+        app.config["SCHEDULER_ENABLED"] = not app.config.get("CHART_ONLY_MODE", False)
         runtime_executor = DaemonExecutor(
             max_workers=2,
             thread_name_prefix="RuntimeBootstrap",
@@ -565,7 +559,8 @@ def main() -> int:
                 return
             try:
                 try:
-                    _warm_chart_cache_from_disk()
+                    if not app.config.get("CHART_ONLY_MODE", False):
+                        _warm_chart_cache_from_disk()
                 except Exception as exc:
                     LogUtil.warning(f"[chart_warm] 启动预热未执行: {exc}")
                 LogUtil.info("应用后台组件启动成功")

@@ -510,11 +510,6 @@ def test_a_share_ticks_bypass_external_market_backoff(client, monkeypatch):
     backoff.record_failure("a")
     client.application.extensions["external_market_tick_backoff"] = backoff
     ticks_map = {"SZ.000001": _tick("SZ.000001", 3.0, 2.5)}
-    monkeypatch.setattr(
-        other_mod,
-        "isolated_a_share_quote_batch",
-        lambda _app, _codes: None,
-    )
     monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _FakeEx(ticks_map))
 
     response = client.post(

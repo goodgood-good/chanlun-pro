@@ -4,10 +4,14 @@ import ast
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOTS = (
-    ROOT / "src/chanlun/decision_support/trading_system",
-    ROOT / "web/chanlun_chart/cl_app/services",
+    ROOT / "src/chanlun",
+    ROOT / "web/chanlun_chart",
 )
 FORBIDDEN_IMPORTS = (
+    "chanlun.decision_support",
+    "chanlun.core.strict_structure.recursive_engine",
+    "chanlun.core.strict_structure.trend_assembler",
+    "chanlun.core.strict_structure.same_level_decomposition",
     "chanlun.recursive_bt",
     "chanlun.signal_monitor",
     "chanlun.strategy",
@@ -162,53 +166,3 @@ def test_production_cl_calls_bind_market_explicitly() -> None:
             if len(node.args) < 5 and not market_keyword:
                 offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert offenders == []
-
-
-def test_strict_signal_and_divergence_assembly_has_one_production_authority() -> None:
-    """生产代码只能由严格证据装配器组合买卖点、背驰和证据身份。"""
-
-    allowed = {
-        "src/chanlun/core/strict_structure/evidence_assembler.py",
-        # 模型会独立重算修订号以验证不可变证据，属于校验而不是第二套装配。
-        "src/chanlun/core/strict_structure/models.py",
-    }
-    forbidden_calls = (
-        "StrictSignalEngine(",
-        "collect_formal_divergence_ledger(",
-        "build_strict_evidence_revision(",
-    )
-    offenders = []
-    roots = (
-        ROOT / "src/chanlun",
-        ROOT / "web/chanlun_chart/cl_app",
-    )
-    for path in (path for root in roots for path in root.rglob("*.py")):
-        relative = path.relative_to(ROOT).as_posix()
-        if relative in allowed:
-            continue
-        source = path.read_text(encoding="utf-8")
-        for token in forbidden_calls:
-            if (
-                token in source
-                and not (
-                    relative == "src/chanlun/core/strict_structure/identity.py"
-                    and token == "build_strict_evidence_revision("
-                )
-                and not (
-                    relative == "src/chanlun/core/strict_structure/divergence.py"
-                    and token == "collect_formal_divergence_ledger("
-                )
-            ):
-                offenders.append(f"{relative}:{token}")
-    assert offenders == []
-
-
-def test_stock_selection_uses_shared_current_strict_event_protocol() -> None:
-    """选股必须复用核心定义的末端两线段血缘，不能在选股层另造口径。"""
-
-    path = ROOT / "src/chanlun/xuangu/strict_xuangu.py"
-    source = path.read_text(encoding="utf-8")
-
-    assert "current_strict_events(" in source
-    assert "_terminal_locked_unit" not in source
-    assert "== point.anchor_unit_id" not in source

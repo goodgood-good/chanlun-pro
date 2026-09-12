@@ -65,6 +65,7 @@ function loadResizeModule(initialCollapsed = false, viewportWidth = 1200, search
     'toggle-menu': createElement(),
   };
   const body = createElement();
+  body.dataset = { chartFocus: 'lowest-center' };
   const storage = new Map([
     ['chart_menu_collapsed', initialCollapsed ? '1' : '0'],
   ]);
@@ -166,7 +167,7 @@ test('sidebar collapse and expand synchronize accessible state', () => {
   assert.match(collapse.getAttribute('aria-label'), /收起/);
 });
 
-test('embedded chart starts with the analysis sidebar collapsed and still permits manual expansion', () => {
+test('URL-configured chart starts with the analysis sidebar collapsed and still permits manual expansion', () => {
   const { elements, body } = loadResizeModule(
     false,
     1200,

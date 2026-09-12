@@ -11,6 +11,7 @@ import json
 import math
 import datetime
 import os
+import re
 import time
 import threading
 from collections import OrderedDict
@@ -21,10 +22,10 @@ try:
 except ImportError:  # Optional acceleration; gzip remains the portable fallback.
     _brotli = None
 
-from flask import Blueprint, current_app, request
+from flask import Blueprint, current_app, g, request
 from flask_login import current_user, login_required
 
-from chanlun import fun
+from chanlun import config, fun
 from chanlun.market import Market
 from chanlun.cl_utils import (
     query_cl_chart_config,
@@ -46,8 +47,8 @@ from ..services.constants import (
     market_types,
 )
 from ..services.last_chart_state import record_user_request
-from ..services.realtime_quotes import isolated_a_share_quote_batch
 from ..services.account_preferences import chart_storage_identity
+from ..services.chart_bar_time import chart_bar_time_fields
 
 tv_bp = Blueprint("tv", __name__)
 
@@ -69,49 +70,6 @@ except (TypeError, ValueError):
     _TV_HISTORY_BROTLI_QUALITY = 4
 _tv_history_gzip_cache: OrderedDict[bytes, bytes] = OrderedDict()
 _tv_history_gzip_cache_lock = threading.Lock()
-
-# These expanded component records duplicate the IDs, counts and endpoint/core
-# geometry that the embedded chart actually consumes. Keep them in the full
-# standalone/audit contract, but omit them from the four simultaneous embedded
-# charts where transfer and JSON parsing are on the click-critical path.
-_EMBEDDED_STRICT_AUDIT_FIELDS = frozenset(
-    {
-        "overlap_components",
-        "establishment_segments",
-        "middle_three_components",
-    }
-)
-
-
-def _compact_embedded_strict_value(value):
-    if isinstance(value, dict):
-        return {
-            key: _compact_embedded_strict_value(item)
-            for key, item in value.items()
-            if key not in _EMBEDDED_STRICT_AUDIT_FIELDS
-        }
-    if isinstance(value, list):
-        return [_compact_embedded_strict_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_compact_embedded_strict_value(item) for item in value)
-    return value
-
-
-def _project_strict_history_fields_for_embedded(fields, *, embedded: bool):
-    """Return a non-mutating chart projection while preserving the audit API."""
-
-    if not embedded or not isinstance(fields, dict):
-        return fields
-    if fields.get("strict_structure_mode") != "replace":
-        return fields
-    snapshot = fields.get("strict_structure")
-    if not isinstance(snapshot, dict):
-        return fields
-    return {
-        **fields,
-        "strict_structure": _compact_embedded_strict_value(snapshot),
-    }
-
 
 def _gzip_tv_history_response(response):
     """Compress large UDF history payloads and reuse identical encodings.
@@ -187,11 +145,23 @@ def _gzip_tv_history_response(response):
     return response
 
 
+@tv_bp.before_request
+def _start_chart_http_timing():
+    if request.endpoint in {"tv.tv_history", "tv.tv_structure_status"}:
+        g.chart_handler_started = time.perf_counter()
+
+
 @tv_bp.after_request
 def _compress_tv_history_http_response(response):
-    if request.endpoint != "tv.tv_history":
+    if request.endpoint not in {"tv.tv_history", "tv.tv_structure_status"}:
         return response
-    return _gzip_tv_history_response(response)
+    response = _gzip_tv_history_response(response)
+    if request.endpoint == "tv.tv_structure_status":
+        response.headers["Cache-Control"] = "no-store"
+    started = getattr(g, "chart_handler_started", None)
+    if started is not None:
+        response.headers.add("Server-Timing", f"chart-handler;dur={(time.perf_counter() - started) * 1000:.1f}")
+    return response
 
 
 def _request_chart_storage_identity():
@@ -231,8 +201,8 @@ _TV_VALUE_COLUMNS = (
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
 )
 
-_EMBEDDED_MACD_DELTA_SCALE = 1_000_000
-_EMBEDDED_MACD_COLUMNS = (
+_MACD_DELTA_SCALE = 1_000_000
+_MACD_COLUMNS = (
     "macd_dif",
     "macd_dea",
     "macd_hist",
@@ -300,12 +270,12 @@ def _history_time_payload(times, *, delta_encoded: bool):
 def _history_floor_payload(
     times,
     *,
-    embedded: bool,
     first_data_request: bool,
     complete_snapshot: bool,
     countback: int,
+    atomic_initial: bool = False,
 ):
-    """Publish the authoritative retained-history floor to embedded charts.
+    """Publish the retained-history floor to charts requesting a full snapshot.
 
     TradingView probes immediately before the oldest bar after receiving a
     complete 1m snapshot.  The server already answers that range from the
@@ -317,7 +287,7 @@ def _history_floor_payload(
 
     source = times or []
     if (
-        not embedded
+        not atomic_initial
         or not first_data_request
         or not complete_snapshot
         or countback > 0
@@ -333,43 +303,36 @@ def _history_floor_payload(
 def _history_indicator_payload(
     cl_chart_data,
     *,
-    embedded: bool,
     delta_encoded: bool = False,
 ):
-    """Project indicator columns onto the transport contract.
+    """Send six MACD columns as deltas for structure patches.
 
-    ``macd_area`` was historically copied into every UDF response and every
-    browser-side cache, but no chart, indicator, analysis panel or merge
-    consumer reads it. Omitting it only for embedded multi-chart requests cuts
-    about 9% from the largest compressed response while the standalone UDF
-    contract remains backward compatible.
+    Full history keeps its existing indicator columns. Delta patches omit the
+    unused area column and fall back to plain values if lossless encoding fails.
     """
 
     payload = {
         key: cl_chart_data.get(key, [])
-        for key in _EMBEDDED_MACD_COLUMNS
+        for key in _MACD_COLUMNS
     }
-    if embedded and delta_encoded:
+    if delta_encoded:
         encoded = {
             key: _delta_encode_numeric_column(
                 payload[key],
-                scale=_EMBEDDED_MACD_DELTA_SCALE,
+                scale=_MACD_DELTA_SCALE,
             )
-            for key in _EMBEDDED_MACD_COLUMNS
+            for key in _MACD_COLUMNS
         }
         if all(value is not None for value in encoded.values()):
             return {
                 **encoded,
-                "macd_delta_scale": _EMBEDDED_MACD_DELTA_SCALE,
+                "macd_delta_scale": _MACD_DELTA_SCALE,
             }
-    if not embedded:
+    if not delta_encoded:
         payload["macd_area"] = cl_chart_data.get("macd_area", [])
     return payload
 
 from ..services.user_activity import _mark_user_request  # noqa: E402
-from ..services.candidate_chart_cache_warm import (  # noqa: E402
-    candidate_local_history_ready,
-)
 # stock_list 服务：symbols 预加载、缓存、读取
 from ..services.stock_list import (  # noqa: E402
     get_cached_processed_stock,
@@ -416,21 +379,22 @@ def _should_suppress_realtime_history_poll(
     requested_to,
     observed_at,
     force_refresh=False,
-    review_locked=False,
+    regular_us_history=False,
 ):
     """Identify only the bounded current-bar poll emitted by DataPulse.
 
     Every uncertain shape fails open: historical pagination, first loads,
-    forced recovery, review locks, and non-A markets must keep their existing
+    forced recovery, and providers with unknown sessions keep their existing
     behavior. This server guard also protects deployments from browser tabs
     that still execute an older datafeed bundle after an application restart.
     """
 
-    if str(market or "").strip().lower() != "a":
+    market = str(market or "").strip().lower()
+    if market not in {"a", "us"} or (market == "us" and not regular_us_history):
         return False
     if str(first_data_request or "").strip().lower() != "false":
         return False
-    if force_refresh or review_locked:
+    if force_refresh:
         return False
 
     parsed_countback = _safe_int(countback, default=-1)
@@ -442,6 +406,10 @@ def _should_suppress_realtime_history_poll(
     if abs(parsed_to - int(observed_at.timestamp())) > _REALTIME_POLL_NEAR_NOW_SECONDS:
         return False
 
+    if market == "us":
+        from chanlun.exchange.closed_history_cache import closed_us_session
+        return closed_us_session(observed_at) is not None
+
     local = observed_at.astimezone(_CN_UTC_OFFSET)
     if local.weekday() >= 5:
         return True
@@ -451,6 +419,15 @@ def _should_suppress_realtime_history_poll(
         for start, end in _A_SHARE_REALTIME_POLL_WINDOWS
     )
     return not due
+
+
+def _regular_us_history_source():
+    from chanlun import config
+    exchange = str(getattr(config, "EXCHANGE_US", "")).lower()
+    return exchange == "cq" or (
+        exchange == "usmart"
+        and str(getattr(config, "US_HISTORY_KLINE_SOURCE", "")).lower() == "longbridge"
+    )
 
 
 def _normalize_unix_ts(value, default=0):
@@ -466,27 +443,6 @@ def _normalize_resolution(resolution: str):
     return {"D": "1D", "W": "1W", "M": "1M"}.get(resolution, resolution)
 
 
-def _validated_review_chart_lock():
-    """返回服务端校验通过的人工复核因果图表锁。"""
-
-    values = {
-        "candidate_id": str(request.args.get("review_candidate_id") or ""),
-        "source_sha256": str(request.args.get("review_source_sha256") or ""),
-        "review_as_of": str(request.args.get("review_as_of") or ""),
-    }
-    if not any(values.values()):
-        return None
-    if not all(values.values()):
-        raise ValueError("partial human-review chart lock")
-    service = current_app.extensions.get("decision_support_human_review")
-    validator = getattr(service, "validate_chart_lock", None)
-    if not callable(validator):
-        raise ValueError("人工复核图表锁服务不可用")
-    return validator(
-        candidate_id=values["candidate_id"],
-        source_sha256=values["source_sha256"],
-        review_as_of=int(values["review_as_of"]),
-    )
 
 
 def _parse_tv_symbol(symbol: str):
@@ -675,11 +631,6 @@ def tv_symbols():
     if market is None or code is None:
         return {"s": "error", "errmsg": f"invalid symbol: {raw_symbol}"}
 
-    try:
-        _validated_review_chart_lock()
-    except (TypeError, ValueError, RuntimeError) as exc:
-        LogUtil.warning(f"[tv_symbols] rejected review lock: {exc}")
-        return {"s": "error", "errmsg": "invalid causal chart lock"}
     # 先读已恢复的 last-known-good symbol 缓存。冷启动时 QMT 的全市场刷新会长时间
     # 持有 xtdata native lock；若这里先调 stock_info，前端 Requester 会在 15 秒后超时并把
     # 一次临时阻塞永久记成 unknown_symbol，直到用户手动“重新加载数据”。缓存命中时不再
@@ -811,16 +762,8 @@ def tv_quotes():
 
     for market, code_map in by_market.items():
         try:
-            isolated_batch = (
-                isolated_a_share_quote_batch(current_app, list(code_map))
-                if market == Market.A.value
-                else None
-            )
-            if isolated_batch is not None:
-                stock_ticks = isolated_batch.ticks()
-            else:
-                ex = get_exchange(Market(market))
-                stock_ticks = ex.ticks(list(code_map.keys()))
+            ex = get_exchange(Market(market))
+            stock_ticks = ex.ticks(list(code_map.keys()))
         except Exception:
             LogUtil.exception(
                 f"[tv_quotes] ticks failed market={market} n={len(code_map)}"
@@ -918,6 +861,26 @@ def tv_search():
         # 兜底也失败时仍降级为空列表而不是 500, 避免前端 datafeed 抛异常显示"加载错误"。
         processed_stocks = []
 
+    # A bounded startup catalog must not prevent opening an explicitly named
+    # stock. Resolve only this code; never enumerate the exchange for a search.
+    explicit_code = query.upper()
+    if exchange == "a" and re.fullmatch(r"[036]\d{5}", explicit_code):
+        explicit_code = ("SH." if explicit_code.startswith("6") else "SZ.") + explicit_code
+    if exchange == "a" and re.fullmatch(r"(?:SH|SZ|BJ)\.\d{6}", explicit_code):
+        if not any(stock["code"].upper() == explicit_code for stock in processed_stocks):
+            try:
+                provider = get_exchange(Market(exchange))
+                stock = resolve_bounded_stock_info(provider, explicit_code, allow_code_fallback=False)
+                if stock:
+                    name = str(stock.get("name") or explicit_code)
+                    processed_stocks = [{
+                        **stock, "code": explicit_code, "name": name,
+                        "code_lower": explicit_code.lower(), "name_lower": name.lower(),
+                        "pinyin_initials": "",
+                    }, *processed_stocks]
+            except Exception as exc:
+                LogUtil.warning(f"[tv_search] explicit identity unavailable code={explicit_code}: {type(exc).__name__}")
+
     if not processed_stocks:
         # 没有可搜的 symbol 直接返回空, 后续逻辑还有 market_session/market_timezone 取值,
         # 提前返回也能省一次循环。
@@ -987,6 +950,49 @@ def tv_search():
         )
     return infos
 
+@tv_bp.route("/tv/structure-status")
+@login_required
+def tv_structure_status():
+    """Read only: checking an open chart never initiates data or strategy builds."""
+    market, code = _parse_tv_symbol(request.args.get("symbol", ""))
+    resolution = _normalize_resolution(request.args.get("resolution"))
+    if market is None or code is None or resolution not in resolution_maps:
+        return {"state": "invalid"}, 400
+    frequency = resolution_maps[resolution]
+    settings = query_cl_chart_config(market, code)
+    cache_key = _build_cache_key(market, code, frequency, settings if isinstance(settings, dict) else {})
+    entry = _get_chart_cache_entry_ram_only(cache_key)
+    if entry is None:
+        return {"state": "missing"}
+    data = entry["data"]
+    if data.get("_initial_structure_build_id"):
+        from ..services.chart_initial_build import is_initial_build_active
+
+        return {"state": "pending" if is_initial_build_active(cache_key) else "missing"}
+    build_id = request.args.get("build_id")
+    if build_id:
+        if data.get("_completed_structure_build_id") != build_id:
+            return {"state": "superseded"}
+        times = data.get("t") or []
+        if not times:
+            return {"state": "invalid"}
+        try:
+            structure_fields = strict_structure_history_fields(
+                data, authoritative=True, expected_source_closed_at=times[-1],
+            )
+        except (TypeError, ValueError):
+            return {"state": "invalid"}
+        return {"state": "complete", "patch": {
+            "schema": "chanlun-structure-patch-v1", "build_id": build_id,
+            "source_count": len(times), "source_first": times[0], "source_last": times[-1],
+            **chart_bar_time_fields(data),
+            **_history_indicator_payload(data, delta_encoded=True),
+            "fxs": data.get("fxs", []), "bis": data.get("bis", []), "xds": data.get("xds", []),
+            **structure_fields,
+        }}
+    return {"state": "complete", "mode": data.get("strict_structure_mode")}
+
+
 @tv_bp.route("/tv/history")
 @login_required
 def tv_history():
@@ -996,27 +1002,13 @@ def tv_history():
         symbol = request.args.get("symbol", "")
         resolution = _normalize_resolution(request.args.get("resolution"))
         firstDataRequest = request.args.get("firstDataRequest", "false")
-        embedded_history = request.args.get("embedded") == "1"
-        numeric_delta_history = (
-            embedded_history and request.args.get("numeric_delta") == "1"
-        )
+        numeric_delta_history = request.args.get("numeric_delta") == "1"
         _from = _normalize_unix_ts(request.args.get("from", "0"))
         _to = _normalize_unix_ts(request.args.get("to", "0"))
-        try:
-            _review_lock = _validated_review_chart_lock()
-        except (TypeError, ValueError, RuntimeError) as exc:
-            LogUtil.warning(f"[tv_history] rejected human-review lock: {exc}")
-            return {"s": "no_data"}
-        _review_as_of = (
-            None if _review_lock is None else int(_review_lock["review_as_of"])
-        )
-        if _review_as_of is not None:
-            _to = _review_as_of if _to <= 0 else min(_to, _review_as_of)
-            if _from > _review_as_of:
-                return {"s": "no_data"}
         # H1(阶段E): 前端断档 gap-reset 主动带 force_refresh=1 → 绕过缓存强制重算,补齐断档。
         # 绕过而非删缓存:走既有 MISS→重算路径,重算失败旧 entry 仍在(符合 C1"绝不丢好缓存")。
         force_refresh = request.args.get("force_refresh") == "1"
+        refresh_if_stale = request.args.get("refresh_if_stale") == "1"
         tz_sh = pytz.timezone("Asia/Shanghai")
 
         def _fmt_ts(ts: int) -> str:
@@ -1036,11 +1028,6 @@ def tv_history():
         if market is None or code is None:
             LogUtil.warning(f"[tv_history] invalid symbol: {symbol}")
             return {"s": "no_data"}
-        if _review_lock is not None and (
-            market != "a" or code != _review_lock.get("symbol")
-        ):
-            LogUtil.warning("[tv_history] review lock symbol mismatch")
-            return {"s": "no_data"}
         frequency = resolution_maps.get(resolution)
         if frequency is None:
             LogUtil.warning(f"[tv_history] Unsupported resolution: {resolution}")
@@ -1052,7 +1039,7 @@ def tv_history():
             requested_to=_to,
             observed_at=datetime.datetime.now(datetime.timezone.utc),
             force_refresh=force_refresh,
-            review_locked=_review_lock is not None,
+            regular_us_history=market == "us" and _regular_us_history_source(),
         ):
             LogUtil.debug(
                 f"[tv_history] suppressed off-session realtime poll "
@@ -1109,12 +1096,6 @@ def tv_history():
             cl_config = {}
         # 使用稳定 hash 构造 cache_key（不受 PYTHONHASHSEED 影响，进程重启后仍一致）
         cache_key = _build_cache_key(market, code, frequency, cl_config)
-        if _review_lock is not None:
-            # 严禁与实时快照共享缓存：先按复核时点截断 K 线，再计算结构；不能
-            # 在包含未来 K 线的结构结果上做事后裁剪。
-            cache_key += (
-                f"_review_{_review_lock['candidate_id'][7:]}_{_review_as_of}"
-            )
 
         cl_chart_data = None
         is_cache_hit = False
@@ -1133,7 +1114,7 @@ def tv_history():
 
         if is_range_request and _to > 0:
             # TradingView requests a small indicator warm-up window immediately
-            # before the oldest bar after an embedded chart receives the complete
+            # before the oldest bar after a chart receives the complete
             # cached history.  A stale revalidation or SSE recompute can hold the
             # per-symbol calculation lock for tens of seconds; waiting for that
             # lock just to rediscover that the requested window predates the
@@ -1154,7 +1135,7 @@ def tv_history():
         # 方向2: 交易时段决定 serve-stale 的过期阈值(盘中短/收盘长)。在锁外算
         # (带 30s TTL 缓存), 不占用 cache_lock 临界区。
         _market_trading = (
-            False if _review_lock is not None else market_now_trading(market)
+            market_now_trading(market)
         )
         _needs_refresh = False
 
@@ -1164,14 +1145,13 @@ def tv_history():
         # must remain immediately readable. The old lock-first order turned
         # stale-while-revalidate into wait-for-revalidate.
         cache_entry = _get_chart_cache_entry(cache_key)
-        if _review_lock is not None and cache_entry is not None:
-            cache_entry = {**cache_entry, "validated_at": time.time()}
         with cache_lock:
             is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
                 evaluate_cache_for_tv_history(
                     cache_entry, _from, _to, is_range_request,
                     market_is_trading=_market_trading,
                     force_refresh=force_refresh,
+                    **({"refresh_if_stale": True} if refresh_if_stale else {}),
                 )
             )
             if not is_cache_hit:
@@ -1191,14 +1171,13 @@ def tv_history():
                 # outside the process-wide cache lock; the per-key lock still
                 # serializes all writes for this chart identity.
                 cache_entry = _get_chart_cache_entry(cache_key)
-                if _review_lock is not None and cache_entry is not None:
-                    cache_entry = {**cache_entry, "validated_at": time.time()}
                 with cache_lock:
                     is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
                         evaluate_cache_for_tv_history(
                             cache_entry, _from, _to, is_range_request,
                             market_is_trading=_market_trading,
                             force_refresh=force_refresh,
+                            **({"refresh_if_stale": True} if refresh_if_stale else {}),
                         )
                     )
                     if not is_cache_hit:
@@ -1227,6 +1206,10 @@ def tv_history():
                     return {"s": "no_data"}
 
                 LogUtil.debug(f"[tv_history] Cache miss ({cache_miss_reason}) req={req_tag}")
+                # Automatic reconnect/watchdog repairs can share a snapshot
+                # just published by SSE or revalidation. If still stale after
+                # the lock's second check, retain the genuine forced fetch.
+                force_refresh = force_refresh or cache_miss_reason == "cache_force_refresh"
                 kline_args = {}
                 # cache_empty(冷缓存,缓存里完全没有该 cache_key)即便是窄范围轮询
                 # 请求,也必须按默认回看窗口全量拉取。否则空缓存会被窄窗口请求"种小"
@@ -1243,27 +1226,18 @@ def tv_history():
                         f"[tv_history] incremental request {code} range: {kline_args['start_date']} -> {kline_args['end_date']}"
                     )
                 else:
-                    end_at = (
-                        datetime.datetime.fromtimestamp(_review_as_of, tz_sh)
-                        if _review_as_of is not None
-                        else datetime.datetime.now(tz_sh)
-                    )
+                    end_at = datetime.datetime.now(tz_sh)
                     kline_args["end_date"] = end_at.strftime("%Y-%m-%d %H:%M:%S")
-                    # The ranked A-share candidate worker has already refreshed
-                    # these symbols into QMT's local store.  Empty and heavily
-                    # stale chart snapshots may therefore rebuild from that
-                    # authoritative local history without queueing behind the
-                    # shared QMT download lane.  The hint expires quickly;
-                    # force-refresh and arbitrary symbols keep the normal
-                    # download path so recovery semantics are never weakened.
-                    if (
-                        market == "a"
-                        and firstDataRequest == "true"
-                        and cache_miss_reason
-                        in {"cache_empty", "cache_stale_snapshot"}
-                        and candidate_local_history_ready(market, code, frequency)
-                    ):
-                        kline_args["args"] = {"skip_download": True}
+                if (
+                    market == "a"
+                    and config.EXCHANGE_A == "qmt"
+                    and not force_refresh
+                    and not kline_args.get("args", {}).get("skip_download")
+                ):
+                    # Both initial history and range repairs first verify the
+                    # complete requested local source. QMT falls back to real
+                    # download when that proof fails; this is not skip_download.
+                    kline_args.setdefault("args", {})["prefer_local"] = True
 
                 _fetch_result = fetch_klines_and_compute_cl_data(
                     market, code, frequency, cl_config,
@@ -1272,6 +1246,11 @@ def tv_history():
                     cache_miss_reason=cache_miss_reason,
                     cache_key=cache_key,
                     to_ts=_to,
+                    force_refresh=force_refresh,
+                    **({"progressive": True} if (
+                        current_app.config.get("CHART_ONLY_MODE", False)
+                        and firstDataRequest == "true"
+                    ) else {}),
                 )
                 if _fetch_result is None:
                     return {"s": "no_data"}
@@ -1302,7 +1281,7 @@ def tv_history():
         # 方向1 (stale-while-revalidate): firstDataRequest 命中"过期全量快照"已即时
         # 返回旧快照(秒显), 这里派去重的后台重验证拉全新数据写回缓存, 经现有
         # SSE 推送 / TV polling 自愈到前端。submit 非阻塞, 不影响本次响应延迟。
-        if is_cache_hit and _needs_refresh and _review_lock is None:
+        if is_cache_hit and _needs_refresh:
             submit_revalidation(market, code, frequency, cl_config, cache_key)
 
         if cl_chart_data is None:
@@ -1395,10 +1374,6 @@ def tv_history():
             ),
             expected_source_closed_at=_resp_t[-1],
         )
-        _strict_history_fields = _project_strict_history_fields_for_embedded(
-            _strict_history_fields,
-            embedded=embedded_history,
-        )
 
         LogUtil.debug(
             f"[DataVerify][Backend] symbol={symbol} resolution={resolution} "
@@ -1427,10 +1402,10 @@ def tv_history():
             ),
             **_history_floor_payload(
                 cl_chart_data.get("t", []),
-                embedded=embedded_history,
                 first_data_request=firstDataRequest == "true",
                 complete_snapshot=_src_is_full,
                 countback=_safe_int(args.get("countback"), default=0),
+                atomic_initial=args.get("atomic_initial") == "1",
             ),
             "c": cl_chart_data.get("c", []),
             "o": cl_chart_data.get("o", []),
@@ -1439,7 +1414,6 @@ def tv_history():
             "v": cl_chart_data.get("v", []),
             **_history_indicator_payload(
                 cl_chart_data,
-                embedded=embedded_history,
                 delta_encoded=numeric_delta_history,
             ),
             "fxs": cl_chart_data.get("fxs", []),
@@ -1447,6 +1421,8 @@ def tv_history():
             "xds": cl_chart_data.get("xds", []),
             "update": False if firstDataRequest == "true" else True,
             "full_snapshot": _emit_full_snapshot,
+            "initial_structure_build_id": _strict_source_data.get("_initial_structure_build_id"),
+            **chart_bar_time_fields(cl_chart_data),
             **_strict_history_fields,
         }
     except Exception as e:

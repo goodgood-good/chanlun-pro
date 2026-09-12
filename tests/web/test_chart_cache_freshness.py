@@ -33,6 +33,21 @@ def test_first_request_fresh_snapshot_hits_without_refresh():
     assert needs_refresh is False
 
 
+def test_rebuilding_a_chart_cannot_extend_the_original_history_source_deadline():
+    now = 100_000.0
+    entry = _full_entry(validated_at=now)
+    entry["data"]["_history_source_valid_until"] = now + 1
+    assert evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=False, now=now,
+    )[0] is True
+    hit, _, reason, refresh = evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=False, now=now + 1,
+    )
+    assert hit is False
+    assert reason == "cache_stale_snapshot"
+    assert refresh is False  # Tail-only validation cannot renew adjusted history.
+
+
 def test_first_request_moderately_stale_serves_stale_and_flags_refresh():
     now = 100_000.0
     # 盘中 10min: 300s(短阈值) < 600 < 1800s(上限) → 小幅过期 → serve-stale + 刷新

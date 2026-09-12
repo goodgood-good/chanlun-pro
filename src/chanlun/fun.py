@@ -68,12 +68,6 @@ def timeint_to_str(_t, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
     return time.strftime(_format, time_arr)
 
 
-def timeint_to_datetime(_t, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
-    """时间戳（int）转 datetime 对象。"""
-    time_arr = time.localtime(int(_t))
-    return str_to_datetime(time.strftime(_format, time_arr), _format, tz=tz)
-
-
 def str_to_datetime(_s, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
     """格式化字符串转 datetime 对象（带时区）。"""
     return datetime.datetime.strptime(_s, _format).astimezone(tz)

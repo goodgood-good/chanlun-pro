@@ -195,53 +195,8 @@ test('preference writes use the account API and include CSRF', async () => {
   });
 });
 
-test('embedded decision-support chart is read-only and cannot overwrite account state', () => {
-  const serverTvChart = JSON.stringify({ market: 'a', a_code: 'SH.600000' });
-  const sharedTvChart = JSON.stringify({ market: 'us', us_code: 'AAPL.US' });
-  const h = loadPreferences(
-    {
-      username: 'alice',
-      account_key: 'alice-key',
-      exists: true,
-      preferences: { schema: SCHEMA, values: { tv_chart: serverTvChart } },
-    },
-    { tv_chart: sharedTvChart },
-    { search: '?chart_embed=decision-support&market=a&code=SZ.000001' },
-  );
-
-  assert.equal(h.sandbox.AccountPreferences.readOnly, true);
-  assert.equal(h.sandbox.AccountPreferences.getItem('tv_chart'), serverTvChart);
-  h.sandbox.AccountPreferences.setItem(
-    'tv_chart',
-    JSON.stringify({ market: 'a', a_code: 'SZ.000001' }),
-  );
-  assert.equal(h.localStorage.getItem('tv_chart'), sharedTvChart);
-  assert.equal(h.fetchCalls.length, 0);
-  assert.equal(h.timers.filter((item) => !item.cleared).length, 0);
-});
-
-test('screening view is an account-approved preference', async () => {
-  const h = loadPreferences({
-    username: 'alice',
-    account_key: 'alice-key',
-    exists: true,
-    preferences: { schema: SCHEMA, values: {} },
-  });
-  const view = JSON.stringify({
-    contract: 'contract-v1',
-    layout: 'quad',
-    chartSizing: { heights: { quad: 920 } },
-  });
-
-  assert.equal(h.sandbox.AccountPreferences.isApprovedKey('trading_screening_view'), true);
-  h.sandbox.AccountPreferences.setItem('trading_screening_view', view);
-  const timer = h.timers.find((item) => !item.cleared);
-  assert.ok(timer);
-  timer.callback();
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(
-    JSON.parse(h.fetchCalls[0].options.body).values.trading_screening_view,
-    view,
-  );
+test('removed analysis preferences are never uploaded', () => {
+ const h=loadPreferences({username:'alice',account_key:'alice',exists:false,preferences:{schema:SCHEMA,values:{}}},{});
+ assert.equal(h.sandbox.AccountPreferences.isApprovedKey('trading_screening_view'),false);
+ assert.equal(h.sandbox.AccountPreferences.isApprovedKey('chart_menu_width'),true);
 });

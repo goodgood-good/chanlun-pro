@@ -122,7 +122,7 @@ test('replace swaps the whole strict object and unavailable clears it', () => {
   );
 });
 
-test('embedded numeric deltas restore exact history and MACD columns', () => {
+test('numeric deltas restore exact history and MACD columns', () => {
   const hp = makeHistoryProvider();
   const payload = response('unchanged', undefined, false);
   Object.assign(payload, {

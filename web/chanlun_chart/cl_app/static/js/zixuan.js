@@ -1,8 +1,4 @@
 var ZiXuan = (function () {
-  function auxiliaryUiEnabled() {
-    return window.__CHANLUN_EMBEDDED_CHART !== true;
-  }
-
   function pageIsVisible() {
     if (typeof document === "undefined") return true;
     return document.visibilityState !== "hidden";
@@ -13,9 +9,13 @@ var ZiXuan = (function () {
   var update_request_in_flight = false;
   var update_poll_generation = 0;
   // The accordion records user intent; only a visible standalone page performs I/O.
-  var rate_polling_requested = auxiliaryUiEnabled();
+  var rate_polling_requested = true;
   var rate_polling_active = rate_polling_requested && pageIsVisible();
   var UPDATE_NORMAL_DELAY_MS = 3000;
+  // HTTP/1.1 also carries the chart's stream and history on this origin.
+  // Reserve connections for switching charts instead of occupying all six
+  // with slow quotes from every market in a cross-market watchlist.
+  var MAX_QUOTE_REQUESTS = 2;
   var UPDATE_CLOSED_DELAY_MS = 300000;
   var UPDATE_RETRY_DELAYS_MS = [6000, 12000, 24000, 30000];
   var marketRetryState = {};
@@ -71,7 +71,7 @@ var ZiXuan = (function () {
 
   function syncRatePollingState() {
     var nextActive =
-      auxiliaryUiEnabled() && rate_polling_requested && pageIsVisible();
+      rate_polling_requested && pageIsVisible();
     if (nextActive === rate_polling_active) return nextActive;
 
     rate_polling_active = nextActive;
@@ -85,7 +85,7 @@ var ZiXuan = (function () {
   }
 
   function bindVisibilityLifecycle() {
-    if (!auxiliaryUiEnabled() || visibilityLifecycleBound) return false;
+    if (visibilityLifecycleBound) return false;
     if (typeof document === "undefined"
         || typeof document.addEventListener !== "function") return false;
     visibilityLifecycleBound = true;
@@ -184,7 +184,7 @@ var ZiXuan = (function () {
   }
 
   function schedule_rate_update(delay, generation) {
-    if (!auxiliaryUiEnabled() || !rate_polling_active) return;
+    if (!rate_polling_active) return;
     if (generation !== update_poll_generation) return;
     if (timeout_update_rates !== null) clearTimeout(timeout_update_rates);
     timeout_update_rates = setTimeout(function () {
@@ -230,6 +230,7 @@ var ZiXuan = (function () {
   }
 
   function formatQuotePrice(value, market) {
+    if (value == null || value === "") return "-";
     var price = Number(value);
     if (!Number.isFinite(price)) return "-";
     var normalizedMarket = String(market || "").toLowerCase();
@@ -246,6 +247,7 @@ var ZiXuan = (function () {
   }
 
   function formatQuoteRate(value) {
+    if (value == null || value === "") return "- %";
     var rate = Number(value);
     if (!Number.isFinite(rate)) return "- %";
     if (Math.abs(rate) < 0.005) rate = 0;
@@ -522,7 +524,6 @@ var ZiXuan = (function () {
       return true;
     },
     load_groups: function (preferredGroup, onLoaded) {
-      if (!auxiliaryUiEnabled()) return false;
       var market = Utils.get_market();
       var requested = validateGroupName(preferredGroup || "");
       var preferred = requested.ok ? requested.name : "";
@@ -580,7 +581,6 @@ var ZiXuan = (function () {
       });
     },
     render_zixuan_opts: function () {
-      if (!auxiliaryUiEnabled()) return false;
       var market = Utils.get_market();
       var code = String(Utils.get_code() || "").replace(/\//g, "__");
       var generation = ++zixuanOptsRequestGeneration;
@@ -617,12 +617,6 @@ var ZiXuan = (function () {
       });
     },
     set_rate_polling_active: function (is_active) {
-      if (!auxiliaryUiEnabled()) {
-        rate_polling_requested = false;
-        rate_polling_active = false;
-        stop_timer();
-        return false;
-      }
       rate_polling_requested = is_active === true;
       return syncRatePollingState();
     },
@@ -631,7 +625,7 @@ var ZiXuan = (function () {
     // 再等待最慢的数据源，造成持仓信息短暂消失。已有请求继续更新同一批行，
     // 避免重复请求；同时清除失败市场退避，让下一次请求立即尝试全部市场。
     refresh_rates: function () {
-      if (!auxiliaryUiEnabled() || !rate_polling_active) return false;
+      if (!rate_polling_active) return false;
       if (timeout_update_rates !== null) {
         clearTimeout(timeout_update_rates);
         timeout_update_rates = null;
@@ -648,7 +642,7 @@ var ZiXuan = (function () {
 
     // 跨市场分组按标的自身市场拆批请求行情，分组本身不再从属于当前图表市场。
     stocks_update_rate: function (generation) {
-      if (!auxiliaryUiEnabled() || !rate_polling_active) return false;
+      if (!rate_polling_active) return false;
       var request_generation =
         typeof generation === "number" ? generation : update_poll_generation;
       if (request_generation !== update_poll_generation) return false;
@@ -779,7 +773,27 @@ var ZiXuan = (function () {
         );
       }
 
-      batches.forEach(function (batch) {
+      var activeBatches = 0;
+      var nextBatch = 0;
+      var currentMarket = Utils.get_market();
+      batches.sort(function (left, right) {
+        return Number(right.market === currentMarket) - Number(left.market === currentMarket);
+      });
+
+      function pumpBatches() {
+        while (nextBatch < batches.length && activeBatches < MAX_QUOTE_REQUESTS) {
+          var batch = batches[nextBatch++];
+          if (request_generation !== update_poll_generation || !rate_polling_active) {
+            // A replaced/hidden watchlist must not start its remaining I/O.
+            finishBatch();
+            continue;
+          }
+          activeBatches += 1;
+          requestBatch(batch);
+        }
+      }
+
+      function requestBatch(batch) {
         var batchFailed = false;
         function failBatch(xhr) {
           if (request_generation !== update_poll_generation) return;
@@ -859,13 +873,17 @@ var ZiXuan = (function () {
             }
           },
           error: failBatch,
-          complete: finishBatch,
+          complete: function () {
+            activeBatches -= 1;
+            finishBatch();
+            pumpBatches();
+          },
         });
-      });
+      }
+      pumpBatches();
     },
 
     render_zixuan_stocks: function () {
-      if (!auxiliaryUiEnabled()) return false;
       stop_timer();
       $("#zixuan_stock_count").text("—");
       setCurrentGroupLabel(ZiXuan.zx_group);
@@ -1094,7 +1112,6 @@ var ZiXuan = (function () {
     },
 
     init_zixuan_opts: function () {
-        if (!auxiliaryUiEnabled()) return false;
         layui.use(function () {
            var layer = layui.layer;
            var dropdown = layui.dropdown;

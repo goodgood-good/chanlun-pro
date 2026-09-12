@@ -7,13 +7,12 @@ failures:
 
 * two simultaneous unfinished centers;
 * a completed center being rewritten after future units are appended;
-* a completed third-class return not producing exactly one strict point;
+* a completed center losing its strict outside return;
 * an equality-boundary return being lost by an accidental strict comparison.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
 from itertools import product
 
 from chanlun.core.strict_structure.center_machine import calculate_centers
@@ -21,12 +20,9 @@ from chanlun.core.strict_structure.models import (
     CenterPreviewState,
     CenterState,
     SourceKind,
-    StrictLevelResult,
-    StrictStructureResult,
 )
-from chanlun.core.strict_structure.signals import StrictSignalEngine
 
-from tests.core.strict_structure.helpers import TEST_PRICE_BASIS, unit
+from tests.core.strict_structure.helpers import unit
 
 
 def _alternating_walk(
@@ -44,7 +40,7 @@ def _alternating_walk(
     return tuple(values)
 
 
-def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> None:
+def test_bounded_segment_walks_preserve_center_lifecycle_invariants() -> None:
     """Exhaust 512 connected walks without allowing lifecycle ambiguity."""
 
     checked = 0
@@ -75,29 +71,11 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
                     if center.state is CenterState.COMPLETED:
                         assert final_by_id.get(center.center_id) == center
 
-            structure = StrictStructureResult(
-                schema="chanlun-structure",
-                price_basis_revision=TEST_PRICE_BASIS,
-                levels=(
-                    StrictLevelResult(
-                        structural_level=0,
-                        units=values,
-                        center_result=final,
-                        trend_types=(),
-                        completed_trends=(),
-                    ),
-                ),
-            )
-            points = StrictSignalEngine(
-                structure=structure,
-                price_quantum=Decimal("1"),
-            ).third_class_points()
             completed_ids = {
                 center.center_id
                 for center in final.centers
                 if center.state is CenterState.COMPLETED
             }
-            assert {point.center_id for point in points} == completed_ids
 
             for center in final.centers:
                 assert len(center.core_units) == 3
@@ -128,10 +106,10 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
                 assert leave not in center.body_units
                 if leave.direction == "up":
                     assert ret.direction == "down"
-                    assert ret.low_tick >= center.zg_tick
+                    assert ret.low_tick > center.zg_tick
                 else:
                     assert ret.direction == "up"
-                    assert ret.high_tick <= center.zd_tick
+                    assert ret.high_tick < center.zd_tick
 
             checked += 1
             completed_count += len(completed_ids)

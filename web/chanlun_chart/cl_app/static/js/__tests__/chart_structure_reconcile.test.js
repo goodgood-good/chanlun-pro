@@ -4,6 +4,12 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const Reconcile = require('../chart_structure_reconcile.js');
 
+
+
+
+
+
+
 function strictCenter(overrides = {}) {
   return {
     render_kind: 'formal_center',
@@ -18,21 +24,7 @@ function strictCenter(overrides = {}) {
   };
 }
 
-function strictTrend(overrides = {}) {
-  return {
-    render_kind: 'strict_trend',
-    trend_id: 'trend-1',
-    render_id: 'trend-1@locked',
-    structural_level: 0,
-    state: 'locked',
-    direction: 'down',
-    points: [
-      { time: 100, price: 11 },
-      { time: 500, price: 9 },
-    ],
-    ...overrides,
-  };
-}
+
 
 function chartContext(chartInstanceId, interval = '5m') {
   return {
@@ -51,6 +43,16 @@ test('formal center identity uses render_id instead of clipped points', () => {
     'c1@2@extending',
   );
 });
+
+
+
+
+
+
+
+
+
+
 
 test('bar milliseconds are converted exactly once to epoch seconds', () => {
   assert.equal(Reconcile.barTimeMsToEpochSeconds(1784511000000), 1784511000);
@@ -162,44 +164,11 @@ test('right unloaded boundary clips only the render copy', () => {
   assert.deepEqual(item.points.map((point) => point.time), [100, 500]);
 });
 
-test('strict movement lines never move an unloaded market anchor', () => {
-  const item = strictTrend();
 
-  assert.equal(
-    Reconcile.clipToLoadedRange(item, { from: 200, to: 600 }),
-    null,
-  );
-  assert.deepEqual(item.points, [
-    { time: 100, price: 11 },
-    { time: 500, price: 9 },
-  ]);
-});
 
-test('fully visible strict movement keeps both exact anchors', () => {
-  const item = strictTrend();
-  const plan = Reconcile.planReconcile(
-    [],
-    [item],
-    { from: 50, to: 600, barTimes: [50, 100, 200, 300, 400, 500, 600] },
-    { from: 50, to: 600 },
-  );
 
-  assert.equal(plan.createItems.length, 1);
-  assert.deepEqual(plan.createItems[0].points, item.points);
-});
 
-test('crossing strict movement waits until both anchors enter the real-bar viewport', () => {
-  const item = strictTrend();
-  const plan = Reconcile.planReconcile(
-    [],
-    [item],
-    { from: 50, to: 600, barTimes: [50, 100, 200, 300, 400, 500, 600] },
-    { from: 200, to: 450 },
-  );
 
-  assert.deepEqual(plan.createItems, []);
-  assert.deepEqual(plan.desiredItems, []);
-});
 
 test('body revision replaces exactly one prior entity', () => {
   const plan = Reconcile.planReconcile(
@@ -218,29 +187,7 @@ test('body revision replaces exactly one prior entity', () => {
   assert.equal(plan.desiredItems.length, 1);
 });
 
-test('走势方向资格变化会触发图形替换', () => {
-  const candidate = {
-    render_kind: 'strict_trend',
-    trend_id: 'trend-1',
-    render_id: 'trend-1@forming@u9@geometric_candidate',
-    structural_level: 0,
-    state: 'forming',
-    direction: 'down',
-    semantic_direction: 'down',
-    direction_status: 'geometric_candidate',
-    points: [{ time: 100, price: 11 }, { time: 500, price: 9 }],
-  };
-  const formal = {
-    ...candidate,
-    render_id: 'trend-1@forming@u9@formal',
-    direction_status: 'formal',
-  };
 
-  assert.notEqual(
-    Reconcile.geometryFingerprint(candidate),
-    Reconcile.geometryFingerprint(formal),
-  );
-});
 
 test('duplicate retained entities are removed and rebuilt as one logical shape', () => {
   const item = strictCenter();
@@ -286,32 +233,4 @@ test('stale epochs are rejected after a newer reconcile or disposal', () => {
   epoch.dispose();
   assert.equal(epoch.current('scope', second), false);
   assert.throws(() => epoch.next('scope'), /disposed/);
-});
-
-test('divergence identity uses its stable divergence id', () => {
-  assert.equal(
-    Reconcile.logicalKey({ render_kind: 'strict_divergence', divergence_id: 'divergence-1' }),
-    'strict_divergence:divergence-1',
-  );
-});
-
-test('pending movement identity uses its stable partition id', () => {
-  assert.equal(
-    Reconcile.logicalKey({
-      render_kind: 'pending_movement',
-      partition_id: 'sha256:pending-1',
-    }),
-    'pending_movement:sha256:pending-1',
-  );
-});
-
-test('forming center preview identity uses its stable preview id', () => {
-  assert.equal(
-    Reconcile.logicalKey({
-      render_kind: 'center_preview',
-      center_id: 'preview-1',
-      preview_id: 'preview-1',
-    }),
-    'center_preview:preview-1',
-  );
 });

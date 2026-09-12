@@ -2,7 +2,7 @@
 
 规则来源（仅标规则，不把结构一致性等同于收益保证）：
 - L062：三 K 分型、笔与至少三笔线段。
-- L065：方向包含、顺序原则及唯一严格笔口径。
+- L065/L077：方向包含、顺序及顶底价格关系；2007-09-18 附文修订距离。
 - L067/L071：特征序列包含与有/无缺口的线段破坏。
 """
 
@@ -102,7 +102,7 @@ def test_l062_fractal_requires_both_high_and_low_relationships():
     assert high_only is None
 
 
-def test_l065_strict_stroke_uses_merged_k_distance_and_directional_endpoint():
+def test_source_stroke_requires_nonshared_fractals_and_raw_distance():
     calc = BiCalculator()
     bottom = _fx("di", cl_index=10, source_index=10, value=90)
     too_near_top = _fx("ding", cl_index=13, source_index=13, value=110)
@@ -257,8 +257,9 @@ def test_strict_base_profile_contains_only_current_production_rules():
     config = dict(strict_base_config())
 
     assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base"
-    assert config["strict_base_profile_id"] == STRICT_BASE_PROFILE_ID
-    assert config["stroke_rule"] == "strict-cl-k-distance"
+    assert config["center_seed_rule"] == "physical-entry-middle-three-core-independent-leave-five-overlap"
+    assert config["chart_structure_rule"] == "native-segment-centers-v2"
+    assert config["stroke_rule"] == "source-fractal-nonshared-raw-distance-v2"
     assert config["stroke_secondary_fractal_rule"] == "allowed"
     assert config["stroke_endpoint_range_rule"] == (
         "fractal-endpoints-not-interval-extremes"
@@ -266,49 +267,21 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert config["stroke_near_opposite_rule"] == (
         "retain-fractal-ignore-as-endpoint"
     )
-    assert config["stroke_same_type_rule"] == "replace-only-if-more-extreme"
+    assert config["stroke_same_type_rule"] == "replace-only-if-more-extreme-and-still-valid-from-previous"
     assert config["stroke_equal_extreme_rule"] == "keep-earlier-fractal"
     assert config["stroke_lock_rule"] == (
         "next-valid-endpoint-physical-witness-no-rollback"
     )
     assert config["segment_rule"] == "feature-sequence"
     assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
-    assert config["strict_macd_source"] == (
-        "same-physical-source-native-all-recursive-levels"
-    )
-    assert (
-        config["strict_macd_level_policy"]
-        == "exact-unit-source-interval"
-    )
-    assert config["strict_macd_area"] == "same_sign_magnitude"
-    assert config["strict_macd_decay_rule"] == "area-or-peak-or-dif"
-    assert config["center_seed_rule"] == (
-        "physical-entry-middle-three-core-independent-leave-five-overlap;"
-        "recursive-three-completed-trend-types"
-    )
     assert config["center_lifecycle_rule"] == (
         "external-departure-first-outside-return-third-class"
     )
     assert config["center_scan_rule"] == (
         "five-role-physical-seed-causal-lifecycle-owner"
     )
-    assert config["trend_divergence_rule"] == (
-        "entry-width-matched-one-or-three-price-extreme-any-macd-decay;"
-        "single-unit-exit-three-segment-nonextending-reversal-confirmation"
-    )
-    assert config["decomposition_rule"] == (
-        "trend-or-consolidation-divergence-terminal-prefix-partition;"
-        "centerless-three-segment-reversal-prefix-and-tail-movement-partition;"
-        "causal-completion-ledger-current-recomposition-and-tail-extension"
-    )
-    assert config["first_class_rule"] == (
-        "trend-or-consolidation-divergence-reversal"
-    )
-    assert config["second_class_rule"] == (
-        "same-or-lower-first-adjacent-rebound-first-pullback"
-    )
     assert not any(
-        key.startswith(("zs_", "chart_", "recursive_")) or "mmd" in key
+        key.startswith(("zs_", "recursive_")) or "mmd" in key
         for key in config
     )
     assert strict_base_config_revision().startswith("sha256:")

@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import math
 import os
 import tempfile
 import threading
@@ -13,7 +14,7 @@ import pytz
 from tenacity import retry, stop_after_attempt, wait_random
 
 from chanlun import fun
-from chanlun.decision_support.trading_system.file_lock import (
+from chanlun.persistence.file_lock import (
     InterprocessLockTimeout,
     interprocess_file_lock,
 )
@@ -88,6 +89,109 @@ def _xtdata_download_interprocess_lock():
         ) from exc
 
 
+def _complete_local_history_requirement(
+    *, frequency, query_start, end_date, req_counts, observed_at,
+):
+    """Prove the requested closed grid using the pinned calendar, or decline.
+
+    This is an opt-in download optimization, not a stale-data fallback.  An
+    uncovered year, suspension or incomplete local window still downloads.
+    """
+    from chanlun.exchange.a_share_minute_grid import (
+        a_share_completed_one_minute_closes,
+    )
+    from chanlun.exchange.trading_session import (
+        official_trading_session_evidence,
+    )
+
+    group_size = {"1m": 1, "5m": 5, "30m": 30}.get(frequency)
+    if group_size is None or not end_date:
+        return None
+    cutoff = pd.Timestamp(end_date)
+    cutoff = (
+        cutoff.tz_localize(observed_at.tzinfo)
+        if cutoff.tzinfo is None else cutoff.tz_convert(observed_at.tzinfo)
+    )
+    cutoff = min(cutoff, pd.Timestamp(observed_at))
+    started = pd.Timestamp(query_start)
+    started = (
+        started.tz_localize(observed_at.tzinfo)
+        if started.tzinfo is None else started.tz_convert(observed_at.tzinfo)
+    )
+    if started > cutoff:
+        return None
+    evidence = official_trading_session_evidence(
+        session=cutoff.date(), observed_at=observed_at,
+    )
+    if evidence is None:
+        return None
+    calendar = evidence["calendar_document"]
+    coverage_start = datetime.date.fromisoformat(calendar["coverage_start"])
+    if req_counts is None and started.date() < coverage_start:
+        return None
+    expected = tuple(
+        close
+        for day in calendar["trading_days"]
+        if max(started.date(), coverage_start) <= datetime.date.fromisoformat(day)
+        <= cutoff.date()
+        for close in a_share_completed_one_minute_closes(
+            datetime.date.fromisoformat(day),
+        )[group_size - 1::group_size]
+        if started <= close <= cutoff
+    )
+    if req_counts is not None:
+        if len(expected) < req_counts:
+            return None
+        expected = expected[-req_counts:]
+    if not expected:
+        return None
+    return expected, calendar["calendar_fingerprint"], started, cutoff
+
+
+def _local_history_covers_requirement(frame, *, code, frequency, requirement):
+    """Keep real rows/price metadata; never fill gaps or move their clocks."""
+    if frame is None or frame.empty:
+        return False
+    expected, _calendar_revision, started, cutoff = requirement
+    columns = {"code", "date", "open", "high", "low", "close", "volume"}
+    if not columns.issubset(frame.columns) or not frame["code"].eq(code).all():
+        return False
+    times = tuple(pd.Timestamp(value) for value in frame["date"])
+    if (
+        any(pd.isna(value) or value.tzinfo is None for value in times)
+        or any(left >= right for left, right in zip(times, times[1:]))
+        or times[0] < started or times[-1] > cutoff
+    ):
+        return False
+    expected_set = frozenset(expected)
+    observed_grid = tuple(value for value in times if value in expected_set)
+    if observed_grid != expected:
+        return False
+    # QMT can include opening-auction events in a 1m response.  Preserve these
+    # actual source rows, but do not count them as completed minute bars.
+    session_dates = {value.date() for value in expected}
+    if any(
+        value not in expected_set
+        and not (
+            frequency == "1m"
+            and value.date() in session_dates
+            and value.time() in {datetime.time(9, 25), datetime.time(9, 30)}
+        )
+        for value in times
+    ):
+        return False
+    for row in frame.itertuples(index=False):
+        prices = (row.open, row.high, row.low, row.close)
+        if (
+            not all(math.isfinite(value) and value > 0 for value in prices)
+            or not math.isfinite(row.volume) or row.volume < 0
+            or row.low > min(row.open, row.close)
+            or row.high < max(row.open, row.close)
+        ):
+            return False
+    return True
+
+
 class ExchangeQMT(Exchange):
     """QMT（xtquant）沪深 A 股行情适配器。"""
 
@@ -154,15 +258,15 @@ class ExchangeQMT(Exchange):
             freq: timedelta(days=days) for freq, days in DEFAULT_LOOKBACK_DAYS.items()
         }
 
-        # ===== QMT 专属回看覆盖（只影响 QMT/A股，不动共享 _lookback.py、不影响美股 alpaca/polygon）=====
-        # 5m 拉长到 365 天，让 5min 图能装出 30m 同级别中枢(需更长 5m 历史才凑得出 3 段走势类型重合)。
+        # QMT 的历史覆盖单独配置，其他数据源继续使用共享回看设置。
+        # 5m 回看 365 天，为本周期笔、线段与中枢提供足够的历史。
         # 1m 覆盖到 60 天(2026-06-25 用户反馈"1m 周期还是太短"):QMT 本地源切标的快、可承受更长
         # 1m;只覆盖 A股,不动共享 _lookback.py → 美股(长桥)1m 仍 30 天(拉 60 天会切标的卡 20-31s)。
-        # 权衡：天数越大 → 1m/递归层级越多，但 K 线越多→计算/BSON payload 越重、首屏越慢;
+        # 历史越长，计算量和图表传输量也越大，需要兼顾首次加载耗时；
         #       且 QMT 实际能回看多少由数据源返回为准(指数/主板通常比个股长,部分个股可能不足 60 天)。
         QMT_LOOKBACK_OVERRIDE_DAYS = {
             "1m": 60,  # A股 1m 拉长(本地源快;US 不动以保切标的速度)
-            "5m": 365,  # 5min 图的 30m 同级别需更长 5m 历史
+            "5m": 365,  # 本周期结构的历史覆盖
         }
         for _freq, _days in QMT_LOOKBACK_OVERRIDE_DAYS.items():
             self.DEFAULT_LOOKBACK[_freq] = timedelta(days=_days)
@@ -565,6 +669,9 @@ class ExchangeQMT(Exchange):
         end_date: str = None,
         args=None,
     ) -> pd.DataFrame:
+        return self._klines_once(code, frequency, start_date, end_date, args)
+
+    def _klines_once(self, code, frequency, start_date=None, end_date=None, args=None):
         empty_df = pd.DataFrame(
             columns=["code", "date", "open", "high", "low", "close", "volume"]
         )
@@ -574,9 +681,10 @@ class ExchangeQMT(Exchange):
                 raise TypeError("QMT K-line args must be an exact dict")
             unknown_args = set(args) - {
                 "req_counts",
-                "research_exact_end",
+                "exact_end",
                 "dividend_type",
                 "skip_download",
+                "prefer_local",
                 "incremental_refresh_days",
             }
             if unknown_args:
@@ -587,6 +695,8 @@ class ExchangeQMT(Exchange):
                 raise ValueError("req_counts must be a positive exact int")
             if "skip_download" in args and type(args["skip_download"]) is not bool:
                 raise ValueError("skip_download must be an exact bool")
+            if "prefer_local" in args and type(args["prefer_local"]) is not bool:
+                raise ValueError("prefer_local must be an exact bool")
             if "incremental_refresh_days" in args and (
                 type(args["incremental_refresh_days"]) is not int
                 or not 1 <= args["incremental_refresh_days"] <= 60
@@ -623,22 +733,22 @@ class ExchangeQMT(Exchange):
             )
         if (
             args is not None
-            and "research_exact_end" in args
-            and type(args["research_exact_end"]) is not bool
+            and "exact_end" in args
+            and type(args["exact_end"]) is not bool
         ):
-            raise ValueError("research_exact_end must be an exact bool")
-        research_exact_end = args is not None and args.get("research_exact_end") is True
-        if research_exact_end and not end_date:
-            raise ValueError("research_exact_end requires end_date")
+            raise ValueError("exact_end must be an exact bool")
+        exact_end = args is not None and args.get("exact_end") is True
+        if exact_end and not end_date:
+            raise ValueError("exact_end requires end_date")
         query_end = (
             end_date.replace("-", "").replace(" ", "").replace(":", "")
-            if research_exact_end
+            if exact_end
             else ""
         )
         # QMT 下载接口不包含 ``end_time``，读取接口却包含同一边界。下载边界统一后移
         # 一秒，读取和下方裁剪仍固定在业务时刻，既补齐端点 K 线，也不会暴露未来数据。
         download_query_end = query_end
-        if research_exact_end:
+        if exact_end:
             download_query_end = qmt_exclusive_download_end(end_date)
 
         dividend_type = (
@@ -661,6 +771,44 @@ class ExchangeQMT(Exchange):
         # 预热批量预下载后, 逐只可跳过 download(数据已在本地库), 只读取——省下逐只 QMT 往返。
         # 仅预热路径经 args 显式传入 skip_download=True; 用户实时请求不传, 行为不变。
         _skip_dl = args.get("skip_download", False) if args is not None else False
+        if args and args.get("prefer_local") and not _skip_dl:
+            try:
+                requirement = _complete_local_history_requirement(
+                    frequency=frequency, query_start=query_start,
+                    end_date=end_date, req_counts=req_counts,
+                    observed_at=datetime.datetime.now(self.tz),
+                )
+                if requirement is not None:
+                    local_args = {**args, "skip_download": True,
+                                  "exact_end": True}
+                    local_args.pop("prefer_local")
+                    # One read under the existing native lock.  A failed probe
+                    # does not spend three retry budgets before normal download.
+                    local = self._klines_once(
+                        code, frequency, start_date=query_start,
+                        end_date=requirement[3].strftime("%Y-%m-%d %H:%M:%S"),
+                        args=local_args,
+                    )
+                    if _local_history_covers_requirement(
+                        local, code=code, frequency=frequency,
+                        requirement=requirement,
+                    ):
+                        local.attrs["qmt_history_read_mode"] = "local_complete"
+                        local.attrs["qmt_local_history_verified_through"] = (
+                            requirement[0][-1].isoformat()
+                        )
+                        local.attrs["qmt_local_history_calendar_revision"] = requirement[1]
+                        LogUtil.info(
+                            f"[ExchangeQMT.klines] complete local history "
+                            f"code={code} frequency={frequency} rows={len(local)} "
+                            f"through={requirement[0][-1].isoformat()}"
+                        )
+                        return local
+            except Exception as exc:
+                LogUtil.debug(
+                    f"[ExchangeQMT.klines] local coverage unproved "
+                    f"code={code} frequency={frequency}: {type(exc).__name__}: {exc}"
+                )
         incremental_refresh_days = (
             args.get("incremental_refresh_days") if args is not None else None
         )
@@ -676,7 +824,7 @@ class ExchangeQMT(Exchange):
         price_basis_factors = None
         if (
             _skip_dl
-            and not research_exact_end
+            and not exact_end
             and not end_date
             and qmt_read_period in {"1m", "5m"}
         ):
@@ -795,7 +943,7 @@ class ExchangeQMT(Exchange):
                     else _end_dt.tz_convert(self.tz)
                 )
                 if (
-                    research_exact_end
+                    exact_end
                     or _end_dt.date() < datetime.datetime.now(self.tz).date()
                 ):
                     klines_df = klines_df[klines_df["date"] <= _end_dt]
@@ -935,12 +1083,3 @@ class ExchangeQMT(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-    def balance(self):
-        raise Exception("QMT 交易功能在 trader 目录实现")
-
-    def positions(self, code: str = ""):
-        raise Exception("QMT 交易功能在 trader 目录实现")
-
-    def order(self, code: str, o_type: str, amount: float, args=None):
-        raise Exception("QMT 交易功能在 trader 目录实现")
