@@ -305,14 +305,11 @@ class XD(LINE):
         self.di_fx: XLFX = di_fx
         self.tzxls: List[TZXL] = []  # 特征序列列表
         self.done: bool = False  # 标记线段是否完成（信号/当下性口径：端点是否已锁定不可回改）
-        # 显示口径：是否为"正在形成的最后一段"。与 done 解耦——确认级联推迟 done 的末
-        # 几条已成形段 done=False 但 forming=False（图表仍画实线），只有真正在建的末段
-        # forming=True（图表画虚线）。done 是防重绘审计锁，不应把已经几何成形的历史段
-        # 误画成多条“未完成线段”。详见 xd_calculator._emit_pending。
+        # forming 表示正在形成的几何尾段；done 还要求参与破坏证据的笔已锁定。
+        # 两者分开，避免把已经形成、但证据笔仍待确认的线段画成多条活动尾段。
         self.forming: bool = False
-        # First causal witness that made this segment geometrically complete.
-        # This is deliberately independent from ``locked_at``: the latter is
-        # the later non-repainting/audit lock.
+        # The actual feature-sequence proof time, separate from endpoint time.
+        # Locked physical evidence confirms immediately, without a fixed buffer.
         self.formed_at = None
 
         # 是否是拆分后的线段，如果是，这里会写明原因

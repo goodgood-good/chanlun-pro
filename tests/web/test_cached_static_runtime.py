@@ -96,7 +96,6 @@ def _wsgi_app():
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -113,7 +112,7 @@ def test_generic_wsgi_sameorigin_matches_official_csp_boundary():
             "/static/charting_library/charting_library.standalone.js"
         )
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 200
     assert "Content-Security-Policy" not in response.headers
@@ -131,7 +130,7 @@ def test_conventional_favicon_path_serves_the_product_icon():
     try:
         response = app.test_client().get("/favicon.ico")
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 200
     assert response.mimetype in {"image/x-icon", "image/vnd.microsoft.icon"}
@@ -181,7 +180,7 @@ def test_generic_wsgi_browser_executes_sameorigin_bootstrap():
     finally:
         server.shutdown()
         server.server_close()
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
 def test_generic_wsgi_full_chart_has_no_vendor_inline_csp_blocks(monkeypatch):
     sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
@@ -282,7 +281,7 @@ def test_generic_wsgi_full_chart_has_no_vendor_inline_csp_blocks(monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
 
 def test_index_uses_runtime_asset_token_for_unhashed_charting_entrypoint():
@@ -319,6 +318,6 @@ def test_static_asset_token_changes_when_standalone_entrypoint_changes(monkeypat
             )
             second = processor()["static_asset_token"]
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert second != first

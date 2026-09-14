@@ -196,10 +196,10 @@ def test_chart_identity_changes_for_web_producer_and_provider_without_global_cl_
 def client():
     app = create_app(test_config={
         "TESTING": True, "LOGIN_DISABLED": True, "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False, "WTF_CSRF_ENABLED": False,
+        "WTF_CSRF_ENABLED": False,
     })
     yield app.test_client()
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()
 
 
 @pytest.mark.parametrize("first", [True, False])
@@ -209,7 +209,6 @@ def test_history_label_is_independent_of_full_or_partial_strict_response(client,
     monkeypatch.setattr(tv, "market_now_trading", lambda _: False)
     monkeypatch.setattr(tv, "_should_suppress_realtime_history_poll", lambda **_: False)
     monkeypatch.setattr(tv, "_mark_user_request", lambda *_: None)
-    monkeypatch.setattr(tv, "record_user_request", lambda *_: None)
     monkeypatch.setattr(tv, "_get_chart_cache_entry_ram_only", lambda _: None)
     monkeypatch.setattr(tv, "_get_chart_cache_entry", lambda _: {"data": data, "is_full_snapshot": True})
     monkeypatch.setattr(tv, "evaluate_cache_for_tv_history", lambda *a, **k: (True, data, "hit", False))

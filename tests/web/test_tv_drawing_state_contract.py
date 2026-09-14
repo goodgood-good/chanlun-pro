@@ -23,7 +23,6 @@ def app():
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -31,7 +30,7 @@ def app():
     try:
         yield flask_app
     finally:
-        flask_app.extensions["shutdown_scheduler"]()
+        flask_app.extensions["shutdown_runtime_services"]()
 
 
 def _install_fake_store(monkeypatch, records=None):

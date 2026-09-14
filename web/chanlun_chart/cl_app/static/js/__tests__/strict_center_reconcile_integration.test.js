@@ -66,6 +66,8 @@ function center(revision = 1, overrides = {}) {
     schema: 'chanlun-chart-center',
     render_kind: 'formal_center',
     center_id: 'center-1',
+    price_basis_revision: 'raw-test',
+    available_at: BASE + 500,
     render_id: `center-1@${revision}@ongoing`,
     body_revision: revision,
     structural_level: 0,
@@ -164,9 +166,6 @@ function manager(instanceId = 'chart-manager-1', runtimeOverrides = {}) {
   // product defaults are covered by cl_show_config_per_resolution.test.js.
   cm.cl_show_config = {
     center_all: true,
-    center_provisional: true,
-    trend_all: true,
-    pending_movement: true,
   };
   cm.chart = {
     createMultipointShape(points, options) {
@@ -192,6 +191,113 @@ function scopeContext(cm) {
     price_basis_revision: 'raw-test',
   };
 }
+
+test('forming core draws before an exit exists and is replaced when the exit locks', () => {
+  const {cm,calls} = manager();
+  const preview = center(1, {render_kind:'center_preview', state:'forming', third_class_confirmed:false,
+    preview_status:'awaiting_leave', draw_geometry:true, establishment_leave_unit_id:null,
+    initial_exit_unit_id:null, establishment_segment_ids:['u1','u2','u3','u4'],
+    establishment_component_count:4, lifecycle_role_count:4, overlap_component_count:4});
+  const forming = snapshot({levels:[{structural_level:0,origin:'native_segments',centers:[],center_previews:[preview]}]});
+  cm._drawStrictStructure(chartData('replace',forming),'5');
+  assert.equal(calls.create.length,1);
+  assert.equal(calls.create[0].options.overrides.linestyle,2);
+  assert.match(calls.create[0].options.text,/待离开段/);
+  cm._drawStrictStructure(chartData(),'5');
+  assert.equal(calls.create.length,2);
+  assert.deepEqual(calls.remove,[calls.create[0].id]);
+  assert.equal(calls.create[1].options.overrides.linestyle,0);
+});
+
+test('owner projection with no extra geometry does not draw a duplicate rectangle', () => {
+  const {cm,calls} = manager();
+  cm._drawStrictStructure(chartData(),'5');
+  const preview = center(1,{render_kind:'center_preview',state:'forming',third_class_confirmed:false,
+    owner_center_id:'center-1',draw_geometry:false,preview_status:'awaiting_completion_confirmation'});
+  const data = snapshot({levels:[{structural_level:0,origin:'native_segments',centers:[center()],center_previews:[preview]}]});
+  cm._drawStrictStructure(chartData('replace',data),'5');
+  assert.equal(calls.create.length,2);
+  assert.deepEqual(calls.remove,[calls.create[0].id]);
+  assert.match(calls.create[1].options.title,/回试待确认/);
+  assert.match(calls.create[1].options.title, /回试已位于中枢区间外，相关线段待最终确认/);
+  assert.doesNotMatch(calls.create[1].options.title, /延伸/);
+  assert.deepEqual(calls.create[0].points,calls.create[1].points);
+});
+
+for (const pointType of ['3buy', '3sell']) {
+  test(`${pointType} return updates the owner label and confirmation removes only its pending tail`, () => {
+    const {cm, calls} = manager();
+    const owner = center();
+    const completedOther = center(1, {center_id: 'other-center', render_id: 'other-completed',
+      state: 'completed', third_class_confirmed: true, center_ended: true});
+    const preview = center(1, {render_kind: 'center_preview', state: 'forming',
+      third_class_confirmed: false, owner_center_id: owner.center_id,
+      draw_geometry: true, preview_status: 'extending'});
+    const point = {render_kind: 'point_approaching', render_id: 'p3-pending', point_id: 'p3-pending',
+      point_type: pointType, side: pointType === '3buy' ? 'buy' : 'sell', status: 'approaching',
+      center_id: owner.center_id, structural_level: 0, source_kind: 'segment',
+      price_basis_revision: 'raw-test', available_at: BASE + 500,
+      points: [{time: BASE + 500, price: pointType === '3buy' ? 12 : 9}]};
+    const draw = (centerItem, previews, points = []) => cm._drawStrictStructure(chartData('replace', snapshot({
+      analysis_scope: 'centers_and_signals', levels: [{structural_level: 0, origin: 'native_segments',
+        centers: [centerItem, completedOther], center_previews: previews, points}],
+    })), '5');
+    draw(owner, [preview]);
+    const extension = calls.create.find(item => item.options.text === 'Z1·延伸中·待确认');
+    const unrelated = calls.create.find(item => item.options.text === 'Z2');
+    assert.ok(extension && unrelated);
+
+    // Identical geometry must still refresh the tail label and owner title.
+    draw(owner, [{...preview, preview_status: 'awaiting_completion_confirmation'}], [point]);
+    const waiting = calls.create.find(item => item.options.text === 'Z1·回试待确认');
+    assert.ok(waiting);
+    assert.ok(calls.remove.includes(extension.id));
+    assert.match(waiting.options.title, /相关线段待最终确认/);
+    assert.doesNotMatch(waiting.options.title, /延伸/);
+    const pendingPoint = calls.create.find(item => item.options.shape === 'text');
+    assert.equal(pendingPoint.options.text, (pointType === '3buy' ? '三买' : '三卖') + '·待确认');
+
+    draw({...owner, state: 'completed', render_id: 'center-1@completed', third_class_confirmed: true,
+      center_ended: true}, [], [{...point, render_kind: 'point_confirmed', status: 'confirmed',
+      point_id: 'p3-confirmed', render_id: 'p3-confirmed'}]);
+    assert.ok(calls.remove.includes(waiting.id));
+    assert.ok(calls.remove.includes(pendingPoint.id));
+    assert.ok(!calls.remove.includes(unrelated.id), 'another completed center keeps its entity');
+    const active = calls.create.filter(item => !calls.remove.includes(item.id));
+    assert.equal(active.length, 3);
+    assert.match(active.find(item => item.options.text === 'Z1').options.title, /中枢已结束/);
+    assert.ok(active.every(item => !/待确认|延伸/.test(item.options.text + item.options.title)));
+  });
+}
+
+test('center level and global switches also control unfinished frames', () => {
+  const {cm,calls} = manager();
+  const preview = center(1,{render_kind:'center_preview',state:'forming',third_class_confirmed:false,
+    draw_geometry:true,preview_status:'awaiting_segment_confirmation'});
+  const data = chartData('replace',snapshot({levels:[{structural_level:0,origin:'native_segments',centers:[],center_previews:[preview]}]}));
+  cm._drawStrictStructure(data,'5');
+  assert.equal(calls.create.length,1);
+  cm.cl_show_config.center_L0=false;
+  cm._drawStrictStructure(data,'5');
+  assert.equal(calls.remove.length,1);
+  cm.cl_show_config.center_L0=true;
+  cm.cl_show_config.center_all=false;
+  cm._drawStrictStructure(data,'5');
+  assert.equal(calls.create.length,1);
+});
+
+test('frozen boundaries are explained without claiming extension or a confirmed third point', () => {
+  for (const state of ['divergence_closed', 'superseded']) {
+    const {cm, calls} = manager();
+    const closed = center(1, {state, third_class_confirmed: false, center_ended: false});
+    cm._drawStrictStructure(chartData('replace', snapshot({levels: [
+      {structural_level: 0, origin: 'native_segments', centers: [closed]},
+    ]})), '5');
+    assert.equal(calls.create.length, 1);
+    assert.match(calls.create[0].options.title, /原划分已固定/);
+    assert.doesNotMatch(calls.create[0].options.title, /延伸|等待回试|中枢已结束/);
+  }
+});
 
 
 // UI contract fixture only. Production proof-DAG fixtures are tested separately.
@@ -678,6 +784,84 @@ test('strict failure clears an expired snapshot and enters automatic recovery', 
   assert.equal(calls.remove.length, 1);
   assert.equal(cm._strictStructureSnapshot, null);
   assert.equal(cm._strictStructureStatus.state, 'recovering');
+});
+
+test('exit prices update point details without moving anchors or redrawing on cutoff-only changes', () => {
+  const {cm, calls} = manager('chart-manager-exits', {PointExitInfo: require('../point_exit_info.js')});
+  const point = {structural_level: 0, source_kind: 'segment', price_basis_revision: 'raw-test',
+    available_at: BASE + 500, points: [{time: BASE + 500, price: 11}],
+    render_kind: 'point_confirmed', render_id: 'p3', point_id: 'p3', point_type: '3buy', side: 'buy'};
+  const plan = {version:'v1',side:'buy',point_status:'confirmed',as_of:BASE+600,
+    stop_loss:{price:10.01,trigger:'lte',basis:'center_edge'},take_profit:{price:null}};
+  const s = snapshot({analysis_scope:'centers_and_signals', point_exit_plans:{p3:plan},
+    levels:[{...snapshot().levels[0],points:[point]}]});
+  const draw = () => cm._drawStrictStructure(chartData('replace',s),'5');
+  draw();
+  const mark = calls.create.find(x=>x.options.shape==='text');
+  assert.equal(mark.options.text,'三买');
+  assert.match(mark.options.title,/止损参考：≤ 10.01/);
+  const count = calls.create.length;
+  plan.as_of++;
+  draw();
+  assert.equal(calls.create.length,count,'a newer cutoff alone must not recreate every point');
+  plan.take_profit={price:12,basis:'opposite_point',point_type:'1sell',available_at:BASE+601};
+  draw();
+  assert.equal(calls.create.length,count+1);
+  assert.deepEqual(calls.create.at(-1).points,mark.points);
+  assert.match(calls.create.at(-1).options.title,/后续同级一卖/);
+});
+
+test('requested signal and observation switches remove only their actual chart entities', () => {
+  const {cm, calls} = manager('chart-manager-analysis');
+  const common = {structural_level: 0, source_kind: 'segment', price_basis_revision: 'raw-test',
+    available_at: BASE + 500, points: [{time: BASE + 500, price: 11}]};
+  const point = {...common, render_kind: 'point_confirmed', render_id: 'p3', point_id: 'p3',
+    point_type: '3buy', side: 'buy'};
+  const divergences = ['consolidation', 'trend'].map(kind => ({...common, kind, direction: 'down',
+    render_kind: 'strict_divergence', render_id: kind, divergence_id: kind, metrics: {is_divergent: true}}));
+  const data = chartData('replace', snapshot({analysis_scope: 'centers_and_signals',
+    levels: [{...snapshot().levels[0], points: [point], divergences}],
+    stroke_center_observations: [center(1, {render_kind: 'center_observation',
+      source_kind: 'stroke_observation', center_id: 'stroke-center', render_id: 'stroke-center'})],
+  }));
+  cm.cl_show_config.center_observation = true;
+  cm._drawStrictStructure(data, '5');
+  assert.equal(cm._strictStructureStatus.state, 'ready');
+  assert.equal(calls.create.length, 5);
+  assert.equal(calls.create.filter(item => item.options.shape === 'text').length, 3);
+  assert.ok(calls.create.some(item => item.options.text === '三买'));
+  assert.ok(calls.create.some(item => item.options.text === '\n盘背'));
+  assert.ok(calls.create.some(item => item.options.text === '\n\n趋背'));
+  assert.equal(calls.create.find(item => item.options.text === '三买').options.title, '三买');
+  for (const key of ['point_3buy', 'divergence_consolidation_L0', 'center_observation', 'center_all']) {
+    const before = calls.remove.length;
+    cm.cl_show_config[key] = false;
+    cm._drawStrictStructure(data, '5');
+    assert.equal(calls.remove.length, before + 1, key);
+    assert.equal(calls.create.length, 5, 'unaffected shapes keep their identities');
+  }
+  assert.equal(Array.from(cm._strictContainers.values()).flat().length, 1);
+});
+
+test('recursive center level is drawn only after its own switch is enabled', () => {
+  const {cm, calls} = manager('chart-manager-higher-center');
+  const higher = center(1, {structural_level: 1, source_kind: 'trend_type',
+    center_id: 'higher-center', render_id: 'higher-center', formation_rule: 'recursive_three',
+    core: {zd_tick: 1000, zg_tick: 1100}, establishment_component_count: 3,
+    establishment_segment_ids: ['u2', 'u3', 'u4']});
+  const data = chartData('replace', snapshot({analysis_scope: 'centers_and_signals',
+    levels: [snapshot().levels[0], {structural_level: 1, origin: 'completed_lower_structures',
+      centers: [higher], points: [], divergences: []}],
+  }));
+  cm._drawStrictStructure(data, '5');
+  assert.equal(calls.create.length, 1);
+  cm.cl_show_config.center_L1 = true;
+  cm._drawStrictStructure(data, '5');
+  assert.equal(cm._strictStructureStatus.state, 'ready');
+  assert.equal(calls.create.length, 2);
+  cm.cl_show_config.center_L1 = false;
+  cm._drawStrictStructure(data, '5');
+  assert.deepEqual(calls.remove, [calls.create[1].id]);
 });
 
 test('strict failure without a same-context snapshot clears and enters recovery', () => {

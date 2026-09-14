@@ -17,14 +17,13 @@ def app(monkeypatch):
         test_config={
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
     try:
         yield flask_app
     finally:
-        flask_app.extensions["shutdown_scheduler"]()
+        flask_app.extensions["shutdown_runtime_services"]()
 
 
 def _login(client, username, password):
@@ -203,3 +202,29 @@ def test_key_merge_prevents_stale_tabs_from_overwriting_unrelated_preferences(ap
 
     assert values["chart_menu_width"] == "520"
     assert values["chart_menu_collapsed"] == "1"
+
+
+def test_restored_analysis_controls_roundtrip_with_account_preferences(app):
+    client = app.test_client()
+    _login(client, "alice-layout-test", "alice-password")
+    display = {
+        "schema": "chanlun-chart-config-v7",
+        "fx": True, "bi": False, "xd": True,
+        "center_L0": False, "center_L1": True, "center_observation": True,
+        "point_1buy": False, "point_2buy": True, "point_3buy": False,
+        "point_1sell": True, "point_2sell": False, "point_3sell": True,
+        "divergence_consolidation_L0": False, "divergence_trend_L0": True,
+        "trend_L0": True,
+    }
+    response = client.put("/api/chart/preferences", json={
+        "schema": "chanlun-account-chart-preferences/v1",
+        "values": {"cl_show_config_1_1": json.dumps(display)},
+    })
+    assert response.status_code == 200
+    saved = json.loads(client.get("/api/chart/preferences").get_json()
+                       ["preferences"]["values"]["cl_show_config_1_1"])
+    assert saved["schema"] == "chanlun-chart-config-v8"
+    assert "trend_L0" not in saved
+    for key, value in display.items():
+        if key not in {"schema", "trend_L0"}:
+            assert saved[key] is value

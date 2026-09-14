@@ -10,7 +10,6 @@ def _app():
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )

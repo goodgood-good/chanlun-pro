@@ -9,8 +9,6 @@ import pandas as pd
 
 from chanlun.cl_utils import cl_data_to_tv_chart
 from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
-from chanlun.core.strict_structure.center_machine import calculate_centers
-from chanlun.core.strict_structure.models import SourceKind
 
 
 class _StrictChartCD:
@@ -43,8 +41,12 @@ class _StrictChartCD:
     def get_xds(self):
         return []
 
-    def get_native_centers(self):
-        return calculate_centers((), 0, SourceKind.SEGMENT)
+    def get_strict_evidence(self):
+        return SimpleNamespace(
+            structure=SimpleNamespace(levels=()),
+            confirmed_points=(), approaching_points=(), divergences=(),
+            stroke_center_observations=SimpleNamespace(centers=()),
+        )
 
     def get_code(self):
         return self.evidence.symbol

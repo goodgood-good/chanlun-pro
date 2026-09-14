@@ -12,11 +12,11 @@ from cl_app.blueprints import tv as subject
 def client():
     app = create_app(test_config={
         "TESTING": True, "LOGIN_DISABLED": True,
-        "VALIDATE_WEB_SECURITY": False, "SCHEDULER_ENABLED": False,
+        "VALIDATE_WEB_SECURITY": False,
         "WTF_CSRF_ENABLED": False,
     })
     yield app.test_client()
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()
 
 
 @pytest.fixture
@@ -25,7 +25,6 @@ def fetch_history(client, monkeypatch):
     monkeypatch.setattr(subject, "market_now_trading", lambda _: False)
     monkeypatch.setattr(subject, "_should_suppress_realtime_history_poll", lambda **_: False)
     monkeypatch.setattr(subject, "_mark_user_request", lambda *_: None)
-    monkeypatch.setattr(subject, "record_user_request", lambda *_: None)
     monkeypatch.setattr(subject, "_get_chart_cache_entry_ram_only", lambda _: None)
     monkeypatch.setattr(subject, "market_frequencys", SimpleNamespace(
         cached_snapshot=lambda _: {"a": ["1m", "5m", "30m"], "us": ["5m"]},

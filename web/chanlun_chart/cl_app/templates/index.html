@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>缠论结构解盘 - Chanlun Pro</title>
+    <title>{% if request.args.get('screening_source') %}本次筛选证据 · {% endif %}缠论结构解盘 - Chanlun Pro</title>
 
     <link
       rel="shortcut icon"
@@ -190,6 +190,7 @@
               <div class="ca-sidebar-title-wrap">
                 <span class="ca-sidebar-eyebrow">STRUCTURE WORKBENCH</span>
                 <h2 class="ca-sidebar-title">缠论结构解盘</h2>
+                <a href="/screening" target="_blank" rel="noopener" class="ca-screening-link">缠论选股工作台 →</a>
                 <p class="ca-sidebar-subtitle">行情 · 笔与线段 · 本周期中枢</p>
                 <p class="ca-account-context" title="当前登录账号">
                   <i class="layui-icon layui-icon-username" aria-hidden="true"></i>
@@ -275,6 +276,10 @@
               <thead><tr><th>编号</th><th>中枢区间</th><th>状态</th></tr></thead>
               <tbody id="ca-native-centers"></tbody>
             </table></div></details>
+            <details id="ca-point-details" class="ca-center-details"><summary id="ca-points-detail-label">买卖点止盈止损参考</summary>
+              <div id="ca-point-exits" class="ca-native-table-scroll"></div>
+              <details><summary>价格依据</summary><div id="ca-point-exit-sources" class="ca-disclaimer"></div></details>
+            </details>
             <p class="ca-disclaimer">中枢核心为三段重叠区间；进入段与离开段独立显示。中枢结束按严格离开、回试条件确认，触边不算结束。</p>
           </section>
 
@@ -351,7 +356,7 @@
                         class="layui-input"
                         maxlength="64"
                         autocomplete="off"
-                        placeholder="{% if config.CHART_ONLY_MODE %}例如：一买观察{% else %}例如：一买观察；优先监听可使用“人工关注组”{% endif %}" />
+                        placeholder="例如：一买观察" />
                       <button type="submit" id="zixuan_group_submit" class="zx-primary-button">创建分组</button>
                       <button type="button" id="zixuan_group_cancel" class="zx-text-button">取消</button>
                     </div>
@@ -591,6 +596,8 @@
   <script nonce="{{ csp_nonce }}">
     // SSE 实时推送开关(后端 config.ENABLE_SSE_PUSH 注入); charts.js 据此决定是否建 EventSource 连接。
     window.__CHANLUN_SSE_ENABLED = {{ 'true' if enable_sse else 'false' }};
+    window.__CHANLUN_SCREENING_EVIDENCE = {{ ({'source': request.args.get('screening_source', ''), 'point': request.args.get('screening_point', ''), 'frequency': request.args.get('frequency', '')} if ('screening_source' in request.args or 'screening_point' in request.args) else none)|tojson }};
+    if (window.__CHANLUN_SCREENING_EVIDENCE) window.__CHANLUN_SSE_ENABLED = false;
     var initial_market = {{ initial_market|tojson }};
     var market_frequencys = `{{ market_frequencys| tojson }}`;
     var market_frequencys = JSON.parse(market_frequencys);
@@ -769,10 +776,10 @@
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vegasma.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vol.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macd_backend.js') }}?asset={{ static_asset_token }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/sse_gap.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_structure_reconcile.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_transition.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/point_exit_info.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/charts.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_line_states.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?asset={{ static_asset_token }}"></script>
@@ -1419,12 +1426,6 @@
               id: 2,
             },
             {
-              title: "查看后台任务",
-              templet:
-                '<div><i class="layui-icon layui-icon-senior"></i> <span>查看后台任务</span></div>',
-              id: 6,
-            },
-            {
               title: "切换图表布局",
               templet:
                 '<div><i class="layui-icon layui-icon-carousel"></i> <span>切换图表布局</span></div>',
@@ -1498,16 +1499,6 @@
                 title: "管理自选分组",
                 area: ["800px", "50vh"],
                 content: "/zixuan_group/" + Utils.get_market(),
-                anim: 1,
-                fixed: true,
-                shadeClose: true,
-              });
-            } else if (item.id === 6) {
-              layer.open({
-                type: 2,
-                title: "后台任务",
-                area: ["1000px", "50vh"],
-                content: "/jobs",
                 anim: 1,
                 fixed: true,
                 shadeClose: true,

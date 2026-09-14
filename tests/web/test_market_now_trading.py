@@ -251,7 +251,7 @@ def test_four_real_history_cache_hits_do_not_wait_for_market_state(monkeypatch, 
 
     app = create_app(test_config={
         "TESTING": True, "LOGIN_DISABLED": True,
-        "VALIDATE_WEB_SECURITY": False, "SCHEDULER_ENABLED": False,
+        "VALIDATE_WEB_SECURITY": False,
     })
     entered, release = threading.Event(), threading.Event()
     provider_calls = []
@@ -267,7 +267,6 @@ def test_four_real_history_cache_hits_do_not_wait_for_market_state(monkeypatch, 
     monkeypatch.setattr(tv, "market_now_trading", chart_compute.market_now_trading)
     monkeypatch.setattr(tv, "query_cl_chart_config", lambda *_args: {})
     monkeypatch.setattr(tv, "_mark_user_request", lambda *_args: None)
-    monkeypatch.setattr(tv, "record_user_request", lambda *_args: None)
     monkeypatch.setattr(tv, "submit_revalidation", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tv.market_frequencys, "cached_snapshot", lambda *_args: {})
     monkeypatch.setattr(tv, "fetch_klines_and_compute_cl_data", lambda *_args, **_kwargs: pytest.fail("must hit snapshot"))

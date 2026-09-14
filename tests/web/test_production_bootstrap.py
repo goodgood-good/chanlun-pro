@@ -53,7 +53,6 @@ def test_inactive_app_shutdown_does_not_stop_process_shared_services(monkeypatch
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
             "WTF_CSRF_ENABLED": False,
-            "SCHEDULER_ENABLED": False,
         }
     )
     app.extensions["shutdown_runtime_services"]()
@@ -116,12 +115,11 @@ def test_runtime_cleanup_continues_after_one_component_fails(monkeypatch):
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
             "WTF_CSRF_ENABLED": False,
-            "SCHEDULER_ENABLED": False,
         }
     )
-    app.extensions["start_runtime_services"](enable_scheduler=False)
+    app.extensions["start_runtime_services"]()
     assert app.extensions["runtime_status"]()["status"] == "running"
-    app.extensions["start_runtime_services"](enable_scheduler=True)
+    app.extensions["start_runtime_services"]()
 
     app.extensions["shutdown_runtime_services"]()
 
@@ -156,13 +154,12 @@ def test_shutdown_cancels_an_inflight_runtime_start(monkeypatch):
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
             "WTF_CSRF_ENABLED": False,
-            "SCHEDULER_ENABLED": False,
         }
     )
 
     def start():
         try:
-            app.extensions["start_runtime_services"](enable_scheduler=False)
+            app.extensions["start_runtime_services"]()
         except Exception as exc:
             errors.append(exc)
 

@@ -60,12 +60,7 @@ def _positive_env_int(name: str, default: int) -> int:
 
 _CHART_CACHE_MAX_BYTES = max(
     16 * 1024 * 1024,
-    # The selection workspace presents four charts per candidate.  The old
-    # 256 MiB default could retain only about a dozen complete four-period
-    # candidates on a normal production data set, so later clicks repeatedly
-    # fell through to multi-megabyte disk snapshots.  Keep a conservative
-    # byte-weighted ceiling, but size the default for the complete top-20
-    # working set on the 32 GiB deployment host.
+    # Retain recently viewed symbols and periods within a byte-weighted ceiling.
     _positive_env_int("CHANLUN_CHART_CACHE_MAX_BYTES", 768 * 1024 * 1024),
 )
 _CHART_CACHE_MAX_ENTRIES = _positive_env_int(
@@ -127,11 +122,8 @@ class _WeightedTTLCache(TTLCache):
 
 chart_data_cache: TTLCache = _WeightedTTLCache(
     maxsize=_CHART_CACHE_MAX_BYTES,
-    # Freshness is enforced independently by ``validated_at``.  A one-hour RAM
-    # TTL used to evict the entire ranked-candidate working set during a normal
-    # trading morning, forcing an avoidable pickle load and weight
-    # re-serialization on the next click.  Keep bounded entries resident across
-    # a session; the byte budget remains the authoritative memory limit.
+    # Freshness is enforced independently by ``validated_at``; the byte budget
+    # bounds memory while recently viewed charts stay resident across a session.
     ttl=_CHART_CACHE_RAM_TTL_SECONDS,
     getsizeof=_chart_cache_entry_weight,
 )
@@ -635,7 +627,7 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
 
     本函数自带 ``cache_lock``（可重入 RLock），调用方无需持锁。RAM 发布只在
     临界区内做 O(1) 赋值；多 MiB 图对象的持久化快照复制移到锁外，避免一个
-    候选预热写入把所有交互式 ``/tv/history`` 命中串行阻塞。
+    后台缓存写入把所有交互式 ``/tv/history`` 命中串行阻塞。
     """
     with cache_lock:
         current = _normalize_cache_entry(chart_data_cache.get(cache_key))

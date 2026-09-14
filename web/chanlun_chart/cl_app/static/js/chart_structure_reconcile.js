@@ -29,8 +29,16 @@
 
 
   function logicalKey(item) {
-    if (!item || item.render_kind !== 'formal_center') throw new Error('unsupported native center shape');
-    return 'formal_center:' + requireString(item.center_id, 'center_id');
+    if (['formal_center', 'center_observation', 'center_preview'].includes(item?.render_kind)) {
+      return item.render_kind + ':' + requireString(item.center_id, 'center_id');
+    }
+    if (item?.render_kind === 'point_confirmed' || item?.render_kind === 'point_approaching') {
+      return item.render_kind + ':' + requireString(item.point_id, 'point_id');
+    }
+    if (item?.render_kind === 'strict_divergence') {
+      return item.render_kind + ':' + requireString(item.divergence_id, 'divergence_id');
+    }
+    throw new Error('unsupported chart analysis shape');
   }
 
 
@@ -238,6 +246,8 @@
         points: item.points,
         state: item.state,
         center_state: item.center_state,
+        center_label: item.center_label,
+        tail_status: item.tail_status,
         core_formed: item.core_formed,
         frame_qualified: item.frame_qualified,
         frame_missing_conditions: item.frame_missing_conditions,
@@ -268,6 +278,11 @@
         semantic_direction: item.semantic_direction,
         direction_status: item.direction_status,
         point_type: item.point_type,
+        exit_prices: item.exit_plan && {
+          version: item.exit_plan.version, point_status: item.exit_plan.point_status,
+          stop_loss: item.exit_plan.stop_loss, take_profit: item.exit_plan.take_profit,
+          profit_observation: item.exit_plan.profit_observation,
+        },
         display_label: item.display_label,
         level_label: item.level_label,
 

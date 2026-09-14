@@ -394,7 +394,7 @@ function Get-AttestedWebProcs {
 
     if ($null -eq $health.components) { return @() }
     $componentNames = @($health.components.PSObject.Properties.Name)
-    foreach ($requiredComponent in @('scheduler', 'qmt_runtime', 'trading_screening')) {
+    foreach ($requiredComponent in @('runtime', 'metadata', 'symbols', 'ticks')) {
         if ($componentNames -notcontains $requiredComponent) { return @() }
     }
 
@@ -558,7 +558,6 @@ try {
         $(if ($EnableFullSymbolCatalog) { '1' } else { '0' }),
         'Process'
     )
-    $env:CHANLUN_CHART_ONLY = '1'
     Import-UserEnvironmentFallback -Names @(
         'LONGBRIDGE_APP_KEY',
         'LONGBRIDGE_APP_SECRET',
@@ -625,7 +624,7 @@ for base in (root / 'src' / 'chanlun', root / 'web' / 'chanlun_chart'):
             continue
         source = path.read_bytes()
         compile(source, str(path), 'exec')
-required = ('apscheduler', 'flask', 'flask_login', 'flask_wtf', 'numpy', 'pandas', 'sqlalchemy', 'tornado')
+required = ('flask', 'flask_login', 'flask_wtf', 'numpy', 'pandas', 'sqlalchemy', 'tornado')
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit('missing runtime modules: ' + ', '.join(missing))
@@ -939,8 +938,7 @@ try {
 }
 
 # --- 3. 校验就绪状态、精确 PID、端口所有者和源码 ----------------------------
-# 全新选股周期必须先发布一批因果结构，严格就绪接口才可进入就绪状态。冷启动路径可能
-# 超过 120 秒，因此部署门槛保持有界且可配置，但不放宽下方任何就绪判据。
+# 等待市场元数据、报价和图表后台服务就绪；超时有界且可配置。
 $deadline = (Get-Date).AddSeconds($WebReadinessTimeoutSeconds)
 $healthy = $false
 $lastReadinessDetail = 'not checked'

@@ -63,7 +63,7 @@ Register-ScheduledTask `
     -Trigger @($logonTrigger, $premarketTrigger) `
     -Principal $principal `
     -Settings $settings `
-    -Description 'Keep chanlun-pro Web, screening monitor, and manual-trade alerts alive.' `
+    -Description 'Keep the chanlun-pro chart Web service alive.' `
     -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 Write-Output (

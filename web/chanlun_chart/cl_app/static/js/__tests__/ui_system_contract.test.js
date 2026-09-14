@@ -18,7 +18,6 @@ const fullPages = [
   'login.html',
   'setting.html',
   'symbols.html',
-  'jobs.html',
   'options.html',
   'zixuan.html',
 ];
@@ -68,7 +67,6 @@ test('operational pages use explicit task-oriented sections', () => {
   const expected = {
     'setting.html': ['系统设置', '网络代理'],
     'symbols.html': ['标的中心', '筛选标的', '标的列表'],
-    'jobs.html': ['任务运行状态', '调度任务'],
     'options.html': ['图表显示配置', '配置范围', '基础结构'],
   };
 
@@ -110,13 +108,10 @@ test('mobile configuration actions use a compact two-column control dock', () =>
   assert.match(css, /@media\s*\(max-width:\s*720px\)[\s\S]*\.cp-config-form\s*>\s*\.cp-actions--sticky[^{]*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
 });
 
-test('operational empty states and compact chart options remain intentional', () => {
-  const jobs = template('jobs.html');
+test('compact chart options and symbol pagination remain intentional', () => {
   const options = template('options.html');
   const symbols = template('symbols.html');
 
-  assert.match(jobs, /cp-empty-state/);
-  assert.match(jobs, /暂时没有已注册的调度任务/);
   assert.match(options, /cp-page--compact/);
   assert.match(options, /cp-actions--sticky/);
   assert.match(symbols, /aria-label', '跳转页码'/);

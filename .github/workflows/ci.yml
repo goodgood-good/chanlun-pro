@@ -124,7 +124,7 @@ jobs:
           # 安全配置要求至少存在一个命名登录账户；烟测只验证应用可启动，不执行登录。
           CHANLUN_LOGIN_USERS: '{"ci":"scrypt:32768:8:1$ci$startup-smoke"}'
         run: >-
-          poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
+          poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert app.extensions['runtime_status']()['status'] == 'stopped'"
       - name: Install test profile dependencies
         # tests/exchange/test_usmart.py 在收集阶段直接导入 Crypto，必须安装 usmart 画像。
         run: poetry install --extras usmart

@@ -18,7 +18,6 @@ def test_invalid_market_is_rejected_before_zixuan_is_created(monkeypatch):
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -28,4 +27,4 @@ def test_invalid_market_is_rejected_before_zixuan_is_created(monkeypatch):
     assert response.status_code == 400
     assert response.get_json() == {"ok": False, "msg": "无效的市场"}
     assert created == []
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()

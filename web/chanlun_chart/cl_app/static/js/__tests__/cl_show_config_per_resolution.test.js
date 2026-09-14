@@ -110,9 +110,6 @@ function makeManager(ChartManager, id) {
 
 
 
-for (const [interval, lowest] of [['1', 0], ['5', 1], ['30', 2]]) {
-
-}
 
 
 
@@ -129,7 +126,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v7');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v8');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -193,11 +190,78 @@ test('resolution switching persists each period under the current schema', () =>
   assert.equal(manager.cl_show_config.fx, true);
 });
 
-test('native settings migrate v6 without restoring retired layers', () => {
+test('old settings retain requested layers while trend display stays removed', () => {
  const {api}=loadClConfigApi();
  const config=api.normalize({schema:'chanlun-chart-config-v6',bi:false,xd:true,center_all:true,point_all:true,trend_L1:true},'5');
- assert.deepEqual(JSON.parse(JSON.stringify(config)),{schema:'chanlun-chart-config-v7',fx:false,bi:false,xd:true,center_all:true,center_L0:true});
+ assert.equal(config.schema,'chanlun-chart-config-v8');
+ assert.equal(config.bi,false);
+ assert.equal(config.point_all,true);
+ assert.equal(config.trend_L1,undefined);
  assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:0}),true);
  assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:1}),false);
  assert.equal(api.enabled(config,{render_kind:'strict_trend',structural_level:0}),false);
+});
+
+test('center levels and stroke observation can be switched independently', () => {
+  const { api } = loadClConfigApi();
+  const config = currentConfig(api, {center_L0: false, center_L1: true, center_observation: true});
+  const center = (level) => ({render_kind: 'formal_center', structural_level: level});
+  assert.equal(api.enabled(config, center(0)), false);
+  assert.equal(api.enabled(config, center(1)), true);
+  config.center_all = false;
+  assert.equal(api.enabled(config, center(1)), false);
+  assert.equal(api.enabled(config, {render_kind: 'center_observation', structural_level: 0}), true);
+});
+
+test('each buy and sell class controls confirmed and approaching marks without hiding other classes', () => {
+  const { api } = loadClConfigApi();
+  const types = ['1buy', '2buy', '3buy', '1sell', '2sell', '3sell'];
+  for (const disabled of types) {
+    const config = currentConfig(api, {[`point_${disabled}`]: false, point_L1: true});
+    for (const type of types) {
+      for (const kind of ['point_confirmed', 'point_approaching']) {
+        for (const level of [0, 1]) {
+          assert.equal(api.enabled(config, {render_kind: kind, point_type: type, structural_level: level}), type !== disabled);
+        }
+      }
+    }
+    config.point_all = false;
+    assert.equal(api.enabled(config, {render_kind: 'point_confirmed', point_type: '1buy', structural_level: 0}), false);
+  }
+});
+
+test('consolidation and trend divergence have independent level switches', () => {
+  const { api } = loadClConfigApi();
+  const config = currentConfig(api, {
+    divergence_consolidation_L0: false, divergence_trend_L0: true,
+    divergence_consolidation_L1: true, divergence_trend_L1: false,
+  });
+  for (const kind of ['consolidation', 'trend']) {
+    for (const level of [0, 1]) {
+      assert.equal(api.enabled(config, {render_kind: 'strict_divergence', kind, structural_level: level}),
+        kind === (level === 0 ? 'trend' : 'consolidation'));
+    }
+  }
+  config.divergence_all = false;
+  assert.equal(api.enabled(config, {render_kind: 'strict_divergence', kind: 'trend', structural_level: 0}), false);
+});
+
+test('all restored display choices survive storage and period switching', () => {
+  const { api } = loadClConfigApi();
+  const manager = makeManager(api.ChartManager, 'restored');
+  const choices = {
+    fx: true, bi: false, xd: false, center_L0: false, center_L1: true,
+    center_observation: true, point_1buy: false, point_2sell: false,
+    divergence_consolidation_L0: false, divergence_trend_L1: true,
+  };
+  manager.cl_show_config = currentConfig(api, choices, '1');
+  manager._curResolution = '1';
+  manager._applyResolutionConfig('5');
+  manager.cl_show_config.fx = false;
+  manager._applyResolutionConfig('1');
+  for (const [key, value] of Object.entries(choices)) {
+    assert.equal(api.load('restored', '1')[key], value);
+    assert.equal(manager.cl_show_config[key], value);
+  }
+  assert.equal(api.load('restored', '5').fx, false);
 });

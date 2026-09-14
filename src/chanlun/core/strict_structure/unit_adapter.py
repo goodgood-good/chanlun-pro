@@ -1,15 +1,16 @@
 from __future__ import annotations
+from chanlun.core.strict_structure.models import TrendType, TrendState
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from chanlun.core.strict_structure.identity import stable_structure_id
-from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind
+from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind, combined_extreme_market_time
 
 
 class UnitLockRegistry:
     """记录每个稳定单元首次获得的因果确认时间。"""
 
-    def __init__(self, price_basis_revision: str) -> None:
+    def __init__(self, price_basis_revision: str, *, scope: tuple[str, ...] = ()) -> None:
         if (
             not isinstance(price_basis_revision, str)
             or not price_basis_revision.strip()
@@ -17,6 +18,9 @@ class UnitLockRegistry:
         ):
             raise ValueError("price_basis_revision is required")
         self.price_basis_revision = price_basis_revision
+        if not isinstance(scope, tuple) or any(not isinstance(v, str) or not v for v in scope):
+            raise ValueError("unit scope must contain nonempty strings")
+        self.scope = scope
         self._confirmed_at: dict[str, datetime] = {}
 
     def confirmed_at(self, unit_id: str, locked_at: datetime) -> datetime:
@@ -91,6 +95,13 @@ def _line_price_range(line, quantum, constituents):
     return (low, high, low_at, high_at)
 
 
+def _identity_time(value: datetime) -> datetime:
+    # Low-level synthetic calculations also accept naive times. Keep that
+    # explicit namespace; never guess the machine timezone. Production chart
+    # input requires aware timestamps and canonicalizes equivalent instants.
+    return value if value.tzinfo is None or value.utcoffset() is None else value.astimezone(timezone.utc)
+
+
 def line_to_unit(
     line,
     structural_level: int,
@@ -102,6 +113,8 @@ def line_to_unit(
     constituents: Mapping | None = None,
 ) -> ConstituentUnit:
     source_kind = SourceKind(source_kind)
+    if source_kind is SourceKind.TREND_TYPE:
+        raise ValueError("physical line adapter rejects recursive trend source")
     quantum = _normalize_quantum(price_quantum)
     market_start = line.start.k.date
     market_end = line.end.k.date
@@ -131,8 +144,6 @@ def line_to_unit(
             raise ValueError("formed_at cannot exceed as_of")
         if locked_at is not None and formed_at > locked_at:
             raise ValueError("formed_at cannot exceed locked_at")
-    start_index = line.start.k.k_index
-    end_index = line.end.k.k_index
     start_tick = _tick(line.start.val, quantum)
     end_tick = _tick(line.end.val, quantum)
     (low_tick, high_tick, low_at, high_at) = _line_price_range(
@@ -145,15 +156,18 @@ def line_to_unit(
         market_end if end_tick >= start_tick else market_start,
     )
     actual_range = (low_tick, high_tick, low_at, high_at)
-    range_identity = () if actual_range == endpoint_range else actual_range
+    range_identity = () if actual_range == endpoint_range else (
+        low_tick, high_tick, _identity_time(low_at), _identity_time(high_at)
+    )
     unit_id = stable_structure_id(
-        "chanlun-unit",
+        "chanlun-unit-time-v2",
+        registry.scope,
         registry.price_basis_revision,
         structural_level,
         source_kind,
         line.type,
-        start_index,
-        end_index,
+        _identity_time(market_start),
+        _identity_time(market_end),
         start_tick,
         end_tick,
         *range_identity,
@@ -214,3 +228,108 @@ def adapt_lines(
             for line in lines
         )
     )
+
+
+def trend_type_to_unit(trend: TrendType) -> ConstituentUnit:
+    if not trend.locked:
+        raise ValueError("only locked trend types can recurse")
+    return ConstituentUnit(
+        unit_id=trend.trend_id,
+        structural_level=trend.structural_level + 1,
+        source_kind=SourceKind.TREND_TYPE,
+        price_basis_revision=trend.price_basis_revision,
+        direction=trend.direction,
+        start_tick=trend.start_tick,
+        end_tick=trend.end_tick,
+        low_tick=trend.low_tick,
+        high_tick=trend.high_tick,
+        market_start=trend.market_start,
+        market_end=trend.market_end,
+        confirmed_at=trend.confirmed_at,
+        available_at=trend.available_at,
+        locked=True,
+        child_ids=tuple(item.unit_id for item in trend.constituent_units),
+        forming=False,
+        formed_at=trend.confirmed_at,
+        low_market_time=combined_extreme_market_time(trend.constituent_units, "low"),
+        high_market_time=combined_extreme_market_time(trend.constituent_units, "high"),
+    )
+
+
+def trend_type_to_observation_unit(trend: TrendType) -> ConstituentUnit:
+    """把尚未锁定的当前走势转换为高级别只读观察单元。"""
+
+    if trend.state is TrendState.LOCKED:
+        raise ValueError("locked trend type must use the formal unit adapter")
+    return ConstituentUnit(
+        unit_id=trend.trend_id,
+        structural_level=trend.structural_level + 1,
+        source_kind=SourceKind.TREND_TYPE,
+        price_basis_revision=trend.price_basis_revision,
+        direction=trend.direction,
+        start_tick=trend.start_tick,
+        end_tick=trend.end_tick,
+        low_tick=trend.low_tick,
+        high_tick=trend.high_tick,
+        market_start=trend.market_start,
+        market_end=trend.market_end,
+        confirmed_at=None,
+        available_at=trend.available_at,
+        locked=False,
+        child_ids=tuple(item.unit_id for item in trend.constituent_units),
+        forming=trend.state is TrendState.FORMING,
+        formed_at=(trend.confirmed_at if trend.state is TrendState.COMPLETE else None),
+        low_market_time=combined_extreme_market_time(trend.constituent_units, "low"),
+        high_market_time=combined_extreme_market_time(trend.constituent_units, "high"),
+    )
+
+
+def build_recursive_unit_stream(
+    current_trends: tuple[TrendType, ...],
+    protected_after_ids: frozenset[str] = frozenset(),
+) -> tuple[tuple[ConstituentUnit, ...], frozenset[str]]:
+    """构造高级别正式前缀及其连续的未锁定观察尾部。"""
+
+    # 延迟导入，避免单元适配器与同级别结合模块在加载阶段形成循环依赖。
+    from chanlun.core.strict_structure.center_machine import validate_unit_sequence
+    from chanlun.core.strict_structure.same_level_decomposition import (
+        combine_same_level_trends,
+    )
+
+    trends = tuple(current_trends)
+    unlocked_seen = False
+    for trend in trends:
+        if trend.state is not TrendState.LOCKED:
+            unlocked_seen = True
+        elif unlocked_seen:
+            raise ValueError("locked recursive trends must form a prefix")
+
+    locked = tuple(trend for trend in trends if trend.state is TrendState.LOCKED)
+    observations = tuple(
+        trend for trend in trends if trend.state is not TrendState.LOCKED
+    )
+    locked_units = tuple(trend_type_to_unit(trend) for trend in locked)
+    decomposition = combine_same_level_trends(
+        locked_units,
+        frozenset(),
+        protected_after_ids,
+    )
+    output = list(decomposition.units)
+
+    for trend in observations:
+        candidate = trend_type_to_observation_unit(trend)
+        try:
+            validate_unit_sequence(
+                tuple((*output, candidate)),
+                candidate.structural_level,
+                SourceKind.TREND_TYPE,
+                frozenset(),
+            )
+        except ValueError as exc:
+            if str(exc) == "unit directions must alternate":
+                # 同向的未锁定走势将来可能按结合律并入前一单元。在身份冻结之前
+                # 不制造高级别观察单元，避免临时合并改写正式递归前缀。
+                break
+            raise
+        output.append(candidate)
+    return tuple(output), frozenset()

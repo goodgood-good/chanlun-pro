@@ -10,7 +10,6 @@ def test_removed_tv_overlays_route_is_absent() -> None:
         "TESTING": True,
         "LOGIN_DISABLED": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
     })
 
     response = app.test_client().get(

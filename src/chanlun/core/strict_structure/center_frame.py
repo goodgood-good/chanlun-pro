@@ -6,31 +6,24 @@ from chanlun.core.strict_structure.models import ConstituentUnit
 
 
 def center_frame_leave(center) -> ConstituentUnit | None:
-    """Preserve a directional frame's departure, or its opposite final exit.
+    """Use the current departure while retaining initial establishment evidence.
 
-    A return may disprove a departure's *ending*, but cannot erase the five
-    roles already observed. Prefer the earliest departure in the entry's
-    direction when one exists; a later opposite ending does not replace it.
-    Failed departures are retained by the center machine for this purpose.
-    Lessons 87/88 also permit an opposite final departure: the direction of
-    entry defines the core's role, not the direction of every later exit.
+    A failed departure stays in lifecycle history. Once its return is folded
+    into the center, it cannot cut off later confirmed extensions merely
+    because the eventual departure has the opposite direction.
     """
     core = center.initial_units
-    expected = ("up" if tuple(u.direction for u in core) == ("down", "up", "down")
-                else "down" if tuple(u.direction for u in core) == ("up", "down", "up")
-                else None)
     candidates = (
-        *getattr(center, "failed_departure_units", ()),
-        getattr(center, "establishment_leave_unit", None),
         center.lifecycle_leave_unit,
+        getattr(center, "establishment_leave_unit", None),
+        *getattr(center, "failed_departure_units", ()),
     )
     valid = [u for u in candidates if u is not None
              and u.unit_id not in {c.unit_id for c in core}
              and u.market_start >= core[-1].market_end
              and max(u.low_tick, center.zd_tick) <= min(u.high_tick, center.zg_tick)
              and (u.end_tick > center.zg_tick if u.direction == "up" else u.end_tick < center.zd_tick)]
-    directional = [u for u in valid if u.direction == expected]
-    return min(directional or valid, key=lambda u: (u.market_start, u.available_at, u.unit_id), default=None)
+    return next(iter(valid), None)
 
 
 def center_frame_evidence(center) -> dict:
@@ -71,16 +64,3 @@ def directional_ownership_pending(center):
     leave = center_frame_leave(center)
     return bool(center.third_class_confirmed and center.entry_unit is not None and leave is not None
                 and center.completion_direction != center.entry_unit.direction)
-
-
-def directional_frame_end(center):
-    """Separate the directional body from a later reversal observation.
-
-    The first directional departure stays external when the later escape is
-    opposite to the entering movement. Later touches remain in the lifecycle
-    record while movement ownership is pending; they do not silently turn the
-    original departure into a child of the displayed directional body.
-    """
-    if directional_ownership_pending(center):
-        return center_frame_leave(center).market_start
-    return center.display_range_end_market_time

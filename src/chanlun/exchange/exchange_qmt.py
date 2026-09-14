@@ -426,7 +426,12 @@ class ExchangeQMT(Exchange):
             # 同时 inline 拿 instrument_detail 减少 native 调用次数。
             with _XTDATA_NATIVE_LOCK:
                 ticks = xtdata.get_full_tick(["SH", "SZ", "BJ"])
-                tick_codes = list(ticks.keys())
+                # Quotes are not a security directory: BJ can have usable
+                # history while the provider returns no current market ticks.
+                # Retain quoted ETF/index entries and include every listed
+                # A-share instrument, then classify the actual security type.
+                listed_codes = xtdata.get_stock_list_in_sector("沪深京A股")
+                tick_codes = list(dict.fromkeys([*ticks, *listed_codes]))
 
                 all_stocks = []
                 for _c in tick_codes:
@@ -686,6 +691,7 @@ class ExchangeQMT(Exchange):
                 "skip_download",
                 "prefer_local",
                 "incremental_refresh_days",
+                "download_start_date",
             }
             if unknown_args:
                 raise ValueError(f"unsupported QMT K-line args: {sorted(unknown_args)}")
@@ -704,6 +710,13 @@ class ExchangeQMT(Exchange):
                 raise ValueError(
                     "incremental_refresh_days must be an exact int inside [1, 60]"
                 )
+            if "download_start_date" in args:
+                value = args["download_start_date"]
+                if not isinstance(value, str) or len(value) != 8 or not value.isdigit():
+                    raise ValueError("download_start_date must be YYYYMMDD")
+                datetime.datetime.strptime(value, "%Y%m%d")
+                if "incremental_refresh_days" in args:
+                    raise ValueError("download start options cannot be combined")
 
         # QMT 可服务周期 = 原生(frequency_map) + convert 合成(2m/10m resample, 120m 分段)。
         # 其余(q/y/3m/6m 等)convert 不支持:历史会 fallback 读 1m 再 convert 抛异常,被外层
@@ -813,6 +826,10 @@ class ExchangeQMT(Exchange):
             args.get("incremental_refresh_days") if args is not None else None
         )
         download_query_start = query_start
+        if args is not None and "download_start_date" in args:
+            download_query_start = max(query_start, args["download_start_date"])
+            if query_end and download_query_start[:8] > query_end[:8]:
+                raise ValueError("download_start_date cannot exceed query end")
         if incremental_refresh_days is not None:
             # 实时结构已有完整本地历史时，只需下载最近窗口以补齐新完成 K 线；读取仍从
             # query_start 开始，因而不会缩短用于一、二、三类点识别的完整结构前缀。

@@ -7,11 +7,10 @@ RUNTIME_ROOTS = (
     ROOT / "src/chanlun",
     ROOT / "web/chanlun_chart",
 )
+# Recursive structure and signal mathematics serve the chart. Removed trading,
+# screening, backtest and alert products must remain outside the runtime.
 FORBIDDEN_IMPORTS = (
     "chanlun.decision_support",
-    "chanlun.core.strict_structure.recursive_engine",
-    "chanlun.core.strict_structure.trend_assembler",
-    "chanlun.core.strict_structure.same_level_decomposition",
     "chanlun.recursive_bt",
     "chanlun.signal_monitor",
     "chanlun.strategy",

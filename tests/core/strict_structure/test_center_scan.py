@@ -86,6 +86,20 @@ def test_empty_stream_returns_empty_level_without_tail_indexing():
     assert result.price_basis_revision is None
 
 
+def test_invalid_five_role_window_keeps_final_entry_and_three_core_units():
+    prices = (140, 100, 130, 110, 125, 115)
+    values = tuple(unit(i, "up" if end > start else "down", start, end)
+                   for i, (start, end) in enumerate(zip(prices, prices[1:])))
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+    assert result.centers == ()
+    assert len(result.previews) == 1
+    preview = result.previews[0]
+    assert preview.entry_unit_id == values[1].unit_id
+    assert preview.unit_ids == tuple(value.unit_id for value in values[2:])
+    assert preview.establishment_leave_unit_id is None
+    assert (preview.zd_tick, preview.zg_tick) == (115, 125)
+
+
 def test_unlocked_fifth_segment_remains_preview_only():
     values = valid_five_up_exit()
     active = values[:-1] + (
@@ -101,6 +115,57 @@ def test_unlocked_fifth_segment_remains_preview_only():
     assert preview.entry_unit_id == active[0].unit_id
     assert preview.unit_ids == tuple(item.unit_id for item in active[1:4])
     assert preview.pending_leave_unit_id == active[4].unit_id
+
+
+@pytest.mark.parametrize('source_kind', [SourceKind.SEGMENT, SourceKind.STROKE_OBSERVATION, SourceKind.TREND_TYPE])
+@pytest.mark.parametrize('mirror', [False, True])
+def test_locking_unchanged_geometry_preserves_the_first_selected_core(source_kind, mirror):
+    prices = (100, 104, 101, 105, 102, 106, 103, 107)
+    if mirror:
+        prices = tuple(220 - value for value in prices)
+    level = 1 if source_kind is SourceKind.TREND_TYPE else 0
+    values = tuple(unit(i, 'up' if end > start else 'down', start, end,
+                        locked=i < 2, source_kind=source_kind, structural_level=level)
+                   for i, (start, end) in enumerate(zip(prices, prices[1:])))
+    live = calculate_centers(values, level, source_kind)
+    locked = tuple(replace(value, locked=True, confirmed_at=value.available_at) for value in values)
+    confirmed = calculate_centers(locked, level, source_kind)
+    assert not live.centers and len(live.previews) == 1
+    assert live.previews[0].formal_center_id == confirmed.centers[0].center_id
+    assert live.previews[0].unit_ids[:3] == tuple(u.unit_id for u in confirmed.centers[0].initial_units)
+    assert (live.previews[0].zd_tick, live.previews[0].zg_tick) == (
+        confirmed.centers[0].zd_tick, confirmed.centers[0].zg_tick)
+
+
+@pytest.mark.parametrize('source_kind', [SourceKind.SEGMENT, SourceKind.STROKE_OBSERVATION, SourceKind.TREND_TYPE])
+@pytest.mark.parametrize('mirror', [False, True])
+def test_unattachable_last_unit_does_not_erase_valid_owner_extensions(source_kind, mirror):
+    prices = (130, 105, 115, 100, 120, 104, 121, 90, 112, 100, 104, 90)
+    level = 1 if source_kind is SourceKind.TREND_TYPE else 0
+    values = tuple(unit(i, 'up' if end > start else 'down', start, end,
+                        locked=i < 6, source_kind=source_kind, structural_level=level)
+                   for i, (start, end) in enumerate(zip(prices, prices[1:])))
+    # The return's internal price extreme reaches the core even though its endpoint
+    # is below ZD. The following down unit is wholly outside that same core.
+    values = (*values[:9], replace(values[9], high_tick=106), values[10])
+    if mirror:
+        values = tuple(replace(value, direction='down' if value.direction == 'up' else 'up',
+                              start_tick=300-value.start_tick, end_tick=300-value.end_tick,
+                              low_tick=300-value.high_tick, high_tick=300-value.low_tick) for value in values)
+    before = calculate_centers(values[:-1], level, source_kind)
+    after = calculate_centers(values, level, source_kind)
+    assert len(before.previews) == len(after.previews) == 1
+    assert after.centers == before.centers
+    assert after.previews[0].formal_center_id == before.previews[0].formal_center_id
+    assert after.previews[0].unit_ids == before.previews[0].unit_ids
+    assert after.previews[0].failed_departure_unit_ids == before.previews[0].failed_departure_unit_ids
+    assert after.previews[0].completion_return_unit_id is None
+    assert values[-1].unit_id not in after.previews[0].unit_ids
+    # When those valid extensions have already locked, the same outside tail
+    # supplies no new evidence and must not create a phantom owner projection.
+    locked_prefix = tuple(replace(value, locked=True, confirmed_at=value.available_at) for value in values[:-1])
+    no_change = calculate_centers((*locked_prefix, values[-1]), level, source_kind)
+    assert no_change.previews == ()
 
 
 def test_locked_leave_and_unlocked_outside_return_make_one_completed_preview():
@@ -367,7 +432,8 @@ def test_deterministic_fuzz_retains_first_seed_after_each_third_class_point():
         for position, previous in enumerate(result.centers):
             if previous.state is not CenterState.COMPLETED:
                 continue
-            resume = index_by_id[previous.completion_leave_unit.unit_id]
+            leave_index = index_by_id[previous.completion_leave_unit.unit_id]
+            resume = leave_index
             expected = next(
                 (
                     start
@@ -386,6 +452,7 @@ def test_deterministic_fuzz_retains_first_seed_after_each_third_class_point():
             assert position + 1 < len(result.centers)
             following = result.centers[position + 1]
             assert index_by_id[following.entry_unit.unit_id] == expected
+            assert index_by_id[following.core_units[0].unit_id] >= leave_index
 
 
 def test_zero_width_three_unit_intersection_is_touch_only_not_formal():

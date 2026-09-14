@@ -21,21 +21,20 @@ def _app():
         test_config={
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
 
 
-def test_app_factory_is_scheduler_side_effect_free_by_default():
+def test_app_factory_is_runtime_side_effect_free_by_default():
     first = _app()
     second = _app()
 
     for app in (first, second):
-        scheduler = app.extensions["scheduler"]
-        assert scheduler.running is False
-        assert scheduler.get_jobs() == []
-        app.extensions["shutdown_scheduler"]()
+        assert app.extensions["runtime_status"]() == {
+            "status": "stopped", "ready": False, "error": None,
+        }
+        app.extensions["shutdown_runtime_services"]()
 
 
 def test_app_factory_does_not_start_cache_writer_threads_by_default():
@@ -57,7 +56,6 @@ from cl_app import create_app
 app = create_app(test_config={
     'TESTING': True,
     'VALIDATE_WEB_SECURITY': False,
-    'SCHEDULER_ENABLED': False,
     'WTF_CSRF_ENABLED': False,
 })
 prefixes = ('FileDbPickleWriter-', 'ChartCacheDisk-')
@@ -228,7 +226,6 @@ def test_desktop_main_starts_runtime_after_http_listener(monkeypatch):
         lambda *_a: events.append("static-precompress"),
     )
     monkeypatch.setattr(sse_stream, "build_routes", lambda *_a, **_k: [])
-    monkeypatch.setattr(desktop_app, "_warm_chart_cache_from_disk", lambda: None)
     monkeypatch.setattr(desktop_app, "validate_web_security_config", lambda *_a: None)
     monkeypatch.setattr(desktop_app, "get_web_host", lambda: "127.0.0.1")
     monkeypatch.setattr(desktop_app, "get_login_accounts", lambda: ())
@@ -236,7 +233,7 @@ def test_desktop_main_starts_runtime_after_http_listener(monkeypatch):
     monkeypatch.setattr(desktop_app.sys, "argv", ["app.py", "nobrowser"])
 
     assert desktop_app.main() == 0
-    assert ("create-app", {"start_scheduler": False}) in events
+    assert ("create-app", {}) in events
     assert events.index("server-bind") < events.index("server-start")
     assert events.index("server-start") < events.index("loop-start")
     assert events.index("loop-start") < events.index("runtime-start")
@@ -294,7 +291,7 @@ def test_factory_blocks_external_request_when_runtime_bind_bypasses_config(
         "CHANLUN_LOGIN_USERS",
         _login_users("scrypt:32768:8:1$stub$stub"),
     )
-    app = create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
+    app = create_app(test_config={"TESTING": True})
 
     response = app.test_client().get(
         "/login", environ_overrides={"REMOTE_ADDR": "203.0.113.10"}
@@ -302,7 +299,7 @@ def test_factory_blocks_external_request_when_runtime_bind_bypasses_config(
 
     assert response.status_code == 503
     assert response.get_json() == {"status": "security_misconfigured"}
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()
 
 def test_factory_rejects_external_plaintext_account_hash(monkeypatch):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "0.0.0.0")
@@ -312,7 +309,7 @@ def test_factory_rejects_external_plaintext_account_hash(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
 
     with pytest.raises(ValueError, match="LOGIN_USERS"):
-        create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
+        create_app(test_config={"TESTING": True})
 
 
 def test_factory_rejects_external_hash_without_https(monkeypatch):
@@ -324,7 +321,7 @@ def test_factory_rejects_external_hash_without_https(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
 
     with pytest.raises(ValueError, match="HTTPS"):
-        create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
+        create_app(test_config={"TESTING": True})
 
 
 def test_factory_accepts_external_hash_with_https_and_forces_secure_cookies(
@@ -338,12 +335,12 @@ def test_factory_accepts_external_hash_with_https_and_forces_secure_cookies(
     monkeypatch.setenv("CHANLUN_HTTPS", "1")
     monkeypatch.setenv("CHANLUN_SESSION_COOKIE_SECURE", "0")
 
-    app = create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
+    app = create_app(test_config={"TESTING": True})
 
     assert app.config["WEB_HOST"] == "0.0.0.0"
     assert app.config["SESSION_COOKIE_SECURE"] is True
     assert app.config["REMEMBER_COOKIE_SECURE"] is True
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()
 
 
 def test_factory_allows_loopback_hash_with_http(monkeypatch):
@@ -354,7 +351,7 @@ def test_factory_allows_loopback_hash_with_http(monkeypatch):
     )
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
 
-    app = create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
+    app = create_app(test_config={"TESTING": True})
 
     assert app.config["SESSION_COOKIE_SECURE"] is False
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()

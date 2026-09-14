@@ -177,11 +177,9 @@ class XdCalculator:
     def calculate(self, bis: List[BI]) -> List[XD]:
         """根据笔列表计算线段（当前=全量重建；段增量已禁用）。
 
-        确认级联会使已确认段终点被后续假反弹回溯合并，旧段增量「删末 2 段、复用前缀
-        （依赖 done 段不回改）」的前提不再成立，故 calculate 改为每次全量重建：
-        self.xds.clear() + _find_strict_start + _build_segments。下方 identity 脏检查
-        （_identity_prefix_len）保留：实测约半数 calculate 命中、省全量 xd 重建。
-        全量重建下，增量喂入 == 批量 由 tests/chan_core/test_incremental_equivalence.py 对拍守护。
+        几何仍以全量重建对照，只有实际输入笔变化才重新计算。确认只来自
+        已锁定笔的破坏证据；追加数据不得改写已确认前缀。活动尾部允许继续
+        延伸。下方 identity 检查保留，跳过没有输入变化的重复计算。
         """
         all_bis = bis
         if all_bis is self._last_bis_obj:
@@ -202,8 +200,7 @@ class XdCalculator:
             self._last_bis_obj = all_bis
             return self.xds
 
-        # 禁用段增量(全量重建保 inc==batch)：级联使已确认段终点可被后续假反弹回溯合并,
-        # 旧段增量「删末2段、复用前缀(依赖 done 段不回改)」的前提不再成立。
+        # 全量重建保留为与增量喂入一致的确定性计算路径。
         self.xds.clear()
         start = self._find_strict_start(all_bis)
         if start < 0:
@@ -238,14 +235,14 @@ class XdCalculator:
     # 主循环
     # ----------------------------------------------------------
     def _build_segments(self, all_bis: List[BI], start: int):
-        """主循环：逐段构造线段 + 确认级联（breaks-back 合并 + 推迟 done）。
+        """按特征序列的破坏证据逐段构造，未完成的破坏保留在活动尾部。
 
-        线段只有被「合法反向线段」破坏才真正终结。若反向只是假反弹(跌破/涨破转折点 T),
-        则未破坏本段 → 本段延伸吞掉假反弹至真极值(_cascade_merge_back)。又因破坏本段的
-        反向段自身需待其反向确认,故最后一条已确认段推迟为 pending(_emit_segments_deferred)。
+        第 67/71 课：无缺口特征分型成立，或有缺口时第二特征分型成立，
+        即可确定原段结束。第 78 课的继续延伸只适用于尚未完成线段破坏的
+        候选，不能用以后出现的走势否定已有完整证据的线段。
         """
-        # 候选段携带本分支真正使用到的因果见证时间；只有后续确认级联跨过
-        # deferred 边界后，才会把该见证写成 XD.locked_at。
+        # 每一分支必须携带实际使用的已锁定笔的最晚见证；几何端点时间
+        # 不等于确认时间。只有证据完整的候选可以进入不可改写的前缀。
         segs: List[tuple] = []      # 元组格式：（线段起点、实际终点、线段类型、形成时刻）
         locked_candidates = {}      # （起点、终点、类型）映射到首次因果锁定时刻
         pos = start
@@ -272,7 +269,7 @@ class XdCalculator:
                     # 因此只有真正处在活动边缘——其后已不足以再构成任何一段——才
                     # 终止；否则与「尚未成段」的首段情形一样向前推进一笔继续找。
                     # 被跳过的笔不并入任何线段，这与首段之前的前导笔处理一致；
-                    # 末段的连续性仍由 _emit_segments_deferred 归一化保证。
+                    # 末段的连续性仍由 _emit_segments 归一化保证。
                     if segs and pos + 2 >= len(all_bis) - 1:
                         pending_tail = (pos, all_bis[pos].type)
                         break
@@ -441,7 +438,7 @@ class XdCalculator:
                 pending_tail = (seg_start, seg_type)
                 break
 
-        self._emit_segments_deferred(
+        self._emit_segments(
             all_bis,
             segs,
             pending_tail,
@@ -590,36 +587,42 @@ class XdCalculator:
         if not _overlap(all_bis[rb1], all_bis[rb2]):
             return None
         peak_idx = self._extreme_idx(all_bis, seg_start, rb1 - 1, seg_type)
-        real_end = max(peak_idx, seg_start + 2)
+        # If the true extreme lies in the first stroke, the >=3-stroke segment
+        # must retain an internal extreme (lesson 78). Choose the first legal
+        # non-extreme boundary, not blindly start+2: its reverse side must also
+        # start with three overlapping strokes. Otherwise the old main loop
+        # skipped a stroke and emitted two adjacent segments in one direction.
+        real_end = peak_idx
+        if peak_idx < seg_start + 2:
+            real_end = next((j for j in range(seg_start + 2, rb1, 2)
+                if ((all_bis[j].end.val > seg_anchor) if seg_type == 'up'
+                    else (all_bis[j].end.val < seg_anchor))
+                and _overlap(all_bis[j + 1], all_bis[j + 3])), None)
+            if real_end is None:
+                return None
         if real_end >= rb1 or all_bis[real_end].type != seg_type:
+            return None
+        if not _overlap(all_bis[real_end + 1], all_bis[real_end + 3]):
             return None
         return real_end, real_end + 1, rb2, all_bis[rb2].locked_at
 
-    # 确认级联推迟 done 的深度：一条段被确认(done)须其反向段「锁定不再延伸」——反向段
-    # 自身的反向被确认时才锁定(确认有递归前提)。除了 breaks-back，退化反向成段还会触发
-    # A-B-C 吸收；这两层级联叠加时，第四个后继段才足以排除对候选段的再次拆分/回溯。
-    #
-    # 只保留 2 个后继段曾在真实前缀中把尚可重划的段过早标为 done：SZ.300981 5m 的
-    # 2026-04-24~04-28 下段先被锁定，未来到 05-11 后又被拆成三段，连带改写已完成
-    # 中枢和三买。SZ.300132 1m 同样发生确认时点后移。四段缓冲使这两个反例和全缓存
-    # 前缀审计都只消费几何已经稳定的 locked 段。
-    _DEFER_DONE = 4
-
     def _freeze_confirmed_candidate(self, segs, locked_candidates) -> None:
-        """后继证据充足后冻结候选线段几何及其首个见证。"""
-        if len(segs) <= self._DEFER_DONE:
+        """完整破坏证据出现即冻结，不能另加固定数量的后继段延迟。
+
+        _try_end 已检查无缺口分型或有缺口的第二特征分型；_try_end_r34
+        已检查第 71 课相邻三笔的反向破坏。formed_at 为 None 表示仍有
+        未锁定的证据笔，此时保持待定。以后级联只能处理未锁定候选。
+        """
+        if not segs:
             return
-        index = len(segs) - self._DEFER_DONE - 1
-        candidate = segs[index]
-        boundary = segs[index + self._DEFER_DONE]
+        candidate = segs[-1]
         formed_at = candidate[3]
-        boundary_witness = boundary[3]
-        if formed_at is None or boundary_witness is None:
+        if formed_at is None:
             return
         key = self._candidate_key(candidate)
-        locked_candidates.setdefault(key, max(formed_at, boundary_witness))
+        locked_candidates.setdefault(key, formed_at)
 
-    def _emit_segments_deferred(
+    def _emit_segments(
         self,
         all_bis,
         segs,
@@ -627,8 +630,7 @@ class XdCalculator:
         start,
         locked_candidates,
     ):
-        """发射 segs:推迟 done——末 _DEFER_DONE 条已确认段(反向尚未锁定)标 pending、其余
-        done;再补末段未完成线段。"""
+        """输出已确认前缀及证据尚未完整的尾部，再补正在形成的末段。"""
         for s, e, t, formed_at in segs:
             locked_at = locked_candidates.get((s, e, t))
             self._make_xd(

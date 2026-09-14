@@ -47,6 +47,7 @@ def strict_runtime_config_revision(
     basis = _validated_basis(price_basis_revision)
     payload = {
         "base_revision": strict_base_config_revision(),
+        "analysis_revision": "chart-signals-complete-trend-departure-v9",
         "structure_price_quantum": _canonical_decimal(quantum),
         "price_basis_revision": basis,
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from dataclasses import replace
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,7 @@ from chanlun.core.strict_structure.center_machine import (
     advance_center,
     establish_center,
 )
-from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind, TrendCenter
+from chanlun.core.strict_structure.models import CenterState, ConstituentUnit, SourceKind, TrendCenter
 from tests.core.strict_structure.helpers import completed_up_center
 
 
@@ -19,6 +20,19 @@ CN = ZoneInfo("Asia/Shanghai")
 BASE = datetime(2026, 7, 20, 9, 30, tzinfo=CN)
 PRICE_BASIS = "test-raw"
 QUANTUM = Decimal("0.01")
+
+
+def test_point_and_divergence_geometry_changes_invalidate_chart_render_identity():
+    from chanlun.cl_utils.strict_chart import strict_point_to_chart_dict, strict_divergence_to_chart_dict
+    from tests.core.strict_structure.test_first_class_points import structure_from_values, divergent_strength, engine_for
+    strength = divergent_strength("down")
+    structure, _ = structure_from_values(direction="down", strength=strength)
+    point = engine_for(structure, strength).first_class_points()[0]
+    divergence = replace(point.divergence, anchor_at=point.anchor_at-timedelta(seconds=1))
+    moved = replace(point, anchor_at=divergence.anchor_at, divergence=divergence)
+    assert moved.point_id == point.point_id
+    assert strict_point_to_chart_dict(moved)["render_id"] != strict_point_to_chart_dict(point)["render_id"]
+    assert strict_divergence_to_chart_dict(divergence)["render_id"] != strict_divergence_to_chart_dict(point.divergence)["render_id"]
 
 
 
@@ -84,6 +98,26 @@ def test_formal_center_rectangle_uses_core_not_envelope() -> None:
 
     assert [point["price_tick"] for point in payload["points"]] == [115, 105]
     assert payload["envelope"] == {"dd_tick": 100, "gg_tick": 130}
+
+
+@pytest.mark.parametrize('state,phase', [
+    (CenterState.DIVERGENCE_CLOSED, 'CLOSED_AT_DIVERGENCE'),
+    (CenterState.SUPERSEDED, 'SUPERSEDED_BY_SUCCESSOR'),
+])
+def test_frozen_center_without_a_third_point_does_not_wait_for_a_future_return(state, phase):
+    center = _center()
+    if state is CenterState.DIVERGENCE_CLOSED:
+        center = replace(center, state=state, boundary_divergence_id='confirmed-divergence',
+                         boundary_anchor_unit_id=center.pending_leave_unit.unit_id)
+    else:
+        center = replace(center, state=state, pending_leave_unit=None,
+                         superseded_by_center_id='successor', superseded_at=center.available_at,
+                         supersession_bridge_units=(center.pending_leave_unit,))
+    payload = strict_center_to_chart_dict(center)
+    assert payload['completion_phase'] == phase
+    assert payload['expected_completion_point_type'] is None
+    assert payload['completion_point_type'] is None
+    assert not payload['third_class_confirmed'] and not payload['center_ended']
 
 
 def test_first_three_locked_units_never_render_a_formal_physical_center() -> None:

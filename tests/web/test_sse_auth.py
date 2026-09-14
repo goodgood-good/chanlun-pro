@@ -14,7 +14,6 @@ def app():
     return create_app(test_config={
         "TESTING": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
         "WTF_CSRF_ENABLED": False,
     })
 

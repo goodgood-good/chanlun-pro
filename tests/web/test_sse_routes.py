@@ -15,7 +15,6 @@ def test_routes_integrate_into_application(monkeypatch):
     app = create_app(test_config={
         "TESTING": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
     })
     routes = [
         (r"/static/(.*)", tornado.web.StaticFileHandler, {"path": "."}),
@@ -37,6 +36,5 @@ def test_routes_empty_when_flag_off(monkeypatch):
     app = create_app(test_config={
         "TESTING": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
     })
     assert build_routes(app, pool=None) == []

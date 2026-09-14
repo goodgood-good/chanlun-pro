@@ -29,10 +29,6 @@ def app(monkeypatch, tmp_path):
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
-            "TRADING_SCREENING_SNAPSHOT_PATH": (
-                tmp_path / "trading_screening_snapshot.json"
-            ),
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -62,7 +58,7 @@ def app(monkeypatch, tmp_path):
         raising=False,
     )
     yield flask_app
-    flask_app.extensions["shutdown_scheduler"]()
+    flask_app.extensions["shutdown_runtime_services"]()
 
 
 def test_livez_and_healthz_have_distinct_compatible_contracts(app):
@@ -149,11 +145,6 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
     assert payload["pid"] == os.getpid()
     assert payload["market"] == "a"
     assert payload["reasons"] == []
-    assert payload["components"]["scheduler"] == {
-        "required": False,
-        "ready": True,
-        "status": "disabled",
-    }
     assert payload["components"]["metadata"] == {
         "ready": True,
         "status": "ready",
@@ -386,27 +377,22 @@ def test_ticks_dependency_error_remains_not_ready_after_details_expire():
     }
 
 
-def test_readyz_requires_scheduler_only_when_enabled(app):
-    app.config["SCHEDULER_ENABLED"] = True
+def test_readyz_requires_owned_runtime_when_enabled(app):
+    app.config["RUNTIME_SERVICES_REQUIRED"] = True
     app.extensions["readiness"].record_ticks_success("a")
-    assert app.extensions["scheduler"].running is False
+    assert app.extensions["runtime_status"]()["ready"] is False
 
     response = app.test_client().get("/readyz?market=a")
 
     assert response.status_code == 503
     payload = response.get_json()
-    assert payload["components"]["scheduler"] == {
-        "required": True,
-        "ready": False,
-        "status": "stopped",
-    }
     assert payload["components"]["runtime"] == {
         "required": True,
         "ready": False,
         "status": "stopped",
         "error": None,
     }
-    assert payload["reasons"] == ["runtime_not_running", "scheduler_not_running"]
+    assert payload["reasons"] == ["runtime_not_running"]
 
 
 

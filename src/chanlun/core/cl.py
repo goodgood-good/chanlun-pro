@@ -2,6 +2,7 @@
 """本周期缠论运行时：K 线、分型、笔、线段、MACD 与线段中枢。"""
 
 from __future__ import annotations
+from collections import OrderedDict
 
 import datetime
 import threading
@@ -95,7 +96,7 @@ def _production_config(config: dict | None) -> dict[str, object]:
 class CL(ICL):
     """以唯一严格证据为权威的生产缠论状态。"""
 
-    _PICKLE_SCHEMA = "chanlun-native-center-cl-v3"
+    _PICKLE_SCHEMA = "chanlun-analysis-cl-v4"
     _PICKLE_STATE_FIELDS = frozenset(
         {
             "code",
@@ -147,6 +148,7 @@ class CL(ICL):
             int, CausalPartialHigherMACDCalculator
         ] = {}
         self._strict_structure_memo: dict[object, object] = {}
+        self._strict_center_prefix_cache = OrderedDict()
         self._strict_unit_registry = None
         self._strict_price_quantum_value = None
         self._strict_evidence_lock = threading.RLock()
@@ -154,6 +156,7 @@ class CL(ICL):
     def __getstate__(self):
         state = dict(self.__dict__)
         state.pop("_strict_evidence_lock", None)
+        state.pop("_strict_center_prefix_cache", None)
         if set(state) != self._PICKLE_STATE_FIELDS:
             raise ValueError("strict CL pickle state is invalid")
         return {"_pickle_schema": self._PICKLE_SCHEMA, **state}
@@ -168,6 +171,7 @@ class CL(ICL):
         current = dict(state)
         current.pop("_pickle_schema")
         self.__dict__.update(current)
+        self._strict_center_prefix_cache = OrderedDict()
         self._strict_evidence_lock = threading.RLock()
 
     @_strict_runtime_locked
@@ -332,7 +336,9 @@ class CL(ICL):
 
         price_basis_revision = self._strict_price_basis_revision()
         if self._strict_unit_registry is None:
-            self._strict_unit_registry = UnitLockRegistry(price_basis_revision)
+            self._strict_unit_registry = UnitLockRegistry(
+                price_basis_revision, scope=(self.market or "unknown", self.code, self.frequency)
+            )
         elif self._strict_unit_registry.price_basis_revision != price_basis_revision:
             raise ValueError("price basis changed within CL lifecycle")
         return self._strict_unit_registry
@@ -372,6 +378,133 @@ class CL(ICL):
         )
         result = calculate_centers(units, 0, SourceKind.SEGMENT)
         self._strict_structure_memo["native_centers"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_strict_structure_levels(self):
+        from chanlun.core.strict_structure.level_catalog import recursive_level_labels
+        from chanlun.core.strict_structure.models import SourceKind
+        from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
+        from chanlun.core.strict_structure.strength import MacdStrengthProvider
+        from chanlun.core.strict_structure.unit_adapter import adapt_lines
+
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("formal")
+        if cached is not None:
+            return cached
+        price_basis_revision = self._strict_price_basis_revision()
+        price_quantum = self._strict_price_quantum()
+        units = adapt_lines(
+            self.get_xds(),
+            0,
+            SourceKind.SEGMENT,
+            price_quantum,
+            self._strict_as_of(),
+            self._strict_registry(), constituent_lines=self.get_bis(),
+        )
+        labels = recursive_level_labels(self.get_frequency())
+        engine = StrictRecursiveEngine(max_levels=len(labels))
+        # 保持只覆写 ``max_levels`` 的研究/测试适配器兼容；缓存是运行时加速附件，
+        # 不属于递归引擎的策略构造参数。
+        engine.center_prefix_cache = self._strict_center_prefix_cache
+        result = engine.calculate(
+            units,
+            price_basis_revision=price_basis_revision,
+            strength=MacdStrengthProvider(self),
+        )
+        self._strict_structure_memo["formal"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_stroke_observation_centers(self):
+        from chanlun.core.strict_structure.center_machine import calculate_centers
+        from chanlun.core.strict_structure.models import SourceKind
+        from chanlun.core.strict_structure.unit_adapter import adapt_lines
+
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("stroke_observation")
+        if cached is not None:
+            return cached
+        self._strict_price_basis_revision()
+        units = adapt_lines(
+            self.get_bis(),
+            0,
+            SourceKind.STROKE_OBSERVATION,
+            self._strict_price_quantum(),
+            self._strict_as_of(),
+            self._strict_registry(),
+        )
+        result = calculate_centers(units, 0, SourceKind.STROKE_OBSERVATION)
+        self._strict_structure_memo["stroke_observation"] = result
+        return result
+
+    def _strict_evidence_assembler(self):
+        from chanlun.core.strict_structure.evidence_assembler import (
+            StrictEvidenceAssembler,
+        )
+        from chanlun.core.strict_structure.strength import MacdStrengthProvider
+
+        cached = self._strict_structure_memo.get("evidence_assembler")
+        if cached is not None:
+            return cached
+        assembler = StrictEvidenceAssembler(
+            symbol=self.get_code(),
+            source_frequency=self.get_frequency(),
+            source_closed_at=self._strict_as_of(),
+            price_basis_revision=self._strict_price_basis_revision(),
+            structure_price_quantum=self._strict_price_quantum(),
+            strict_config_revision=self._strict_config_revision(),
+            structure=self.get_strict_structure_levels(),
+            strength=MacdStrengthProvider(self),
+            projection_cache=self._strict_center_prefix_cache,
+        )
+        self._strict_structure_memo["evidence_assembler"] = assembler
+        return assembler
+
+    @_strict_runtime_locked
+    def get_strict_points(self):
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("confirmed_points")
+        if cached is not None:
+            return cached
+        result = self._strict_evidence_assembler().confirmed_points()
+        self._strict_structure_memo["confirmed_points"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_strict_approaching_points(self):
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("approaching_points")
+        if cached is not None:
+            return cached
+        result = self._strict_evidence_assembler().approaching_points()
+        self._strict_structure_memo["approaching_points"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_strict_divergences(self):
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("divergences")
+        if cached is not None:
+            return cached
+        result = self._strict_evidence_assembler().divergences()
+        self._strict_structure_memo["divergences"] = result
+        return result
+
+    @_strict_runtime_locked
+    @_strict_contract_boundary
+    def get_strict_evidence(self):
+        self._validate_strict_structure_metadata()
+        strict_config_revision = self._strict_config_revision()
+        cached = self._strict_structure_memo.get("evidence")
+        if cached is not None:
+            if cached.strict_config_revision != strict_config_revision:
+                raise ValueError("strict config revision changed within CL lifecycle")
+            return cached
+        result = self._strict_evidence_assembler().evidence(
+            stroke_center_observations=self.get_stroke_observation_centers(),
+        )
+        self._strict_structure_memo["evidence"] = result
         return result
 
     @_strict_runtime_locked

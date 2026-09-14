@@ -20,7 +20,6 @@ def test_non_object_json_returns_structured_400(path, expected):
             "PROPAGATE_EXCEPTIONS": False,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -39,7 +38,6 @@ def test_drawings_requires_an_object_state(payload):
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -49,7 +47,7 @@ def test_drawings_requires_an_object_state(payload):
             json=payload,
         )
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 400
     assert response.get_json() == {

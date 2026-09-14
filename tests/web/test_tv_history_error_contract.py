@@ -8,7 +8,6 @@ def test_internal_history_failure_is_not_reported_as_no_data(monkeypatch):
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -23,7 +22,7 @@ def test_internal_history_failure_is_not_reported_as_no_data(monkeypatch):
             "/tv/history?symbol=a:SZ.000001&resolution=1&from=1&to=2"
         )
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 503
     assert response.get_json() == {

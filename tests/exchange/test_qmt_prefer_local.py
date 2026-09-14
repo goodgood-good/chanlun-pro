@@ -293,10 +293,10 @@ def test_explicit_skip_download_remains_separate_caller_contract(qmt):
     assert "qmt_history_read_mode" not in result.attrs
 
 
-@pytest.mark.parametrize("end", [None, "2025-09-06 15:00:00"])
+@pytest.mark.parametrize("end", [None, "2023-09-06 15:00:00"])
 def test_unbounded_or_uncovered_end_keeps_original_download(qmt, end):
     qmt.responses.append(_raw(_closes()))
-    _request(qmt, start="2025-09-01", end=end)
+    _request(qmt, start="2023-09-01", end=end)
     assert qmt.events == ["lane_enter", "download", "read", "factors", "lane_exit"]
 
 
@@ -304,4 +304,27 @@ def test_unbounded_or_uncovered_end_keeps_original_download(qmt, end):
 def test_prefer_local_requires_exact_bool(qmt, value):
     with pytest.raises(ValueError, match="prefer_local must be an exact bool"):
         qmt.ex.klines.__wrapped__(qmt.ex, "SZ.301004", "1m", args={"prefer_local": value})
+    assert qmt.events == []
+
+
+def test_explicit_download_start_preserves_full_read_prefix(qmt, monkeypatch):
+    downloaded = []
+    monkeypatch.setattr(exchange_qmt.xtdata, "download_history_data", lambda **kw: downloaded.append(kw))
+    qmt.responses.append(_raw(_closes()))
+    _request(qmt, start="2026-08-01", end="2026-09-04 15:00:00",
+             args={"download_start_date": "20260903", "exact_end": True})
+    assert downloaded[0]["start_time"] == "20260903"
+    assert qmt.reads[0]["start_time"] == "20260801"
+    assert qmt.reads[0]["end_time"] == "20260904150000"
+    assert downloaded[0]["incrementally"] is True
+
+
+@pytest.mark.parametrize("options", [
+    {"download_start_date": "20260999"}, {"download_start_date": "20260910"},
+    {"download_start_date": "20260903", "incremental_refresh_days": 2},
+])
+def test_invalid_download_start_does_not_reach_qmt(qmt, options):
+    with pytest.raises(ValueError):
+        qmt.ex.klines.__wrapped__(qmt.ex, "SZ.301004", "1m", start_date="2026-08-01",
+                                  end_date="2026-09-04 15:00:00", args={"exact_end": True, **options})
     assert qmt.events == []

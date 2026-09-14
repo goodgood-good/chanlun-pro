@@ -89,7 +89,6 @@ def test_route_returns_no_data_before_chart_or_exchange_work(monkeypatch) -> Non
             "TESTING": True,
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -113,7 +112,7 @@ def test_route_returns_no_data_before_chart_or_exchange_work(monkeypatch) -> Non
             "&firstDataRequest=false&countback=2&from=1787670000&to=1787673900"
         )
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 200
     assert response.get_json() == {"s": "no_data"}

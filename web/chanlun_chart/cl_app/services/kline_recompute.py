@@ -377,8 +377,8 @@ def recompute_chart_data_from_klines(
             )
             cd = strict_runtime.cd
         elif unchanged:
-            # Reprocessing the same closed frame clears the strict branch memo
-            # and turns an idle refresh into another cold recursive analysis.
+            # Reprocessing unchanged bars would clear the native-center memo
+            # and repeat structure analysis during an idle refresh.
             strict_runtime = StrictChartRuntimeResult.success(cd)
         else:
             # The immutable prefix was already authenticated above by its exact

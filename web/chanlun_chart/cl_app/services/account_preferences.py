@@ -168,7 +168,7 @@ def _normalize_display_config(key: str, raw: object) -> str:
     parsed, _ = _json_string(raw, key=key)
     if (
         not isinstance(parsed, dict)
-        or len(parsed) > 100
+        or len(parsed) > 256
         or not isinstance(parsed.get("schema"), str)
     ):
         raise InvalidAccountPreferences(f"{key} must contain a chart config object")
@@ -180,10 +180,16 @@ def _normalize_display_config(key: str, raw: object) -> str:
                 raise InvalidAccountPreferences(f"{key} schema is too long")
         elif type(value) is not bool:
             raise InvalidAccountPreferences(f"{key} values must be booleans")
-    if parsed["schema"] not in {"chanlun-chart-config-v6", "chanlun-chart-config-v7"}:
+    if parsed["schema"] not in {"chanlun-chart-config-v5", "chanlun-chart-config-v6", "chanlun-chart-config-v7", "chanlun-chart-config-v8"}:
         raise InvalidAccountPreferences(f"{key} has an unsupported display schema")
-    normalized = {"schema": "chanlun-chart-config-v7"}
-    normalized.update({name: parsed[name] for name in ("fx", "bi", "xd", "center_all", "center_L0") if name in parsed})
+    normalized = {"schema": "chanlun-chart-config-v8"}
+    basic_keys = {
+        "fx", "bi", "xd", "center_all", "center_observation", "point_all", "divergence_all",
+        "point_1buy", "point_2buy", "point_3buy", "point_1sell", "point_2sell", "point_3sell",
+    }
+    level_key = re.compile(r"^(center|point|divergence_consolidation|divergence_trend)_L([0-9]|[1-4][0-9])$")
+    normalized.update({name: value for name, value in parsed.items()
+                       if name in basic_keys or level_key.fullmatch(name)})
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
@@ -222,7 +228,6 @@ def _is_supported_preference_key(key: object) -> bool:
                 "tv_chart",
                 "chart_menu_width",
                 "chart_menu_collapsed",
-                "chart_analysis_overview_collapsed",
             }
             or _DRAWING_MODE_KEY.fullmatch(key)
             or _DISPLAY_CONFIG_KEY.fullmatch(key)

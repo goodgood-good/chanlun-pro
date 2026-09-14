@@ -3,8 +3,11 @@
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    schema: 'chanlun-chart-config-v7', fx: false, bi: true, xd: true,
-    center_all: true, center_L0: true,
+    schema: 'chanlun-chart-config-v8', fx: false, bi: true, xd: true,
+    center_all: true, center_L0: true, center_observation: false,
+    point_all: true, point_1buy: true, point_2buy: true, point_3buy: true,
+    point_1sell: true, point_2sell: true, point_3sell: true,
+    divergence_all: true,
 };
 
 
@@ -503,19 +506,42 @@ function bindClDisplayMenuDrag(menuElement, handleElement, topWindow) {
 function normalizeClShowConfig(config, interval) {
     const source = config ?? CL_SHOW_DEFAULT;
     if (!source || typeof source !== 'object' || Array.isArray(source)
-        || !['chanlun-chart-config-v6', CL_SHOW_DEFAULT.schema].includes(source.schema)) {
+        || !['chanlun-chart-config-v5', 'chanlun-chart-config-v6', 'chanlun-chart-config-v7', CL_SHOW_DEFAULT.schema].includes(source.schema)) {
         throw new TypeError('cl_show_config_current_schema_required');
     }
     const output = {...CL_SHOW_DEFAULT};
-    for (const key of ['fx', 'bi', 'xd', 'center_all', 'center_L0']) {
-        if (Object.prototype.hasOwnProperty.call(source,key)) output[key] = source[key] !== false;
+    for (const key of Object.keys(source)) {
+        if (key !== 'schema' && (Object.prototype.hasOwnProperty.call(CL_SHOW_DEFAULT, key)
+            || /^(center|point|divergence_consolidation|divergence_trend)_L(?:[0-9]|[1-4][0-9])$/.test(key))) {
+            output[key] = source[key] !== false;
+        }
     }
     return output;
 }
 
 function strictItemEnabled(cfg, item) {
-    return item?.render_kind === 'formal_center' && item?.structural_level === 0
-        && cfg?.center_all !== false && cfg?.center_L0 !== false;
+    const level = item?.structural_level;
+    if (!Number.isInteger(level) || level < 0 || level >= 50) return false;
+    const enabled = (key) => cfg?.[key] ?? (level === 0);
+    if (item.render_kind === 'center_observation') return cfg?.center_observation === true;
+    if (['formal_center', 'center_preview'].includes(item.render_kind)) return cfg?.center_all !== false && enabled(`center_L${level}`);
+    if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
+        return cfg?.point_all !== false && cfg?.[`point_${item.point_type}`] !== false && enabled(`point_L${level}`);
+    }
+    if (item.render_kind === 'strict_divergence' && ['consolidation', 'trend'].includes(item.kind)) {
+        return cfg?.divergence_all !== false && enabled(`divergence_${item.kind}_L${level}`);
+    }
+    return false;
+}
+
+function analysisDisplayLevels(snapshot, interval) {
+    const levels = snapshot?.levels;
+    const source = Array.isArray(levels) && levels.length ? levels : [{structural_level: 0}];
+    const sourceLabel = snapshot?.source_frequency || (/^\d+$/.test(String(interval)) ? `${interval}m` : interval);
+    return source.map((item) => ({
+        level: item.structural_level,
+        label: item.structural_level === 0 ? `${sourceLabel} 本级` : `L${item.structural_level} 高${item.structural_level}级`,
+    }));
 }
 
 function strictStringArray(value) {
@@ -536,7 +562,7 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     if (
         !item || item.schema !== 'chanlun-chart-center'
         || item.structural_level !== level
-        || item.source_kind !== 'segment'
+        || !['segment', 'trend_type', 'stroke_observation'].includes(item.source_kind)
         || !strictStringArray(item.core_unit_ids)
         || item.core_unit_ids.length !== 3
         || new Set(item.core_unit_ids).size !== 3
@@ -545,6 +571,15 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
         || !strictSameIds(item.initial_unit_ids, item.core_unit_ids)
         || !strictStringArray(item.establishment_segment_ids)
     ) throw new Error('strict center core contract is invalid');
+
+    if (item.source_kind === 'trend_type') {
+        if (item.formation_rule !== 'recursive_three' || item.establishment_component_count !== 3
+            || !strictSameIds(item.establishment_segment_ids, item.core_unit_ids)
+            || !(item.core?.zd_tick <= item.core?.zg_tick)) {
+            throw new Error('recursive center requires three completed lower structures');
+        }
+        return;
+    }
 
     if (item.core_formed !== undefined) {
         if (item.core_formed !== true || typeof item.frame_qualified !== 'boolean'
@@ -732,6 +767,9 @@ function getSignalColor(role, theme = currentChartTheme()) {
 
 function getCenterVisualStyle(role, item = {}) {
     const spec = CHANLUN_VISUAL_STYLE.center.formal;
+    if (item.render_kind === 'center_preview') {
+        return {linewidth: 1, linestyle: CHART_CONFIG.LINE_STYLES.DASHED, transparency: 96};
+    }
     return {linewidth: spec.linewidth, linestyle: CHART_CONFIG.LINE_STYLES.SOLID,
       transparency: item.third_class_confirmed ? spec.completedTransparency : spec.ongoingTransparency};
 }
@@ -741,8 +779,36 @@ function getCenterVisualStyle(role, item = {}) {
 function centerEvidenceTitle(item) {
     const bounds = item.core || {};
     const interval = '[' + bounds.zd_price + ', ' + bounds.zg_price + ']';
-    const state = item.third_class_confirmed ? '离开后回试严格位于区间外，中枢已结束' : '中枢延伸或等待回试确认';
-    return interval + '；进入、三核心与离开独立；' + state;
+    if (item.render_kind === 'center_preview') {
+        return interval + '；' + centerPreviewLabel(item)
+            + (item.preview_status === 'awaiting_completion_confirmation'
+                ? '；回试已位于中枢区间外，相关线段待最终确认'
+                : '；虚线部分随未确认线段更新');
+    }
+    const awaitingReturn = item.tail_status === 'awaiting_completion_confirmation';
+    const state = item.third_class_confirmed ? '离开后回试严格位于区间外，中枢已结束'
+        : item.state === 'divergence_closed' ? '已按确认背驰分界，原划分已固定'
+        : item.state === 'superseded' ? '后继中枢已成立，原划分已固定'
+        : awaitingReturn ? '回试已位于中枢区间外，相关线段待最终确认' : '中枢延伸或等待回试确认';
+    const formation = item.source_kind === 'trend_type' ? '三个已完成下级结构重叠' : '进入、三核心与离开独立';
+    return interval + '；' + formation + '；' + state
+        + (!item.third_class_confirmed && item.tail_status
+            ? '；' + centerPreviewLabel({preview_status: item.tail_status}) : '');
+}
+
+function centerPreviewLabel(item) {
+    return ({awaiting_leave: '形成中·待离开段', extending: '延伸中·待确认',
+        awaiting_completion_confirmation: '回试待确认',
+        awaiting_segment_confirmation: '形成中·待线段确认'})[item.preview_status] || '形成中';
+}
+
+function chartSignalLabel(item) {
+    const names = {'1buy':'一买','2buy':'二买','3buy':'三买','1sell':'一卖','2sell':'二卖','3sell':'三卖'};
+    const label = item.render_kind === 'strict_divergence'
+        ? (item.kind === 'trend' ? '趋背' : '盘背') : names[item.point_type];
+    const prefix = item.structural_level > 0 ? `L${item.structural_level}·` : '';
+    const suffix = item.render_kind === 'point_approaching' ? '·待确认' : '';
+    return `${prefix}${label}${suffix}`;
 }
 
 
@@ -797,7 +863,7 @@ function isInitialSegmentThirdClass(item = {}) {
 
 
 
-// 基础结构保留“笔细、线段粗”的第二重视觉层级；颜色由下面的绝对递归级别色链决定，
+// 基础结构保留“笔细、线段粗”的视觉层级；颜色由下面的周期配色决定，
 // 因而 1m 线段与 5m 笔、5m 线段与 30m 笔始终同色。这里只影响显示，不改变结构计算。
 const BASE_STRUCTURE_LINE_WIDTHS = Object.freeze({
     bis: 1,
@@ -828,7 +894,7 @@ const DEFAULT_COLORS = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// 绝对递归级别色链：每个绝对级别一个固定颜色，**同一绝对级别在任何周期图上恒同色**。
+// 周期配色：相邻周期沿用固定颜色组合，便于多图对照。
 // 例如 1m 线段与 5m 笔都落在 index 2；5m 线段与 30m 笔都落在 index 3。
 // 相邻级别采用跨色相、高饱和且兼顾明暗主题的颜色，避免旧橙/黄组合在密集 K 线上混淆。
 //   index: 0=15秒(白) 1=1FB品红 2=1FC蓝 3=1F橙 4=5F青绿 5=30F紫
@@ -845,7 +911,7 @@ const LEVEL_COLOR_CHAIN = [
     "#BE185D", // 8  月线 玫红
     "#4D7C0F", // 9  季线 橄榄绿
 ];
-// 按链索引取色:溢出(深递归 > 9)在 [1..9] 区间循环,既不 undefined 又仍可辨。
+// 超出颜色表时循环取色。
 function chainColor(idx) {
     if (idx <= 0) return LEVEL_COLOR_CHAIN[0];
     if (idx < LEVEL_COLOR_CHAIN.length) return LEVEL_COLOR_CHAIN[idx];
@@ -861,22 +927,10 @@ function chartBiIndex(interval) {
     return (typeof p === "number") ? p : 1;
 }
 
-// 当前周期 → 各递归级别(L0/L1/L2/L3)的周期标签链。模块级:菜单与左侧级别快捷开关浮条共用。
-const FREQ_CHAIN = {
-    "1": ["1m", "5m", "30m", "日线"],
-    "5": ["5m", "30m", "日线", "周线"],
-    "15": ["15m", "60m", "日线", "周线"],
-    "30": ["30m", "日线", "周线", "月线"],
-    "60": ["60m", "日线", "周线", "月线"],
-    "1D": ["日线", "周线", "月线", "年线"],
-    "1W": ["周线", "月线", "年线", "10年"],
-    "1M": ["月线", "年线", "10年", "30年"],
-};
-
 // 基础元素相对「笔」的链偏移。
 const ELEMENT_CHAIN_OFFSET = { bis: 0, xds: 1 };
 
-// 基础元素(笔/线段/笔中枢/线段中枢)按当前周期取链色。替代旧 DYNAMIC_CHART_COLORS。
+// 笔和线段按当前周期取色。
 function getDynamicColor(interval, elementType) {
     const off = ELEMENT_CHAIN_OFFSET[elementType];
     if (typeof off === "number") return chainColor(chartBiIndex(interval) + off);
@@ -1185,7 +1239,7 @@ class ChartManager {
         this._verifyingUntil = null;  // performance.now() 时间戳，在此之前的 reconcile 属于 verify 内部
         // 嵌入图表只能在 K 线、严格结构、异步图元和补绘都稳定后向父页
         // 宣告完成。旧逻辑在 dataReady 回调内立即上报，父页会提前移除 loading，
-        // 用户随后仍要等待数百毫秒到数秒才能看到完整中枢/买卖点。
+        // 用户随后仍要等待数百毫秒到数秒才能看到完整结构。
         this._chartStableReadyTimer = null;
         this._chartStableReadySince = null;
         this._chartStableReadyStartedAt = null;
@@ -1999,10 +2053,21 @@ class ChartManager {
         const _sseOn = (typeof window !== 'undefined' && window.__CHANLUN_SSE_ENABLED === true);
         const _historyParams = {};
         _historyParams.atomic_initial = 1;
+        const screeningEvidence = window.__CHANLUN_SCREENING_EVIDENCE;
+        if (screeningEvidence) {
+            _historyParams.screening_source = screeningEvidence.source;
+            _historyParams.screening_point = screeningEvidence.point;
+        }
         this.udf_datafeed = new Datafeeds.UDFCompatibleDatafeed("/tv", _sseOn ? 30000 : 3000, undefined, {
             managerId: this.instanceId,
             historyParams: _historyParams,
         });
+        if (screeningEvidence) {
+            // Frozen evidence uses the same renderer and settings. Never mix a
+            // subsequent live candle or SSE structure into the saved snapshot.
+            this.udf_datafeed.subscribeBars = function () {};
+            this.udf_datafeed.unsubscribeBars = function () {};
+        }
 
         const registry = getTVRegistry();
         registry.chartManagers.set(this.instanceId, this);
@@ -2481,7 +2546,9 @@ class ChartManager {
             numeric_formatting: { decimal_sign: "." },
             time_frames: [], timezone: getMarketTimezone(Utils.get_market()), locale: "zh",
             symbol_search_request_delay: 100, auto_save_delay: 5, study_count_limit: 100,
-            disabled_features: CHART_DISABLED_FEATURES,
+            disabled_features: screeningEvidence
+                ? [...CHART_DISABLED_FEATURES, 'header_symbol_search', 'header_compare', 'header_resolutions']
+                : CHART_DISABLED_FEATURES,
             enabled_features: viewportOptions.enabledFeatures,
             saved_data_meta_info: { uid: 1, name: "default", description: "default" },
             save_load_adapter: save_load_adapter,
@@ -2489,7 +2556,7 @@ class ChartManager {
             user_id: "session", load_last_chart: shouldLoadLastChart(),
             custom_indicators_getter: this.getCustomIndicators,
             // TradingView 会在画布放不下时忽略 setVisibleRange 的 from。
-            // 仅 1m 选股嵌入图允许官方支持的 0.01 最小间距，使当前完整缓存
+            // 1m 中枢观察页采用 0.01 最小间距，使当前完整缓存
             // （约万根）可以在半屏卡片内一次展示；其他图保持原值控制计算量。
             time_scale: {
                 min_bar_spacing: viewportOptions.minBarSpacing,
@@ -2629,6 +2696,10 @@ class ChartManager {
                         <input type="checkbox" id="${cbId(key)}" ${_checked(key, fallback) ? 'checked' : ''}
                             style="margin-right:6px; vertical-align:middle;">${label}
                     </label>`;
+                const _levels = analysisDisplayLevels(self._strictStructureSnapshot, _curInterval);
+                const _levelRows = (prefix, suffix) => _levels.map((item) =>
+                    _cbRow(`${prefix}_L${item.level}`, `${item.label} ${suffix}`, item.level === 0)
+                ).join('');
                 const _grpTitle = (title, note = '') => `
                     <div style="font-size:14px; color:#2563a6; padding:8px 0 2px; font-weight:700;">
                         ${title}${note ? `<span style="font-size:13px; color:#687386; margin-left:6px; font-weight:400;">${note}</span>` : ''}
@@ -2666,6 +2737,7 @@ class ChartManager {
                             本周期 K 线计算分型、笔与线段，中枢由本周期线段构建。
                             中枢核心为三段重叠区间，进入段与离开段独立于核心。
                             严格离开后，回试不触及中枢区间才确认中枢结束。
+                            L1、L2 等高一级结构由已确认的下级结构递归构建；其 K 线来源仍是当前周期。
                         </div>
 
                         ${_grpTitle('基础结构')}
@@ -2674,11 +2746,25 @@ class ChartManager {
                                 ${_dualSwatch(getSignalColor('fractalTop'), getSignalColor('fractalBottom'), '顶分型 / 底分型')}分型</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${_checked('bi') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'bis'))}笔</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${_checked('xd') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'xds'))}线段</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('center_observation')}" ${_checked('center_observation') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'bis'))}笔类中枢观察</label>
                         </div>
+                        ${_cbRow('center_observation', '笔类中枢观察', false)}
 
-                        ${_grpTitle('本周期中枢')}
-                        ${_cbRow('center_all', '显示线段中枢')}
+                        ${_grpTitle('按级别显示中枢')}
+                        ${_cbRow('center_all', '中枢总开关')}
+                        <div style="padding-left:14px;">${_levelRows('center', '中枢')}</div>
+
+                        ${_grpTitle('一、二、三类买卖点')}
+                        ${_cbRow('point_all', '买卖点总开关')}
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;">
+                            ${[['1buy','一买'],['2buy','二买'],['3buy','三买'],['1sell','一卖'],['2sell','二卖'],['3sell','三卖']]
+                                .map(([key, label]) => _cbRow(`point_${key}`, label)).join('')}
+                        </div>
+                        <div style="padding-left:14px;">${_levelRows('point', '买卖点')}</div>
+
+                        ${_grpTitle('背驰')}
+                        ${_cbRow('divergence_all', '背驰总开关')}
+                        <div style="padding-left:14px;">${_levelRows('divergence_consolidation', '盘整背驰')}
+                            ${_levelRows('divergence_trend', '趋势背驰')}</div>
 
                         ${_grpTitle('画线设置')}
                         <label style="display:block;cursor:pointer;font-size:14px;">
@@ -2697,7 +2783,7 @@ class ChartManager {
                 const menuElement = document.getElementById(menuId);
                 let menuPlacement = null;
                 // 工具栏按钮位于 TradingView 同源内嵌框架中，菜单则挂载在当前
-                // ChartManager 文档内。页面被嵌入时（例如预选股页），window.top 属于
+                // ChartManager 文档内。页面被嵌入时，window.top 属于
                 // 另一套坐标空间；菜单定位和拖动必须以其实际所属窗口为准。
                 const menuWindow = menuElement?.ownerDocument?.defaultView || window;
                 if (menuElement) {
@@ -2732,7 +2818,12 @@ class ChartManager {
                     });
                 });
 
-                const keys = ['fx', 'bi', 'xd', 'center_all'];
+                const keys = [
+                    'fx', 'bi', 'xd', 'center_all', 'center_observation', 'point_all', 'divergence_all',
+                    'point_1buy', 'point_2buy', 'point_3buy', 'point_1sell', 'point_2sell', 'point_3sell',
+                    ..._levels.flatMap(({level}) => ['center', 'point', 'divergence_consolidation', 'divergence_trend']
+                        .map((prefix) => `${prefix}_L${level}`)),
+                ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
                         const checked = $(this).is(':checked');
@@ -3032,7 +3123,7 @@ class ChartManager {
         }
     }
 
-    // 当前周期 → 调色板级别颜色项(只各递归级别 1m/5m/30m/日线…,label + 链色;不含笔/段基础)。
+    // 手工画线调色板沿用当前周期线段的颜色。
     _levelBarItems(interval) {
         return {items: [{label: '本周期', color: getDynamicColor(interval, 'xds')}], sig: String(interval)};
     }
@@ -3246,7 +3337,6 @@ class ChartManager {
 
 
 
-    // 审计页的稳定买卖点链接带有服务端已复核的因果锁。首次数据就绪后把
 
 
     // 首次加载某 标的+周期 时,若默认可视窗过窄(实测外汇默认仅 ~4h/~43根 → 只见 1 笔,而数据有 438 笔),
@@ -3824,9 +3914,9 @@ class ChartManager {
         if (!Number.isFinite(Number(snapshot.structure_price_quantum)) || Number(snapshot.structure_price_quantum) <= 0) {
             throw new Error('strict structure price quantum is invalid');
         }
-        if (snapshot.analysis_scope !== 'native_centers' || !Array.isArray(snapshot.levels)
-            || snapshot.levels.length !== 1) {
-            throw new Error('native center collections are invalid');
+        if (!['native_centers', 'centers_and_signals'].includes(snapshot.analysis_scope)
+            || !Array.isArray(snapshot.levels) || snapshot.levels.length < 1 || snapshot.levels.length > 50) {
+            throw new Error('chart analysis collections are invalid');
         }
 
         const displayFrequency = this._strictFrequencyFromResolution(currentInterval);
@@ -3889,24 +3979,84 @@ class ChartManager {
 
     _strictRenderGroups(snapshot, context) {
         const api = this._strictApi();
-        const level = snapshot.levels[0];
-        if (level.structural_level !== 0 || level.origin !== 'native_segments'
-            || level.label !== snapshot.display_frequency || !Array.isArray(level.centers)) {
-            throw new Error('native center level is invalid');
-        }
         const groups = new Map();
-        for (const [index, rawItem] of level.centers.entries()) {
-            if (rawItem.render_kind !== 'formal_center' || rawItem.source_kind !== 'segment') {
-                throw new Error('native center source is invalid');
+        const annotationSlots = new Map();
+        const add = (rawItem, level, centerLabel) => {
+            if (rawItem.structural_level !== level || rawItem.price_basis_revision !== snapshot.price_basis_revision
+                || !Number.isInteger(rawItem.available_at) || rawItem.available_at > snapshot.source_closed_at) {
+                throw new Error('chart evidence context or cutoff is invalid');
             }
-            validateStrictCenterRenderContract(rawItem, 0, false);
-            if (rawItem.available_at > snapshot.source_closed_at) throw new Error('center exceeds source cutoff');
-            const item = api.itemToChartCoordinates({...rawItem, center_label: 'Z' + (index + 1)},
+            const item = api.itemToChartCoordinates({...rawItem, ...(centerLabel ? {center_label: centerLabel} : {})},
                 context.interval, context.sourceTimeIsClose ?? this._chartUsesCloseTimestampCoordinates());
-            if (!this._strictItemEnabled(item)) continue;
+            if (item.points.length === 1) {
+                const anchor = item.points[0];
+                const key = `${anchor.time}:${anchor.price_tick ?? anchor.price}`;
+                const slot = annotationSlots.get(key) || 0;
+                annotationSlots.set(key, slot + 1);
+                // Keep the true price/time anchor. Separate coincident text rows,
+                // including hidden marks so toggles do not move other labels.
+                item.display_label = '\n'.repeat(slot) + chartSignalLabel(item);
+                if (item.point_id) item.exit_plan = snapshot.point_exit_plans?.[item.point_id] || null;
+            }
+            if (!this._strictItemEnabled(item)) return;
             const scope = api.scopeKey(context,item);
             if (!groups.has(scope)) groups.set(scope,[]);
             groups.get(scope).push(item);
+        };
+        for (const [depth, level] of snapshot.levels.entries()) {
+            if (level.structural_level !== depth || !Array.isArray(level.centers)
+                || level.origin !== (depth === 0 ? 'native_segments' : 'completed_lower_structures')) {
+                throw new Error('chart analysis level is invalid');
+            }
+            const previews = level.center_previews || [];
+            const ownerProjections = new Map(previews.filter(item => item.owner_center_id)
+                .map(item => [item.owner_center_id, item]));
+            const centerLabels = new Map();
+            for (const [index, item] of level.centers.entries()) {
+                if (item.render_kind !== 'formal_center' || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')) {
+                    throw new Error('center source is invalid');
+                }
+                validateStrictCenterRenderContract(item, depth, false);
+                const label = (depth === 0 ? '' : `L${depth}·`) + 'Z' + (index + 1);
+                centerLabels.set(item.center_id, label);
+                add({...item, tail_status: ownerProjections.get(item.center_id)?.preview_status}, depth, label);
+            }
+            let formingIndex = 0;
+            for (const item of previews) {
+                if (item.render_kind !== 'center_preview' || item.state !== 'forming'
+                    || item.tradable !== false || item.third_class_confirmed !== false
+                    || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')
+                    || (item.owner_center_id && !centerLabels.has(item.owner_center_id))) {
+                    throw new Error('forming center evidence is invalid');
+                }
+                validateStrictCenterRenderContract(item, depth, true);
+                if (item.draw_geometry === false) continue;
+                const label = item.owner_center_id ? centerLabels.get(item.owner_center_id) + '·' + centerPreviewLabel(item)
+                    : (depth === 0 ? '' : `L${depth}·`) + 'P' + (++formingIndex) + '·' + centerPreviewLabel(item);
+                add(item, depth, label);
+            }
+            for (const item of level.points || []) {
+                if (!['point_confirmed', 'point_approaching'].includes(item.render_kind)
+                    || !/^[123](buy|sell)$/.test(item.point_type) || !item.point_id
+                    || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')) {
+                    throw new Error('chart point evidence is invalid');
+                }
+                add(item, depth);
+            }
+            for (const item of level.divergences || []) {
+                if (item.render_kind !== 'strict_divergence' || !['consolidation', 'trend'].includes(item.kind)
+                    || !item.divergence_id || !item.metrics?.is_divergent) {
+                    throw new Error('chart divergence evidence is invalid');
+                }
+                add(item, depth);
+            }
+        }
+        for (const [index, item] of (snapshot.stroke_center_observations || []).entries()) {
+            if (item.render_kind !== 'center_observation' || item.source_kind !== 'stroke_observation') {
+                throw new Error('stroke center observation source is invalid');
+            }
+            validateStrictCenterRenderContract(item, 0, false);
+            add(item, 0, '笔Z' + (index + 1));
         }
         return groups;
     }
@@ -3920,12 +4070,27 @@ class ChartManager {
 
 
     _createStrictShape(item, currentInterval, bars) {
-        if (item.render_kind !== 'formal_center') throw new Error('unsupported native center shape');
-        const style = getCenterVisualStyle('formal', item);
-        return ChartUtils.createZhongshuShape(this.chart, item, {
-            color: getDynamicColor(currentInterval, 'xds'), linewidth: style.linewidth,
-            text: item.center_label || '', title: centerEvidenceTitle(item),
-            overrides: {linestyle: style.linestyle, transparency: style.transparency},
+        if (['formal_center', 'center_observation', 'center_preview'].includes(item.render_kind)) {
+            const observation = item.render_kind === 'center_observation';
+            const style = getCenterVisualStyle('formal', item);
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: observation ? getDynamicColor(currentInterval, 'bis')
+                    : chainColor(chartBiIndex(currentInterval) + 1 + item.structural_level),
+                linewidth: observation ? 1 : style.linewidth,
+                text: item.center_label || '', title: centerEvidenceTitle(item),
+                overrides: {linestyle: style.linestyle, transparency: observation ? 95 : style.transparency},
+            });
+        }
+        const isDivergence = item.render_kind === 'strict_divergence';
+        const isPoint = ['point_confirmed', 'point_approaching'].includes(item.render_kind);
+        if (!isDivergence && !isPoint) throw new Error('unsupported chart analysis shape');
+        const buy = isDivergence ? item.direction === 'down' : item.side === 'buy';
+        const label = chartSignalLabel(item);
+        return ChartUtils.createShape(this.chart, item.points[0], {
+            shape: 'text', text: item.display_label || label,
+            title: item.exit_plan && globalThis.PointExitInfo ? `${label}\n${PointExitInfo.title(item.exit_plan)}` : label,
+            overrides: {color: getSignalColor(buy ? 'buy' : 'sell'), fontsize: 12,
+                bold: item.render_kind === 'point_confirmed', fillBackground: false, fixedSize: true},
         });
     }
 
@@ -3989,7 +4154,9 @@ class ChartManager {
         if (typeof this.chart?.getShapeById === 'function') {
             try {
                 const shape = this.chart.getShapeById(realId);
-                const title = centerEvidenceTitle(item);
+                const title = ['formal_center', 'center_observation', 'center_preview'].includes(item.render_kind)
+                    ? centerEvidenceTitle(item) : chartSignalLabel(item) + (
+                        item.exit_plan && globalThis.PointExitInfo ? '\n' + PointExitInfo.title(item.exit_plan) : '');
                 if (shape && typeof shape.setProperties === 'function' && title) {
                     // TradingView may ignore title in create options. Attach
                     // the qualification to the accepted object at every density;

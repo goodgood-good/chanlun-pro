@@ -43,18 +43,21 @@ def test_only_immediate_three_strokes_qualify_for_reverse_break_fallback(mirror)
 def test_real_segment_confirmation_survives_a_later_reverse_break():
     frame = load_frame("SZ.002299_1m.parquet", 900)
     confirmations = []
-    for count in (778, 792, 793, 900):
+    for count in (489, 778, 792, 793, 900):
         cd = CL("SZ.002299", "1m", strict_config(), market="a")
         cd.process_klines(frame.head(count))
         line = next(
             xd for xd in cd.get_xds()
             if (xd.start.k.k_index, xd.end.k.k_index) == (387, 444)
         )
-        assert line.is_done() is (count >= 793)
+        assert line.is_done()
         confirmations.append(line.locked_at)
-    # The lesson 81 feature rule changes the later cascade witness. Earlier
-    # prefixes must remain unconfirmed, instead of borrowing the future lock.
-    assert confirmations == [None, None, frame.iloc[792].date, frame.iloc[792].date]
+    # The physical feature witness is row 488, not the fourth later segment.
+    assert confirmations == [frame.iloc[488].date] * 5
+    before = CL("SZ.002299", "1m", strict_config(), market="a")
+    before.process_klines(frame.head(488))
+    assert not any(xd.is_done() and (xd.start.k.k_index, xd.end.k.k_index) == (387, 444)
+                   for xd in before.get_xds())
 
 
 @pytest.mark.parametrize("mirror", [False, True])
@@ -88,9 +91,37 @@ def test_lesson_81_public_calculation_reaches_the_valid_initial_segment(mirror):
         assert first.end_line is values[4]
         assert first.type == values[0].type
         assert first.formed_at == values[7].locked_at
-        # The source figure establishes geometry; it does not satisfy this
-        # implementation's later audit lock buffer.
-        assert not first.is_done() and first.locked_at is None
+        # Lesson 67/71 requires the actual feature proof, without waiting for
+        # four additional completed segments after the proof already exists.
+        assert first.is_done() and first.locked_at == values[7].locked_at
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_included_reverse_strokes_do_not_turn_a_pen_break_into_segment_confirmation(mirror):
+    # Lesson 78 figure 1: the first reverse stroke breaks the prior stroke,
+    # but the following reverse stroke is contained; the old segment extends.
+    values = _strokes([0, 10, 6, 15, 11, 20, 14, 18, 16, 21], mirror)
+    for count in (7, 8, 9):
+        lines = XdCalculator().calculate(values[:count])
+        assert not any(line.is_done() for line in lines)
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_non_extreme_boundary_preserves_the_reverse_segment_origin(mirror):
+    # Real failure reduced to ticks: the first stroke is the internal extreme.
+    # Forcing the first segment to end at 3 strands stroke 3-4, because 3-4
+    # and 5-6 do not overlap. The reverse origin must remain valid as well.
+    values = _strokes([3860, 3910, 3866, 3877, 3863, 3895, 3880,
+                      3891, 3853, 3864, 3848, 3888, 3872, 3905], mirror)
+    lines = XdCalculator().calculate(values)
+    assert len(lines) >= 2
+    for a, b in zip(lines, lines[1:]):
+        assert a.end_line.index + 1 == b.start_line.index
+        assert a.type != b.type
+    for line in lines:
+        start = line.start_line.index
+        first, third = values[start], values[start + 2]
+        assert max(first.low, third.low) <= min(first.high, third.high)
 
 
 @pytest.mark.parametrize("mirror", [False, True])

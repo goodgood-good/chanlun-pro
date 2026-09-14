@@ -226,9 +226,8 @@ def ticks():
                 f"/ticks market state unavailable market={market} err={exc}"
             )
             now_trading = None
-        # rate 可为 None（盈透经 Redis 透传或币安 ccxt 缺少 percentage），原列表推导中
-        # float(None) 抛 TypeError 被外层 except 吞→整批(含健康标的)清空且 now_trading=False
-        # 停掉前端轮询。改逐标的隔离 + `or 0` 守零, 镜像 /tv/quotes(tv.py:637)。
+        # 缺失涨跌幅保留为 null，价格仍可显示；不能把未知涨跌误报为 0%。
+        # 逐标的处理，避免一个异常值清空整批行情。
         requested_by_identity = {
             _quote_code_identity(market, code): code for code in codes
         }
@@ -238,10 +237,10 @@ def ticks():
                 continue
             try:
                 _price = float(_t.last)
-                _rate = round(float(_t.rate or 0), 2)
+                _rate = round(float(_t.rate), 2) if _t.rate is not None else None
                 # NaN/Inf 不是合法 JSON（Flask 的 allow_nan=True 会输出裸 NaN 标记，
                 # 打断前端严格 JSON.parse → 整批含健康标的全失败), 镜像 /tv/quotes(tv.py:654)降级跳过。
-                if not math.isfinite(_price) or not math.isfinite(_rate):
+                if not math.isfinite(_price) or (_rate is not None and not math.isfinite(_rate)):
                     continue
                 response_code = requested_by_identity.get(
                     _quote_code_identity(market, _c),

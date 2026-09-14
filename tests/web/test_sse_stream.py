@@ -150,7 +150,6 @@ def test_build_routes_flag_on(monkeypatch):
     app = create_app(test_config={
         "TESTING": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
     })
     routes = build_routes(app)
     assert any("/tv/stream" in str(r[0]) for r in routes)
@@ -163,7 +162,6 @@ def test_build_routes_flag_off(monkeypatch):
     app = create_app(test_config={
         "TESTING": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
     })
     assert build_routes(app) == []
 
@@ -173,7 +171,6 @@ class SseAuthTest(tornado.testing.AsyncHTTPTestCase):
         self.flask_app = create_app(test_config={
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
         })
         return tornado.web.Application(
             [(r"/tv/stream", SseStreamHandler,

@@ -234,6 +234,32 @@ def test_registry_rejects_a_changed_confirmation_for_same_unit(fake_done_line):
         )
 
 
+def test_same_market_line_survives_history_window_reindexing(fake_done_line):
+    def adapt():
+        return adapt_lines([fake_done_line], 0, SourceKind.SEGMENT, Decimal("0.01"),
+                           BASE + timedelta(hours=2), UnitLockRegistry("test-raw"))[0]
+    before = adapt()
+    fake_done_line.start.k.k_index += 700
+    fake_done_line.end.k.k_index += 700
+    assert adapt().unit_id == before.unit_id
+    # The same ordinal and prices at a different market time are a new fact.
+    fake_done_line.start.k.date += timedelta(minutes=5)
+    fake_done_line.end.k.date += timedelta(minutes=5)
+    fake_done_line.locked_at += timedelta(minutes=5)
+    fake_done_line.formed_at += timedelta(minutes=5)
+    assert adapt().unit_id != before.unit_id
+
+
+def test_physical_unit_identity_is_scoped_to_symbol_and_period(fake_done_line):
+    identifiers = {
+        adapt_lines([fake_done_line], 0, SourceKind.SEGMENT, Decimal("0.01"),
+                    BASE + timedelta(hours=2), UnitLockRegistry("test-raw", scope=scope))[0].unit_id
+        for scope in (("a", "SH.600000", "1m"), ("a", "SH.600000", "5m"),
+                      ("a", "SH.600001", "1m"))
+    }
+    assert len(identifiers) == 3
+
+
 def test_adapter_rejects_non_positive_price_quantum(fake_done_line):
     with pytest.raises(ValueError, match="price_quantum must be positive"):
         adapt_lines(
@@ -288,7 +314,7 @@ def test_invalid_early_lock_does_not_poison_registry(fake_done_line):
 
 
 def test_line_adapter_rejects_recursive_trend_source_kind(fake_done_line):
-    with pytest.raises(ValueError, match="not a valid SourceKind"):
+    with pytest.raises(ValueError, match="physical line adapter rejects recursive trend source"):
         adapt_lines(
             [fake_done_line],
             1,

@@ -1,7 +1,7 @@
 """TradingView Web 应用的单进程启动入口。
 
-入口会把项目 ``src`` 与 Web 目录加入 ``sys.path``，兼容 WPF 启动器所需的
-GBK 标准流，并在同一进程中启动 Flask/Tornado 服务。
+入口会把项目 ``src`` 与 Web 目录加入 ``sys.path``，
+并在同一进程中启动 Flask/Tornado 服务。
 """
 
 import asyncio
@@ -25,32 +25,6 @@ for bootstrap_path in (web_server_path, src_path):
     sys.path.insert(0, value)
 
 from chanlun.tools.log_util import LogUtil
-
-
-def _wrap_stdio_gbk() -> None:
-    """
-    Wrap stdin/stdout/stderr to GBK encoding for WPF launcher mode.
-    Ensures print flushes and converts unicode to GBK safely.
-    """
-
-    class _Filter:
-        def __init__(self, target):
-            self.target = target
-
-        def write(self, s):
-            # errors="replace"：日志含非 GBK 字符（emoji 等）时不让 WPF 模式崩溃。
-            self.target.buffer.write(s.encode("gbk", errors="replace"))
-            self.target.flush()
-
-        def flush(self):
-            self.target.flush()
-
-        def close(self):
-            self.target.close()
-
-    sys.stdin = _Filter(sys.stdin)
-    sys.stdout = _Filter(sys.stdout)
-    sys.stderr = _Filter(sys.stderr)
 
 
 import webbrowser
@@ -322,49 +296,6 @@ class BoundedWSGIContainer(WSGIContainer):
         self._log(503, request)
 
 
-def _warm_chart_cache_from_disk() -> None:
-    """启动期 chart_data 预热。把上次访问的 entry 从 fdb 回填 RAM。
-
-    cache_key 由 (market, code, frequency, hash(cl_config)) 组成；这里用
-    query_cl_chart_config(market, code) 获取 cl_config——与 tv.py history 入口
-    的 key 构造方式完全一致，命中率最高。
-    """
-    from cl_app.services.last_chart_state import load_last_state
-
-    state = load_last_state()
-    if not state:
-        return
-    market = state["market"]
-    code = state["code"]
-    frequency = state["frequency"]
-
-    from chanlun.cl_utils import query_cl_chart_config
-    from cl_app.services.chart_cache import (
-        _build_cache_key,
-        _normalize_cache_entry,
-        chart_data_cache,
-    )
-    from chanlun.persistence.file_db import fdb
-
-    cl_config = query_cl_chart_config(market, code)
-    if not isinstance(cl_config, dict):
-        cl_config = {}
-    cache_key = _build_cache_key(market, code, frequency, cl_config)
-    try:
-        disk_entry = fdb.get_chart_cache(cache_key)
-    except Exception as e:
-        LogUtil.warning(f"[chart_warm] 读磁盘 entry 失败 key={cache_key} err={e}")
-        return
-    if disk_entry is None:
-        LogUtil.info(f"[chart_warm] 磁盘冷层无 {market}:{code}:{frequency} entry，跳过")
-        return
-    normalized = _normalize_cache_entry(disk_entry)
-    if normalized is None:
-        return
-    chart_data_cache[cache_key] = normalized
-    LogUtil.info(f"[chart_warm] 已预热 {market}:{code}:{frequency} 到 RAM")
-
-
 def _get_web_port() -> int:
     raw_port = os.environ.get("CHANLUN_WEB_PORT", "9900").strip()
     try:
@@ -402,9 +333,7 @@ def _start_runtime_with_retry(
     maximum = max(delay, float(max_delay))
     while not cancel_event.is_set():
         try:
-            app.extensions["start_runtime_services"](
-                enable_scheduler=not app.config.get("CHART_ONLY_MODE", False)
-            )
+            app.extensions["start_runtime_services"]()
         except Exception as exc:
             app.config["RUNTIME_BOOTSTRAP_ERROR"] = str(exc)[:200]
             LogUtil.exception("应用后台组件启动失败，稍后重试")
@@ -419,10 +348,6 @@ def _start_runtime_with_retry(
 
 def main() -> int:
     """启动承载 Flask 应用的 Tornado HTTP 服务。"""
-    is_wpf_launcher = "wpf_launcher" in sys.argv
-    if is_wpf_launcher:
-        _wrap_stdio_gbk()
-
     # 安装 stdout 噪音过滤：吞掉 pytdx 等第三方库漏删的纯数字调试 print，避免刷屏。
     from chanlun.utils import install_stdout_noise_filter
 
@@ -447,7 +372,8 @@ def main() -> int:
             web_host,
             get_login_accounts(),
         )
-        app = create_app(start_scheduler=False)
+        app = create_app()
+        app.config["RUNTIME_SERVICES_REQUIRED"] = True
 
         # HTTP 线程池容量可配置，默认 32。
         # 多 tab + 多周期并发时 IO（QMT/CQ 拉数据）是瓶颈而非 CPU，扩大 worker 数
@@ -543,7 +469,6 @@ def main() -> int:
         server.bind(web_port, web_host)
         server.start(1)
         io_loop = IOLoop.current()
-        app.config["SCHEDULER_ENABLED"] = not app.config.get("CHART_ONLY_MODE", False)
         runtime_executor = DaemonExecutor(
             max_workers=2,
             thread_name_prefix="RuntimeBootstrap",
@@ -558,11 +483,6 @@ def main() -> int:
             if runtime_cancel_event.is_set():
                 return
             try:
-                try:
-                    if not app.config.get("CHART_ONLY_MODE", False):
-                        _warm_chart_cache_from_disk()
-                except Exception as exc:
-                    LogUtil.warning(f"[chart_warm] 启动预热未执行: {exc}")
                 LogUtil.info("应用后台组件启动成功")
                 try:
                     from chanlun.exchange.lb_quota_tracker import LbQuotaTracker

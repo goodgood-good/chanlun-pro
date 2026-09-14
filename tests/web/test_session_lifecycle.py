@@ -1,4 +1,5 @@
 import datetime
+from unittest.mock import Mock
 
 import pytest
 from werkzeug.security import generate_password_hash
@@ -27,7 +28,6 @@ def _make_app(monkeypatch, password_ref):
         test_config={
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
-            "SCHEDULER_ENABLED": False,
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -46,7 +46,7 @@ def test_post_logout_revokes_the_current_session(monkeypatch):
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/login")
     assert client.get("/").status_code == 302
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()
 
 
 def test_login_requires_explicit_username_even_for_one_account(monkeypatch):
@@ -58,7 +58,7 @@ def test_login_requires_explicit_username_even_for_one_account(monkeypatch):
         response = client.post("/login", data={"password": password[0]})
         protected = client.get("/", follow_redirects=False)
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 200
     assert protected.status_code == 302
@@ -81,7 +81,7 @@ def test_remembered_login_survives_browser_restart_and_refreshes(monkeypatch):
         reopened_client.set_cookie("remember_token", remember_cookie.value)
         response = reopened_client.get("/")
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 200
     assert any(
@@ -103,7 +103,7 @@ def test_password_rotation_invalidates_existing_session(monkeypatch):
 
     assert response.status_code == 302
     assert "/login" in response.headers["Location"]
-    app.extensions["shutdown_scheduler"]()
+    app.extensions["shutdown_runtime_services"]()
 
 
 def test_login_route_blocks_repeated_password_failures(monkeypatch):
@@ -120,7 +120,7 @@ def test_login_route_blocks_repeated_password_failures(monkeypatch):
         blocked = client.post("/login", data=_login_data("wrong"))
         assert blocked.status_code == 429
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
 
 def test_successful_login_clears_failed_attempt_state(monkeypatch):
@@ -137,7 +137,7 @@ def test_successful_login_clears_failed_attempt_state(monkeypatch):
         assert response.status_code == 302
         assert limiter.tracked_keys() == 0
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
 
 def test_api_request_returns_json_401_after_authentication_expires(monkeypatch):
@@ -152,7 +152,7 @@ def test_api_request_returns_json_401_after_authentication_expires(monkeypatch):
             follow_redirects=False,
         )
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 401
     assert response.get_json() == {
@@ -163,16 +163,20 @@ def test_api_request_returns_json_401_after_authentication_expires(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("path", [])
+@pytest.mark.parametrize("path", ["/screening/start", "/screening/cancel", "/screening/reviews"])
 def test_ajax_post_endpoints_share_json_authentication_contract(monkeypatch, path):
+    actions = Mock(side_effect=AssertionError("unauthenticated request executed a screening action"))
+    for name in ("manager.start", "manager.cancel", "workbench.save_review"):
+        monkeypatch.setattr(f"cl_app.blueprints.screening.{name}", actions)
     password = ["first-password"]
     app = _make_app(monkeypatch, password)
 
     try:
         response = app.test_client().post(path, follow_redirects=False)
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
+    actions.assert_not_called()
     assert response.status_code == 401
     assert response.get_json() == {
         "ok": False,
@@ -191,7 +195,7 @@ def test_authenticated_client_can_refresh_csrf_token(monkeypatch):
         assert client.post("/login", data=_login_data(password[0])).status_code == 302
         response = client.get("/api/session")
     finally:
-        app.extensions["shutdown_scheduler"]()
+        app.extensions["shutdown_runtime_services"]()
 
     assert response.status_code == 200
     payload = response.get_json()

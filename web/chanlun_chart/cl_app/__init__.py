@@ -1,29 +1,11 @@
-import atexit
 import datetime
 import hashlib
 import hmac
 import os
 import threading
 import pathlib
-import pytz
 import secrets
 import subprocess
-from apscheduler.events import (
-    EVENT_ALL,
-    EVENT_EXECUTOR_ADDED,
-    EVENT_EXECUTOR_REMOVED,
-    EVENT_JOB_ADDED,
-    EVENT_JOB_ERROR,
-    EVENT_JOB_EXECUTED,
-    EVENT_JOB_MAX_INSTANCES,
-    EVENT_JOB_MISSED,
-    EVENT_JOB_MODIFIED,
-    EVENT_JOB_REMOVED,
-    EVENT_JOB_SUBMITTED,
-    EVENT_JOBSTORE_ADDED,
-    EVENT_JOBSTORE_REMOVED,
-)
-from apscheduler.schedulers.background import BackgroundScheduler
 from flask import (
     Flask,
     g,
@@ -55,8 +37,6 @@ from chanlun.security import (
 __all__ = ["create_app"]
 
 
-_TASK_HISTORY_LIMIT = 500
-_TASK_TERMINAL_STATES = {"已完成", "执行异常", "未执行", "删除作业"}
 _SHARED_RUNTIME_OWNER_LOCK = threading.RLock()
 _SHARED_RUNTIME_OWNER: object | None = None
 def _configured_login_accounts():
@@ -65,35 +45,7 @@ def _configured_login_accounts():
     return get_login_accounts()
 
 
-
-
-def _trim_task_history(task_map, limit: int = _TASK_HISTORY_LIMIT) -> None:
-    terminal_ids = [
-        task_id
-        for task_id, task in task_map.items()
-        if task.get("state") in _TASK_TERMINAL_STATES
-    ]
-    excess = max(0, len(terminal_ids) - max(0, int(limit)))
-    for task_id in terminal_ids[:excess]:
-        task_map.pop(task_id, None)
-
-
-def _scheduler_task_snapshot(scheduler):
-    lock = getattr(scheduler, "my_task_lock", None)
-    if lock is None:
-        task_map = dict(scheduler.my_task_list)
-    else:
-        with lock:
-            task_map = dict(scheduler.my_task_list)
-    snapshot = []
-    for task in task_map.values():
-        row = dict(task)
-        row["name"] = str(row.get("name") or "").strip() or "--"
-        snapshot.append(row)
-    return snapshot
-
-
-def create_app(test_config=None, start_scheduler=False):
+def create_app(test_config=None):
     # 应用工厂默认不得产生副作用；单进程桌面入口会显式启用，测试和通用 WSGI 导入不会启用。
     app = Flask(__name__, instance_relative_config=True)
     https_enabled = is_https_enabled()
@@ -108,12 +60,8 @@ def create_app(test_config=None, start_scheduler=False):
     }
     app.config.from_mapping(
         WEB_HOST=get_web_host(),
-        CHART_ONLY_MODE=(
-            os.environ.get("CHANLUN_CHART_ONLY", "1").strip().lower()
-            in {"1", "true", "yes", "on"}
-        ),
         VALIDATE_WEB_SECURITY=True,
-        SCHEDULER_ENABLED=bool(start_scheduler),
+        RUNTIME_SERVICES_REQUIRED=False,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=secure_cookie_enabled,
@@ -143,40 +91,9 @@ def create_app(test_config=None, start_scheduler=False):
             .lower()
             in {"1", "true", "yes", "on"}
         ),
-        # 生产实时选股只发技术/手工买卖提醒，不读取正式研究账本。正式研究材料仍可在
-        # 离线研究和回放入口使用，但不能成为生产监听的隐藏依赖。
-        # 开发与策略验证默认不运行全市场预选。只有最终验收/生产运行显式设置环境变量
-        # 为 1 才开启盘后完整覆盖，避免每次代码修改都重新处理五千余只标的。
-        # 仅供一次明确运维启动使用：在当前逻辑的完整快照发布前绕过常规盘后窗口。
-        # 环境变量不写入项目配置，完成后即使进程仍存活也会自动恢复时段闸门。
-        # 低频候选必须在下一次 1m 监听到期前停止接纳新任务；剩余标的下一轮继续。
-        # 系统本地且独立于市场的自选组用于声明手工持仓；它只是一项监听事实，不能由成员
-        # 关系推断券商/账户访问权或下单能力。
-        # 只有明确的人工关注组进入分钟级优先监听。旧版通用选股生成的结果组不再被
-        # 隐式并入；它们仍保留在自选数据库中，且不影响独立的全市场收盘后扫描。
-        # This gate is independent from A-share screening authorization.
-        # 修改与策略验证阶段每轮仍只处理 12 只。仅在大范围和完整覆盖两个独立
-        # 授权同时开启时使用固定 240 只批次，让十二个结构进程各自保持约二十个
-        # 连续任务，摊薄每轮发布和长尾等待；盘中 5m 实时候选仍独立限制为 48 只。
-        # Scheduling the full armed/triggered universe is cheap; the absolute
-        # round deadline still limits how much native work may actually start.
-        # QMT 的历史补数 RPC 在正常情况下也可能接近 150 秒才返回，结构进程必须给它
-        # 留出完整窗口；过早终止会触发 30 秒退避，并让同批后续标的被连带记为不可用。
-        # Web 与实时 Tick 已隔离且实时请求繁忙时不排队，因此这里延长等待不会拖死网页。
-        # 原生结构库的长期内存不会完全归还给 Windows。当前候选池约两千只，过早在
-        # 1024 次请求回收会使进程永远无法走完一次缓存轮回；默认允许覆盖完整候选池。
-        # 32-GiB 生产机上 1536 MiB × 12 会与 MiniQMT 一起触发系统提交耗尽，因此在
-        # 1280 MiB 的安全请求边界提前回收；显式环境变量仍可按更大主机容量调高。
-        # QMT 本地 RPC 以等待为主，结构进程按四分之三逻辑 CPU 扩张以覆盖等待
-        # 时间；上限十二个并保留其余 CPU 给 Web、实时监听和 QMT。另有控制进程。
-        # app.py 是前向业务调度的唯一所有者。
-        # app.py 也是交互式 QMT 运行时的唯一所有者。
     )
     if test_config:
         app.config.update(test_config)
-    from .services.chart_only import apply_chart_only_mode
-
-    apply_chart_only_mode(app.config)
     if https_enabled:
         app.config["SESSION_COOKIE_SECURE"] = True
         app.config["REMEMBER_COOKIE_SECURE"] = True
@@ -185,66 +102,7 @@ def create_app(test_config=None, start_scheduler=False):
             app.config["WEB_HOST"],
             accounts=_configured_login_accounts(),
         )
-    scheduler_enabled = bool(app.config.get("SCHEDULER_ENABLED", False))
     app.logger.addFilter(lambda record: "/static/" not in record.getMessage().lower())
-
-    # 任务对象
-    from .services.scheduler_executor import RestartableDaemonPoolExecutor
-
-    scheduler = BackgroundScheduler(
-        timezone=pytz.timezone("Asia/Shanghai"),
-        executors={
-            "default": RestartableDaemonPoolExecutor(
-                max_workers=8,
-                max_pending=64,
-            ),
-        },
-    )
-    scheduler.my_task_list = {}
-    scheduler.my_task_lock = threading.RLock()
-
-
-
-
-    def run_tasks_listener(event):
-        state_map = {
-            EVENT_EXECUTOR_ADDED: "已添加",
-            EVENT_EXECUTOR_REMOVED: "删除调度",
-            EVENT_JOBSTORE_ADDED: "已添加",
-            EVENT_JOBSTORE_REMOVED: "删除存储",
-            EVENT_JOB_ADDED: "已添加",
-            EVENT_JOB_REMOVED: "删除作业",
-            EVENT_JOB_MODIFIED: "修改作业",
-            EVENT_JOB_SUBMITTED: "运行中",
-            EVENT_JOB_MAX_INSTANCES: "等待运行",
-            EVENT_JOB_EXECUTED: "已完成",
-            EVENT_JOB_ERROR: "执行异常",
-            EVENT_JOB_MISSED: "未执行",
-        }
-        if event.code not in state_map.keys():
-            return
-        if hasattr(event, "job_id"):
-            job_id = event.job_id
-            with scheduler.my_task_lock:
-                if job_id not in scheduler.my_task_list:
-                    scheduler.my_task_list[job_id] = {
-                        "id": job_id,
-                        "name": "--",
-                        "update_dt": fun.datetime_to_str(datetime.datetime.now()),
-                        "next_run_dt": "--",
-                        "state": "未知",
-                    }
-                task = scheduler.my_task_list[job_id]
-                task["update_dt"] = fun.datetime_to_str(datetime.datetime.now())
-                job = scheduler.get_job(event.job_id)
-                if job is not None:
-                    task["name"] = job.name
-                    task["next_run_dt"] = fun.datetime_to_str(job.next_run_time)
-                task["state"] = state_map[event.code]
-                _trim_task_history(scheduler.my_task_list)
-        return
-
-    scheduler.add_listener(run_tasks_listener, EVENT_ALL)
 
     # 统一从 services.constants 引用常量，降低耦合
     from .services.constants import (
@@ -280,7 +138,6 @@ def create_app(test_config=None, start_scheduler=False):
 
     readiness_registry = readiness_service.ReadinessRegistry()
     metadata_warmup_thread = None
-
 
 
     __log = fun.get_logger()
@@ -696,20 +553,8 @@ def create_app(test_config=None, start_scheduler=False):
             }
 
         ticks_component = readiness_registry.ticks_snapshot(market)
-        scheduler_required = bool(app.config.get("SCHEDULER_ENABLED", False))
-        scheduler_ready = bool(scheduler.running) if scheduler_required else True
-        scheduler_component = {
-            "required": scheduler_required,
-            "ready": scheduler_ready,
-            "status": (
-                "running"
-                if scheduler_required and scheduler_ready
-                else "stopped"
-                if scheduler_required
-                else "disabled"
-            ),
-        }
-        if scheduler_required:
+        runtime_required = bool(app.config.get("RUNTIME_SERVICES_REQUIRED", False))
+        if runtime_required:
             runtime_probe = app.extensions.get("runtime_status")
             runtime_component = (
                 runtime_probe() if callable(runtime_probe) else runtime_status()
@@ -735,15 +580,13 @@ def create_app(test_config=None, start_scheduler=False):
                 reasons.append("ticks_stale")
             else:
                 reasons.append("ticks_dependency_error")
-        if scheduler_required and not runtime_component["ready"]:
+        if runtime_required and not runtime_component["ready"]:
             if runtime_component["status"] == "starting":
                 reasons.append("runtime_starting")
             elif runtime_component.get("error"):
                 reasons.append("runtime_start_failed")
             else:
                 reasons.append("runtime_not_running")
-        if scheduler_required and not scheduler_ready:
-            reasons.append("scheduler_not_running")
         ready = not reasons
         payload = {
             "status": "ready" if ready else "not_ready",
@@ -753,7 +596,6 @@ def create_app(test_config=None, start_scheduler=False):
             "pid": os.getpid(),
             "market": market,
             "components": {
-                "scheduler": scheduler_component,
                 "runtime": runtime_component,
                 "metadata": metadata_component,
                 "symbols": symbols_component,
@@ -807,22 +649,22 @@ def create_app(test_config=None, start_scheduler=False):
 
     from .blueprints.tv import tv_bp
     from .blueprints.zixuan import zixuan_bp
-    from .blueprints.jobs import jobs_bp
     from .blueprints.setting import setting_bp
     from .blueprints.bkgn import bkgn_bp
     from .blueprints.other import other_bp
     from .blueprints.options import options_bp
     from .blueprints.symbols import symbols_bp
+    from .blueprints.screening import screening_bp
 
     for blueprint in (
         tv_bp,
         zixuan_bp,
-        jobs_bp,
         setting_bp,
         bkgn_bp,
         other_bp,
         options_bp,
         symbols_bp,
+        screening_bp,
     ):
         app.register_blueprint(blueprint)
 
@@ -847,15 +689,10 @@ def create_app(test_config=None, start_scheduler=False):
         "owns_shared_runtime": False,
         "generation": 0,
         "stop_event": threading.Event(),
-        "scheduler_enabled": None,
-        "scheduler_start_attempted": False,
         "metadata": None,
         "ticks": None,
         "symbols": None,
     }
-    # 在 QMT 与正式交易日提供器创建后再构造。生命周期闭包有意引用这个后绑定控制器，
-    # 使应用工厂在 ``start_runtime_services()`` 前保持无副作用。
-
     def _probe_ticks(market):
         default_code = (
             constants_service.market_default_codes.cached_snapshot((market,)).get(
@@ -881,18 +718,11 @@ def create_app(test_config=None, start_scheduler=False):
             return {"__market_closed__": True}
         return {}
 
-    def start_runtime_services(enable_scheduler=True):
+    def start_runtime_services():
         global _SHARED_RUNTIME_OWNER
         nonlocal metadata_warmup_thread
-        if app.config.get("CHART_ONLY_MODE", False):
-            # Desktop/WSGI callers cannot implicitly resume paused producers.
-            enable_scheduler = False
         with runtime_lock:
             if runtime_state["status"] == "running":
-                if runtime_state["scheduler_enabled"] != bool(enable_scheduler):
-                    raise RuntimeError(
-                        "runtime services already running with a different scheduler mode"
-                    )
                 return
             if runtime_state["status"] == "starting":
                 raise RuntimeError("runtime services are starting")
@@ -917,8 +747,7 @@ def create_app(test_config=None, start_scheduler=False):
             runtime_state["error"] = None
             runtime_state["active_starts"] += 1
             runtime_state["shutdown_complete"] = False
-            runtime_state["scheduler_enabled"] = bool(enable_scheduler)
-            app.config["SCHEDULER_ENABLED"] = bool(enable_scheduler)
+            app.config["RUNTIME_SERVICES_REQUIRED"] = True
 
         def _ensure_start_is_current():
             with runtime_lock:
@@ -958,12 +787,6 @@ def create_app(test_config=None, start_scheduler=False):
             chart_revalidate_service.start_revalidation_runtime()
             _ensure_start_is_current()
             sse_stream_service.start_sse_runtime()
-            _ensure_start_is_current()
-            if enable_scheduler:
-                with runtime_lock:
-                    runtime_state["scheduler_start_attempted"] = True
-                scheduler.start()
-
             _ensure_start_is_current()
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
             with runtime_lock:
@@ -1020,34 +843,6 @@ def create_app(test_config=None, start_scheduler=False):
                     cleanup_errors.append(f"{label}: {exc}")
                     app.logger.exception("runtime cleanup failed: %s", label)
 
-            def _shutdown_scheduler_resources():
-                try:
-                    if scheduler.running:
-                        scheduler.shutdown(wait=False)
-                    elif runtime_state.get("scheduler_start_attempted"):
-                        resource_errors = []
-                        for alias, executor in tuple(
-                            getattr(scheduler, "_executors", {}).items()
-                        ):
-                            try:
-                                executor.shutdown(wait=True)
-                            except Exception as exc:
-                                resource_errors.append(f"executor {alias}: {exc}")
-                        for alias, jobstore in tuple(
-                            getattr(scheduler, "_jobstores", {}).items()
-                        ):
-                            try:
-                                jobstore.shutdown()
-                            except Exception as exc:
-                                resource_errors.append(f"jobstore {alias}: {exc}")
-                        if resource_errors:
-                            raise RuntimeError("; ".join(resource_errors))
-                    with runtime_lock:
-                        runtime_state["scheduler_start_attempted"] = False
-                except Exception:
-                    raise
-
-            _cleanup("scheduler", _shutdown_scheduler_resources)
             _cleanup("chart-initial-build", chart_initial_build_service.shutdown_initial_build_runtime)
             def _handles_for(key):
                 value = runtime_state.get(key)
@@ -1099,7 +894,6 @@ def create_app(test_config=None, start_scheduler=False):
                         "stopping": False,
                         "status": "stopped",
                         "shutdown_complete": not cleanup_errors,
-                        "scheduler_enabled": None,
                         "error": (
                             "; ".join(cleanup_errors)[:200]
                             if cleanup_errors
@@ -1125,11 +919,7 @@ def create_app(test_config=None, start_scheduler=False):
                 "error": runtime_state.get("error"),
             }
 
-    def shutdown_scheduler():
-        shutdown_runtime_services()
-
     app.extensions.update({
-        "scheduler": scheduler,
         "readiness": readiness_registry,
         "metadata_warmup_thread": metadata_warmup_thread,
         "login_rate_limiter": login_rate_limiter,
@@ -1137,9 +927,5 @@ def create_app(test_config=None, start_scheduler=False):
         "runtime_status": runtime_status,
         "start_runtime_services": start_runtime_services,
         "shutdown_runtime_services": shutdown_runtime_services,
-        "shutdown_scheduler": shutdown_scheduler,
     })
-    if scheduler_enabled:
-        start_runtime_services(enable_scheduler=True)
-        atexit.register(shutdown_runtime_services)
     return app

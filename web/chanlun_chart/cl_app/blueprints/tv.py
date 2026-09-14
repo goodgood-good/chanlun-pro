@@ -22,7 +22,7 @@ try:
 except ImportError:  # Optional acceleration; gzip remains the portable fallback.
     _brotli = None
 
-from flask import Blueprint, current_app, g, request
+from flask import Blueprint, g, jsonify, request
 from flask_login import current_user, login_required
 
 from chanlun import config, fun
@@ -46,7 +46,6 @@ from ..services.constants import (
     market_timezone,
     market_types,
 )
-from ..services.last_chart_state import record_user_request
 from ..services.account_preferences import chart_storage_identity
 from ..services.chart_bar_time import chart_bar_time_fields
 
@@ -996,6 +995,27 @@ def tv_structure_status():
 @tv_bp.route("/tv/history")
 @login_required
 def tv_history():
+    if "screening_source" in request.args or "screening_point" in request.args:
+        from ..services.screening import manager as screening_manager
+        try:
+            for key in ("screening_source", "screening_point", "symbol", "resolution"):
+                if len(request.args.getlist(key)) != 1 or not request.args[key]:
+                    raise ValueError("选股证据图参数不完整")
+            market, code = _parse_tv_symbol(request.args["symbol"])
+            frequency = resolution_maps.get(_normalize_resolution(request.args["resolution"]))
+            if market != "a" or frequency not in ("1m", "5m", "30m"):
+                raise ValueError("该市场或周期不属于本次选股证据")
+            result = screening_manager.evidence_history(
+                request.args["screening_source"], code, frequency, request.args["screening_point"],
+                first=request.args.get("firstDataRequest") == "true",
+                start=_normalize_unix_ts(request.args.get("from", "0")),
+                end=_normalize_unix_ts(request.args.get("to", "0")),
+            )
+            response = jsonify(result)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        except (ValueError, KeyError, OSError) as exc:
+            return jsonify(s="error", errmsg=str(exc)), 409
     _req_start_ts = time.time()
     try:
         args = request.args.to_dict()
@@ -1071,11 +1091,6 @@ def tv_history():
         # 如果也算"用户活跃"，会把批量预热永久卡死。
         if firstDataRequest == "true":
             _mark_user_request(market, code)
-            # 记录最后访问状态，供下次启动预热 RAM chart_data_cache；失败吞异常不影响主流程。
-            try:
-                record_user_request(market, code, frequency)
-            except Exception:
-                pass
 
         log_args = dict(args)
         for key in ("from", "to"):
@@ -1247,10 +1262,7 @@ def tv_history():
                     cache_key=cache_key,
                     to_ts=_to,
                     force_refresh=force_refresh,
-                    **({"progressive": True} if (
-                        current_app.config.get("CHART_ONLY_MODE", False)
-                        and firstDataRequest == "true"
-                    ) else {}),
+                    **({"progressive": True} if firstDataRequest == "true" else {}),
                 )
                 if _fetch_result is None:
                     return {"s": "no_data"}

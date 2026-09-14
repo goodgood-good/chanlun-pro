@@ -1253,3 +1253,6 @@ html.cl-theme-dark #chart_menu {
 .ca-native-centers thead {position:sticky;top:0;background:var(--cp-surface,#fff);}
 #ca-overview {padding:12px;}
 #ca-overview .ca-native-centers th,#ca-overview .ca-native-centers td {border:0;border-bottom:1px solid var(--cp-border,#e5e7eb);}
+.ca-point-exit {padding:8px 3px;border-bottom:1px solid var(--cp-border,#e5e7eb);font-size:12px;overflow-wrap:anywhere;}
+.ca-point-exit p {margin:4px 0;line-height:1.6;}
+#ca-point-exit-sources {overflow-wrap:anywhere;}

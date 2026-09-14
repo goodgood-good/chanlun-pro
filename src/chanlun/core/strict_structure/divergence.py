@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+from chanlun.core.strict_structure.models import (
+    CenterState,
+    StrictStructureResult,
+)
+from chanlun.core.strict_structure.strength import (
+    center_departure_comparison_leg,
+    center_entry_comparison_leg,
+    compare_comparison_legs,
+)
+
+
+def _center_consolidation_comparison_legs(
+    center,
+    units,
+    *,
+    allowed_states,
+    not_before_unit_id: str | None = None,
+):
+    if center.state not in allowed_states:
+        return None
+    entry = center_entry_comparison_leg(
+        center,
+        units,
+        not_before_unit_id=not_before_unit_id,
+    )
+    departure = (
+        None
+        if entry is None
+        else center_departure_comparison_leg(center, units, width=entry.width)
+    )
+    if (
+        entry is None
+        or departure is None
+        or entry.measurement_unit.direction
+        != departure.measurement_unit.direction
+        or entry.measurement_unit.market_end
+        > departure.measurement_unit.market_start
+    ):
+        return None
+    return entry, departure
+
+
+def center_consolidation_comparison_legs(
+    center,
+    units,
+    *,
+    not_before_unit_id: str | None = None,
+):
+    """返回单中枢盘整背驰使用的同宽进入段与离开段。"""
+
+    return _center_consolidation_comparison_legs(
+        center,
+        units,
+        allowed_states=frozenset(
+            {CenterState.ONGOING, CenterState.COMPLETED}
+        ),
+        not_before_unit_id=not_before_unit_id,
+    )
+
+
+def _compare_center_consolidation_divergence(
+    center,
+    units,
+    strength,
+    *,
+    allowed_states,
+    movement_start_unit_id: str | None = None,
+):
+    source_units = tuple(units)
+    pair = _center_consolidation_comparison_legs(
+        center,
+        source_units,
+        allowed_states=allowed_states,
+        not_before_unit_id=movement_start_unit_id,
+    )
+    if pair is None:
+        return None
+    evidence = compare_comparison_legs(*pair, strength, kind="consolidation")
+
+    # 离开段不但要越过进入段极值，还必须创出整段盘整走势的新极值；否则
+    # 只能视为中枢内部震荡，不能冻结走势边界。盘整背驰本身不生成一类点。
+    unit_index = {item.unit_id: index for index, item in enumerate(source_units)}
+    start_id = movement_start_unit_id or pair[0].units[0].unit_id
+    start_index = unit_index.get(start_id)
+    terminal = pair[1].terminal_unit
+    terminal_index = unit_index.get(terminal.unit_id)
+    if (
+        start_index is None
+        or terminal_index is None
+        or start_index >= terminal_index
+    ):
+        raise ValueError("盘整背驰区间不在同级别单元序列中")
+    signal_start = unit_index[pair[1].units[0].unit_id]
+    prior_units = source_units[start_index:signal_start]
+    signal = pair[1].measurement_unit
+    if not prior_units:
+        raise ValueError("盘整背驰比较组合缺少此前走势")
+    makes_movement_extreme = (
+        signal.high_tick > max(item.high_tick for item in prior_units)
+        if terminal.direction == "up"
+        else signal.low_tick < min(item.low_tick for item in prior_units)
+    )
+    if not makes_movement_extreme:
+        evidence = replace(evidence, price_extreme_confirmed=False)
+    return evidence
+
+
+def compare_center_consolidation_divergence(
+    center,
+    units,
+    strength,
+    *,
+    movement_start_unit_id: str | None = None,
+):
+    """比较单中枢的进入段与离开段，并返回正式盘整背驰证据。"""
+
+    return _compare_center_consolidation_divergence(
+        center,
+        units,
+        strength,
+        allowed_states=frozenset(
+            {CenterState.ONGOING, CenterState.COMPLETED}
+        ),
+        movement_start_unit_id=movement_start_unit_id,
+    )
+
+
+def collect_formal_divergence_ledger(
+    structure,
+    confirmed_points=(),
+):
+    """从正式结构和买卖点中汇总唯一的背驰证据账本。
+
+    背驰只能由走势装配阶段确认，并由走势边界、正式走势或买卖点引用。这里不再
+    针对所有历史中枢重新计算另一套背驰，避免使用互相冲突的分段起点。
+    盘整背驰可独立存在，不要求也不能自动生成本级一类点。
+    """
+
+    if not isinstance(structure, StrictStructureResult):
+        raise TypeError("structure must be a StrictStructureResult")
+
+    by_id = {}
+
+    def record(evidence) -> None:
+        if evidence is None:
+            return
+        previous = by_id.setdefault(evidence.divergence_id, evidence)
+        if previous != evidence:
+            raise ValueError("divergence id maps to conflicting evidence")
+
+    for point in confirmed_points:
+        record(point.divergence)
+    for level in structure.levels:
+        for trend in (*level.trend_types, *level.completed_trends):
+            record(trend.terminal_divergence)
+        for boundary in level.decomposition_boundaries:
+            record(boundary.divergence)
+    return tuple(
+        sorted(
+            by_id.values(),
+            key=lambda item: (
+                item.available_at,
+                item.structural_level,
+                item.kind,
+                item.divergence_id,
+            ),
+        )
+    )

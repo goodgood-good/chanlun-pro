@@ -1,0 +1,51 @@
+{
+  "schema": "chanlun-official-a-share-calendar-source",
+  "authority": "Shanghai Stock Exchange",
+  "market": "a",
+  "timezone": "Asia/Shanghai",
+  "source_id": "SSE-ANNOUNCEMENT-2023-47",
+  "announcement_id": "SSE-ANNOUNCEMENT-2023-47",
+  "published_on": "2023-12-26",
+  "source_url": "https://www.sse.com.cn/disclosure/announcement/general/c/c_20231226_5733939.shtml",
+  "coverage_start": "2024-01-01",
+  "coverage_end": "2024-12-31",
+  "weekends_closed": true,
+  "closure_ranges": [
+    {
+      "label": "NEW_YEAR",
+      "start": "2024-01-01",
+      "end": "2024-01-01"
+    },
+    {
+      "label": "SPRING_FESTIVAL",
+      "start": "2024-02-09",
+      "end": "2024-02-17"
+    },
+    {
+      "label": "QINGMING",
+      "start": "2024-04-04",
+      "end": "2024-04-06"
+    },
+    {
+      "label": "LABOUR_DAY",
+      "start": "2024-05-01",
+      "end": "2024-05-05"
+    },
+    {
+      "label": "DRAGON_BOAT",
+      "start": "2024-06-10",
+      "end": "2024-06-10"
+    },
+    {
+      "label": "MID_AUTUMN",
+      "start": "2024-09-15",
+      "end": "2024-09-17"
+    },
+    {
+      "label": "NATIONAL_DAY",
+      "start": "2024-10-01",
+      "end": "2024-10-07"
+    }
+  ],
+  "content_sha256": "sha256:fbc33262e717ecaa005b7665a29ea1918924a4828e8d5b14be1a75019d078c8e"
+}

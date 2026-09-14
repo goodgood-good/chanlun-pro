@@ -66,7 +66,7 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
 
 def _healthy_readiness_payload():
     return {"status":"ready", "runtime_ready":True,"pid":1234,"revision":"test-revision", "reasons":[],
-            "components": {name: {"required":True,"ready":True} for name in ("scheduler","runtime","metadata","symbols","ticks")}}
+            "components": {name: {"required":True,"ready":True} for name in ("runtime","metadata","symbols","ticks")}}
 
 
 @pytest.mark.skipif(os.name != "nt", reason="watchdog targets Windows")

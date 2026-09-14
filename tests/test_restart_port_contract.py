@@ -95,7 +95,7 @@ def test_restart_only_adopts_restricted_web_process_after_multi_factor_attestati
     assert "$PortOwnerIds -notcontains $reportedPid" in source
     assert "$reportedRevision.StartsWith(" in source
     assert "$expectedCommitPrefix" in source
-    assert "@('scheduler', 'qmt_runtime', 'trading_screening')" in source
+    assert "@('runtime', 'metadata', 'symbols', 'ticks')" in source
     assert "[string]$process.Name -ne 'python.exe'" in source
     assert "accepted endpoint-attested web PID=" in source
 

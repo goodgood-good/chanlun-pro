@@ -3,7 +3,7 @@
 other.py 原用单个列表推导 + 外层 try/except: 任一 Tick.rate=None(EXCHANGE_US=ib 透传
 redis / currency=binance 的 ccxt percentage 缺省)使 float(None) 抛 TypeError→整批返回
 {now_trading:False, ticks:[]}, 前端收到 now_trading:false 会 stop_timer 停轮询。修复=
-逐标的隔离 + `float(_t.rate or 0)`, 镜像 /tv/quotes(tv.py:637)。
+逐标的隔离；缺失 rate 保留为 null，不能伪装成真实的 0% 涨跌。
 """
 import concurrent.futures
 import json
@@ -32,7 +32,6 @@ def client():
         "TESTING": True,
         "LOGIN_DISABLED": True,
         "VALIDATE_WEB_SECURITY": False,
-        "SCHEDULER_ENABLED": False,
         "WTF_CSRF_ENABLED": False,
     })
     return app.test_client()
@@ -73,7 +72,8 @@ def test_ticks_none_rate_does_not_empty_batch(client, monkeypatch):
     out = {t["code"]: t for t in j["ticks"]}
     assert len(out) == 2  # 整批未被一个坏 tick 清空
     assert out["SZ.000001"]["rate"] == 1.5  # 健康标的正常
-    assert out["SH.600000"]["rate"] == 0.0  # None rate 守零
+    assert out["SH.600000"]["rate"] is None  # 未知涨跌，保留有效价格
+    assert out["SH.600000"]["price"] == 2.0
 
 
 def test_ticks_healthy_batch_unaffected(client, monkeypatch):

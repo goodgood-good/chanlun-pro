@@ -151,6 +151,8 @@ web/chanlun_chart/cl_app/static/datafeeds/udf/node_modules
 **/.ipynb_checkpoints
 **/logs
 data
+!src/chanlun/exchange/data/
+!src/chanlun/exchange/data/a_share_trading_calendar_*.json
 **/.pytest_cache
 .vscode
 

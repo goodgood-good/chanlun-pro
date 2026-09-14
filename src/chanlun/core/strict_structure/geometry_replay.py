@@ -1,9 +1,7 @@
-"""Bounded reuse of pure geometry within one complete branch analysis.
+"""Bounded reuse of immutable center geometry within one chart calculation.
 
-Candidate windows and proof paths frequently replay the same immutable
-center seed or transition. Only those geometry operations are shared here;
-MACD, completion permissions, branch selection and observation scopes are
-still evaluated by their original callers.
+Only pure center transitions are shared; source identity, ownership and
+availability times remain part of each cache key.
 """
 
 from collections import OrderedDict

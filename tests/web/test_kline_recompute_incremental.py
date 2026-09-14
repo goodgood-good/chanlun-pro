@@ -278,7 +278,7 @@ def test_incremental_equals_full_end_to_end():
         kline_recompute.reset_cl_pool()
 
 
-def test_identical_closed_frame_preserves_actual_native_center_memo(monkeypatch):
+def test_identical_closed_frame_preserves_actual_analysis_memo(monkeypatch):
     kline_recompute.reset_cl_pool()
     key = "a:SYNMEMO:1m"
     frame = _synth_klines(240)
@@ -287,8 +287,8 @@ def test_identical_closed_frame_preserves_actual_native_center_memo(monkeypatch)
             "a", "SYNMEMO", "1m", {}, frame, cache_key=key,
         )
         cd = kline_recompute._cl_pool[key]["cl"]
-        center_memo = cd._strict_structure_memo["native_centers"]
-        assert center_memo is not None
+        analysis_memo = cd._strict_structure_memo["evidence"]
+        assert analysis_memo is not None
         calls = []
         original = cd.process_validated_incremental_klines
 
@@ -302,7 +302,7 @@ def test_identical_closed_frame_preserves_actual_native_center_memo(monkeypatch)
         )
         assert calls == []
         assert second == first
-        assert cd._strict_structure_memo["native_centers"] is center_memo
+        assert cd._strict_structure_memo["evidence"] is analysis_memo
     finally:
         kline_recompute.reset_cl_pool()
 
