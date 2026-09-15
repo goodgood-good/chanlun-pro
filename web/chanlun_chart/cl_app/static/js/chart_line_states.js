@@ -15,13 +15,18 @@
   }
 })(typeof window !== 'undefined' ? window : globalThis, function buildApi() {
   function stateOf(item) {
-    if (item && item.locked === true) return 'locked';
     const explicit = String(item && item.state || '').trim().toLowerCase();
-    if (['forming', 'formed', 'locked'].includes(explicit)) return explicit;
+    if (item && item.selection_pending === true) return 'forming';
+    // 旧缓存只有承接标记；v14同时提供完成证据标识后才渲染为完成。
+    if (item && item.kind === 'bi' && (item.locked === true || explicit === 'locked')) {
+      return item.completion_is_final === true ? 'locked' : 'continued';
+    }
+    if (item && item.locked === true) return 'locked';
+    if (['forming', 'formed', 'continued', 'locked'].includes(explicit)) return explicit;
     const style = Number.parseInt(item && item.linestyle, 10);
     if (style === 1) return 'forming';
     if (style === 2) return 'formed';
-    return 'locked';
+    return item && item.kind === 'bi' ? 'continued' : 'locked';
   }
 
   function carriesLineState(item) {
@@ -52,7 +57,8 @@
     const stable = [];
     const forming = [];
     sourceList.map(normalizeBaseStructureLine).forEach((item) => {
-      if (stateOf(item) === 'forming') forming.push(item);
+      // 笔的未完成尾部可以包含多笔，不能沿用线段仅保留最后尾段的裁剪。
+      if (stateOf(item) === 'forming' && item.kind !== 'bi' && item.selection_pending !== true) forming.push(item);
       else stable.push(item);
     });
     if (forming.length) stable.push(forming[forming.length - 1]);

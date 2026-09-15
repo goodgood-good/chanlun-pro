@@ -1,0 +1,47 @@
+[
+  {
+    "file": "SH.600189_5m.parquet",
+    "source": "output\\playwright\\center_coverage\\deep_review\\source_frames\\SH.600189_5m.parquet",
+    "source_sha256": "4a25bc39ad7cdc79d2fd2c3d98dd1600140443e7b3ad54ef8fe37a98b89ade1d",
+    "rows": 45,
+    "start": "2025-09-15 09:35:00+08:00",
+    "end": "2025-09-15 14:45:00+08:00",
+    "sha256": "d7e3196f642ffd242a3e75fe4b705667bb8f4baced80b99827fcc69ea66a5b39"
+  },
+  {
+    "file": "SH.600088_30m.parquet",
+    "source": "output\\playwright\\center_coverage\\deep_review\\source_frames\\SH.600088_30m.parquet",
+    "source_sha256": "3d9cc7a6cc305282fb9aaea949321e87bd1159f0e49f099e9686b2a6a1959bfd",
+    "rows": 43,
+    "start": "2025-04-29 11:30:00+08:00",
+    "end": "2025-05-09 14:00:00+08:00",
+    "sha256": "aeeac24541eee1ffc57cd02dae342156f1fe2d2349e8d07c85aaa067243cce02"
+  },
+  {
+    "file": "SH.600519_5m.parquet",
+    "source": "output\\playwright\\center_coverage\\deep_review\\source_frames\\SH.600519_5m.parquet",
+    "source_sha256": "31245cecae3e3bd9217a1d847260aef9a074c8b4dd7a461f062f73f903268a3d",
+    "rows": 106,
+    "start": "2025-09-15 09:35:00+08:00",
+    "end": "2025-09-17 10:20:00+08:00",
+    "sha256": "23fb09c25625f791a2518f9249d85a7e23a90f15ce5de91dab3dfb7b3782d82b"
+  },
+  {
+    "file": "SH.600519_1m.parquet",
+    "source": "output\\playwright\\center_coverage\\deep_review\\source_frames\\SH.600519_1m.parquet",
+    "source_sha256": "13b12a6caf661e8ba4c07cc1a149926b754208f84f8d5a7fd19e9bba34c6b3c4",
+    "rows": 1704,
+    "start": "2026-07-15 09:30:00+08:00",
+    "end": "2026-07-24 09:46:00+08:00",
+    "sha256": "5a20eec25809f4c0902dcc4b4f9c0e50ef96960a046a7a189f83b013f141fca2"
+  },
+  {
+    "file": "SZ.002299_1m.parquet",
+    "source": "output\\playwright\\center_coverage\\deep_review\\source_frames\\SZ.002299_1m.parquet",
+    "source_sha256": "fcbca04925d068735dc42c8dd1effbe7759f187dfa26df3e1fc97486ab599b00",
+    "rows": 1466,
+    "start": "2026-07-15 09:30:00+08:00",
+    "end": "2026-07-23 09:49:00+08:00",
+    "sha256": "e2d45c017e2692a1fc01c40bd6bc7e1e0d77f293d8be48d2ca71e18c87fb28dc"
+  }
+]

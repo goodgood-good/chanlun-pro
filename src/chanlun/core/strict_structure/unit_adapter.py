@@ -29,7 +29,6 @@ class UnitLockRegistry:
             raise ValueError("locked unit confirmation time changed")
         return previous
 
-
 def _normalize_quantum(price_quantum) -> Decimal:
     try:
         value = Decimal(str(price_quantum))
@@ -102,6 +101,47 @@ def _identity_time(value: datetime) -> datetime:
     return value if value.tzinfo is None or value.utcoffset() is None else value.astimezone(timezone.utc)
 
 
+def _stroke_selection_identity(line, quantum):
+    """物理构笔证据的版本；无取舍元数据的外部固定输入仍用原有身份。
+
+    这是工程事实标识，不改变分型或笔的价格、间隔及取舍条件。
+    分型初次可见、选入和承接是不同事实；重新取舍的证据不能借用旧 ID。
+    """
+    selected_at = getattr(line, "selected_at", None)
+    if selected_at is None:
+        return ()
+    visible_at = getattr(line, "fractal_visible_at", None)
+    locked_at = getattr(line, "locked_at", None)
+    return (
+        "old-stroke-selection-v1",
+        _identity_time(line.start.k.date), _identity_time(line.end.k.date),
+        _tick(line.start.val, quantum), _tick(line.end.val, quantum),
+        _identity_time(visible_at) if visible_at is not None else None,
+        _identity_time(selected_at),
+        _identity_time(locked_at) if locked_at is not None else None,
+    )
+
+
+def _source_evidence_identity(line, quantum, constituents):
+    stroke = _stroke_selection_identity(line, quantum)
+    if stroke:
+        return stroke
+    first, last = getattr(line, "start_line", None), getattr(line, "end_line", None)
+    if first is None or last is None or constituents is None:
+        return ()
+    children = tuple(_stroke_selection_identity(constituents[i], quantum)
+                     for i in range(first.index, last.index + 1))
+    if not any(children):
+        return ()
+    # 线段的破坏见证可能在自身组成笔之外，确认时刻也是本次证据的一部分。
+    formed_at, locked_at = getattr(line, "formed_at", None), getattr(line, "locked_at", None)
+    return (
+        "source-segment-evidence-v1", children,
+        _identity_time(formed_at) if formed_at is not None else None,
+        _identity_time(locked_at) if locked_at is not None else None,
+    )
+
+
 def line_to_unit(
     line,
     structural_level: int,
@@ -171,6 +211,7 @@ def line_to_unit(
         start_tick,
         end_tick,
         *range_identity,
+        *_source_evidence_identity(line, quantum, constituents),
     )
     confirmed_at = registry.confirmed_at(unit_id, locked_at) if locked else None
     available_at = confirmed_at if locked else formed_at or max(as_of, market_end)
@@ -207,6 +248,11 @@ def adapt_lines(
     *,
     constituent_lines=None,
 ) -> tuple[ConstituentUnit, ...]:
+    lines = tuple(lines)
+    if any(getattr(line, "observation_scope_id", None) for line in lines):
+        raise ValueError("conditional chart observations cannot enter the formal unit adapter")
+    if len({getattr(line, "component_index", 0) for line in lines}) > 1:
+        raise ValueError("unit input crosses an unresolved stroke boundary")
     quantum = _normalize_quantum(price_quantum)
     constituents = None
     if constituent_lines is not None:

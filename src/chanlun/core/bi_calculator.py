@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-from bisect import bisect_right
 from typing import List, Optional
 
 from chanlun.core.types import FX, BI, CLKline
+from chanlun.core.stroke_ranges import StrokeRanges
+from chanlun.core.stroke_resolver import StrokeResolver
+from chanlun.core.stroke_rules import (
+    fractal_kind, is_strictly_more_extreme, old_pair_geometry_valid,
+)
 
 
 def fractal_lock_witness(fx: FX):
@@ -61,288 +65,279 @@ _fractal_lock_witness = fractal_lock_witness
 
 
 class BiCalculator:
-    """
-    笔计算器。
+    """包含处理后，按当前旧笔工作规则顺序裁决。
 
-    对外仍保持：
-    - self.fxs 为识别出的分型列表
-    - self.bis 为用于展示/下游消费的笔列表，最后一笔可能未完成
-
-    对内采用“已确认笔 + 当前待定笔”的状态机，每次在最新缠论 K 线上重放，
-    优先保证结果正确与全量/增量一致性。
-    生产规则采用作者 2007-09-18 修订的成笔条件。
+    端点满足旧笔间隔与对称的中心区间条件；顺序裁决器执行用户选定的路径乙。
+    本类负责包含后的物理分型、收盘证据和批量/增量状态同步。用户P→C选择与
+    原文全区间极值的解释差异保留在 docs/stroke_path_b_rules.md，不冒称已获证明。
     """
 
     def __init__(self):
+        self._closed_through = "all"
+        self._last_closed_through = None
+        self._close_times = {}
         self.bis: List[BI] = []
         self.fxs: List[FX] = []
         self.confirmed_bis: List[BI] = []
+        self.pending_bis: List[BI] = []
         self.pending_bi: Optional[BI] = None
         self.cl_klines: List[CLKline] = []
+        self._resolver = StrokeResolver()
+        self._ranges = StrokeRanges()
         self._last_kline_snapshot: Optional[tuple] = None
-        # 由 CL_Kline_Process 提供的单调数据代次。只有调用方提供可信代次时，
-        # 才允许使用快照/增量捷径；直接传入任意列表一律全量重放，避免历史修正
-        # 但末根 index/h/l 未变时误返回旧笔。
         self._last_source_revision: Optional[int] = None
-        # 增量字段必须在此初始化：calculate() 里 _try_incremental_extend 先于
-        # _update_prefix_fingerprint（唯一赋值入口）调用，否则首次调用 AttributeError。
-        self._last_processed_kline_count: int = 0
+        self._last_processed_kline_count = 0
         self._last_prefix_fingerprint: Optional[tuple] = None
-        # 持久化单调端点栈(增量):fxs 在增量路径恒为 append-only(前缀不改写,见
-        # _try_incremental_extend,实测 rewrite-depth 恒 0),故维护持久栈,新分型
-        # 只续跑单调栈(均摊 O(1)/fx),消除每次全量重建的 O(F²)。全量降级(档3)
-        # 用新 FX 对象重建,故 incremental=False 时重置;末尾签名再做双保险。
         self._endpoint_stack: List[FX] = []
-        self._endpoint_stack_n: int = 0
-        self._endpoint_stack_tail_sig: Optional[tuple] = None
-        self._endpoint_stable_prefix: int = 0
-        # 持久笔列表(建笔增量):复用稳定前缀笔、只重建活跃尾部,消除每次全量
-        # _create_bi 的 O(n·B)。与 _endpoint_stack 对齐(len = 端点数 - 1)。
+        self._endpoint_node_ids = []
+        self._endpoint_stable_prefix = 0
+        self._state_dirty_bi = 0
         self._all_bis: List[BI] = []
-        # 重索引增量:上次 pending 笔位置。_reindex_bis 只重置
-        # [min(稳定前缀边界, 上次pending位置), 末尾] 的 index/done——稳定前缀 confirmed
-        # 笔的 index(由 _create_bi 设)与 done(历轮已 True、归纳保持)不变,而 done 的唯一
-        # 变化(pending→confirmed)只发生在「上次pending位置」。消除原 O(全部笔)/调用。
-        self._prev_pending_pos: int = -1
+        self._qualification_evidence = ()
+        self._completion_evidence = ()
+        self._continuation_evidence = ()
+        self._endpoint_edge_pairs = []
+        self.stroke_components = ()
+        self.processing_mode = "uninitialized"
+
+    @property
+    def continuation_blocked_at(self):
+        """尾部重接触及完成前缀的时刻；后续合法推进后清除。"""
+        return self._resolver.blocked_at
+
+    @property
+    def completion_evidence(self):
+        """由收盘事实确认、在本次历史版本内保持的完成事件。"""
+        return self._resolver.completions
+
+    @property
+    def continuation_evidence(self):
+        """下一合格连接的承接证据；不等于完成图形不可修改的证明。"""
+        return self._resolver.continuations
+
+    @property
+    def contiguous_bis(self):
+        """当前连续笔链；兼容既有下游的连续输入接口。"""
+        return list(self.stroke_components[0]) if self.stroke_components else []
+
+    @property
+    def unresolved_regions(self):
+        return self._resolver.boundaries
+
+    def construction_state(self):
+        """可序列化的取舍结果；范围边界本身不是新造的一笔。"""
+        nodes = self._resolver.nodes
+        return {
+            "status": "unresolved_connections" if self.unresolved_regions else self.completion_status,
+            "processing_mode": self.processing_mode,
+            "completion_is_final": bool(self.confirmed_bis),
+            "completion_scope": "completed-prefix-within-data-revision",
+            "completed_prefix_count": len(self.confirmed_bis),
+            "closed_through": (self._closed_through.isoformat()
+                               if hasattr(self._closed_through, "isoformat") else self._closed_through),
+            "components": [{
+                "index": index, "context_pending": index > 0,
+                "strokes": [[b.start.k.index, b.end.k.index] for b in values],
+            } for index, values in enumerate(self.stroke_components)],
+            "unresolved_regions": [{
+                "left_center": nodes[b.left].fx.k.index,
+                "right_center": nodes[b.right].fx.k.index,
+                "observed_at": self._resolver.observed_at(b.observed_by).isoformat(),
+                "left_time": nodes[b.left].fx.k.date.isoformat(),
+                "right_time": nodes[b.right].fx.k.date.isoformat(),
+                "reason": b.reason,
+            } for i, b in enumerate(self.unresolved_regions)],
+            "continuation_blocked_at": (self.continuation_blocked_at.isoformat()
+                                        if self.continuation_blocked_at else None),
+        }
+
+    @property
+    def unresolved_endpoint_choices(self):
+        """当前已经识别的同价端点取舍依赖，索引指向分型顺序表。"""
+        return self._resolver.unresolved_equal_choices
+
+    @property
+    def qualification_evidence(self):
+        """每条已选连接的物理可见时间与选入时间；不等于永久完成。"""
+        return self._resolver.qualifications
+
+    @property
+    def completion_status(self):
+        return "tail_pending" if self.bis else "no_qualified_stroke"
+
+    @property
+    def selection_revisions(self):
+        """记录暂定端点的重选；不能把被撤换的连接伪装成从未出现。"""
+        return tuple(self._resolver.revisions)
+
+    @staticmethod
+    def _check_endpoint_geometry(fx1: FX, fx2: FX) -> bool:
+        """L062/L077 旧笔独立 K 线与两端价格条件，不含区间核验。"""
+        return old_pair_geometry_valid(fx1, fx2)
 
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
-        """检查两个分型是否能构成有效的一笔。
+        """用户工作规则的局部资格；不能单独决定取舍或完成。
 
-        L077 的价格区间条件仍成立。2007-09-18 附文修订距离条件：
-        三 K 分型不能共用合并 K 线（中心距离至少 3）；两个极值所在
-        原始 K 线之间至少 3 根 K 线（原始坐标距离至少 4）。
-        不可把原始距离偷换成合并距离，也不可只比较两个分型的 val。
+        间隔与中心区间来自L062/L077的形式化；不以已舍内部分型极值
+        否决用户选定的P→C。L066差异另作只读审计，不删除原始价格。
         """
-        if fx1.type == fx2.type:
-            return False
+        return (self._check_endpoint_geometry(fx1, fx2)
+                and 0 <= fx1.k.index < fx2.k.index < len(self.cl_klines))
 
-        if (fx2.k.index - fx1.k.index) < 3:
-            return False
-        if (fx2.k.k_index - fx1.k.k_index) < 4:
-            return False
+    def audit_endpoint_ranges(self):
+        """报告与L066全区间极值解释的差异，不作为路径乙的硬否决。"""
+        from chanlun.core.stroke_audit import audit_bi_ranges
+        return audit_bi_ranges(self.bis, self.cl_klines)
 
-        top, bottom = (fx1, fx2) if fx1.type == 'ding' else (fx2, fx1)
-        return top.k.h > bottom.k.h and top.k.l > bottom.k.l
+    def audit_endpoint_adjacency(self):
+        """旧全区间模型的可分解性诊断，不代表当前路径乙的入选规则。"""
+        from chanlun.core.stroke_audit import audit_bi_adjacency
+        return audit_bi_adjacency(self.bis, self.fxs, self.cl_klines)
 
     @staticmethod
     def _is_more_extreme(new_fx: FX, old_fx: FX) -> bool:
-        if new_fx.type != old_fx.type:
-            return False
-        if new_fx.type == 'ding':
-            return new_fx.val > old_fx.val
-        return new_fx.val < old_fx.val
+        return is_strictly_more_extreme(new_fx, old_fx)
 
     def _find_fractal(self, k1: CLKline, k2: CLKline, k3: CLKline) -> Optional[FX]:
-        """简化版分型识别。"""
-        if k2.h > k1.h and k2.h > k3.h and k2.l > k1.l and k2.l > k3.l:
-            return FX(_type='ding', k=k2, klines=[k1, k2, k3], val=k2.h)
-        if k2.l < k1.l and k2.l < k3.l and k2.h < k1.h and k2.h < k3.h:
-            return FX(_type='di', k=k2, klines=[k1, k2, k3], val=k2.l)
-        return None
+        kind = fractal_kind(k1, k2, k3)
+        if kind is None:
+            return None
+        return FX(_type=kind, k=k2, klines=[k1, k2, k3], val=k2.h if kind == "ding" else k2.l)
 
     def _collect_fxs(self, cl_klines: List[CLKline]) -> List[FX]:
-        """全量扫描缠论 K 线序列，识别所有分型。"""
-        fxs: List[FX] = []
+        fxs = []
         for i in range(1, len(cl_klines) - 1):
-            current_fx = self._find_fractal(cl_klines[i - 1], cl_klines[i], cl_klines[i + 1])
-            if current_fx is None:
-                continue
-            current_fx.index = len(fxs)
-            fxs.append(current_fx)
+            fx = self._find_fractal(cl_klines[i - 1], cl_klines[i], cl_klines[i + 1])
+            if fx is not None:
+                fx.index = len(fxs)
+                fxs.append(fx)
         return fxs
 
-    def _create_bi(self, start_fx: FX, end_fx: FX, index: int, done: bool) -> BI:
-        bi_type = 'up' if start_fx.type == 'di' else 'down'
-        bi = BI(start=start_fx, end=end_fx, _type=bi_type, index=index)
-        self._set_bi_completion(bi, done)
+    def _create_bi(self, start_fx: FX, end_fx: FX, index: int) -> BI:
+        if not self._check_stroke_validity(start_fx, end_fx):
+            raise ValueError("stroke path emitted an invalid endpoint interval")
+        bi = BI(start=start_fx, end=end_fx, _type="up" if start_fx.type == "di" else "down", index=index)
+        # 两端具备资格只生成暂定连接，不能通过私有参数绕过完成证据。
         return bi
 
-    @staticmethod
-    def _set_bi_completion(
-        bi: BI,
-        done: bool,
-        lock_witness=None,
-    ) -> None:
-        """同时设置笔的完成状态和下一端点见证。
+    def _build_endpoint_stack(self, fxs: List[FX], incremental=False, changed_from=None) -> List[FX]:
+        """兼容既有端点列表接口，以相邻关系和证据驱动尾部更新。"""
+        previous_edges = self._endpoint_edge_pairs
+        self._state_dirty_bi = len(self._all_bis)
+        count = len(self._resolver.nodes)
+        if incremental and changed_from == count - 1 and count:
+            self._resolver.rewind_last()
+        elif not incremental or (changed_from is not None and changed_from < count):
+            self._resolver = StrokeResolver.build_batch(
+                fxs, self._check_stroke_validity, _fractal_lock_witness,
+                closed_through=self._closed_through,
+                close_times=self._close_times,
+            )
+            self._state_dirty_bi = 0
+        # 先移除被盘中改写的分型，再提交已经收盘的旧见证，随后处理新分型。
+        self._resolver.close_times = self._close_times
+        self._resolver.confirm_through(self._closed_through)
+        for fx in fxs[len(self._resolver.nodes):]:
+            self._resolver.advance(fx, self._check_stroke_validity, _fractal_lock_witness(fx))
+        # 资格时间改变而坐标不变时，也要更新下游对象缓存。
+        current_evidence = self.qualification_evidence
+        unchanged = 0
+        for old, new in zip(self._qualification_evidence, current_evidence):
+            if old != new:
+                break
+            unchanged += 1
+        self._state_dirty_bi = min(self._state_dirty_bi, unchanged)
+        self._qualification_evidence = current_evidence
+        unchanged_completion = 0
+        for old, new in zip(self._completion_evidence, self.completion_evidence):
+            if old != new:
+                break
+            unchanged_completion += 1
+        # 状态变化即使没有端点坐标变化，也必须重建对应 BI 对象。
+        if self._completion_evidence != self.completion_evidence:
+            self._state_dirty_bi = min(self._state_dirty_bi, unchanged_completion)
+        self._completion_evidence = self.completion_evidence
+        old_observations = {(c.start, c.end): c for c in self._continuation_evidence}
+        new_observations = {(c.start, c.end): c for c in self.continuation_evidence}
+        for offset, q in enumerate(current_evidence):
+            if old_observations.get((q.start, q.end)) != new_observations.get((q.start, q.end)):
+                self._state_dirty_bi = min(self._state_dirty_bi, offset)
+        self._continuation_evidence = self.continuation_evidence
+        node_ids = [i for path in self._resolver.components() for i in path]
+        endpoints = [self._resolver.nodes[index].fx for index in node_ids]
+        edge_pairs = [(self._resolver.nodes[a].fx, self._resolver.nodes[b].fx)
+                      for a, b in self._resolver.edges()]
+        stable = 0
+        if incremental:
+            for old, new in zip(previous_edges, edge_pairs):
+                if old[0] is not new[0] or old[1] is not new[1]:
+                    break
+                stable += 1
+        self._endpoint_stack = endpoints
+        self._endpoint_node_ids = node_ids
+        self._endpoint_edge_pairs = edge_pairs
+        self._endpoint_stable_prefix = stable + 1
+        return endpoints
 
-        即使自身结束分型已经可见，该笔仍是当前待定笔，后续相反端点仍可能替换其
-        尾部；只有下一笔端点存在后它才不可变。若只使用 ``bi.end``，会把锁定时刻
-        错误提前到该笔仍处于待定状态的前缀。
-        """
-
-        bi._end.done = done
-        bi.forming = not done
-        if not done:
-            bi.locked_at = None
+    def _rebuild_from_fxs(self, fxs: List[FX], incremental=False, changed_from=None):
+        self._build_endpoint_stack(fxs, incremental, changed_from)
+        stable_bi = min(max(0, self._endpoint_stable_prefix - 1), self._state_dirty_bi)
+        count = len(self._qualification_evidence)
+        if stable_bi == len(self._all_bis) == count:
             return
 
-        witness = lock_witness
-        if witness is None:
-            witness = _fractal_lock_witness(bi._end)
-        if witness is None:
-            raise ValueError("completed BI requires physical end-fractal evidence")
-        if bi.locked_at is not None and bi.locked_at != witness:
-            raise RuntimeError("completed BI lock witness must not move")
-        bi.locked_at = witness
+        # 端点资格不冒充永久完成；重选尾部使 XD 的对象前缀缓存重新计算。
+        del self._all_bis[stable_bi:]
+        observations = {(c.start, c.end): c for c in self.continuation_evidence}
+        for index in range(stable_bi, count):
+            evidence = self._qualification_evidence[index]
+            start, end = self._endpoint_edge_pairs[index]
+            bi = self._create_bi(start, end, index)
+            bi.fractal_visible_at = evidence.fractal_visible_at
+            bi.selected_at = evidence.selected_at
+            bi.selection_pending = evidence.selection_pending
+            bi.component_index = evidence.component
+            continuation = observations.get((evidence.start, evidence.end))
+            bi.successor_observed_at = continuation.witnessed_at if continuation else None
+            if index < len(self._completion_evidence):
+                completion = self._completion_evidence[index]
+                bi.locked_at = completion.witnessed_at
+                bi.completion_witness = tuple(self._resolver.nodes[i].fx.k.index
+                                              for i in completion.witness_path)
+                bi.forming = False
+            self._all_bis.append(bi)
+        confirmed_count = len(self._completion_evidence)
+        self.confirmed_bis = self._all_bis[:confirmed_count]
+        self.pending_bis = self._all_bis[confirmed_count:]
+        self.pending_bi = self.pending_bis[-1] if self.pending_bis else None
+        self.bis = list(self._all_bis)
+        groups = [[] for _ in self._resolver.components()]
+        for bi in self.bis:
+            groups[bi.component_index].append(bi)
+        self.stroke_components = tuple(tuple(group) for group in groups)
 
-    def _first_following_endpoint_witness(self, bi: BI):
-        """重放第一个使后续笔成立的更晚分型。"""
-
-        # 分型按中心 K 线递增保存。跳过已过去的前缀，仍依次检查每一个后续
-        # 候选，保留最早确认见证（不能直接取最终下一笔的端点）。
-        start = bisect_right(self.fxs, bi._end.k.index, key=lambda fx: fx.k.index)
-        for position in range(start, len(self.fxs)):
-            candidate = self.fxs[position]
-            if candidate.type == bi._end.type:
-                continue
-            if not self._check_stroke_validity(bi._end, candidate):
-                continue
-            witness = _fractal_lock_witness(candidate)
-            if witness is not None:
-                return witness
-        raise ValueError("completed BI requires a following endpoint witness")
-
-    def _reindex_bis(self, stable_from: int = 0):
-        """重置笔的 index/done(增量版)。
-
-        仅 [start, 末尾] 需要重置:``start = min(稳定前缀边界 stable_from, 上次 pending 位置)``。
-        ① start 之前的 confirmed 笔由 _create_bi 设过 index、且历轮已置 done=True(归纳保持),
-        不变;② done 的唯一变化=上次 pending 笔(_prev_pending_pos)本轮转 confirmed,需补
-        done=True——故 start 下探到该位置。直连 ``_end`` 避开 property getter(原 _reindex 全量
-        遍历占链路 ~30% tottime、.end getter 被调数十万次)。正确性由 test_incremental_equivalence
-        + test_bi_reindex_dense(逐前缀含 done) 守护。
-        """
-        start = stable_from
-        if 0 <= self._prev_pending_pos < start:
-            start = self._prev_pending_pos
-        if start < 0:
-            start = 0
-        nconf = len(self.confirmed_bis)
-        for i in range(start, nconf):
-            bi = self.confirmed_bis[i]
-            bi.index = i
-            self._set_bi_completion(
-                bi,
-                True,
-                lock_witness=self._first_following_endpoint_witness(bi),
-            )
-
-        if self.pending_bi is not None:
-            self.pending_bi.index = nconf
-            self._set_bi_completion(self.pending_bi, False)
-            self._prev_pending_pos = nconf
-        else:
-            self._prev_pending_pos = -1
-
-        self.bis = list(self.confirmed_bis)
-        if self.pending_bi is not None:
-            self.bis.append(self.pending_bi)
-
-    def _build_endpoint_stack(self, fxs: List[FX], incremental: bool = False) -> List[FX]:
-        """单调栈构造笔端点序列(持久栈增量版)。
-
-        ``fxs`` 在增量路径(档2 _try_incremental_extend)恒为 append-only —— 前缀
-        不改写、仅尾部追加 0~1 个新分型(实测 rewrite-depth 恒 0)。故维护持久栈
-        ``self._endpoint_stack``:``incremental=True`` 且本次 fxs 是上次 append 扩展
-        (前 ``_endpoint_stack_n`` 个未变,O(1) 末尾签名校验)时只续跑新增分型
-        (均摊 O(1)/fx);否则(全量降级/校验失败)重置栈从头重建。消除原本每次
-        对全部分型重跑单调栈的 O(F²)。全量降级走新 FX 对象重建,故档3
-        ``_rebuild_from_fxs(incremental=False)`` 传 False。
-
-        单调栈语义(对每个分型跑 while 循环):
-        - 情形①同类：与栈顶同类，更极端则取代栈顶，否则丢弃；
-        - 情形②异类成笔：与栈顶异类且满足成笔条件 → 入栈；
-        - 情形③异类不成笔：分型仍保留在 ``fxs``，但不进入端点栈。后续达到
-          距离要求的次高/次低分型允许成笔，不要求端点是候选区间绝对极值。
-
-        已压入的相邻端点恒为有效笔端点，锁定前缀不做历史回退。该规则与唯一
-        生产 profile 的 ``stroke_secondary_fractal_rule=allowed`` 一致。
-        """
-        n = self._endpoint_stack_n
-        can_incr = (
-            incremental
-            and 0 < n <= len(fxs)
-            and self._endpoint_stack_tail_sig is not None
-            and self._fx_sig(fxs[n - 1]) == self._endpoint_stack_tail_sig
-        )
-        if can_incr:
-            stack = self._endpoint_stack
-            new_fxs = fxs[n:]
-            stable = len(stack)
-        else:
-            stack = []
-            new_fxs = fxs
-            stable = 0
-        for fx in new_fxs:
-            while True:
-                if not stack:
-                    stack.append(fx)
-                    break
-                last = stack[-1]
-                if fx.type == last.type:
-                    # 情形①：同类，保留更极端者
-                    if self._is_more_extreme(fx, last):
-                        # 更极端的中心 K 可能同时变宽，已经不满足与上一
-                        # 端点的价格区间关系。替换必须仍是一笔；不能先弹出
-                        # 有效端点，再因新端点无效而撤销前一笔的确认见证。
-                        if len(stack) >= 2 and not self._check_stroke_validity(stack[-2], fx):
-                            break
-                        stack.pop()
-                        if len(stack) < stable:
-                            stable = len(stack)
-                        continue
-                    break
-                # _check_stroke_validity 要求后者 K 线 index 更大；fxs 按
-                # K 线 index 升序产出、fx 恒晚于栈内任意元素，方向前提成立。
-                if self._check_stroke_validity(last, fx):
-                    # 情形②：异类成笔
-                    stack.append(fx)
-                    break
-                # 情形③：异类但距离/价格方向不成笔。它仍在完整 fxs 中供分型展示，
-                # 这里只是不进入端点序列；允许后续距离足够的次高/次低分型成笔。
-                break
-        self._endpoint_stack = stack
-        self._endpoint_stack_n = len(fxs)
-        self._endpoint_stack_tail_sig = self._fx_sig(fxs[-1]) if fxs else None
-        self._endpoint_stable_prefix = stable
-        return stack
-
-    def _rebuild_from_fxs(self, fxs: List[FX], incremental: bool = False):
-        """从分型列表用单调栈重建笔列表(端点栈 + 建笔双增量)。
-
-        ``incremental=True``(档2 append-only)→ 持久栈增量 + 复用稳定前缀笔、
-        只重建活跃尾部笔;档3 全量降级用新 FX 对象,传 False 触发重置全建。
-
-        done 不再全量重置:笔 FX 的 ``done`` 仅 ``BI.is_done()`` 经 ``bi.end.done``
-        消费(XD 读的是自身 XLFX.done、非笔 FX),且 FX 新建默认 done=True;
-        ``_reindex_bis`` 会覆盖所有当前笔端点的 done(confirmed=True/pending=False),
-        非端点 FX 的残留 done 无人读,故省去原 O(F) 的全量 ``fx.done=True``。
-        """
-        endpoints = self._build_endpoint_stack(fxs, incremental=incremental)
-
-        # 端点栈稳定前缀 → 笔稳定前缀:bi[i] 用 endpoints[i] 与 endpoints[i+1],
-        # 故 endpoints[:stable] 稳定 ⇒ bi[:stable-1] 可复用、bi[stable-1:] 重建。
-        stable_bi = max(0, self._endpoint_stable_prefix - 1)
-        bis = self._all_bis
-        del bis[stable_bi:]
-        for i in range(stable_bi, len(endpoints) - 1):
-            bis.append(self._create_bi(endpoints[i], endpoints[i + 1], i, False))
-
-        if bis:
-            self.confirmed_bis = bis[:-1]
-            self.pending_bi = bis[-1]
-        else:
-            self.confirmed_bis = []
-            self.pending_bi = None
-
-        self._reindex_bis(stable_bi)
+    def calculate_batch(self, cl_klines: List[CLKline], *, source_revision=None, closed_through="all", close_times=None):
+        """一次性重建已知快照；不继承先前实例上的端点取舍。"""
+        self.__init__()
+        self.calculate(cl_klines, source_revision=source_revision, closed_through=closed_through, close_times=close_times)
 
     @staticmethod
-    def _fx_sig(fx: FX) -> tuple:
+    def _kline_sig(k: CLKline) -> tuple:
+        """覆盖合并结果、极值来源和确认分型所需的物理 K 线证据。"""
+        return (
+            k.index, k.k_index, k.date, k.h, k.l, k.o, k.c, k.a,
+            k.n, k.q, k.up_qs,
+            tuple((s.index, s.date, s.h, s.l, s.o, s.c, s.a) for s in k.klines),
+            tuple(BiCalculator._kline_sig(c) for c in getattr(k, "initial_context_alternatives", ())),
+        )
+
+    @classmethod
+    def _fx_sig(cls, fx: FX) -> tuple:
         return (
             fx.type,
-            getattr(fx.k, "index", None),
             fx.val,
+            cls._kline_sig(fx.k),
+            tuple(cls._kline_sig(k) if k is not None else None for k in fx.klines),
         )
 
     def _snapshot_matches(
@@ -352,6 +347,7 @@ class BiCalculator:
     ) -> bool:
         if (
             source_revision is None
+            or self._closed_through != self._last_closed_through
             or source_revision != getattr(self, "_last_source_revision", None)
             or not self._last_kline_snapshot
             or not cl_klines
@@ -366,6 +362,7 @@ class BiCalculator:
         )
 
     def _update_snapshot(self, source_revision: Optional[int]) -> None:
+        self._last_closed_through = self._closed_through
         self._last_source_revision = source_revision
         if not self.cl_klines:
             self._last_kline_snapshot = None
@@ -379,6 +376,8 @@ class BiCalculator:
         *,
         source_revision: Optional[int] = None,
         validated_incremental_prefix: bool = False,
+        closed_through="all",
+        close_times=None,
     ):
         """
         计算笔列表。
@@ -391,26 +390,38 @@ class BiCalculator:
         生产 CL 路径由包含处理器提供单调代次并显式认证历史前缀未改写，维持
         尾部增量性能。代次前进但没有前缀认证时仍全量重放。
         """
+        self._closed_through = closed_through
+        self._close_times = {} if close_times is None else close_times
         if not cl_klines:
             self.cl_klines = []
             self.fxs = []
             self.confirmed_bis = []
             self.pending_bi = None
+            self.pending_bis = []
+            self._resolver = StrokeResolver()
+            self._ranges = StrokeRanges()
+            self._endpoint_node_ids = []
+            self._qualification_evidence = ()
+            self._completion_evidence = ()
+            self._state_dirty_bi = 0
             self.bis = []
             self._last_kline_snapshot = None
             self._last_source_revision = None
+            self._last_closed_through = None
             self._last_processed_kline_count = 0
             self._last_prefix_fingerprint = None
             self._endpoint_stack = []
-            self._endpoint_stack_n = 0
-            self._endpoint_stack_tail_sig = None
             self._endpoint_stable_prefix = 0
             self._all_bis = []
-            self._prev_pending_pos = -1
+            self._continuation_evidence = ()
+            self._endpoint_edge_pairs = []
+            self.stroke_components = ()
+            self.processing_mode = "batch"
             return
 
         # 档 1：调用方数据代次和末根快照同时命中（数据完全没变）
         if self._snapshot_matches(cl_klines, source_revision):
+            self.processing_mode = "unchanged"
             return
 
         previous_revision = getattr(self, "_last_source_revision", None)
@@ -421,15 +432,18 @@ class BiCalculator:
             and source_revision > previous_revision
         )
 
+        # 校验和尾部重建必须读取本次包含处理结果。
+        self.cl_klines = cl_klines
         # 档 2：只有可信数据代次向前推进时才尝试增量扩展。
         if trusted_forward_revision and self._try_incremental_extend(cl_klines):
-            self.cl_klines = cl_klines
+            self.processing_mode = "incremental"
             self._update_snapshot(source_revision)
             self._update_prefix_fingerprint(cl_klines)
             return
 
         # 档 3：降级全量
-        self.cl_klines = cl_klines
+        self._ranges.update(cl_klines)
+        self.processing_mode = "batch"
         self.fxs = self._collect_fxs(cl_klines)
         self._rebuild_from_fxs(self.fxs)
         self._update_snapshot(source_revision)
@@ -438,7 +452,7 @@ class BiCalculator:
     def _update_prefix_fingerprint(self, cl_klines: List[CLKline]) -> None:
         """记录本次处理后的前缀指纹，供下次增量判定使用。
 
-        指纹覆盖：(总长度, 倒数第 2 根的 index/h/l)。
+        指纹覆盖：(总长度, 倒数第 2 根的完整来源签名)。
         - 总长度：用于判断是否「仅末尾追加」
         - 倒数第 2 根：cl_kline_process 在末尾追加新 K 时一般不动倒数第 2 根，
           但若发生包含合并，倒数第 2 根可能被改写 → 指纹不匹配 → 降级全量。
@@ -448,9 +462,7 @@ class BiCalculator:
             sec_last = cl_klines[-2]
             self._last_prefix_fingerprint = (
                 len(cl_klines),
-                sec_last.index,
-                sec_last.h,
-                sec_last.l,
+                self._kline_sig(sec_last),
             )
         else:
             # 不足 2 根时不维护指纹，下次必定走全量
@@ -465,14 +477,8 @@ class BiCalculator:
           3. 上一轮指纹存在且仍命中（前缀未被改写）
           4. 上一轮位于「倒数第 2 根」的指纹在新 cl_klines 中位置不变
 
-        命中后的策略：
-          - 在新增的 cl_klines 上做增量分型识别
-          - 把新分型 append 到 self.fxs 后端
-          - 重新跑 _rebuild_from_fxs（fxs 全量但分型识别量变小）
-
-        注：保守起见，增量分支只省 _collect_fxs 的 O(N) 扫描；
-            _rebuild_from_fxs 仍跑全量，避免笔状态机回退的复杂度。
-            实测在 1m 长序列上，_collect_fxs 占比超过 60%，效果显著。
+        从旧倒数第二根中心起重新识别分型，用完整证据比较后替换尾部。
+        纯追加沿用顺序裁决结果；旧尾部分型的证据变化时恢复检查点。
         """
         if self._last_processed_kline_count < 3:
             return False
@@ -480,18 +486,19 @@ class BiCalculator:
             return False
         if len(cl_klines) < self._last_processed_kline_count:
             return False
-        prev_len, prev_sec_idx, prev_sec_h, prev_sec_l = self._last_prefix_fingerprint
+        prev_len, previous_anchor = self._last_prefix_fingerprint
         # 新 cl_klines 在 prev_len-2 位置应该仍然是当时的「倒数第 2 根」
         anchor_pos = prev_len - 2
         if anchor_pos < 0 or anchor_pos >= len(cl_klines):
             return False
         anchor = cl_klines[anchor_pos]
-        if anchor.index != prev_sec_idx or anchor.h != prev_sec_h or anchor.l != prev_sec_l:
+        if self._kline_sig(anchor) != previous_anchor:
             return False
 
-        # 增量识别新分型：从 prev_len-1 开始（旧的"末根"现在有了 right K 可以判分型），
-        # 因为分型需要 [i-1, i, i+1] 三根上下文。
-        # _collect_fxs 已经按 1..N-1 扫描，重做这一段只针对新增段。
+        self._ranges.update(cl_klines, start=prev_len - 1)
+
+        # 从 prev_len-2 起重做中心：旧倒数第二根的右肩可能被更新，
+        # 旧末根及新增 K 线也可能获得右肩，不能只扫描新增中心。
         new_fxs = self._incremental_collect_fxs(cl_klines, start=max(prev_len - 2, 1))
         # 用新 fxs 替换原 fxs 的尾部（从 anchor_pos-1 之后的所有分型都重做）。
         # keep_until = fxs 中 k.index < anchor.index 的数量。fxs 按 k.index 严格升序、
@@ -508,19 +515,21 @@ class BiCalculator:
         for offset, fx in enumerate(new_fxs):
             fx.index = keep_until + offset
         if keep_until == len(self.fxs) and not new_fxs:
+            self._rebuild_from_fxs(self.fxs, incremental=True)
             return True
         old_tail = self.fxs[keep_until:]
         if len(old_tail) == len(new_fxs) and all(
             self._fx_sig(old) == self._fx_sig(new)
             for old, new in zip(old_tail, new_fxs)
         ):
+            self._rebuild_from_fxs(self.fxs, incremental=True)
             return True
         # 原地删尾 + extend(O(尾段))取代 kept_fxs + new_fxs 的 O(F) 切片+拼接;前缀 FX
         # 对象不动,_rebuild_from_fxs 按 fxs **内容**(经 _fx_sig,非列表身份)增量,等价。
         del self.fxs[keep_until:]
         self.fxs.extend(new_fxs)
-        # 笔状态机走持久栈增量(append-only,见 _build_endpoint_stack)
-        self._rebuild_from_fxs(self.fxs, incremental=True)
+        # 将实际发生变化的尾部边界传给裁决器，恢复该分型之前的状态。
+        self._rebuild_from_fxs(self.fxs, incremental=True, changed_from=keep_until)
         return True
 
     def _incremental_collect_fxs(self, cl_klines: List[CLKline], start: int) -> List[FX]:

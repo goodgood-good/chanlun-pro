@@ -2,7 +2,7 @@
 
 规则来源（仅标规则，不把结构一致性等同于收益保证）：
 - L062：三 K 分型、笔与至少三笔线段。
-- L065/L077：方向包含、顺序及顶底价格关系；2007-09-18 附文修订距离。
+- L065/L077：方向包含、顺序及顶底价格关系；旧笔保留独立的合并 K 线。
 - L067/L071：特征序列包含与有/无缺口的线段破坏。
 """
 
@@ -102,79 +102,26 @@ def test_l062_fractal_requires_both_high_and_low_relationships():
     assert high_only is None
 
 
-def test_source_stroke_requires_nonshared_fractals_and_raw_distance():
+def test_old_stroke_requires_an_independent_merged_bar():
     calc = BiCalculator()
     bottom = _fx("di", cl_index=10, source_index=10, value=90)
     too_near_top = _fx("ding", cl_index=13, source_index=13, value=110)
     valid_top = _fx("ding", cl_index=14, source_index=14, value=111)
 
-    assert calc._check_stroke_validity(bottom, too_near_top) is False
-    assert calc._check_stroke_validity(bottom, valid_top) is True
+    assert calc._check_endpoint_geometry(bottom, too_near_top) is False
+    assert calc._check_endpoint_geometry(bottom, valid_top) is True
+    assert calc._check_stroke_validity(bottom, valid_top) is False  # no full interval evidence
 
-    endpoints = calc._build_endpoint_stack(
-        [bottom, too_near_top, valid_top], incremental=False
-    )
-    assert endpoints == [bottom, valid_top]
+    with pytest.raises(ValueError, match="physical fractal requires visibility evidence"):
+        calc._build_endpoint_stack([bottom, too_near_top, valid_top], incremental=False)
 
 
-@pytest.mark.parametrize(
-    (
-        "start_kind",
-        "near_kind",
-        "start_value",
-        "near_value",
-        "middle_value",
-        "later_value",
-    ),
-    (
-        ("ding", "di", 609.127, 591.101, 600.114, 597.153),
-        ("di", "ding", 90.0, 110.0, 95.0, 105.0),
-    ),
-)
-def test_l065_secondary_fractal_may_form_after_more_extreme_near_fractal(
-    start_kind,
-    near_kind,
-    start_value,
-    near_value,
-    middle_value,
-    later_value,
-):
-    """距离不足的反向分型不成笔，也不约束后续次高/次低端点。"""
-
+def test_l077_equal_same_type_fractal_keeps_earlier_endpoint():
+    values = [(12, 8), (10, 6), (11, 7), (12, 8), (13, 9), (14, 10),
+              (13, 9), (12, 8), (13, 9), (14, 10), (13, 9)]
     calc = BiCalculator()
-    start = _fx(start_kind, cl_index=8, source_index=8, value=start_value)
-    too_near = _fx(near_kind, cl_index=11, source_index=11, value=near_value)
-    weaker_same_as_start = _fx(
-        start_kind,
-        cl_index=13,
-        source_index=13,
-        value=middle_value,
-    )
-    later_secondary = _fx(
-        near_kind,
-        cl_index=14,
-        source_index=14,
-        value=later_value,
-    )
-    all_fxs = [start, too_near, weaker_same_as_start, later_secondary]
-
-    endpoints = calc._build_endpoint_stack(all_fxs, incremental=False)
-
-    assert endpoints == [start, later_secondary]
-    assert too_near in all_fxs
-
-
-def test_l065_equal_same_type_fractal_keeps_earlier_endpoint():
-    calc = BiCalculator()
-    earlier = _fx("ding", cl_index=8, source_index=8, value=100)
-    equal_later = _fx("ding", cl_index=12, source_index=12, value=100)
-    bottom = _fx("di", cl_index=16, source_index=16, value=90)
-
-    endpoints = calc._build_endpoint_stack(
-        [earlier, equal_later, bottom], incremental=False
-    )
-
-    assert endpoints == [earlier, bottom]
+    calc.calculate([_cl(i, h, l) for i, (h, l) in enumerate(values)])
+    assert [(bi.start.k.index, bi.end.k.index) for bi in calc.bis] == [(1, 5)]
 
 
 def test_direct_bi_replay_detects_historical_change_when_last_k_is_unchanged():
@@ -195,6 +142,8 @@ def test_direct_bi_replay_detects_historical_change_when_last_k_is_unchanged():
     changed = copy.deepcopy(original)
     changed[5].h = 10.5
     changed[5].l = 8.5
+    changed[5].klines[0].h = 10.5
+    changed[5].klines[0].l = 8.5
 
     reused = BiCalculator()
     reused.calculate(copy.deepcopy(original))
@@ -259,19 +208,24 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base"
     assert config["center_seed_rule"] == "physical-entry-middle-three-core-independent-leave-five-overlap"
     assert config["chart_structure_rule"] == "native-segment-centers-v2"
-    assert config["stroke_rule"] == "source-fractal-nonshared-raw-distance-v2"
-    assert config["stroke_secondary_fractal_rule"] == "allowed"
+    assert config["stroke_rule"] == "old-user-path-b-completed-prefix-v14"
+    assert config["stroke_distance_rule"] == "merged-centers-at-least-four"
+    assert config["stroke_secondary_fractal_rule"] == "retained-facts-without-internal-extreme-veto"
     assert config["stroke_endpoint_range_rule"] == (
-        "fractal-endpoints-not-interval-extremes"
+        "symmetric-center-ranges-user-P-C-policy"
     )
     assert config["stroke_near_opposite_rule"] == (
-        "retain-fractal-ignore-as-endpoint"
+        "path-b-tail-reselection-with-completed-prefix-guard"
     )
-    assert config["stroke_same_type_rule"] == "replace-only-if-more-extreme-and-still-valid-from-previous"
+    assert config["stroke_same_type_rule"] == "strict-extreme-replacement-of-mutable-tail"
     assert config["stroke_equal_extreme_rule"] == "keep-earlier-fractal"
     assert config["stroke_lock_rule"] == (
-        "next-valid-endpoint-physical-witness-no-rollback"
+        "third-qualified-edge-with-closed-source-witness"
     )
+    assert config["inclusion_initial_context_rule"] == "common-price-geometry-with-separate-source-provenance-v2"
+    assert config["stroke_path_rule"] == "causal-selected-chain-without-discarded-path-restoration"
+    assert config["stroke_downstream_rule"] == "continuous-formal-input-and-isolated-conditional-observations-v2"
+    assert config["stroke_completion_scope"] == "qualified-continued-and-final-completion-distinguished"
     assert config["segment_rule"] == "feature-sequence"
     assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
     assert config["center_lifecycle_rule"] == (

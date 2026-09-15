@@ -1,4 +1,4 @@
-"""L077 and the author's 2007-09-18 correction, including physical replay."""
+"""Old stroke spacing from L062/L077, including physical replay."""
 
 from datetime import datetime, timedelta
 
@@ -30,7 +30,7 @@ def _calculate(bars):
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_adjacent_nonshared_fractals_can_form_with_three_raw_bars_between(mirror):
+def test_old_stroke_requires_an_independent_merged_bar_even_with_enough_raw_bars(mirror):
     # Seven raw bars become six merged bars; the middle raw pair is included.
     bars = _bars(
         [(12, 8), (10, 6), (11, 7), (10.8, 7.2), (12, 8), (14, 10), (13, 9)],
@@ -38,18 +38,15 @@ def test_adjacent_nonshared_fractals_can_form_with_three_raw_bars_between(mirror
     )
     merged, calc = _calculate(bars)
     assert len(merged.cl_klines) == 6
-    assert len(calc.bis) == 1
-    stroke = calc.bis[0]
-    assert stroke.end.k.index - stroke.start.k.index == 3
-    assert stroke.end.k.k_index - stroke.start.k.k_index == 4
-    assert not stroke.is_done()
-    assert {k.index for k in stroke.start.klines}.isdisjoint(
-        k.index for k in stroke.end.klines
-    )
+    first, second = calc.fxs
+    assert second.k.index - first.k.index == 3
+    assert second.k.k_index - first.k.k_index == 4
+    assert {k.index for k in first.klines}.isdisjoint(k.index for k in second.klines)
+    assert calc.bis == []
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_six_unmerged_bars_are_insufficient_under_explicit_september_rule(mirror):
+def test_six_unmerged_bars_are_insufficient_for_an_old_stroke(mirror):
     _, calc = _calculate(
         _bars([(12, 8), (10, 6), (11, 7), (12, 8), (14, 10), (13, 9)], mirror)
     )
@@ -97,13 +94,13 @@ def test_endpoint_value_alone_does_not_prove_top_bottom_price_order(
     bottom = _fractal("di", 8 if reverse_time else 1, *bottom_range)
     top = _fractal("ding", 1 if reverse_time else 8, *top_range)
     first, second = (top, bottom) if reverse_time else (bottom, top)
-    assert not BiCalculator()._check_stroke_validity(first, second)
+    assert not BiCalculator()._check_endpoint_geometry(first, second)
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_revised_stroke_batch_and_incremental_replay_have_same_lock_time(mirror):
+def test_old_stroke_batch_and_incremental_replay_have_same_qualification_time(mirror):
     bars = _bars(
-        [(12, 8), (10, 6), (11, 7), (10.8, 7.2), (12, 8), (14, 10), (13, 9),
+        [(12, 8), (10, 6), (11, 7), (10.8, 7.2), (12, 8), (13, 9), (14, 10), (13, 9),
          (12, 8), (11, 7), (9, 5), (10, 6), (11, 7), (12, 8), (14, 10), (13, 9)],
         mirror,
     )
@@ -126,13 +123,18 @@ def test_revised_stroke_batch_and_incremental_replay_have_same_lock_time(mirror)
         )
         _, batch = _calculate(prefix)
         assert signature(live) == signature(batch)
+    assert len(live.bis) == 3
     assert live.bis[0].is_done()
-    assert live.bis[0].end.k.index - live.bis[0].start.k.index == 3
-    assert live.bis[0].locked_at == bars[10].date
+    assert live.bis[0].end.k.index - live.bis[0].start.k.index == 4
+    assert live.bis[0].locked_at == bars[15].date
+    assert live.bis[0].fractal_visible_at == bars[7].date
+    assert live.qualification_evidence == batch.qualification_evidence
+    assert live.completion_evidence == batch.completion_evidence
+    assert live.audit_endpoint_ranges() == []
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_more_extreme_same_fractal_cannot_erase_a_valid_preceding_stroke(mirror):
+def test_wider_endpoint_fails_price_geometry_and_missing_interval_cannot_pass(mirror):
     start = _fractal("di", 1, 10, 6)
     prior = _fractal("ding", 8, 14, 10)
     wider = _fractal("ding", 13, 15, 5)
@@ -143,7 +145,7 @@ def test_more_extreme_same_fractal_cannot_erase_a_valid_preceding_stroke(mirror)
                 k.h, k.l = 100 - k.l, 100 - k.h
             fx.val = fx.k.h if fx.type == "ding" else fx.k.l
     calc = BiCalculator()
-    assert calc._check_stroke_validity(start, prior)
+    assert calc._check_endpoint_geometry(start, prior)
     assert calc._is_more_extreme(wider, prior)
-    assert not calc._check_stroke_validity(start, wider)
-    assert calc._build_endpoint_stack([start, prior, wider]) == [start, prior]
+    assert not calc._check_endpoint_geometry(start, wider)
+    assert not calc._check_stroke_validity(start, prior)

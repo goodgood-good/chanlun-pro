@@ -94,8 +94,13 @@ def cl_data_to_tv_chart(
                         },
                     ],
                     "linestyle": "0" if bi.is_done() else "1",
+                    "kind": "bi",
                     "state": "locked" if bi.is_done() else "forming",
-                    "locked": bool(bi.is_done()),
+                    "locked": bi.is_done(),
+                    "completion_status": bi.completion_status,
+                    "completion_is_final": bi.completion_is_final,
+                    "selection_pending": bi.selection_pending,
+                    "component_index": bi.component_index,
                 }
                 for bi in strict_cd.get_bis()
             ]
@@ -115,22 +120,26 @@ def cl_data_to_tv_chart(
                         },
                     ],
                     "linestyle": (
-                        "0"
+                        "1" if getattr(xd, "selection_pending", False) else "0"
                         if xd.is_done()
                         else "1"
                         if getattr(xd, "forming", False)
                         else "0"
                     ),
                     "state": (
-                        "locked"
+                        "forming" if getattr(xd, "selection_pending", False) else "locked"
                         if xd.is_done()
                         else "forming"
                         if getattr(xd, "forming", False)
                         else "formed"
                     ),
                     "locked": bool(xd.is_done()),
+                    "kind": "xd",
+                    "selection_pending": bool(getattr(xd, "selection_pending", False)),
+                    "component_index": getattr(xd, "component_index", 0),
+                    "observation_scope_id": getattr(xd, "observation_scope_id", None),
                 }
-                for xd in strict_cd.get_xds()
+                for xd in (strict_cd.get_chart_xds() if hasattr(strict_cd, "get_chart_xds") else strict_cd.get_xds())
             ]
             xd_chart_data.sort(key=lambda value: value["points"][0]["time"])
 
@@ -199,6 +208,11 @@ def cl_data_to_tv_chart(
         "bis": bi_chart_data,
         "xds": xd_chart_data,
     }
+    if runtime_available and hasattr(strict_cd, "get_stroke_construction_state"):
+        construction = strict_cd.get_stroke_construction_state()
+        # 执行方式不属于行情分析结果；同一快照的批量/增量图表应一致。
+        construction.pop("processing_mode", None)
+        result["stroke_construction"] = construction
 
     if strict_runtime.error_code is not None or strict_runtime.cd is None:
         result["strict_structure_mode"] = "unavailable"

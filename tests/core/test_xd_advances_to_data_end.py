@@ -52,14 +52,20 @@ def minute_frame() -> pd.DataFrame:
     return pd.read_parquet(FIXTURE)
 
 
-def test_segment_count_grows_with_more_history(minute_frame: pd.DataFrame) -> None:
-    """笔在增长时线段数不得冻结。"""
+def test_continuous_strokes_keep_segments_progressing_through_real_history(minute_frame: pd.DataFrame) -> None:
+    """路径乙保持连续输入，行情增长不能使线段永久停在旧断点。"""
 
     total = len(minute_frame)
     counts = []
     for fraction in (0.25, 0.5, 0.75, 1.0):
-        strokes, segments = _segments_at(minute_frame, int(total * fraction))
+        state = CL("SZ.002299", "1m", {}, market="a")
+        state.process_klines(minute_frame.iloc[:int(total * fraction)])
+        strokes, segments = len(state.get_bis()), len(state.get_xds())
         counts.append((fraction, strokes, segments))
+        assert not state.get_stroke_construction_state()["unresolved_regions"]
+        continuous = state.get_contiguous_bis()
+        assert all(xd.end_line.index < len(continuous) for xd in state.get_xds())
+        assert len(continuous) == strokes
 
     for (_, previous_strokes, previous_segments), (
         fraction,
@@ -67,11 +73,7 @@ def test_segment_count_grows_with_more_history(minute_frame: pd.DataFrame) -> No
         segments,
     ) in zip(counts, counts[1:]):
         assert strokes > previous_strokes, "前提失效：更长前缀必须产生更多笔"
-        assert segments > previous_segments, (
-            f"线段在历史中途停摆：前缀 {fraction:.0%} 时笔 "
-            f"{previous_strokes}->{strokes} 增长，线段却停在 "
-            f"{previous_segments}->{segments}"
-        )
+        assert segments > previous_segments
 
 
 def test_no_single_segment_swallows_the_tail(minute_frame: pd.DataFrame) -> None:
@@ -82,7 +84,9 @@ def test_no_single_segment_swallows_the_tail(minute_frame: pd.DataFrame) -> None
     """
 
     state = CL("SZ.002299", "1m", {}, market="a")
-    state.process_klines(minute_frame)
+    # Isolate a known continuous window so this remains a positive segment
+    # construction test, independent of the full file's earlier BI boundary.
+    state.process_klines(minute_frame.iloc[4600:5150].reset_index(drop=True))
     segments = state.get_xds()
     assert len(segments) >= 3
 

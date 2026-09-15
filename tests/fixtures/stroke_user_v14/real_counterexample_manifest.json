@@ -1,0 +1,14 @@
+{
+  "SH.600036_5m_raw_prefix.csv": {
+    "source": "output\\old_stroke_full_validation_20260915\\counterexamples\\SH.600036_5m_raw_prefix.csv",
+    "sha256": "646fe9a87365e965eefed3afe337c82c6b243977b452dca7dfc3094ff1267f25"
+  },
+  "SH.600519_5m_raw_prefix.csv": {
+    "source": "output\\old_stroke_full_validation_20260915\\counterexamples\\SH.600519_5m_raw_prefix.csv",
+    "sha256": "33d6e0cd4f22a7c567ab150b57e1d87a635c2136adfa0e87e426b034df224dcb"
+  },
+  "SH.601059_1m_raw_prefix.csv": {
+    "source": "output\\old_stroke_full_validation_20260915\\counterexamples\\SH.601059_1m_raw_prefix.csv",
+    "sha256": "a785a5193772cc0aa7b5526562405fa83bdf36a4ca45cccd66c1cf063fdcae87"
+  }
+}

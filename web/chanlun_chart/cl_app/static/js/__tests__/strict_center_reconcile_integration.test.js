@@ -61,6 +61,60 @@ function loadChartManager(runtimeOverrides = {}) {
   return { ChartManager: sandbox.__STRICT_CM, sandbox };
 }
 
+test('an unresolved pen connection is shown as pending without triggering load recovery', () => {
+  const { cm } = manager();
+  const data = chartData();
+  data.barsResult.bis = [{ kind: 'bi', component_index: 0 }, { kind: 'bi', component_index: 1 }];
+  cm._drawStrictStructure(data, '5');
+  assert.equal(cm._strictStructureStatus.state, 'selection_pending');
+  assert.ok(cm._strictStructureSnapshot);
+  cm._strictReconcileComplete = () => true;
+  assert.equal(cm._strictStructureReadyForCurrentContext(), true);
+  data.barsResult.bis = [];
+  data.barsResult.strict_structure.stroke_connection_pending = true;
+  cm._drawStrictStructure(data, '5');
+  assert.equal(cm._strictStructureStatus.state, 'selection_pending');
+  data.barsResult.bis = [{ kind: 'bi', component_index: 0 }];
+  data.barsResult.strict_structure.stroke_connection_pending = false;
+  cm._drawStrictStructure(data, '5');
+  assert.equal(cm._strictStructureStatus.state, 'ready');
+});
+
+test('conditional centers render separately and disappear when their scope resolves', () => {
+  const { cm } = manager();
+  const data = chartData();
+  const conditional = center(1, {render_kind: 'conditional_center', center_id: 'pending-center',
+    render_id: 'pending-center-v1', observation_scope_id: 'range-1', component_index: 1,
+    selection_pending: true, state: 'selection_pending', locked: false,
+    third_class_confirmed: false, tradable: false, core: {zd_price: 10, zg_price: 11}});
+  const snapshot = data.barsResult.strict_structure;
+  snapshot.conditional_centers = [conditional];
+  snapshot.stroke_connection_pending = true;
+  cm._drawStrictStructure(data, '5');
+  assert.equal(cm._strictStructureStatus.state, 'selection_pending');
+  const entries = () => Array.from(cm._strictContainers.values()).flat();
+  assert.ok(entries().some(item => item.logicalKey === 'conditional_center:pending-center'));
+  snapshot.conditional_centers = [];
+  snapshot.stroke_connection_pending = false;
+  snapshot.snapshot_revision = snapshot.render_revision = snapshot.structure_revision = 'resolved-2';
+  cm._drawStrictStructure(data, '5');
+  assert.ok(!entries().some(item => item.logicalKey === 'conditional_center:pending-center'));
+  assert.ok(entries().some(item => item.logicalKey === 'formal_center:center-1'));
+});
+
+test('a conditional center cannot carry a formal confirmation flag', () => {
+  const { cm } = manager();
+  const data = chartData();
+  data.barsResult.strict_structure.levels[0].centers = [];
+  data.barsResult.strict_structure.conditional_centers = [center(1, {
+    render_kind: 'conditional_center', observation_scope_id: 'range-1', component_index: 1,
+    selection_pending: true, state: 'selection_pending', locked: true,
+    third_class_confirmed: false, tradable: false, core: {zd_price: 10, zg_price: 11},
+  })];
+  assert.throws(() => cm._strictRenderGroups(data.barsResult.strict_structure, {interval: '5m'}),
+    /conditional center scope or state is invalid/);
+});
+
 function center(revision = 1, overrides = {}) {
   return {
     schema: 'chanlun-chart-center',

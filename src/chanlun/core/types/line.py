@@ -17,7 +17,7 @@ class LINE:
         self._end: FX = end  # 线的结束位置，以分型来记录
         self._type: str = _type  # 线的方向类型 （up 上涨  down 下跌）
         self.index: int = index  # 线的索引，后续查找方便
-    # 因果结构锁定时刻。锁定线只能使用该时刻已经存在的证据；未完成线保持 None。
+        # 当前划分的因果确认时刻；依赖的端点重选后须重算，不能回填未来证据。
         self.locked_at = None
 
         # 根据缠论配置（笔/段区间），得来的高低点
@@ -155,10 +155,37 @@ class BI(LINE):
 
         # 记录是否是拆分笔
         self.is_split = ""
-        # 笔只有“已锁定前缀 + 唯一正在形成的尾笔”两种状态。尾笔已有候选
-        # 分型端点但仍可被后续同类更极端分型延伸，因此在下一有效端点出现前
-        # 保持 forming=True，并由 BiCalculator 在锁定时原子切换为 False。
+        # 合格、已有后继、完成分别表达；第三条合格连接有收盘见证才完成第一笔。
         self.forming: bool = True
+        self.fractal_visible_at = None
+        self.selected_at = None
+        self.selection_pending = False
+        self.component_index = 0
+        self.successor_observed_at = None
+        self.completion_witness = ()
+
+    @property
+    def continuation_at(self):
+        """合格后继的可见时间；完成后保留当时的历史证据。"""
+        return self.successor_observed_at or self.locked_at
+
+    def has_qualified_successor(self) -> bool:
+        return self.continuation_at is not None
+
+    @property
+    def completion_status(self) -> str:
+        if self.is_done():
+            return "completed"
+        if self.selection_pending:
+            return "selection_pending"
+        if self.has_qualified_successor():
+            return "continued"
+        return "qualified" if self.selected_at is not None else "unassessed"
+
+    @property
+    def completion_is_final(self):
+        """完成前缀在同一历史版本内固定；历史修订通过重建产生新版本。"""
+        return self.is_done()
 
     def to_dict(self):
         """将BI对象转换为字典"""
@@ -166,13 +193,21 @@ class BI(LINE):
         data.update({
             'is_split': self.is_split,
             'forming': self.forming,
+            'fractal_visible_at': self.fractal_visible_at.isoformat() if self.fractal_visible_at else None,
+            'selected_at': self.selected_at.isoformat() if self.selected_at else None,
+            'continuation_at': self.continuation_at.isoformat() if self.continuation_at else None,
+            'completion_status': self.completion_status,
+            'completion_is_final': self.completion_is_final,
+            'completion_witness': list(self.completion_witness),
+            'component_index': self.component_index,
+            'selection_pending': self.selection_pending,
         })
         return data
     def is_done(self) -> bool:
         """
-        返回笔是否完成
+        在收盘事实中完成且不处于取舍待决。后继承接本身不赋予此状态。
         """
-        return self.locked_at is not None
+        return self.locked_at is not None and not self.selection_pending
 
 class TZXL:
     """

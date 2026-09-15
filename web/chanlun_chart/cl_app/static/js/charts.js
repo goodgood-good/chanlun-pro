@@ -524,7 +524,7 @@ function strictItemEnabled(cfg, item) {
     if (!Number.isInteger(level) || level < 0 || level >= 50) return false;
     const enabled = (key) => cfg?.[key] ?? (level === 0);
     if (item.render_kind === 'center_observation') return cfg?.center_observation === true;
-    if (['formal_center', 'center_preview'].includes(item.render_kind)) return cfg?.center_all !== false && enabled(`center_L${level}`);
+    if (['formal_center', 'center_preview', 'conditional_center'].includes(item.render_kind)) return cfg?.center_all !== false && enabled(`center_L${level}`);
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
         return cfg?.point_all !== false && cfg?.[`point_${item.point_type}`] !== false && enabled(`point_L${level}`);
     }
@@ -767,7 +767,7 @@ function getSignalColor(role, theme = currentChartTheme()) {
 
 function getCenterVisualStyle(role, item = {}) {
     const spec = CHANLUN_VISUAL_STYLE.center.formal;
-    if (item.render_kind === 'center_preview') {
+    if (['center_preview', 'conditional_center'].includes(item.render_kind)) {
         return {linewidth: 1, linestyle: CHART_CONFIG.LINE_STYLES.DASHED, transparency: 96};
     }
     return {linewidth: spec.linewidth, linestyle: CHART_CONFIG.LINE_STYLES.SOLID,
@@ -779,6 +779,9 @@ function getCenterVisualStyle(role, item = {}) {
 function centerEvidenceTitle(item) {
     const bounds = item.core || {};
     const interval = '[' + bounds.zd_price + ', ' + bounds.zg_price + ']';
+    if (item.render_kind === 'conditional_center') {
+        return interval + '；笔的前后连接待定，本范围内的中枢观察随取舍更新';
+    }
     if (item.render_kind === 'center_preview') {
         return interval + '；' + centerPreviewLabel(item)
             + (item.preview_status === 'awaiting_completion_confirmation'
@@ -1871,7 +1874,7 @@ class ChartManager {
 
     _strictStructureReadyForCurrentContext() {
         return Boolean(
-            this._strictStructureStatus?.state === 'ready'
+            ['ready', 'selection_pending'].includes(this._strictStructureStatus?.state)
             && this._strictStructureSnapshot
             && this._strictStructureContextToken
             && this._strictReconcileComplete()
@@ -3715,6 +3718,8 @@ class ChartManager {
             status.dataset.state = state;
             status.textContent = state === 'loading'
                 ? 'K 线已显示，正在计算线段和中枢…'
+                : state === 'selection_pending'
+                ? '笔的前后取舍待定：相关线段和中枢以虚线观察'
                 : state === 'recovering'
                 ? '严格缠论结构加载异常，正在自动恢复…'
                 : state === 'error'
@@ -4058,6 +4063,19 @@ class ChartManager {
             validateStrictCenterRenderContract(item, 0, false);
             add(item, 0, '笔Z' + (index + 1));
         }
+        for (const [index, item] of (snapshot.conditional_centers || []).entries()) {
+            if (item.render_kind !== 'conditional_center' || item.source_kind !== 'segment'
+                || item.state !== 'selection_pending' || item.selection_pending !== true
+                || item.tradable !== false || item.locked !== false || item.third_class_confirmed !== false
+                || !Number.isInteger(item.component_index) || item.component_index < 1
+                || typeof item.observation_scope_id !== 'string' || !item.observation_scope_id
+                || !Array.isArray(item.points) || item.points.length !== 2
+                || !Number.isFinite(item.core?.zd_price) || !Number.isFinite(item.core?.zg_price)
+                || item.core.zd_price >= item.core.zg_price) {
+                throw new Error('conditional center scope or state is invalid');
+            }
+            add(item, 0, '待定Z' + (index + 1));
+        }
         return groups;
     }
 
@@ -4070,7 +4088,7 @@ class ChartManager {
 
 
     _createStrictShape(item, currentInterval, bars) {
-        if (['formal_center', 'center_observation', 'center_preview'].includes(item.render_kind)) {
+        if (['formal_center', 'center_observation', 'center_preview', 'conditional_center'].includes(item.render_kind)) {
             const observation = item.render_kind === 'center_observation';
             const style = getCenterVisualStyle('formal', item);
             return ChartUtils.createZhongshuShape(this.chart, item, {
@@ -4154,7 +4172,7 @@ class ChartManager {
         if (typeof this.chart?.getShapeById === 'function') {
             try {
                 const shape = this.chart.getShapeById(realId);
-                const title = ['formal_center', 'center_observation', 'center_preview'].includes(item.render_kind)
+                const title = ['formal_center', 'center_observation', 'center_preview', 'conditional_center'].includes(item.render_kind)
                     ? centerEvidenceTitle(item) : chartSignalLabel(item) + (
                         item.exit_plan && globalThis.PointExitInfo ? '\n' + PointExitInfo.title(item.exit_plan) : '');
                 if (shape && typeof shape.setProperties === 'function' && title) {
@@ -4441,7 +4459,9 @@ class ChartManager {
                 if (!nextScopes.has(scope)) this._clearStrictScope(scope, 'snapshot-replace');
             }
             this._settleReconcileRetryIfComplete();
-            this._setStrictStructureStatus('ready');
+            const connectionPending = snapshot.stroke_connection_pending === true
+                || (barsResult.bis || []).some(item => Number(item.component_index) > 0);
+            this._setStrictStructureStatus(connectionPending ? 'selection_pending' : 'ready');
             this._cancelStrictStructureRecovery();
             if (this._strictRecoveryAttempts instanceof Map) {
                 this._strictRecoveryAttempts.delete(this._currentDataIdentityKey());

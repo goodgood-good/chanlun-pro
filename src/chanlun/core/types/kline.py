@@ -84,6 +84,7 @@ class CLKline:
     __slots__ = (
         "k_index", "date", "h", "l", "o", "c", "a",
         "klines", "index", "n", "q", "up_qs",
+        "initial_context_alternatives",
     )
 
     def __init__(
@@ -114,6 +115,9 @@ class CLKline:
         self.n: int = _n  # 记录包含的K线数量
         self.q: bool = _q  # 是否有缺口
         self.up_qs = None  # 合并时之前的趋势
+        # 仅用于初始共同后缀的左肩；该前情本身不能充当笔端点。
+        # 每个候选保留真实包含结果，不伪造统一的高低价。
+        self.initial_context_alternatives = ()
 
     def __setstate__(self, state):
         _slot_setstate(self, state)
@@ -133,6 +137,7 @@ class CLKline:
             'n': self.n,
             'q': self.q,
             'up_qs': self.up_qs,
+            'initial_context_alternatives': [k.to_dict() for k in self.initial_context_alternatives],
             'klines': [kline.to_dict() for kline in self.klines] if self.klines else []
         }
 

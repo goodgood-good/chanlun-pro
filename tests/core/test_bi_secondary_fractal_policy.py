@@ -1,4 +1,4 @@
-"""真实行情回归：修订距离允许相邻非共用分型成笔。"""
+"""真实行情的旧笔间隔与候选路径取舍回归。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _signature(cd: CL) -> list[tuple[int, int, str, bool]]:
     ]
 
 
-def test_qqq_30m_near_lower_bottom_is_eligible_under_revised_raw_distance():
+def test_qqq_old_stroke_starts_from_the_previously_skipped_extreme():
     cd = CL("QQQ.US", "30m", strict_base_config(), market="us")
     cd.process_klines(_qqq_prefix())
 
@@ -40,14 +40,11 @@ def test_qqq_30m_near_lower_bottom_is_eligible_under_revised_raw_distance():
     assert bottoms[11] == 591.101
     assert bottoms[14] == 597.153
     first = cd.get_bis()[0]
-    assert first.end.k.index - first.start.k.index == 3
-    assert first.end.k.k_index - first.start.k.k_index == 4
-    assert _signature(cd)[:4] == [
-        (8, 11, "down", True),
-        (11, 16, "up", True),
-        (16, 19, "down", True),
-        (19, 28, "up", True),
-    ]
+    assert first.end.k.index - first.start.k.index >= 4
+    assert first.start.k.index == 11
+    assert first.start.val == 591.101
+    assert (8, 14) not in {(bi.start.k.index, bi.end.k.index) for bi in cd.get_bis()}
+    assert cd.bi_calculator.audit_endpoint_ranges() == []
 
 
 def test_qqq_30m_secondary_fractal_policy_is_incrementally_stable():
@@ -67,3 +64,4 @@ def test_qqq_30m_secondary_fractal_policy_is_incrementally_stable():
         )
 
     assert _signature(incremental) == _signature(batch)
+    assert incremental.bi_calculator.audit_endpoint_ranges() == batch.bi_calculator.audit_endpoint_ranges()

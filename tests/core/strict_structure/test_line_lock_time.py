@@ -27,13 +27,13 @@ def sample_frame() -> pd.DataFrame:
 
 @pytest.fixture(scope="module")
 def segment_frame() -> pd.DataFrame:
-    """Four-successor XD locking needs a longer non-vacuous real sample."""
+    """Conservative BI confirmation needs enough history for locked XDs."""
 
     return (
         pd.read_parquet(FIXTURE)[
             ["date", "open", "high", "low", "close", "volume"]
         ]
-        .head(800)
+        .head(2400)
         .reset_index(drop=True)
     )
 
@@ -113,27 +113,37 @@ def test_done_and_locked_at_are_bijective(sample_frame):
 
     bis = cd.get_bis()
     assert bis
-    assert all(not bi.forming for bi in bis[:-1])
+    calc = cd.bi_calculator
+    assert bis == calc.confirmed_bis + calc.pending_bis
+    assert all(not bi.forming and bi.is_done() for bi in calc.confirmed_bis)
+    assert 1 <= len(calc.pending_bis) <= 3
+    assert all(bi.forming and not bi.is_done() for bi in calc.pending_bis)
     assert bis[-1].forming is True
     assert bis[-1].is_done() is False
 
 
-def test_bi_lock_time_is_first_sufficient_following_endpoint_witness(sample_frame):
+def test_bi_lock_time_matches_its_first_confirmed_physical_prefix(sample_frame):
     cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     cd.process_klines(sample_frame)
 
     all_bis = cd.get_bis()
     locked_bis = [line for line in all_bis if line.is_done()]
     assert locked_bis
+    first_seen = {}
+    live = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
+    for row in sample_frame.itertuples(index=False):
+        _incremental_update(live, row)
+        for bi in live.bi_calculator.confirmed_bis:
+            first_seen.setdefault(_line_identity("bi", bi), row.date)
+    physical_witnesses = {_first_sufficient_fractal_witness(fx) for fx in cd.get_fxs()}
+    completion_by_edge = {(c.start, c.end): c for c in cd.bi_calculator.completion_evidence}
     for bi in locked_bis:
-        following = next(
-            fx
-            for fx in cd.get_fxs()
-            if fx.k.index > bi.end.k.index
-            and fx.type != bi.end.type
-            and cd.bi_calculator._check_stroke_validity(bi.end, fx)
-        )
-        assert bi.locked_at == _first_sufficient_fractal_witness(following)
+        assert bi.locked_at == first_seen[_line_identity("bi", bi)]
+        event = next(c for c in completion_by_edge.values()
+                     if cd.bi_calculator._resolver.nodes[c.start].fx.k.index == bi.start.k.index
+                     and cd.bi_calculator._resolver.nodes[c.end].fx.k.index == bi.end.k.index)
+        assert event.physical_witness_at in physical_witnesses
+        assert bi.locked_at == cd._stroke_close_times[event.physical_witness_at]
         assert bi.locked_at >= _first_sufficient_fractal_witness(bi.end)
 
 
@@ -156,7 +166,7 @@ def test_xd_lock_times_follow_causal_segment_order():
         pd.read_parquet(FIXTURE)[
             ["date", "open", "high", "low", "close", "volume"]
         ]
-        .head(800)
+        .head(2400)
         .reset_index(drop=True)
     )
     cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
@@ -188,6 +198,8 @@ def test_locked_line_time_never_moves_on_longer_prefix(sample_frame):
     frozen = {}
     for row in sample_frame.itertuples(index=False):
         _incremental_update(cd, row)
+        current = {_line_identity(kind, line): line for kind, line in _locked_lines(cd)}
+        assert frozen.keys() <= current.keys()
         for kind, line in _locked_lines(cd):
             key = _line_identity(kind, line)
             record = (line.locked_at, line.start.k.k_index, line.end.k.k_index)

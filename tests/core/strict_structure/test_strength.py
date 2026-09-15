@@ -487,7 +487,8 @@ def test_strict_strength_matches_directional_native_formula_for_locked_xd_pair()
         pd.read_parquet("tests/fixtures/SH.600519_5m.parquet")[
             ["date", "open", "high", "low", "close", "volume"]
         ]
-        .head(1500)
+        # The conservative BI prefix must contain a nonempty locked XD pair.
+        .head(2400)
         .reset_index(drop=True)
     )
     config = {

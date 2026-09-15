@@ -16,13 +16,14 @@ from chanlun.core.strict_structure.models import SourceKind
 from tests.core.strict_structure.helpers import TEST_PRICE_BASIS, unit, valid_five_up_exit
 
 
-@pytest.mark.parametrize("name,frequency", [
-    ("SZ.002299_1m.parquet", "1m"),
-    ("SH.600519_5m.parquet", "5m"),
-    ("SH.600519_30m.parquet", "30m"),
+@pytest.mark.parametrize("name,frequency,rows", [
+    ("SZ.002299_1m.parquet", "1m", 3000),
+    # Long enough to exercise centers beyond historical short conflicts.
+    ("SH.600519_5m.parquet", "5m", 10000),
+    ("SH.600519_30m.parquet", "30m", 3000),
 ])
-def test_recorded_market_bars_render_centers_and_signals_from_one_source(name, frequency):
-    frame = pd.read_parquet(Path(__file__).parents[1] / "fixtures" / name).head(3000)
+def test_recorded_market_bars_render_centers_and_signals_from_one_source(name, frequency, rows):
+    frame = pd.read_parquet(Path(__file__).parents[1] / "fixtures" / name).head(rows)
     frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
     code = name.split("_")[0]
     runtime = build_strict_chart_cd(market="a", code=code, frequency=frequency, frame=frame)
@@ -47,13 +48,28 @@ def test_recorded_market_bars_render_centers_and_signals_from_one_source(name, f
     level = snapshot["levels"][0]
     assert set(level) == {"structural_level", "label", "origin", "centers", "center_previews", "points", "divergences"}
     assert level["origin"] == "native_segments"
-    if frequency == "30m":
-        assert not level["centers"]
-        assert sum(xd.is_done() for xd in runtime.cd.get_xds()) < 5
-    else:
-        assert level["centers"]
+    assert not result["stroke_construction"]["unresolved_regions"]
+    assert not snapshot["conditional_centers"]
+    continuous = runtime.cd.get_contiguous_bis()
+    assert len(continuous) == len(runtime.cd.get_bis())
+    assert all(x.end_line.index < len(continuous) for x in runtime.cd.get_xds())
+    assert all(not item["tradable"] for item in level["center_previews"])
     assert result["bis"] and result["xds"]
+    assert all(item["state"] in {"locked", "forming"} for item in result["bis"])
+    assert any(item["locked"] for item in result["bis"])
+    assert all(item["locked"] == item["completion_is_final"] == (item["state"] == "locked")
+               for item in result["bis"])
+    assert all(item["component_index"] == 0 and not item["selection_pending"] for item in result["bis"])
     assert "stroke_center_observations" in snapshot
+    for item in snapshot["conditional_centers"]:
+        assert item["render_kind"] == "conditional_center"
+        assert item["selection_pending"] and item["component_index"] > 0
+        assert not item["tradable"] and not item["locked"] and not item["third_class_confirmed"]
+        assert item["center_id"] not in {c["center_id"] for c in level["centers"]}
+    for item in result["xds"]:
+        if item["component_index"] > 0:
+            assert item["state"] == "forming" and item["selection_pending"] and not item["locked"]
+            assert item["observation_scope_id"]
     for item in snapshot["stroke_center_observations"]:
         assert item["source_kind"] == "stroke_observation" and not item["tradable"]
     for item in level["points"]:
@@ -71,6 +87,34 @@ def test_recorded_market_bars_render_centers_and_signals_from_one_source(name, f
     repeated = cl_data_to_tv_chart(frame, {}, market="a", code=code,
                                    frequency=frequency, strict_runtime=runtime)
     assert repeated["strict_structure"] == snapshot
+
+
+def test_initial_reselection_renders_one_pending_pen_without_a_future_lock():
+    from script.review_stroke_rule_logic import COMPLETION_RETRACTION
+    from tests.core.test_bi_source_updates import _frame
+
+    frame = _frame(COMPLETION_RETRACTION, False)
+    frame["date"] = frame["date"].dt.tz_localize("UTC")
+    frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="test-raw")
+    runtime = build_strict_chart_cd(market="a", code="TST", frequency="1m", frame=frame)
+    assert runtime.error_code is None
+    result = cl_data_to_tv_chart(
+        frame, {"chart_show_bi": "1", "chart_show_xd": "1"},
+        market="a", code="TST", frequency="1m", strict_runtime=runtime,
+    )
+    assert [item["component_index"] for item in result["bis"]] == [0]
+    assert [item["state"] for item in result["bis"]] == ["forming"]
+    assert not result["bis"][0]["completion_is_final"]
+    assert result["stroke_construction"]["status"] == "tail_pending"
+    assert "processing_mode" not in result["stroke_construction"]
+    assert not result["stroke_construction"]["unresolved_regions"]
+    assert not result["xds"]
+    assert result["strict_structure_mode"] == "replace"
+    assert not result["strict_structure"]["stroke_connection_pending"]
+    hidden = cl_data_to_tv_chart(
+        frame, {}, market="a", code="TST", frequency="1m", strict_runtime=runtime,
+    )
+    assert not hidden["bis"] and not hidden["strict_structure"]["stroke_connection_pending"]
 
 
 def _snapshot_for_units(units):

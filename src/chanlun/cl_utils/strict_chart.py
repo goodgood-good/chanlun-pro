@@ -564,6 +564,33 @@ def _with_prices(value: object, quantum: Decimal) -> object:
     return result
 
 
+def _conditional_center_payload(center, observation):
+    """只有条件几何和作用范围；局部证明不冒充正式中枢/三买卖确认。"""
+    payload = {
+        "schema": CHART_CENTER_SCHEMA,
+        "render_kind": "conditional_center",
+        "center_id": center.center_id,
+        "observation_scope_id": observation.scope_id,
+        "component_index": observation.component_index,
+        "price_basis_revision": center.price_basis_revision,
+        "structural_level": 0,
+        "source_kind": "segment",
+        "state": "selection_pending",
+        "selection_pending": True,
+        "tradable": False,
+        "locked": False,
+        "third_class_confirmed": False,
+        "available_at": aware_datetime_to_epoch_seconds(center.available_at),
+        "core": {"zd_tick": center.zd_tick, "zg_tick": center.zg_tick},
+        "points": [
+            {"time": aware_datetime_to_epoch_seconds(center.display_range_start_market_time), "price_tick": center.zg_tick},
+            {"time": aware_datetime_to_epoch_seconds(center.display_range_end_market_time), "price_tick": center.zd_tick},
+        ],
+    }
+    payload["render_id"] = stable_structure_id("conditional-center-v1", payload)
+    return payload
+
+
 def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int, ...]):
     if interval != cd.get_frequency():
         raise ValueError("native center interval must match its source bars")
@@ -622,14 +649,22 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         for center in evidence.stroke_center_observations.centers
         if center.available_at <= cd._strict_as_of()
     ]
+    construction = (cd.get_stroke_construction_state()
+                    if hasattr(cd, "get_stroke_construction_state") else {})
+    connection_pending = bool(construction.get("unresolved_regions"))
+    conditional = [
+        _with_prices(_conditional_center_payload(center, observation), quantum)
+        for observation, result in (cd.get_conditional_centers() if hasattr(cd, "get_conditional_centers") else ())
+        for center in result.centers if center.available_at <= cd._strict_as_of()
+    ]
     revision = stable_structure_id(
-        "chart-analysis-snapshot-v4",
+        "chart-analysis-snapshot-v6",
         EXIT_PRICE_VERSION,
         cd.get_code(),
         interval,
         cd._strict_config_revision(),
         cutoff,
-        levels, observations,
+        levels, observations, connection_pending, conditional,
     )
     return with_point_exit_plans({
         "schema": CHART_STRUCTURE_SCHEMA,
@@ -646,6 +681,8 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         "render_revision": revision,
         "levels": levels,
         "stroke_center_observations": observations,
+        "stroke_connection_pending": connection_pending,
+        "conditional_centers": conditional,
     })
 
 

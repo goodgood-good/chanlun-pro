@@ -29,7 +29,7 @@
 
 
   function logicalKey(item) {
-    if (['formal_center', 'center_observation', 'center_preview'].includes(item?.render_kind)) {
+    if (['formal_center', 'center_observation', 'center_preview', 'conditional_center'].includes(item?.render_kind)) {
       return item.render_kind + ':' + requireString(item.center_id, 'center_id');
     }
     if (item?.render_kind === 'point_confirmed' || item?.render_kind === 'point_approaching') {

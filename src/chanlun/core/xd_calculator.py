@@ -20,12 +20,13 @@ _TYPE2_INVALIDATED = "invalidated"
 
 @dataclass(frozen=True)
 class _GapConfirmationInvalidated:
-    """待定的第二种缺口确认被更晚锁定的笔否定。
+    """待定的第二种缺口结构被更晚的笔否定。
 
     即使线段随后通过普通无缺口分支成立，这根否定笔仍是因果证据。若丢失该
     时间，更晚前缀可能生成一条 ``locked_at`` 被错误提前到线段可见之前的线段。
     """
 
+    # None 表示否定证据自身仍是候选笔，只能改变预览，不能确认线段。
     witnessed_at: object
 
 
@@ -178,9 +179,13 @@ class XdCalculator:
         """根据笔列表计算线段（当前=全量重建；段增量已禁用）。
 
         几何仍以全量重建对照，只有实际输入笔变化才重新计算。确认只来自
-        已锁定笔的破坏证据；追加数据不得改写已确认前缀。活动尾部允许继续
-        延伸。下方 identity 检查保留，跳过没有输入变化的重复计算。
+        连续输入笔的承接和破坏证据；来源取舍修订时须重新核验已确认结构。
+        活动尾部允许继续延伸。下方 identity 检查跳过没有输入变化的计算。
         """
+        if len({getattr(bi, "component_index", 0) for bi in bis}) > 1:
+            raise ValueError("segment input crosses an unresolved stroke boundary")
+        if any(bi.index != position for position, bi in enumerate(bis)):
+            raise ValueError("segment input indices must match continuous scope positions")
         all_bis = bis
         if all_bis is self._last_bis_obj:
             return self.xds
@@ -245,6 +250,9 @@ class XdCalculator:
         # 不等于确认时间。只有证据完整的候选可以进入不可改写的前缀。
         segs: List[tuple] = []      # 元组格式：（线段起点、实际终点、线段类型、形成时刻）
         locked_candidates = {}      # （起点、终点、类型）映射到首次因果锁定时刻
+        # 当前候选笔路径上的完整几何证据，独立于不可撤销的确认。
+        # 防止仅因组成笔待定，就把已有候选分界吸收成一条巨大尾段。
+        geometric_candidates = set()
         pos = start
         reverse_end_hint = None
         pending_tail = None         # 内层自然结束的末段未完成线段 (start, type)
@@ -353,11 +361,14 @@ class XdCalculator:
                                            seg_high, seg_low, check,
                                            seg_cs_bis_cache=seg_cs_bis)
                 if isinstance(end_result, _GapConfirmationInvalidated):
-                    decision_floor = (
-                        end_result.witnessed_at
-                        if decision_floor is None
-                        else max(decision_floor, end_result.witnessed_at)
-                    )
+                    if end_result.witnessed_at is None:
+                        decision_is_formal = False
+                    else:
+                        decision_floor = (
+                            end_result.witnessed_at
+                            if decision_floor is None
+                            else max(decision_floor, end_result.witnessed_at)
+                        )
                     end_result = None
                 if end_result is _GAP_CONFIRMATION_PENDING:
                     # 原文第二种情况一旦出现缺口，就必须等待第二特征序列
@@ -385,8 +396,9 @@ class XdCalculator:
                         all_bis,
                         segs,
                         r34_starts,
-                        locked_candidates,
+                        geometric_candidates,
                     )
+                    geometric_candidates.add(self._candidate_key(segs[-1]))
                     self._freeze_confirmed_candidate(segs, locked_candidates)
                     pos = segs[-1][1] + 1   # 从(可能已合并的)最后段终点之后续建
                     # 反向区间提示:无合并时沿用外层 check(反向段同向笔);合并后作废
@@ -420,8 +432,9 @@ class XdCalculator:
                         all_bis,
                         segs,
                         r34_starts,
-                        locked_candidates,
+                        geometric_candidates,
                     )
+                    geometric_candidates.add(self._candidate_key(segs[-1]))
                     self._freeze_confirmed_candidate(segs, locked_candidates)
                     pos = segs[-1][1] + 1
                     reverse_end_hint = None
@@ -495,7 +508,7 @@ class XdCalculator:
         all_bis,
         segs,
         r34_starts,
-        locked_candidates,
+        protected_candidates,
     ) -> bool:
         """确认级联：两类合并循环至稳定，返回是否合并过。
         ① 深度-1 假反弹（_breaks_back）：末段(cur)破前段转折点 → 并入前段，终点取真极值
@@ -511,7 +524,7 @@ class XdCalculator:
             if (
                 len(segs) >= 2
                 and self._breaks_back(all_bis, segs[-2], segs[-1])
-                and self._candidate_key(segs[-2]) not in locked_candidates
+                and self._candidate_key(segs[-2]) not in protected_candidates
             ):
                 ps, _pe, pt, prior_formed_at = segs[-2]
                 cs, ce, _, current_formed_at = segs[-1]
@@ -530,7 +543,7 @@ class XdCalculator:
                 if (
                     A[2] == C[2]
                     and self._breaks_extreme(all_bis, A, C)
-                    and self._candidate_key(A) not in locked_candidates
+                    and self._candidate_key(A) not in protected_candidates
                 ):
                     new_end = self._extreme_idx(all_bis, A[0], C[1], A[2])
                     witnesses = (A[3], B[3], C[3])
@@ -803,8 +816,6 @@ class XdCalculator:
                 if type2_witness_idx is None:
                     raise ValueError("type-2 invalidation requires a causal witness")
                 witnessed_at = all_bis[type2_witness_idx].locked_at
-                if witnessed_at is None:
-                    raise ValueError("type-2 invalidation witness must be locked")
                 return _GapConfirmationInvalidated(witnessed_at)
             _log.debug(lambda:"    _try_end: _check_type2成功")
         else:
@@ -813,7 +824,7 @@ class XdCalculator:
         # ---- 步骤6: 定位当前线段结束位置 + 反向线段范围 ----
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
-        # bi.index 恒等于其在 all_bis 中的位置(bi_calculator._reindex_bis 保证),
+        # bi.index 恒等于其在 all_bis 中的位置(BiCalculator 重建尾部时保证),
         # 故直接用 .index 代替原 _bi_pos[id(bi)] 映射,省去每次 calculate O(B) 重建。
         end_bi_idx = target_bi.index - 1
         if end_bi_idx <= seg_start or end_bi_idx >= len(all_bis):
@@ -934,8 +945,8 @@ class XdCalculator:
         i = start_pos
         while i < len(all_bis):
             bi = all_bis[i]
-            if getattr(bi, 'locked_at', None) is None:
-                break
+            # 在当前候选笔路径上继续判断几何；_try_end 与主循环单独
+            # 检查这些证据的 locked_at，缺失时输出待确认线段。
 
             # 原线段严格创新高/低检查（> / <，等价不算创新极值）。
             # 直接 return False 会让"等价新高 + 跨段后续创新高"误判为段延伸，
@@ -1064,9 +1075,8 @@ class XdCalculator:
           已完成段由 _try_end 严格判定终点；未完成段无完整反向特征序列可用，
           只能保守估计。极值优先体现"线段记录方向极值"，兜底体现"实盘需有持续反馈"。
 
-        candidates 不过滤 is_done()：BiCalculator 把最后一根笔标 pending，只收 done
-        笔会出现"反向段恰好 3 根（末根 pending）→ candidates 只剩 2"的塌陷窗口。
-        pending 笔 high/low 仍有效，参与极值/兜底逻辑无副作用。
+        candidates 不过滤 is_done()：BiCalculator 可以输出多笔待定尾部，
+        它们参与当前路径的几何预览，但不能单独提供正式确认。
         """
         candidates = list(all_bis[start:])
         if len(candidates) < 3:

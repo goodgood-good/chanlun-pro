@@ -6,22 +6,35 @@ import hashlib
 import json
 
 STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base"
-STRICT_STROKE_MODE = "source-fractal-nonshared-raw-distance-v2"
+STRICT_STROKE_MODE = "old-user-path-b-completed-prefix-v14"
 
 
 _STRICT_BASE_CONFIG: dict[str, object] = {'fractal_rule': 'three-cl-k-both-extremes',
+ 'inclusion_initial_context_rule': 'common-price-geometry-with-separate-source-provenance-v2',
+ 'fractal_completion_rule': 'physical-fractal-independent-of-stroke-completion',
  'stroke_rule': STRICT_STROKE_MODE,
- 'stroke_distance_rule': 'merged-centers-at-least-three-raw-extremes-at-least-four',
+ 'stroke_distance_rule': 'merged-centers-at-least-four',
  'stroke_price_rule': 'top-middle-high-and-low-above-bottom-middle',
- 'stroke_secondary_fractal_rule': 'allowed',
- 'stroke_endpoint_range_rule': 'fractal-endpoints-not-interval-extremes',
- 'stroke_near_opposite_rule': 'retain-fractal-ignore-as-endpoint',
- 'stroke_same_type_rule': 'replace-only-if-more-extreme-and-still-valid-from-previous',
+ 'stroke_secondary_fractal_rule': 'retained-facts-without-internal-extreme-veto',
+ 'stroke_endpoint_range_rule': 'symmetric-center-ranges-user-P-C-policy',
+ 'stroke_near_opposite_rule': 'path-b-tail-reselection-with-completed-prefix-guard',
+ 'stroke_same_type_rule': 'strict-extreme-replacement-of-mutable-tail',
  'stroke_equal_extreme_rule': 'keep-earlier-fractal',
- 'stroke_lock_rule': 'next-valid-endpoint-physical-witness-no-rollback',
+ 'stroke_path_rule': 'causal-selected-chain-without-discarded-path-restoration',
+ 'stroke_origin_rule': 'earliest-relative-fractal-with-unqualified-origin-recovery',
+ 'stroke_pending_rule': 'retain-physical-facts-outside-selected-chain',
+ 'stroke_lock_rule': 'third-qualified-edge-with-closed-source-witness',
+ 'stroke_completion_scope': 'qualified-continued-and-final-completion-distinguished',
+ 'stroke_revision_rule': 'recompute-dependent-structures-after-endpoint-reselection',
+ 'physical_unit_evidence_rule': 'version-selection-and-confirmation-evidence-v1',
+ 'stroke_evidence_rule': 'physical-fractal-visibility-separated-from-selection-time',
+ 'stroke_disconnected_rule': 'one-continuous-chain-and-unselected-observations',
+ 'stroke_processing_rule': 'fresh-batch-and-causal-tail-update-share-source-rules',
+ 'stroke_downstream_rule': 'continuous-formal-input-and-isolated-conditional-observations-v2',
  'segment_rule': 'feature-sequence',
  'segment_start_rule': 'earliest-three-overlap-directional-observation-origin-v1',
  'segment_gap_rule': 'second-feature-sequence-fractal',
+ 'segment_pending_input_rule': 'candidate-geometry-separate-from-locked-evidence-v1',
  'segment_feature_pivot_rule': 'original-segment-directional-record-extremes-lesson-81-v1',
  'segment_reverse_break_rule': 'immediate-three-strokes-no-distant-lookahead-v2',
  'segment_price_range_rule': 'constituent-stroke-extremes-with-actual-market-time-v1',
