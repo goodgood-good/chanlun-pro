@@ -1,0 +1,799 @@
+{
+  "scope": "Historical chart data actually reviewed by the user; not current production output.",
+  "generated_at": "2026-09-16T10:30:44",
+  "implementation_sha256": {
+    "src/chanlun/core/xd_calculator.py": "3032dbf0ab772f5a881e5531be5b6bef9874b648fdb3dbec77a29635c1d6d1e5",
+    "src/chanlun/core/segment_evidence.py": "51d93584ed33b6f861128c6ae4573e1af279a8fed1d28048949a605ec1c8eb01",
+    "src/chanlun/core/strict_structure/base_profile.py": "06e4c2ee1ad0282643d8ac42ac89eb5cfe7d69851f11701ff1dfc68dbc59266c",
+    "script/check_segment_gap_classification.py": "98b714e4171e755fe6fc76b050dd75918445a4afcd43d2e48f922b97f5fc923e"
+  },
+  "cases": {
+    "r1": {
+      "9_0": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          9,
+          13,
+          3
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        },
+        "inside": 9,
+        "future": false
+      },
+      "9_1": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          9,
+          13,
+          3,
+          15,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "waiting-first-feature",
+          "confirmed": 1
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "waiting-first-feature",
+          "confirmed": 1
+        },
+        "inside": 9,
+        "future": true
+      },
+      "10_0": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          10,
+          13,
+          3
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        },
+        "inside": 10,
+        "future": false
+      },
+      "10_1": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          10,
+          13,
+          3,
+          15,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "waiting-first-feature",
+          "confirmed": 1
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "waiting-first-feature",
+          "confirmed": 1
+        },
+        "inside": 10,
+        "future": true
+      },
+      "11_0": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          11,
+          13,
+          3
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              false
+            ]
+          ],
+          "reason": "waiting-second-feature",
+          "confirmed": 0
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        },
+        "inside": 11,
+        "future": false
+      },
+      "11_1": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          11,
+          13,
+          3,
+          15,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              9,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 0
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              false
+            ]
+          ],
+          "reason": "waiting-first-feature",
+          "confirmed": 1
+        },
+        "inside": 11,
+        "future": true
+      }
+    },
+    "r2": {
+      "11": {
+        "points": [
+          0,
+          10,
+          6,
+          18,
+          13,
+          16,
+          11,
+          14,
+          11,
+          13,
+          12,
+          14
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              6,
+              true
+            ],
+            [
+              6,
+              11,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 2
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              true
+            ],
+            [
+              8,
+              11,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 2
+        }
+      },
+      "14": {
+        "points": [
+          0,
+          10,
+          6,
+          18,
+          13,
+          16,
+          11,
+          14,
+          11,
+          13,
+          12,
+          14,
+          12.5,
+          13,
+          10
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              6,
+              true
+            ],
+            [
+              6,
+              13,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 2
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              true
+            ],
+            [
+              8,
+              11,
+              true
+            ],
+            [
+              11,
+              14,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 3
+        }
+      }
+    },
+    "r3": {
+      "13": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          13,
+          3
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              6,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              6,
+              false
+            ]
+          ],
+          "kind": "假设标法，非完整替代算法"
+        },
+        "high": 13
+      },
+      "14": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          14,
+          3
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              false
+            ]
+          ],
+          "reason": "waiting-first-feature",
+          "confirmed": 0
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              6,
+              false
+            ]
+          ],
+          "kind": "假设标法，非完整替代算法"
+        },
+        "high": 14
+      },
+      "15": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          15,
+          3
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              5,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 0
+        },
+        "b": {
+          "segments": [
+            [
+              0,
+              5,
+              false
+            ]
+          ],
+          "kind": "假设标法，非完整替代算法"
+        },
+        "high": 15
+      }
+    },
+    "r4": {
+      "reference": {
+        "points": [
+          0,
+          8,
+          3,
+          6,
+          2,
+          12,
+          7,
+          11,
+          4
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              5,
+              true
+            ],
+            [
+              5,
+              8,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        }
+      },
+      "upper": {
+        "points": [
+          30,
+          20,
+          29,
+          12,
+          32,
+          14,
+          26,
+          18,
+          30,
+          15,
+          24,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              true
+            ],
+            [
+              8,
+              11,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 2
+        }
+      },
+      "lower": {
+        "points": [
+          30,
+          20,
+          29,
+          12,
+          32,
+          14,
+          26,
+          18,
+          30,
+          21,
+          28,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              10,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        }
+      },
+      "equal": {
+        "points": [
+          30,
+          20,
+          29,
+          12,
+          32,
+          14,
+          26,
+          18,
+          30,
+          18,
+          28,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              10,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 1
+        }
+      },
+      "break": {
+        "points": [
+          30,
+          20,
+          29,
+          12,
+          32,
+          14,
+          26,
+          18,
+          30,
+          15,
+          28,
+          8
+        ],
+        "a": {
+          "segments": [
+            [
+              0,
+              3,
+              true
+            ],
+            [
+              3,
+              8,
+              true
+            ],
+            [
+              8,
+              11,
+              false
+            ]
+          ],
+          "reason": "forming",
+          "confirmed": 2
+        }
+      }
+    },
+    "r5": {
+      "author": {
+        "points": [
+          30,
+          20,
+          29,
+          12,
+          32,
+          14,
+          26,
+          18,
+          30
+        ],
+        "ranges": [
+          [
+            12,
+            32
+          ],
+          [
+            14,
+            26
+          ]
+        ],
+        "a": [
+          12,
+          26
+        ],
+        "b": [
+          14,
+          32
+        ],
+        "pivot": 12
+      },
+      "strict": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          12,
+          11,
+          13,
+          3
+        ],
+        "ranges": [
+          [
+            4,
+            14
+          ],
+          [
+            11,
+            12
+          ]
+        ],
+        "a": [
+          11,
+          14
+        ],
+        "b": [
+          4,
+          12
+        ],
+        "pivot": 14
+      },
+      "equal": {
+        "points": [
+          0,
+          10,
+          6,
+          14,
+          4,
+          14,
+          3
+        ],
+        "ranges": [
+          [
+            4,
+            14
+          ],
+          [
+            3,
+            14
+          ]
+        ],
+        "a": [
+          4,
+          14
+        ],
+        "b": [
+          3,
+          14
+        ],
+        "pivot": 14
+      }
+    }
+  }
+}

@@ -95,6 +95,9 @@ def test_fixed_stroke_proof_is_immutable_and_pending_projection_cannot_lock(mirr
             first_confirmed = first_confirmed or first.locked_at
             assert (first.start_line.index, first.end_line.index) == (0, 6)
             assert first.locked_at == first_confirmed
+    # Reviewed chart-01 reading: raw [1375,1385] overlaps [1384,1388].
+    # The later contained middle [1375,1383] does not reclassify that break.
+    # Its FIRST fractal is witnessed by pen 11; a second top is unnecessary.
     assert first_confirmed == values[11].locked_at
 
 
@@ -149,10 +152,25 @@ def test_non_extreme_boundary_preserves_the_reverse_segment_origin(mirror):
     # Real failure reduced to ticks: the first stroke is the internal extreme.
     # Forcing the first segment to end at 3 strands stroke 3-4, because 3-4
     # and 5-6 do not overlap. The reverse origin must remain valid as well.
-    values = _strokes([3860, 3910, 3866, 3877, 3863, 3895, 3880,
-                      3891, 3853, 3864, 3848, 3888, 3872, 3905], mirror)
-    lines = XdCalculator().calculate(values)
-    assert len(lines) >= 2
+    points = [3860, 3910, 3866, 3877, 3863, 3895, 3880,
+              3891, 3853, 3864, 3848, 3888, 3872, 3905]
+    calculator = XdCalculator()
+    before = calculator.calculate(_strokes(points, mirror))
+    # L079's contained pivot: 4-5 / 6-7 retain the outside 3-4 reference.
+    # P7=3891 is below the interior P5=3895, but is a strict top relative
+    # to the effective left P3=3877. Comparing only adjacent raw pens had
+    # incorrectly rejected this valid boundary during the earlier audit.
+    assert len(before) == 3 and before[0].is_done()
+    proof = before[0].construction_evidence
+    assert proof.end_index == 6 and proof.witness_index == 9
+    assert proof.first_sequence[0].source_indices == (3,)
+    assert proof.pivot_stem.source_indices == (4, 6)
+    confirmed_time = before[0].locked_at
+    values = _strokes(points + [3860, 3890, 3830], mirror)
+    lines = calculator.calculate(values)
+    assert len(lines) == 4 and lines[0].is_done()
+    assert lines[0].end_line.index == 6
+    assert lines[0].locked_at == confirmed_time
     for a, b in zip(lines, lines[1:]):
         assert a.end_line.index + 1 == b.start_line.index
         assert a.type != b.type

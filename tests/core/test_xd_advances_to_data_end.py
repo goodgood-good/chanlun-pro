@@ -88,7 +88,17 @@ def test_no_single_segment_swallows_the_tail(minute_frame: pd.DataFrame) -> None
     # construction test, independent of the full file's earlier BI boundary.
     state.process_klines(minute_frame.iloc[4600:5150].reset_index(drop=True))
     segments = state.get_xds()
-    assert len(segments) >= 3
+    # L067 requires an actual feature fractal, not a minimum segment count.
+    # The former four-segment output began with a false top: middle high
+    # 16.58 < left high 16.73. The first valid top has high 17.25 and ends at
+    # point 32. This window therefore has one confirmed segment and one tail;
+    # it still exercises whether the tail swallows disproportionate history.
+    assert len(segments) == 2
+    assert _segment_signature(segments[0]) == (1, 31, "up", True)
+    first_proof = segments[0].construction_evidence
+    left, middle, right = first_proof.first_sequence
+    assert (left.high, middle.high, right.high) == (17.2, 17.25, 17.19)
+    assert not first_proof.initial_gap
 
     spans = [
         int(item.end_line.index) - int(item.start_line.index) + 1

@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="990" height="390" viewBox="0 0 990 390" role="img" aria-labelledby="title desc">
+  <title id="title">局部极值与更早内部极值的区别</title>
+  <desc id="desc">三组推导示意采用端点 0,30,4,20,15,H,5,16,2。H 为 19 或 20 时，不能把候选当作局部顶；H 为 21 时高于局部左肩 20，虽然仍低于更早的内部高点 30，本例可以确认在点 5 分界。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #26364a; }
+    .panel { fill: #f7f9fc; stroke: #dce3ec; }
+    .pen { fill: none; stroke: #8795a7; stroke-width: 2; stroke-linejoin: round; }
+    .reference { stroke: #516a8c; stroke-width: 4; }
+    .guide { stroke: #516a8c; stroke-width: 1; stroke-dasharray: 4 4; }
+    .bad { stroke: #b84b44; stroke-width: 4; }
+    .good { stroke: #16806b; stroke-width: 4; }
+    .small { font-size: 12px; }
+    .label { font-size: 14px; font-weight: 600; }
+    .heading { font-size: 17px; font-weight: 600; }
+  </style>
+  <rect width="990" height="390" fill="white"/>
+  <text x="24" y="27" class="heading">第一笔破坏的包含保护，不取消局部顶／底的极值条件</text>
+  <text x="24" y="50" class="small">规则推导示意；合成合法笔输入，非原文行情价格。三例的更早内部高点均为 30。</text>
+  <g transform="translate(15,65)">
+    <rect class="panel" width="310" height="260" rx="10"/>
+    <text x="18" y="28" class="heading">H = 19：低于左侧高点</text>
+    <polyline class="pen" points="20,210 52,60 84,190 116,110 148,135 180,115 212,185 244,130 276,200"/>
+    <line class="guide" x1="107" y1="110" x2="287" y2="110"/>
+    <line class="reference" x1="116" y1="110" x2="148" y2="135"/>
+    <line class="bad" x1="180" y1="115" x2="212" y2="185"/>
+    <line class="reference" x1="244" y1="130" x2="276" y2="200"/>
+    <text x="38" y="51" class="small">P1：30</text>
+    <text x="94" y="100" class="label">P3：20</text>
+    <text x="169" y="100" class="label" style="fill:#b84b44">P5：19</text>
+    <text x="239" y="122" class="small">16</text>
+    <text x="18" y="241" class="label">局部顶不成立；本例保持待定</text>
+  </g>
+  <g transform="translate(340,65)">
+    <rect class="panel" width="310" height="260" rx="10"/>
+    <text x="18" y="28" class="heading">H = 20：等于左侧高点</text>
+    <polyline class="pen" points="20,210 52,60 84,190 116,110 148,135 180,110 212,185 244,130 276,200"/>
+    <line class="guide" x1="107" y1="110" x2="287" y2="110"/>
+    <line class="reference" x1="116" y1="110" x2="148" y2="135"/>
+    <line class="bad" x1="180" y1="110" x2="212" y2="185"/>
+    <line class="reference" x1="244" y1="130" x2="276" y2="200"/>
+    <text x="38" y="51" class="small">P1：30</text>
+    <text x="94" y="100" class="label">P3：20</text>
+    <text x="169" y="100" class="label" style="fill:#b84b44">P5：20</text>
+    <text x="239" y="122" class="small">16</text>
+    <text x="18" y="241" class="label">相等不能作为严格局部顶</text>
+  </g>
+  <g transform="translate(665,65)">
+    <rect class="panel" width="310" height="260" rx="10"/>
+    <text x="18" y="28" class="heading">H = 21：高于左侧高点</text>
+    <polyline class="pen" points="20,210 52,60 84,190 116,110 148,135 180,105 212,185 244,130 276,200"/>
+    <line class="guide" x1="107" y1="110" x2="287" y2="110"/>
+    <line class="reference" x1="116" y1="110" x2="148" y2="135"/>
+    <line class="good" x1="180" y1="105" x2="212" y2="185"/>
+    <line class="reference" x1="244" y1="130" x2="276" y2="200"/>
+    <text x="38" y="51" class="small">P1：30</text>
+    <text x="94" y="100" class="label">P3：20</text>
+    <text x="169" y="92" class="label" style="fill:#16806b">P5：21</text>
+    <text x="239" y="122" class="small">16</text>
+    <text x="18" y="241" class="label">本例确认 0—5；端点仍低于 30</text>
+  </g>
+  <text x="24" y="351" class="small">蓝色：局部左右参考元素；红／绿色：候选中间元素。端点依次为 0,30,4,20,15,H,5,16,2。</text>
+  <text x="24" y="375" class="small">原文依据与工程起点约定见同目录《系统线段构建审查与修正记录》。上下镜像采用对应的底分型条件。</text>
+</svg>

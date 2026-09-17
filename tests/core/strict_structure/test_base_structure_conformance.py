@@ -227,7 +227,12 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert config["stroke_downstream_rule"] == "continuous-formal-input-and-isolated-conditional-observations-v2"
     assert config["stroke_completion_scope"] == "qualified-continued-and-final-completion-distinguished"
     assert config["segment_rule"] == "feature-sequence"
-    assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
+    assert config["segment_gap_rule"] == (
+        "second-feature-fractal-completes-parent-and-successor-v2"
+    )
+    assert config["segment_equal_extreme_rule"] == (
+        "earliest-middle-feature-boundary-source-with-separate-stem-provenance-v2"
+    )
     assert config["center_lifecycle_rule"] == (
         "external-departure-first-outside-return-third-class"
     )

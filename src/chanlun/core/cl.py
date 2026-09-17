@@ -98,7 +98,7 @@ def _production_config(config: dict | None) -> dict[str, object]:
 class CL(ICL):
     """以唯一严格证据为权威的生产缠论状态。"""
 
-    _PICKLE_SCHEMA = "chanlun-analysis-cl-v14"
+    _PICKLE_SCHEMA = "chanlun-analysis-cl-v15"
     _PICKLE_STATE_FIELDS = frozenset(
         {
             "code",

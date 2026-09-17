@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>线段规则图解 · 已落实用户裁定</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M3 27L12 7L20 22L29 4' fill='none' stroke='%23225bd8' stroke-width='3'/%3E%3C/svg%3E">
+<style>
+:root{--ink:#24354b;--muted:#64748b;--blue:#225bd8;--amber:#ad660b;--edge:#dfe5ee;--paper:#fff;--bg:#f3f6fa;--green:#176654}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}button,input,textarea,select{font:inherit}button,a,input,textarea{outline-offset:4px}button{cursor:pointer;border:1px solid var(--edge);border-radius:8px;padding:8px 15px;background:white;color:var(--ink)}button:hover{border-color:#8b9fb9;background:#f8faff}a{color:var(--blue);text-underline-offset:3px}.wrap{max-width:1440px;margin:auto;padding:0 30px}.mast{padding:30px 0 20px;background:white;border-bottom:1px solid var(--edge)}.eyebrow{font-size:12px;letter-spacing:2px;color:var(--muted)}h1{font-size:32px;line-height:1.3;margin:9px 0 10px;letter-spacing:1px}.lead{color:var(--muted);margin:0;font-size:14px}.toprow{display:flex;align-items:center;justify-content:space-between;gap:24px}.export{flex-shrink:0}.export small{display:block;color:var(--muted);text-align:right;margin-top:7px;font-size:12px}.tabsbar{position:sticky;top:0;background:rgba(255,255,255,.97);z-index:10;border-bottom:1px solid var(--edge)}.tabs{display:flex;gap:7px;padding-top:12px;padding-bottom:12px;overflow:auto}.tabs button{white-space:nowrap;border:0;font-size:14px}.tabs button[aria-selected=true]{background:#eaf0ff;color:var(--blue);font-weight:700}.tabs b{margin-right:7px}.review{padding:24px 0 46px}h2{font-size:26px;margin:8px 0 9px;line-height:1.4}h3{font-size:17px;margin:0 0 6px}p{margin:7px 0 12px}.tag{display:inline-block;font-size:12px;padding:3px 10px;border:1px solid #dce4f2;border-radius:30px;color:var(--muted);background:white}.tag.author{color:var(--green);border-color:#c8e1d8;background:#f0f8f4}.question{font-size:16px;max-width:1100px}.scope{font-size:13px;color:var(--muted)}.controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin:22px 0 14px}.variant-controls,.global-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.controls button[aria-pressed=true]{border-color:var(--blue);background:#edf3ff;color:var(--blue)}.control-label{font-size:13px;color:var(--muted);margin-right:3px}.global-controls label{font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer}.global-controls input{accent-color:var(--blue)}.legend{display:flex;gap:22px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:0 0 14px}.legend span{display:flex;align-items:center;gap:7px}.swatch{display:inline-block;width:25px;border-top:3px solid var(--blue)}.swatch.raw{border-color:#9da8b6;border-width:2px}.swatch.pending{border-top-style:dashed}.pair{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:16px 0}.card{background:white;border:1px solid var(--edge);border-radius:13px;overflow:hidden}.cardhead{padding:18px 22px 5px}.cardhead p{font-size:13px;color:var(--muted);margin:6px 0 5px}.policy-label{font-weight:700;font-size:13px;letter-spacing:.3px;color:var(--blue)}.card.b .policy-label{color:var(--amber)}.chartbox{overflow-x:auto;overscroll-behavior:contain;padding:0 8px}.chartbox svg{display:block;width:100%;min-width:530px;height:auto}.chartbox.wide svg{min-width:880px}.result{padding:11px 22px 15px;background:#f7faff;border-top:1px solid #edf1f8;font-size:14px;color:var(--blue)}.b .result{background:#fffaf2;color:var(--amber)}.callout{background:white;border-left:4px solid #b7c7dc;border-radius:7px;padding:14px 18px;margin:16px 0;font-size:14px}.callout strong{color:var(--ink)}.points{color:var(--muted);font-size:12px;overflow-wrap:anywhere;margin:13px 0}.section-title{font-size:14px;font-weight:700;margin:27px 0 8px}.equation{font-size:15px;font-weight:600;margin-top:8px!important;color:var(--ink)!important}.sourcebox{margin-top:20px;background:white;border:1px solid var(--edge);border-radius:12px;padding:0 20px}.sourcebox summary{cursor:pointer;font-weight:600;padding:16px 0}.sourcegrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}.source{border:1px solid var(--edge);border-radius:9px;padding:16px;font-size:13px}.source h4{font-size:14px;margin:0 0 8px}.source-path{font-size:11px;color:var(--muted);word-break:break-all;line-height:1.7}.source-line{margin:6px 0;line-height:1.9}.source-line span{color:#8b99aa;font-size:10px;margin-right:8px;white-space:nowrap}.source-image{max-width:100%;display:block;background:white}.image-caption{font-size:12px;color:var(--muted)}.judge{margin-top:24px;background:#fff;border:1px solid #c9d7eb;border-radius:12px;padding:22px}.judge h3{margin:0}.judge .scope{margin:6px 0 14px}.judgements{display:flex;gap:12px;flex-wrap:wrap}.judgements label{font-size:14px;padding:7px 11px;border:1px solid var(--edge);border-radius:7px;display:flex;gap:7px;align-items:center;cursor:pointer}.judgements input{accent-color:var(--blue)}textarea{display:block;width:100%;min-height:86px;resize:vertical;margin:13px 0 7px;border:1px solid var(--edge);border-radius:7px;padding:11px;font-size:14px;line-height:1.7}.save-state{font-size:12px;color:var(--muted);min-height:20px}.gallery{margin-top:25px;font-size:13px}.gallery summary{cursor:pointer}.gallery a{display:inline-block;margin:9px 16px 3px 0}footer{font-size:12px;color:var(--muted);padding:0 0 25px}.smalltable{width:100%;border-collapse:collapse;font-size:13px}.smalltable td,.smalltable th{padding:10px;border-bottom:1px solid var(--edge);text-align:left}.smalltable th{background:#f6f8fc}.notice{font-size:13px;background:#fff6e8;border:1px solid #ecd7b8;padding:12px 17px;border-radius:8px}.export-menu{display:flex;gap:8px}.svg-meta{font-size:12px;color:var(--muted)}
+.image-caption{overflow-wrap:anywhere}.review{padding:24px 30px 46px}
+.approved .card{border-color:#9bc5b6;margin-bottom:22px}.approved .policy-label,.approved .result{color:var(--green)}.approved .result{background:#f0f8f4}.approved .notice{background:#f0f8f4;border-color:#b8d9cb;margin:0 0 14px}.history-label{font-size:14px;color:var(--muted);margin-top:24px}
+@media(max-width:850px){.wrap{padding:0 16px}.toprow{display:block}.export{margin-top:18px}.export small{text-align:left}.pair,.sourcegrid{grid-template-columns:1fr}.mast{padding-top:22px}h1{font-size:26px}h2{font-size:23px}.controls{align-items:flex-start}.cardhead{padding:15px 16px 3px}.result{padding:11px 16px}.judge{padding:16px}.global-controls{width:100%;justify-content:space-between}.tabs{padding-left:16px;padding-right:16px}}
+@media print{.tabsbar,.controls,.judge,.export,.gallery{display:none}.pair{break-inside:avoid}.sourcebox{break-inside:avoid}body{background:#fff}.wrap{max-width:none;padding:0 10px}.chartbox svg{min-width:0}.card{border-color:#bbb}}
+@media(max-width:850px){.review{padding:20px 16px 40px}}
+</style>
+</head>
+<body>
+<header class="mast"><div class="wrap toprow"><div><div class="eyebrow">缠论原文研究 · 2026-09-17 用户裁定已落实</div><h1>线段规则图解与修正结果</h1><p class="lead">绿色显示当前系统结果；下方保留你此前审阅的 A／B 对照。可切换价格、后续走势和镜像，展开原文并补充判断。</p></div><div class="export"><div class="export-menu"><button id="save-figure">下载当前图 SVG</button><button id="export">导出裁定与补充判断</button></div><small id="record-count">五项裁定已记录</small></div></div></header>
+<nav class="tabsbar" aria-label="五项规则"><div class="wrap tabs" role="tablist">
+<button role="tab" data-case="r1" aria-selected="true" aria-controls="review-panel"><b>01</b>包含后新增缺口</button>
+<button role="tab" data-case="r2" aria-selected="false" aria-controls="review-panel"><b>02</b>同价端点选择</button>
+<button role="tab" data-case="r3" aria-selected="false" aria-controls="review-panel"><b>03</b>等值返回起点</button>
+<button role="tab" data-case="r4" aria-selected="false" aria-controls="review-panel"><b>04</b>参考与候选资格</button>
+<button role="tab" data-case="r5" aria-selected="false" aria-controls="review-panel"><b>05</b>包含方向</button>
+</div></nav>
+<main class="wrap review" id="review-panel" role="tabpanel">
+<div id="intro"></div><div class="controls"><div class="variant-controls" id="variants"></div><div class="global-controls"><label><input type="checkbox" id="mirror">上下镜像</label><label><input type="checkbox" id="prices" checked>显示点价</label></div></div>
+<div class="legend"><span><i class="swatch raw"></i>灰线：原始笔</span><span><i class="swatch"></i>彩色实线：确认段</span><span><i class="swatch pending"></i>彩色虚线：待定段</span><span>价格为合成值；图内缺口指特征区间，不是行情跳空</span></div>
+<div id="approved" class="approved"></div><div class="history-label">裁定前的 A／B 对照与区间解释（保留审阅依据）</div><div id="visuals"></div><div id="sources"></div>
+<section class="judge" aria-label="补充你的判断"><h3>补充你对当前图的判断</h3><p class="scope" id="judge-context"></p><div class="judgements" id="judgements"></div><textarea id="notes" aria-label="判断依据或你的划法" placeholder="可以写出补充段界或适用条件；已记录的对话裁定显示在上方。"></textarea><div class="save-state" id="saved">补充记录保存在本浏览器，可导出为文件。</div></section>
+<details class="gallery"><summary>五张静态图与三项争议总览</summary>
+<a href="01_包含后新增缺口.png" target="_blank">图1 PNG</a><a href="02_同价端点.png" target="_blank">图2 PNG</a><a href="03_等值返回首笔起点.png" target="_blank">图3 PNG</a><a href="04_参考资格与内部极值.png" target="_blank">图4 PNG</a><a href="05_包含方向约束.png" target="_blank">图5 PNG</a><a href="三项争议对照总览.png" target="_blank">三项争议总览</a>
+</details>
+</main>
+<footer class="wrap">依据仅来自 D:\缠论 中实际读取的文件。原图另列，合成数值、镜像及假设划法均为研究材料。记录你的判断不会自动修改系统规则。本页可离线使用。</footer>
+<script id="review-data" type="application/json">__REVIEW_DATA__</script>
+<script>
+'use strict';
+const DATA=JSON.parse(document.getElementById('review-data').textContent);
+const $=id=>document.getElementById(id),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const BLUE='#225bd8',AMBER='#ad660b',GRAY='#9da8b6',INK='#24354b',GREEN='#176654';
+const state={case:'r1',inside:11,future:false,tieEnd:14,returnHigh:14,reference:'reference',seed:'author',mirror:false,prices:true};
+let records={};let storageAvailable=true;let activeSources=[];
+try{records=JSON.parse(localStorage.getItem('chan-segment-review-v1')||'{}');if(!records||typeof records!=='object'||Array.isArray(records))records={};}catch(e){storageAvailable=false;}
+const value=x=>state.mirror?-x:x,fmt=x=>Number.isInteger(x)?String(x):String(x),interval=r=>{const p=r.map(value).sort((a,b)=>a-b);return `[${p.map(fmt).join(', ')}]`;};
+function svgText(x,y,text,opts={}){return `<text x="${x}" y="${y}" text-anchor="${opts.anchor||'middle'}" font-family="Microsoft YaHei, sans-serif" font-size="${opts.size||18}" fill="${opts.color||INK}"${opts.halo?' paint-order="stroke" stroke="white" stroke-width="5" stroke-linejoin="round"':''}>${esc(text)}</text>`;}
+function line(x1,y1,x2,y2,color,width=2,dash=''){return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="${width}"${dash?` stroke-dasharray="${dash}"`:''} stroke-linecap="round"/>`;}
+function curve(base,segments=[],tone=BLUE,marks=[],wide=false){
+ const p=base.map(value),w=wide?1280:720,h=348,lo=Math.min(...p),hi=Math.max(...p),spread=hi-lo||1,l=46,r=w-36,t=60,b=h-50;
+ const x=i=>l+i*(r-l)/(p.length-1),y=v=>b-(v-(lo-.22*spread))/(1.49*spread)*(b-t);
+ let s=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="原始笔链及线段对照"><rect width="${w}" height="${h}" fill="white"/>`;
+ for(let i=0;i<=4;i++){const price=lo+spread*i/4,yy=y(price);s+=line(l,yy,r,yy,'#edf1f6',1)+svgText(l-8,yy+4,fmt(Math.round(price*10)/10),{anchor:'end',size:12,color:'#8291a5'});}
+ s+=`<polyline points="${p.map((a,i)=>`${x(i)},${y(a)}`).join(' ')}" fill="none" stroke="${GRAY}" stroke-width="2.3" stroke-linejoin="round"/>`;
+ segments.forEach(([a,b,done])=>{s+=line(x(a),y(p[a]),x(b),y(p[b]),tone,4,done?'':'9 7');});
+ p.forEach((a,i)=>{const peak=i===0?a>p[1]:a>p[i-1],labelY=y(a)+(peak?-33:23);s+=`<circle cx="${x(i)}" cy="${y(a)}" r="3.3" fill="${GRAY}"><title>P${i} = ${fmt(a)}</title></circle>`;if(marks.includes(i))s+=`<circle cx="${x(i)}" cy="${y(a)}" r="10" fill="none" stroke="${tone}" stroke-width="2"/>`;s+=svgText(x(i),labelY,`P${i}`,{size:16,halo:true});if(state.prices)s+=svgText(x(i),labelY+18,fmt(a),{size:15,halo:true,color:'#59697e'});});
+ return s+'</svg>';
+}
+function featureBars(base,names,colors=[],gap=null,domain=null){
+ const ranges=base.map(r=>r.map(value).sort((a,b)=>a-b)),extent=domain?domain.map(value).sort((a,b)=>a-b):null,w=720,h=305,l=70,r=w-70,t=48,b=h-64,lo=extent?extent[0]:Math.min(...ranges.map(x=>x[0])),hi=extent?extent[1]:Math.max(...ranges.map(x=>x[1])),spread=hi-lo||1;
+ const x=i=>l+(i+.5)*(r-l)/ranges.length,y=v=>b-(v-(lo-.14*spread))/(1.35*spread)*(b-t);
+ let s=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="特征元素区间"><rect width="${w}" height="${h}" fill="white"/>`;
+ if(gap){let [a,z]=gap.map(value).sort((a,b)=>a-b);s+=`<rect x="${l}" y="${y(z)}" width="${r-l}" height="${y(a)-y(z)}" fill="#fff0d6"/>`;s+=svgText(r,28,`特征缺口 ${fmt(a)}—${fmt(z)}`,{anchor:'end',size:14,color:AMBER,halo:true});}
+ ranges.forEach(([low,high],i)=>{const xx=x(i),col=colors[i]||BLUE;s+=line(xx,y(low),xx,y(high),col,20);s+=`<rect x="${xx-13}" y="${y(high)}" width="26" height="${y(low)-y(high)}" fill="white" fill-opacity=".72"/>`;s+=line(xx,y(low),xx,y(high),col,3)+line(xx-12,y(low),xx+12,y(low),col,2)+line(xx-12,y(high),xx+12,y(high),col,2);s+=svgText(xx+18,y(high)+5,fmt(high),{anchor:'start',size:17,color:col,halo:true})+svgText(xx-18,y(low)+5,fmt(low),{anchor:'end',size:17,color:col,halo:true})+svgText(xx,h-30,names[i],{size:16});});return s+'</svg>';
+}
+function summary(result){return result.segments.map(([a,b,d])=>`P${a}—P${b} ${d?'确认':'待定'}`).join('；')||'尚无可展示线段';}
+function card(label,title,note,graphic,result='',isB=false){return `<article class="card${isB?' b':''}"><div class="cardhead"><div class="policy-label">${esc(label)}</div><h3>${esc(title)}</h3>${note?`<p>${esc(note)}</p>`:''}</div><div class="chartbox">${graphic}</div>${result?`<div class="result">${esc(result)}</div>`:''}</article>`;}
+function pair(a,b){return `<div class="pair">${a}${b}</div>`;}
+function callout(text){return `<div class="callout">${text}</div>`;}
+function pointsText(p){return `<p class="points">当前合成点链：${p.map(value).map(fmt).join(' → ')}。点从 P0 起编号；笔 i 连接 Pi 与 P(i+1)。</p>`;}
+function button(label,key,v,current){return `<button type="button" data-control="${key}" data-value="${v}" aria-pressed="${String(v===current)}">${esc(label)}</button>`;}
+function currentKey(){const k=state.case==='r1'?`${state.inside}_${+state.future}`:state.case==='r2'?`${state.tieEnd}`:state.case==='r3'?`${state.returnHigh}`:state.case==='r4'?state.reference:state.seed;return `${state.case}:${k}:${state.mirror?'mirror':'original'}`;}
+function currentEntry(){const k=state.case==='r1'?`${state.inside}_${+state.future}`:state.case==='r2'?`${state.tieEnd}`:state.case==='r3'?`${state.returnHigh}`:state.case==='r4'?state.reference:state.seed;return DATA.cases[state.case][k];}
+function sourceHTML(key){const s=DATA.sources[key],spans=s.spans.map(([a,b])=>a===b?`${a}`:`${a}—${b}`).join('、');return `<article class="source"><h4>第${s.lesson}课 · ${esc(s.title)}</h4><div class="source-path"><a href="${esc(s.uri)}" target="_blank">${esc(s.path)}</a><br>定位：第 ${spans} 行</div>${s.lines.map(l=>`<p class="source-line"><span>L${l.line}</span>${esc(l.text)}</p>`).join('')}</article>`;}
+function renderSources(keys,includeImages=false){
+ activeSources=keys;
+ $('sources').innerHTML=`<details class="sourcebox"><summary>展开原文依据${includeImages?'与第79课原图':''} · ${keys.length} 组</summary><p class="scope">以下为实际读取文件中的原文摘录，保留行号。数值图属于合成推导；上下镜像不改写原文。第79课末尾的整理者方向注释未用作作者依据。</p><div class="sourcegrid">${keys.map(sourceHTML).join('')}</div>${includeImages?['upper79','lower79'].map(k=>`<figure><img class="source-image" alt="第79课${k==='upper79'?'上':'下'}图，含整理版演示标线" src="${DATA.images[k].data}"><figcaption class="image-caption">第79课${k==='upper79'?'上':'下'}图，PDF 第1992页。含整理版演示标线，段数与合并结论以作者正文为准。<br><a href="${esc(DATA.images[k].uri)}" target="_blank">${esc(DATA.images[k].path)}</a></figcaption></figure>`).join(''):''}</details>`;
+}
+function setIntro(n,title,question,status='规则衔接'){$('intro').innerHTML=`<span class="tag author">${esc(DATA.review_decisions.date)} · 本项裁定已落实</span><h2>${String(n).padStart(2,'0')} · ${esc(title)}</h2><p class="question">${question}</p>`;}
+function renderR1(){
+ const e=currentEntry(),mid=[state.inside,14],gap=state.inside>10;
+  setIntro(1,'首笔已经破坏，包含后却产生新缺口','已采用 B：破坏类型按<strong>原始首笔</strong>与有效左参考的关系确定；后续包含仍用于检查完整分型。');
+ $('variants').innerHTML=`<span class="control-label">改变内包点</span>${[9,10,11].map(n=>button(`P6 = ${value(n)}`,'inside',n,state.inside)).join('')}<span class="control-label">观察范围</span>${button('到 P8','future',false,state.future)}${button('追加 P9、P10','future',true,state.future)}`;
+  let s=pair(card('A · 修改前系统','按标准元素判类',gap?'标准左、中之间有特征缺口。':'标准左、中仍有重叠。',curve(e.points,e.a.segments,BLUE,[3,6]),summary(e.a)),card('B · 原受控实验，已采纳','按原始首笔判类','保持包含处理，只替换判类所用的首笔区间。',curve(e.points,e.b.segments,AMBER,[3,6]),summary(e.b),true));
+ s+=pointsText(e.points)+`<div class="section-title">在 P8 首次取得独立右元素时，判类依据发生了什么变化</div>`;
+ s+=pair(card('原始区间','左参考与首笔有重叠',`${interval([6,10])} 与 ${interval([4,14])}`,featureBars([[6,10],[4,14],[3,13]],['左：笔1','首笔：笔3','右：笔7'],[GRAY,BLUE,GRAY])),card('包含后的区间','笔3与笔5合成中间元素',`${interval([4,14])} + ${interval([state.inside,12])} → ${interval(mid)}`,featureBars([[6,10],mid,[3,13]],['左：笔1','中：笔3+5','右：笔7'],[GRAY,AMBER,GRAY],gap?[10,state.inside]:null),gap?'新增特征缺口：两种判类出现分歧。':'此变体没有新增缺口，两种判类一致。',true));
+ s+=callout(state.future?(gap?'本例追加原方向新极值后，A 否定原 P3 候选，B 保留已确认的 P3。<strong>这改变了实际段界，不能只理解为确认早晚不同。</strong>':'此变体在 P8 时两种口径都已确认 P3。追加走势后，该确认仍然保留。<strong>这里没有包含后新增缺口，两种判类结果一致。</strong>'):'这里的关键是：第一分型已有，但第二分型尚无；首笔结束位置却已经先被跌破（镜像为上破）。<strong>A、B 的差别在判类所用的区间。</strong>');
+ $('visuals').innerHTML=s;renderSources(['standard','first']);
+}
+function renderR2(){
+  const e=currentEntry();setIntro(2,'同价端点与后续第三段','保留较早端点 <strong>P6</strong>。到 P14 时，第三段应在 <strong>P11</strong> 确认，末段 P11—P14 形成中。');
+ $('variants').innerHTML=`<span class="control-label">观察范围</span>${button('第二分型出现：到 P11','tieEnd',11,state.tieEnd)}${button('继续观察：到 P14','tieEnd',14,state.tieEnd)}`;
+  let s=pair(card('A · 修改前系统','取较早来源 P6','P11 时正确；P14 时漏掉第三段的完成。',curve(e.points,e.a.segments,BLUE,[6,8]),summary(e.a)),card('B · 原受控实验，未采纳','取较晚来源 P8','只改变同价边界的来源选择。',curve(e.points,e.b.segments,AMBER,[6,8]),summary(e.b),true));
+ s+=pointsText(e.points);s+=pair(card('包含过程','两个来源贡献同一个极值',`${interval([11,14])} + ${interval([11,13])} → ${interval([11,13])}`,featureBars([[11,14],[11,13],[11,13]],['笔6','笔8','合并中元素'],[GRAY,GRAY,BLUE],null,[11,16])),card('第二分型','两种选择使用同一组三个标准区间',`共同${state.mirror?'高':'低'}点 ${value(11)}，分别位于 P6 和 P8。`,featureBars([[13,16],[11,13],[12,14]],['左：笔4','中：笔6+8','右：笔10'],[GRAY,AMBER,GRAY]),'价格区间唯一，不自动等于物理段界已经唯一。',true));
+  s+=callout('本次按用户裁定保留 P6，并修复后续 P11 的候选资格。<strong>没有把已确认的 P6 改成 P8。</strong> 原文、基于原文的推导与用户选定口径分别记录，用户裁定不冒充作者引语。');
+ $('visuals').innerHTML=s;renderSources(['equal','pen','standard']);
+}
+function renderR3(){
+  const e=currentEntry(),h=state.returnHigh;setIntro(3,'恰好回到首笔起点，再破首笔终点','P5＝14 时显示 <strong>P0—P5 未完成段</strong>；P5＝13、15 时保留两种原标法一致的结果。');
+ $('variants').innerHTML=`<span class="control-label">改变反弹端点</span>${[13,14,15].map(n=>button(`P5 = ${value(n)}`,'returnHigh',n,h)).join('')}`;
+ const aNote=h===14?'首笔与第三笔包含，尚缺独立右元素。':h===13?'形成独立右元素，确认 P3。':'先出现原方向新极值，P3 候选失效。';
+  let s=pair(card('A · 修改前系统','按标准分型继续确认',aNote,curve(e.points,e.a.segments,BLUE,[3,5]),summary(e.a)),card('B · 原供判断的假设标法',h===14?'第三笔破终点，即在 P3 确认':'此变体与 A 的标法一致',h===14?'此快捷确认未被采纳；裁定结果为上方绿色的 P0—P5 未完成段。':aNote,curve(e.points,e.b.segments,AMBER,[3,5]),summary(e.b),true));
+ s+=pointsText(e.points);
+ if(h===14){s+=pair(card('包含前','三个原始反向区间','首笔与第三笔有一端价格相等，存在包含。',featureBars([[6,10],[4,14],[3,14]],['左参考','首笔：笔3','第三笔：笔5'],[GRAY,BLUE,AMBER])),card('按当前方向包含后','只剩两个有效元素',`${interval([4,14])} + ${interval([3,14])} → ${interval([4,14])}`,featureBars([[6,10],[4,14]],['左参考','合并中元素'],[GRAY,AMBER],null,[3,14]),'不能把同一个合并元素重复计算为两个。',true));s+=callout('<strong>B 需要解释为何这里可以直接确认，以及如何满足“出现分型”的条件。</strong> 改用图1的原始首笔判类，也不会补出本图缺少的第一分型。');}
+ else{s+=callout(h===13?'这是未触及反向首笔起点的常规对照，首笔和第三笔不包含，A、B 一致。':'这是严格越过反向首笔起点的对照：越界先发生，旧候选应延续。争议集中在精确相等的中间值。');}
+ $('visuals').innerHTML=s;renderSources(['first','equal','three']);
+}
+function renderR4(){
+ const e=currentEntry(),v=state.reference;setIntro(4,'谁有资格成为参考或段端？','这两组图有作者明确答复。请先核对这些约束，再判断它们应如何推广到<strong>更复杂前史、连续包含和待定候选</strong>。','原文图例已有答案 · 任意前史的推广仍需证明');
+ $('variants').innerHTML=`${button('第81课：参考 1 / 3','reference','reference',v)}${button('第79课：上图','reference','upper',v)}${button('第79课：下图','reference','lower',v)}${button('下图：9 = 7','reference','equal',v)}${button(`下图：9 ${state.mirror?'>':'<'} 7`,'reference','break',v)}`;
+ let s='';
+ if(v==='reference'){
+  s+=pair(card('作者指定的参考',`选 1，不选较${state.mirror?'高':'低'}的 3`,state.mirror?'当前是原图大小关系的上下镜像推导。':'合成值保持本例 3 低于 1 的大小关系。',curve(e.points,e.a.segments,BLUE,[1,3,5]),summary(e.a)),card('参考元素比较','12 与 34 不能随意互换','把最近的 34 当作左参考，会新增与 56 的缺口。',featureBars([[3,8],[2,6],[7,12],[4,11]],['12：作者所选','34：本例排除','56','78'],[BLUE,AMBER,BLUE,BLUE]),'作者指定 12、56、78 构成分型；34 在本例被排除。',true));
+  s+=callout('<strong>这里不是让两种取法平票竞争：</strong>作者已明确给出本例参考。尚待证明的是系统的参考筛选能否覆盖所有前史。图下读者建议的“更早元素覆盖就不算缺口”，没有被当作作者的一般规则。');
+ }else{
+  const isOpen=v==='lower'||v==='equal';
+  s+=pair(card('原图大小关系的合成实现',isOpen?'第二段仍在延伸，尚未确认':'第二段在 P8 结束',v==='equal'?'9=7 是按相等仍包含作出的推导，不是作者另画的原图。':v==='break'?'作者说明：若9跌破7，而10不变，则为三段。':'请展开下方作者正文与所收原图核对。',curve(e.points,e.a.segments,BLUE,[4,8,9,10]),summary(e.a)),card('局部同向笔的区间','检查 78 与 9—10 是否包含',`${interval([18,30])} 与 ${interval([e.points[9],e.points[10]])}`,featureBars([[18,30],[e.points[9],e.points[10]]],['78','9—10'],[BLUE,AMBER]),isOpen?'存在包含：不能仅凭10—11这一笔确认。':'9已越过7：按此例条件，第二段可在8结束。',true));
+  s+=callout(isOpen?'此变体的 <strong>P8 尚不是已确认的第二段终点</strong>。78 与9—10存在包含，第二段预览延伸至 P10，后续仍不足以确认。不能为了整齐而强行凑成三条确认段。':`内部点 P4=${value(32)} 比段端 P8=${value(30)} 更${state.mirror?'低':'高'}。<strong>不能把“段端必须是全段极值”作为通用筛选条件。</strong>`);
+ }
+ s+=pointsText(e.points);$('visuals').innerHTML=s;renderSources(['reference','fig79','equal'],true);
+}
+function renderR5(){
+ const e=currentEntry(),v=state.seed,dirA=(v==='author')?(state.mirror?'向上':'向下'):(state.mirror?'向下':'向上'),dirB=dirA==='向上'?'向下':'向上';
+ setIntro(5,'包含方向能否任意反转？','先看作者指定的合并结果，再检查固定候选的极值是否被保留。已能排除的方向与仍待推导的初始化语境分别展示。','已有局部约束 · 剩余初始化规则待证明');
+ $('variants').innerHTML=`${button('作者指定：34 + 56 → 36','seed','author',v)}${button('固定候选：严格内包','seed','strict',v)}${button('同价：两方向均保留极值','seed','equal',v)}`;
+ const names=v==='author'?['34','56','合并结果']:['首笔：笔3','后续：笔5','合并结果'];
+ let s=pair(card('A · 保留当前假设的处理',`${dirA}包含 → ${interval(e.a)}`,v==='author'?'得到正文指定的36区间。':`保留候选 P3=${value(e.pivot)}。`,featureBars([...e.ranges,e.a],names,[GRAY,GRAY,BLUE]),v==='author'?'原文给定结果：36。':v==='equal'?'极值保留，但另一侧边界与B不同。':'所用中间元素仍保留原候选极值。'),card('B · 相反方向的对照',`${dirB}包含 → ${interval(e.b)}`,v==='author'?'得到54区间，不是正文指定的36。':v==='equal'?`同样保留 ${value(e.pivot)}，仅凭这一条尚不能选择。`:`候选极值 ${value(e.pivot)} 已不在所用中间元素的极值边界。`,featureBars([...e.ranges,e.b],names,[GRAY,GRAY,AMBER]),v==='equal'?'同价组仍需进一步说明初始化依据。':'不能继续用这个结果证明原先同一个候选。',true));
+ s+=card('原始笔链','区间来自哪些物理笔','此图只显示原始笔与所考察候选，不额外宣告线段完成。',curve(e.points,[],BLUE,[3],true));
+ s+=pointsText(e.points)+callout(v==='author'?'第79课正文直接给出34、56合为36。<strong>该图的方向已有约束，无需借用末尾整理者注释。</strong>':'保留极值是固定候选所需的约束之一。<strong>它不自动解决所有无前项语境的方向，也不授权更换候选后沿用原来的证明。</strong>');
+ $('visuals').innerHTML=s;renderSources(['inclusion','fig79','standard'],true);
+}
+function renderApproved(){
+ const e=currentEntry(),text=DATA.review_decisions[state.case];
+ let html=`<div class="notice"><strong>已记录的用户裁定：</strong>${esc(text)}<br>上下镜像按同一规则推演；裁定是本系统采用的口径，不冒充作者原文。</div>`;
+ if(e.approved){html+=card('已裁定 · 当前系统结果','修正后的线段划分','实线已确认，虚线仍在形成。',curve(e.points,e.approved.segments,GREEN,[],true),summary(e.approved));}
+ else{const names=state.seed==='author'?['34','56','合并结果']:['首笔','后续笔','合并结果'];html+=card('已裁定 · 保持包含方向','保留当前合并结果',`合并为 ${interval(e.a)}。`,featureBars([...e.ranges,e.a],names,[GRAY,GRAY,GREEN]));}
+ $('approved').innerHTML=html;
+}
+function renderJudge(){
+ const key=currentKey(),r=records[key]||{},choices=state.case==='r4'?[['constraints','认可这两例的原文约束'],['conditions','推广还需补充条件'],['counterexample','我有反例或另一划法']]:state.case==='r5'?[['A','当前图采用 A'],['B-conditions','B 需更换候选或补充条件'],['pending','暂不裁定']]:[['A','倾向 A'],['B','倾向 B'],['pending','暂不裁定'],['other','另有划法']];
+ $('judge-context').textContent=`当前：${$('intro').querySelector('h2').textContent} · ${state.mirror?'上下镜像':'原方向'}。记录只对应当前变体，可切换后分别填写。`;
+ $('judgements').innerHTML=choices.map(([v,t])=>`<label><input type="radio" name="verdict" value="${v}"${r.verdict===v?' checked':''}>${t}</label>`).join('');
+ $('notes').value=r.notes||'';$('saved').textContent=r.updated_at?'已载入此变体的判断。':storageAvailable?'记录保存在本浏览器；完成后可导出。':'浏览器不支持本地持久保存；请使用“导出我的判断”保存文件。';
+  $('record-count').textContent=`五项裁定已记录 · 本地补充 ${Object.keys(records).length} 条`;
+}
+function render(){
+ document.querySelectorAll('[data-case]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.case===state.case)));
+  ({r1:renderR1,r2:renderR2,r3:renderR3,r4:renderR4,r5:renderR5})[state.case]();renderApproved();renderJudge();
+}
+function persist(){
+ const selection=document.querySelector('input[name=verdict]:checked'),notes=$('notes').value;
+ if(!selection&&!notes.trim()){delete records[currentKey()];}else{records[currentKey()]={case:state.case,variant:currentKey(),mirror:state.mirror,verdict:selection?selection.value:null,notes,points:currentEntry().points.map(value),updated_at:new Date().toISOString()};}
+ try{localStorage.setItem('chan-segment-review-v1',JSON.stringify(records));$('saved').textContent='已在本浏览器保存。可继续切换变体，或导出判断文件。';}catch(e){storageAvailable=false;$('saved').textContent='已在当前页面保留；请导出文件保存。';}
+  $('record-count').textContent=`五项裁定已记录 · 本地补充 ${Object.keys(records).length} 条`;
+}
+function download(content,type,name){const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function exportPayload(){return {title:'线段规则图表裁定与补充判断',exported_at:new Date().toISOString(),chart_generated_at:DATA.generated_at,accepted_decisions:DATA.review_decisions,judgements:Object.values(records),scope:DATA.scope,export_changes_production_rules:false};}
+window.exportPayload=exportPayload;
+document.addEventListener('click',e=>{
+ const tab=e.target.closest('[data-case]');if(tab){state.case=tab.dataset.case;render();window.scrollTo({top:0,behavior:'instant'});return;}
+ const control=e.target.closest('[data-control]');if(control){const k=control.dataset.control;let v=control.dataset.value;if(['inside','tieEnd','returnHigh'].includes(k))v=Number(v);else if(k==='future')v=v==='true';state[k]=v;render();}
+});
+$('mirror').addEventListener('change',e=>{state.mirror=e.target.checked;render();});$('prices').addEventListener('change',e=>{state.prices=e.target.checked;render();});
+$('judgements').addEventListener('change',persist);$('notes').addEventListener('input',persist);
+$('export').addEventListener('click',()=>download(JSON.stringify(exportPayload(),null,2),'application/json;charset=utf-8','我的线段规则判断.json'));
+$('save-figure').addEventListener('click',()=>{
+  const charts=[...document.querySelectorAll('#approved svg,#visuals svg')];let y=80;const width=1280;let body=`<rect width="1280" height="100%" fill="white"/>${svgText(30,36,$('intro').querySelector('h2').textContent,{anchor:'start',size:26})}${svgText(30,63,`合成示例 · ${state.mirror?'上下镜像':'原方向'} · 灰线为笔，实线为确认段，虚线为待定段`,{anchor:'start',size:16,color:'#64748b'})}`;
+ charts.forEach(svg=>{const card=svg.closest('.card'),title=card.querySelector('h3').textContent,label=card.querySelector('.policy-label').textContent;body+=svgText(28,y+24,`${label} · ${title}`,{anchor:'start',size:20});y+=38;const view=svg.viewBox.baseVal,scale=width/view.width,height=view.height*scale;const clone=svg.cloneNode(true);clone.setAttribute('x','0');clone.setAttribute('y',String(y));clone.setAttribute('width',String(width));clone.setAttribute('height',String(height));body+=new XMLSerializer().serializeToString(clone);y+=height+24;});
+ activeSources.forEach(key=>{const s=DATA.sources[key];body+=svgText(28,y+22,`${s.path} · 行 ${s.spans.map(a=>a.join('—')).join('、')}`,{anchor:'start',size:14,color:'#64748b'});y+=38;});
+ y+=15;download(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${y}" viewBox="0 0 ${width} ${y}">${body}</svg>`,'image/svg+xml;charset=utf-8',`${state.case}_${currentKey().replace(/:/g,'_')}.svg`);
+});
+render();
+</script>
+</body>
+</html>

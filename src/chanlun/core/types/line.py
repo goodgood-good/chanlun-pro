@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 from abc import abstractmethod
-from typing import List, Union
+from typing import TYPE_CHECKING, List, Union
 
 from chanlun.core.types.kline import FX
+
+if TYPE_CHECKING:
+    from chanlun.core.segment_evidence import SegmentEvidence
 
 
 class LINE:
@@ -143,13 +146,8 @@ class BI(LINE):
         index: int = 0,
     ):
         super().__init__(start, end, _type, index)
-        # 笔(BI)的中枢重叠用高低点等于笔的端点价——
-        # 与 XD 完成段的 ``zs_high/zs_low = max/min(sv, ev)`` 同口径,且
-        # 等价于 LINE.update_high_low 设的 high/low。
-        # LINE.__init__ 在 ``update_high_low()`` 之后把 ``zs_high/zs_low``
-        # 强制重置为 0(为 XD pending 段口径留位),BI 在此显式同步回 high/low。
-        # 缺失此步会让 ZsCalculator 在笔层重叠判定全部失败 → 笔中枢识别为 0、
-        # 笔层买卖点全部无法识别(进而线段层买卖点亦失效)。
+        # 笔的实际区间就是端点区间；将基类初始化为零的兼容字段同步回来。
+        # 线段可能含有超出端点的内部极值，由 XdCalculator 按全部组成笔赋值。
         self.zs_high = self.high if self.high is not None else 0
         self.zs_low = self.low if self.low is not None else 0
 
@@ -346,6 +344,7 @@ class XD(LINE):
         # The actual feature-sequence proof time, separate from endpoint time.
         # Locked physical evidence confirms immediately, without a fixed buffer.
         self.formed_at = None
+        self.construction_evidence: SegmentEvidence | None = None
 
         # 是否是拆分后的线段，如果是，这里会写明原因
         self.is_split: str = ""
