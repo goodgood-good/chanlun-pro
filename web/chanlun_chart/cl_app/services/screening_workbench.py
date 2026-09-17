@@ -75,7 +75,7 @@ def _current_rows(result, source):
         waiting = "observation_validation" in item
         rows.append({
             "id": identity,
-            "code": item["code"], "name": item.get("name", item["code"]), "market": "a",
+            "code": item["code"], "name": item.get("name", item["code"]), "market": item.get("market", "a"),
             "frequency": item["frequency"], "point": point,
             "exit_plan": item.get("exit_plan"), "confirmation_exit_plan": item.get("confirmation_exit_plan"),
             "latest_price": item.get("latest_price"), "source_closed_at": item.get("source_closed_at"),

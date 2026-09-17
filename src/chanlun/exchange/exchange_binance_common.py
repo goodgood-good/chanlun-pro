@@ -98,7 +98,12 @@ def normalize_binance_kline_frame(
         structure_price_quantum=quantum,
         normalization_revision=BINANCE_OHLC_NORMALIZATION_REVISION,
     )
-    return attach_price_basis_metadata(normalized, metadata)
+    result = attach_price_basis_metadata(normalized, metadata)
+    # Binance/CCXT's first OHLCV field is the opening timestamp. Consumers
+    # must remove an unfinished tail before shifting it to a close boundary.
+    # https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints
+    result.attrs["bar_time_label"] = "start"
+    return result
 
 
 def configure_spot_public_market_data(exchange: Any) -> Any:

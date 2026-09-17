@@ -298,11 +298,7 @@ def test_operations_default_to_readiness_probe():
     assert "ops\\restart_web.ps1" in windows_run
     assert "-OpenBrowser" in windows_run
     for scope_switch in (
-        "-EnableLargeScreeningScope",
-        "-EnableLargeHoldingMonitorScope",
         "-EnableFullSymbolCatalog",
-        "-EnableFullCoverage",
-        "-ForceFullCoverageUntilComplete",
     ):
         assert scope_switch in windows_run
     assert "web\\chanlun_chart\\app.py" not in windows_run

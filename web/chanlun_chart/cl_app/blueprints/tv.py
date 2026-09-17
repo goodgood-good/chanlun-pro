@@ -1003,13 +1003,14 @@ def tv_history():
                     raise ValueError("选股证据图参数不完整")
             market, code = _parse_tv_symbol(request.args["symbol"])
             frequency = resolution_maps.get(_normalize_resolution(request.args["resolution"]))
-            if market != "a" or frequency not in ("1m", "5m", "30m"):
+            if frequency not in ("1m", "5m", "30m"):
                 raise ValueError("该市场或周期不属于本次选股证据")
             result = screening_manager.evidence_history(
                 request.args["screening_source"], code, frequency, request.args["screening_point"],
                 first=request.args.get("firstDataRequest") == "true",
                 start=_normalize_unix_ts(request.args.get("from", "0")),
                 end=_normalize_unix_ts(request.args.get("to", "0")),
+                market=market,
             )
             response = jsonify(result)
             response.headers["Cache-Control"] = "private, no-store"

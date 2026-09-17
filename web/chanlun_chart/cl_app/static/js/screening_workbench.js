@@ -48,7 +48,7 @@
       frequency:periods[0],intervals:periods.slice(0,count).map(f=>INTERVALS[f]).join(','),chart_sidebar:'collapsed'});
   }
   function evidenceUrl(row, source, frequency=row.frequency) {
-    return '/screening/evidence?' + new URLSearchParams({source,code:row.code,frequency,point:row.point.point_id});
+    return '/screening/evidence?' + new URLSearchParams({source,code:row.code,frequency,point:row.point.point_id,...(row.market&&row.market!=='a'?{market:row.market}:{})});
   }
   function filterRows(rows, filters, reviewed={}, sectorNames={}) {
     const query = (filters.query || '').trim().toLowerCase();
@@ -140,8 +140,8 @@
         `代码版本：${status.source_current===true?'当前':status.source_current===false?'历史':'待核对'}`,
         `数据问题：${status.error_count??'—'} 个周期组合`,status.error||''].filter(Boolean).join('；');
       const coverage=status.universe_coverage,markets={SH:'沪市',SZ:'深市',BJ:'北交所'};
-      $('coverage-detail').textContent=coverage?`实际覆盖：${Object.entries(coverage.exchanges).map(([e,n])=>`${markets[e]||e} ${n} 只`).join('，')}`+
-        (settings.scope==='all_a'&&coverage.absent_exchanges.length?`；本次股票池未覆盖：${coverage.absent_exchanges.map(e=>markets[e]||e).join('、')}`:''):'';
+      $('coverage-detail').textContent=coverage?`实际股票池：${Object.entries(coverage.markets||coverage.exchanges).map(([e,n])=>`${markets[e]||e} ${n} 只`).join('，')}`+
+        (['all_a','all_a_watchlist'].includes(settings.scope)&&coverage.absent_exchanges.length?`；本次股票池未覆盖：${coverage.absent_exchanges.map(e=>markets[e]||e).join('、')}`:''):'';
       const diagnostics=state.data.diagnostics||{},labels=diagnostics.reason_labels||{};
       $('diagnostic-reasons').textContent=Object.entries(diagnostics.rejection_counts||{}).map(([r,n])=>`${labels[r]||r}：${n}`).join('；');
       $('diagnostic-errors').replaceChildren(...(diagnostics.errors||[]).map(r=>node('li',`${r.code} ${r.frequency||''}：${(r.reasons||[]).map(k=>labels[k]||k).join('；')} ${r.error||''}${r.data_quality?.missing_bars?`；缺口 ${r.data_quality.missing_bars} 根，始于 ${date(r.data_quality.first_missing_at)}`:''}`)),

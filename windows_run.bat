@@ -16,7 +16,7 @@ exit /b 1
 REM This is the user-facing production launcher. The PowerShell script still
 REM defaults to the 12-symbol validation cohort when invoked without switches,
 REM so code changes can be verified quickly without rebuilding the full market.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%RESTART_SCRIPT%" -EnableLargeScreeningScope -EnableLargeHoldingMonitorScope -EnableFullSymbolCatalog -EnableFullCoverage -ForceFullCoverageUntilComplete -OpenBrowser
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%RESTART_SCRIPT%" -EnableFullSymbolCatalog -OpenBrowser
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" echo ERROR: managed web restart failed with exit code %EXIT_CODE%.
 exit /b %EXIT_CODE%

@@ -78,11 +78,12 @@ def is_a_share(stock: dict) -> bool:
 def snapshot_for(frame, code, frequency):
     from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
     from chanlun.cl_utils.tv_chart import cl_data_to_tv_chart
-    runtime = build_strict_chart_cd(market="a", code=code, frequency=frequency, frame=frame)
+    market = frame.attrs.get("screening_market", "a")
+    runtime = build_strict_chart_cd(market=market, code=code, frequency=frequency, frame=frame)
     if runtime.cd is None:
         raise ValueError(f"{runtime.error_code}: {runtime.error_message}")
     chart = cl_data_to_tv_chart(frame, {"chart_show_bi": "1", "chart_show_xd": "1", "chart_show_fx": "1"},
-                               market="a", code=code, frequency=frequency, strict_runtime=runtime)
+                               market=market, code=code, frequency=frequency, strict_runtime=runtime)
     if chart.get("strict_structure_mode") != "replace":
         raise ValueError(f"chart evidence unavailable: {chart.get('strict_structure_error')}")
     snapshot = chart["strict_structure"]
@@ -101,7 +102,7 @@ def snapshot_for(frame, code, frequency):
          "start_tick": u.start_tick, "end_tick": u.end_tick,
          "locked": u.locked, "forming": u.forming,
          "confirmed_at": None if u.confirmed_at is None else int(u.confirmed_at.timestamp())}
-        for u in levels[0].units
+        for u in (levels[0].units if 0 in levels else ())
     ]
     points = {p.point_id: p for p in (*evidence.confirmed_points, *evidence.approaching_points)}
     starts = {}
@@ -164,6 +165,9 @@ def _resolve_suspensions(frame, code, context):
 
 
 def fetch_frame(code, frequency, context, *, repair_from=None):
+    if context.get("market", "a") != "a":
+        from chanlun.screening.markets import external_frame
+        return external_frame(code, frequency, context)
     end = datetime.fromtimestamp(context["cutoff"], CN).strftime("%Y-%m-%d %H:%M:%S")
     exchange = _exchange()
     # Preserve the adapter's normal structural lookback, but extend it when a
@@ -299,7 +303,9 @@ def _review_candidates(snapshot, frame, candidates, code, frequency):
 
 
 def _save_evidence(run_dir, code, frequency, frame, snapshot):
-    base = Path(run_dir, "evidence", f"{code}_{frequency}")
+    from chanlun.screening.markets import storage_symbol
+    market = frame.attrs.get("screening_market", "a")
+    base = Path(run_dir, "evidence", f"{storage_symbol(code, market)}_{frequency}")
     base.parent.mkdir(parents=True, exist_ok=True)
     parquet, packed = Path(str(base) + ".parquet"), Path(str(base) + ".json.gz")
     temp_parquet, temp_packed = Path(str(parquet) + ".tmp"), Path(str(packed) + ".tmp")
@@ -308,7 +314,7 @@ def _save_evidence(run_dir, code, frequency, frame, snapshot):
         temp_packed.write_bytes(gzip.compress(json.dumps(snapshot, ensure_ascii=False, allow_nan=False).encode("utf-8")))
         os.replace(temp_parquet, parquet)
         os.replace(temp_packed, packed)
-        return {"status": "complete", "chart_saved": bool(snapshot.get("chart")), "parquet_bytes": parquet.stat().st_size,
+        return {"status": "complete", "market": market, "chart_saved": bool(snapshot.get("chart")), "parquet_bytes": parquet.stat().st_size,
                 "snapshot_bytes": packed.stat().st_size,
                 "parquet_sha256": hashlib.sha256(parquet.read_bytes()).hexdigest(),
                 "snapshot_sha256": hashlib.sha256(packed.read_bytes()).hexdigest(),
@@ -328,7 +334,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
     for frequency in settings["frequencies"]:
         if Path(run_dir, "cancel").exists():
             break
-        row = {"code": code, "name": stock["name"], "frequency": frequency,
+        row = {"code": code, "market": stock.get("market", "a"), "name": stock["name"], "frequency": frequency,
                "selected": [], "observations": [], "recent_rejections": [], "reason_counts": {},
                "confirmed_buys": 0, "unconfirmed_buys": 0, "confirmed_sells": 0, "unconfirmed_sells": 0}
         context = {**contexts[frequency], "symbol": code}
@@ -342,7 +348,8 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             if errors:
                 rows.append(row)
                 continue
-            cache_path = None if cache_root is None else Path(cache_root, f"{code}_{frequency}.json.gz")
+            from chanlun.screening.markets import storage_symbol
+            cache_path = None if cache_root is None else Path(cache_root, f"{storage_symbol(code, stock.get('market', 'a'))}_{frequency}.json.gz")
             key = None if cache_path is None else calculation_key(frame, code, frequency, revision or source_revision())
             cached = None if cache_path is None else read_calculation(cache_path, key)
             snapshot = cached["snapshot"] if cached is not None else snapshot_for(frame, code, frequency)
@@ -406,7 +413,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             row.update(selected=[], observations=[], data_errors=["EVIDENCE_WRITE_FAILED" if phase == "evidence" else "ENGINE_ERROR"],
                        error=f"{type(exc).__name__}: {exc}")
         rows.append(row)
-    return {"code": code, "name": stock["name"], "rows": rows,
+    return {"code": code, "market": stock.get("market", "a"), "name": stock["name"], "rows": rows,
             "seconds": round(time.monotonic() - started, 3)}
 
 
@@ -510,10 +517,18 @@ def _worker_main(connection, settings, contexts, run_dir, revision):
             if stock is None:
                 return
             try:
-                result = scan_symbol(stock, settings, contexts, run_dir,
+                symbol_contexts = contexts
+                if stock.get("market", "a") != "a":
+                    from chanlun.screening.markets import market_context
+                    observed = datetime.fromisoformat(json.loads(Path(run_dir, "request.json").read_text(encoding="utf-8"))["observed_at"])
+                    main = market_context(stock["market"], stock["code"], observed, "5m", settings["recent_sessions"], settings["max_anchor_sessions"],
+                                          completed_session=settings.get("scope") in {"all_a_watchlist", "watchlist"})
+                    lower = market_context(stock["market"], stock["code"], datetime.fromtimestamp(main["cutoff"], CN), "1m", settings["recent_sessions"], settings["max_anchor_sessions"])
+                    symbol_contexts = {"5m": main, "1m": lower}
+                result = scan_symbol(stock, settings, symbol_contexts, run_dir,
                                      cache_root=Path(run_dir).parent / "analysis_cache", revision=revision)
             except Exception as exc:
-                result = {"code": stock["code"], "name": stock["name"], "rows": [],
+                result = {"code": stock["code"], "market": stock.get("market", "a"), "name": stock["name"], "rows": [],
                           "error": f"{type(exc).__name__}: {exc}"}
             connection.send(result)
     except (EOFError, BrokenPipeError):
@@ -596,8 +611,8 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
                 timed_out = now - slot["started"] >= timeout_seconds
                 if result is None and (failed or timed_out or not slot["process"].is_alive()):
                     reason = "WORKER_TIMEOUT" if timed_out else "ENGINE_ERROR"
-                    result = {"code": stock["code"], "name": stock["name"], "rows": [
-                        {"code": stock["code"], "name": stock["name"], "frequency": f,
+                    result = {"code": stock["code"], "market": stock.get("market", "a"), "name": stock["name"], "rows": [
+                        {"code": stock["code"], "market": stock.get("market", "a"), "name": stock["name"], "frequency": f,
                          "selected": [], "recent_rejections": [], "reason_counts": {}, "data_errors": [reason]}
                         for f in settings["frequencies"]]}
                     _stop_worker(slot)
@@ -614,8 +629,10 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
 def _catalog_worker(connection, settings, _run_dir):
     try:
         requested = set(settings.get("codes", []))
-        if settings.get("scope") == "all_a":
+        if settings.get("scope") in {"all_a", "all_a_watchlist"}:
             stocks = _exchange().all_stocks(full_market_authorized=True)
+        elif settings.get("scope") in {"watchlist", "symbols"}:
+            stocks = []
         elif settings.get("scope") == "codes" and requested:
             stocks = [{**info, "type": "stock_cn"} for code in sorted(requested)
                       if (info := _exchange().stock_info(code))]
@@ -625,6 +642,16 @@ def _catalog_worker(connection, settings, _run_dir):
                          and (not requested or s["code"] in requested)
                          and not (settings["exclude_st"] and ("ST" in s["name"].upper() or "退" in s["name"]))),
                         key=lambda s: s["code"])
+        if settings.get("scope") in {"all_a_watchlist", "watchlist", "symbols"}:
+            from chanlun.screening.markets import watchlist_symbols
+            additions = settings.get("symbols", []) if settings["scope"] == "symbols" else watchlist_symbols()
+            combined = {("a", s["code"]): {**s, "market": "a"} for s in stocks}
+            for item in additions:
+                item = {**item, "name": item.get("name", item["code"])}
+                combined[(item["market"], item["code"])] = item
+            # User-maintained groups are checked first, without enumerating any
+            # non-A-share exchange. The remaining A-share pool follows.
+            stocks = sorted(combined.values(), key=lambda s: (s.get("origin") != "watchlist", s["market"], s["code"]))
         if not stocks:
             raise ValueError("所选范围没有符合股票类别条件的标的")
         connection.send({"stocks": stocks,
@@ -697,13 +724,15 @@ def run_screening(run_dir: Path):
             raise ScreeningCancelled()
         stocks = catalog["stocks"]
         state["excluded_requested_codes"] = catalog["excluded_requested_codes"]
-        exchanges = dict(Counter(s["code"].split(".")[0] for s in stocks))
+        exchanges = dict(Counter(s["code"].split(".")[0] for s in stocks if s.get("market", "a") == "a"))
         state.update(total=len(stocks), phase="screening",
                      cutoffs={f: c["cutoff"] for f, c in contexts.items()},
                      calendar_source=next(iter(contexts.values()))["calendar_source"],
-                     universe_coverage={"source": "QMT", "exchanges": exchanges,
+                     universe_coverage={"source": "QMT + 人工关注组行情源", "exchanges": exchanges,
+                         "markets": dict(Counter(s.get("market", "a") for s in stocks)),
                          "absent_exchanges": [e for e in ("SH", "SZ", "BJ") if e not in exchanges],
-                         "scope_label": "行情源 A 股股票池" if settings["scope"] == "all_a" else "指定股票"})
+                         "scope_label": {"all_a": "行情源 A 股股票池", "all_a_watchlist": "A 股 + 人工关注组（各市场）",
+                                         "watchlist": "人工关注组（各市场）", "symbols": "选股候选（跨市场）"}.get(settings["scope"], "指定股票")})
         write_json(run_dir / "universe.json", stocks)
         write_json(run_dir / "status.json", state)
         workers = min(settings.get("workers", 4), max(1, (os.cpu_count() or 2) - 2), 6)

@@ -221,6 +221,12 @@ def _calendar_closes(days: tuple[str, ...], step: int, cutoff: int) -> tuple[int
 
 def expected_closes_between(context: dict, start: int) -> set[int]:
     """Generate verified closes for the actual dependency, even before the UI window."""
+    if "session_periods" in context:
+        if start < context["session_periods"][0][0]:
+            raise ValueError("calendar does not cover dependency start")
+        step = int(context["frequency"][:-1]) * 60
+        return {stamp for opening, closing in context["session_periods"]
+                for stamp in range(opening + step, closing + 1, step) if stamp >= start}
     first_day = datetime.fromtimestamp(start, CN).date().isoformat()
     if first_day < context.get("calendar_coverage_start", context["trading_days"][0]):
         raise ValueError("calendar does not cover dependency start")
@@ -232,7 +238,7 @@ def frame_gaps(frame: pd.DataFrame, context: dict, start: int, *, raw=False) -> 
     present = set() if frame is None or frame.empty else set(
         frame.date.astype(pd.DatetimeTZDtype(unit="ns", tz=CN)).astype("int64") // 1_000_000_000)
     expected = expected_closes_between(context, start)
-    exempt = set() if raw or frame is None or frame.empty else exempt_closes(frame, context, expected)
+    exempt = set() if raw or frame is None or frame.empty or "session_periods" in context else exempt_closes(frame, context, expected)
     return sorted(expected - present - exempt)
 
 
@@ -279,11 +285,17 @@ def validate_frame(frame: pd.DataFrame, context: dict) -> list[str]:
             or (frame.low > frame[["open", "close", "high"]].min(axis=1)).any()):
         return ["INVALID_BARS"]
     reasons = []
-    local = dates.dt.tz_convert(CN)
+    local = dates.dt.tz_convert(context.get("session_timezone", CN))
     minute = local.dt.hour * 60 + local.dt.minute
     step = int(context["frequency"][:-1])
-    aligned = (((minute > 570) & (minute <= 690) & ((minute - 570) % step == 0))
-               | ((minute > 780) & (minute <= 900) & ((minute - 780) % step == 0)))
+    if "session_periods" in context:
+        stamps = dates.astype("int64") // 1_000_000_000
+        aligned = pd.Series(False, index=frame.index)
+        for opening, closing in context["session_periods"]:
+            aligned |= (stamps > opening) & (stamps <= closing) & ((stamps-opening) % (step*60) == 0)
+    else:
+        aligned = (((minute > 570) & (minute <= 690) & ((minute - 570) % step == 0))
+                   | ((minute > 780) & (minute <= 900) & ((minute - 780) % step == 0)))
     # Match the QMT adapter: these are real auction rows, not continuous
     # minute closes. Preserve their prices without requiring or inventing them.
     if context["frequency"] == "1m" and frame.attrs.get("price_basis_provider") == "qmt":
@@ -291,8 +303,8 @@ def validate_frame(frame: pd.DataFrame, context: dict) -> list[str]:
     known_days = local.dt.strftime("%Y-%m-%d")
     if (not aligned.all() or (local.dt.second != 0).any()
             or (local.dt.microsecond != 0).any() or (local.dt.nanosecond != 0).any()
-            or ((known_days >= context.get("calendar_coverage_start", context["trading_days"][0]))
-                & ~known_days.isin(context["trading_days"])).any()):
+            or ("session_periods" not in context and ((known_days >= context.get("calendar_coverage_start", context["trading_days"][0]))
+                & ~known_days.isin(context["trading_days"])).any())):
         reasons.append("INVALID_SESSION")
     if int(dates.iloc[-1].timestamp()) != context["cutoff"]:
         reasons.append("STALE_DATA")
@@ -350,8 +362,10 @@ def audit_snapshot(snapshot: dict, frame: pd.DataFrame, context: dict,
         result[("confirmed_" if confirmed else "unconfirmed_") + ("buys" if buy else "sells")] += 1
         anchor = point["anchor_at"]
         available = point["available_at"]
-        anchor_day = datetime.fromtimestamp(anchor, CN).date().isoformat()
-        confirm_day = datetime.fromtimestamp(available, CN).date().isoformat()
+        from zoneinfo import ZoneInfo
+        session_tz = ZoneInfo(context["session_timezone"]) if "session_timezone" in context else CN
+        anchor_day = datetime.fromtimestamp(anchor, session_tz).date().isoformat()
+        confirm_day = datetime.fromtimestamp(available, session_tz).date().isoformat()
         if not confirmed:
             reasons.append("NOT_CONFIRMED")
         if not as_confirmation and confirm_day < context["recent_from"]:

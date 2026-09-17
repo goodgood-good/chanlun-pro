@@ -26,18 +26,18 @@ from chanlun.screening.confirmation import confirmation_reasons, is_confirmed
 from chanlun.screening.nesting import STRATEGY, saved_confirmation_valid
 
 
-def validate_settings(body):
+def validate_settings(body, *, max_codes=100):
     if not isinstance(body, dict):
         raise ValueError("请求必须为 JSON 对象")
     allowed = {"scope", "codes", "frequencies", "point_types", "recent_sessions",
                "max_anchor_sessions", "exclude_st", "workers", "max_anchor_gain_pct",
-               "include_weak_second", "strategy", "confirmation_frequency"}
+               "include_weak_second", "strategy", "confirmation_frequency", "symbols"}
     if set(body) - allowed:
         raise ValueError("请求包含未知选股条件")
     if body.get("strategy", STRATEGY) != STRATEGY or body.get("confirmation_frequency", "1m") != "1m":
         raise ValueError("当前选股采用 5m 买卖点与 1m 区间套确认")
     scope = body.get("scope")
-    if scope not in {"all_a", "codes"}:
+    if scope not in {"all_a", "codes", "all_a_watchlist", "watchlist", "symbols"}:
         raise ValueError("请指定行情源 A 股股票池或明确的股票代码")
     result = {"scope": scope}
     for field, options, default in (("frequencies", ("5m",), ["5m"]),
@@ -68,11 +68,22 @@ def validate_settings(body):
     if type(result["exclude_st"]) is not bool:
         raise ValueError("exclude_st 必须为布尔值")
     codes = body.get("codes", [])
-    if (not isinstance(codes, list) or len(codes) > 100
+    if (not isinstance(codes, list) or len(codes) > max_codes
             or any(type(c) is not str or not re.fullmatch(r"(?:SH|SZ|BJ)\.\d{6}", c) for c in codes)
-            or (scope == "codes" and not codes) or (scope == "all_a" and codes)):
-        raise ValueError("指定范围需填写 1–100 个 SH./SZ./BJ. 股票代码，全市场无需代码")
+            or (scope == "codes" and not codes) or (scope != "codes" and codes)):
+        raise ValueError(f"指定范围需填写 1–{max_codes} 个 SH./SZ./BJ. 股票代码，全市场无需代码")
     result["codes"] = list(dict.fromkeys(codes))
+    symbols = body.get("symbols", [])
+    if scope == "symbols":
+        from chanlun.screening.markets import validate_symbol
+        if (not isinstance(symbols, list) or not 1 <= len(symbols) <= max_codes
+                or any(not isinstance(s, dict) or set(s) - {"market", "code", "name", "origin"}
+                       or not validate_symbol(s.get("market"), s.get("code"))
+                       or not isinstance(s.get("name", ""), str) or len(s.get("name", "")) > 200 for s in symbols)):
+            raise ValueError("跨市场标的列表不合法")
+        result["symbols"] = list({(s["market"], s["code"]): s for s in symbols}.values())
+    elif symbols:
+        raise ValueError("仅指定跨市场范围可携带标的列表")
     return result
 
 
@@ -103,8 +114,9 @@ def _pid_alive(pid):
 
 
 class ScreeningManager:
-    def __init__(self, root=None, *, now=None):
+    def __init__(self, root=None, *, now=None, max_codes=100):
         self._root = root
+        self._max_codes = max_codes
         self._lock = threading.Lock()
         self._process = None
         self._revision = None
@@ -190,9 +202,9 @@ class ScreeningManager:
                     continue
                 item = json.loads(line)
                 if item.get("error"):
-                    errors.append({"code": item["code"], "error": item["error"]})
+                    errors.append({"code": item["code"], "market": item.get("market", "a"), "error": item["error"]})
                 for row in item["rows"]:
-                    header = {k: row[k] for k in ("code", "name", "frequency", "source_closed_at", "input_fingerprint") if k in row}
+                    header = {k: row[k] for k in ("code", "market", "name", "frequency", "source_closed_at", "input_fingerprint") if k in row}
                     nested = state.get("settings", {}).get("strategy") == STRATEGY
                     if nested:
                         header.update(strategy=STRATEGY, confirmation_evidence=row.get("confirmation_evidence", {}))
@@ -291,12 +303,12 @@ class ScreeningManager:
                 "observation_count": len(observations),
                 "selected_symbols": len({s["code"] for s in selected})}
 
-    def evidence(self, source, code, frequency, point_id):
+    def evidence(self, source, code, frequency, point_id, *, market="a"):
         result = self.results()
         if result.get("run_id") != source:
             raise ValueError("该结果已被新一轮选股替换，请刷新选股页面")
         candidate = next((row for row in [*result["selected"], *result["observations"]]
-                          if row["code"] == code and (row["frequency"] == frequency
+                          if row["code"] == code and row.get("market", "a") == market and (row["frequency"] == frequency
                               or frequency == "1m" and row.get("nested_confirmation", {}).get("strategy") == STRATEGY)
                           and row["point"]["point_id"] == point_id and row.get("evidence_available")), None)
         if candidate is None:
@@ -317,13 +329,13 @@ class ScreeningManager:
                              "source_current": result["source_current"], "cutoff_current": result["cutoff_current"],
                              "source_closed_at": snapshot["source_closed_at"], "input_revision_state": "not_rechecked"}}
 
-    def evidence_history(self, source, code, frequency, point_id, *, first, start, end):
+    def evidence_history(self, source, code, frequency, point_id, *, first, start, end, market="a"):
         """Adapt saved chart geometry to the shared TradingView history contract.
 
         This path never calls a market feed or recomputes historical structure.
         It intentionally cannot fall back to live data on a missing proof.
         """
-        payload = self.evidence(source, code, frequency, point_id)
+        payload = self.evidence(source, code, frequency, point_id, market=market)
         snapshot, bars = with_point_exit_plans(payload["snapshot"]), payload["bars"]
         geometry = snapshot.get("chart")
         if not geometry:
@@ -351,7 +363,7 @@ class ScreeningManager:
                    if authoritative else {})}
 
     def start(self, body):
-        settings = validate_settings(body)
+        settings = validate_settings(body, max_codes=self._max_codes)
         with self._lock:
             if self.status()["status"] in {"starting", "running"}:
                 raise RuntimeError("已有选股任务在执行，请等待完成或取消")

@@ -12,7 +12,7 @@
 </head>
 <body>
 <a class="skip" href="#workspace">跳到选股工作台</a>
-<nav class="topbar"><a class="brand" href="/">CL <span>缠论交易分析</span></a><div><a href="/">行情与画图</a><a href="/zixuan_group/a" target="_blank" rel="noopener">自选分组管理</a></div></nav>
+<nav class="topbar"><a class="brand" href="/">CL <span>缠论交易分析</span></a><div><a href="/monitor" target="_blank" rel="noopener">盘后选股与实时监听</a><a href="/">行情与画图</a><a href="/zixuan_group/a" target="_blank" rel="noopener">自选分组管理</a></div></nav>
 <main data-user="{{ current_user.get_id() if current_user is defined else '' }}">
   <header class="hero"><div><small>SCREENING WORKSPACE</small><h1>缠论选股 · 5m 买卖点与 1m 区间套</h1><p>以 5m 买卖点为主信号，在对应末端区间内用 1m 确认，分别展示已确认与形成等待。</p></div><span class="tag">人工判断 · 手工交易</span></header>
   <div id="page-message" role="alert" hidden></div>
@@ -20,7 +20,7 @@
     <section class="statusbar"><div><strong id="run-status">正在读取最新选股结果…</strong><p id="run-detail" class="muted"></p><progress id="run-progress" max="1" value="0" aria-label="选股进度" hidden></progress></div><div class="run-controls"><span class="tag">最新选股结果</span><button id="start" type="submit" form="screen-form" class="primary" disabled>开始选股</button><button id="cancel" type="button" hidden disabled>取消选股</button><button id="refresh">刷新结果</button><button id="export">导出当前筛选</button></div></section>
     <details class="panel" id="screen-settings"><summary>选股条件</summary>
       <form id="screen-form"><fieldset id="screen-fields" class="screen-controls">
-        <label>股票范围<select id="scope"><option value="all_a">行情源 A 股股票池</option><option value="codes">指定股票</option></select></label>
+        <label>股票范围<select id="scope"><option value="all_a_watchlist">A 股 + 人工关注组（各市场）</option><option value="watchlist">仅人工关注组（各市场）</option><option value="all_a">行情源 A 股股票池</option><option value="codes">指定股票</option></select></label>
         <label id="codes-label" hidden>股票代码<input id="codes" placeholder="SH.600088, SZ.301004"></label>
         <fieldset><legend>周期关系</legend><p>主周期 <strong>5m</strong> · 区间套确认 <strong>1m</strong></p></fieldset>
         <fieldset><legend>买卖点类型</legend><label><input type="checkbox" name="point" value="1buy" checked>一买</label><label><input type="checkbox" name="point" value="2buy" checked>二买</label><label><input type="checkbox" name="point" value="3buy" checked>三买</label><label><input type="checkbox" name="point" value="1sell" checked>一卖</label><label><input type="checkbox" name="point" value="2sell" checked>二卖</label><label><input type="checkbox" name="point" value="3sell" checked>三卖</label></fieldset>
@@ -68,7 +68,7 @@
         </div>
       </section>
     </section>
-    <details class="panel" id="notifications-panel"><summary>实时通知与监听历史 <span id="notification-count" class="muted"></span></summary><p class="muted">保留清理前的提醒及监听状态变化，所有记录按当时日期展示。当前页面自动更新行情；结构筛选由选股任务启动，外部通知尚未重新开启。</p><div class="toolbar"><label>状态<select id="notification-filter"><option value="all">全部记录</option><option value="delivered">已发送</option><option value="suppressed">未发送</option></select></label><input id="notification-search" type="search" placeholder="搜索股票代码" aria-label="搜索通知记录"></div><div id="notification-list"></div><button id="notification-more" hidden>显示更多通知记录</button></details>
+    <details class="panel" id="notifications-panel"><summary>旧版通知与监听历史 <span id="notification-count" class="muted"></span></summary><p class="muted">这里保留旧版提醒，按当时日期展示。新的候选监听状态与站内提醒请打开<a href="/monitor" target="_blank" rel="noopener">实时监听页面</a>。</p><div class="toolbar"><label>状态<select id="notification-filter"><option value="all">全部记录</option><option value="delivered">已发送</option><option value="suppressed">未发送</option></select></label><input id="notification-search" type="search" placeholder="搜索股票代码" aria-label="搜索通知记录"></div><div id="notification-list"></div><button id="notification-more" hidden>显示更多通知记录</button></details>
     <details class="panel"><summary>运行与数据诊断</summary><p id="diagnostics"></p><p id="coverage-detail"></p><p id="diagnostic-reasons"></p><ul id="diagnostic-errors"></ul></details>
   </div>
 </main>

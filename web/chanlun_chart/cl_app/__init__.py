@@ -655,6 +655,7 @@ def create_app(test_config=None):
     from .blueprints.options import options_bp
     from .blueprints.symbols import symbols_bp
     from .blueprints.screening import screening_bp
+    from .blueprints.monitor import monitor_bp
 
     for blueprint in (
         tv_bp,
@@ -665,6 +666,7 @@ def create_app(test_config=None):
         options_bp,
         symbols_bp,
         screening_bp,
+        monitor_bp,
     ):
         app.register_blueprint(blueprint)
 
@@ -788,6 +790,10 @@ def create_app(test_config=None):
             _ensure_start_is_current()
             sse_stream_service.start_sse_runtime()
             _ensure_start_is_current()
+            if not app.testing:
+                from .services.signal_monitor import service as signal_monitor
+                signal_monitor.start_runtime()
+            _ensure_start_is_current()
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
             with runtime_lock:
                 if (
@@ -843,6 +849,9 @@ def create_app(test_config=None):
                     cleanup_errors.append(f"{label}: {exc}")
                     app.logger.exception("runtime cleanup failed: %s", label)
 
+            if not app.testing:
+                from .services.signal_monitor import service as signal_monitor
+                _cleanup("signal-monitor", signal_monitor.stop_runtime)
             _cleanup("chart-initial-build", chart_initial_build_service.shutdown_initial_build_runtime)
             def _handles_for(key):
                 value = runtime_state.get(key)

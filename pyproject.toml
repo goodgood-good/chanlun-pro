@@ -31,6 +31,7 @@ dependencies = [
     "tornado>=6.5.8",
     "tzlocal==5.3.1",
     "urllib3>=2.7.0",
+    "exchange-calendars (>=4.11,<4.12)",
 ]
 
 # 可选依赖：按需求场景分组安装（默认不装）

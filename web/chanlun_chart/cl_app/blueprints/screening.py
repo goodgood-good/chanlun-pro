@@ -72,9 +72,10 @@ def evidence_page():
     frequency = request.args.get("frequency", "")
     interval = {"1m": "1", "5m": "5", "30m": "30"}.get(frequency)
     fields = {"source", "code", "frequency", "point"}
-    if set(request.args) != fields or not interval or any(len(request.args.getlist(k)) != 1 for k in fields):
+    if (set(request.args) - {"market"} != fields or not interval
+            or any(len(request.args.getlist(k)) != 1 for k in request.args)):
         return jsonify(error="请从最新选股候选打开本次证据图"), 400
-    return redirect(url_for("index_show", market="a", code=request.args["code"], frequency=frequency,
+    return redirect(url_for("index_show", market=request.args.get("market", "a"), code=request.args["code"], frequency=frequency,
                             layout="single", intervals=interval, chart_sidebar="collapsed",
                             screening_source=request.args["source"], screening_point=request.args["point"]))
 
@@ -84,9 +85,9 @@ def evidence_page():
 def evidence_data():
     try:
         fields = ("source", "code", "frequency", "point")
-        if set(request.args) != set(fields) or any(len(request.args.getlist(k)) != 1 for k in fields):
+        if set(request.args) - {"market"} != set(fields) or any(len(request.args.getlist(k)) != 1 for k in request.args):
             raise ValueError("请从最新选股候选打开本次证据图")
-        payload = manager.evidence(*(request.args[k] for k in fields))
+        payload = manager.evidence(*(request.args[k] for k in fields), market=request.args.get("market", "a"))
         response = jsonify(payload)
         response.headers["Cache-Control"] = "private, no-store"
         return response

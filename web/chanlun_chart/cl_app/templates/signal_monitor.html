@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>盘后选股与实时监听 · Chanlun Pro</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/screening_workbench.css') }}?asset={{ static_asset_token }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/signal_monitor.css') }}?asset={{ static_asset_token }}">
+  <script defer src="{{ url_for('static', filename='js/signal_monitor.js') }}?asset={{ static_asset_token }}"></script>
+</head>
+<body>
+<nav class="topbar"><a class="brand" href="/">CL <span>缠论交易分析</span></a><div><a href="/">行情与画图</a><a href="/screening" target="_blank" rel="noopener">选股工作台</a><a href="/zixuan_group/a" target="_blank" rel="noopener">人工关注组</a></div></nav>
+<main>
+  <header class="hero"><div><small>SIGNAL MONITOR</small><h1>盘后选股 · 实时买卖点监听</h1><p>每天盘后更新候选池，盘中持续检查选股候选的买卖点变化。</p></div><span class="tag" id="enabled-label">正在连接…</span></header>
+  <div id="monitor-message" class="notice" role="alert" hidden></div>
+  <section class="panel">
+    <form id="monitor-form">
+      <div class="screen-controls">
+        <label>盘后选股时间（北京时间）<input id="after-close" type="time" min="15:01" max="23:59" value="15:10" required></label>
+        <label>检查间隔<select id="interval"><option value="30">30 秒</option><option value="60" selected>60 秒</option><option value="120">2 分钟</option><option value="300">5 分钟</option></select></label>
+        <label>盘后选股范围<select id="daily-scope"><option value="all_a_watchlist">A 股 + 人工关注组（各市场）</option><option value="watchlist">仅人工关注组（各市场）</option><option value="latest">沿用最近一次选股条件</option></select></label>
+      </div>
+      <div class="toolbar"><button class="primary" id="enable" type="submit" disabled>启动自动任务</button><button id="pause" type="button" disabled>暂停自动任务</button><button id="check-now" type="button" disabled>立即检查候选</button><button id="reload" type="button">刷新状态</button></div>
+    </form>
+    <p class="muted">监听最近一轮完成选股的已确认与形成等待候选，采用选股工作台现有的 5m 主信号与 1m 确认。出现新的已收盘 K 线后计算；无新 K 线时等待。提醒在本页保留，可开启钉钉推送，关闭网页后后台任务仍继续。</p>
+    <p class="muted">A 股盘后统一启动；关注组中的其他交易所取各自最近一个完整收盘交易日，24 小时市场取任务启动时的已收盘 K 线。实时监听随各市场新 K 线更新。缺少行情、价格基准或交易时段的标的会列入诊断，不当作无信号。</p>
+  </section>
+  <section class="panel" id="dingtalk-panel">
+    <header><h2>钉钉通知</h2><label><input id="dingtalk-enabled" type="checkbox" disabled> 推送选股完成与监听新信号</label></header>
+    <strong id="dingtalk-status">正在读取通知状态…</strong><p id="dingtalk-detail" class="muted"></p>
+    <p class="muted">选股完成发送汇总；实时监听发送新信号及确认状态变化，明确区分已确认与形成等待。同一信号的相同状态去重，初始选股候选不会重复推送。发送失败会重试，过期的实时提醒不补发。</p>
+    <details><summary>最近发送记录</summary><div id="dingtalk-history"></div></details>
+  </section>
+  <section class="monitor-stages">
+    <article class="panel"><small>01 · 每日盘后</small><h2>选股任务</h2><strong id="daily-status">正在读取…</strong><p id="daily-detail" class="muted"></p><progress id="daily-progress" hidden></progress><a href="/screening" target="_blank" rel="noopener">查看选股进度与结果 →</a></article>
+    <article class="panel"><small>02 · 跟踪候选</small><h2>实时监听</h2><strong id="live-status">正在读取…</strong><p id="live-detail" class="muted"></p><progress id="live-progress" hidden></progress><p id="pool-source" class="muted"></p></article>
+  </section>
+  <section class="summary"><article><small>监听标的</small><strong id="pool-count">0</strong></article><article><small>当前信号</small><strong id="signal-count">0</strong></article><article><small>变化记录</small><strong id="event-count">0</strong></article><article><small>本轮数据问题</small><strong id="error-count">0</strong></article></section>
+  <section class="panel"><header><h2>当前买卖点</h2><span id="signal-cutoff" class="muted"></span></header><p class="muted">点击标的查看当前行情图表。表中信号以显示的检查截止时刻为准。</p><div class="monitor-table"><table><thead><tr><th>标的</th><th>买卖点</th><th>状态</th><th>拐点价格</th><th>信号可用时间</th><th>行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p></section>
+  <details class="panel"><summary>选股候选监听名单</summary><p id="pool-empty" class="muted"></p><div id="pool" class="monitor-pool"></div></details>
+  <details class="panel" id="errors-panel"><summary>行情与计算问题</summary><ul id="errors"></ul></details>
+  <section class="panel"><header><h2>站内提醒与监听历史</h2><span class="muted">最近 500 条 · 同一状态去重</span></header><p class="muted">记录首次发现、状态变化和退出本轮候选。退出候选只是筛选结果变化。保留的历史提醒不代表当前信号。</p><div id="events"></div><button id="more-events" type="button" hidden>显示更多</button><p id="events-empty" class="muted"></p></section>
+</main>
+</body>
+</html>

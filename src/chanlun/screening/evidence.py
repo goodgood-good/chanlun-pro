@@ -7,7 +7,6 @@ import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
-import re
 import zlib
 
 import pandas as pd
@@ -18,10 +17,11 @@ from .rules import FREQUENCIES
 from .confirmation import confirmation_catalog
 
 
-def evidence_paths(directory, code, frequency):
-    if not re.fullmatch(r"(?:SH|SZ|BJ)\.\d{6}", code) or frequency not in FREQUENCIES:
+def evidence_paths(directory, code, frequency, market="a"):
+    from .markets import storage_symbol
+    if frequency not in FREQUENCIES:
         raise ValueError("选股证据的标的或周期无效")
-    stem = Path(directory) / "evidence" / f"{code}_{frequency}"
+    stem = Path(directory) / "evidence" / f"{storage_symbol(code, market)}_{frequency}"
     return Path(str(stem) + ".parquet"), Path(str(stem) + ".json.gz")
 
 
@@ -33,7 +33,7 @@ def _file_digest(path, size, mtime_ns, ctime_ns):
 def evidence_health(directory, code, frequency, manifest):
     verified = True
     try:
-        for path, name in zip(evidence_paths(directory, code, frequency), ("parquet", "snapshot")):
+        for path, name in zip(evidence_paths(directory, code, frequency, manifest.get("market", "a")), ("parquet", "snapshot")):
             stat = path.stat()
             expected_size = manifest.get(name + "_bytes")
             if stat.st_size <= 0 or (expected_size is not None and stat.st_size != expected_size):
@@ -102,7 +102,7 @@ def _selection_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_confirmation_catalog(directory, code, frequency, manifest):
     """Recheck saved candidates with current lifetime rules, without scanning."""
-    _, path = evidence_paths(directory, code, frequency)
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
     stat = path.stat()
     symbol, interval, catalog = _selection_catalog(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, manifest.get("snapshot_sha256"),
@@ -125,7 +125,7 @@ def _semantic_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_semantic_catalog(directory, code, frequency, manifest):
     """Read only saved point lineage, cached by file version; never recalculate bars."""
-    _, path = evidence_paths(directory, code, frequency)
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
     stat = path.stat()
     symbol, interval, points, centers = _semantic_catalog(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
@@ -153,7 +153,7 @@ def evidence_nested_snapshots(directory, code, main_manifest, lower_manifest):
         health = evidence_health(directory, code, frequency, manifest)
         if not health["complete"] or not health["verified"]:
             raise ValueError("区间套需要完整且经过校验的 5m 与 1m 证据")
-        _, path = evidence_paths(directory, code, frequency)
+        _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
         stat = path.stat()
         snapshot = _nested_snapshot(str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
                                     manifest.get("snapshot_sha256"))
@@ -171,7 +171,7 @@ def _exit_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_exit_catalog(directory, code, frequency, manifest):
     """Derive display references from verified saved structure, without a scan."""
-    _, path = evidence_paths(directory, code, frequency)
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
     stat = path.stat()
     symbol, interval, plans = _exit_catalog(str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
                                             manifest.get("snapshot_sha256"))
@@ -184,7 +184,7 @@ def load_evidence(directory, code, frequency, manifest):
     health = evidence_health(directory, code, frequency, manifest)
     if not health["complete"]:
         raise ValueError("本次筛选证据缺失或校验失败，请重新进行小范围验证")
-    parquet, packed = evidence_paths(directory, code, frequency)
+    parquet, packed = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
     raw_frame, raw_snapshot = parquet.read_bytes(), packed.read_bytes()
     # Hash the actual bytes consumed by this request. The cached stat/hash is
     # only a polling optimization, not authority across concurrent file writes.
