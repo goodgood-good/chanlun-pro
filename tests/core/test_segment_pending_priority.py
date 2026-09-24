@@ -29,7 +29,9 @@ def test_later_local_fractal_waits_for_the_original_second_sequence(
     values = strokes(points, mirror)
     local = local_first_fractal(values, 0, 11, 19)
     assert local is not None and not local.has_gap
-    assert local.witness == 19
+    # The selected effective-end rule establishes this alternative at 17;
+    # it still cannot bypass the already eligible earlier second-case search.
+    assert local.witness == 17
     calc = XdCalculator()
     before = calc.calculate(values)
     assert geometry(before) == [(0, 7, False)]

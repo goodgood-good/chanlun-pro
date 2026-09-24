@@ -128,6 +128,7 @@ def _snapshot_for_units(units):
     cutoff = max(value.available_at for value in units)
     cd = SimpleNamespace(
         get_frequency=lambda: "1m", get_code=lambda: "test",
+        get_src_klines=lambda: [SimpleNamespace(date=cutoff)],
         _strict_as_of=lambda: cutoff, _strict_price_quantum=lambda: Decimal("0.01"),
         _strict_price_basis_revision=lambda: TEST_PRICE_BASIS,
         _strict_config_revision=lambda: "test", get_strict_evidence=lambda: evidence,

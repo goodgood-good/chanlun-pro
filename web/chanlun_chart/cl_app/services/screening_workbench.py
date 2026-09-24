@@ -18,6 +18,7 @@ from chanlun import config
 from chanlun.cl_utils.point_exits import EXIT_PRICE_SOURCES
 
 from .screening import manager
+from . import higher_context
 
 
 REVIEW_FIELDS = {
@@ -80,6 +81,8 @@ def _current_rows(result, source):
             "exit_plan": item.get("exit_plan"), "confirmation_exit_plan": item.get("confirmation_exit_plan"),
             "latest_price": item.get("latest_price"), "source_closed_at": item.get("source_closed_at"),
             "gain_pct": item.get("distance_from_anchor_pct"),
+            "anchor_age_sessions": item.get("anchor_age_sessions"),
+            "confirmation_age_sessions": item.get("confirmation_age_sessions"),
             "confirmation_delay_sessions": item.get("confirmation_delay_sessions"),
             "audit": item.get("audit", {}),
             "stage": item.get("selection_status", point["status"] if waiting else "confirmed"), "origin": "screening",
@@ -98,14 +101,24 @@ def _current_rows(result, source):
     return rows
 
 
-def dashboard():
-    result = manager.results()
+def dashboard(*, background=False):
+    result = manager.results(background=background)
     source = result.get("run_id", "idle")
     rows = _current_rows(result, source)
     status = {k: v for k, v in result.items() if k not in (
         "selected", "observations", "recent_rejections", "rejection_counts", "reason_labels", "errors",
     )}
-    status["error_count"] = len(result.get("errors", []))
+    status["error_count"] = (result.get("error_count") if result.get("results_loading")
+                             else len(result.get("errors", [])))
+    context = higher_context.snapshot(manager, source, result.get("source_revision"))
+    status["higher_context_version"] = higher_context.status_version(manager, source)
+    for row in rows:
+        key = (row["market"], row["code"], row.get("source_closed_at"))
+        row["higher_context"] = context["rows"].get(key) or {
+            "frequency": "30m", "source_closed_at": row.get("source_closed_at"),
+            "category": "unknown", "quality": "unknown",
+            "reason": "NOT_COMPUTED" if context["status"] in {"not_started", "failed"} else "PENDING",
+        }
     sectors, members, catalog_at = _sector_catalog()
     membership = {}
     for sector_id, codes in members.items():
@@ -127,6 +140,7 @@ def dashboard():
     } for s in sectors]
     sector_rows.sort(key=lambda s: (-s["signal_count"], s["name"]))
     return {"source": source, "status": status, "candidates": rows, "sectors": sector_rows,
+            "higher_context": {k: v for k, v in context.items() if k != "rows"},
             "point_exit_sources": EXIT_PRICE_SOURCES,
             "diagnostics": {key: result.get(key, {} if key != "errors" else [])
                             for key in ("rejection_counts", "reason_labels", "errors")},

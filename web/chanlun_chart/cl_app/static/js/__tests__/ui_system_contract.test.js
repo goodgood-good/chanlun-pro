@@ -85,7 +85,7 @@ test('login and workbench surfaces share product identity without losing their r
   const index = template('index.html');
 
   assert.match(login, /CHANLUN PRO/);
-  assert.match(login, /行情结构研究工作台/);
+  assert.match(login, /缠论交易与选股/);
   assert.match(login, /autocomplete=["']current-password["']/);
   assert.match(login, /autocomplete=["']username["']/);
   assert.match(index, /行情与结构工作台/);

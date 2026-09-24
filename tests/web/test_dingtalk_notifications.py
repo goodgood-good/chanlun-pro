@@ -61,6 +61,29 @@ def test_completion_is_durable_and_deduplicated_after_restart(box):
     assert restored.snapshot()["sent"] == 1
 
 
+def test_success_clears_historical_failure_banner_but_active_retry_is_visible(box):
+    outbox, transport, clock = box
+    transport.error = True
+    outbox.screening_completed(result(), [])
+    for _ in range(6):
+        outbox.deliver_one()
+        clock[0] += 700
+    assert outbox.snapshot()["failed"] == 1
+    assert outbox.snapshot()["last_error"]
+    transport.error = False
+    outbox.screening_completed({**result(), "run_id": "b" * 32}, [])
+    outbox.deliver_one()
+    snapshot = outbox.snapshot()
+    assert snapshot["sent"] == 1 and snapshot["failed"] == 1
+    assert snapshot["last_error"] == ""
+    clock[0] += 10
+    outbox.signal_events([event(identity="new", stamp=clock[0])], since=0)
+    transport.error = True
+    outbox.deliver_one()
+    assert outbox.snapshot()["pending"] == 1
+    assert outbox.snapshot()["last_error"]
+
+
 def test_initial_pool_does_not_repeat_but_confirmation_transition_notifies(box):
     outbox, transport, clock = box
     initial = event()
@@ -78,6 +101,40 @@ def test_initial_pool_does_not_repeat_but_confirmation_transition_notifies(box):
     assert "三买 · 已确认" in transport.messages[1]
 
 
+def test_confirmed_main_point_and_waiting_lower_confirmation_have_separate_notifications(box):
+    from cl_app.services.signal_monitor import _signal
+    outbox, transport, clock = box
+    candidate = {"code": "TSM.US", "market": "us", "frequency": "5m", "source_closed_at": 1000,
+                 "point": {"point_id": "tsm", "point_type": "3buy", "status": "confirmed",
+                           "confirmed_at": 900, "available_at": 900, "missing_conditions": [], "anchor_price": 428.98},
+                 "selection_status": "approaching", "selection_available_at": 1000,
+                 "selection_missing_conditions": ["lower_1m_confirmation"],
+                 "nested_confirmation": {"state": "waiting", "frequency": "1m"},
+                 "confirmation_segment": {"state": "in_progress", "segment": {"direction": "up"}}}
+    original = deepcopy(candidate)
+    row = {**_signal(candidate), "recorded_at": 1000, "change": "discovered"}
+    assert row["point_status"] == "confirmed" and row["stage"] == "approaching"
+    assert row["available_at"] == 900 and row["selection_available_at"] == 1000
+    assert row["missing_conditions"] == []
+    assert candidate == original
+    outbox.signal_events([row, row], since=999)
+    outbox.deliver_one()
+    assert len(transport.messages) == 1
+    text = transport.messages[0]
+    assert "5m 三买 · 已确认" in text
+    assert "1m 区间套：等待确认" in text
+    assert "后继向上线段：进行中（尚未完成）" in text
+    assert "三买 · 形成等待" not in text
+    clock[0] += 10
+    ready = {**row, "stage": "confirmed", "selection_status": "confirmed",
+             "lower_confirmation_state": "confirmed", "recorded_at": clock[0], "change": "changed"}
+    outbox.signal_events([ready, ready], since=999)
+    outbox.deliver_one()
+    assert len(transport.messages) == 2
+    assert "5m 三买 · 已确认" in transport.messages[1]
+    assert "1m 区间套：已确认" in transport.messages[1]
+
+
 def test_network_failure_retries_without_being_counted_as_sent(box):
     outbox, transport, clock = box
     outbox.signal_events([event()], since=999)
@@ -93,7 +150,7 @@ def test_network_failure_retries_without_being_counted_as_sent(box):
     clock[0] += 2
     outbox.deliver_one()
     assert len(transport.messages) == 1
-    assert "形成等待（未确认）" in transport.messages[0]
+    assert "筛选条件待齐" in transport.messages[0]
     assert outbox.snapshot()["last_error"] == ""
 
 

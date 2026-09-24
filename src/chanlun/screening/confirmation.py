@@ -17,6 +17,8 @@ def confirmation_reasons(point, catalog):
     status = catalog.get(point.get("point_id"), {}).get("state")
     if status == "completed":
         return ["CONFIRMING_SEGMENT_COMPLETED"]
+    if status == "unresolved":
+        return ["CONFIRMING_SEGMENT_UNRESOLVED"]
     return [] if status == "in_progress" else ["CONFIRMING_SEGMENT_MISSING"]
 
 
@@ -79,7 +81,26 @@ def confirmation_catalog(snapshot):
             elif (point.get("anchor_unit_id") and
                   point.get("price_anchor_unit_id", point["anchor_unit_id"]) == point["anchor_unit_id"]):
                 positions = by_end.get((point.get("anchor_at"), point.get("anchor_tick")), [])
-        if len(positions) != 1 or positions[0] + 1 >= len(units):
+        if len(positions) != 1:
+            continue
+        anchor = units[positions[0]]
+        construction = snapshot.get("segment_construction") or {}
+        tail = construction.get("tail") or {}
+        # Never let an older drawn projection override an explicit unresolved
+        # interval belonging to this point's immediate completed anchor.
+        if (construction.get("status") == "unresolved" and anchor.get("locked") is True
+                and anchor.get("forming") is False
+                and tail.get("start_time") == anchor.get("end_time")
+                and tail.get("direction") == ("up" if point.get("side") == "buy" else "down")
+                and type(cutoff) is int and tail.get("available_at") == cutoff):
+            try:
+                start_tick = _tick(tail["start_price"], Decimal(str(snapshot["structure_price_quantum"])))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                continue
+            if start_tick == anchor.get("end_tick"):
+                record.update(state="unresolved", unresolved_tail=dict(tail))
+                continue
+        if positions[0] + 1 >= len(units):
             continue
         anchor, segment = units[positions[0]:positions[0] + 2]
         direction = "up" if point.get("side") == "buy" else "down"

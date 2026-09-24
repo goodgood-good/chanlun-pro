@@ -65,7 +65,8 @@ def test_chart_serializer_drops_future_end_label_before_strict_runtime(
     runtime = object()
     calls: list[tuple[object, ...]] = []
 
-    def build_strict(*, market, code, frequency, frame):
+    def build_strict(*, market, code, frequency, frame, last_bar_closed):
+        assert last_bar_closed is True
         calls.append(("build", tuple(frame["date"]), dict(frame.attrs)))
         return runtime
 

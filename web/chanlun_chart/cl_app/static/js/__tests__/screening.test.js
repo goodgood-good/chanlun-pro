@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'screening_workbench.js'), 'utf8');
+const {filterRows} = require('../screening_workbench.js');
 class Element {
   constructor() {
     this.children = []; this.listeners = {}; this.textContent = ''; this.value = '';
@@ -25,7 +26,7 @@ class Element {
 function page(fetch) {
   const elements = new Map();
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-  for (const [id, value] of Object.entries({scope:'all_a', codes:'', recent:'5', anchor:'20', 'max-gain':'10','chart-layout':'single'})) get(id).value = value;
+  for (const [id, value] of Object.entries({scope:'all_a', codes:'', recent:'5', anchor:'20', workers:'12', 'max-gain':'10','chart-layout':'single'})) get(id).value = value;
   get('exclude-st').checked = true;
   const frequency = ['1m','5m','30m'].map(value => ({value,checked:value!=='1m'}));
   const point = ['1buy','2buy','3buy','1sell','2sell','3sell'].map(value => ({value,checked:true}));
@@ -34,10 +35,12 @@ function page(fetch) {
   });
   get('chart-periods').append(...periods);
   const timers = [];
+  const body = new Element(), documentEvents = {};
   vm.runInNewContext(source, {
     PointExitInfo: require('../point_exit_info.js'),
     document: {
-      getElementById:get, createElement:() => new Element(), addEventListener() {},
+      body, getElementById:get, createElement:() => new Element(),
+      addEventListener(name, fn) { (documentEvents[name] ||= []).push(fn); },
       querySelector:s => s==='main' ? {dataset:{user:'tester'}} : {content:'test-csrf'},
       querySelectorAll:s => {
         if(s==='[data-frequency]')return periods;
@@ -48,9 +51,9 @@ function page(fetch) {
     fetch, URL, URLSearchParams, Date, Blob, AbortSignal, location:{origin:'http://local'},
     setTimeout:fn => timers.push(fn), clearTimeout:id=>{timers[id-1]=()=>{};},
   });
-  return {get, timers, periods};
+  return {get, timers, periods, body, documentEvents};
 }
-const response = (value, status=200) => ({ok:status===200, status, redirected:false, json:async () => value});
+const response = (value, status=200) => ({ok:status>=200&&status<300, status, redirected:false, json:async () => value});
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
 function result(id='a', frequency='30m', status='completed') {
   return {source:id, candidates:[],sectors:[],point_counts:{},status:{
@@ -67,6 +70,80 @@ function dispatch(latest, url) {
   if(url==='/get_zixuan_groups/a') return response([]);
   throw new Error('Unexpected endpoint: '+url);
 }
+
+test('pending evidence loads show progress and poll until the same run is ready', async () => {
+  let latest=result(); latest.status.results_loading=true;
+  const ui=page(async url=>url==='/screening/workbench'?response(latest,latest.status.results_loading?202:200):dispatch(latest,url));
+  await settle();
+  assert.match(ui.get('run-status').textContent,/本次筛选完成.*正在读取结果/);
+  assert.match(ui.get('queue-empty').textContent,/正在读取并校验/);
+  assert.equal(ui.get('signal-count').textContent,'—');
+  latest=withCandidate();
+  await ui.timers[0]();await settle();
+  assert.equal(ui.get('signal-count').textContent,1);
+  assert.equal(ui.get('page-message').textContent,'');
+  assert.equal(ui.get('queue-empty').hidden,true);
+});
+
+test('polling and refresh clicks do not duplicate an inflight workbench read', async () => {
+  const latest=result();let release, reads=0;
+  const pending=new Promise(resolve=>{release=resolve;});
+  const ui=page(async url=>{
+    if(url==='/screening/workbench'){reads++;return pending;}
+    return dispatch(latest,url);
+  });
+  await settle();
+  await ui.timers[0]();
+  await ui.get('refresh').listeners.click();
+  assert.equal(reads,1);
+  release(response(latest));await settle();
+  assert.equal(ui.get('run-status').textContent,'本次筛选完成');
+});
+
+test('a timeout is readable and clears after a successful unchanged status poll', async () => {
+  const latest=result();let timeout=true;
+  const ui=page(async url=>{
+    if(url==='/screening/status'&&timeout){
+      const error=new Error('signal timed out');error.name='TimeoutError';throw error;
+    }
+    return dispatch(latest,url);
+  });
+  await settle();await ui.timers[0]();
+  assert.equal(ui.get('page-message').textContent,'读取选股数据超时，页面会自动重试。');
+  timeout=false;await ui.timers[0]();
+  assert.equal(ui.get('page-message').textContent,'');
+});
+
+test('full-chart mode preserves the chart and review draft and restores list visibility', async () => {
+  const data=withCandidate();
+  const ui=page(async url=>dispatch(data,url));await settle();
+  const chart=ui.get('chart-frame').src;
+  ui.get('review-notes').value='keep this review';ui.get('review-form').listeners.input();
+  ui.get('theater').listeners.click();
+  assert.equal(ui.body.classList.contains('theater'),true);
+  assert.equal(ui.get('workspace').classList.contains('list-hidden'),true);
+  assert.equal(ui.get('theater').textContent,'退出满屏');
+  ui.get('toggle-list').listeners.click();
+  assert.equal(ui.get('workspace').classList.contains('list-hidden'),false);
+  for(const listener of ui.documentEvents.keydown)listener({key:'Escape'});
+  assert.equal(ui.body.classList.contains('theater'),false);
+  assert.equal(ui.get('workspace').classList.contains('list-hidden'),false);
+  assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(ui.get('review-notes').value,'keep this review');
+  ui.get('toggle-list').listeners.click();
+  ui.get('theater').listeners.click();ui.get('theater').listeners.click();
+  assert.equal(ui.get('workspace').classList.contains('list-hidden'),true);
+});
+
+test('multichart layouts expose their row count to chart sizing without changing a full-chart toggle', async () => {
+  const data=withCandidate();const ui=page(async url=>dispatch(data,url));await settle();
+  assert.equal(ui.get('chart-stage').dataset.chartLayout,'single');
+  ui.get('chart-layout').value='four';ui.get('chart-layout').listeners.change();
+  assert.equal(ui.get('chart-stage').dataset.chartLayout,'four');
+  const chart=ui.get('chart-frame').src;
+  ui.get('theater').listeners.click();ui.get('theater').listeners.click();
+  assert.equal(ui.get('chart-frame').src,chart);
+});
 
 test('a delayed poll cannot overwrite a run started from the latest-results page', async () => {
   let latest=result(), resolveOld, submitted;
@@ -87,6 +164,7 @@ test('a delayed poll cannot overwrite a run started from the latest-results page
   await ui.get('screen-form').listeners.submit({preventDefault() {}});
   resolveOld(response(result('old','30m').status));await pendingPoll;await settle();
   assert.equal(submitted.max_anchor_gain_pct,8);
+  assert.equal(submitted.workers,12);
   assert.deepEqual(submitted.frequencies,['5m']);
   assert.deepEqual(submitted.point_types,['1buy','2buy','3buy','1sell','2sell','3sell']);
   assert.match(ui.get('diagnostics').textContent,/new/);
@@ -144,6 +222,44 @@ function withCandidate() {
     origin:'screening',stage:'confirmed',sectors:[],point:{point_id:'P',point_type:'3buy',anchor_at:100,available_at:200,anchor_price:12,invalidation_price:11}}];
   return data;
 }
+
+test('third-class counts distinguish confirmed points from incomplete lower confirmation', async () => {
+  const data=withCandidate(), first=data.candidates[0];
+  first.point.status='confirmed';first.stage='approaching';first.nested_confirmation={state:'waiting',interval:{start_after:100,end_at:200}};
+  first.point.center_ordinal=1;first.confirmation_age_sessions=1;first.gain_pct=1.5;
+  const forming={...first,id:'forming',code:'SH.600001',point:{...first.point,status:'approaching'},stage:'approaching'};
+  const complete={...first,id:'complete',code:'SH.600002',point:{...first.point},stage:'confirmed',nested_confirmation:{state:'confirmed',interval:{start_after:100,end_at:200}}};
+  const laterSell={...complete,id:'sell',code:'SH.600003',point:{...complete.point,point_type:'3sell',center_ordinal:2}};
+  data.candidates=[first,forming,complete,laterSell];
+  const ui=page(async url=>dispatch(data,url));await settle();
+  assert.match(ui.get('third-breakdown').textContent,/三类点线索 4 条：5m 与 1m 均确认 2 · 5m 已确认、1m 待齐 1 · 5m 尚在形成 1/);
+  assert.equal(ui.get('visible-count').textContent,'3 条');
+  ui.get('lower-status-filter').value='confirmed';ui.get('lower-status-filter').listeners.change();
+  assert.equal(ui.get('visible-count').textContent,'2 条');
+  ui.get('center-order-filter').value='first';ui.get('center-order-filter').listeners.change();
+  assert.equal(ui.get('visible-count').textContent,'1 条');
+  ui.get('point-status-filter').value='all';ui.get('point-status-filter').listeners.change();
+  ui.get('lower-status-filter').value='all';ui.get('lower-status-filter').listeners.change();
+  ui.get('center-order-filter').value='all';ui.get('center-order-filter').listeners.change();
+  assert.equal(ui.get('visible-count').textContent,'4 条');
+});
+
+test('age, price distance and sort refine confirmed evidence without changing the point', () => {
+  const rows=[
+    {id:'older',code:'SH.600001',market:'a',origin:'screening',frequency:'5m',stage:'confirmed',sectors:[],
+      point:{point_type:'3buy',status:'confirmed',center_ordinal:1},nested_confirmation:{state:'confirmed'},confirmation_age_sessions:3,gain_pct:4},
+    {id:'near',code:'SH.600002',market:'a',origin:'screening',frequency:'5m',stage:'approaching',sectors:[],
+      point:{point_type:'3buy',status:'confirmed',center_ordinal:1},nested_confirmation:{state:'waiting'},confirmation_age_sessions:1,gain_pct:1.2},
+    {id:'next',code:'SH.600003',market:'a',origin:'screening',frequency:'5m',stage:'confirmed',sectors:[],
+      point:{point_type:'3sell',status:'confirmed',center_ordinal:2},nested_confirmation:{state:'confirmed'},confirmation_age_sessions:0,gain_pct:2},
+  ];
+  const base={market:'all',origin:'screening',frequency:'all',point:'all',stage:'all',review:'all',sector:'',query:'',
+    point_status:'confirmed',lower_status:'all',center_order:'all',age:'all',gain:'all',sort:'distance'};
+  assert.deepEqual(filterRows(rows,base).map(r=>r.id),['near','next','older']);
+  assert.deepEqual(filterRows(rows,{...base,age:'1',gain:'3',center_order:'first'}).map(r=>r.id),['near']);
+  assert.deepEqual(filterRows(rows,{...base,lower_status:'confirmed'}).map(r=>r.id),['next','older']);
+  assert.equal(rows[1].point.status,'confirmed');
+});
 
 test('selected 5m and confirming 1m points display separate exit references', async () => {
   const data=withCandidate(), row=data.candidates[0];
@@ -282,7 +398,7 @@ test('completed or unverified confirmation segments explain exclusions without s
   await settle();
   assert.match(ui.get('freshness').textContent,/3 个确认线段已完成/);
   assert.match(ui.get('freshness').textContent,/2 个旧买点缺少确认线段证据/);
-  assert.match(ui.get('stage-counts').textContent,/已确认 0/);
+  assert.match(ui.get('stage-counts').textContent,/筛选已通过 0/);
   assert.equal(requests.includes('/screening/start'),false);
 });
 
@@ -291,6 +407,8 @@ test('waiting candidates use the shared analysis chart and never claim confirmat
   row.stage='approaching'; row.observation_validation='legacy_not_rechecked'; row.evidence_chart_available=false;
   row.point.confirmed_at=null; row.point.missing_conditions=['terminal_unit_locked'];
   const ui=page(async url=>dispatch(data,url));await settle();
+  assert.equal(ui.get('selected-detail').hidden,true); // The default list is primary-confirmed only.
+  ui.get('point-status-filter').value='all';ui.get('point-status-filter').listeners.change();
   const chart=new URL(ui.get('chart-frame').src,'http://local');
   assert.equal(chart.pathname,'/');assert.equal(chart.searchParams.get('code'),row.code);
   assert.equal(chart.searchParams.get('layout'),'single');assert.equal(chart.searchParams.get('intervals'),'5');
@@ -298,7 +416,7 @@ test('waiting candidates use the shared analysis chart and never claim confirmat
   assert.match(ui.get('decision-title').textContent,/买点尚未确认/);
   assert.match(ui.get('decision-detail').textContent,/观测/);
   assert.doesNotMatch(ui.get('decision-detail').textContent,/确认间隔/);
-  assert.match(ui.get('stage-counts').textContent,/已确认 0 · 形成与等待 1/);
+  assert.match(ui.get('stage-counts').textContent,/筛选已通过 0 · 条件待齐 1/);
   assert.ok(ui.get('evidence-missing').children.some(e=>e.textContent==='等待末段完成并锁定'));
   ui.get('stage-filter').value='confirmed';ui.get('stage-filter').listeners.change();
   assert.equal(ui.get('selected-detail').hidden,true);
@@ -311,10 +429,14 @@ test('a confirmed 5m chart point still waits when 1m confirmation is missing', a
   row.stage='approaching'; row.point.status='confirmed';
   row.selection_missing_conditions=['lower_1m_confirmation'];
   row.nested_confirmation={state:'waiting',frequency:'1m',interval:{start_after:60,end_at:100},point:null};
+  row.confirmation_segment={state:'in_progress',segment:{direction:'up'}};
   const ui=page(async url=>dispatch(data,url));await settle();
-  assert.match(ui.get('decision-title').textContent,/5m 或 1m 尚缺确认/);
+  assert.match(ui.get('decision-title').textContent,/5m 买卖点已确认 · 1m 区间套等待确认/);
   assert.match(ui.get('decision-detail').textContent,/5m 已确认；1m 等待确认/);
-  assert.match(ui.get('stage-counts').textContent,/已确认 0 · 形成与等待 1/);
+  assert.match(ui.get('selected-tags').textContent,/已确认/);
+  assert.match(ui.get('decision-detail').textContent,/后继向上线段进行中/);
+  assert.doesNotMatch(ui.get('decision-title').textContent,/买点尚未确认/);
+  assert.match(ui.get('stage-counts').textContent,/筛选已通过 0 · 条件待齐 1/);
   assert.ok(ui.get('evidence-missing').children.some(e=>e.textContent==='等待对应区间内的 1m 买卖点确认'));
 });
 

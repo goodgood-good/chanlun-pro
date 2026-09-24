@@ -30,7 +30,7 @@ from chanlun.exchange import (
     get_exchange,
     market_now_trading as exchange_market_now_trading,
 )
-from chanlun.exchange.kline_completion import drop_unclosed_last_bar
+from chanlun.exchange.kline_completion import drop_unclosed_last_bar, frequency_to_minutes
 from chanlun.exchange.price_basis import copy_price_basis_metadata
 from chanlun.tools.log_util import LogUtil
 from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
@@ -177,6 +177,9 @@ def serialize_chart_data_with_strict_runtime(
     if strict_runtime is None:
         strict_runtime = build_strict_chart_cd(
             market=market, code=code, frequency=display_frequency, frame=completed_klines,
+            # This filter proves intraday closure; calendar bars need a
+            # separate session-close contract and retain the live default.
+            last_bar_closed=frequency_to_minutes(display_frequency) is not None,
         )
     result = cl_data_to_tv_chart(
         completed_klines, chart_config, market=market, code=code,
@@ -250,8 +253,11 @@ def _compute_and_cache_chart_data_impl(
 
     ex = get_exchange(Market(market))
 
+    observed = datetime.datetime.now(tz_sh)
     kline_args = {
-        "end_date": datetime.datetime.now(tz_sh).strftime("%Y-%m-%d %H:%M:%S")
+        # The US adapter interprets naive strings in its own timezone. Keep
+        # this instant explicit; a Shanghai wall clock is not an Eastern one.
+        "end_date": observed.isoformat() if market == "us" else observed.strftime("%Y-%m-%d %H:%M:%S")
     }
     # 预热批量预下载后, 让 ex.klines 跳过逐只 download(数据已在本地库)。仅 A股/QMT 的
     # klines 识别 args["skip_download"]; 其他交易所不传此 args, 行为不变。
@@ -265,7 +271,14 @@ def _compute_and_cache_chart_data_impl(
         }
 
     with lb_low_priority():
-        klines = ex.klines(code, frequency, **kline_args)
+        canonical_fetch = getattr(ex, "canonical_closed_minute_history", None)
+        if frequency == "1m" and callable(canonical_fetch):
+            # Match the initial /tv/history cache-miss contract. A rolling
+            # wall-clock query may clip the first session in mid-minute and
+            # lose the predecessor needed by the same chart's segment proof.
+            klines = canonical_fetch(code, **kline_args)
+        else:
+            klines = ex.klines(code, frequency, **kline_args)
     klines = attach_chart_bar_time_label(
         klines, market=market, frequency=frequency, exchange=ex,
     )

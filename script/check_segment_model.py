@@ -8,7 +8,7 @@ not call production feature/fractal helpers when validating returned evidence.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -53,16 +53,69 @@ def check_evidence(calc, strokes):
             if proof.direction == "up"
             else strokes[b].end.val < strokes[a].start.val
         ), "net_direction"
+        if position:
+            predecessor = calc.evidence[position - 1]
+            if (predecessor.parent_key is None and not predecessor.second_sequence
+                    and predecessor.reverse_segment is None and predecessor.return_segment is None):
+                formation_sources = []
+                if predecessor.first_sequence:
+                    formation_sources.extend(predecessor.first_sequence[-1].source_indices)
+                if predecessor.first_break_evidence is not None:
+                    formation_sources.append(predecessor.first_break_evidence.extension_index)
+                assert not formation_sources or b >= max(formation_sources), 'successor_splits_predecessor_formation'
+        origin = proof.origin_evidence
+        if origin is not None:
+            assert position == 0 and origin.selected_index == a, "origin_recovery_scope"
+            assert origin.initial_index + 1 == a, "origin_recovery_extreme"
+            assert a + 2 <= origin.witness_index <= witness, "origin_recovery_witness"
+            first = strokes[origin.initial_index]
+            up = first.type == "up"
+            assert first.end.val == strokes[a].start.val, "origin_recovery_price"
+            for i in range(origin.initial_index + 2, origin.witness_index + 1):
+                p = strokes[i]
+                if p.type == first.type:
+                    assert not (p.end.val > first.end.val if up else p.end.val < first.end.val), "established_origin_reanchored"
+                else:
+                    crossed = p.end.val < first.start.val if up else p.end.val > first.start.val
+                    assert crossed == (i == origin.witness_index), "origin_crossing_order"
+        if proof.first_pen_continuation is not None:
+            check_first_pen_continuation(calc.evidence, position, strokes)
+            continue
+        assert proof.rule != 'first-pen-continuation', 'first_continuation_certificate_missing'
+        if proof.return_segment is not None:
+            check_return_segment(calc.evidence, position, strokes)
+            continue
+        assert proof.rule != 'completed-return-segment', 'return_proof_certificate_missing'
+        if proof.reverse_segment is not None:
+            check_reverse_segment(calc.evidence, position, strokes)
+            continue
+        assert proof.rule != 'completed-reverse-segment', 'reverse_proof_certificate_missing'
         left, middle, right = proof.first_sequence
-        if proof.direction == "up":
+        inherited_break = proof.rule == 'established-predecessor-reverse-break'
+        if inherited_break:
+            assert position > 0, 'established_predecessor_missing'
+            previous = calc.evidence[position - 1]
+            assert proof.predecessor_key == previous.key, 'established_predecessor_identity'
+            assert previous.end_index + 1 == a and previous.direction != proof.direction, 'established_predecessor_continuity'
+            assert not proof.parent_key and not proof.second_sequence, 'established_predecessor_wrong_context'
+            assert proof.first_break_witness_index is not None, 'reverse_continuation_witness_missing'
+            direct = proof.direct_first_break
+            assert direct is not None, 'raw_first_break_certificate_missing'
+            assert (direct.first_pen_index, direct.reference_index, direct.overlap_third_index) == (b + 1, b - 1, b + 3), 'raw_first_break_source_indices'
+            assert direct.predecessor_key == previous.key, 'raw_first_break_predecessor'
+            assert direct.extension_index == proof.first_break_witness_index, 'raw_first_break_certificate_witness'
+        elif proof.direction == "up":
             assert middle.high > max(left.high, right.high), "first_top"
         else:
             assert middle.low < min(left.low, right.low), "first_bottom"
+        if not inherited_break:
+            assert proof.direct_first_break is None, 'unexpected_raw_first_break_certificate'
         check_first_reference(proof, strokes)
         check_first_sequence(proof, strokes)
         assert max(left.source_indices) < min(middle.source_indices), "left_ownership"
         assert max(middle.source_indices) < min(right.source_indices), "right_ownership"
         features = (*proof.first_sequence, *proof.second_sequence)
+        features += tuple(e for decision in proof.second_sequence_breaks for e in decision.fractal)
         if proof.pivot_stem is not None:
             features += (proof.pivot_stem,)
         assert all(
@@ -90,11 +143,30 @@ def check_evidence(calc, strokes):
             else middle.low_source_index
         )
         assert endpoint_source - 1 == b, "pivot_source"
-        # Ordinary classification follows the reviewed original-first-pen
-        # reading. An inherited proof retains its parent's strict standard
-        # second sequence; its own gap never requests a third sequence.
-        gap_middle = middle if proof.parent_key is not None else strokes[b + 1]
-        actual_gap = max(left.low, gap_middle.low) > min(left.high, gap_middle.high)
+        # Reconstruct BOTH price facts, without calling the production gap
+        # helper. A covering reversal is distinct from ordinary overlap.
+        standard_gap = max(left.low, middle.low) > min(left.high, middle.high)
+        actual_gap = standard_gap
+        if proof.parent_key is None:
+            gap = proof.gap_context
+            assert gap is not None, "gap_context_missing"
+            first = strokes[b + 1]
+            assert (gap.raw_first.low, gap.raw_first.high, gap.raw_first.source_indices,
+                    gap.raw_first.low_source_index, gap.raw_first.high_source_index) == (
+                        first.low, first.high, (b + 1,), b + 1, b + 1
+                    ), "raw_first_evidence"
+            raw_gap = max(left.low, first.low) > min(left.high, first.high)
+            assert gap.raw_gap == raw_gap, "raw_gap_evidence"
+            assert gap.standard_gap == standard_gap, "standard_gap_evidence"
+            covers = first.low <= left.low and first.high >= left.high
+            turns = first.high > left.high if proof.direction == "up" else first.low < left.low
+            protected = covers and turns
+            assert gap.basis == ("protected-first-reversal" if protected else "standard-first-feature"), (
+                "gap_classification_basis"
+            )
+            actual_gap = raw_gap if protected else standard_gap
+        else:
+            assert proof.gap_context is None, "inherited_first_gap_context"
         assert proof.initial_gap == actual_gap, "boundary_gap"
         if proof.parent_key is not None:
             assert position > 0, "inherited_parent_missing"
@@ -128,6 +200,194 @@ def check_evidence(calc, strokes):
             assert successor.parent_key == proof.key, "second_fractal_not_propagated"
         else:
             assert not proof.second_sequence, "unexpected_second_sequence"
+            assert not proof.second_sequence_breaks, "unexpected_second_sequence_breaks"
+
+
+def check_reverse_segment(evidence, position, strokes):
+    """Check a connected backward proof without invoking a production scanner.
+
+    The next iteration of check_evidence independently reconstructs the exact
+    child's ordinary/F2 feature proof. No child may assume this parent's key,
+    use a recovered origin, or silently change after establishing the parent.
+    """
+    proof = evidence[position]
+    cert = proof.reverse_segment
+    assert proof.rule == 'completed-reverse-segment', 'reverse_proof_rule'
+    assert proof.return_segment is None, 'reverse_proof_mixed_certificate'
+    assert proof.first_pen_continuation is None, 'reverse_proof_mixed_continuation'
+    assert position > 0, 'reverse_proof_predecessor_missing'
+    previous = evidence[position - 1]
+    assert previous.key == proof.predecessor_key == cert.predecessor_key, 'reverse_proof_predecessor'
+    assert previous.end_index + 1 == proof.start_index and previous.direction != proof.direction, 'reverse_proof_continuity'
+    first = proof.end_index + 1
+    assert (cert.first_pen_index, cert.reference_index, cert.overlap_third_index) == (first, first - 2, first + 2), 'reverse_proof_source_indices'
+    reference, reversal, third = (strokes[i] for i in (first - 2, first, first + 2))
+    up = proof.direction == 'up'
+    assert reversal.type != proof.direction, 'reverse_proof_direction'
+    assert reversal.low < reference.low if up else reversal.high > reference.high, 'reverse_proof_first_break'
+    assert max(reference.low, reversal.low) <= min(reference.high, reversal.high), 'reverse_proof_initial_gap'
+    assert max(third.low, reversal.low) <= min(third.high, reversal.high), 'reverse_proof_first_third_overlap'
+    assert not proof.first_sequence and not proof.second_sequence and not proof.second_sequence_breaks, 'reverse_proof_mislabelled_fractal'
+    assert proof.parent_key is None and proof.origin_evidence is None and proof.pivot_stem is None, 'reverse_proof_wrong_context'
+    assert proof.gap_context is None and not proof.initial_gap, 'reverse_proof_gap_context'
+    assert proof.direct_first_break is None and proof.first_break_witness_index is None, 'reverse_proof_mislabelled_extension'
+    assert position + 1 < len(evidence), 'reverse_proof_successor_missing'
+    child = evidence[position + 1]
+    assert cert.successor == child, 'reverse_proof_successor_changed'
+    assert child.start_index == first and child.direction != proof.direction, 'reverse_proof_successor_continuity'
+    assert child.origin_evidence is None and child.predecessor_key is None and child.parent_key is None, 'reverse_proof_circular_child'
+    assert child.reverse_segment is None and child.return_segment is None and child.direct_first_break is None, 'reverse_proof_circular_certificate'
+    assert proof.witness_index == child.witness_index, 'reverse_proof_witness'
+    for i in range(first + 1, proof.witness_index + 1, 2):
+        assert not (strokes[i].end.val > reversal.start.val if up else strokes[i].end.val < reversal.start.val), 'reverse_proof_origin_return'
+
+
+def check_return_segment(evidence, position, strokes):
+    """Validate L078's completed internal return independently of the parent.
+
+    Unlike the reverse-child certificate, its return is not asserted to be the
+    next emitted segment. Its own immutable standalone proof is reconstructed
+    from original pens by the same independent feature checker, with no parent
+    prerequisite or recovered observation origin available to that proof.
+    """
+    proof = evidence[position]
+    cert = proof.return_segment
+    assert proof.rule == 'completed-return-segment', 'return_proof_rule'
+    assert proof.first_pen_continuation is None, 'return_proof_mixed_continuation'
+    assert position > 0, 'return_proof_predecessor_missing'
+    previous = evidence[position - 1]
+    assert previous.key == proof.predecessor_key == cert.predecessor_key, 'return_proof_predecessor'
+    assert previous.end_index + 1 == proof.start_index and previous.direction != proof.direction, 'return_proof_continuity'
+    first = proof.end_index + 1
+    assert (cert.first_pen_index, cert.reference_index, cert.overlap_third_index) == (first, first - 2, first + 2), 'return_proof_source_indices'
+    reference, reversal, third = (strokes[i] for i in (first - 2, first, first + 2))
+    up = proof.direction == 'up'
+    assert reversal.type != proof.direction, 'return_proof_direction'
+    assert reversal.low < reference.low if up else reversal.high > reference.high, 'return_proof_first_break'
+    assert max(reference.low, reversal.low) <= min(reference.high, reversal.high), 'return_proof_initial_gap'
+    assert max(third.low, reversal.low) <= min(third.high, reversal.high), 'return_proof_first_third_overlap'
+    assert not proof.first_sequence and not proof.second_sequence and not proof.second_sequence_breaks, 'return_proof_mislabelled_fractal'
+    assert proof.parent_key is None and proof.origin_evidence is None and proof.pivot_stem is None, 'return_proof_wrong_context'
+    assert proof.gap_context is None and not proof.initial_gap and proof.reverse_segment is None, 'return_proof_mixed_context'
+    assert proof.direct_first_break is None and proof.first_break_witness_index is None, 'return_proof_mislabelled_extension'
+    chain = cert.return_proofs
+    assert 1 <= len(chain) <= 2, 'return_proof_chain_length'
+    support = chain[0]
+    assert support.start_index == first + 1 and support.direction == proof.direction, 'return_proof_fixed_origin'
+    assert support.predecessor_key is None and support.origin_evidence is None and support.parent_key is None, 'return_proof_circular_support'
+    assert all(p.return_segment is None and p.reverse_segment is None and p.direct_first_break is None for p in chain), 'return_proof_circular_certificate'
+    assert bool(support.second_sequence) == (len(chain) == 2), 'return_proof_inheritance'
+    assert proof.witness_index == max(p.witness_index for p in chain), 'return_proof_witness'
+    for i in range(first + 1, proof.witness_index + 1, 2):
+        assert not (strokes[i].end.val > reversal.start.val if up else strokes[i].end.val < reversal.start.val), 'return_proof_crossed_origin'
+    check_evidence(SimpleNamespace(evidence=chain), strokes)
+
+
+def check_first_break_evidence(proof, strokes):
+    """Independently rebuild the selected effective edge and its first exit.
+
+    This implements the user-approved normalized comparison using interval
+    tuples only. It deliberately does not call the production scan helper.
+    """
+    receipt = proof.first_break_evidence
+    assert receipt is not None, 'first_break_effective_receipt_missing'
+    first, extension = receipt.first_pen_index, receipt.extension_index
+    assert first == proof.end_index + 1, 'first_break_effective_origin'
+    assert first + 2 <= extension <= proof.witness_index, 'first_break_effective_bounds'
+    assert proof.first_break_witness_index == extension, 'first_break_effective_witness'
+    raw = strokes[first]
+    up = proof.direction == 'up'
+    low, high, sources = raw.low, raw.high, (first,)
+    low_source = high_source = first
+    for i in range(first + 1, extension + 1):
+        item = strokes[i]
+        if item.type == proof.direction:
+            assert not (item.high > high if up else item.low < low), 'first_break_effective_origin_returned'
+            continue
+        outward = item.end.val < low if up else item.end.val > high
+        if outward:
+            assert i == extension, 'first_break_effective_not_first_exit'
+            saved = receipt.effective_first
+            assert (saved.low, saved.high, saved.source_indices,
+                    saved.low_source_index, saved.high_source_index) == (
+                        low, high, sources, low_source, high_source), 'first_break_effective_interval'
+            return
+        assert i < extension, 'first_break_effective_did_not_extend'
+        assert (low <= item.low and item.high <= high or
+                item.low <= low and high <= item.high), 'first_break_effective_inclusion'
+        if item.low > low if up else item.low < low:
+            low, low_source = item.low, i
+        if item.high > high if up else item.high < high:
+            high, high_source = item.high, i
+        sources += (i,)
+    raise AssertionError('first_break_effective_unresolved')
+
+
+def check_first_pen_continuation(evidence, position, strokes):
+    """Literal L071 completion; reference reconstruction remains independent.
+
+    A raw first/third certificate must not be required to resemble a standard
+    three-element fractal, nor may it manufacture an eligible left reference.
+    """
+    proof = evidence[position]
+    cert = proof.first_pen_continuation
+    assert proof.rule == 'first-pen-continuation', 'first_continuation_rule'
+    first = proof.end_index + 1
+    assert (cert.first_pen_index,cert.third_pen_index) == (first,first+2), 'first_continuation_indices'
+    assert first+2<=cert.extension_index<=proof.witness_index, 'first_continuation_witness'
+    assert not proof.first_sequence and not proof.second_sequence and not proof.second_sequence_breaks, 'first_continuation_not_a_fractal'
+    assert proof.return_segment is None and proof.reverse_segment is None and proof.direct_first_break is None, 'first_continuation_mixed_certificate'
+    assert not proof.initial_gap and proof.gap_context is None and proof.parent_key is None, 'first_continuation_gap_context'
+    raw, third, left = strokes[first],strokes[first+2],cert.reference
+    up = proof.direction == 'up'
+    assert max(raw.low,third.low)<=min(raw.high,third.high), 'first_continuation_reverse_overlap'
+    assert max(raw.low,left.low)<=min(raw.high,left.high), 'first_continuation_reference_gap'
+    if cert.reference_context in {'record','origin-retest'}:
+        # L065's contact criterion, checked without the production helper.
+        assert (raw.low <= left.high if up else raw.high >= left.low), 'first_continuation_not_a_break'
+        effective = proof.first_break_evidence.effective_first
+        covering = (raw.high > left.high and raw.low <= left.low if up
+                    else raw.low < left.low and raw.high >= left.high)
+        middle = raw if covering else effective
+        assert max(left.low, middle.low) <= min(left.high, middle.high), 'first_continuation_normalized_gap'
+    else:
+        assert raw.low<left.low if up else raw.high>left.high, 'first_continuation_not_a_break'
+    assert all(proof.start_index<=i<first for i in left.source_indices), 'first_continuation_reference_bounds'
+    assert left.low_source_index in left.source_indices and left.high_source_index in left.source_indices, 'first_continuation_reference_ownership'
+    assert left.low==strokes[left.low_source_index].low and left.high==strokes[left.high_source_index].high, 'first_continuation_reference_price'
+    turns = raw.high>left.high if up else raw.low<left.low
+    context=cert.reference_context
+    assert context in {'record','local','established','origin-retest'}, 'first_continuation_reference_context'
+    if context=='origin-retest':
+        standard=[]
+        for i in range(proof.start_index+1,first,2):
+            item=(strokes[i].low,strokes[i].high)
+            if standard:
+                old=standard[-1]
+                included=(old[0]<=item[0] and item[1]<=old[1]) or (item[0]<=old[0] and old[1]<=item[1])
+                if included:
+                    rising=up if len(standard)==1 else old[1]>standard[-2][1]
+                    choose=max if rising else min
+                    standard[-1]=(choose(old[0],item[0]),choose(old[1],item[1]))
+                    continue
+            standard.append(item)
+        assert len(standard)<2 or not (raw.high>standard[-1][1] if up else raw.low<standard[-1][0]), 'origin_retest_overrides_eligible_standard_reference'
+    if context=='established':
+        assert position>0 and proof.predecessor_key==evidence[position-1].key, 'first_continuation_predecessor'
+        assert evidence[position-1].end_index+1==proof.start_index and evidence[position-1].direction!=proof.direction, 'first_continuation_predecessor_continuity'
+        assert not turns, 'first_continuation_wrong_established_context'
+    else:
+        assert turns and proof.predecessor_key is None, 'first_continuation_turn'
+    def feature(p):
+        return SimpleNamespace(low=p.low,high=p.high,source_indices=(p.index,),low_source_index=p.index,high_source_index=p.index)
+    reference_view=replace(proof,rule=('established-predecessor-reverse-break' if context=='established'
+                                      else 'origin-extreme-retest' if context=='origin-retest'
+                                      else 'first-pen-break' if context=='local' else 'first-feature-fractal'),
+                           first_sequence=(left,feature(raw),feature(third)))
+    check_first_reference(reference_view,strokes)
+    check_first_break_evidence(proof,strokes)
+    assert proof.first_break_evidence.extension_index==cert.extension_index, 'first_continuation_effective_exit'
+    assert strokes[cert.extension_index].type==raw.type, 'first_continuation_exit_direction'
 
 
 def check_first_reference(proof, strokes):
@@ -137,6 +397,34 @@ def check_first_reference(proof, strokes):
     checked. A local first-break context has a different reference role.
     """
     left, middle, _ = proof.first_sequence
+    if proof.rule == 'established-predecessor-reverse-break':
+        raw = strokes[proof.end_index - 1]
+        first = strokes[proof.end_index + 1]
+        assert (left.low, left.high, left.source_indices) == (raw.low, raw.high, (raw.index,)), 'reverse_break_reference'
+        assert (first.low < raw.low if proof.direction == 'up' else first.high > raw.high), 'reverse_break_not_strong'
+        return
+    if proof.reference_mode == "standard-local":
+        assert proof.parent_key is None and proof.pivot_stem is None, "local_standard_context"
+        assert bool(proof.initial_gap) == bool(proof.second_sequence), "local_standard_gap_requires_second_sequence"
+        standard = []
+        up = proof.direction == "up"
+        for i in range(proof.start_index + 1, min(middle.source_indices), 2):
+            item = (strokes[i].low, strokes[i].high, (i,))
+            if standard:
+                old = standard[-1]
+                contained = (old[0] <= item[0] and old[1] >= item[1]) or (item[0] <= old[0] and item[1] >= old[1])
+                if contained:
+                    rising = up if len(standard) == 1 else old[1] > standard[-2][1]
+                    choose = max if rising else min
+                    standard[-1] = (choose(old[0], item[0]), choose(old[1], item[1]), old[2] + item[2])
+                    continue
+            standard.append(item)
+        assert len(standard) >= 2, "local_standard_shoulders"
+        assert standard[-1] == (left.low, left.high, left.source_indices), "local_standard_reference"
+        raw = strokes[min(middle.source_indices)]
+        assert (raw.high > left.high if up else raw.low < left.low), "local_standard_strict_turn"
+        return
+    assert proof.reference_mode == "record", "unknown_reference_mode"
     if proof.rule == "parent-second-feature":
         return
     up = proof.direction == "up"
@@ -221,7 +509,14 @@ def check_local_reference(proof, strokes):
         raw_left.low, raw_left.high, (expected_left,)
     ), "local_reference_scope"
     first = strokes[proof.end_index + 1]
-    if proof.rule == "origin-extreme-retest":
+    # A local origin retest can now acquire a STANDARD gap after inclusion.
+    # Its ending rule is then second-feature-fractal, while the reference
+    # qualification is still an origin retest. Reconstruct that qualification
+    # from prices; do not mistake every second-fractal proof for a strong break.
+    strong = first.high > left.high and first.low < left.low
+    if proof.rule == "origin-extreme-retest" or (
+        proof.rule == "second-feature-fractal" and not strong
+    ):
         up = proof.direction == "up"
         body = strokes[proof.start_index:proof.end_index + 1:2]
         assert (
@@ -241,8 +536,10 @@ def check_local_reference(proof, strokes):
 def check_second_sequence(proof, strokes):
     """Rebuild from all original pens, independently of production helpers.
 
-    Pure tuples retain interval ownership. A first valid fractal is decisive;
-    an earlier old-direction extreme without a fractal closes this context.
+    Pure tuples retain interval ownership. An F2 hidden inside a contained raw
+    first break must wait for its first physical exit (L071 109-124). Returning
+    through its origin rejects that turn; extending its end establishes the
+    direction without requiring a third feature fractal.
     The checks exercise the stated interpretation of L065/L067/L078/L081,
     rather than proving that interpretation equivalent to every original chart.
     """
@@ -250,6 +547,8 @@ def check_second_sequence(proof, strokes):
     pivot = proof.end_index + 1
     extreme = strokes[pivot].high if up else strokes[pivot].low
     standard = []
+    ignored_until = -1
+    decisions = []
     for i in range(pivot + 1, proof.witness_index + 1):
         pen_value = strokes[i]
         if pen_value.type != proof.direction:
@@ -272,7 +571,7 @@ def check_second_sequence(proof, strokes):
                 standard.append(new)
         else:
             standard.append(new)
-        if len(standard) >= 3:
+        if len(standard) >= 3 and i >= ignored_until:
             x, y, z = standard[-3:]
             found = (
                 y[0] < min(x[0], z[0]) and y[1] < min(x[1], z[1])
@@ -280,10 +579,45 @@ def check_second_sequence(proof, strokes):
                 else y[0] > max(x[0], z[0]) and y[1] > max(x[1], z[1])
             )
             if found:
+                # Use endpoints and interval exits, independently of the
+                # production feature helper and raw-break scanner.
+                price = y[0] if up else y[1]
+                raw_start = next(j for j in y[2] if (
+                    strokes[j].low if up else strokes[j].high
+                ) == price)
+                first = strokes[raw_start]
+                resolution, resolved_at = None, None
+                same_side_ends = [first.end.val]
+                for j in range(raw_start + 1, proof.witness_index + 1):
+                    endpoint = strokes[j].end.val
+                    if strokes[j].type == first.type:
+                        edge = min(same_side_ends) if up else max(same_side_ends)
+                        if endpoint > edge if up else endpoint < edge:
+                            resolution, resolved_at = 'directional-extension', j
+                            break
+                        same_side_ends.append(endpoint)
+                    elif endpoint < first.start.val if up else endpoint > first.start.val:
+                        resolution, resolved_at = 'origin-return', j
+                        break
+                assert resolution is not None, "second_first_break_unresolved"
+                if resolution == "origin-return" or resolved_at > i:
+                    decisions.append((list(standard[-3:]), raw_start, raw_start - 2,
+                                      i, resolution, resolved_at))
+                if resolution == "origin-return":
+                    ignored_until = max(i, resolved_at)
+                    crossed = pen_value.high > extreme if up else pen_value.low < extreme
+                    assert not crossed, "second_sequence_borrowed_after_invalidation"
+                    continue
                 saved = [
                     (e.low, e.high, e.source_indices) for e in proof.second_sequence
                 ]
                 assert saved == standard[-3:], "second_sequence_reconstruction"
+                recorded = [([(e.low, e.high, e.source_indices) for e in d.fractal],
+                             d.first_pen_index, d.reference_index, d.fractal_witness_index,
+                             d.outcome, d.outcome_witness_index)
+                            for d in proof.second_sequence_breaks]
+                assert recorded == decisions, "second_first_break_history"
+                assert max(i, resolved_at) <= proof.witness_index, "second_first_break_witness"
                 return
         crossed = pen_value.high > extreme if up else pen_value.low < extreme
         assert not crossed, "second_sequence_borrowed_after_invalidation"
@@ -335,6 +669,20 @@ def check_first_sequence(proof, strokes):
             item.low > low and item.high > high
         )
         assert outward, "first_sequence_right_direction"
+        left, middle, right = proof.first_sequence
+        full = (middle.low > max(left.low, right.low) if up
+                else middle.high < min(left.high, right.high))
+        if proof.rule == 'established-predecessor-reverse-break':
+            check_first_break_evidence(proof,strokes)
+            assert proof.witness_index >= max(i,proof.first_break_witness_index), 'first_break_confirmation_before_evidence'
+        elif full:
+            assert proof.first_break_witness_index is None, "unnecessary_first_break_witness"
+            assert proof.first_break_evidence is None, 'unnecessary_first_break_effective_receipt'
+        else:
+            covers = (first.high > left.high and first.low <= left.low if up
+                      else first.low < left.low and first.high >= left.high)
+            assert covers, "first_fractal_missing_opposite_coordinate"
+            check_first_break_evidence(proof,strokes)
         return
     raise AssertionError("first_sequence_not_reconstructible")
 

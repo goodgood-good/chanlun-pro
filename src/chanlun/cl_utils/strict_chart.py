@@ -595,9 +595,12 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
     if interval != cd.get_frequency():
         raise ValueError("native center interval must match its source bars")
     cutoff = aware_datetime_to_epoch_seconds(cd._strict_as_of())
+    # Display geometry keeps the provider's labels. For start-labelled bars,
+    # the completed input's causal cutoff is one interval after its last label.
+    display_end = aware_datetime_to_epoch_seconds(cd.get_src_klines()[-1].date)
     if (
         not display_bar_closed_at
-        or display_bar_closed_at[-1] != cutoff
+        or display_bar_closed_at[-1] != display_end
         or any(
             (
                 left >= right
@@ -657,14 +660,31 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         for observation, result in (cd.get_conditional_centers() if hasattr(cd, "get_conditional_centers") else ())
         for center in result.centers if center.available_at <= cd._strict_as_of()
     ]
+    segment_construction = (cd.get_segment_construction_state()
+                            if hasattr(cd, "get_segment_construction_state") else {})
+    tail = segment_construction.get("tail")
+    unresolved_segment_ranges = []
+    if segment_construction.get("status") == "unresolved" and tail:
+        region_id = stable_structure_id("unresolved-segment-tail-v1", cd.get_code(), interval,
+                                        cd._strict_price_basis_revision(), tail["start_time"], tail["start_price"])
+        unresolved_segment_ranges.append({
+            "render_kind": "segment_unresolved_range", "region_id": region_id,
+            "render_id": stable_structure_id(region_id, tail),
+            "structural_level": 0, "price_basis_revision": cd._strict_price_basis_revision(),
+            "available_at": cutoff, "state": "unresolved", "tradable": False,
+            "direction": tail["direction"], "reason": tail["reason"],
+            "pen_count": tail["pen_count"], "confirmed_pen_count": tail["confirmed_pen_count"],
+            "points": [{"time": tail["start_time"], "price": tail["high"]},
+                       {"time": tail["observed_through"], "price": tail["low"]}],
+        })
     revision = stable_structure_id(
-        "chart-analysis-snapshot-v6",
+        "chart-analysis-snapshot-v7",
         EXIT_PRICE_VERSION,
         cd.get_code(),
         interval,
         cd._strict_config_revision(),
         cutoff,
-        levels, observations, connection_pending, conditional,
+        levels, observations, connection_pending, conditional, segment_construction,
     )
     return with_point_exit_plans({
         "schema": CHART_STRUCTURE_SCHEMA,
@@ -683,6 +703,8 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         "stroke_center_observations": observations,
         "stroke_connection_pending": connection_pending,
         "conditional_centers": conditional,
+        "segment_construction": segment_construction,
+        "unresolved_segment_ranges": unresolved_segment_ranges,
     })
 
 

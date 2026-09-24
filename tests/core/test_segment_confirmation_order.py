@@ -2,8 +2,7 @@
 
 The synthetic equal-high family keeps the currently declared earliest-price-
 source convention. It does not adjudicate the unresolved equal-price boundary
-rule. Source premises and the interval derivation are in
-docs/segment_confirmation_order_audit.md.
+rule. The current rule and its source premises are in docs/segment_rules.md.
 """
 
 from datetime import timedelta

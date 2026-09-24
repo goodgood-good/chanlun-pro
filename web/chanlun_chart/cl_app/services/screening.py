@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future
+from copy import deepcopy
 from datetime import datetime
 import json
 import math
@@ -24,6 +26,7 @@ from chanlun.screening.evidence import (
 from chanlun.cl_utils.point_exits import with_point_exit_plans
 from chanlun.screening.confirmation import confirmation_reasons, is_confirmed
 from chanlun.screening.nesting import STRATEGY, saved_confirmation_valid
+from .screening_policy import POLICY_LABELS, POLICY_VERSION, selection_policy_reasons
 
 
 def validate_settings(body, *, max_codes=100):
@@ -51,7 +54,7 @@ def validate_settings(body, *, max_codes=100):
     result["strategy"] = STRATEGY
     result["confirmation_frequency"] = "1m"
     for field, default, limit in (("recent_sessions", 5, 20), ("max_anchor_sessions", 20, 60),
-                                  ("workers", 4, 6)):
+                                  ("workers", 12, 12)):
         value = body.get(field, default)
         if type(value) is not int or not 1 <= value <= limit:
             raise ValueError(f"{field} 必须是 1–{limit} 的整数")
@@ -113,11 +116,25 @@ def _pid_alive(pid):
         return False
 
 
+def read_state_json(path):
+    """Read committed state despite a brief Windows atomic-replace lock."""
+    for attempt in range(15):
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == 14:
+                raise
+            time.sleep(min(0.05 * 2 ** attempt, 0.5))
+
+
 class ScreeningManager:
     def __init__(self, root=None, *, now=None, max_codes=100):
         self._root = root
         self._max_codes = max_codes
         self._lock = threading.Lock()
+        self._results_lock = threading.Lock()
+        self._results_key = None
+        self._results_future = None
         self._process = None
         self._revision = None
         self._revision_checked = None
@@ -131,7 +148,7 @@ class ScreeningManager:
         latest = self.root / "latest.json"
         if not latest.exists():
             return None
-        run_id = json.loads(latest.read_text(encoding="utf-8"))["run_id"]
+        run_id = read_state_json(latest)["run_id"]
         if not re.fullmatch(r"[0-9a-f]{32}", run_id):
             raise ValueError("选股任务标识无效")
         return self.root / run_id
@@ -142,15 +159,17 @@ class ScreeningManager:
     def _status(self, directory):
         """Read one pinned run; a concurrent start may change latest.json."""
         if directory is None:
-            return {"status": "idle", "selected": [], "reason_labels": REASON_LABELS}
-        state = json.loads((directory / "status.json").read_text(encoding="utf-8"))
+            return {"status": "idle", "selected": [], "reason_labels": {**REASON_LABELS, **POLICY_LABELS},
+                    "selection_policy_version": POLICY_VERSION}
+        state = read_state_json(directory / "status.json")
         if state.get("run_id") != directory.name:
             raise ValueError("选股任务状态与目录不一致")
         if (state["status"] in {"starting", "running"}
                 and time.time() - state.get("updated_at", state.get("started_at", 0)) > 30
                 and not _pid_alive(state.get("worker_pid"))):
             state = {**state, "status": "interrupted", "error": "选股工作进程已退出，可重新运行"}
-        state["reason_labels"] = REASON_LABELS
+        state["reason_labels"] = {**REASON_LABELS, **POLICY_LABELS}
+        state["selection_policy_version"] = POLICY_VERSION
         state["cancel_requested"] = (directory / "cancel").exists()
         state["evidence_version"] = evidence_version(directory)
         checked = time.monotonic()
@@ -182,12 +201,77 @@ class ScreeningManager:
                 "freshness_message": ("收盘截止时间一致；尚未重新核对全体历史行情修订。复核图使用本次保存的行情。"
                                       if current else "已有新的收盘 K 线，本结果仅代表原截止时刻，请重新运行选股")}
 
-    def results(self):
+    def results(self, *, background=False):
         directory = self._directory()
         state = self._status(directory)
+        # Reuse only the same committed rows and evidence-file versions. The
+        # status/freshness fields are still read on every request.
+        key = (str(directory), state.get("completed"), state.get("evidence_version"), POLICY_VERSION,
+               json.dumps({k: state.get(k) for k in ("settings", "cutoffs", "source_revision")}, sort_keys=True))
+        pending = {**state, "results_loading": True, "selected": [], "observations": [],
+                   "recent_rejections": [], "errors": [], "rejection_counts": {}}
+        while True:
+            launch = False
+            with self._results_lock:
+                future = self._results_future
+                matching = future is not None and self._results_key == key
+                if not matching and (future is None or future.done()):
+                    future = Future()
+                    self._results_future, self._results_key = future, key
+                    matching = launch = True
+            if not matching:
+                # A changed run/version waits for the one active reader, rather
+                # than spawning another full-market evidence read on every poll.
+                if background:
+                    return pending
+                try:
+                    future.result()
+                except Exception:
+                    pass
+                continue
+            if launch:
+                if background:
+                    threading.Thread(target=self._prepare_results, args=(future, directory, state),
+                                     name="screening-results", daemon=True).start()
+                else:
+                    self._prepare_results(future, directory, state)
+            if background and not future.done():
+                return pending
+            try:
+                payload = future.result()
+            except Exception:
+                with self._results_lock:
+                    if self._results_future is future:
+                        self._results_future = None
+                        self._results_key = None
+                raise
+            return {**deepcopy(payload), **state, "results_loading": False}
+
+    def _prepare_results(self, future, directory, state):
+        try:
+            future.set_result(self._read_results(directory, state))
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    def committed_results(self, after_completed=0, *, limit=16):
+        """Read only the next committed symbols for the live monitor.
+
+        Worker progress is published after its JSONL rows and evidence are
+        saved. Never infer a missing signal from symbols still being computed.
+        """
+        directory = self._directory()
+        state = self._status(directory)
+        completed = state.get("completed", 0)
+        pinned = {**state, "completed": min(completed, after_completed + limit)}
+        result = self._read_results(directory, pinned, after_completed=after_completed)
+        return {**result, "completed": completed}
+
+    def _read_results(self, directory, state, *, after_completed=0):
         selected, observations, recent_rejections, errors, counts = [], [], [], [], {}
+        processed_symbols, results_through = [], after_completed
         semantic_exclusions = 0
         lifetime_exclusions = 0
+        policy_exclusions = 0
         if directory is not None and (directory / "results.jsonl").exists():
             # Append-only JSONL can end in an in-flight partial line.
             committed = state.get("completed")
@@ -196,11 +280,15 @@ class ScreeningManager:
                 # Rows appended after this status snapshot belong to the next poll.
                 if committed is not None and index >= committed:
                     break
+                if index < after_completed:
+                    continue
                 # A concurrent append may end halfway through a Chinese UTF-8
                 # character. Decode only newline-terminated, committed records.
                 if not line.endswith(b"\n"):
                     continue
                 item = json.loads(line)
+                processed_symbols.append({"market": item.get("market", "a"), "code": item["code"]})
+                results_through = index + 1
                 if item.get("error"):
                     errors.append({"code": item["code"], "market": item.get("market", "a"), "error": item["error"]})
                 for row in item["rows"]:
@@ -252,9 +340,12 @@ class ScreeningManager:
                                            or not saved_confirmation_valid(s, *paired)):
                                 reasons.append("NESTED_EVIDENCE_MISSING")
                             lifetime_reasons = confirmation_reasons(s["point"], confirmations)
+                            policy_reasons = selection_policy_reasons(s["point"])
                             semantic_exclusions += bool(reasons)
                             lifetime_exclusions += bool(lifetime_reasons)
                             reasons.extend(lifetime_reasons)
+                            reasons.extend(policy_reasons)
+                            policy_exclusions += bool(policy_reasons)
                             s = {**s, "exit_plan": exit_plans.get(s["point"].get("point_id")),
                                  "confirmation_exit_plan": lower_exit_plans.get(
                                      ((s.get("nested_confirmation") or {}).get("point") or {}).get("point_id"))}
@@ -297,9 +388,11 @@ class ScreeningManager:
         selected.sort(key=lambda s: (-s.get("selection_available_at", s["point"]["available_at"]), s["code"], s["frequency"]))
         observations.sort(key=lambda s: (-s.get("selection_available_at", s["point"]["available_at"]), s["code"], s["frequency"]))
         return {**state, "selected": selected, "observations": observations, "recent_rejections": recent_rejections,
+                "processed_symbols": processed_symbols, "results_through": results_through,
                 "errors": errors, "rejection_counts": counts,
                 "semantic_exclusion_count": semantic_exclusions,
                 "lifetime_exclusion_count": lifetime_exclusions,
+                "selection_policy_exclusion_count": policy_exclusions,
                 "observation_count": len(observations),
                 "selected_symbols": len({s["code"] for s in selected})}
 
@@ -362,7 +455,11 @@ class ScreeningManager:
                 **({"strict_structure": {k: v for k, v in snapshot.items() if k != "chart"}}
                    if authoritative else {})}
 
-    def start(self, body):
+    def start(self, body, *, external_notifications=True, force_rebuild=False):
+        if type(external_notifications) is not bool:
+            raise ValueError("外部通知选项必须是布尔值")
+        if type(force_rebuild) is not bool:
+            raise ValueError("重新计算选项必须是布尔值")
         settings = validate_settings(body, max_codes=self._max_codes)
         with self._lock:
             if self.status()["status"] in {"starting", "running"}:
@@ -371,6 +468,12 @@ class ScreeningManager:
             directory = self.root / run_id
             request = {"run_id": run_id, "observed_at": self._now().isoformat(),
                        "settings": settings}
+            if not external_notifications:
+                # Run-local delivery policy, independent of stock selection
+                # settings and the user's normal notification preference.
+                request["external_notifications"] = False
+            if force_rebuild:
+                request["force_rebuild"] = True
             write_json(directory / "request.json", request)
             write_json(directory / "status.json", {**request, "status": "starting",
                        "started_at": time.time(), "completed": 0, "total": 0})

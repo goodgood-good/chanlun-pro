@@ -85,6 +85,23 @@ def test_intact_native_buy_is_selected(sample):
     assert not result["data_errors"]
 
 
+@pytest.mark.parametrize('keep_old_projection', [False, True])
+def test_unresolved_tail_cannot_keep_a_confirmed_point_in_the_selection_window(sample, keep_old_projection):
+    frame, snapshot, context = sample
+    anchor = snapshot['screening_segments'][0]
+    snapshot['segment_construction'] = {'status': 'unresolved', 'tail': {
+        'start_time': anchor['end_time'], 'start_price': anchor['end_tick'], 'direction': 'up',
+        'available_at': snapshot['source_closed_at'], 'observed_through': snapshot['source_closed_at'],
+        'pen_count': 283, 'reason': 'initial-extreme-too-short', 'end_confirmed': False}}
+    if not keep_old_projection:
+        snapshot['screening_segments'] = [anchor]
+    result = audit_snapshot(snapshot, frame, context)
+    assert result['selected'] == [] and result['observations'] == []
+    rejected, = result['rejected']
+    assert 'CONFIRMING_SEGMENT_UNRESOLVED' in rejected['reasons']
+    assert rejected['confirmation_segment']['state'] == 'unresolved'
+
+
 def _mirror_signal(value):
     if isinstance(value, list):
         return [_mirror_signal(item) for item in value]
@@ -138,6 +155,9 @@ def test_sells_use_symmetric_price_and_confirmation_lifetime(sample, kind):
 def nested_sample(sample):
     from chanlun.screening.nesting import STRATEGY
     frame, main, context = sample
+    # This is an eligible third-buy fixture. The result reader now requires
+    # the directional center ordinal; missing metadata is tested separately.
+    main["levels"][0]["points"][0]["center_ordinal"] = 1
     main["screening_segments"][0]["start_time"] = context["expected_closes"][-240]
     main["chart"] = {"xds": []}
     lower = deepcopy(main)
@@ -422,6 +442,25 @@ def test_cached_five_minute_result_rechecks_changed_one_minute_input(nested_samp
     assert second["calculation_reused"]
     assert not second["selected"] and len(second["observations"]) == 1
     assert second["observations"][0]["nested_confirmation"]["point"] is None
+
+
+def test_forced_rerun_bypasses_both_calculation_caches_without_changing_filters(nested_sample, monkeypatch, tmp_path):
+    runner = _nested_runtime(monkeypatch, nested_sample)
+    stock = {"code": "SH.600000", "name": "fixture"}
+    settings = deepcopy(nested_sample["settings"])
+    first = runner.scan_symbol(stock, settings, nested_sample["contexts"], tmp_path/"first",
+                               cache_root=tmp_path/"cache", revision="test")["rows"][0]
+    assert len(first["selected"]) == 1
+    def forbidden_read(*_):
+        raise AssertionError("forced rerun read a calculation cache")
+    monkeypatch.setattr(runner, "read_calculation", forbidden_read)
+    second = runner.scan_symbol(stock, settings, nested_sample["contexts"], tmp_path/"second",
+                                cache_root=tmp_path/"cache", revision="test", force_rebuild=True)["rows"][0]
+    assert not second.get("data_errors") and not second["calculation_reused"]
+    assert len(second["selected"]) == 1
+    assert second["selected"][0]["point"] == first["selected"][0]["point"]
+    assert second["confirmation_evidence"]["status"] == "complete"
+    assert settings == nested_sample["settings"]
 
 
 @pytest.mark.parametrize("kind", ["1buy", "2buy", "3buy"])

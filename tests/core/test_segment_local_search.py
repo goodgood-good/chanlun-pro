@@ -63,6 +63,14 @@ class WithoutSuffixReuse(XdCalculator):
         finally:
             self._feature_scan_cache = previous
 
+    def _first_pen_break_completion(self, *args):
+        previous = self._feature_scan_cache
+        self._feature_scan_cache = None
+        try:
+            return super()._first_pen_break_completion(*args)
+        finally:
+            self._feature_scan_cache = previous
+
 
 @pytest.mark.parametrize("mirror", [False, True])
 def test_cached_equal_prices_keep_the_actual_suppliers_numeric_types(mirror):
@@ -104,8 +112,16 @@ def test_reused_suffix_preserves_each_boundary_price_supplier(kind, mirror, numb
     if kind == "local_first_break":
         assert len(same_direction) > 1
     for proof in same_direction:
-        middle = proof.first_sequence[1]
-        supplier = middle.low_source_index if mirror else middle.high_source_index
+        if proof.first_pen_continuation is not None:
+            supplier = proof.first_pen_continuation.first_pen_index
+        elif proof.return_segment is not None:
+            supplier = proof.return_segment.first_pen_index
+        elif proof.reverse_segment is not None:
+            supplier = proof.reverse_segment.first_pen_index
+            assert proof.reverse_segment.successor.start_index == supplier
+        else:
+            middle = proof.first_sequence[1]
+            supplier = middle.low_source_index if mirror else middle.high_source_index
         assert supplier == proof.end_index + 1
 
 
@@ -120,9 +136,16 @@ def test_local_contained_search_does_not_repeat_the_same_future(kind, outcome, m
         calculator = XdCalculator()
         lines = calculator.calculate(values)
         count = CountedPrice.comparisons
-        if outcome == "completed":
+        if outcome == "completed" or kind == "local_first_break":
             assert geometry(lines)[0] == (0, 5, True)
-            assert geometry(lines)[-1][1:] == (len(values), False)
+            if kind == "local_first_break":
+                # The second repeated dip extends the raw first end after an
+                # equal-origin retrace. L071 has already completed this break;
+                # the name of the subsequently appended tail cannot undo it.
+                assert calculator.evidence[0].first_pen_continuation is not None
+                assert calculator.evidence[0].witness_index == 9
+            else:
+                assert geometry(lines)[-1][1:] == (len(values), False)
             # In the strong-break family, confirming the first segment also
             # releases shorter subsequent proofs. They are checked below;
             # a long contained first feature does not imply only two segments.
@@ -151,7 +174,10 @@ def test_local_search_preserves_prefix_proofs_and_checks_skipped_candidates(kind
                    for key, when in current.items() if key not in prior)
         check_evidence(calculator, values[:end])
         prior = current
-    if outcome == "pending":
+    if kind == "local_first_break":
+        assert calculator.evidence[0].first_pen_continuation is not None
+        assert calculator.evidence[0].witness_index == 9
+    elif outcome == "pending":
         assert calculator.counts["local_pending_first_ranges"] > 0
     elif outcome == "extension":
         assert calculator.counts["local_extension_ranges"] > 0

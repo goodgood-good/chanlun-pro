@@ -191,11 +191,15 @@ class CL(ICL):
         klines = self._without_auction(klines)
         replacement = self._history_replacement(klines)
         if replacement is not None:
+            replacement.attrs.update(klines.attrs)
             last_bar_closed |= (self._stroke_closed_through is not None and
                                 replacement.date.iloc[-1] <= self._stroke_closed_through)
             return self.process_klines_batch(replacement, last_bar_closed=last_bar_closed)
         src_klines = self.kline_processor.process_kline(klines)
-        return self._process_src_klines(src_klines, last_bar_closed=last_bar_closed)
+        return self._process_src_klines(
+            src_klines, last_bar_closed=last_bar_closed,
+            bar_close_offset=self._bar_close_offset(klines),
+        )
 
     @_strict_runtime_locked
     def process_klines_batch(self, klines: pd.DataFrame, *, last_bar_closed: bool = True):
@@ -226,6 +230,7 @@ class CL(ICL):
             src_klines,
             validated_incremental_prefix=True,
             last_bar_closed=last_bar_closed,
+            bar_close_offset=self._bar_close_offset(klines),
         )
 
     @_strict_runtime_locked
@@ -301,12 +306,23 @@ class CL(ICL):
             'date', keep='last',
         ).sort_values('date').reset_index(drop=True)
 
+    def _bar_close_offset(self, frame):
+        """Preserve source coordinates while recording actual minute closes."""
+        from chanlun.exchange.kline_completion import frequency_to_minutes
+
+        label = frame.attrs.get("bar_time_label", "end")
+        if label not in {"start", "end"}:
+            raise ValueError("bar_time_label must be start or end")
+        minutes = frequency_to_minutes(self.frequency)
+        return datetime.timedelta(minutes=minutes) if label == "start" and minutes is not None else datetime.timedelta()
+
     def _process_src_klines(
         self,
         src_klines: List[Kline],
         *,
         validated_incremental_prefix: bool = False,
         last_bar_closed: bool = False,
+        bar_close_offset: datetime.timedelta = datetime.timedelta(),
     ):
         all_klines = self.kline_processor.klines
         previous_closed = self._stroke_closed_through
@@ -321,7 +337,9 @@ class CL(ICL):
                 for k in all_klines[start:stop]:
                     # 明确收盘的输入在自身事件可用；默认盘中输入在下一根
                     # 到来时才获得前根收盘事实，不能把完成时间倒填一根。
-                    self._stroke_close_times[k.date] = k.date if last_bar_closed else all_klines[k.index + 1].date
+                    self._stroke_close_times[k.date] = (
+                        k.date + bar_close_offset if last_bar_closed else all_klines[k.index + 1].date
+                    )
                 self._stroke_closed_through = closed
         if not src_klines and previous_closed == self._stroke_closed_through:
             return self
@@ -443,6 +461,46 @@ class CL(ICL):
         ]
 
     @_strict_runtime_locked
+    def get_segment_construction_state(self):
+        """Expose the unassigned tail without inventing a segment endpoint."""
+        lines = self.get_xds()
+        pens = self.get_contiguous_bis()
+        tail = self.xd_calculator.tail_state
+        confirmed = [line for line in lines if line.is_done()]
+        result = {
+            "schema": "chanlun-segment-construction-v1",
+            "status": "ready", "tail": None,
+            "confirmed_segments": len(confirmed),
+            "awaiting_confirmation_segments": sum(not line.is_done() and not line.forming for line in lines),
+            "preview_segments": sum(bool(line.forming) for line in lines),
+        }
+        if tail.start_index is None or tail.start_index >= len(pens):
+            result["status"] = "awaiting_pens" if not lines else "ready"
+            return result
+        remaining = pens[tail.start_index:]
+        first = remaining[0]
+        start_time = first.start.k.date
+        source = [bar for bar in self.get_src_klines() if bar.date >= start_time]
+        if not source:
+            return result
+        reason = tail.projection_reason or tail.reason
+        unresolved = reason in {"tail-end-direction-conflict", "initial-pens-not-overlapping"}
+        status = "unresolved" if unresolved else "forming" if tail.projection_index is not None else "awaiting_pens"
+        result.update(status=status, tail={
+            "status": status, "reason": reason, "boundary_search": tail.reason,
+            "direction": tail.direction, "start_pen": tail.start_index,
+            "start_time": int(start_time.timestamp()), "start_price": first.start.val,
+            "observed_through": int(source[-1].date.timestamp()),
+            "available_at": int(self._strict_as_of().timestamp()),
+            "pen_count": len(remaining), "confirmed_pen_count": sum(p.is_done() for p in remaining),
+            "bar_count": len(source), "high": max(bar.h for bar in source), "low": min(bar.l for bar in source),
+            "candidate_end_pen": tail.candidate_index,
+            "preview_end_pen": tail.projection_index,
+            "end_confirmed": False,
+        })
+        return result
+
+    @_strict_runtime_locked
     def get_conditional_centers(self):
         self._validate_strict_structure_metadata()
         cached = self._strict_structure_memo.get("conditional_centers")
@@ -459,7 +517,8 @@ class CL(ICL):
         values = self.get_src_klines()
         if not values:
             raise ValueError("strict structure requires source klines")
-        return values[-1].date
+        last = values[-1].date
+        return max(last, self._stroke_close_times.get(last, last))
 
     def _strict_price_quantum(self):
         from decimal import Decimal, DecimalException
@@ -517,14 +576,13 @@ class CL(ICL):
 
     @_strict_runtime_locked
     @_strict_contract_boundary
-    def get_native_centers(self):
-        """Calculate centers from the segments of this chart's own interval."""
-        from chanlun.core.strict_structure.center_machine import calculate_centers
+    def get_segment_units(self):
+        """Return causal segment units even before a structural level exists."""
         from chanlun.core.strict_structure.models import SourceKind
         from chanlun.core.strict_structure.unit_adapter import adapt_lines
 
         self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("native_centers")
+        cached = self._strict_structure_memo.get("segment_units")
         if cached is not None:
             return cached
         units = adapt_lines(
@@ -532,6 +590,21 @@ class CL(ICL):
             self._strict_price_quantum(), self._strict_as_of(),
             self._strict_registry(), constituent_lines=self.get_contiguous_bis(),
         )
+        self._strict_structure_memo["segment_units"] = units
+        return units
+
+    @_strict_runtime_locked
+    @_strict_contract_boundary
+    def get_native_centers(self):
+        """Calculate centers from the segments of this chart's own interval."""
+        from chanlun.core.strict_structure.center_machine import calculate_centers
+        from chanlun.core.strict_structure.models import SourceKind
+
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("native_centers")
+        if cached is not None:
+            return cached
+        units = self.get_segment_units()
         result = calculate_centers(units, 0, SourceKind.SEGMENT)
         self._strict_structure_memo["native_centers"] = result
         return result
@@ -539,25 +612,15 @@ class CL(ICL):
     @_strict_runtime_locked
     def get_strict_structure_levels(self):
         from chanlun.core.strict_structure.level_catalog import recursive_level_labels
-        from chanlun.core.strict_structure.models import SourceKind
         from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
         from chanlun.core.strict_structure.strength import MacdStrengthProvider
-        from chanlun.core.strict_structure.unit_adapter import adapt_lines
 
         self._validate_strict_structure_metadata()
         cached = self._strict_structure_memo.get("formal")
         if cached is not None:
             return cached
         price_basis_revision = self._strict_price_basis_revision()
-        price_quantum = self._strict_price_quantum()
-        units = adapt_lines(
-            self.get_xds(),
-            0,
-            SourceKind.SEGMENT,
-            price_quantum,
-            self._strict_as_of(),
-            self._strict_registry(), constituent_lines=self.get_contiguous_bis(),
-        )
+        units = self.get_segment_units()
         labels = recursive_level_labels(self.get_frequency())
         engine = StrictRecursiveEngine(max_levels=len(labels))
         # 保持只覆写 ``max_levels`` 的研究/测试适配器兼容；缓存是运行时加速附件，

@@ -24,7 +24,7 @@ def fixture_run(tmp_path, monkeypatch):
     })
     item = {"code": "SH.600088", "rows": [{
         "code": "SH.600088", "name": "样例", "frequency": "5m",
-        "selected": [{"point": {"point_id": "point", "point_type": "3buy", "available_at": 100,
+        "selected": [{"point": {"point_id": "point", "point_type": "3buy", "center_ordinal": 1, "available_at": 100,
                                   "anchor_price": 10, "anchor_tick": 10, "anchor_at": 90,
                                   "anchor_unit_id": "return", "side": "buy", "status": "confirmed",
                                   "confirmed_at": 100, "structural_level": 0, "source_kind": "segment"}, "center": None}],
@@ -79,6 +79,9 @@ def test_one_damaged_legacy_snapshot_does_not_break_workbench(fixture_run, monke
     app = create_app(test_config={"TESTING": True, "LOGIN_DISABLED": True, "VALIDATE_WEB_SECURITY": False})
     try:
         response = app.test_client().get("/screening/workbench")
+        if response.status_code == 202:
+            manager.results()
+            response = app.test_client().get("/screening/workbench")
     finally:
         app.extensions["shutdown_runtime_services"]()
     assert response.status_code == 200
@@ -88,6 +91,26 @@ def test_one_damaged_legacy_snapshot_does_not_break_workbench(fixture_run, monke
             or result["status"]["lifetime_exclusion_count"])
     assert packed.read_bytes() == raw
     manager.start.assert_not_called()
+
+
+@pytest.mark.parametrize("ordinal,expected", [(1, 1), (2, 0), (None, 0)])
+def test_saved_selection_applies_first_center_preference_without_changing_confirmation(fixture_run, ordinal, expected):
+    manager, source, _ = fixture_run
+    path = manager.root / source / "results.jsonl"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    point = record["rows"][0]["selected"][0]["point"]
+    point["center_ordinal"] = ordinal
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    packed = manager.root / source / "evidence/SH.600088_5m.json.gz"
+    snapshot = json.loads(gzip.decompress(packed.read_bytes()))
+    snapshot["levels"][0]["points"][0]["center_ordinal"] = ordinal
+    packed.write_bytes(gzip.compress(json.dumps(snapshot).encode()))
+    result = manager.results()
+    assert len(result["selected"]) == expected
+    assert result["selection_policy_exclusion_count"] == 1 - expected
+    if not expected:
+        assert result["recent_rejections"][0]["point"]["status"] == "confirmed"
+    assert json.loads(path.read_text(encoding="utf-8"))["rows"][0]["selected"][0]["point"]["status"] == "confirmed"
 
 
 def test_dashboard_reads_current_run_without_starting_scan_or_promoting_sector_history(fixture_run):
@@ -111,6 +134,16 @@ def test_dashboard_reads_current_run_without_starting_scan_or_promoting_sector_h
     assert "current_regime" not in data["sectors"][0]
     assert before == {p: p.stat().st_mtime_ns for p in manager.root.rglob("*") if p.is_file()}
     manager.start.assert_not_called()
+
+
+def test_workbench_keeps_point_age_available_for_user_filters():
+    rows = workbench._current_rows({"selected": [{"code": "SH.600088", "market": "a", "frequency": "5m",
+        "point": {"point_id": "point", "point_type": "3buy", "status": "confirmed", "available_at": 200},
+        "anchor_age_sessions": 3, "confirmation_age_sessions": 1,
+        "distance_from_anchor_pct": 2.5}]}, "run")
+    assert rows[0]["anchor_age_sessions"] == 3
+    assert rows[0]["confirmation_age_sessions"] == 1
+    assert rows[0]["gain_pct"] == 2.5
 
 
 @pytest.mark.parametrize("state,expected", [("forming", 1), ("formed", 1), ("locked", 0)])
@@ -348,6 +381,9 @@ def test_restored_routes_require_login_and_writes_keep_csrf(fixture_run):
         response = client.get("/screening/workbench", query_string={"source": source})
         assert response.status_code == 400
         assert "仅支持最新选股结果" in response.get_json()["error"]
+    response = client.get("/screening/workbench?source=latest")
+    assert response.status_code in (200, 202)
+    fixture_run[0].results()
     assert client.get("/screening/workbench?source=latest").status_code == 200
     assert client.get("/screening/workbench").status_code == 200
     assert client.get("/screening/notifications").get_json()["automatic_notifications"] is False

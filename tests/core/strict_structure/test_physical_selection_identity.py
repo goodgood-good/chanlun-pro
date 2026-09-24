@@ -51,16 +51,18 @@ def test_evidence_revision_normalizes_equivalent_instants_and_price_ticks():
 
 
 def test_qqq_unchanged_confirmation_keeps_its_first_identity_after_a_later_choice():
-    frame = load_frame("QQQ.US_30m.parquet", 282)
+    # The window's initial up-origin is invalidated before it forms a valid
+    # boundary. Use the recovered 35 -> 271 proof once it is actually available.
+    frame = load_frame("QQQ.US_30m.parquet", 338)
     live = CL("QQQ.US", "30m", strict_config(), market="us")
     snapshots = []
-    for count in (281, 282):
+    for count in (337, 338):
         live.process_klines(frame.head(count))
         units = adapt_lines(live.get_xds(), 0, SourceKind.SEGMENT, "0.01",
                             frame.iloc[count - 1].date, live._strict_registry(),
                             constituent_lines=live.get_bis())
         snapshots.append(next(unit for line, unit in zip(live.get_xds(), units)
-                              if (line.start.k.k_index, line.end.k.k_index) == (14, 85)))
+                              if (line.start.k.k_index, line.end.k.k_index) == (35, 271)))
     before, after = snapshots
     # Resolving a later candidate must not re-date an unchanged earlier proof.
     assert before.confirmed_at is not None

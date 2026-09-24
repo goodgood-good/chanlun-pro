@@ -65,7 +65,9 @@ def build_strict_chart_cd(
     code: str,
     frequency: str,
     frame: pd.DataFrame,
+    last_bar_closed: bool = False,
 ) -> StrictChartRuntimeResult:
+    """Build one runtime; callers must explicitly attest completed input."""
     try:
         metadata = strict_snapshot_price_metadata(frame)
     except Exception as exc:
@@ -84,7 +86,7 @@ def build_strict_chart_cd(
             price_basis_revision=metadata.price_basis_revision,
         )
         cd = CL(code, frequency, config, market=market)
-        cd.process_klines(frame)
+        cd.process_klines(frame, last_bar_closed=last_bar_closed)
         return StrictChartRuntimeResult.success(cd)
     except Exception as exc:
         return _failure(

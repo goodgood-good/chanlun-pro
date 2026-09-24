@@ -1,0 +1,38 @@
+{
+  "SZ.000766_1m": {
+    "dataset_id": "23d87de244693d94c81786f0",
+    "sha256": "922d2e97716fc1cd21f41cbff4d7e688e46946d436976ba085201f73d3ef6b23",
+    "frozen_audit": "output/segment_by_segment_20260919",
+    "is_production_cache": true
+  },
+  "SH.600658_5m": {
+    "dataset_id": "a1eaf264f3c8f79bff9b913e",
+    "sha256": "c6deb6d06bf92a6e00f36d687c5c582e818c55ec29deaca2c8e1854c0bede5d9",
+    "frozen_audit": "output/segment_by_segment_20260919",
+    "is_production_cache": true
+  },
+  "BJ.920268_5m": {
+    "dataset_id": "c751661e892f0757c91ca9ed",
+    "sha256": "d89c4a3520fc146b6646627e58cd80712158d2eb81504f8f900ba7f0afb1816d",
+    "frozen_audit": "output/segment_by_segment_20260919",
+    "is_production_cache": true
+  },
+  "SZ.301697_5m": {
+    "dataset_id": "2e64922551d36be7b632ac32",
+    "sha256": "d731e02d4ad5bee933ca7c6c3faca2a493fa403fc648eb18ea977d067d1e6573",
+    "frozen_audit": "output/segment_by_segment_20260919",
+    "is_production_cache": true
+  },
+  "SZ.301699_5m": {
+    "dataset_id": "d006dc7e9ddfc121acc6c85f",
+    "sha256": "f69a8a5fbfcf8d01b0a2790f24d06621e02988972cc49e471bb77f0e8848be36",
+    "frozen_audit": "output/segment_by_segment_20260919",
+    "is_production_cache": true
+  },
+  "QQQ.US_1m": {
+    "dataset_id": "qqq_requested_c62dbdedb5c66e06",
+    "sha256": "002bd3e6d695d3118f4e623e5af479652b9f57bed6a3354f6fa68bb511a0ca36",
+    "frozen_audit": "output/segment_by_segment_20260919",
+    "is_production_cache": false
+  }
+}

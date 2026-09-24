@@ -4,7 +4,6 @@
   const $ = id => document.getElementById(id);
   const points = {'1buy':'一买','2buy':'二买','3buy':'三买','1sell':'一卖','2sell':'二卖','3sell':'三卖'};
   const stages = {confirmed:'已确认',approaching:'形成等待',formed:'形成等待',observed:'形成等待',left:'退出本轮候选'};
-  const jobs = {idle:'尚未运行',starting:'正在启动',running:'正在计算',completed:'已完成',failed:'运行失败',cancelled:'已取消',interrupted:'任务中断'};
   const active = job => ['starting','running'].includes(job?.status);
   const date = value => value ? new Date(value * 1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) : '—';
   let data, busy = false, polling = false, initialized = false, eventLimit = 40, serial = 0;
@@ -24,11 +23,22 @@
     return result;
   }
   function message(text) { $('monitor-message').textContent=text;$('monitor-message').hidden=!text; }
+  function pointStatus(row) {
+    if(row.stage==='left')return '退出候选';
+    return row.point_status ? stages[row.point_status]||row.point_status : row.stage==='confirmed'?'已确认':'筛选条件待齐';
+  }
+  function statusDetails(row) {
+    const details=[];
+    if(row.lower_confirmation_state)details.push(`${row.lower_frequency||'1m'} 区间套：${row.lower_confirmation_state==='confirmed'?'已确认':'等待确认'}`);
+    if(row.following_segment_state==='in_progress')details.push(`后继${{up:'向上',down:'向下'}[row.following_segment_direction]||''}线段：进行中`);
+    return details;
+  }
   function progress(id, job) { const el=$(id);el.hidden=!active(job);el.max=Math.max(1,job.total||0);el.value=job.completed||0; }
   function events() {
     const rows=data?.events||[];
     $('events').replaceChildren(...rows.slice(0,eventLimit).map(row=>{
-      const item=node('article',undefined,'monitor-event');item.append(chart(row),node('span',` · ${points[row.point_type]||row.point_type} · ${stages[row.stage]||row.stage}`));
+      const item=node('article',undefined,'monitor-event');item.append(chart(row),node('span',` · ${row.frequency||'5m'} ${points[row.point_type]||row.point_type} · ${pointStatus(row)}`));
+      for(const detail of statusDetails(row))item.append(node('small',detail));
       item.append(node('small',`${date(row.recorded_at)} 记录 · 行情截止 ${date(row.source_closed_at)} · ${row.change==='discovered'?'首次发现':row.change==='left'?'退出候选':'状态变化'}`));return item;
     }));
     $('events-empty').textContent=rows.length?'':'尚无监听变化记录；完成首轮检查后在这里显示。';
@@ -36,26 +46,40 @@
   }
   function render(result) {
     data=result; const manual=result.screening_job||{},live=result.monitor_job||{},seed=result.seed;
-    if(!initialized){$('after-close').value=result.settings.after_close;$('interval').value=String(result.settings.interval_seconds);$('daily-scope').value=result.settings.daily_scope;initialized=true;}
+    if(!initialized){$('morning-after-close').value=result.settings.morning_after_close||'11:35';$('after-close').value=result.settings.after_close;$('daily-workers').value=String(result.settings.screening?.workers||12);$('interval').value=String(result.settings.interval_seconds);$('daily-scope').value=result.settings.daily_scope;initialized=true;}
     $('enabled-label').textContent=result.enabled?(result.runtime_running?'自动任务已开启':'后台服务尚未就绪'):'自动任务已暂停';
     $('enable').disabled=busy;$('enable').textContent=result.enabled?'保存并保持开启':'启动自动任务';
     $('pause').disabled=busy||!result.enabled;$('check-now').disabled=busy||!result.enabled||!seed?.codes.length||active(live)||active(manual);
-    $('daily-status').textContent=active(manual)?`选股中 · ${manual.completed||0} / ${manual.total||'—'}`:jobs[manual.status]||manual.status;
-    $('daily-detail').textContent=`交易日 ${result.settings.after_close} 自动选股；应用需保持运行。${manual.error||''}${result.daily?.attempts>=3&&manual.status!=='completed'?'本日已尝试 3 次，请检查行情后手动重新选股。':''}`;
-    $('live-status').textContent=!result.enabled?'监听已暂停':active(manual)?'等待本轮盘后选股完成':!seed?'等待有效的盘后选股结果':!seed.codes.length?'本轮选股没有候选':active(live)?`检查中 · ${live.completed||0} / ${live.total||'—'}`:result.last_error?'本轮检查存在问题':'等待新的已收盘 K 线';
-    $('live-detail').textContent=`每 ${result.settings.interval_seconds} 秒检查；最近完成 ${date(result.last_check_at)}。${live.error||''}`;
-    $('pool-source').textContent=seed?`监听名单来自选股截止 ${date(seed.cutoffs?.['5m'])}；候选 ${seed.codes.length} 只。${seed.error_count?'选股有数据问题，请同时查看选股诊断。':''}`:'新的完整选股结果就绪后自动建立名单。';
+    const daily=result.daily||{};
+    const today=daily.session===result.today;
+    const phase=(key)=>today?daily[key]:null;
+    $('daily-status').textContent=active(manual)?`选股中 · ${manual.completed||0} / ${manual.total||'—'}`:
+      !today?'今日待运行':phase('afternoon')?.status==='completed'?'今日两轮已完成':
+      phase('morning')?.status==='completed'?'上午已完成，下午待运行':
+      phase('morning')?.status==='failed'||phase('afternoon')?.status==='failed'?'本日选股需要检查':'今日待运行';
+    const phaseText=(key,label,time)=>`${label} ${time}：${phase(key)?.status==='completed'?'已完成':phase(key)?.status==='started'?'计算中':phase(key)?.status==='failed'?'失败，待重试':'待运行'}`;
+    $('daily-detail').textContent=`${phaseText('morning','上午',result.settings.morning_after_close||'11:35')}；${phaseText('afternoon','下午',result.settings.after_close)}。应用需保持运行。${manual.error||''}${['morning','afternoon'].some(key=>phase(key)?.attempts>=3&&phase(key)?.status!=='completed')?'本时段已尝试 3 次，请检查行情后手动重新选股。':''}`;
+    $('live-status').textContent=!result.enabled?'监听已暂停':active(manual)?'等待本轮盘后选股完成':!seed?'等待选股候选或自选标的':!seed.codes.length?'监听名单为空':active(live)?`检查中 · ${live.completed||0} / ${live.total||'—'}`:result.last_error?'部分标的需要检查':'等待各市场新的已收盘 K 线';
+    $('live-detail').textContent=`每 ${result.settings.interval_seconds} 秒调度；分批检查，已完成标的即时处理。最近处理 ${date(result.last_check_at)}，最近整批完成 ${date(result.last_batch_completed_at)}。${result.pending_symbols_count?`仍有 ${result.pending_symbols_count} 只等待检查。`:''}${live.error||''}`;
+    const markets={a:'A 股',us:'美股',hk:'港股',fx:'外汇',ny_futures:'国际期货',futures:'国内期货',currency_spot:'数字货币现货',currency:'数字货币合约'};
+    const coverage=Object.entries(result.pool_markets||{}).map(([m,n])=>`${markets[m]||m} ${n} 只`).join('，');
+    $('pool-source').textContent=seed?`选股候选 ${seed.screening_symbols?.length??seed.codes.length} 只 + 自选 ${seed.watchlist_count||0} 只，去重共 ${seed.codes.length} 只。${coverage}。${seed.error_count?'盘后选股存在数据问题，详见选股诊断。':''}`:'自选标的无需先出现买卖点即可进入监听名单。';
     progress('daily-progress',manual);progress('live-progress',live);
     $('pool-count').textContent=seed?.codes.length||0;$('signal-count').textContent=result.signals.length;
     $('event-count').textContent=result.events.length;$('error-count').textContent=result.errors?.length||0;
-    $('signal-cutoff').textContent=`最近检查行情截止 ${date(result.last_cutoffs?.['5m'])}`;
+    const marketCutoffs=Object.entries(result.last_cutoffs_by_market||{}).map(([m,t])=>`${markets[m]||m} ${date(t)}`).join(' / ');
+    $('signal-cutoff').textContent=marketCutoffs?`各市场最近检查截止：${marketCutoffs}`:`最近检查行情截止 ${date(result.last_cutoffs?.['5m'])}`;
     $('signals').replaceChildren(...result.signals.map(row=>{
       const tr=node('tr'),name=node('td');name.append(chart(row));tr.append(name);
-      for(const value of [points[row.point_type]||row.point_type,stages[row.stage]||row.stage,row.anchor_price??'—',date(row.available_at),date(row.source_closed_at)])tr.append(node('td',String(value)));return tr;
+      tr.append(node('td',`${row.frequency} ${points[row.point_type]||row.point_type}`));
+      const status=node('td');status.append(node('div',pointStatus(row)));
+      for(const detail of statusDetails(row))status.append(node('div',detail,'muted'));
+      tr.append(status);
+      for(const value of [row.anchor_price??'—',date(row.available_at),date(row.source_closed_at)])tr.append(node('td',String(value)));return tr;
     }));
     $('signals-empty').textContent=result.signals.length?'':result.last_check_at?'最近完成的一轮没有可展示信号；有行情问题时请查看诊断。':'尚待首轮监听完成。';
     $('pool').replaceChildren(...(seed?.symbols||[]).map(chart));
-    $('pool-empty').textContent=seed?.codes.length?'':'尚无选股候选。';
+    $('pool-empty').textContent=seed?.codes.length?'':'尚无选股候选或自选标的。';
     $('errors').replaceChildren(...(result.errors||[]).map(row=>node('li',`${row.code} · ${row.error||(row.reasons||[]).join('、')||'行情或计算异常'}`)));
     $('errors-panel').hidden=!result.errors?.length;events();message(result.last_error);
     const dt=result.dingtalk||{};
@@ -73,7 +97,7 @@
     if(busy)return;busy=true;++serial;if(data)render(data);message('');
     try{render(await api('/monitor/'+action,body));}catch(error){message(error.message);}finally{busy=false;if(data){$('enable').disabled=false;$('pause').disabled=!data.enabled;$('check-now').disabled=!data.enabled||!data.seed?.codes.length||active(data.monitor_job)||active(data.screening_job);$('dingtalk-enabled').checked=!!data.dingtalk?.enabled;$('dingtalk-enabled').disabled=!data.dingtalk?.configured;}}
   }
-  $('monitor-form').addEventListener('submit',event=>{event.preventDefault();void control('start',{after_close:$('after-close').value,interval_seconds:Number($('interval').value),daily_scope:$('daily-scope').value});});
+  $('monitor-form').addEventListener('submit',event=>{event.preventDefault();void control('start',{morning_after_close:$('morning-after-close').value,after_close:$('after-close').value,screening_workers:Number($('daily-workers').value),interval_seconds:Number($('interval').value),daily_scope:$('daily-scope').value});});
   $('pause').addEventListener('click',()=>void control('pause'));
   $('dingtalk-enabled').addEventListener('change',()=>void control('dingtalk',{enabled:$('dingtalk-enabled').checked}));
   $('check-now').addEventListener('click',()=>void control('check'));

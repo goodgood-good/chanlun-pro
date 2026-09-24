@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>管理自选分组 - Chanlun Pro</title>
+    <title>自选管理 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}?asset={{ static_asset_token }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?asset={{ static_asset_token }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
@@ -11,15 +11,17 @@
     <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?asset={{ static_asset_token }}"></script>
     <script src="{{ url_for('static', filename='layui.js') }}?asset={{ static_asset_token }}"></script>
     {% include 'dark.html' %}
+    {% include 'workspace_head.html' %}
   </head>
   <body class="cp-ui zx-manager-page">
+    {% include 'workspace_nav.html' %}
     <a class="cp-skip-link" href="#main-content">跳到自选分组管理</a>
     <main id="main-content" class="zx-manager-shell">
       <header class="zx-manager-hero">
         <div>
           <span class="zx-manager-eyebrow">WATCHLIST WORKSPACE</span>
-          <h1>管理自选分组</h1>
-          <p>按交易目的拆分观察池。新建、删除与文件迁移互不混用，降低误操作。</p>
+          <h1>自选管理</h1>
+          <p>管理跨市场自选标的，建立日常关注与跟踪列表。</p>
         </div>
         <div class="zx-manager-count" aria-label="当前分组数量">
           <strong>{{ zx_groups | length }}</strong>

@@ -2,7 +2,7 @@
 
 Prices are synthetic order-preserving realizations, not market data. Source
 locations and the distinction between author rules and deductions are recorded
-in docs/segment_construction_audit.md. Market price gaps are outside this audit;
+in docs/segment_rules.md. Market price gaps are outside this audit;
 feature-interval gaps are essential to L067 and remain covered.
 """
 
@@ -42,9 +42,10 @@ def geometry(lines):
 
 
 CASES = {
-    # Review chart 01 selected raw-first classification. This is a deduction,
-    # not an author's separately answered figure.
-    "67_gap_after_inclusion": ([-4, 8, 0, 12, 7, 11, 9, 10, 8.5], [(0, 3, True), (3, 8, False)]),
+    # Ordinary overlap is not the covering first reversal in review chart 01.
+    # L067 standard inclusion creates a gap; no second fractal exists yet.
+    # These synthetic prices are a deduction, not an author's answered figure.
+    "67_gap_after_inclusion": ([-4, 8, 0, 12, 7, 11, 9, 10, 8.5], [(0, 3, False)]),
     "67_first": ([0, 10, 6, 14, 8, 12, 5], [(0, 3, True), (3, 6, False)]),
     "71_strong": ([0, 10, 6, 14, 4, 12, 2], [(0, 3, True), (3, 6, False)]),
     "67_second_no_fill": (
@@ -569,13 +570,24 @@ def test_contained_pivot_keeps_its_sources_and_effective_left_reference(mirror):
 
 @pytest.mark.parametrize("mirror", [False, True])
 @pytest.mark.parametrize("endpoint", [25, 26])
-def test_contained_pivot_still_requires_a_strict_effective_extremum(endpoint, mirror):
+def test_nonextreme_break_uses_established_predecessor_not_a_fabricated_local_fractal(endpoint, mirror):
     points = list(CASES["79_lower_completed_reverse_triple"][0])
     points[10] = endpoint
     calculator = XdCalculator()
-    lines = calculator.calculate(strokes(points, mirror))
+    values = strokes(points, mirror)
+    calculator.calculate(values[:-1])
     assert len(calculator.evidence) == 1
-    assert not lines[1].done
+    lines = calculator.calculate(values)
+    assert geometry(lines) == [(0, 3, True), (3, 10, True), (10, 13, False)]
+    parent, proof = calculator.evidence
+    assert proof.rule == 'established-predecessor-reverse-break'
+    assert proof.predecessor_key == parent.key
+    assert proof.first_break_witness_index == 12
+    # The same prices do not acquire this rule as an unestablished initial
+    # observation. L078 208-211's predecessor condition is material.
+    initial = XdCalculator()
+    initial._build_segments(values, 3)
+    assert not any(p.rule == proof.rule for p in initial.evidence)
 
 
 @pytest.mark.parametrize("mirror", [False, True])
@@ -752,16 +764,14 @@ def test_second_sequence_auxiliary_evidence_cannot_be_unlocked(missing):
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_later_middle_inclusion_does_not_change_raw_first_classification(mirror):
-    # Reviewed L071 reading: raw [7,12] overlaps left [0,8]. Inclusion with
-    # [9,11] yields [9,12], but that later gap does not reclassify the boundary.
+def test_ordinary_overlap_does_not_inherit_the_covering_reversal_exception(mirror):
+    # Raw [7,12] overlaps left [0,8] without covering it. Inclusion with
+    # [9,11] yields [9,12]; L067's standard gap requires a second fractal.
     values = strokes([-4, 8, 0, 12, 7, 11, 9, 10, 8.5], mirror)
     calculator = XdCalculator()
-    assert geometry(calculator.calculate(values)) == [(0, 3, True), (3, 8, False)]
-    proof = calculator.evidence[0]
-    assert not proof.initial_gap and not proof.second_sequence
-    left, middle, _ = proof.first_sequence
-    assert max(left.low, middle.low) > min(left.high, middle.high)
+    assert geometry(calculator.calculate(values)) == [(0, 3, False)]
+    assert not calculator.evidence
+    assert calculator.tail_state.reason == "waiting-second-feature"
 
 
 @pytest.mark.parametrize("mirror", [False, True])

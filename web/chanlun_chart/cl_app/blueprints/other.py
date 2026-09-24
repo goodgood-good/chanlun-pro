@@ -28,6 +28,12 @@ _EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS = 2.0
 _EXTERNAL_TICK_COALESCE_WAIT_SECONDS = 1.0
 
 
+def _provider_transport_error(exc):
+    """Provider outages are reported to callers and logged without a stack flood."""
+    return (isinstance(exc, (TimeoutError, ConnectionError))
+            or type(exc).__module__.split(".", 1)[0] in {"requests", "urllib3", "ccxt", "pytdx"})
+
+
 def _error_response(
     code: str,
     message: str,
@@ -287,8 +293,9 @@ def ticks():
                 response_payload=response_payload,
             )
         return response_payload
-    except Exception:
-        # 完整堆栈仅写日志，避免直接暴露给前端调用方。
+    except Exception as exc:
+        # Provider failures retain a bounded retry and a concise warning.
+        # Unexpected bugs keep a full stack in the server log.
         readiness = current_app.extensions.get("readiness")
         if readiness is not None:
             readiness.record_ticks_failure(
@@ -302,7 +309,11 @@ def ticks():
                 market,
                 probe_id=external_probe_id,
             ).retry_after_seconds
-        LogUtil.exception(f"/ticks failed market={market} codes_len={len(codes)}")
+        if _provider_transport_error(exc):
+            LogUtil.warning(f"/ticks provider unavailable market={market} codes_len={len(codes)} "
+                            f"error_type={type(exc).__name__} retry_after={retry_after_seconds}")
+        else:
+            LogUtil.exception(f"/ticks failed market={market} codes_len={len(codes)}")
         return _error_response(
             "service_unavailable",
             "Tick service is temporarily unavailable.",

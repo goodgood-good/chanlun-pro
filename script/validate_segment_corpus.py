@@ -72,7 +72,9 @@ def inventory(output):
             if not set(RAW_COLUMNS).issubset(columns):
                 excluded.append({"file": name, "reason": "not a dated raw OHLCV table", "columns": list(columns)})
                 continue
-        match = re.match(r"(?P<code>.+?)_(?P<frequency>\d+(?:m|h|d|w))(?:_raw_prefix)?$", path.stem)
+        # Frozen regressions may add a date range or a descriptive window
+        # suffix. The leading code/frequency still identify the raw dataset.
+        match = re.match(r"(?P<code>.+?)_(?P<frequency>\d+(?:m|h|d|w))(?:_.*)?$", path.stem)
         if not match:
             raise ValueError(f"Unknown dataset identity: {name}")
         code, frequency = match.group("code", "frequency")
@@ -138,7 +140,8 @@ def check_structure(calc, values):
             assert line.locked_at is None, "pending_with_lock"
             continue
         proof = proof_by_key[(a, b, line.type)]
-        dependencies = values[a:proof.witness_index + 1]
+        dependency_start = proof.origin_evidence.initial_index if proof.origin_evidence else a
+        dependencies = values[dependency_start:proof.witness_index + 1]
         assert all(x.locked_at is not None and not x.selection_pending for x in dependencies), "unavailable_evidence"
         expected = max(x.locked_at for x in dependencies)
         if previous_time is not None:

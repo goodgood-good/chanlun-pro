@@ -37,8 +37,33 @@ def _clean(value, limit=100):
     return " ".join(str(value).split())[:limit]
 
 
+def signal_status_key(row):
+    """Track point confirmation independently from the strategy's extra gates."""
+    if "point_status" not in row:
+        return row["stage"]
+    return json.dumps([row["point_status"], row.get("selection_status", row["stage"]),
+                       row.get("lower_confirmation_state")], separators=(",", ":"))
+
+
 def signal_key(row):
-    return f"signal:{row['id']}:{row['stage']}"
+    return f"signal:{row['id']}:{signal_status_key(row)}"
+
+
+def signal_status_lines(row):
+    """Never describe a confirmed chart point as unconfirmed selection."""
+    status = row.get("point_status")
+    label = STAGES.get(status, status) if status is not None else (
+        "已确认" if row["stage"] == "confirmed" else "筛选条件待齐")
+    lines = [f"{row['frequency']} {POINTS.get(row['point_type'], row['point_type'])} · {label}"]
+    lower = row.get("lower_confirmation_state")
+    if lower is not None:
+        lines.append(f"{row.get('lower_frequency') or '1m'} 区间套：" +
+                     ("已确认" if lower == "confirmed" else "等待确认"))
+    direction = {"up": "向上", "down": "向下"}.get(row.get("following_segment_direction"), "")
+    following = row.get("following_segment_state")
+    if following in {"in_progress", "completed"}:
+        lines.append(f"后继{direction}线段：" + ("进行中（尚未完成）" if following == "in_progress" else "已完成"))
+    return lines
 
 
 class DeliveryError(Exception):
@@ -145,12 +170,12 @@ class DingTalkOutbox:
         failures = {(e.get("market", "a"), e["code"]) for e in result.get("errors", [])}
         lines = ["缠论 Pro · 盘后选股完成", f"完成时间：{date(result.get('finished_at') or self.now())}",
                  f"检查标的：{result.get('completed', 0)} / {result.get('total', 0)}",
-                 f"已确认：{len(confirmed)} 个信号 / {len({(r.get('market','a'),r['code']) for r in confirmed})} 个标的",
-                 f"形成等待（未确认）：{len(waiting)} 个信号",
+                 f"筛选条件已齐：{len(confirmed)} 个信号 / {len({(r.get('market','a'),r['code']) for r in confirmed})} 个标的",
+                 f"筛选条件待齐：{len(waiting)} 个信号（不代表主周期买卖点未确认）",
                  f"数据异常：{len(failures)} 个标的", "结果摘要："]
         for row in [*confirmed, *waiting][:8]:
             point = row["point"]
-            stage = row.get("selection_status", point["status"])
+            stage = point["status"]
             lines.append(f"{_clean(row.get('name', row['code']), 28)} {row.get('market','a')}:{row['code']} · "
                          f"{POINTS.get(point['point_type'], point['point_type'])} · {STAGES.get(stage, stage)}")
         if not confirmed and not waiting:
@@ -185,7 +210,7 @@ class DingTalkOutbox:
                 lines = ["缠论 Pro · 监听信号变化", f"检查时间：{date(stamp)}"]
                 for _, row in group:
                     lines += ["", f"{_clean(row.get('name',row['code']),28)} · {row.get('market','a')}:{_clean(row['code'],80)}",
-                              f"{row['frequency']} {POINTS.get(row['point_type'],row['point_type'])} · {STAGES[row['stage']]}",
+                              *signal_status_lines(row),
                               f"拐点价：{row.get('anchor_price') if row.get('anchor_price') is not None else '—'}",
                               f"信号可用：{date(row.get('available_at'))}；行情截止：{date(row.get('source_closed_at'))}"]
                 lifetime = min(row["recorded_at"] + 1800 for _, row in group) - stamp
@@ -205,7 +230,12 @@ class DingTalkOutbox:
             result["last_sent_at"] = db.execute("SELECT MAX(sent) FROM outbox").fetchone()[0]
             rows = db.execute("SELECT id,kind,status,created,sent,attempts,error FROM outbox ORDER BY created DESC,rowid DESC LIMIT 30").fetchall()
             result["history"] = [dict(row) for row in rows]
-            result["last_error"] = next((row["error"] for row in rows if row["status"] in {"retry", "failed"}), "")
+            # Successful later delivery resolves an old failure banner. Keep
+            # historical failures in history/counts and show active retries.
+            last_sent = result["last_sent_at"] or 0
+            result["last_error"] = next((row["error"] for row in rows
+                                         if row["status"] == "retry" or (
+                                             row["status"] == "failed" and row["created"] >= last_sent)), "")
         return result
 
     def deliver_one(self):

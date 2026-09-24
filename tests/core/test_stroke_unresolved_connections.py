@@ -19,7 +19,7 @@ from chanlun.core.strict_structure.models import SourceKind
 from chanlun.core.strict_structure.unit_adapter import adapt_lines
 from chanlun.core.xd_calculator import XdCalculator
 from script.review_stroke_rule_logic import (
-    COMPLETION_RETRACTION, EQUAL_PREFIX, long_origin_wait, path_conditions, reflected,
+    COMPLETION_RETRACTION, EQUAL_PREFIX, long_origin_wait, reflected,
 )
 from tests.core.strict_structure.real_history import strict_config
 from tests.core.strict_structure.test_source_stroke_revision import _bars, _calculate

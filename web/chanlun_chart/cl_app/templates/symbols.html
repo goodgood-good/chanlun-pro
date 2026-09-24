@@ -10,9 +10,11 @@
     <script src="{{ url_for('static', filename='layui.js') }}"></script>
     <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
+    {% include 'workspace_head.html' %}
   </head>
 
   <body class="cp-ui">
+    {% include 'workspace_nav.html' %}
     <a class="cp-skip-link" href="#main-content">跳到标的列表</a>
     <main id="main-content" class="cp-page cp-page-stack">
       <header class="cp-page-header">

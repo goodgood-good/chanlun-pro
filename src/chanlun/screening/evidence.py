@@ -144,7 +144,8 @@ def _nested_snapshot(path, size, mtime_ns, ctime_ns, expected_digest):
     snapshot = _decode_snapshot(raw)
     return {k: snapshot[k] for k in ("symbol", "source_frequency", "source_closed_at", "source_started_at",
                                    "price_basis_revision", "structure_price_quantum", "levels",
-                                   "screening_segments", "screening_interval_signals") if k in snapshot}
+                                   "screening_segments", "screening_interval_signals", "segment_construction",
+                                   "unresolved_segment_ranges") if k in snapshot}
 
 
 def evidence_nested_snapshots(directory, code, main_manifest, lower_manifest):

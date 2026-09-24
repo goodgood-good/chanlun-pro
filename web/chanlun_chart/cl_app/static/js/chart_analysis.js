@@ -25,7 +25,18 @@
     const previews = valid ? snapshot.levels[0].center_previews || [] : [];
     return {bars: data?.bars?.length || 0, strokes: data?.bis?.length || 0,
       segments: data?.xds?.length || 0, centers, previews, ready: valid,
+      ...(valid && snapshot.segment_construction ? {segmentConstruction: snapshot.segment_construction} : {}),
       loading: data?.strict_structure_error?.code === 'strict_structure_pending'};
+  }
+  function segmentStatusText(summary) {
+    if (!summary.ready || !summary.segmentConstruction) return '';
+    const state = summary.segmentConstruction;
+    if (state.status === 'unresolved') {
+      return `已确认 ${state.confirmed_segments} 条线段；末尾 ${state.tail.pen_count} 笔的线段分界待判定，灰色区间不作为选股确认段。`;
+    }
+    if (state.preview_segments) return `已确认 ${state.confirmed_segments} 条线段；${state.preview_segments} 条虚线为形成中预览，端点尚未确认。`;
+    if (state.awaiting_confirmation_segments) return `已确认 ${state.confirmed_segments} 条线段；${state.awaiting_confirmation_segments} 条线段仍在等待证据笔确认。`;
+    return state.status === 'awaiting_pens' ? `已确认 ${state.confirmed_segments} 条线段；末尾等待新段形成。` : `已确认 ${state.confirmed_segments} 条线段。`;
   }
   function currentManager(detail) {
     const managers = Object.values(root.__cm || {});
@@ -70,6 +81,7 @@
     text('ca-bar-count', summary.bars || '—');
     text('ca-bi-count', summary.ready ? summary.strokes : '—');
     text('ca-xd-count', summary.ready ? summary.segments : '—');
+    text('ca-segment-status', segmentStatusText(summary));
     text('ca-center-count', summary.ready ? count : '—');
     text('ca-native-status', summary.ready
       ? (count ? `本周期中枢 ${summary.centers.length} 个，形成中 ${forming.length} 个；虚线表示未确认部分`
@@ -158,5 +170,5 @@
     if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', init, {once: true});
     else init();
   }
-  return {formatPrice, formatResolution, summarizeChartData, layerIsVisible, setLayerVisibility, refresh, init};
+  return {formatPrice, formatResolution, summarizeChartData, segmentStatusText, layerIsVisible, setLayerVisibility, refresh, init};
 });

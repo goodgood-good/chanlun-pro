@@ -41,6 +41,9 @@ class _StrictChartCD:
     def get_xds(self):
         return []
 
+    def get_src_klines(self):
+        return [SimpleNamespace(date=self.evidence.source_closed_at)]
+
     def get_strict_evidence(self):
         return SimpleNamespace(
             structure=SimpleNamespace(levels=()),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
 from chanlun.cl_utils import strict_chart_runtime
 from chanlun.cl_utils.price_metadata import (
@@ -30,7 +31,8 @@ def _frame() -> pd.DataFrame:
     return frame
 
 
-def test_strict_chart_runtime_uses_only_fixed_recursive_config(monkeypatch) -> None:
+@pytest.mark.parametrize("closed", [False, True])
+def test_strict_chart_runtime_uses_only_fixed_recursive_config(monkeypatch, closed) -> None:
     captured = {}
 
     class FakeCL:
@@ -42,19 +44,22 @@ def test_strict_chart_runtime_uses_only_fixed_recursive_config(monkeypatch) -> N
                 config=config,
             )
 
-        def process_klines(self, frame):
+        def process_klines(self, frame, *, last_bar_closed=False):
             captured["frame"] = frame
+            captured["closed"] = last_bar_closed
 
     monkeypatch.setattr(strict_chart_runtime, "CL", FakeCL)
     frame = _frame()
 
     result = strict_chart_runtime.build_strict_chart_cd(
-        market="a", code="SH.600926", frequency="1m", frame=frame
+        market="a", code="SH.600926", frequency="1m", frame=frame,
+        **({"last_bar_closed": True} if closed else {}),
     )
 
     assert isinstance(result.cd, FakeCL)
     assert result.error_code is None
     assert captured["frame"] is frame
+    assert captured["closed"] is closed
     assert captured["config"] == strict_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="sha256:test-basis",

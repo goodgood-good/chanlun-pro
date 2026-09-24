@@ -36,7 +36,14 @@ def dashboard():
     try:
         if request.args.getlist("source") not in ([], ["latest"]):
             raise ValueError("仅支持最新选股结果，请刷新页面")
-        return jsonify(workbench.dashboard())
+        data = workbench.dashboard(background=True)
+        loading = data["status"].get("results_loading", False)
+        response = jsonify(data)
+        response.status_code = 202 if loading else 200
+        response.headers["Cache-Control"] = "private, no-store"
+        if loading:
+            response.headers["Retry-After"] = "5"
+        return response
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
@@ -56,7 +63,9 @@ def reviews():
 @screening_bp.get("/screening/status")
 @login_required
 def status():
-    return jsonify(manager.status())
+    state = manager.status()
+    state["higher_context_version"] = workbench.higher_context.status_version(manager, state.get("run_id"))
+    return jsonify(state)
 
 
 @screening_bp.get("/screening/results")
@@ -99,7 +108,21 @@ def evidence_data():
 @login_required
 def start():
     try:
-        return jsonify(manager.start(request.get_json(silent=True))), 202
+        body = request.get_json(silent=True)
+        external_notifications = True
+        force_rebuild = False
+        if isinstance(body, dict):
+            body = dict(body)
+            external_notifications = body.pop("external_notifications", True)
+            force_rebuild = body.pop("force_rebuild", False)
+        if type(external_notifications) is not bool:
+            raise ValueError("外部通知选项必须是布尔值")
+        if type(force_rebuild) is not bool:
+            raise ValueError("重新计算选项必须是布尔值")
+        options = {} if external_notifications else {"external_notifications": False}
+        if force_rebuild:
+            options["force_rebuild"] = True
+        return jsonify(manager.start(body, **options)), 202
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
     except RuntimeError as exc:

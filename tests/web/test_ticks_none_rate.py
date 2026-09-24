@@ -10,6 +10,7 @@ import json
 import pathlib
 import sys
 import threading
+from unittest.mock import Mock
 
 _root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_root / "src"))
@@ -274,12 +275,17 @@ def test_us_ticks_fail_closed_when_primary_times_out(client, monkeypatch):
             return False
 
     monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _UnavailableUS())
+    warning, exception = Mock(), Mock()
+    monkeypatch.setattr(other_mod.LogUtil, "warning", warning)
+    monkeypatch.setattr(other_mod.LogUtil, "exception", exception)
 
     resp = client.post(
         "/ticks", data={"market": "us", "codes": json.dumps(["AAPL.US"])}
     )
 
     _assert_ticks_error(resp, 503, "service_unavailable")
+    assert "error_type=TimeoutError" in warning.call_args.args[0]
+    exception.assert_not_called()
 
 
 def test_external_tick_failures_open_one_shared_market_backoff(

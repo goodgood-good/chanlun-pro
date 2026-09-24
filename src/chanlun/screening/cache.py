@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import zlib
+from uuid import uuid4
 
 import pandas as pd
 
@@ -52,20 +53,64 @@ def read_calculation(path: Path, key: str):
         for checks in value["reviewed"].values():
             if not all(checks.get(k) is True for k in REPLAY_CHECKS):
                 return None
+        source = value.get("source_input")
+        if source:
+            original = (path.parent / source["file"]).resolve()
+            if not original.is_relative_to((path.parent / "inputs").resolve()):
+                return None
+            if hashlib.sha256(original.read_bytes()).hexdigest() != source["sha256"]:
+                return None
         return value
     except (OSError, EOFError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, zlib.error):
         return None
 
 
-def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed):
+def _save_source_input(path, frame, code, frequency):
+    """Keep every cached calculation's exact input, even without any signal.
+
+    Immutable input files are shared by their fingerprint/content hash. Run
+    diagnostics excluded by input_fingerprint are also excluded from these
+    replay files. Never silently replace the input of an existing snapshot.
+    """
+    folder=path.parent/'inputs'
+    folder.mkdir(parents=True,exist_ok=True)
+    data=frame.copy(deep=False)
+    data.attrs={k:v for k,v in frame.attrs.items()
+                if not k.startswith('_screening_') and k not in {'qmt_history_read_mode','screening_suspensions'}}
+    fingerprint=input_fingerprint(data,code,frequency)
+    temporary=folder/f'.input.{os.getpid()}.{uuid4().hex}.tmp'
+    try:
+        data.to_parquet(temporary,index=False)
+        restored=pd.read_parquet(temporary)
+        if input_fingerprint(restored,code,frequency)!=fingerprint:
+            raise OSError('Calculation input did not survive the replay-file round trip')
+        checksum=hashlib.sha256(temporary.read_bytes()).hexdigest()
+        original=folder/f'{fingerprint}.{checksum[:16]}.parquet'
+        if original.exists() and hashlib.sha256(original.read_bytes()).hexdigest()==checksum:
+            temporary.unlink()
+        else:
+            os.replace(temporary,original)
+        return {'file':original.relative_to(path.parent).as_posix(),'sha256':checksum,
+                'fingerprint':fingerprint,'bars':len(data),'code':code,'frequency':frequency}
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, source_frame=None):
     # Unresolved data or structural replay failures must get another cold check.
     if row.get("data_errors") or any(row["reason_counts"].get(reason) for reason in (
         "DATA_GAPS", "DEPENDENCY_MISSING", "CALENDAR_COVERAGE_UNKNOWN",
         "CONFIRMATION_REPLAY_FAILED", "CONFIRMATION_TIME_MISMATCH", "REBUILD_MISMATCH",
     )):
         return
-    raw = json.dumps({"schema": "screening-structure-v2", "key": key,
-                     "snapshot": snapshot, "reviewed": reviewed},
+    payload={"schema": "screening-structure-v2", "key": key,
+             "snapshot": snapshot, "reviewed": reviewed}
+    if source_frame is not None:
+        payload['source_input']=_save_source_input(
+            path,source_frame,snapshot.get('symbol',row.get('code')),
+            snapshot.get('source_frequency',row.get('frequency')),
+        )
+    raw = json.dumps(payload,
                      ensure_ascii=False, allow_nan=False)
     wrapper = {"payload": raw, "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
     path.parent.mkdir(parents=True, exist_ok=True)

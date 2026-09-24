@@ -21,6 +21,10 @@ def lesson79_family(kind, touching_left=False):
         (5, 6),
         (6, 4),
         (3, 7),
+        # Both actual L079 diagrams draw P5 below P7. Reversing this order
+        # makes 45/67 non-contained and can create a new local standard
+        # fractal; it is not an unconstrained version of the author's figure.
+        (5, 7),
         (7, 6),
         (6, 2),
         (1, 6),

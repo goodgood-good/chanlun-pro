@@ -1,0 +1,7225 @@
+{
+  "source_algorithm_sha256": "defd9517e2882ef76a2eb13df963044777279d7d3120ee4ce16cd57c9ad262f3",
+  "scope": {
+    "symbol": "QQQ.US",
+    "frequency": "1m",
+    "start": "2026-08-18T09:31:00-04:00",
+    "end": "2026-09-17T11:07:00-04:00",
+    "bars": 8287,
+    "pens": 510,
+    "segments": 58,
+    "confirmed": 56,
+    "chart_segments": 57,
+    "time_label": "end",
+    "data_timezone": "America/New_York",
+    "snapshot_validated_at": 1789657628.081439,
+    "closed_through": "2026-09-17T11:06:00-04:00",
+    "price_basis": {
+      "structure_price_quantum": "0.001",
+      "price_basis_revision": "sha256:d33f6aadf19956a6072131e2aba096ac68e48f76a5692c490a86bd6754ae869e",
+      "price_basis_provider": "longbridge",
+      "price_basis_adjustment": "forward",
+      "ohlc_geometry_normalization": "ohlc-envelope",
+      "ohlc_geometry_repair_count": 0,
+      "ohlc_geometry_max_adjustment": 0.0,
+      "bar_time_label": "end"
+    },
+    "added_opening_bars": 94,
+    "overlap_bars": 7,
+    "ohlcv_overlap_exact": true,
+    "provider_labels": "start",
+    "chart_labels": "end"
+  },
+  "segments": [
+    {
+      "number": 1,
+      "index": 0,
+      "chart_index": null,
+      "start_bi": 1,
+      "end_bi": 7,
+      "pen_count": 7,
+      "type": "down",
+      "start": {
+        "time": 1787060520,
+        "date": "2026-08-18T09:42:00-04:00",
+        "price": 722.13
+      },
+      "end": {
+        "time": 1787065860,
+        "date": "2026-08-18T11:11:00-04:00",
+        "price": 715.92
+      },
+      "high": 722.13,
+      "low": 715.92,
+      "done": true,
+      "locked_at": "2026-08-18T12:43:00-04:00",
+      "proof": {
+        "start_index": 1,
+        "end_index": 7,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 10,
+        "first_sequence": [
+          {
+            "low": 716.22,
+            "high": 717.31,
+            "source_indices": [
+              6
+            ],
+            "low_source_index": 6,
+            "high_source_index": 6
+          },
+          {
+            "low": 715.92,
+            "high": 718.2,
+            "source_indices": [
+              8
+            ],
+            "low_source_index": 8,
+            "high_source_index": 8
+          },
+          {
+            "low": 717.19,
+            "high": 719.49,
+            "source_indices": [
+              10
+            ],
+            "low_source_index": 10,
+            "high_source_index": 10
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        718.11,
+        720.56
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 10,
+        "end": {
+          "time": 1787069640,
+          "date": "2026-08-18T12:14:00-04:00",
+          "price": 719.49
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 718.11,
+          "high": 720.56,
+          "sources": [
+            2
+          ]
+        },
+        {
+          "low": 717.24,
+          "high": 720.2,
+          "sources": [
+            4
+          ]
+        },
+        {
+          "low": 716.22,
+          "high": 717.31,
+          "sources": [
+            6
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 716.22,
+        "high": 717.31,
+        "source_indices": [
+          6
+        ],
+        "low_source_index": 6,
+        "high_source_index": 6
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 2,
+      "index": 1,
+      "chart_index": 0,
+      "start_bi": 8,
+      "end_bi": 12,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787065860,
+        "date": "2026-08-18T11:11:00-04:00",
+        "price": 715.92
+      },
+      "end": {
+        "time": 1787072100,
+        "date": "2026-08-18T12:55:00-04:00",
+        "price": 719.67
+      },
+      "high": 719.67,
+      "low": 715.92,
+      "done": true,
+      "locked_at": "2026-08-18T13:55:00-04:00",
+      "proof": {
+        "start_index": 8,
+        "end_index": 12,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 15,
+        "first_sequence": [
+          {
+            "low": 718.05,
+            "high": 719.49,
+            "source_indices": [
+              11
+            ],
+            "low_source_index": 11,
+            "high_source_index": 11
+          },
+          {
+            "low": 717.8,
+            "high": 719.67,
+            "source_indices": [
+              13
+            ],
+            "low_source_index": 13,
+            "high_source_index": 13
+          },
+          {
+            "low": 717.75,
+            "high": 718.47,
+            "source_indices": [
+              15
+            ],
+            "low_source_index": 15,
+            "high_source_index": 15
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        717.19,
+        718.2
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 15,
+        "end": {
+          "time": 1787074680,
+          "date": "2026-08-18T13:38:00-04:00",
+          "price": 717.75
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 717.19,
+          "high": 718.2,
+          "sources": [
+            9
+          ]
+        },
+        {
+          "low": 718.05,
+          "high": 719.49,
+          "sources": [
+            11
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 718.05,
+        "high": 719.49,
+        "source_indices": [
+          11
+        ],
+        "low_source_index": 11,
+        "high_source_index": 11
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 3,
+      "index": 2,
+      "chart_index": 1,
+      "start_bi": 13,
+      "end_bi": 19,
+      "pen_count": 7,
+      "type": "down",
+      "start": {
+        "time": 1787072100,
+        "date": "2026-08-18T12:55:00-04:00",
+        "price": 719.67
+      },
+      "end": {
+        "time": 1787076780,
+        "date": "2026-08-18T14:13:00-04:00",
+        "price": 716.69
+      },
+      "high": 719.67,
+      "low": 716.69,
+      "done": true,
+      "locked_at": "2026-08-18T15:49:00-04:00",
+      "proof": {
+        "start_index": 13,
+        "end_index": 19,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 24,
+        "first_sequence": [
+          {
+            "low": 717.03,
+            "high": 717.409,
+            "source_indices": [
+              18
+            ],
+            "low_source_index": 18,
+            "high_source_index": 18
+          },
+          {
+            "low": 716.69,
+            "high": 717.59,
+            "source_indices": [
+              20,
+              22
+            ],
+            "low_source_index": 20,
+            "high_source_index": 22
+          },
+          {
+            "low": 717.11,
+            "high": 718.08,
+            "source_indices": [
+              24
+            ],
+            "low_source_index": 24,
+            "high_source_index": 24
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        717.8,
+        718.47
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 24,
+        "end": {
+          "time": 1787081400,
+          "date": "2026-08-18T15:30:00-04:00",
+          "price": 718.08
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 717.8,
+          "high": 718.47,
+          "sources": [
+            14
+          ]
+        },
+        {
+          "low": 717.75,
+          "high": 718.31,
+          "sources": [
+            16
+          ]
+        },
+        {
+          "low": 717.03,
+          "high": 717.409,
+          "sources": [
+            18
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 717.03,
+        "high": 717.409,
+        "source_indices": [
+          18
+        ],
+        "low_source_index": 18,
+        "high_source_index": 18
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 4,
+      "index": 3,
+      "chart_index": 2,
+      "start_bi": 20,
+      "end_bi": 26,
+      "pen_count": 7,
+      "type": "up",
+      "start": {
+        "time": 1787076780,
+        "date": "2026-08-18T14:13:00-04:00",
+        "price": 716.69
+      },
+      "end": {
+        "time": 1787146440,
+        "date": "2026-08-19T09:34:00-04:00",
+        "price": 721.5
+      },
+      "high": 721.5,
+      "low": 716.69,
+      "done": true,
+      "locked_at": "2026-08-19T10:49:00-04:00",
+      "proof": {
+        "start_index": 20,
+        "end_index": 26,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 29,
+        "first_sequence": [
+          {
+            "low": 717.11,
+            "high": 718.29,
+            "source_indices": [
+              21,
+              23
+            ],
+            "low_source_index": 23,
+            "high_source_index": 21
+          },
+          {
+            "low": 713.37,
+            "high": 721.5,
+            "source_indices": [
+              27
+            ],
+            "low_source_index": 27,
+            "high_source_index": 27
+          },
+          {
+            "low": 712.61,
+            "high": 715.65,
+            "source_indices": [
+              29
+            ],
+            "low_source_index": 29,
+            "high_source_index": 29
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        717.08,
+        717.59
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 29,
+        "end": {
+          "time": 1787148960,
+          "date": "2026-08-19T10:16:00-04:00",
+          "price": 712.61
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 717.11,
+          "high": 718.29,
+          "sources": [
+            21,
+            23
+          ]
+        },
+        {
+          "low": 716.92,
+          "high": 718.08,
+          "sources": [
+            25
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 717.11,
+        "high": 718.29,
+        "source_indices": [
+          21,
+          23
+        ],
+        "low_source_index": 23,
+        "high_source_index": 21
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 5,
+      "index": 4,
+      "chart_index": 3,
+      "start_bi": 27,
+      "end_bi": 29,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1787146440,
+        "date": "2026-08-19T09:34:00-04:00",
+        "price": 721.5
+      },
+      "end": {
+        "time": 1787148960,
+        "date": "2026-08-19T10:16:00-04:00",
+        "price": 712.61
+      },
+      "high": 721.5,
+      "low": 712.61,
+      "done": true,
+      "locked_at": "2026-08-19T11:20:00-04:00",
+      "proof": {
+        "start_index": 27,
+        "end_index": 29,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 32,
+        "first_sequence": [
+          {
+            "low": 713.37,
+            "high": 715.65,
+            "source_indices": [
+              28
+            ],
+            "low_source_index": 28,
+            "high_source_index": 28
+          },
+          {
+            "low": 712.61,
+            "high": 717.405,
+            "source_indices": [
+              30
+            ],
+            "low_source_index": 30,
+            "high_source_index": 30
+          },
+          {
+            "low": 716.24,
+            "high": 718.73,
+            "source_indices": [
+              32
+            ],
+            "low_source_index": 32,
+            "high_source_index": 32
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        713.37,
+        715.65
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 32,
+        "end": {
+          "time": 1787151720,
+          "date": "2026-08-19T11:02:00-04:00",
+          "price": 718.73
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 713.37,
+          "high": 715.65,
+          "sources": [
+            28
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 713.37,
+        "high": 715.65,
+        "source_indices": [
+          28
+        ],
+        "low_source_index": 28,
+        "high_source_index": 28
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 6,
+      "index": 5,
+      "chart_index": 4,
+      "start_bi": 30,
+      "end_bi": 40,
+      "pen_count": 11,
+      "type": "up",
+      "start": {
+        "time": 1787148960,
+        "date": "2026-08-19T10:16:00-04:00",
+        "price": 712.61
+      },
+      "end": {
+        "time": 1787156400,
+        "date": "2026-08-19T12:20:00-04:00",
+        "price": 719.7
+      },
+      "high": 719.7,
+      "low": 712.61,
+      "done": true,
+      "locked_at": "2026-08-19T13:25:00-04:00",
+      "proof": {
+        "start_index": 30,
+        "end_index": 40,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 43,
+        "first_sequence": [
+          {
+            "low": 718.705,
+            "high": 719.33,
+            "source_indices": [
+              39
+            ],
+            "low_source_index": 39,
+            "high_source_index": 39
+          },
+          {
+            "low": 717.9,
+            "high": 719.7,
+            "source_indices": [
+              41
+            ],
+            "low_source_index": 41,
+            "high_source_index": 41
+          },
+          {
+            "low": 716.58,
+            "high": 718.505,
+            "source_indices": [
+              43
+            ],
+            "low_source_index": 43,
+            "high_source_index": 43
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        716.24,
+        717.405
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 43,
+        "end": {
+          "time": 1787159400,
+          "date": "2026-08-19T13:10:00-04:00",
+          "price": 716.58
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 716.24,
+          "high": 717.405,
+          "sources": [
+            31
+          ]
+        },
+        {
+          "low": 717.58,
+          "high": 718.737,
+          "sources": [
+            33,
+            35
+          ]
+        },
+        {
+          "low": 717.29,
+          "high": 718.39,
+          "sources": [
+            37
+          ]
+        },
+        {
+          "low": 718.705,
+          "high": 719.33,
+          "sources": [
+            39
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 718.705,
+        "high": 719.33,
+        "source_indices": [
+          39
+        ],
+        "low_source_index": 39,
+        "high_source_index": 39
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 7,
+      "index": 6,
+      "chart_index": 5,
+      "start_bi": 41,
+      "end_bi": 45,
+      "pen_count": 5,
+      "type": "down",
+      "start": {
+        "time": 1787156400,
+        "date": "2026-08-19T12:20:00-04:00",
+        "price": 719.7
+      },
+      "end": {
+        "time": 1787160180,
+        "date": "2026-08-19T13:23:00-04:00",
+        "price": 715.83
+      },
+      "high": 719.7,
+      "low": 715.83,
+      "done": true,
+      "locked_at": "2026-08-19T14:24:00-04:00",
+      "proof": {
+        "start_index": 41,
+        "end_index": 45,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 48,
+        "first_sequence": [
+          {
+            "low": 716.58,
+            "high": 716.93,
+            "source_indices": [
+              44
+            ],
+            "low_source_index": 44,
+            "high_source_index": 44
+          },
+          {
+            "low": 715.83,
+            "high": 716.61,
+            "source_indices": [
+              46
+            ],
+            "low_source_index": 46,
+            "high_source_index": 46
+          },
+          {
+            "low": 715.94,
+            "high": 717.79,
+            "source_indices": [
+              48
+            ],
+            "low_source_index": 48,
+            "high_source_index": 48
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        717.9,
+        718.505
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 48,
+        "end": {
+          "time": 1787162580,
+          "date": "2026-08-19T14:03:00-04:00",
+          "price": 717.79
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 717.9,
+          "high": 718.505,
+          "sources": [
+            42
+          ]
+        },
+        {
+          "low": 716.58,
+          "high": 716.93,
+          "sources": [
+            44
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 716.58,
+        "high": 716.93,
+        "source_indices": [
+          44
+        ],
+        "low_source_index": 44,
+        "high_source_index": 44
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 8,
+      "index": 7,
+      "chart_index": 6,
+      "start_bi": 46,
+      "end_bi": 48,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1787160180,
+        "date": "2026-08-19T13:23:00-04:00",
+        "price": 715.83
+      },
+      "end": {
+        "time": 1787162580,
+        "date": "2026-08-19T14:03:00-04:00",
+        "price": 717.79
+      },
+      "high": 717.79,
+      "low": 715.83,
+      "done": true,
+      "locked_at": "2026-08-20T09:56:00-04:00",
+      "proof": {
+        "start_index": 46,
+        "end_index": 48,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 53,
+        "first_sequence": [
+          {
+            "low": 715.94,
+            "high": 716.61,
+            "source_indices": [
+              47
+            ],
+            "low_source_index": 47,
+            "high_source_index": 47
+          },
+          {
+            "low": 716.25,
+            "high": 717.79,
+            "source_indices": [
+              49,
+              51
+            ],
+            "low_source_index": 51,
+            "high_source_index": 49
+          },
+          {
+            "low": 711.763,
+            "high": 717.76,
+            "source_indices": [
+              53
+            ],
+            "low_source_index": 53,
+            "high_source_index": 53
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        715.94,
+        716.61
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 53,
+        "end": {
+          "time": 1787232660,
+          "date": "2026-08-20T09:31:00-04:00",
+          "price": 711.763
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 715.94,
+          "high": 716.61,
+          "sources": [
+            47
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 715.94,
+        "high": 716.61,
+        "source_indices": [
+          47
+        ],
+        "low_source_index": 47,
+        "high_source_index": 47
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 9,
+      "index": 8,
+      "chart_index": 7,
+      "start_bi": 49,
+      "end_bi": 57,
+      "pen_count": 9,
+      "type": "down",
+      "start": {
+        "time": 1787162580,
+        "date": "2026-08-19T14:03:00-04:00",
+        "price": 717.79
+      },
+      "end": {
+        "time": 1787235660,
+        "date": "2026-08-20T10:21:00-04:00",
+        "price": 711.05
+      },
+      "high": 717.79,
+      "low": 711.05,
+      "done": true,
+      "locked_at": "2026-08-20T11:05:00-04:00",
+      "proof": {
+        "start_index": 49,
+        "end_index": 57,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 60,
+        "first_sequence": [
+          {
+            "low": 711.07,
+            "high": 713.52,
+            "source_indices": [
+              56
+            ],
+            "low_source_index": 56,
+            "high_source_index": 56
+          },
+          {
+            "low": 711.05,
+            "high": 713.58,
+            "source_indices": [
+              58
+            ],
+            "low_source_index": 58,
+            "high_source_index": 58
+          },
+          {
+            "low": 711.59,
+            "high": 714.08,
+            "source_indices": [
+              60
+            ],
+            "low_source_index": 60,
+            "high_source_index": 60
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        716.25,
+        717.24
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 60,
+        "end": {
+          "time": 1787237160,
+          "date": "2026-08-20T10:46:00-04:00",
+          "price": 714.08
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 715.38,
+          "high": 717.24,
+          "sources": [
+            50
+          ]
+        },
+        {
+          "low": 716.25,
+          "high": 717.76,
+          "sources": [
+            52
+          ]
+        },
+        {
+          "low": 711.763,
+          "high": 714.94,
+          "sources": [
+            54
+          ]
+        },
+        {
+          "low": 711.07,
+          "high": 713.52,
+          "sources": [
+            56
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 711.07,
+        "high": 713.52,
+        "source_indices": [
+          56
+        ],
+        "low_source_index": 56,
+        "high_source_index": 56
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 10,
+      "index": 9,
+      "chart_index": 8,
+      "start_bi": 58,
+      "end_bi": 62,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787235660,
+        "date": "2026-08-20T10:21:00-04:00",
+        "price": 711.05
+      },
+      "end": {
+        "time": 1787238180,
+        "date": "2026-08-20T11:03:00-04:00",
+        "price": 714.625
+      },
+      "high": 714.625,
+      "low": 711.05,
+      "done": true,
+      "locked_at": "2026-08-20T11:37:00-04:00",
+      "proof": {
+        "start_index": 58,
+        "end_index": 62,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 65,
+        "first_sequence": [
+          {
+            "low": 712.05,
+            "high": 714.08,
+            "source_indices": [
+              61
+            ],
+            "low_source_index": 61,
+            "high_source_index": 61
+          },
+          {
+            "low": 711.47,
+            "high": 714.625,
+            "source_indices": [
+              63
+            ],
+            "low_source_index": 63,
+            "high_source_index": 63
+          },
+          {
+            "low": 710.89,
+            "high": 712.51,
+            "source_indices": [
+              65
+            ],
+            "low_source_index": 65,
+            "high_source_index": 65
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        711.59,
+        713.58
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 65,
+        "end": {
+          "time": 1787239560,
+          "date": "2026-08-20T11:26:00-04:00",
+          "price": 710.89
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 711.59,
+          "high": 713.58,
+          "sources": [
+            59
+          ]
+        },
+        {
+          "low": 712.05,
+          "high": 714.08,
+          "sources": [
+            61
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 712.05,
+        "high": 714.08,
+        "source_indices": [
+          61
+        ],
+        "low_source_index": 61,
+        "high_source_index": 61
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 11,
+      "index": 10,
+      "chart_index": 9,
+      "start_bi": 63,
+      "end_bi": 67,
+      "pen_count": 5,
+      "type": "down",
+      "start": {
+        "time": 1787238180,
+        "date": "2026-08-20T11:03:00-04:00",
+        "price": 714.625
+      },
+      "end": {
+        "time": 1787240820,
+        "date": "2026-08-20T11:47:00-04:00",
+        "price": 710.134
+      },
+      "high": 714.625,
+      "low": 710.134,
+      "done": true,
+      "locked_at": "2026-08-20T12:43:00-04:00",
+      "proof": {
+        "start_index": 63,
+        "end_index": 67,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 70,
+        "first_sequence": [
+          {
+            "low": 710.89,
+            "high": 712.08,
+            "source_indices": [
+              66
+            ],
+            "low_source_index": 66,
+            "high_source_index": 66
+          },
+          {
+            "low": 710.134,
+            "high": 711.925,
+            "source_indices": [
+              68
+            ],
+            "low_source_index": 68,
+            "high_source_index": 68
+          },
+          {
+            "low": 710.924,
+            "high": 712.2,
+            "source_indices": [
+              70
+            ],
+            "low_source_index": 70,
+            "high_source_index": 70
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        711.47,
+        712.51
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 70,
+        "end": {
+          "time": 1787243220,
+          "date": "2026-08-20T12:27:00-04:00",
+          "price": 712.2
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 711.47,
+          "high": 712.51,
+          "sources": [
+            64
+          ]
+        },
+        {
+          "low": 710.89,
+          "high": 712.08,
+          "sources": [
+            66
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.89,
+        "high": 712.08,
+        "source_indices": [
+          66
+        ],
+        "low_source_index": 66,
+        "high_source_index": 66
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 12,
+      "index": 11,
+      "chart_index": 10,
+      "start_bi": 68,
+      "end_bi": 72,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787240820,
+        "date": "2026-08-20T11:47:00-04:00",
+        "price": 710.134
+      },
+      "end": {
+        "time": 1787244480,
+        "date": "2026-08-20T12:48:00-04:00",
+        "price": 713.0
+      },
+      "high": 713.0,
+      "low": 710.134,
+      "done": true,
+      "locked_at": "2026-08-20T14:30:00-04:00",
+      "proof": {
+        "start_index": 68,
+        "end_index": 72,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 75,
+        "first_sequence": [
+          {
+            "low": 711.13,
+            "high": 712.2,
+            "source_indices": [
+              71
+            ],
+            "low_source_index": 71,
+            "high_source_index": 71
+          },
+          {
+            "low": 710.46,
+            "high": 713.0,
+            "source_indices": [
+              73
+            ],
+            "low_source_index": 73,
+            "high_source_index": 73
+          },
+          {
+            "low": 708.52,
+            "high": 711.487,
+            "source_indices": [
+              75
+            ],
+            "low_source_index": 75,
+            "high_source_index": 75
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.924,
+        711.925
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 75,
+        "end": {
+          "time": 1787249820,
+          "date": "2026-08-20T14:17:00-04:00",
+          "price": 708.52
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.924,
+          "high": 711.925,
+          "sources": [
+            69
+          ]
+        },
+        {
+          "low": 711.13,
+          "high": 712.2,
+          "sources": [
+            71
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 711.13,
+        "high": 712.2,
+        "source_indices": [
+          71
+        ],
+        "low_source_index": 71,
+        "high_source_index": 71
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 13,
+      "index": 12,
+      "chart_index": 11,
+      "start_bi": 73,
+      "end_bi": 75,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1787244480,
+        "date": "2026-08-20T12:48:00-04:00",
+        "price": 713.0
+      },
+      "end": {
+        "time": 1787249820,
+        "date": "2026-08-20T14:17:00-04:00",
+        "price": 708.52
+      },
+      "high": 713.0,
+      "low": 708.52,
+      "done": true,
+      "locked_at": "2026-08-21T10:40:00-04:00",
+      "proof": {
+        "start_index": 73,
+        "end_index": 75,
+        "direction": "down",
+        "rule": "second-feature-fractal",
+        "witness_index": 83,
+        "first_sequence": [
+          {
+            "low": 710.46,
+            "high": 711.487,
+            "source_indices": [
+              74
+            ],
+            "low_source_index": 74,
+            "high_source_index": 74
+          },
+          {
+            "low": 708.52,
+            "high": 709.62,
+            "source_indices": [
+              76
+            ],
+            "low_source_index": 76,
+            "high_source_index": 76
+          },
+          {
+            "low": 708.72,
+            "high": 711.65,
+            "source_indices": [
+              78
+            ],
+            "low_source_index": 78,
+            "high_source_index": 78
+          }
+        ],
+        "second_sequence": [
+          {
+            "low": 708.72,
+            "high": 709.62,
+            "source_indices": [
+              77
+            ],
+            "low_source_index": 77,
+            "high_source_index": 77
+          },
+          {
+            "low": 710.665,
+            "high": 715.37,
+            "source_indices": [
+              79,
+              81
+            ],
+            "low_source_index": 79,
+            "high_source_index": 81
+          },
+          {
+            "low": 709.205,
+            "high": 711.97,
+            "source_indices": [
+              83
+            ],
+            "low_source_index": 83,
+            "high_source_index": 83
+          }
+        ],
+        "initial_gap": true,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.46,
+        711.487
+      ],
+      "standard_gap": true,
+      "raw_gap": true,
+      "witness": {
+        "index": 83,
+        "end": {
+          "time": 1787322120,
+          "date": "2026-08-21T10:22:00-04:00",
+          "price": 709.205
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.46,
+          "high": 711.487,
+          "sources": [
+            74
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.46,
+        "high": 711.487,
+        "source_indices": [
+          74
+        ],
+        "low_source_index": 74,
+        "high_source_index": 74
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 14,
+      "index": 13,
+      "chart_index": 12,
+      "start_bi": 76,
+      "end_bi": 80,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787249820,
+        "date": "2026-08-20T14:17:00-04:00",
+        "price": 708.52
+      },
+      "end": {
+        "time": 1787319060,
+        "date": "2026-08-21T09:31:00-04:00",
+        "price": 715.37
+      },
+      "high": 715.37,
+      "low": 708.52,
+      "done": true,
+      "locked_at": "2026-08-21T10:40:00-04:00",
+      "proof": {
+        "start_index": 76,
+        "end_index": 80,
+        "direction": "up",
+        "rule": "parent-second-feature",
+        "witness_index": 83,
+        "first_sequence": [
+          {
+            "low": 708.72,
+            "high": 709.62,
+            "source_indices": [
+              77
+            ],
+            "low_source_index": 77,
+            "high_source_index": 77
+          },
+          {
+            "low": 710.665,
+            "high": 715.37,
+            "source_indices": [
+              79,
+              81
+            ],
+            "low_source_index": 79,
+            "high_source_index": 81
+          },
+          {
+            "low": 709.205,
+            "high": 711.97,
+            "source_indices": [
+              83
+            ],
+            "low_source_index": 83,
+            "high_source_index": 83
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": true,
+        "parent_key": [
+          73,
+          75,
+          "down"
+        ],
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        708.72,
+        709.62
+      ],
+      "standard_gap": true,
+      "raw_gap": true,
+      "witness": {
+        "index": 83,
+        "end": {
+          "time": 1787322120,
+          "date": "2026-08-21T10:22:00-04:00",
+          "price": 709.205
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 708.72,
+          "high": 709.62,
+          "sources": [
+            77
+          ]
+        },
+        {
+          "low": 710.665,
+          "high": 711.65,
+          "sources": [
+            79
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 708.72,
+        "high": 709.62,
+        "source_indices": [
+          77
+        ],
+        "low_source_index": 77,
+        "high_source_index": 77
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 15,
+      "index": 14,
+      "chart_index": 13,
+      "start_bi": 81,
+      "end_bi": 83,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1787319060,
+        "date": "2026-08-21T09:31:00-04:00",
+        "price": 715.37
+      },
+      "end": {
+        "time": 1787322120,
+        "date": "2026-08-21T10:22:00-04:00",
+        "price": 709.205
+      },
+      "high": 715.37,
+      "low": 709.205,
+      "done": true,
+      "locked_at": "2026-08-21T11:56:00-04:00",
+      "proof": {
+        "start_index": 81,
+        "end_index": 83,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 86,
+        "first_sequence": [
+          {
+            "low": 710.1,
+            "high": 711.97,
+            "source_indices": [
+              82
+            ],
+            "low_source_index": 82,
+            "high_source_index": 82
+          },
+          {
+            "low": 709.205,
+            "high": 712.78,
+            "source_indices": [
+              84
+            ],
+            "low_source_index": 84,
+            "high_source_index": 84
+          },
+          {
+            "low": 711.915,
+            "high": 715.27,
+            "source_indices": [
+              86
+            ],
+            "low_source_index": 86,
+            "high_source_index": 86
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.1,
+        711.97
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 86,
+        "end": {
+          "time": 1787326920,
+          "date": "2026-08-21T11:42:00-04:00",
+          "price": 715.27
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.1,
+          "high": 711.97,
+          "sources": [
+            82
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.1,
+        "high": 711.97,
+        "source_indices": [
+          82
+        ],
+        "low_source_index": 82,
+        "high_source_index": 82
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 16,
+      "index": 15,
+      "chart_index": 14,
+      "start_bi": 84,
+      "end_bi": 88,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787322120,
+        "date": "2026-08-21T10:22:00-04:00",
+        "price": 709.205
+      },
+      "end": {
+        "time": 1787327640,
+        "date": "2026-08-21T11:54:00-04:00",
+        "price": 715.674
+      },
+      "high": 715.674,
+      "low": 709.205,
+      "done": true,
+      "locked_at": "2026-08-21T13:14:00-04:00",
+      "proof": {
+        "start_index": 84,
+        "end_index": 88,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 93,
+        "first_sequence": [
+          {
+            "low": 714.153,
+            "high": 715.27,
+            "source_indices": [
+              87
+            ],
+            "low_source_index": 87,
+            "high_source_index": 87
+          },
+          {
+            "low": 713.39,
+            "high": 715.674,
+            "source_indices": [
+              89,
+              91
+            ],
+            "low_source_index": 91,
+            "high_source_index": 89
+          },
+          {
+            "low": 713.05,
+            "high": 714.11,
+            "source_indices": [
+              93
+            ],
+            "low_source_index": 93,
+            "high_source_index": 93
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        711.915,
+        712.78
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 93,
+        "end": {
+          "time": 1787331060,
+          "date": "2026-08-21T12:51:00-04:00",
+          "price": 713.05
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 711.915,
+          "high": 712.78,
+          "sources": [
+            85
+          ]
+        },
+        {
+          "low": 714.153,
+          "high": 715.27,
+          "sources": [
+            87
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 714.153,
+        "high": 715.27,
+        "source_indices": [
+          87
+        ],
+        "low_source_index": 87,
+        "high_source_index": 87
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 17,
+      "index": 16,
+      "chart_index": 15,
+      "start_bi": 89,
+      "end_bi": 95,
+      "pen_count": 7,
+      "type": "down",
+      "start": {
+        "time": 1787327640,
+        "date": "2026-08-21T11:54:00-04:00",
+        "price": 715.674
+      },
+      "end": {
+        "time": 1787332980,
+        "date": "2026-08-21T13:23:00-04:00",
+        "price": 712.97
+      },
+      "high": 715.674,
+      "low": 712.97,
+      "done": true,
+      "locked_at": "2026-08-21T14:26:00-04:00",
+      "proof": {
+        "start_index": 89,
+        "end_index": 95,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 98,
+        "first_sequence": [
+          {
+            "low": 713.05,
+            "high": 713.865,
+            "source_indices": [
+              90,
+              94
+            ],
+            "low_source_index": 94,
+            "high_source_index": 90
+          },
+          {
+            "low": 712.97,
+            "high": 713.67,
+            "source_indices": [
+              96
+            ],
+            "low_source_index": 96,
+            "high_source_index": 96
+          },
+          {
+            "low": 713.12,
+            "high": 713.775,
+            "source_indices": [
+              98
+            ],
+            "low_source_index": 98,
+            "high_source_index": 98
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        713.39,
+        713.865
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 98,
+        "end": {
+          "time": 1787334540,
+          "date": "2026-08-21T13:49:00-04:00",
+          "price": 713.775
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 713.26,
+          "high": 713.865,
+          "sources": [
+            90
+          ]
+        },
+        {
+          "low": 713.39,
+          "high": 714.11,
+          "sources": [
+            92
+          ]
+        },
+        {
+          "low": 713.05,
+          "high": 714.1,
+          "sources": [
+            94
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 713.05,
+        "high": 713.865,
+        "source_indices": [
+          90,
+          94
+        ],
+        "low_source_index": 94,
+        "high_source_index": 90
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 18,
+      "index": 17,
+      "chart_index": 16,
+      "start_bi": 96,
+      "end_bi": 98,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1787332980,
+        "date": "2026-08-21T13:23:00-04:00",
+        "price": 712.97
+      },
+      "end": {
+        "time": 1787334540,
+        "date": "2026-08-21T13:49:00-04:00",
+        "price": 713.775
+      },
+      "high": 713.775,
+      "low": 712.97,
+      "done": true,
+      "locked_at": "2026-08-21T14:49:00-04:00",
+      "proof": {
+        "start_index": 96,
+        "end_index": 98,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 101,
+        "first_sequence": [
+          {
+            "low": 713.12,
+            "high": 713.67,
+            "source_indices": [
+              97
+            ],
+            "low_source_index": 97,
+            "high_source_index": 97
+          },
+          {
+            "low": 712.79,
+            "high": 713.775,
+            "source_indices": [
+              99
+            ],
+            "low_source_index": 99,
+            "high_source_index": 99
+          },
+          {
+            "low": 712.43,
+            "high": 713.31,
+            "source_indices": [
+              101
+            ],
+            "low_source_index": 101,
+            "high_source_index": 101
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        713.12,
+        713.67
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 101,
+        "end": {
+          "time": 1787337240,
+          "date": "2026-08-21T14:34:00-04:00",
+          "price": 712.43
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 713.12,
+          "high": 713.67,
+          "sources": [
+            97
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 713.12,
+        "high": 713.67,
+        "source_indices": [
+          97
+        ],
+        "low_source_index": 97,
+        "high_source_index": 97
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 19,
+      "index": 18,
+      "chart_index": 17,
+      "start_bi": 99,
+      "end_bi": 101,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1787334540,
+        "date": "2026-08-21T13:49:00-04:00",
+        "price": 713.775
+      },
+      "end": {
+        "time": 1787337240,
+        "date": "2026-08-21T14:34:00-04:00",
+        "price": 712.43
+      },
+      "high": 713.775,
+      "low": 712.43,
+      "done": true,
+      "locked_at": "2026-08-21T15:24:00-04:00",
+      "proof": {
+        "start_index": 99,
+        "end_index": 101,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 104,
+        "first_sequence": [
+          {
+            "low": 712.79,
+            "high": 713.31,
+            "source_indices": [
+              100
+            ],
+            "low_source_index": 100,
+            "high_source_index": 100
+          },
+          {
+            "low": 712.43,
+            "high": 712.87,
+            "source_indices": [
+              102
+            ],
+            "low_source_index": 102,
+            "high_source_index": 102
+          },
+          {
+            "low": 712.67,
+            "high": 713.89,
+            "source_indices": [
+              104
+            ],
+            "low_source_index": 104,
+            "high_source_index": 104
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        712.79,
+        713.31
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 104,
+        "end": {
+          "time": 1787338920,
+          "date": "2026-08-21T15:02:00-04:00",
+          "price": 713.89
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 712.79,
+          "high": 713.31,
+          "sources": [
+            100
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 712.79,
+        "high": 713.31,
+        "source_indices": [
+          100
+        ],
+        "low_source_index": 100,
+        "high_source_index": 100
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 20,
+      "index": 19,
+      "chart_index": 18,
+      "start_bi": 102,
+      "end_bi": 106,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787337240,
+        "date": "2026-08-21T14:34:00-04:00",
+        "price": 712.43
+      },
+      "end": {
+        "time": 1787341800,
+        "date": "2026-08-21T15:50:00-04:00",
+        "price": 714.31
+      },
+      "high": 714.31,
+      "low": 712.43,
+      "done": true,
+      "locked_at": "2026-08-24T14:42:00-04:00",
+      "proof": {
+        "start_index": 102,
+        "end_index": 106,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 117,
+        "first_sequence": [
+          {
+            "low": 713.09,
+            "high": 713.89,
+            "source_indices": [
+              105
+            ],
+            "low_source_index": 105,
+            "high_source_index": 105
+          },
+          {
+            "low": 707.64,
+            "high": 714.31,
+            "source_indices": [
+              107,
+              109,
+              111,
+              113,
+              115
+            ],
+            "low_source_index": 115,
+            "high_source_index": 107
+          },
+          {
+            "low": 706.74,
+            "high": 708.98,
+            "source_indices": [
+              117
+            ],
+            "low_source_index": 117,
+            "high_source_index": 117
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        712.67,
+        712.87
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 117,
+        "end": {
+          "time": 1787594160,
+          "date": "2026-08-24T13:56:00-04:00",
+          "price": 706.74
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 712.67,
+          "high": 712.87,
+          "sources": [
+            103
+          ]
+        },
+        {
+          "low": 713.09,
+          "high": 713.89,
+          "sources": [
+            105
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 713.09,
+        "high": 713.89,
+        "source_indices": [
+          105
+        ],
+        "low_source_index": 105,
+        "high_source_index": 105
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 21,
+      "index": 20,
+      "chart_index": 19,
+      "start_bi": 107,
+      "end_bi": 121,
+      "pen_count": 15,
+      "type": "down",
+      "start": {
+        "time": 1787341800,
+        "date": "2026-08-21T15:50:00-04:00",
+        "price": 714.31
+      },
+      "end": {
+        "time": 1787601600,
+        "date": "2026-08-24T16:00:00-04:00",
+        "price": 706.23
+      },
+      "high": 714.31,
+      "low": 702.7,
+      "done": true,
+      "locked_at": "2026-08-25T10:42:00-04:00",
+      "proof": {
+        "start_index": 107,
+        "end_index": 121,
+        "direction": "down",
+        "rule": "first-pen-break",
+        "witness_index": 124,
+        "first_sequence": [
+          {
+            "low": 707.33,
+            "high": 708.05,
+            "source_indices": [
+              120
+            ],
+            "low_source_index": 120,
+            "high_source_index": 120
+          },
+          {
+            "low": 706.23,
+            "high": 713.13,
+            "source_indices": [
+              122
+            ],
+            "low_source_index": 122,
+            "high_source_index": 122
+          },
+          {
+            "low": 711.34,
+            "high": 714.04,
+            "source_indices": [
+              124
+            ],
+            "low_source_index": 124,
+            "high_source_index": 124
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "local_break_context"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        702.83,
+        704.815
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 124,
+        "end": {
+          "time": 1787665800,
+          "date": "2026-08-25T09:50:00-04:00",
+          "price": 714.04
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 702.7,
+          "high": 704.815,
+          "sources": [
+            108
+          ]
+        },
+        {
+          "low": 702.83,
+          "high": 706.545,
+          "sources": [
+            110
+          ]
+        },
+        {
+          "low": 704.915,
+          "high": 708.844,
+          "sources": [
+            112
+          ]
+        },
+        {
+          "low": 707.64,
+          "high": 709.53,
+          "sources": [
+            114,
+            116,
+            118
+          ]
+        },
+        {
+          "low": 707.33,
+          "high": 708.05,
+          "sources": [
+            120
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 707.33,
+        "high": 708.05,
+        "source_indices": [
+          120
+        ],
+        "low_source_index": 120,
+        "high_source_index": 120
+      },
+      "endpoint_is_directional_extreme": false
+    },
+    {
+      "number": 22,
+      "index": 21,
+      "chart_index": 20,
+      "start_bi": 122,
+      "end_bi": 124,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1787601600,
+        "date": "2026-08-24T16:00:00-04:00",
+        "price": 706.23
+      },
+      "end": {
+        "time": 1787665800,
+        "date": "2026-08-25T09:50:00-04:00",
+        "price": 714.04
+      },
+      "high": 714.04,
+      "low": 706.23,
+      "done": true,
+      "locked_at": "2026-08-25T11:52:00-04:00",
+      "proof": {
+        "start_index": 122,
+        "end_index": 124,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 129,
+        "first_sequence": [
+          {
+            "low": 711.34,
+            "high": 713.13,
+            "source_indices": [
+              123
+            ],
+            "low_source_index": 123,
+            "high_source_index": 123
+          },
+          {
+            "low": 709.115,
+            "high": 714.04,
+            "source_indices": [
+              125,
+              127
+            ],
+            "low_source_index": 127,
+            "high_source_index": 125
+          },
+          {
+            "low": 708.883,
+            "high": 709.96,
+            "source_indices": [
+              129
+            ],
+            "low_source_index": 129,
+            "high_source_index": 129
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        711.34,
+        713.13
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 129,
+        "end": {
+          "time": 1787670300,
+          "date": "2026-08-25T11:05:00-04:00",
+          "price": 708.883
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 711.34,
+          "high": 713.13,
+          "sources": [
+            123
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 711.34,
+        "high": 713.13,
+        "source_indices": [
+          123
+        ],
+        "low_source_index": 123,
+        "high_source_index": 123
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 23,
+      "index": 22,
+      "chart_index": 21,
+      "start_bi": 125,
+      "end_bi": 129,
+      "pen_count": 5,
+      "type": "down",
+      "start": {
+        "time": 1787665800,
+        "date": "2026-08-25T09:50:00-04:00",
+        "price": 714.04
+      },
+      "end": {
+        "time": 1787670300,
+        "date": "2026-08-25T11:05:00-04:00",
+        "price": 708.883
+      },
+      "high": 714.04,
+      "low": 707.45,
+      "done": true,
+      "locked_at": "2026-08-25T12:53:00-04:00",
+      "proof": {
+        "start_index": 125,
+        "end_index": 129,
+        "direction": "down",
+        "rule": "first-pen-break",
+        "witness_index": 134,
+        "first_sequence": [
+          {
+            "low": 709.115,
+            "high": 709.96,
+            "source_indices": [
+              128
+            ],
+            "low_source_index": 128,
+            "high_source_index": 128
+          },
+          {
+            "low": 708.883,
+            "high": 711.06,
+            "source_indices": [
+              130,
+              132
+            ],
+            "low_source_index": 130,
+            "high_source_index": 132
+          },
+          {
+            "low": 710.46,
+            "high": 711.29,
+            "source_indices": [
+              134
+            ],
+            "low_source_index": 134,
+            "high_source_index": 134
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "local_break_context"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        709.115,
+        710.55
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 134,
+        "end": {
+          "time": 1787675520,
+          "date": "2026-08-25T12:32:00-04:00",
+          "price": 711.29
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 707.45,
+          "high": 709.96,
+          "sources": [
+            126,
+            128
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 709.115,
+        "high": 709.96,
+        "source_indices": [
+          128
+        ],
+        "low_source_index": 128,
+        "high_source_index": 128
+      },
+      "endpoint_is_directional_extreme": false
+    },
+    {
+      "number": 24,
+      "index": 23,
+      "chart_index": 22,
+      "start_bi": 130,
+      "end_bi": 134,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1787670300,
+        "date": "2026-08-25T11:05:00-04:00",
+        "price": 708.883
+      },
+      "end": {
+        "time": 1787675520,
+        "date": "2026-08-25T12:32:00-04:00",
+        "price": 711.29
+      },
+      "high": 711.47,
+      "low": 708.883,
+      "done": true,
+      "locked_at": "2026-08-25T13:31:00-04:00",
+      "proof": {
+        "start_index": 130,
+        "end_index": 134,
+        "direction": "up",
+        "rule": "first-pen-break",
+        "witness_index": 137,
+        "first_sequence": [
+          {
+            "low": 710.46,
+            "high": 711.06,
+            "source_indices": [
+              133
+            ],
+            "low_source_index": 133,
+            "high_source_index": 133
+          },
+          {
+            "low": 710.19,
+            "high": 711.29,
+            "source_indices": [
+              135
+            ],
+            "low_source_index": 135,
+            "high_source_index": 135
+          },
+          {
+            "low": 709.48,
+            "high": 710.8,
+            "source_indices": [
+              137
+            ],
+            "low_source_index": 137,
+            "high_source_index": 137
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "local_break_context"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        709.47,
+        711.06
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 137,
+        "end": {
+          "time": 1787677860,
+          "date": "2026-08-25T13:11:00-04:00",
+          "price": 709.48
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.46,
+          "high": 711.47,
+          "sources": [
+            131,
+            133
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.46,
+        "high": 711.06,
+        "source_indices": [
+          133
+        ],
+        "low_source_index": 133,
+        "high_source_index": 133
+      },
+      "endpoint_is_directional_extreme": false
+    },
+    {
+      "number": 25,
+      "index": 24,
+      "chart_index": 23,
+      "start_bi": 135,
+      "end_bi": 141,
+      "pen_count": 7,
+      "type": "down",
+      "start": {
+        "time": 1787675520,
+        "date": "2026-08-25T12:32:00-04:00",
+        "price": 711.29
+      },
+      "end": {
+        "time": 1787681340,
+        "date": "2026-08-25T14:09:00-04:00",
+        "price": 708.96
+      },
+      "high": 711.29,
+      "low": 708.96,
+      "done": true,
+      "locked_at": "2026-08-26T09:44:00-04:00",
+      "proof": {
+        "start_index": 135,
+        "end_index": 141,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 144,
+        "first_sequence": [
+          {
+            "low": 709.27,
+            "high": 709.71,
+            "source_indices": [
+              140
+            ],
+            "low_source_index": 140,
+            "high_source_index": 140
+          },
+          {
+            "low": 708.96,
+            "high": 710.67,
+            "source_indices": [
+              142
+            ],
+            "low_source_index": 142,
+            "high_source_index": 142
+          },
+          {
+            "low": 709.18,
+            "high": 711.08,
+            "source_indices": [
+              144
+            ],
+            "low_source_index": 144,
+            "high_source_index": 144
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.19,
+        710.8
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 144,
+        "end": {
+          "time": 1787688000,
+          "date": "2026-08-25T16:00:00-04:00",
+          "price": 711.08
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.19,
+          "high": 710.8,
+          "sources": [
+            136
+          ]
+        },
+        {
+          "low": 709.48,
+          "high": 710.3,
+          "sources": [
+            138
+          ]
+        },
+        {
+          "low": 709.27,
+          "high": 709.71,
+          "sources": [
+            140
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 709.27,
+        "high": 709.71,
+        "source_indices": [
+          140
+        ],
+        "low_source_index": 140,
+        "high_source_index": 140
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 26,
+      "index": 25,
+      "chart_index": 24,
+      "start_bi": 142,
+      "end_bi": 148,
+      "pen_count": 7,
+      "type": "up",
+      "start": {
+        "time": 1787681340,
+        "date": "2026-08-25T14:09:00-04:00",
+        "price": 708.96
+      },
+      "end": {
+        "time": 1787752800,
+        "date": "2026-08-26T10:00:00-04:00",
+        "price": 712.2
+      },
+      "high": 712.2,
+      "low": 708.96,
+      "done": true,
+      "locked_at": "2026-08-26T12:04:00-04:00",
+      "proof": {
+        "start_index": 142,
+        "end_index": 148,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 155,
+        "first_sequence": [
+          {
+            "low": 710.28,
+            "high": 711.73,
+            "source_indices": [
+              147
+            ],
+            "low_source_index": 147,
+            "high_source_index": 147
+          },
+          {
+            "low": 709.927,
+            "high": 712.2,
+            "source_indices": [
+              149,
+              151,
+              153
+            ],
+            "low_source_index": 153,
+            "high_source_index": 149
+          },
+          {
+            "low": 709.55,
+            "high": 710.66,
+            "source_indices": [
+              155
+            ],
+            "low_source_index": 155,
+            "high_source_index": 155
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        709.18,
+        710.67
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 155,
+        "end": {
+          "time": 1787758500,
+          "date": "2026-08-26T11:35:00-04:00",
+          "price": 709.55
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 709.18,
+          "high": 710.67,
+          "sources": [
+            143
+          ]
+        },
+        {
+          "low": 709.19,
+          "high": 711.08,
+          "sources": [
+            145
+          ]
+        },
+        {
+          "low": 710.28,
+          "high": 711.73,
+          "sources": [
+            147
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.28,
+        "high": 711.73,
+        "source_indices": [
+          147
+        ],
+        "low_source_index": 147,
+        "high_source_index": 147
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 27,
+      "index": 26,
+      "chart_index": 25,
+      "start_bi": 149,
+      "end_bi": 161,
+      "pen_count": 13,
+      "type": "down",
+      "start": {
+        "time": 1787752800,
+        "date": "2026-08-26T10:00:00-04:00",
+        "price": 712.2
+      },
+      "end": {
+        "time": 1787762700,
+        "date": "2026-08-26T12:45:00-04:00",
+        "price": 708.29
+      },
+      "high": 712.2,
+      "low": 707.97,
+      "done": true,
+      "locked_at": "2026-08-26T14:12:00-04:00",
+      "proof": {
+        "start_index": 149,
+        "end_index": 161,
+        "direction": "down",
+        "rule": "first-pen-break",
+        "witness_index": 164,
+        "first_sequence": [
+          {
+            "low": 708.88,
+            "high": 709.5,
+            "source_indices": [
+              160
+            ],
+            "low_source_index": 160,
+            "high_source_index": 160
+          },
+          {
+            "low": 708.29,
+            "high": 711.16,
+            "source_indices": [
+              162
+            ],
+            "low_source_index": 162,
+            "high_source_index": 162
+          },
+          {
+            "low": 710.605,
+            "high": 711.23,
+            "source_indices": [
+              164
+            ],
+            "low_source_index": 164,
+            "high_source_index": 164
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "local_break_context"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        709.58,
+        711.04
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 164,
+        "end": {
+          "time": 1787766960,
+          "date": "2026-08-26T13:56:00-04:00",
+          "price": 711.23
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 707.97,
+          "high": 710.49,
+          "sources": [
+            150,
+            152
+          ]
+        },
+        {
+          "low": 709.927,
+          "high": 711.22,
+          "sources": [
+            154,
+            156
+          ]
+        },
+        {
+          "low": 708.777,
+          "high": 709.5,
+          "sources": [
+            158,
+            160
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 708.88,
+        "high": 709.5,
+        "source_indices": [
+          160
+        ],
+        "low_source_index": 160,
+        "high_source_index": 160
+      },
+      "endpoint_is_directional_extreme": false
+    },
+    {
+      "number": 28,
+      "index": 27,
+      "chart_index": 26,
+      "start_bi": 162,
+      "end_bi": 184,
+      "pen_count": 23,
+      "type": "up",
+      "start": {
+        "time": 1787762700,
+        "date": "2026-08-26T12:45:00-04:00",
+        "price": 708.29
+      },
+      "end": {
+        "time": 1787851440,
+        "date": "2026-08-27T13:24:00-04:00",
+        "price": 720.62
+      },
+      "high": 720.62,
+      "low": 708.29,
+      "done": true,
+      "locked_at": "2026-08-27T14:49:00-04:00",
+      "proof": {
+        "start_index": 162,
+        "end_index": 184,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 187,
+        "first_sequence": [
+          {
+            "low": 720.215,
+            "high": 720.58,
+            "source_indices": [
+              183
+            ],
+            "low_source_index": 183,
+            "high_source_index": 183
+          },
+          {
+            "low": 717.881,
+            "high": 720.62,
+            "source_indices": [
+              185
+            ],
+            "low_source_index": 185,
+            "high_source_index": 185
+          },
+          {
+            "low": 717.04,
+            "high": 718.53,
+            "source_indices": [
+              187
+            ],
+            "low_source_index": 187,
+            "high_source_index": 187
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.605,
+        711.16
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 187,
+        "end": {
+          "time": 1787855340,
+          "date": "2026-08-27T14:29:00-04:00",
+          "price": 717.04
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.605,
+          "high": 711.16,
+          "sources": [
+            163
+          ]
+        },
+        {
+          "low": 710.725,
+          "high": 711.293,
+          "sources": [
+            165,
+            167
+          ]
+        },
+        {
+          "low": 712.12,
+          "high": 713.02,
+          "sources": [
+            169
+          ]
+        },
+        {
+          "low": 711.515,
+          "high": 712.75,
+          "sources": [
+            171
+          ]
+        },
+        {
+          "low": 715.0,
+          "high": 718.83,
+          "sources": [
+            173,
+            175
+          ]
+        },
+        {
+          "low": 718.08,
+          "high": 719.58,
+          "sources": [
+            177,
+            179,
+            181
+          ]
+        },
+        {
+          "low": 720.215,
+          "high": 720.58,
+          "sources": [
+            183
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 720.215,
+        "high": 720.58,
+        "source_indices": [
+          183
+        ],
+        "low_source_index": 183,
+        "high_source_index": 183
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 29,
+      "index": 28,
+      "chart_index": 27,
+      "start_bi": 185,
+      "end_bi": 187,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1787851440,
+        "date": "2026-08-27T13:24:00-04:00",
+        "price": 720.62
+      },
+      "end": {
+        "time": 1787855340,
+        "date": "2026-08-27T14:29:00-04:00",
+        "price": 717.04
+      },
+      "high": 720.62,
+      "low": 717.04,
+      "done": true,
+      "locked_at": "2026-08-28T09:46:00-04:00",
+      "proof": {
+        "start_index": 185,
+        "end_index": 187,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 190,
+        "first_sequence": [
+          {
+            "low": 717.881,
+            "high": 718.53,
+            "source_indices": [
+              186
+            ],
+            "low_source_index": 186,
+            "high_source_index": 186
+          },
+          {
+            "low": 717.04,
+            "high": 718.36,
+            "source_indices": [
+              188
+            ],
+            "low_source_index": 188,
+            "high_source_index": 188
+          },
+          {
+            "low": 717.48,
+            "high": 721.35,
+            "source_indices": [
+              190
+            ],
+            "low_source_index": 190,
+            "high_source_index": 190
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        717.881,
+        718.53
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 190,
+        "end": {
+          "time": 1787860800,
+          "date": "2026-08-27T16:00:00-04:00",
+          "price": 721.35
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 717.881,
+          "high": 718.53,
+          "sources": [
+            186
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 717.881,
+        "high": 718.53,
+        "source_indices": [
+          186
+        ],
+        "low_source_index": 186,
+        "high_source_index": 186
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 30,
+      "index": 29,
+      "chart_index": 28,
+      "start_bi": 188,
+      "end_bi": 196,
+      "pen_count": 9,
+      "type": "up",
+      "start": {
+        "time": 1787855340,
+        "date": "2026-08-27T14:29:00-04:00",
+        "price": 717.04
+      },
+      "end": {
+        "time": 1787929320,
+        "date": "2026-08-28T11:02:00-04:00",
+        "price": 724.125
+      },
+      "high": 724.125,
+      "low": 716.79,
+      "done": true,
+      "locked_at": "2026-08-28T13:18:00-04:00",
+      "proof": {
+        "start_index": 188,
+        "end_index": 196,
+        "direction": "up",
+        "rule": "second-feature-fractal",
+        "witness_index": 204,
+        "first_sequence": [
+          {
+            "low": 719.2,
+            "high": 721.55,
+            "source_indices": [
+              191,
+              193,
+              195
+            ],
+            "low_source_index": 195,
+            "high_source_index": 193
+          },
+          {
+            "low": 722.28,
+            "high": 724.125,
+            "source_indices": [
+              197
+            ],
+            "low_source_index": 197,
+            "high_source_index": 197
+          },
+          {
+            "low": 716.84,
+            "high": 723.65,
+            "source_indices": [
+              199
+            ],
+            "low_source_index": 199,
+            "high_source_index": 199
+          }
+        ],
+        "second_sequence": [
+          {
+            "low": 716.84,
+            "high": 718.82,
+            "source_indices": [
+              200
+            ],
+            "low_source_index": 200,
+            "high_source_index": 200
+          },
+          {
+            "low": 715.69,
+            "high": 717.305,
+            "source_indices": [
+              202
+            ],
+            "low_source_index": 202,
+            "high_source_index": 202
+          },
+          {
+            "low": 715.97,
+            "high": 717.79,
+            "source_indices": [
+              204
+            ],
+            "low_source_index": 204,
+            "high_source_index": 204
+          }
+        ],
+        "initial_gap": true,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence",
+        "crosses_origin"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        717.48,
+        718.36
+      ],
+      "standard_gap": true,
+      "raw_gap": true,
+      "witness": {
+        "index": 204,
+        "end": {
+          "time": 1787935980,
+          "date": "2026-08-28T12:53:00-04:00",
+          "price": 717.79
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 717.48,
+          "high": 718.36,
+          "sources": [
+            189
+          ]
+        },
+        {
+          "low": 719.2,
+          "high": 721.55,
+          "sources": [
+            191,
+            193,
+            195
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 719.2,
+        "high": 721.55,
+        "source_indices": [
+          191,
+          193,
+          195
+        ],
+        "low_source_index": 195,
+        "high_source_index": 193
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 31,
+      "index": 30,
+      "chart_index": 29,
+      "start_bi": 197,
+      "end_bi": 201,
+      "pen_count": 5,
+      "type": "down",
+      "start": {
+        "time": 1787929320,
+        "date": "2026-08-28T11:02:00-04:00",
+        "price": 724.125
+      },
+      "end": {
+        "time": 1787934300,
+        "date": "2026-08-28T12:25:00-04:00",
+        "price": 715.69
+      },
+      "high": 724.125,
+      "low": 715.69,
+      "done": true,
+      "locked_at": "2026-08-28T13:18:00-04:00",
+      "proof": {
+        "start_index": 197,
+        "end_index": 201,
+        "direction": "down",
+        "rule": "parent-second-feature",
+        "witness_index": 204,
+        "first_sequence": [
+          {
+            "low": 716.84,
+            "high": 718.82,
+            "source_indices": [
+              200
+            ],
+            "low_source_index": 200,
+            "high_source_index": 200
+          },
+          {
+            "low": 715.69,
+            "high": 717.305,
+            "source_indices": [
+              202
+            ],
+            "low_source_index": 202,
+            "high_source_index": 202
+          },
+          {
+            "low": 715.97,
+            "high": 717.79,
+            "source_indices": [
+              204
+            ],
+            "low_source_index": 204,
+            "high_source_index": 204
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": [
+          188,
+          196,
+          "up"
+        ],
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        722.28,
+        723.65
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 204,
+        "end": {
+          "time": 1787935980,
+          "date": "2026-08-28T12:53:00-04:00",
+          "price": 717.79
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 722.28,
+          "high": 723.65,
+          "sources": [
+            198
+          ]
+        },
+        {
+          "low": 716.84,
+          "high": 718.82,
+          "sources": [
+            200
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 716.84,
+        "high": 718.82,
+        "source_indices": [
+          200
+        ],
+        "low_source_index": 200,
+        "high_source_index": 200
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 32,
+      "index": 31,
+      "chart_index": 30,
+      "start_bi": 202,
+      "end_bi": 204,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1787934300,
+        "date": "2026-08-28T12:25:00-04:00",
+        "price": 715.69
+      },
+      "end": {
+        "time": 1787935980,
+        "date": "2026-08-28T12:53:00-04:00",
+        "price": 717.79
+      },
+      "high": 717.79,
+      "low": 715.69,
+      "done": true,
+      "locked_at": "2026-08-28T15:21:00-04:00",
+      "proof": {
+        "start_index": 202,
+        "end_index": 204,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 209,
+        "first_sequence": [
+          {
+            "low": 715.97,
+            "high": 717.305,
+            "source_indices": [
+              203
+            ],
+            "low_source_index": 203,
+            "high_source_index": 203
+          },
+          {
+            "low": 715.9,
+            "high": 717.79,
+            "source_indices": [
+              205,
+              207
+            ],
+            "low_source_index": 207,
+            "high_source_index": 205
+          },
+          {
+            "low": 715.15,
+            "high": 716.74,
+            "source_indices": [
+              209
+            ],
+            "low_source_index": 209,
+            "high_source_index": 209
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        715.97,
+        717.305
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 209,
+        "end": {
+          "time": 1787943240,
+          "date": "2026-08-28T14:54:00-04:00",
+          "price": 715.15
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 715.97,
+          "high": 717.305,
+          "sources": [
+            203
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 715.97,
+        "high": 717.305,
+        "source_indices": [
+          203
+        ],
+        "low_source_index": 203,
+        "high_source_index": 203
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 33,
+      "index": 32,
+      "chart_index": 31,
+      "start_bi": 205,
+      "end_bi": 215,
+      "pen_count": 11,
+      "type": "down",
+      "start": {
+        "time": 1787935980,
+        "date": "2026-08-28T12:53:00-04:00",
+        "price": 717.79
+      },
+      "end": {
+        "time": 1788186420,
+        "date": "2026-08-31T10:27:00-04:00",
+        "price": 713.16
+      },
+      "high": 717.79,
+      "low": 713.16,
+      "done": true,
+      "locked_at": "2026-08-31T11:13:00-04:00",
+      "proof": {
+        "start_index": 205,
+        "end_index": 215,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 218,
+        "first_sequence": [
+          {
+            "low": 713.54,
+            "high": 714.96,
+            "source_indices": [
+              214
+            ],
+            "low_source_index": 214,
+            "high_source_index": 214
+          },
+          {
+            "low": 713.16,
+            "high": 715.08,
+            "source_indices": [
+              216
+            ],
+            "low_source_index": 216,
+            "high_source_index": 216
+          },
+          {
+            "low": 713.86,
+            "high": 715.27,
+            "source_indices": [
+              218
+            ],
+            "low_source_index": 218,
+            "high_source_index": 218
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        715.9,
+        717.29
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 218,
+        "end": {
+          "time": 1788188280,
+          "date": "2026-08-31T10:58:00-04:00",
+          "price": 715.27
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 715.085,
+          "high": 716.74,
+          "sources": [
+            206,
+            208
+          ]
+        },
+        {
+          "low": 715.15,
+          "high": 717.05,
+          "sources": [
+            210
+          ]
+        },
+        {
+          "low": 714.01,
+          "high": 716.128,
+          "sources": [
+            212
+          ]
+        },
+        {
+          "low": 713.54,
+          "high": 714.96,
+          "sources": [
+            214
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 713.54,
+        "high": 714.96,
+        "source_indices": [
+          214
+        ],
+        "low_source_index": 214,
+        "high_source_index": 214
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 34,
+      "index": 33,
+      "chart_index": 32,
+      "start_bi": 216,
+      "end_bi": 222,
+      "pen_count": 7,
+      "type": "up",
+      "start": {
+        "time": 1788186420,
+        "date": "2026-08-31T10:27:00-04:00",
+        "price": 713.16
+      },
+      "end": {
+        "time": 1788189960,
+        "date": "2026-08-31T11:26:00-04:00",
+        "price": 715.31
+      },
+      "high": 715.31,
+      "low": 713.16,
+      "done": true,
+      "locked_at": "2026-08-31T12:21:00-04:00",
+      "proof": {
+        "start_index": 216,
+        "end_index": 222,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 225,
+        "first_sequence": [
+          {
+            "low": 714.199,
+            "high": 715.27,
+            "source_indices": [
+              219,
+              221
+            ],
+            "low_source_index": 221,
+            "high_source_index": 219
+          },
+          {
+            "low": 713.85,
+            "high": 715.31,
+            "source_indices": [
+              223
+            ],
+            "low_source_index": 223,
+            "high_source_index": 223
+          },
+          {
+            "low": 713.36,
+            "high": 715.0,
+            "source_indices": [
+              225
+            ],
+            "low_source_index": 225,
+            "high_source_index": 225
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        713.86,
+        715.08
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 225,
+        "end": {
+          "time": 1788192420,
+          "date": "2026-08-31T12:07:00-04:00",
+          "price": 713.36
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 713.86,
+          "high": 715.08,
+          "sources": [
+            217
+          ]
+        },
+        {
+          "low": 714.199,
+          "high": 715.27,
+          "sources": [
+            219,
+            221
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 714.199,
+        "high": 715.27,
+        "source_indices": [
+          219,
+          221
+        ],
+        "low_source_index": 221,
+        "high_source_index": 219
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 35,
+      "index": 34,
+      "chart_index": 33,
+      "start_bi": 223,
+      "end_bi": 225,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1788189960,
+        "date": "2026-08-31T11:26:00-04:00",
+        "price": 715.31
+      },
+      "end": {
+        "time": 1788192420,
+        "date": "2026-08-31T12:07:00-04:00",
+        "price": 713.36
+      },
+      "high": 715.31,
+      "low": 713.36,
+      "done": true,
+      "locked_at": "2026-08-31T13:48:00-04:00",
+      "proof": {
+        "start_index": 223,
+        "end_index": 225,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 228,
+        "first_sequence": [
+          {
+            "low": 713.85,
+            "high": 715.0,
+            "source_indices": [
+              224
+            ],
+            "low_source_index": 224,
+            "high_source_index": 224
+          },
+          {
+            "low": 713.36,
+            "high": 714.52,
+            "source_indices": [
+              226
+            ],
+            "low_source_index": 226,
+            "high_source_index": 226
+          },
+          {
+            "low": 713.822,
+            "high": 715.28,
+            "source_indices": [
+              228
+            ],
+            "low_source_index": 228,
+            "high_source_index": 228
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        713.85,
+        715.0
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 228,
+        "end": {
+          "time": 1788195600,
+          "date": "2026-08-31T13:00:00-04:00",
+          "price": 715.28
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 713.85,
+          "high": 715.0,
+          "sources": [
+            224
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 713.85,
+        "high": 715.0,
+        "source_indices": [
+          224
+        ],
+        "low_source_index": 224,
+        "high_source_index": 224
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 36,
+      "index": 35,
+      "chart_index": 34,
+      "start_bi": 226,
+      "end_bi": 236,
+      "pen_count": 11,
+      "type": "up",
+      "start": {
+        "time": 1788192420,
+        "date": "2026-08-31T12:07:00-04:00",
+        "price": 713.36
+      },
+      "end": {
+        "time": 1788205980,
+        "date": "2026-08-31T15:53:00-04:00",
+        "price": 717.46
+      },
+      "high": 717.46,
+      "low": 713.36,
+      "done": true,
+      "locked_at": "2026-09-01T12:48:00-04:00",
+      "proof": {
+        "start_index": 226,
+        "end_index": 236,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 245,
+        "first_sequence": [
+          {
+            "low": 714.96,
+            "high": 715.74,
+            "source_indices": [
+              231,
+              233,
+              235
+            ],
+            "low_source_index": 235,
+            "high_source_index": 233
+          },
+          {
+            "low": 709.0,
+            "high": 717.46,
+            "source_indices": [
+              237,
+              239,
+              241,
+              243
+            ],
+            "low_source_index": 243,
+            "high_source_index": 237
+          },
+          {
+            "low": 707.89,
+            "high": 712.3,
+            "source_indices": [
+              245
+            ],
+            "low_source_index": 245,
+            "high_source_index": 245
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        713.822,
+        714.52
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 245,
+        "end": {
+          "time": 1788280500,
+          "date": "2026-09-01T12:35:00-04:00",
+          "price": 707.89
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 713.822,
+          "high": 714.52,
+          "sources": [
+            227
+          ]
+        },
+        {
+          "low": 713.99,
+          "high": 715.28,
+          "sources": [
+            229
+          ]
+        },
+        {
+          "low": 714.96,
+          "high": 715.74,
+          "sources": [
+            231,
+            233,
+            235
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 714.96,
+        "high": 715.74,
+        "source_indices": [
+          231,
+          233,
+          235
+        ],
+        "low_source_index": 235,
+        "high_source_index": 233
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 37,
+      "index": 36,
+      "chart_index": 35,
+      "start_bi": 237,
+      "end_bi": 255,
+      "pen_count": 19,
+      "type": "down",
+      "start": {
+        "time": 1788205980,
+        "date": "2026-08-31T15:53:00-04:00",
+        "price": 717.46
+      },
+      "end": {
+        "time": 1788288420,
+        "date": "2026-09-01T14:47:00-04:00",
+        "price": 704.66
+      },
+      "high": 717.46,
+      "low": 704.66,
+      "done": true,
+      "locked_at": "2026-09-02T11:09:00-04:00",
+      "proof": {
+        "start_index": 237,
+        "end_index": 255,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 260,
+        "first_sequence": [
+          {
+            "low": 705.62,
+            "high": 707.45,
+            "source_indices": [
+              238,
+              252,
+              254
+            ],
+            "low_source_index": 238,
+            "high_source_index": 254
+          },
+          {
+            "low": 704.66,
+            "high": 707.54,
+            "source_indices": [
+              256,
+              258
+            ],
+            "low_source_index": 256,
+            "high_source_index": 258
+          },
+          {
+            "low": 705.11,
+            "high": 709.799,
+            "source_indices": [
+              260
+            ],
+            "low_source_index": 260,
+            "high_source_index": 260
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        706.88,
+        708.45
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 260,
+        "end": {
+          "time": 1788359760,
+          "date": "2026-09-02T10:36:00-04:00",
+          "price": 709.799
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 705.62,
+          "high": 708.45,
+          "sources": [
+            238
+          ]
+        },
+        {
+          "low": 706.88,
+          "high": 708.97,
+          "sources": [
+            240
+          ]
+        },
+        {
+          "low": 708.4,
+          "high": 711.09,
+          "sources": [
+            242
+          ]
+        },
+        {
+          "low": 709.0,
+          "high": 712.3,
+          "sources": [
+            244
+          ]
+        },
+        {
+          "low": 707.87,
+          "high": 708.74,
+          "sources": [
+            246,
+            248
+          ]
+        },
+        {
+          "low": 707.03,
+          "high": 708.27,
+          "sources": [
+            250,
+            252
+          ]
+        },
+        {
+          "low": 706.81,
+          "high": 707.45,
+          "sources": [
+            254
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 705.62,
+        "high": 707.45,
+        "source_indices": [
+          238,
+          252,
+          254
+        ],
+        "low_source_index": 238,
+        "high_source_index": 254
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 38,
+      "index": 37,
+      "chart_index": 36,
+      "start_bi": 256,
+      "end_bi": 260,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1788288420,
+        "date": "2026-09-01T14:47:00-04:00",
+        "price": 704.66
+      },
+      "end": {
+        "time": 1788359760,
+        "date": "2026-09-02T10:36:00-04:00",
+        "price": 709.799
+      },
+      "high": 709.799,
+      "low": 704.66,
+      "done": true,
+      "locked_at": "2026-09-02T13:12:00-04:00",
+      "proof": {
+        "start_index": 256,
+        "end_index": 260,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 267,
+        "first_sequence": [
+          {
+            "low": 705.58,
+            "high": 707.62,
+            "source_indices": [
+              257
+            ],
+            "low_source_index": 257,
+            "high_source_index": 257
+          },
+          {
+            "low": 708.17,
+            "high": 709.799,
+            "source_indices": [
+              261,
+              263,
+              265
+            ],
+            "low_source_index": 265,
+            "high_source_index": 261
+          },
+          {
+            "low": 707.98,
+            "high": 708.888,
+            "source_indices": [
+              267
+            ],
+            "low_source_index": 267,
+            "high_source_index": 267
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "gap_classification_conflict"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        705.58,
+        707.54
+      ],
+      "standard_gap": true,
+      "raw_gap": false,
+      "witness": {
+        "index": 267,
+        "end": {
+          "time": 1788367980,
+          "date": "2026-09-02T12:53:00-04:00",
+          "price": 707.98
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 705.58,
+          "high": 707.62,
+          "sources": [
+            257
+          ]
+        },
+        {
+          "low": 705.11,
+          "high": 707.54,
+          "sources": [
+            259
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 705.58,
+        "high": 707.62,
+        "source_indices": [
+          257
+        ],
+        "low_source_index": 257,
+        "high_source_index": 257
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 39,
+      "index": 38,
+      "chart_index": 37,
+      "start_bi": 261,
+      "end_bi": 363,
+      "pen_count": 103,
+      "type": "down",
+      "start": {
+        "time": 1788359760,
+        "date": "2026-09-02T10:36:00-04:00",
+        "price": 709.799
+      },
+      "end": {
+        "time": 1789047240,
+        "date": "2026-09-10T09:34:00-04:00",
+        "price": 706.855
+      },
+      "high": 721.886,
+      "low": 706.855,
+      "done": true,
+      "locked_at": "2026-09-10T10:06:00-04:00",
+      "proof": {
+        "start_index": 261,
+        "end_index": 363,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 366,
+        "first_sequence": [
+          {
+            "low": 707.298,
+            "high": 708.44,
+            "source_indices": [
+              262,
+              264,
+              266,
+              270
+            ],
+            "low_source_index": 262,
+            "high_source_index": 270
+          },
+          {
+            "low": 706.855,
+            "high": 710.27,
+            "source_indices": [
+              364
+            ],
+            "low_source_index": 364,
+            "high_source_index": 364
+          },
+          {
+            "low": 708.626,
+            "high": 710.36,
+            "source_indices": [
+              366
+            ],
+            "low_source_index": 366,
+            "high_source_index": 366
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "crosses_origin"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        708.0,
+        709.74
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 366,
+        "end": {
+          "time": 1789048200,
+          "date": "2026-09-10T09:50:00-04:00",
+          "price": 710.36
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 707.298,
+          "high": 708.888,
+          "sources": [
+            262,
+            264,
+            266
+          ]
+        },
+        {
+          "low": 707.98,
+          "high": 709.08,
+          "sources": [
+            268
+          ]
+        },
+        {
+          "low": 707.72,
+          "high": 708.44,
+          "sources": [
+            270
+          ]
+        },
+        {
+          "low": 707.76,
+          "high": 708.88,
+          "sources": [
+            272
+          ]
+        },
+        {
+          "low": 707.97,
+          "high": 709.49,
+          "sources": [
+            274
+          ]
+        },
+        {
+          "low": 707.85,
+          "high": 708.87,
+          "sources": [
+            276
+          ]
+        },
+        {
+          "low": 708.433,
+          "high": 711.66,
+          "sources": [
+            278
+          ]
+        },
+        {
+          "low": 710.68,
+          "high": 713.81,
+          "sources": [
+            280,
+            282
+          ]
+        },
+        {
+          "low": 716.94,
+          "high": 717.865,
+          "sources": [
+            284,
+            286
+          ]
+        },
+        {
+          "low": 716.34,
+          "high": 717.7,
+          "sources": [
+            288,
+            290
+          ]
+        },
+        {
+          "low": 718.443,
+          "high": 720.805,
+          "sources": [
+            292,
+            294
+          ]
+        },
+        {
+          "low": 719.885,
+          "high": 721.86,
+          "sources": [
+            296
+          ]
+        },
+        {
+          "low": 718.6,
+          "high": 719.4,
+          "sources": [
+            298
+          ]
+        },
+        {
+          "low": 717.24,
+          "high": 718.32,
+          "sources": [
+            300
+          ]
+        },
+        {
+          "low": 716.79,
+          "high": 717.87,
+          "sources": [
+            302
+          ]
+        },
+        {
+          "low": 717.0,
+          "high": 718.855,
+          "sources": [
+            304
+          ]
+        },
+        {
+          "low": 718.43,
+          "high": 719.08,
+          "sources": [
+            306
+          ]
+        },
+        {
+          "low": 718.725,
+          "high": 719.605,
+          "sources": [
+            308
+          ]
+        },
+        {
+          "low": 716.56,
+          "high": 717.266,
+          "sources": [
+            310
+          ]
+        },
+        {
+          "low": 716.64,
+          "high": 718.36,
+          "sources": [
+            312
+          ]
+        },
+        {
+          "low": 717.48,
+          "high": 718.46,
+          "sources": [
+            314
+          ]
+        },
+        {
+          "low": 718.095,
+          "high": 721.886,
+          "sources": [
+            316
+          ]
+        },
+        {
+          "low": 715.57,
+          "high": 717.94,
+          "sources": [
+            318
+          ]
+        },
+        {
+          "low": 717.15,
+          "high": 719.05,
+          "sources": [
+            320
+          ]
+        },
+        {
+          "low": 718.555,
+          "high": 720.72,
+          "sources": [
+            322
+          ]
+        },
+        {
+          "low": 719.76,
+          "high": 720.93,
+          "sources": [
+            324
+          ]
+        },
+        {
+          "low": 718.67,
+          "high": 719.96,
+          "sources": [
+            326,
+            328,
+            330
+          ]
+        },
+        {
+          "low": 720.04,
+          "high": 720.67,
+          "sources": [
+            332
+          ]
+        },
+        {
+          "low": 719.57,
+          "high": 720.24,
+          "sources": [
+            334
+          ]
+        },
+        {
+          "low": 715.49,
+          "high": 718.93,
+          "sources": [
+            336,
+            338,
+            340,
+            342,
+            344
+          ]
+        },
+        {
+          "low": 714.02,
+          "high": 716.36,
+          "sources": [
+            346,
+            348
+          ]
+        },
+        {
+          "low": 715.65,
+          "high": 716.95,
+          "sources": [
+            350,
+            352
+          ]
+        },
+        {
+          "low": 716.3,
+          "high": 717.05,
+          "sources": [
+            354
+          ]
+        },
+        {
+          "low": 715.728,
+          "high": 716.52,
+          "sources": [
+            356,
+            358
+          ]
+        },
+        {
+          "low": 716.321,
+          "high": 716.8,
+          "sources": [
+            360
+          ]
+        },
+        {
+          "low": 715.76,
+          "high": 716.745,
+          "sources": [
+            362
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 707.298,
+        "high": 708.44,
+        "source_indices": [
+          262,
+          264,
+          266,
+          270
+        ],
+        "low_source_index": 262,
+        "high_source_index": 270
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 40,
+      "index": 39,
+      "chart_index": 38,
+      "start_bi": 364,
+      "end_bi": 374,
+      "pen_count": 11,
+      "type": "up",
+      "start": {
+        "time": 1789047240,
+        "date": "2026-09-10T09:34:00-04:00",
+        "price": 706.855
+      },
+      "end": {
+        "time": 1789051140,
+        "date": "2026-09-10T10:39:00-04:00",
+        "price": 712.06
+      },
+      "high": 712.06,
+      "low": 706.855,
+      "done": true,
+      "locked_at": "2026-09-10T11:35:00-04:00",
+      "proof": {
+        "start_index": 364,
+        "end_index": 374,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 377,
+        "first_sequence": [
+          {
+            "low": 710.17,
+            "high": 711.78,
+            "source_indices": [
+              373
+            ],
+            "low_source_index": 373,
+            "high_source_index": 373
+          },
+          {
+            "low": 710.5,
+            "high": 712.06,
+            "source_indices": [
+              375
+            ],
+            "low_source_index": 375,
+            "high_source_index": 375
+          },
+          {
+            "low": 710.21,
+            "high": 711.83,
+            "source_indices": [
+              377
+            ],
+            "low_source_index": 377,
+            "high_source_index": 377
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        708.626,
+        710.27
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 377,
+        "end": {
+          "time": 1789053720,
+          "date": "2026-09-10T11:22:00-04:00",
+          "price": 710.21
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 708.626,
+          "high": 710.36,
+          "sources": [
+            365,
+            367
+          ]
+        },
+        {
+          "low": 708.04,
+          "high": 709.51,
+          "sources": [
+            369,
+            371
+          ]
+        },
+        {
+          "low": 710.17,
+          "high": 711.78,
+          "sources": [
+            373
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.17,
+        "high": 711.78,
+        "source_indices": [
+          373
+        ],
+        "low_source_index": 373,
+        "high_source_index": 373
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 41,
+      "index": 40,
+      "chart_index": 39,
+      "start_bi": 375,
+      "end_bi": 377,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1789051140,
+        "date": "2026-09-10T10:39:00-04:00",
+        "price": 712.06
+      },
+      "end": {
+        "time": 1789053720,
+        "date": "2026-09-10T11:22:00-04:00",
+        "price": 710.21
+      },
+      "high": 712.06,
+      "low": 710.21,
+      "done": true,
+      "locked_at": "2026-09-10T12:23:00-04:00",
+      "proof": {
+        "start_index": 375,
+        "end_index": 377,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 380,
+        "first_sequence": [
+          {
+            "low": 710.5,
+            "high": 711.83,
+            "source_indices": [
+              376
+            ],
+            "low_source_index": 376,
+            "high_source_index": 376
+          },
+          {
+            "low": 710.21,
+            "high": 711.6,
+            "source_indices": [
+              378
+            ],
+            "low_source_index": 378,
+            "high_source_index": 378
+          },
+          {
+            "low": 710.68,
+            "high": 711.98,
+            "source_indices": [
+              380
+            ],
+            "low_source_index": 380,
+            "high_source_index": 380
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.5,
+        711.83
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 380,
+        "end": {
+          "time": 1789054680,
+          "date": "2026-09-10T11:38:00-04:00",
+          "price": 711.98
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.5,
+          "high": 711.83,
+          "sources": [
+            376
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.5,
+        "high": 711.83,
+        "source_indices": [
+          376
+        ],
+        "low_source_index": 376,
+        "high_source_index": 376
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 42,
+      "index": 41,
+      "chart_index": 40,
+      "start_bi": 378,
+      "end_bi": 380,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1789053720,
+        "date": "2026-09-10T11:22:00-04:00",
+        "price": 710.21
+      },
+      "end": {
+        "time": 1789054680,
+        "date": "2026-09-10T11:38:00-04:00",
+        "price": 711.98
+      },
+      "high": 711.98,
+      "low": 710.21,
+      "done": true,
+      "locked_at": "2026-09-10T13:57:00-04:00",
+      "proof": {
+        "start_index": 378,
+        "end_index": 380,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 385,
+        "first_sequence": [
+          {
+            "low": 710.68,
+            "high": 711.6,
+            "source_indices": [
+              379
+            ],
+            "low_source_index": 379,
+            "high_source_index": 379
+          },
+          {
+            "low": 710.2,
+            "high": 711.98,
+            "source_indices": [
+              381,
+              383
+            ],
+            "low_source_index": 383,
+            "high_source_index": 381
+          },
+          {
+            "low": 709.67,
+            "high": 710.59,
+            "source_indices": [
+              385
+            ],
+            "low_source_index": 385,
+            "high_source_index": 385
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.68,
+        711.6
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 385,
+        "end": {
+          "time": 1789062060,
+          "date": "2026-09-10T13:41:00-04:00",
+          "price": 709.67
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.68,
+          "high": 711.6,
+          "sources": [
+            379
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.68,
+        "high": 711.6,
+        "source_indices": [
+          379
+        ],
+        "low_source_index": 379,
+        "high_source_index": 379
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 43,
+      "index": 42,
+      "chart_index": 41,
+      "start_bi": 381,
+      "end_bi": 393,
+      "pen_count": 13,
+      "type": "down",
+      "start": {
+        "time": 1789054680,
+        "date": "2026-09-10T11:38:00-04:00",
+        "price": 711.98
+      },
+      "end": {
+        "time": 1789070040,
+        "date": "2026-09-10T15:54:00-04:00",
+        "price": 708.28
+      },
+      "high": 711.98,
+      "low": 708.28,
+      "done": true,
+      "locked_at": "2026-09-11T10:18:00-04:00",
+      "proof": {
+        "start_index": 381,
+        "end_index": 393,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 396,
+        "first_sequence": [
+          {
+            "low": 708.67,
+            "high": 709.43,
+            "source_indices": [
+              392
+            ],
+            "low_source_index": 392,
+            "high_source_index": 392
+          },
+          {
+            "low": 708.28,
+            "high": 716.931,
+            "source_indices": [
+              394
+            ],
+            "low_source_index": 394,
+            "high_source_index": 394
+          },
+          {
+            "low": 714.76,
+            "high": 717.04,
+            "source_indices": [
+              396
+            ],
+            "low_source_index": 396,
+            "high_source_index": 396
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.2,
+        711.81
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 396,
+        "end": {
+          "time": 1789135200,
+          "date": "2026-09-11T10:00:00-04:00",
+          "price": 717.04
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 709.44,
+          "high": 710.35,
+          "sources": [
+            382,
+            384,
+            386
+          ]
+        },
+        {
+          "low": 708.921,
+          "high": 709.705,
+          "sources": [
+            388,
+            390
+          ]
+        },
+        {
+          "low": 708.67,
+          "high": 709.43,
+          "sources": [
+            392
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 708.67,
+        "high": 709.43,
+        "source_indices": [
+          392
+        ],
+        "low_source_index": 392,
+        "high_source_index": 392
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 44,
+      "index": 43,
+      "chart_index": 42,
+      "start_bi": 394,
+      "end_bi": 396,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1789070040,
+        "date": "2026-09-10T15:54:00-04:00",
+        "price": 708.28
+      },
+      "end": {
+        "time": 1789135200,
+        "date": "2026-09-11T10:00:00-04:00",
+        "price": 717.04
+      },
+      "high": 717.04,
+      "low": 708.28,
+      "done": true,
+      "locked_at": "2026-09-11T11:17:00-04:00",
+      "proof": {
+        "start_index": 394,
+        "end_index": 396,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 399,
+        "first_sequence": [
+          {
+            "low": 714.76,
+            "high": 716.931,
+            "source_indices": [
+              395
+            ],
+            "low_source_index": 395,
+            "high_source_index": 395
+          },
+          {
+            "low": 714.41,
+            "high": 717.04,
+            "source_indices": [
+              397
+            ],
+            "low_source_index": 397,
+            "high_source_index": 397
+          },
+          {
+            "low": 713.65,
+            "high": 716.83,
+            "source_indices": [
+              399
+            ],
+            "low_source_index": 399,
+            "high_source_index": 399
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        714.76,
+        716.931
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 399,
+        "end": {
+          "time": 1789138140,
+          "date": "2026-09-11T10:49:00-04:00",
+          "price": 713.65
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 714.76,
+          "high": 716.931,
+          "sources": [
+            395
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 714.76,
+        "high": 716.931,
+        "source_indices": [
+          395
+        ],
+        "low_source_index": 395,
+        "high_source_index": 395
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 45,
+      "index": 44,
+      "chart_index": 43,
+      "start_bi": 397,
+      "end_bi": 399,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1789135200,
+        "date": "2026-09-11T10:00:00-04:00",
+        "price": 717.04
+      },
+      "end": {
+        "time": 1789138140,
+        "date": "2026-09-11T10:49:00-04:00",
+        "price": 713.65
+      },
+      "high": 717.04,
+      "low": 713.65,
+      "done": true,
+      "locked_at": "2026-09-11T11:50:00-04:00",
+      "proof": {
+        "start_index": 397,
+        "end_index": 399,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 402,
+        "first_sequence": [
+          {
+            "low": 714.41,
+            "high": 716.83,
+            "source_indices": [
+              398
+            ],
+            "low_source_index": 398,
+            "high_source_index": 398
+          },
+          {
+            "low": 713.65,
+            "high": 715.98,
+            "source_indices": [
+              400
+            ],
+            "low_source_index": 400,
+            "high_source_index": 400
+          },
+          {
+            "low": 714.6,
+            "high": 717.62,
+            "source_indices": [
+              402
+            ],
+            "low_source_index": 402,
+            "high_source_index": 402
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        714.41,
+        716.83
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 402,
+        "end": {
+          "time": 1789140780,
+          "date": "2026-09-11T11:33:00-04:00",
+          "price": 717.62
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 714.41,
+          "high": 716.83,
+          "sources": [
+            398
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 714.41,
+        "high": 716.83,
+        "source_indices": [
+          398
+        ],
+        "low_source_index": 398,
+        "high_source_index": 398
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 46,
+      "index": 45,
+      "chart_index": 44,
+      "start_bi": 400,
+      "end_bi": 402,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1789138140,
+        "date": "2026-09-11T10:49:00-04:00",
+        "price": 713.65
+      },
+      "end": {
+        "time": 1789140780,
+        "date": "2026-09-11T11:33:00-04:00",
+        "price": 717.62
+      },
+      "high": 717.62,
+      "low": 713.65,
+      "done": true,
+      "locked_at": "2026-09-11T13:56:00-04:00",
+      "proof": {
+        "start_index": 400,
+        "end_index": 402,
+        "direction": "up",
+        "rule": "second-feature-fractal",
+        "witness_index": 408,
+        "first_sequence": [
+          {
+            "low": 714.6,
+            "high": 715.98,
+            "source_indices": [
+              401
+            ],
+            "low_source_index": 401,
+            "high_source_index": 401
+          },
+          {
+            "low": 716.245,
+            "high": 717.62,
+            "source_indices": [
+              403
+            ],
+            "low_source_index": 403,
+            "high_source_index": 403
+          },
+          {
+            "low": 715.05,
+            "high": 717.26,
+            "source_indices": [
+              405
+            ],
+            "low_source_index": 405,
+            "high_source_index": 405
+          }
+        ],
+        "second_sequence": [
+          {
+            "low": 716.245,
+            "high": 717.26,
+            "source_indices": [
+              404
+            ],
+            "low_source_index": 404,
+            "high_source_index": 404
+          },
+          {
+            "low": 715.05,
+            "high": 716.79,
+            "source_indices": [
+              406
+            ],
+            "low_source_index": 406,
+            "high_source_index": 406
+          },
+          {
+            "low": 716.09,
+            "high": 717.13,
+            "source_indices": [
+              408
+            ],
+            "low_source_index": 408,
+            "high_source_index": 408
+          }
+        ],
+        "initial_gap": true,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        714.6,
+        715.98
+      ],
+      "standard_gap": true,
+      "raw_gap": true,
+      "witness": {
+        "index": 408,
+        "end": {
+          "time": 1789147560,
+          "date": "2026-09-11T13:26:00-04:00",
+          "price": 717.13
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 714.6,
+          "high": 715.98,
+          "sources": [
+            401
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 714.6,
+        "high": 715.98,
+        "source_indices": [
+          401
+        ],
+        "low_source_index": 401,
+        "high_source_index": 401
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 47,
+      "index": 46,
+      "chart_index": 45,
+      "start_bi": 403,
+      "end_bi": 405,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1789140780,
+        "date": "2026-09-11T11:33:00-04:00",
+        "price": 717.62
+      },
+      "end": {
+        "time": 1789144860,
+        "date": "2026-09-11T12:41:00-04:00",
+        "price": 715.05
+      },
+      "high": 717.62,
+      "low": 715.05,
+      "done": true,
+      "locked_at": "2026-09-11T13:56:00-04:00",
+      "proof": {
+        "start_index": 403,
+        "end_index": 405,
+        "direction": "down",
+        "rule": "parent-second-feature",
+        "witness_index": 408,
+        "first_sequence": [
+          {
+            "low": 716.245,
+            "high": 717.26,
+            "source_indices": [
+              404
+            ],
+            "low_source_index": 404,
+            "high_source_index": 404
+          },
+          {
+            "low": 715.05,
+            "high": 716.79,
+            "source_indices": [
+              406
+            ],
+            "low_source_index": 406,
+            "high_source_index": 406
+          },
+          {
+            "low": 716.09,
+            "high": 717.13,
+            "source_indices": [
+              408
+            ],
+            "low_source_index": 408,
+            "high_source_index": 408
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": [
+          400,
+          402,
+          "up"
+        ],
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        716.245,
+        717.26
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 408,
+        "end": {
+          "time": 1789147560,
+          "date": "2026-09-11T13:26:00-04:00",
+          "price": 717.13
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 716.245,
+          "high": 717.26,
+          "sources": [
+            404
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 716.245,
+        "high": 717.26,
+        "source_indices": [
+          404
+        ],
+        "low_source_index": 404,
+        "high_source_index": 404
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 48,
+      "index": 47,
+      "chart_index": 46,
+      "start_bi": 406,
+      "end_bi": 408,
+      "pen_count": 3,
+      "type": "up",
+      "start": {
+        "time": 1789144860,
+        "date": "2026-09-11T12:41:00-04:00",
+        "price": 715.05
+      },
+      "end": {
+        "time": 1789147560,
+        "date": "2026-09-11T13:26:00-04:00",
+        "price": 717.13
+      },
+      "high": 717.13,
+      "low": 715.05,
+      "done": true,
+      "locked_at": "2026-09-11T14:49:00-04:00",
+      "proof": {
+        "start_index": 406,
+        "end_index": 408,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 411,
+        "first_sequence": [
+          {
+            "low": 716.09,
+            "high": 716.79,
+            "source_indices": [
+              407
+            ],
+            "low_source_index": 407,
+            "high_source_index": 407
+          },
+          {
+            "low": 716.56,
+            "high": 717.13,
+            "source_indices": [
+              409
+            ],
+            "low_source_index": 409,
+            "high_source_index": 409
+          },
+          {
+            "low": 715.72,
+            "high": 716.879,
+            "source_indices": [
+              411
+            ],
+            "low_source_index": 411,
+            "high_source_index": 411
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        716.09,
+        716.79
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 411,
+        "end": {
+          "time": 1789150860,
+          "date": "2026-09-11T14:21:00-04:00",
+          "price": 715.72
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 716.09,
+          "high": 716.79,
+          "sources": [
+            407
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 716.09,
+        "high": 716.79,
+        "source_indices": [
+          407
+        ],
+        "low_source_index": 407,
+        "high_source_index": 407
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 49,
+      "index": 48,
+      "chart_index": 47,
+      "start_bi": 409,
+      "end_bi": 415,
+      "pen_count": 7,
+      "type": "down",
+      "start": {
+        "time": 1789147560,
+        "date": "2026-09-11T13:26:00-04:00",
+        "price": 717.13
+      },
+      "end": {
+        "time": 1789392720,
+        "date": "2026-09-14T09:32:00-04:00",
+        "price": 702.75
+      },
+      "high": 717.13,
+      "low": 702.75,
+      "done": true,
+      "locked_at": "2026-09-14T12:34:00-04:00",
+      "proof": {
+        "start_index": 409,
+        "end_index": 415,
+        "direction": "down",
+        "rule": "second-feature-fractal",
+        "witness_index": 429,
+        "first_sequence": [
+          {
+            "low": 715.392,
+            "high": 715.88,
+            "source_indices": [
+              414
+            ],
+            "low_source_index": 414,
+            "high_source_index": 414
+          },
+          {
+            "low": 702.75,
+            "high": 706.74,
+            "source_indices": [
+              416
+            ],
+            "low_source_index": 416,
+            "high_source_index": 416
+          },
+          {
+            "low": 705.42,
+            "high": 707.77,
+            "source_indices": [
+              418
+            ],
+            "low_source_index": 418,
+            "high_source_index": 418
+          }
+        ],
+        "second_sequence": [
+          {
+            "low": 706.05,
+            "high": 707.55,
+            "source_indices": [
+              425
+            ],
+            "low_source_index": 425,
+            "high_source_index": 425
+          },
+          {
+            "low": 709.56,
+            "high": 710.647,
+            "source_indices": [
+              427
+            ],
+            "low_source_index": 427,
+            "high_source_index": 427
+          },
+          {
+            "low": 708.84,
+            "high": 710.13,
+            "source_indices": [
+              429
+            ],
+            "low_source_index": 429,
+            "high_source_index": 429
+          }
+        ],
+        "initial_gap": true,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        716.56,
+        716.879
+      ],
+      "standard_gap": true,
+      "raw_gap": true,
+      "witness": {
+        "index": 429,
+        "end": {
+          "time": 1789402140,
+          "date": "2026-09-14T12:09:00-04:00",
+          "price": 708.84
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 716.56,
+          "high": 716.879,
+          "sources": [
+            410
+          ]
+        },
+        {
+          "low": 715.72,
+          "high": 716.67,
+          "sources": [
+            412
+          ]
+        },
+        {
+          "low": 715.392,
+          "high": 715.88,
+          "sources": [
+            414
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 715.392,
+        "high": 715.88,
+        "source_indices": [
+          414
+        ],
+        "low_source_index": 414,
+        "high_source_index": 414
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 50,
+      "index": 49,
+      "chart_index": 48,
+      "start_bi": 416,
+      "end_bi": 426,
+      "pen_count": 11,
+      "type": "up",
+      "start": {
+        "time": 1789392720,
+        "date": "2026-09-14T09:32:00-04:00",
+        "price": 702.75
+      },
+      "end": {
+        "time": 1789400700,
+        "date": "2026-09-14T11:45:00-04:00",
+        "price": 710.647
+      },
+      "high": 710.647,
+      "low": 702.75,
+      "done": true,
+      "locked_at": "2026-09-14T12:34:00-04:00",
+      "proof": {
+        "start_index": 416,
+        "end_index": 426,
+        "direction": "up",
+        "rule": "parent-second-feature",
+        "witness_index": 429,
+        "first_sequence": [
+          {
+            "low": 706.05,
+            "high": 707.55,
+            "source_indices": [
+              425
+            ],
+            "low_source_index": 425,
+            "high_source_index": 425
+          },
+          {
+            "low": 709.56,
+            "high": 710.647,
+            "source_indices": [
+              427
+            ],
+            "low_source_index": 427,
+            "high_source_index": 427
+          },
+          {
+            "low": 708.84,
+            "high": 710.13,
+            "source_indices": [
+              429
+            ],
+            "low_source_index": 429,
+            "high_source_index": 429
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": true,
+        "parent_key": [
+          409,
+          415,
+          "down"
+        ],
+        "pivot_stem": null
+      },
+      "flags": [
+        "second_sequence"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        705.42,
+        706.74
+      ],
+      "standard_gap": true,
+      "raw_gap": true,
+      "witness": {
+        "index": 429,
+        "end": {
+          "time": 1789402140,
+          "date": "2026-09-14T12:09:00-04:00",
+          "price": 708.84
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 705.42,
+          "high": 707.77,
+          "sources": [
+            417,
+            419
+          ]
+        },
+        {
+          "low": 704.59,
+          "high": 706.1,
+          "sources": [
+            421
+          ]
+        },
+        {
+          "low": 704.93,
+          "high": 706.11,
+          "sources": [
+            423
+          ]
+        },
+        {
+          "low": 706.05,
+          "high": 707.55,
+          "sources": [
+            425
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 706.05,
+        "high": 707.55,
+        "source_indices": [
+          425
+        ],
+        "low_source_index": 425,
+        "high_source_index": 425
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 51,
+      "index": 50,
+      "chart_index": 49,
+      "start_bi": 427,
+      "end_bi": 429,
+      "pen_count": 3,
+      "type": "down",
+      "start": {
+        "time": 1789400700,
+        "date": "2026-09-14T11:45:00-04:00",
+        "price": 710.647
+      },
+      "end": {
+        "time": 1789402140,
+        "date": "2026-09-14T12:09:00-04:00",
+        "price": 708.84
+      },
+      "high": 710.647,
+      "low": 708.84,
+      "done": true,
+      "locked_at": "2026-09-14T13:09:00-04:00",
+      "proof": {
+        "start_index": 427,
+        "end_index": 429,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 432,
+        "first_sequence": [
+          {
+            "low": 709.56,
+            "high": 710.13,
+            "source_indices": [
+              428
+            ],
+            "low_source_index": 428,
+            "high_source_index": 428
+          },
+          {
+            "low": 708.84,
+            "high": 711.12,
+            "source_indices": [
+              430
+            ],
+            "low_source_index": 430,
+            "high_source_index": 430
+          },
+          {
+            "low": 710.05,
+            "high": 712.3,
+            "source_indices": [
+              432
+            ],
+            "low_source_index": 432,
+            "high_source_index": 432
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        709.56,
+        710.13
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 432,
+        "end": {
+          "time": 1789404540,
+          "date": "2026-09-14T12:49:00-04:00",
+          "price": 712.3
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 709.56,
+          "high": 710.13,
+          "sources": [
+            428
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 709.56,
+        "high": 710.13,
+        "source_indices": [
+          428
+        ],
+        "low_source_index": 428,
+        "high_source_index": 428
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 52,
+      "index": 51,
+      "chart_index": 50,
+      "start_bi": 430,
+      "end_bi": 438,
+      "pen_count": 9,
+      "type": "up",
+      "start": {
+        "time": 1789402140,
+        "date": "2026-09-14T12:09:00-04:00",
+        "price": 708.84
+      },
+      "end": {
+        "time": 1789408620,
+        "date": "2026-09-14T13:57:00-04:00",
+        "price": 712.95
+      },
+      "high": 712.95,
+      "low": 708.84,
+      "done": true,
+      "locked_at": "2026-09-14T15:04:00-04:00",
+      "proof": {
+        "start_index": 430,
+        "end_index": 438,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 441,
+        "first_sequence": [
+          {
+            "low": 712.22,
+            "high": 712.5,
+            "source_indices": [
+              437
+            ],
+            "low_source_index": 437,
+            "high_source_index": 437
+          },
+          {
+            "low": 712.102,
+            "high": 712.95,
+            "source_indices": [
+              439
+            ],
+            "low_source_index": 439,
+            "high_source_index": 439
+          },
+          {
+            "low": 711.8,
+            "high": 712.62,
+            "source_indices": [
+              441
+            ],
+            "low_source_index": 441,
+            "high_source_index": 441
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.05,
+        711.12
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 441,
+        "end": {
+          "time": 1789411620,
+          "date": "2026-09-14T14:47:00-04:00",
+          "price": 711.8
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 710.05,
+          "high": 711.12,
+          "sources": [
+            431
+          ]
+        },
+        {
+          "low": 711.39,
+          "high": 712.3,
+          "sources": [
+            433
+          ]
+        },
+        {
+          "low": 711.36,
+          "high": 712.286,
+          "sources": [
+            435
+          ]
+        },
+        {
+          "low": 712.22,
+          "high": 712.5,
+          "sources": [
+            437
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 712.22,
+        "high": 712.5,
+        "source_indices": [
+          437
+        ],
+        "low_source_index": 437,
+        "high_source_index": 437
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 53,
+      "index": 52,
+      "chart_index": 51,
+      "start_bi": 439,
+      "end_bi": 451,
+      "pen_count": 13,
+      "type": "down",
+      "start": {
+        "time": 1789408620,
+        "date": "2026-09-14T13:57:00-04:00",
+        "price": 712.95
+      },
+      "end": {
+        "time": 1789484040,
+        "date": "2026-09-15T10:54:00-04:00",
+        "price": 703.906
+      },
+      "high": 712.95,
+      "low": 703.906,
+      "done": true,
+      "locked_at": "2026-09-15T12:27:00-04:00",
+      "proof": {
+        "start_index": 439,
+        "end_index": 451,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 454,
+        "first_sequence": [
+          {
+            "low": 705.3,
+            "high": 705.92,
+            "source_indices": [
+              450
+            ],
+            "low_source_index": 450,
+            "high_source_index": 450
+          },
+          {
+            "low": 703.906,
+            "high": 705.66,
+            "source_indices": [
+              452
+            ],
+            "low_source_index": 452,
+            "high_source_index": 452
+          },
+          {
+            "low": 704.95,
+            "high": 705.945,
+            "source_indices": [
+              454
+            ],
+            "low_source_index": 454,
+            "high_source_index": 454
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        712.102,
+        712.62
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 454,
+        "end": {
+          "time": 1789487820,
+          "date": "2026-09-15T11:57:00-04:00",
+          "price": 705.945
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 712.102,
+          "high": 712.62,
+          "sources": [
+            440
+          ]
+        },
+        {
+          "low": 711.8,
+          "high": 712.19,
+          "sources": [
+            442
+          ]
+        },
+        {
+          "low": 707.56,
+          "high": 709.16,
+          "sources": [
+            444,
+            446
+          ]
+        },
+        {
+          "low": 705.95,
+          "high": 706.8,
+          "sources": [
+            448
+          ]
+        },
+        {
+          "low": 705.3,
+          "high": 705.92,
+          "sources": [
+            450
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 705.3,
+        "high": 705.92,
+        "source_indices": [
+          450
+        ],
+        "low_source_index": 450,
+        "high_source_index": 450
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 54,
+      "index": 53,
+      "chart_index": 52,
+      "start_bi": 452,
+      "end_bi": 460,
+      "pen_count": 9,
+      "type": "up",
+      "start": {
+        "time": 1789484040,
+        "date": "2026-09-15T10:54:00-04:00",
+        "price": 703.906
+      },
+      "end": {
+        "time": 1789491360,
+        "date": "2026-09-15T12:56:00-04:00",
+        "price": 706.0
+      },
+      "high": 706.0,
+      "low": 703.906,
+      "done": true,
+      "locked_at": "2026-09-15T13:42:00-04:00",
+      "proof": {
+        "start_index": 452,
+        "end_index": 460,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 463,
+        "first_sequence": [
+          {
+            "low": 705.121,
+            "high": 705.945,
+            "source_indices": [
+              453,
+              455,
+              457,
+              459
+            ],
+            "low_source_index": 459,
+            "high_source_index": 455
+          },
+          {
+            "low": 704.631,
+            "high": 706.0,
+            "source_indices": [
+              461
+            ],
+            "low_source_index": 461,
+            "high_source_index": 461
+          },
+          {
+            "low": 704.55,
+            "high": 705.25,
+            "source_indices": [
+              463
+            ],
+            "low_source_index": 463,
+            "high_source_index": 463
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        704.95,
+        705.66
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 463,
+        "end": {
+          "time": 1789493160,
+          "date": "2026-09-15T13:26:00-04:00",
+          "price": 704.55
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 705.121,
+          "high": 705.945,
+          "sources": [
+            453,
+            455,
+            457,
+            459
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 705.121,
+        "high": 705.945,
+        "source_indices": [
+          453,
+          455,
+          457,
+          459
+        ],
+        "low_source_index": 459,
+        "high_source_index": 455
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 55,
+      "index": 54,
+      "chart_index": 53,
+      "start_bi": 461,
+      "end_bi": 473,
+      "pen_count": 13,
+      "type": "down",
+      "start": {
+        "time": 1789491360,
+        "date": "2026-09-15T12:56:00-04:00",
+        "price": 706.0
+      },
+      "end": {
+        "time": 1789501980,
+        "date": "2026-09-15T15:53:00-04:00",
+        "price": 703.635
+      },
+      "high": 706.0,
+      "low": 703.635,
+      "done": true,
+      "locked_at": "2026-09-16T10:23:00-04:00",
+      "proof": {
+        "start_index": 461,
+        "end_index": 473,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 476,
+        "first_sequence": [
+          {
+            "low": 704.191,
+            "high": 704.425,
+            "source_indices": [
+              470,
+              472
+            ],
+            "low_source_index": 470,
+            "high_source_index": 472
+          },
+          {
+            "low": 703.635,
+            "high": 708.79,
+            "source_indices": [
+              474
+            ],
+            "low_source_index": 474,
+            "high_source_index": 474
+          },
+          {
+            "low": 707.65,
+            "high": 710.27,
+            "source_indices": [
+              476
+            ],
+            "low_source_index": 476,
+            "high_source_index": 476
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        704.631,
+        705.25
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 476,
+        "end": {
+          "time": 1789567260,
+          "date": "2026-09-16T10:01:00-04:00",
+          "price": 710.27
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 704.631,
+          "high": 705.25,
+          "sources": [
+            462
+          ]
+        },
+        {
+          "low": 704.53,
+          "high": 705.13,
+          "sources": [
+            464,
+            466
+          ]
+        },
+        {
+          "low": 704.985,
+          "high": 705.4,
+          "sources": [
+            468
+          ]
+        },
+        {
+          "low": 704.191,
+          "high": 704.425,
+          "sources": [
+            470,
+            472
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 704.191,
+        "high": 704.425,
+        "source_indices": [
+          470,
+          472
+        ],
+        "low_source_index": 470,
+        "high_source_index": 472
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 56,
+      "index": 55,
+      "chart_index": 54,
+      "start_bi": 474,
+      "end_bi": 486,
+      "pen_count": 13,
+      "type": "up",
+      "start": {
+        "time": 1789501980,
+        "date": "2026-09-15T15:53:00-04:00",
+        "price": 703.635
+      },
+      "end": {
+        "time": 1789573680,
+        "date": "2026-09-16T11:48:00-04:00",
+        "price": 711.85
+      },
+      "high": 711.85,
+      "low": 703.635,
+      "done": true,
+      "locked_at": "2026-09-16T12:37:00-04:00",
+      "proof": {
+        "start_index": 474,
+        "end_index": 486,
+        "direction": "up",
+        "rule": "first-feature-fractal",
+        "witness_index": 489,
+        "first_sequence": [
+          {
+            "low": 710.62,
+            "high": 711.55,
+            "source_indices": [
+              483
+            ],
+            "low_source_index": 483,
+            "high_source_index": 483
+          },
+          {
+            "low": 710.01,
+            "high": 711.85,
+            "source_indices": [
+              487
+            ],
+            "low_source_index": 487,
+            "high_source_index": 487
+          },
+          {
+            "low": 709.93,
+            "high": 710.6,
+            "source_indices": [
+              489
+            ],
+            "low_source_index": 489,
+            "high_source_index": 489
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        707.65,
+        708.79
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 489,
+        "end": {
+          "time": 1789575780,
+          "date": "2026-09-16T12:23:00-04:00",
+          "price": 709.93
+        }
+      },
+      "dependencies_unlocked": [],
+      "chronological_prefix": [
+        {
+          "low": 707.65,
+          "high": 708.79,
+          "sources": [
+            475
+          ]
+        },
+        {
+          "low": 709.52,
+          "high": 710.27,
+          "sources": [
+            477,
+            479,
+            481
+          ]
+        },
+        {
+          "low": 710.62,
+          "high": 711.55,
+          "sources": [
+            483
+          ]
+        },
+        {
+          "low": 710.3,
+          "high": 711.31,
+          "sources": [
+            485
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 710.62,
+        "high": 711.55,
+        "source_indices": [
+          483
+        ],
+        "low_source_index": 483,
+        "high_source_index": 483
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 57,
+      "index": 56,
+      "chart_index": 55,
+      "start_bi": 487,
+      "end_bi": 503,
+      "pen_count": 17,
+      "type": "down",
+      "start": {
+        "time": 1789573680,
+        "date": "2026-09-16T11:48:00-04:00",
+        "price": 711.85
+      },
+      "end": {
+        "time": 1789586880,
+        "date": "2026-09-16T15:28:00-04:00",
+        "price": 700.0
+      },
+      "high": 711.85,
+      "low": 700.0,
+      "done": false,
+      "locked_at": null,
+      "proof": {
+        "start_index": 487,
+        "end_index": 503,
+        "direction": "down",
+        "rule": "first-feature-fractal",
+        "witness_index": 508,
+        "first_sequence": [
+          {
+            "low": 704.02,
+            "high": 706.02,
+            "source_indices": [
+              502
+            ],
+            "low_source_index": 502,
+            "high_source_index": 502
+          },
+          {
+            "low": 700.0,
+            "high": 715.495,
+            "source_indices": [
+              504,
+              506
+            ],
+            "low_source_index": 504,
+            "high_source_index": 506
+          },
+          {
+            "low": 714.16,
+            "high": 716.8,
+            "source_indices": [
+              508
+            ],
+            "low_source_index": 508,
+            "high_source_index": 508
+          }
+        ],
+        "second_sequence": [],
+        "initial_gap": false,
+        "parent_key": null,
+        "pivot_stem": null
+      },
+      "flags": [
+        "pending"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true,
+        "middle_source_is_endpoint": true,
+        "completed_dependencies": true,
+        "directional_fractal": true
+      },
+      "first_three_overlap": [
+        710.01,
+        710.6
+      ],
+      "standard_gap": false,
+      "raw_gap": false,
+      "witness": {
+        "index": 508,
+        "end": {
+          "time": 1789656180,
+          "date": "2026-09-17T10:43:00-04:00",
+          "price": 716.8
+        }
+      },
+      "dependencies_unlocked": [
+        508
+      ],
+      "chronological_prefix": [
+        {
+          "low": 710.01,
+          "high": 710.6,
+          "sources": [
+            488
+          ]
+        },
+        {
+          "low": 709.87,
+          "high": 710.41,
+          "sources": [
+            490,
+            492
+          ]
+        },
+        {
+          "low": 705.895,
+          "high": 709.83,
+          "sources": [
+            494,
+            496,
+            498,
+            500
+          ]
+        },
+        {
+          "low": 704.02,
+          "high": 706.02,
+          "sources": [
+            502
+          ]
+        }
+      ],
+      "production_left": {
+        "low": 704.02,
+        "high": 706.02,
+        "source_indices": [
+          502
+        ],
+        "low_source_index": 502,
+        "high_source_index": 502
+      },
+      "endpoint_is_directional_extreme": true
+    },
+    {
+      "number": 58,
+      "index": 57,
+      "chart_index": 56,
+      "start_bi": 504,
+      "end_bi": 508,
+      "pen_count": 5,
+      "type": "up",
+      "start": {
+        "time": 1789586880,
+        "date": "2026-09-16T15:28:00-04:00",
+        "price": 700.0
+      },
+      "end": {
+        "time": 1789656180,
+        "date": "2026-09-17T10:43:00-04:00",
+        "price": 716.8
+      },
+      "high": 716.8,
+      "low": 700.0,
+      "done": false,
+      "locked_at": null,
+      "proof": null,
+      "flags": [
+        "pending"
+      ],
+      "checks": {
+        "odd_span": true,
+        "first_three_overlap": true,
+        "direction": true,
+        "connected": true
+      },
+      "first_three_overlap": [
+        713.32,
+        715.495
+      ],
+      "endpoint_is_directional_extreme": true
+    }
+  ]
+}

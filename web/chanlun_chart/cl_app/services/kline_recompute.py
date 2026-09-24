@@ -285,7 +285,7 @@ def recompute_chart_data_from_klines(
         klines["date"] = pd.to_datetime(klines["date"], utc=True)
 
     from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
-    from chanlun.exchange.kline_completion import drop_unclosed_last_bar
+    from chanlun.exchange.kline_completion import drop_unclosed_last_bar, frequency_to_minutes
     from . import chart_compute as _chart_compute
 
     display_frequency = frequency
@@ -309,6 +309,7 @@ def recompute_chart_data_from_klines(
         completed_klines.attrs.clear()
         completed_klines.attrs.update(source_attrs)
     display_klines = completed_klines
+    completed_input = frequency_to_minutes(display_frequency) is not None
 
     runtime_key = "|".join(
         (
@@ -341,10 +342,11 @@ def recompute_chart_data_from_klines(
             and n >= entry["n"]
         ):
             unchanged = bool(n == entry["n"] and full_fp and full_fp == entry.get("full_fp"))
-            if unchanged or (
-                entry.get("prefix_fp")
-                and _klines_prefix_fp(display_klines, entry["n"] - 1) == entry["prefix_fp"]
-            ):
+            # Every retained intraday bar is closed. A revision of the old
+            # last bar must rebuild its dependent confirmations as history.
+            stable_count = entry["n"] if completed_input else entry["n"] - 1
+            stable_fp = entry.get("full_fp" if completed_input else "prefix_fp")
+            if unchanged or (stable_fp and _klines_prefix_fp(display_klines, stable_count) == stable_fp):
                 cd = entry["cl"]
                 reused = True
                 with _cl_pool_lock:
@@ -374,6 +376,7 @@ def recompute_chart_data_from_klines(
                 code=code,
                 frequency=display_frequency,
                 frame=display_klines,
+                last_bar_closed=completed_input,
             )
             cd = strict_runtime.cd
         elif unchanged:
@@ -393,9 +396,9 @@ def recompute_chart_data_from_klines(
                 None,
             )
             if callable(validated_incremental):
-                validated_incremental(display_klines)
+                validated_incremental(display_klines, last_bar_closed=completed_input)
             else:
-                cd.process_klines(display_klines)
+                cd.process_klines(display_klines, last_bar_closed=completed_input)
             strict_runtime = StrictChartRuntimeResult.success(cd)
 
         process_done = time.time()

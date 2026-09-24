@@ -523,6 +523,7 @@ function strictItemEnabled(cfg, item) {
     const level = item?.structural_level;
     if (!Number.isInteger(level) || level < 0 || level >= 50) return false;
     const enabled = (key) => cfg?.[key] ?? (level === 0);
+    if (item.render_kind === 'segment_unresolved_range') return cfg?.xd !== false;
     if (item.render_kind === 'center_observation') return cfg?.center_observation === true;
     if (['formal_center', 'center_preview', 'conditional_center'].includes(item.render_kind)) return cfg?.center_all !== false && enabled(`center_L${level}`);
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
@@ -3037,7 +3038,7 @@ class ChartManager {
             });
         } catch (e) { /* override 失败不致命,create 事件仍会兜底套色 */ }
         try {
-            for (const f of document.querySelectorAll('iframe')) {
+            for (const f of this._drawPaletteFrames()) {
                 let dd; try { dd = f.contentDocument; } catch (e) { continue; }
                 const g = dd && dd.getElementById('cl_tv_drawpal_' + this.id);
                 if (g) this._paintDrawPalette(g);
@@ -3047,15 +3048,22 @@ class ChartManager {
         } catch (e) {}
     }
 
-    // 高亮调色板中当前画图色对应的色块。
+    _drawPaletteFrames() {
+        const container = document.getElementById('tv_chart_container_' + this.id);
+        return container ? container.querySelectorAll('iframe') : [];
+    }
+
+    // 高亮当前画图工具，单独区分线段和矩形。
     _paintDrawPalette(grp) {
         try {
-            grp.querySelectorAll('.cl-drawcol').forEach(b => {
+            grp.querySelectorAll('.cl-drawbtn').forEach(b => {
                 const c = b.getAttribute('data-color') || '';
-                const active = this._drawColor && c.toUpperCase() === this._drawColor.toUpperCase();
-                b.style.background = active ? c : 'transparent';
-                b.style.color = active ? '#fff' : c;
-                b.style.boxShadow = active ? '0 0 0 1.5px #333' : 'none';
+                const active = Boolean(this._drawColor && c.toUpperCase() === this._drawColor.toUpperCase()
+                    && b.getAttribute('data-tool') === this._drawTool);
+                b.setAttribute('aria-pressed', String(active));
+                b.style.background = active ? 'color-mix(in srgb, ' + c + ' 14%, transparent)' : 'transparent';
+                b.style.color = c;
+                b.style.boxShadow = active ? 'inset 0 0 0 1px ' + c : 'none';
             });
         } catch (e) {}
     }
@@ -3064,33 +3072,30 @@ class ChartManager {
     _buildDrawPaletteInto(grp, doc, interval) {
         const { items } = this._levelBarItems(interval);
         const hd = doc.createElement('div');
-        hd.textContent = '一键画';
-        hd.title = '点对应级别的「线/框」即可直接画(已含选色+激活工具)';
-        hd.style.cssText = 'font-size:10px; color:#999; user-select:none; text-align:center;';
+        grp.setAttribute('role', 'group');
+        grp.setAttribute('aria-label', '本周期快捷画图');
+        hd.textContent = '画图';
+        hd.title = '使用当前周期颜色，一键激活画线或画框工具';
+        hd.style.cssText = 'font-size:10px; color:#7d8796; user-select:none; text-align:center; white-space:nowrap; line-height:16px;';
         grp.appendChild(hd);
-        // 列头:左=线段、右=矩形
-        const colhd = doc.createElement('div');
-        colhd.style.cssText = 'display:flex; gap:2px; font-size:9px; color:#aaa; user-select:none;';
-        ['线', '框'].forEach(t => { const c = doc.createElement('div'); c.textContent = t; c.style.cssText = 'width:28px; text-align:center;'; colhd.appendChild(c); });
-        grp.appendChild(colhd);
-        // 每级一行:左「线段」按钮(下划线样式) + 右「矩形」按钮(方框样式),均为该级颜色。
-        // 点一下 = 设画图色 + 激活对应工具,直接画(用户要的「一键直画」)。
+        // Stack short action labels inside the narrow native toolbar.
         items.forEach((it) => {
             const row = doc.createElement('div');
-            row.style.cssText = 'display:flex; gap:2px;';
+            row.style.cssText = 'display:flex; flex-direction:column; gap:5px; align-items:center;';
             const mk = (tool, isBox) => {
                 const b = doc.createElement('button');
                 b.type = 'button';
                 b.className = 'cl-drawbtn';
-                b.textContent = it.label;
-                b.title = '画 ' + it.label + ' 级别' + (isBox ? '矩形' : '线段') + '(一键:选色+激活工具)';
+                b.textContent = isBox ? '画框' : '画线';
+                b.title = it.label + (isBox ? '颜色 · 绘制矩形' : '颜色 · 绘制线段');
                 b.setAttribute('aria-label', b.title);
-                b.style.cssText = 'width:28px; height:24px; padding:0; line-height:20px; text-align:center; font-family:inherit; font-size:10px; font-weight:700; cursor:pointer; box-sizing:border-box; background:transparent; color:' + it.color + '; '
-                    + (isBox
-                        ? 'border:1.5px solid ' + it.color + '; border-radius:3px;'
-                        : 'border:0; border-bottom:2.5px solid ' + it.color + ';');
+                b.setAttribute('data-color', it.color);
+                b.setAttribute('data-tool', tool);
+                b.setAttribute('aria-pressed', 'false');
+                b.style.cssText = 'width:38px; height:30px; padding:0; line-height:28px; white-space:nowrap; flex-shrink:0; text-align:center; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; box-sizing:border-box; background:transparent; border:1px solid ' + it.color + '; border-radius:5px; color:' + it.color + ';';
                 b.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    this._drawTool = tool;
                     this.setDrawColor(it.color);
                     try { this.widget.selectLineTool(tool); } catch (err) {}
                 });
@@ -3100,6 +3105,7 @@ class ChartManager {
             row.appendChild(mk('rectangle', true));
             grp.appendChild(row);
         });
+        this._paintDrawPalette(grp);
     }
 
     // 回退:把调色板做成左侧浮层(TV 工具栏注入失败时)。
@@ -3118,7 +3124,7 @@ class ChartManager {
             bar = document.createElement('div');
             bar.id = barId;
             bar.setAttribute('data-sig', sig);
-            bar.style.cssText = 'position:absolute; left:6px; top:64px; z-index:42; display:flex; flex-direction:column; align-items:center; gap:3px; background:rgba(255,255,255,0.85); padding:4px 3px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.18);';
+            bar.style.cssText = 'position:absolute; left:4px; top:54px; z-index:42; display:flex; flex-direction:column; align-items:center; gap:4px; width:48px; box-sizing:border-box; background:var(--cp-surface,#fff); padding:6px 4px; border:1px solid var(--cp-border,#dce4ee); border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,0.1);';
             this._buildDrawPaletteInto(bar, document, interval);
             container.appendChild(bar);
         } catch (e) {
@@ -3131,18 +3137,18 @@ class ChartManager {
         return {items: [{label: '本周期', color: getDynamicColor(interval, 'xds')}], sig: String(interval)};
     }
 
-    // 把「画图调色板」原生注入 TV 左侧画线工具栏列顶部。锚点用几何探测(窄<70+高>400+最左+含多个 group 子)
+    // 在当前图表的窄工具栏内注入按钮，短图表也使用同一布局。
     // 而非哈希类名,较抗 TV 升级;找不到工具栏返回 false → 调用方回退浮层 renderDrawPaletteOverlay。
     injectDrawPaletteIntoTVToolbar() {
         try {
             let doc = null, inner = null;
-            for (const f of document.querySelectorAll('iframe')) {
+            for (const f of this._drawPaletteFrames()) {
                 let dd; try { dd = f.contentDocument; } catch (e) { continue; }
                 if (!dd) continue;
                 let cand = null;
                 dd.querySelectorAll('div').forEach(el => {
                     const r = el.getBoundingClientRect();
-                    if (r.width < 70 && r.height > 400 && r.left < 12 && el.children.length >= 3) {
+                    if (r.width >= 36 && r.width < 70 && r.height > 120 && r.left < 12 && el.children.length >= 3) {
                         if (!cand || r.height > cand.getBoundingClientRect().height) cand = el;
                     }
                 });
@@ -3164,7 +3170,7 @@ class ChartManager {
             grp = doc.createElement('div');
             grp.id = grpId;
             grp.setAttribute('data-sig', sig);
-            grp.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:3px; padding:6px 0 5px; width:52px; border-bottom:1px solid rgba(120,120,120,0.3);';
+            grp.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:4px; padding:6px 0 8px; width:100%; max-width:52px; box-sizing:border-box; border-bottom:1px solid rgba(120,120,120,0.2);';
             this._buildDrawPaletteInto(grp, doc, interval);
             inner.insertBefore(grp, inner.firstChild);
             hideOverlay();
@@ -4076,6 +4082,17 @@ class ChartManager {
             }
             add(item, 0, '待定Z' + (index + 1));
         }
+        for (const item of snapshot.unresolved_segment_ranges || []) {
+            if (item.render_kind !== 'segment_unresolved_range' || item.state !== 'unresolved'
+                || item.tradable !== false || typeof item.region_id !== 'string' || !item.region_id
+                || !Number.isInteger(item.pen_count) || item.pen_count < 3
+                || !Array.isArray(item.points) || item.points.length !== 2
+                || !item.points.every(p => Number.isInteger(p.time) && Number.isFinite(p.price))
+                || item.points[0].time > item.points[1].time || item.points[0].price < item.points[1].price) {
+                throw new Error('unresolved segment interval is invalid');
+            }
+            add(item, 0);
+        }
         return groups;
     }
 
@@ -4088,6 +4105,14 @@ class ChartManager {
 
 
     _createStrictShape(item, currentInterval, bars) {
+        if (item.render_kind === 'segment_unresolved_range') {
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: '#7c8798', linewidth: 1,
+                text: `线段待判定 · ${item.pen_count}笔`,
+                title: `${item.confirmed_pen_count}笔已完成，当前线段分界仍待判定；该区域不是线段或中枢，也不作为选股确认段。`,
+                overrides: {linestyle: 2, transparency: 96},
+            });
+        }
         if (['formal_center', 'center_observation', 'center_preview', 'conditional_center'].includes(item.render_kind)) {
             const observation = item.render_kind === 'center_observation';
             const style = getCenterVisualStyle('formal', item);

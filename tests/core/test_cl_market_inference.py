@@ -78,6 +78,25 @@ def test_cache_with_reference_filter_before_inclusion_is_rejected() -> None:
         object.__new__(CL).__setstate__(state)
 
 
+def test_cache_with_unconditional_raw_first_gap_classification_is_rejected() -> None:
+    current = CL("QQQ.US", "1m", {}, market="us")
+    state = current.__getstate__()
+    state["config"] = dict(
+        state["config"],
+        segment_gap_classification_rule="protected-reference-and-original-first-pen-v3",
+    )
+    with pytest.raises(ValueError, match="segment_gap_classification_rule"):
+        object.__new__(CL).__setstate__(state)
+
+
+def test_cache_with_unrecoverable_observation_origin_is_rejected() -> None:
+    current = CL("SZ.300867", "5m", {}, market="a")
+    state = current.__getstate__()
+    state["config"] = dict(state["config"], segment_start_rule="earliest-three-overlap-directional-observation-origin-v1")
+    with pytest.raises(ValueError, match="segment_start_rule"):
+        object.__new__(CL).__setstate__(state)
+
+
 def test_cache_conflating_stem_price_source_with_segment_boundary_is_rejected() -> None:
     current = CL("SH.600519", "30m", {}, market="a")
     state = current.__getstate__()

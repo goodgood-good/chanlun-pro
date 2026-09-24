@@ -48,6 +48,7 @@ REASON_LABELS = {
     "NOT_CONFIRMED": "买卖点尚未确认",
     "CONFIRMING_SEGMENT_COMPLETED": "买卖点已确认且确认该点的反向线段已完成，不再作为当前候选",
     "CONFIRMING_SEGMENT_MISSING": "缺少可核对的确认线段证据，需按当前规则重新计算",
+    "CONFIRMING_SEGMENT_UNRESOLVED": "后续线段尚未判定，不能用尾部投影充当确认线段",
     "VARIANT_EXCLUDED": "该二买变体不在本次所选范围内",
     "FIRST_CLASS_NOT_TREND": "盘整背驰或无本级趋势背驰证据，不能作为一类点",
     "TREND_PROOF_MISSING": "缺少同级趋势或末中枢三类点证据，需按当前规则重算",

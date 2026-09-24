@@ -48,7 +48,8 @@ def test_extreme_endpoints_do_not_allow_swallowing_three_qualified_strokes(mirro
 
 @pytest.mark.parametrize("mirror", [False, True])
 def test_equal_extreme_keeps_first_selected_endpoint_under_user_price_policy(mirror):
-    for _,calc in _live_prefixes(_bars(EQUAL_BOTTOMS,mirror)):pass
+    for _,calc in _live_prefixes(_bars(EQUAL_BOTTOMS,mirror)):
+        pass
     assert _geometry(calc)==[(1,5),(5,15)]
     by_center={fx.k.index:fx for fx in calc.fxs}
     assert calc._check_stroke_validity(by_center[5],by_center[15])
@@ -60,7 +61,8 @@ def test_equal_extreme_keeps_first_selected_endpoint_under_user_price_policy(mir
 def test_retained_equal_extreme_gets_completion_from_the_third_qualified_edge(mirror):
     values=EQUAL_BOTTOMS+[(10,6),(9.5,5.5),(9,5),(10,6)]
     for end,calc in _live_prefixes(_bars(values,mirror)):
-        if end==len(EQUAL_BOTTOMS):assert _geometry(calc)==[(1,5),(5,15)]
+        if end==len(EQUAL_BOTTOMS):
+            assert _geometry(calc)==[(1,5),(5,15)]
     assert _geometry(calc)==[(1,5),(5,15),(15,19)]
     assert len(calc.completion_evidence)==1
     assert calc.completion_evidence[0].witnessed_at==_bars(values,mirror)[20].date

@@ -29,6 +29,9 @@
 
 
   function logicalKey(item) {
+    if (item?.render_kind === 'segment_unresolved_range') {
+      return item.render_kind + ':' + requireString(item.region_id, 'region_id');
+    }
     if (['formal_center', 'center_observation', 'center_preview', 'conditional_center'].includes(item?.render_kind)) {
       return item.render_kind + ':' + requireString(item.center_id, 'center_id');
     }
@@ -245,6 +248,9 @@
         render_kind: item.render_kind,
         points: item.points,
         state: item.state,
+        reason: item.reason,
+        pen_count: item.pen_count,
+        confirmed_pen_count: item.confirmed_pen_count,
         center_state: item.center_state,
         center_label: item.center_label,
         tail_status: item.tail_status,

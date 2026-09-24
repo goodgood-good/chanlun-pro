@@ -26,7 +26,7 @@ class ICL(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def process_klines(self, klines: pd.DataFrame):
+    def process_klines(self, klines: pd.DataFrame, *, last_bar_closed: bool = False):
         pass
 
     @abstractmethod
@@ -71,6 +71,11 @@ class ICL(metaclass=ABCMeta):
 
     @abstractmethod
     def get_xds(self) -> List[XD]:
+        pass
+
+    @abstractmethod
+    def get_segment_units(self):
+        """Causal native segments, independently of center/level formation."""
         pass
 
     @abstractmethod

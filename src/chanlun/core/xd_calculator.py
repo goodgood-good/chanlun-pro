@@ -2,7 +2,7 @@
 """
 按原始笔与特征序列证据构建线段。
 
-原文、图例、推导和工程约定见 docs/segment_construction_audit.md。
+原文定位、项目规则和工程约定见 docs/segment_rules.md。
 """
 
 from dataclasses import dataclass, replace
@@ -15,6 +15,14 @@ from chanlun.core.types import BI, XD
 from chanlun.tools.log_util import LogUtil
 from chanlun.core.segment_evidence import (
     FeatureEvidence,
+    FeatureGapEvidence,
+    ObservationOriginEvidence,
+    SecondFeatureBreakEvidence,
+    DirectFirstBreakEvidence,
+    ReverseSegmentEvidence,
+    ReturnSegmentEvidence,
+    FirstPenContinuationEvidence,
+    FirstPenBreakEvidence,
     SegmentEvidence,
     SegmentTail,
     PendingBoundary,
@@ -52,6 +60,7 @@ class _GapConfirmationInvalidated:
     witnessed_at: object
     witness_index: Optional[int] = None
     candidate_index: Optional[int] = None
+    first_sequence: tuple[FeatureEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,29 @@ def _overlap(a, b) -> bool:
     h1, l1 = (a["high"], a["low"]) if isinstance(a, dict) else (a.high, a.low)
     h2, l2 = (b["high"], b["low"]) if isinstance(b, dict) else (b.high, b.low)
     return max(l1, l2) <= min(h1, h2)
+
+
+def _classify_first_feature_gap(left: dict, first: BI, middle: dict, direction: str):
+    """L067 standard gap, with the scoped L071/L078 boundary exception.
+
+    A covering first reversal must not have its strength erased by inclusion
+    across the assumed boundary. It is different from a merely overlapping
+    reversal whose standard middle later becomes gapped. The former retains
+    the reviewed figure-01 classification; the latter needs a second fractal.
+    A shared far edge is still containment (L075), but the turning extreme
+    must be strict. This is a documented deduction, not a verbatim source rule.
+    """
+    covers_reference = (
+        first.high > left["high"] and first.low <= left["low"]
+        if direction == "up"
+        else first.low < left["low"] and first.high >= left["high"]
+    )
+    return FeatureGapEvidence(
+        raw_first=FeatureEvidence.from_element(_bi_to_cs_elem(first)),
+        raw_gap=not _overlap(left, first),
+        standard_gap=not _overlap(left, middle),
+        basis="protected-first-reversal" if covers_reference else "standard-first-feature",
+    )
 
 
 def _elem_farthest_bi_index(elem: dict) -> int:
@@ -220,6 +252,65 @@ def _contained_pivot_origins(all_bis):
     return origins
 
 
+def _next_strict_pen_extensions(values):
+    """Next same-direction end beyond each physical end, in linear work.
+
+    A reversal's origin is the preceding pen's end. Reuse that price-order
+    fact when bounding independent probes; long equal-price containment must
+    not rescan the entire remaining history for every candidate.
+    """
+    following = [None] * len(values)
+    stacks = {'up': [], 'down': []}
+    for i in range(len(values) - 1, -1, -1):
+        pen = values[i]
+        stack = stacks[pen.type]
+        while stack and (values[stack[-1]].end.val <= pen.end.val if pen.type == 'up'
+                         else values[stack[-1]].end.val >= pen.end.val):
+            stack.pop()
+        if stack:
+            following[i] = stack[-1]
+        stack.append(i)
+    return following
+
+
+def _next_feature_progress(values):
+    """Next strict far-edge progression between adjacent same-direction pens.
+
+    Any standalone first fractal needs an outward right element. If all of an
+    up segment's down-feature lows are nondecreasing (or a down segment's up-
+    feature highs nonincreasing), neither inclusion nor a protected first break
+    can produce that right element. This is only a negative filter, not a proof.
+    """
+    following = [None] * len(values)
+    next_at = {'up': None, 'down': None}
+    for i in range(len(values) - 1, -1, -1):
+        item = values[i]
+        if i >= 2 and (item.end.val > values[i - 2].end.val if item.type == 'up'
+                       else item.end.val < values[i - 2].end.val):
+            next_at[item.type] = i
+        following[i] = next_at[item.type]
+    return following
+
+
+def _next_feature_turn(values):
+    """Necessary entering edge of a standalone first fractal, without a parent.
+
+    Down features must have a higher later start for a top, and up features a
+    lower later start for a bottom. A monotone sequence of starts cannot supply
+    such a strict pivot through inclusion either. A predecessor-dependent
+    nonordinary break is deliberately unavailable to standalone probes.
+    """
+    following = [None] * len(values)
+    next_at = {'up': None, 'down': None}
+    for i in range(len(values) - 1, -1, -1):
+        item = values[i]
+        if i >= 2 and (item.start.val < values[i - 2].start.val if item.type == 'up'
+                       else item.start.val > values[i - 2].start.val):
+            next_at[item.type] = i
+        following[i] = next_at[item.type]
+    return following
+
+
 def _advance_left_reference(reference, candidate, direction):
     """Advance the standard element of the eligible pre-boundary records.
 
@@ -256,6 +347,7 @@ class XdCalculator:
         self.tail_state = SegmentTail(None, None, "insufficient-pens")
         # Reuse suffix calculations only within one validated input replay.
         self._feature_scan_cache = None
+        self._origin_recovery = None
 
     def __getstate__(self):
         state = dict(self.__dict__)
@@ -324,6 +416,7 @@ class XdCalculator:
         self._proofs = {}
         self.evidence = ()
         self.tail_state = SegmentTail(None, None, "insufficient-pens")
+        self._origin_recovery = None
         if len(bis) >= 3:
             start = self._find_strict_start(bis)
             if start >= 0:
@@ -423,6 +516,7 @@ class XdCalculator:
         已有完整走势。第 81 课的 0—9 图允许 3 低于 1，不能再附加首笔终点
         低于后两根同向笔的五笔单调条件。后继段仍须通过原段破坏规则识别。
         """
+        self._origin_recovery = None
         for i in range(len(all_bis) - 2):
             bi_i = all_bis[i]
             bi_i2 = all_bis[i + 2]
@@ -432,13 +526,68 @@ class XdCalculator:
                 else bi_i.start.val >= bi_i2.start.val
             )
             if is_extreme and _overlap(bi_i, bi_i2):
-                return i
+                return self._resolve_observation_origin(all_bis, i)
         return -1
+
+    def _resolve_observation_origin(self, all_bis, start):
+        """Recover only an unestablished origin at the observation-window edge.
+
+        L078 permits choosing an observed high/low, without inventing history
+        before that point. The earliest overlapping triple is provisional:
+        if it never advances beyond its first pen, and its origin is crossed
+        before a viable boundary hypothesis exists, use that first pen's
+        opposite extreme. Directional extension, a proof, or an eligible
+        pending boundary by that same event preserves it.
+        This is an observation policy, not a new interior segment-break rule.
+        """
+        first = all_bis[start]
+        up = first.type == "up"
+        for index in range(start + 2, len(all_bis)):
+            pen = all_bis[index]
+            if pen.type == first.type:
+                if pen.end.val > first.end.val if up else pen.end.val < first.end.val:
+                    return start
+            elif pen.end.val < first.start.val if up else pen.end.val > first.start.val:
+                # Never discard an already established boundary, including a
+                # valid non-extreme boundary completed by this very crossing.
+                prefix = XdCalculator()
+                prefix._feature_scan_cache = {}
+                prefix._build_segments(all_bis[:index + 1], start)
+                if (prefix.evidence or prefix.tail_state.reason in {"waiting-first-feature", "waiting-second-feature"}
+                        or self._has_local_boundary_at_origin_cross(all_bis, start, index)):
+                    return start
+                self._origin_recovery = ObservationOriginEvidence(start, start + 1, index)
+                return start + 1
+        return start
+
+    @staticmethod
+    def _has_local_boundary_at_origin_cross(values, start, crossing):
+        """Preserve an eligible strong turn even before its right pen arrives.
+
+        At the first origin crossing, the reverse pen already passes every
+        earlier shoulder's far edge. Only its turning extreme and any retained
+        same-direction contained stem remain to be checked. No future pen is
+        fabricated to make the ordinary three-pen scanner run.
+        """
+        first = values[crossing]
+        def turns(left):
+            return first.high > left.high if values[start].type == "up" else first.low < left.low
+        if turns(values[crossing - 2]):
+            return True
+        stem = crossing - 1
+        while stem - 2 >= start:
+            before, after = values[stem - 2], values[stem]
+            if not (before.low <= after.low and after.high <= before.high):
+                break
+            stem -= 2
+        return stem > start and stem < crossing - 1 and turns(values[stem - 1])
 
     # ----------------------------------------------------------
     # 主循环
     # ----------------------------------------------------------
-    def _build_segments(self, all_bis: List[BI], start: int):
+    def _build_segments(self, all_bis: List[BI], start: int, *, first_proof_only=False,
+                        pivot_origins=None, next_extensions=None, feature_progress=None,
+                        feature_turns=None):
         """Accept complete geometric proofs in order, then project one tail.
 
         There is no post-hoc extreme relocation, historical pen skipping, or
@@ -450,11 +599,28 @@ class XdCalculator:
         accepted = []
         pos = start
         pending = None
-        pivot_origins = _contained_pivot_origins(all_bis)
+        if pivot_origins is None:
+            pivot_origins = _contained_pivot_origins(all_bis)
+        if next_extensions is None:
+            next_extensions = _next_strict_pen_extensions(all_bis)
+        self._reverse_pivot_origins = pivot_origins
+        self._reverse_extensions = next_extensions
+        self._reverse_feature_progress = (
+            _next_feature_progress(all_bis) if feature_progress is None else feature_progress
+        )
+        self._reverse_feature_turns = (
+            _next_feature_turn(all_bis) if feature_turns is None else feature_turns
+        )
+        self._reverse_probe_cache = {}
+        self._origin_context_prefixes = {}
 
         def accept(proof):
+            origin = self._origin_recovery if not accepted else None
+            if origin is not None:
+                proof = replace(proof, witness_index=max(proof.witness_index, origin.witness_index),
+                                origin_evidence=origin)
             formed_at = confirmation_time(
-                all_bis, proof.start_index, proof.witness_index
+                all_bis, origin.initial_index if origin else proof.start_index, proof.witness_index
             )
             if segs:
                 previous_time = segs[-1][3]
@@ -468,10 +634,14 @@ class XdCalculator:
             self._freeze_confirmed_candidate(segs, locked_candidates)
 
         while pos + 2 < len(all_bis):
+            if first_proof_only and accepted:
+                break
             if not _overlap(all_bis[pos], all_bis[pos + 2]):
                 break
             inherited = (
-                self._successor_from_second_sequence(accepted[-1], all_bis)
+                accepted[-1].reverse_segment.successor
+                if accepted and accepted[-1].reverse_segment is not None
+                else self._successor_from_second_sequence(accepted[-1], all_bis)
                 if accepted and accepted[-1].second_sequence
                 else None
             )
@@ -487,9 +657,23 @@ class XdCalculator:
             anchor = all_bis[pos].start.val
             extreme = all_bis[seg_end].end.val
             left_reference = all_bis[pos + 1]
+            standard_references = [_bi_to_cs_elem(left_reference)]
             check = seg_end + 1
             decision_index = seg_end
             result = None
+            minimum_end = self._successor_formation_end(accepted[-1]) if accepted else None
+            if minimum_end is not None:
+                # The same-side pens used as the predecessor's completed
+                # continuation belong to this newly formed segment. Starting
+                # another boundary inside that span would split the element
+                # whose inclusion was just used to establish the predecessor.
+                while seg_end < minimum_end:
+                    extreme = (max(extreme, all_bis[seg_end].end.val) if seg_type == 'up'
+                               else min(extreme, all_bis[seg_end].end.val))
+                    left_reference = _advance_left_reference(left_reference, all_bis[check], seg_type)
+                    _append_feature(standard_references, _bi_to_cs_elem(all_bis[check]), seg_type)
+                    seg_end, check = check + 1, check + 2
+                decision_index = max(decision_index, seg_end)
             while check + 1 < len(all_bis):
                 end_value = all_bis[seg_end].end.val
                 extreme = (
@@ -508,6 +692,7 @@ class XdCalculator:
                     else next_same.low < extreme
                 )
                 if not extends:
+                    search_context = "ordinary"
                     result = self._try_end(
                         all_bis,
                         seg_start,
@@ -519,10 +704,33 @@ class XdCalculator:
                         [left_reference],
                     )
                     if result is None:
+                        search_context = "local"
                         result = self._try_end_r34(
                             all_bis, seg_start, seg_type, seg_high, seg_low, check,
                             max(seg_start, pivot_origins[check - 1]),
                         )
+                    if result is None:
+                        search_context = "standard"
+                        result = self._try_end_standard_local(
+                            all_bis, seg_start, seg_type, check, standard_references
+                        )
+                    if result is None and accepted:
+                        search_context = "direct"
+                        result = self._try_established_reverse_break(
+                            all_bis, seg_start, seg_type, check, accepted[-1]
+                        )
+                    predecessor = accepted[-1] if accepted else None
+                    result = self._try_first_case_completions(
+                        all_bis, seg_start, seg_type, check, result, predecessor,
+                    )
+                    result = self._try_completed_return_segment(
+                        all_bis, seg_start, seg_type, check, result, predecessor,
+                    )
+                    result = self._resolve_first_search_outcome(
+                        all_bis, seg_start, seg_type, check, result,
+                        standard_references, search_context, left_reference, pivot_origins,
+                        predecessor,
+                    )
                     if isinstance(
                         result, (_CandidateExtension, _GapConfirmationInvalidated)
                     ):
@@ -537,6 +745,7 @@ class XdCalculator:
                             left_reference = _advance_left_reference(
                                 left_reference, all_bis[i], seg_type
                             )
+                            _append_feature(standard_references, _bi_to_cs_elem(all_bis[i]), seg_type)
                         seg_end, check = extension, extension + 1
                         decision_index = max(decision_index, extension)
                         result = None
@@ -550,6 +759,7 @@ class XdCalculator:
                 left_reference = _advance_left_reference(
                     left_reference, all_bis[check], seg_type
                 )
+                _append_feature(standard_references, _bi_to_cs_elem(all_bis[check]), seg_type)
                 seg_end = check + 1
                 check += 2
             if result is None:
@@ -564,14 +774,39 @@ class XdCalculator:
             pos = real_end + 1
         self.evidence = tuple(accepted)
         self._proofs = {p.key: p for p in accepted}
+        if first_proof_only:
+            # A certificate probe needs no display tail or XD objects. Apart
+            # from wasting work, materializing a whole future tail here made
+            # repeated small independent probes quadratic.
+            return
         tail = (pos, all_bis[pos].type) if pos < len(all_bis) else None
         self.tail_state = SegmentTail(
             pos if tail else None,
             tail[1] if tail else None,
             pending.reason if pending else "forming",
             pending.candidate_index if pending else None,
+            minimum_end_index=(self._successor_formation_end(accepted[-1])
+                               if tail and accepted else None),
         )
         self._emit_segments(all_bis, segs, tail, start, locked_candidates)
+
+    @staticmethod
+    def _successor_formation_end(parent):
+        """Keep a direct first-case continuation intact in the output chain.
+
+        Return certificates are internal witnesses, not the next segment's
+        formation span. F2 and explicit reverse certificates inherit their
+        exact successor through the separate existing path.
+        """
+        if parent.parent_key is not None or parent.second_sequence or parent.reverse_segment or parent.return_segment:
+            return None
+        ends = []
+        if parent.first_break_evidence is not None:
+            ends.append(parent.first_break_evidence.extension_index)
+        if parent.first_sequence:
+            ends.append(max(parent.first_sequence[-1].source_indices))
+        minimum = max(ends) if ends else None
+        return minimum if minimum is not None and minimum > parent.end_index + 3 else None
 
     @staticmethod
     def _successor_from_second_sequence(parent, all_bis):
@@ -611,9 +846,404 @@ class XdCalculator:
             parent_key=parent.key,
         )
 
+    def _try_end_standard_local(self, all_bis, start, direction, check, standard, allow_type2=True):
+        """L065/L067 first or second case in the chronological standard sequence.
+
+        The caller first resolves the protected and record-reference contexts;
+        a pending earlier hypothesis never reaches this fallback (L078).
+        The left shoulder must survive full chronological inclusion, and the
+        post-boundary elements must independently form the first fractal.
+        A gap then requires the same strict second-sequence proof as any other
+        L067 second case. A one-pen initial extreme is not an extra veto on an
+        otherwise qualified non-extreme endpoint (L078, lines 280-313).
+        """
+        if len(standard) < 2:
+            return None
+        left, first = standard[-1], all_bis[check]
+        # A covering reversal may only cover the NORMALIZED left element;
+        # its raw predecessor can have a different far edge. Let _try_end
+        # validate this protected case as well as an ordinary standard turn.
+        turns = first.high > left["high"] if direction == "up" else first.low < left["low"]
+        if not turns:
+            return None
+        result = self._try_end(
+            all_bis, start, check - 1, direction, first.high, first.low, check, [left], allow_type2
+        )
+        if isinstance(result, tuple):
+            key = (start, result[0], direction)
+            self._proofs[key] = replace(self._proofs[key], reference_mode="standard-local")
+        return result
+
+    def _resolve_first_search_outcome(self, values, start, direction, first, result,
+                                      standard, context, reference, pivot_origins=None,
+                                      predecessor=None):
+        """Compare the current standard context as well as later candidates.
+
+        A local origin-retest can be pending while this same candidate already
+        completes against its surviving standard reference (L067/L071). The
+        later-candidate search starts two pens ahead and cannot find it. Keep
+        the earlier F2-fractal/origin-return deadline, and preserve the actual
+        winning proof when both contexts address the same physical boundary.
+        """
+        chosen = self._resolve_later_first_search_outcome(
+            values, start, direction, first, result, standard, context, reference,
+            pivot_origins, predecessor,
+        )
+        retained = None
+        if isinstance(chosen, PendingBoundary) and chosen.reason == 'waiting-first-feature':
+            limit = len(values) - 1
+        elif (isinstance(chosen, PendingBoundary) and chosen.reason == 'waiting-second-feature'
+              or isinstance(chosen, _GapConfirmationInvalidated)):
+            if not chosen.first_sequence:
+                return chosen
+            limit = max(chosen.first_sequence[-1].source_indices) - 1
+        elif isinstance(chosen, _CandidateExtension):
+            limit = chosen.witness_index - 1
+        elif isinstance(chosen, tuple):
+            retained = self._proofs[(start, chosen[0], direction)]
+            if retained.second_sequence:
+                limit = max(retained.first_sequence[-1].source_indices) - 1
+            else:
+                cert = retained.first_pen_continuation
+                # A later origin-retest hypothesis must not replace the
+                # current standard boundary at the same completion event.
+                # Keep the established standard proof on this new-route tie.
+                origin_fallback = cert is not None and cert.reference_context == 'origin-retest'
+                limit = retained.witness_index - (0 if origin_fallback else 1)
+        else:
+            return chosen
+        if first + 2 > limit:
+            return chosen
+        alternate = self._try_end_standard_local(
+            values, start, direction, first, standard, allow_type2=False,
+        )
+        if isinstance(alternate, tuple):
+            proof = self._proofs[(start, alternate[0], direction)]
+            if proof.witness_index <= limit:
+                return alternate
+        if retained is not None:
+            self._proofs[retained.key] = retained
+        return chosen
+
+    def _resolve_later_first_search_outcome(self, values, start, direction, first, result,
+                                            standard, context, reference, pivot_origins=None,
+                                            predecessor=None):
+        """L071: an unfinished first break cannot hide a completed later turn.
+
+        Earlier complete gapped fractals retain L067/L078's F2 priority.
+        Only a still-incomplete FIRST-case continuation opens this search;
+        candidates use the surviving chronological standard left element.
+        A first-pen completion delayed beyond its right element also waits
+        long enough for a later candidate to finish earlier, so compare the
+        actual witness, not the first candidate's position alone.
+        """
+        if isinstance(result, PendingBoundary) and result.reason == "waiting-first-feature":
+            last = len(values) - 1
+        elif (isinstance(result, PendingBoundary) and result.reason == "waiting-second-feature"
+              or isinstance(result, _GapConfirmationInvalidated)):
+            if not result.first_sequence:
+                return result
+            # L06764-118: a second-case hypothesis first requires a first
+            # fractal. It cannot retroactively suppress a completion that
+            # already existed before that fractal's right element arrived.
+            last = max(result.first_sequence[-1].source_indices) - 1
+        elif isinstance(result, _CandidateExtension):
+            last = result.witness_index - 1
+        elif isinstance(result, tuple):
+            proof = self._proofs[(start, result[0], direction)]
+            if proof.second_sequence:
+                last = max(proof.first_sequence[-1].source_indices) - 1
+            # A delayed ordinary F1 can also hide an earlier completed local
+            # continuation. Restricting this comparison to explicit raw-break
+            # receipts makes a later right shoulder replace an already locked
+            # boundary. Every first-case proof competes by its actual witness;
+            # a completed or unresolved F2 retains its separate priority.
+            else:
+                if proof.witness_index <= first + 2:
+                    return result
+                last = proof.witness_index - 1
+        else:
+            return result
+        if first + 4 > last:
+            return result
+        refs = list(standard)
+        if pivot_origins is None:
+            pivot_origins = _contained_pivot_origins(values)
+        body_high = max(values[i].high for i in range(start, first, 2))
+        body_low = min(values[i].low for i in range(start, first, 2))
+        best = None
+        for check in range(first + 2, last - 1, 2):
+            _append_feature(refs, _bi_to_cs_elem(values[check - 2]), direction)
+            body_high = max(body_high, values[check - 1].high)
+            body_low = min(body_low, values[check - 1].low)
+            candidate = self._try_end_standard_local(
+                values, start, direction, check, refs, allow_type2=False,
+            )
+            # L079's contained original-direction stem can retain its own
+            # outside reference, which is different from a fabricated raw
+            # replacement for an absorbed ordinary left element.
+            if not isinstance(candidate, tuple):
+                local = self._try_end_r34(
+                    values, start, direction, body_high, body_low, check,
+                    max(start, pivot_origins[check - 1]), False,
+                )
+                if isinstance(local, tuple):
+                    proof = self._proofs[(start, local[0], direction)]
+                    left = (proof.first_pen_continuation.reference if proof.first_pen_continuation
+                            else proof.first_sequence[0])
+                    if proof.pivot_stem is not None or (refs and
+                            (left.low, left.high) == (refs[-1]['low'], refs[-1]['high'])):
+                        candidate = local
+            candidate = self._try_first_case_completions(
+                values, start, direction, check, candidate, predecessor,
+                latest_witness=last,
+            )
+            candidate = self._try_completed_return_segment(
+                values, start, direction, check, candidate, predecessor,
+                latest_witness=last,
+            )
+            if not isinstance(candidate, tuple):
+                continue
+            proof = self._proofs[(start, candidate[0], direction)]
+            if proof.witness_index > last:
+                continue
+            if best is None or (proof.witness_index, proof.end_index) < (best[0], best[1][0]):
+                best = (proof.witness_index, candidate)
+        return result if best is None else best[1]
+
+    def _try_first_case_completions(self, values, start, direction, first,
+                                    result, predecessor, *, latest_witness=None):
+        """Compare all established-predecessor first-case completion routes.
+
+        L071 100-124 supplies the first-break continuation; L078 208-220
+        requires the established predecessor and preserves F2 priority.
+        Both the main scan and the interior candidate search must consider
+        this existing route. A pending first hypothesis or a later independent
+        reverse proof must not hide its earlier completion. Equal witnesses
+        retain the already selected proof.
+        """
+        original = result
+        result = self._try_completed_reverse_segment(
+            values, start, direction, first, result, predecessor,
+            latest_witness=latest_witness,
+        )
+        if predecessor is None or isinstance(original, _GapConfirmationInvalidated):
+            return result
+        if isinstance(original, PendingBoundary) and original.reason != 'waiting-first-feature':
+            return result
+        limit = len(values) - 1 if latest_witness is None else latest_witness
+        if isinstance(original, _CandidateExtension):
+            limit = min(limit, original.witness_index - 1)
+        if isinstance(result, tuple):
+            current = self._proofs[(start, result[0], direction)]
+            if current.second_sequence or current.parent_key is not None:
+                return result
+            limit = min(limit, current.witness_index - 1)
+
+        # The candidate can share its key with the selected reverse proof.
+        # Restore the latter if the candidate loses the witness comparison.
+        saved_proofs = dict(self._proofs)
+        try:
+            candidate = self._try_established_reverse_break(
+                values, start, direction, first, predecessor,
+            )
+            proof = (self._proofs[(start, candidate[0], direction)]
+                     if isinstance(candidate, tuple) else None)
+        finally:
+            self._proofs = saved_proofs
+        if proof is not None and proof.witness_index <= limit:
+            self._proofs[proof.key] = proof
+            return candidate
+        return result
+
+    def _try_completed_reverse_segment(self, values, start, direction, first,
+                                       result, predecessor, *, latest_witness=None):
+        """Transmit an independently complete FIRST-case reverse proof (L078).
+
+        L071's raw-first-end extension is sufficient, not the only route once
+        the reverse segment has its own complete break. Preserve L078's prior
+        established segment and origin-return order. A pending/invalidated F2
+        retains its separate priority. Never let the child assume its parent:
+        probe its fixed origin with an empty accepted chain, then inherit that
+        exact proof instead of rescanning with the newly confirmed parent.
+        """
+        if predecessor is None or predecessor.end_index + 1 != start:
+            return result
+        if first < start + 3 or first + 5 >= len(values):
+            return result
+        if isinstance(result, _GapConfirmationInvalidated):
+            return result
+        if isinstance(result, PendingBoundary) and result.reason != 'waiting-first-feature':
+            return result
+        limit = len(values) - 1 if latest_witness is None else latest_witness
+        if isinstance(result, _CandidateExtension):
+            limit = min(limit, result.witness_index - 1)
+        elif isinstance(result, tuple):
+            current = self._proofs[(start, result[0], direction)]
+            if current.second_sequence or current.parent_key is not None:
+                return result
+            # An already complete native proof wins a tie; there is no need
+            # to inspect data arriving at or after its actual witness.
+            limit = min(limit, current.witness_index - 1)
+        reversal, reference = values[first], values[first - 2]
+        strong = reversal.low < reference.low if direction == 'up' else reversal.high > reference.high
+        endpoint = reversal.start.val
+        net = endpoint > values[start].start.val if direction == 'up' else endpoint < values[start].start.val
+        if not (strong and net and _overlap(reversal, reference)
+                and _overlap(reversal, values[first + 2])):
+            return result
+        returned_at = self._reverse_extensions[first - 1]
+        if returned_at is not None:
+            limit = min(limit, returned_at - 1)
+        if limit < first + 5:
+            return result
+        child = self._standalone_first_proof(values, first, limit)
+        if child is None:
+            return result
+        proof = SegmentEvidence(
+            start, first - 1, direction, 'completed-reverse-segment', child.witness_index,
+            predecessor_key=predecessor.key,
+            reverse_segment=ReverseSegmentEvidence(
+                first, first - 2, first + 2, predecessor.key, child,
+            ),
+        )
+        self._proofs[proof.key] = proof
+        return first - 1, first, proof.witness_index, confirmation_time(values, start, proof.witness_index)
+
+    def _standalone_first_proof(self, values, first, limit):
+        """Independent fixed-origin proof; no established parent is supplied."""
+        if limit < first + 5:
+            return None
+        progress = self._reverse_feature_progress[first + 3]
+        turn = self._reverse_feature_turns[first + 3]
+        if progress is None or progress > limit or turn is None or turn > limit:
+            return None
+        cache = self._reverse_probe_cache
+        cache_key = (first, limit)
+        if cache_key not in cache:
+            probe = XdCalculator()
+            probe._feature_scan_cache = {}
+            probe._build_segments(values[:limit + 1], first, first_proof_only=True,
+                                  pivot_origins=self._reverse_pivot_origins,
+                                  next_extensions=self._reverse_extensions,
+                                  feature_progress=self._reverse_feature_progress,
+                                  feature_turns=self._reverse_feature_turns)
+            cache[cache_key] = probe.evidence[0] if probe.evidence else None
+        return cache[cache_key]
+
+    def _try_completed_return_segment(self, values, start, direction, first,
+                                      result, predecessor, *, latest_witness=None):
+        """L078 160-211: the completed return remains inside the break origin.
+
+        The return begins immediately AFTER the first breaking pen, in the
+        original direction. Prove it independently, including its own break;
+        three alternating pens alone do not prove that the return has ended.
+        It is an internal witness, so do not inherit it as the actual successor.
+        Actual successor proofs may use this now-established parent, with their
+        clocks bounded by the entire parent's proof. This route can finish
+        before the reverse segment itself has an independently completed end.
+        """
+        if predecessor is None or predecessor.end_index + 1 != start:
+            return result
+        if first < start + 3 or first + 6 >= len(values):
+            return result
+        if isinstance(result, _GapConfirmationInvalidated):
+            return result
+        if isinstance(result, PendingBoundary) and result.reason != 'waiting-first-feature':
+            return result
+        limit = len(values) - 1 if latest_witness is None else latest_witness
+        if isinstance(result, _CandidateExtension):
+            limit = min(limit, result.witness_index - 1)
+        elif isinstance(result, tuple):
+            current = self._proofs[(start, result[0], direction)]
+            if current.second_sequence or current.parent_key is not None:
+                return result
+            limit = min(limit, current.witness_index - 1)
+        reversal, reference = values[first], values[first - 2]
+        strong = reversal.low < reference.low if direction == 'up' else reversal.high > reference.high
+        net = reversal.start.val > values[start].start.val if direction == 'up' else reversal.start.val < values[start].start.val
+        if not (strong and net and _overlap(reversal, reference)
+                and _overlap(reversal, values[first + 2])):
+            return result
+        returned_at = self._reverse_extensions[first - 1]
+        if returned_at is not None:
+            limit = min(limit, returned_at - 1)
+        support = self._standalone_first_proof(values, first + 1, limit)
+        if support is None:
+            return result
+        support_chain = (support,)
+        if support.second_sequence:
+            support_chain += (self._successor_from_second_sequence(support, values),)
+        proof = SegmentEvidence(
+            start, first - 1, direction, 'completed-return-segment', support.witness_index,
+            predecessor_key=predecessor.key,
+            return_segment=ReturnSegmentEvidence(
+                first, first - 2, first + 2, predecessor.key, support_chain,
+            ),
+        )
+        self._proofs[proof.key] = proof
+        return first - 1, first, proof.witness_index, confirmation_time(values, start, proof.witness_index)
+
+    def _try_established_reverse_break(self, values, start, direction, check, predecessor):
+        """L071 raw first-break continuation with L078's established predecessor.
+
+        A strong reverse pen can start above/below a contained internal price
+        source, so a new local extremum against that source is not mandatory.
+        The effective first-ending edge follows same-side inclusion under
+        the user-selected rule. Its first exit must precede an origin return.
+        The complete predecessor is indispensable;
+        an unproved initial observation does not receive this shortcut.
+        """
+        if predecessor.end_index + 1 != start or check < start + 3 or check + 2 >= len(values):
+            return None
+        first, left = values[check], values[check - 2]
+        strong = first.low < left.low if direction == 'up' else first.high > left.high
+        # Ordinary strict-turn cases remain with their feature-sequence rules.
+        turns = first.high > left.high if direction == 'up' else first.low < left.low
+        if not strong or turns or not _overlap(first, values[check + 2]):
+            return None
+        origin, endpoint = values[start].start.val, first.start.val
+        if not (endpoint > origin if direction == 'up' else endpoint < origin):
+            return None
+        scan = self._scan_first_feature(values, check, direction, first.start.val)
+        literal = self._first_continuation_proof(
+            values, start, direction, check, _bi_to_cs_elem(left),
+            reference_context='established', predecessor=predecessor,
+        )
+        if literal is not None and (not isinstance(scan, tuple)
+                or literal.witness_index < _elem_farthest_bi_index(scan[1])):
+            return self._commit_first_continuation(values, literal)
+        if not isinstance(scan, tuple):
+            return scan
+        middle, right = scan
+        outward = (right['high'] < middle['high'] and right['low'] < middle['low']
+                   if direction == 'up' else
+                   right['low'] > middle['low'] and right['high'] > middle['high'])
+        if not outward:
+            return None
+        witness = _elem_farthest_bi_index(right)
+        gap = _classify_first_feature_gap(_bi_to_cs_elem(left), first, middle, direction)
+        if gap.effective_gap:
+            return None
+        completion = self._first_pen_break_completion(values, first, direction)
+        if not isinstance(completion, FirstPenBreakEvidence):
+            return completion
+        witness = max(witness, completion.extension_index)
+        proof = SegmentEvidence(
+            start, check - 1, direction, 'established-predecessor-reverse-break', witness,
+            tuple(FeatureEvidence.from_element(e) for e in (_bi_to_cs_elem(left), middle, right)),
+            gap_context=gap, first_break_witness_index=completion.extension_index, predecessor_key=predecessor.key,
+            first_break_evidence=completion,
+            direct_first_break=DirectFirstBreakEvidence(
+                check, check - 2, check + 2, completion.extension_index, predecessor.key,
+            ),
+        )
+        self._proofs[proof.key] = proof
+        return check - 1, check, witness, confirmation_time(values, start, witness)
+
     def _try_end_r34(
         self, all_bis, seg_start, seg_type, seg_high, seg_low, check,
-        pivot_start=None,
+        pivot_start=None, allow_type2=True,
     ) -> (
         tuple[int, int, int, object]
         | PendingBoundary
@@ -641,7 +1271,7 @@ class XdCalculator:
         remains eligible; an intervening interior pen cannot replace it. The
         stem is retained as explicit source evidence, with no physical edits.
         """
-        if check < seg_start + 3 or check + 2 >= len(all_bis):
+        if check < seg_start + 3 or check >= len(all_bis):
             return None
         left, first = all_bis[check - 2], all_bis[check]
         origin_retest = (
@@ -651,11 +1281,7 @@ class XdCalculator:
         )
 
         def breaks_reference(reference):
-            strong = (
-                first.low < reference.low
-                if seg_type == "up"
-                else first.high > reference.high
-            )
+            strong = first.low < reference.low if seg_type == "up" else first.high > reference.high
             return strong or (origin_retest and _overlap(first, reference))
 
         breaks = breaks_reference(left)
@@ -687,15 +1313,32 @@ class XdCalculator:
             if not turns or not breaks:
                 return None
             stem_start = pivot_start
-        if not _overlap(first, all_bis[check + 2]):
-            return None
         real_end = check - 1
         anchor, endpoint = all_bis[seg_start].start.val, all_bis[real_end].end.val
         if not (endpoint > anchor if seg_type == "up" else endpoint < anchor):
             return None
+        if check + 2 >= len(all_bis):
+            # A qualified first break is a named hypothesis while its right
+            # evidence is absent (L071 76-124 / L079 286-295). It is not a
+            # completed fractal. An already observed return beyond its origin
+            # invalidates it even before the third pen can arrive.
+            if check + 1 < len(all_bis):
+                next_same = all_bis[check + 1]
+                if (next_same.high > first.high if seg_type == "up" else next_same.low < first.low):
+                    return _CandidateExtension(check + 1)
+            return PendingBoundary("waiting-first-feature", real_end)
+        if not _overlap(first, all_bis[check + 2]):
+            return None
         scan = self._scan_first_feature(
             all_bis, check, seg_type, first.high if seg_type == "up" else first.low
         )
+        literal = self._first_continuation_proof(
+            all_bis, seg_start, seg_type, check, _bi_to_cs_elem(left),
+            reference_context='local', pivot_start=stem_start,
+        )
+        if literal is not None and (not isinstance(scan, tuple)
+                or literal.witness_index < _elem_farthest_bi_index(scan[1])):
+            return self._commit_first_continuation(all_bis, literal)
         if not isinstance(scan, tuple):
             return scan
         middle, element = scan
@@ -707,28 +1350,36 @@ class XdCalculator:
         )
         if not outward:
             return None
+        completion = self._complete_first_fractal(all_bis, _bi_to_cs_elem(left), middle, element, seg_type)
+        if not isinstance(completion, tuple):
+            return completion
+        continuation_witness, first_break_witness, first_break_evidence = completion
         elements = tuple(
             FeatureEvidence.from_element(e)
             for e in (_bi_to_cs_elem(left), middle, element)
         )
-        # L071's boundary classification uses the original first reversal;
-        # later same-side inclusion still supplies the standard fractal.
-        # This is the interpretation selected in review chart 01 (B).
-        has_gap = not _overlap(left, first)
+        gap_context = _classify_first_feature_gap(
+            _bi_to_cs_elem(left), first, middle, seg_type
+        )
+        has_gap = gap_context.effective_gap
         second = ()
-        witness = i
+        second_breaks = ()
+        witness = max(i, continuation_witness)
         if has_gap:
+            if not allow_type2:
+                return None
             status, witness2 = self._check_type2(all_bis, middle, seg_type)
             if status == _TYPE2_PENDING:
-                return PendingBoundary("waiting-second-feature", real_end)
+                return PendingBoundary("waiting-second-feature", real_end, elements)
             if witness2 is None:
                 raise ValueError("type-2 resolution requires a causal witness")
             if status == _TYPE2_INVALIDATED:
                 return _GapConfirmationInvalidated(
-                    all_bis[witness2].locked_at, witness2, real_end
+                    all_bis[witness2].locked_at, witness2, real_end, elements
                 )
             witness = max(witness, witness2)
             second = self._second_evidence
+            second_breaks = self._second_breaks
         pivot_stem = None
         if stem_start is not None:
             stem = _bi_to_cs_elem(all_bis[stem_start])
@@ -737,7 +1388,7 @@ class XdCalculator:
                 stem = _merge_two(stem, _bi_to_cs_elem(all_bis[j]), fold_direction)
             pivot_stem = FeatureEvidence.from_element(stem)
         strong_break = first.low < left.low if seg_type == "up" else first.high > left.high
-        local_rule = "first-pen-break" if strong_break else "origin-extreme-retest"
+        local_rule = "origin-extreme-retest" if origin_retest and not strong_break else "first-pen-break"
         proof = SegmentEvidence(
             seg_start,
             real_end,
@@ -748,6 +1399,10 @@ class XdCalculator:
             second,
             initial_gap=has_gap,
             pivot_stem=pivot_stem,
+            gap_context=gap_context,
+            second_sequence_breaks=second_breaks,
+            first_break_witness_index=first_break_witness,
+            first_break_evidence=first_break_evidence,
         )
         self._proofs[proof.key] = proof
         return real_end, check, i, confirmation_time(all_bis, seg_start, witness)
@@ -811,6 +1466,221 @@ class XdCalculator:
     # ----------------------------------------------------------
     # 尝试结束线段。
     # ----------------------------------------------------------
+    def _first_pen_break_completion(self, all_bis, first, direction):
+        """First exit from the evolving effective interval, in observed order.
+
+        User-selected interpretation, 2026-09-21: subsequent same-side
+        inclusion updates the end used for continuation. Inspect an incoming
+        pen against the interval that existed before it; a witnessed exit
+        cannot be erased by including that very pen afterward. The candidate
+        origin remains protected until an earlier completion or strict return.
+
+        Reuse suffix states only within the current input, like feature scans.
+        The separate key tag prevents mixing first-break and fractal scans.
+        """
+        up = direction == 'up'
+        low, high = first.low, first.high
+        low_source = high_source = first.index
+        cache = getattr(self, '_feature_scan_cache', None)
+        visited, outcome = [], None
+        for i in range(first.index + 1, len(all_bis)):
+            if cache is not None:
+                key = ('first-break', i, direction, low, high)
+                try:
+                    cached = cache.get(key)
+                except TypeError:
+                    cache = None
+                    visited = []
+                else:
+                    if cached is not None:
+                        if cached.status == 'completed':
+                            low_source = low_source if cached.low == low else cached.low_source
+                            high_source = high_source if cached.high == high else cached.high_source
+                            low, high = all_bis[low_source].low, all_bis[high_source].high
+                        outcome = _FeatureTail(cached.status, cached.stop, low, high,
+                                               low_source, high_source)
+                        break
+                    visited.append(key)
+            item = all_bis[i]
+            if item.type == direction:
+                if item.high > high if up else item.low < low:
+                    outcome = _FeatureTail('extension', i, low, high, low_source, high_source)
+                    break
+                continue
+            if item.end.val < low if up else item.end.val > high:
+                outcome = _FeatureTail('completed', i, low, high, low_source, high_source)
+                break
+            # Prior to this first escape, the incoming interval is contained
+            # in the protected same-side element. Equal prices retain the
+            # earlier physical supplier and its exact numeric representation.
+            if item.low > low if up else item.low < low:
+                low, low_source = item.low, i
+            if item.high > high if up else item.high < high:
+                high, high_source = item.high, i
+        if outcome is None:
+            outcome = _FeatureTail('pending', None, low, high, low_source, high_source)
+        if cache is not None:
+            for key in visited:
+                cache[key] = outcome
+        if outcome.status == 'pending':
+            return PendingBoundary('waiting-first-feature', first.index - 1)
+        if outcome.status == 'extension':
+            return _CandidateExtension(outcome.stop)
+        return FirstPenBreakEvidence(
+            first.index,
+            FeatureEvidence(outcome.low, outcome.high,
+                            tuple(range(first.index, outcome.stop, 2)),
+                            outcome.low_source, outcome.high_source),
+            outcome.stop,
+        )
+
+    def _complete_first_fractal(self, all_bis, left, middle, right, direction):
+        """Distinguish a full fractal from L071's covering-first-pen break.
+
+        A protected covering reversal can have only the turning coordinate
+        of an ordinary fractal. In that exceptional case, it must actually
+        continue beyond its effective first element under the user's selected
+        interpretation. Containment alone is not completion. Full-coordinate
+        fractals keep their own proof; local reference qualification is not
+        broadened, preserving L079's unfinished lower figure.
+        """
+        up = direction == "up"
+        full = (middle['low'] > max(left['low'], right['low']) if up
+                else middle['high'] < min(left['high'], right['high']))
+        if full:
+            return _elem_farthest_bi_index(right), None, None
+        first = _resolve_pivot_bi(middle, direction)
+        covering = (first.high > left['high'] and first.low <= left['low'] if up
+                    else first.low < left['low'] and first.high >= left['high'])
+        if not covering:
+            return None
+        completion = self._first_pen_break_completion(all_bis, first, direction)
+        if isinstance(completion, FirstPenBreakEvidence):
+            return (max(completion.extension_index, _elem_farthest_bi_index(right)),
+                    completion.extension_index, completion)
+        return completion
+
+    def _origin_context_before(self, values, start, first, direction):
+        """Price-only standard prefix before a qualified origin retest.
+
+        A surviving standard shoulder owns its ordinary/F2 classification;
+        an absorbed raw shoulder must not bypass that gap. Prefix summaries
+        also avoid rescanning a long equal-price body for every local turn.
+        No future outcome or completed proof is cached here.
+        """
+        cache = getattr(self, '_origin_context_prefixes', None)
+        if cache is None:
+            cache = self._origin_context_prefixes = {}
+        key = (id(values), start, direction)
+        if key not in cache:
+            cache[key] = {'next': start + 1, 'elements': [], 'before': {},
+                          'extreme': values[start].end.val}
+        state = cache[key]
+        if first not in state['before']:
+            up = direction == 'up'
+            while state['next'] <= first:
+                index = state['next']
+                elements = state['elements']
+                last = elements[-1] if elements else None
+                state['before'][index] = (len(elements), last, state['extreme'])
+                item = values[index]
+                new = (item.low, item.high)
+                if elements:
+                    old = elements[-1]
+                    included = (old[0] <= new[0] and new[1] <= old[1]
+                                or new[0] <= old[0] and old[1] <= new[1])
+                    if included:
+                        rising = up if len(elements) == 1 else old[1] > elements[-2][1]
+                        choose = max if rising else min
+                        elements[-1] = (choose(old[0], new[0]), choose(old[1], new[1]))
+                    else:
+                        elements.append(new)
+                else:
+                    elements.append(new)
+                state['extreme'] = (max(state['extreme'], item.high) if up
+                                    else min(state['extreme'], item.low))
+                state['next'] += 2
+        return state['before'][first]
+
+    def _first_continuation_proof(self, values, start, direction, first, reference,
+                                      *, reference_context='record', predecessor=None,
+                                      pivot_start=None):
+        """Effective first-break completion, independent of a separate right.
+
+        A retrace exactly to the breaking pen's origin can make an extending
+        pen contain the previous effective interval. Including that witness
+        afterward must not erase an already completed FIRST-case break.
+        L065 226-244 includes contact with the near edge in stroke destruction;
+        it does not require crossing the reference's far edge. For an already
+        qualified ordinary reference, retain that case as well. L067 49-118
+        still requires the normalized first feature to be ungapped. Local and
+        established reference qualification stays with the caller's context.
+        """
+        if first < start + 3 or first + 2 >= len(values):
+            return None
+        raw = values[first]
+        up = direction == 'up'
+        strong = raw.low < reference['low'] if up else raw.high > reference['high']
+        turns = raw.high > reference['high'] if up else raw.low < reference['low']
+        if not (_overlap(raw, reference) and _overlap(raw, values[first + 2])):
+            return None
+        net = raw.start.val > values[start].start.val if up else raw.start.val < values[start].start.val
+        if not net:
+            return None
+        if reference_context == 'established':
+            if not strong or predecessor is None or predecessor.end_index + 1 != start or turns:
+                return None
+        elif not turns:
+            return None
+        elif reference_context != 'record' and not strong:
+            if reference_context != 'local' or predecessor is not None:
+                return None
+            # _try_end_r34 already admits a retest of the initial extreme.
+            # Its completed continuation must also survive an equal-origin
+            # retrace; do not apply this to arbitrary contained local turns.
+            origin_retest = raw.high == values[start].high if up else raw.low == values[start].low
+            if not origin_retest:
+                return None
+            reference_context = 'origin-retest'
+        receipt = self._first_pen_break_completion(values, raw, direction)
+        if not isinstance(receipt, FirstPenBreakEvidence):
+            return None
+        if reference_context == 'origin-retest':
+            count, standard_left, body_extreme = self._origin_context_before(values, start, first, direction)
+            if body_extreme > raw.high if up else body_extreme < raw.low:
+                return None
+            if count >= 2 and (raw.high > standard_left[1] if up else raw.low < standard_left[0]):
+                # The normal standard route already handles its completed F1
+                # or waits for its required F2. This local fallback cannot
+                # replace that reference, including after inclusion opens a gap.
+                return None
+        if reference_context in {'record', 'origin-retest'}:
+            middle = {'low': receipt.effective_first.low, 'high': receipt.effective_first.high}
+            if _classify_first_feature_gap(reference, raw, middle, direction).effective_gap:
+                return None
+        completion = receipt.extension_index
+        stem = None
+        if pivot_start is not None:
+            element = _bi_to_cs_elem(values[pivot_start])
+            for i in range(pivot_start + 2, first, 2):
+                element = _merge_two(element, _bi_to_cs_elem(values[i]), 'down' if up else 'up')
+            stem = FeatureEvidence.from_element(element)
+        return SegmentEvidence(
+            start, first - 1, direction, 'first-pen-continuation', completion,
+            pivot_stem=stem,
+            predecessor_key=predecessor.key if predecessor is not None else None,
+            first_pen_continuation=FirstPenContinuationEvidence(
+                first, first + 2, completion, FeatureEvidence.from_element(reference), reference_context,
+            ),
+            first_break_witness_index=completion,
+            first_break_evidence=receipt,
+        )
+
+    def _commit_first_continuation(self, values, proof):
+        self._proofs[proof.key] = proof
+        first = proof.end_index + 1
+        return proof.end_index, first, proof.witness_index, confirmation_time(values, proof.start_index, proof.witness_index)
+
     def _try_end(
         self,
         all_bis,
@@ -821,6 +1691,7 @@ class XdCalculator:
         seg_low,
         check_pos,
         seg_cs_bis_cache: List[BI | dict],
+        allow_type2: bool = True,
     ) -> (
         tuple[int, int, int, object]
         | PendingBoundary
@@ -870,15 +1741,21 @@ class XdCalculator:
         scan = self._scan_first_feature(
             all_bis, check_pos, seg_type, seg_high if seg_type == "up" else seg_low
         )
+        literal = self._first_continuation_proof(
+            all_bis, seg_start, seg_type, check_pos, first_elem,
+        )
+        if literal is not None and (not isinstance(scan, tuple)
+                or literal.witness_index < _elem_farthest_bi_index(scan[1])):
+            return self._commit_first_continuation(all_bis, literal)
         if not isinstance(scan, tuple):
             return scan
         mid, right = scan
         left = first_elem
         look_elems = [left, mid, right]
-        # Reviewed L071 reading: classify the protected left and original
-        # first reversal, then use the contained middle to prove the fractal.
-        # A gap created only by later inclusion does not change this class.
-        has_gap = not _overlap(left, _bi_to_cs_elem(first))
+        gap_context = _classify_first_feature_gap(left, first, mid, seg_type)
+        has_gap = gap_context.effective_gap
+        if has_gap and not allow_type2:
+            return None
         if seg_type == "up":
             is_frac = mid["high"] > left["high"] and mid["high"] > right["high"]
         else:
@@ -886,6 +1763,10 @@ class XdCalculator:
         if not is_frac:
             _log.debug(lambda: f"    _try_end: 固定三元素不构成{frac_name}")
             return None
+        completion = self._complete_first_fractal(all_bis, left, mid, right, seg_type)
+        if not isinstance(completion, tuple):
+            return completion
+        continuation_witness, first_break_witness, first_break_evidence = completion
         _log.debug(
             lambda: (
                 f"    _try_end: {[_elem_label(e) for e in look_elems]} → {frac_name}"
@@ -896,6 +1777,7 @@ class XdCalculator:
         mid_elem = mid
         if has_gap:
             _log.debug(lambda: "    _try_end: 第二种情况,进入_check_type2验证...")
+            first_features = tuple(FeatureEvidence.from_element(e) for e in look_elems)
             type2_status, type2_witness_idx = self._check_type2(
                 all_bis,
                 mid_elem,
@@ -906,6 +1788,7 @@ class XdCalculator:
                 return PendingBoundary(
                     "waiting-second-feature",
                     _resolve_pivot_bi(mid_elem, seg_type).index - 1,
+                    first_features,
                 )
             if type2_status == _TYPE2_INVALIDATED:
                 _log.debug(
@@ -918,6 +1801,7 @@ class XdCalculator:
                     witnessed_at,
                     type2_witness_idx,
                     _resolve_pivot_bi(mid_elem, seg_type).index - 1,
+                    first_features,
                 )
             _log.debug(lambda: "    _try_end: _check_type2成功")
         else:
@@ -994,6 +1878,7 @@ class XdCalculator:
         # 是不可省略的因果见证。若该笔尚未锁定，几何可以投影，但不得把更早
         # 的历史时间回填成 XD.locked_at。
         witness_idx = _elem_farthest_bi_index(right)
+        witness_idx = max(witness_idx, continuation_witness)
         if type2_witness_idx is not None:
             witness_idx = max(witness_idx, type2_witness_idx)
         witness_idx = max(witness_idx, check_pos + 1)
@@ -1011,6 +1896,10 @@ class XdCalculator:
             features,
             getattr(self, "_second_evidence", ()) if has_gap else (),
             initial_gap=has_gap,
+            gap_context=gap_context,
+            second_sequence_breaks=getattr(self, "_second_breaks", ()) if has_gap else (),
+            first_break_witness_index=first_break_witness,
+            first_break_evidence=first_break_evidence,
         )
         self._proofs[proof.key] = proof
         formed_at = confirmation_time(all_bis, seg_start, witness_idx)
@@ -1019,6 +1908,38 @@ class XdCalculator:
     # ----------------------------------------------------------
     # 检查第二种情况。
     # ----------------------------------------------------------
+    @staticmethod
+    def _raw_first_break_followthrough(all_bis, middle, original_direction):
+        """Resolve the physical turn's own continuation after same-side inclusion.
+
+        A/C have original_direction; the standard middle locates B's turn.
+        A standard F2 can combine prices from both sides of B's actual pivot.
+        Its outgoing C must still develop on its own side of that pivot. Same-
+        side containment updates the continuation edge (L065/L079); requiring
+        a new raw first-pen extreme would wrongly reject internal extrema.
+        Returning through the pivot first rejects this B turn, without
+        rejecting A's still-pending second-sequence search.
+
+        This combines L065/L071 with L077 367-391/L078 208-211 and L079. Strict
+        second-sequence inclusion is preserved; no third fractal is required.
+        """
+        successor_direction = "down" if original_direction == "up" else "up"
+        first = _resolve_pivot_bi(middle, successor_direction)
+        down = original_direction == "down"
+        edge = first.end.val
+        for i in range(first.index + 1, len(all_bis)):
+            pen = all_bis[i]
+            if pen.type == first.type:
+                if pen.end.val < edge if down else pen.end.val > edge:
+                    return "directional-extension", i, first.index
+                # Before this first outward element, every same-direction
+                # pen is contained in the current context. Its opposite
+                # edge follows max(low) for down pens / min(high) for up pens.
+                edge = pen.end.val
+            elif pen.high > first.high if down else pen.low < first.low:
+                return "origin-return", i, first.index
+        return "pending", None, first.index
+
     def _check_type2(self, all_bis, mid_elem, seg_type) -> tuple[str, Optional[int]]:
         """返回第二种情况状态及最远因果见证笔序号。"""
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
@@ -1063,6 +1984,9 @@ class XdCalculator:
                 )
 
         self._second_evidence = ()
+        self._second_breaks = ()
+        break_evidence = []
+        ignored_until = -1
         cs2_elems = []
         i = start_pos
         while i < len(all_bis):
@@ -1083,17 +2007,28 @@ class XdCalculator:
                 _append_feature(cs2_elems, new_elem, cs2_dir)
 
                 # 每次添加/合并后立即检查分型（仅看尾部三元素，O(1)）
-                if _is_tail_fractal(cs2_elems):
-                    self._second_evidence = tuple(
+                if i >= ignored_until and _is_tail_fractal(cs2_elems):
+                    fractal = tuple(
                         FeatureEvidence.from_element(e) for e in cs2_elems[-3:]
                     )
-                    _log.debug(
-                        lambda: f"      _check_type2: 尾部三元素构成{frac2_name} → True"
+                    outcome, resolved_at, first_index = self._raw_first_break_followthrough(
+                        all_bis, cs2_elems[-2], seg_type
                     )
-                    return (
-                        _TYPE2_CONFIRMED,
-                        _elem_farthest_bi_index(cs2_elems[-1]),
-                    )
+                    if outcome == "pending":
+                        return _TYPE2_PENDING, None
+                    if outcome == "origin-return" or resolved_at > i:
+                        break_evidence.append(SecondFeatureBreakEvidence(
+                            fractal, first_index, first_index - 2, i, outcome, resolved_at
+                        ))
+                    if outcome == "origin-return":
+                        # L071: the attempted successor did not develop. Keep
+                        # every physical pen in A's F2 normalization, but do
+                        # not borrow an interior turn from the failed context.
+                        ignored_until = max(i, resolved_at)
+                    else:
+                        self._second_evidence = fractal
+                        self._second_breaks = tuple(break_evidence)
+                        return _TYPE2_CONFIRMED, max(i, resolved_at)
 
                 # 收完后才判断"严格创新极值停止"：
                 # 此根 cs 笔创了原段方向的新极值，后续走势不可能再形成本段的反向段，
@@ -1123,17 +2058,8 @@ class XdCalculator:
                 lambda: f"      _check_type2: cs2_elems仅{len(cs2_elems)}个<3 → False"
             )
             return _TYPE2_PENDING, None
-        # 走到这里说明扫描结束（要么 i 越界，要么遇到 strict_new_extreme break）
-        # 由于循环内每次追加/合并后都已经检查过尾部分型，此处只需对最终状态做一次兜底检查。
-        result = _is_tail_fractal(cs2_elems)
-        elems_str = " ".join(_elem_label(e) for e in cs2_elems)
-        _log.debug(
-            lambda: (
-                f"      _check_type2: 最终[{elems_str}] → {frac2_name}{'成立' if result else '不成立'} → {result}"
-            )
-        )
-        if result:
-            return _TYPE2_CONFIRMED, _elem_farthest_bi_index(cs2_elems[-1])
+        # Every appended feature was checked above, including the raw first-
+        # break outcome. A bare final fractal must not bypass that decision.
         return _TYPE2_PENDING, None
 
     # ----------------------------------------------------------
@@ -1186,94 +2112,69 @@ class XdCalculator:
         return xd
 
     def _emit_pending(self, all_bis, start, seg_type):
-        """输出活动尾段的几何投影，不赋予分界或完成证据。
+        """Preview a directional extreme or the current same-direction tail.
 
-        终点选择策略（双路保障，确保有 ≥3 根笔时必有输出）：
-
-        主路径（全局极值）：
-          扫描 candidates 中所有 seg_type 同向笔，取使段达到方向极值的那根作为终点
-             - up 段 → 取 high 最大的 up 笔
-             - down 段 → 取 low 最小的 down 笔
-          同价时展示较晚位置（用户图 03）；已证明段界的较早来源约定不变。
-          这只是尾部的显示约定，不能用于移动已经证明的实际段界。
-
-        兜底路径（确保有输出）：
-          若主路径选出的极值笔位置导致 pending_bis < 3 根
-          （典型场景：段第一根同向笔就是全段极值，后续震荡不再突破），
-          则改用 candidates 中**最后一根**同向笔作为初选终点。
-
-        方向校验：
-          上面选出的初选终点若使 pending 段方向矛盾（终点价落在与 seg_type
-          相反的一侧），则改在"方向合法的同向笔"中重新取方向极值；若无任何
-          方向合法的 ≥3 笔终点，则不输出（该区间不构成合法的 seg_type 线段）。
-
-        说明：
-          实际段界由破坏证据决定。此处的活动终点可以随后改变，
-          不声称它是原文规定的最终端点，更不能用它推翻已有分界。
-
-        candidates 不过滤 is_done()：BiCalculator 可以输出多笔待定尾部，
-        它们参与当前路径的几何预览，但不能单独提供正式确认。
+        L079's unfinished lower figure can have a non-extreme live endpoint.
+        Preserve that preview when its current endpoint has the right direction.
+        If it crosses the origin, do not search backwards for a historical
+        endpoint merely to emit a line. Keep an explicit unresolved interval
+        outside XD units instead. This adds no new segment-end rule.
         """
-        candidates = list(all_bis[start:])
-        if len(candidates) < 3 or not _overlap(candidates[0], candidates[2]):
-            return
+        state = self.tail_state
+        if state.start_index != start or state.direction != seg_type:
+            state = SegmentTail(start, seg_type, "forming")
 
-        # 主路径：找全局极值的同向笔
-        best_idx = -1
-        last_same_idx = -1  # 同时记录最后一根同向笔位置，作为兜底
-        for i in range(len(candidates)):
-            if candidates[i].type != seg_type:
+        def projection(reason, index=None):
+            self.tail_state = replace(
+                state, projection_reason=reason, projection_index=index,
+                observed_end_index=len(all_bis) - 1 if all_bis else None,
+            )
+
+        candidates = all_bis[start:]
+        if len(candidates) < 3:
+            projection("insufficient-pens")
+            return
+        if not _overlap(candidates[0], candidates[2]):
+            projection("initial-pens-not-overlapping")
+            return
+        best_idx = None
+        last_same_idx = None
+        minimum_offset = max(2, (state.minimum_end_index or start + 2) - start)
+        for i, current in enumerate(candidates):
+            if current.type != seg_type:
                 continue
             last_same_idx = i
-            if best_idx == -1:
+            if best_idx is None or (
+                current.high >= candidates[best_idx].high if seg_type == "up"
+                else current.low <= candidates[best_idx].low
+            ):
                 best_idx = i
-                continue
-            cur = candidates[i]
-            best = candidates[best_idx]
-            if seg_type == "up" and cur.high >= best.high:
-                best_idx = i
-            elif seg_type == "down" and cur.low <= best.low:
-                best_idx = i
-
-        if best_idx == -1:
+        if best_idx is None or last_same_idx is None or last_same_idx < minimum_offset:
+            projection("insufficient-pens")
             return
-
-        pending_bis = candidates[: best_idx + 1]
-        # 兜底：若全局极值导致段太短（<3 根），改用最后一根同向笔
-        if len(pending_bis) < 3 and last_same_idx > best_idx:
-            pending_bis = candidates[: last_same_idx + 1]
-
-        if len(pending_bis) < 3:
-            return
-
-        # 方向校验：未完成段同样必须方向自洽。"极值优先 + 兜底
-        # 末尾同向笔"在段内出现巨幅反向笔时，兜底路径会把终点落到方向相反的
-        # 一侧。若初选 pending 段方向矛盾，则改在"方向合法（终点价落在与 seg_type
-        # 一致一侧）且笔数≥3 的同向笔"中重新取方向极值；无合法候选则不强行成段。
-        seg_anchor = candidates[0].start.val
-        _end_val = pending_bis[-1].end.val
-        _dir_ok = (
-            (_end_val > seg_anchor) if seg_type == "up" else (_end_val < seg_anchor)
-        )
-        if not _dir_ok:
-            valid_idx = -1
-            for i in range(len(candidates)):
-                if candidates[i].type != seg_type or i + 1 < 3:
-                    continue
-                ev_i = candidates[i].end.val
-                if not (
-                    (ev_i > seg_anchor) if seg_type == "up" else (ev_i < seg_anchor)
-                ):
-                    continue
-                if valid_idx == -1 or (
-                    (seg_type == "up" and ev_i > candidates[valid_idx].end.val)
-                    or (seg_type == "down" and ev_i < candidates[valid_idx].end.val)
-                ):
-                    valid_idx = i
-            if valid_idx == -1:
-                _log.debug(lambda: f"[未完成] {seg_type} 段无方向合法终点 → 不输出")
+        preview_kind = "directional-extreme"
+        if best_idx < minimum_offset:
+            best_idx = last_same_idx
+            preview_kind = "latest-same-direction"
+        pending_bis = candidates[:best_idx + 1]
+        origin, endpoint = pending_bis[0].start.val, pending_bis[-1].end.val
+        if not (endpoint > origin if seg_type == "up" else endpoint < origin):
+            # The search may already be waiting at a specific qualified
+            # boundary (L071/L079). Preserve that hypothesis, not an arbitrary
+            # old price found by a backwards scan through the tail.
+            candidate = state.candidate_index
+            if (state.reason in {"waiting-first-feature", "waiting-second-feature"}
+                    and candidate is not None and start + minimum_offset <= candidate < len(all_bis)
+                    and all_bis[candidate].type == seg_type
+                    and (all_bis[candidate].end.val > origin if seg_type == "up"
+                         else all_bis[candidate].end.val < origin)):
+                best_idx = candidate - start
+                pending_bis = candidates[:best_idx + 1]
+                preview_kind = "boundary-hypothesis"
+            else:
+                projection("tail-end-direction-conflict")
                 return
-            pending_bis = candidates[: valid_idx + 1]
+        projection(preview_kind, start + best_idx)
 
         xd = self._make_xd(pending_bis, seg_type, done=False)
         xd.forming = (

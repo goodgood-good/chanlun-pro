@@ -51,3 +51,14 @@ test('layer changes redraw without enabling removed analysis',()=>{
  assert.equal(Analysis.setLayerVisibility(manager,'bi',false),true);assert.equal(manager.cl_show_config.bi,false);
  assert.equal(Analysis.setLayerVisibility(manager,'point_all',true),false);assert.equal(draws,1);
 });
+
+test('unresolved segment coverage is visible without being counted as an extra segment',()=>{
+ const state={status:'unresolved',confirmed_segments:70,preview_segments:0,awaiting_confirmation_segments:0,
+  tail:{pen_count:283}};
+ const summary=Analysis.summarizeChartData({xds:Array(70).fill({locked:true}),strict_structure_mode:'replace',
+  strict_structure:{analysis_scope:'centers_and_signals',levels:[{centers:[]}],segment_construction:state}});
+ assert.equal(summary.segments,70);
+ assert.equal(summary.ready,true);
+ assert.match(Analysis.segmentStatusText(summary),/283 笔的线段分界待判定/);
+ assert.match(Analysis.segmentStatusText(summary),/不作为选股确认段/);
+});

@@ -54,6 +54,7 @@ def test_serializer_builds_strict_runtime_from_exact_display_frame(
         "code": "SH.600926",
         "frequency": "30m",
         "frame": frame,
+        "last_bar_closed": True,
     }
     assert len(captured["builds"]) == 1
     processed_frame, serialized_config, kwargs = captured["serialize"]

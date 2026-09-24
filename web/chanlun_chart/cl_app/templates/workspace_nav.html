@@ -1,0 +1,13 @@
+{% set current_path = request.path %}
+<nav class="app-nav" aria-label="主导航">
+  <a class="app-brand" href="/" aria-label="Chanlun Pro 交易分析"><span class="app-brand-mark" aria-hidden="true">CL</span><span>CHANLUN <b>PRO</b></span></a>
+  <div class="app-nav-links">
+    <a href="/"{% if current_path == '/' %} aria-current="page"{% endif %}>交易分析</a>
+    <a href="/screening"{% if current_path in ['/screening', '/early-screening', '/decision-support/early-screening'] %} aria-current="page"{% endif %}>缠论选股</a>
+    <a href="/monitor"{% if current_path == '/monitor' %} aria-current="page"{% endif %}>信号监听</a>
+    <a href="/zixuan_group/a"{% if current_path.startswith('/zixuan_group/') %} aria-current="page"{% endif %}>自选管理</a>
+    <a href="/symbols"{% if current_path == '/symbols' %} aria-current="page"{% endif %}>标的中心</a>
+    <a href="/setting"{% if current_path == '/setting' or current_path.startswith('/get_cl_config/') %} aria-current="page"{% endif %}>设置</a>
+  </div>
+  <span class="app-account" title="当前登录账号"><span class="app-account-dot" aria-hidden="true"></span>{{ account_username }}</span>
+</nav>

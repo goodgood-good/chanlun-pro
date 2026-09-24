@@ -1,0 +1,13 @@
+{
+  "symbol": "QQQ.US",
+  "frequency": "1m",
+  "source": "Longbridge forward-adjusted; frozen chart plus same-provider opening 94 bars",
+  "start": "2026-08-18T09:31:00-04:00",
+  "end": "2026-09-17T11:07:00-04:00",
+  "time_label": "end",
+  "latest_bar_closed": false,
+  "bars": 8287,
+  "sha256": "73d5f4b5c4cc9237b535b6e307155b45792df1cb3e0fc0a1eb32b33ae7bb3703",
+  "source_snapshot_sha256": "543c7642eca964e7b9f87dd7f19e2d1b371ba5241d6379573e3f1e1dba4ca74b",
+  "overlap_ohlcv_exact_bars": 7
+}

@@ -182,9 +182,12 @@ test('URL-configured chart starts with the analysis sidebar collapsed and still 
   assert.equal(elements.chart_menu_toggle.getAttribute('aria-expanded'), 'true');
 });
 
-test('mobile sidebar overlays the chart instead of squeezing its working area', () => {
+test('mobile starts with a full chart and opens its sidebar as an overlay', () => {
   const { sandbox, elements, body } = loadResizeModule(false, 390);
 
+  assert.equal(body.classList.contains('chart-menu-collapsed'), true);
+  assert.equal(elements.chart_container.style.width, '100%');
+  elements.chart_menu_toggle.dispatch('click');
   assert.equal(elements.chart_menu.style.width, '390px');
   assert.equal(elements.chart_menu.style.maxWidth, '390px');
   assert.equal(elements.chart_container.style.width, '100%');
@@ -198,6 +201,8 @@ test('mobile sidebar overlays the chart instead of squeezing its working area', 
 test('portrait tablet keeps the chart full-width under an overlay sidebar', () => {
   const { sandbox, elements, body } = loadResizeModule(false, 768);
 
+  assert.equal(body.classList.contains('chart-menu-collapsed'), true);
+  elements.chart_menu_toggle.dispatch('click');
   assert.equal(elements.chart_menu.style.width, '420px');
   assert.equal(elements.chart_container.style.width, '100%');
   assert.equal(elements.chart_container.style.maxWidth, '100%');

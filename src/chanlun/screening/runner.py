@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import time
+import traceback
 
 from chanlun.screening.rules import CN, POINT_TYPES, audit_snapshot, frame_gaps, frame_quality, trading_context, validate_frame
 from chanlun.screening.cache import (
@@ -36,19 +37,23 @@ class ScreeningCancelled(Exception):
     """Cancellation is a terminal state, not a failed data calculation."""
 
 
-def write_json(path: Path, value) -> None:
+def write_json(path: Path, value, *, durable=False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(value, ensure_ascii=False, allow_nan=False))
+        if durable:
+            stream.flush()
+            os.fsync(stream.fileno())
     # Windows readers / virus scanners can briefly deny replacement even
     # though the destination is writable. Preserve the old complete state
     # and retry the atomic rename; never truncate the published JSON file.
-    for attempt in range(12):
+    for attempt in range(20):
         try:
             os.replace(tmp, path)
             break
         except PermissionError:
-            if attempt == 11:
+            if attempt == 19:
                 raise
             time.sleep(min(0.025 * 2 ** attempt, 0.4))
 
@@ -76,10 +81,13 @@ def is_a_share(stock: dict) -> bool:
 
 
 def snapshot_for(frame, code, frequency):
+    """Snapshot the completed, end-labelled screening input (including replays)."""
     from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
     from chanlun.cl_utils.tv_chart import cl_data_to_tv_chart
     market = frame.attrs.get("screening_market", "a")
-    runtime = build_strict_chart_cd(market=market, code=code, frequency=frequency, frame=frame)
+    runtime = build_strict_chart_cd(
+        market=market, code=code, frequency=frequency, frame=frame, last_bar_closed=True,
+    )
     if runtime.cd is None:
         raise ValueError(f"{runtime.error_code}: {runtime.error_message}")
     chart = cl_data_to_tv_chart(frame, {"chart_show_bi": "1", "chart_show_xd": "1", "chart_show_fx": "1"},
@@ -102,7 +110,7 @@ def snapshot_for(frame, code, frequency):
          "start_tick": u.start_tick, "end_tick": u.end_tick,
          "locked": u.locked, "forming": u.forming,
          "confirmed_at": None if u.confirmed_at is None else int(u.confirmed_at.timestamp())}
-        for u in (levels[0].units if 0 in levels else ())
+        for u in runtime.cd.get_segment_units()
     ]
     points = {p.point_id: p for p in (*evidence.confirmed_points, *evidence.approaching_points)}
     starts = {}
@@ -325,9 +333,10 @@ def _save_evidence(run_dir, code, frequency, frame, snapshot):
 
 
 def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision=None,
-                _confirmation_only=False, _inputs=None):
+                _confirmation_only=False, _inputs=None, force_rebuild=False):
     if settings.get("strategy") == STRATEGY and not _confirmation_only:
-        return _scan_nested_symbol(stock, settings, contexts, run_dir, cache_root=cache_root, revision=revision)
+        return _scan_nested_symbol(stock, settings, contexts, run_dir, cache_root=cache_root, revision=revision,
+                                   force_rebuild=force_rebuild)
     started = time.monotonic()
     rows = []
     code = stock["code"]
@@ -351,7 +360,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             from chanlun.screening.markets import storage_symbol
             cache_path = None if cache_root is None else Path(cache_root, f"{storage_symbol(code, stock.get('market', 'a'))}_{frequency}.json.gz")
             key = None if cache_path is None else calculation_key(frame, code, frequency, revision or source_revision())
-            cached = None if cache_path is None else read_calculation(cache_path, key)
+            cached = None if cache_path is None or force_rebuild else read_calculation(cache_path, key)
             snapshot = cached["snapshot"] if cached is not None else snapshot_for(frame, code, frequency)
             reviewed = cached["reviewed"] if cached is not None else {}
             result = audit_snapshot(snapshot, frame, context, settings["point_types"],
@@ -402,9 +411,9 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             if _inputs is not None:
                 _inputs[frequency] = {"frame": frame, "snapshot": snapshot, "reviewed": reviewed,
                                       "cache_path": cache_path, "key": key}
-            if cache_path is not None and (cached is None or pending):
+            if cache_path is not None and (cached is None or pending or not cached.get('source_input')):
                 try:
-                    write_calculation(cache_path, key, row, snapshot, reviewed)
+                    write_calculation(cache_path, key, row, snapshot, reviewed, source_frame=frame)
                 except OSError:
                     # Optional reuse storage cannot undo successfully persisted
                     # evidence or turn a usable result into an engine failure.
@@ -417,13 +426,13 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             "seconds": round(time.monotonic() - started, 3)}
 
 
-def _scan_nested_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision=None):
+def _scan_nested_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision=None, force_rebuild=False):
     """Calculate 1m only for usable 5m setups; publish one joined 5m result."""
     started = time.monotonic()
     inputs = {}
     main_settings = {**settings, "strategy": None, "frequencies": ["5m"]}
     result = scan_symbol(stock, main_settings, contexts, run_dir, cache_root=cache_root,
-                         revision=revision, _inputs=inputs)
+                         revision=revision, _inputs=inputs, force_rebuild=force_rebuild)
     if not result["rows"]:
         return result
     row = result["rows"][0]
@@ -434,7 +443,7 @@ def _scan_nested_symbol(stock, settings, contexts, run_dir, *, cache_root=None, 
     try:
         lower_settings = {**main_settings, "frequencies": ["1m"], "point_types": list(POINT_TYPES)}
         lower_result = scan_symbol(stock, lower_settings, contexts, run_dir, cache_root=cache_root,
-                                   revision=revision, _confirmation_only=True, _inputs=inputs)
+                                   revision=revision, _confirmation_only=True, _inputs=inputs, force_rebuild=force_rebuild)
         lower_row = next(iter(lower_result["rows"]), {})
         if lower_row.get("data_errors") or "1m" not in inputs:
             row.update(selected=[], observations=[], data_errors=["LOWER_DATA_ERROR"],
@@ -499,7 +508,7 @@ def _scan_nested_symbol(stock, settings, contexts, run_dir, *, cache_root=None, 
                 # checked afresh against both inputs on every scan.
                 lower_input["snapshot"].pop("screening_interval_signals", None)
                 write_calculation(lower_input["cache_path"], lower_input["key"], lower_row,
-                                  lower_input["snapshot"], lower_input["reviewed"])
+                                  lower_input["snapshot"], lower_input["reviewed"], source_frame=lower_input['frame'])
             except OSError:
                 pass
     except Exception as exc:
@@ -512,6 +521,9 @@ def _scan_nested_symbol(stock, settings, contexts, run_dir, *, cache_root=None, 
 
 def _worker_main(connection, settings, contexts, run_dir, revision):
     try:
+        request_path = Path(run_dir, "request.json")
+        request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
+        cache_options = {"force_rebuild": True} if request.get("force_rebuild") is True else {}
         while True:
             stock = connection.recv()
             if stock is None:
@@ -520,13 +532,13 @@ def _worker_main(connection, settings, contexts, run_dir, revision):
                 symbol_contexts = contexts
                 if stock.get("market", "a") != "a":
                     from chanlun.screening.markets import market_context
-                    observed = datetime.fromisoformat(json.loads(Path(run_dir, "request.json").read_text(encoding="utf-8"))["observed_at"])
+                    observed = datetime.fromisoformat(request["observed_at"])
                     main = market_context(stock["market"], stock["code"], observed, "5m", settings["recent_sessions"], settings["max_anchor_sessions"],
                                           completed_session=settings.get("scope") in {"all_a_watchlist", "watchlist"})
                     lower = market_context(stock["market"], stock["code"], datetime.fromtimestamp(main["cutoff"], CN), "1m", settings["recent_sessions"], settings["max_anchor_sessions"])
                     symbol_contexts = {"5m": main, "1m": lower}
                 result = scan_symbol(stock, settings, symbol_contexts, run_dir,
-                                     cache_root=Path(run_dir).parent / "analysis_cache", revision=revision)
+                                     cache_root=Path(run_dir).parent / "analysis_cache", revision=revision, **cache_options)
             except Exception as exc:
                 result = {"code": stock["code"], "market": stock.get("market", "a"), "name": stock["name"], "rows": [],
                           "error": f"{type(exc).__name__}: {exc}"}
@@ -735,7 +747,10 @@ def run_screening(run_dir: Path):
                                          "watchlist": "人工关注组（各市场）", "symbols": "选股候选（跨市场）"}.get(settings["scope"], "指定股票")})
         write_json(run_dir / "universe.json", stocks)
         write_json(run_dir / "status.json", state)
-        workers = min(settings.get("workers", 4), max(1, (os.cpu_count() or 2) - 2), 6)
+        workers = min(settings.get("workers", 12), max(1, (os.cpu_count() or 2) - 2), 12)
+        state["effective_workers"] = workers
+        state["catalog_elapsed_seconds"] = round(time.time() - state["started_at"], 1)
+        scan_started = time.time()
         for result, current_codes in bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"]):
             if result is not None:
                 with (run_dir / "results.jsonl").open("a", encoding="utf-8") as stream:
@@ -744,14 +759,17 @@ def run_screening(run_dir: Path):
                 state["selected_count"] += int(any(r["selected"] for r in result["rows"]))
                 state["error_count"] += int(bool(result.get("error")) or any(r.get("data_errors") for r in result["rows"]))
                 state["reused_combinations"] = state.get("reused_combinations", 0) + sum(bool(r.get("calculation_reused")) for r in result["rows"])
+                state["symbol_seconds_total"] = round(state.get("symbol_seconds_total", 0) + result.get("seconds", 0), 3)
             state.update(current_codes=current_codes,
                          elapsed_seconds=round(time.time() - state["started_at"], 1), updated_at=time.time())
             write_json(run_dir / "status.json", state)
         state["status"] = "cancelled" if (run_dir / "cancel").exists() else "completed"
+        state["scan_elapsed_seconds"] = round(time.time() - scan_started, 1)
         state["phase"] = "finished"
     except ScreeningCancelled:
         state.update(status="cancelled", phase="finished")
     except Exception as exc:
+        traceback.print_exc()
         state.update(status="failed", phase="finished", error=f"{type(exc).__name__}: {exc}")
     state.update(current_codes=[], finished_at=time.time(), elapsed_seconds=round(time.time() - state["started_at"], 1))
     write_json(run_dir / "status.json", state)

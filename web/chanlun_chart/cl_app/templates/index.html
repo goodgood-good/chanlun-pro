@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>{% if request.args.get('screening_source') %}本次筛选证据 · {% endif %}缠论结构解盘 - Chanlun Pro</title>
+    <title>{% if request.args.get('screening_source') %}本次筛选证据 · {% endif %}交易分析 · Chanlun Pro</title>
 
     <link
       rel="shortcut icon"
@@ -43,6 +43,7 @@
       type="text/javascript"
       src="{{ url_for('static', filename='datafeeds/udf/dist/bundle.js') }}?asset={{ static_asset_token }}"></script>
     {% include 'dark.html' %}
+    {% include 'workspace_head.html' %}
   </head>
 
   <body class="cp-ui cp-workbench" data-chart-focus="lowest-center">
@@ -188,10 +189,8 @@
           <div class="ca-sidebar-top">
             <header class="ca-sidebar-header">
               <div class="ca-sidebar-title-wrap">
-                <span class="ca-sidebar-eyebrow">STRUCTURE WORKBENCH</span>
+                <span class="ca-sidebar-eyebrow">MARKET ANALYSIS</span>
                 <h2 class="ca-sidebar-title">缠论结构解盘</h2>
-                <a href="/screening" target="_blank" rel="noopener" class="ca-screening-link">缠论选股工作台 →</a>
-                <a href="/monitor" target="_blank" rel="noopener" class="ca-screening-link">盘后选股与实时监听 →</a>
                 <p class="ca-sidebar-subtitle">行情 · 笔与线段 · 本周期中枢</p>
                 <p class="ca-account-context" title="当前登录账号">
                   <i class="layui-icon layui-icon-username" aria-hidden="true"></i>
@@ -216,8 +215,8 @@
                   class="ca-sidebar-menu"
                   aria-haspopup="menu"
                   aria-expanded="false"
-                  aria-label="打开结构解盘工具菜单"
-                  title="结构解盘工具菜单">
+                  aria-label="打开工作台菜单"
+                  title="工作台菜单">
                   <i class="layui-icon layui-icon-more-vertical" aria-hidden="true"></i>
                 </button>
               </div>
@@ -260,6 +259,7 @@
               <button type="button" id="ca-refresh-analysis" class="ca-action">刷新</button>
             </header>
             <p id="ca-native-status" role="status" aria-live="polite">加载 K 线与中枢…</p>
+            <p id="ca-segment-status" role="status" aria-live="polite"></p>
             <div class="ca-native-counts" aria-label="结构数量">
               <span>K 线 <strong id="ca-bar-count">—</strong></span>
               <span>笔 <strong id="ca-bi-count">—</strong></span>
@@ -1407,6 +1407,13 @@
         dropdown.render({
           elem: "#toggle-menu",
           data: [
+            { title: "交易分析", id: "workspace_trading" },
+            { title: "缠论选股", id: "workspace_screening" },
+            { title: "信号监听", id: "workspace_monitor" },
+            { title: "自选管理", id: 2 },
+            { title: "标的中心", id: "workspace_symbols" },
+            { title: "设置", id: "workspace_settings" },
+            { type: "-" },
             {
               title: "收起结构解盘侧栏",
               templet:
@@ -1419,12 +1426,6 @@
               templet:
                 '<div><i class="layui-icon layui-icon-set"></i> <span>结构显示设置</span></div>',
               id: 1,
-            },
-            {
-              title: "管理自选分组",
-              templet:
-                '<div><i class="layui-icon layui-icon-templeate-1"></i> <span>管理自选分组</span></div>',
-              id: 2,
             },
             {
               title: "切换图表布局",
@@ -1473,7 +1474,21 @@
             },
           ],
           click: function (item) {
-            if (item.id === "logout") {
+            var workspacePages = {
+              workspace_trading: "/",
+              workspace_screening: "/screening",
+              workspace_monitor: "/monitor",
+              workspace_symbols: "/symbols",
+              workspace_settings: "/setting",
+            };
+            var destination = workspacePages[item.id];
+            if (destination) {
+              if (window.AccountPreferences && typeof window.AccountPreferences.navigateAfterSave === "function") {
+                window.AccountPreferences.navigateAfterSave(destination, false);
+              } else {
+                location.assign(destination);
+              }
+            } else if (item.id === "logout") {
               document.getElementById("logout-form").submit();
             } else if (item.id === "collapse_menu") {
               // 由 ChartMenuResize 模块挂载到 window 上的接口（在底部 IIFE 中暴露）
@@ -1586,7 +1601,7 @@
           Utils.get_local_data("chart_layout_type") || "single";
         let charts_area = $("#tv_charts_area");
         charts_area.empty();
-        let win_height = window.innerHeight;
+        let win_height = document.getElementById("chart_container")?.clientHeight || window.innerHeight;
         let win_width = charts_area.width() || window.innerWidth;
         let chart_configs = [];
         if (chart_layout_type === "single") {
@@ -1913,7 +1928,7 @@
         // 初始宽度：localStorage > 默认；初始收起状态：localStorage
         var stored = readStoredWidth();
         var initial = clampWidth(stored || DEFAULT_WIDTH);
-        var collapsed = requestsInitialCollapse() || readCollapsed();
+        var collapsed = requestsInitialCollapse() || window.innerWidth <= OVERLAY_BREAKPOINT || readCollapsed();
         applyWidth(initial, collapsed);
 
         var handle = document.getElementById('chart_resize_handle');

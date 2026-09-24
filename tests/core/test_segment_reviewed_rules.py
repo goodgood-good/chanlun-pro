@@ -1,7 +1,7 @@
 """Acceptance cases supplied by the user for review charts 01--05, 2026-09-17.
 
-These expectations are user decisions, not newly discovered author quotations.
-The original-source constraints remain covered by the source-figure regressions.
+REVIEWED preserves the historical user decisions, not author quotations. Later
+source-based corrections are explicit below; they never rewrite that history.
 """
 
 import pytest
@@ -24,11 +24,18 @@ REVIEWED = {
     "03_P5_15": ([0, 10, 6, 14, 4, 15, 3], [(0, 5, False)]),
 }
 
+# Later full-rule audit, L07176-106: in 14->4->14->3 the third pen extends
+# the first end before any STRICT origin return. Equal-origin inclusion must
+# not erase this sufficient completion. Keep the prior decision above for
+# comparison; docs/segment_rules.md describes the current rule.
+SOURCE_REVISIONS_20260921 = {"03_P5_14": [(0, 3, True), (3, 6, False)]}
+
 
 @pytest.mark.parametrize("mirror", [False, True])
 @pytest.mark.parametrize("name", REVIEWED)
-def test_user_chart_decisions(name, mirror):
+def test_reviewed_cases_with_explicit_later_source_corrections(name, mirror):
     points, expected = REVIEWED[name]
+    expected = SOURCE_REVISIONS_20260921.get(name, expected)
     values = strokes(points, mirror)
     calculator = XdCalculator()
     assert geometry(calculator.calculate(values)) == expected

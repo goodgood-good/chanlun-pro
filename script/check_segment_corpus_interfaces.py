@@ -8,8 +8,9 @@ and order-preserving price transforms. No new theory interpretation is added.
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import copy
-from dataclasses import asdict, replace
+from dataclasses import asdict, replace, fields, is_dataclass
 from fractions import Fraction
+from decimal import Decimal, ROUND_FLOOR
 import argparse
 import hashlib
 import json
@@ -23,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from chanlun.core.xd_calculator import XdCalculator
+from chanlun.core.segment_evidence import FeatureEvidence
 from script.check_segment_candidates import SearchAuditCalculator
 from script.validate_segment_corpus import (
     check_structure, hashes, line_state, new_cl, pen_state, physical, read_frame, write_json,
@@ -107,11 +109,20 @@ def ordinal_check(values, original):
                            high_source_index=e.low_source_index if mirror else e.high_source_index)
 
         def proof(p):
-            return replace(p, direction=flip(p.direction),
-                           first_sequence=tuple(element(e) for e in p.first_sequence),
-                           second_sequence=tuple(element(e) for e in p.second_sequence),
-                           parent_key=(*p.parent_key[:2], flip(p.parent_key[2])) if p.parent_key else None,
-                           pivot_stem=element(p.pivot_stem) if p.pivot_stem else None)
+            # Certificates now contain their own independent proofs. Transform
+            # their price suppliers and directions as well, keeping indices and
+            # clocks unchanged; omitting nested receipts is not a valid oracle.
+            if isinstance(p,FeatureEvidence):
+                return element(p)
+            if is_dataclass(p):
+                return replace(p,**{f.name:proof(getattr(p,f.name)) for f in fields(p)})
+            if isinstance(p,tuple):
+                return tuple(proof(x) for x in p)
+            if isinstance(p,list):
+                return [proof(x) for x in p]
+            if isinstance(p,str) and p in ('up','down'):
+                return flip(p)
+            return p
 
         assert tuple(proof(p) for p in original.evidence) == transformed.evidence, "ordinal_proof"
         assert replace(original.tail_state, direction=flip(original.tail_state.direction)
@@ -157,6 +168,12 @@ def check_one(dataset, output):
             row = prefix.iloc[-1]
             # A partial candle inside its final range, then its final OHLCV.
             draft_close = (float(row.open) + float(row.close)) / 2
+            if dataset.get('structure_price_quantum') is not None:
+                # The simulated partial candle must obey the retained price
+                # grid too; a floating midpoint can invent an invalid half tick.
+                quantum=Decimal(str(dataset['structure_price_quantum']))
+                middle=(Decimal(str(row.open))+Decimal(str(row.close)))/(2*quantum)
+                draft_close=float(middle.to_integral_value(rounding=ROUND_FLOOR)*quantum)
             prefix.loc[end - 1, ["high", "low", "close", "volume"]] = [
                 max(float(row.open), draft_close), min(float(row.open), draft_close),
                 draft_close, float(row.volume) / 2,

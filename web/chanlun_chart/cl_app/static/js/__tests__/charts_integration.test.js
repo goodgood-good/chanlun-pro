@@ -86,6 +86,50 @@ function makeManager(ChartManager, mockWidget, barsResultMap) {
   return cm;
 }
 
+test('quick drawing tools fit one column and activate the selected tool and color', () => {
+  const { ChartManager, sb } = loadChartManager();
+  function element() {
+    return {style:{},children:[],attributes:{},listeners:{},
+      appendChild(child){this.children.push(child);},
+      setAttribute(key,value){this.attributes[key]=value;},
+      getAttribute(key){return this.attributes[key];},
+      addEventListener(name,fn){this.listeners[name]=fn;},
+      querySelectorAll(){return this.children.flatMap(c=>c.className==='cl-drawbtn'?[c]:c.querySelectorAll());}};
+  }
+  const group=element(), calls=[], cm=Object.create(ChartManager.prototype);
+  cm.id=2;
+  cm._levelBarItems=()=>({items:[{label:'本周期',color:'#2563eb'}]});
+  cm.chart={applyOverrides:value=>calls.push(value)};
+  cm.widget={selectLineTool:tool=>calls.push(tool)};
+  sb.document.getElementById=id=>id==='cl_drawpal_2'?group:null;
+  cm._buildDrawPaletteInto(group,{createElement:element},'5');
+  const buttons=group.querySelectorAll();
+  assert.deepEqual(buttons.map(b=>b.textContent),['画线','画框']);
+  assert.match(group.children[1].style.cssText,/flex-direction:column/);
+  assert.ok(buttons.every(b=>b.style.cssText.includes('white-space:nowrap')));
+  buttons[1].listeners.click({stopPropagation(){}});
+  assert.equal(calls[1],'rectangle');
+  assert.equal(calls[0]['linetoolrectangle.color'],'#2563eb');
+  assert.equal(buttons[1].getAttribute('aria-pressed'),'true');
+  assert.equal(buttons[0].getAttribute('aria-pressed'),'false');
+  buttons[0].listeners.click({stopPropagation(){}});
+  assert.equal(calls[3],'trend_line');
+  assert.equal(buttons[1].getAttribute('aria-pressed'),'false');
+  assert.equal(buttons[0].getAttribute('aria-pressed'),'true');
+});
+
+test('drawing toolbar lookup is confined to its own chart in a multichart layout', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm=Object.create(ChartManager.prototype);cm.id=2;
+  const ownFrame={contentDocument:{}}, otherFrame={contentDocument:{}};
+  sb.document.querySelectorAll=()=>{throw new Error('must not inspect sibling charts');};
+  sb.document.getElementById=id=>id==='tv_chart_container_2'?{querySelectorAll:()=>[ownFrame]}:
+    id==='tv_chart_container_1'?{querySelectorAll:()=>[otherFrame]}:null;
+  assert.deepEqual(cm._drawPaletteFrames(),[ownFrame]);
+  cm.id=3;
+  assert.equal(cm._drawPaletteFrames().length,0);
+});
+
 function makeDrawingPersistenceManager(ChartManager) {
   const cm = Object.create(ChartManager.prototype);
   cm._drawingSaveInFlight = false;
@@ -347,6 +391,33 @@ test('explicit US bar labels align base paths, fractals and SSE replay without c
   cm.widget = { symbolInterval: () => ({ symbol: 'currency_spot:BTC/USDT', interval: '30' }) };
   assert.equal(cm._centerChartTimeCoordinate(close, '30'), close,
     'old symbol metadata cannot leak into the next symbol');
+});
+
+test('unresolved segment interval is a labelled range on the segment layer, not another XD', async () => {
+  const { ChartManager } = loadChartManager();
+  const api = require('../chart_structure_reconcile.js');
+  const cm = Object.create(ChartManager.prototype);
+  cm._strictApi = () => api;
+  cm.cl_show_config = {xd:true,center_all:false};
+  const item = {render_kind:'segment_unresolved_range',region_id:'tail-1',render_id:'tail-1@283',
+    structural_level:0,price_basis_revision:'raw-test',available_at:500,state:'unresolved',tradable:false,
+    pen_count:283,confirmed_pen_count:281,reason:'initial-extreme-too-short',
+    points:[{time:100,price:160},{time:500,price:80.61}]};
+  const snapshot={price_basis_revision:'raw-test',source_closed_at:500,
+    levels:[{structural_level:0,origin:'native_segments',centers:[]}],unresolved_segment_ranges:[item]};
+  const context={chartInstanceId:'one',symbol:'SH.600183',interval:'5m',price_basis_revision:'raw-test',sourceTimeIsClose:false};
+  const groups=cm._strictRenderGroups(snapshot,context);
+  assert.equal(groups.size,1);
+  let drawn;
+  cm.chart={createMultipointShape(points,options){drawn={points,options};return 'interval-1';}};
+  await cm._createStrictShape([...groups.values()][0][0],'5',[]);
+  assert.equal(drawn.options.shape,'rectangle');
+  assert.match(drawn.options.text,/线段待判定/);
+  assert.equal(drawn.options.overrides.transparency,96);
+  cm.cl_show_config.xd=false;
+  assert.equal(cm._strictRenderGroups(snapshot,context).size,0);
+  cm.cl_show_config.xd=true;
+  assert.equal(cm._strictRenderGroups({...snapshot,unresolved_segment_ranges:[]},context).size,0);
 });
 
 test('dense base structures are rendered as bounded open paths instead of one line-tool per segment', () => {

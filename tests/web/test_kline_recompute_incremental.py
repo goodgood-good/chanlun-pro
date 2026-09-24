@@ -27,13 +27,16 @@ class _FakeCL:
     def __init__(self):
         self.n = 0
         self.validated_incremental_calls = 0
+        self.close_contracts = []
 
-    def process_klines(self, klines):
+    def process_klines(self, klines, *, last_bar_closed=False):
         self.n = len(klines)
+        self.close_contracts.append(last_bar_closed)
 
-    def process_validated_incremental_klines(self, klines):
+    def process_validated_incremental_klines(self, klines, *, last_bar_closed=False):
         self.validated_incremental_calls += 1
         self.n = len(klines)
+        self.close_contracts.append(last_bar_closed)
 
 
 @pytest.fixture
@@ -42,7 +45,7 @@ def mock_cl(monkeypatch):
 
     def build(**kwargs):
         cd = _FakeCL()
-        cd.process_klines(kwargs["frame"])
+        cd.process_klines(kwargs["frame"], last_bar_closed=kwargs["last_bar_closed"])
         created.append(cd)
         return StrictChartRuntimeResult.success(cd)
 
@@ -72,6 +75,7 @@ def test_reuse_when_prefix_stable(mock_cl):
 
     assert first["id"] == second["id"]
     assert mock_cl[0].validated_incremental_calls == 1
+    assert mock_cl[0].close_contracts == [True, True]
 
 
 def test_identical_full_frame_skips_processing_but_serializes_again(mock_cl):
@@ -86,6 +90,14 @@ def test_identical_full_frame_skips_processing_but_serializes_again(mock_cl):
     assert second is not first
     assert len(mock_cl) == 1
     assert mock_cl[0].validated_incremental_calls == 0
+
+
+def test_calendar_bar_without_close_attestation_keeps_live_contract(mock_cl):
+    recompute_chart_data_from_klines(
+        "a", "SYN", "d", {}, _klines_df([1000, 87400], [10, 11]),
+        cache_key="a:SYN:d",
+    )
+    assert mock_cl[0].close_contracts == [False]
 
 
 def test_unchanged_published_frame_reuses_payload_and_skips_another_disk_write(mock_cl, monkeypatch):
@@ -109,7 +121,7 @@ def test_unchanged_published_frame_reuses_payload_and_skips_another_disk_write(m
 
 
 @pytest.mark.parametrize("field", ["date", "open", "high", "low", "close", "volume"])
-def test_last_bar_fact_change_still_processes_reused_runtime(mock_cl, field):
+def test_completed_last_bar_revision_rebuilds_its_dependent_confirmations(mock_cl, field):
     frame = _klines_df([1000, 1060], [10, 11])
     first = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, frame, cache_key="a:SYN:1m",
@@ -122,8 +134,9 @@ def test_last_bar_fact_change_still_processes_reused_runtime(mock_cl, field):
     second = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, changed, cache_key="a:SYN:1m",
     )
-    assert second["id"] == first["id"]
-    assert mock_cl[0].validated_incremental_calls == 1
+    assert second["id"] != first["id"]
+    assert len(mock_cl) == 2
+    assert all(cd.close_contracts == [True] for cd in mock_cl)
 
 
 @pytest.mark.parametrize("field", ["date", "open", "high", "low", "close", "volume"])

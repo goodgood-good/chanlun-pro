@@ -27,6 +27,8 @@ import pandas as pd
 import pytest
 
 from chanlun.core.cl import CL
+from chanlun.core.xd_calculator import XdCalculator
+from script.check_segment_model import check_evidence
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "SZ.002299_1m.parquet"
@@ -88,17 +90,35 @@ def test_no_single_segment_swallows_the_tail(minute_frame: pd.DataFrame) -> None
     # construction test, independent of the full file's earlier BI boundary.
     state.process_klines(minute_frame.iloc[4600:5150].reset_index(drop=True))
     segments = state.get_xds()
-    # L067 requires an actual feature fractal, not a minimum segment count.
-    # The former four-segment output began with a false top: middle high
-    # 16.58 < left high 16.73. The first valid top has high 17.25 and ends at
-    # point 32. This window therefore has one confirmed segment and one tail;
-    # it still exercises whether the tail swallows disproportionate history.
-    assert len(segments) == 2
-    assert _segment_signature(segments[0]) == (1, 31, "up", True)
-    first_proof = segments[0].construction_evidence
+    # The unestablished opening up-origin is crossed first, so the observed
+    # down-origin is recovered. 17.25's first reverse element is normalized
+    # from its 16.87 raw end to 17.05; pen 36 reaches 17.00 and establishes
+    # the parent before the independent child completion at pen 39.
+    assert [_segment_signature(x) for x in segments] == [
+        (2, 8, "down", True), (9, 31, "up", True), (32, 36, "down", True),
+        (37, 39, "up", True), (40, 46, "down", False),
+    ]
+    values = state.get_contiguous_bis()
+    receipt=segments[1].construction_evidence.first_break_evidence
+    assert receipt.effective_first.source_indices==(32,34)
+    assert receipt.effective_first.low==17.05 and receipt.extension_index==36
+    assert segments[1].construction_evidence.witness_index == 36
+    assert segments[1].locked_at == values[36].locked_at
+    assert segments[2].locked_at == values[39].locked_at
+    check_evidence(state.xd_calculator, values)
+    # This first-break proof is independent of an established predecessor.
+    isolated = XdCalculator()
+    isolated._build_segments(values, 9)
+    first_proof = isolated.evidence[0]
+    assert first_proof.key == (9, 31, 'up')
     left, middle, right = first_proof.first_sequence
     assert (left.high, middle.high, right.high) == (17.2, 17.25, 17.19)
+    assert (left.low,middle.low,right.low)==(17.07,17.05,17.0)
     assert not first_proof.initial_gap
+    assert first_proof.reference_mode=='record'
+    assert first_proof.witness_index==36
+    assert first_proof.first_break_witness_index == 36
+    assert not state.get_contiguous_bis()[46].is_done()
 
     spans = [
         int(item.end_line.index) - int(item.start_line.index) + 1

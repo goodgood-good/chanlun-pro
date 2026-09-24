@@ -8,6 +8,7 @@
     <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}?asset={{ static_asset_token|default('') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
+    {% include 'workspace_head.html' %}
   </head>
 
   <body class="cp-ui">
@@ -24,9 +25,9 @@
         </div>
 
         <div class="cp-login-story">
-          <span class="cp-eyebrow">STRUCTURE RESEARCH WORKSPACE</span>
-          <h1 id="product-title">行情结构研究工作台</h1>
-          <p>查看实时行情、自选分组、笔、线段和本周期中枢。</p>
+          <span class="cp-eyebrow">TRADING & SCREENING</span>
+          <h1 id="product-title">缠论交易与选股</h1>
+          <p>行情图表、缠论选股与信号跟踪，在同一工作台完成。</p>
           <div class="cp-login-points" aria-label="工作台能力">
             <span>实时盯盘</span>
             <span>笔与线段中枢</span>
@@ -35,7 +36,7 @@
           </div>
         </div>
 
-        <p class="cp-login-footnote">研究工具 · 不替代独立判断 · 不承诺未来收益</p>
+        <p class="cp-login-footnote">行情分析 · 信号筛选 · 人工复核</p>
       </section>
 
       <section class="cp-login-panel" aria-labelledby="login-title">

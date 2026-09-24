@@ -17,7 +17,7 @@ from chanlun.core.bi_calculator import BiCalculator
 from chanlun.core.cl_kline_process import CL_Kline_Process
 from script.review_stroke_rule_logic import (
     COMPLETION_RETRACTION, EQUAL_PREFIX, INITIAL_INCLUSION, ORIGIN_WAIT,
-    independent_definitions, long_origin_wait, path_conditions, reflected,
+    independent_definitions, long_origin_wait, reflected,
 )
 from tests.core.strict_structure.test_source_stroke_revision import _bars, _calculate
 from tests.core.test_stroke_endpoint_candidates import _live_prefixes, _signature
@@ -69,7 +69,8 @@ def test_a_retained_reverse_connection_settles_the_earlier_equal_junction(mirror
 @pytest.mark.parametrize("extended", [False, True])
 def test_later_candidates_progress_in_the_same_continuous_chain(extended,mirror):
     values=reflected(long_origin_wait() if extended else ORIGIN_WAIT,mirror)
-    for _,calc in _live_prefixes(_bars(values)):pass
+    for _,calc in _live_prefixes(_bars(values)):
+        pass
     assert len(calc.stroke_components)==1 and not calc.unresolved_regions
     assert [(b.start.k.index,b.end.k.index) for b in calc.bis[:2]]==[(1,11),(11,19)]
     assert len(calc.bis)==(69 if extended else 5)
@@ -80,7 +81,8 @@ def test_later_candidates_progress_in_the_same_continuous_chain(extended,mirror)
 @pytest.mark.parametrize("mirror", [False, True])
 def test_short_opposite_observations_do_not_create_an_unrelated_component(mirror):
     values=ORIGIN_WAIT[:15]+[(14,10),(16,12),(18,14),(20,16),(21,17),(20,16)]
-    for _,calc in _live_prefixes(_bars(values,mirror)):pass
+    for _,calc in _live_prefixes(_bars(values,mirror)):
+        pass
     assert [(b.start.k.index,b.end.k.index) for b in calc.bis]==[(1,11),(11,19)]
     assert len(calc.stroke_components)==1 and not calc.unresolved_regions
 

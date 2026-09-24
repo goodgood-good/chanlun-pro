@@ -1,0 +1,29 @@
+[
+  {
+    "id": "14beaff7c352076c48167a0e",
+    "code": "SH.600279",
+    "frequency": "1m",
+    "file": "SH_600279_1m.parquet",
+    "sha256": "8090a7fe304b889e6cb6049a0a9704e902fe4b7df5c166bc357b18db3d9dceca",
+    "source_fingerprint": "28f10b37dec3e4a7994cc5a5116002805ceea10cfc446bab06165518f194d561",
+    "origin": "Retained raw input of independently reviewed 2026-09-21 completion omission; market case, not an author figure."
+  },
+  {
+    "id": "db0e0eb68a89d4794f2a67e9",
+    "code": "SH.600004",
+    "frequency": "5m",
+    "file": "SH_600004_5m.parquet",
+    "sha256": "4ac1ea72bc3ce14ed911ded9a2cd1d1dffbec5fca4fd14457ddbfae8edddbfa4",
+    "source_fingerprint": "ed8e89b21af05665329bbe8f7913e68f4b147bbb4b39f2d393fda9ca9ca60a74",
+    "origin": "Retained raw input of independently reviewed 2026-09-21 completion omission; market case, not an author figure."
+  },
+  {
+    "id": "357bed55121ac1bf37e9cfbb",
+    "code": "SH.600033",
+    "frequency": "5m",
+    "file": "SH_600033_5m.parquet",
+    "sha256": "1003d5d9faba61ac6e782a9b3bae30303e2df5e6fe9a0df38d5c26fd41d61b90",
+    "source_fingerprint": "ebad429678896906c2c5c1e84143aa61f4a0f6b3d52b4ee4f1bc629bee3c619f",
+    "origin": "Retained raw input of independently reviewed 2026-09-21 completion omission; market case, not an author figure."
+  }
+]

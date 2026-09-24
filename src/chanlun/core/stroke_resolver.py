@@ -158,11 +158,18 @@ class StrokeResolver:
         for a, b in selected[stable:]:
             qualifications.append(StrokeQualification(a, b, self._witnesses[b], witness, index))
         self.qualifications = tuple(qualifications)
-        prior = {(c.start, c.end, c.following_end): c for c in self._continuations}
-        prior_edges = {(c.start, c.end): c for c in self._continuations}
+        # A continuation uses two adjacent qualified edges. Both edges remain
+        # identical before stable - 1, so their existing records can be kept
+        # verbatim. Rebuild only the boundary and changed suffix; edge pairs
+        # are unique within a selected endpoint path.
+        prefix = max(0, stable - 1)
+        previous_continuations = self._continuations
+        changed_continuations = previous_continuations[prefix:]
+        prior = {(c.start, c.end, c.following_end): c for c in changed_continuations}
+        prior_edges = {(c.start, c.end): c for c in changed_continuations}
         completed_edges = {(c.start, c.end) for c in self.completions}
-        continuations = []
-        for i in range(max(0, len(selected) - 1)):
+        continuations = list(previous_continuations[:prefix])
+        for i in range(prefix, max(0, len(selected) - 1)):
             current, following = self.qualifications[i:i + 2]
             key = (current.start, current.end, following.end)
             # 完成事件已保存当时的反向后继；尾部重选不能改写该笔的

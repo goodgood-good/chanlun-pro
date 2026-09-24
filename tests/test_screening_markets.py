@@ -79,7 +79,7 @@ def test_external_start_labels_are_closed_once_and_future_tail_is_excluded(monke
 def test_no_native_segments_is_an_empty_snapshot_not_a_worker_failure(monkeypatch):
     from types import SimpleNamespace
     evidence = SimpleNamespace(structure=SimpleNamespace(levels=[]), confirmed_points=[], approaching_points=[])
-    runtime = SimpleNamespace(cd=SimpleNamespace(get_strict_evidence=lambda: evidence))
+    runtime = SimpleNamespace(cd=SimpleNamespace(get_strict_evidence=lambda: evidence, get_segment_units=lambda: ()))
     monkeypatch.setattr("chanlun.cl_utils.strict_chart_runtime.build_strict_chart_cd", lambda **kwargs: runtime)
     snapshot = {"levels": []}
     monkeypatch.setattr("chanlun.cl_utils.tv_chart.cl_data_to_tv_chart", lambda *args, **kwargs: {

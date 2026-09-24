@@ -3,6 +3,7 @@
 import json
 import gzip
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -22,6 +23,13 @@ def test_invalid_screen_scope_is_rejected_before_process_launch(body):
         screening.validate_settings(body)
 
 
+def test_screening_allows_twelve_workers_on_sixteen_logical_processors():
+    assert screening.validate_settings({"scope": "all_a"})["workers"] == 12
+    assert screening.validate_settings({"scope": "all_a", "workers": 12})["workers"] == 12
+    with pytest.raises(ValueError, match="workers"):
+        screening.validate_settings({"scope": "all_a", "workers": 13})
+
+
 def test_new_manual_run_is_detached_bounded_and_not_restarted_by_reads(tmp_path, monkeypatch):
     manager = screening.ScreeningManager(tmp_path)
     popen = Mock(return_value=Mock(pid=1234))
@@ -37,6 +45,18 @@ def test_new_manual_run_is_detached_bounded_and_not_restarted_by_reads(tmp_path,
     assert call.kwargs["env"]["OMP_NUM_THREADS"] == "1"
     assert manager.cancel()["cancel_requested"] is True
     assert popen.call_count == 1
+
+
+def test_quiet_run_preserves_selection_settings_and_persists_delivery_policy(tmp_path, monkeypatch):
+    manager = screening.ScreeningManager(tmp_path)
+    monkeypatch.setattr(screening.subprocess, "Popen", Mock(return_value=Mock(pid=1234)))
+    launched = manager.start({"scope": "all_a_watchlist"}, external_notifications=False, force_rebuild=True)
+    request = json.loads((tmp_path/launched["run_id"]/"request.json").read_text(encoding="utf-8"))
+    assert request["external_notifications"] is False
+    assert request["force_rebuild"] is True
+    assert launched["external_notifications"] is False
+    assert "external_notifications" not in request["settings"]
+    assert request["settings"] == screening.validate_settings({"scope": "all_a_watchlist"})
 
 
 def test_results_keep_errors_separate_from_no_signal_and_survive_new_manager(tmp_path):
@@ -89,6 +109,47 @@ def test_state_replacement_retries_transient_windows_reader_lock(tmp_path, monke
     assert json.loads(path.read_text())["status"] == "completed"
 
 
+@pytest.mark.parametrize("locked_file", ["latest.json", "status.json"])
+def test_status_read_survives_transient_windows_replace_lock(tmp_path, monkeypatch, locked_file):
+    run_id = "a" * 32
+    screening.write_json(tmp_path / "latest.json", {"run_id": run_id})
+    screening.write_json(tmp_path / run_id / "status.json", {"run_id": run_id, "status": "completed"})
+    original = Path.read_text
+    failures = []
+
+    def briefly_locked(path, *args, **kwargs):
+        if path.name == locked_file and len(failures) < 2:
+            failures.append(path)
+            raise PermissionError("simulated atomic replace sharing violation")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", briefly_locked)
+    monkeypatch.setattr(screening.time, "sleep", lambda _: None)
+    state = screening.ScreeningManager(tmp_path).status()
+    assert state["run_id"] == run_id
+    assert state["status"] == "completed"
+    assert len(failures) == 2
+
+
+def test_state_read_does_not_hide_persistent_permission_errors(tmp_path, monkeypatch):
+    locked = Mock(side_effect=PermissionError("access denied"))
+    monkeypatch.setattr(Path, "read_text", locked)
+    monkeypatch.setattr(screening.time, "sleep", lambda _: None)
+    with pytest.raises(PermissionError, match="access denied"):
+        screening.read_state_json(tmp_path / "status.json")
+    assert 1 < locked.call_count <= 15
+
+
+def test_state_read_reports_malformed_committed_json_without_retry(tmp_path, monkeypatch):
+    path = tmp_path / "status.json"
+    path.write_text('{"status":', encoding="utf-8")
+    sleep = Mock()
+    monkeypatch.setattr(screening.time, "sleep", sleep)
+    with pytest.raises(json.JSONDecodeError):
+        screening.read_state_json(path)
+    sleep.assert_not_called()
+
+
 def test_results_pin_task_identity_during_a_concurrent_start(tmp_path, monkeypatch):
     first, second = tmp_path / ("a" * 32), tmp_path / ("b" * 32)
     for directory, code in ((first, "SH.600000"), (second, "SZ.000001")):
@@ -125,7 +186,7 @@ def frozen_run(tmp_path):
     frame = pd.DataFrame({"date": pd.to_datetime(times, unit="s", utc=True),
                           "open": [12., 13., 14.], "high": [14., 14., 15.],
                           "low": [11., 12., 13.], "close": [13., 14., 14.], "volume": [100, 200, 300]})
-    point = {"point_id": "waiting", "point_type": "3buy", "side": "buy", "status": "approaching",
+    point = {"point_id": "waiting", "point_type": "3buy", "center_ordinal": 1, "side": "buy", "status": "approaching",
              "structural_level": 0, "source_kind": "segment", "anchor_at": times[0],
              "available_at": times[-1], "confirmed_at": None, "missing_conditions": ["terminal_unit_locked"]}
     geometry = {"fxs": [], "bis": [], "xds": [{"points": [{"time": times[0], "price": 11},

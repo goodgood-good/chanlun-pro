@@ -119,7 +119,8 @@ def test_third_qualified_edge_completes_first_and_two_conflicts_cannot_erase_it(
     assert live.fxs[-1].k.index==19
     # Subsequent qualifying top/bottom resumes the same continuous tail.
     extra=[(350,550),(400,600),(450,650),(350,550)]
-    if mirror:extra=reflect(extra)
+    if mirror:
+        extra=reflect(extra)
     update(merged,live,bars(values+extra))
     assert geometry(live.bis)==[(1,5),(5,16),(16,23)]
     assert live.completion_evidence==finished
@@ -129,7 +130,8 @@ def test_third_qualified_edge_completes_first_and_two_conflicts_cannot_erase_it(
 def test_gap_three_cannot_complete_first_pen(mirror):
     values=prices('completion_above')
     values += [(310,510),(400,600),(350,550)]
-    if mirror:values=reflect(values)
+    if mirror:
+        values=reflect(values)
     _,calc=cold(bars(values))
     assert not calc.confirmed_bis
     assert geometry(calc.bis)==[(1,12)]

@@ -132,6 +132,58 @@ def test_skip_auditor_requires_the_whole_contained_stem_and_right_shoulder(mirro
 
 
 @pytest.mark.parametrize("mirror", [False, True])
+def test_skip_auditor_recognizes_completion_at_the_selected_effective_edge(mirror):
+    # The old fixed-end convention rejected this. The selected normalized
+    # policy completes [6,10], [2,10], [8,12] at pen 11: its 12 exceeds the
+    # effective 10, without waiting for the physical first pen's 14.
+    points = [13, 8, 9, 6, 10, 2, 14, 9, 14, 8, 10, 8, 12, 1]
+    values = strokes(points, mirror)
+    assert local_first_fractal(values, 0, 5, 10) is None
+    assert local_first_fractal(values, 0, 5, 11).witness == 11
+    assert local_first_fractal(values, 0, 5, 12).witness == 11
+    # Later data cannot postpone that already observed effective completion.
+    continued = strokes(points[:-1] + [9, 15], mirror)
+    assert local_first_fractal(continued, 0, 5, 12).witness == 11
+    proof = local_first_fractal(continued, 0, 5, 13)
+    assert proof is not None and proof.witness == 11
+
+
+@pytest.mark.parametrize('mirror',[False,True])
+def test_effective_completion_retains_the_declared_absorbed_reference(mirror):
+    # R04: the raw [0,4] is already absorbed into the declared [2,4].
+    # The new completion is legal using [2,4] itself, not by replacing it
+    # with the absorbed raw [0,4]. Preserve that distinction in the receipt.
+    points=[0,-7,4,2,4,0,5,-6,5,1,3,0,4,-4,6,3,10,2,8,0]
+    values=strokes(points,mirror)
+    raw=local_first_fractal(values,1,6,12)
+    assert raw is not None and raw.witness==10
+    reference=(-4,-2) if mirror else (2,4)
+    declared=local_first_fractal(values,1,6,12,reference)
+    assert declared.witness==10 and declared.left==reference
+    from collections import Counter
+    counts=Counter()
+    calculator=SearchAuditCalculator(counts)
+    calculator.calculate(values)
+    proof=next(p for p in calculator.evidence if p.start_index==1)
+    assert (proof.first_sequence[0].low,proof.first_sequence[0].high)==reference
+    assert proof.first_sequence[0].source_indices==(2,4)
+    check_evidence(calculator,values)
+
+
+@pytest.mark.parametrize('mirror',[False,True])
+def test_interior_candidate_also_needs_a_surviving_or_protected_reference(mirror):
+    values=strokes([27,38,30,35,33,38,29,38,32,34,33,37,32,35,29,40],mirror)
+    assert local_first_fractal(values,0,11,13) is not None
+    from collections import Counter
+    counts=Counter()
+    earlier=skipped_local_fractal(values,0,5,13,counts,None,True)
+    assert (earlier.candidate,earlier.witness)==(5,11)
+    # The later turn is still ineligible under its actual standard shoulder.
+    reference=(-38,-33) if mirror else (33,38)
+    assert local_first_fractal(values,0,11,13,reference) is None
+
+
+@pytest.mark.parametrize("mirror", [False, True])
 def test_invalidation_auditor_rejects_a_resurrected_interior_boundary(mirror):
     values = strokes(CASES["78_new_turn_after_gap_invalidation"][0], mirror)
     counts = dict.fromkeys(
@@ -164,3 +216,12 @@ def test_invalidation_auditor_checks_second_fractal_before_the_same_pen_extensio
     direction = values[0].type
     with pytest.raises(AssertionError, match="second_fractal_precedes_invalidation"):
         check_gap_invalidation(values, 2, direction, 8)
+
+
+@pytest.mark.parametrize('mirror',[False,True])
+def test_invalidation_auditor_rejects_a_normalized_f2_when_its_physical_turn_returned(mirror):
+    # A normalized shape alone was incorrectly treated as completed by the
+    # old pruning auditor. Its own outgoing turn returns before continuing.
+    points=[0,2,-7,1,-3,5,2,10,6,13,10,21,14,17,9,10,8,20,10,11,7,18,12,22]
+    values=strokes(points,mirror)
+    check_gap_invalidation(values,10,'down' if mirror else 'up',22)
