@@ -110,6 +110,25 @@ def test_completed_results_open_from_disk_after_restart_and_recheck_changes(cach
     assert recovered.results()["errors"][0]["code"] == "SZ.000001"
 
 
+def test_unrelated_source_change_keeps_saved_results_visible_with_stale_warning(cached_run, monkeypatch):
+    manager = cached_run
+    directory = manager._directory()
+    state = json.loads((directory / "status.json").read_text(encoding="utf-8"))
+    screening.write_json(directory / "status.json", {**state, "source_revision": "saved-engine"})
+    monkeypatch.setattr(screening, "source_revision", lambda: "saved-engine")
+    assert manager.results(persist=True)["source_current"] is True
+
+    monkeypatch.setattr(screening, "source_revision", lambda: "changed-engine")
+    reopened = screening.ScreeningManager(manager.root)
+    read = Mock(side_effect=AssertionError("unrelated engine changes must not re-read frozen evidence"))
+    monkeypatch.setattr(reopened, "_read_results", read)
+    result = reopened.results(background=True)
+    assert result["results_loading"] is False
+    assert result["source_current"] is False
+    assert result["errors"][0]["code"] == "SH.600000"
+    assert read.call_count == 0
+
+
 def test_completed_run_warms_disk_cache_without_a_page_request(tmp_path, monkeypatch):
     manager = screening.ScreeningManager(tmp_path / "screening")
     release, warmed = Event(), Event()
