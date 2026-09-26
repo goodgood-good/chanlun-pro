@@ -7,6 +7,12 @@ def classify_center_relation(
     previous: TrendCenter,
     current: TrendCenter,
 ) -> CenterRelation:
+    """Classify same-grade center geometry, not higher-center completion.
+
+    Lesson 20's four inequalities apply when the immutable cores are strictly
+    above/below one another. Touching or overlapping cores need repartition
+    review, so they cannot inherit the formula's upgrade relation.
+    """
     if (
         previous.structural_level != current.structural_level
         or previous.source_kind is not current.source_kind
@@ -30,6 +36,11 @@ def classify_center_relation(
         )
     ):
         raise ValueError("centers must be strictly time ordered")
+    if not (
+        current.zd_tick > previous.zg_tick
+        or current.zg_tick < previous.zd_tick
+    ):
+        return CenterRelation.RECOMPOSITION_PENDING
     if current.dd_tick > previous.gg_tick:
         return CenterRelation.UP_TREND
     if current.gg_tick < previous.dd_tick:

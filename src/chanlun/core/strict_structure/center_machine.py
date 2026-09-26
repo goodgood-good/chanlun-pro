@@ -15,6 +15,7 @@ from chanlun.core.strict_structure.models import (
     DivergenceEvidence,
     SourceKind,
     TrendCenter,
+    center_envelope_units,
     center_seed_size,
 )
 
@@ -56,13 +57,13 @@ def _overlaps_core(
     zg_tick: int,
     source_kind: SourceKind,
 ) -> bool:
-    """应用与来源类型对应的重叠规则。
+    """A qualified one-price core uses closed overlap at every source grade.
 
-    线段/笔中枢要求正宽度重叠。递归输入是已完成的低级别走势类型，保留原始
-    闭区间规则；一个价格跳动点上的相等也构成有效中枢边界。
+    Physical cores with positive width retain their existing positive-overlap
+    role gate; a singleton core cannot satisfy that gate by construction.
     """
 
-    if SourceKind(source_kind) is SourceKind.TREND_TYPE:
+    if SourceKind(source_kind) is SourceKind.TREND_TYPE or zd_tick == zg_tick:
         return _touches_core(item, zd_tick, zg_tick)
     return _positive_overlap(item, zd_tick, zg_tick)
 
@@ -70,7 +71,7 @@ def _overlaps_core(
 def _return_reenters_core(
     leave: ConstituentUnit, ret: ConstituentUnit, zd_tick: int, zg_tick: int
 ) -> bool:
-    """触及核心闭区间即回到边界；等值不构成三类点。"""
+    """越过离开侧边界才回入；恰好触边仍满足第三点价位条件。"""
     direction = leave.direction
     return not return_outside_core(
         direction=direction,
@@ -202,6 +203,7 @@ def _new_ongoing_center(
         zg_tick=zg_tick,
     )
     body_units = initial_units + extension_units
+    envelope_units = center_envelope_units(initial_units, body_units, source_kind)
     maturity = establishment_leave_unit or initial_units[-1]
     return TrendCenter(
         center_id=center_id,
@@ -216,8 +218,8 @@ def _new_ongoing_center(
         extension_units=extension_units,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
-        dd_tick=min((item.low_tick for item in body_units)),
-        gg_tick=max((item.high_tick for item in body_units)),
+        dd_tick=min((item.low_tick for item in envelope_units)),
+        gg_tick=max((item.high_tick for item in envelope_units)),
         body_start_market_time=initial_units[0].market_start,
         established_market_time=maturity.market_end,
         established_at=maturity.confirmed_at,
@@ -251,15 +253,15 @@ def establish_center(initial_units, structural_level: int, source_kind: SourceKi
     evidence = values
     extension_units = ()
     (zd_tick, zg_tick) = _core(core_units)
-    if zd_tick >= zg_tick:
+    if zd_tick > zg_tick:
         return None
     if any(
         (not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units)
     ):
         return None
     if (
-        not _positive_overlap(seed_entry, zd_tick, zg_tick)
-        or not _positive_overlap(establishment_leave, zd_tick, zg_tick)
+        not _overlaps_core(seed_entry, zd_tick, zg_tick, source_kind)
+        or not _overlaps_core(establishment_leave, zd_tick, zg_tick, source_kind)
         or (not _outside_in_direction(establishment_leave, zd_tick, zg_tick))
     ):
         return None
@@ -305,15 +307,15 @@ def establish_center_preview(initial_units, structural_level: int, source_kind: 
     if not unlocked_seen:
         return None
     (zd_tick, zg_tick) = _core(core_units)
-    if zd_tick >= zg_tick:
+    if zd_tick > zg_tick:
         return None
     if any(
         (not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units)
     ):
         return None
     if (
-        not _positive_overlap(seed_entry, zd_tick, zg_tick)
-        or not _positive_overlap(establishment_leave, zd_tick, zg_tick)
+        not _overlaps_core(seed_entry, zd_tick, zg_tick, source_kind)
+        or not _overlaps_core(establishment_leave, zd_tick, zg_tick, source_kind)
         or (not _outside_in_direction(establishment_leave, zd_tick, zg_tick))
     ):
         return None
@@ -564,7 +566,7 @@ def _append_body_unit(
 ) -> tuple[TrendCenter, CenterEvent]:
     extension_units = center.extension_units + (item,)
     body_units = center.initial_units + extension_units
-    envelope = body_units + ()
+    envelope = center_envelope_units(center.initial_units, body_units, center.source_kind)
     updated = replace(
         center,
         body_units=body_units,
@@ -622,7 +624,7 @@ def _fold_failed_departure(
     returned_to_body = () if crossed_opposite_boundary else (ret,)
     extension_units = center.extension_units + returned_to_body
     body_units = center.initial_units + extension_units
-    envelope = body_units + ()
+    envelope = center_envelope_units(center.initial_units, body_units, center.source_kind)
     updated = replace(
         center,
         body_units=body_units,
@@ -800,31 +802,16 @@ def forming_preview(candidate, structural_level: int, source_kind: SourceKind, o
         (zd_tick, zg_tick) = _core(core_units)
         if zd_tick > zg_tick:
             return None
-        if zd_tick == zg_tick:
-            state = CenterPreviewState.TOUCH_ONLY
-        if state is CenterPreviewState.TOUCH_ONLY:
-            if any(
-                (item.low_tick > zd_tick or item.high_tick < zg_tick for item in body)
-            ):
-                return None
-        elif any(
+        if any(
             (not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in body)
         ):
             return None
-        if state is CenterPreviewState.TOUCH_ONLY:
-            if not _touches_core(seed_entry, zd_tick, zg_tick):
-                return None
-            if establishment_leave is not None and (
-                not _touches_core(establishment_leave, zd_tick, zg_tick)
-            ):
-                return None
-        else:
-            if not _positive_overlap(seed_entry, zd_tick, zg_tick):
-                return None
-            if establishment_leave is not None and (
-                not _positive_overlap(establishment_leave, zd_tick, zg_tick)
-            ):
-                return None
+        if not _overlaps_core(seed_entry, zd_tick, zg_tick, source_kind):
+            return None
+        if establishment_leave is not None and not _overlaps_core(
+            establishment_leave, zd_tick, zg_tick, source_kind
+        ):
+            return None
         if establishment_leave is not None:
             if not _outside_in_direction(establishment_leave, zd_tick, zg_tick):
                 return None
@@ -1308,8 +1295,8 @@ def _recursive_advance_center_preview_lifecycle(preview: CenterPreview, initial_
         if _conflicting_pair(previous, item, oscillatory_ids) or item.start_tick != previous.end_tick or item.market_start < previous.market_end:
             raise ValueError('preview transition must be connected and alternating')
         if pending is not None:
-            completes_up = pending.direction == 'up' and item.direction == 'down' and (item.low_tick > preview.zg_tick)
-            completes_down = pending.direction == 'down' and item.direction == 'up' and (item.high_tick < preview.zd_tick)
+            completes_up = pending.direction == 'up' and item.direction == 'down' and return_outside_core(direction='up', low_tick=item.low_tick, high_tick=item.high_tick, zd_tick=preview.zd_tick, zg_tick=preview.zg_tick)
+            completes_down = pending.direction == 'down' and item.direction == 'up' and return_outside_core(direction='down', low_tick=item.low_tick, high_tick=item.high_tick, zd_tick=preview.zd_tick, zg_tick=preview.zg_tick)
             if completes_up or completes_down:
                 return replace(preview, unit_ids=tuple((value.unit_id for value in body)), failed_departure_unit_ids=tuple((value.unit_id for value in failed_departures)), state=CenterPreviewState.COMPLETED, available_at=max(available_at, item.available_at), pending_leave_unit_id=None, completion_leave_unit_id=pending.unit_id, completion_return_unit_id=item.unit_id)
             if _return_reenters_core(pending, item, preview.zd_tick, preview.zg_tick) and _overlaps_core(item, preview.zd_tick, preview.zg_tick, preview.source_kind):

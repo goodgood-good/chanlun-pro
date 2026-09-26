@@ -11,6 +11,7 @@ from chanlun.core.strict_structure.center_machine import (
     forming_preview,
 )
 from chanlun.core.strict_structure.models import (
+    CenterEvidence,
     CenterPreviewState,
     CenterState,
     SourceKind,
@@ -110,7 +111,7 @@ def test_unlocked_fifth_role_is_preview_only() -> None:
     assert preview in result.previews
 
 
-def test_zero_width_middle_core_is_observation_never_formal() -> None:
+def test_qualified_one_price_core_keeps_preview_and_formal_identity() -> None:
     values = (
         unit(-1, "down", 130, 120),
         replace(unit(0, "up", 120, 120), high_tick=130),
@@ -120,11 +121,15 @@ def test_zero_width_middle_core_is_observation_never_formal() -> None:
     )
 
     preview = forming_preview(values, 0, SourceKind.SEGMENT)
+    center = _establish(values)
 
-    assert preview is not None
-    assert preview.state is CenterPreviewState.TOUCH_ONLY
+    assert preview is not None and center is not None
+    assert preview.state is CenterPreviewState.FORMING
     assert preview.zd_tick == preview.zg_tick == 120
-    assert preview.formal_center_id is None
+    assert preview.formal_center_id == center.center_id
+    evidence = CenterEvidence.from_center(center)
+    assert evidence.runtime_overlap_policy == "physical_closed_interval_contact"
+    assert evidence.unresolved_source_difference_ids == ("C46-01",)
 
 
 def test_center_identity_includes_price_basis_revision() -> None:

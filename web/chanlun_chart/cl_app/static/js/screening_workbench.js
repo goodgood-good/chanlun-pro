@@ -123,7 +123,7 @@
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
       reviews:{latest:{},history:[]},drafts:new Map(),filters:{query:'',market:'all',origin:'screening',frequency:'all',point:'all',review:'all',stage:'all',sector:'',
         point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent'},
-      frequency:'5m',sectorExpanded:false,queueLimit:100,chartKey:'',quoteBusy:false,watchSerial:0,
+      frequency:'5m',sectorExpanded:false,queueLimit:100,chartKey:'',chartVisible:typeof window==='undefined'||typeof IntersectionObserver==='undefined',quoteBusy:false,watchSerial:0,
       mutationPending:false,refreshPending:false,settingsInitialized:false,settingsEdited:false,
       reviewsLoadedSource:null,reviewSerial:0,reviewWriteEpoch:0,savingReview:false,
       stopChartSync:null,chartPeriods:[],fullChartPreviousList:null};
@@ -168,15 +168,19 @@
       if (!state.data) return;
       const {status,candidates,sectors}=state.data;
       renderRunControls();
-      $('run-status').textContent=(STATES[status.status] || status.status)+(status.results_loading?' · 正在读取结果…':'');
+      const incompleteRun=status.status==='completed'&&status.total>0
+        &&status.error_count/status.total>=.2;
+      $('run-status').textContent=(STATES[status.status] || status.status)
+        +(status.results_loading?' · 正在读取结果…':incompleteRun?' · 结果不完整':'');
       const settings=status.settings||{};
       $('run-detail').textContent=[status.total ? `已处理 ${status.completed||0} / ${status.total} 只` : '',
         status.effective_workers?`并行 ${status.effective_workers} 进程`:settings.workers?`设定 ${settings.workers} 进程`:'',
         settings.strategy===STRATEGY?'5m 主信号 · 1m 区间套确认':settings.frequencies?.join(' / '),settings.point_types?.map(p=>POINTS[p]||p).join(' / '),
         settings.recent_sessions ? `最近 ${settings.recent_sessions} 个交易日确认 / 观测` : '',
         status.cancel_requested&&activeRun(status.status)?'正在取消选股计算':''].filter(Boolean).join(' · ');
-      $('freshness').className='notice'+(status.source_current===true&&status.cutoff_current===true?' current':'');
-      $('freshness').textContent=[status.source_current===false&&status.run_id?(status.source_revision?'本次结果使用旧版算法，请重新选股。':'本次结果的算法版本尚不可核对。'):'',
+      $('freshness').className='notice'+(!incompleteRun&&status.source_current===true&&status.cutoff_current===true?' current':'');
+      $('freshness').textContent=[incompleteRun?`本轮 ${status.error_count}/${status.total} 只标的存在数据或计算错误，候选数量不能代表完整市场；请检查行情服务后重新选股。`:'',
+        status.source_current===false&&status.run_id?(status.source_revision?'本次结果使用旧版算法，请重新选股。':'本次结果的算法版本尚不可核对。'):'',
         status.run_id&&settings.strategy!==STRATEGY?'这轮是原独立周期结果，尚未经过 1m 区间套确认。新一轮将按 5m 主信号筛选。':'',
         status.freshness_message||'尚无可核对的数据截止时刻。',
         status.semantic_exclusion_count?`已排除 ${status.semantic_exclusion_count} 个混用背驰类型或缺少来源证据的旧候选；需按当前规则重算。`:'',
@@ -203,7 +207,7 @@
       $('point-counts').replaceChildren(...Object.entries(POINTS).map(([p,label])=>{
         const rows=candidates.filter(row=>row.point?.point_type===p);
         const confirmed=rows.filter(row=>pointStage(row)==='confirmed').length;
-        return node('span',`${label} ${rows.length}${p.startsWith('3')?` · 5m 已确认 ${confirmed}`:''}`);
+        return node('span',`${label} ${rows.length} · 5m 已确认 ${confirmed}`);
       }));
       const third=candidates.filter(row=>['3buy','3sell'].includes(row.point?.point_type));
       const both=third.filter(row=>pointStage(row)==='confirmed'&&row.nested_confirmation?.state==='confirmed').length;
@@ -398,6 +402,7 @@
         state.chartPeriods=[state.frequency];syncPeriodControls();
         const url=evidenceUrl(row,state.data.source,state.frequency),key='evidence:'+state.data.source+':'+row.id+':'+state.frequency;
         $('open-chart').href=url;$('open-chart').textContent='新窗口查看本次证据图';
+        if(!state.chartVisible){$('chart-status').textContent='滚动到图表时加载';return;}
         if(force||state.chartKey!==key){stopChartSync();state.chartKey=key;$('chart-frame').src=url;$('chart-status').textContent='正在读取本次保存的证据';}
         return;
       }
@@ -408,6 +413,7 @@
       const url=chartUrl(row,state.frequency,layout,periods);
       $('open-chart').href=url;
       $('open-chart').textContent='完整图表 ↗';
+      if(!state.chartVisible){$('chart-status').textContent='滚动到图表时加载';return;}
       if(!force&&state.chartKey===key)return;
       const previous=state.chartKey.split(':'),frame=$('chart-frame');
       // Reuse the chart's existing symbol transition and drawing isolation.
@@ -563,7 +569,7 @@
         const group=$('watch-group').value;if(!group)return;
         const data=await api('/get_zixuan_stocks/a/'+encodeURIComponent(group));
         if(serial!==state.watchSerial)return;
-        state.watch=data.data||[];$('watch-status').textContent=state.watch.length?'点击标的进入右侧图表。':'当前分组暂无标的，可在自选分组管理中添加。';renderWatch();if(state.data)renderQueue();await refreshQuotes();
+        state.watch=data.data||[];$('watch-status').textContent=state.watch.length?'点击标的进入右侧图表。':'当前分组暂无标的，可在自选分组管理中添加。';renderWatch();if(state.data){renderQueue();if(!state.data.status?.results_loading)await refreshQuotes();}
       }catch(error){if(serial===state.watchSerial)$('watch-status').textContent=error.message;}
     }
     async function initWatch() {
@@ -606,7 +612,9 @@
     $('screen-form').addEventListener('submit',event=>{event.preventDefault();return changeRun('start');});
     $('cancel').addEventListener('click',()=>changeRun('cancel'));
     document.querySelectorAll('[data-point]').forEach(b=>b.addEventListener('click',()=>{state.filters.point=b.dataset.point;syncPoints();renderQueue();}));
-    document.querySelectorAll('[data-frequency]').forEach(b=>b.addEventListener('click',()=>{state.frequency=b.dataset.frequency;renderChart();}));
+    let chartObserver=null;
+    function activateChart(){state.chartVisible=true;if(chartObserver){chartObserver.disconnect();chartObserver=null;}}
+    document.querySelectorAll('[data-frequency]').forEach(b=>b.addEventListener('click',()=>{activateChart();state.frequency=b.dataset.frequency;renderChart();}));
     for(const [id,key] of [['market-filter','market'],['origin-filter','origin'],['frequency-filter','frequency'],['review-filter','review'],['stage-filter','stage'],
       ['point-status-filter','point_status'],['lower-status-filter','lower_status'],['higher-context-filter','higher'],['center-order-filter','center_order'],['age-filter','age'],['gain-filter','gain'],['sort-filter','sort']])
       $(id).addEventListener('change',()=>{state.filters[key]=$(id).value;state.queueLimit=100;renderQueue();});
@@ -624,18 +632,17 @@
     $('refresh').addEventListener('click',()=>{void refresh(true);void refreshQuotes();});
     $('watch-group').addEventListener('change',()=>void refreshWatch());$('watch-refresh').addEventListener('click',()=>void refreshWatch());
     $('auto-quotes').addEventListener('change',()=>void refreshQuotes());
-    $('chart-layout').addEventListener('change',()=>renderChart());$('chart-reload').addEventListener('click',()=>renderChart(true));
+    $('chart-layout').addEventListener('change',()=>{activateChart();renderChart();});$('chart-reload').addEventListener('click',()=>{activateChart();renderChart(true);});
     let chartFitFrame=0;
     function fitChartHeight(){
       if(typeof window==='undefined'||document.body.classList.contains('theater')||$('selected-detail').hidden)return;
-      const stage=$('chart-stage'),analysis=$('analysis');
+      const stage=$('chart-stage');
       const viewport=window.visualViewport?.height||window.innerHeight;
       const nav=document.querySelector('.app-nav')?.getBoundingClientRect().height||0;
-      // Fit the analysis workspace below the navigation. Relative positions
-      // keep scrolling from continually growing or shrinking the chart.
-      const controls=stage.getBoundingClientRect().top-analysis.getBoundingClientRect().top;
-      const bottom=parseFloat(window.getComputedStyle(analysis).paddingBottom)||0;
-      const height=Math.max(Math.min(260,viewport*.4),viewport-nav-24-controls-bottom);
+      // Give the chart itself a viewport of space below the navigation.
+      // The controls above it and the structure conclusion below it remain
+      // reachable by scrolling the page.
+      const height=Math.max(Math.min(260,viewport*.4),viewport-nav-24);
       stage.style.height='';
       stage.style.setProperty('--chart-auto-height',`${Math.floor(height)}px`);
     }
@@ -656,11 +663,21 @@
       scheduleChartFit();
     }
     $('chart-reset-size').addEventListener('click',fitChartHeight);
-    $('chart-source').addEventListener('change',()=>renderChart());
+    $('chart-source').addEventListener('change',()=>{activateChart();renderChart();});
     $('chart-frame').addEventListener('load',()=>{
+      if($('chart-frame').src==='about:blank')return;
       if(state.selected)$('chart-status').textContent='图表页面已载入，数据状态见图内提示';
       watchChartInterval();
     });
+    if(!state.chartVisible){
+      chartObserver=new IntersectionObserver(entries=>{
+        if(entries.some(entry=>entry.isIntersecting)){
+          activateChart();
+          if(state.selected)renderChart();
+        }
+      },{rootMargin:'120px 0px'});
+      chartObserver.observe($('chart-stage'));
+    }
     function listHidden(hidden){$('workspace').classList.toggle('list-hidden',hidden);$('toggle-list').textContent=hidden?'展开列表':'收起列表';$('toggle-list').setAttribute('aria-pressed',String(hidden));}
     $('toggle-list').addEventListener('click',()=>listHidden(!$('workspace').classList.contains('list-hidden')));
     function theater(on){

@@ -102,9 +102,57 @@ def test_three_locked_trends_establish_recursive_center() -> None:
     assert center.pending_leave_unit is None
 
 
-@pytest.mark.parametrize("return_tick,expected", [(115, CenterPreviewState.FORMING),
+def test_recursive_envelope_uses_center_direction_not_opposite_leg_extremes() -> None:
+    # Lesson 20's GG/DD ranges over the center-forming direction's Zn legs.
+    # The opposite completed trend may have an internal extreme beyond both Z
+    # legs while remaining a valid, connected center member.
+    source = SourceKind.TREND_TYPE
+    first = replace(unit(0, "up", 100, 120, source_kind=source, structural_level=1),
+                    high_tick=130)
+    opposite = replace(unit(1, "down", 120, 105, source_kind=source, structural_level=1),
+                       high_tick=145)
+    third = replace(unit(2, "up", 105, 125, source_kind=source, structural_level=1),
+                    low_tick=100, high_tick=130)
+
+    center = establish_center((first, opposite, third), 1, source)
+
+    assert center is not None
+    assert (center.zd_tick, center.zg_tick) == (105, 130)
+    assert (center.dd_tick, center.gg_tick) == (100, 130)
+    assert max(item.high_tick for item in center.body_units) == 145
+    with pytest.raises(ValueError, match="same-direction Z envelope"):
+        replace(center, gg_tick=145)
+
+    opposite_extension = replace(
+        unit(3, "down", 125, 110, source_kind=source, structural_level=1),
+        low_tick=90, high_tick=140,
+    )
+    center, _ = advance_center(center, opposite_extension)
+    assert (center.dd_tick, center.gg_tick) == (100, 130)
+
+    same_direction_extension = replace(
+        unit(4, "up", 110, 125, source_kind=source, structural_level=1),
+        low_tick=105, high_tick=150,
+    )
+    center, _ = advance_center(center, same_direction_extension)
+    assert (center.dd_tick, center.gg_tick) == (100, 150)
+
+
+def test_physical_center_keeps_its_full_body_envelope() -> None:
+    values = valid_five_up_exit()
+    values = (*values[:2], replace(values[2], high_tick=150), *values[3:])
+
+    center = establish_center(values, 0, SourceKind.SEGMENT)
+
+    assert center is not None
+    assert (center.zd_tick, center.zg_tick) == (105, 115)
+    assert center.gg_tick == 150
+
+
+@pytest.mark.parametrize("return_tick,expected", [(114, CenterPreviewState.FORMING),
+                                                  (115, CenterPreviewState.COMPLETED),
                                                   (116, CenterPreviewState.COMPLETED)])
-def test_recursive_preview_return_touching_boundary_is_not_a_third_point(return_tick, expected):
+def test_recursive_preview_return_respects_inclusive_third_point_boundary(return_tick, expected):
     values = _trend_units()
     core = tuple(replace(value, locked=False, confirmed_at=None) for value in values[1:4])
     preview = establish_center_preview(core, 1, SourceKind.TREND_TYPE, entry_unit=values[0])
@@ -269,7 +317,8 @@ def test_level_zero_uses_five_physical_roles_and_middle_three_core() -> None:
     assert completed.completion_return_unit is outside_return
 
 
-def test_recursive_center_completes_only_after_leave_and_return() -> None:
+@pytest.mark.parametrize("return_tick", [115, 116])
+def test_recursive_center_completes_only_after_leave_and_return(return_tick) -> None:
     values = _trend_units()
     center = establish_center(
         values[1:4],
@@ -283,11 +332,26 @@ def test_recursive_center_completes_only_after_leave_and_return() -> None:
     assert center.state is CenterState.ONGOING
     assert center.pending_leave_unit is values[4]
 
-    center, _complete = advance_center(center, values[5])
+    returning = replace(values[5], end_tick=return_tick, low_tick=return_tick)
+    center, _complete = advance_center(center, returning)
     assert center.state is CenterState.COMPLETED
     assert center.completion_leave_unit is values[4]
-    assert center.completion_return_unit is values[5]
-    assert center.completed_at == values[5].confirmed_at
+    assert center.completion_return_unit is returning
+    assert center.completed_at == returning.confirmed_at
+
+
+def test_recursive_return_crossing_zg_keeps_center_ongoing() -> None:
+    values = _trend_units()
+    center = establish_center(values[1:4], 1, SourceKind.TREND_TYPE,
+                              entry_unit=values[0])
+    assert center is not None
+    center, _ = advance_center(center, values[4])
+    reentering = replace(values[5], end_tick=114, low_tick=114)
+
+    center, _ = advance_center(center, reentering)
+
+    assert center.state is CenterState.ONGOING
+    assert center.completion_return_unit is None
 
 
 def test_recursive_scan_emits_first_center_third_buy() -> None:

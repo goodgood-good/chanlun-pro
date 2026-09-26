@@ -66,19 +66,16 @@ def test_locked_return_outside_completes_center():
     assert event.available_at == ret.available_at
 
 
-def test_return_touching_zg_extends_without_completing():
+def test_return_touching_zg_completes_third_buy_boundary():
     value = _ongoing_up_center()
     ret = unit(5, "down", 130, value.zg_tick)
-    extended, event = advance_center(value, ret)
-    assert extended.state is CenterState.ONGOING
-    assert extended.completion_return_unit is None
-    assert extended.completed_at is None
-    assert extended.pending_leave_unit is None
-    assert extended.failed_departure_units == (value.pending_leave_unit,)
-    assert extended.extension_units == value.extension_units + (ret,)
-    assert extended.center_id == value.center_id
-    assert (extended.zd_tick, extended.zg_tick) == (value.zd_tick, value.zg_tick)
-    assert event.kind is CenterEventKind.EXTENDED
+    completed, event = advance_center(value, ret)
+    assert completed.state is CenterState.COMPLETED
+    assert completed.completion_return_unit is ret
+    assert completed.completed_at == ret.confirmed_at
+    assert completed.failed_departure_units == ()
+    assert completed.center_id == value.center_id
+    assert event.kind is CenterEventKind.COMPLETED_UP
 
 
 def test_down_leave_and_outside_return_complete_down_center():

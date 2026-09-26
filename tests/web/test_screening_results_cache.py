@@ -83,6 +83,61 @@ def test_results_progress_and_evidence_versions_each_invalidate_cache(cached_run
     assert read.call_count == 6
 
 
+def test_completed_results_open_from_disk_after_restart_and_recheck_changes(cached_run, monkeypatch):
+    manager = cached_run
+    assert manager.results(persist=True)["errors"][0]["code"] == "SH.600000"
+    directory = manager._directory()
+    cache = directory / screening._RESULT_CACHE_FILE
+    assert cache.is_file()
+
+    reopened = screening.ScreeningManager(manager.root)
+    read = Mock(side_effect=AssertionError("verified results should come from disk"))
+    monkeypatch.setattr(reopened, "_read_results", read)
+    result = reopened.results(background=True)
+    assert result["results_loading"] is False
+    assert result["errors"][0]["code"] == "SH.600000"
+    assert read.call_count == 0
+
+    path = directory / "results.jsonl"
+    previous = path.stat()
+    path.write_bytes(path.read_bytes().replace(b"SH.600000", b"SZ.000001"))
+    os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000))
+    changed = screening.ScreeningManager(manager.root)
+    assert changed.results()["errors"][0]["code"] == "SZ.000001"
+
+    cache.write_bytes(b"broken")
+    recovered = screening.ScreeningManager(manager.root)
+    assert recovered.results()["errors"][0]["code"] == "SZ.000001"
+
+
+def test_completed_run_warms_disk_cache_without_a_page_request(tmp_path, monkeypatch):
+    manager = screening.ScreeningManager(tmp_path / "screening")
+    release, warmed = Event(), Event()
+
+    class Worker:
+        pid = 1234
+
+        def wait(self):
+            assert release.wait(10)
+            return 0
+
+    monkeypatch.setattr(screening.subprocess, "Popen", lambda *args, **kwargs: Worker())
+    save = manager._save_results_cache
+
+    def track_cache(*args):
+        save(*args)
+        warmed.set()
+
+    monkeypatch.setattr(manager, "_save_results_cache", track_cache)
+    launched = manager.start({"scope": "all_a"})
+    directory = manager.root / launched["run_id"]
+    state = json.loads((directory / "status.json").read_text(encoding="utf-8"))
+    screening.write_json(directory / "status.json", {**state, "status": "completed"})
+    release.set()
+    assert warmed.wait(10)
+    assert (directory / screening._RESULT_CACHE_FILE).is_file()
+
+
 def test_slow_workbench_returns_pending_and_shares_one_reader(cached_run, monkeypatch):
     manager = cached_run
     entered, release = Event(), Event()

@@ -206,7 +206,7 @@ def test_strict_base_profile_contains_only_current_production_rules():
     config = dict(strict_base_config())
 
     assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base"
-    assert config["center_seed_rule"] == "physical-entry-middle-three-core-independent-leave-five-overlap"
+    assert config["center_seed_rule"] == "physical-entry-middle-three-core-independent-leave-five-closed-single-price-v2"
     assert config["chart_structure_rule"] == "native-segment-centers-v2"
     assert config["stroke_rule"] == "old-user-path-b-completed-prefix-v14"
     assert config["stroke_distance_rule"] == "merged-centers-at-least-four"
@@ -234,7 +234,10 @@ def test_strict_base_profile_contains_only_current_production_rules():
         "earliest-middle-feature-boundary-source-with-separate-stem-provenance-v2"
     )
     assert config["center_lifecycle_rule"] == (
-        "external-departure-first-outside-return-third-class"
+        "external-departure-first-non-crossing-return-third-class-v2"
+    )
+    assert config["third_class_boundary_rule"] == (
+        "departure-side-contact-permitted-inclusive-return-E2-v3"
     )
     assert config["center_scan_rule"] == (
         "five-role-physical-seed-causal-lifecycle-owner"

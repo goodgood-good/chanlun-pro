@@ -7,7 +7,7 @@ failures:
 
 * two simultaneous unfinished centers;
 * a completed center being rewritten after future units are appended;
-* a completed center losing its strict outside return;
+* a completed center losing its non-crossing return;
 * an equality-boundary return being lost by an accidental strict comparison.
 """
 
@@ -106,10 +106,10 @@ def test_bounded_segment_walks_preserve_center_lifecycle_invariants() -> None:
                 assert leave not in center.body_units
                 if leave.direction == "up":
                     assert ret.direction == "down"
-                    assert ret.low_tick > center.zg_tick
+                    assert ret.low_tick >= center.zg_tick
                 else:
                     assert ret.direction == "up"
-                    assert ret.high_tick < center.zd_tick
+                    assert ret.high_tick <= center.zd_tick
 
             checked += 1
             completed_count += len(completed_ids)

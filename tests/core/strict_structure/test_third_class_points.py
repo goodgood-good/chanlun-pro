@@ -39,11 +39,18 @@ def test_completed_up_center_emits_exactly_one_confirmed_three_buy():
     assert point.available_at == completed.available_at
 
 
-def test_return_touching_core_boundary_never_confirms_three_buy():
+def test_return_touching_core_boundary_confirms_three_buy():
     center = ongoing_center(zg_tick=115)
     center, _ = advance_center(center, unit(5, "down", 130, 115))
-    assert not center.third_class_confirmed
-    assert engine_for(center).third_class_points() == ()
+    assert center.third_class_confirmed
+    point = only_point(engine_for(center).third_class_points())
+    assert point.point_type == "3buy" and point.anchor_tick == 115
+
+
+def test_return_touching_core_boundary_confirms_three_sell():
+    completed = completed_down_center(return_high_tick=95, zd_tick=95)
+    point = only_point(engine_for(completed).third_class_points())
+    assert point.point_type == "3sell" and point.anchor_tick == 95
 
 
 def test_completed_down_center_emits_symmetric_three_sell():

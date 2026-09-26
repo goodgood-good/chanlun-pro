@@ -48,6 +48,12 @@ def _configured_login_accounts():
 def create_app(test_config=None):
     # 应用工厂默认不得产生副作用；单进程桌面入口会显式启用，测试和通用 WSGI 导入不会启用。
     app = Flask(__name__, instance_relative_config=True)
+    # Freeze chart cache identities before a long-running process can import
+    # calculation modules from an edited source tree at different times.
+    from chanlun.tools.cache_identity import source_fingerprint
+    from .services.chart_producer_identity import chart_producer_revision
+    source_fingerprint()
+    chart_producer_revision()
     https_enabled = is_https_enabled()
     secure_cookie_setting = (
         os.environ.get("CHANLUN_SESSION_COOKIE_SECURE", "").strip().lower()

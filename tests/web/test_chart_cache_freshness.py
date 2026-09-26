@@ -99,6 +99,30 @@ def test_first_request_no_snapshot_is_miss():
     assert needs_refresh is False
 
 
+def test_first_request_retries_an_old_unavailable_strict_snapshot():
+    now = 10_000.0
+    entry = _build_chart_cache_entry({"t": [1000, 2000], "strict_structure_mode": "unavailable",
+                                      "strict_structure_error": {"code": "strict_evidence_invalid"}},
+                                     is_full_snapshot=True, validated_at=now - 31)
+    assert evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=False, now=now,
+    ) == (False, None, "cache_strict_unavailable", False)
+    assert evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=False, now=now - 2,
+    )[0] is True
+    assert evaluate_cache_for_tv_history(
+        entry, 1000, 2000, is_range_request=True, market_is_trading=False, now=now,
+    )[0] is True
+    entry["validated_at"] = now
+    assert evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=False, now=now,
+    )[2] == "cache_strict_unavailable"
+    del entry["data"]["_strict_failure_at"]  # Older disk entries lack the independent failure clock.
+    assert evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=False, now=now - 2,
+    )[2] == "cache_strict_unavailable"
+
+
 def test_first_request_partial_snapshot_is_miss():
     entry = _build_chart_cache_entry(
         {"t": [1, 2], "c": [1.0, 2.0]}, is_full_snapshot=False, validated_at=1.0,

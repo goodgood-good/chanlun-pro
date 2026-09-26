@@ -1156,3 +1156,19 @@ test('formal center validation accepts opposite external exits and rejects an ex
     assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /independent entry or leave/);
   }
 });
+
+test('legacy one-price physical center requires five verified closed-contact roles', () => {
+  const {sandbox} = loadChartManager();
+  const roles = ['u1','u2','u3','u4','u5'].map(unit_id => ({
+    unit_id, low_tick: 990, high_tick: 1010, locked: true,
+  }));
+  const item = center(1, {core: {zd_tick: 1000, zg_tick: 1000},
+    runtime_overlap_policy: 'physical_closed_interval_contact',
+    overlap_component_count: 0, establishment_segments: roles});
+  assert.doesNotThrow(() => sandbox.validateStrictCenterRenderContract(item, 0));
+  roles[4].low_tick = 1001;
+  assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /five-role overlap/);
+  roles[4].low_tick = 990;
+  item.runtime_overlap_policy = 'physical_positive_overlap';
+  assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /five-role overlap/);
+});

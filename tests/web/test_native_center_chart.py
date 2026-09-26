@@ -46,7 +46,45 @@ def test_recorded_market_bars_render_centers_and_signals_from_one_source(name, f
         assert type(item["available_at"]) is int
         assert item["available_at"] <= snapshot["source_closed_at"]
     level = snapshot["levels"][0]
-    assert set(level) == {"structural_level", "label", "origin", "centers", "center_previews", "points", "divergences"}
+    assert set(level) == {
+        "structural_level", "label", "origin", "centers", "center_previews",
+        "trend_types", "completed_trend_ids", "decomposition_boundaries",
+        "center_pair_rule_states", "transition_rule_state", "points", "divergences",
+    }
+    assert snapshot["rule_state_version"] == "chanlun-local-source-conditioned-v4"
+    assert all(
+        boundary["previous_type_end_at"] == boundary["next_type_start_at"]
+        for boundary in level["decomposition_boundaries"]
+    )
+    for layer in snapshot["levels"]:
+        assert all(
+            trend["available_at"] <= snapshot["source_closed_at"]
+            for trend in layer["trend_types"]
+        )
+        assert all(
+            boundary["boundary_available_at"] <= snapshot["source_closed_at"]
+            and boundary["shared_market_boundary_at"]
+            <= boundary["boundary_confirmed_at"]
+            <= boundary["boundary_available_at"]
+            for boundary in layer["decomposition_boundaries"]
+        )
+        assert all(
+            pair["touch_known_at"] is None
+            or pair["touch_known_at"] <= snapshot["source_closed_at"]
+            for pair in layer["center_pair_rule_states"]
+        )
+        assert all(
+            pair["higher_center_formal_at"] is None
+            or pair["higher_center_formal_at"] <= snapshot["source_closed_at"]
+            for pair in layer["center_pair_rule_states"]
+        )
+        transition = layer["transition_rule_state"]
+        if transition["status"] != "not_started":
+            assert transition["previous_type_end_at"] == transition["next_type_start_at"]
+            assert transition["boundary_available_at"] <= snapshot["source_closed_at"]
+        if transition["status"] == "ended":
+            assert transition["transition_exit_at"] > transition["previous_type_end_at"]
+            assert transition["transition_exit_confirmed_at"] <= snapshot["source_closed_at"]
     assert level["origin"] == "native_segments"
     assert not result["stroke_construction"]["unresolved_regions"]
     assert not snapshot["conditional_centers"]

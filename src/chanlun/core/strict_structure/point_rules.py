@@ -55,7 +55,7 @@ def classify_third_class_geometry(
     if (
         leave.direction == "up"
         and return_unit.direction == "down"
-        and return_unit.low_tick > zg_tick
+        and return_unit.low_tick >= zg_tick
     ):
         direction = "up"
         point_type = "3buy"
@@ -65,7 +65,7 @@ def classify_third_class_geometry(
     elif (
         leave.direction == "down"
         and return_unit.direction == "up"
-        and return_unit.high_tick < zd_tick
+        and return_unit.high_tick <= zd_tick
     ):
         direction = "down"
         point_type = "3sell"
@@ -123,7 +123,7 @@ def center_ordinals(
                     if center.zd_tick > previous.zg_tick
                     else CenterRelation.DOWN_TREND
                     if center.zg_tick < previous.zd_tick
-                    else CenterRelation.UPGRADE
+                    else CenterRelation.RECOMPOSITION_PENDING
                 )
                 if relation is CenterRelation.UP_TREND:
                     up_run += 1

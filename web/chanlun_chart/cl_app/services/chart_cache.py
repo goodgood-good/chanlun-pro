@@ -215,6 +215,10 @@ _SNAPSHOT_STALE_AFTER_CLOSED = _cfg_int("CHART_SNAPSHOT_STALE_AFTER_CLOSED", 360
 # 收盘 MAX 取 1 天: 收盘数据静止、serve-stale 无滞后, 仅拦"隔多日缺整段交易日"的缓存。
 _SNAPSHOT_SERVE_STALE_MAX_TRADING = _cfg_int("CHART_SERVE_STALE_MAX_TRADING", 1800)
 _SNAPSHOT_SERVE_STALE_MAX_CLOSED = _cfg_int("CHART_SERVE_STALE_MAX_CLOSED", 86400)
+# An unavailable strict structure is not a valid long-lived chart snapshot.
+# Allow a brief retry interval so a persistent computation failure cannot make
+# every chart open start another full rebuild.
+_STRICT_UNAVAILABLE_RETRY_SECONDS = 30
 
 
 # ---------------- 工具函数 ----------------
@@ -245,8 +249,18 @@ def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) ->
             f"_{_stable_hash(cl_config)}")
 
 
+def _terminal_strict_unavailable(data: dict) -> bool:
+    if data.get("strict_structure_mode") != "unavailable":
+        return False
+    error = data.get("strict_structure_error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return code not in {"strict_structure_pending", "strict_initial_build_busy"}
+
+
 def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, validated_at: float = None):
     validated_at = time.time() if validated_at is None else validated_at
+    if _terminal_strict_unavailable(cl_chart_data) and "_strict_failure_at" not in cl_chart_data:
+        cl_chart_data = {**cl_chart_data, "_strict_failure_at": validated_at}
     bar_times = cl_chart_data.get("t", []) if isinstance(cl_chart_data, dict) else []
     return {
         "data": cl_chart_data,
@@ -484,6 +498,13 @@ def evaluate_cache_for_tv_history(
     if force_refresh or (refresh_if_stale and not _cache_entry_recently_validated(cache_entry)):
         return False, None, "cache_force_refresh", False
     cached_data = cache_entry.get("data", {})
+    if not is_range_request and _terminal_strict_unavailable(cached_data):
+        failed_at = cached_data.get("_strict_failure_at")
+        observed_at = time.time() if now is None else now
+        if (not isinstance(failed_at, (int, float)) or failed_at <= 0
+                or observed_at < failed_at
+                or observed_at - failed_at >= _STRICT_UNAVAILABLE_RETRY_SECONDS):
+            return False, None, "cache_strict_unavailable", False
     cache_min_time = cache_entry.get("min_time")
     cache_max_time = cache_entry.get("max_time")
     if not is_range_request:

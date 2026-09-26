@@ -625,11 +625,25 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     ) throw new Error('physical center entry/leave contract is invalid');
     const expected = [entryId, ...item.core_unit_ids];
     if (!partial) expected.push(leaveId);
+    // Older saved one-price centers counted only positive-width overlaps.
+    // Accept their declared closed-contact policy only when all five saved
+    // establishment roles independently cover the exact core tick.
+    const coreTick = item.core?.zd_tick;
+    const legacyClosedContact = !partial
+        && Number.isInteger(coreTick) && coreTick === item.core?.zg_tick
+        && item.runtime_overlap_policy === 'physical_closed_interval_contact'
+        && item.overlap_component_count === 0
+        && Array.isArray(item.establishment_segments)
+        && item.establishment_segments.length === expected.length
+        && item.establishment_segments.every((unit, index) =>
+            unit?.unit_id === expected[index] && unit.locked === true
+            && Number.isInteger(unit.low_tick) && Number.isInteger(unit.high_tick)
+            && unit.low_tick <= coreTick && coreTick <= unit.high_tick);
     if (
         new Set(expected).size !== expected.length
         || !strictSameIds(item.establishment_segment_ids, expected)
         || item.establishment_component_count !== expected.length
-        || item.overlap_component_count < expected.length
+        || (item.overlap_component_count < expected.length && !legacyClosedContact)
         || item.lifecycle_role_count < expected.length
     ) throw new Error('physical center five-role overlap contract is invalid');
 }

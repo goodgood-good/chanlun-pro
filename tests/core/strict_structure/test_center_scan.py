@@ -455,7 +455,7 @@ def test_deterministic_fuzz_retains_first_seed_after_each_third_class_point():
             assert index_by_id[following.core_units[0].unit_id] >= leave_index
 
 
-def test_zero_width_three_unit_intersection_is_touch_only_not_formal():
+def test_qualified_one_price_core_is_formal_in_scan():
     values = (
         unit(0, "down", 130, 120),
         replace(unit(1, "up", 120, 120), high_tick=130),
@@ -464,11 +464,11 @@ def test_zero_width_three_unit_intersection_is_touch_only_not_formal():
         unit(4, "down", 120, 110),
     )
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
-    assert result.centers == ()
-    touch = [p for p in result.previews if p.state is CenterPreviewState.TOUCH_ONLY]
-    assert len(touch) == 1
-    assert touch[0].zd_tick == touch[0].zg_tick == 120
-    assert touch[0].formal_center_id is None
+    assert len(result.centers) == 1
+    assert result.centers[0].zd_tick == result.centers[0].zg_tick == 120
+    assert result.centers[0].initial_units == values[1:4]
+    assert result.centers[0].entry_unit is values[0]
+    assert result.centers[0].establishment_leave_unit is values[4]
 
 
 def test_scan_rejects_locked_unit_after_preview_tail():

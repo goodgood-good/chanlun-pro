@@ -21,6 +21,13 @@ from chanlun.core.strict_structure.models import (
     StrictPointEvidence,
     StrictPointStatus,
     TrendCenter,
+    center_overlap_interpretation,
+)
+from chanlun.core.strict_structure.rule_state import (
+    RULE_STATE_VERSION,
+    center_pair_rule_state,
+    small_to_large_point_rule_state,
+    transition_rule_state,
 )
 
 CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure"
@@ -44,7 +51,7 @@ def _unique_units_in_time_order(
 
 
 def _center_overlap_units(center: TrendCenter) -> tuple[ConstituentUnit, ...]:
-    """返回与冻结核心存在正宽重叠的全部中心生命周期角色。"""
+    """Return lifecycle roles under the center's declared source overlap policy."""
     candidates = _unique_units_in_time_order(
         (
             *((center.entry_unit,) if center.entry_unit is not None else ()),
@@ -66,7 +73,14 @@ def _center_overlap_units(center: TrendCenter) -> tuple[ConstituentUnit, ...]:
         (
             item
             for item in candidates
-            if max(item.low_tick, center.zd_tick) < min(item.high_tick, center.zg_tick)
+            if (
+                max(item.low_tick, center.zd_tick)
+                <= min(item.high_tick, center.zg_tick)
+                if center.source_kind is SourceKind.TREND_TYPE
+                or center.zd_tick == center.zg_tick
+                else max(item.low_tick, center.zd_tick)
+                < min(item.high_tick, center.zg_tick)
+            )
         )
     )
 
@@ -180,7 +194,7 @@ def _center_frame_payload(center: TrendCenter) -> dict[str, object]:
         "center_end_available_at": _optional_epoch(
             center.completion_available_at if center.third_class_confirmed else None
         ),
-        "center_end_rule": "independent_completed_lower_leave_and_first_outside_return",
+        "center_end_rule": "independent_completed_lower_leave_and_first_non_crossing_return",
     }
 
 
@@ -192,7 +206,10 @@ def _center_payload(
     if not center.has_minimum_physical_roles:
         raise ValueError("chart center lacks its declared formation evidence")
     recursive = center.source_kind is SourceKind.TREND_TYPE
-    if center.zd_tick > center.zg_tick or (not recursive and center.zd_tick == center.zg_tick):
+    overlap_policy, source_differences = center_overlap_interpretation(
+        center.source_kind, center.zd_tick, center.zg_tick
+    )
+    if center.zd_tick > center.zg_tick:
         raise ValueError("formal chart center violates source overlap contract")
     leaving_unit = center_frame_leave(center)
     frame_end = center.display_range_end_market_time
@@ -212,6 +229,8 @@ def _center_payload(
         "body_revision": center.body_revision,
         "structural_level": center.structural_level,
         "source_kind": center.source_kind.value,
+        "runtime_overlap_policy": overlap_policy,
+        "unresolved_source_difference_ids": list(source_differences),
         "formation_rule": "recursive_three" if recursive else center.formation_rule,
         "boundary_contact": center.boundary_contact,
         "state": center.state.value,
@@ -286,6 +305,20 @@ def _center_payload(
         if center.establishment_leave_unit is None
         else center.establishment_leave_unit.unit_id,
         "initial_unit_ids": [unit.unit_id for unit in center.initial_units],
+        "higher_center_member_trend_ids": (
+            [unit.unit_id for unit in center.initial_units] if recursive else []
+        ),
+        "higher_center_member_confirmed_at": (
+            [_optional_epoch(unit.confirmed_at) for unit in center.initial_units]
+            if recursive else []
+        ),
+        "higher_center_formal_at": (
+            aware_datetime_to_epoch_seconds(center.established_at)
+            if recursive else None
+        ),
+        "higher_center_formal_member_gate": (
+            "three_locked_lower_types" if recursive else "not_recursive_center"
+        ),
         "body_unit_ids": [unit.unit_id for unit in center.body_units],
         "extension_unit_ids": [unit.unit_id for unit in center.extension_units],
         "failed_departure_unit_ids": [
@@ -365,6 +398,9 @@ def strict_center_preview_to_chart_dict(
             or preview.zg_tick is None or preview.state is CenterPreviewState.TOUCH_ONLY):
         return None
     recursive = preview.source_kind is SourceKind.TREND_TYPE
+    overlap_policy, source_differences = center_overlap_interpretation(
+        preview.source_kind, preview.zd_tick, preview.zg_tick
+    )
     body = tuple(units[key] for key in preview.unit_ids)
     core = body[:3]
     entry = units.get(preview.entry_unit_id)
@@ -399,6 +435,8 @@ def strict_center_preview_to_chart_dict(
         "price_basis_revision": preview.price_basis_revision,
         "structural_level": preview.structural_level,
         "source_kind": preview.source_kind.value,
+        "runtime_overlap_policy": overlap_policy,
+        "unresolved_source_difference_ids": list(source_differences),
         "formation_rule": "recursive_three" if recursive else "five_role",
         "state": "forming",
         "geometry_state": preview.state.value,
@@ -515,6 +553,7 @@ def strict_point_to_chart_dict(point: StrictPointEvidence) -> dict:
         "missing_conditions": list(point.missing_conditions),
         "related_point_ids": list(point.related_point_ids),
         "small_to_large_carrier_unit_ids": list(point.small_to_large_carrier_unit_ids),
+        "large_turn_certificate": small_to_large_point_rule_state(point),
         "divergence": None if point.divergence is None else strict_divergence_to_chart_dict(point.divergence),
         "points": [{"time": aware_datetime_to_epoch_seconds(point.anchor_at),
                     "price_tick": point.anchor_tick}],
@@ -591,10 +630,92 @@ def _conditional_center_payload(center, observation):
     return payload
 
 
+def _trend_type_rule_payload(trend) -> dict[str, object]:
+    return {
+        "trend_id": trend.trend_id,
+        "kind": trend.kind.value,
+        "direction": trend.direction,
+        "state": trend.state.value,
+        "structural_level": trend.structural_level,
+        "center_ids": [center.center_id for center in trend.centers],
+        "constituent_unit_ids": [unit.unit_id for unit in trend.constituent_units],
+        "market_start": aware_datetime_to_epoch_seconds(trend.market_start),
+        "market_end": aware_datetime_to_epoch_seconds(trend.market_end),
+        "confirmed_at": _optional_epoch(trend.confirmed_at),
+        "available_at": aware_datetime_to_epoch_seconds(trend.available_at),
+        "terminal_divergence_id": (
+            trend.terminal_divergence.divergence_id
+            if trend.terminal_divergence is not None else None
+        ),
+    }
+
+
+def _decomposition_boundary_rule_payload(boundary) -> dict[str, object]:
+    market_boundary = aware_datetime_to_epoch_seconds(boundary.anchor_at)
+    return {
+        "boundary_id": boundary.boundary_id,
+        "view_id": boundary.decomposition_mode,
+        "boundary_kind": boundary.boundary_kind,
+        "structural_level": boundary.structural_level,
+        "left_trend_id": boundary.left_trend_id,
+        "terminal_center_id": boundary.terminal_center_id,
+        "divergence_id": boundary.divergence.divergence_id,
+        "shared_market_boundary_at": market_boundary,
+        "previous_type_end_at": market_boundary,
+        "next_type_start_at": market_boundary,
+        "boundary_confirmed_at": aware_datetime_to_epoch_seconds(boundary.confirmed_at),
+        "boundary_available_at": aware_datetime_to_epoch_seconds(boundary.available_at),
+        "policy_basis": "same_grade_shared_divergence_point_P132",
+    }
+
+
+def _center_pair_rule_payload(previous: TrendCenter, current: TrendCenter) -> dict[str, object]:
+    state = center_pair_rule_state(previous, current)
+    state["touch_known_at"] = _optional_epoch(state["touch_known_at"])
+    state["strict_relation_known_at"] = _optional_epoch(state["strict_relation_known_at"])
+    return state
+
+
+def _transition_rule_payload(level, confirmed_points, cutoff) -> dict[str, object]:
+    state = transition_rule_state(level, tuple(confirmed_points), cutoff)
+    for key in (
+        "previous_type_end_at", "next_type_start_at", "boundary_confirmed_at",
+        "boundary_available_at", "transition_exit_at", "transition_exit_confirmed_at",
+        "return_to_last_center_at", "return_to_last_center_known_at",
+    ):
+        if key in state:
+            state[key] = _optional_epoch(state[key])
+    return state
+
+
+def _attach_parent_center_rule_evidence(levels: list[dict]) -> None:
+    """Link a pair only through three exact, locked parent member trend IDs."""
+
+    for lower, parent in zip(levels, levels[1:]):
+        lower_trends = {trend["trend_id"]: trend for trend in lower["trend_types"]}
+        for higher_center in parent["centers"]:
+            member_ids = higher_center["higher_center_member_trend_ids"]
+            if len(member_ids) != 3 or any(key not in lower_trends for key in member_ids):
+                continue
+            represented_centers = {
+                center_id
+                for key in member_ids
+                for center_id in lower_trends[key]["center_ids"]
+            }
+            for pair in lower["center_pair_rule_states"]:
+                if {
+                    pair["previous_center_id"], pair["current_center_id"]
+                } <= represented_centers:
+                    pair["higher_center_ids"].append(higher_center["center_id"])
+                    pair["higher_center_formal"] = "confirmed_by_parent_three_members"
+                    pair["higher_center_formal_at"] = higher_center["higher_center_formal_at"]
+
+
 def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int, ...]):
     if interval != cd.get_frequency():
         raise ValueError("native center interval must match its source bars")
-    cutoff = aware_datetime_to_epoch_seconds(cd._strict_as_of())
+    as_of = cd._strict_as_of()
+    cutoff = aware_datetime_to_epoch_seconds(as_of)
     # Display geometry keeps the provider's labels. For start-labelled bars,
     # the completed input's causal cutoff is one interval after its last label.
     display_end = aware_datetime_to_epoch_seconds(cd.get_src_klines()[-1].date)
@@ -616,37 +737,69 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
     levels = []
     for level in evidence.structure.levels:
         depth = level.structural_level
+        visible_centers = tuple(
+            center for center in level.center_result.centers
+            if center.available_at <= as_of
+        )
         centers = [
             strict_center_to_chart_dict(center)
-            for center in level.center_result.centers
-            if center.available_at <= cd._strict_as_of()
+            for center in visible_centers
         ]
         by_id = {center["center_id"]: center for center in centers}
         units = {unit.unit_id: unit for unit in level.units}
         previews = [item for preview in level.center_result.previews
-                    if preview.available_at <= cd._strict_as_of()
+                    if preview.available_at <= as_of
                     if (item := strict_center_preview_to_chart_dict(
                         preview, units, by_id.get(preview.formal_center_id))) is not None]
+        visible_trends = tuple(
+            trend for trend in getattr(level, "trend_types", ())
+            if trend.available_at <= as_of
+        )
+        visible_boundaries = tuple(
+            boundary for boundary in getattr(level, "decomposition_boundaries", ())
+            if boundary.available_at <= as_of
+        )
         levels.append({
             "structural_level": depth,
             "label": interval if depth == 0 else f"{interval}/L{depth}",
             "origin": "native_segments" if depth == 0 else "completed_lower_structures",
             "centers": [_with_prices(center, quantum) for center in centers],
             "center_previews": [_with_prices(preview, quantum) for preview in previews],
+            "trend_types": [_trend_type_rule_payload(trend) for trend in visible_trends],
+            "completed_trend_ids": [
+                trend.trend_id for trend in getattr(level, "completed_trends", ())
+                if trend.available_at <= as_of
+            ],
+            "decomposition_boundaries": [
+                _decomposition_boundary_rule_payload(boundary)
+                for boundary in visible_boundaries
+            ],
+            "center_pair_rule_states": [
+                _center_pair_rule_payload(previous, current)
+                for previous, current in zip(visible_centers, visible_centers[1:])
+            ],
+            "transition_rule_state": _transition_rule_payload(
+                level, evidence.confirmed_points, as_of
+            ),
             "points": [
                 _with_prices(strict_point_to_chart_dict(point), quantum)
                 for point in (*evidence.confirmed_points, *evidence.approaching_points)
-                if point.structural_level == depth and point.available_at <= cd._strict_as_of()
+                if point.structural_level == depth and point.available_at <= as_of
             ],
             "divergences": [
                 _with_prices(strict_divergence_to_chart_dict(divergence), quantum)
                 for divergence in evidence.divergences
-                if divergence.structural_level == depth and divergence.available_at <= cd._strict_as_of()
+                if divergence.structural_level == depth and divergence.available_at <= as_of
             ],
         })
     if not levels:
         levels.append({"structural_level": 0, "label": interval, "origin": "native_segments",
-                       "centers": [], "center_previews": [], "points": [], "divergences": []})
+                       "centers": [], "center_previews": [], "trend_types": [],
+                       "completed_trend_ids": [], "decomposition_boundaries": [],
+                       "center_pair_rule_states": [],
+                       "transition_rule_state": {"status": "not_started", "boll_hint": "unavailable"},
+                       "points": [], "divergences": []})
+    _attach_parent_center_rule_evidence(levels)
     observations = [
         _with_prices(_center_payload(center, render_kind="center_observation", tradable=False), quantum)
         for center in evidence.stroke_center_observations.centers
@@ -696,6 +849,7 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         "price_basis_revision": cd._strict_price_basis_revision(),
         "structure_price_quantum": _canonical_quantum(quantum),
         "strict_config_revision": cd._strict_config_revision(),
+        "rule_state_version": RULE_STATE_VERSION,
         "structure_revision": revision,
         "snapshot_revision": revision,
         "render_revision": revision,

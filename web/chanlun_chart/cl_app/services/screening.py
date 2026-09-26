@@ -5,6 +5,8 @@ from __future__ import annotations
 from concurrent.futures import Future
 from copy import deepcopy
 from datetime import datetime
+import gzip
+import hashlib
 import json
 import math
 import os
@@ -15,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 
 from chanlun import config
 from chanlun.screening.rules import CN, POINT_TYPES, REASON_LABELS, is_forming_observation, point_semantic_reasons, trading_context
@@ -27,6 +30,33 @@ from chanlun.cl_utils.point_exits import with_point_exit_plans
 from chanlun.screening.confirmation import confirmation_reasons, is_confirmed
 from chanlun.screening.nesting import STRATEGY, saved_confirmation_valid
 from .screening_policy import POLICY_LABELS, POLICY_VERSION, selection_policy_reasons
+
+_RESULT_CACHE_SCHEMA = "screening-verified-results-v1"
+_RESULT_CACHE_FILE = "verified_results.json.gz"
+
+
+def _result_reader_revision():
+    """Version only code that interprets an already saved screening run.
+
+    A change to the structure generator makes the run stale, but does not
+    change the bytes or meaning of its frozen evidence. That freshness warning
+    is returned from status() independently of this verified result cache.
+    """
+    project = Path(__file__).resolve().parents[4]
+    files = [Path(__file__).resolve(), Path(__file__).with_name("screening_policy.py")]
+    files.extend(project / "src" / "chanlun" / "screening" / name for name in (
+        "rules.py", "confirmation.py", "nesting.py", "evidence.py", "cache.py", "markets.py",
+    ))
+    files.extend((project / "src" / "chanlun" / "cl_utils" / "point_exits.py",
+                  project / "src" / "chanlun" / "core" / "strict_structure" / "unit_adapter.py"))
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(project).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+_RESULT_READER_REVISION = _result_reader_revision()
 
 
 def validate_settings(body, *, max_codes=100):
@@ -201,12 +231,13 @@ class ScreeningManager:
                 "freshness_message": ("收盘截止时间一致；尚未重新核对全体历史行情修订。复核图使用本次保存的行情。"
                                       if current else "已有新的收盘 K 线，本结果仅代表原截止时刻，请重新运行选股")}
 
-    def results(self, *, background=False):
+    def results(self, *, background=False, persist=False):
         directory = self._directory()
         state = self._status(directory)
         # Reuse only the same committed rows and evidence-file versions. The
         # status/freshness fields are still read on every request.
         key = (str(directory), state.get("completed"), state.get("evidence_version"), POLICY_VERSION,
+               _RESULT_READER_REVISION,
                json.dumps({k: state.get(k) for k in ("settings", "cutoffs", "source_revision")}, sort_keys=True))
         pending = {**state, "results_loading": True, "selected": [], "observations": [],
                    "recent_rejections": [], "errors": [], "rejection_counts": {}}
@@ -230,7 +261,10 @@ class ScreeningManager:
                     pass
                 continue
             if launch:
-                if background:
+                cached = self._load_results_cache(directory, state, key)
+                if cached is not None:
+                    future.set_result(cached)
+                elif background:
                     threading.Thread(target=self._prepare_results, args=(future, directory, state),
                                      name="screening-results", daemon=True).start()
                 else:
@@ -245,13 +279,51 @@ class ScreeningManager:
                         self._results_future = None
                         self._results_key = None
                 raise
+            if persist:
+                self._save_results_cache(directory, state, key, payload)
             return {**deepcopy(payload), **state, "results_loading": False}
+
+    @staticmethod
+    def _results_cache_key(key):
+        return hashlib.sha256(json.dumps(key, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+    def _load_results_cache(self, directory, state, key):
+        if directory is None or state.get("status") != "completed":
+            return None
+        try:
+            data = json.loads(gzip.decompress((directory / _RESULT_CACHE_FILE).read_bytes()))
+        except (OSError, ValueError, EOFError, zlib.error):
+            return None
+        if (not isinstance(data, dict) or data.get("schema") != _RESULT_CACHE_SCHEMA
+                or data.get("key") != self._results_cache_key(key)
+                or not isinstance(data.get("payload"), dict)
+                or data["payload"].get("run_id") != state.get("run_id")):
+            return None
+        return data["payload"]
+
+    def _save_results_cache(self, directory, state, key, payload):
+        if directory is None or state.get("status") != "completed":
+            return
+        path = directory / _RESULT_CACHE_FILE
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            encoded = json.dumps({"schema": _RESULT_CACHE_SCHEMA,
+                                  "key": self._results_cache_key(key), "payload": payload},
+                                 ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            temporary.write_bytes(gzip.compress(encoded))
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError):
+            # A cache write cannot turn a verified result into a page failure.
+            pass
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _prepare_results(self, future, directory, state):
         try:
             future.set_result(self._read_results(directory, state))
         except BaseException as exc:
-            future.set_exception(exc)
+            if not future.done():
+                future.set_exception(exc)
 
     def committed_results(self, after_completed=0, *, limit=16):
         """Read only the next committed symbols for the live monitor.
@@ -492,7 +564,20 @@ class ScreeningManager:
             except Exception as exc:
                 write_json(directory / "status.json", {**request, "status": "failed", "error": str(exc)})
                 raise
+        threading.Thread(target=self._warm_after_run, args=(directory, self._process),
+                         name="screening-result-warmup", daemon=True).start()
         return self._status(directory)
+
+    def _warm_after_run(self, directory, process):
+        """Prepare the verified page result after the worker commits its run."""
+        try:
+            process.wait()
+            state = read_state_json(directory / "status.json")
+            if state.get("status") == "completed" and self._directory() == directory:
+                self.results(persist=True)
+        except Exception:
+            # The page can still build or retry the result on demand.
+            pass
 
     def cancel(self):
         with self._lock:

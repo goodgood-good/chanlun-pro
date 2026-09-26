@@ -189,6 +189,34 @@ def combined_extreme_market_time(units, side: str) -> datetime | None:
     return None if any(t is None for t in moments) else max(moments)
 
 
+def center_envelope_units(initial_units, body_units, source_kind: SourceKind) -> tuple[ConstituentUnit, ...]:
+    """Use the center-forming direction's Z legs for recursive DD/GG.
+
+    Physical segment centers retain their operational full-body envelope.
+    A recursive center follows the same-direction Zn definition in lesson 20;
+    the opposite legs still belong to the body and must overlap its core.
+    """
+    values = tuple(body_units)
+    if SourceKind(source_kind) is SourceKind.TREND_TYPE:
+        direction = tuple(initial_units)[0].direction
+        return tuple(item for item in values if item.direction == direction)
+    return values
+
+
+def center_overlap_interpretation(
+    source_kind: SourceKind,
+    zd_tick: int | None,
+    zg_tick: int | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Expose the runtime overlap choice and unresolved one-price source issue."""
+    differences = ("C46-01",) if zd_tick is not None and zd_tick == zg_tick else ()
+    if SourceKind(source_kind) is SourceKind.TREND_TYPE:
+        return "recursive_closed_interval_contact", differences
+    if differences:
+        return "physical_closed_interval_contact", differences
+    return "physical_positive_width", ()
+
+
 @dataclass(frozen=True, slots=True)
 class TrendCenter:
     __getstate__ = frozen_dataclass_state
@@ -266,10 +294,11 @@ class TrendCenter:
         expected_zg = min((item.high_tick for item in self.core_units))
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
             raise ValueError('center core must equal its three core-unit intersection')
-        expected_dd = min((item.low_tick for item in self.body_units))
-        expected_gg = max((item.high_tick for item in self.body_units))
+        envelope_units = center_envelope_units(self.initial_units, self.body_units, self.source_kind)
+        expected_dd = min((item.low_tick for item in envelope_units))
+        expected_gg = max((item.high_tick for item in envelope_units))
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
-            raise ValueError('center envelope must equal body envelope')
+            raise ValueError('recursive center envelope must equal same-direction Z envelope')
         if self.zd_tick > self.zg_tick:
             raise ValueError('trend-type center requires zd_tick <= zg_tick')
         if self.dd_tick > self.zd_tick or self.gg_tick < self.zg_tick:
@@ -545,8 +574,8 @@ class TrendCenter:
         expected_gg = max((item.high_tick for item in envelope_units))
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
             raise ValueError("center envelope must equal body envelope")
-        if self.zd_tick >= self.zg_tick:
-            raise ValueError("line center requires zd_tick < zg_tick")
+        if self.zd_tick > self.zg_tick:
+            raise ValueError("line center requires zd_tick <= zg_tick")
         if self.dd_tick > self.zd_tick or self.gg_tick < self.zg_tick:
             raise ValueError("envelope must contain the core")
         if any((not self._touches_core(item) for item in self.body_units)):
@@ -556,11 +585,11 @@ class TrendCenter:
         if self.entry_unit is None:
             raise ValueError("physical center entry is missing")
         if not self._overlaps_core(self.entry_unit):
-            raise ValueError("entry unit must positively overlap center core")
+            raise ValueError("entry unit must overlap center core")
         if establishment_leave is None:
             raise ValueError("physical center leave is missing")
         if not self._overlaps_core(establishment_leave):
-            raise ValueError("establishment leave must positively overlap center core")
+            raise ValueError("establishment leave must overlap center core")
         if not self._outside_in_direction(establishment_leave):
             raise ValueError("establishment leave endpoint must be outside center core")
         establishment_ids = tuple(
@@ -937,7 +966,7 @@ class TrendCenter:
     def _overlaps_core(self, item: ConstituentUnit) -> bool:
         left = max(item.low_tick, self.zd_tick)
         right = min(item.high_tick, self.zg_tick)
-        if self.source_kind is SourceKind.TREND_TYPE:
+        if self.source_kind is SourceKind.TREND_TYPE or self.zd_tick == self.zg_tick:
             return left <= right
         return left < right
 
@@ -1259,7 +1288,7 @@ class CenterPreview:
         if (
             self.state is CenterPreviewState.FORMING
             and self.zd_tick is not None
-            and (self.zd_tick >= self.zg_tick)
+            and (self.zd_tick > self.zg_tick)
         ):
             raise ValueError("forming preview core violates source overlap contract")
         if self.state is CenterPreviewState.COMPLETED:
@@ -1267,7 +1296,7 @@ class CenterPreview:
                 len(self.unit_ids) < 3
                 or self.zd_tick is None
                 or self.zg_tick is None
-                or (self.zd_tick >= self.zg_tick)
+                or (self.zd_tick > self.zg_tick)
             ):
                 raise ValueError(
                     "completed preview requires a source-valid center core"
@@ -1320,7 +1349,7 @@ class CenterPreview:
     def formal_center_id(self) -> str | None:
         """返回该预览锁定后将采用的正式中枢身份。
 
-        触碰型预览没有有效价格区间，永远不能提升为正式中枢。其余预览与
+        旧触碰型预览没有正式五角色证，不能提升为正式中枢。其余预览与
         正式中枢共用完全相同的种子身份，盘中候选因此可以保留到确认阶段的
         精确中枢血缘，而不需要由选股层重新拼装另一套身份。
         """
@@ -1331,11 +1360,7 @@ class CenterPreview:
             or self.state is CenterPreviewState.TOUCH_ONLY
         ):
             return None
-        if (
-            self.zd_tick > self.zg_tick
-            if self.source_kind is SourceKind.TREND_TYPE
-            else self.zd_tick >= self.zg_tick
-        ):
+        if self.zd_tick > self.zg_tick:
             return None
         if self.source_kind is not SourceKind.TREND_TYPE and (
             self.entry_unit_id is None or self.establishment_leave_unit_id is None
@@ -1400,9 +1425,14 @@ class CenterEvidence:
     superseded_by_center_id: str | None = None
     superseded_at: datetime | None = None
     supersession_bridge_unit_ids: tuple[str, ...] = ()
+    runtime_overlap_policy: str = ""
+    unresolved_source_difference_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_center(cls, center: TrendCenter) -> "CenterEvidence":
+        policy, differences = center_overlap_interpretation(
+            center.source_kind, center.zd_tick, center.zg_tick
+        )
         return cls(
             schema="chanlun-center",
             center_id=center.center_id,
@@ -1459,6 +1489,8 @@ class CenterEvidence:
             supersession_bridge_unit_ids=tuple(
                 item.unit_id for item in center.supersession_bridge_units
             ),
+            runtime_overlap_policy=policy,
+            unresolved_source_difference_ids=differences,
         )
 
 
@@ -1574,9 +1606,12 @@ class CenterLevelResult:
 
 
 class CenterRelation(str, Enum):
+    """Geometric relation only; UPGRADE is not a completed parent-center proof."""
+
     UP_TREND = "up_trend"
     DOWN_TREND = "down_trend"
     UPGRADE = "upgrade"
+    RECOMPOSITION_PENDING = "recomposition_pending"
 
 
 class TrendKind(str, Enum):

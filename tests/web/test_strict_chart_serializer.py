@@ -7,13 +7,19 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chanlun.cl_utils.strict_chart import aware_datetime_to_epoch_seconds, strict_center_to_chart_dict
+from chanlun.cl_utils.strict_chart import (
+    _center_payload,
+    aware_datetime_to_epoch_seconds,
+    strict_center_preview_to_chart_dict,
+    strict_center_to_chart_dict,
+)
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     establish_center,
+    establish_center_preview,
 )
-from chanlun.core.strict_structure.models import CenterState, ConstituentUnit, SourceKind, TrendCenter
-from tests.core.strict_structure.helpers import completed_up_center
+from chanlun.core.strict_structure.models import CenterEvidence, CenterState, ConstituentUnit, SourceKind, TrendCenter
+from tests.core.strict_structure.helpers import completed_up_center, unit
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -98,6 +104,166 @@ def test_formal_center_rectangle_uses_core_not_envelope() -> None:
 
     assert [point["price_tick"] for point in payload["points"]] == [115, 105]
     assert payload["envelope"] == {"dd_tick": 100, "gg_tick": 130}
+
+
+def test_boundary_third_buy_exports_non_crossing_end_rule() -> None:
+    center = completed_up_center(return_low_tick=115, zg_tick=115)
+
+    payload = strict_center_to_chart_dict(center)
+
+    assert payload["third_class_confirmed"]
+    assert payload["center_end_rule"] == (
+        "independent_completed_lower_leave_and_first_non_crossing_return"
+    )
+    assert payload["completion_return_segment"]["low_tick"] == payload["core"]["zg_tick"]
+
+
+def test_one_price_recursive_center_publishes_unresolved_C46_policy() -> None:
+    source = SourceKind.TREND_TYPE
+    units = (
+        unit(0, "up", 100, 120, source_kind=source, structural_level=1),
+        unit(1, "down", 120, 90, source_kind=source, structural_level=1),
+        unit(2, "up", 90, 100, source_kind=source, structural_level=1),
+    )
+    center = establish_center(units, 1, source)
+    assert center is not None and center.zd_tick == center.zg_tick == 100
+
+    evidence = CenterEvidence.from_center(center)
+    assert evidence.runtime_overlap_policy == "recursive_closed_interval_contact"
+    assert evidence.unresolved_source_difference_ids == ("C46-01",)
+
+    payload = strict_center_to_chart_dict(center)
+    assert payload["runtime_overlap_policy"] == "recursive_closed_interval_contact"
+    assert payload["unresolved_source_difference_ids"] == ["C46-01"]
+    assert payload["overlap_component_count"] == 3
+    assert payload["higher_center_member_trend_ids"] == [part.unit_id for part in units]
+    assert payload["higher_center_member_confirmed_at"] == [
+        int(part.confirmed_at.timestamp()) for part in units
+    ]
+    assert payload["higher_center_formal_at"] >= payload["higher_center_member_confirmed_at"][-1]
+    assert payload["higher_center_formal_member_gate"] == "three_locked_lower_types"
+    assert [part["unit_id"] for part in payload["overlap_components"]] == [
+        part.unit_id for part in units
+    ]
+
+    preview_units = (*units[:2], replace(units[2], locked=False, confirmed_at=None))
+    preview = establish_center_preview(preview_units, 1, source)
+    assert preview is not None
+    candidate = strict_center_preview_to_chart_dict(
+        preview, {part.unit_id: part for part in preview_units}
+    )
+    assert candidate is not None
+    assert candidate["runtime_overlap_policy"] == "recursive_closed_interval_contact"
+    assert candidate["unresolved_source_difference_ids"] == ["C46-01"]
+
+    physical = strict_center_to_chart_dict(_center())
+    assert physical["runtime_overlap_policy"] == "physical_positive_width"
+    assert physical["unresolved_source_difference_ids"] == []
+
+    positive_units = (
+        unit(3, "up", 100, 120, source_kind=source, structural_level=1),
+        unit(4, "down", 120, 100, source_kind=source, structural_level=1),
+        unit(5, "up", 100, 115, source_kind=source, structural_level=1),
+    )
+    positive_center = establish_center(positive_units, 1, source)
+    assert positive_center is not None and positive_center.zd_tick < positive_center.zg_tick
+    assert strict_center_to_chart_dict(positive_center)["unresolved_source_difference_ids"] == []
+
+
+def test_one_price_physical_center_keeps_C46_marker_through_chart_output() -> None:
+    values = (
+        _unit(0, "down", 130, 120),
+        replace(_unit(1, "up", 120, 120), high_tick=130),
+        _unit(2, "down", 120, 100),
+        _unit(3, "up", 100, 120),
+        _unit(4, "down", 120, 110),
+    )
+    unfinished = values[:-1] + (replace(values[-1], locked=False, confirmed_at=None),)
+    preview = establish_center_preview(unfinished, 0, SourceKind.SEGMENT)
+    assert preview is not None
+    candidate = strict_center_preview_to_chart_dict(
+        preview, {part.unit_id: part for part in unfinished}
+    )
+    assert candidate is not None
+    assert candidate["runtime_overlap_policy"] == "physical_closed_interval_contact"
+    assert candidate["unresolved_source_difference_ids"] == ["C46-01"]
+
+    center = establish_center(values, 0, SourceKind.SEGMENT)
+    assert center is not None
+    completed, _event = advance_center(center, _unit(5, "up", 110, 115))
+    payload = strict_center_to_chart_dict(completed)
+    assert payload["core"] == {"zd_tick": 120, "zg_tick": 120}
+    assert payload["runtime_overlap_policy"] == "physical_closed_interval_contact"
+    assert payload["unresolved_source_difference_ids"] == ["C46-01"]
+    assert payload["overlap_component_count"] >= 5
+
+
+def test_one_price_stroke_observation_counts_its_five_closed_overlap_roles() -> None:
+    source = SourceKind.STROKE_OBSERVATION
+    values = (
+        _unit(0, "down", 130, 120, source_kind=source),
+        replace(_unit(1, "up", 120, 120, source_kind=source), high_tick=130),
+        _unit(2, "down", 120, 100, source_kind=source),
+        _unit(3, "up", 100, 120, source_kind=source),
+        _unit(4, "down", 120, 110, source_kind=source),
+    )
+    center = establish_center(values, 0, source)
+    assert center is not None and center.zd_tick == center.zg_tick == 120
+    payload = _center_payload(center, render_kind="center_observation", tradable=False)
+    assert payload["runtime_overlap_policy"] == "physical_closed_interval_contact"
+    assert payload["overlap_component_count"] >= 5
+
+
+def test_small_to_large_second_point_does_not_claim_larger_turn_confirmation() -> None:
+    from chanlun.cl_utils.strict_chart import strict_point_to_chart_dict
+    from tests.core.strict_structure.signal_helpers import confirmed_point
+
+    second = confirmed_point(point_type="2buy")
+    candidate = replace(
+        second,
+        evidence_codes=("formal_structure", "small_to_large_reversal"),
+        small_to_large_carrier_unit_ids=("depart", "return", second.anchor_unit_id),
+    )
+
+    assert strict_point_to_chart_dict(candidate)["large_turn_certificate"] == (
+        "operating_second_class_not_larger_turn_certificate"
+    )
+
+
+def test_higher_center_is_linked_only_through_three_exact_lower_trend_members() -> None:
+    from chanlun.cl_utils.strict_chart import _attach_parent_center_rule_evidence
+
+    pair = {
+        "previous_center_id": "old", "current_center_id": "new",
+        "higher_center_ids": [],
+        "higher_center_formal": "requires_independent_parent_three_members",
+        "higher_center_formal_at": None,
+    }
+    unrelated = {
+        "previous_center_id": "old", "current_center_id": "other",
+        "higher_center_ids": [],
+        "higher_center_formal": "requires_independent_parent_three_members",
+        "higher_center_formal_at": None,
+    }
+    levels = [
+        {"trend_types": [
+            {"trend_id": "a", "center_ids": ["old"]},
+            {"trend_id": "b", "center_ids": []},
+            {"trend_id": "c", "center_ids": ["new"]},
+        ], "center_pair_rule_states": [pair, unrelated]},
+        {"centers": [{
+            "center_id": "parent", "higher_center_member_trend_ids": ["a", "b", "c"],
+            "higher_center_formal_at": 123,
+        }]},
+    ]
+
+    _attach_parent_center_rule_evidence(levels)
+
+    assert pair["higher_center_ids"] == ["parent"]
+    assert pair["higher_center_formal"] == "confirmed_by_parent_three_members"
+    assert pair["higher_center_formal_at"] == 123
+    assert unrelated["higher_center_ids"] == []
+    assert unrelated["higher_center_formal_at"] is None
 
 
 @pytest.mark.parametrize('state,phase', [
