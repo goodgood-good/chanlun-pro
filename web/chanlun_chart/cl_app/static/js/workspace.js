@@ -4,7 +4,7 @@
   document.documentElement.classList.toggle('cp-embedded', window.self !== window.top);
   function syncTheme() {
     try {
-      const theme = JSON.parse(localStorage.getItem('tv_chart') || '{}').theme;
+      const theme = JSON.parse(localStorage.getItem(window.WorkspaceDevice?.preferenceKey('tv_chart') || 'tv_chart') || '{}').theme;
       if (theme === 'light' || theme === 'dark') {
         document.documentElement.classList.toggle('cl-theme-dark', theme === 'dark');
       }
@@ -12,6 +12,7 @@
   }
   syncTheme();
   window.addEventListener('storage', function (event) {
-    if (event.key === 'tv_chart') syncTheme();
+    if (event.key === (window.WorkspaceDevice?.preferenceKey('tv_chart') || 'tv_chart')) syncTheme();
   });
+  window.addEventListener('workspace-preferences-ready', syncTheme);
 })();

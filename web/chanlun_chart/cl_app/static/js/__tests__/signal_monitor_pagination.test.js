@@ -28,6 +28,15 @@ function payload(){
     signals:rows,events:rows,errors:[],pool_markets:{a:125},pagination:Object.fromEntries(['signals','pool','events'].map(k=>
       [k,{page:2,pages:5,size:25,total:125,overall:125,query:''}])),coverage:{total:125,ready:121,limited:4,pending:0}};
 }
+
+test('phone requests 25 rows and keeps signal labels available without a table header',async()=>{
+  const app=fixture(async()=>({ok:true,json:async()=>payload()}),{WorkspaceDevice:{isPhone:true}});
+  await wait();
+  const url=new URL(app.requests[0].url,'http://local');
+  for(const name of ['signals','pool','events'])assert.equal(url.searchParams.get(name+'_size'),'25');
+  assert.equal(app.get('monitor-settings').open,false);assert.equal(app.get('monitor-history').open,false);
+  assert.equal(app.get('signals').children[0].children[1]['data-label'],'信号');
+});
 test('remote pages are not sliced twice and full totals and layout links survive',async()=>{
   const app=fixture(async()=>({ok:true,json:async()=>payload()}));await wait();
   assert.equal(app.get('signals').children.length,25);

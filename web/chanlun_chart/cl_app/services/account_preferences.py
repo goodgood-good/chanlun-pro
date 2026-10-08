@@ -201,6 +201,8 @@ def _normalize_display_config(key: str, raw: object) -> str:
 
 
 def _normalize_value(key: str, raw: object) -> str:
+    if key in {'phone_tv_chart', 'phone_chart_menu_width', 'phone_chart_menu_collapsed'}:
+        key = key.removeprefix('phone_')
     if key == "tv_chart":
         return _normalize_tv_chart(raw)
     if key == "chart_menu_width":
@@ -233,6 +235,9 @@ def _is_supported_preference_key(key: object) -> bool:
                 "tv_chart",
                 "chart_menu_width",
                 "chart_menu_collapsed",
+                "phone_tv_chart",
+                "phone_chart_menu_width",
+                "phone_chart_menu_collapsed",
             }
             or _DRAWING_MODE_KEY.fullmatch(key)
             or _DISPLAY_CONFIG_KEY.fullmatch(key)
@@ -244,7 +249,7 @@ def normalize_preferences(payload: object) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("schema") != PREFERENCE_SCHEMA:
         raise InvalidAccountPreferences("unsupported preference schema")
     values = payload.get("values")
-    if not isinstance(values, dict) or len(values) > 100:
+    if not isinstance(values, dict) or len(values) > 128:
         raise InvalidAccountPreferences("values must be a bounded object")
 
     normalized_values: dict[str, str] = {}
@@ -288,7 +293,7 @@ def save_preferences_for_user(user: object, payload: object) -> dict[str, Any]:
         raw_changed_keys = payload.get("changed_keys")
         if (
             not isinstance(raw_changed_keys, list)
-            or len(raw_changed_keys) > 100
+            or len(raw_changed_keys) > 128
             or any(not _is_supported_preference_key(key) for key in raw_changed_keys)
             or len(raw_changed_keys) != len(set(raw_changed_keys))
         ):

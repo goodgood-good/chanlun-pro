@@ -16,8 +16,9 @@ var Utils = (function () {
 
   return {
     get_local_data: function (key) {
-      if (layui.data("tv_chart")) {
-        let val = layui.data("tv_chart")[key];
+      const bucket = window.WorkspaceDevice?.preferenceKey('tv_chart') || 'tv_chart';
+      if (layui.data(bucket)) {
+        let val = layui.data(bucket)[key];
         if (val === undefined) {
           return default_vals[key];
         }
@@ -26,7 +27,7 @@ var Utils = (function () {
       return default_vals[key];
     },
     set_local_data: function (key, val) {
-      layui.data("tv_chart", {
+      layui.data(window.WorkspaceDevice?.preferenceKey('tv_chart') || 'tv_chart', {
         key: key,
         value: val,
       });

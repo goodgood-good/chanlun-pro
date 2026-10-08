@@ -659,7 +659,7 @@
           if (window.Utils && typeof Utils.set_local_data === "function") {
             Utils.set_local_data(key, value);
           } else if (window.layui && typeof layui.data === "function") {
-            layui.data("tv_chart", { key: key, value: value });
+            layui.data(window.WorkspaceDevice?.preferenceKey('tv_chart') || 'tv_chart', { key: key, value: value });
           } else {
             try { localStorage.setItem(key, value); } catch (_) { /* 极端环境下不阻塞初始化 */ }
           }
@@ -685,7 +685,7 @@
             // Selecting a screening candidate pins this iframe's context;
             // it does not replace the account's saved workspace defaults.
             if (params.get('workspace_layout') !== '1') {
-              setLocalValue("chart_layout_type", urlLayout);
+              setLocalValue("chart_layout_type", window.WorkspaceDevice?.layout(urlLayout) || urlLayout);
               selectedIntervals.forEach(function (interval, index) {
                 setLocalValue(selectedMarket + "_interval_" + (index + 1), interval);
               });
@@ -1476,7 +1476,7 @@
                 '<div><i class="layui-icon layui-icon-logout"></i> <span>退出登录</span></div>',
               id: "logout",
             },
-          ],
+          ].filter(function (item) { return !window.WorkspaceDevice?.isPhone || item.id !== 7; }),
           click: function (item) {
             var workspacePages = {
               workspace_trading: "/",
@@ -1603,6 +1603,7 @@
         let chart_layout_type =
           (url_bootstrap && url_bootstrap.layout) ||
           Utils.get_local_data("chart_layout_type") || "single";
+        chart_layout_type = window.WorkspaceDevice?.layout(chart_layout_type) || chart_layout_type;
         let charts_area = $("#tv_charts_area");
         charts_area.empty();
         let win_height = document.getElementById("chart_container")?.clientHeight || window.innerHeight;

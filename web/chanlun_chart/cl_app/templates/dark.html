@@ -283,6 +283,7 @@
 <script type="text/javascript" nonce="{{ csp_nonce }}">
     window.__CHANLUN_ACCOUNT_PREFERENCES__ = {{ account_preferences_bootstrap|default(none)|tojson }};
 </script>
+<script src="{{ url_for('static', filename='js/workspace_device.js') }}?asset={{ static_asset_token|default('') }}"></script>
 <script
     type="text/javascript"
     src="{{ url_for('static', filename='js/account_preferences.js') }}?asset={{ static_asset_token|default('') }}"></script>
@@ -292,7 +293,7 @@
             var c = document.getElementsByTagName("head");
 
             try {
-                var b = JSON.parse(localStorage.tv_chart);
+                var b = JSON.parse((window.AccountPreferences ? AccountPreferences.getItem('tv_chart') : localStorage.tv_chart) || '{}') || {};
             } catch (d) {
                 b = {};
             }

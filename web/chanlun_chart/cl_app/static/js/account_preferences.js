@@ -19,6 +19,8 @@
   var mutationSerial = 0;
   var saveTimer = null;
   var savePromise = null;
+  var device = root.WorkspaceDevice;
+  function preferenceKey(key) { return device ? device.preferenceKey(key) : key; }
 
   function storageGet(key) {
     try { return root.localStorage.getItem(key); }
@@ -36,6 +38,7 @@
   }
 
   function isApprovedKey(key) {
+    if (['phone_tv_chart','phone_chart_menu_width','phone_chart_menu_collapsed'].indexOf(key) !== -1) return true;
     return key === "tv_chart" ||
       key === "chart_menu_width" ||
       key === "chart_menu_collapsed" ||
@@ -78,7 +81,7 @@
       var changedKeys = Array.isArray(parsed.changedKeys)
         ? parsed.changedKeys.filter(isApprovedKey)
         : Object.keys(cachedValues);
-      return { values: cachedValues, changedKeys: changedKeys };
+      return { values: cachedValues, changedKeys: changedKeys, hasChangedKeys: Array.isArray(parsed.changedKeys) };
     } catch (_) {
       return null;
     }
@@ -95,10 +98,24 @@
   }
 
   function applyAccountValues(nextValues) {
-    localApprovedKeys().forEach(storageRemove);
+    var active = function (key) { return !device || device.isCurrentKey(key); };
+    localApprovedKeys().filter(active).forEach(storageRemove);
     Object.keys(nextValues).forEach(function (key) {
-      storageSet(key, nextValues[key]);
+      if (active(key)) storageSet(key, nextValues[key]);
     });
+    if (device && device.isPhone && storageGet('phone_tv_chart') === null) {
+      // Carry common defaults into the first phone view without importing a
+      // desktop split-screen choice or modifying its persisted preferences.
+      var inherited = {};
+      try {
+        var desktop = JSON.parse(nextValues.tv_chart || '{}');
+        Object.keys(desktop).forEach(function (key) {
+          if (key === 'theme' || key === 'market' || /_code$|_interval_1$/.test(key)) inherited[key] = desktop[key];
+        });
+      } catch (_) {}
+      inherited.chart_layout_type = 'single';
+      storageSet('phone_tv_chart', JSON.stringify(inherited));
+    }
   }
 
   function csrfToken() {
@@ -179,6 +196,7 @@
   }
 
   function setItem(key, value) {
+    key = preferenceKey(key);
     if (!isApprovedKey(key)) return storageSet(key, value);
     var normalized = String(value);
     storageSet(key, normalized);
@@ -193,6 +211,7 @@
   }
 
   function removeItem(key) {
+    key = preferenceKey(key);
     storageRemove(key);
     if (!enabled || !isApprovedKey(key) || !Object.prototype.hasOwnProperty.call(values, key)) {
       return true;
@@ -243,15 +262,17 @@
     // reload, otherwise a transient network failure silently rolls settings
     // back to their previous values.
     if (pendingCache) {
-      values = pendingCache.values;
       // Legacy pending caches did not record deletions. Include every server
       // key as changed so an absent local key is removed during the merge.
       var pendingKeys = pendingCache.changedKeys.concat(
-        Object.keys(serverValues).filter(function (key) {
-          return !Object.prototype.hasOwnProperty.call(values, key);
+        pendingCache.hasChangedKeys ? [] : Object.keys(serverValues).filter(function (key) {
+          return !Object.prototype.hasOwnProperty.call(pendingCache.values, key);
         })
       );
+      values = cloneValues(serverValues);
       pendingKeys.forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(pendingCache.values, key)) values[key] = pendingCache.values[key];
+        else delete values[key];
         dirtyKeyVersions[key] = ++mutationSerial;
       });
       dirty = true;
@@ -268,7 +289,7 @@
   }
 
   function getItem(key) {
-    return storageGet(key);
+    return storageGet(preferenceKey(key));
   }
 
   root.AccountPreferences = {
@@ -295,4 +316,7 @@
       });
     }
   };
+  if (typeof root.dispatchEvent === 'function' && typeof root.CustomEvent === 'function') {
+    root.dispatchEvent(new root.CustomEvent('workspace-preferences-ready'));
+  }
 })(typeof window !== "undefined" ? window : globalThis);

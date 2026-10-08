@@ -1,0 +1,75 @@
+/* Compact views share business data while keeping their workspace independent. */
+.mobile-workspace-tabs,.mobile-back-to-list{display:none}
+.cp-mobile #selected-detail:not([hidden]){display:flex;flex-direction:column}
+.cp-mobile #candidate-detail-state{order:-5}
+.cp-mobile #chart-periods{order:-4}
+.cp-mobile .mobile-chart-options{order:-3;margin:6px 0}
+.cp-mobile .mobile-chart-options>summary{cursor:pointer;min-height:42px;padding:8px 0}
+.cp-mobile .mobile-screening-actions>summary,.cp-mobile .mobile-monitor-controls>summary{cursor:pointer;min-height:42px;padding:8px 0}
+.cp-mobile .mobile-screening-actions{border:1px solid var(--cp-border);border-radius:8px;padding:0 12px;background:var(--cp-surface-strong)}
+.cp-mobile .mobile-screening-actions #run-status{font-size:12px;font-weight:400}
+.cp-mobile .mobile-monitor-controls{padding:0 16px}
+.cp-mobile .mobile-monitor-controls .monitor-controls{border:0;box-shadow:none;padding:0;margin:8px 0}
+.cp-mobile .mobile-monitor-controls .monitor-settings>summary{display:none}
+.cp-mobile #chart-periods small{display:none}
+.cp-mobile .chart-stage{order:-2}
+.cp-mobile #chart-context{order:-1}
+.cp-mobile button,.cp-mobile input:not([type=checkbox]):not([type=radio]),.cp-mobile select{min-height:42px}
+.cp-mobile input:not([type=checkbox]):not([type=radio]),.cp-mobile select,.cp-mobile textarea{font-size:16px}
+.cp-mobile .app-nav{padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right))}
+.cp-mobile #chart_menu_toggle{width:36px!important;min-height:56px;opacity:.92}
+.cp-mobile .ca-sidebar-header button{min-width:42px;min-height:42px}
+.cp-mobile .cp-content-page main{padding:12px 10px 24px}
+.cp-mobile .cp-content-page .hero{margin-bottom:10px}
+.cp-mobile .cp-content-page .hero h1{font-size:21px}
+.cp-mobile .cp-content-page .hero p{font-size:12px;margin:4px 0}
+.cp-mobile .cp-content-page .hero small{display:none}
+.monitor-settings>summary{display:none}
+.cp-mobile .monitor-settings>summary{display:list-item;cursor:pointer;min-height:42px;padding:8px 0;font-weight:600}
+.cp-mobile .cp-monitor .summary{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.cp-mobile .cp-monitor .summary article{padding:8px 6px}
+.cp-mobile .cp-monitor .summary small{font-size:11px}
+.cp-mobile .cp-monitor .monitor-stages{grid-template-columns:1fr;gap:0}
+.cp-mobile .monitor-signals .monitor-table{overflow:visible;margin:0}
+.cp-mobile .monitor-signals table,.cp-mobile .monitor-signals tbody{display:block;width:100%}
+.cp-mobile .monitor-signals thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+.cp-mobile .monitor-signals tbody{display:grid;gap:12px}
+.cp-mobile .monitor-signals tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px;padding:12px;border:1px solid var(--cp-border);border-radius:9px;background:var(--cp-surface-strong)}
+.cp-mobile .monitor-signals td{display:block;padding:0;min-width:0;border:0;white-space:normal;overflow-wrap:anywhere}
+.cp-mobile .monitor-signals td:before{content:attr(data-label);display:block;font-size:11px;color:var(--cp-muted)}
+.cp-mobile .monitor-signals td:first-child{grid-column:1/-1;font-size:15px;font-weight:650;padding-bottom:4px}
+.cp-mobile .monitor-signals td:first-child:before{display:none}
+.cp-mobile .monitor-list-controls{display:grid;grid-template-columns:minmax(0,1fr) 92px;gap:10px;margin:12px 0;align-items:start}
+.cp-mobile .monitor-list-controls label{display:flex;flex-direction:column;align-items:stretch;gap:4px;white-space:nowrap}
+.cp-mobile .monitor-search,.cp-mobile .monitor-search input{min-width:0;width:100%}
+.cp-mobile .monitor-pagination{gap:8px;justify-content:space-between}
+.cp-mobile .monitor-pagination button{min-width:76px}
+.cp-mobile .monitor-signals .monitor-pagination{position:sticky;top:var(--app-nav-height);z-index:3;padding:8px 0;margin:0 0 8px;background:var(--cp-surface-strong)}
+.cp-mobile .queue>.toolbar{position:sticky;top:calc(var(--app-nav-height) + 60px);z-index:3;display:flex;flex-wrap:nowrap;justify-content:space-between;gap:5px;padding:8px 0;background:var(--cp-surface-strong)}
+.cp-mobile #queue-page{font-size:11px;text-align:center}
+.cp-mobile .queue>.toolbar button{white-space:nowrap}
+.cp-mobile .mobile-workspace-tabs{display:flex;gap:6px;position:sticky;top:var(--app-nav-height);z-index:20;padding:8px 0;background:var(--cp-bg);scroll-margin-top:var(--app-nav-height)}
+.cp-mobile .mobile-workspace-tabs button{flex:1;min-height:44px}
+.cp-mobile .mobile-workspace-tabs [aria-selected=true]{background:var(--cp-accent);color:#fff;border-color:var(--cp-accent)}
+.cp-mobile .cp-screening .workspace{display:block;margin-top:4px}
+.cp-mobile .cp-screening .workspace>.panel{width:100%}
+.cp-mobile .cp-screening .queue{max-height:none;position:static;overflow:visible}
+.cp-mobile .cp-screening [data-mobile-view=list]>.analysis{display:none}
+.cp-mobile .cp-screening [data-mobile-view=chart]>.queue{display:none}
+.cp-mobile .cp-screening .mobile-back-to-list{display:inline-block}
+.cp-mobile .cp-screening #toggle-list{display:none}
+.cp-mobile .cp-screening .analysis>header{gap:8px;flex-wrap:wrap}
+.cp-mobile .cp-screening .analysis>header .toolbar{justify-content:flex-start;gap:6px}
+.cp-mobile .cp-screening .analysis>header .toolbar>a[href="#review-panel"]{display:none}
+.cp-mobile .cp-screening .chart-stage{min-height:300px}
+.cp-mobile .cp-screening .signal-card{padding:12px}
+.cp-mobile .cp-screening .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+.cp-mobile .cp-screening .auxiliary-panels{grid-template-columns:1fr}
+.cp-mobile .cp-screening .chart-filters{position:static}
+.cp-mobile .cp-screening.theater .mobile-workspace-tabs{visibility:hidden}
+.cp-mobile .cp-screening.theater .mobile-chart-options,.cp-mobile .cp-screening.theater .exit-reference-note{display:none}
+.cp-mobile .cp-screening.theater .analysis>header{min-height:48px;height:auto}
+.cp-mobile .layui-layer-iframe{left:8px!important;top:5dvh!important;width:calc(100vw - 16px)!important;max-width:1100px;height:90dvh!important}
+.cp-mobile .layui-layer-iframe .layui-layer-content{height:calc(90dvh - 42px)!important}
+.cp-mobile .layui-layer-iframe iframe{height:100%!important}
+@media(min-width:700px){.cp-mobile .monitor-signals tbody{grid-template-columns:repeat(2,minmax(0,1fr))}}

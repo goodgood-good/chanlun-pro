@@ -1956,6 +1956,28 @@ test('real save/load adapter writes current zoom and restores workspace studies 
   assert.equal(cm._loadingSavedLayout,false);
 });
 
+test('phone chart layout clients are independent while drawing clients remain shared', async () => {
+  const {ChartManager,sb}=loadChartManager();
+  const cm=Object.create(ChartManager.prototype);
+  cm.id='1';cm.instanceId='chart-manager-1';cm.setupEventListeners=()=>{};
+  sb.Utils.get_market=()=> 'a';sb.Utils.get_code=()=> 'SZ.000001';
+  sb.WorkspaceDevice={layoutClient:client=>client+'_phone'};
+  sb.addEventListener=()=>{};
+  let widgetOptions;sb.TradingView.widget=function(options){widgetOptions=options;return {};};
+  const requests=[];
+  sb.fetch=async(url,options={})=>{
+    requests.push({url:String(url),options});
+    return {ok:true,json:async()=>({status:'ok',id:12,data:{entries:[],complete:true}})};
+  };
+  cm.init();
+  await cm.save_load_adapter.saveChart({name:'Phone',symbol:'SZ.000001',resolution:'5',content:'{"charts":[]}'});
+  assert.equal(widgetOptions.client_id,'chanlun_pro_a_1_phone');
+  const native=requests.find(r=>r.options.method==='POST');
+  assert.equal(new URL(native.url,'http://local').searchParams.get('client'),'chanlun_pro_a_1_phone');
+  const manifest=requests.find(r=>r.url.startsWith('/tv/1.1/drawings?'));
+  assert.equal(new URL(manifest.url,'http://local').searchParams.get('client'),'chanlun_pro_a_1');
+});
+
 test('lowest-center page preserves studies restored from a saved chart layout', async () => {
   const { ChartManager, sb } = loadChartManager();
   const cm = makeManager(ChartManager, null);

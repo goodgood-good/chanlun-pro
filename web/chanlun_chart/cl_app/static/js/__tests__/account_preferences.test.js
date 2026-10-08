@@ -60,10 +60,41 @@ function loadPreferences(bootstrap, initial, options = {}) {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  if (options.viewport) {
+    Object.assign(sandbox, options.viewport);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'workspace_device.js'), 'utf8'), sandbox);
+  }
   const source = fs.readFileSync(path.join(__dirname, '..', 'account_preferences.js'), 'utf8');
   vm.runInContext(source, sandbox, { filename: 'account_preferences.js' });
   return { sandbox, localStorage, timers, fetchCalls, listeners };
 }
+
+test('phone preferences start single and save without changing desktop layouts', async () => {
+  const desktop=JSON.stringify({theme:'dark',market:'us',chart_layout_type:'four',us_code:'AAPL.US',us_interval_1:'30'});
+  const h=loadPreferences({account_key:'alice-key',exists:true,preferences:{schema:SCHEMA,values:{tv_chart:desktop}}},
+    {tv_chart:desktop},{viewport:{innerWidth:393}});
+  assert.equal(h.sandbox.WorkspaceDevice.isPhone,true);
+  const initial=JSON.parse(h.sandbox.AccountPreferences.getItem('tv_chart'));
+  assert.equal(initial.chart_layout_type,'single');assert.equal(initial.us_interval_1,'30');
+  const phone=JSON.stringify({...initial,us_interval_1:'1'});
+  h.sandbox.AccountPreferences.setItem('tv_chart',phone);
+  await h.sandbox.AccountPreferences.flush();
+  const sent=JSON.parse(h.fetchCalls[0].options.body);
+  assert.deepEqual(sent.changed_keys,['phone_tv_chart']);
+  assert.equal(sent.values.tv_chart,desktop);assert.equal(sent.values.phone_tv_chart,phone);
+  assert.equal(h.localStorage.getItem('tv_chart'),desktop);
+});
+
+test('pending phone changes preserve newer server desktop settings and other device keys', async () => {
+  const desktop=JSON.stringify({chart_layout_type:'four'}),phone=JSON.stringify({chart_layout_type:'single',us_interval_1:'1'});
+  const h=loadPreferences({account_key:'alice-key',exists:true,preferences:{schema:SCHEMA,values:{tv_chart:desktop,phone_chart_menu_width:'320'}}},
+    {'chanlun_account_preferences_v1:alice-key':JSON.stringify({schema:SCHEMA,pending:true,changedKeys:['phone_tv_chart'],values:{phone_tv_chart:phone}})},
+    {viewport:{innerWidth:393}});
+  await h.sandbox.AccountPreferences.flush();
+  const sent=JSON.parse(h.fetchCalls[0].options.body);
+  assert.deepEqual(sent.changed_keys,['phone_tv_chart']);assert.equal(sent.values.tv_chart,desktop);
+  assert.equal(sent.values.phone_chart_menu_width,'320');
+});
 
 test('server account preferences replace another account local chart state', () => {
   const serverTvChart = JSON.stringify({ theme: 'dark', chart_layout_type: 'four' });

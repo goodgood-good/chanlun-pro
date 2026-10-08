@@ -13,6 +13,26 @@
   let statusCache=null;
   let riskRevision=null,riskRetryAt=0;
   const pages = {signals:1,pool:1,events:1};
+  const phone = !!globalThis.WorkspaceDevice?.isPhone;
+  if (phone) {
+    for (const id of ['signals','pool','events']) $(id+'-page-size').value='25';
+    if ($('monitor-settings')) $('monitor-settings').open=false;
+    if ($('monitor-history')) $('monitor-history').open=false;
+    const main=document.querySelector('main'),controls=document.querySelector('.monitor-controls');
+    if(main?.insertBefore&&controls){
+      for(const selector of ['[aria-label="通知运行状态"]','.summary','.monitor-signals','.monitor-stages']){
+        const element=document.querySelector(selector);if(element)main.insertBefore(element,controls);
+      }
+      const signals=document.querySelector('.monitor-signals');
+      const options=document.createElement('details'),summary=document.createElement('summary');
+      options.className='panel mobile-monitor-controls';summary.textContent='监听与通知设置';options.append(summary,controls);
+      const notifications=$('dingtalk-panel');if(notifications)options.append(notifications);
+      main.insertBefore(options,signals);
+      $('monitor-settings').open=true;
+      const table=signals?.querySelector('.monitor-table'),pager=signals?.querySelector('.monitor-pagination');
+      if(table&&pager)signals.insertBefore(pager,table);
+    }
+  }
   function node(tag, text, className) { const el = document.createElement(tag); if(text !== undefined)el.textContent = text; if(className)el.className = className; return el; }
   function chart(row) {
     const link = node('a', `${row.name || row.code} · ${row.code}`);
@@ -103,7 +123,10 @@
       const status=node('td');status.append(node('div',pointStatus(row)));
       for(const detail of statusDetails(row))status.append(node('div',detail,'muted'));
       tr.append(status);
-      for(const value of [row.anchor_price??'—',date(row.available_at),date(row.source_closed_at)])tr.append(node('td',String(value)));return tr;
+      for(const value of [row.anchor_price??'—',date(row.available_at),date(row.source_closed_at)])tr.append(node('td',String(value)));
+      const labels=['标的','信号','状态','拐点价格','信号可用时间','行情截止'];
+      Array.from(tr.children).forEach((cell,index)=>cell.setAttribute('data-label',labels[index]));
+      return tr;
     }));
     $('signals-empty').textContent=page.total?'':page.filtered?'没有匹配的当前信号。':data?.last_check_at?'最近完成的一轮没有可展示信号；有行情问题时请查看诊断。':'尚待首轮监听完成。';
   }
@@ -224,8 +247,8 @@
   for(const id of ['signals','pool','events']){
     $(id+'-search').addEventListener('input',()=>{pages[id]=1;clearTimeout(searchTimer);searchTimer=setTimeout(()=>void refresh(true),180);});
     $(id+'-page-size').addEventListener('change',()=>{pages[id]=1;void refresh(true);});
-    $(id+'-prev').addEventListener('click',()=>{pages[id]--;void refresh(true);});
-    $(id+'-next').addEventListener('click',()=>{pages[id]++;void refresh(true);});
+    $(id+'-prev').addEventListener('click',()=>{pages[id]--;void refresh(true);if(phone)$(id+'-page')?.scrollIntoView?.({block:'center'});});
+    $(id+'-next').addEventListener('click',()=>{pages[id]++;void refresh(true);if(phone)$(id+'-page')?.scrollIntoView?.({block:'center'});});
   }
   let riskBusy=false,analyticsBusy=false,riskActionKey=null;
   const riskActions=[],riskSelections=new Map();

@@ -31,7 +31,8 @@
 <main id="main-content">
   <header class="hero"><div><small>SIGNAL MONITOR</small><h1>信号监听</h1><p>持续跟踪选股候选与自选标的，按各市场行情更新检查买卖点变化。</p></div><span class="tag" id="enabled-label">正在连接…</span></header>
   <div id="monitor-message" class="notice" role="alert" hidden></div>
-  <section class="panel">
+  <section class="panel monitor-controls">
+    <details class="monitor-settings" id="monitor-settings" open><summary>自动任务设置</summary>
     <form id="monitor-form">
       <div class="screen-controls">
         <label>上午收盘后选股（北京时间）<input id="morning-after-close" type="time" min="11:35" max="12:59" value="11:35" required></label>
@@ -42,6 +43,7 @@
       </div>
       <div class="toolbar"><button class="primary" id="enable" type="submit" disabled>启动自动任务</button><button id="pause" type="button" disabled>暂停自动任务</button><button id="check-now" type="button" disabled>立即检查候选</button><button id="reload" type="button">刷新状态</button></div>
     </form>
+    </details>
     <details class="monitor-policy"><summary>调度与行情更新说明</summary>
     <p class="muted">监听最近一轮选股候选及自选组中的标的；自选标的无需先入选或出现信号。各所选 K 线周期独立计算已确认中枢与买卖点，随对应市场的新收盘 K 线更新。提醒在本页保留，可开启钉钉推送，关闭网页后后台任务仍继续。</p>
     <p class="muted">“我的持仓”分组同时接收盘整背驰提前预警及确认通知。提前预警结合未完成线段的力度减弱、已收盘行情的动能收缩与局部转折，后续可能确认或失效。数据异常时等待复核，失效预警保留在变化记录中。启用前的历史信号不补发；移出持仓分组后停止该标的的盘整背驰提醒。</p>
@@ -60,7 +62,7 @@
     <article class="panel"><small>02 · 跟踪候选</small><h2>实时监听</h2><strong id="live-status">正在读取…</strong><p id="live-detail" class="muted"></p><progress id="live-progress" hidden></progress><p id="pool-source" class="muted"></p></article>
   </section>
   <section class="summary"><article><small>监听标的</small><strong id="pool-count">0</strong></article><article><small>当前信号</small><strong id="signal-count">0</strong></article><article><small>变化记录</small><strong id="event-count">0</strong></article><article><small>本轮数据问题</small><strong id="error-count">0</strong></article></section>
-  <section class="panel"><header><h2>当前买卖点与持仓盘整背驰</h2><span id="signal-cutoff" class="muted"></span></header><p class="muted">点击标的查看当前行情图表。表中信号以显示的检查截止时刻为准。</p>{{ list_controls('signals', '代码、名称或信号类型') }}<div class="monitor-table"><table><thead><tr><th>标的</th><th>信号</th><th>状态</th><th>拐点价格</th><th>信号可用时间</th><th>行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p>{{ list_pager('signals', '当前信号') }}</section>
+  <section class="panel monitor-signals"><header><h2>当前买卖点与持仓盘整背驰</h2><span id="signal-cutoff" class="muted"></span></header><p class="muted">点击标的查看当前行情图表。表中信号以显示的检查截止时刻为准。</p>{{ list_controls('signals', '代码、名称或信号类型') }}<div class="monitor-table"><table><thead><tr><th scope="col">标的</th><th scope="col">信号</th><th scope="col">状态</th><th scope="col">拐点价格</th><th scope="col">信号可用时间</th><th scope="col">行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p>{{ list_pager('signals', '当前信号') }}</section>
   <details class="panel"><summary>完整监听名单 · 选股候选与自选标的</summary>{{ list_controls('pool', '代码或名称') }}<p id="pool-empty" class="muted"></p><div id="pool" class="monitor-pool"></div>{{ list_pager('pool', '监听名单') }}</details>
   <details class="panel" id="holding-risk-panel"><summary>持仓风险参考 · 绑定买点后持续跟踪</summary>
     <p class="muted">为实际持仓选择参考买点和周期。已收盘K线跌破对应结构止损、或之后出现同周期已确认卖点时提醒；买点退出选股窗口后继续跟踪。替换或解除参考会结束旧参考的跟踪。</p>
@@ -72,7 +74,7 @@
     <p class="muted">确认间隔按K线根数统计；退出选股窗口不等同于持仓离场。以下为最近7天标的内部计算耗时，不包含进程启动和通知传输。</p><div id="analytics-timings" class="muted"></div>
   </details>
   <details class="panel" id="errors-panel"><summary>行情与计算问题</summary><ul id="errors"></ul></details>
-  <section class="panel"><header><h2>站内提醒与监听历史</h2><span class="muted">最近 500 条 · 同一状态去重</span></header><p class="muted">记录首次发现、状态变化和退出本轮候选。退出候选只是筛选结果变化。保留的历史提醒不代表当前信号。</p>{{ list_controls('events', '代码、名称或信号类型') }}<div id="events"></div><p id="events-empty" class="muted"></p>{{ list_pager('events', '监听历史') }}</section>
+  <details class="panel monitor-history" id="monitor-history" open><summary>站内提醒与监听历史</summary><p class="muted">最近 500 条 · 同一状态去重。记录首次发现、状态变化和退出本轮候选；历史提醒不代表当前信号。</p>{{ list_controls('events', '代码、名称或信号类型') }}<div id="events"></div><p id="events-empty" class="muted"></p>{{ list_pager('events', '监听历史') }}</details>
 </main>
 </body>
 </html>

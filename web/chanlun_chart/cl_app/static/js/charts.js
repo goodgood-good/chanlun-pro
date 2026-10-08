@@ -2653,7 +2653,8 @@ class ChartManager {
         }, 20000);
 
         const self = this;
-        const client_id = "chanlun_pro_" + Utils.get_market() + "_" + this.id;
+        const drawing_client_id = "chanlun_pro_" + Utils.get_market() + "_" + this.id;
+        const client_id = window.WorkspaceDevice?.layoutClient(drawing_client_id) || drawing_client_id;
         // The server derives the real storage owner from the authenticated
         // session.  This placeholder only satisfies TradingView's URL contract.
         const user_id = "session";
@@ -2667,7 +2668,7 @@ class ChartManager {
         );
         const preloadDrawingManifest = () => {
             const query = new URLSearchParams({
-                client: client_id,
+                client: drawing_client_id,
                 user: user_id,
                 chart: 'default',
                 layout: 'default',
@@ -2807,7 +2808,7 @@ class ChartManager {
                 const processedState = options.capturedState || self.serializeUserDrawingsState(state);
                 clog("[DEBUG-CHARTS] Evaluating drawings save", { symbol, resolution, reason: options.reason });
                 const query = new URLSearchParams({
-                    client: client_id,
+                    client: drawing_client_id,
                     user: user_id,
                     chart: String(chartId),
                     layout: String(layoutId),
@@ -2907,7 +2908,7 @@ class ChartManager {
                         return resolve(self.deserializeUserDrawingsState(emptyState));
                     }
                     const query = new URLSearchParams({
-                        client: client_id,
+                        client: drawing_client_id,
                         user: user_id,
                         chart: String(chartId),
                         layout: String(layoutId),
@@ -3034,7 +3035,7 @@ class ChartManager {
                 : CHART_DISABLED_FEATURES,
             enabled_features: viewportOptions.enabledFeatures,
             save_load_adapter: save_load_adapter,
-            client_id: "chanlun_pro_" + Utils.get_market() + "_" + this.id,
+            client_id: client_id,
             user_id: "session", load_last_chart: shouldLoadLastChart(),
             custom_indicators_getter: this.getCustomIndicators,
             // TradingView 会在画布放不下时忽略 setVisibleRange 的 from。
@@ -3635,6 +3636,12 @@ class ChartManager {
             select.setAttribute('aria-label', '手绘周期');
             select.title = '新画出的线和框所属周期';
             select.style.cssText = 'width:44px;height:26px;padding:0;box-sizing:border-box;font-family:inherit;font-size:11px;border:1px solid #c5ced8;border-radius:4px;background:var(--cp-surface,#fff);color:var(--cp-text,#334155);cursor:pointer;';
+            if (window.WorkspaceDevice?.isPhone) {
+                select.style.height = '42px';
+                select.style.minHeight = '42px';
+                select.style.flexShrink = '0';
+                select.style.fontSize = '16px';
+            }
             for (const item of items) {
                 const option = doc.createElement('option');
                 option.value = item.period;
@@ -3668,6 +3675,9 @@ class ChartManager {
                 b.setAttribute('data-tool', tool);
                 b.setAttribute('aria-pressed', 'false');
                 b.style.cssText = 'width:38px; height:30px; padding:0; line-height:28px; white-space:nowrap; flex-shrink:0; text-align:center; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; box-sizing:border-box; background:transparent; border:1px solid ' + item.color + '; border-radius:5px; color:' + item.color + ';';
+                if (window.WorkspaceDevice?.isPhone) {
+                    b.style.width = '42px';b.style.height = '42px';b.style.lineHeight = '40px';
+                }
                 b.addEventListener('click', (e) => {
                     e.stopPropagation();
                     const current = this.chart?.resolution?.() ?? this._curResolution ?? interval;

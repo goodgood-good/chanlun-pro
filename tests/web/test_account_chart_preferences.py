@@ -145,6 +145,28 @@ def test_tradingview_storage_ignores_client_supplied_user_and_uses_session(app):
     assert [row["name"] for row in alice_rows] == ["Alice layout"]
 
 
+def test_phone_preferences_and_layouts_do_not_overwrite_desktop(app):
+    client = app.test_client()
+    _login(client, "alice-layout-test", "alice-password")
+    original = _preferences("four", "dark", 520)
+    assert client.put("/api/chart/preferences", json=original).status_code == 200
+    phone = json.dumps({"chart_layout_type": "single", "us_interval_1": "1"})
+    assert client.put("/api/chart/preferences", json={
+        "schema": original["schema"], "merge": True,
+        "changed_keys": ["phone_tv_chart"], "values": {"phone_tv_chart": phone},
+    }).status_code == 200
+    values = client.get("/api/chart/preferences").get_json()["preferences"]["values"]
+    assert json.loads(values["tv_chart"])["chart_layout_type"] == "four"
+    assert json.loads(values["phone_tv_chart"])["us_interval_1"] == "1"
+    desktop_url = "/tv/1.1/charts?client=device-regression_us_1&user=session"
+    phone_url = "/tv/1.1/charts?client=device-regression_us_1_phone&user=session"
+    for url, name in [(desktop_url, "Desktop MACD"), (phone_url, "Phone MACD HTF")]:
+        assert client.post(url, data={"name": name, "content": '{"charts":[]}',
+                                      "symbol": "US:AAPL.US", "resolution": "5"}).status_code == 200
+    assert [r["name"] for r in client.get(desktop_url).get_json()["data"]] == ["Desktop MACD"]
+    assert [r["name"] for r in client.get(phone_url).get_json()["data"]] == ["Phone MACD HTF"]
+
+
 def test_stale_chart_id_from_other_market_creates_persisted_us_layout(app):
     client = app.test_client()
     _login(client, "alice-layout-test", "alice-password")

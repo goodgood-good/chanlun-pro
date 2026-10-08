@@ -31,7 +31,7 @@ class Element {
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0]||null; }
 }
-function page(fetch, preferences, autoQuotes=false, strictTemplate=false) {
+function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=false) {
   const elements = new Map();
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   for (const [id, value] of Object.entries({scope:'all_a', codes:'', recent:'5', anchor:'20', workers:'12', 'max-gain':'10','chart-layout':'single',
@@ -61,7 +61,7 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false) {
       },
     },
     fetch, URL, URLSearchParams, Date:PageDate, Blob, AbortSignal, location:{origin:'http://local'},
-    AccountPreferences:preferences,
+    AccountPreferences:preferences,WorkspaceDevice:{isPhone:phone},
     setTimeout:(fn,delay) => {timerDelays.push(delay);return timers.push(fn);}, clearTimeout:id=>{timers[id-1]=()=>{};},
   };
   vm.runInNewContext(source,sandbox);
@@ -849,6 +849,24 @@ test('page navigation caps rendered cards and search still covers later pages',a
   ui.get('signal-search').value='UniqueTarget';ui.get('signal-search').listeners.input();await settle();
   assert.equal(ui.get('signal-list').children.length,1);
   assert.equal(ui.get('signal-list').children[0].dataset.id,'120');
+});
+
+test('phone queue uses 25 rows and returning from its chart preserves the selected page',async()=>{
+  const latest=withCandidate(),row=latest.candidates[0];
+  latest.candidates=Array.from({length:60},(_,i)=>({...row,id:String(i),name:'Stock '+i}));
+  const ui=page(async url=>dispatch(latest,url),{getItem:()=>'{"chart_layout_type":"four"}'},false,false,true);
+  await settle();assert.equal(ui.get('chart-layout').value,'single');
+  assert.equal(ui.get('signal-list').children.length,25);
+  ui.get('queue-next').listeners.click();await settle();
+  assert.equal(ui.get('signal-list').children[0].dataset.id,'25');
+  ui.get('signal-list').children[0].listeners.click();await settle();
+  assert.equal(ui.get('workspace').attributes['data-mobile-view'],'chart');
+  assert.equal(ui.get('mobile-chart-tab').attributes['aria-selected'],'true');
+  const chart=ui.get('chart-frame').src;
+  ui.get('mobile-back-to-list').listeners.click();
+  assert.equal(ui.get('workspace').attributes['data-mobile-view'],'list');
+  assert.equal(ui.get('signal-list').children[0].dataset.id,'25');
+  assert.equal(ui.get('chart-frame').src,chart);
 });
 
 test('live rechecks invalidate only the affected cached detail and preserve review drafts',async()=>{

@@ -11,6 +11,7 @@ class Element {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children=children; }
   addEventListener() {}
+  setAttribute(name,value) { this[name]=value; }
 }
 
 async function render(direction, stage='confirmed') {
