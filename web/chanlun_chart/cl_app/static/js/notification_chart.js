@@ -7,8 +7,8 @@
     window.__CHANLUN_SSE_ENABLED = false;
     window.__CHANLUN_SCREENING_EVIDENCE = {source: 'notification', point: 'notification'};
     const cm = window.notificationChartManager = new ChartManager('notification');
-    // Fit all available 30m history into the native exported canvas.
-    if (data.frequency === '30m') cm.exportMinBarSpacing = 0.01;
+    // Fit the requested history into the native exported canvas on every period.
+    cm.exportMinBarSpacing = 0.01;
     cm.getCustomIndicators = function (PineJS) {
         const study = TvIdxMACDBackend.idx(PineJS);
         study.metainfo.shortDescription = 'MACD_HTF · ' + ({'1m':'5m','5m':'30m','30m':'日线'}[data.frequency] || data.frequency);
@@ -29,6 +29,31 @@
         }
     }
     const coord = time => cm._centerChartTimeCoordinate(time, data.resolution, 'end');
+    const painted = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    async function settleHistoryRange() {
+        const requested = {from: coord(data.from), to: coord(data.cutoff)};
+        let visible = cm.chart.getVisibleRange();
+        const beforeCorrectionFrom = visible?.from;
+        const coversHistory = () => visible && visible.from <= requested.from && visible.to >= requested.to;
+        let corrections = 0;
+        // Pane heights, price-axis labels and font metrics settle after the
+        // first range request. Reapply it using the final canvas dimensions.
+        while (!coversHistory() && corrections < 2) {
+            await cm.chart.setVisibleRange(requested, {percentRightMargin: 8});
+            await painted();
+            await waitForReady();
+            visible = cm.chart.getVisibleRange();
+            corrections += 1;
+        }
+        const previous = window.__notificationViewport;
+        window.__notificationViewport = {frequency: data.frequency, requestedFrom: requested.from,
+            requestedTo: requested.to, actualFrom: visible?.from, actualTo: visible?.to,
+            beforeCorrectionFrom: previous?.beforeCorrectionFrom ?? beforeCorrectionFrom,
+            corrections: (previous?.corrections || 0) + corrections};
+        if (!coversHistory()) {
+            throw new Error(data.frequency + ' history range was truncated by the chart after layout retries');
+        }
+    }
     async function prepare() {
         await waitForReady();
         await cm.ensureRequestedDefaultStudies();
@@ -69,14 +94,9 @@
             overrides: {color: '#334155', fontsize: 14, backgroundColor: '#ffffff', fillBackground: true}});
         await document.fonts.ready;
         // Two animation frames let the native canvas finish its last paint.
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await painted();
         await waitForReady();
-        const visible = cm.chart.getVisibleRange();
-        window.__notificationViewport = {frequency: data.frequency, requestedFrom: coord(data.from),
-            requestedTo: coord(data.cutoff), actualFrom: visible?.from, actualTo: visible?.to};
-        if (data.frequency === '30m' && (!visible || visible.from > coord(data.from))) {
-            throw new Error('30m history range was truncated by the chart');
-        }
+        await settleHistoryRange();
         window.__notificationReady = true;
     }
     window.exportNotificationChart = async function () {
@@ -84,6 +104,7 @@
         if (!window.__notificationReady || !complete()) throw new Error('chart is not ready for export');
         const history = cm.getChartData().barsResult;
         if (history.strict_structure?.source_closed_at !== data.cutoff) throw new Error('snapshot cutoff mismatch');
+        await settleHistoryRange();
         const canvas = await cm.widget.takeClientScreenshot({hideStudiesFromLegend: false});
         return canvas.toDataURL('image/png');
     };

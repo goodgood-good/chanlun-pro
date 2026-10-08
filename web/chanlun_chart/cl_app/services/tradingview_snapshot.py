@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+from bisect import bisect_left
 from datetime import datetime
 from decimal import Decimal
 import json
+import logging
 import math
 import mimetypes
 from pathlib import Path
@@ -13,11 +15,12 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .notification_text import POINTS, heading, price
 
 APP_ROOT = Path(__file__).resolve().parents[1]
+LOG = logging.getLogger(__name__)
 ORIGIN = "http://notification-chart.invalid"
 VIEW = "/?screening_source=notification&default_study=MACD"
 PERIODS = ("1m", "5m", "30m")
-# Give the short and long context panels enough history to show larger swings.
-VISIBLE_BARS = {"1m": 720, "5m": 180}
+# Calendar windows are consistent across regular and continuously traded markets.
+VISIBLE_DAYS = {"1m": 30, "5m": 90, "30m": None}
 
 
 def prepare(event, runs_root):
@@ -55,7 +58,8 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
                "strict_structure_mode": "replace",
                "strict_structure": {k: v for k, v in snapshot.items() if k != "chart"}}
     anchor_pos = positions[signal["anchor_at"]]
-    history_start = 0 if frequency == '30m' else len(frame) - VISIBLE_BARS.get(frequency, 180)
+    days = VISIBLE_DAYS[frequency]
+    history_start = 0 if days is None else bisect_left(times, times[-1] - days * 86400)
     starts = [anchor_pos - 40, history_start]
     centers = [c for level in snapshot["levels"] for c in level.get("centers", [])]
     center = next((c for c in centers if c["center_id"] == event.get("center_id")), None)
@@ -84,6 +88,8 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
     caption = f"行情截止 {cutoff}（北京时间） · 图中时间 {timezone}"
     if frequency == '30m':
         caption += f"\n30m 全部可用历史：{display_from} 至 {cutoff[:10]}"
+    else:
+        caption += f"\n{frequency} 显示范围：{display_from} 至 {cutoff[:10]}"
     stop = ((event.get("exit_plan") or {}).get("stop_loss") or {})
     stop_price = stop.get("price") if stop.get("status") == "reference" else None
     if risk:
@@ -137,6 +143,8 @@ def prepare_periods(event, runs_root):
         except Exception as exc:
             # One unavailable context period must not suppress verified signal
             # evidence. Never relabel another period or synthesize missing bars.
+            LOG.warning('notification context unavailable market=%s code=%s frequency=%s error=%s',
+                        event['market'], event['code'], frequency, type(exc).__name__)
             panels.append({'settings': {'frequency': frequency, 'signal_panel': False},
                            'error': '该周期行情暂不可用；已保留信号周期图表',
                            'error_type': type(exc).__name__})
@@ -218,19 +226,25 @@ def capture(payload, *, diagnostics=None):
                     error = page.evaluate("window.__notificationError || null")
                     if error:
                         raise ValueError("TradingView export: " + error)
-                    if diagnostics is not None:
-                        diagnostics.append(page.evaluate('window.__notificationViewport'))
                     # Each panel uses TradingView's own export. Compose those
                     # native canvases into one attachment and one send job.
                     data = page.evaluate("() => Promise.race([window.exportNotificationChart(), new Promise((_, reject) => setTimeout(() => reject(new Error('snapshot timeout')), 15000))])")
                     if not isinstance(data, str) or not data.startswith('data:image/png;base64,'):
                         raise ValueError('TradingView did not export a PNG')
+                    if diagnostics is not None:
+                        diagnostics.append(page.evaluate('window.__notificationViewport'))
                     images.append({'data': data, 'frequency': panel['settings']['frequency']})
                     if panel['settings'].get('signal_panel', True):
                         composer = page
-                except Exception:
+                except Exception as exc:
                     if panel['settings'].get('signal_panel', True):
                         raise
+                    LOG.warning('notification chart export unavailable market=%s code=%s frequency=%s error=%s',
+                                panel['settings'].get('market'), panel['settings'].get('code'),
+                                panel['settings']['frequency'], type(exc).__name__)
+                    if diagnostics is not None:
+                        diagnostics.append({'frequency': panel['settings']['frequency'], 'status': 'failed',
+                                            'error_type': type(exc).__name__})
                     images.append({'frequency': panel['settings']['frequency'],
                                    'error': '该周期图表暂不可用；已保留信号周期图表'})
                 finally:
