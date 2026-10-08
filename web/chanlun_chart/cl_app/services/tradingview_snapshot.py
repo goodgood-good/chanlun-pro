@@ -16,6 +16,8 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 ORIGIN = "http://notification-chart.invalid"
 VIEW = "/?screening_source=notification&default_study=MACD"
 PERIODS = ("1m", "5m", "30m")
+# Give the short and long context panels enough history to show larger swings.
+VISIBLE_BARS = {"1m": 720, "5m": 180, "30m": 480}
 
 
 def prepare(event, runs_root):
@@ -53,7 +55,7 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
                "strict_structure_mode": "replace",
                "strict_structure": {k: v for k, v in snapshot.items() if k != "chart"}}
     anchor_pos = positions[signal["anchor_at"]]
-    starts = [anchor_pos - 40, len(frame) - 180]
+    starts = [anchor_pos - 40, len(frame) - VISIBLE_BARS.get(frequency, 180)]
     centers = [c for level in snapshot["levels"] for c in level.get("centers", [])]
     center = next((c for c in centers if c["center_id"] == event.get("center_id")), None)
     if center and center.get("points"):
