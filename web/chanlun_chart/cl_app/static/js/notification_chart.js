@@ -9,7 +9,7 @@
     const cm = window.notificationChartManager = new ChartManager('notification');
     cm.getCustomIndicators = function (PineJS) {
         const study = TvIdxMACDBackend.idx(PineJS);
-        study.metainfo.shortDescription = 'MACD · ' + data.frequency;
+        study.metainfo.shortDescription = 'MACD_HTF · ' + ({'1m':'5m','5m':'30m','30m':'日线'}[data.frequency] || data.frequency);
         return Promise.resolve([study]);
     };
     cm.init();
@@ -30,13 +30,17 @@
     async function prepare() {
         await waitForReady();
         await cm.ensureRequestedDefaultStudies();
-        if (!cm.chart.getAllStudies().length) throw new Error('MACD study is missing');
+        const studies = cm.chart.getAllStudies();
+        if (!studies.some(study => study.name === 'MACD') || !studies.some(study => study.name === 'MACD_HTF')) {
+            throw new Error('MACD / MACD_HTF study is missing');
+        }
         cm._cancelDefaultViewWork();
         cm._hasSavedViewport = true;
         await cm.chart.setVisibleRange({from: coord(data.from), to: coord(data.cutoff)}, {percentRightMargin: 8});
         const panes = cm.chart.getPanes();
-        if (panes.length !== 2) throw new Error('MACD pane is missing');
-        panes[1].setHeight(205);
+        if (panes.length !== 3) throw new Error('MACD / MACD_HTF pane is missing');
+        panes[1].setHeight(175);
+        panes[2].setHeight(175);
         await waitForReady();
         const options = {lock: true, disableSelection: true, disableSave: true, disableUndo: true};
         if (data.marker) {
@@ -73,6 +77,33 @@
         const history = cm.getChartData().barsResult;
         if (history.strict_structure?.source_closed_at !== data.cutoff) throw new Error('snapshot cutoff mismatch');
         const canvas = await cm.widget.takeClientScreenshot({hideStudiesFromLegend: false});
+        return canvas.toDataURL('image/png');
+    };
+    window.composeNotificationCharts = async function (panels) {
+        const canvas = document.createElement('canvas');
+        const rows = await Promise.all(panels.map(async panel => {
+            if (panel.error) return {...panel, height: 150};
+            const image = new Image();
+            image.src = panel.data;
+            await image.decode();
+            return {...panel, image, height: image.height};
+        }));
+        canvas.width = Math.max(...rows.map(row => row.image?.width || 0));
+        if (!canvas.width) throw new Error('no chart image to compose');
+        canvas.height = rows.reduce((height, row) => height + row.height + 12, 0) - 12;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#e2e8f0';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        let top = 0;
+        for (const row of rows) {
+            if (row.image) ctx.drawImage(row.image, 0, top);
+            else {
+                ctx.fillStyle = '#f8fafc'; ctx.fillRect(0, top, canvas.width, row.height);
+                ctx.fillStyle = '#334155'; ctx.font = '24px sans-serif';
+                ctx.fillText(row.frequency + ' · ' + row.error, 32, top + 80);
+            }
+            top += row.height + 12;
+        }
         return canvas.toDataURL('image/png');
     };
     prepare().catch(error => { window.__notificationError = error.message; });

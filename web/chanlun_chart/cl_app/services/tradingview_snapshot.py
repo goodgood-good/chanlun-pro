@@ -14,38 +14,44 @@ from .notification_text import POINTS, heading, price
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 ORIGIN = "http://notification-chart.invalid"
-VIEW = "/?screening_source=notification"
+VIEW = "/?screening_source=notification&default_study=MACD"
+PERIODS = ("1m", "5m", "30m")
 
 
 def prepare(event, runs_root):
     from .notification_charts import load_chart_evidence
+
+    return _prepare_panel(event, *load_chart_evidence(event, runs_root))
+
+
+def _prepare_panel(event, frame, snapshot, signal, *, context=False):
     from .constants import frequency_maps, market_session, market_timezone, market_types
     from chanlun.screening.rules import CN
 
-    frame, snapshot, signal = load_chart_evidence(event, runs_root)
-    frequency, market = event["frequency"], event["market"]
+    frequency, market = snapshot["source_frequency"], event["market"]
     resolution = frequency_maps[frequency]
     times = [int(t.timestamp()) for t in frame.date]
     positions = {t: i for i, t in enumerate(times)}
     if signal["anchor_at"] not in positions:
         raise ValueError("signal anchor is absent from source candles")
-    if times[-1] != event["source_closed_at"]:
+    if times[-1] != snapshot["source_closed_at"] or (
+        times[-1] > event["source_closed_at"] if context else times[-1] != event["source_closed_at"]
+    ):
         raise ValueError("chart candles and signal have different cutoffs")
     columns = {key: frame[column].astype(float).tolist()
                for key, column in (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close"), ("v", "volume"))}
     if not all(math.isfinite(v) for values in columns.values() for v in values):
         raise ValueError("chart candles must be finite")
     chart = snapshot["chart"]
-    for name in ("macd_dif", "macd_dea", "macd_hist"):
-        if len(chart.get(name, [])) != len(frame):
+    for name in ("macd_dif", "macd_dea", "macd_hist", "higher_macd_dif", "higher_macd_dea", "higher_macd_hist"):
+        if len(chart.get(name, [])) != len(frame) or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in chart[name]
+        ):
             raise ValueError("frozen MACD is incomplete")
     history = {**chart, **columns, "t": times, "s": "ok", "update": False,
                "full_snapshot": False, "bar_time_label": "end",
                "strict_structure_mode": "replace",
                "strict_structure": {k: v for k, v in snapshot.items() if k != "chart"}}
-    # The notification compares this period's MACD, not a second period's values.
-    # Reuse the page's backend-data study, explicitly labelled with this period.
-    history.update(higher_macd_dif=[], higher_macd_dea=[], higher_macd_hist=[])
     anchor_pos = positions[signal["anchor_at"]]
     starts = [anchor_pos - 40, len(frame) - 180]
     centers = [c for level in snapshot["levels"] for c in level.get("centers", [])]
@@ -65,7 +71,7 @@ def prepare(event, runs_root):
     consolidation = event.get("signal_type") == "consolidation_divergence"
     risk = event.get('signal_type') == 'holding_risk'
     invalidated = consolidation and event.get('stage') == 'invalidated'
-    anchor_price = signal['anchor_price'] if risk or invalidated else event['anchor_price']
+    anchor_price = signal['anchor_price'] if context or risk or invalidated else event['anchor_price']
     label = ('结构止损触发' if event['point_type'] == 'risk_stop' else '反向'+POINTS[event['reverse_point_type']]) if risk else (
              ('预警失效复核' if invalidated else "盘整背驰预警" if event["stage"] == "warning" else "盘整背驰确认")
              if consolidation else POINTS[event["point_type"]])
@@ -77,6 +83,9 @@ def prepare(event, runs_root):
         stop_price = event.get('stop_price')
     if isinstance(stop_price, bool) or not isinstance(stop_price, (int, float)) or not math.isfinite(stop_price):
         stop_price = None
+    if context:
+        stop_price = None
+    role = "信号周期" if not context else f"辅助周期 · 信号来自 {event['frequency']}"
     return {
         "history": history,
         "symbol_info": {"name": symbol, "ticker": symbol, "description": event.get("name") or event["code"],
@@ -86,16 +95,45 @@ def prepare(event, runs_root):
                         "supported_resolutions": [resolution], "volume_precision": 0, "data_status": "endofday"},
         "settings": {"market": market, "code": event["code"], "resolution": resolution,
                      "frequency": frequency, "cutoff": times[-1], "from": times[left],
-                     "title": heading(event), "caption": f"行情截止 {cutoff}（北京时间） · 图中时间 {timezone}",
-                     'invalidation_reason':event.get('invalidation_reason') if invalidated else None,
-                     'reference_anchor_at':signal.get('reference_anchor_at') if invalidated and signal.get('reference_basis_current') and signal.get('reference_anchor_at') in positions else None,
+                     "title": f"{frequency} · {role} · {heading(event)}",
+                     "caption": f"行情截止 {cutoff}（北京时间） · 图中时间 {timezone}",
+                     'invalidation_reason':event.get('invalidation_reason') if invalidated and not context else None,
+                     'reference_anchor_at':signal.get('reference_anchor_at') if invalidated and not context and signal.get('reference_basis_current') and signal.get('reference_anchor_at') in positions else None,
                      'reference_anchor_price':signal.get('reference_anchor_price'),
                      "anchor_at": signal["anchor_at"], "anchor_price": anchor_price,
-                     "marker": consolidation or risk, "up": event["point_type"].endswith(("buy", "down")),
+                     "marker": (consolidation or risk) and not context,
+                     "signal_panel": not context, "up": event["point_type"].endswith(("buy", "down")),
                      "label": label + " " + price(anchor_price, quantum),
                      "stop_price": stop_price,
                      "stop_label": "结构止损参考 " + price(stop_price, quantum)},
     }
+
+
+def prepare_periods(event, runs_root):
+    """Keep the trigger's frozen proof; add independently labelled context charts."""
+    from .notification_charts import load_chart_evidence
+    from .notification_periods import context_evidence
+
+    frame, snapshot, signal = load_chart_evidence(event, runs_root)
+    primary = _prepare_panel(event, frame, snapshot, signal)
+    panels = []
+    for frequency in PERIODS:
+        if frequency == event['frequency']:
+            panels.append(primary)
+            continue
+        try:
+            context_frame, context_snapshot = context_evidence(event, runs_root, frequency, frame.attrs)
+            panel = _prepare_panel(event, context_frame, context_snapshot,
+                                   {'anchor_at': context_snapshot['source_closed_at'],
+                                    'anchor_price': float(context_frame.close.iloc[-1])}, context=True)
+            panels.append(panel)
+        except Exception as exc:
+            # One unavailable context period must not suppress verified signal
+            # evidence. Never relabel another period or synthesize missing bars.
+            panels.append({'settings': {'frequency': frequency, 'signal_panel': False},
+                           'error': '该周期行情暂不可用；已保留信号周期图表',
+                           'error_type': type(exc).__name__})
+    return {'panels': panels}
 
 
 def route_request(route, payload):
@@ -145,6 +183,9 @@ def route_request(route, payload):
 def capture(payload):
     from playwright.sync_api import sync_playwright
 
+    def bind_routes(panel):
+        return lambda route: route_request(route, panel)
+
     # One sequential worker owns each short-lived browser. A failed export closes
     # its context/process in finally and cannot contaminate the next symbol.
     with sync_playwright() as playwright:
@@ -154,16 +195,41 @@ def capture(payload):
             # fractional devicePixelRatio; native export is verified at 1:1.
             context = browser.new_context(viewport={"width": 1440, "height": 960}, device_scale_factor=1,
                                           locale="zh-CN", timezone_id="Asia/Shanghai", service_workers="block")
-            context.route("**/*", lambda route: route_request(route, payload))
-            context.add_init_script("window.__notificationChart=" + json.dumps(payload["settings"], ensure_ascii=False) + ";")
-            page = context.new_page()
-            page.goto(ORIGIN + VIEW, wait_until="load", timeout=20000)
-            page.wait_for_function("window.__notificationReady === true || !!window.__notificationError", timeout=30000)
-            error = page.evaluate("window.__notificationError || null")
-            if error:
-                raise ValueError("TradingView export: " + error)
-            # Use TradingView's own client snapshot API, not a browser screenshot.
-            data = page.evaluate("() => Promise.race([window.exportNotificationChart(), new Promise((_, reject) => setTimeout(() => reject(new Error('snapshot timeout')), 15000))])")
+            panels = payload.get('panels', [payload])
+            images = []
+            composer = None
+            for panel in panels:
+                if panel.get('error'):
+                    images.append({'frequency': panel['settings']['frequency'], 'error': panel['error']})
+                    continue
+                page = context.new_page()
+                try:
+                    page.route("**/*", bind_routes(panel))
+                    page.add_init_script("window.__notificationChart=" + json.dumps(panel["settings"], ensure_ascii=False) + ";")
+                    page.goto(ORIGIN + VIEW, wait_until="load", timeout=20000)
+                    page.wait_for_function("window.__notificationReady === true || !!window.__notificationError", timeout=30000)
+                    error = page.evaluate("window.__notificationError || null")
+                    if error:
+                        raise ValueError("TradingView export: " + error)
+                    # Each panel uses TradingView's own export. Compose those
+                    # native canvases into one attachment and one send job.
+                    data = page.evaluate("() => Promise.race([window.exportNotificationChart(), new Promise((_, reject) => setTimeout(() => reject(new Error('snapshot timeout')), 15000))])")
+                    if not isinstance(data, str) or not data.startswith('data:image/png;base64,'):
+                        raise ValueError('TradingView did not export a PNG')
+                    images.append({'data': data, 'frequency': panel['settings']['frequency']})
+                    if panel['settings'].get('signal_panel', True):
+                        composer = page
+                except Exception:
+                    if panel['settings'].get('signal_panel', True):
+                        raise
+                    images.append({'frequency': panel['settings']['frequency'],
+                                   'error': '该周期图表暂不可用；已保留信号周期图表'})
+                finally:
+                    if page is not composer:
+                        page.close()
+            if composer is None:
+                raise ValueError('no verified signal chart to export')
+            data = composer.evaluate("images => window.composeNotificationCharts(images)", images) if len(images) > 1 else images[0]['data']
             prefix = "data:image/png;base64,"
             if not isinstance(data, str) or not data.startswith(prefix):
                 raise ValueError("TradingView did not export a PNG")

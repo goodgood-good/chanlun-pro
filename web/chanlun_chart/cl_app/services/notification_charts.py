@@ -87,8 +87,8 @@ class ChartStore:
 
 def render_signal_chart(event, runs_root):
     """Export the real TradingView renderer using verified, frozen evidence."""
-    from .tradingview_snapshot import capture, prepare
-    return capture(prepare(event, runs_root))
+    from .tradingview_snapshot import capture, prepare_periods
+    return capture(prepare_periods(event, runs_root))
 
 
 def load_chart_evidence(event, runs_root):
