@@ -3041,7 +3041,7 @@ class ChartManager {
             // 1m 中枢观察页采用 0.01 最小间距，使当前完整缓存
             // （约万根）可以在半屏卡片内一次展示；其他图保持原值控制计算量。
             time_scale: {
-                min_bar_spacing: viewportOptions.minBarSpacing,
+                min_bar_spacing: this.exportMinBarSpacing ?? viewportOptions.minBarSpacing,
             },
         });
         this.setupEventListeners();

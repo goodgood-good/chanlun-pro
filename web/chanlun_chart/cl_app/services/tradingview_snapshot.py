@@ -17,7 +17,7 @@ ORIGIN = "http://notification-chart.invalid"
 VIEW = "/?screening_source=notification&default_study=MACD"
 PERIODS = ("1m", "5m", "30m")
 # Give the short and long context panels enough history to show larger swings.
-VISIBLE_BARS = {"1m": 720, "5m": 180, "30m": 480}
+VISIBLE_BARS = {"1m": 720, "5m": 180}
 
 
 def prepare(event, runs_root):
@@ -55,7 +55,8 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
                "strict_structure_mode": "replace",
                "strict_structure": {k: v for k, v in snapshot.items() if k != "chart"}}
     anchor_pos = positions[signal["anchor_at"]]
-    starts = [anchor_pos - 40, len(frame) - VISIBLE_BARS.get(frequency, 180)]
+    history_start = 0 if frequency == '30m' else len(frame) - VISIBLE_BARS.get(frequency, 180)
+    starts = [anchor_pos - 40, history_start]
     centers = [c for level in snapshot["levels"] for c in level.get("centers", [])]
     center = next((c for c in centers if c["center_id"] == event.get("center_id")), None)
     if center and center.get("points"):
@@ -79,6 +80,10 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
              if consolidation else POINTS[event["point_type"]])
     timezone = market_timezone.get(market, "Asia/Shanghai")
     cutoff = datetime.fromtimestamp(times[-1], CN).strftime("%Y-%m-%d %H:%M:%S")
+    display_from = datetime.fromtimestamp(times[left], CN).strftime('%Y-%m-%d')
+    caption = f"行情截止 {cutoff}（北京时间） · 图中时间 {timezone}"
+    if frequency == '30m':
+        caption += f"\n30m 全部可用历史：{display_from} 至 {cutoff[:10]}"
     stop = ((event.get("exit_plan") or {}).get("stop_loss") or {})
     stop_price = stop.get("price") if stop.get("status") == "reference" else None
     if risk:
@@ -98,7 +103,7 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
         "settings": {"market": market, "code": event["code"], "resolution": resolution,
                      "frequency": frequency, "cutoff": times[-1], "from": times[left],
                      "title": f"{frequency} · {role} · {heading(event)}",
-                     "caption": f"行情截止 {cutoff}（北京时间） · 图中时间 {timezone}",
+                     "caption": caption,
                      'invalidation_reason':event.get('invalidation_reason') if invalidated and not context else None,
                      'reference_anchor_at':signal.get('reference_anchor_at') if invalidated and not context and signal.get('reference_basis_current') and signal.get('reference_anchor_at') in positions else None,
                      'reference_anchor_price':signal.get('reference_anchor_price'),
@@ -182,7 +187,7 @@ def route_request(route, payload):
         route.fulfill(body=json.dumps(result, ensure_ascii=False, allow_nan=False), content_type="application/json")
 
 
-def capture(payload):
+def capture(payload, *, diagnostics=None):
     from playwright.sync_api import sync_playwright
 
     def bind_routes(panel):
@@ -213,6 +218,8 @@ def capture(payload):
                     error = page.evaluate("window.__notificationError || null")
                     if error:
                         raise ValueError("TradingView export: " + error)
+                    if diagnostics is not None:
+                        diagnostics.append(page.evaluate('window.__notificationViewport'))
                     # Each panel uses TradingView's own export. Compose those
                     # native canvases into one attachment and one send job.
                     data = page.evaluate("() => Promise.race([window.exportNotificationChart(), new Promise((_, reject) => setTimeout(() => reject(new Error('snapshot timeout')), 15000))])")

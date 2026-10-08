@@ -7,6 +7,8 @@
     window.__CHANLUN_SSE_ENABLED = false;
     window.__CHANLUN_SCREENING_EVIDENCE = {source: 'notification', point: 'notification'};
     const cm = window.notificationChartManager = new ChartManager('notification');
+    // Fit all available 30m history into the native exported canvas.
+    if (data.frequency === '30m') cm.exportMinBarSpacing = 0.01;
     cm.getCustomIndicators = function (PineJS) {
         const study = TvIdxMACDBackend.idx(PineJS);
         study.metainfo.shortDescription = 'MACD_HTF · ' + ({'1m':'5m','5m':'30m','30m':'日线'}[data.frequency] || data.frequency);
@@ -69,6 +71,12 @@
         // Two animation frames let the native canvas finish its last paint.
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         await waitForReady();
+        const visible = cm.chart.getVisibleRange();
+        window.__notificationViewport = {frequency: data.frequency, requestedFrom: coord(data.from),
+            requestedTo: coord(data.cutoff), actualFrom: visible?.from, actualTo: visible?.to};
+        if (data.frequency === '30m' && (!visible || visible.from > coord(data.from))) {
+            throw new Error('30m history range was truncated by the chart');
+        }
         window.__notificationReady = true;
     }
     window.exportNotificationChart = async function () {
