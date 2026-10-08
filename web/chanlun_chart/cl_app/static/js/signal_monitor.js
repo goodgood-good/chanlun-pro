@@ -125,7 +125,8 @@
     $('daily-status').textContent=result.daily_schedule?.title||'定时选股状态待核验';
     $('daily-detail').textContent=result.daily_schedule?.detail||'正在读取交易日历和任务记录。';
     $('live-status').textContent=!result.enabled?'监听已暂停':!seed?'等待选股候选或自选标的':!poolCount?'监听名单为空':active(live)?`检查中 · ${live.completed||0} / ${live.total||'—'}${active(manual)?' · 全量选股同时进行':''}`:active(manual)?'全量选股中 · 实时监听等待下一次检查':result.last_error?'部分标的需要检查':'等待各市场新的已收盘 K 线';
-    $('live-detail').textContent=`新 K 线收盘后优先检查；常规检查间隔 ${result.settings.interval_seconds} 秒，已完成标的即时更新。最近处理 ${date(result.last_check_at)}，最近整批完成 ${date(result.last_batch_completed_at)}。${result.pending_symbols_count?`仍有 ${result.pending_symbols_count} 只等待检查。`:''}${live.error||''}`;
+    const periods=result.monitor_frequencies||seed?.settings?.frequencies||result.settings.screening?.frequencies||[];
+    $('live-detail').textContent=`监听周期：${periods.join('、')||'待配置'}。新 K 线收盘后优先检查；常规检查间隔 ${result.settings.interval_seconds} 秒，已完成标的即时更新。最近处理 ${date(result.last_check_at)}，最近整批完成 ${date(result.last_batch_completed_at)}。${result.pending_symbols_count?`仍有 ${result.pending_symbols_count} 只等待检查。`:''}${live.error||''}`;
     const markets={a:'A 股',us:'美股',hk:'港股',fx:'外汇',ny_futures:'国际期货',futures:'国内期货',currency_spot:'数字货币现货',currency:'数字货币合约'};
     const coverage=Object.entries(result.pool_markets||{}).map(([m,n])=>`${markets[m]||m} ${n} 只`).join('，');
     $('pool-source').textContent=seed?`选股候选 ${seed.screening_count??seed.screening_symbols?.length??poolCount} 只${seed.screening_recheck_count?` + 待复核 ${seed.screening_recheck_count} 只`:''} + 自选 ${seed.watchlist_count||0} 只，去重共 ${poolCount} 只，其中持仓 ${seed.holding_count||0} 只。${coverage}。${result.coverage?`检查通过 ${result.coverage.ready} 只 · 数据受限 ${result.coverage.limited} 只 · 待核验 ${result.coverage.pending} 只。`:''}${seed.error_count?'盘后选股存在数据问题，详见选股诊断。':''}`:'自选标的无需先出现买卖点即可进入监听名单。';

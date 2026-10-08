@@ -105,6 +105,43 @@ def _monitor_frequency(state, symbol, default='5m'):
     return next((f for f in ('1m','5m','30m') if f in frequencies),default)
 
 
+def monitor_settings(state, source_settings):
+    """Apply explicit monitoring periods without rewriting saved scan results."""
+    settings = deepcopy(source_settings)
+    if state.get('monitor_frequencies'):
+        settings['frequencies'] = list(state['monitor_frequencies'])
+        if settings.get('minimum_operating_frequency') and settings['frequencies'] != [settings['minimum_operating_frequency']]:
+            settings.pop('minimum_operating_frequency')
+    return settings
+
+
+def configure_periods(state, frequencies, stamp):
+    """Persist a period change and establish notification cutoffs for additions."""
+    base = deepcopy(state['settings']['screening'])
+    base['frequencies'] = frequencies
+    if base.get('minimum_operating_frequency') and frequencies != [base['minimum_operating_frequency']]:
+        base.pop('minimum_operating_frequency')
+    validated = validate_settings(base)
+    seed = state.get('seed') or {}
+    previous = set(seed.get('settings', state['settings']['screening']).get('frequencies', []))
+    added = set(validated['frequencies']) - previous
+    state['monitor_frequencies'] = list(validated['frequencies'])
+    state['settings']['screening'] = validated
+    if seed:
+        seed.setdefault('screening_frequencies', list(seed['settings']['frequencies']))
+        seed['settings'] = monitor_settings(state, seed['settings'])
+    for frequency in added:
+        state.setdefault('notification_frequency_since', {})[frequency] = stamp
+    if added:
+        # Existing successful checks and notification identities stay intact;
+        # only scheduling clocks are cleared so the new periods get a first pass.
+        for symbol in seed.get('codes', []):
+            state.setdefault('attempted_cutoffs', {}).pop(symbol, None)
+        state['last_attempt_key'] = None
+        state['next_check_at'] = 0
+        state['pending_symbols_count'] = len(seed.get('codes', []))
+
+
 def _recent_clock(now, closed, frequency):
     return 0<=now.timestamp()-closed<=int(frequency[:-1])*60
 
@@ -346,6 +383,8 @@ class SignalMonitor:
                     pending.append(event)
                 continue
             if key not in seed.get("codes", []) or frequency not in seed.get("settings", {}).get("frequencies", []):
+                continue
+            if (event.get('available_at') or 0) < state.get('notification_frequency_since', {}).get(frequency, 0):
                 continue
             consolidation = event.get("signal_type") == "consolidation_divergence"
             if consolidation:
@@ -931,7 +970,7 @@ class SignalMonitor:
 
     def enable(self, body, *, page_options=None):
         validate_page_options(page_options)
-        if not isinstance(body, dict) or set(body) - {"morning_after_close", "after_close", "interval_seconds", "daily_scope", "screening_workers"}:
+        if not isinstance(body, dict) or set(body) - {"morning_after_close", "after_close", "interval_seconds", "daily_scope", "screening_workers", "frequencies"}:
             raise ValueError("自动任务设置不合法")
         morning = body.get("morning_after_close", self._load()["settings"].get("morning_after_close", MORNING_AFTER_CLOSE))
         if not isinstance(morning, str) or not re.fullmatch(r"(?:11:(?:3[5-9]|[4-5][0-9])|12:[0-5][0-9])", morning):
@@ -952,14 +991,22 @@ class SignalMonitor:
             base.pop("symbols", None)
         settings = {"morning_after_close": morning, "after_close": after, "interval_seconds": interval,
                     "daily_scope": scope, "screening": validate_settings(base)}
+        # Validate before taking ownership or changing any live state.
+        if 'frequencies' in body:
+            trial = {'settings': deepcopy(settings)}
+            configure_periods(trial, body['frequencies'], self.now().timestamp())
+            settings = trial['settings']
         with self._control_lock:
             with self._lock:
                 state = self._load()
-                if state["settings"] != settings or not state["enabled"]:
+                if (state["settings"] != settings or not state["enabled"]
+                        or 'frequencies' in body and state.get('monitor_frequencies') != body['frequencies']):
                     self._control_version += 1
                     state["daily"] = {}
                     self._startup_retries.clear()
                     state.pop('startup_errors',None)
+                if 'frequencies' in body:
+                    configure_periods(state, body['frequencies'], self.now().timestamp())
                 state.update(enabled=True, settings=settings, last_error="")
                 self._save()
             self.start_runtime()
@@ -1167,7 +1214,9 @@ class SignalMonitor:
                                            "selection_policy_version": result.get("selection_policy_version"),
                                            "result_reader_revision": result.get("result_reader_revision"),
                                            "historical_pool_requires_recheck": bool(result.get("frozen_native_review")),
-                                           "cutoffs": result.get("cutoffs", {}), "settings": result["settings"],
+                                           "cutoffs": result.get("cutoffs", {}),
+                                           "screening_frequencies": list(result["settings"].get('frequencies', [])),
+                                           "settings": monitor_settings(current, result["settings"]),
                                            "error_count": len(result.get("errors", []))}
                         # Prune after merging the watchlist below, so replacing
                         # the daily pool does not erase unexamined US signals.
@@ -1962,7 +2011,9 @@ class SignalMonitor:
                 reclassified=self._historical_reclassification(
                     state['selection_checks'].get(f"{_symbol_key(item)}:{item['frequency']}",{}),
                     result.get('source_revision'),item.get('available_at'))
-                notification_authorized = not reclassified
+                period_since = state.get('notification_frequency_since', {}).get(item['frequency'], 0)
+                historical_period = bool(period_since and (item.get('available_at') or 0) < period_since)
+                notification_authorized = not reclassified and not historical_period
                 if item.get("signal_type") == "consolidation_divergence":
                     cycle = (previous or {}).get("lifecycle_cycle", 0)
                     if item["stage"] == "warning" and previous and previous.get("stage") in {"invalidated", "left"}:
@@ -2010,10 +2061,12 @@ class SignalMonitor:
                       and notification_authorized):
                     event = {**item, "recorded_at": stamp, "run_id": result["run_id"],
                              "change": "discovered" if previous is None else "changed"}
-                    if item.get("signal_type") == "consolidation_divergence" or reclassified:
+                    if item.get("signal_type") == "consolidation_divergence" or reclassified or historical_period:
                         event["external_notifications"] = notification_authorized
                     if reclassified:
                         event['notification_suppressed_reason']='ALGORITHM_RECLASSIFICATION'
+                    elif historical_period:
+                        event['notification_suppressed_reason']='CONFIRMED_BEFORE_PERIOD_ENABLED'
                     events.insert(0, event)
                     if event.get("external_notifications", True):
                         changed_events.append(event)
