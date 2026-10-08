@@ -7,6 +7,7 @@ import pytest
 
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
+    calculate_centers,
 )
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import CenterEvidence, ConstituentUnit, SourceKind
@@ -17,6 +18,7 @@ from tests.core.strict_structure.helpers import (
     ongoing_center,
     unit,
 )
+from tests.core.strict_structure.test_first_class_points import structure_from_values
 
 
 def test_constituent_unit_rejects_inverted_range():
@@ -70,6 +72,21 @@ def test_constituent_unit_requires_integer_structure_ticks():
         replace(unit(0, "up", 90, 110), end_tick=110.5)
     with pytest.raises(TypeError, match="ticks must be integers"):
         replace(unit(0, "up", 90, 110), low_tick=True)
+
+
+def test_trend_type_constituents_cannot_have_price_only_head_tail_contact():
+    # L038:1450-1456 requires a shared type endpoint, not only an equal tick.
+    _structure, assembly = structure_from_values()
+    trend = assembly.current_trends[0]
+    constituents = list(trend.constituent_units)
+    prior, current = constituents[:2]
+    constituents[1] = replace(
+        current,
+        market_start=prior.market_end + timedelta(seconds=1),
+    )
+    assert prior.end_tick == constituents[1].start_tick
+    with pytest.raises(ValueError, match="trend constituent market endpoints must connect"):
+        replace(trend, constituent_units=tuple(constituents))
 
 
 def test_constituent_unit_enforces_market_confirmation_and_availability_order():
@@ -178,7 +195,7 @@ def test_center_rejects_mixed_price_basis():
         )
 
 
-def test_center_rejects_disconnected_or_non_alternating_body():
+def test_center_rejects_disconnected_body_and_scanner_rejects_same_direction():
     value = ongoing_center()
     disconnected = replace(
         value.initial_units[1],
@@ -194,26 +211,20 @@ def test_center_rejects_disconnected_or_non_alternating_body():
             dd_tick=value.dd_tick - 1,
         )
 
-    non_alternating = replace(
-        value.initial_units[1],
-        direction="down",
-        start_tick=value.initial_units[1].end_tick,
-        end_tick=value.initial_units[1].start_tick,
+    non_alternating = (
+        unit(0, "up", 90, 120),
+        unit(1, "up", 120, 130),
+        unit(2, "down", 130, 100),
     )
-    initial = (value.initial_units[0], non_alternating) + value.initial_units[2:]
-    with pytest.raises(ValueError, match="center body directions must alternate"):
-        replace(
-            value,
-            initial_units=initial,
-            body_units=initial + value.extension_units,
-        )
+    with pytest.raises(ValueError, match="unit directions must alternate"):
+        calculate_centers(non_alternating, 0, SourceKind.SEGMENT)
 
 
 def test_center_rejects_forged_core_or_envelope_fields():
     value = ongoing_center()
     with pytest.raises(ValueError, match="three core-unit intersection"):
         replace(value, zg_tick=value.zg_tick + 1)
-    with pytest.raises(ValueError, match="body envelope"):
+    with pytest.raises(ValueError, match="envelope"):
         replace(value, gg_tick=value.gg_tick + 1)
 
 

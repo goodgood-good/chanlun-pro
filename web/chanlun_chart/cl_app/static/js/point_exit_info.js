@@ -15,24 +15,26 @@
   function describe(plan, sources = {}) {
     if (!plan) return {stop: '依据不足', profit: '待结构证据', lines: ['尚无可核对的止盈止损价格依据。'], sources: []};
     const sl = plan.stop_loss || {}, tp = plan.take_profit || {};
+    const native = plan.evidence_scope === 'native_center_signal';
+    const scope = native ? '本周期' : '同级';
     const provisional = plan.point_status !== 'confirmed';
     const suffix = provisional ? '（预案）' : '';
     const edge = plan.side === 'buy' ? '中枢上沿 ZG' : '中枢下沿 ZD';
     const slBasis = {center_edge: edge, parent_extreme: '二类点所依赖的前一转折极值', turn_extreme: '该点的转折极值'}[sl.basis] || '结构边界';
-    const trigger = {lt:'<', gt:'>', lte:'≤', gte:'≥'}[sl.trigger] || '';
+    const trigger = (native ? {lt:'跌破', gt:'升破', lte:'跌至或低于', gte:'升至或高于'} : {lt:'<', gt:'>', lte:'≤', gte:'≥'})[sl.trigger] || '';
     const stop = sl.price == null ? '依据不足' : `${trigger} ${price(sl.price)}${suffix}`;
-    let profit = '待同级反向点';
+    let profit = native ? '等待本周期已确认反向点' : '待同级反向点';
     const lines = [`止损参考：${stop}；${slBasis}。该价格由结构失效条件推导。`];
     if (tp.price != null) {
       if (tp.basis === 'opposite_point') {
         profit = `${price(tp.price)}（反向点）`;
-        lines.push(`止盈 / 退出参考：${price(tp.price)}；后续同级${names[tp.point_type] || '反向点'}，确认于 ${time(tp.available_at)}。这是后续确认的历史拐点价，不是入场时已知的目标价或确认时成交价；退出可能亏损。`);
+        lines.push(`止盈 / 退出参考：${price(tp.price)}；后续${scope}${names[tp.point_type] || '反向点'}，确认于 ${time(tp.available_at)}。这是后续确认的历史拐点价，不是入场时已知的目标价或确认时成交价；退出可能亏损。`);
       } else {
         profit = `${price(tp.price)}（${tp.basis === 'terminal_dd' ? 'DD' : 'GG'}观察）${suffix}`;
         lines.push(`止盈观察：${profit}；取趋势末中枢的外围极值，不是中枢核心边界，也不是固定兑现价格。仍需观察反向买卖点。`);
       }
     } else {
-      lines.push('止盈参考：等待同级反向买卖点形成，当前没有可确定的固定目标价。');
+      lines.push(`止盈参考：等待${scope}${native ? '已确认的' : ''}反向买卖点，当前没有可确定的固定目标价。`);
     }
     if (tp.basis === 'opposite_point' && plan.profit_observation?.price != null) {
       lines.push(`原一类点的末中枢回抽观察价：${price(plan.profit_observation.price)}。`);

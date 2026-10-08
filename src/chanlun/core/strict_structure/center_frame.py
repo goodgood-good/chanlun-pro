@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from chanlun.core.strict_structure.models import ConstituentUnit
+
+
+def initial_center_known_at(center) -> datetime:
+    """Earliest time the three completed initial members certify a center.
+
+    ``established_at`` is a market timestamp, while the center object's later
+    ``available_at`` can include subsequent lifecycle updates. Neither alone
+    is the initial three-member evidence clock.
+    """
+
+    members = tuple(getattr(center, "initial_units", ()))
+    if not members:
+        members = tuple(center.body_units[:3])
+    if len(members) != 3:
+        raise ValueError("center initial certificate requires three members")
+    return max(center.established_at, *(unit.available_at for unit in members))
 
 
 def center_frame_leave(center) -> ConstituentUnit | None:

@@ -11,6 +11,7 @@ interface DataSubscriber {
 	resolution: ResolutionString;
 	lastBarTime: number | null;
 	listener: SubscribeBarsCallback;
+	updateVersion: number;
 }
 
 interface DataSubscribers {
@@ -57,17 +58,29 @@ function _realtimePollingDue(symbolInfo: LibrarySymbolInfo, nowMs: number): bool
 
 export class DataPulseProvider implements IDataPulseProvider {
 	private readonly _subscribers: DataSubscribers = {};
-	private readonly _requestsPending: Set<string> = new Set();
+	private readonly _requestsPending: Map<string, DataSubscriber> = new Map();
 	private readonly _requestTimeoutMs: number;
 	private readonly _historyProvider: IHistoryProvider;
+	private _timer: ReturnType<typeof setInterval> | null;
+	private _disposed = false;
 
 	public constructor(historyProvider: IHistoryProvider, updateFrequency: number) {
 		this._historyProvider = historyProvider;
 		this._requestTimeoutMs = Math.max(10_000, Number.isFinite(updateFrequency) ? updateFrequency * 2 : 10_000);
-		setInterval(this._updateData.bind(this), updateFrequency);
+		this._timer = setInterval(this._updateData.bind(this), updateFrequency);
+	}
+
+	public dispose(): void {
+		if (this._disposed) return;
+		this._disposed = true;
+		if (this._timer !== null) clearInterval(this._timer);
+		this._timer = null;
+		for (const guid of Object.keys(this._subscribers)) delete this._subscribers[guid];
+		this._requestsPending.clear();
 	}
 
 	public subscribeBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, newDataCallback: SubscribeBarsCallback, listenerGuid: string): void {
+		if (this._disposed) return;
 		if (this._subscribers.hasOwnProperty(listenerGuid)) {
 			logMessage(`DataPulseProvider: already has subscriber with id=${listenerGuid}`);
 			return;
@@ -78,6 +91,7 @@ export class DataPulseProvider implements IDataPulseProvider {
 			listener: newDataCallback,
 			resolution: resolution,
 			symbolInfo: symbolInfo,
+			updateVersion: 0,
 		};
 
 		logMessage(`DataPulseProvider: subscribed for #${listenerGuid} - {${symbolInfo.name}, ${resolution}}`);
@@ -85,6 +99,7 @@ export class DataPulseProvider implements IDataPulseProvider {
 
 	public unsubscribeBars(listenerGuid: string): void {
 		delete this._subscribers[listenerGuid];
+		this._requestsPending.delete(listenerGuid);
 		logMessage(`DataPulseProvider: unsubscribed for #${listenerGuid}`);
 	}
 
@@ -107,6 +122,8 @@ export class DataPulseProvider implements IDataPulseProvider {
 			if (sub.lastBarTime !== null && bar.time < sub.lastBarTime) {
 				continue;
 			}
+			// A newly accepted push owns the candle over older in-flight polls.
+			sub.updateVersion += 1;
 			sub.lastBarTime = bar.time;
 			try {
 				sub.listener(bar);
@@ -124,8 +141,13 @@ export class DataPulseProvider implements IDataPulseProvider {
 				continue;
 			}
 
-			this._requestsPending.add(listenerGuid);
-			this._withTimeout(Promise.resolve().then(() => this._updateDataForSubscriber(listenerGuid)), listenerGuid)
+			const subscription = this._subscribers[listenerGuid];
+			const version = ++subscription.updateVersion;
+			const invalidate = () => {
+				if (subscription.updateVersion === version) subscription.updateVersion += 1;
+			};
+			this._requestsPending.set(listenerGuid, subscription);
+			this._withTimeout(Promise.resolve().then(() => this._updateDataForSubscriber(listenerGuid, subscription, version)), listenerGuid, invalidate)
 				.then(() => {
 					logMessage(`DataPulseProvider: data for #${listenerGuid} updated successfully`);
 				})
@@ -133,15 +155,20 @@ export class DataPulseProvider implements IDataPulseProvider {
 					logMessage(`DataPulseProvider: data for #${listenerGuid} updated with error=${getErrorMessage(reason)}`);
 				})
 				.finally(() => {
-					this._requestsPending.delete(listenerGuid);
+					if (this._requestsPending.get(listenerGuid) === subscription) {
+						this._requestsPending.delete(listenerGuid);
+					}
+					// A timeout settles this wrapper before the network request.
+					invalidate();
 				});
 		}
 	}
 
-	private _withTimeout<T>(request: Promise<T>, listenerGuid: string): Promise<T> {
+	private _withTimeout<T>(request: Promise<T>, listenerGuid: string, onTimeout?: () => void): Promise<T> {
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 		const timeout = new Promise<T>((_resolve, reject) => {
 			timeoutId = setTimeout(() => {
+				onTimeout?.();
 				reject(new Error(`Data refresh timed out for #${listenerGuid}`));
 			}, this._requestTimeoutMs);
 		});
@@ -153,11 +180,17 @@ export class DataPulseProvider implements IDataPulseProvider {
 		});
 	}
 
-	private _updateDataForSubscriber(listenerGuid: string): Promise<void> {
-		const subscriptionRecord = this._subscribers[listenerGuid];
-		if (!subscriptionRecord || !_realtimePollingDue(subscriptionRecord.symbolInfo, Date.now())) {
+	private _isCurrentSubscriber(listenerGuid: string, subscription: DataSubscriber | undefined, version: number | undefined): boolean {
+		return !!subscription && this._subscribers[listenerGuid] === subscription && subscription.updateVersion === version;
+	}
+
+	private _updateDataForSubscriber(listenerGuid: string, subscriptionRecord = this._subscribers[listenerGuid], version?: number): Promise<void> {
+		if (!subscriptionRecord || this._subscribers[listenerGuid] !== subscriptionRecord || !_realtimePollingDue(subscriptionRecord.symbolInfo, Date.now())) {
 			return Promise.resolve();
 		}
+		const requestVersion = version === undefined ? ++subscriptionRecord.updateVersion : version;
+		const isCurrent = () => this._isCurrentSubscriber(listenerGuid, subscriptionRecord, requestVersion);
+		if (!isCurrent()) return Promise.resolve();
 
 		const rangeEndTime = parseInt((Date.now() / 1000).toString())
 			+ REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS;
@@ -174,15 +207,15 @@ export class DataPulseProvider implements IDataPulseProvider {
 				to: rangeEndTime,
 				countBack: 2,
 				firstDataRequest: false,
-			})
+			}, isCurrent)
 			.then((result: GetBarsResult) => {
-				this._onSubscriberDataReceived(listenerGuid, result);
+				this._onSubscriberDataReceived(listenerGuid, result, subscriptionRecord, requestVersion);
 			});
 	}
 
-	private _onSubscriberDataReceived(listenerGuid: string, result: GetBarsResult): void {
-		// means the subscription was cancelled while waiting for data
-		if (!this._subscribers.hasOwnProperty(listenerGuid)) {
+	private _onSubscriberDataReceived(listenerGuid: string, result: GetBarsResult,
+		subscriptionRecord = this._subscribers[listenerGuid], version = subscriptionRecord?.updateVersion): void {
+		if (!this._isCurrentSubscriber(listenerGuid, subscriptionRecord, version)) {
 			logMessage(`DataPulseProvider: Data comes for already unsubscribed subscription #${listenerGuid}`);
 			return;
 		}
@@ -193,7 +226,6 @@ export class DataPulseProvider implements IDataPulseProvider {
 		}
 
 		const lastBar = bars[bars.length - 1];
-		const subscriptionRecord = this._subscribers[listenerGuid];
 
 		if (subscriptionRecord.lastBarTime !== null && lastBar.time < subscriptionRecord.lastBarTime) {
 			return;
@@ -207,9 +239,13 @@ export class DataPulseProvider implements IDataPulseProvider {
 			// 仅当确有前一根时补发它；bars<2(数据源延迟/窗口仅 1 根)时跳过补发、
 			// 不再抛错，避免“数据延迟后新 bar 到达”令 K 线更新整条中断。
 			const previousBar = bars[bars.length - 2];
-			subscriptionRecord.listener(previousBar);
+			if (subscriptionRecord.lastBarTime !== null && previousBar.time >= subscriptionRecord.lastBarTime) {
+				subscriptionRecord.listener(previousBar);
+			}
 		}
 
+		if (!this._isCurrentSubscriber(listenerGuid, subscriptionRecord, version)
+			|| subscriptionRecord.lastBarTime !== null && lastBar.time < subscriptionRecord.lastBarTime) return;
 		subscriptionRecord.lastBarTime = lastBar.time;
 		subscriptionRecord.listener(lastBar);
 	}

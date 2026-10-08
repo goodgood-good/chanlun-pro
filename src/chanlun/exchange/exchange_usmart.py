@@ -32,6 +32,7 @@ except ImportError as _crypto_import_error:
 
 from chanlun import config
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_completion import (
     drop_unclosed_last_bar,
     normalize_completed_bar_labels,
@@ -911,13 +912,10 @@ class ExchangeUSmart(Exchange):
             project_code = secu_to_project.get(secu_id)
             if project_code is None:
                 continue
-            last = _float_value(item.get("latestPrice", item.get("close")))
-            previous_close = _float_value(item.get("preClose"))
-            rate = (
-                round((last - previous_close) / previous_close * 100, 2)
-                if previous_close > 0
-                else 0
-            )
+            last = quote_price(item.get("latestPrice", item.get("close")))
+            if last is None:
+                continue
+            rate = quote_change_rate(last, item.get("preClose"))
             ticks[project_code] = Tick(
                 code=project_code,
                 last=last,
@@ -927,6 +925,7 @@ class ExchangeUSmart(Exchange):
                 low=_float_value(item.get("low")),
                 open=_float_value(item.get("open")),
                 volume=_float_value(item.get("volume")),
+                reference_price=quote_price(item.get("preClose")),
                 rate=rate,
             )
         return ticks

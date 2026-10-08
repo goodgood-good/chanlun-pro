@@ -262,6 +262,7 @@ def test_canonical_observation_is_frozen_before_download_crosses_close(delegated
     result = delegated.ex.canonical_closed_minute_history("AAPL.US")
     assert result.iloc[-1].date == pd.Timestamp("2026-09-04T19:59:00Z")
     assert delegated.ex.can_reuse_closed_minute_history("AAPL.US", result)
+    assert max(end for _,_,end in delegated.requests) == pd.Timestamp('2026-09-04T20:04:59Z')
 
 
 def test_explicit_range_and_unaware_provider_keep_the_original_query_contract(delegated, monkeypatch):

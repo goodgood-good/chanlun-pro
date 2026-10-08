@@ -44,6 +44,10 @@ $premarketTrigger = New-ScheduledTaskTrigger `
     -WeeksInterval 1 `
     -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday `
     -At $premarketTime
+# A stopped/terminated interactive task may not use RestartCount. Recheck every
+# five minutes, including weekends; IgnoreNew and the file lock prevent twins.
+$recoveryTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $principal = New-ScheduledTaskPrincipal `
     -UserId $currentUser `
     -LogonType Interactive `
@@ -60,7 +64,7 @@ $settings = New-ScheduledTaskSettingsSet `
 Register-ScheduledTask `
     -TaskName $taskName `
     -Action $action `
-    -Trigger @($logonTrigger, $premarketTrigger) `
+    -Trigger @($logonTrigger, $premarketTrigger, $recoveryTrigger) `
     -Principal $principal `
     -Settings $settings `
     -Description 'Keep the chanlun-pro chart Web service alive.' `

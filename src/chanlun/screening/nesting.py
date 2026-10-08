@@ -20,7 +20,7 @@ def main_interval(snapshot, point):
     """
     if (snapshot.get("source_frequency") != MAIN_FREQUENCY
             or point.get("source_kind") != "segment" or point.get("structural_level") != 0):
-        raise ValueError("区间套主信号必须来自 5m 原生线段")
+        raise ValueError("组合确认主信号必须来自 5m 原生线段")
     units = snapshot.get("screening_segments", [])
     indices = {u["unit_id"]: i for i, u in enumerate(units)}
     first = point["point_type"] in {"1buy", "1sell"}
@@ -53,7 +53,7 @@ def matching_confirmations(main_snapshot, point, lower_snapshot, candidates):
         raise ValueError("5m 与 1m 的标的、截止时间或价格基准不一致")
     if (type(lower_snapshot.get("source_started_at")) is not int
             or lower_snapshot["source_started_at"] > interval["start_after"] + 60):
-        raise ValueError("1m 历史未覆盖完整的 5m 离开或回试区间，不能判断区间套")
+        raise ValueError("1m 历史未覆盖完整的 5m 离开或回试区间，不能判断区间内确认")
     matches = []
     for candidate in candidates:
         lower = candidate["point"]

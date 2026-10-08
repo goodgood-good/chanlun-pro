@@ -1,5 +1,6 @@
 import time
 import traceback
+import math
 from typing import Dict, List, Union
 
 import pandas as pd
@@ -17,6 +18,7 @@ from chanlun.exchange.exchange import (
     convert_overseas_tdx_kline_frequency,
 )
 from chanlun.exchange.kline_precision import normalize_kline_precision
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.persistence.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
 
@@ -28,42 +30,36 @@ class ExchangeTDXFX(Exchange):
     """
 
     g_all_stocks = []
+    screening_time_contract_verified = False
+    _CONNECT_TIMEOUT = 5
+    _INIT_MAX_RETRY = 2
 
     def __init__(self):
         self.tz = pytz.timezone("Asia/Shanghai")
 
         self.fdb = FileCacheDB()
 
-        try:
-            # 优先复用缓存中的最优服务器，无缓存则重新选择
-            self.connect_info = db.cache_get("tdxex_connect_ip")
-            if self.connect_info is None:
-                self.connect_info = self.reset_tdx_ip()
-
-            # 映射外汇交易所代码（category==4 为外汇）
-            self.market_maps = {}
-            while True:
-                try:
-                    client = TdxExHq_API(
-                        multithread=True, raise_exception=True, auto_retry=True
-                    )
-                    with client.connect(
-                        self.connect_info["ip"], self.connect_info["port"]
-                    ):
-                        all_markets = client.get_markets()
-                        for _m in all_markets:
-                            if _m["category"] == 4:
-                                self.market_maps[_m["short_name"]] = {
-                                    "market": _m["market"],
-                                    "category": _m["category"],
-                                    "name": _m["name"],
-                                }
-                    break
-                except TdxConnectionError:
-                    self.reset_tdx_ip()
-        except Exception:
-            print(traceback.format_exc())
-            print("通达信 外汇行情接口初始化失败，外汇行情不可用")
+        # Failed constructors propagate and are not cached by either singleton
+        # layer. The normal request backoff can retry after the provider recovers.
+        self.connect_info = db.cache_get("tdxex_connect_ip")
+        if self.connect_info is None:
+            self.connect_info = self.reset_tdx_ip()
+        self.market_maps = {}
+        for attempt in range(self._INIT_MAX_RETRY):
+            try:
+                client = TdxExHq_API(multithread=True, raise_exception=True, auto_retry=False)
+                with client.connect(self.connect_info["ip"], self.connect_info["port"], time_out=self._CONNECT_TIMEOUT):
+                    markets = client.get_markets()
+                self.market_maps = {item["short_name"]: {
+                    "market": item["market"], "category": item["category"], "name": item["name"],
+                } for item in markets if item["category"] == 4}
+                if not self.market_maps:
+                    raise TdxConnectionError("FX market catalog is unavailable")
+                break
+            except TdxConnectionError:
+                if attempt + 1 == self._INIT_MAX_RETRY:
+                    raise
+                self.reset_tdx_ip()
 
     def reset_tdx_ip(self):
         """
@@ -311,8 +307,8 @@ class ExchangeTDXFX(Exchange):
         获取日线的k线，并返回最后一根k线的数据
         """
         ticks = {}
-        client = TdxExHq_API(multithread=True, raise_exception=True, auto_retry=True)
-        with client.connect(self.connect_info["ip"], self.connect_info["port"]):
+        client = TdxExHq_API(multithread=True, raise_exception=True, auto_retry=False)
+        with client.connect(self.connect_info["ip"], self.connect_info["port"], time_out=self._CONNECT_TIMEOUT):
             for _code in codes:
                 _market, _tdx_code = self.to_tdx_code(_code)
                 if _market is None:
@@ -329,24 +325,18 @@ class ExchangeTDXFX(Exchange):
                         high=_quote["high"],
                         volume=_quote["zongliang"],
                         open=_quote["open"],
-                        rate=(
-                            # 涨跌幅 =(现价-昨收)/昨收;原分母用现价 price 是错的(涨 10% 会显示
-                            # 成 ~9.09%),改除以 pre_close 与 cq/QMT 口径一致(审查 L2)。
-                            round(
-                                (_quote["price"] - _quote["pre_close"])
-                                / _quote["pre_close"]
-                                * 100,
-                                2,
-                            )
-                            if _quote["pre_close"] > 0
-                            else 0
-                        ),
+                        reference_price=quote_price(_quote.get("pre_close")),
+                        rate=self._quote_rate(_quote.get("price"), _quote.get("pre_close")),
                     )
         return ticks
 
+    @staticmethod
+    def _quote_rate(price, reference):
+        return quote_change_rate(price, reference)
+
     def now_trading(self, market: str):
-        """返回当前是否是交易时间（外汇视为始终可交易）"""
-        return True
+        """No verified instrument session is available for this mixed FX feed."""
+        return None
 
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")

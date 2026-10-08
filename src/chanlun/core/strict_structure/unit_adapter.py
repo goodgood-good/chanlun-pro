@@ -279,6 +279,8 @@ def adapt_lines(
 def trend_type_to_unit(trend: TrendType) -> ConstituentUnit:
     if not trend.locked:
         raise ValueError("only locked trend types can recurse")
+    if not trend.centers:
+        raise ValueError("centerless geometric movement is not a complete trend type")
     return ConstituentUnit(
         unit_id=trend.trend_id,
         structural_level=trend.structural_level + 1,
@@ -307,6 +309,8 @@ def trend_type_to_observation_unit(trend: TrendType) -> ConstituentUnit:
 
     if trend.state is TrendState.LOCKED:
         raise ValueError("locked trend type must use the formal unit adapter")
+    if not trend.centers:
+        raise ValueError("centerless geometric movement is not a recursive type preview")
     return ConstituentUnit(
         unit_id=trend.trend_id,
         structural_level=trend.structural_level + 1,
@@ -350,6 +354,16 @@ def build_recursive_unit_stream(
         elif unlocked_seen:
             raise ValueError("locked recursive trends must form a prefix")
 
+    # L025:625-628: a complete trend type needs at least one own-grade center.
+    # A centerless geometric movement can separate same-grade pieces, but it
+    # cannot be promoted as an exact lower trend-type member of a parent center.
+    # Stop at the first such movement so no later suffix bridges that gap.
+    first_centerless = next(
+        (index for index, trend in enumerate(trends) if not trend.centers),
+        len(trends),
+    )
+    trends = trends[:first_centerless]
+
     locked = tuple(trend for trend in trends if trend.state is TrendState.LOCKED)
     observations = tuple(
         trend for trend in trends if trend.state is not TrendState.LOCKED
@@ -358,7 +372,7 @@ def build_recursive_unit_stream(
     decomposition = combine_same_level_trends(
         locked_units,
         frozenset(),
-        protected_after_ids,
+        protected_after_ids.intersection(trend.trend_id for trend in locked),
     )
     output = list(decomposition.units)
 

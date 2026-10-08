@@ -6,7 +6,7 @@ import pytest
 
 from chanlun.core.strict_structure.center_machine import calculate_centers, establish_center
 from chanlun.core.strict_structure.center_relation import classify_center_relation
-from chanlun.core.strict_structure.models import CenterRelation, CenterState, SourceKind, TrendState
+from chanlun.core.strict_structure.models import CenterRelation, CenterState, SourceKind
 from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from chanlun.core.strict_structure.unit_adapter import build_recursive_unit_stream
 from tests.core.strict_structure.helpers import unit
@@ -68,7 +68,7 @@ def test_theorem_two_relation_does_not_label_core_contact_as_upgrade(later, expe
     assert classify_center_relation(previous, current) is expected
 
 
-def test_touching_successor_after_boundary_third_sell_waits_for_parent_members():
+def test_boundary_contact_defers_completion_without_a_phantom_successor():
     source = SourceKind.TREND_TYPE
     prices = (
         ("up", 80, 120), ("down", 120, 100), ("up", 100, 120),
@@ -84,20 +84,19 @@ def test_touching_successor_after_boundary_third_sell_waits_for_parent_members()
     values[8] = replace(values[8], high_tick=80)
 
     first = calculate_centers(tuple(values[:5]), 1, source).centers
-    assert len(first) == 1 and first[0].state is CenterState.COMPLETED
-    assert first[0].completion_return_unit.high_tick == first[0].zd_tick
+    assert len(first) == 1 and first[0].state is CenterState.ONGOING
+    assert first[0].body_units[-1].high_tick == first[0].zd_tick
 
     for length, successor_state in ((7, CenterState.ONGOING),
                                     (9, CenterState.COMPLETED)):
         prefix = tuple(values[:length])
         centers = calculate_centers(prefix, 1, source).centers
-        assert len(centers) == 2 and centers[1].state is successor_state
-        assert classify_center_relation(*centers) is CenterRelation.RECOMPOSITION_PENDING
+        assert len(centers) == 1 and centers[0].state is successor_state
+        assert centers[0].center_id == first[0].center_id
         assembly = assemble_trend_types(centers, prefix, 1)
         assert all(not trend.locked for trend in assembly.current_trends)
         parent_units, _ = build_recursive_unit_stream(assembly.current_trends)
         assert all(not item.locked for item in parent_units)
         assert len(parent_units) < 3
         if length == 9:
-            assert len(assembly.current_trends) == 1
-            assert assembly.current_trends[0].state is TrendState.COMPLETE
+            assert centers[0].completion_return_unit is values[8]

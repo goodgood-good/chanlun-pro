@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
     calculate_centers,
-    establish_center,
 )
 from chanlun.core.strict_structure.models import (
     CenterEventKind,
@@ -116,7 +115,8 @@ def ongoing_center(
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
-    value = establish_center(lifecycle, structural_level, SourceKind.SEGMENT)
+    centers = calculate_centers(lifecycle, structural_level, SourceKind.SEGMENT).centers
+    value = centers[0] if centers else None
     assert value is not None
     return value if center_id is None else replace(value, center_id=center_id)
 
@@ -196,7 +196,8 @@ def ongoing_down_center(
             structural_level=structural_level,
         ),
     )
-    value = establish_center(lifecycle, structural_level, SourceKind.SEGMENT)
+    centers = calculate_centers(lifecycle, structural_level, SourceKind.SEGMENT).centers
+    value = centers[0] if centers else None
     assert value is not None
     return value if center_id is None else replace(value, center_id=center_id)
 

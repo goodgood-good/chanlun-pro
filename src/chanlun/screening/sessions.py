@@ -7,6 +7,7 @@ used as independent evidence. One replaceable feed cache is shared by scans.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from datetime import datetime
 import hashlib
 import json
@@ -30,12 +31,12 @@ def _digest(value):
                                      ensure_ascii=True, allow_nan=False).encode()).hexdigest()
 
 
-def _read_cache(path, start, cutoff):
+def _read_cache(path, start, cutoff, *, source_url=SOURCE_URL):
     try:
         data = json.loads(path.read_bytes())
         digest = data.pop("sha256")
         if (digest == _digest(data) and data["schema"] == SCHEMA
-                and data["source_url"] == SOURCE_URL and data["query_from"] <= start
+                and data["source_url"] == source_url and data["query_from"] <= start
                 and cutoff <= data["fetched_at"] <= time.time()
                 and time.time() - data["fetched_at"] < 3600
                 and isinstance(data["records"], list)):
@@ -85,19 +86,47 @@ def _timestamp(value):
     return int(stamp.timestamp())
 
 
+def _stock_intervals_from_records(code, records, start, cutoff):
+    vendor_code = code[3:] + "." + code[:2]
+    intervals = set()
+    for record in records:
+        if not isinstance(record, dict) or record.get("SECUCODE") != vendor_code:
+            continue
+        began = _timestamp(record.get("SUSPEND_START_TIME"))
+        ended = cutoff if record.get("SUSPEND_END_TIME") is None else _timestamp(record["SUSPEND_END_TIME"])
+        if ended < began and began <= cutoff:
+            raise ValueError("suspension interval ends before it starts")
+        if began <= cutoff and ended >= start:
+            intervals.add((began, min(ended, cutoff)))
+    return [list(pair) for pair in sorted(intervals)]
+
+
 def suspension_evidence(code: str, start: int, cutoff: int, *, cache_root=None) -> dict:
     """Resolve reported intervals for one symbol, retaining feed provenance."""
     if not re.fullmatch(r"(?:SH|SZ|BJ)\.\d{6}", code) or start > cutoff:
         raise ValueError("suspension request identity is invalid")
+    if code.startswith('SH.5'):
+        from .fund_suspensions import suspension_evidence as fund_evidence
+        return fund_evidence(code,start,cutoff,cache_root=cache_root)
     first = datetime.fromtimestamp(start, CN).date().isoformat()
     if cache_root is None:
         from chanlun import config
         cache_root = config.get_data_path() / "screening"
     path = Path(cache_root) / "suspensions.json"
     data = _read_cache(path, first, cutoff)
+    intervals = None
+    if data is not None:
+        try:
+            intervals = _stock_intervals_from_records(code, data["records"], start, cutoff)
+        except (ValueError, TypeError):
+            # A valid cache hash does not prove that this symbol's dates are
+            # usable. Refresh without discarding records for other symbols.
+            data = None
     if data is None:
         data = {"schema": SCHEMA, "source_url": SOURCE_URL, "query_from": first,
                 "records": _fetch_records(first), "fetched_at": int(time.time())}
+        # Invalid fetched intervals must not replace the shared cache.
+        intervals = _stock_intervals_from_records(code, data["records"], start, cutoff)
         temp = path.with_suffix(f".{os.getpid()}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,20 +140,9 @@ def suspension_evidence(code: str, start: int, cutoff: int, *, cache_root=None) 
                 temp.unlink(missing_ok=True)
             except OSError:
                 pass
-    vendor_code = code[3:] + "." + code[:2]
-    intervals = set()
-    for record in data["records"]:
-        if not isinstance(record, dict) or record.get("SECUCODE") != vendor_code:
-            continue
-        began = _timestamp(record.get("SUSPEND_START_TIME"))
-        ended = cutoff if record.get("SUSPEND_END_TIME") is None else _timestamp(record["SUSPEND_END_TIME"])
-        if ended < began and began <= cutoff:
-            raise ValueError("suspension interval ends before it starts")
-        if began <= cutoff and ended >= start:
-            intervals.add((began, min(ended, cutoff)))
     evidence = {"schema": SCHEMA, "symbol": code, "source_url": SOURCE_URL,
                 "source_page": SOURCE_PAGE, "checked_through": cutoff,
-                "intervals": [list(pair) for pair in sorted(intervals)]}
+                "intervals": intervals}
     return {**evidence, "revision": _digest(evidence)}
 
 
@@ -134,9 +152,11 @@ def exempt_closes(frame, context, expected):
     if evidence is None:
         return set()
     try:
+        from .fund_suspensions import SOURCE_URL as FUND_SOURCE_URL
         content = {k: v for k, v in evidence.items() if k != "revision"}
         codes = {context["symbol"]} if "symbol" in context else set(frame.code) if "code" in frame else set()
-        if (evidence["schema"] != SCHEMA or evidence["source_url"] != SOURCE_URL
+        if (evidence["schema"] != SCHEMA or evidence["source_url"] not in (SOURCE_URL,FUND_SOURCE_URL)
+                or evidence["source_url"] == FUND_SOURCE_URL and not evidence.get('symbol','').startswith('SH.5')
                 or codes != {evidence["symbol"]} or evidence["revision"] != _digest(content)
                 or type(evidence["checked_through"]) is not int
                 or evidence["checked_through"] < context["cutoff"]
@@ -146,15 +166,32 @@ def exempt_closes(frame, context, expected):
         dates = frame.date.astype(pd.DatetimeTZDtype(unit="ns", tz=CN)).astype("int64").to_numpy() // 1_000_000_000
         volume = frame.volume.to_numpy()
         output = set()
+        positive_closes = ordered_expected = None
         for pair in evidence["intervals"]:
             if not isinstance(pair, list) or len(pair) != 2 or any(type(x) is not int for x in pair):
                 raise ValueError("suspension evidence interval is invalid")
             first, last = pair
             if first > last or last > evidence["checked_through"]:
                 raise ValueError("suspension evidence interval is invalid")
-            if ((dates - step >= first) & (dates <= last) & (volume > 0)).any():
+            if len(evidence["intervals"]) == 1:
+                # One interval is cheaper to scan directly than to sort two
+                # histories. Keep the common case free of setup overhead.
+                if ((dates - step >= first) & (dates <= last) & (volume > 0)).any():
+                    raise ValueError("suspension record conflicts with recorded trades")
+                output.update(at for at in expected if first <= at - step and at <= last)
+                continue
+            if positive_closes is None:
+                positive_closes = dates[volume > 0]
+                positive_closes.sort()
+            lower = first + step
+            position = bisect_left(positive_closes, lower)
+            if position < len(positive_closes) and positive_closes[position] <= last:
                 raise ValueError("suspension record conflicts with recorded trades")
-            output.update(at for at in expected if first <= at - step and at <= last)
+            if ordered_expected is None:
+                ordered_expected = sorted(expected)
+            # Each bar must be wholly inside the suspension interval. Reuse
+            # the ordered clocks rather than scanning every bar per record.
+            output.update(ordered_expected[bisect_left(ordered_expected, lower):bisect_right(ordered_expected, last)])
         return output
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("suspension evidence is invalid") from exc

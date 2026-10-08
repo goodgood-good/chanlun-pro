@@ -50,6 +50,9 @@ def _trend_divergence(
         histogram_peak_decayed=True,
         dif_extreme_decayed=True,
         strength_source="macd",
+        comparison_center_id="center-1",
+        comparison_center_established_at=BASE - timedelta(minutes=20),
+        comparison_center_known_at=BASE - timedelta(minutes=10),
     )
 
 
@@ -67,7 +70,7 @@ def confirmed_point(
     is_first = point_type in {"1buy", "1sell"}
     is_second = point_type in {"2buy", "2sell"}
     is_third = point_type in {"3buy", "3sell"}
-    center_id = "center-1" if is_third else None
+    center_id = "center-1" if is_first or is_third else None
     parent_point_id = "parent-point" if is_second else None
     return StrictPointEvidence(
         point_id=build_strict_point_id(

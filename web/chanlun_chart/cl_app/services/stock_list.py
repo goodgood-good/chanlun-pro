@@ -775,12 +775,15 @@ def _start_preload_attempt(exchange: str, *, skip_if_disk_warm: bool = False):
                     skip_if_disk_warm=skip_if_disk_warm,
                 )
             finally:
-                done.set()
                 with _preload_attempts_lock:
                     if _preload_attempts.get(exchange) is attempt:
                         _preload_attempts.pop(exchange, None)
                 with _async_refresh_lock:
                     _async_refresh_in_flight.discard(exchange)
+                # A completed round must not observe `done` before the market
+                # slot is free; otherwise an immediate next round can reuse
+                # the finished attempt and silently skip its refresh.
+                done.set()
 
         thread = threading.Thread(
             target=_worker,

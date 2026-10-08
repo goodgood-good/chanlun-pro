@@ -9,6 +9,7 @@ xtdata.get_full_tick 是 native 模块, 这里 monkeypatch 掉, 不连真实数�
 """
 from chanlun.exchange import exchange_qmt
 from chanlun.exchange.exchange import Tick
+import pytest
 
 
 def _full_tick(last_price, last_close):
@@ -28,7 +29,7 @@ def _full_tick(last_price, last_close):
 
 
 def test_ticks_zero_last_close_does_not_raise(monkeypatch):
-    """新股首日 lastClose=0: ticks() 不应抛 ZeroDivisionError, rate 记为 0。"""
+    """lastClose=0: 保留已知价格，未知涨跌幅不得当成真实的 0%。"""
     ex = exchange_qmt.ExchangeQMT()
     monkeypatch.setattr(
         exchange_qmt.xtdata, "get_full_tick", lambda codes: _full_tick(10.0, 0)
@@ -38,7 +39,8 @@ def test_ticks_zero_last_close_does_not_raise(monkeypatch):
 
     assert "SH.600000" in result
     assert isinstance(result["SH.600000"], Tick)
-    assert result["SH.600000"].rate == 0
+    assert result["SH.600000"].last == 10.0
+    assert result["SH.600000"].rate is None
 
 
 def test_ticks_normal_last_close_computes_rate(monkeypatch):
@@ -51,3 +53,21 @@ def test_ticks_normal_last_close_computes_rate(monkeypatch):
     result = ex.ticks(["SH.600000"])
 
     assert abs(result["SH.600000"].rate - 10.0) < 1e-9
+
+
+@pytest.mark.parametrize('last_close', [None, 'unknown', float('nan'), float('inf')])
+def test_unusable_previous_close_keeps_price_without_inventing_change(monkeypatch, last_close):
+    ex = exchange_qmt.ExchangeQMT()
+    monkeypatch.setattr(exchange_qmt.xtdata, 'get_full_tick', lambda _: _full_tick(10., last_close))
+    value = ex.ticks(['SH.600000'])['SH.600000']
+    assert value.last == 10. and value.rate is None
+
+
+def test_one_malformed_qmt_row_does_not_drop_the_healthy_quote(monkeypatch):
+    ex = exchange_qmt.ExchangeQMT()
+    payload = _full_tick(11., 10.)
+    payload['000001.SZ'] = {'lastPrice': 20., 'lastClose': 19., 'bidPrice': []}
+    monkeypatch.setattr(exchange_qmt.xtdata, 'get_full_tick', lambda _: payload)
+    value = ex.ticks(['SH.600000', 'SZ.000001'])
+    assert list(value) == ['SH.600000']
+    assert value['SH.600000'].last == 11. and value['SH.600000'].rate == 10.

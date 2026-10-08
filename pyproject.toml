@@ -19,6 +19,7 @@ dependencies = [
     "numpy==1.26.4",
     "pandas==2.1.0",
     "pinyin>=0.4.0",
+    "playwright>=1.59.0,<2",
     "pyarrow>=22.0.0",
     "pymysql>=1.1.1",
     "pytdx",
@@ -47,7 +48,6 @@ futures = [
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.4.1"
 ruff = ">=0.12"
-playwright = ">=1.59.0,<2"
 
 [tool.ruff]
 # xtquant 是 vendored 的第三方 SDK（迅投 QMT），不纳入 lint

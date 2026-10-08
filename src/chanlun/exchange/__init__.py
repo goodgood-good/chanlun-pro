@@ -14,6 +14,7 @@ from chanlun.exchange.exchange import (
 g_exchange_obj = {}
 # 构造期互斥锁:防止启动期多线程并发首访同一 market 各自构建实例(审查 B-1)
 _get_exchange_lock = threading.Lock()
+_get_exchange_market_locks = {}
 
 
 def market_now_trading(ex: Exchange, market) -> bool | None:
@@ -28,10 +29,11 @@ def get_exchange(market: Market) -> Exchange:
     global g_exchange_obj
     if market.value in g_exchange_obj.keys():
         return g_exchange_obj[market.value]
-    # g_exchange_obj 是裸 dict,无锁 check-then-act 在启动期多线程并发首访同一 market 时会各自
-    # 构建实例(重复 native 连接 / cq 双建泄漏 16-32 worker 线程池)。构造期加进程锁 +
-    # double-check,已构建则直接返回。
+    # Allocate the market lock briefly under the registry lock. Provider I/O
+    # must not hold that global lock and block unrelated markets.
     with _get_exchange_lock:
+        market_lock = _get_exchange_market_locks.setdefault(market.value, threading.Lock())
+    with market_lock:
         if market.value in g_exchange_obj.keys():
             return g_exchange_obj[market.value]
         _build_exchange(market)
@@ -49,7 +51,7 @@ def _changqiao_market_view(market: Market):
 
 
 def _build_exchange(market: Market) -> None:
-    """实际构建交易所适配器并写入 g_exchange_obj。必须在 _get_exchange_lock 持锁下调用。"""
+    """实际构建并发布适配器；调用方持有对应市场的构造锁。"""
     if market == Market.A:
         if config.EXCHANGE_A == "tdx":
             from chanlun.exchange.exchange_tdx import ExchangeTDX

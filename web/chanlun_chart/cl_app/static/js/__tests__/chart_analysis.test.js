@@ -14,6 +14,22 @@ test('native overview reads only the current native snapshot',()=>{
  assert.deepEqual(Analysis.summarizeChartData(payload),{bars:3,strokes:2,segments:1,centers,previews:[],ready:true,loading:false});
  assert.equal(Analysis.summarizeChartData({...payload,strict_structure_mode:'unavailable'}).centers.length,0);
 });
+test('archived selected center fields cannot override formal centers and previews',()=>{
+ const formal={center_id:'formal'},preview={center_id:'preview'},old={center_id:'old',formation_rule:'three_core'};
+ const oldPreview={center_id:'old-preview',formation_rule:'three_core'};
+ const summary=Analysis.summarizeChartData({strict_structure_mode:'replace',strict_structure:{
+  analysis_scope:'centers_and_signals',levels:[{centers:[formal,old],center_previews:[preview,oldPreview]}],
+  user_same_level_type_view:{schema:'chanlun-user-same-level-structure-view-v1',formal_point_issued:false},
+  selected_user_center_policy:{levels:[{structural_level:0,observed_center_ids:[]}]},
+  selected_five_segment_centers:{schema:'chanlun-user-five-segment-centers-v3',
+   centers:[{center_id:'experimental',core_ticks:[100,110]}]},
+  selected_center_type_partition:{schema:'chanlun-user-center-type-partition-v1'},
+ }});
+ assert.deepEqual(summary.centers,[formal]);
+ assert.deepEqual(summary.previews,[preview]);
+ assert.equal(summary.userView,undefined);
+ assert.equal(summary.directFive,undefined);
+});
 test('forming-only payload is ready even before any center becomes formal',()=>{
  const previews=[{center_id:'p1',owner_center_id:null,preview_status:'awaiting_leave'}];
  const summary=Analysis.summarizeChartData({strict_structure_mode:'replace',strict_structure:{

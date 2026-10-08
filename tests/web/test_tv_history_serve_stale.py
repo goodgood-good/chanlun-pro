@@ -98,6 +98,29 @@ def test_fresh_snapshot_hits_without_revalidate(client, monkeypatch):
     assert len(called) == 0             # 新鲜 → 不触发后台刷新
 
 
+def test_structure_only_history_returns_closed_source_without_bar_columns(client, monkeypatch):
+    monkeypatch.setattr(tv_mod, "market_now_trading", lambda _market: False)
+    key = _seed_entry(validated_at=time.time())
+    with chart_cache.cache_lock:
+        entry = chart_cache.chart_data_cache[key]
+        source_closed_at = entry["data"]["t"][-1]
+        entry["data"]["strict_structure_mode"] = "replace"
+        entry["data"]["strict_structure"] = {
+            "schema": "chanlun-chart-structure",
+            "source_closed_at": source_closed_at,
+            "source_frequency": FREQ,
+        }
+
+    response = client.get(_url() + "&countback=1&structure_only=1")
+    packet = response.get_json()
+    assert response.status_code == 200
+    assert packet["s"] == "ok"
+    assert packet["source_closed_at"] == source_closed_at
+    assert packet["strict_structure_mode"] == "replace"
+    assert packet["strict_structure"]["source_frequency"] == FREQ
+    assert "t" not in packet and "c" not in packet and "fxs" not in packet
+
+
 def test_endpoint_reads_disk_cache_outside_global_cache_lock(client, monkeypatch):
     monkeypatch.setattr(tv_mod, "market_now_trading", lambda _market: False)
     monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *_a, **_k: None)

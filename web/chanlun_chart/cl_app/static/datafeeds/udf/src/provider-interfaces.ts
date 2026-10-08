@@ -12,7 +12,7 @@ export interface GetBarsResult {
 }
 
 export interface IHistoryProvider {
-	getBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, periodParams: PeriodParams): Promise<GetBarsResult>;
+	getBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, periodParams: PeriodParams, isRequestCurrent?: () => boolean): Promise<GetBarsResult>;
 }
 
 export interface IResolveProvider {

@@ -90,7 +90,9 @@ class Tick:
     low: float
     open: float
     volume: float
-    rate: float = 0
+    rate: float | None = None
+    # Exact provider basis used for the quoted percentage (close/settlement).
+    reference_price: float | None = None
 
 
 class Exchange(ABC):

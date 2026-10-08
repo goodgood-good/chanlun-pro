@@ -12,6 +12,7 @@ from chanlun import fun
 from chanlun.market import Market
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.persistence.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
@@ -22,6 +23,9 @@ class ExchangeTDXNYFutures(Exchange):
     """通达信纽约期货行情适配器（market=16/17，category=3）。"""
 
     g_all_stocks = []
+    # Display data exists, but this adapter has no verified intraday label
+    # contract for structural screening. Do not download it only to reject it.
+    screening_time_contract_verified = False
 
     # 连接超时与 ExchangeTDXFutures 保持一致；auto_retry=False 避免 pytdx 内部叠加重试导致 60s+ 卡顿
     _CONNECT_TIMEOUT = 5
@@ -309,17 +313,11 @@ class ExchangeTDXNYFutures(Exchange):
                         high=_quote["high"],
                         volume=_quote["zongliang"],
                         open=_quote["open"],
+                        reference_price=quote_price(_quote.get("pre_close")),
                         rate=(
                             # 涨跌幅=(现价-昨收)/昨收;原分母用现价是错的(涨10%显示~9.09%),
                             # 与 tdx_fx/tdx_us 的审查 L2 修复口径一致。
-                            round(
-                                (_quote["price"] - _quote["pre_close"])
-                                / _quote["pre_close"]
-                                * 100,
-                                2,
-                            )
-                            if _quote["pre_close"] > 0
-                            else 0
+                            quote_change_rate(_quote["price"], _quote.get("pre_close"))
                         ),
                     )
         return ticks
@@ -357,17 +355,11 @@ class ExchangeTDXNYFutures(Exchange):
                         high=_quote["ZuiGao"],
                         volume=_quote["ZongLiang"],
                         open=_quote["JinKai"],
+                        reference_price=quote_price(_quote.get("ZuoJie")),
                         rate=(
                             # 涨跌幅=(现价-昨结)/昨结;原分母用现价 MaiChu 是错的,
                             # 与 tdx_fx/tdx_us 的审查 L2 修复口径一致。
-                            round(
-                                (_quote["MaiChu"] - _quote["ZuoJie"])
-                                / _quote["ZuoJie"]
-                                * 100,
-                                2,
-                            )
-                            if _quote["ZuoJie"] > 0
-                            else 0
+                            quote_change_rate(_quote["MaiChu"], _quote.get("ZuoJie"))
                         ),
                     )
         return ticks

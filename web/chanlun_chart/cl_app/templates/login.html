@@ -47,6 +47,7 @@
 
           <form class="layui-form" action="/login" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="next" value="{{ login_next|default('/') }}" />
             <div class="layui-form-item">
               <label class="cp-field-label" for="LAY-user-login-username">账号</label>
               <input

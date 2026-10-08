@@ -9,7 +9,8 @@ param(
     [int]$ExpectedProcessId = 0,
     [switch]$SkipProcessCheck,
     [switch]$SkipFreshnessCheck,
-    [switch]$SkipSourceCheck
+    [switch]$SkipSourceCheck,
+    [switch]$RequireWatchdog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -143,6 +144,22 @@ try {
         } catch {
             Write-Output "FAIL: readiness endpoint unavailable ($($_.Exception.Message))"
             $ok = $false
+        }
+        if ($RequireWatchdog) {
+            try {
+                $heartbeat = Get-Content -LiteralPath (Join-Path $resolvedRoot '.cache\chanlun_web_watchdog\heartbeat.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+                $watchdog = Get-CimInstance Win32_Process -Filter ('ProcessId={0}' -f [int]$heartbeat.watchdog_pid)
+                $watchdogScript = Join-Path $resolvedRoot 'ops\watch_web.ps1'
+                if ($null -eq $watchdog -or $watchdog.CommandLine -notlike ('*' + $watchdogScript + '*') -or
+                    [int]$heartbeat.app_pid -ne [int]$health.pid -or $heartbeat.status -ne 'healthy' -or
+                    ((Get-Date) - [datetime]$heartbeat.observed_at).TotalSeconds -gt 60) {
+                    throw 'watchdog is absent, stale or following a different application process'
+                }
+                Write-Output ('OK: watchdog PID={0} has a fresh heartbeat for app PID={1}' -f $heartbeat.watchdog_pid, $health.pid)
+            } catch {
+                Write-Output ('FAIL: watchdog verification failed ({0})' -f $_.Exception.Message)
+                $ok = $false
+            }
         }
     } finally {
         Pop-Location

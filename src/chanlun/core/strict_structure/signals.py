@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
 from chanlun.core.strict_structure.models import (
     CenterState,
     ConstituentUnit,
+    DivergenceEvidence,
     SourceKind,
     StrictPointEvidence,
     StrictPointStatus,
@@ -58,6 +59,86 @@ def _divergence_evidence_codes(divergence) -> tuple[str, ...]:
     if divergence.dif_extreme_decayed:
         codes.append("macd_dif_extreme_decay")
     return tuple(codes)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedTerminalTrendComparison:
+    """One comparison on an unlocked tail, never a formal divergence event."""
+
+    trend: TrendType
+    center: TrendCenter
+    projected_center: TrendCenter
+    projected_units: tuple[ConstituentUnit, ...]
+    divergence: DivergenceEvidence
+    signal_unit: ConstituentUnit
+
+
+def project_live_terminal_trend_comparisons(
+    level, tail: ConstituentUnit, strength,
+) -> tuple[ProjectedTerminalTrendComparison, ...]:
+    """Use the first-class engine's exact trend projection before its point gate."""
+
+    if strength is None or tail.source_kind is SourceKind.STROKE_OBSERVATION:
+        return ()
+    unit_index = {item.unit_id: index for index, item in enumerate(level.units)}
+    tail_index = unit_index.get(tail.unit_id)
+    if tail_index is None:
+        return ()
+    projected_tail = _locked_projection(tail)
+    output = []
+    for trend in reversed(level.trend_types):
+        if trend.kind is not TrendKind.TREND or trend.terminal_divergence is not None:
+            continue
+        if len(trend.centers) < 2:
+            continue
+        last_center = trend.centers[-1]
+        if (
+            last_center.state is CenterState.ONGOING
+            and last_center.pending_leave_unit is None
+        ):
+            previous_index = unit_index.get(last_center.body_units[-1].unit_id)
+            if previous_index is None or tail_index != previous_index + 1:
+                continue
+            try:
+                projected_center = replace(
+                    last_center,
+                    pending_leave_unit=projected_tail,
+                    available_at=max(
+                        last_center.available_at, projected_tail.available_at,
+                    ),
+                )
+            except ValueError:
+                continue
+        elif last_center.state is CenterState.COMPLETED:
+            ret = last_center.completion_return_unit
+            previous_index = None if ret is None else unit_index.get(ret.unit_id)
+            if previous_index is None or tail_index != previous_index + 1:
+                continue
+            projected_center = last_center
+        else:
+            continue
+        projected_units = list(level.units)
+        projected_units[tail_index] = projected_tail
+        try:
+            compared = compare_terminal_trend_divergence(
+                (*trend.centers[:-1], projected_center),
+                tuple(projected_units), strength,
+                trend_start_unit_id=trend.constituent_units[0].unit_id,
+            )
+        except (FormalDivergenceUnavailable, MacdStrengthUnavailable):
+            continue
+        if compared is None:
+            continue
+        divergence, signal = compared
+        output.append(ProjectedTerminalTrendComparison(
+            trend=trend,
+            center=last_center,
+            projected_center=projected_center,
+            projected_units=tuple(projected_units),
+            divergence=divergence,
+            signal_unit=signal,
+        ))
+    return tuple(output)
 
 
 class StrictSignalEngine:
@@ -516,65 +597,13 @@ class StrictSignalEngine:
         level,
         tail: ConstituentUnit,
     ) -> StrictPointEvidence | None:
-        if self.strength is None:
-            return None
-        for trend in reversed(level.trend_types):
-            if (
-                trend.kind is not TrendKind.TREND
-                or trend.terminal_divergence is not None
-                or tail.source_kind is SourceKind.STROKE_OBSERVATION
-            ):
-                continue
-            if len(trend.centers) < 2:
-                continue
-            last_center = trend.centers[-1]
-            unit_index = {item.unit_id: index for index, item in enumerate(level.units)}
-            tail_index = unit_index.get(tail.unit_id)
-            if tail_index is None:
-                continue
-            projected_tail = _locked_projection(tail)
-            if (
-                last_center.state is CenterState.ONGOING
-                and last_center.pending_leave_unit is None
-            ):
-                previous_index = unit_index.get(last_center.body_units[-1].unit_id)
-                if previous_index is None or tail_index != previous_index + 1:
-                    continue
-                try:
-                    projected_center = replace(
-                        last_center,
-                        pending_leave_unit=projected_tail,
-                        available_at=max(
-                            last_center.available_at,
-                            projected_tail.available_at,
-                        ),
-                    )
-                except ValueError:
-                    continue
-            elif last_center.state is CenterState.COMPLETED:
-                ret = last_center.completion_return_unit
-                previous_index = (
-                    None if ret is None else unit_index.get(ret.unit_id)
-                )
-                if previous_index is None or tail_index != previous_index + 1:
-                    continue
-                projected_center = last_center
-            else:
-                continue
-            projected_units = list(level.units)
-            projected_units[tail_index] = projected_tail
-            try:
-                compared = compare_terminal_trend_divergence(
-                    (*trend.centers[:-1], projected_center),
-                    tuple(projected_units),
-                    self.strength,
-                    trend_start_unit_id=trend.constituent_units[0].unit_id,
-                )
-            except (FormalDivergenceUnavailable, MacdStrengthUnavailable):
-                continue
-            if compared is None:
-                continue
-            divergence, signal = compared
+        for comparison in project_live_terminal_trend_comparisons(
+            level, tail, self.strength,
+        ):
+            trend = comparison.trend
+            last_center = comparison.center
+            divergence = comparison.divergence
+            signal = comparison.signal_unit
             if not divergence.is_divergent:
                 continue
             # 已完成中枢仍可能保留一个锚在历史离开段上的背驰比较；它不是当前
@@ -823,8 +852,8 @@ class StrictSignalEngine:
             and signal.direction == pullback.direction
             and signal.end_tick == rebound.start_tick
             and rebound.end_tick == pullback.start_tick
-            and rebound.market_start >= signal.market_end
-            and pullback.market_start >= rebound.market_end
+            and rebound.market_start == signal.market_end
+            and pullback.market_start == rebound.market_end
         )
 
     @staticmethod
@@ -854,7 +883,11 @@ class StrictSignalEngine:
         *,
         live: bool,
     ):
-        """按统一的守前低/前高或盘整背驰规则判定二类点。"""
+        """Classify the first completed retest; divergence strengthens a lower retest.
+
+        L101:37-82 explicitly permits a second buy below the first and says
+        consolidation divergence is usual, not a necessary condition.
+        """
 
         held = (
             pullback.low_tick >= parent.anchor_tick
@@ -863,21 +896,21 @@ class StrictSignalEngine:
         )
         if held:
             return StrictPointVariant.STRICT, None
-        if self.strength is None:
-            return None
-        comparison_pullback = _locked_projection(pullback) if live else pullback
-        try:
-            divergence = compare_divergence(
-                signal,
-                comparison_pullback,
-                self.strength,
-                kind="consolidation",
-            )
-        except (FormalDivergenceUnavailable, MacdStrengthUnavailable):
-            return None
-        if not divergence.is_divergent:
-            return None
-        return StrictPointVariant.WEAK_DIVERGENCE, divergence
+        if self.strength is not None:
+            comparison_pullback = _locked_projection(pullback) if live else pullback
+            try:
+                divergence = compare_divergence(
+                    signal,
+                    comparison_pullback,
+                    self.strength,
+                    kind="consolidation",
+                )
+            except (FormalDivergenceUnavailable, MacdStrengthUnavailable):
+                pass
+            else:
+                if divergence.is_divergent:
+                    return StrictPointVariant.WEAK_DIVERGENCE, divergence
+        return StrictPointVariant.LOWER_RETEST, None
 
     @staticmethod
     def _recursive_observation_is_complete(unit: ConstituentUnit, levels) -> bool:
@@ -1211,9 +1244,10 @@ class StrictSignalEngine:
                 "complete_first_pullback",
                 *(("internal_first_retest",) if parent.price_anchor_unit_id != parent.anchor_unit_id else ()),
                 (
-                    "prior_extreme_held"
-                    if variant is StrictPointVariant.STRICT
+                    "prior_extreme_held" if variant is StrictPointVariant.STRICT
                     else "consolidation_divergence"
+                    if variant is StrictPointVariant.WEAK_DIVERGENCE
+                    else "lower_extreme_retested"
                 ),
             ),
             related_point_ids=related_point_ids,
@@ -1394,9 +1428,10 @@ class StrictSignalEngine:
                 "complete_adjacent_rebound",
                 "complete_first_pullback",
                 (
-                    "prior_extreme_held"
-                    if variant is StrictPointVariant.STRICT
+                    "prior_extreme_held" if variant is StrictPointVariant.STRICT
                     else "consolidation_divergence"
+                    if variant is StrictPointVariant.WEAK_DIVERGENCE
+                    else "lower_extreme_retested"
                 ),
             ),
             related_point_ids=(parent.point_id,),

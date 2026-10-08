@@ -15,6 +15,7 @@ from chanlun.market import Market
 from chanlun.config import get_data_path
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_frequency
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.exchange.stocks_bkgn import StocksBKGN
 from chanlun.exchange.tdx_a_codes import tdx_codes_by_bj, tdx_codes_by_error
@@ -389,7 +390,10 @@ class ExchangeTDX(Exchange):
                     _q["low"] /= 10
                     _q["high"] /= 10
                     _q["open"] /= 10
-                    _q["last_close"] /= 10
+                    try:
+                        _q["last_close"] = float(_q.get("last_close")) / 10
+                    except (TypeError, ValueError, OverflowError):
+                        _q["last_close"] = None
                 ticks[_code] = Tick(
                     code=_code,
                     last=_q["price"],
@@ -399,14 +403,9 @@ class ExchangeTDX(Exchange):
                     high=_q["high"],
                     volume=_q["vol"],
                     open=_q["open"],
+                    reference_price=quote_price(_q.get("last_close")),
                     rate=(
-                        round(
-                            (_q["price"] - _q["last_close"]) / _q["last_close"] * 100, 2
-                        )
-                        # 保护真正的除数 last_close（而非 price），否则新股首日或停牌复牌时，
-                        # last_close=0 而 price!=0 时上一行除零崩溃吞掉 A股实盘信号通知。
-                        if _q["last_close"] != 0
-                        else 0
+                        quote_change_rate(_q["price"], _q.get("last_close"), positive_reference=False)
                     ),
                 )
 

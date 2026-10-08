@@ -101,21 +101,36 @@ def _assemble_trends_with_prefix_cache(
 
     center_values = tuple(centers)
     unit_values = tuple(units)
+    def assemble_or_pending():
+        try:
+            return assemble_trend_types(
+                center_values,
+                unit_values,
+                structural_level,
+                oscillatory_ids,
+                strength=strength,
+                ignored_boundary_anchor_ids=ignored_boundary_anchor_ids,
+                group_start_unit_id=group_start_unit_id,
+            )
+        except ValueError as exc:
+            if not (
+                str(exc) == "trend must contain every center body and bridge unit"
+                and center_values
+                and all(center.formation_rule == "three_core" for center in center_values)
+            ):
+                raise
+            return normalize_trend_assembly(
+                current_trends=(), completed_trends=(),
+                decomposition_boundaries=(), source_units=unit_values,
+                structural_level=structural_level,
+            )
     cacheable = (
         center_prefix_cache is not None
         and strength is not None
         and all(item.locked for item in unit_values)
     )
     if not cacheable:
-        return assemble_trend_types(
-            center_values,
-            unit_values,
-            structural_level,
-            oscillatory_ids,
-            strength=strength,
-            ignored_boundary_anchor_ids=ignored_boundary_anchor_ids,
-            group_start_unit_id=group_start_unit_id,
-        )
+        return assemble_or_pending()
     key = (
         "trend",
         structural_level,
@@ -137,15 +152,7 @@ def _assemble_trends_with_prefix_cache(
     if cached is not None:
         center_prefix_cache[key] = cached
         return cached
-    result = assemble_trend_types(
-        center_values,
-        unit_values,
-        structural_level,
-        oscillatory_ids,
-        strength=strength,
-        ignored_boundary_anchor_ids=ignored_boundary_anchor_ids,
-        group_start_unit_id=group_start_unit_id,
-    )
+    result = assemble_or_pending()
     center_prefix_cache[key] = result
     while len(center_prefix_cache) > _CENTER_PREFIX_CACHE_CAPACITY:
         center_prefix_cache.popitem(last=False)
@@ -173,11 +180,9 @@ def calculate_level_with_divergence_boundaries(
             oscillatory_ids,
             center_prefix_cache=center_prefix_cache,
         )
-        return center_result, assemble_trend_types(
-            center_result.centers,
-            values,
-            structural_level,
-            oscillatory_ids,
+        return center_result, _assemble_trends_with_prefix_cache(
+            center_result.centers, values, structural_level,
+            oscillatory_ids, strength=None,
         )
     accepted: frozenset[str] = frozenset()
     rejected: frozenset[str] = frozenset()
@@ -505,17 +510,14 @@ class StrictRecursiveEngine:
         for level in range(self.max_levels):
             source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
-            # 物理层至少需要进入 + 中间三段核心 + 独立离开五个角色；更高层
-            # 仍由三个已完成低级别走势类型递归，不能混用物理线段门槛。
+            # Physical centers use entry + three overlapping core units +
+            # independent leave. Recursive trend-type centers use three units.
             minimum_units = (
                 center_seed_size(source_kind)
                 if source_kind is SourceKind.TREND_TYPE
                 else 5
             )
             if len(units) < minimum_units:
-                # Four physical roles can already prove entry + a three-unit
-                # overlap. Keep that forming core for observation while it
-                # waits for its independent departure; it cannot recurse.
                 if source_kind is SourceKind.SEGMENT and len(units) >= 4:
                     center_result = calculate_centers(units, level, source_kind)
                     levels.append(StrictLevelResult(

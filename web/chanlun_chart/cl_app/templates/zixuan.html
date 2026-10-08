@@ -61,7 +61,7 @@
               <div class="zx-manager-group-row" data-group-name="{{ group['name'] }}">
                 <span class="zx-manager-group-avatar" aria-hidden="true">{% if group['name'] == '我的持仓' %}人{% else %}{{ group['name'][:1] }}{% endif %}</span>
                 <span class="zx-manager-group-copy">
-                  <strong>{% if group['name'] == '我的持仓' %}人工关注组{% else %}{{ group['name'] }}{% endif %}</strong>
+                  <strong>{{ group['name'] }}</strong>
                   <small>{% if group['name'] == '我的关注' %}系统默认分组{% elif group['name'] == '我的持仓' %}人工维护的优先监听分组{% else %}跨市场观察分组{% endif %}</small>
                 </span>
                 {% if group['name'] in ('我的关注', '我的持仓') %}
@@ -93,7 +93,7 @@
                 <label class="zx-field-label" for="export_zx_group">目标分组</label>
                 <select id="export_zx_group" name="zx_group" aria-label="选择导入导出的目标分组">
                   {% for group in zx_groups %}
-                    <option value="{{ group['name'] }}">{% if group['name'] == '我的持仓' %}人工关注组{% else %}{{ group['name'] }}{% endif %}</option>
+                    <option value="{{ group['name'] }}">{{ group['name'] }}</option>
                   {% endfor %}
                 </select>
               </div>

@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from chanlun.core.strict_structure.center_machine import advance_center, close_center_at_divergence
-from chanlun.core.strict_structure.identity import build_center_id, stable_structure_id
+from chanlun.core.strict_structure.center_machine import advance_center, close_center_at_divergence, establish_center
+from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterPreview,
     CenterPreviewState,
@@ -22,7 +22,9 @@ from tests.core.strict_structure.helpers import (
     engine_for,
     only_point,
     ongoing_center,
+    ongoing_down_center,
     unit,
+    valid_five_up_exit,
 )
 
 
@@ -39,18 +41,33 @@ def test_completed_up_center_emits_exactly_one_confirmed_three_buy():
     assert point.available_at == completed.available_at
 
 
-def test_return_touching_core_boundary_confirms_three_buy():
+def test_return_touching_core_boundary_does_not_confirm_three_buy():
     center = ongoing_center(zg_tick=115)
     center, _ = advance_center(center, unit(5, "down", 130, 115))
-    assert center.third_class_confirmed
-    point = only_point(engine_for(center).third_class_points())
-    assert point.point_type == "3buy" and point.anchor_tick == 115
+    assert not center.third_class_confirmed
+    assert not engine_for(center).third_class_points()
 
 
-def test_return_touching_core_boundary_confirms_three_sell():
-    completed = completed_down_center(return_high_tick=95, zd_tick=95)
-    point = only_point(engine_for(completed).third_class_points())
-    assert point.point_type == "3sell" and point.anchor_tick == 95
+def test_l081_return_endpoint_outside_but_internal_dip_inside_is_not_three_buy():
+    # L081:1579-1591 explicitly rejects a third buy when the lower-level
+    # return dips into the old center even though its endpoint stays outside.
+    center = ongoing_center(zg_tick=115)
+    return_unit = unit(5, "down", 130, 116)
+    return_unit = replace(
+        return_unit,
+        low_tick=114,
+        low_market_time=return_unit.market_start + timedelta(minutes=2),
+    )
+    center, _ = advance_center(center, return_unit)
+    assert not center.third_class_confirmed
+    assert not engine_for(center).third_class_points()
+
+
+def test_return_touching_core_boundary_does_not_confirm_three_sell():
+    center = ongoing_down_center(zd_tick=95)
+    center, _ = advance_center(center, unit(5, "up", 80, 95))
+    assert not center.third_class_confirmed
+    assert not engine_for(center).third_class_points()
 
 
 def test_completed_down_center_emits_symmetric_three_sell():
@@ -119,6 +136,11 @@ def test_later_divergence_boundary_cannot_rewrite_confirmed_third_point():
         strength_source="macd",
         compare_leg_unit_ids=compare_ids,
         signal_leg_unit_ids=signal_ids,
+        comparison_center_id=completed.center_id,
+        comparison_center_established_at=completed.established_at,
+        comparison_center_known_at=max(
+            item.available_at for item in completed.establishment_units
+        ),
     )
     closed = close_center_at_divergence(completed, divergence)
     after = engine._third_class_point(closed, direction="up", ordinal=1)
@@ -158,8 +180,8 @@ def test_center_ordinal_restarts_after_divergence_decomposition_boundary():
 
 def test_center_ordinal_tracks_rising_cores_when_envelopes_still_overlap():
     first = completed_up_center(0, zd_tick=100, zg_tick=110)
-    second = completed_up_center(10, zd_tick=111, zg_tick=121)
-    third = completed_up_center(20, zd_tick=122, zg_tick=132)
+    second = completed_up_center(10, zd_tick=116, zg_tick=126)
+    third = completed_up_center(20, zd_tick=132, zg_tick=142)
 
     # 601298 一类的走势里，中枢核心持续抬高，但组成单元的外围仍会重叠。
     assert second.dd_tick <= first.gg_tick
@@ -189,29 +211,30 @@ def test_center_ordinal_tracks_falling_cores_when_envelopes_still_overlap():
 
 def test_completed_preview_continues_ordinal_by_rising_core():
     first = completed_up_center(0, zd_tick=100, zg_tick=110)
-    second = completed_up_center(10, zd_tick=111, zg_tick=121)
-    third = completed_up_center(20, zd_tick=122, zg_tick=132)
+    second = completed_up_center(10, zd_tick=116, zg_tick=126)
+    third = completed_up_center(20, zd_tick=132, zg_tick=142)
     entry = unit(29, "down", 138, 127)
     body = (
         unit(30, "up", 127, 148),
-        unit(31, "down", 148, 133),
-        unit(32, "up", 133, 143),
+        unit(31, "down", 148, 143),
+        unit(32, "up", 143, 148),
     )
-    leave = unit(33, "up", 143, 153)
-    return_unit = unit(34, "down", 153, 145)
+    leave = unit(33, "up", 148, 163)
+    return_unit = unit(34, "down", 163, 150)
     preview = CenterPreview(
         structural_level=0,
         source_kind=SourceKind.SEGMENT,
         price_basis_revision=first.price_basis_revision,
-        entry_unit_id=entry.unit_id,
+        entry_unit_id=None,
         unit_ids=tuple(item.unit_id for item in body),
         state=CenterPreviewState.COMPLETED,
-        zd_tick=133,
-        zg_tick=143,
+        zd_tick=143,
+        zg_tick=148,
         available_at=return_unit.available_at,
         completion_leave_unit_id=leave.unit_id,
         completion_return_unit_id=return_unit.unit_id,
-        establishment_leave_unit_id=leave.unit_id,
+        establishment_leave_unit_id=None,
+        formation_rule="three_core",
     )
     level = SimpleNamespace(
         center_result=SimpleNamespace(centers=(first, second, third)),
@@ -224,48 +247,14 @@ def test_completed_preview_continues_ordinal_by_rising_core():
 
 
 def test_stroke_observation_center_is_never_formal_third_class_point():
-    formal = completed_up_center()
-    converted = {
-        item.unit_id: replace(item, source_kind=SourceKind.STROKE_OBSERVATION)
-        for item in (
-            *(() if formal.entry_unit is None else (formal.entry_unit,)),
-            *formal.body_units,
-            formal.completion_leave_unit,
-            formal.completion_return_unit,
-        )
-    }
-    observation = replace(
-        formal,
-        center_id=build_center_id(
-            price_basis_revision=formal.price_basis_revision,
-            structural_level=formal.structural_level,
-            source_kind=SourceKind.STROKE_OBSERVATION.value,
-            initial_unit_ids=tuple(item.unit_id for item in formal.initial_units),
-            entry_unit_id=formal.entry_unit.unit_id,
-            establishment_leave_unit_id=(
-                formal.establishment_leave_unit.unit_id
-            ),
-            zd_tick=formal.zd_tick,
-            zg_tick=formal.zg_tick,
-        ),
-        source_kind=SourceKind.STROKE_OBSERVATION,
-        entry_unit=(
-            None
-            if formal.entry_unit is None
-            else converted[formal.entry_unit.unit_id]
-        ),
-        initial_units=tuple(
-            converted[item.unit_id] for item in formal.initial_units
-        ),
-        body_units=tuple(converted[item.unit_id] for item in formal.body_units),
-        establishment_leave_unit=converted[
-            formal.establishment_leave_unit.unit_id
-        ],
-        extension_units=tuple(
-            converted[item.unit_id] for item in formal.extension_units
-        ),
-        completion_leave_unit=converted[formal.completion_leave_unit.unit_id],
-        completion_return_unit=converted[formal.completion_return_unit.unit_id],
+    source = SourceKind.STROKE_OBSERVATION
+    values = tuple(
+        replace(item, source_kind=source) for item in valid_five_up_exit()
+    )
+    observation = establish_center(values, 0, source)
+    assert observation is not None
+    observation, _event = advance_center(
+        observation, unit(5, "down", 130, 120, source_kind=source)
     )
     with pytest.raises(ValueError, match="canonical recursive source"):
         engine_for(observation)

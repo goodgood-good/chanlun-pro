@@ -2,6 +2,7 @@ import random
 from tenacity import retry, stop_after_attempt, wait_random, retry_if_result
 from chanlun import config, fun
 from chanlun.exchange.exchange import *
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_precision import normalize_kline_precision
 
 try:
@@ -178,25 +179,22 @@ class ExchangeFutu(Exchange):
         """获取标的列表的行情快照，返回 Tick 字典。"""
         ret, data = CTX().get_market_snapshot(codes)
         if ret == RET_OK:
-            return {
-                _d[1]["code"]: Tick(
-                    code=_d[1]["code"],
-                    last=_d[1]["last_price"],
-                    high=_d[1]["high_price"],
-                    low=_d[1]["low_price"],
-                    open=_d[1]["open_price"],
-                    volume=_d[1]["volume"],
-                    buy1=_d[1]["bid_price"],
-                    sell1=_d[1]["ask_price"],
-                    rate=0 if not _d[1]["prev_close_price"] else round(  # B3(Round8): prev_close==0(上市首日/停牌复牌首笔)守零防整批 ticks 崩
-                        (_d[1]["last_price"] - _d[1]["prev_close_price"])
-                        / _d[1]["prev_close_price"]
-                        * 100,
-                        2,
-                    ),
-                )
-                for _d in data.iterrows()
-            }
+            ticks = {}
+            for _, row in data.iterrows():
+                try:
+                    last = quote_price(row.get("last_price"))
+                    if last is None or not isinstance(row.get("code"), str) or not row["code"].strip():
+                        continue
+                    ticks[row["code"]] = Tick(
+                        code=row["code"], last=last,
+                        high=row["high_price"], low=row["low_price"], open=row["open_price"],
+                        volume=row["volume"], buy1=row["bid_price"], sell1=row["ask_price"],
+                        reference_price=quote_price(row.get("prev_close_price")),
+                        rate=quote_change_rate(last, row.get("prev_close_price"), positive_reference=False),
+                    )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+            return ticks
 
         print("Ticks Error : ", data)
         return {}

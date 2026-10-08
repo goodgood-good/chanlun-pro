@@ -163,6 +163,23 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
     }
 
 
+def test_readyz_exposes_stopped_monitor_and_transient_degradation_without_restarting_dependencies(app):
+    app.config['RUNTIME_SERVICES_REQUIRED']=True
+    app.extensions['readiness'].record_ticks_success('a')
+    app.extensions['runtime_status']=lambda:{'ready':True,'status':'running','error':None}
+    health={'required':True,'ready':False,'status':'stopped','recovery_recommended':True}
+    app.extensions['monitor_health']=lambda:dict(health)
+    response=app.test_client().get('/readyz?market=a')
+    assert response.status_code==503
+    assert response.get_json()['components']['runtime']['ready']
+    assert response.get_json()['components']['monitor']['recovery_recommended']
+    assert 'signal_monitor_stopped' in response.get_json()['reasons']
+    health.update(status='degraded',recovery_recommended=False)
+    assert app.test_client().get('/readyz?market=a').get_json()['components']['monitor']['recovery_recommended'] is False
+    health.update(status='running',ready=True)
+    assert app.test_client().get('/readyz?market=a').status_code==200
+
+
 def test_readyz_blocks_until_ticks_have_been_verified(app):
     response = app.test_client().get("/readyz?market=a")
 

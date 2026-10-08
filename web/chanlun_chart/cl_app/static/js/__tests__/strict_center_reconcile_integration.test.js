@@ -102,6 +102,38 @@ test('conditional centers render separately and disappear when their scope resol
   assert.ok(entries().some(item => item.logicalKey === 'formal_center:center-1'));
 });
 
+test('archived selected center fields cannot replace the formal center chart', () => {
+  const {cm}=manager();
+  const structure=snapshot({analysis_scope:'centers_and_signals',
+    levels:[{structural_level:0,origin:'native_segments',centers:[center()],
+      center_previews:[],trend_shapes:[],points:[],divergences:[]}],
+    user_same_level_type_view:{schema:'chanlun-user-same-level-structure-view-v1',
+      as_of:BASE+600,lower_types:[],forming_lower_types:[],parent_centers:[],parent_types:[]},
+    selected_five_segment_centers:{schema:'chanlun-user-five-segment-centers-v3',
+      as_of:BASE+600,window_count:1,center_count:1,
+      centers:[{center_id:'experimental',seed_member_unit_ids:['a','b','c','d','e'],
+        core_ticks:[1000,1100],state:'formed',market_start:BASE+100,
+        market_end:BASE+500,formed_at:BASE+500,known_at:BASE+500}]},
+  });
+  const rendered=[...cm._strictRenderGroups(structure,{...scopeContext(cm),sourceTimeIsClose:false}).values()].flat();
+  assert.deepEqual(rendered.map(item=>item.render_kind),['formal_center']);
+  assert.equal(Reconcile.logicalKey(rendered[0]),'formal_center:center-1');
+});
+
+test('experimental centers alone cannot create formal chart shapes', () => {
+  const {cm}=manager();
+  const structure=snapshot({analysis_scope:'centers_and_signals',
+    levels:[{structural_level:0,origin:'native_segments',centers:[],
+      center_previews:[],trend_shapes:[],points:[],divergences:[]}],
+    user_same_level_type_view:{schema:'chanlun-user-same-level-structure-view-v1',
+      as_of:BASE+600,lower_types:[],forming_lower_types:[],parent_centers:[],parent_types:[]},
+    selected_five_segment_centers:{schema:'chanlun-user-five-segment-centers-v3',
+      as_of:BASE+600,window_count:1,center_count:1,centers:[{center_id:'experimental'}]},
+  });
+  const rendered=[...cm._strictRenderGroups(structure,{...scopeContext(cm),sourceTimeIsClose:false}).values()].flat();
+  assert.deepEqual(rendered,[]);
+});
+
 test('a conditional center cannot carry a formal confirmation flag', () => {
   const { cm } = manager();
   const data = chartData();
@@ -246,6 +278,112 @@ function scopeContext(cm) {
   };
 }
 
+test('stale three-core segment centers are rejected from the formal chart', () => {
+  const {cm}=manager();
+  const old=center(1,{formation_rule:'three_core'});
+  const structure=snapshot({levels:[{structural_level:0,origin:'native_segments',
+    centers:[old],center_previews:[],trend_shapes:[],points:[],divergences:[]}]});
+  assert.throws(() => cm._strictRenderGroups(structure,scopeContext(cm)),
+    /withdrawn three-core segment center/);
+});
+
+test('retired movement types stay hidden even with a saved display switch', () => {
+  const {cm,calls}=manager();
+  const trend={schema:'chanlun-chart-trend',render_kind:'strict_trend',
+    trend_id:'type-1',render_id:'type-1@forming',price_basis_revision:'raw-test',
+    structural_level:0,source_kind:'segment',kind:'consolidation',state:'forming',
+    center_ids:['center-1'],available_at:BASE+500,
+    points:[{time:BASE+100,price:11},{time:BASE+500,price:10}]};
+  const structure=snapshot({levels:[{structural_level:0,origin:'native_segments',
+    centers:[center()],trend_shapes:[trend]}]});
+  cm.cl_show_config={center_all:true,trend_all:false};
+  cm._drawStrictStructure(chartData('replace',structure),'5');
+  assert.equal(calls.create.filter(item=>item.options.shape==='trend_line').length,0);
+  cm.cl_show_config.trend_all=true;
+  cm._drawStrictStructure(chartData('replace',structure),'5');
+  const lines=calls.create.filter(item=>item.options.shape==='trend_line');
+  assert.equal(lines.length,0);
+});
+
+test('a 1m chart uses a separate real 5m snapshot for its higher-period overlay', () => {
+  const {cm}=manager();
+  cm._currentDataIdentityKey=()=> 'a:sh.600519|1';
+  cm.cl_show_config={center_all:true,center_period_5m:true,
+    point_all:false,trend_all:false,divergence_all:false};
+  const main=snapshot({source_frequency:'1m',display_frequency:'1m'});
+  const higher=snapshot({source_frequency:'5m',display_frequency:'5m',
+    source_closed_at:BASE+500,levels:[{structural_level:0,origin:'native_segments',
+      centers:[center(1,{center_id:'higher-center',render_id:'higher-center-v1'})]}]});
+  cm._strictOverlayIdentity='a:sh.600519|1';
+  cm._strictOverlaySources=new Map([['5m',{snapshot:higher,loadedAt:Date.now(),
+    loading:false,retryTimer:null,nextAttemptAt:0,attempts:0}]]);
+  const context={...scopeContext(cm),interval:'1m',sourceTimeIsClose:true};
+  const own=cm._strictRenderGroups(main,context);
+  const overlaid=cm._strictOverlayGroups(main,{context,loadedRange:{barTimes:[BASE+40,BASE+440]}},'1');
+  const drawn=Array.from(overlaid.values()).flat();
+  assert.equal(drawn.length,1);
+  assert.equal(drawn[0].center_label,'5m');
+  assert.equal(drawn[0].source_frequency,'5m');
+  assert.equal(drawn[0].display_frequency,'1m');
+  assert.equal(drawn[0].points[0].time,BASE+40);
+  assert.ok(!own.has(Array.from(overlaid.keys())[0]));
+  assert.throws(() => cm._validateStrictOverlaySnapshot(
+    {...higher,source_closed_at:BASE+700},'5m',main),
+  /strict_overlay_context_mismatch/);
+});
+
+test('higher-period request retries a pending build and installs its verified snapshot', async () => {
+  const retries=[];
+  const requests=[];
+  const main=snapshot({source_frequency:'1m',display_frequency:'1m'});
+  const higher=snapshot({source_frequency:'5m',display_frequency:'5m',
+    source_closed_at:BASE+700});
+  let attempt=0;
+  const {cm}=manager('chart-manager-overlay',{
+    AbortController,
+    fetch:async (url)=>{
+      requests.push(new URL(String(url),'http://local'));
+      attempt+=1;
+      return {ok:true,json:async()=>attempt===1
+        ? {s:'ok',strict_structure_mode:'unavailable',
+          strict_structure_error:{code:'strict_structure_pending'}}
+        : {s:'ok',source_closed_at:BASE+700,strict_structure_mode:'replace',
+          strict_structure:higher}};
+    },
+    setTimeout:(fn,delay)=>{if(delay===1000)retries.push(fn);return retries.length+1;},
+    clearTimeout:()=>{},
+  });
+  cm.getCurrentChartIdentity=()=>({symbol:'a:SH.600519',interval:'1'});
+  cm._currentDataIdentityKey=()=> 'a:sh.600519|1';
+  cm.cl_show_config={center_all:true,center_period_5m:true,
+    point_all:false,trend_all:false,divergence_all:false};
+  cm._strictStructureSnapshot=main;
+  cm._strictOverlayIdentity='a:sh.600519|1';
+  const state={snapshot:null,loading:false,retryTimer:null,attempts:0};
+  cm._strictOverlaySources=new Map([['5m',state]]);
+  let redraws=0;
+  cm.debouncedDrawChanlun=()=>{redraws+=1;};
+  cm._fetchStrictOverlay('5m','a:sh.600519|1');
+  await new Promise(setImmediate);
+  assert.equal(requests[0].searchParams.get('resolution'),'5');
+  assert.equal(requests[0].searchParams.get('structure_only'),'1');
+  assert.equal(requests[0].searchParams.get('countback'),'1');
+  assert.equal(state.error,'pending');
+  assert.equal(retries.length,1);
+  retries[0]();
+  await new Promise(setImmediate);
+  assert.equal(state.snapshot,null);
+  assert.equal(state.error,'pending');
+  assert.equal(retries.length,2);
+  cm._strictStructureSnapshot=snapshot({source_frequency:'1m',display_frequency:'1m',
+    source_closed_at:BASE+800});
+  retries[1]();
+  await new Promise(setImmediate);
+  assert.equal(state.snapshot,higher);
+  assert.equal(state.error,null);
+  assert.equal(redraws,1);
+});
+
 test('forming core draws before an exit exists and is replaced when the exit locks', () => {
   const {cm,calls} = manager();
   const preview = center(1, {render_kind:'center_preview', state:'forming', third_class_confirmed:false,
@@ -256,7 +394,8 @@ test('forming core draws before an exit exists and is replaced when the exit loc
   cm._drawStrictStructure(chartData('replace',forming),'5');
   assert.equal(calls.create.length,1);
   assert.equal(calls.create[0].options.overrides.linestyle,2);
-  assert.match(calls.create[0].options.text,/待离开段/);
+  assert.equal(calls.create[0].options.text, '');
+  assert.match(calls.create[0].options.title, /待离开段/);
   cm._drawStrictStructure(chartData(),'5');
   assert.equal(calls.create.length,2);
   assert.deepEqual(calls.remove,[calls.create[0].id]);
@@ -279,7 +418,7 @@ test('owner projection with no extra geometry does not draw a duplicate rectangl
 });
 
 for (const pointType of ['3buy', '3sell']) {
-  test(`${pointType} return updates the owner label and confirmation removes only its pending tail`, () => {
+  test(`${pointType} return updates center details without visible status labels and confirmation removes only its pending tail`, () => {
     const {cm, calls} = manager();
     const owner = center();
     const completedOther = center(1, {center_id: 'other-center', render_id: 'other-completed',
@@ -297,14 +436,18 @@ for (const pointType of ['3buy', '3sell']) {
         centers: [centerItem, completedOther], center_previews: previews, points}],
     })), '5');
     draw(owner, [preview]);
-    const extension = calls.create.find(item => item.options.text === 'Z1·延伸中·待确认');
-    const unrelated = calls.create.find(item => item.options.text === 'Z2');
+    const extension = calls.create.find(item => item.options.overrides.linestyle === 2
+      && /延伸中·待确认/.test(item.options.title));
+    const unrelated = calls.create.find(item => item.options.text === '' && /中枢已结束/.test(item.options.title));
     assert.ok(extension && unrelated);
+    assert.ok(calls.create.every(item => item.options.text === ''));
 
-    // Identical geometry must still refresh the tail label and owner title.
+    // Identical geometry must still refresh the tail and owner details.
     draw(owner, [{...preview, preview_status: 'awaiting_completion_confirmation'}], [point]);
-    const waiting = calls.create.find(item => item.options.text === 'Z1·回试待确认');
+    const waiting = calls.create.find(item => item.options.overrides.linestyle === 2
+      && /回试待确认/.test(item.options.title));
     assert.ok(waiting);
+    assert.equal(waiting.options.text, '');
     assert.ok(calls.remove.includes(extension.id));
     assert.match(waiting.options.title, /相关线段待最终确认/);
     assert.doesNotMatch(waiting.options.title, /延伸/);
@@ -319,7 +462,7 @@ for (const pointType of ['3buy', '3sell']) {
     assert.ok(!calls.remove.includes(unrelated.id), 'another completed center keeps its entity');
     const active = calls.create.filter(item => !calls.remove.includes(item.id));
     assert.equal(active.length, 3);
-    assert.match(active.find(item => item.options.text === 'Z1').options.title, /中枢已结束/);
+    assert.match(active.find(item => item.id !== unrelated.id && item.options.text === '').options.title, /中枢已结束/);
     assert.ok(active.every(item => !/待确认|延伸/.test(item.options.text + item.options.title)));
   });
 }
@@ -840,20 +983,21 @@ test('strict failure clears an expired snapshot and enters automatic recovery', 
   assert.equal(cm._strictStructureStatus.state, 'recovering');
 });
 
-test('exit prices update point details without moving anchors or redrawing on cutoff-only changes', () => {
+for (const native of [false,true]) test(`exit prices update ${native?'native':'legacy'} point details without moving anchors or redrawing on cutoff-only changes`, () => {
   const {cm, calls} = manager('chart-manager-exits', {PointExitInfo: require('../point_exit_info.js')});
   const point = {structural_level: 0, source_kind: 'segment', price_basis_revision: 'raw-test',
     available_at: BASE + 500, points: [{time: BASE + 500, price: 11}],
     render_kind: 'point_confirmed', render_id: 'p3', point_id: 'p3', point_type: '3buy', side: 'buy'};
   const plan = {version:'v1',side:'buy',point_status:'confirmed',as_of:BASE+600,
-    stop_loss:{price:10.01,trigger:'lte',basis:'center_edge'},take_profit:{price:null}};
-  const s = snapshot({analysis_scope:'centers_and_signals', point_exit_plans:{p3:plan},
+    ...(native?{evidence_scope:'native_center_signal'}:{}),
+    stop_loss:{price:10.01,trigger:native?'lt':'lte',basis:'center_edge'},take_profit:{price:null}};
+  const s = snapshot({analysis_scope:native?'native_centers':'centers_and_signals', point_exit_plans:{p3:plan},
     levels:[{...snapshot().levels[0],points:[point]}]});
   const draw = () => cm._drawStrictStructure(chartData('replace',s),'5');
   draw();
   const mark = calls.create.find(x=>x.options.shape==='text');
   assert.equal(mark.options.text,'三买');
-  assert.match(mark.options.title,/止损参考：≤ 10.01/);
+  assert.match(mark.options.title,native?/止损参考：跌破 10.01/:/止损参考：≤ 10.01/);
   const count = calls.create.length;
   plan.as_of++;
   draw();
@@ -862,7 +1006,7 @@ test('exit prices update point details without moving anchors or redrawing on cu
   draw();
   assert.equal(calls.create.length,count+1);
   assert.deepEqual(calls.create.at(-1).points,mark.points);
-  assert.match(calls.create.at(-1).options.title,/后续同级一卖/);
+  assert.match(calls.create.at(-1).options.title,native?/后续本周期一卖/:/后续同级一卖/);
 });
 
 test('requested signal and observation switches remove only their actual chart entities', () => {
@@ -881,20 +1025,18 @@ test('requested signal and observation switches remove only their actual chart e
   cm.cl_show_config.center_observation = true;
   cm._drawStrictStructure(data, '5');
   assert.equal(cm._strictStructureStatus.state, 'ready');
-  assert.equal(calls.create.length, 5);
-  assert.equal(calls.create.filter(item => item.options.shape === 'text').length, 3);
+  assert.equal(calls.create.length, 3);
+  assert.equal(calls.create.filter(item => item.options.shape === 'text').length, 1);
   assert.ok(calls.create.some(item => item.options.text === '三买'));
-  assert.ok(calls.create.some(item => item.options.text === '\n盘背'));
-  assert.ok(calls.create.some(item => item.options.text === '\n\n趋背'));
   assert.equal(calls.create.find(item => item.options.text === '三买').options.title, '三买');
-  for (const key of ['point_3buy', 'divergence_consolidation_L0', 'center_observation', 'center_all']) {
+  for (const key of ['point_3buy', 'center_observation', 'center_all']) {
     const before = calls.remove.length;
     cm.cl_show_config[key] = false;
     cm._drawStrictStructure(data, '5');
     assert.equal(calls.remove.length, before + 1, key);
-    assert.equal(calls.create.length, 5, 'unaffected shapes keep their identities');
+    assert.equal(calls.create.length, 3, 'unaffected shapes keep their identities');
   }
-  assert.equal(Array.from(cm._strictContainers.values()).flat().length, 1);
+  assert.equal(Array.from(cm._strictContainers.values()).flat().length, 0);
 });
 
 test('recursive center level is drawn only after its own switch is enabled', () => {

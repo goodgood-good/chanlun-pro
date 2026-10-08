@@ -943,20 +943,19 @@ class DB(object):
         self, chart_type, id, client_id, user_id, name, content, symbol, resolution
     ):
         with self.Session() as session:
-            session.query(TableByTVCharts).filter(
+            chart = session.query(TableByTVCharts).filter(
                 TableByTVCharts.id == id,
                 TableByTVCharts.client_id == client_id,
                 TableByTVCharts.user_id == user_id,
                 TableByTVCharts.chart_type == chart_type,
-            ).update(
-                {
-                    TableByTVCharts.name: name,
-                    TableByTVCharts.content: content,
-                    TableByTVCharts.symbol: symbol,
-                    TableByTVCharts.resolution: resolution,
-                    TableByTVCharts.timestamp: int(time.time()),
-                }
-            )
+            ).first()
+            if chart is None:
+                return False
+            chart.name = name
+            chart.content = content
+            chart.symbol = symbol
+            chart.resolution = resolution
+            chart.timestamp = int(time.time())
             session.commit()
         return True
 

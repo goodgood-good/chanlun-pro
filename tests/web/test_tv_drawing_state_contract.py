@@ -68,6 +68,45 @@ def test_currency_spot_drawing_name_fits_persistence_column():
     assert len(name) <= TableByTVCharts.name.type.length
 
 
+def test_hierarchy_load_combines_legacy_period_records_without_rewriting_them(app, monkeypatch):
+    records = {}
+    for period, source_id in (("all", "shared"), ("1", "one"), ("5", "five"), ("30", "thirty")):
+        state = {"schema": SCHEMA, "sources": {source_id: {
+            "id": source_id, "state": {"type": "LineToolTrendLine", "state": {
+                "interval": "5" if period == "all" else period}}}}, "groups": {}}
+        records[tv._drawing_storage_name("default", "default", "US:QQQ.US", period)] = SimpleNamespace(
+            content=json.dumps(state), timestamp=1)
+    stored, writes = _install_fake_store(monkeypatch, records)
+    response = app.test_client().get(URL.replace("resolution=all", "resolution=hierarchy"))
+    assert response.status_code == 200
+    sources = response.get_json()["data"]["sources"]
+    assert {key: value["_cl_origin_resolution"] for key, value in sources.items()} == {
+        "shared": "5", "one": "1", "five": "5", "thirty": "30"}
+    assert writes == []
+    assert set(stored) == set(records)
+
+
+def test_deleting_all_hierarchy_drawings_cannot_resurrect_legacy_shapes(app, monkeypatch):
+    legacy = {"schema": SCHEMA, "sources": {"manual": {"type": "LineToolRectangle", "state": {"interval": "30"}}}, "groups": {}}
+    stored, writes = _install_fake_store(monkeypatch, {CURRENT_NAME: SimpleNamespace(content=json.dumps(legacy))})
+    url = URL.replace("resolution=all", "resolution=hierarchy")
+    empty = {"schema": SCHEMA, "sources": {}, "groups": {}}
+    base=app.test_client().get(url).get_json()['data']
+    response = app.test_client().post(url, json={"state": empty,'base_state':base})
+    assert response.status_code == 200
+    assert app.test_client().get(url).get_json()["data"] == empty
+    assert CURRENT_NAME in stored
+    assert tv._drawing_storage_name("default", "default", "US:QQQ.US", "hierarchy") in stored
+
+
+def test_hierarchy_empty_without_legacy_sources_does_not_create_a_row(app, monkeypatch):
+    stored, writes = _install_fake_store(monkeypatch)
+    response = app.test_client().post(URL.replace("resolution=all", "resolution=hierarchy"),
+                                     json={"state": {"schema": SCHEMA, "sources": {}, "groups": {}}})
+    assert response.status_code == 200
+    assert stored == {} and writes == []
+
+
 @pytest.mark.parametrize(
     "state",
     [
@@ -132,6 +171,7 @@ def test_write_is_normalized_to_explicit_manual_sources(app, monkeypatch):
     response = app.test_client().post(
         URL,
         json={
+            'base_state':{'schema':SCHEMA,'sources':{},'groups':{}},
             "state": {
                 "schema": SCHEMA,
                 "sources": {
@@ -145,7 +185,8 @@ def test_write_is_normalized_to_explicit_manual_sources(app, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"status": "ok"}
+    assert response.get_json()['status'] == 'ok'
+    assert response.get_json()['revision']
     assert len(writes) == 1
     name, raw_content, symbol, resolution = writes[0]
     assert (name, symbol, resolution) == (CURRENT_NAME, "US:QQQ.US", "all")
@@ -176,11 +217,12 @@ def test_empty_current_state_removes_redundant_record(app, monkeypatch):
 
     response = app.test_client().post(
         URL,
-        json={"state": {"schema": SCHEMA, "sources": {}, "groups": {}}},
+        json={"state": {"schema": SCHEMA, "sources": {}, "groups": {}},
+              'base_state':app.test_client().get(URL).get_json()['data']},
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"status": "ok"}
+    assert response.get_json()['status'] == 'ok'
     assert CURRENT_NAME not in stored
     assert writes == []
 
@@ -207,10 +249,8 @@ def test_invalid_current_record_is_not_restored(app, monkeypatch):
     response = app.test_client().get(URL)
 
     assert response.status_code == 200
-    assert response.get_json() == {
-        "status": "ok",
-        "data": {"schema": SCHEMA, "sources": {}, "groups": {}},
-    }
+    assert response.get_json()['status']=='ok'
+    assert response.get_json()['data']=={"schema": SCHEMA, "sources": {}, "groups": {}}
     assert writes == []
 
 

@@ -20,16 +20,19 @@ L1 Phase 2 + Tier 4 P1 重构：把 tv.py 里 chart cache 相关的状态 + 函�
 - ``_get_chart_cache_entry``: 两层读取（RAM → disk → warm RAM）
 - ``_set_chart_cache_entry``: 两层写入（RAM 立即可见 + 异步落盘）
 - ``_mark_chart_cache_validated``: 更新 entry.validated_at
-- ``_persist_chart_cache_async``: 提交磁盘写入，异常 fallback 同步
+- ``_persist_chart_cache_async``: 限额内复制快照，同键仅保留最新待写版本
 - ``_is_negatively_cached`` / ``_mark_negative_cache``: 空数据负缓存
 """
 import copy
 import hashlib
 import json
+import math
 import os
 import random
 import threading
 import time
+import weakref
+from concurrent.futures import Future
 from threading import RLock
 from typing import Dict, Optional
 
@@ -134,6 +137,32 @@ cache_lock: RLock = RLock()
 # callers calculate it before taking ``cache_lock`` and expose the result only
 # for the duration of that assignment. Access is serialized by ``cache_lock``.
 _chart_cache_weight_hints: Dict[int, int] = {}
+
+
+class _ChartCacheOperation:
+    """Short-lived ownership shared by overlapping operations on one key."""
+
+    def __init__(self):
+        self.generation = 0
+        self.committed_generation = 0
+        self.invalidating = False
+        self.disk_invalidated = False
+        self.io_lock = threading.Lock()
+
+
+_chart_cache_operations = weakref.WeakValueDictionary()
+# Retain rejection state only when the filesystem could not persist its marker.
+# A verified replacement releases it; ordinary operations still use weak refs.
+_failed_chart_cache_invalidations = {}
+
+
+def _chart_cache_operation(cache_key):
+    """Called under cache_lock; active readers/writers retain the returned state."""
+    state = _chart_cache_operations.get(cache_key)
+    if state is None:
+        state = _ChartCacheOperation()
+        _chart_cache_operations[cache_key] = state
+    return state
 
 
 def chart_cache_metrics() -> dict[str, int]:
@@ -271,6 +300,13 @@ def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, valida
     }
 
 
+def _finite_cache_time(value) -> bool:
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
+
+
 def _normalize_cache_entry(cached) -> Optional[dict]:
     """Validate the sole production chart-cache entry schema."""
     required = {"data", "min_time", "max_time", "validated_at", "is_full_snapshot"}
@@ -283,7 +319,7 @@ def _normalize_cache_entry(cached) -> Optional[dict]:
         return None
     if not isinstance(cached["data"], dict):
         return None
-    if not isinstance(cached["validated_at"], (int, float)):
+    if not _finite_cache_time(cached["validated_at"]):
         return None
     if type(cached["is_full_snapshot"]) is not bool:
         return None
@@ -315,6 +351,10 @@ def _get_chart_cache_entry(cache_key: str):
         entry = _normalize_cache_entry(chart_data_cache.get(cache_key))
         if entry is not None:
             return entry
+        operation = _chart_cache_operation(cache_key)
+        if operation.invalidating or operation.disk_invalidated:
+            return None
+        generation = operation.generation
 
     # HIGH-2: RAM miss → 磁盘读移出 cache_lock。pickle-load(数百KB~MB)绝不在全局锁内做,
     # 否则一次冷读把 cache_lock 持有到 IO 结束 → 串行化所有 tv_history/写/SSE, 且 IOLoop
@@ -341,6 +381,9 @@ def _get_chart_cache_entry(cache_key: str):
         existing = _normalize_cache_entry(chart_data_cache.get(cache_key))
         if existing is not None:
             return existing
+        if (operation.invalidating or operation.disk_invalidated
+                or operation.generation != generation):
+            return None
         _put_chart_cache_ram(cache_key, entry, prepared_weight=prepared_weight)
 
     # 机会型清理(磁盘 IO)也移出锁。
@@ -362,8 +405,12 @@ def _get_chart_cache_entry_ram_only(cache_key: str):
 
 
 def _source_history_expired(cache_entry, now):
-    deadline = (cache_entry.get("data") or {}).get("_history_source_valid_until")
-    return isinstance(deadline, (int, float)) and not now < deadline
+    data = cache_entry.get("data") or {}
+    field = "_history_source_valid_until"
+    if field not in data:
+        return False
+    deadline = data[field]
+    return not _finite_cache_time(deadline) or not now < deadline
 
 
 def _entry_freshness(cache_entry: dict, mode: str) -> str:
@@ -380,16 +427,18 @@ def _entry_freshness(cache_entry: dict, mode: str) -> str:
     """
     if not isinstance(cache_entry, dict):
         return "unknown"
-    if _source_history_expired(cache_entry, time.time()):
-        return "stale"
+    now = time.time()
     validated_at = cache_entry.get("validated_at")
-    if not isinstance(validated_at, (int, float)) or validated_at <= 0:
+    if (not _finite_cache_time(now) or now <= 0 or not _finite_cache_time(validated_at)
+            or validated_at <= 0 or validated_at > now):
         return "unknown"
+    if _source_history_expired(cache_entry, now):
+        return "stale"
 
     threshold = (
         _CACHE_REVALIDATION_INTERVAL if mode == "polling" else _SNAPSHOT_STALE_AFTER
     )
-    return "fresh" if (time.time() - validated_at) < threshold else "stale"
+    return "fresh" if (now - validated_at) < threshold else "stale"
 
 
 def _cache_entry_recently_validated(cache_entry: dict) -> bool:
@@ -418,11 +467,12 @@ def _first_request_freshness(
             保持本函数纯净可测)。
         now: 当前时间戳(秒); None 时取 ``time.time()``(单测可注入固定时钟)。
     """
+    now = time.time() if now is None else now
     validated_at = cache_entry.get("validated_at")
-    if not isinstance(validated_at, (int, float)) or validated_at <= 0:
+    if (not _finite_cache_time(now) or now <= 0 or not _finite_cache_time(validated_at)
+            or validated_at <= 0 or validated_at > now):
         # 时效无法验证：保守走同步重算。
         return "too_stale"
-    now = time.time() if now is None else now
     # A chart rebuilt from a 59-minute-old source must not receive another
     # hour of freshness. A tail-only refresh cannot validate adjusted history.
     if _source_history_expired(cache_entry, now):
@@ -539,17 +589,120 @@ def evaluate_cache_for_tv_history(
 _CHART_CACHE_DISK_WORKERS = 4
 _CHART_CACHE_MAX_PENDING_WRITES = 64
 _chart_cache_disk_lock = threading.Lock()
+_chart_cache_disk_condition = threading.Condition(_chart_cache_disk_lock)
 _chart_cache_disk_closed = True
 _chart_cache_accepting_writes = True
 _chart_cache_disk_futures = set()
 _chart_cache_disk_future_keys = {}
 _chart_cache_disk_slots = threading.BoundedSemaphore(_CHART_CACHE_MAX_PENDING_WRITES)
 _chart_cache_disk_executor = None
+_chart_cache_disk_shutdown_executor = None
+_chart_cache_disk_groups = {}
 
 
-def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
-    """Submit a best-effort write with a strict pending-task capacity."""
-    snapshot = copy.deepcopy(entry)
+class _ChartCacheDiskGroup:
+    """One worker and at most one pending snapshot for a chart key."""
+
+    def __init__(self):
+        self.pending = None
+
+
+class _ChartCacheDiskSlot:
+    """Capacity can move from an obsolete pending snapshot to its replacement."""
+
+    def __init__(self, semaphore, owner):
+        self.semaphore = semaphore
+        self.owner = owner
+
+
+def _write_chart_cache_until_complete(cache_key, snapshot, operation, generation):
+    """Serialize one key and retain ownership until the actual write finishes."""
+    with operation.io_lock:
+        with cache_lock:
+            if operation.generation != generation:
+                return
+        completion = fdb.set_chart_cache(cache_key, snapshot)
+        if isinstance(completion, Future):
+            completion.result()
+            with cache_lock:
+                operation.committed_generation = generation
+                if operation.generation == generation:
+                    operation.disk_invalidated = False
+                    _failed_chart_cache_invalidations.pop(cache_key, None)
+
+
+def _chart_cache_write_completed(cache_key, slot, done_future):
+    """Release capacity only after copying, cancellation or actual disk work ends."""
+    try:
+        error = None if done_future.cancelled() else done_future.exception()
+        if error is not None:
+            LogUtil.error(
+                f"[chart_cache] async write failed key={cache_key} err={error}"
+            )
+    except Exception as exc:
+        LogUtil.warning(
+            f"[chart_cache] async write completion failed key={cache_key} err={exc}"
+        )
+    finally:
+        with _chart_cache_disk_condition:
+            _chart_cache_disk_futures.discard(done_future)
+            _chart_cache_disk_future_keys.pop(done_future, None)
+            release_slot = slot.owner is done_future
+            if release_slot:
+                slot.owner = None
+            _chart_cache_disk_condition.notify_all()
+        if release_slot:
+            slot.semaphore.release()
+
+
+def _drain_chart_cache_group(cache_key, group):
+    while True:
+        with _chart_cache_disk_condition:
+            pending = group.pending
+            group.pending = None
+            if pending is None:
+                if _chart_cache_disk_groups.get(cache_key) is group:
+                    del _chart_cache_disk_groups[cache_key]
+                _chart_cache_disk_condition.notify_all()
+                return
+        snapshot, operation, generation, completion, _slot = pending
+        try:
+            _write_chart_cache_until_complete(cache_key, snapshot, operation, generation)
+        except BaseException as exc:
+            completion.set_exception(exc)
+        else:
+            completion.set_result(None)
+
+
+def _chart_cache_group_completed(cache_key, group, driver):
+    # A canceled queued driver never enters the drain loop. An old driver's
+    # callback must not remove a newer group that now owns the same key.
+    with _chart_cache_disk_condition:
+        orphan = None
+        if _chart_cache_disk_groups.get(cache_key) is group:
+            del _chart_cache_disk_groups[cache_key]
+            orphan, group.pending = group.pending, None
+        _chart_cache_disk_condition.notify_all()
+    if orphan is not None:
+        error = None if driver.cancelled() else driver.exception()
+        if error is None:
+            orphan[3].set_result(None)
+        else:
+            orphan[3].set_exception(error)
+
+
+def _persist_chart_cache_async(cache_key: str, entry: dict, ownership=None) -> None:
+    """Bound snapshot work and coalesce waiting writes for the same chart."""
+    with cache_lock:
+        if ownership is None:
+            operation = _chart_cache_operation(cache_key)
+            operation.generation += 1
+            operation.invalidating = False
+            generation = operation.generation
+        else:
+            operation, generation = ownership
+        if operation.generation != generation:
+            return
     with _chart_cache_disk_lock:
         global _chart_cache_disk_closed, _chart_cache_disk_executor
         if _chart_cache_disk_closed:
@@ -557,59 +710,100 @@ def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
                 return
             _chart_cache_disk_executor = DaemonExecutor(
                 max_workers=_CHART_CACHE_DISK_WORKERS,
+                max_pending=_CHART_CACHE_MAX_PENDING_WRITES,
                 thread_name_prefix="ChartCacheDisk",
             )
             _chart_cache_disk_closed = False
-        if _chart_cache_disk_closed:
-            return
         executor = _chart_cache_disk_executor
         slots = _chart_cache_disk_slots
-        if not slots.acquire(blocking=False):
+        group = _chart_cache_disk_groups.get(cache_key)
+        previous = group.pending if group is not None else None
+        if previous is not None and previous[2] > generation:
+            return
+        if previous is None and not slots.acquire(blocking=False):
             LogUtil.warning(
                 f"[chart_cache] pending write limit reached, skip key={cache_key}"
             )
             return
-        try:
-            future = executor.submit(fdb.set_chart_cache, cache_key, snapshot)
-        except Exception as exc:
-            slots.release()
-            LogUtil.warning(
-                f"[chart_cache] async submit failed key={cache_key} err={exc}"
-            )
-            return
-        _chart_cache_disk_futures.add(future)
-        _chart_cache_disk_future_keys[future] = cache_key
+        completion = Future()
+        completion.set_running_or_notify_cancel()
+        if previous is not None:
+            slot = previous[4]
+            slot.owner = completion
+            group.pending = None
+        else:
+            slot = _ChartCacheDiskSlot(slots, completion)
+        _chart_cache_disk_futures.add(completion)
+        _chart_cache_disk_future_keys[completion] = cache_key
+    completion.add_done_callback(
+        lambda done: _chart_cache_write_completed(cache_key, slot, done)
+    )
+    if previous is not None:
+        previous[3].set_result(None)
+        previous = None
+    try:
+        # Large copies stay outside shared locks, but now have a capacity slot
+        # and lifecycle ownership before they start.
+        snapshot = copy.deepcopy(entry)
+    except BaseException as exc:
+        completion.set_exception(exc)
+        return
+    with cache_lock:
+        obsolete = operation.generation != generation
+    if obsolete:
+        completion.set_result(None)
+        return
 
-    def _completed(done_future):
-        try:
-            error = None if done_future.cancelled() else done_future.exception()
-            if error is not None:
-                LogUtil.error(
-                    f"[chart_cache] async write failed key={cache_key} err={error}"
-                )
-        except Exception as exc:
-            LogUtil.warning(
-                f"[chart_cache] async write completion failed key={cache_key} err={exc}"
-            )
-        finally:
-            with _chart_cache_disk_lock:
-                _chart_cache_disk_futures.discard(done_future)
-                _chart_cache_disk_future_keys.pop(done_future, None)
-            slots.release()
-
-    future.add_done_callback(_completed)
+    replaced = None
+    driver = None
+    skipped = False
+    submission_error = None
+    with _chart_cache_disk_lock:
+        if _chart_cache_disk_closed or executor is not _chart_cache_disk_executor:
+            skipped = True
+        else:
+            group = _chart_cache_disk_groups.get(cache_key)
+            create_driver = group is None
+            if create_driver:
+                group = _ChartCacheDiskGroup()
+                _chart_cache_disk_groups[cache_key] = group
+            previous = group.pending
+            if previous is not None and previous[2] > generation:
+                skipped = True
+            else:
+                group.pending = (snapshot, operation, generation, completion, slot)
+                replaced = previous
+                if create_driver:
+                    try:
+                        driver = executor.submit(_drain_chart_cache_group, cache_key, group)
+                    except Exception as exc:
+                        submission_error = exc
+                        group.pending = None
+                        del _chart_cache_disk_groups[cache_key]
+    # Completing a reservation invokes callbacks; never do that under the
+    # queue lock, because those callbacks release their own tracked capacity.
+    if replaced is not None:
+        replaced[3].set_result(None)
+    if submission_error is not None:
+        completion.set_exception(submission_error)
+    elif skipped:
+        completion.set_result(None)
+    elif driver is not None:
+        driver.add_done_callback(lambda done: _chart_cache_group_completed(cache_key, group, done))
 
 
 def start_chart_cache_runtime():
     global _chart_cache_disk_closed, _chart_cache_disk_executor
     global _chart_cache_accepting_writes, _chart_cache_disk_slots
+    global _chart_cache_disk_shutdown_executor
     with _chart_cache_disk_lock:
         if not _chart_cache_disk_closed:
             return
-        if _chart_cache_disk_futures:
+        if _chart_cache_disk_futures or _chart_cache_disk_groups:
             raise RuntimeError("cannot restart chart cache writer with active writes")
         _chart_cache_disk_executor = DaemonExecutor(
             max_workers=_CHART_CACHE_DISK_WORKERS,
+            max_pending=_CHART_CACHE_MAX_PENDING_WRITES,
             thread_name_prefix="ChartCacheDisk",
         )
         _chart_cache_disk_slots = threading.BoundedSemaphore(
@@ -617,13 +811,15 @@ def start_chart_cache_runtime():
         )
         _chart_cache_accepting_writes = True
         _chart_cache_disk_closed = False
+        _chart_cache_disk_shutdown_executor = None
 
 
 def allow_lazy_chart_cache_writes():
     """Allow a newly created application to open the writer on first use."""
     global _chart_cache_accepting_writes
     with _chart_cache_disk_lock:
-        if _chart_cache_disk_closed and not _chart_cache_disk_futures:
+        if (_chart_cache_disk_closed and not _chart_cache_disk_futures
+                and not _chart_cache_disk_groups):
             _chart_cache_accepting_writes = True
 
 
@@ -631,17 +827,29 @@ def shutdown_chart_cache_runtime(wait=False):
     """Reject new writes and cancel queued disk-cache work."""
     global _chart_cache_accepting_writes, _chart_cache_disk_closed
     global _chart_cache_disk_executor
+    global _chart_cache_disk_shutdown_executor
     with _chart_cache_disk_lock:
         _chart_cache_accepting_writes = False
-        if _chart_cache_disk_closed:
-            return not _chart_cache_disk_futures
-        _chart_cache_disk_closed = True
-        executor = _chart_cache_disk_executor
-        _chart_cache_disk_executor = None
+        if not _chart_cache_disk_closed:
+            _chart_cache_disk_closed = True
+            _chart_cache_disk_shutdown_executor = _chart_cache_disk_executor
+            _chart_cache_disk_executor = None
+        executor = _chart_cache_disk_shutdown_executor
+        canceled = []
+        for group in _chart_cache_disk_groups.values():
+            if group.pending is not None:
+                canceled.append(group.pending[3])
+                group.pending = None
+    for completion in canceled:
+        completion.set_result(None)
     if executor is not None:
         executor.shutdown(wait=bool(wait), cancel_futures=True)
-    with _chart_cache_disk_lock:
-        return not _chart_cache_disk_futures
+    with _chart_cache_disk_condition:
+        if wait:
+            _chart_cache_disk_condition.wait_for(
+                lambda: not _chart_cache_disk_futures and not _chart_cache_disk_groups
+            )
+        return not _chart_cache_disk_futures and not _chart_cache_disk_groups
 
 def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot: bool):
     """两层缓存写入：RAM 立即可见，磁盘异步持久化。
@@ -669,6 +877,10 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
     # on their next normal write.
     entry[_RESIDENT_WEIGHT_FIELD] = prepared_weight
     with cache_lock:
+        operation = _chart_cache_operation(cache_key)
+        operation.generation += 1
+        operation.invalidating = False
+        ownership = (operation, operation.generation)
         _put_chart_cache_ram(cache_key, entry, prepared_weight=prepared_weight)
     # Published entries are immutable apart from the scalar validated_at stamp;
     # nested chart arrays are replaced as a whole on refresh, never mutated in
@@ -676,7 +888,7 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
     # newer, not tear its data graph.
     # A pending calculation has no durable result; a process restart must retry it.
     if not cl_chart_data.get("_initial_structure_build_id"):
-        _persist_chart_cache_async(cache_key, entry)
+        _persist_chart_cache_async(cache_key, entry, ownership)
     return entry
 
 
@@ -684,31 +896,34 @@ def _delete_chart_cache_entry(cache_key: str) -> None:
     """Invalidate one RAM/disk entry after its price basis becomes unsafe."""
 
     with cache_lock:
+        operation = _chart_cache_operation(cache_key)
+        operation.generation += 1
+        operation.invalidating = True
+        operation.disk_invalidated = True
+        generation = operation.generation
+        _failed_chart_cache_invalidations[cache_key] = operation
         chart_data_cache.pop(cache_key, None)
 
-    # 先前的设置操作可能仍在异步写入同一键；删除前只等待这种少见的同键写入，
-    # 否则延迟写入者会在删除后复活不安全快照。
-    with _chart_cache_disk_lock:
-        pending = [
-            future
-            for future in _chart_cache_disk_futures
-            if _chart_cache_disk_future_keys.get(future) == cache_key
-        ]
-    for future in pending:
-        try:
-            future.result()
-        except Exception as exc:
-            LogUtil.warning(
-                f"[chart_cache] pending write failed before delete "
-                f"key={cache_key} error={type(exc).__name__}: {exc}"
-            )
+    # Wait only for an actual same-key write. Queued or still-copying old
+    # snapshots have lost their generation and will skip disk publication.
     try:
-        fdb.delete_chart_cache(cache_key)
+        with operation.io_lock:
+            with cache_lock:
+                newer_committed = operation.committed_generation > generation
+            if not newer_committed:
+                fdb.delete_chart_cache(cache_key)
+            with cache_lock:
+                if operation.generation == generation:
+                    _failed_chart_cache_invalidations.pop(cache_key, None)
     except Exception as exc:
         LogUtil.warning(
             f"[chart_cache] disk delete failed key={cache_key} "
             f"error={type(exc).__name__}: {exc}"
         )
+    finally:
+        with cache_lock:
+            if operation.generation == generation:
+                operation.invalidating = False
 
 
 def _mark_chart_cache_validated(cache_key: str):

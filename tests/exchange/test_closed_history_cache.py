@@ -136,3 +136,67 @@ def test_manual_refresh_replaces_old_prices_and_a_failed_refresh_cannot_resurrec
     assert pd.read_parquet(next(storage.klines_path.rglob("*.parquet"))).empty
     read(observed + pd.Timedelta(minutes=4))
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize("receipt", [False, None])
+def test_forced_refresh_requires_a_confirmed_durable_invalidation(history, monkeypatch, receipt):
+    frame, observed, calls, read, storage = history
+    read()
+    path = next(storage.klines_path.rglob("*.parquet"))
+    before = path.read_bytes()
+    frame.loc[0, "close"] += .25
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "save_klines_parquet", lambda *args: receipt)
+        with pytest.raises(OSError, match="缓存.*失效"):
+            read(observed + pd.Timedelta(minutes=1), force=True)
+    assert path.read_bytes() == before
+    assert len(calls) == 1, "a rejected invalidation cannot advertise a refreshed provider result"
+    assert read(observed + pd.Timedelta(minutes=2), force=True).equals(frame)
+    assert read(observed + pd.Timedelta(minutes=3)).equals(frame)
+    assert len(calls) == 2
+
+
+def test_real_cache_writer_failure_is_not_ignored_by_forced_refresh(history, monkeypatch):
+    import os
+
+    frame, observed, calls, read, storage = history
+    read()
+    path = next(storage.klines_path.rglob("*.parquet"))
+    before = path.read_bytes()
+    original_replace = os.replace
+
+    def locked(source, target):
+        if str(target) == str(path):
+            raise PermissionError("isolated locked cache")
+        return original_replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", locked)
+        with pytest.raises(OSError, match="缓存.*失效"):
+            read(observed + pd.Timedelta(minutes=1), force=True)
+    assert path.read_bytes() == before and len(calls) == 1
+    assert read(observed + pd.Timedelta(minutes=2), force=True).equals(frame)
+
+
+def test_failure_to_save_new_prices_after_successful_invalidation_never_restores_old_prices(history, monkeypatch):
+    frame, observed, calls, read, storage = history
+    read()
+    frame.loc[0, "close"] += .25
+    save = storage.save_klines_parquet
+
+    def invalidate_only(market, code, frequency, value):
+        return save(market, code, frequency, value) if value.empty else False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "save_klines_parquet", invalidate_only)
+        assert read(observed + pd.Timedelta(minutes=1), force=True).equals(frame)
+        assert pd.read_parquet(next(storage.klines_path.rglob("*.parquet"))).empty
+        assert read(observed + pd.Timedelta(minutes=2)).equals(frame)
+    assert len(calls) == 3
+
+
+def test_open_session_forced_reads_do_not_depend_on_closed_cache_writes(history, monkeypatch):
+    frame, observed, calls, read, storage = history
+    monkeypatch.setattr(storage, "save_klines_parquet", lambda *_: (_ for _ in ()).throw(AssertionError("closed cache used")))
+    assert read(pd.Timestamp("2026-09-14T09:25:00-04:00"), force=True).equals(frame)
+    assert len(calls) == 1

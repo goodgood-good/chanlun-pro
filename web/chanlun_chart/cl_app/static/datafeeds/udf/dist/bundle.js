@@ -244,6 +244,7 @@
             this._failedInitialHistory = new Set();
             this._activeHistoryRequests = 0;
             this._lastHistorySettledAt = 0;
+            this._disposed = false;
             // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
             // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
             this._forceRefreshOnce = false;
@@ -261,11 +262,20 @@
             this._barsResultMaxSize = options.barsResultMaxSize || 100;
             this.bars_result = new Map();
         }
+        dispose() {
+            this._disposed = true;
+            this.bars_result.clear();
+            this._latestFullRequestByKey.clear();
+            this._completeHistoryFloorByKey.clear();
+            this._failedInitialHistory.clear();
+        }
         /**
          * 图表切换的原子展示闸门使用此状态，避免 TradingView 首帧完成后仍有
          * 向左补历史请求在运行，导致用户先看到少量 K 线、随后又整批扩展。
          */
         hasPendingHistoryWork(quietPeriodMs = 0) {
+            if (this._disposed)
+                return false;
             if (this._activeHistoryRequests > 0) {
                 return true;
             }
@@ -429,7 +439,11 @@
                 return this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs, requestGeneration === undefined ? undefined : "history-initial");
             }
         }
-        getBars(symbolInfo, resolution, periodParams) {
+        getBars(symbolInfo, resolution, periodParams, isRequestCurrent) {
+            const callerIsCurrent = isRequestCurrent;
+            isRequestCurrent = () => !this._disposed && (!callerIsCurrent || callerIsCurrent());
+            if (!isRequestCurrent())
+                return Promise.resolve({ bars: [], meta: { noData: false }, fxs: [], bis: [], xds: [] });
             const requestParams = {
                 ...this._historyParams,
                 symbol: symbolInfo.ticker || "",
@@ -493,6 +507,10 @@
             return new Promise(async (resolve, reject) => {
                 try {
                     const initialResponse = await this._requestHistoryWithStartupRetry(requestParams, requestTimeoutMs, requestGeneration);
+                    if (isRequestCurrent && !isRequestCurrent()) {
+                        resolve({ bars: [], meta: { noData: false }, fxs: [], bis: [], xds: [] });
+                        return;
+                    }
                     const result = this._processHistoryResponse(initialResponse, requestParams, requestGeneration);
                     if (initialResponse.s === 'no_data') {
                         this._rememberInitialHistoryFailure(requestParams, requestGeneration);
@@ -500,11 +518,19 @@
                     }
                     if (this._limitedServerResponse &&
                         this._fullRequestIsCurrent(requestParams, requestGeneration)) {
-                        await this._processTruncatedResponse(result, requestParams, requestGeneration);
+                        await this._processTruncatedResponse(result, requestParams, requestGeneration, isRequestCurrent);
+                    }
+                    if (isRequestCurrent && !isRequestCurrent()) {
+                        resolve({ bars: [], meta: { noData: false }, fxs: [], bis: [], xds: [] });
+                        return;
                     }
                     resolve(this._resultForCompletedRequest(result, requestParams, requestGeneration));
                 }
                 catch (e) {
+                    if (isRequestCurrent && !isRequestCurrent()) {
+                        resolve({ bars: [], meta: { noData: false }, fxs: [], bis: [], xds: [] });
+                        return;
+                    }
                     this._rememberInitialHistoryFailure(requestParams, requestGeneration);
                     const reasonString = e instanceof Error || typeof e === "string"
                         ? getErrorMessage(e)
@@ -524,13 +550,15 @@
                 this._lastHistorySettledAt = Date.now();
             });
         }
-        async _processTruncatedResponse(result, requestParams, requestGeneration) {
+        async _processTruncatedResponse(result, requestParams, requestGeneration, isRequestCurrent) {
             let lastResultLength = result.bars.length;
             try {
                 while (this._limitedServerResponse &&
                     this._limitedServerResponse.maxResponseLength > 0 &&
                     this._limitedServerResponse.maxResponseLength === lastResultLength &&
                     requestParams.from < requestParams.to) {
+                    if (isRequestCurrent && !isRequestCurrent())
+                        return;
                     // adjust request parameters for follow-up request
                     if (requestParams.countback) {
                         requestParams.countback =
@@ -545,6 +573,8 @@
                     const followupResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestGeneration === undefined
                         ? undefined
                         : this._initialHistoryTimeoutMs, requestGeneration === undefined ? undefined : "history-initial");
+                    if (isRequestCurrent && !isRequestCurrent())
+                        return;
                     const followupResult = this._processHistoryResponse(followupResponse, requestParams, requestGeneration);
                     lastResultLength = followupResult.bars.length;
                     // merge result with results collected so far
@@ -569,6 +599,8 @@
                 }
             }
             catch (e) {
+                if (isRequestCurrent && !isRequestCurrent())
+                    return;
                 /**
                  * Error occurred during followup request. We won't reject the original promise
                  * because the initial response was valid so we will return what we've got so far.
@@ -644,6 +676,8 @@
             return true;
         }
         _processHistoryResponse(response, requestParams, requestGeneration) {
+            if (this._disposed)
+                return { bars: [], meta: { noData: false }, fxs: [], bis: [], xds: [] };
             if (response.s !== "ok" && response.s !== "no_data") {
                 throw new Error(response.errmsg);
             }
@@ -1081,12 +1115,26 @@
     class DataPulseProvider {
         constructor(historyProvider, updateFrequency) {
             this._subscribers = {};
-            this._requestsPending = new Set();
+            this._requestsPending = new Map();
+            this._disposed = false;
             this._historyProvider = historyProvider;
             this._requestTimeoutMs = Math.max(10_000, Number.isFinite(updateFrequency) ? updateFrequency * 2 : 10_000);
-            setInterval(this._updateData.bind(this), updateFrequency);
+            this._timer = setInterval(this._updateData.bind(this), updateFrequency);
+        }
+        dispose() {
+            if (this._disposed)
+                return;
+            this._disposed = true;
+            if (this._timer !== null)
+                clearInterval(this._timer);
+            this._timer = null;
+            for (const guid of Object.keys(this._subscribers))
+                delete this._subscribers[guid];
+            this._requestsPending.clear();
         }
         subscribeBars(symbolInfo, resolution, newDataCallback, listenerGuid) {
+            if (this._disposed)
+                return;
             if (this._subscribers.hasOwnProperty(listenerGuid)) {
                 return;
             }
@@ -1095,11 +1143,13 @@
                 listener: newDataCallback,
                 resolution: resolution,
                 symbolInfo: symbolInfo,
+                updateVersion: 0,
             };
             logMessage(`DataPulseProvider: subscribed for #${listenerGuid} - {${symbolInfo.name}, ${resolution}}`);
         }
         unsubscribeBars(listenerGuid) {
             delete this._subscribers[listenerGuid];
+            this._requestsPending.delete(listenerGuid);
         }
         /**
          * SSE 推送驱动：把最新 bar 直接喂给匹配的订阅者(绕过轮询/浏览器节流)。
@@ -1120,6 +1170,8 @@
                 if (sub.lastBarTime !== null && bar.time < sub.lastBarTime) {
                     continue;
                 }
+                // A newly accepted push owns the candle over older in-flight polls.
+                sub.updateVersion += 1;
                 sub.lastBarTime = bar.time;
                 try {
                     sub.listener(bar);
@@ -1136,22 +1188,33 @@
                 if (this._requestsPending.has(listenerGuid)) {
                     continue;
                 }
-                this._requestsPending.add(listenerGuid);
-                this._withTimeout(Promise.resolve().then(() => this._updateDataForSubscriber(listenerGuid)), listenerGuid)
+                const subscription = this._subscribers[listenerGuid];
+                const version = ++subscription.updateVersion;
+                const invalidate = () => {
+                    if (subscription.updateVersion === version)
+                        subscription.updateVersion += 1;
+                };
+                this._requestsPending.set(listenerGuid, subscription);
+                this._withTimeout(Promise.resolve().then(() => this._updateDataForSubscriber(listenerGuid, subscription, version)), listenerGuid, invalidate)
                     .then(() => {
                 })
                     .catch((reason) => {
                     logMessage(`DataPulseProvider: data for #${listenerGuid} updated with error=${getErrorMessage(reason)}`);
                 })
                     .finally(() => {
-                    this._requestsPending.delete(listenerGuid);
+                    if (this._requestsPending.get(listenerGuid) === subscription) {
+                        this._requestsPending.delete(listenerGuid);
+                    }
+                    // A timeout settles this wrapper before the network request.
+                    invalidate();
                 });
             }
         }
-        _withTimeout(request, listenerGuid) {
+        _withTimeout(request, listenerGuid, onTimeout) {
             let timeoutId;
             const timeout = new Promise((_resolve, reject) => {
                 timeoutId = setTimeout(() => {
+                    onTimeout?.();
                     reject(new Error(`Data refresh timed out for #${listenerGuid}`));
                 }, this._requestTimeoutMs);
             });
@@ -1161,11 +1224,17 @@
                 }
             });
         }
-        _updateDataForSubscriber(listenerGuid) {
-            const subscriptionRecord = this._subscribers[listenerGuid];
-            if (!subscriptionRecord || !_realtimePollingDue(subscriptionRecord.symbolInfo, Date.now())) {
+        _isCurrentSubscriber(listenerGuid, subscription, version) {
+            return !!subscription && this._subscribers[listenerGuid] === subscription && subscription.updateVersion === version;
+        }
+        _updateDataForSubscriber(listenerGuid, subscriptionRecord = this._subscribers[listenerGuid], version) {
+            if (!subscriptionRecord || this._subscribers[listenerGuid] !== subscriptionRecord || !_realtimePollingDue(subscriptionRecord.symbolInfo, Date.now())) {
                 return Promise.resolve();
             }
+            const requestVersion = version === undefined ? ++subscriptionRecord.updateVersion : version;
+            const isCurrent = () => this._isCurrentSubscriber(listenerGuid, subscriptionRecord, requestVersion);
+            if (!isCurrent())
+                return Promise.resolve();
             const rangeEndTime = parseInt((Date.now() / 1000).toString())
                 + REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS;
             // BEWARE: please note we really need 2 bars, not the only last one
@@ -1176,14 +1245,13 @@
                 to: rangeEndTime,
                 countBack: 2,
                 firstDataRequest: false,
-            })
+            }, isCurrent)
                 .then((result) => {
-                this._onSubscriberDataReceived(listenerGuid, result);
+                this._onSubscriberDataReceived(listenerGuid, result, subscriptionRecord, requestVersion);
             });
         }
-        _onSubscriberDataReceived(listenerGuid, result) {
-            // means the subscription was cancelled while waiting for data
-            if (!this._subscribers.hasOwnProperty(listenerGuid)) {
+        _onSubscriberDataReceived(listenerGuid, result, subscriptionRecord = this._subscribers[listenerGuid], version = subscriptionRecord?.updateVersion) {
+            if (!this._isCurrentSubscriber(listenerGuid, subscriptionRecord, version)) {
                 return;
             }
             const bars = result.bars;
@@ -1191,7 +1259,6 @@
                 return;
             }
             const lastBar = bars[bars.length - 1];
-            const subscriptionRecord = this._subscribers[listenerGuid];
             if (subscriptionRecord.lastBarTime !== null && lastBar.time < subscriptionRecord.lastBarTime) {
                 return;
             }
@@ -1202,8 +1269,13 @@
                 // 仅当确有前一根时补发它；bars<2(数据源延迟/窗口仅 1 根)时跳过补发、
                 // 不再抛错，避免“数据延迟后新 bar 到达”令 K 线更新整条中断。
                 const previousBar = bars[bars.length - 2];
-                subscriptionRecord.listener(previousBar);
+                if (subscriptionRecord.lastBarTime !== null && previousBar.time >= subscriptionRecord.lastBarTime) {
+                    subscriptionRecord.listener(previousBar);
+                }
             }
+            if (!this._isCurrentSubscriber(listenerGuid, subscriptionRecord, version)
+                || subscriptionRecord.lastBarTime !== null && lastBar.time < subscriptionRecord.lastBarTime)
+                return;
             subscriptionRecord.lastBarTime = lastBar.time;
             subscriptionRecord.listener(lastBar);
         }
@@ -1229,10 +1301,23 @@
         constructor(quotesProvider) {
             this._subscribers = {};
             this._requestsPending = 0;
+            this._pendingSubscriptions = new Map();
             this._timers = null;
+            this._disposed = false;
             this._quotesProvider = quotesProvider;
         }
+        dispose() {
+            if (this._disposed)
+                return;
+            this._disposed = true;
+            this._destroyTimers();
+            for (const guid of Object.keys(this._subscribers))
+                delete this._subscribers[guid];
+            this._pendingSubscriptions.clear();
+        }
         subscribeQuotes(symbols, fastSymbols, onRealtimeCallback, listenerGuid) {
+            if (this._disposed)
+                return;
             this._subscribers[listenerGuid] = {
                 symbols: symbols,
                 fastSymbols: fastSymbols,
@@ -1242,6 +1327,7 @@
         }
         unsubscribeQuotes(listenerGuid) {
             delete this._subscribers[listenerGuid];
+            this._pendingSubscriptions.delete(listenerGuid);
             if (Object.keys(this._subscribers).length === 0) {
                 this._destroyTimers();
             }
@@ -1261,27 +1347,53 @@
             }
         }
         _updateQuotes(updateType) {
-            if (this._requestsPending > 0) {
-                return;
-            }
             // eslint-disable-next-line guard-for-in
             for (const listenerGuid in this._subscribers) {
-                this._requestsPending++;
-                const subscriptionRecord = this._subscribers[listenerGuid];
-                this._quotesProvider.getQuotes(updateType === 1 /* SymbolsType.Fast */ ? subscriptionRecord.fastSymbols : subscriptionRecord.symbols)
-                    .then((data) => {
-                    this._requestsPending--;
-                    if (!this._subscribers.hasOwnProperty(listenerGuid)) {
-                        return;
-                    }
-                    subscriptionRecord.listener(data);
-                    logMessage(`QuotesPulseProvider: data for #${listenerGuid} (${updateType}) updated successfully, pending=${this._requestsPending}`);
-                })
-                    .catch((reason) => {
-                    this._requestsPending--;
-                    logMessage(`QuotesPulseProvider: data for #${listenerGuid} (${updateType}) updated with error=${getErrorMessage(reason)}, pending=${this._requestsPending}`);
-                });
+                this._updateSubscription(listenerGuid, updateType);
             }
+        }
+        _updateSubscription(listenerGuid, updateType) {
+            const subscriptionRecord = this._subscribers[listenerGuid];
+            if (this._disposed || !subscriptionRecord)
+                return;
+            const symbols = updateType === 1 /* SymbolsType.Fast */ ? subscriptionRecord.fastSymbols : subscriptionRecord.symbols;
+            if (symbols.length === 0)
+                return;
+            const pending = this._pendingSubscriptions.get(listenerGuid);
+            if (pending && pending.subscription === subscriptionRecord) {
+                // Fast and general timers can fire together. Preserve the other
+                // update once, while coalescing repeats of the in-flight kind.
+                if (pending.updateType !== updateType)
+                    pending.nextType = updateType;
+                return;
+            }
+            const request = { subscription: subscriptionRecord, updateType };
+            this._pendingSubscriptions.set(listenerGuid, request);
+            this._requestsPending++;
+            Promise.resolve().then(() => {
+                if (this._subscribers[listenerGuid] !== subscriptionRecord || this._pendingSubscriptions.get(listenerGuid) !== request)
+                    return [];
+                return this._quotesProvider.getQuotes(symbols);
+            })
+                .then((data) => {
+                if (this._subscribers[listenerGuid] !== subscriptionRecord || this._pendingSubscriptions.get(listenerGuid) !== request) {
+                    return;
+                }
+                subscriptionRecord.listener(data);
+                logMessage(`QuotesPulseProvider: data for #${listenerGuid} (${updateType}) updated successfully, pending=${this._requestsPending}`);
+            })
+                .catch((reason) => {
+                logMessage(`QuotesPulseProvider: data for #${listenerGuid} (${updateType}) updated with error=${getErrorMessage(reason)}, pending=${this._requestsPending}`);
+            })
+                .finally(() => {
+                this._requestsPending--;
+                if (this._pendingSubscriptions.get(listenerGuid) !== request)
+                    return;
+                this._pendingSubscriptions.delete(listenerGuid);
+                if (request.nextType !== undefined && this._subscribers[listenerGuid] === subscriptionRecord) {
+                    this._updateSubscription(listenerGuid, request.nextType);
+                }
+            });
         }
     }
 
@@ -1346,6 +1458,7 @@
      */
     class UDFCompatibleDatafeedBase {
         constructor(datafeedURL, quotesProvider, requester, updateFrequency = 10 * 1000, limitedServerResponse, options = {}) {
+            this._disposed = false;
             this._configuration = defaultConfiguration();
             this._subscribersResetCallbacks = {};
             this._datafeedURL = datafeedURL;
@@ -1356,34 +1469,54 @@
             this._quotesPulseProvider = new QuotesPulseProvider(this._quotesProvider);
             this._configurationReadyPromise = this._requestConfiguration()
                 .then((configuration) => {
+                if (this._disposed)
+                    return;
                 if (configuration === null) {
                     configuration = defaultConfiguration();
                 }
                 this._setupWithConfiguration(configuration);
             });
         }
+        dispose() {
+            if (this._disposed)
+                return;
+            this._disposed = true;
+            this._dataPulseProvider.dispose();
+            this._quotesPulseProvider.dispose();
+            this._historyProvider.dispose();
+            this._subscribersResetCallbacks = {};
+        }
         onReady(callback) {
             this._configurationReadyPromise.then(() => {
-                callback(this._configuration);
+                if (!this._disposed)
+                    callback(this._configuration);
             });
         }
         getQuotes(symbols, onDataCallback, onErrorCallback) {
-            this._quotesProvider.getQuotes(symbols).then(onDataCallback).catch(onErrorCallback);
+            if (this._disposed)
+                return;
+            this._quotesProvider.getQuotes(symbols)
+                .then(data => { if (!this._disposed)
+                onDataCallback(data); })
+                .catch(error => { if (!this._disposed)
+                onErrorCallback(error); });
         }
         subscribeQuotes(symbols, fastSymbols, onRealtimeCallback, listenerGuid) {
+            if (this._disposed)
+                return;
             this._quotesPulseProvider.subscribeQuotes(symbols, fastSymbols, onRealtimeCallback, listenerGuid);
         }
         unsubscribeQuotes(listenerGuid) {
             this._quotesPulseProvider.unsubscribeQuotes(listenerGuid);
         }
         getServerTime(callback) {
-            if (!this._configuration.supports_time) {
+            if (this._disposed || !this._configuration.supports_time) {
                 return;
             }
             this._send('time')
                 .then((response) => {
                 const time = parseInt(response);
-                if (!isNaN(time)) {
+                if (!this._disposed && !isNaN(time)) {
                     callback(time);
                 }
             })
@@ -1392,6 +1525,8 @@
             });
         }
         searchSymbols(userInput, exchange, symbolType, onResult) {
+            if (this._disposed)
+                return;
             const params = {
                 limit: 30 /* Constants.SearchItemsLimit */,
                 query: userInput.toUpperCase(),
@@ -1400,6 +1535,8 @@
             };
             this._send('search', params)
                 .then((response) => {
+                if (this._disposed)
+                    return;
                 if (response.s !== undefined) {
                     logMessage(`UdfCompatibleDatafeed: search symbols error=${response.errmsg}`);
                     onResult([]);
@@ -1409,10 +1546,13 @@
             })
                 .catch((reason) => {
                 logMessage(`UdfCompatibleDatafeed: Search symbols for '${userInput}' failed. Error=${getErrorMessage(reason)}`);
-                onResult([]);
+                if (!this._disposed)
+                    onResult([]);
             });
         }
         resolveSymbol(symbolName, onResolve, onError, extension) {
+            if (this._disposed)
+                return;
             const currencyCode = extension && extension.currencyCode;
             const unitId = extension && extension.unitId;
             function onResultReady(symbolInfo) {
@@ -1429,6 +1569,8 @@
             }
             sharedSymbolResolveResponse(this._datafeedURL, params, () => this._send('symbols', params))
                 .then((response) => {
+                if (this._disposed)
+                    return;
                 if (response.s !== undefined) {
                     onError('unknown_symbol');
                     return;
@@ -1464,21 +1606,28 @@
             })
                 .catch((reason) => {
                 logMessage(`UdfCompatibleDatafeed: Error resolving symbol: ${getErrorMessage(reason)}`);
-                onError('unknown_symbol');
+                if (!this._disposed)
+                    onError('unknown_symbol');
             });
         }
         getBars(symbolInfo, resolution, periodParams, onResult, onError) {
+            if (this._disposed)
+                return;
             this._historyProvider.getBars(symbolInfo, resolution, periodParams)
                 .then((result) => {
-                onResult(result.bars, result.meta);
+                if (!this._disposed)
+                    onResult(result.bars, result.meta);
             })
-                .catch(onError);
+                .catch(error => { if (!this._disposed)
+                onError(error); });
         }
         /**
          * SSE 推送驱动 K 线：从 /tv/history 同构 response 取最新一根 bar，喂给
          * DataPulseProvider 的订阅者，让 K 线随 SSE 实时刷新(不依赖轮询)。
          */
         feedRealtimeBar(symbolResKey, response, resolution = '', replayFromSeconds) {
+            if (this._disposed)
+                return;
             const t = response.t;
             const c = response.c;
             if (!response || !t || t.length === 0 || !c) {
@@ -1548,6 +1697,8 @@
             this._dataPulseProvider.feedBar(symbolResKey, lastBar);
         }
         subscribeBars(symbolInfo, resolution, onTick, listenerGuid, _onResetCacheNeededCallback) {
+            if (this._disposed)
+                return;
             this._dataPulseProvider.subscribeBars(symbolInfo, resolution, onTick, listenerGuid);
             // TV 通过 onResetCacheNeeded 通知 datafeed 当前 symbol+resolution 的缓存需要清空
             // （比如盘后数据修正、合约换月等）。我们在原回调外再清掉 bars_result，避免缠论形态

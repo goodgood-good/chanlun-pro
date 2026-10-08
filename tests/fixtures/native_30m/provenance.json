@@ -1,0 +1,43 @@
+{
+  "schema": "recorded-period-aggregation-v1",
+  "kind": "30m_bars_aggregated_from_recorded_5m_bars",
+  "time_label": "end",
+  "aggregation": {
+    "window": "30min",
+    "closed": "right",
+    "label": "right",
+    "required_source_bars": 6,
+    "incomplete_windows": "discard",
+    "open": "first",
+    "high": "max",
+    "low": "min",
+    "close": "last",
+    "volume": "sum"
+  },
+  "sources": [
+    {
+      "file": "SH.600004_30m.parquet",
+      "code": "SH.600004",
+      "market": "a",
+      "frequency": "30m",
+      "source": "segment_completion/SH_600004_5m.parquet",
+      "source_sha256": "4ac1ea72bc3ce14ed911ded9a2cd1d1dffbec5fca4fd14457ddbfae8edddbfa4",
+      "source_rows": 11616,
+      "output_rows": 1936,
+      "first_close": "2025-09-22T10:00:00+08:00",
+      "last_close": "2026-09-21T15:00:00+08:00"
+    },
+    {
+      "file": "SH.600183_30m.parquet",
+      "code": "SH.600183",
+      "market": "a",
+      "frequency": "30m",
+      "source": "segment_projection/SH.600183_5m_20250922_20260918.parquet",
+      "source_sha256": "636018f127ed5e8a80811a53b4dc9482daab0453a62bdd7afc025c9315fa3565",
+      "source_rows": 11568,
+      "output_rows": 1928,
+      "first_close": "2025-09-22T10:00:00+08:00",
+      "last_close": "2026-09-18T15:00:00+08:00"
+    }
+  ]
+}

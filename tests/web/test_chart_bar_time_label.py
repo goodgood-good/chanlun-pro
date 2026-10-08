@@ -192,6 +192,28 @@ def test_chart_identity_changes_for_web_producer_and_provider_without_global_cl_
         chart_producer_identity.chart_producer_revision.cache_clear()
 
 
+def test_chart_cache_identity_includes_the_shared_exit_reference_producer(monkeypatch, tmp_path):
+    services = tmp_path / "web/chanlun_chart/cl_app/services"
+    services.mkdir(parents=True)
+    identity = services / "chart_producer_identity.py"
+    identity.write_text("identity", encoding="utf-8")
+    shared = tmp_path / "src/chanlun/cl_utils/point_exits.py"
+    shared.parent.mkdir(parents=True)
+    shared.write_text("old exit references", encoding="utf-8")
+    monkeypatch.setattr(chart_producer_identity, "__file__", str(identity))
+    original_cl = chart_cache.source_fingerprint()
+    chart_producer_identity.chart_producer_revision.cache_clear()
+    try:
+        before = chart_cache._build_cache_key("a", "SH.600000", "5m", {})
+        shared.write_text("updated exit references", encoding="utf-8")
+        chart_producer_identity.chart_producer_revision.cache_clear()
+        after = chart_cache._build_cache_key("a", "SH.600000", "5m", {})
+        assert before != after
+        assert chart_cache.source_fingerprint() == original_cl
+    finally:
+        chart_producer_identity.chart_producer_revision.cache_clear()
+
+
 @pytest.fixture(scope="module")
 def client():
     app = create_app(test_config={

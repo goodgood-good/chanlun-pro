@@ -415,7 +415,7 @@ def test_realtime_ticks_preserve_callers_codes_and_calculate_rate():
     assert set(ticks) == {"KH.00700", "00005.HK"}
     assert ticks["KH.00700"].rate == 10.0
     assert ticks["KH.00700"].buy1 == 109.8
-    assert ticks["00005.HK"].rate == 0
+    assert ticks["00005.HK"].rate is None
 
 
 @pytest.mark.parametrize(

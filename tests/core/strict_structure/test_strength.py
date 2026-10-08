@@ -134,6 +134,36 @@ def test_strength_slice_uses_only_unit_market_interval():
     assert snapshot.histogram_area == 3
 
 
+@pytest.mark.parametrize("direction,sign", [("up", 1), ("down", -1)])
+def test_native_dif_phase_observes_exact_zero_touch_without_claiming_near_zero(
+    direction, sign,
+):
+    # L025:3424-3430 distinguishes a completed impulse/reset/second move,
+    # but gives no numeric neighbourhood of the zero axis.
+    earlier = unit_covering_indexes(0, 2, direction=direction, unit_id="earlier")
+    later = unit_covering_indexes(5, 7, direction=direction, unit_id="later")
+    provider = fake_strength_provider(
+        native_hist=[sign] * 8,
+        native_dif=[sign * value for value in (0.1, 0.2, 0.3, 0.05, -0.01, 0.1, 0.2, 0.3)],
+    )
+    observed = provider.zero_axis_phase_observation(earlier, later)
+    assert observed["status"] == "exact_zero_touch_observed"
+    assert observed["intervening_bar_count"] == 2
+    assert observed["intervening_exact_zero_touch"] is True
+    assert observed["intervening_min_abs_dif"] == pytest.approx(0.01)
+    assert observed["known_at"] == later.available_at
+    assert observed["author_phase_certified"] is False
+    assert observed["tradable"] is False
+
+    without_touch = fake_strength_provider(
+        native_hist=[sign] * 8,
+        native_dif=[sign * value for value in (0.1, 0.2, 0.3, 0.05, 0.02, 0.1, 0.2, 0.3)],
+    ).zero_axis_phase_observation(earlier, later)
+    assert without_touch["status"] == "no_exact_touch_near_zero_threshold_unspecified"
+    assert without_touch["intervening_exact_zero_touch"] is False
+    assert without_touch["author_phase_certified"] is False
+
+
 @pytest.mark.parametrize("direction", ["down", "up"])
 def test_divergence_price_and_time_refer_to_the_same_internal_extreme(direction):
     sign = -1 if direction == "down" else 1
@@ -376,6 +406,31 @@ def test_three_unit_measurement_preserves_counter_displaced_real_endpoints():
         native_hist=(-1, -2, -3, -4),
     ).snapshot(measurement)
     assert snapshot.histogram_area == 10
+
+
+def test_three_unit_comparison_rejects_a_time_gap_despite_matching_prices():
+    first = unit_covering_indexes(
+        0, 1, direction="up", unit_id="first",
+        start_tick=90, end_tick=110,
+    )
+    reverse = unit_covering_indexes(
+        1, 2, direction="down", unit_id="reverse",
+        start_tick=110, end_tick=100,
+    )
+    terminal = unit_covering_indexes(
+        2, 3, direction="up", unit_id="terminal",
+        start_tick=100, end_tick=120,
+    )
+    assert isinstance(
+        _comparison_measurement((first, reverse, terminal)),
+        ComparisonMeasurement,
+    )
+    gapped = replace(
+        reverse, market_start=reverse.market_start + timedelta(seconds=1),
+    )
+    assert first.end_tick == gapped.start_tick
+    with pytest.raises(ValueError, match="connected three-unit leg"):
+        _comparison_measurement((first, gapped, terminal))
 
 
 def test_area_decay_alone_is_sufficient_macd_decay_for_formal_divergence():

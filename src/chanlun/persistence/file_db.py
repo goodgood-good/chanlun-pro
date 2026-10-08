@@ -1,6 +1,7 @@
 import atexit
 from collections import deque
 from collections.abc import Callable
+from contextlib import nullcontext
 import datetime
 import os
 import pathlib
@@ -14,6 +15,7 @@ from chanlun.market import Market
 from chanlun.config import get_data_path
 from chanlun.tools.daemon_executor import DaemonExecutor
 from chanlun.tools.log_util import LogUtil
+from chanlun.persistence.file_lock import interprocess_file_lock
 
 
 class _PickleWriteQueue:
@@ -216,6 +218,20 @@ class FileCacheDB(_ChartDataCacheMixin, _KlineCacheMixin):
         finally:
             os.close(directory_fd)
 
+    @staticmethod
+    def _replace_cache_file(source: pathlib.Path, target: pathlib.Path) -> None:
+        """Retry only brief sharing/permission conflicts, with 450 ms total backoff."""
+        delays = (0, 0.03, 0.06, 0.12, 0.24)
+        for attempt, delay in enumerate(delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(source, target)
+                return
+            except PermissionError:
+                if attempt == len(delays) - 1:
+                    raise
+
     def _atomic_write_pickle_blocking(
         self, path: pathlib.Path, obj: object, *, durable: bool = False
     ):
@@ -234,19 +250,7 @@ class FileCacheDB(_ChartDataCacheMixin, _KlineCacheMixin):
                 if durable:
                     fp.flush()
                     os.fsync(fp.fileno())
-            # Windows 文件锁兜底重试：4 次共约 30+60+120+240 = 450ms 退避。
-            # 现在跑在 _PICKLE_WRITE_EXECUTOR 的 worker 上, 不再卡 web 线程。
-            _delays_ms = (30, 60, 120, 240)
-            for _attempt, _delay in enumerate((0, *_delays_ms)):
-                if _delay:
-                    time.sleep(_delay / 1000.0)
-                try:
-                    os.replace(tmp, path)
-                    break
-                except PermissionError:
-                    if _attempt == len(_delays_ms):
-                        raise  # 重试用完仍失败，让外层捕获 + 清理 tmp
-                    continue
+            self._replace_cache_file(tmp, path)
             if durable:
                 self._fsync_parent_directory(path.parent)
         except Exception:
@@ -269,6 +273,7 @@ class FileCacheDB(_ChartDataCacheMixin, _KlineCacheMixin):
         *,
         suppress_errors: bool = True,
         durable: bool = False,
+        publication_lock: pathlib.Path | None = None,
     ) -> Future:
         """异步 fire-and-forget 写入 pickle，立刻返回 Future，web 线程不阻塞。
 
@@ -276,19 +281,25 @@ class FileCacheDB(_ChartDataCacheMixin, _KlineCacheMixin):
         写盘失败仅记 warning，不抛到调用栈（下次重算即可）。
         如有强一致性需求可显式 await：``fut.result()``。
         executor 提交竞态失败时 fallback 为同步调用；显式关闭后拒绝新写入。
+        可选 publication_lock 在实际写入线程内取得，用于协调外部清理操作。
         """
         global _PICKLE_WRITE_EXECUTOR, _PICKLE_WRITES_ACCEPTING, _PICKLE_WRITES_CLOSED
         absolute_path = pathlib.Path(os.path.abspath(os.fspath(path)))
         path_key = os.path.normcase(os.fspath(absolute_path))
+        lock_path = (
+            pathlib.Path(os.path.abspath(os.fspath(publication_lock)))
+            if publication_lock is not None else None
+        )
         result_future: Future = Future()
 
         def _write() -> None:
-            if durable:
-                self._atomic_write_pickle_blocking(
-                    absolute_path, obj, durable=True
-                )
-            else:
-                self._atomic_write_pickle_blocking(absolute_path, obj)
+            with interprocess_file_lock(lock_path) if lock_path is not None else nullcontext():
+                if durable:
+                    self._atomic_write_pickle_blocking(
+                        absolute_path, obj, durable=True
+                    )
+                else:
+                    self._atomic_write_pickle_blocking(absolute_path, obj)
 
         run_synchronously = False
         capacity_rejected = False

@@ -321,6 +321,8 @@ def recompute_chart_data_from_klines(
             str(display_klines.attrs.get("price_basis_provider")),
             str(display_klines.attrs.get("price_basis_adjustment")),
             str(display_klines.attrs.get("bar_time_label")),
+            str(display_klines.attrs.get("qmt_listing_date")),
+            str(display_klines.attrs.get("qmt_listing_history_conflict")),
         )
     )
     first_date = int(display_klines.iloc[0]["date"].timestamp())

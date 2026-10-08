@@ -635,13 +635,14 @@ class CL(ICL):
         return result
 
     @_strict_runtime_locked
-    def get_stroke_observation_centers(self):
-        from chanlun.core.strict_structure.center_machine import calculate_centers
+    @_strict_contract_boundary
+    def get_stroke_observation_units(self):
+        """Return the exact adapted pen source used by non-trading centers."""
         from chanlun.core.strict_structure.models import SourceKind
         from chanlun.core.strict_structure.unit_adapter import adapt_lines
 
         self._validate_strict_structure_metadata()
-        cached = self._strict_structure_memo.get("stroke_observation")
+        cached = self._strict_structure_memo.get("stroke_observation_units")
         if cached is not None:
             return cached
         self._strict_price_basis_revision()
@@ -653,6 +654,19 @@ class CL(ICL):
             self._strict_as_of(),
             self._strict_registry(),
         )
+        self._strict_structure_memo["stroke_observation_units"] = units
+        return units
+
+    @_strict_runtime_locked
+    def get_stroke_observation_centers(self):
+        from chanlun.core.strict_structure.center_machine import calculate_centers
+        from chanlun.core.strict_structure.models import SourceKind
+
+        self._validate_strict_structure_metadata()
+        cached = self._strict_structure_memo.get("stroke_observation")
+        if cached is not None:
+            return cached
+        units = self.get_stroke_observation_units()
         result = calculate_centers(units, 0, SourceKind.STROKE_OBSERVATION)
         self._strict_structure_memo["stroke_observation"] = result
         return result

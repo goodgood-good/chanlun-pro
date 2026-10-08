@@ -22,7 +22,6 @@ test('Requester aborts a stalled fetch at a bounded deadline and clears its time
 
 test('DataPulseProvider isolates pending work per subscriber and bounds every refresh', () => {
   const source = read('data-pulse-provider.ts');
-  assert.match(source, /Set<string>/);
   assert.match(source, /_requestsPending\.has\(listenerGuid\)/);
   assert.match(source, /Promise\.race/);
   assert.match(source, /clearTimeout/);

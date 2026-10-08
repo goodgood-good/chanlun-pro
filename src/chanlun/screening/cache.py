@@ -50,8 +50,9 @@ def read_calculation(path: Path, key: str):
             return None
         if not isinstance(value["snapshot"], dict) or not isinstance(value["snapshot"]["levels"], list):
             return None
-        for checks in value["reviewed"].values():
-            if not all(checks.get(k) is True for k in REPLAY_CHECKS):
+        for identity, checks in value["reviewed"].items():
+            required = ("cold_rebuild", "closed_bar_replay") if identity.startswith("consolidation-preview:") else REPLAY_CHECKS
+            if not all(checks.get(k) is True for k in required):
                 return None
         source = value.get("source_input")
         if source:
@@ -63,6 +64,34 @@ def read_calculation(path: Path, key: str):
         return value
     except (OSError, EOFError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, zlib.error):
         return None
+
+
+def read_append_proofs(path, frame, code, frequency, revision):
+    """Reuse immutable confirmation proofs only after verifying the entire old input prefix.
+
+    The caller still builds today's structure and rechecks selection lifetime.
+    Rolling windows, corrections, price-basis changes and source changes reject
+    this shortcut. Provisional consolidation comparisons are never reused.
+    """
+    try:
+        wrapper=json.loads(gzip.decompress(path.read_bytes()))
+        raw=wrapper['payload'].encode('utf-8')
+        if hashlib.sha256(raw).hexdigest()!=wrapper['sha256']:
+            return {}
+        value=json.loads(raw);source=value.get('source_input') or {}
+        count=source.get('bars')
+        if (value.get('schema')!='screening-structure-v2' or value.get('calculation_revision')!=revision or type(count) is not int or not 0<count<len(frame)
+                or source.get('code')!=code or source.get('frequency')!=frequency):
+            return {}
+        original=(path.parent/source['file']).resolve()
+        if original.parent!=(path.parent/'inputs').resolve() or hashlib.sha256(original.read_bytes()).hexdigest()!=source['sha256']:
+            return {}
+        if input_fingerprint(frame.iloc[:count],code,frequency)!=source['fingerprint']:
+            return {}
+        return {key:dict(checks) for key,checks in value['reviewed'].items()
+                if not key.startswith('consolidation-preview:') and all(checks.get(k) is True for k in REPLAY_CHECKS)}
+    except (OSError,ValueError,KeyError,TypeError,AttributeError,EOFError,zlib.error):
+        return {}
 
 
 def _save_source_input(path, frame, code, frequency):
@@ -90,13 +119,14 @@ def _save_source_input(path, frame, code, frequency):
             temporary.unlink()
         else:
             os.replace(temporary,original)
+        os.utime(original,None)  # Protect a reused input until its new reference is published.
         return {'file':original.relative_to(path.parent).as_posix(),'sha256':checksum,
                 'fingerprint':fingerprint,'bars':len(data),'code':code,'frequency':frequency}
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, source_frame=None):
+def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, source_frame=None, calculation_revision=None):
     # Unresolved data or structural replay failures must get another cold check.
     if row.get("data_errors") or any(row["reason_counts"].get(reason) for reason in (
         "DATA_GAPS", "DEPENDENCY_MISSING", "CALENDAR_COVERAGE_UNKNOWN",
@@ -105,6 +135,8 @@ def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, so
         return
     payload={"schema": "screening-structure-v2", "key": key,
              "snapshot": snapshot, "reviewed": reviewed}
+    if calculation_revision is not None:
+        payload['calculation_revision']=calculation_revision
     if source_frame is not None:
         payload['source_input']=_save_source_input(
             path,source_frame,snapshot.get('symbol',row.get('code')),
@@ -116,7 +148,9 @@ def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, so
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(f".{os.getpid()}.tmp")
     try:
-        temp.write_bytes(gzip.compress(json.dumps(wrapper, ensure_ascii=False).encode("utf-8")))
+        temp.write_bytes(gzip.compress(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"),compresslevel=3))
         os.replace(temp, path)
+        from .cache_retention import save_reference
+        save_reference(path,payload.get('source_input'))
     finally:
         temp.unlink(missing_ok=True)

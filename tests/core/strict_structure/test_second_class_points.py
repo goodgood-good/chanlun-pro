@@ -116,10 +116,14 @@ def test_second_point_keeps_internal_pullback_extreme_and_confirmation(direction
     assert point.available_at == old.available_at
 
 
-def test_new_low_pullback_requires_weak_divergence():
-    rejected = strict_engine(direction="down", values=WEAK_VALUES, invalid=True)
-    rejected_parent = only_point(rejected.first_class_points())
-    assert rejected.second_class_points((rejected_parent,)) == ()
+def test_new_low_pullback_is_second_class_with_divergence_as_optional_evidence():
+    without_divergence = strict_engine(direction="down", values=WEAK_VALUES, invalid=True)
+    lower_parent = only_point(without_divergence.first_class_points())
+    lower = only_point(without_divergence.second_class_points((lower_parent,)))
+    assert lower.variant is StrictPointVariant.LOWER_RETEST
+    assert lower.divergence is None
+    assert "lower_extreme_retested" in lower.evidence_codes
+    assert lower.anchor_tick < lower_parent.anchor_tick
 
     accepted = strict_engine(direction="down", values=WEAK_VALUES, weak=True)
     parent = only_point(accepted.first_class_points())
@@ -134,7 +138,17 @@ def test_new_low_pullback_requires_weak_divergence():
     )
 
 
-def test_weak_second_class_skips_formal_divergence_that_is_not_yet_available(
+def test_new_high_second_sell_is_valid_without_optional_consolidation_divergence():
+    engine = strict_engine(direction="up", values=WEAK_VALUES, invalid=True)
+    first = only_point(engine.first_class_points())
+    point = only_point(engine.second_class_points((first,)))
+    assert point.point_type == "2sell"
+    assert point.variant is StrictPointVariant.LOWER_RETEST
+    assert point.divergence is None
+    assert point.anchor_tick > first.anchor_tick
+
+
+def test_lower_second_class_survives_unavailable_auxiliary_divergence(
     monkeypatch,
 ):
     engine = strict_engine(direction="down", values=WEAK_VALUES, weak=True)
@@ -145,7 +159,9 @@ def test_weak_second_class_skips_formal_divergence_that_is_not_yet_available(
 
     monkeypatch.setattr(signal_module, "compare_divergence", unavailable)
 
-    assert engine.second_class_points((parent,)) == ()
+    point = only_point(engine.second_class_points((parent,)))
+    assert point.variant is StrictPointVariant.LOWER_RETEST
+    assert point.divergence is None
 
 
 def test_two_sell_is_symmetric():
@@ -214,7 +230,7 @@ def test_pullback_touching_first_point_extreme_is_strict_second_class():
     assert buy.variant is sell.variant is StrictPointVariant.STRICT
 
 
-def test_invalid_first_completed_pullback_cannot_be_skipped_for_later_pullback():
+def test_first_completed_lower_pullback_is_not_skipped_for_later_pullback():
     parent_engine = strict_engine(direction="down", values=WEAK_VALUES, invalid=True)
     first = only_point(parent_engine.first_class_points())
     extended_structure, _assembly = structure_from_values(
@@ -223,7 +239,9 @@ def test_invalid_first_completed_pullback_cannot_be_skipped_for_later_pullback()
         strength=strengths("down", invalid=True),
     )
     engine = engine_for(extended_structure, strengths("down", invalid=True))
-    assert engine.second_class_points((first,)) == ()
+    point = only_point(engine.second_class_points((first,)))
+    assert point.variant is StrictPointVariant.LOWER_RETEST
+    assert point.anchor_unit_id == extended_structure.levels[0].units[20].unit_id
 
 
 def promote_structure_to_level_one(structure):
@@ -323,7 +341,10 @@ def promote_structure_to_level_one(structure):
     )
 
 
-def test_lower_level_first_point_independently_emits_higher_level_second_buy():
+@pytest.mark.parametrize("pullback_index,expected_count", [(8, 1), (13, 0)])
+def test_lower_level_first_point_requires_connected_higher_retest(
+    pullback_index, expected_count,
+):
     lower_anchor = unit(6, "down", 110, 90)
     signal = replace(
         unit(
@@ -350,7 +371,7 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
     )
     pullback = replace(
         unit(
-            13,
+            pullback_index,
             "down",
             120,
             105,
@@ -368,10 +389,11 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
             point_type="1buy",
             structural_level=0,
             anchor_unit_id=lower_anchor.unit_id,
-            center_id=None,
+            center_id=lower.center_id,
             parent_point_id=None,
         ),
         anchor_unit_id=lower_anchor.unit_id,
+        center_id=lower.center_id,
         anchor_at=signal.market_end,
         confirmed_at=signal.confirmed_at,
         available_at=signal.available_at,
@@ -427,7 +449,9 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
 
     points = engine_for(structure, None).second_class_points((lower,))
     promoted = tuple(point for point in points if point.structural_level == 1)
-    assert len(promoted) == 1
+    assert len(promoted) == expected_count
+    if not promoted:
+        return
     point = promoted[0]
     assert point.point_type == "2buy"
     assert point.parent_point_id == lower.point_id
@@ -654,10 +678,11 @@ def test_small_first_point_can_promote_across_multiple_levels():
             point_type="1buy",
             structural_level=0,
             anchor_unit_id=lower_anchor.unit_id,
-            center_id=None,
+            center_id=parent.center_id,
             parent_point_id=None,
         ),
         anchor_unit_id=lower_anchor.unit_id,
+        center_id=parent.center_id,
         anchor_at=signal.market_end,
         confirmed_at=signal.confirmed_at,
         available_at=signal.available_at,

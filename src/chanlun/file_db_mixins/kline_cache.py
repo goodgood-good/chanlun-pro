@@ -11,6 +11,7 @@ from typing import Union
 import pandas as pd
 
 from chanlun import fun
+from chanlun.persistence.file_lock import interprocess_file_lock
 from chanlun.tools.log_util import LogUtil
 
 
@@ -29,7 +30,11 @@ class _KlineCacheMixin:
         tmp = self._make_unique_tmp_path(path)
         try:
             df.to_parquet(tmp, engine="pyarrow", compression="zstd", index=False)
-            os.replace(tmp, path)
+            # The closed-history caller may already own ``.parquet.lock`` for
+            # its fetch transaction. Publication/cleanup use a distinct lock,
+            # held only for the final replacement, never parquet serialization.
+            with interprocess_file_lock(path.with_suffix(path.suffix + ".publish.lock")):
+                self._replace_cache_file(tmp, path)
             return True
         except Exception as exc:
             try:
@@ -49,18 +54,19 @@ class _KlineCacheMixin:
     def load_klines_parquet(
         self, market: str, code: str, frequency: str
     ) -> Union[None, pd.DataFrame]:
-        """Read parquet K-lines; missing or corrupt files are cache misses."""
+        """Read parquet K-lines; failed reads are misses, never file deletions."""
         path = self._kline_parquet_path(market, code, frequency)
-        if not path.is_file():
-            return None
         try:
+            if not path.is_file():
+                return None
             return pd.read_parquet(path, engine="pyarrow")
         except Exception as exc:
+            # The path may already refer to a healthy replacement from another
+            # writer. A reader cannot safely remove it after its own read fails.
             LogUtil.debug(
-                f"[FileCacheDB.load_klines_parquet] read failed (file corrupt?), "
-                f"unlinking path={path} err={exc}"
+                f"[FileCacheDB.load_klines_parquet] cache miss "
+                f"path={path} error={type(exc).__name__}"
             )
-            path.unlink(missing_ok=True)
             return None
 
     def get_tdx_klines(
@@ -106,8 +112,14 @@ class _KlineCacheMixin:
         market_dir = self.klines_path / market
         for filename in market_dir.glob("*.parquet"):
             try:
-                if filename.stat().st_mtime < del_lt_times:
-                    filename.unlink(missing_ok=True)
+                if filename.stat().st_mtime >= del_lt_times:
+                    continue
+                with interprocess_file_lock(
+                    filename.with_suffix(filename.suffix + ".publish.lock"),
+                    timeout_seconds=0.01, poll_seconds=0.01,
+                ):
+                    if filename.stat().st_mtime < del_lt_times:
+                        filename.unlink(missing_ok=True)
             except Exception as exc:
                 LogUtil.debug(
                     f"[FileCacheDB.clear_tdx_old_klines] unlink failed "

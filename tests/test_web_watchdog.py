@@ -18,6 +18,36 @@ INSTALLER = ROOT / "ops" / "install_web_watchdog.ps1"
 RESTART = ROOT / "ops" / "restart_web.ps1"
 
 
+@pytest.mark.skipif(os.name!='nt',reason='watchdog targets Windows')
+@pytest.mark.parametrize('recover',[False,True])
+def test_monitor_health_controls_recovery_without_restarting_storage_degradation(tmp_path,recover):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body={'status':'alive','pid':1234,'revision':'test'}
+            status=200
+            if self.path.startswith('/readyz'):
+                body={'status':'not_ready','pid':1234,'revision':'test','reasons':['signal_monitor_unavailable'],
+                      'components':{'runtime':{'required':True,'ready':True},
+                                    'monitor':{'required':True,'ready':False,'recovery_recommended':recover}}}
+                status=503
+            data=json.dumps(body).encode()
+            self.send_response(status);self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+        def log_message(self,*args):pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+    (tmp_path/'ops').mkdir();(tmp_path/'ops/restart_web.ps1').write_text('exit 0\n',encoding='utf-8')
+    try:
+        result=subprocess.run(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',str(WATCHDOG),
+                               '-ProjectRoot',str(tmp_path),'-WebPort',str(server.server_port),'-Once'],
+                              capture_output=True,text=True,timeout=20,creationflags=subprocess.CREATE_NO_WINDOW)
+    finally:server.shutdown();server.server_close()
+    assert result.returncode==1,result.stdout+result.stderr
+    heartbeat=json.loads((tmp_path/'.cache/chanlun_web_watchdog/heartbeat.json').read_text(encoding='utf-8-sig'))
+    assert heartbeat['recovery_recommended'] is recover
+    assert heartbeat['status']==('readiness_failed' if recover else 'operational_degraded')
+
+
 def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
     restart = RESTART.read_text(encoding="utf-8")
     watchdog = WATCHDOG.read_text(encoding="utf-8")

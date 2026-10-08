@@ -150,9 +150,9 @@ def test_physical_center_keeps_its_full_body_envelope() -> None:
 
 
 @pytest.mark.parametrize("return_tick,expected", [(114, CenterPreviewState.FORMING),
-                                                  (115, CenterPreviewState.COMPLETED),
+                                                  (115, CenterPreviewState.FORMING),
                                                   (116, CenterPreviewState.COMPLETED)])
-def test_recursive_preview_return_respects_inclusive_third_point_boundary(return_tick, expected):
+def test_recursive_preview_return_must_clear_the_closed_core(return_tick, expected):
     values = _trend_units()
     core = tuple(replace(value, locked=False, confirmed_at=None) for value in values[1:4])
     preview = establish_center_preview(core, 1, SourceKind.TREND_TYPE, entry_unit=values[0])
@@ -334,6 +334,11 @@ def test_recursive_center_completes_only_after_leave_and_return(return_tick) -> 
 
     returning = replace(values[5], end_tick=return_tick, low_tick=return_tick)
     center, _complete = advance_center(center, returning)
+    if return_tick == center.zg_tick:
+        assert center.state is CenterState.ONGOING
+        assert center.completion_return_unit is None
+        assert center.body_units[-1] is returning
+        return
     assert center.state is CenterState.COMPLETED
     assert center.completion_leave_unit is values[4]
     assert center.completion_return_unit is returning

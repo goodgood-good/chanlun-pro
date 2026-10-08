@@ -1,10 +1,47 @@
 """Serialize chart centers, stroke observations, points and divergence evidence."""
 
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Iterable
+from zoneinfo import ZoneInfo
+from chanlun.exchange.trading_session import official_trading_session_evidence
 from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.same_level_decomposition import (
+    fixed_three_member_partition_payload,
+    l038_six_member_split_payload,
+    observe_l038_six_member_split,
+    review_fixed_three_member_partition,
+)
+from chanlun.core.strict_structure.general_decomposition import (
+    GapBarEvidence,
+    associative_view_payload,
+    discover_entry_anchored_associations,
+    general_center_connector_observation_payload,
+    observe_explicit_general_center_connector,
+    materialize_declared_upgrade_child_path,
+    declared_upgrade_child_path_payload,
+    replay_declared_upgrade_parent_geometry,
+)
+from chanlun.core.strict_structure.unit_adapter import _tick
+from chanlun.core.strict_structure.operational_risk import macd_zero_axis_operational_state
+from chanlun.core.strict_structure.gap_strength import observe_u297_gap_strength
+from chanlun.core.strict_structure.physical_stroke_lineage import (
+    observe_class_formal_component_candidates,
+    observe_physical_segment_stroke_lineage,
+)
+from chanlun.core.strict_structure.nine_segment_grade_watch import (
+    observe_u180_nine_segment_grade_watches,
+)
+from chanlun.core.strict_structure.macd_cross_frequency import observe_u293_macd_cross_frequency
+from chanlun.core.strict_structure.nested_divergence_lineage import (
+    observe_completed_nested_divergence_lineage,
+    observe_nested_candidate_history_lineage,
+)
+from chanlun.core.strict_structure.live_divergence_candidate import (
+    observe_live_center_divergence_candidate,
+    observe_live_trend_divergence_comparisons,
+)
 from chanlun.cl_utils.point_exits import EXIT_PRICE_VERSION, with_point_exit_plans
 from chanlun.core.strict_structure.center_frame import (
     center_frame_evidence,
@@ -18,6 +55,7 @@ from chanlun.core.strict_structure.models import (
     ConstituentUnit,
     DivergenceEvidence,
     SourceKind,
+    StrictLevelResult,
     StrictPointEvidence,
     StrictPointStatus,
     TrendCenter,
@@ -25,10 +63,20 @@ from chanlun.core.strict_structure.models import (
 )
 from chanlun.core.strict_structure.rule_state import (
     RULE_STATE_VERSION,
+    center_first_return_grade_watch_states,
+    third_point_entry_precision_rule_states,
     center_pair_rule_state,
+    center_oscillation_monitor_state,
+    center_oscillation_operation_rule_states,
+    center_macd_phase_rule_states,
+    nested_change_watch_rule_states,
+    second_buy_followup_observations,
     small_to_large_point_rule_state,
+    trend_formation_rule_states,
     transition_rule_state,
 )
+from chanlun.core.strict_structure.strength import MacdStrengthProvider
+from chanlun.core.strict_structure.native_center_signals import build_native_center_signals
 
 CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure"
 CHART_CENTER_SCHEMA = "chanlun-chart-center"
@@ -77,6 +125,7 @@ def _center_overlap_units(center: TrendCenter) -> tuple[ConstituentUnit, ...]:
                 max(item.low_tick, center.zd_tick)
                 <= min(item.high_tick, center.zg_tick)
                 if center.source_kind is SourceKind.TREND_TYPE
+                or center.formation_rule == "three_core"
                 or center.zd_tick == center.zg_tick
                 else max(item.low_tick, center.zd_tick)
                 < min(item.high_tick, center.zg_tick)
@@ -181,6 +230,20 @@ def _center_lifecycle_payload(
 
 def _center_frame_payload(center: TrendCenter) -> dict[str, object]:
     frame = center_frame_evidence(center)
+    if center.formation_rule == "three_core":
+        leave = center_frame_leave(center)
+        frame = {
+            **frame,
+            "core_formed": True,
+            "frame_qualified": leave is not None,
+            "frame_missing_conditions": (() if leave is not None else ("leave_unavailable",)),
+            "frame_leave_unit_id": None if leave is None else leave.unit_id,
+            "available_at": max(
+                center.established_at,
+                *(unit.available_at for unit in center.initial_units),
+                *((leave.available_at,) if leave is not None else ()),
+            ),
+        }
     return {
         "third_class_confirmation_rule": "independent_leave_after_three_core_children",
         "minimum_third_class_role_count": 5,
@@ -194,7 +257,7 @@ def _center_frame_payload(center: TrendCenter) -> dict[str, object]:
         "center_end_available_at": _optional_epoch(
             center.completion_available_at if center.third_class_confirmed else None
         ),
-        "center_end_rule": "independent_completed_lower_leave_and_first_non_crossing_return",
+        "center_end_rule": "independent_completed_lower_leave_and_first_disjoint_return",
     }
 
 
@@ -206,6 +269,7 @@ def _center_payload(
     if not center.has_minimum_physical_roles:
         raise ValueError("chart center lacks its declared formation evidence")
     recursive = center.source_kind is SourceKind.TREND_TYPE
+    three_seed = recursive or center.formation_rule == "three_core"
     overlap_policy, source_differences = center_overlap_interpretation(
         center.source_kind, center.zd_tick, center.zg_tick
     )
@@ -261,7 +325,10 @@ def _center_payload(
             },
         ],
         "display_range": {
-            "start_role": "middle_three_first_start",
+            "start_role": (
+                "first_three_start" if center.formation_rule == "three_core"
+                else "middle_three_first_start"
+            ),
             "end_role": "external_leave_start"
             if center.lifecycle_leave_unit is not None
             and center.lifecycle_leave_unit != center.establishment_leave_unit
@@ -270,7 +337,10 @@ def _center_payload(
             else "middle_three_last_end",
             "includes_entry": False,
             "includes_leave": False,
-            "price_core_source": "middle_three_intersection",
+            "price_core_source": (
+                "first_three_intersection" if center.formation_rule == "three_core"
+                else "middle_three_intersection"
+            ),
         },
         "directional_ownership_pending": directional_ownership_pending(center),
         "lifecycle_range_end": aware_datetime_to_epoch_seconds(
@@ -291,7 +361,7 @@ def _center_payload(
         else center.entry_unit.unit_id,
         "entry_role": None if center.entry_unit is None else "external_entry",
         "lifecycle_role_count": center.lifecycle_role_count,
-        "minimum_lifecycle_role_count": 3 if recursive else 5,
+        "minimum_lifecycle_role_count": 3 if three_seed else 5,
         "core_component_count": 3,
         "overlap_component_count": len(overlap_units),
         "establishment_component_count": len(establishment_units),
@@ -390,14 +460,16 @@ def strict_center_preview_to_chart_dict(
 ) -> dict | None:
     """Publish the selected unfinished tail without changing confirmed geometry.
 
-    An entry and three overlapping core children are enough to draw a forming
-    frame. Its independent exit and locked evidence remain mandatory for formal
-    establishment. A projection of an existing center only draws its extension.
+    Source-specific seeds keep five-role and selected three-core previews
+    separate. A projection of an existing center only draws its extension.
     """
     if (len(preview.unit_ids) < 3 or preview.zd_tick is None
             or preview.zg_tick is None or preview.state is CenterPreviewState.TOUCH_ONLY):
         return None
-    recursive = preview.source_kind is SourceKind.TREND_TYPE
+    recursive = (
+        preview.source_kind is SourceKind.TREND_TYPE
+        or preview.formation_rule == "three_core"
+    )
     overlap_policy, source_differences = center_overlap_interpretation(
         preview.source_kind, preview.zd_tick, preview.zg_tick
     )
@@ -437,7 +509,10 @@ def strict_center_preview_to_chart_dict(
         "source_kind": preview.source_kind.value,
         "runtime_overlap_policy": overlap_policy,
         "unresolved_source_difference_ids": list(source_differences),
-        "formation_rule": "recursive_three" if recursive else "five_role",
+        "formation_rule": (
+            "three_core" if preview.formation_rule == "three_core"
+            else "recursive_three" if recursive else "five_role"
+        ),
         "state": "forming",
         "geometry_state": preview.state.value,
         "preview_status": status,
@@ -491,6 +566,13 @@ def strict_divergence_to_chart_dict(divergence: DivergenceEvidence) -> dict:
         "direction": divergence.direction,
         "compare_unit_id": divergence.compare_unit_id,
         "signal_unit_id": divergence.signal_unit_id,
+        "comparison_center_id": divergence.comparison_center_id,
+        "comparison_center_established_at": _optional_epoch(
+            divergence.comparison_center_established_at
+        ),
+        "comparison_center_known_at": _optional_epoch(
+            divergence.comparison_center_known_at
+        ),
         "comparison_width": divergence.comparison_width,
         "signal_width": divergence.signal_width,
         "compare_leg_unit_ids": list(divergence.compare_leg_unit_ids),
@@ -631,10 +713,14 @@ def _conditional_center_payload(center, observation):
 
 
 def _trend_type_rule_payload(trend) -> dict[str, object]:
+    formal_type_qualified = bool(trend.centers)
     return {
         "trend_id": trend.trend_id,
-        "kind": trend.kind.value,
-        "direction": trend.direction,
+        "kind": trend.kind.value if formal_type_qualified else "geometric_movement",
+        "formal_type_qualified": formal_type_qualified,
+        "direction": trend.trend_direction,
+        "trend_direction": trend.trend_direction,
+        "movement_orientation": trend.movement_orientation,
         "state": trend.state.value,
         "structural_level": trend.structural_level,
         "center_ids": [center.center_id for center in trend.centers],
@@ -648,6 +734,204 @@ def _trend_type_rule_payload(trend) -> dict[str, object]:
             if trend.terminal_divergence is not None else None
         ),
     }
+
+
+def _formal_trend_chart_payload(trend) -> dict[str, object]:
+    """Draw a type with an established center using its audited endpoints."""
+    if not trend.centers:
+        raise ValueError("chart trend requires a formal center")
+    return {
+        "schema": "chanlun-chart-trend",
+        "render_kind": "strict_trend",
+        "trend_id": trend.trend_id,
+        "render_id": f"{trend.trend_id}@{trend.state.value}@{trend.terminal_unit.unit_id}",
+        "price_basis_revision": trend.price_basis_revision,
+        "structural_level": trend.structural_level,
+        "source_kind": trend.terminal_unit.source_kind.value,
+        "kind": trend.kind.value,
+        "direction": trend.trend_direction,
+        "movement_orientation": trend.movement_orientation,
+        "state": trend.state.value,
+        "tradable": False,
+        "center_ids": [center.center_id for center in trend.centers],
+        "constituent_unit_ids": [unit.unit_id for unit in trend.constituent_units],
+        "points": [
+            {"time": aware_datetime_to_epoch_seconds(trend.market_start),
+             "price_tick": trend.start_tick},
+            {"time": aware_datetime_to_epoch_seconds(trend.market_end),
+             "price_tick": trend.end_tick},
+        ],
+        "range": {"low_tick": trend.low_tick, "high_tick": trend.high_tick},
+        "confirmed_at": _optional_epoch(trend.confirmed_at),
+        "available_at": aware_datetime_to_epoch_seconds(trend.available_at),
+    }
+
+
+def _trend_partition_review(level, visible_centers, visible_trends, as_of) -> dict[str, object]:
+    """Separate local types from a proven whole-window same-level partition."""
+
+    source_units = tuple(unit for unit in level.units if unit.available_at <= as_of)
+    owned_ids = {
+        unit.unit_id for trend in visible_trends
+        for unit in trend.constituent_units if unit.available_at <= as_of
+    }
+    unowned_ids = [unit.unit_id for unit in source_units if unit.unit_id not in owned_ids]
+    formal_count = sum(bool(trend.centers) for trend in visible_trends)
+    geometric_count = len(visible_trends) - formal_count
+    first_formal = next((trend for trend in visible_trends if trend.centers), None)
+    first_formal_offset = (
+        next(
+            index for index, unit in enumerate(source_units)
+            if unit.unit_id == first_formal.constituent_units[0].unit_id
+        )
+        if first_formal is not None else None
+    )
+    leading_unowned_ids = (
+        [
+            unit.unit_id for unit in source_units[:first_formal_offset]
+            if unit.unit_id not in owned_ids
+        ]
+        if first_formal_offset is not None else []
+    )
+    first_formal_connection = (
+        "no_formal_type" if first_formal_offset is None else
+        "starts_at_recorded_source" if first_formal_offset == 0 else
+        "unowned_prefix_before_first_formal_type" if leading_unowned_ids else
+        "preceded_by_nonformal_movement"
+    )
+    first_center = visible_centers[0] if visible_centers else None
+    left_edge_candidate = bool(
+        source_units and first_center is not None
+        and first_center.entry_unit is None
+        and first_center.body_units[0].unit_id == source_units[0].unit_id
+    )
+    status = (
+        "no_visible_source_units" if not source_units else
+        "formal_types_with_open_left_partition" if formal_count and first_formal_offset else
+        "formal_types_with_pending_source" if formal_count and unowned_ids else
+        "formal_types_cover_visible_source" if formal_count else
+        "geometric_movements_only" if geometric_count else
+        "pending_connected_type_partition" if visible_centers else
+        "no_formal_center_or_type"
+    )
+    return {
+        "status": status,
+        "source_unit_count": len(source_units),
+        "formal_center_count": len(visible_centers),
+        "formal_type_count": formal_count,
+        "geometric_movement_count": geometric_count,
+        "unowned_source_unit_ids": unowned_ids,
+        "unowned_leading_source_unit_ids": leading_unowned_ids,
+        "first_formal_type_connection": first_formal_connection,
+        "open_left_boundary_candidate": left_edge_candidate,
+        "formal_type_absence_proves_market_has_no_type": False,
+        "tradable": False,
+    }
+
+
+def _l038_six_member_split_observations(level, as_of) -> list[dict[str, object]]:
+    """Keep bounded fixed same-level splits apart from lifecycle centers."""
+
+    if level.structural_level < 1:
+        return []
+    source = tuple(level.units)
+    output = []
+    for offset in range(max(0, len(source) - 5)):
+        window = source[offset : offset + 6]
+        if any(
+            not unit.locked or unit.available_at > as_of or not unit.child_ids
+            for unit in window
+        ):
+            continue
+        observed = observe_l038_six_member_split(window, as_of=as_of)
+        if observed is not None:
+            output.append(l038_six_member_split_payload(observed))
+    return output
+
+
+def _declared_30m_fixed_same_level_review(
+    lower_types, source_units, as_of, basis,
+    pending_lower_type_ids=frozenset(),
+) -> dict:
+    """Apply the user's 30m operating view to completed 5m-type source units.
+
+    The live recursive grade is kept separate from a physical bar frequency.
+    This view is selected by the explicit 5m-lower/30m-operating declaration;
+    its local triples do not overwrite the existing center lifecycle or points.
+    """
+
+    source = tuple(source_units)
+    visible_prefix = []
+    for unit in source:
+        if unit.available_at > as_of:
+            break
+        visible_prefix.append(unit.unit_id)
+    view_id = stable_structure_id(
+        "chanlun-declared-30m-fixed-same-level-v1", basis,
+        tuple(visible_prefix),
+    )
+    if source:
+        pending_lower_type_ids = frozenset(pending_lower_type_ids) | frozenset(
+            trend.trend_id
+            for trend in lower_types
+            if trend.kind.value == "consolidation" and len(trend.centers) > 1
+        )
+        payload = fixed_three_member_partition_payload(
+            review_fixed_three_member_partition(
+                source, view_id=view_id,
+                operating_type_label="30m", as_of=as_of,
+                pending_lower_type_ids=pending_lower_type_ids.intersection(
+                    unit.unit_id for unit in source
+                ),
+            )
+        )
+    else:
+        payload = {
+            "schema": "chanlun-fixed-three-member-partition-review-v1",
+            "rule_source_refs": ["L018:31-55", "L038:81-94", "L038:175-196"],
+            "policy_basis": "declared_fixed_same_level_implementation",
+            "view_id": view_id,
+            "operating_type_label": "30m",
+            "target_structural_level": 1,
+            "lower_trend_structural_level": 0,
+            "source_unit_ids": [],
+            "status": "awaiting_three_completed_lower_types",
+            "as_of": int(as_of.timestamp()),
+            "candidates": [],
+            "post_gap_center_candidates": [],
+            "pending_source_unit_ids": [
+                trend.trend_id
+                for trend in lower_types
+                if trend.locked and trend.available_at <= as_of
+            ],
+            "unavailable_future_count": 0,
+            "whole_path_partition_certified": False,
+            "formal_point_from_review": False,
+            "tradable": False,
+        }
+    payload.update({
+        "source_frequency": "5m",
+        "target_operating_type": "30m",
+        "lower_construction_policy": "center_extension_and_connected_trend_types",
+        "formal_30m_type_issued": False,
+    })
+    return payload
+
+
+def _declared_upgrade_review_payload(trend, parent_level, depth, as_of) -> dict:
+    view_id = stable_structure_id(
+        "chanlun-declared-upgrade-split-view-v1",
+        trend.price_basis_revision, depth, trend.trend_id,
+    )
+    path = materialize_declared_upgrade_child_path(
+        trend, view_id=view_id, as_of=as_of,
+    )
+    payload = declared_upgrade_child_path_payload(path)
+    payload["parent_geometry_replay"] = (
+        None if parent_level is None else
+        replay_declared_upgrade_parent_geometry(path, parent_level, as_of=as_of)
+    )
+    return payload
 
 
 def _decomposition_boundary_rule_payload(boundary) -> dict[str, object]:
@@ -671,7 +955,16 @@ def _decomposition_boundary_rule_payload(boundary) -> dict[str, object]:
 
 def _center_pair_rule_payload(previous: TrendCenter, current: TrendCenter) -> dict[str, object]:
     state = center_pair_rule_state(previous, current)
+    state["previous_center_initial_known_at"] = _optional_epoch(
+        state["previous_center_initial_known_at"]
+    )
+    state["current_center_initial_known_at"] = _optional_epoch(
+        state["current_center_initial_known_at"]
+    )
     state["touch_known_at"] = _optional_epoch(state["touch_known_at"])
+    state["touch_witness_known_at"] = _optional_epoch(
+        state["touch_witness_known_at"]
+    )
     state["strict_relation_known_at"] = _optional_epoch(state["strict_relation_known_at"])
     return state
 
@@ -711,14 +1004,339 @@ def _attach_parent_center_rule_evidence(levels: list[dict]) -> None:
                     pair["higher_center_formal_at"] = higher_center["higher_center_formal_at"]
 
 
-def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int, ...]):
+def _active_associative_hypotheses(level, as_of: datetime) -> list[dict]:
+    """Keep source-bounded general-view geometry separate from formal output."""
+
+    if level.structural_level != 0:
+        return []
+    locked = tuple(
+        unit for unit in level.units
+        if unit.locked and unit.available_at <= as_of
+    )
+    if len(locked) < 7:
+        return []
+    positions = {unit.unit_id: index for index, unit in enumerate(locked)}
+    visible_trends = tuple(
+        trend for trend in getattr(level, "trend_types", ())
+        if trend.available_at <= as_of
+        and trend.constituent_units[0].unit_id in positions
+    )
+    anchor_id = (
+        visible_trends[-1].constituent_units[0].unit_id
+        if visible_trends else locked[0].unit_id
+    )
+    source = locked[positions[anchor_id] :]
+    if len(source) < 7:
+        return []
+    return [
+        {**associative_view_payload(view),
+         "schema": "chanlun-entry-anchored-associative-hypothesis-v1",
+         "evidence_scope": "entry_anchored_general_geometry_hypothesis",
+         "anchor_basis": (
+             "latest_visible_same_level_type_start"
+             if visible_trends else "first_locked_segment"
+         ),
+         "anchor_unit_id": anchor_id}
+        for view in discover_entry_anchored_associations(
+            source, anchor_unit_id=anchor_id, as_of=as_of
+        )
+    ]
+
+
+def _direct_chart_gap_connectors(
+    centers: tuple[TrendCenter, ...], raw_bars: tuple,
+    display_bar_closed_at: tuple[int, ...], *, symbol: str,
+    market: str, interval: str, basis: str, quantum: Decimal, as_of: datetime,
+) -> tuple[list[dict], dict]:
+    """Observe only direct center-boundary gaps in the full chart bar window."""
+
+    def review(status, candidates=0, verified=0, invalid=0, observed=0):
+        return {
+            "status": status,
+            "candidate_boundary_pairs": candidates,
+            "calendar_verified_pairs": verified,
+            "calendar_unverified_pairs": candidates - verified,
+            "invalid_bar_geometry_pairs": invalid,
+            "direct_gap_observations": observed,
+            "tradable": False,
+        }
+
+    if (len(raw_bars) != len(display_bar_closed_at)
+            or any(aware_datetime_to_epoch_seconds(bar.date) != stamp
+                   for bar, stamp in zip(raw_bars, display_bar_closed_at))):
+        return [], review("source_window_mismatch")
+    positions = {bar.date: index for index, bar in enumerate(raw_bars)}
+    if len(positions) != len(raw_bars):
+        return [], review("source_window_mismatch")
+    output = []
+    candidates = verified = invalid = 0
+    for previous, current in zip(centers, centers[1:]):
+        if not previous.physically_completed:
+            continue
+        left = (previous.completion_return_unit
+                or (previous.supersession_bridge_units[-1]
+                    if previous.supersession_bridge_units else previous.body_units[-1]))
+        right = current.entry_unit or current.body_units[0]
+        first = positions.get(left.market_end)
+        second = positions.get(right.market_start)
+        if first is None or second != first + 1:
+            continue
+        candidates += 1
+        calendar_ids = _official_adjacent_a_share_closes(
+            left.market_end, right.market_start,
+            market=market, interval=interval, as_of=as_of,
+        )
+        if calendar_ids is None:
+            continue
+        verified += 1
+        try:
+            pair = tuple(
+                GapBarEvidence(
+                    bar_id=stable_structure_id(
+                        "chart-closed-gap-bar-v1", symbol, interval, basis,
+                        index, int(bar.date.timestamp()),
+                        _tick(bar.l, quantum), _tick(bar.h, quantum),
+                    ),
+                    closed_at=bar.date, low_tick=_tick(bar.l, quantum),
+                    high_tick=_tick(bar.h, quantum),
+                    price_basis_revision=basis,
+                )
+                for index, bar in ((first, raw_bars[first]), (second, raw_bars[second]))
+            )
+        except (AttributeError, ArithmeticError, TypeError, ValueError):
+            invalid += 1
+            continue
+        try:
+            observation = observe_explicit_general_center_connector(
+                previous, current, as_of=as_of,
+                market_source_ref=stable_structure_id(
+                    "chart-center-gap-source-v1", symbol, interval, basis,
+                    len(raw_bars), pair[0].bar_id, pair[1].bar_id,
+                    calendar_ids,
+                ),
+                source_bars=pair, gap_after_bar_index=0,
+            )
+        except ValueError:
+            continue
+        output.append({
+            **general_center_connector_observation_payload(observation),
+            "source_adjacency_scope": "adjacent_in_matching_chart_source_bars",
+            "source_bar_count": len(raw_bars),
+            "calendar_adjacency_scope": "official_a_share_next_closed_bar",
+            "calendar_evidence_ids": list(calendar_ids),
+            "u297_gap_strength_state": observe_u297_gap_strength(
+                pair[0], pair[1], physical_frequency=interval, as_of=as_of,
+            ),
+        })
+    status = (
+        "direct_gap_observed" if output else
+        "no_direct_boundary_pair" if not candidates else
+        "calendar_adjacency_not_proven" if not verified else
+        "bar_geometry_invalid" if invalid == verified else
+        "verified_no_direct_gap"
+    )
+    return output, review(status, candidates, verified, invalid, len(output))
+
+
+def _official_adjacent_a_share_closes(
+    before: datetime, after: datetime, *,
+    market: str, interval: str, as_of: datetime,
+) -> tuple[str, ...] | None:
+    """Require a source pair to be adjacent in pinned A-share sessions."""
+
+    if (market != "a" or interval not in {"1m", "5m", "30m"}
+            or before.tzinfo is None or after.tzinfo is None):
+        return None
+    cn = ZoneInfo("Asia/Shanghai")
+    earlier, later = before.astimezone(cn), after.astimezone(cn)
+    if earlier >= later or later.year > earlier.year + 1:
+        return None
+    try:
+        first = official_trading_session_evidence(
+            session=earlier.date(), observed_at=as_of,
+        )
+        second = (first if earlier.year == later.year else
+                  official_trading_session_evidence(
+                      session=later.date(), observed_at=as_of,
+                  ))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if (first is None or second is None
+            or first["classification"] != "TRADING_SESSION"
+            or second["classification"] != "TRADING_SESSION"):
+        return None
+    step = int(interval[:-1])
+
+    def closes(day):
+        return tuple(
+            datetime.combine(day, time(hour, minute), cn) + timedelta(minutes=offset)
+            for hour, minute in ((9, 30), (13, 0))
+            for offset in range(step, 121, step)
+        )
+
+    if earlier.date() == later.date():
+        ordered = closes(earlier.date())
+        if (earlier, later) not in tuple(zip(ordered, ordered[1:])):
+            return None
+    else:
+        if earlier != closes(earlier.date())[-1] or later != closes(later.date())[0]:
+            return None
+        days = tuple(first["calendar_document"]["trading_days"])
+        following = next((day for day in days if day > earlier.date().isoformat()), None)
+        if following is None and earlier.year != later.year:
+            following = next(iter(second["calendar_document"]["trading_days"]), None)
+        if following != later.date().isoformat():
+            return None
+    return tuple(dict.fromkeys((first["content_sha256"], second["content_sha256"])))
+
+
+def build_native_center_snapshot(
+    cd, *, interval: str, display_bar_closed_at: tuple[int, ...],
+) -> dict[str, object]:
+    """Publish only centers calculated from this chart's own K-line period.
+
+    The retired recursive movement partition does not run in the live chart.
+    Point labels use the separately declared native-center signal policy.
+    """
+
+    if interval != cd.get_frequency():
+        raise ValueError("native center interval must match its source bars")
+    bars = tuple(cd.get_src_klines())
+    if not bars or not display_bar_closed_at:
+        raise ValueError("native center snapshot requires source bars")
+    display_end = aware_datetime_to_epoch_seconds(bars[-1].date)
+    if (display_bar_closed_at[-1] != display_end
+            or any(left >= right for left, right in zip(
+                display_bar_closed_at, display_bar_closed_at[1:]
+            ))):
+        raise ValueError("display bars must be ordered and end at the source cutoff")
+
+    as_of = cd._strict_as_of()
+    cutoff = aware_datetime_to_epoch_seconds(as_of)
+    quantum = cd._strict_price_quantum()
+    center_result = cd.get_native_centers()
+    centers = []
+    for center in center_result.centers:
+        if center.available_at > as_of:
+            continue
+        item = strict_center_to_chart_dict(center)
+        item["tradable"] = False
+        centers.append(_with_prices(item, quantum))
+    segment_units = tuple(cd.get_segment_units())
+    units = {unit.unit_id: unit for unit in segment_units}
+    center_by_id = {center["center_id"]: center for center in centers}
+    previews = [
+        _with_prices(item, quantum)
+        for preview in center_result.previews
+        if preview.available_at <= as_of
+        if (item := strict_center_preview_to_chart_dict(
+            preview, units, center_by_id.get(preview.formal_center_id)
+        )) is not None
+    ]
+    try:
+        strength = MacdStrengthProvider(cd)
+    except (AttributeError, TypeError, ValueError):
+        strength = None
+    alerts = [
+        _with_prices(item, quantum)
+        for item in build_native_center_signals(
+            segment_units, tuple(center_result.centers), strength, as_of=as_of,
+        )
+    ]
+    stroke_construction = (
+        cd.get_stroke_construction_state()
+        if hasattr(cd, "get_stroke_construction_state") else {}
+    )
+    segment_construction = (
+        cd.get_segment_construction_state()
+        if hasattr(cd, "get_segment_construction_state") else {}
+    )
+    unresolved_segment_ranges = []
+    tail = segment_construction.get("tail")
+    if segment_construction.get("status") == "unresolved" and tail:
+        region_id = stable_structure_id(
+            "unresolved-segment-tail-v1", cd.get_code(), interval,
+            cd._strict_price_basis_revision(), tail["start_time"], tail["start_price"],
+        )
+        unresolved_segment_ranges.append({
+            "render_kind": "segment_unresolved_range",
+            "region_id": region_id,
+            "render_id": stable_structure_id(region_id, tail),
+            "structural_level": 0,
+            "price_basis_revision": cd._strict_price_basis_revision(),
+            "available_at": cutoff,
+            "state": "unresolved",
+            "tradable": False,
+            "direction": tail["direction"],
+            "reason": tail["reason"],
+            "pen_count": tail["pen_count"],
+            "confirmed_pen_count": tail["confirmed_pen_count"],
+            "points": [
+                {"time": tail["start_time"], "price": tail["high"]},
+                {"time": tail["observed_through"], "price": tail["low"]},
+            ],
+        })
+    basis = cd._strict_price_basis_revision()
+    revision = stable_structure_id(
+        "native-center-only-v1", cd.get_code(), interval, basis, cutoff,
+        centers, previews, alerts, bool(stroke_construction.get("unresolved_regions")),
+        segment_construction,
+        unresolved_segment_ranges,
+        EXIT_PRICE_VERSION,
+    )
+    return with_point_exit_plans({
+        "schema": CHART_STRUCTURE_SCHEMA,
+        "analysis_scope": "native_centers",
+        "native_member_policy": {
+            "source_frequency": interval,
+            "member_basis": "native_locked_segment",
+            "role": "operational_subordinate_member",
+            "recursive_type_proven": False,
+        },
+        "symbol": cd.get_code(),
+        "source_frequency": interval,
+        "display_frequency": interval,
+        "source_closed_at": cutoff,
+        "price_basis_revision": basis,
+        "structure_price_quantum": _canonical_quantum(quantum),
+        "strict_config_revision": cd._strict_config_revision(),
+        "structure_revision": revision,
+        "snapshot_revision": revision,
+        "render_revision": revision,
+        "declared_30m_fixed_view": None,
+        "levels": [{
+            "structural_level": 0,
+            "label": interval,
+            "origin": "native_segments",
+            "centers": centers,
+            "center_previews": previews,
+            "trend_types": [],
+            "trend_shapes": [],
+            "points": alerts,
+            "divergences": [],
+        }],
+        "stroke_center_observations": [],
+        "conditional_centers": [],
+        "unresolved_segment_ranges": unresolved_segment_ranges,
+        "stroke_connection_pending": bool(stroke_construction.get("unresolved_regions")),
+        "segment_construction": segment_construction,
+        "point_exit_plans": {},
+        "formal_point_issued": bool(alerts),
+        "tradable": bool(alerts),
+    }, native_source_valid={point["point_id"]: True for point in alerts})
+
+
+def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int, ...],
+                          declared_minimum_frequency: str | None = None,
+                          bar_time_label: str = "end"):
     if interval != cd.get_frequency():
         raise ValueError("native center interval must match its source bars")
     as_of = cd._strict_as_of()
     cutoff = aware_datetime_to_epoch_seconds(as_of)
     # Display geometry keeps the provider's labels. For start-labelled bars,
     # the completed input's causal cutoff is one interval after its last label.
-    display_end = aware_datetime_to_epoch_seconds(cd.get_src_klines()[-1].date)
+    raw_bars = tuple(cd.get_src_klines())
+    display_end = aware_datetime_to_epoch_seconds(raw_bars[-1].date)
     if (
         not display_bar_closed_at
         or display_bar_closed_at[-1] != display_end
@@ -734,9 +1352,66 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         raise ValueError("display bars must be ordered and end at the source cutoff")
     quantum = cd._strict_price_quantum()
     evidence = cd.get_strict_evidence()
+    try:
+        macd = cd.get_idx()["macd"]
+        zero_axis_state = macd_zero_axis_operational_state(
+            tuple(bar.date for bar in raw_bars), macd["dif"], macd["dea"],
+            physical_frequency=interval, as_of=as_of,
+            closed_through=getattr(cd, "_stroke_closed_through", None),
+            bar_known_times=tuple(
+                getattr(cd, "_stroke_close_times", {}).get(bar.date)
+                for bar in raw_bars
+            ),
+            declared_minimum_frequency=declared_minimum_frequency,
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        zero_axis_state = macd_zero_axis_operational_state(
+            (), (), (), physical_frequency=interval, as_of=as_of,
+            closed_through=None,
+            declared_minimum_frequency=declared_minimum_frequency,
+        )
+    zero_axis_state = {
+        **zero_axis_state,
+        "bar_market_at": _optional_epoch(zero_axis_state["bar_market_at"]),
+        "known_at": _optional_epoch(zero_axis_state["known_at"]),
+        "price_basis_revision": cd._strict_price_basis_revision(),
+    }
+    cross_frequency_state = None
+    if interval == "5m":
+        try:
+            cross_frequency_state = observe_u293_macd_cross_frequency(
+                tuple(bar.date for bar in raw_bars),
+                tuple(getattr(cd, "_stroke_close_times", {}).get(bar.date)
+                      for bar in raw_bars),
+                tuple(bar.c for bar in raw_bars),
+                cd.get_idx()["macd"]["hist"],
+                physical_frequency=interval,
+                market=getattr(cd, "market", "unknown"),
+                bar_time_label=bar_time_label,
+                as_of=as_of,
+                closed_through=getattr(cd, "_stroke_closed_through", None),
+                price_basis_revision=cd._strict_price_basis_revision(),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            cross_frequency_state = observe_u293_macd_cross_frequency(
+                (), (), (), (), physical_frequency=interval,
+                market=getattr(cd, "market", "unknown"),
+                bar_time_label=bar_time_label, as_of=as_of, closed_through=None,
+                price_basis_revision=cd._strict_price_basis_revision(),
+            )
+    try:
+        formation_strength = MacdStrengthProvider(cd)
+    except (AttributeError, TypeError, ValueError):
+        # The local formation comparison is optional diagnostic evidence;
+        # a structure-only replay must remain drawable without MACD.
+        formation_strength = None
     levels = []
+    source_levels = {level.structural_level: level for level in evidence.structure.levels}
+    associative_hypotheses = []
     for level in evidence.structure.levels:
         depth = level.structural_level
+        if depth == 0:
+            associative_hypotheses = _active_associative_hypotheses(level, as_of)
         visible_centers = tuple(
             center for center in level.center_result.centers
             if center.available_at <= as_of
@@ -745,6 +1420,12 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
             strict_center_to_chart_dict(center)
             for center in visible_centers
         ]
+        direct_gap_connectors, direct_gap_review = _direct_chart_gap_connectors(
+            visible_centers, raw_bars, display_bar_closed_at,
+            symbol=cd.get_code(), market=getattr(cd, "market", "unknown"), interval=interval,
+            basis=cd._strict_price_basis_revision(), quantum=quantum,
+            as_of=as_of,
+        )
         by_id = {center["center_id"]: center for center in centers}
         units = {unit.unit_id: unit for unit in level.units}
         previews = [item for preview in level.center_result.previews
@@ -755,10 +1436,186 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
             trend for trend in getattr(level, "trend_types", ())
             if trend.available_at <= as_of
         )
+        formal_chart_trends = {
+            trend.trend_id: trend
+            for trend in (*getattr(level, "completed_trends", ()), *visible_trends)
+            if trend.available_at <= as_of and trend.centers
+        }
         visible_boundaries = tuple(
             boundary for boundary in getattr(level, "decomposition_boundaries", ())
             if boundary.available_at <= as_of
         )
+        formation_states = [
+            {
+                **state,
+                "following_up_market_end": _optional_epoch(
+                    state["following_up_market_end"]
+                ),
+                "following_up_available_at": _optional_epoch(
+                    state["following_up_available_at"]
+                ),
+                "formation_market_at": _optional_epoch(state["formation_market_at"]),
+                "formation_known_at": _optional_epoch(state["formation_known_at"]),
+            }
+            for state in trend_formation_rule_states(
+                level, evidence.confirmed_points, as_of, formation_strength
+            )
+        ]
+        second_buy_followups = [
+            {
+                **state,
+                "first_up_available_at": _optional_epoch(
+                    state["first_up_available_at"]
+                ),
+                "following_up_available_at": _optional_epoch(
+                    state["following_up_available_at"]
+                ),
+                "branch_market_at": _optional_epoch(state["branch_market_at"]),
+                "branch_known_at": _optional_epoch(state["branch_known_at"]),
+            }
+            for state in second_buy_followup_observations(
+                level, evidence.confirmed_points, as_of
+            )
+        ]
+        oscillation_monitors = [
+            {
+                **state,
+                "z_known_at": _optional_epoch(state["z_known_at"]),
+                "center_initial_known_at": _optional_epoch(
+                    state["center_initial_known_at"]
+                ),
+                "observations": [
+                    {
+                        **item,
+                        "market_at": _optional_epoch(item["market_at"]),
+                        "known_at": _optional_epoch(item["known_at"]),
+                    }
+                    for item in state["observations"]
+                ],
+            }
+            for center in visible_centers
+            for state in (center_oscillation_monitor_state(center, as_of),)
+        ]
+        oscillation_operation_states = [
+            {
+                **state,
+                "center_established_at": _optional_epoch(state["center_established_at"]),
+                "lower_divergence_observations": [
+                    {
+                        **item,
+                        "market_at": _optional_epoch(item["market_at"]),
+                        "known_at": _optional_epoch(item["known_at"]),
+                    }
+                    for item in state["lower_divergence_observations"]
+                ],
+                "formal_third_points": [
+                    {
+                        **item,
+                        "market_at": _optional_epoch(item["market_at"]),
+                        "known_at": _optional_epoch(item["known_at"]),
+                    }
+                    for item in state["formal_third_points"]
+                ],
+            }
+            for state in (
+                center_oscillation_operation_rule_states(
+                    level, source_levels[depth - 1],
+                    tuple((*evidence.confirmed_points, *evidence.approaching_points)),
+                    as_of,
+                ) if depth > 0 and depth - 1 in source_levels else ()
+            )
+        ]
+        nested_change_states = [
+            {
+                **state,
+                "parent_center_initial_known_at": _optional_epoch(
+                    state["parent_center_initial_known_at"]
+                ),
+                "condition_market_at": _optional_epoch(state["condition_market_at"]),
+                "condition_known_at": _optional_epoch(state["condition_known_at"]),
+            }
+            for state in (
+                nested_change_watch_rule_states(level, source_levels[depth - 1], as_of)
+                if depth > 0 and depth - 1 in source_levels else ()
+            )
+        ]
+        return_grade_states = [
+            {
+                **state,
+                "first_lower_return_market_at": _optional_epoch(
+                    state["first_lower_return_market_at"]
+                ),
+                "first_lower_return_known_at": _optional_epoch(
+                    state["first_lower_return_known_at"]
+                ),
+                "qualified_child_return_market_at": _optional_epoch(
+                    state["qualified_child_return_market_at"]
+                ),
+                "qualified_child_return_known_at": _optional_epoch(
+                    state["qualified_child_return_known_at"]
+                ),
+            }
+            for state in (
+                center_first_return_grade_watch_states(
+                    level, source_levels[depth - 1], as_of
+                )
+                if depth > 0 and depth - 1 in source_levels else ()
+            )
+        ]
+        third_precision_states = [
+            {
+                **state,
+                "lower_return_member_ids": list(state["lower_return_member_ids"]),
+                "parent_center_established_at": _optional_epoch(
+                    state["parent_center_established_at"]
+                ),
+                "parent_center_initial_known_at": _optional_epoch(
+                    state["parent_center_initial_known_at"]
+                ),
+                "double_subsub_return_known_at": _optional_epoch(
+                    state["double_subsub_return_known_at"]
+                ),
+                "lower_divergence_known_at": _optional_epoch(
+                    state["lower_divergence_known_at"]
+                ),
+                "precision_market_at": _optional_epoch(state["precision_market_at"]),
+                "precision_known_at": _optional_epoch(state["precision_known_at"]),
+                "formal_third_point_available_at": _optional_epoch(
+                    state["formal_third_point_available_at"]
+                ),
+            }
+            for state in (
+                third_point_entry_precision_rule_states(
+                    level, source_levels[depth - 1],
+                    tuple((*evidence.confirmed_points, *evidence.approaching_points)),
+                    as_of,
+                )
+                if depth > 0 and depth - 1 in source_levels else ()
+            )
+        ]
+        macd_phase_states = [
+            {
+                **state,
+                "center_initial_known_at": _optional_epoch(
+                    state["center_initial_known_at"]
+                ),
+                "center_context_known_at": _optional_epoch(
+                    state["center_context_known_at"]
+                ),
+                "compare_leg_unit_ids": list(state["compare_leg_unit_ids"]),
+                "signal_leg_unit_ids": list(state["signal_leg_unit_ids"]),
+                "phase": (
+                    None if state["phase"] is None else {
+                        **state["phase"],
+                        "market_at": _optional_epoch(state["phase"]["market_at"]),
+                        "known_at": _optional_epoch(state["phase"]["known_at"]),
+                    }
+                ),
+            }
+            for state in center_macd_phase_rule_states(
+                level, as_of, formation_strength
+            )
+        ]
         levels.append({
             "structural_level": depth,
             "label": interval if depth == 0 else f"{interval}/L{depth}",
@@ -766,9 +1623,26 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
             "centers": [_with_prices(center, quantum) for center in centers],
             "center_previews": [_with_prices(preview, quantum) for preview in previews],
             "trend_types": [_trend_type_rule_payload(trend) for trend in visible_trends],
+            "trend_shapes": [
+                _with_prices(_formal_trend_chart_payload(trend), quantum)
+                for trend in formal_chart_trends.values()
+            ],
+            "trend_partition_review": _trend_partition_review(
+                level, visible_centers, visible_trends, as_of
+            ),
+            "declared_upgrade_split_reviews": [
+                _declared_upgrade_review_payload(
+                    trend, source_levels.get(depth + 1), depth, as_of,
+                )
+                for trend in visible_trends
+                if trend.kind.value == "consolidation" and len(trend.centers) > 1
+            ],
+            "l038_fixed_same_level_split_observations": (
+                _l038_six_member_split_observations(level, as_of)
+            ),
             "completed_trend_ids": [
                 trend.trend_id for trend in getattr(level, "completed_trends", ())
-                if trend.available_at <= as_of
+                if trend.available_at <= as_of and trend.centers
             ],
             "decomposition_boundaries": [
                 _decomposition_boundary_rule_payload(boundary)
@@ -778,16 +1652,31 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
                 _center_pair_rule_payload(previous, current)
                 for previous, current in zip(visible_centers, visible_centers[1:])
             ],
+            "general_center_connector_observations": direct_gap_connectors,
+            "general_center_connector_review": direct_gap_review,
+            "center_return_grade_watch_states": return_grade_states,
+            "third_point_entry_precision_rule_states": third_precision_states,
+            "center_oscillation_monitors": oscillation_monitors,
+            "center_oscillation_operation_rule_states": oscillation_operation_states,
+            "nested_change_watch_rule_states": nested_change_states,
+            "center_macd_phase_rule_states": macd_phase_states,
             "transition_rule_state": _transition_rule_payload(
                 level, evidence.confirmed_points, as_of
             ),
+            "trend_formation_rule_states": formation_states,
+            "second_buy_followup_observations": second_buy_followups,
             "points": [
                 _with_prices(strict_point_to_chart_dict(point), quantum)
                 for point in (*evidence.confirmed_points, *evidence.approaching_points)
                 if point.structural_level == depth and point.available_at <= as_of
             ],
             "divergences": [
-                _with_prices(strict_divergence_to_chart_dict(divergence), quantum)
+                {
+                    **_with_prices(strict_divergence_to_chart_dict(divergence), quantum),
+                    "evidence_scope": "formal_structural_ledger",
+                    "indicator_role": "auxiliary_strength_comparison",
+                    "metric_policy": "price_extreme_and_any_recorded_decay",
+                }
                 for divergence in evidence.divergences
                 if divergence.structural_level == depth and divergence.available_at <= as_of
             ],
@@ -795,9 +1684,43 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
     if not levels:
         levels.append({"structural_level": 0, "label": interval, "origin": "native_segments",
                        "centers": [], "center_previews": [], "trend_types": [],
+                       "trend_shapes": [],
+                       "trend_partition_review": {
+                           "status": "no_visible_source_units",
+                           "source_unit_count": 0,
+                           "formal_center_count": 0,
+                           "formal_type_count": 0,
+                           "geometric_movement_count": 0,
+                           "unowned_source_unit_ids": [],
+                           "unowned_leading_source_unit_ids": [],
+                           "first_formal_type_connection": "no_formal_type",
+                           "open_left_boundary_candidate": False,
+                           "formal_type_absence_proves_market_has_no_type": False,
+                           "tradable": False,
+                       },
+                       "declared_upgrade_split_reviews": [],
+                       "l038_fixed_same_level_split_observations": [],
                        "completed_trend_ids": [], "decomposition_boundaries": [],
-                       "center_pair_rule_states": [],
+                        "center_pair_rule_states": [],
+                        "general_center_connector_observations": [],
+                        "general_center_connector_review": {
+                            "status": "no_formal_center_level",
+                            "candidate_boundary_pairs": 0,
+                            "calendar_verified_pairs": 0,
+                            "calendar_unverified_pairs": 0,
+                            "invalid_bar_geometry_pairs": 0,
+                            "direct_gap_observations": 0,
+                            "tradable": False,
+                        },
+                        "center_return_grade_watch_states": [],
+                        "third_point_entry_precision_rule_states": [],
+                       "center_oscillation_monitors": [],
+                       "center_oscillation_operation_rule_states": [],
+                       "nested_change_watch_rule_states": [],
+                       "center_macd_phase_rule_states": [],
                        "transition_rule_state": {"status": "not_started", "boll_hint": "unavailable"},
+                       "trend_formation_rule_states": [],
+                       "second_buy_followup_observations": [],
                        "points": [], "divergences": []})
     _attach_parent_center_rule_evidence(levels)
     observations = [
@@ -805,6 +1728,153 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         for center in evidence.stroke_center_observations.centers
         if center.available_at <= cd._strict_as_of()
     ]
+    physical_lineage_api_ready = all(callable(getattr(cd, name, None)) for name in (
+        "get_xds", "get_segment_units", "get_contiguous_bis",
+        "get_stroke_observation_units",
+    ))
+    physical_lineage_sources = (
+        cd.get_xds(), cd.get_segment_units(),
+        cd.get_contiguous_bis(), cd.get_stroke_observation_units(),
+    ) if physical_lineage_api_ready else ((), (), (), ())
+    raw_physical_memberships = observe_physical_segment_stroke_lineage(
+        *physical_lineage_sources
+    )
+    physical_stroke_lineage = [
+        {
+            **item,
+            "stroke_unit_ids": list(item["stroke_unit_ids"]),
+            "segment_available_at": aware_datetime_to_epoch_seconds(
+                item["segment_available_at"]
+            ),
+            "latest_stroke_available_at": _optional_epoch(
+                item["latest_stroke_available_at"]
+            ),
+        }
+        for item in raw_physical_memberships
+    ]
+    physical_lineage_status = (
+        "source_api_unavailable" if not physical_lineage_api_ready else
+        "pending_raw_stroke_indices" if any(
+            item["status"] != "exact_raw_stroke_membership"
+            for item in physical_stroke_lineage
+        ) else "exact_raw_source_membership"
+    )
+    physical_formal_centers = (
+        evidence.structure.levels[0].center_result.centers
+        if evidence.structure.levels else ()
+    )
+    u194_observation = observe_class_formal_component_candidates(
+        evidence.stroke_center_observations.centers,
+        physical_formal_centers,
+        raw_physical_memberships,
+        as_of=as_of,
+    )
+    u194_component_pairs = [
+        {
+            **pair,
+            "class_core_pen_unit_ids": list(pair["class_core_pen_unit_ids"]),
+            "class_body_pen_unit_ids": list(pair["class_body_pen_unit_ids"]),
+            "formal_body_segment_unit_ids": list(pair["formal_body_segment_unit_ids"]),
+            "class_core_zone": list(pair["class_core_zone"]),
+            "formal_core_zone": list(pair["formal_core_zone"]),
+            "class_available_at": aware_datetime_to_epoch_seconds(pair["class_available_at"]),
+            "formal_available_at": aware_datetime_to_epoch_seconds(pair["formal_available_at"]),
+        }
+        for pair in u194_observation["pairs"]
+    ]
+    u194_component_review = {
+        **{key: value for key, value in u194_observation.items() if key != "pairs"},
+        "as_of": cutoff,
+        "formal_center_ids_missing_segment_membership": list(
+            u194_observation["formal_center_ids_missing_segment_membership"]
+        ),
+        "physical_lineage_status": physical_lineage_status,
+    }
+    strict_levels = evidence.structure.levels
+    u180_source_ready = bool(strict_levels) and isinstance(
+        strict_levels[0], StrictLevelResult
+    )
+    u180_watches = (
+        observe_u180_nine_segment_grade_watches(
+            strict_levels[0],
+            strict_levels[1] if len(strict_levels) > 1 else None,
+            as_of=as_of,
+        )
+        if u180_source_ready else ()
+    )
+    u180_watch_payload = [
+        {
+            **watch,
+            "related_rule_ids": list(watch["related_rule_ids"]),
+            "source_refs": list(watch["source_refs"]),
+            "segment_unit_ids": list(watch["segment_unit_ids"]),
+            "higher_level_visible_center_ids": list(watch["higher_level_visible_center_ids"]),
+            "higher_level_member_reviews": [
+                {
+                    **item,
+                    "parent_established_at": aware_datetime_to_epoch_seconds(
+                        item["parent_established_at"]
+                    ),
+                    "parent_grade_source_known_at": _optional_epoch(
+                        item["parent_grade_source_known_at"]
+                    ),
+                    "parent_member_type_unit_ids": list(item["parent_member_type_unit_ids"]),
+                    "parent_member_segment_groups": [
+                        list(group) for group in item["parent_member_segment_groups"]
+                    ],
+                    "shared_first_nine_segment_unit_ids": list(
+                        item["shared_first_nine_segment_unit_ids"]
+                    ),
+                }
+                for item in watch["higher_level_member_reviews"]
+            ],
+            "higher_level_center_ids_with_shared_nine_segments": list(
+                watch["higher_level_center_ids_with_shared_nine_segments"]
+            ),
+            "nine_segment_source_contained_formal_parent_center_ids": list(
+                watch["nine_segment_source_contained_formal_parent_center_ids"]
+            ),
+            "all_completed_watch_segments_in_formal_parent_center_ids": list(
+                watch["all_completed_watch_segments_in_formal_parent_center_ids"]
+            ),
+            "ninth_segment_market_at": aware_datetime_to_epoch_seconds(
+                watch["ninth_segment_market_at"]
+            ),
+            "review_known_at": aware_datetime_to_epoch_seconds(watch["review_known_at"]),
+            "nine_segment_review_known_at": aware_datetime_to_epoch_seconds(
+                watch["nine_segment_review_known_at"]
+            ),
+            "higher_grade_source_link_known_at": _optional_epoch(
+                watch["higher_grade_source_link_known_at"]
+            ),
+        }
+        for watch in u180_watches
+    ]
+    u180_watch_review = {
+        "rule_id": "U180",
+        "status": (
+            "source_api_unavailable" if not u180_source_ready else
+            "review_candidates" if u180_watches else "no_nine_segment_lifecycle_witness"
+        ),
+        "source_scope": "one_formal_center_body_plus_failed_departures",
+        "candidate_count": len(u180_watch_payload),
+        "source_linked_parent_center_count": sum(
+            len(watch["higher_level_center_ids_with_shared_nine_segments"])
+            for watch in u180_watch_payload
+        ),
+        "nine_segment_source_contained_parent_center_count": sum(
+            len(watch["nine_segment_source_contained_formal_parent_center_ids"])
+            for watch in u180_watch_payload
+        ),
+        "all_completed_watch_source_contained_parent_center_count": sum(
+            len(watch["all_completed_watch_segments_in_formal_parent_center_ids"])
+            for watch in u180_watch_payload
+        ),
+        "author_exact_nine_segment_pattern_certified": False,
+        "higher_center_membership_certified_by_watch": False,
+        "formal_third_point_identity_changed": False,
+        "tradable": False,
+    }
     construction = (cd.get_stroke_construction_state()
                     if hasattr(cd, "get_stroke_construction_state") else {})
     connection_pending = bool(construction.get("unresolved_regions"))
@@ -830,14 +1900,44 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
             "points": [{"time": tail["start_time"], "price": tail["high"]},
                        {"time": tail["observed_through"], "price": tail["low"]}],
         })
+    completed_nested_divergences = list(observe_completed_nested_divergence_lineage(
+        evidence.structure.levels, getattr(evidence, "divergences", ()), as_of=as_of,
+    ))
+    live_divergence_candidates = [
+        state for level in evidence.structure.levels
+        for state in observe_live_center_divergence_candidate(
+            level, as_of=as_of, strength=formation_strength,
+        )
+    ]
+    live_divergence_candidates.extend(
+        state for level in evidence.structure.levels
+        for state in observe_live_trend_divergence_comparisons(
+            level, evidence.approaching_points, as_of=as_of,
+            strength=formation_strength,
+        )
+    )
+    live_divergence_candidates.sort(key=lambda state: (
+        state["structural_level"], state["center_id"], state["candidate_id"],
+    ))
+    nested_candidate_lineage = list(observe_nested_candidate_history_lineage(
+        evidence.structure.levels, getattr(evidence, "divergences", ()),
+        ((cutoff, tuple(live_divergence_candidates)),), as_of=as_of,
+    ))
     revision = stable_structure_id(
-        "chart-analysis-snapshot-v7",
+        "chart-analysis-snapshot-v45-restored-physical-centers",
         EXIT_PRICE_VERSION,
         cd.get_code(),
         interval,
         cd._strict_config_revision(),
         cutoff,
-        levels, observations, connection_pending, conditional, segment_construction,
+        levels, observations, physical_stroke_lineage, physical_lineage_status,
+        u194_component_pairs, u194_component_review,
+        u180_watch_payload, u180_watch_review,
+        connection_pending, conditional, segment_construction,
+        associative_hypotheses,
+        zero_axis_state,
+        cross_frequency_state, completed_nested_divergences,
+        live_divergence_candidates, nested_candidate_lineage,
     )
     return with_point_exit_plans({
         "schema": CHART_STRUCTURE_SCHEMA,
@@ -854,7 +1954,20 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         "snapshot_revision": revision,
         "render_revision": revision,
         "levels": levels,
+        "declared_30m_fixed_view": None,
+        "general_associative_hypotheses": associative_hypotheses,
+        "macd_zero_axis_operational_state": zero_axis_state,
+        "macd_cross_frequency_u293_state": cross_frequency_state,
+        "completed_nested_divergence_observations": completed_nested_divergences,
+        "u255_live_departure_candidate_states": live_divergence_candidates,
+        "nested_candidate_history_lineage_observations": nested_candidate_lineage,
         "stroke_center_observations": observations,
+        "physical_segment_stroke_lineage": physical_stroke_lineage,
+        "physical_segment_stroke_lineage_status": physical_lineage_status,
+        "u194_class_formal_component_candidates": u194_component_pairs,
+        "u194_class_formal_component_review": u194_component_review,
+        "u180_nine_segment_grade_watch_states": u180_watch_payload,
+        "u180_nine_segment_grade_watch_review": u180_watch_review,
         "stroke_connection_pending": connection_pending,
         "conditional_centers": conditional,
         "segment_construction": segment_construction,
@@ -866,5 +1979,6 @@ __all__ = [
     "CHART_STRUCTURE_SCHEMA",
     "CHART_CENTER_SCHEMA",
     "build_center_snapshot",
+    "build_native_center_snapshot",
     "strict_center_to_chart_dict",
 ]

@@ -36,7 +36,9 @@ def dashboard():
     try:
         if request.args.getlist("source") not in ([], ["latest"]):
             raise ValueError("仅支持最新选股结果，请刷新页面")
-        data = workbench.dashboard(background=True)
+        if request.args.getlist("compact") not in ([], ["0"], ["1"]):
+            raise ValueError("列表读取方式无效")
+        data = workbench.dashboard(background=True, compact=request.args.get("compact") == "1")
         loading = data["status"].get("results_loading", False)
         response = jsonify(data)
         response.status_code = 202 if loading else 200
@@ -60,11 +62,25 @@ def reviews():
         return jsonify(error=str(exc)), 400
 
 
+@screening_bp.get("/screening/candidate")
+@login_required
+def candidate():
+    try:
+        if set(request.args) != {"source", "id"} or any(len(request.args.getlist(key)) != 1 for key in request.args):
+            raise ValueError("请指定候选所属批次及身份")
+        response = jsonify(workbench.candidate_detail(request.args["source"], request.args["id"]))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except (ValueError, KeyError, OSError) as exc:
+        return jsonify(error=str(exc)), 409
+
+
 @screening_bp.get("/screening/status")
 @login_required
 def status():
     state = manager.status()
     state["higher_context_version"] = workbench.higher_context.status_version(manager, state.get("run_id"))
+    state["live_recheck_version"] = workbench.live_recheck_version(state.get("run_id"), state.get("current_source_revision"))
     return jsonify(state)
 
 

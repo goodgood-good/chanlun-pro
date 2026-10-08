@@ -14,7 +14,7 @@ from chanlun.cl_utils.strict_chart_runtime import (
 )
 from chanlun.cl_utils.strict_chart import (
     aware_datetime_to_epoch_seconds,
-    build_center_snapshot,
+    build_native_center_snapshot,
     strict_center_to_chart_dict,
 )
 
@@ -31,6 +31,6 @@ __all__ = [
     "build_strict_chart_cd",
 # 严格图表证据。
     "aware_datetime_to_epoch_seconds",
-    "build_center_snapshot",
+    "build_native_center_snapshot",
     "strict_center_to_chart_dict",
 ]

@@ -224,6 +224,28 @@ test('same ids in two chart instances never share ownership scope', () => {
   );
 });
 
+test('physical source periods keep overlaid centers separate and trends have stable ids', () => {
+  const center = strictCenter();
+  const own = {...center, source_frequency:'1m'};
+  const higher = {...center, source_frequency:'5m'};
+  assert.notEqual(
+    Reconcile.scopeKey(chartContext('chart-a'), own),
+    Reconcile.scopeKey(chartContext('chart-a'), higher),
+  );
+  assert.equal(Reconcile.logicalKey({render_kind:'strict_trend',trend_id:'trend-1'}),
+    'strict_trend:trend-1');
+  assert.equal(Reconcile.logicalKey({render_kind:'user_same_level_type',trend_id:'user-1'}),
+    'user_same_level_type:user-1');
+  assert.equal(Reconcile.logicalKey({render_kind:'user_parent_center',center_id:'parent-1'}),
+    'user_parent_center:parent-1');
+});
+
+test('user same-level type keeps exact endpoints until both source bars are loaded', () => {
+  const item={render_kind:'user_same_level_type',points:[{time:100,price:10},{time:500,price:11}]};
+  assert.equal(Reconcile.clipToLoadedRange(item,{from:200,to:600}),null);
+  assert.deepEqual(Reconcile.clipToLoadedRange(item,{from:100,to:500}).points,item.points);
+});
+
 test('stale epochs are rejected after a newer reconcile or disposal', () => {
   const epoch = new Reconcile.ReconcileEpoch();
   const first = epoch.next('scope');

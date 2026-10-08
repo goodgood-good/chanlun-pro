@@ -2,7 +2,9 @@
 
 import json
 import gzip
+import os
 import time
+from threading import Event
 from unittest.mock import Mock
 
 import pytest
@@ -21,21 +23,45 @@ def fixture_run(tmp_path, monkeypatch):
     screening.write_json(manager.root / "latest.json", {"run_id": run_id})
     screening.write_json(directory / "status.json", {
         "run_id": run_id, "status": "completed", "completed": 1, "total": 1,
+        "source_revision": screening.source_revision(),
     })
     item = {"code": "SH.600088", "rows": [{
         "code": "SH.600088", "name": "样例", "frequency": "5m",
         "selected": [{"point": {"point_id": "point", "point_type": "3buy", "center_ordinal": 1, "available_at": 100,
-                                  "anchor_price": 10, "anchor_tick": 10, "anchor_at": 90,
-                                  "anchor_unit_id": "return", "side": "buy", "status": "confirmed",
-                                  "confirmed_at": 100, "structural_level": 0, "source_kind": "segment"}, "center": None}],
+                    "anchor_price": 10, "anchor_tick": 10, "anchor_at": 90,
+                    "center_id": "center", "invalidation_tick": 9,
+                    "anchor_unit_id": "return", "side": "buy", "status": "confirmed",
+                    "confirmed_at": 100, "structural_level": 0, "source_kind": "segment"}, "center": None}],
         "recent_rejections": [], "reason_counts": {},
     }]}
-    (directory / "results.jsonl").write_text(json.dumps(item) + "\n", encoding="utf-8")
     (directory / "evidence").mkdir()
     (directory / "evidence/SH.600088_5m.parquet").write_bytes(b"fixture")
+    def unit(identity, start, end, start_tick, end_tick):
+        return {"unit_id": identity, "start_time": start, "end_time": end,
+                "start_tick": start_tick, "end_tick": end_tick,
+                "low_tick": min(start_tick, end_tick), "high_tick": max(start_tick, end_tick),
+                "direction": "up" if end_tick > start_tick else "down",
+                "confirmed_at": end, "available_at": end, "locked": True, "forming": False}
+
+    roles = [unit("a", 50, 56, 7, 9), unit("b", 56, 62, 9, 8),
+             unit("c", 62, 68, 8, 10)]
+    body = unit("d", 68, 74, 10, 8)
+    leave = unit("leave", 74, 80, 8, 12)
+    ret = unit("return", 80, 90, 12, 10)
+    center = {"center_id": "center", "structural_level": 0, "source_kind": "segment",
+              "formation_rule": "three_core", "third_class_confirmed": True,
+              "core": {"zd_tick": 8, "zg_tick": 9},
+              "core_unit_ids": [role["unit_id"] for role in roles],
+              "body_unit_ids": [role["unit_id"] for role in [*roles, body]],
+              "entry_unit_id": None, "establishment_leave_unit_id": None,
+              "establishment_segments": roles, "overlap_components": [*roles, body, leave],
+              "completion_leave_unit_id": "leave", "completion_return_unit_id": "return",
+              "lifecycle_leaving_segment": leave, "completion_return_segment": ret}
+    item["rows"][0]["selected"][0]["center"] = center
+    (directory / "results.jsonl").write_text(json.dumps(item) + "\n", encoding="utf-8")
     snapshot = {"symbol": "SH.600088", "source_frequency": "5m", "source_closed_at": 130,
                 "structure_price_quantum": "1", "levels": [{"structural_level": 0,
-                    "points": [item["rows"][0]["selected"][0]["point"]], "centers": [],
+                    "points": [item["rows"][0]["selected"][0]["point"]], "centers": [center],
                 }], "chart": {"xds": [
                     {"points": [{"time": 80, "price": 12}, {"time": 90, "price": 10}], "locked": True, "state": "locked"},
                     {"points": [{"time": 90, "price": 10}, {"time": 120, "price": 12}], "locked": False, "state": "forming"},
@@ -73,7 +99,8 @@ def test_one_damaged_legacy_snapshot_does_not_break_workbench(fixture_run, monke
     # must reject damaged gzip/structure, not crash or publish the bad stock.
     row["evidence"] = {"snapshot_bytes": len(raw), "parquet_bytes": 7}
     records.write_text(json.dumps(good) + "\n" + json.dumps(broken) + "\n", encoding="utf-8")
-    screening.write_json(directory / "status.json", {"run_id": source, "status": "completed", "completed": 2, "total": 2})
+    screening.write_json(directory / "status.json", {"run_id": source, "status": "completed", "completed": 2,
+                                                   "total": 2, "source_revision": screening.source_revision()})
     manager.start = Mock(side_effect=AssertionError("read must not scan"))
     monkeypatch.setattr("chanlun.screening.runner.snapshot_for", Mock(side_effect=AssertionError("read must not calculate")))
     app = create_app(test_config={"TESTING": True, "LOGIN_DISABLED": True, "VALIDATE_WEB_SECURITY": False})
@@ -91,6 +118,155 @@ def test_one_damaged_legacy_snapshot_does_not_break_workbench(fixture_run, monke
             or result["status"]["lifetime_exclusion_count"])
     assert packed.read_bytes() == raw
     manager.start.assert_not_called()
+
+
+def test_running_scan_keeps_verified_candidates_and_details_while_next_chunk_loads(fixture_run, monkeypatch):
+    manager, run_id, _ = fixture_run
+    directory = manager.root / run_id
+    state = json.loads((directory / "status.json").read_text(encoding="utf-8"))
+    state.update(status="running", total=100, worker_pid=os.getpid())
+    screening.write_json(directory / "status.json", state)
+    entered, release = Event(), Event()
+    original = manager._read_results
+
+    def read(directory, state, **kwargs):
+        if kwargs.get("after_completed") == 1:
+            entered.set()
+            assert release.wait(10)
+        return original(directory, state, **kwargs)
+
+    monkeypatch.setattr(manager, "_read_results", read)
+    manager.results()
+    app = create_app(test_config={"TESTING": True, "LOGIN_DISABLED": True, "VALIDATE_WEB_SECURITY": False})
+    try:
+        client = app.test_client()
+        first = client.get("/screening/workbench?compact=1").get_json()
+        row, = first["candidates"]
+        assert first["status"]["status"] == "running"
+        assert first["status"]["results_partial"] is True
+        with (directory / "results.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"code": "SZ.000001", "rows": [], "error": "missing bars"}) + "\n")
+        screening.write_json(directory / "status.json", {**state, "completed": 2})
+        pending = client.get("/screening/workbench?compact=1")
+        assert entered.wait(2)
+        assert pending.status_code == 202
+        body = pending.get_json()
+        assert body["status"]["results_through"] == 1
+        assert body["candidates"][0]["id"] == row["id"]
+        detail = client.get("/screening/candidate", query_string={"source": run_id, "id": row["id"]})
+        assert detail.status_code == 200
+        assert detail.get_json()["candidate"]["candidate_evidence_version"] == row["candidate_evidence_version"]
+    finally:
+        release.set()
+        manager.results()
+        app.extensions["shutdown_runtime_services"]()
+
+
+def test_changed_evidence_removes_a_previously_published_running_candidate(fixture_run):
+    manager, run_id, _ = fixture_run
+    directory = manager.root / run_id
+    state = json.loads((directory / "status.json").read_text(encoding="utf-8"))
+    screening.write_json(directory / "status.json", {**state, "status": "running", "worker_pid": os.getpid(), "total": 100})
+    assert len(workbench.dashboard()["candidates"]) == 1
+    (directory / "evidence/SH.600088_5m.json.gz").write_bytes(b"broken")
+    assert workbench.dashboard()["candidates"] == []
+
+
+def test_compact_index_and_lazy_detail_keep_the_same_verified_candidate(fixture_run, monkeypatch):
+    manager, run_id, archive = fixture_run
+    # Native price generation has separate recorded-data coverage. Here the
+    # contract is that a calculated exit reference survives both projections.
+    monkeypatch.setattr(screening, "evidence_exit_catalog", lambda *_: {"point": {
+        "point_id": "point", "point_status": "confirmed", "side": "buy", "source_frequency": "5m",
+        "stop_loss": {"price": 9, "trigger": "lt", "basis": "center_edge"},
+        "take_profit": {"price": None, "basis": "opposite_point", "status": "waiting"},
+    }})
+    full = workbench.dashboard()
+    compact = workbench.dashboard(compact=True)
+    row = compact["candidates"][0]
+    assert compact["point_counts"] == full["point_counts"]
+    assert row["id"] == full["candidates"][0]["id"]
+    assert row["detail_loaded"] is False
+    assert "audit" not in row and "center" not in row
+    assert row["exit_plan"]["stop_loss"] == full["candidates"][0]["exit_plan"]["stop_loss"]
+    assert row["exit_plan"]["take_profit"] == full["candidates"][0]["exit_plan"]["take_profit"]
+    assert "processed_symbols" not in compact["status"]
+    detail = workbench.candidate_detail(run_id, row["id"])
+    assert detail["candidate"]["detail_loaded"] is True
+    assert detail["candidate"]["point"] == full["candidates"][0]["point"]
+    with pytest.raises(ValueError):
+        workbench.candidate_detail("f" * 32, row["id"])
+
+
+def test_latest_verified_period_removes_stale_candidate_but_failed_or_older_checks_do_not(fixture_run, monkeypatch):
+    manager, run_id, archive = fixture_run
+    from cl_app.services.signal_monitor import service
+    current = workbench.dashboard()["candidates"][0]
+    key = f"{current['market']}:{current['code']}:{current['frequency']}"
+    cutoff = current["source_closed_at"] or 100
+    records = {key: {"cutoff": cutoff + 300, "checked_at": 1234, "identities": []}}
+    monkeypatch.setattr(service, "selection_overlay", lambda *_: records)
+    removed = workbench.dashboard(compact=True)
+    assert removed["candidates"] == []
+    assert removed["status"]["live_exclusion_count"] == 1
+    with pytest.raises(ValueError):
+        workbench.candidate_detail(run_id, current["id"])
+    records[key]["cutoff"] = cutoff - 300
+    assert len(workbench.dashboard()["candidates"]) == 1
+    records.clear()
+    assert len(workbench.dashboard()["candidates"]) == 1
+
+
+def test_live_failures_never_restore_exited_candidates_or_publish_unverified_ones(fixture_run, monkeypatch):
+    from cl_app.services.signal_monitor import service, _signal
+    manager, run_id, _ = fixture_run
+    current = workbench.dashboard()["candidates"][0]
+    key = f"{current['market']}:{current['code']}:{current['frequency']}"
+    cutoff = (current.get("source_closed_at") or 0) + 300
+    records = {key: {"cutoff": cutoff, "checked_at": 1234, "identities": [], "error": False}}
+    monkeypatch.setattr(service, "selection_overlay", lambda *_: records)
+    good_version = workbench.live_recheck_version(run_id, None)
+    assert workbench.dashboard()["candidates"] == []
+    records[key].update(error=True, failed_at=1234, failed_cutoff=cutoff + 300)
+    failed = workbench.dashboard()
+    assert failed["candidates"] == []
+    assert failed["status"]["live_exclusion_count"] == 1
+    assert failed["status"]["live_unverified_count"] == 0
+    assert failed["status"]["live_recheck_version"] != good_version
+
+    # A first failure carries no successful negative proof and suspends the
+    # row instead. Recovery can restore it without altering its point facts.
+    records[key] = {"error": True, "failed_at": 1234, "failed_cutoff": cutoff + 300}
+    failed = workbench.dashboard(compact=True)
+    assert failed["candidates"] == []
+    assert failed["status"]["live_exclusion_count"] == 0
+    assert failed["status"]["live_unverified_count"] == 1
+    with pytest.raises(ValueError, match="复核失败"):
+        workbench.candidate_detail(run_id, current["id"])
+    records[key] = {"cutoff": cutoff, "checked_at": 1234, "identities": [_signal(current)["id"]], "error": False}
+    restored = workbench.dashboard(compact=True)
+    row = restored["candidates"][0]
+    detail = workbench.candidate_detail(run_id, row["id"])
+    assert row["selection_check_version"] == detail["candidate"]["selection_check_version"]
+    assert row["latest_recheck_closed_at"] == cutoff
+    assert detail["candidate"]["point"] == current["point"]
+    assert restored["status"]["live_unverified_count"] == 0
+
+
+def test_live_version_changes_for_same_second_period_updates(fixture_run, monkeypatch):
+    from cl_app.services.signal_monitor import service
+    _, run_id, _ = fixture_run
+    records = {"a:SH.600088:5m": {"cutoff": 300, "checked_at": 1234, "identities": []}}
+    monkeypatch.setattr(service, "selection_overlay", lambda *_: records)
+    first = workbench.live_recheck_version(run_id, None)
+    records["a:SH.600088:30m"] = {"cutoff": 300, "checked_at": 1234, "identities": []}
+    second = workbench.live_recheck_version(run_id, None)
+    assert first != second
+    records["a:SH.600088:5m"]["identities"] = ["new-point"]
+    third = workbench.live_recheck_version(run_id, None)
+    assert second != third
+    records = dict(reversed(list(records.items())))
+    assert workbench.live_recheck_version(run_id, None) == third
 
 
 @pytest.mark.parametrize("ordinal,expected", [(1, 1), (2, 0), (None, 0)])
@@ -113,6 +289,40 @@ def test_saved_selection_applies_first_center_preference_without_changing_confir
     assert json.loads(path.read_text(encoding="utf-8"))["rows"][0]["selected"][0]["point"]["status"] == "confirmed"
 
 
+def test_frozen_third_buy_rejects_a_broken_center_return(fixture_run):
+    manager, source, _ = fixture_run
+    assert len(manager.results()["selected"]) == 1
+    packed = manager.root / source / "evidence/SH.600088_5m.json.gz"
+    snapshot = json.loads(gzip.decompress(packed.read_bytes()))
+    snapshot["levels"][0]["centers"][0]["completion_return_segment"]["low_tick"] = 8
+    packed.write_bytes(gzip.compress(json.dumps(snapshot).encode()))
+    result = manager.results()
+    assert not result["selected"]
+    assert "STRUCTURE_MISMATCH" in result["recent_rejections"][0]["reasons"]
+    assert not workbench._current_rows(result, source)
+
+
+@pytest.mark.parametrize("changed,reason", [
+    ("point", "STRUCTURE_MISMATCH"),
+    ("center", "STRUCTURE_MISMATCH"),
+    ("confirmation", "NOT_CONFIRMED"),
+])
+def test_frozen_third_buy_rejects_a_record_that_differs_from_saved_proof(fixture_run, changed, reason):
+    manager, source, _ = fixture_run
+    record_path = manager.root / source / "results.jsonl"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    if changed == "confirmation":
+        record["rows"][0]["selected"][0]["point"]["confirmed_at"] = None
+    else:
+        record["rows"][0]["selected"][0][changed]["record_only_annotation"] = "different"
+    record_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    result = manager.results()
+    assert not result["selected"]
+    assert reason in result["recent_rejections"][0]["reasons"]
+    with pytest.raises(ValueError):
+        manager.evidence(source, "SH.600088", "5m", "point")
+
+
 def test_dashboard_reads_current_run_without_starting_scan_or_promoting_sector_history(fixture_run):
     manager, run_id, archive = fixture_run
     screening.write_json(archive / "trading_screening_sector_snapshot.json", {"payload": {
@@ -132,7 +342,8 @@ def test_dashboard_reads_current_run_without_starting_scan_or_promoting_sector_h
     assert data["sectors"][0]["historical_regime"] == "up"
     assert data["sector_catalog_at"].startswith("2026-09-07")
     assert "current_regime" not in data["sectors"][0]
-    assert before == {p: p.stat().st_mtime_ns for p in manager.root.rglob("*") if p.is_file()}
+    assert before == {p: p.stat().st_mtime_ns for p in manager.root.rglob("*")
+                      if p.is_file() and p.name != "verified_results.json.gz"}
     manager.start.assert_not_called()
 
 
@@ -144,6 +355,22 @@ def test_workbench_keeps_point_age_available_for_user_filters():
     assert rows[0]["anchor_age_sessions"] == 3
     assert rows[0]["confirmation_age_sessions"] == 1
     assert rows[0]["gain_pct"] == 2.5
+
+
+def test_confirmed_third_buy_waiting_for_entry_proof_has_its_own_stage():
+    point = {"point_id": "third", "point_type": "3buy", "status": "confirmed",
+             "available_at": 200, "structural_level": 1}
+    rows = workbench._current_rows({"entry_waiting": [{
+        "code": "SH.600088", "frequency": "5m", "point": point,
+        "selection_status": "entry_pending", "entry_waiting": True,
+        "decision_reasons": ["THIRD_ENTRY_PRECISION_PENDING"],
+        "evidence_available": True, "evidence_chart_available": True,
+    }]}, "run")
+    assert len(rows) == 1
+    assert rows[0]["stage"] == "entry_pending"
+    assert rows[0]["point"]["status"] == "confirmed"
+    assert rows[0]["decision_reasons"] == ["THIRD_ENTRY_PRECISION_PENDING"]
+    assert rows[0]["evidence_chart_available"] is True
 
 
 @pytest.mark.parametrize("state,expected", [("forming", 1), ("formed", 1), ("locked", 0)])
@@ -192,10 +419,14 @@ def test_legacy_results_recheck_divergence_and_parent_meaning_without_rewriting(
              "confirmed_at": 100, "anchor_at": 90, "available_at": 100, "anchor_tick": 10,
              "structural_level": 0, "source_kind": "segment", "price_basis_revision": "basis", "center_id": "Z",
              "anchor_unit_id": "first-signal",
-             "evidence_codes": ["two_separated_centers"],
-             "divergence": {"kind": "trend", "structural_level": 0, "price_basis_revision": "basis",
-                            "direction": "down", "signal_leg_unit_ids": ["leave", "return", "end"],
-                            "metrics": {"is_divergent": True}}}
+              "evidence_codes": ["two_separated_centers"],
+              "divergence": {"kind": "trend", "structural_level": 0, "price_basis_revision": "basis",
+                             "source_kind": "segment", "direction": "down",
+                             "divergence_id": "first-divergence", "signal_unit_id": "end",
+                             "comparison_center_id": "Z", "comparison_center_established_at": 80,
+                             "comparison_center_known_at": 80, "available_at": 100,
+                             "signal_leg_unit_ids": ["leave", "return", "end"],
+                             "metrics": {"is_divergent": True}}}
     weak = {**first, "point_id": "weak-second", "point_type": "2buy", "parent_point_id": "first",
             "variant": "weak_divergence", "anchor_at": 110, "anchor_tick": 9, "available_at": 120,
             "confirmed_at": 120, "anchor_unit_id": "pullback",
@@ -209,9 +440,15 @@ def test_legacy_results_recheck_divergence_and_parent_meaning_without_rewriting(
     row["selected"].extend({"point": p} for p in (first, weak, bad_first, bad_second))
     row["recent_rejections"] = [{"point": waiting, "reasons": ["NOT_CONFIRMED"]}]
     center = {"center_id": "Z", "third_class_confirmed": True,
+              "structural_level": 0, "source_kind": "segment",
+              "price_basis_revision": "basis", "established_at": 80,
+              "boundary_divergence_id": "first-divergence", "boundary_anchor_unit_id": "end",
               "completion_direction": "down", "completion_return_unit_id": "return"}
     snapshot = json.loads(gzip.decompress((directory / "evidence/SH.600088_5m.json.gz").read_bytes()))
-    snapshot["levels"][0].update(points=[row["selected"][0]["point"], first, weak, bad_first, bad_second], centers=[center])
+    snapshot["levels"][0].update(
+        points=[row["selected"][0]["point"], first, weak, bad_first, bad_second],
+        centers=[*snapshot["levels"][0]["centers"], center],
+    )
     snapshot["chart"]["xds"] = [
         {"points": [{"time": 80, "price": 12}, {"time": 90, "price": 10}], "locked": True, "state": "locked"},
         {"points": [{"time": 90, "price": 10}, {"time": 105, "price": 12}], "locked": True, "state": "locked"},
@@ -331,6 +568,7 @@ def test_new_run_does_not_expose_or_accept_previous_run_reviews(fixture_run):
     latest_id = "b" * 32
     screening.write_json(manager.root / latest_id / "status.json", {
         "run_id": latest_id, "status": "completed", "completed": 1, "total": 1,
+        "source_revision": screening.source_revision(),
     })
     (manager.root / latest_id / "results.jsonl").write_bytes(
         (manager.root / old_id / "results.jsonl").read_bytes()

@@ -197,6 +197,7 @@ export class HistoryProvider {
   private readonly _failedInitialHistory: Set<string> = new Set();
   private _activeHistoryRequests: number = 0;
   private _lastHistorySettledAt: number = 0;
+  private _disposed = false;
   public bars_result: Map<string, GetBarsResult>;
   // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
   // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
@@ -223,11 +224,20 @@ export class HistoryProvider {
     this.bars_result = new Map();
   }
 
+  public dispose(): void {
+    this._disposed = true;
+    this.bars_result.clear();
+    this._latestFullRequestByKey.clear();
+    this._completeHistoryFloorByKey.clear();
+    this._failedInitialHistory.clear();
+  }
+
   /**
    * 图表切换的原子展示闸门使用此状态，避免 TradingView 首帧完成后仍有
    * 向左补历史请求在运行，导致用户先看到少量 K 线、随后又整批扩展。
    */
   public hasPendingHistoryWork(quietPeriodMs: number = 0): boolean {
+    if (this._disposed) return false;
     if (this._activeHistoryRequests > 0) {
       return true;
     }
@@ -447,8 +457,12 @@ export class HistoryProvider {
   public getBars(
     symbolInfo: LibrarySymbolInfo,
     resolution: string,
-    periodParams: PeriodParamsWithOptionalCountback
+    periodParams: PeriodParamsWithOptionalCountback,
+    isRequestCurrent?: () => boolean
   ): Promise<GetBarsResult> {
+    const callerIsCurrent = isRequestCurrent;
+    isRequestCurrent = () => !this._disposed && (!callerIsCurrent || callerIsCurrent());
+    if (!isRequestCurrent()) return Promise.resolve({bars: [], meta: {noData: false}, fxs: [], bis: [], xds: []});
     const requestParams: RequestParams = {
       ...this._historyParams,
       symbol: symbolInfo.ticker || "",
@@ -534,6 +548,10 @@ export class HistoryProvider {
             requestTimeoutMs,
             requestGeneration
           );
+          if (isRequestCurrent && !isRequestCurrent()) {
+            resolve({bars: [], meta: {noData: false}, fxs: [], bis: [], xds: []});
+            return;
+          }
           const result = this._processHistoryResponse(
             initialResponse,
             requestParams,
@@ -552,8 +570,13 @@ export class HistoryProvider {
             await this._processTruncatedResponse(
               result,
               requestParams,
-              requestGeneration
+              requestGeneration,
+              isRequestCurrent
             );
+          }
+          if (isRequestCurrent && !isRequestCurrent()) {
+            resolve({bars: [], meta: {noData: false}, fxs: [], bis: [], xds: []});
+            return;
           }
           resolve(this._resultForCompletedRequest(
             result,
@@ -561,6 +584,10 @@ export class HistoryProvider {
             requestGeneration
           ));
         } catch (e: unknown) {
+          if (isRequestCurrent && !isRequestCurrent()) {
+            resolve({bars: [], meta: {noData: false}, fxs: [], bis: [], xds: []});
+            return;
+          }
           this._rememberInitialHistoryFailure(requestParams, requestGeneration);
           const reasonString =
             e instanceof Error || typeof e === "string"
@@ -590,7 +617,8 @@ export class HistoryProvider {
   private async _processTruncatedResponse(
     result: GetBarsResult,
     requestParams: RequestParams,
-    requestGeneration?: number
+    requestGeneration?: number,
+    isRequestCurrent?: () => boolean
   ) {
     let lastResultLength = result.bars.length;
     try {
@@ -600,6 +628,7 @@ export class HistoryProvider {
         this._limitedServerResponse.maxResponseLength === lastResultLength &&
         requestParams.from < requestParams.to
       ) {
+        if (isRequestCurrent && !isRequestCurrent()) return;
         // adjust request parameters for follow-up request
         if (requestParams.countback) {
           requestParams.countback =
@@ -623,6 +652,7 @@ export class HistoryProvider {
               : this._initialHistoryTimeoutMs,
             requestGeneration === undefined ? undefined : "history-initial"
           );
+        if (isRequestCurrent && !isRequestCurrent()) return;
         const followupResult = this._processHistoryResponse(
           followupResponse,
           requestParams,
@@ -653,6 +683,7 @@ export class HistoryProvider {
         }
       }
     } catch (e: unknown) {
+      if (isRequestCurrent && !isRequestCurrent()) return;
       /**
        * Error occurred during followup request. We won't reject the original promise
        * because the initial response was valid so we will return what we've got so far.
@@ -742,6 +773,7 @@ export class HistoryProvider {
     requestParams: RequestParams,
     requestGeneration?: number
   ) {
+    if (this._disposed) return {bars: [], meta: {noData: false}, fxs: [], bis: [], xds: []};
     if (response.s !== "ok" && response.s !== "no_data") {
       throw new Error(response.errmsg);
     }

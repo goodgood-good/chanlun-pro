@@ -6,11 +6,15 @@
 256–280 作者回复的区间极值要求尚未完成理论协调，见 docs/stroke_path_b_rules.md。
 """
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime
+from operator import attrgetter
 
 from chanlun.core.stroke_rules import is_strictly_more_extreme
 from chanlun.core.types import FX
+
+_COMPLETION_START = attrgetter("start")
 
 
 @dataclass(frozen=True)
@@ -147,6 +151,14 @@ class StrokeResolver:
         protected = len(self.completions) + 1
         return proposed[:protected] == self._path[:protected]
 
+    def _has_completed_edge(self, start, end):
+        # Completion records follow increasing endpoint indices. Rewinds
+        # restore an earlier tuple, so no separate mutable index is needed.
+        position = bisect_left(self.completions, start, key=_COMPLETION_START)
+        return (position < len(self.completions)
+                and self.completions[position].start == start
+                and self.completions[position].end == end)
+
     def _record_selection(self, previous, index, witness):
         selected = self.edges()
         stable = 0
@@ -167,14 +179,13 @@ class StrokeResolver:
         changed_continuations = previous_continuations[prefix:]
         prior = {(c.start, c.end, c.following_end): c for c in changed_continuations}
         prior_edges = {(c.start, c.end): c for c in changed_continuations}
-        completed_edges = {(c.start, c.end) for c in self.completions}
         continuations = list(previous_continuations[:prefix])
         for i in range(prefix, max(0, len(selected) - 1)):
             current, following = self.qualifications[i:i + 2]
             key = (current.start, current.end, following.end)
             # 完成事件已保存当时的反向后继；尾部重选不能改写该笔的
             # 历史承接时间，否则相同完成证据会错误地使下游缓存失效。
-            retained = (prior_edges.get(key[:2]) if key[:2] in completed_edges else prior.get(key))
+            retained = (prior_edges.get(key[:2]) if self._has_completed_edge(*key[:2]) else prior.get(key))
             continuations.append(retained or StrokeContinuation(
                 *key, max(current.selected_at, following.selected_at),
             ))
@@ -252,7 +263,7 @@ class StrokeResolver:
         blocked = proposed != old and not self._preserves_completed(proposed)
         if blocked:
             proposed, action = old, "await_completed_boundary"
-        previous_edges = self.edges()
+        previous_edges = self.edges() if proposed != old else ()
         self.nodes.append(StrokeEndpoint(fx, proposed[-2] if len(proposed) > 1 and proposed[-1] == index else -1,
                                          proposed[0] if proposed else index))
         self._witnesses.append(witness)

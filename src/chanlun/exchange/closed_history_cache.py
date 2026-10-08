@@ -17,6 +17,7 @@ import weakref
 import pandas as pd
 
 from chanlun.exchange._lookback import get_lookback_timedelta
+from chanlun.persistence.file_lock import interprocess_file_lock
 from chanlun.tools.log_util import LogUtil
 
 
@@ -84,18 +85,23 @@ def load_closed_us_history(*, code, frequency, observed, end, canonical, loader,
     storage_code = hashlib.sha256(code.encode()).hexdigest()[:32]
     storage_frequency = frequency + ("_canonical" if canonical else "")
     key = (storage_code, storage_frequency)
+    lock_path = storage._kline_parquet_path(_NAMESPACE, *key).with_suffix(".parquet.lock").resolve()
     with _registry_lock:
-        lock = _locks.get(key)
+        lock = _locks.get(lock_path)
         if lock is None:
             lock = threading.RLock()
-            _locks[key] = lock
+            _locks[lock_path] = lock
     started = time.perf_counter()
-    with lock:
+    # Hold one shared-file transaction through fetch and publication. Atomic
+    # replacement alone cannot stop an earlier process publishing last.
+    with lock, interprocess_file_lock(lock_path):
         revision = _source_revision()
         # A manual validation must also replace/invalidate the durable source,
         # otherwise a later algorithm rebuild could resurrect the old prices.
         if force:
-            storage.save_klines_parquet(_NAMESPACE, *key, pd.DataFrame())
+            invalidated = storage.save_klines_parquet(_NAMESPACE, *key, pd.DataFrame())
+            if invalidated is not True:
+                raise OSError("历史缓存失效写入未成功，请待存储恢复后重试强制刷新")
         cached = None if force else storage.load_klines_parquet(_NAMESPACE, *key)
         if cached is not None and not cached.empty:
             meta = cached.attrs.get(_META) or {}

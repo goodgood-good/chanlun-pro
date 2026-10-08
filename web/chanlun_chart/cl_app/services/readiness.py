@@ -136,11 +136,15 @@ def start_ticks_warmup(
     market: str = "a",
     retry_seconds: float = 30.0,
     attempt_timeout: float = 5.0,
+    initial_retry_seconds: float = 1.0,
 ):
     """Probe ticks until valid data arrives, without blocking shutdown."""
     stop_event = threading.Event()
+    interval = max(0.0, float(retry_seconds))
+    initial_retry = min(interval, max(0.01, float(initial_retry_seconds)))
 
     def _worker():
+        failure_delay = initial_retry
         while not stop_event.is_set():
             attempt = _start_daemon_attempt(
                 lambda: probe(market),
@@ -160,13 +164,14 @@ def start_ticks_warmup(
 
             error = attempt["outcome"]["error"]
             value = attempt["outcome"]["value"]
+            successful = error is None and _has_probe_data(value)
             if error is not None:
                 registry.record_ticks_failure(
                     market,
                     "warmup_error",
                     (str(error) or type(error).__name__)[:200],
                 )
-            elif _has_probe_data(value):
+            elif successful:
                 registry.record_ticks_success(market)
             else:
                 registry.record_ticks_failure(
@@ -174,7 +179,13 @@ def start_ticks_warmup(
                     "empty_ticks",
                     "ticks warmup returned no data",
                 )
-            if stop_event.wait(max(0.0, float(retry_seconds))):
+            # Metadata loading and quote probing start concurrently. Recover
+            # promptly from an initial empty/default-code race, then back off
+            # during sustained failures. Successful refreshes keep their usual
+            # interval; a hung probe still owns its single in-flight attempt.
+            delay = interval if successful else failure_delay
+            failure_delay = initial_retry if successful else min(interval, failure_delay * 2)
+            if stop_event.wait(delay):
                 return
 
     thread = threading.Thread(

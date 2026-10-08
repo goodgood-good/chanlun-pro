@@ -92,6 +92,16 @@ def test_identical_full_frame_skips_processing_but_serializes_again(mock_cl):
     assert mock_cl[0].validated_incremental_calls == 0
 
 
+def test_listing_metadata_conflict_cannot_reuse_an_older_valid_runtime(mock_cl):
+    frame = _klines_df([1000, 1060], [10, 11])
+    first = recompute_chart_data_from_klines("a", "SYN", "1m", {}, frame, cache_key="listing-status")
+    changed = frame.copy()
+    changed.attrs.update(qmt_listing_date="2026-09-23", qmt_listing_history_conflict=True)
+    second = recompute_chart_data_from_klines("a", "SYN", "1m", {}, changed, cache_key="listing-status")
+    assert second["id"] != first["id"]
+    assert len(mock_cl) == 2
+
+
 def test_calendar_bar_without_close_attestation_keeps_live_contract(mock_cl):
     recompute_chart_data_from_klines(
         "a", "SYN", "d", {}, _klines_df([1000, 87400], [10, 11]),
@@ -300,7 +310,7 @@ def test_identical_closed_frame_preserves_actual_analysis_memo(monkeypatch):
             "a", "SYNMEMO", "1m", {}, frame, cache_key=key,
         )
         cd = kline_recompute._cl_pool[key]["cl"]
-        analysis_memo = cd._strict_structure_memo["evidence"]
+        analysis_memo = cd._strict_structure_memo["native_centers"]
         assert analysis_memo is not None
         calls = []
         original = cd.process_validated_incremental_klines
@@ -315,7 +325,7 @@ def test_identical_closed_frame_preserves_actual_analysis_memo(monkeypatch):
         )
         assert calls == []
         assert second == first
-        assert cd._strict_structure_memo["evidence"] is analysis_memo
+        assert cd._strict_structure_memo["native_centers"] is analysis_memo
     finally:
         kline_recompute.reset_cl_pool()
 

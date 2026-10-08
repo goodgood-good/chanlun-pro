@@ -34,6 +34,8 @@ from chanlun.exchange.price_basis import (
     build_qmt_price_basis_metadata,
 )
 from chanlun.exchange.qmt_time_contract import qmt_exclusive_download_end
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
+from chanlun.exchange.qmt_listing import QmtListingBoundary, normalize_stock_listing_rows
 from chanlun.tools.log_util import LogUtil
 from xtquant import xtdata
 
@@ -152,6 +154,8 @@ def _local_history_covers_requirement(frame, *, code, frequency, requirement):
     """Keep real rows/price metadata; never fill gaps or move their clocks."""
     if frame is None or frame.empty:
         return False
+    if frame.attrs.get("qmt_listing_history_conflict") is True:
+        return False
     expected, _calendar_revision, started, cutoff = requirement
     columns = {"code", "date", "open", "high", "low", "close", "volume"}
     if not columns.issubset(frame.columns) or not frame["code"].eq(code).all():
@@ -211,6 +215,7 @@ class ExchangeQMT(Exchange):
         # 避免多线程同时进入 all_stocks() 各自跑全量扫描，以及类属性多实例共享穿透。
         self.g_all_stocks: list = []
         self._all_stocks_lock = threading.Lock()
+        self._listing_boundary = QmtListingBoundary()
         # A subscription is process-local and keeps MiniQMT's in-memory K-line
         # cache continuous without mutating the shared on-disk history store.
         # Native screening shards are long lived and own stable symbol
@@ -478,16 +483,17 @@ class ExchangeQMT(Exchange):
             return self.g_all_stocks
 
     def get_start_date_by_frequency(
-        self, frequency: str, req_counts: int = None
+        self, frequency: str, req_counts: int = None, *, as_of: datetime.datetime | None = None
     ) -> str:
         """
         根据周期获取默认起始日期。
         如果上层指定了 req_counts（用户实际只要这么多根 K 线），会按周期估算
         一个紧凑的回看窗口，避免无谓地拉超长历史导致 BSON payload 过大。
+        as_of 用于按已收盘行情截止固定回看起点，避免休市时随系统日期漂移。
         """
         if frequency not in self.download_frequency_map:
             raise ValueError(f"unsupported QMT frequency: {frequency}")
-        now = datetime.datetime.now()
+        now = as_of if as_of is not None else datetime.datetime.now()
         delta = self.DEFAULT_LOOKBACK[frequency]
 
         # 当调用方指定了请求 K 线数量时，按周期估算一个紧凑的窗口（带 3 倍冗余）。
@@ -735,6 +741,10 @@ class ExchangeQMT(Exchange):
         qmt_code = self.code_to_qmt(code)
 
         qmt_download_period = self.download_frequency_map[frequency]
+        listed = None
+        if frequency == "d" or (frequency.endswith("m") and frequency[:-1].isdigit()):
+            with _XTDATA_NATIVE_LOCK:
+                listed = self._listing_boundary.listing_date(qmt_code, xtdata)
 
         # args["req_counts"] 允许上层声明实际需要的 K 线数量，用于收紧回看窗口
         req_counts = args.get("req_counts") if args else None
@@ -787,7 +797,7 @@ class ExchangeQMT(Exchange):
         if args and args.get("prefer_local") and not _skip_dl:
             try:
                 requirement = _complete_local_history_requirement(
-                    frequency=frequency, query_start=query_start,
+                    frequency=frequency, query_start=max(query_start, listed.strftime("%Y%m%d")) if listed else query_start,
                     end_date=end_date, req_counts=req_counts,
                     observed_at=datetime.datetime.now(self.tz),
                 )
@@ -943,9 +953,17 @@ class ExchangeQMT(Exchange):
         cols_to_float = ["open", "high", "low", "close", "volume"]
         klines_df[cols_to_float] = klines_df[cols_to_float].astype(float)
 
+        # Minute and daily stock rows before the reported IPO can be provider
+        # issue-price placeholders. Weekly/monthly labels may straddle the IPO
+        # and are not safely comparable to a daily boundary here.
+        if frequency == "d" or (frequency.endswith("m") and frequency[:-1].isdigit()):
+            klines_df = normalize_stock_listing_rows(klines_df, listed, code=code)
+
         # 非原生周期（如 2m/10m）通过 convert_stock_kline_frequency 从 1m 合成
         if frequency not in self.frequency_map:
+            source_attrs = dict(klines_df.attrs)
             klines_df = convert_stock_kline_frequency(klines_df, frequency)
+            klines_df.attrs.update(source_attrs)
 
         # end_date 历史区间裁剪:本函数原忽略 end_date(只用 start 算 query_start、拉到最新),
         # 历史回放或区间查询可能返回超出 end_date 的未来数据。仅对过去自然日的历史查询
@@ -1030,21 +1048,22 @@ class ExchangeQMT(Exchange):
         with _XTDATA_NATIVE_LOCK:
             qmt_ticks = xtdata.get_full_tick([self.code_to_qmt(_c) for _c in codes])
         for _c, _t in qmt_ticks.items():
-            ticks[self.code_to_tdx(_c)] = Tick(
-                code=self.code_to_tdx(_c),
-                last=_t["lastPrice"],
-                buy1=_t["bidPrice"][0],
-                sell1=_t["askPrice"][0],
-                high=_t["high"],
-                low=_t["low"],
-                open=_t["open"],
-                volume=_t["volume"],
-                rate=(
-                    (_t["lastPrice"] - _t["lastClose"]) / _t["lastClose"] * 100
-                    if _t["lastClose"] != 0
-                    else 0
-                ),
-            )
+            try:
+                last_price = quote_price(_t["lastPrice"])
+                if last_price is None:
+                    continue
+                rate = quote_change_rate(last_price, _t.get("lastClose"), digits=None, positive_reference=False)
+                code = self.code_to_tdx(_c)
+                ticks[code] = Tick(
+                    code=code, last=last_price,
+                    buy1=_t["bidPrice"][0], sell1=_t["askPrice"][0],
+                    high=_t["high"], low=_t["low"], open=_t["open"], volume=_t["volume"],
+                    reference_price=quote_price(_t.get("lastClose")),
+                    rate=rate,
+                )
+            except Exception as exc:
+                LogUtil.warning(f"QMT tick unavailable code={_c} error_type={type(exc).__name__}")
+                continue
 
         return ticks
 

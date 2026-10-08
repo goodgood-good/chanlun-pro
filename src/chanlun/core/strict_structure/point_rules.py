@@ -315,7 +315,7 @@ def approaching_third_class_points(
             leave is None
             or not leave.locked
             or leave.end_tick != tail.start_tick
-            or tail.market_start < leave.market_end
+            or tail.market_start != leave.market_end
             or center.state is not CenterState.ONGOING
         ):
             continue

@@ -139,6 +139,7 @@ function sharedSymbolResolveResponse(
  * See [UDF protocol reference](@docs/connecting_data/UDF.md)
  */
 export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQuotesApi, IDatafeedChartApi {
+	private _disposed = false;
 	protected _configuration: UdfCompatibleConfiguration = defaultConfiguration();
 	private readonly _datafeedURL: string;
 	private readonly _configurationReadyPromise: Promise<void>;
@@ -176,6 +177,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 
 		this._configurationReadyPromise = this._requestConfiguration()
 			.then((configuration: UdfCompatibleConfiguration | null) => {
+				if (this._disposed) return;
 				if (configuration === null) {
 					configuration = defaultConfiguration();
 				}
@@ -184,17 +186,30 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 			});
 	}
 
+	public dispose(): void {
+		if (this._disposed) return;
+		this._disposed = true;
+		this._dataPulseProvider.dispose();
+		this._quotesPulseProvider.dispose();
+		this._historyProvider.dispose();
+		this._subscribersResetCallbacks = {};
+	}
+
 	public onReady(callback: OnReadyCallback): void {
 		this._configurationReadyPromise.then(() => {
-			callback(this._configuration);
+			if (!this._disposed) callback(this._configuration);
 		});
 	}
 
 	public getQuotes(symbols: string[], onDataCallback: QuotesCallback, onErrorCallback: (msg: string) => void): void {
-		this._quotesProvider.getQuotes(symbols).then(onDataCallback).catch(onErrorCallback);
+		if (this._disposed) return;
+		this._quotesProvider.getQuotes(symbols)
+			.then(data => { if (!this._disposed) onDataCallback(data); })
+			.catch(error => { if (!this._disposed) onErrorCallback(error); });
 	}
 
 	public subscribeQuotes(symbols: string[], fastSymbols: string[], onRealtimeCallback: QuotesCallback, listenerGuid: string): void {
+		if (this._disposed) return;
 		this._quotesPulseProvider.subscribeQuotes(symbols, fastSymbols, onRealtimeCallback, listenerGuid);
 	}
 
@@ -203,14 +218,14 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	}
 
 	public getServerTime(callback: ServerTimeCallback): void {
-		if (!this._configuration.supports_time) {
+		if (this._disposed || !this._configuration.supports_time) {
 			return;
 		}
 
 		this._send<string>('time')
 			.then((response: string) => {
 				const time = parseInt(response);
-				if (!isNaN(time)) {
+				if (!this._disposed && !isNaN(time)) {
 					callback(time);
 				}
 			})
@@ -220,6 +235,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	}
 
 	public searchSymbols(userInput: string, exchange: string, symbolType: string, onResult: SearchSymbolsCallback): void {
+		if (this._disposed) return;
 		const params: RequestParams = {
 			limit: Constants.SearchItemsLimit,
 			query: userInput.toUpperCase(),
@@ -229,6 +245,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 
 		this._send<UdfSearchSymbolsResponse | UdfErrorResponse>('search', params)
 			.then((response: UdfSearchSymbolsResponse | UdfErrorResponse) => {
+				if (this._disposed) return;
 				if (response.s !== undefined) {
 					logMessage(`UdfCompatibleDatafeed: search symbols error=${response.errmsg}`);
 					onResult([]);
@@ -239,11 +256,12 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 			})
 			.catch((reason?: string | Error) => {
 				logMessage(`UdfCompatibleDatafeed: Search symbols for '${userInput}' failed. Error=${getErrorMessage(reason)}`);
-				onResult([]);
+				if (!this._disposed) onResult([]);
 			});
 	}
 
 	public resolveSymbol(symbolName: string, onResolve: ResolveCallback, onError: DatafeedErrorCallback, extension?: SymbolResolveExtension): void {
+		if (this._disposed) return;
 		logMessage('Resolve requested');
 
 		const currencyCode = extension && extension.currencyCode;
@@ -271,6 +289,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 			() => this._send<SymbolResolveResponse>('symbols', params)
 		)
 			.then((response: ResolveSymbolResponse | UdfErrorResponse) => {
+				if (this._disposed) return;
 				if (response.s !== undefined) {
 					onError('unknown_symbol');
 					return;
@@ -306,16 +325,17 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 			})
 			.catch((reason?: string | Error) => {
 				logMessage(`UdfCompatibleDatafeed: Error resolving symbol: ${getErrorMessage(reason)}`);
-				onError('unknown_symbol');
+				if (!this._disposed) onError('unknown_symbol');
 			});
 	}
 
 	public getBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, periodParams: PeriodParamsWithOptionalCountback, onResult: HistoryCallback, onError: DatafeedErrorCallback): void {
+		if (this._disposed) return;
 		this._historyProvider.getBars(symbolInfo, resolution, periodParams)
 			.then((result: GetBarsResult) => {
-				onResult(result.bars, result.meta);
+				if (!this._disposed) onResult(result.bars, result.meta);
 			})
-			.catch(onError);
+			.catch(error => { if (!this._disposed) onError(error); });
 	}
 
 	/**
@@ -328,6 +348,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 		resolution: string = '',
 		replayFromSeconds?: number,
 	): void {
+		if (this._disposed) return;
 		const t = response.t as number[] | undefined;
 		const c = response.c as number[] | undefined;
 		if (!response || !t || t.length === 0 || !c) {
@@ -398,6 +419,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	}
 
 	public subscribeBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, onTick: SubscribeBarsCallback, listenerGuid: string, _onResetCacheNeededCallback: () => void): void {
+		if (this._disposed) return;
 		this._dataPulseProvider.subscribeBars(symbolInfo, resolution, onTick, listenerGuid);
 		// TV 通过 onResetCacheNeeded 通知 datafeed 当前 symbol+resolution 的缓存需要清空
 		// （比如盘后数据修正、合约换月等）。我们在原回调外再清掉 bars_result，避免缠论形态

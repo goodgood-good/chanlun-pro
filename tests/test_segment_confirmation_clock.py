@@ -59,7 +59,12 @@ def test_last_closed_minute_confirms_a08_without_a_future_candle():
 def test_short_history_saves_segment_clocks_without_a_recursive_level(code, start, end, confirmed):
     data = frame(code, "5m")
     cd = runtime(data, code, "5m", closed=True).cd
-    assert not cd.get_strict_evidence().structure.levels
+    levels = cd.get_strict_evidence().structure.levels
+    assert all(level.structural_level == 0 for level in levels)
+    assert all(
+        center.available_at <= cd._strict_as_of()
+        for level in levels for center in level.center_result.centers
+    )
     snapshot = snapshot_for(data, code, "5m")
     segment = matching_segment(snapshot, start, end)
     assert segment["locked"] and segment["confirmed_at"] == epoch(confirmed)

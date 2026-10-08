@@ -128,6 +128,7 @@ class ExternalMarketTickBackoff:
         market: str,
         *,
         probe_id: int | None = None,
+        on_accept: Callable[[], None] | None = None,
     ) -> TickProbeDecision:
         normalized = self._market(market)
         now = float(self._clock())
@@ -157,6 +158,8 @@ class ExternalMarketTickBackoff:
                 probe_started_at=None,
                 probe_id=None,
             )
+            if on_accept is not None:
+                on_accept()
             self._condition.notify_all()
             return decision
 
@@ -167,6 +170,7 @@ class ExternalMarketTickBackoff:
         probe_id: int | None = None,
         requested_codes: Sequence[str] | None = None,
         response_payload: Mapping[str, object] | None = None,
+        on_accept: Callable[[], None] | None = None,
     ) -> bool:
         """Close the probe and optionally publish its normalized response."""
 
@@ -194,6 +198,8 @@ class ExternalMarketTickBackoff:
             self._states.pop(normalized, None)
             if cached is not None:
                 self._recent_successes[normalized] = cached
+            if on_accept is not None:
+                on_accept()
             self._condition.notify_all()
             return True
 

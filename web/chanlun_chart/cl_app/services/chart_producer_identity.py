@@ -7,7 +7,8 @@ from pathlib import Path
 
 def chart_producer_files():
     app = Path(__file__).resolve().parents[1]
-    return tuple(app / name for name in (
+    project = Path(__file__).resolve().parents[4]
+    return (*tuple(app / name for name in (
         "services/chart_producer_identity.py",
         "services/chart_bar_time.py",
         "services/chart_compute.py",
@@ -19,14 +20,14 @@ def chart_producer_files():
         "services/sse_signature.py",
         "handlers/sse_stream.py",
         "blueprints/tv.py",
-    ))
+    )), project / "src/chanlun/cl_utils/point_exits.py")
 
 
 @lru_cache(maxsize=1)
 def chart_producer_revision():
-    digest = hashlib.sha256(b"native-center-chart-producer-v2\0")
+    digest = hashlib.sha256(b"native-center-chart-producer-v3\0")
     for path in chart_producer_files():
-        digest.update(path.relative_to(Path(__file__).resolve().parents[1]).as_posix().encode())
+        digest.update(path.relative_to(Path(__file__).resolve().parents[4]).as_posix().encode())
         digest.update(b"\0")
         digest.update(path.read_bytes() if path.is_file() else b"<absent>")
         digest.update(b"\0")

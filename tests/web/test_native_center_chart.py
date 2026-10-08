@@ -18,113 +18,79 @@ from tests.core.strict_structure.helpers import TEST_PRICE_BASIS, unit, valid_fi
 
 @pytest.mark.parametrize("name,frequency,rows", [
     ("SZ.002299_1m.parquet", "1m", 3000),
-    # Long enough to exercise centers beyond historical short conflicts.
     ("SH.600519_5m.parquet", "5m", 10000),
     ("SH.600519_30m.parquet", "30m", 3000),
 ])
-def test_recorded_market_bars_render_centers_and_signals_from_one_source(name, frequency, rows):
+def test_recorded_market_bars_publish_native_centers_without_recursive_types(
+    name, frequency, rows, monkeypatch,
+):
     frame = pd.read_parquet(Path(__file__).parents[1] / "fixtures" / name).head(rows)
     frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
     code = name.split("_")[0]
     runtime = build_strict_chart_cd(market="a", code=code, frequency=frequency, frame=frame)
     assert runtime.error_code is None
+    monkeypatch.setattr(runtime.cd, "get_strict_structure_levels",
+                        lambda: pytest.fail("recursive type assembly reached the live chart"))
+    monkeypatch.setattr(runtime.cd, "get_strict_evidence",
+                        lambda: pytest.fail("formal signal engine reached the live chart"))
+
     result = cl_data_to_tv_chart(
         frame, {"chart_show_bi": "1", "chart_show_xd": "1"},
         market="a", code=code, frequency=frequency, strict_runtime=runtime,
     )
     assert result["strict_structure_mode"] == "replace"
     snapshot = result["strict_structure"]
-    assert snapshot["analysis_scope"] == "centers_and_signals"
+    assert snapshot["analysis_scope"] == "native_centers"
     assert snapshot["source_frequency"] == snapshot["display_frequency"] == frequency
     assert snapshot["source_closed_at"] == int(frame.iloc[-1].date.timestamp())
-    assert len(snapshot["levels"]) >= 1
-    items = [item for layer in snapshot["levels"]
-             for field in ("centers", "center_previews", "points", "divergences") for item in layer[field]]
-    items.extend(snapshot["stroke_center_observations"])
-    for item in items:
-        assert item["price_basis_revision"] == snapshot["price_basis_revision"]
-        assert type(item["available_at"]) is int
-        assert item["available_at"] <= snapshot["source_closed_at"]
+    assert snapshot["formal_point_issued"] is bool(snapshot["levels"][0]["points"])
+    assert snapshot["tradable"] is bool(snapshot["levels"][0]["points"])
+    assert len(snapshot["levels"]) == 1
     level = snapshot["levels"][0]
-    assert set(level) == {
-        "structural_level", "label", "origin", "centers", "center_previews",
-        "trend_types", "completed_trend_ids", "decomposition_boundaries",
-        "center_pair_rule_states", "transition_rule_state", "points", "divergences",
-    }
-    assert snapshot["rule_state_version"] == "chanlun-local-source-conditioned-v4"
-    assert all(
-        boundary["previous_type_end_at"] == boundary["next_type_start_at"]
-        for boundary in level["decomposition_boundaries"]
-    )
-    for layer in snapshot["levels"]:
-        assert all(
-            trend["available_at"] <= snapshot["source_closed_at"]
-            for trend in layer["trend_types"]
-        )
-        assert all(
-            boundary["boundary_available_at"] <= snapshot["source_closed_at"]
-            and boundary["shared_market_boundary_at"]
-            <= boundary["boundary_confirmed_at"]
-            <= boundary["boundary_available_at"]
-            for boundary in layer["decomposition_boundaries"]
-        )
-        assert all(
-            pair["touch_known_at"] is None
-            or pair["touch_known_at"] <= snapshot["source_closed_at"]
-            for pair in layer["center_pair_rule_states"]
-        )
-        assert all(
-            pair["higher_center_formal_at"] is None
-            or pair["higher_center_formal_at"] <= snapshot["source_closed_at"]
-            for pair in layer["center_pair_rule_states"]
-        )
-        transition = layer["transition_rule_state"]
-        if transition["status"] != "not_started":
-            assert transition["previous_type_end_at"] == transition["next_type_start_at"]
-            assert transition["boundary_available_at"] <= snapshot["source_closed_at"]
-        if transition["status"] == "ended":
-            assert transition["transition_exit_at"] > transition["previous_type_end_at"]
-            assert transition["transition_exit_confirmed_at"] <= snapshot["source_closed_at"]
     assert level["origin"] == "native_segments"
-    assert not result["stroke_construction"]["unresolved_regions"]
-    assert not snapshot["conditional_centers"]
-    continuous = runtime.cd.get_contiguous_bis()
-    assert len(continuous) == len(runtime.cd.get_bis())
-    assert all(x.end_line.index < len(continuous) for x in runtime.cd.get_xds())
-    assert all(not item["tradable"] for item in level["center_previews"])
-    assert result["bis"] and result["xds"]
-    assert all(item["state"] in {"locked", "forming"} for item in result["bis"])
-    assert any(item["locked"] for item in result["bis"])
-    assert all(item["locked"] == item["completion_is_final"] == (item["state"] == "locked")
-               for item in result["bis"])
-    assert all(item["component_index"] == 0 and not item["selection_pending"] for item in result["bis"])
-    assert "stroke_center_observations" in snapshot
-    for item in snapshot["conditional_centers"]:
-        assert item["render_kind"] == "conditional_center"
-        assert item["selection_pending"] and item["component_index"] > 0
-        assert not item["tradable"] and not item["locked"] and not item["third_class_confirmed"]
-        assert item["center_id"] not in {c["center_id"] for c in level["centers"]}
-    for item in result["xds"]:
-        if item["component_index"] > 0:
-            assert item["state"] == "forming" and item["selection_pending"] and not item["locked"]
-            assert item["observation_scope_id"]
-    for item in snapshot["stroke_center_observations"]:
-        assert item["source_kind"] == "stroke_observation" and not item["tradable"]
-    for item in level["points"]:
-        assert item["point_type"] in {"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}
-        assert item["available_at"] <= snapshot["source_closed_at"]
-    for item in level["divergences"]:
-        assert item["metrics"]["is_divergent"] and item["available_at"] <= snapshot["source_closed_at"]
-    for center in level["centers"]:
-        assert center["formation_rule"] == "five_role"
-        assert center["entry_unit_id"] not in center["core_unit_ids"]
-        assert center["establishment_leave_unit_id"] not in center["core_unit_ids"]
-        assert center["core"]["zd_tick"] < center["core"]["zg_tick"]
-        assert center["available_at"] <= snapshot["source_closed_at"]
-    # Re-reading the same completed bars must neither search alternatives nor change identity.
-    repeated = cl_data_to_tv_chart(frame, {}, market="a", code=code,
-                                   frequency=frequency, strict_runtime=runtime)
-    assert repeated["strict_structure"] == snapshot
+    assert level["trend_types"] == level["trend_shapes"] == level["divergences"] == []
+    assert len(level["centers"]) == len(runtime.cd.get_native_centers().centers)
+    assert all(center["source_kind"] == "segment" and center["tradable"] is False
+               for center in level["centers"])
+    assert all(point["evidence_scope"] == "native_center_signal"
+               and point["formal_point_issued"] is True
+               and point["status"] == "confirmed"
+               and point["point_type"] in {"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}
+               and point["available_at"] <= snapshot["source_closed_at"]
+               for point in level["points"])
+    assert set(snapshot["point_exit_plans"]) == {point["point_id"] for point in level["points"]}
+    for point in level["points"]:
+        plan = snapshot["point_exit_plans"][point["point_id"]]
+        assert plan["stop_loss"]["price"] == point["invalidation_price"]
+        assert plan["take_profit"]["basis"] == "opposite_point"
+        assert plan["profit_observation"] is None
+    if frequency == "5m":
+        assert {point["point_type"][0] for point in level["points"]} == {"3"}
+
+
+def test_live_and_frozen_native_exit_references_agree_for_all_six_signal_classes():
+    from copy import deepcopy
+    from chanlun.screening.runner import snapshot_for
+    from chanlun.cl_utils.point_exits import build_point_exit_plans
+
+    frame = pd.read_parquet(Path("tests/fixtures/SZ.002299_1m.parquet"))
+    frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
+    snapshot = snapshot_for(frame, "SZ.002299", "1m")
+    original = deepcopy(snapshot)
+    live = snapshot["point_exit_plans"]
+    frozen = build_point_exit_plans(snapshot)
+    assert frozen == live
+    assert {point["point_type"] for point in snapshot["levels"][0]["points"]} == {
+        "1buy", "2buy", "3buy", "1sell", "2sell", "3sell",
+    }
+    assert any(plan["take_profit"].get("point_type") in {"1buy", "1sell"} for plan in live.values())
+    assert snapshot == original
+
+    missing = deepcopy(snapshot)
+    point = missing["levels"][0]["points"][-1]
+    missing["screening_segments"] = [unit for unit in missing["screening_segments"]
+                                     if unit["unit_id"] != point["price_anchor_unit_id"]]
+    assert point["point_id"] not in build_point_exit_plans(missing)
 
 
 def test_initial_reselection_renders_one_pending_pen_without_a_future_lock():
@@ -148,11 +114,12 @@ def test_initial_reselection_renders_one_pending_pen_without_a_future_lock():
     assert not result["stroke_construction"]["unresolved_regions"]
     assert not result["xds"]
     assert result["strict_structure_mode"] == "replace"
-    assert not result["strict_structure"]["stroke_connection_pending"]
+    assert result["strict_structure"]["analysis_scope"] == "native_centers"
+    assert result["strict_structure"]["levels"][0]["centers"] == []
     hidden = cl_data_to_tv_chart(
         frame, {}, market="a", code="TST", frequency="1m", strict_runtime=runtime,
     )
-    assert not hidden["bis"] and not hidden["strict_structure"]["stroke_connection_pending"]
+    assert not hidden["bis"] and hidden["strict_structure"]["levels"][0]["centers"] == []
 
 
 def _snapshot_for_units(units):
@@ -174,21 +141,21 @@ def _snapshot_for_units(units):
     return build_center_snapshot(cd, interval="1m", display_bar_closed_at=(int(cutoff.timestamp()),))
 
 
-def test_forming_core_promotes_only_after_independent_exit_locks():
+def test_five_locked_roles_establish_center_after_short_previews():
     units = valid_five_up_exit()
+    three = _snapshot_for_units(units[:3])["levels"][0]
     four = _snapshot_for_units(units[:4])["levels"][0]
     live = _snapshot_for_units((*units[:4], replace(units[4], locked=False, confirmed_at=None)))["levels"][0]
     locked = _snapshot_for_units(units)["levels"][0]
-    assert not four["centers"] and not live["centers"]
-    assert len(four["center_previews"]) == len(live["center_previews"]) == 1
-    first, second = four["center_previews"][0], live["center_previews"][0]
-    assert first["preview_status"] == "awaiting_leave"
-    assert first["establishment_segment_ids"] == [value.unit_id for value in units[:4]]
-    assert second["preview_status"] == "awaiting_segment_confirmation"
-    assert len(locked["centers"]) == 1 and locked["center_previews"] == []
-    assert first["points"] == second["points"] == locked["centers"][0]["points"]
-    assert second["center_id"] == locked["centers"][0]["center_id"]
-    assert not first["tradable"] and not second["third_class_confirmed"]
+    assert three["centers"] == four["centers"] == live["centers"] == []
+    assert four["center_previews"][0]["preview_status"] == "awaiting_leave"
+    assert live["center_previews"][0]["preview_status"] == "awaiting_segment_confirmation"
+    center, = locked["centers"]
+    assert center["formation_rule"] == "five_role"
+    assert center["entry_unit_id"] == units[0].unit_id
+    assert center["establishment_leave_unit_id"] == units[4].unit_id
+    assert center["core_unit_ids"] == [unit.unit_id for unit in units[1:4]]
+    assert locked["center_previews"] == []
 
 
 def test_unlocked_return_does_not_duplicate_or_complete_the_formal_owner():
@@ -218,7 +185,7 @@ def test_unconfirmed_extension_starts_at_confirmed_frame_end_without_moving_core
 
 @pytest.mark.parametrize("mirror", [False, True])
 @pytest.mark.parametrize("locked_tail", [False, True])
-def test_opposite_departure_preserves_extensions_and_excludes_the_current_exit(mirror, locked_tail):
+def test_failed_departure_preserves_five_role_seed_and_stops_at_core_break(mirror, locked_tail):
     units = (*valid_five_up_exit(),
              unit(5, "down", 130, 110, locked=locked_tail),
              unit(6, "up", 110, 114, locked=locked_tail),
@@ -230,20 +197,14 @@ def test_opposite_departure_preserves_extensions_and_excludes_the_current_exit(m
                               low_tick=260-value.high_tick, high_tick=260-value.low_tick)
                       for value in units)
     layer = _snapshot_for_units(units)["levels"][0]
-    owner = layer["centers"][0]
+    owner, = layer["centers"]
     frame = owner if locked_tail else layer["center_previews"][0]
-    assert frame["points"][-1]["time"] == int(units[7].market_start.timestamp())
-    assert frame["leaving_segment"]["unit_id"] == units[7].unit_id
+    assert owner["formation_rule"] == "five_role"
+    assert frame["entry_unit_id"] == units[0].unit_id
     assert frame["establishment_leave_unit_id"] == units[4].unit_id
     assert frame["failed_departure_unit_ids"] == [units[4].unit_id]
+    assert frame["body_unit_ids"] == [unit.unit_id for unit in (*units[1:4], *units[5:7])]
     assert units[7].unit_id not in frame["body_unit_ids"]
-    assert units[8].unit_id not in frame["body_unit_ids"]
-    if locked_tail:
-        pending = _snapshot_for_units(units[:-1])["levels"][0]["centers"][0]
-        # Confirming the opposite return must not shrink an already drawn body.
-        assert frame["points"] == pending["points"]
-        assert set(frame["frame_body_unit_ids"]) == {value.unit_id for value in units[1:7]}
-    else:
+    if not locked_tail:
         assert frame["owner_center_id"] == owner["center_id"]
         assert frame["draw_geometry"] and not frame["third_class_confirmed"]
-        assert frame["points"][0]["time"] == owner["points"][-1]["time"]

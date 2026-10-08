@@ -466,6 +466,8 @@ def partition_pending_movements(
             raise ValueError("pending movement source units must connect")
         if current.market_start < previous.market_end:
             raise ValueError("pending movement source intervals must not overlap")
+        if current.market_start > previous.market_end:
+            raise ValueError("pending movement source market endpoints must connect")
 
     positions = {item.unit_id: offset for offset, item in enumerate(values)}
     owners: list[str | None] = [None] * len(values)
@@ -715,7 +717,7 @@ def _merge_trend_group(trends) -> TrendType:
             raise ValueError("merged trends must share one structural context")
         if (
             previous.end_tick != current.start_tick
-            or current.market_start < previous.market_end
+            or current.market_start != previous.market_end
         ):
             raise ValueError("merged trends must form one connected chain")
 
@@ -1034,7 +1036,7 @@ def normalize_trend_assembly(
                 raise TypeError("invalid canonical trend accumulator")
             pending_head = pending_group[0]
             if previous is not None and (
-                pending_head.market_start < previous.market_end
+                pending_head.market_start != previous.market_end
                 or pending_head.start_tick != previous.end_tick
             ):
                 # Prefix snapshots may overlap a later divergence-locked
@@ -1055,7 +1057,7 @@ def normalize_trend_assembly(
 
             if (
                 previous.end_tick != candidate.start_tick
-                or candidate.market_start < previous.market_end
+                or candidate.market_start != previous.market_end
             ):
                 # Unowned bridge units still separate these raw movements.
                 # They cannot be collapsed merely because their endpoint

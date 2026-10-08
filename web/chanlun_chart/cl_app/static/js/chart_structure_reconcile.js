@@ -32,7 +32,11 @@
     if (item?.render_kind === 'segment_unresolved_range') {
       return item.render_kind + ':' + requireString(item.region_id, 'region_id');
     }
-    if (['formal_center', 'center_observation', 'center_preview', 'conditional_center'].includes(item?.render_kind)) {
+    if (['formal_center', 'center_observation', 'center_preview', 'conditional_center',
+      'user_physical_center_observation', 'user_parent_center',
+      'user_parent_center_observation', 'user_fixed30m_center_window',
+      'user_five_segment_center', 'user_alternative_five_center',
+      'user_center_structure_extent', 'user_forming_five_center_preview'].includes(item?.render_kind)) {
       return item.render_kind + ':' + requireString(item.center_id, 'center_id');
     }
     if (item?.render_kind === 'point_confirmed' || item?.render_kind === 'point_approaching') {
@@ -40,6 +44,12 @@
     }
     if (item?.render_kind === 'strict_divergence') {
       return item.render_kind + ':' + requireString(item.divergence_id, 'divergence_id');
+    }
+    if (item?.render_kind === 'user_center_type_region') {
+      return item.render_kind + ':' + requireString(item.region_id, 'region_id');
+    }
+    if (item?.render_kind === 'strict_trend' || item?.render_kind === 'user_same_level_type') {
+      return item.render_kind + ':' + requireString(item.trend_id, 'trend_id');
     }
     throw new Error('unsupported chart analysis shape');
   }
@@ -61,6 +71,7 @@
       requireString(context.symbol, "symbol"),
       requireString(context.interval, "interval"),
       requireString(context.price_basis_revision, "price_basis_revision"),
+      String(item?.source_frequency || context.sourceFrequency || ''),
       String(item && item.structural_level),
       requireString(item && item.render_kind, "render_kind"),
     ];
@@ -155,7 +166,9 @@
 
   function requiresExactTimeAnchors(item) {
     return item && (
-      item.render_kind === "strict_trend" || item.render_kind === "trend_observation" ||
+      item.render_kind === "strict_trend" || item.render_kind === "user_same_level_type" ||
+      item.render_kind === "user_center_type_region" ||
+      item.render_kind === "trend_observation" ||
       item.render_kind === "pending_movement"
     );
   }
@@ -254,6 +267,7 @@
         center_state: item.center_state,
         center_label: item.center_label,
         tail_status: item.tail_status,
+        preview_status: item.preview_status,
         core_formed: item.core_formed,
         frame_qualified: item.frame_qualified,
         frame_missing_conditions: item.frame_missing_conditions,

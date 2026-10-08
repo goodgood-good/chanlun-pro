@@ -54,6 +54,22 @@ def test_no_signal_cache_keeps_an_authenticated_round_trip_input(tmp_path):
     assert len(list((path.parent / "inputs").glob("*.parquet"))) == 1
 
 
+def test_append_proofs_require_identical_history_revision_and_exclude_previews(tmp_path):
+    from chanlun.screening.cache import read_append_proofs,REPLAY_CHECKS
+    source=frame().iloc[:3].copy();path=tmp_path/'cache/SH.600000_5m.json.gz'
+    snap={'levels':[],'symbol':'SH.600000','source_frequency':'5m'}
+    proofs={'formal':dict.fromkeys(REPLAY_CHECKS,True),'consolidation-preview:p':{'cold_rebuild':True,'closed_bar_replay':True}}
+    write_calculation(path,'old',{'reason_counts':{}},snap,proofs,source_frame=source,calculation_revision='r')
+    current=frame()
+    assert read_append_proofs(path,current,'SH.600000','5m','r')=={'formal':proofs['formal']}
+    assert read_append_proofs(path,current,'SH.600000','5m','new')=={}
+    corrected=current.copy();corrected.loc[0,'volume']+=1
+    assert read_append_proofs(path,corrected,'SH.600000','5m','r')=={}
+    assert read_append_proofs(path,current.iloc[1:],'SH.600000','5m','r')=={}
+    changed=current.copy();changed.attrs['price_basis_revision']='new'
+    assert read_append_proofs(path,changed,'SH.600000','5m','r')=={}
+
+
 @pytest.mark.parametrize("corruption", ["missing", "changed"])
 def test_cache_with_missing_or_changed_input_is_not_reused(tmp_path, corruption):
     path = tmp_path / "analysis/SH.600000_5m.json.gz"

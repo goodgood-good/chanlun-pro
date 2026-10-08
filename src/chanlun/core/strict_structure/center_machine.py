@@ -71,7 +71,7 @@ def _overlaps_core(
 def _return_reenters_core(
     leave: ConstituentUnit, ret: ConstituentUnit, zd_tick: int, zg_tick: int
 ) -> bool:
-    """越过离开侧边界才回入；恰好触边仍满足第三点价位条件。"""
+    """触及离开侧边界即回到闭区间；按 L054:181-196 继续中枢震荡。"""
     direction = leave.direction
     return not return_outside_core(
         direction=direction,
@@ -105,12 +105,7 @@ def _is_leave_candidate(center: TrendCenter, item: ConstituentUnit) -> bool:
 
 
 def _seed_size(source_kind: SourceKind) -> int:
-    """返回 ``establish_center`` 消耗的候选窗口宽度。
-
-    物理线段/笔中枢使用五角色窗口：进入段 + 中间三段核心 + 独立离开段。
-    五段都必须与冻结核心正宽重叠。递归中枢仍由三个已完成的低级别走势
-    类型构成，不能把物理线段直接冒充高一级走势。
-    """
+    """Use five physical roles and three completed lower types recursively."""
 
     return (
         center_seed_size(source_kind)
@@ -174,6 +169,8 @@ def _validate_seed_context(
             raise ValueError("seed prices must connect")
         if current.market_start < previous.market_end:
             raise ValueError("seed intervals must not overlap")
+        if current.market_start > previous.market_end:
+            raise ValueError("seed market endpoints must connect")
     return next(iter(bases))
 
 
@@ -189,6 +186,7 @@ def _new_ongoing_center(
     price_basis_revision: str,
     zd_tick: int,
     zg_tick: int,
+    formation_rule: str | None = None,
 ) -> TrendCenter:
     center_id = build_center_id(
         price_basis_revision=price_basis_revision,
@@ -201,6 +199,7 @@ def _new_ongoing_center(
         else establishment_leave_unit.unit_id,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
+        formation_rule=formation_rule,
     )
     body_units = initial_units + extension_units
     envelope_units = center_envelope_units(initial_units, body_units, source_kind)
@@ -230,6 +229,7 @@ def _new_ongoing_center(
         completed_at=None,
         available_at=max((item.available_at for item in evidence_units)),
         body_revision=len(extension_units),
+        formation_rule=formation_rule,
     )
 
 
@@ -344,7 +344,10 @@ def _advance_center_preview_lifecycle(preview: CenterPreview, initial_units, fol
     未锁定线段可以为显示而建立、延伸并在几何上完成中枢，但结果仍故意保持为
     不可交易的 ``CenterPreview``；正式中枢与已确认三类点仍要求单元锁定。
     """
-    if SourceKind(preview.source_kind) is SourceKind.TREND_TYPE:
+    if (
+        SourceKind(preview.source_kind) is SourceKind.TREND_TYPE
+        or preview.formation_rule == "three_core"
+    ):
         return _recursive_advance_center_preview_lifecycle(preview, initial_units, following_units, oscillatory_ids)
     known = tuple(initial_units)
     by_id = {item.unit_id: item for item in known}
@@ -395,7 +398,7 @@ def _advance_center_preview_lifecycle(preview: CenterPreview, initial_units, fol
         if (
             _conflicting_pair(previous, item)
             or item.start_tick != previous.end_tick
-            or item.market_start < previous.market_end
+            or item.market_start != previous.market_end
         ):
             raise ValueError("preview transition must be connected and alternating")
         if pending is not None:
@@ -470,7 +473,10 @@ def _advance_center_preview_lifecycle(preview: CenterPreview, initial_units, fol
 
 def _project_ongoing_center_preview(center: TrendCenter, following_units, oscillatory_ids: frozenset[str]=frozenset()) -> CenterPreview | None:
     """使用临时单元投影一个已正式成立但仍在进行的中枢。"""
-    if SourceKind(center.source_kind) is SourceKind.TREND_TYPE:
+    if (
+        SourceKind(center.source_kind) is SourceKind.TREND_TYPE
+        or center.formation_rule == "three_core"
+    ):
         return _recursive_project_ongoing_center_preview(center, following_units, oscillatory_ids)
     if center.state is not CenterState.ONGOING:
         return None
@@ -559,6 +565,8 @@ def _validate_transition_unit(center: TrendCenter, item: ConstituentUnit, oscill
         raise ValueError("center transition must alternate")
     if item.market_start < previous.market_end:
         raise ValueError("center transition intervals must not overlap")
+    if item.market_start > previous.market_end:
+        raise ValueError("center transition market endpoints must connect")
 
 
 def _append_body_unit(
@@ -566,7 +574,7 @@ def _append_body_unit(
 ) -> tuple[TrendCenter, CenterEvent]:
     extension_units = center.extension_units + (item,)
     body_units = center.initial_units + extension_units
-    envelope = center_envelope_units(center.initial_units, body_units, center.source_kind)
+    envelope = center_envelope_units(center.initial_units, body_units, center.source_kind, center.failed_departure_units)
     updated = replace(
         center,
         body_units=body_units,
@@ -624,7 +632,7 @@ def _fold_failed_departure(
     returned_to_body = () if crossed_opposite_boundary else (ret,)
     extension_units = center.extension_units + returned_to_body
     body_units = center.initial_units + extension_units
-    envelope = center_envelope_units(center.initial_units, body_units, center.source_kind)
+    envelope = center_envelope_units(center.initial_units, body_units, center.source_kind, failed_departures)
     updated = replace(
         center,
         body_units=body_units,
@@ -859,6 +867,8 @@ def validate_unit_sequence(values: tuple[ConstituentUnit, ...], structural_level
                 raise ValueError("adjacent unit prices must connect")
             if item.market_start < previous.market_end:
                 raise ValueError("unit market intervals must not overlap")
+            if item.market_start > previous.market_end:
+                raise ValueError("adjacent unit market endpoints must connect")
         previous = item
 
 
@@ -868,7 +878,11 @@ def _next_scan_start_after_completion(
     """The completed leave is the entry of the next five-role window."""
     if completion_return_offset <= 0:
         raise ValueError("completion return must follow a leave unit")
-    return completion_return_offset if SourceKind(source_kind) is SourceKind.TREND_TYPE else completion_return_offset - 1
+    return (
+        completion_return_offset
+        if SourceKind(source_kind) is SourceKind.TREND_TYPE
+        else completion_return_offset - 1
+    )
 
 
 def _first_disjoint_successor_seed(values: tuple[ConstituentUnit, ...], start: int, center: TrendCenter, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str] = frozenset()) -> tuple[int, TrendCenter] | None:
@@ -1157,10 +1171,10 @@ def _calculate_physical_centers(
         replay_from=replay_from,
     )
 
-def _recursive_establish_center(initial_units, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None) -> TrendCenter | None:
+def _recursive_establish_center(initial_units, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None, formation_rule: str | None=None) -> TrendCenter | None:
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
-    width = _seed_size(source_kind)
+    width = center_seed_size(source_kind) if formation_rule == "three_core" else _seed_size(source_kind)
     if False and entry_unit is not None:
         values = (entry_unit,) + values
         entry_unit = None
@@ -1181,13 +1195,183 @@ def _recursive_establish_center(initial_units, structural_level: int, source_kin
             return None
     extension_units = ()
     (zd_tick, zg_tick) = _core(core_units)
-    if zd_tick > zg_tick if SourceKind(source_kind) is SourceKind.TREND_TYPE else zd_tick >= zg_tick:
+    if (zd_tick > zg_tick if SourceKind(source_kind) is SourceKind.TREND_TYPE or formation_rule == "three_core" else zd_tick >= zg_tick):
         return None
     if any((not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units)):
         return None
-    return _new_ongoing_center(seed_entry, establishment_leave, core_units, extension_units, establishment_leave, evidence, structural_level, source_kind, price_basis_revision, zd_tick, zg_tick)
+    return _new_ongoing_center(seed_entry, establishment_leave, core_units, extension_units, establishment_leave, evidence, structural_level, source_kind, price_basis_revision, zd_tick, zg_tick, formation_rule=formation_rule)
 
-def _recursive_establish_center_preview(initial_units, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None) -> CenterPreview | None:
+
+def establish_three_core_segment_center(
+    initial_units: tuple[ConstituentUnit, ...], structural_level: int,
+) -> TrendCenter | None:
+    """Establish a selected segment-base center at its three completed members."""
+
+    return _recursive_establish_center(
+        initial_units, structural_level, SourceKind.SEGMENT,
+        formation_rule="three_core",
+    )
+
+
+def replay_three_core_segment_center(
+    units: tuple[ConstituentUnit, ...], structural_level: int,
+) -> TrendCenter | None:
+    """Follow one selected three-core center until completion or a new view is needed."""
+
+    values = tuple(units)
+    validate_unit_sequence(values, structural_level, SourceKind.SEGMENT)
+    if len(values) < 3 or any(not unit.locked for unit in values):
+        return None
+    center = establish_three_core_segment_center(values[:3], structural_level)
+    if center is None:
+        return None
+    for unit in values[3:]:
+        try:
+            center, _event = advance_center(center, unit)
+        except ValueError as exc:
+            if str(exc) not in _GEOMETRY_STOP_ERRORS:
+                raise
+            break
+        if center.state is CenterState.COMPLETED:
+            break
+    return center
+
+def calculate_three_core_segment_centers(
+    units: tuple[ConstituentUnit, ...], structural_level: int,
+) -> CenterLevelResult:
+    """Scan one selected locked segment view using three-member center seeds.
+
+    Completed returns may begin a later center, while an uncompleted center
+    keeps its member ownership. A disjoint successor additionally needs an
+    intervening segment; overlapping shifted cores remain a different view.
+    Unlocked-tail previews await a selected-view ownership policy.
+    """
+
+    values = tuple(units)
+    validate_unit_sequence(values, structural_level, SourceKind.SEGMENT)
+    locked_count = 0
+    for unit in values:
+        if not unit.locked:
+            break
+        locked_count += 1
+    formal = values[:locked_count]
+    offsets = {unit.unit_id: index for index, unit in enumerate(formal)}
+    centers: list[TrendCenter] = []
+    events: list[CenterEvent] = []
+    cursor = 0
+    replay_from = 0
+    while cursor + 3 <= len(formal):
+        center = establish_three_core_segment_center(
+            formal[cursor:cursor + 3], structural_level,
+        )
+        if center is None:
+            cursor += 1
+            continue
+        candidate_events = [
+            _event(
+                center, CenterEventKind.ESTABLISHED,
+                center.established_market_time, center.available_at,
+            )
+        ]
+        next_offset = cursor + 3
+        geometry_stop_at = None
+        while next_offset < len(formal):
+            try:
+                center, event = advance_center(center, formal[next_offset])
+            except ValueError as exc:
+                if str(exc) not in _GEOMETRY_STOP_ERRORS:
+                    raise
+                geometry_stop_at = next_offset
+                break
+            candidate_events.append(event)
+            if center.state is CenterState.COMPLETED:
+                break
+            next_offset += 1
+
+        successor_start = None
+        if center.state is CenterState.ONGOING and geometry_stop_at is not None:
+            body_end = offsets[center.body_units[-1].unit_id]
+            for start in range(
+                max(geometry_stop_at, body_end + 2), len(formal) - 2
+            ):
+                successor = establish_three_core_segment_center(
+                    formal[start:start + 3], structural_level,
+                )
+                if successor is None or not (
+                    successor.zd_tick > center.zg_tick
+                    or successor.zg_tick < center.zd_tick
+                ):
+                    continue
+                bridge = (
+                    *((center.pending_leave_unit,) if center.pending_leave_unit is not None else ()),
+                    *formal[geometry_stop_at:start],
+                )
+                center, event = _supersede_center(center, successor, bridge)
+                candidate_events.append(event)
+                successor_start = start
+                break
+
+        centers.append(center)
+        events.extend(candidate_events)
+        replay_from = cursor
+        if center.state is CenterState.COMPLETED:
+            cursor = max(cursor + 1, next_offset)
+            continue
+        if center.state is CenterState.SUPERSEDED:
+            if successor_start is None:
+                raise ValueError("superseded center requires a successor offset")
+            cursor = successor_start
+            continue
+        break
+
+    previews: list[CenterPreview] = []
+    if locked_count < len(values):
+        if centers and centers[-1].state is CenterState.ONGOING:
+            projected = _project_ongoing_center_preview(
+                centers[-1], values[locked_count:]
+            )
+            if projected is not None:
+                previews.append(projected)
+        else:
+            resume = 0
+            if centers and centers[-1].completion_return_unit is not None:
+                resume = next(
+                    index for index, unit in enumerate(values)
+                    if unit.unit_id == centers[-1].completion_return_unit.unit_id
+                )
+            for start in range(max(resume, locked_count - 2), len(values) - 2):
+                candidate = values[start:start + 3]
+                if all(unit.locked for unit in candidate):
+                    continue
+                zd_tick, zg_tick = _core(candidate)
+                if zd_tick > zg_tick:
+                    continue
+                preview = CenterPreview(
+                    structural_level=structural_level,
+                    source_kind=SourceKind.SEGMENT,
+                    price_basis_revision=values[0].price_basis_revision,
+                    entry_unit_id=None,
+                    unit_ids=tuple(unit.unit_id for unit in candidate),
+                    state=CenterPreviewState.FORMING,
+                    zd_tick=zd_tick, zg_tick=zg_tick,
+                    available_at=max(unit.available_at for unit in candidate),
+                    formation_rule="three_core",
+                )
+                progressed = _advance_center_preview_lifecycle(
+                    preview, candidate, values[start + 3:]
+                )
+                previews.append(progressed or preview)
+                break
+
+    return CenterLevelResult(
+        structural_level=structural_level,
+        price_basis_revision=(values[0].price_basis_revision if values else None),
+        centers=tuple(centers), previews=tuple(previews), events=tuple(events),
+        locked_unit_count=locked_count, replay_from=replay_from,
+    )
+
+
+def _recursive_establish_center_preview(initial_units, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None, formation_rule: str | None=None) -> CenterPreview | None:
     """构建进入、本体和离开角色相互分离的临时证据。"""
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
@@ -1216,13 +1400,13 @@ def _recursive_establish_center_preview(initial_units, structural_level: int, so
     if not unlocked_seen:
         return None
     (zd_tick, zg_tick) = _core(core_units)
-    if zd_tick > zg_tick if SourceKind(source_kind) is SourceKind.TREND_TYPE else zd_tick >= zg_tick:
+    if zd_tick > zg_tick if SourceKind(source_kind) is SourceKind.TREND_TYPE or formation_rule == "three_core" else zd_tick >= zg_tick:
         return None
     if any((not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units)):
         return None
-    return CenterPreview(structural_level=structural_level, source_kind=source_kind, price_basis_revision=price_basis_revision, entry_unit_id=None if seed_entry is None else seed_entry.unit_id, unit_ids=tuple((item.unit_id for item in body_units)), state=CenterPreviewState.FORMING, zd_tick=zd_tick, zg_tick=zg_tick, available_at=max((item.available_at for item in evidence)), pending_leave_unit_id=None if establishment_leave is None else establishment_leave.unit_id, establishment_leave_unit_id=None if establishment_leave is None else establishment_leave.unit_id)
+    return CenterPreview(structural_level=structural_level, source_kind=source_kind, price_basis_revision=price_basis_revision, entry_unit_id=None if seed_entry is None else seed_entry.unit_id, unit_ids=tuple((item.unit_id for item in body_units)), state=CenterPreviewState.FORMING, zd_tick=zd_tick, zg_tick=zg_tick, available_at=max((item.available_at for item in evidence)), pending_leave_unit_id=None if establishment_leave is None else establishment_leave.unit_id, establishment_leave_unit_id=None if establishment_leave is None else establishment_leave.unit_id, formation_rule=formation_rule)
 
-def _recursive_forming_preview(candidate, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None) -> CenterPreview | None:
+def _recursive_forming_preview(candidate, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None, formation_rule: str | None=None) -> CenterPreview | None:
     values = tuple(candidate)
     source_kind = SourceKind(source_kind)
     maximum = _seed_size(source_kind)
@@ -1258,7 +1442,7 @@ def _recursive_forming_preview(candidate, structural_level: int, source_kind: So
                 return None
         elif any((not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in body)):
             return None
-    return CenterPreview(structural_level=structural_level, source_kind=source_kind, price_basis_revision=price_basis_revision, entry_unit_id=None if seed_entry is None else seed_entry.unit_id, unit_ids=tuple((item.unit_id for item in body)), state=state, zd_tick=zd_tick, zg_tick=zg_tick, available_at=max((item.available_at for item in evidence)), pending_leave_unit_id=None if pending_leave is None else pending_leave.unit_id, establishment_leave_unit_id=None if establishment_leave is None else establishment_leave.unit_id)
+    return CenterPreview(structural_level=structural_level, source_kind=source_kind, price_basis_revision=price_basis_revision, entry_unit_id=None if seed_entry is None else seed_entry.unit_id, unit_ids=tuple((item.unit_id for item in body)), state=state, zd_tick=zd_tick, zg_tick=zg_tick, available_at=max((item.available_at for item in evidence)), pending_leave_unit_id=None if pending_leave is None else pending_leave.unit_id, establishment_leave_unit_id=None if establishment_leave is None else establishment_leave.unit_id, formation_rule=formation_rule)
 
 def _recursive_advance_center_preview_lifecycle(preview: CenterPreview, initial_units, following_units, oscillatory_ids: frozenset[str]=frozenset()) -> CenterPreview | None:
     """推进临时中枢几何，但不把它提升为正式证据。
@@ -1279,6 +1463,10 @@ def _recursive_advance_center_preview_lifecycle(preview: CenterPreview, initial_
         raise ValueError('only a forming preview can advance')
     if preview.zd_tick is None or preview.zg_tick is None:
         raise ValueError('preview lifecycle requires a positive core')
+    def overlaps_selected_core(unit: ConstituentUnit) -> bool:
+        if preview.formation_rule == "three_core":
+            return _touches_core(unit, preview.zd_tick, preview.zg_tick)
+        return _overlaps_core(unit, preview.zd_tick, preview.zg_tick, preview.source_kind)
     available_at = max((item.available_at for item in (*((entry,) if entry is not None else ()), *body, *failed_departures, *((pending,) if pending else ()))))
     occupied_ids = {item.unit_id for item in body}
     occupied_ids.update((item.unit_id for item in failed_departures))
@@ -1292,14 +1480,14 @@ def _recursive_advance_center_preview_lifecycle(preview: CenterPreview, initial_
             raise ValueError('preview transition level/source/basis mismatch')
         if item.unit_id in occupied_ids:
             raise ValueError('preview transition unit already belongs to lifecycle')
-        if _conflicting_pair(previous, item, oscillatory_ids) or item.start_tick != previous.end_tick or item.market_start < previous.market_end:
+        if _conflicting_pair(previous, item, oscillatory_ids) or item.start_tick != previous.end_tick or item.market_start != previous.market_end:
             raise ValueError('preview transition must be connected and alternating')
         if pending is not None:
             completes_up = pending.direction == 'up' and item.direction == 'down' and return_outside_core(direction='up', low_tick=item.low_tick, high_tick=item.high_tick, zd_tick=preview.zd_tick, zg_tick=preview.zg_tick)
             completes_down = pending.direction == 'down' and item.direction == 'up' and return_outside_core(direction='down', low_tick=item.low_tick, high_tick=item.high_tick, zd_tick=preview.zd_tick, zg_tick=preview.zg_tick)
             if completes_up or completes_down:
                 return replace(preview, unit_ids=tuple((value.unit_id for value in body)), failed_departure_unit_ids=tuple((value.unit_id for value in failed_departures)), state=CenterPreviewState.COMPLETED, available_at=max(available_at, item.available_at), pending_leave_unit_id=None, completion_leave_unit_id=pending.unit_id, completion_return_unit_id=item.unit_id)
-            if _return_reenters_core(pending, item, preview.zd_tick, preview.zg_tick) and _overlaps_core(item, preview.zd_tick, preview.zg_tick, preview.source_kind):
+            if _return_reenters_core(pending, item, preview.zd_tick, preview.zg_tick) and overlaps_selected_core(item):
                 failed_departures.append(pending)
                 if _outside_in_direction(item, preview.zd_tick, preview.zg_tick):
                     pending = item
@@ -1315,7 +1503,7 @@ def _recursive_advance_center_preview_lifecycle(preview: CenterPreview, initial_
                 break
             pending = item
         else:
-            if not _overlaps_core(item, preview.zd_tick, preview.zg_tick, preview.source_kind):
+            if not overlaps_selected_core(item):
                 break
             body.append(item)
         occupied_ids.add(item.unit_id)
@@ -1330,7 +1518,7 @@ def _recursive_project_ongoing_center_preview(center: TrendCenter, following_uni
     if not following or all((item.locked for item in following)):
         return None
     known = (() if center.entry_unit is None else (center.entry_unit,)) + center.body_units + center.failed_departure_units + (() if center.pending_leave_unit is None else (center.pending_leave_unit,))
-    preview = CenterPreview(structural_level=center.structural_level, source_kind=center.source_kind, price_basis_revision=center.price_basis_revision, entry_unit_id=None if center.entry_unit is None else center.entry_unit.unit_id, unit_ids=tuple((item.unit_id for item in center.body_units)), state=CenterPreviewState.FORMING, zd_tick=center.zd_tick, zg_tick=center.zg_tick, available_at=center.available_at, failed_departure_unit_ids=tuple((item.unit_id for item in center.failed_departure_units)), pending_leave_unit_id=None if center.pending_leave_unit is None else center.pending_leave_unit.unit_id, establishment_leave_unit_id=None if center.establishment_leave_unit is None else center.establishment_leave_unit.unit_id)
+    preview = CenterPreview(structural_level=center.structural_level, source_kind=center.source_kind, price_basis_revision=center.price_basis_revision, entry_unit_id=None if center.entry_unit is None else center.entry_unit.unit_id, unit_ids=tuple((item.unit_id for item in center.body_units)), state=CenterPreviewState.FORMING, zd_tick=center.zd_tick, zg_tick=center.zg_tick, available_at=center.available_at, failed_departure_unit_ids=tuple((item.unit_id for item in center.failed_departure_units)), pending_leave_unit_id=None if center.pending_leave_unit is None else center.pending_leave_unit.unit_id, establishment_leave_unit_id=None if center.establishment_leave_unit is None else center.establishment_leave_unit.unit_id, formation_rule=center.formation_rule)
     try:
         projected = _advance_center_preview_lifecycle(preview, known, following, oscillatory_ids)
         return None if projected == preview else projected

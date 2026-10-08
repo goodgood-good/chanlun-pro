@@ -14,6 +14,7 @@ from chanlun.market import Market
 from chanlun.exchange import get_exchange, market_now_trading
 from chanlun.tools.log_util import LogUtil
 from ..services.external_tick_backoff import ExternalMarketTickBackoff
+from ..services.quote_symbols import QuoteLookup, quote_code_identity as _quote_code_identity
 
 
 other_bp = Blueprint("other", __name__)
@@ -69,42 +70,20 @@ def _success_response(now_trading, ticks):
     }
 
 
-def _quote_code_identity(market: str, code: object) -> str:
-    value = str(code or "").strip().upper()
-    if market == Market.US.value:
-        if value.startswith("US."):
-            value = value[3:]
-        if value.endswith(".US"):
-            value = value[:-3]
-    elif market == Market.HK.value:
-        if value.startswith(("KH.", "HK.")):
-            value = value[3:]
-        if value.endswith(".HK"):
-            value = value[:-3]
-        value = value.zfill(5) if value.isdigit() else value
-    elif market == Market.A.value:
-        parts = value.split(".", 1)
-        if len(parts) == 2 and parts[0] in {"SH", "SZ"}:
-            value = parts[0] + parts[1]
-        elif len(parts) == 2 and parts[1] in {"SH", "SZ"}:
-            value = parts[1] + parts[0]
-    return value
-
-
 def _shared_success_response(shared, requested_codes, market):
     payload = dict(shared.payload)
-    requested = {
-        _quote_code_identity(market, code): code for code in requested_codes
-    }
+    requested = tuple(dict.fromkeys(requested_codes))
     ticks = payload.get("ticks")
     if isinstance(ticks, list):
         filtered_ticks = []
-        for tick in ticks:
-            if not isinstance(tick, dict):
-                continue
-            identity = _quote_code_identity(market, tick.get("code"))
-            requested_code = requested.get(identity)
-            if requested_code is None:
+        lookup = QuoteLookup(
+            market, {tick.get('code'): tick for tick in ticks if isinstance(tick, dict)},
+            equivalent=lambda left, right: {key: value for key, value in left.items() if key != 'code'}
+                == {key: value for key, value in right.items() if key != 'code'},
+        )
+        for requested_code in requested:
+            tick = lookup.get(requested_code)
+            if tick is None:
                 continue
             normalized_tick = dict(tick)
             normalized_tick["code"] = requested_code
@@ -132,6 +111,15 @@ def _deferred_response(retry_after_seconds: int):
         "ticks": [],
         "error": None,
     }
+
+
+def _late_quote_response(backoff, market, shared_codes, requested_codes):
+    shared = backoff.recent_success(market, shared_codes, max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS)
+    if shared is not None:
+        response = _shared_success_response(shared, requested_codes, market)
+        if response is not None:
+            return response
+    return _deferred_response(1)
 
 
 def _external_tick_backoff() -> ExternalMarketTickBackoff:
@@ -167,6 +155,13 @@ def ticks():
     # 元素必须是字符串，避免下游交易所 SDK 收到非法类型崩溃。
     if not all(isinstance(c, str) for c in codes):
         return _error_response("code_must_be_string", "each code must be a string.", 400)
+    if any(not code.strip() for code in codes):
+        return _error_response("empty_code", "each code must be non-empty.", 400)
+    if not codes:
+        return _success_response(None, [])
+    shared_codes = tuple(dict.fromkeys(_quote_code_identity(market, code) for code in codes))
+    if any(not code for code in shared_codes):
+        return _error_response("empty_code", "each code must identify a symbol.", 400)
 
     external_backoff = None
     external_probe_id = None
@@ -174,7 +169,7 @@ def ticks():
         external_backoff = _external_tick_backoff()
         shared = external_backoff.recent_success(
             market,
-            codes,
+            shared_codes,
             max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS,
         )
         if shared is not None:
@@ -186,7 +181,7 @@ def ticks():
             if permit.reason_code == "PROVIDER_PROBE_IN_FLIGHT":
                 shared = external_backoff.wait_for_success(
                     market,
-                    codes,
+                    shared_codes,
                     not_before=permit.probe_started_at,
                     timeout_seconds=_EXTERNAL_TICK_COALESCE_WAIT_SECONDS,
                     max_age_seconds=_EXTERNAL_TICK_SHARED_MAX_AGE_SECONDS,
@@ -205,13 +200,6 @@ def ticks():
                 ):
                     return _deferred_response(permit.retry_after_seconds)
             if not permit.allowed:
-                readiness = current_app.extensions.get("readiness")
-                if readiness is not None:
-                    readiness.record_ticks_failure(
-                        market,
-                        "service_unavailable",
-                        "Tick provider retry is temporarily deferred.",
-                    )
                 return _error_response(
                     "service_unavailable",
                     "Tick service is temporarily unavailable.",
@@ -234,26 +222,21 @@ def ticks():
             now_trading = None
         # 缺失涨跌幅保留为 null，价格仍可显示；不能把未知涨跌误报为 0%。
         # 逐标的处理，避免一个异常值清空整批行情。
-        requested_by_identity = {
-            _quote_code_identity(market, code): code for code in codes
-        }
+        lookup = QuoteLookup(market, stock_ticks)
         res_ticks = []
-        for _c, _t in stock_ticks.items():
-            if _t is None or _t.last is None:
-                continue
+        for _c in dict.fromkeys(codes):
+            _t = lookup.get(_c)
             try:
+                if _t is None or _t.last is None:
+                    continue
                 _price = float(_t.last)
                 _rate = round(float(_t.rate), 2) if _t.rate is not None else None
                 # NaN/Inf 不是合法 JSON（Flask 的 allow_nan=True 会输出裸 NaN 标记，
                 # 打断前端严格 JSON.parse → 整批含健康标的全失败), 镜像 /tv/quotes(tv.py:654)降级跳过。
                 if not math.isfinite(_price) or (_rate is not None and not math.isfinite(_rate)):
                     continue
-                response_code = requested_by_identity.get(
-                    _quote_code_identity(market, _c),
-                    str(_c),
-                )
                 res_ticks.append(
-                    {"code": response_code, "price": _price, "rate": _rate}
+                    {"code": _c, "price": _price, "rate": _rate}
                 )
             except Exception:
                 LogUtil.exception(
@@ -262,10 +245,8 @@ def ticks():
                 continue
         readiness = current_app.extensions.get("readiness")
         market_closed = now_trading is not None and not bool(now_trading)
-        if readiness is not None:
-            if res_ticks or (codes and market_closed):
-                readiness.record_ticks_success(market)
-            elif codes:
+        def publish_empty():
+            if readiness is not None:
                 readiness.record_ticks_failure(
                     market,
                     "empty_result",
@@ -275,40 +256,63 @@ def ticks():
             if external_backoff is not None:
                 # The provider answered, so failure backoff can close, but an
                 # unusable open-market batch must not enter the shared cache.
-                external_backoff.record_success(
+                accepted = external_backoff.record_success(
                     market,
                     probe_id=external_probe_id,
+                    on_accept=publish_empty,
                 )
+                if not accepted:
+                    return _late_quote_response(external_backoff, market, shared_codes, codes)
+            else:
+                publish_empty()
             return _error_response(
                 "empty_result",
                 "Tick service returned no usable data.",
                 503,
             )
         response_payload = _success_response(now_trading, res_ticks)
+        def publish_success():
+            if readiness is not None:
+                readiness.record_ticks_success(market)
+
         if external_backoff is not None:
-            external_backoff.record_success(
+            accepted = external_backoff.record_success(
                 market,
                 probe_id=external_probe_id,
-                requested_codes=codes,
+                requested_codes=shared_codes,
                 response_payload=response_payload,
+                on_accept=publish_success,
             )
+            if not accepted:
+                return _late_quote_response(external_backoff, market, shared_codes, codes)
+        else:
+            publish_success()
         return response_payload
     except Exception as exc:
         # Provider failures retain a bounded retry and a concise warning.
         # Unexpected bugs keep a full stack in the server log.
         readiness = current_app.extensions.get("readiness")
-        if readiness is not None:
-            readiness.record_ticks_failure(
-                market,
-                "service_unavailable",
-                "Tick service is temporarily unavailable.",
-            )
+        accepted = False
+        def publish_failure():
+            nonlocal accepted
+            accepted = True
+            if readiness is not None:
+                readiness.record_ticks_failure(
+                    market,
+                    "service_unavailable",
+                    "Tick service is temporarily unavailable.",
+                )
         retry_after_seconds = None
         if external_backoff is not None:
             retry_after_seconds = external_backoff.record_failure(
                 market,
                 probe_id=external_probe_id,
+                on_accept=publish_failure,
             ).retry_after_seconds
+            if not accepted:
+                return _late_quote_response(external_backoff, market, shared_codes, codes)
+        else:
+            publish_failure()
         if _provider_transport_error(exc):
             LogUtil.warning(f"/ticks provider unavailable market={market} codes_len={len(codes)} "
                             f"error_type={type(exc).__name__} retry_after={retry_after_seconds}")

@@ -165,6 +165,8 @@ class ComparisonLeg:
             item.unit_id for item in self.units
         ):
             raise ValueError("three-unit comparison measurement lost its source proof")
+        if len(self.units) == 3 and not _is_contiguous_three_leg(self.units):
+            raise ValueError("three-unit comparison leg must connect head to tail")
 
     @property
     def width(self) -> int:
@@ -262,6 +264,60 @@ class MacdStrengthProvider:
             available_at=max(unit.available_at, self._dates[right - 1]),
         )
 
+    def zero_axis_phase_observation(
+        self,
+        earlier: ConstituentUnit | ComparisonMeasurement,
+        later: ConstituentUnit | ComparisonMeasurement,
+    ) -> dict:
+        """Measure native DIF between legs without inventing a near-zero rule.
+
+        L025:3424-3430 distinguishes a just-crossed line from an impulse,
+        return near zero, and renewed move. The author gave no numeric
+        neighbourhood of zero; this records exact source facts only.
+        """
+
+        if earlier.direction != later.direction or earlier.market_end > later.market_start:
+            raise ValueError("MACD phase legs must share direction and be time ordered")
+        earlier_strength = self.snapshot(earlier)
+        later_strength = self.snapshot(later)
+        left = bisect_right(self._dates, earlier.market_end)
+        right = bisect_left(self._dates, later.market_start)
+        between = self._dif_series[left:right]
+        if not np.isfinite(between).all():
+            raise ValueError("intervening MACD DIF values must be finite")
+        first_directional = (
+            earlier_strength.dif_extreme > 0
+            if earlier.direction == "up"
+            else earlier_strength.dif_extreme < 0
+        )
+        exact_touch = (
+            None if between.size == 0 else
+            bool(np.min(between) <= 0) if earlier.direction == "up"
+            else bool(np.max(between) >= 0)
+        )
+        status = (
+            "no_intervening_source_bars" if between.size == 0
+            else "first_leg_not_directional" if not first_directional
+            else "exact_zero_touch_observed" if exact_touch
+            else "no_exact_touch_near_zero_threshold_unspecified"
+        )
+        return {
+            "status": status,
+            "source": "native_macd_dif",
+            "first_leg_dif_extreme": earlier_strength.dif_extreme,
+            "second_leg_dif_extreme": later_strength.dif_extreme,
+            "first_leg_directional": first_directional,
+            "intervening_bar_count": int(between.size),
+            "intervening_min_abs_dif": (
+                None if between.size == 0 else float(np.min(np.abs(between)))
+            ),
+            "intervening_exact_zero_touch": exact_touch,
+            "market_at": later.market_end,
+            "known_at": max(earlier_strength.available_at, later_strength.available_at),
+            "author_phase_certified": False,
+            "tradable": False,
+        }
+
 
 def _comparison_measurement(
     leg_units: tuple[ConstituentUnit, ...],
@@ -270,6 +326,8 @@ def _comparison_measurement(
         return leg_units[0]
     if len(leg_units) != 3:
         raise ValueError("comparison measurement requires one or three units")
+    if not _is_contiguous_three_leg(leg_units):
+        raise ValueError("comparison measurement requires a connected three-unit leg")
     first, _reverse, terminal = leg_units
     child_ids = tuple(item.unit_id for item in leg_units)
     confirmed_at = tuple(item.confirmed_at for item in leg_units)
@@ -323,7 +381,7 @@ def _is_contiguous_three_leg(values: tuple[ConstituentUnit, ...]) -> bool:
             and previous.source_kind is current.source_kind
             and previous.price_basis_revision == current.price_basis_revision
             and previous.end_tick == current.start_tick
-            and current.market_start >= previous.market_end
+            and current.market_start == previous.market_end
             for previous, current in zip(values, values[1:])
         )
     )
@@ -335,23 +393,40 @@ def center_entry_comparison_leg(
     *,
     not_before_unit_id: str | None = None,
 ) -> ComparisonLeg | None:
-    """返回中枢正式的一段或三段进入走势。
+    """Return a one- or three-unit center-entry strength witness.
 
-    三段进入是以 ``center.entry_unit`` 结束的同级别“进入—反向—再进入”序列。
-    第一段必须严格位于冻结中枢区间的进入侧之外；仅触碰 ``ZD`` 或 ``ZG`` 也
-    视为重叠，此时进入段保持一段宽度。
+    A five-role center ends this witness at its external entry. For a selected
+    three-core center, the endpoint is its first core unit when directions
+    agree, otherwise the preceding connector. This is comparison geometry;
+    it never transfers core-member ownership to the connecting trend type.
+    The earlier end of a three-unit witness must lie strictly outside the
+    frozen center core; boundary contact leaves a one-unit comparison.
     """
 
-    if center.source_kind.value == "stroke_observation" or center.entry_unit is None:
+    if center.source_kind.value == "stroke_observation":
         return None
     values = tuple(units)
     index = {item.unit_id: offset for offset, item in enumerate(values)}
-    entry_index = index.get(center.entry_unit.unit_id)
+    if center.formation_rule == "three_core":
+        first_core = center.initial_units[0]
+        first_index = index.get(first_core.unit_id)
+        leave = center.lifecycle_leave_unit
+        if first_index is None or leave is None:
+            return None
+        entry_unit = (
+            first_core if first_core.direction == leave.direction
+            else values[first_index - 1] if first_index > 0 else None
+        )
+    else:
+        entry_unit = center.entry_unit
+    if entry_unit is None:
+        return None
+    entry_index = index.get(entry_unit.unit_id)
     lower_bound = 0 if not_before_unit_id is None else index.get(not_before_unit_id)
     if entry_index is None or lower_bound is None or entry_index < lower_bound:
         return None
     entry = values[entry_index]
-    if entry != center.entry_unit or not entry.locked or entry.confirmed_at is None:
+    if entry != entry_unit or not entry.locked or entry.confirmed_at is None:
         return None
     if entry_index - 2 >= lower_bound:
         candidate = values[entry_index - 2 : entry_index + 1]
@@ -453,6 +528,17 @@ def compare_terminal_trend_divergence(
     ):
         return None
     evidence = compare_comparison_legs(earlier, later, provider, kind="trend")
+    center_known_at = max(
+        terminal_center.established_at,
+        *(unit.available_at for unit in terminal_center.establishment_units),
+    )
+    evidence = replace(
+        evidence,
+        available_at=max(evidence.available_at, center_known_at),
+        comparison_center_id=terminal_center.center_id,
+        comparison_center_established_at=terminal_center.established_at,
+        comparison_center_known_at=center_known_at,
+    )
     terminal = later.terminal_unit
     unit_index = {item.unit_id: index for index, item in enumerate(source_units)}
     start_index = unit_index.get(trend_start_unit_id)

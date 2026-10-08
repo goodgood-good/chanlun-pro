@@ -31,6 +31,7 @@ function loadClConfigApi({ focus = false } = {}) {
     Error,
     TypeError,
     Date,
+    URLSearchParams,
     setInterval: () => 0,
     clearInterval: () => {},
     setTimeout: () => 0,
@@ -88,6 +89,7 @@ function loadClConfigApi({ focus = false } = {}) {
   resolve: resolveClConfigForResolution,
   normalize: normalizeClShowConfig,
   enabled: strictItemEnabled,
+  periods: structurePeriodsForChart,
   ChartManager,
   DEFAULT: CL_SHOW_DEFAULT,
   requestedStudies: requestedDefaultStudies,
@@ -126,7 +128,7 @@ test('resolution keys are canonical and isolated by chart period', () => {
 
 test('only the current display schema is accepted', () => {
   const { api } = loadClConfigApi();
-  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v8');
+  assert.equal(api.DEFAULT.schema, 'chanlun-chart-config-v9');
   assert.throws(
     () => api.normalize({ ...api.DEFAULT, schema: "unsupported" }, '5'),
     /cl_show_config_current_schema_required/,
@@ -190,16 +192,64 @@ test('resolution switching persists each period under the current schema', () =>
   assert.equal(manager.cl_show_config.fx, true);
 });
 
-test('old settings retain requested layers while trend display stays removed', () => {
+test('old settings retain requested layers and migrate trend visibility to the new schema', () => {
  const {api}=loadClConfigApi();
  const config=api.normalize({schema:'chanlun-chart-config-v6',bi:false,xd:true,center_all:true,point_all:true,trend_L1:true},'5');
- assert.equal(config.schema,'chanlun-chart-config-v8');
+ assert.equal(config.schema,'chanlun-chart-config-v9');
  assert.equal(config.bi,false);
  assert.equal(config.point_all,true);
- assert.equal(config.trend_L1,undefined);
+ assert.equal(config.trend_L1,true);
+ assert.equal(config.trend_all,undefined);
  assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:0}),true);
  assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:1}),false);
  assert.equal(api.enabled(config,{render_kind:'strict_trend',structural_level:0}),false);
+});
+
+test('physical period choices use real source periods and are isolated per chart', () => {
+  const {api}=loadClConfigApi();
+  assert.deepEqual(Array.from(api.periods('1')),['1m','5m','30m']);
+  assert.deepEqual(Array.from(api.periods('5')),['5m','30m']);
+  assert.deepEqual(Array.from(api.periods('30')),['30m']);
+  const manager=makeManager(api.ChartManager,'physical');
+  manager.cl_show_config=currentConfig(api,{},'1');
+  manager._curResolution='1';
+  assert.equal(manager.cl_show_config.center_period_1m,true);
+  assert.equal(manager.cl_show_config.center_period_5m,false);
+  const higher={render_kind:'formal_center',structural_level:0,source_frequency:'5m'};
+  assert.equal(api.enabled(manager.cl_show_config,higher),false);
+  manager.cl_show_config.center_period_5m=true;
+  assert.equal(api.enabled(manager.cl_show_config,higher),true);
+  manager._applyResolutionConfig('5');
+  assert.equal(manager.cl_show_config.center_period_5m,true);
+  assert.equal(manager.cl_show_config.center_period_1m,false);
+  assert.equal(manager.cl_show_config.center_period_30m,false);
+  manager._applyResolutionConfig('1');
+  assert.equal(manager.cl_show_config.center_period_5m,true);
+});
+
+test('physical source switches gate centers and reminders while retired types stay hidden', () => {
+  const {api}=loadClConfigApi();
+  const config=currentConfig(api,{trend_all:true},'1');
+  const items=[
+    ['center',{render_kind:'formal_center',structural_level:0,source_frequency:'30m'}],
+    ['point',{render_kind:'point_confirmed',point_type:'1buy',structural_level:0,source_frequency:'30m'}],
+  ];
+  for(const [layer,item] of items){
+    assert.equal(api.enabled(config,item),false);
+    config[`${layer}_period_30m`]=true;
+    assert.equal(api.enabled(config,item),true);
+    config[`${layer}_period_30m`]=false;
+  }
+  config.trend_period_30m=true;
+  assert.equal(api.enabled(config,{render_kind:'strict_trend',structural_level:0,source_frequency:'30m'}),false);
+  config.divergence_period_30m=true;
+  assert.equal(api.enabled(config,{render_kind:'strict_divergence',kind:'trend',structural_level:0,source_frequency:'30m'}),false);
+  config.center_L0=false;
+  config.center_period_30m=true;
+  assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:0,
+    source_frequency:'1m',display_frequency:'1m'}),false);
+  assert.equal(api.enabled(config,{render_kind:'formal_center',structural_level:0,
+    source_frequency:'30m',display_frequency:'1m'}),true);
 });
 
 test('center levels and stroke observation can be switched independently', () => {
@@ -230,7 +280,7 @@ test('each buy and sell class controls confirmed and approaching marks without h
   }
 });
 
-test('consolidation and trend divergence have independent level switches', () => {
+test('retired formal divergence drawings remain hidden for all saved settings', () => {
   const { api } = loadClConfigApi();
   const config = currentConfig(api, {
     divergence_consolidation_L0: false, divergence_trend_L0: true,
@@ -238,8 +288,7 @@ test('consolidation and trend divergence have independent level switches', () =>
   });
   for (const kind of ['consolidation', 'trend']) {
     for (const level of [0, 1]) {
-      assert.equal(api.enabled(config, {render_kind: 'strict_divergence', kind, structural_level: level}),
-        kind === (level === 0 ? 'trend' : 'consolidation'));
+      assert.equal(api.enabled(config, {render_kind: 'strict_divergence', kind, structural_level: level}), false);
     }
   }
   config.divergence_all = false;

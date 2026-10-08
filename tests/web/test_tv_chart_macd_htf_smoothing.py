@@ -44,6 +44,12 @@ class _StrictChartCD:
     def get_src_klines(self):
         return [SimpleNamespace(date=self.evidence.source_closed_at)]
 
+    def get_native_centers(self):
+        return SimpleNamespace(centers=(), previews=())
+
+    def get_segment_units(self):
+        return ()
+
     def get_strict_evidence(self):
         return SimpleNamespace(
             structure=SimpleNamespace(levels=()),

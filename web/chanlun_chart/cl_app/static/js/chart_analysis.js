@@ -21,8 +21,10 @@
     const valid = data?.strict_structure_mode === 'replace'
       && ['native_centers', 'centers_and_signals'].includes(snapshot?.analysis_scope)
       && snapshot.levels?.length >= 1;
-    const centers = valid ? snapshot.levels[0].centers || [] : [];
-    const previews = valid ? snapshot.levels[0].center_previews || [] : [];
+    const centers = valid ? (snapshot.levels[0].centers || []).filter(
+      center => center.formation_rule !== 'three_core') : [];
+    const previews = valid ? (snapshot.levels[0].center_previews || []).filter(
+      preview => preview.formation_rule !== 'three_core') : [];
     return {bars: data?.bars?.length || 0, strokes: data?.bis?.length || 0,
       segments: data?.xds?.length || 0, centers, previews, ready: valid,
       ...(valid && snapshot.segment_construction ? {segmentConstruction: snapshot.segment_construction} : {}),
@@ -84,8 +86,8 @@
     text('ca-segment-status', segmentStatusText(summary));
     text('ca-center-count', summary.ready ? count : '—');
     text('ca-native-status', summary.ready
-      ? (count ? `本周期中枢 ${summary.centers.length} 个，形成中 ${forming.length} 个；虚线表示未确认部分`
-        : '当前已加载区间尚无满足完整条件的中枢')
+      ? count ? `本周期中枢 ${summary.centers.length} 个，形成中 ${forming.length} 个；虚线表示未确认部分`
+        : '当前已加载区间尚无满足完整条件的中枢'
       : summary.loading ? 'K 线已加载，正在计算笔、线段与中枢…'
       : data ? '结构暂未就绪，请查看图表加载状态' : '正在加载行情…');
     const tbody = root.document?.getElementById('ca-native-centers');
@@ -95,7 +97,16 @@
         const row = root.document.createElement('tr');
         const pending = center.render_kind === 'center_preview';
         const projection = summary.previews.find(item => item.owner_center_id === center.center_id);
-        const status = pending ? (center.preview_status === 'awaiting_leave' ? '形成中 / 待离开段'
+        const status = center.alternative_five_segment_center
+          ? '五段重叠已成枢 / 唯一归属待判'
+          : center.direct_five_segment_center
+          ? center.state === 'completed' ? '五段成枢 / 离返完成'
+            : center.state === 'awaiting_return' ? '五段成枢 / 待返回'
+              : '五段成枢 / 延伸中'
+          : summary.userView && !pending
+          && !summary.qualifiedPhysicalIds.has(center.center_id)
+          ? '结构已出现 / 独立离返待确认'
+          : pending ? (center.preview_status === 'awaiting_leave' ? '形成中 / 待离开段'
           : center.preview_status === 'awaiting_completion_confirmation' ? '回试待确认' : '形成中 / 待线段确认')
           : center.third_class_confirmed ? '已结束' : center.state === 'divergence_closed' ? '背驰分界'
           : center.state === 'superseded' ? '后继中枢已成立'

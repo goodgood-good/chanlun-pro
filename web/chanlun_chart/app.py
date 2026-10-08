@@ -206,6 +206,10 @@ class NativeReadinessRunner:
                 if allow_stale
                 else self._cache_ttl_seconds
             )
+            if not allow_stale and (value[1] != 200 or value[0].get("status") != "ready"):
+                # A failed startup probe may recover almost immediately. Keep
+                # its negative cache short while retaining normal ready/busy caching.
+                maximum = min(maximum, 1.0)
             if age > maximum:
                 return None
             return self._cached_payload(value, age)

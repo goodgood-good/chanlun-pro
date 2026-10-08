@@ -15,6 +15,7 @@ import re
 import time
 import threading
 from collections import OrderedDict
+from decimal import Decimal
 from contextlib import nullcontext
 
 try:
@@ -24,6 +25,7 @@ except ImportError:  # Optional acceleration; gzip remains the portable fallback
 
 from flask import Blueprint, g, jsonify, request
 from flask_login import current_user, login_required
+from ..services.quote_symbols import QuoteLookup
 
 from chanlun import config, fun
 from chanlun.market import Market
@@ -466,6 +468,18 @@ def _drawing_storage_name(chart_id: str, layout_id: str, symbol: str, resolution
 
 _USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings"
 _DRAWING_MANIFEST_LIMIT = 1000
+_DRAWING_SAVE_LOCK = threading.RLock()
+
+
+def _current_drawing_state(client_id,user_id,chart_id,layout_id,symbol,resolution):
+    name=_drawing_storage_name(chart_id,layout_id,symbol,resolution)
+    record=db.tv_chart_get_by_name('drawing',name,client_id,user_id)
+    if record:
+        try:return _normalize_user_drawing_state(json.loads(record.content)) or _empty_user_drawing_state()
+        except (TypeError,ValueError):return _empty_user_drawing_state()
+    if resolution=='hierarchy':
+        return _legacy_hierarchy_drawing_state(client_id,user_id,chart_id,layout_id,symbol)
+    return _empty_user_drawing_state()
 
 
 def _empty_user_drawing_state():
@@ -591,6 +605,38 @@ def _normalize_user_drawing_state(value):
     # 自动生成的实体绝不写入持久化 TradingView 分组。
         "groups": {},
     }
+
+
+def _manual_drawing_origin(source, storage_resolution):
+    props = source.get("state")
+    props = props if isinstance(props, dict) else {}
+    nested = props.get("state")
+    nested = nested if isinstance(nested, dict) else {}
+    value = source.get("_cl_origin_resolution", nested.get("interval", props.get("interval")))
+    if value is None and storage_resolution != "all":
+        value = storage_resolution
+    value = str(value).strip() if isinstance(value, (str, int)) else ""
+    return re.sub(r"^(\d+)m$", r"\1", value)
+
+
+def _legacy_hierarchy_drawing_state(client_id, user_id, chart_id, layout_id, symbol):
+    """Read existing manual contexts without rewriting or deleting originals."""
+    sources, versions = {}, {}
+    for order, resolution in enumerate(("all", "1", "5", "30")):
+        name = _drawing_storage_name(chart_id, layout_id, symbol, resolution)
+        record = db.tv_chart_get_by_name("drawing", name, client_id, user_id)
+        if record is None:
+            continue
+        state = _drawing_record_manual_state(record)
+        if state is None:
+            continue
+        version = (_drawing_record_timestamp(record), order)
+        for source_id, source in state["sources"].items():
+            if source_id in versions and versions[source_id] > version:
+                continue
+            versions[source_id] = version
+            sources[source_id] = {**source, "_cl_origin_resolution": _manual_drawing_origin(source, resolution)}
+    return {"schema": _USER_DRAWING_STATE_SCHEMA, "sources": sources, "groups": {}}
 
 
 @tv_bp.route("/tv/config")
@@ -776,16 +822,31 @@ def tv_quotes():
                 f"type={type(stock_ticks).__name__}"
             )
             stock_ticks = {}
+        lookup = QuoteLookup(market, stock_ticks)
         for code, sym in code_map.items():
-            t = stock_ticks.get(code)
-            if t is None or t.last is None:
-                data.append({"s": "error", "n": sym, "v": {}})
-                continue
+            t = lookup.get(code)
             try:
+                # UDF treats omitted change fields as zero, so an incomplete
+                # quote must use its per-symbol unavailable response.
+                if t is None or t.last is None or t.rate is None:
+                    data.append({"s": "error", "n": sym, "v": {}})
+                    continue
                 last = float(t.last)
-                rate = float(t.rate or 0)
-                # rate 为涨跌幅百分比(Tick 文档口径)→ 反推昨收: prev = last/(1+rate/100)。
-                prev_close = last / (1 + rate / 100) if rate != -100 else last
+                rate = float(t.rate)
+                # A rounded percentage cannot reconstruct the exact provider
+                # basis. Preserve it when supplied; legacy rate-only sources
+                # retain their fallback except the non-invertible -100% case.
+                reference = getattr(t, "reference_price", None)
+                if reference is not None:
+                    prev_close = float(reference)
+                    if prev_close == 0:
+                        raise ValueError("quote comparison reference is zero")
+                    change = float(Decimal(str(last)) - Decimal(str(prev_close)))
+                elif rate == -100:
+                    raise ValueError("quote comparison reference is unavailable")
+                else:
+                    prev_close = last / (1 + rate / 100)
+                    change = round(last - prev_close, 4)
                 open_p = float(t.open) if t.open is not None else last
                 high_p = float(t.high) if t.high is not None else last
                 low_p = float(t.low) if t.low is not None else last
@@ -802,7 +863,7 @@ def tv_quotes():
             # 决不让非有限值进入最终 JSON(NaN 与任何数比较均为 False, rate!=-100 拦不住)。
             if not all(
                 math.isfinite(x)
-                for x in (last, rate, prev_close, open_p, high_p, low_p, volume)
+                for x in (last, rate, prev_close, change, open_p, high_p, low_p, volume)
             ):
                 data.append({"s": "error", "n": sym, "v": {}})
                 continue
@@ -811,12 +872,12 @@ def tv_quotes():
                 "n": sym,
                 "v": {
                     "lp": last,
-                    "ch": round(last - prev_close, 4),
+                    "ch": change,
                     "chp": round(rate, 2),
                     "open_price": open_p,
                     "high_price": high_p,
                     "low_price": low_p,
-                    "prev_close_price": round(prev_close, 4),
+                    "prev_close_price": prev_close if reference is not None else round(prev_close, 4),
                     "volume": volume,
                 },
             })
@@ -1403,6 +1464,17 @@ def tv_history():
             f"first={firstDataRequest} elapsed={_elapsed_ms:.0f}ms"
         )
 
+        if args.get("structure_only") == "1":
+            return {
+                "s": "ok",
+                "symbol": symbol,
+                "resolution": resolution,
+                "source_closed_at": _resp_t[-1],
+                "initial_structure_build_id": _strict_source_data.get("_initial_structure_build_id"),
+                **chart_bar_time_fields(cl_chart_data),
+                **_strict_history_fields,
+            }
+
         # 按 bar index 的数值列（OHLCV + macd_* + higher_macd_*）必须与 t 等长，否则前端越界取
         # undefined → 静默 NaN（无异常无日志，最难排查，审查 F-1/MED-3）。统一对齐见 _align_value_columns_to_t。
         _align_value_columns_to_t(cl_chart_data, symbol, resolution)
@@ -1465,7 +1537,11 @@ def tv_charts(api_revision):
     if request.method == "GET":
         chart_id = request.args.get("chart")
         if chart_id is None:
-            chart_list = db.tv_chart_list("chart", client_id, user_id)
+            chart_list = sorted(
+                db.tv_chart_list("chart", client_id, user_id),
+                key=lambda chart: (chart.timestamp or 0, chart.id or 0),
+                reverse=True,
+            )
             return {
                 "status": "ok",
                 "data": [
@@ -1516,17 +1592,23 @@ def tv_charts(api_revision):
                 "id": id,
             }
         else:
-            db.tv_chart_update(
-                "chart",
-                chart_id,
-                client_id,
-                user_id,
-                name,
-                content,
-                symbol,
-                resolution,
+            try:
+                existing_id = int(chart_id)
+            except (TypeError, ValueError):
+                existing_id = None
+            updated = existing_id is not None and existing_id > 0 and db.tv_chart_update(
+                "chart", existing_id, client_id, user_id,
+                name, content, symbol, resolution,
             )
-            return {"status": "ok"}
+            if updated:
+                return {"status": "ok", "id": existing_id}
+            # TradingView can submit a layout id retained from another market,
+            # account, or a deleted record. A zero-row update must create an
+            # owned layout and return its new id, rather than claim success.
+            new_id = db.tv_chart_save(
+                "chart", client_id, user_id, name, content, symbol, resolution
+            )
+            return {"status": "ok", "id": new_id}
 
 
 @tv_bp.route("/tv/<api_revision>/study_templates", methods=["GET", "POST", "DELETE"])
@@ -1626,36 +1708,31 @@ def tv_drawings(api_revision):
                 "status": "error",
                 "message": "invalid drawing state",
             }, 400
-        if not normalized["sources"]:
-            # An empty manual-drawing state has no information to persist.
-            # Removing the row keeps the table from filling with one empty
-            # record per symbol/resolution while GET still returns the same
-            # canonical empty state.
-            db.tv_chart_del_by_name("drawing", drawing_name, client_id, user_id)
-            return {"status": "ok"}
-        db.tv_chart_save(
-            "drawing",
-            client_id,
-            user_id,
-            drawing_name,
-            json.dumps(normalized, ensure_ascii=False, sort_keys=True),
-            symbol,
-            resolution,
-        )
-        return {"status": "ok"}
+        from ..services.drawing_merge import merge,revision
+        base = _normalize_user_drawing_state(payload['base_state']) if 'base_state' in payload else None
+        if 'base_state' in payload and base is None:
+            return {'status':'error','message':'invalid base drawing state'},400
+        with _DRAWING_SAVE_LOCK:
+            current=_current_drawing_state(client_id,user_id,chart_id,layout_id,symbol,resolution)
+            if base is None:
+                if current!=normalized:
+                    return {'status':'error','reason_code':'DRAWING_BASE_REQUIRED',
+                            'message':'画线保存协议已更新，请刷新图表后再修改；本次未覆盖已保存的图形。'},409
+                base=_empty_user_drawing_state()
+            merged,conflicts=merge(base,normalized,current)
+            if conflicts:
+                return {'status':'error','reason_code':'DRAWING_CONFLICT','conflicts':conflicts,
+                        'message':'同一图形已在其他窗口被修改，本次未保存。当前画图仍保留在本页，请核对后再保存。'},409
+            retain_empty_hierarchy = resolution == 'hierarchy' and not merged['sources'] and bool(
+                _legacy_hierarchy_drawing_state(client_id,user_id,chart_id,layout_id,symbol)['sources'])
+            if not merged['sources'] and not retain_empty_hierarchy:
+                db.tv_chart_del_by_name('drawing',drawing_name,client_id,user_id)
+            else:
+                db.tv_chart_save('drawing',client_id,user_id,drawing_name,
+                                 json.dumps(merged,ensure_ascii=False,sort_keys=True),symbol,resolution)
+        return {'status':'ok','data':merged,'revision':revision(merged),'merged':merged!=normalized}
 
     if request.method == "GET":
-        drawing = db.tv_chart_get_by_name("drawing", drawing_name, client_id, user_id)
-        if drawing:
-            try:
-                data = _normalize_user_drawing_state(json.loads(drawing.content))
-            except Exception:
-                data = None
-            return {
-                "status": "ok",
-                "data": data or _empty_user_drawing_state(),
-            }
-        return {
-            "status": "ok",
-            "data": _empty_user_drawing_state(),
-        }
+        from ..services.drawing_merge import revision
+        data=_current_drawing_state(client_id,user_id,chart_id,layout_id,symbol,resolution)
+        return {'status':'ok','data':data,'revision':revision(data)}

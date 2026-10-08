@@ -189,14 +189,17 @@ def combined_extreme_market_time(units, side: str) -> datetime | None:
     return None if any(t is None for t in moments) else max(moments)
 
 
-def center_envelope_units(initial_units, body_units, source_kind: SourceKind) -> tuple[ConstituentUnit, ...]:
+def center_envelope_units(initial_units, body_units, source_kind: SourceKind, failed_departure_units=()) -> tuple[ConstituentUnit, ...]:
     """Use the center-forming direction's Z legs for recursive DD/GG.
 
     Physical segment centers retain their operational full-body envelope.
     A recursive center follows the same-direction Zn definition in lesson 20;
     the opposite legs still belong to the body and must overlap its core.
     """
-    values = tuple(body_units)
+    # A failed departure is a completed surrounding wave, even if its return
+    # crosses the entire core and becomes the next pending departure. L020's
+    # separation test must retain those extremes without enlarging ZD/ZG.
+    values = (*tuple(body_units), *tuple(failed_departure_units))
     if SourceKind(source_kind) is SourceKind.TREND_TYPE:
         direction = tuple(initial_units)[0].direction
         return tuple(item for item in values if item.direction == direction)
@@ -250,8 +253,8 @@ class TrendCenter:
     superseded_by_center_id: str | None = None
     superseded_at: datetime | None = None
     supersession_bridge_units: tuple[ConstituentUnit, ...] = ()
-    formation_rule: Literal["five_role"] | None = None
-    boundary_contact: Literal["oscillation", "third_class"] = "third_class"
+    formation_rule: Literal["five_role", "three_core"] | None = None
+    boundary_contact: Literal["oscillation", "third_class"] = "oscillation"
 
     def _validate_recursive(self) -> None:
         object.__setattr__(self, 'source_kind', SourceKind(self.source_kind))
@@ -294,7 +297,7 @@ class TrendCenter:
         expected_zg = min((item.high_tick for item in self.core_units))
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
             raise ValueError('center core must equal its three core-unit intersection')
-        envelope_units = center_envelope_units(self.initial_units, self.body_units, self.source_kind)
+        envelope_units = center_envelope_units(self.initial_units, self.body_units, self.source_kind, self.failed_departure_units)
         expected_dd = min((item.low_tick for item in envelope_units))
         expected_gg = max((item.high_tick for item in envelope_units))
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
@@ -315,6 +318,8 @@ class TrendCenter:
                 raise ValueError('center entry must connect to first core unit')
             if first.market_start < self.entry_unit.market_end:
                 raise ValueError('center body cannot overlap external entry')
+            if first.market_start > self.entry_unit.market_end:
+                raise ValueError('center entry and body market endpoints must connect')
         if self.body_start_market_time != self.body_units[0].market_start:
             raise ValueError('body start time must equal first body unit')
         maturity_unit = self.initial_units[-1]
@@ -379,12 +384,14 @@ class TrendCenter:
             if not self._touches_core(leave) or not self._outside_in_direction(leave):
                 raise ValueError('completion leave geometry is invalid')
             self._validate_external_leave(leave)
-            if False and leave.direction == ret.direction:
+            if leave.direction == ret.direction:
                 raise ValueError('completion return must alternate with leave')
             if leave.end_tick != ret.start_tick:
                 raise ValueError('completion return must connect to leave')
             if ret.market_start < leave.market_end:
                 raise ValueError('completion return cannot overlap leave')
+            if ret.market_start > leave.market_end:
+                raise ValueError('completion return must share leave market endpoint')
             if leave.direction == 'up':
                 valid_return = ret.direction == 'down' and ret.low_tick >= self.zg_tick
             else:
@@ -467,12 +474,14 @@ class TrendCenter:
         physical_chain = (*((self.entry_unit,) if self.entry_unit is not None else ()), *ordered_transitions)
         for (previous, current) in zip(physical_chain, physical_chain[1:]):
             pair_label = 'center body' if previous.unit_id in body_ids and current.unit_id in body_ids else 'center transition'
-            if False and previous.direction == current.direction:
+            if previous.direction == current.direction:
                 raise ValueError(f'{pair_label} directions must alternate')
             if previous.end_tick != current.start_tick:
                 raise ValueError(f'{pair_label} prices must connect')
             if current.market_start < previous.market_end:
                 raise ValueError(f'{pair_label} intervals must not overlap')
+            if current.market_start > previous.market_end:
+                raise ValueError(f'{pair_label} market endpoints must connect')
         transition_offset = {item.unit_id: offset for (offset, item) in enumerate(ordered_transitions)}
         for failed in self.failed_departure_units:
             offset = transition_offset[failed.unit_id]
@@ -481,12 +490,12 @@ class TrendCenter:
             ret = ordered_transitions[offset + 1]
             if not self._overlaps_core(ret):
                 raise ValueError('failed departure return must re-enter center core')
-        expected_center_id = build_center_id(price_basis_revision=self.price_basis_revision, structural_level=self.structural_level, source_kind=self.source_kind.value, entry_unit_id=None if self.entry_unit is None else self.entry_unit.unit_id, initial_unit_ids=tuple((item.unit_id for item in self.initial_units)), establishment_leave_unit_id=None if self.establishment_leave_unit is None else self.establishment_leave_unit.unit_id, zd_tick=self.zd_tick, zg_tick=self.zg_tick)
+        expected_center_id = build_center_id(price_basis_revision=self.price_basis_revision, structural_level=self.structural_level, source_kind=self.source_kind.value, entry_unit_id=None if self.entry_unit is None else self.entry_unit.unit_id, initial_unit_ids=tuple((item.unit_id for item in self.initial_units)), establishment_leave_unit_id=None if self.establishment_leave_unit is None else self.establishment_leave_unit.unit_id, zd_tick=self.zd_tick, zg_tick=self.zg_tick, formation_rule=self.formation_rule)
         if self.center_id != expected_center_id:
             raise ValueError('center_id must match the immutable center seed')
 
     def __post_init__(self) -> None:
-        if SourceKind(self.source_kind) is SourceKind.TREND_TYPE:
+        if SourceKind(self.source_kind) is SourceKind.TREND_TYPE or self.formation_rule == "three_core":
             return self._validate_recursive()
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
         object.__setattr__(self, "state", CenterState(self.state))
@@ -569,7 +578,7 @@ class TrendCenter:
         expected_zg = min((item.high_tick for item in self.core_units))
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
             raise ValueError("center core must equal its three core-unit intersection")
-        envelope_units = self.body_units + ()
+        envelope_units = center_envelope_units(self.initial_units, self.body_units, self.source_kind, self.failed_departure_units)
         expected_dd = min((item.low_tick for item in envelope_units))
         expected_gg = max((item.high_tick for item in envelope_units))
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
@@ -615,6 +624,8 @@ class TrendCenter:
                 raise ValueError("center entry must connect to first core unit")
             if first.market_start < self.entry_unit.market_end:
                 raise ValueError("center body cannot overlap external entry")
+            if first.market_start > self.entry_unit.market_end:
+                raise ValueError("center entry and body market endpoints must connect")
         if self.body_start_market_time != self.body_units[0].market_start:
             raise ValueError("body start time must equal first body unit")
         maturity_unit = self.establishment_leave_unit
@@ -723,6 +734,8 @@ class TrendCenter:
                 raise ValueError("completion return must connect to leave")
             if ret.market_start < leave.market_end:
                 raise ValueError("completion return cannot overlap leave")
+            if ret.market_start > leave.market_end:
+                raise ValueError("completion return must share leave market endpoint")
             departure_direction = self.departure_direction(leave)
             valid_return = ret.is_return_from(
                 departure_direction
@@ -937,6 +950,8 @@ class TrendCenter:
                 raise ValueError(f"{pair_label} prices must connect")
             if current.market_start < previous.market_end:
                 raise ValueError(f"{pair_label} intervals must not overlap")
+            if current.market_start > previous.market_end:
+                raise ValueError(f"{pair_label} market endpoints must connect")
         transition_offset = {
             item.unit_id: offset for (offset, item) in enumerate(ordered_transitions)
         }
@@ -966,7 +981,7 @@ class TrendCenter:
     def _overlaps_core(self, item: ConstituentUnit) -> bool:
         left = max(item.low_tick, self.zd_tick)
         right = min(item.high_tick, self.zg_tick)
-        if self.source_kind is SourceKind.TREND_TYPE or self.zd_tick == self.zg_tick:
+        if self.source_kind is SourceKind.TREND_TYPE or self.formation_rule == "three_core" or self.zd_tick == self.zg_tick:
             return left <= right
         return left < right
 
@@ -999,6 +1014,8 @@ class TrendCenter:
             raise ValueError("external leave must connect to center body")
         if leave.market_start < previous.market_end:
             raise ValueError("external leave cannot overlap center body in time")
+        if leave.market_start > previous.market_end:
+            raise ValueError("external leave must share body market endpoint")
 
     def _is_seed_exit(self, unit: ConstituentUnit) -> bool:
         """第 54 课共享末段的几何图例；正式三类点另按第 61 课校验。"""
@@ -1057,7 +1074,7 @@ class TrendCenter:
     def maturity_unit(self) -> ConstituentUnit:
         """返回锁定后使中枢正式成立的不可变单元。"""
 
-        if self.source_kind is SourceKind.TREND_TYPE:
+        if self.source_kind is SourceKind.TREND_TYPE or self.formation_rule == "three_core":
             return self.initial_units[-1]
         if self.establishment_leave_unit is None:  # guarded by __post_init__
             raise ValueError("physical center maturity evidence is missing")
@@ -1072,7 +1089,7 @@ class TrendCenter:
     def establishment_units(self) -> tuple[ConstituentUnit, ...]:
         """返回用于建立该中枢的精确来源窗口。"""
 
-        if self.source_kind is SourceKind.TREND_TYPE:
+        if self.source_kind is SourceKind.TREND_TYPE or self.formation_rule == "three_core":
             return self.initial_units
         if self.entry_unit is None or self.establishment_leave_unit is None:
             return ()
@@ -1133,9 +1150,12 @@ class TrendCenter:
 
     @property
     def has_minimum_physical_roles(self) -> bool:
-        """物理中枢必须具备进入、三段核心和独立离开五个角色。"""
+        """Check the selected source-specific center formation seed."""
 
-        if self.source_kind is SourceKind.TREND_TYPE:
+        if (
+            self.source_kind is SourceKind.TREND_TYPE
+            or self.formation_rule == "three_core"
+        ):
             return True
         establishment_ids = tuple(item.unit_id for item in self.establishment_units)
         return len(establishment_ids) == 5 and len(set(establishment_ids)) == 5
@@ -1193,6 +1213,7 @@ class CenterPreview:
     completion_leave_unit_id: str | None = None
     completion_return_unit_id: str | None = None
     establishment_leave_unit_id: str | None = None
+    formation_rule: Literal["five_role", "three_core"] | None = None
 
     def _validate_recursive(self) -> None:
         object.__setattr__(self, 'source_kind', SourceKind(self.source_kind))
@@ -1243,10 +1264,13 @@ class CenterPreview:
         if self.entry_unit_id is not None and self.entry_unit_id in external_ids:
             raise ValueError('preview entry and lifecycle units must be distinct')
         if self.establishment_leave_unit_id is not None:
-            raise ValueError('trend-type preview has no physical establishment leave')
+            raise ValueError('three-core preview has no establishment leave')
 
     def __post_init__(self) -> None:
-        if SourceKind(self.source_kind) is SourceKind.TREND_TYPE:
+        if (
+            SourceKind(self.source_kind) is SourceKind.TREND_TYPE
+            or self.formation_rule == "three_core"
+        ):
             return self._validate_recursive()
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
         object.__setattr__(self, "state", CenterPreviewState(self.state))
@@ -1349,9 +1373,9 @@ class CenterPreview:
     def formal_center_id(self) -> str | None:
         """返回该预览锁定后将采用的正式中枢身份。
 
-        旧触碰型预览没有正式五角色证，不能提升为正式中枢。其余预览与
-        正式中枢共用完全相同的种子身份，盘中候选因此可以保留到确认阶段的
-        精确中枢血缘，而不需要由选股层重新拼装另一套身份。
+        Five-role physical previews need an entry and independent leave;
+        selected three-core previews need only their three source members.
+        Each qualified preview retains its locked center identity.
         """
 
         if (
@@ -1362,7 +1386,10 @@ class CenterPreview:
             return None
         if self.zd_tick > self.zg_tick:
             return None
-        if self.source_kind is not SourceKind.TREND_TYPE and (
+        if (
+            self.source_kind is not SourceKind.TREND_TYPE
+            and self.formation_rule != "three_core"
+        ) and (
             self.entry_unit_id is None or self.establishment_leave_unit_id is None
         ):
             return None
@@ -1375,6 +1402,7 @@ class CenterPreview:
             establishment_leave_unit_id=self.establishment_leave_unit_id,
             zd_tick=self.zd_tick,
             zg_tick=self.zg_tick,
+            formation_rule=self.formation_rule,
         )
 
 
@@ -1527,14 +1555,19 @@ class CenterLevelResult:
                 if center.supersession_bridge_units
                 else center.body_units[-1]
             )
-            if successor.entry_unit != boundary_unit:
+            if successor.formation_rule == "three_core":
+                if not center.supersession_bridge_units:
+                    raise ValueError(
+                        "three-core successor requires a connecting lower unit"
+                    )
+            elif successor.entry_unit != boundary_unit:
                 raise ValueError(
                     "successor entry must equal the supersession boundary unit"
                 )
             if boundary_unit.end_tick != successor.body_units[0].start_tick:
                 raise ValueError("supersession boundary prices must connect")
-            if successor.body_units[0].market_start < boundary_unit.market_end:
-                raise ValueError("supersession boundary intervals must not overlap")
+            if successor.body_units[0].market_start != boundary_unit.market_end:
+                raise ValueError("supersession boundary market endpoints must connect")
             cores_overlap = not (
                 successor.zd_tick > center.zg_tick or successor.zg_tick < center.zd_tick
             )
@@ -1643,6 +1676,7 @@ class StrictPointVariant(str, Enum):
     STANDARD = "standard"
     STRICT = "strict"
     WEAK_DIVERGENCE = "weak_divergence"
+    LOWER_RETEST = "lower_retest"
     BOUNDARY_TOUCH = "boundary_touch"
 
 
@@ -1652,6 +1686,8 @@ class TrendType:
     structural_level: int
     price_basis_revision: str
     kind: TrendKind
+    # The connected path needs an up/down geometric orientation even for
+    # consolidation. Only a TREND has a formal trend direction (L031).
     direction: Direction
     state: TrendState
     centers: tuple[TrendCenter, ...]
@@ -1768,6 +1804,8 @@ class TrendType:
                 raise ValueError("trend constituent prices must connect")
             if current.market_start < previous.market_end:
                 raise ValueError("trend constituent intervals must not overlap")
+            if current.market_start > previous.market_end:
+                raise ValueError("trend constituent market endpoints must connect")
 
         constituent_ids = {item.unit_id for item in self.constituent_units}
         terminal_unit_id = self.constituent_units[-1].unit_id
@@ -1835,7 +1873,7 @@ class TrendType:
             for previous, current in zip(witness_chain, witness_chain[1:]):
                 if (
                     previous.end_tick != current.start_tick
-                    or current.market_start < previous.market_end
+                    or current.market_start != previous.market_end
                 ):
                     raise ValueError(
                         "geometric completion witness must follow terminal"
@@ -2092,15 +2130,26 @@ class TrendType:
                 if self.direction == "up"
                 else signal_extreme < min(item.low_tick for item in prior_units)
             )
-            if terminal_center.entry_unit is None:
+            if terminal_center.formation_rule == "three_core":
+                first_core = terminal_center.initial_units[0]
+                first_core_offset = unit_offsets.get(first_core.unit_id)
+                comparison_entry = (
+                    first_core if first_core.direction == divergence.direction
+                    else self.constituent_units[first_core_offset - 1]
+                    if first_core_offset is not None and first_core_offset > 0
+                    else None
+                )
+            else:
+                comparison_entry = terminal_center.entry_unit
+            if comparison_entry is None:
                 raise ValueError(
-                    "terminal divergence requires an external center entry leg"
+                    "terminal divergence requires a qualified entry comparison leg"
                 )
             if (
                 terminal.direction != self.direction
-                or divergence.compare_unit_id != terminal_center.entry_unit.unit_id
+                or divergence.compare_unit_id != comparison_entry.unit_id
                 or divergence.signal_unit_id != terminal.unit_id
-                or compare_leg[-1] != terminal_center.entry_unit
+                or compare_leg[-1] != comparison_entry
                 or signal_leg[0] != leave
                 or signal_leg[-1] != terminal
                 or not contiguous(compare_leg)
@@ -2208,6 +2257,14 @@ class TrendType:
         return self.state in (TrendState.COMPLETE, TrendState.LOCKED)
 
     @property
+    def movement_orientation(self) -> Direction:
+        return self.direction
+
+    @property
+    def trend_direction(self) -> Direction | None:
+        return self.direction if self.kind is TrendKind.TREND else None
+
+    @property
     def terminal_unit(self) -> ConstituentUnit:
         return self.constituent_units[-1]
 
@@ -2271,6 +2328,8 @@ class PendingMovementPartition:
                 raise ValueError("pending movement units must connect")
             if current.market_start < previous.market_end:
                 raise ValueError("pending movement unit intervals must not overlap")
+            if current.market_start > previous.market_end:
+                raise ValueError("pending movement market endpoints must connect")
         first = self.constituent_units[0]
         last = self.constituent_units[-1]
         expected_direction = (
@@ -2431,7 +2490,7 @@ class TrendAssemblyResult:
                 raise ValueError("current trend directions must alternate")
             if (
                 previous.end_tick != current.start_tick
-                or current.market_start < previous.market_end
+                or current.market_start != previous.market_end
             ):
                 raise ValueError("current trends must form one connected chain")
         if any(item.left_trend_id not in current_ids for item in boundaries):
@@ -2620,7 +2679,8 @@ class StrictLevelResult:
     trend_types: tuple[TrendType, ...]
     completed_trends: tuple[TrendType, ...]
     decomposition_boundaries: tuple[DecompositionBoundaryEvidence, ...] = ()
-    decomposition_mode: Literal["same_level"] = "same_level"
+    decomposition_mode: Literal["same_level", "general_declared"] = "same_level"
+    view_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
@@ -2633,8 +2693,15 @@ class StrictLevelResult:
         )
         if type(self.structural_level) is not int or self.structural_level < 0:
             raise ValueError("structural_level must be non-negative")
-        if self.decomposition_mode != "same_level":
-            raise ValueError("strict level requires fixed same-level decomposition")
+        if self.decomposition_mode not in ("same_level", "general_declared"):
+            raise ValueError("unknown strict decomposition mode")
+        if self.decomposition_mode == "general_declared":
+            if not self.view_id or not self.view_id.strip():
+                raise ValueError("declared general level requires view_id")
+            if self.decomposition_boundaries:
+                raise ValueError("general view boundaries need view-specific proof")
+        elif self.view_id is not None:
+            raise ValueError("fixed same-level view does not take a second view_id")
         if self.center_result.structural_level != self.structural_level:
             raise ValueError("level result center level mismatch")
         if any(item.structural_level != self.structural_level for item in self.units):
@@ -2681,7 +2748,7 @@ class StrictLevelResult:
             if (
                 previous.direction == current.direction
                 or previous.end_tick != current.start_tick
-                or current.market_start < previous.market_end
+                or current.market_start != previous.market_end
             ):
                 raise ValueError(
                     "same-level trends must form one alternating causal chain"
@@ -3544,8 +3611,8 @@ class StrictEvidenceResult:
             or pullback.direction != signal.direction
             or signal.end_tick != rebound.start_tick
             or rebound.end_tick != pullback.start_tick
-            or rebound.market_start < signal.market_end
-            or pullback.market_start < rebound.market_end
+            or rebound.market_start != signal.market_end
+            or pullback.market_start != rebound.market_end
             or pullback.unit_id != point.anchor_unit_id
         ):
             raise ValueError("small-to-large carrier geometry is invalid")
@@ -3670,6 +3737,11 @@ class DivergenceEvidence:
     compare_leg_unit_ids: tuple[str, ...] = ()
     signal_leg_unit_ids: tuple[str, ...] = ()
     price_anchor_unit_id: str | None = None
+    # The center that supplied the entry/departure comparison. A direct local
+    # two-leg observation has no center and leaves this unset.
+    comparison_center_id: str | None = None
+    comparison_center_established_at: datetime | None = None
+    comparison_center_known_at: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
@@ -3682,6 +3754,28 @@ class DivergenceEvidence:
             raise ValueError("divergence price anchor must belong to its signal leg")
         if not self.divergence_id:
             raise ValueError("divergence_id is required")
+        if self.comparison_center_id is not None and not self.comparison_center_id.strip():
+            raise ValueError("comparison center id must be nonempty when supplied")
+        center_clocks = (
+            self.comparison_center_established_at,
+            self.comparison_center_known_at,
+        )
+        if (self.comparison_center_id is None) != (center_clocks == (None, None)):
+            raise ValueError("comparison center identity and clocks must be supplied together")
+        if self.comparison_center_id is not None:
+            if any(
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() is None
+                for value in center_clocks
+            ):
+                raise ValueError("comparison center clocks must be timezone-aware")
+            if not (
+                self.comparison_center_established_at
+                <= self.comparison_center_known_at
+                <= self.available_at
+            ):
+                raise ValueError("comparison center must be known before divergence")
         if type(self.structural_level) is not int or self.structural_level < 0:
             raise ValueError("structural_level must be non-negative")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
@@ -3951,6 +4045,14 @@ class StrictPointEvidence:
                 raise ValueError(
                     "weak divergence requires confirmed consolidation divergence"
                 )
+        if self.variant is StrictPointVariant.LOWER_RETEST and (
+            self.point_type not in {"2buy", "2sell"}
+            or self.divergence is not None
+            or self.invalidation_tick != self.anchor_tick
+        ):
+            raise ValueError(
+                "lower retest is a second-class point without a required divergence"
+            )
 
         if self.point_type in {"1buy", "1sell"} and (
             self.variant is not StrictPointVariant.STANDARD
@@ -3963,9 +4065,10 @@ class StrictPointEvidence:
             if self.variant not in {
                 StrictPointVariant.STRICT,
                 StrictPointVariant.WEAK_DIVERGENCE,
+                StrictPointVariant.LOWER_RETEST,
             }:
                 raise ValueError(
-                    "second class requires strict or weak divergence variant"
+                    "second class requires strict, divergence, or lower retest variant"
                 )
             if self.parent_point_id is None:
                 raise ValueError("second class requires parent point")

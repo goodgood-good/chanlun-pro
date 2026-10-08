@@ -3,12 +3,27 @@
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    schema: 'chanlun-chart-config-v8', fx: false, bi: true, xd: true,
+    schema: 'chanlun-chart-config-v9', fx: false, bi: true, xd: true,
     center_all: true, center_L0: true, center_observation: false,
     point_all: true, point_1buy: true, point_2buy: true, point_3buy: true,
     point_1sell: true, point_2sell: true, point_3sell: true,
     divergence_all: true,
 };
+const STRUCTURE_PERIODS = Object.freeze(['1m', '5m', '30m']);
+const PERIOD_LAYERS = Object.freeze(['center', 'point']);
+function physicalStructurePeriod(resolution) {
+    return ({'1':'1m','5':'5m','30':'30m',
+        '1m':'1m','5m':'5m','30m':'30m'})[String(resolution || '').trim()] || null;
+}
+function structurePeriodsForChart(resolution) {
+    const period = physicalStructurePeriod(resolution);
+    if (!period) return [];
+    try {
+        const query = new URLSearchParams(location.search || '');
+        if (query.has('screening_source') || query.has('screening_point')) return [period];
+    } catch (_) { /* A standalone chart has no frozen screening source. */ }
+    return STRUCTURE_PERIODS.slice(STRUCTURE_PERIODS.indexOf(period));
+}
 
 
 // Atomic initial history already contains the complete current snapshot. Keep
@@ -61,6 +76,38 @@ function chartWidgetViewportOptions(interval) {
     };
 }
 const USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings";
+const MANUAL_DRAWING_PERIODS = new Set(['1', '5', '30']);
+function manualDrawingResolution(value) {
+    return String(value ?? '').trim().replace(/^(\d+)m$/, '$1');
+}
+function manualDrawingOrigin(source) {
+    if (Object.prototype.hasOwnProperty.call(source || {}, '_cl_origin_resolution')) {
+        return manualDrawingResolution(source._cl_origin_resolution);
+    }
+    return manualDrawingResolution(source?.state?.state?.interval ?? source?.state?.interval);
+}
+function manualDrawingVisibility(origin) {
+    if (!origin) return null; // An old shared drawing without a known origin stays shared.
+    return {ticks: false, seconds: false, minutes: MANUAL_DRAWING_PERIODS.has(origin),
+        minutesFrom: 1, minutesTo: MANUAL_DRAWING_PERIODS.has(origin) ? Number(origin) : 1,
+        hours: false, days: false, weeks: false, months: false, ranges: false};
+}
+function manualDrawingState(source, origin, hierarchy) {
+    const value = {...source};
+    if (origin || hierarchy || Object.prototype.hasOwnProperty.call(source, '_cl_origin_resolution')) {
+        value._cl_origin_resolution = origin;
+    }
+    const visibility = hierarchy && manualDrawingVisibility(origin);
+    if (visibility && source.state && typeof source.state === 'object') {
+        if (source.state.state && typeof source.state.state === 'object') {
+            value.state = {...source.state, state: {...source.state.state,
+                intervalsVisibilities: {...source.state.state.intervalsVisibilities, ...visibility}}};
+        } else {
+            value.state = {...source.state, intervalsVisibilities: {...source.state.intervalsVisibilities, ...visibility}};
+        }
+    }
+    return value;
+}
 const MAX_AUTHORITATIVE_SSE_REPLAY_BARS = 240;
 const DEFAULT_STUDY_ALLOWLIST = new Set(["MACD_HTF", "MACD"]);
 function lowestCenterReviewPage() {
@@ -80,6 +127,7 @@ function requestedDefaultStudies(search) {
         return lowestCenterReviewPage() ? [] : ["MACD_HTF"];
     }
 }
+
 function _browserLocalTz() {
     try {
         return (Intl.DateTimeFormat().resolvedOptions().timeZone) || "Asia/Shanghai";
@@ -506,13 +554,21 @@ function bindClDisplayMenuDrag(menuElement, handleElement, topWindow) {
 function normalizeClShowConfig(config, interval) {
     const source = config ?? CL_SHOW_DEFAULT;
     if (!source || typeof source !== 'object' || Array.isArray(source)
-        || !['chanlun-chart-config-v5', 'chanlun-chart-config-v6', 'chanlun-chart-config-v7', CL_SHOW_DEFAULT.schema].includes(source.schema)) {
+        || !['chanlun-chart-config-v5', 'chanlun-chart-config-v6',
+            'chanlun-chart-config-v7', 'chanlun-chart-config-v8', CL_SHOW_DEFAULT.schema].includes(source.schema)) {
         throw new TypeError('cl_show_config_current_schema_required');
     }
     const output = {...CL_SHOW_DEFAULT};
+    const ownPeriod = physicalStructurePeriod(interval);
+    for (const period of STRUCTURE_PERIODS) {
+        for (const layer of PERIOD_LAYERS) {
+            output[`${layer}_period_${period}`] = period === ownPeriod;
+        }
+    }
     for (const key of Object.keys(source)) {
         if (key !== 'schema' && (Object.prototype.hasOwnProperty.call(CL_SHOW_DEFAULT, key)
-            || /^(center|point|divergence_consolidation|divergence_trend)_L(?:[0-9]|[1-4][0-9])$/.test(key))) {
+            || /^(center|trend|point|divergence_consolidation|divergence_trend)_L(?:[0-9]|[1-4][0-9])$/.test(key)
+            || /^(center|trend|point|divergence)_period_(1m|5m|30m)$/.test(key))) {
             output[key] = source[key] !== false;
         }
     }
@@ -523,15 +579,31 @@ function strictItemEnabled(cfg, item) {
     const level = item?.structural_level;
     if (!Number.isInteger(level) || level < 0 || level >= 50) return false;
     const enabled = (key) => cfg?.[key] ?? (level === 0);
+    const overlay = item?.source_frequency && item?.display_frequency
+        && item.source_frequency !== item.display_frequency;
+    const levelEnabled = (key) => overlay || enabled(key);
+    const periodEnabled = (layer) => !item?.source_frequency
+        || cfg?.[`${layer}_period_${item.source_frequency}`] !== false;
     if (item.render_kind === 'segment_unresolved_range') return cfg?.xd !== false;
+    if (item.render_kind === 'user_same_level_type' || item.render_kind === 'user_center_type_region') return false;
+    if (['user_parent_center', 'user_parent_center_observation',
+        'user_fixed30m_center_window'].includes(item.render_kind))
+        return false;
+    if (item.render_kind === 'user_physical_center_observation')
+        return cfg?.center_all !== false && periodEnabled('center') && levelEnabled(`center_L${level}`);
+    if (item.render_kind === 'user_five_segment_center')
+        return cfg?.center_all !== false && periodEnabled('center') && levelEnabled(`center_L${level}`);
+    if (['user_alternative_five_center', 'user_center_structure_extent',
+        'user_forming_five_center_preview'].includes(item.render_kind))
+        return cfg?.center_all !== false && periodEnabled('center') && levelEnabled(`center_L${level}`);
     if (item.render_kind === 'center_observation') return cfg?.center_observation === true;
-    if (['formal_center', 'center_preview', 'conditional_center'].includes(item.render_kind)) return cfg?.center_all !== false && enabled(`center_L${level}`);
+    if (['formal_center', 'center_preview', 'conditional_center'].includes(item.render_kind)) return cfg?.center_all !== false && periodEnabled('center') && levelEnabled(`center_L${level}`);
+    if (item.render_kind === 'strict_trend') return false;
     if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
-        return cfg?.point_all !== false && cfg?.[`point_${item.point_type}`] !== false && enabled(`point_L${level}`);
+        return cfg?.point_all !== false && periodEnabled('point')
+            && cfg?.[`point_${item.point_type}`] !== false && levelEnabled(`point_L${level}`);
     }
-    if (item.render_kind === 'strict_divergence' && ['consolidation', 'trend'].includes(item.kind)) {
-        return cfg?.divergence_all !== false && enabled(`divergence_${item.kind}_L${level}`);
-    }
+    if (item.render_kind === 'strict_divergence') return false;
     return false;
 }
 
@@ -555,10 +627,6 @@ function strictSameIds(left, right) {
         && left.every((item, index) => item === right[index]);
 }
 
-
-
-
-
 function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     if (
         !item || item.schema !== 'chanlun-chart-center'
@@ -572,6 +640,10 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
         || !strictSameIds(item.initial_unit_ids, item.core_unit_ids)
         || !strictStringArray(item.establishment_segment_ids)
     ) throw new Error('strict center core contract is invalid');
+
+    if (item.source_kind === 'segment' && item.formation_rule === 'three_core') {
+        throw new Error('withdrawn three-core segment center cannot enter the formal chart');
+    }
 
     if (item.source_kind === 'trend_type') {
         if (item.formation_rule !== 'recursive_three' || item.establishment_component_count !== 3
@@ -690,7 +762,14 @@ function saveClShowConfig(chartId, resolution, cfg) {
 // 无当前配置则使用当前生产默认值；persist=true 表示需固化到该周期 key。
 function resolveClConfigForResolution(chartId, resolution, currentCfg) {
     const loaded = loadClShowConfig(chartId, resolution);
-    return {cfg: loaded || normalizeClShowConfig(currentCfg, resolution), persist: loaded === null};
+    if (loaded) return {cfg: loaded, persist: false};
+    const inherited = currentCfg ? {...currentCfg} : null;
+    if (inherited) {
+        for (const period of STRUCTURE_PERIODS) {
+            for (const layer of PERIOD_LAYERS) delete inherited[`${layer}_period_${period}`];
+        }
+    }
+    return {cfg: normalizeClShowConfig(inherited, resolution), persist: true};
 }
 
 function loadClIndependentDrawings(chartId) {
@@ -808,8 +887,10 @@ function centerEvidenceTitle(item) {
         : item.state === 'divergence_closed' ? '已按确认背驰分界，原划分已固定'
         : item.state === 'superseded' ? '后继中枢已成立，原划分已固定'
         : awaitingReturn ? '回试已位于中枢区间外，相关线段待最终确认' : '中枢延伸或等待回试确认';
-    const formation = item.source_kind === 'trend_type' ? '三个已完成下级结构重叠' : '进入、三核心与离开独立';
-    return interval + '；' + formation + '；' + state
+    const formation = item.source_kind === 'trend_type' ? '三个已完成下级结构重叠'
+        : item.formation_rule === 'three_core' ? '三段核心重叠'
+        : '进入、三核心与离开独立';
+    return (item.source_frequency ? `${item.source_frequency}·` : '') + interval + '；' + formation + '；' + state
         + (!item.third_class_confirmed && item.tail_status
             ? '；' + centerPreviewLabel({preview_status: item.tail_status}) : '');
 }
@@ -824,7 +905,9 @@ function chartSignalLabel(item) {
     const names = {'1buy':'一买','2buy':'二买','3buy':'三买','1sell':'一卖','2sell':'二卖','3sell':'三卖'};
     const label = item.render_kind === 'strict_divergence'
         ? (item.kind === 'trend' ? '趋背' : '盘背') : names[item.point_type];
-    const prefix = item.structural_level > 0 ? `L${item.structural_level}·` : '';
+    const sourcePrefix = item.source_frequency && item.display_frequency
+        && item.source_frequency !== item.display_frequency ? `${item.source_frequency}·` : '';
+    const prefix = sourcePrefix + (item.structural_level > 0 ? `L${item.structural_level}·` : '');
     const suffix = item.render_kind === 'point_approaching' ? '·待确认' : '';
     return `${prefix}${label}${suffix}`;
 }
@@ -939,7 +1022,8 @@ function chainColor(idx) {
 
 // 图周期 → 该图「笔」在链上的索引 p：1m=1、5m/15m=2、30m/60m=3、
 // 日线=4、周线=5、月线=6。非标准周期按最接近的操作级别共享颜色锚点。
-const CHART_BI_INDEX = { "1": 1, "5": 2, "15": 2, "30": 3, "60": 3, "1D": 4, "1W": 5, "1M": 6 };
+const CHART_BI_INDEX = { "1": 1, "1m": 1, "5": 2, "5m": 2,
+    "15": 2, "30": 3, "30m": 3, "60": 3, "1D": 4, "1W": 5, "1M": 6 };
 function chartBiIndex(interval) {
     const p = CHART_BI_INDEX[interval];
     return (typeof p === "number") ? p : 1;
@@ -1111,10 +1195,151 @@ function getInitialChartInterval(chartId) {
 
 function shouldLoadLastChart() {
     try {
-        return !window.__chanlunUrlBootstrap;
+        const query = new URLSearchParams(window.location.search || '');
+        if (query.has('screening_source') || query.has('screening_point')) return false;
+        return !window.__chanlunUrlBootstrap || query.get('workspace_layout') === '1';
     } catch (e) {
         return true;
     }
+}
+
+function prepareSavedChartLayout(content, target = null, viewport = null) {
+    // TradingView stores either native widget state or a symbol-metadata
+    // envelope with a JSON/string `content` field. Preserve both formats.
+    let hasViewport = false, hasMainSeries = false, targetChanged = false, legacyPrices = null;
+    const resetPriceRanges = (value) => {
+        if (!value || typeof value !== 'object') return;
+        if (Object.prototype.hasOwnProperty.call(value, 'm_priceRange')) {
+            value.m_priceRange = null;
+            value.m_isAutoScale = true;
+        }
+        Object.values(value).forEach(resetPriceRanges);
+    };
+    const visit = (value, depth = 0) => {
+        if (!value || typeof value !== 'object' || depth > 4) return value;
+        if (Array.isArray(value.charts)) {
+            if (value.charts.length === 1) legacyPrices = legacyChartPriceViewport(value.charts[0]);
+            for (const chart of value.charts) {
+                if (viewport && chart.timeScale) {
+                    chart.timeScale.m_barSpacing = viewport.spacing;
+                    chart.timeScale.m_rightOffset = viewport.offset;
+                    chart.timeScale.usePercentageRightOffset = false;
+                }
+                const spacing = chart.timeScale?.m_barSpacing;
+                if (Number.isFinite(spacing) && spacing > 0) hasViewport = true;
+                for (const pane of chart.panes || []) {
+                    let changed = false;
+                    for (const source of pane.sources || []) {
+                        if (source.type !== 'MainSeries' || !source.state) continue;
+                        hasMainSeries = true;
+                        if (!target) continue;
+                        changed = String(source.state.symbol).toLowerCase() !== target.symbol.toLowerCase()
+                            || String(source.state.interval) !== target.interval;
+                        targetChanged ||= changed;
+                        source.state.symbol = target.symbol;
+                        source.state.interval = target.interval;
+                    }
+                    // A different security must not inherit the old security's
+                    // absolute price bounds. Time-axis zoom and studies survive.
+                    if (changed) {
+                        for (const item of chart.panes || []) resetPriceRanges(item);
+                    }
+                }
+            }
+        } else if (value.content) {
+            const encoded = typeof value.content === 'string';
+            value.content = visit(encoded ? JSON.parse(value.content) : value.content, depth + 1);
+            if (encoded) value.content = JSON.stringify(value.content);
+            if (target) {
+                value.symbol = target.symbol.split(':').slice(1).join(':');
+                value.resolution = target.interval;
+                for (const name of ['symbol_type', 'exchange', 'listed_exchange', 'short_name', 'legs', 'description', 'is_realtime']) delete value[name];
+            }
+        }
+        return value;
+    };
+    try {
+        const parsed = JSON.parse(content);
+        const savedPrices = parsed.__chanlun_price_viewport;
+        delete parsed.__chanlun_price_viewport;
+        const value = visit(parsed);
+        const prices = savedPrices === undefined ? legacyPrices : savedPrices;
+        const priceViewport = validSavedPriceViewport(prices) && !targetChanged
+            && (!target || (prices.symbol.toLowerCase() === target.symbol.toLowerCase()
+                && prices.interval === target.interval)) ? prices : null;
+        return {content: target && !hasMainSeries ? null : JSON.stringify(value), hasViewport, priceViewport};
+    } catch (_) {
+        return {content: target ? null : content, hasViewport: false};
+    }
+}
+
+function legacyChartPriceViewport(chart) {
+    const main = (chart.panes || []).flatMap(pane => pane.sources || []).find(source => source.type === 'MainSeries');
+    if (!main?.state) return null;
+    const scales = [];
+    for (const [paneIndex, pane] of (chart.panes || []).entries()) {
+        for (const [side, key] of [['left', 'leftAxisesState'], ['right', 'rightAxisesState']]) {
+            for (const [index, axis] of (pane[key] || []).entries()) {
+                const state = axis.state, range = state?.m_priceRange;
+                if (!state || state.m_isAutoScale !== false || state.m_isLog !== false
+                    || state.m_isPercentage !== false || state.m_isIndexedTo100 !== false
+                    || state.m_isInverted !== false || !Array.isArray(axis.sources)
+                    || !range || !Number.isFinite(range.m_minValue) || !Number.isFinite(range.m_maxValue)
+                    || range.m_minValue >= range.m_maxValue) continue;
+                const top = state.m_topMargin, bottom = state.m_bottomMargin;
+                if (![top, bottom].every(value => Number.isFinite(value) && value >= 0) || top + bottom >= 1) continue;
+                // Native normal-scale state excludes its saved top/bottom margins.
+                // Other legacy modes lack a sufficient public-price reference;
+                // a new save records their visible API ranges explicitly instead.
+                const span = (range.m_maxValue - range.m_minValue) / (1 - top - bottom);
+                const isMain = axis.sources.includes(main.id);
+                scales.push({pane: paneIndex, side, index, mode: 0, main: isMain,
+                    from: range.m_minValue - span * bottom, to: range.m_maxValue + span * top,
+                    studies: axis.sources.filter(id => id !== main.id).map(String)});
+            }
+        }
+    }
+    return {version: 1, symbol: main.state.symbol, interval: String(main.state.interval || ''), scales};
+}
+
+function validSavedPriceViewport(value) {
+    return !!value && value.version === 1 && typeof value.symbol === 'string' && !!value.symbol
+        && typeof value.interval === 'string' && !!value.interval && Array.isArray(value.scales)
+        && value.scales.length > 0 && value.scales.every(item => item && Number.isInteger(item.pane) && item.pane >= 0
+            && ['left', 'right', 'main'].includes(item.side) && Number.isInteger(item.index) && item.index >= 0
+            && Number.isFinite(item.from) && Number.isFinite(item.to) && item.from < item.to
+            && Number.isInteger(item.mode) && item.mode >= 0 && item.mode <= 3
+            && typeof item.main === 'boolean' && Array.isArray(item.studies)
+            && item.studies.every(id => typeof id === 'string'));
+}
+
+function captureChartLayoutViewport(content, chart, identity = null) {
+    try {
+        const scale = chart?.getTimeScale?.();
+        const spacing = scale?.barSpacing?.(), offset = scale?.rightOffset?.();
+        if (Number.isFinite(spacing) && spacing > 0 && Number.isFinite(offset)) {
+            const prepared = prepareSavedChartLayout(content, null, {spacing, offset});
+            const value = JSON.parse(prepared.content), scales = [];
+            for (const [paneIndex, pane] of (chart.getPanes?.() || []).entries()) {
+                const left = pane.getLeftPriceScales?.() || [], right = pane.getRightPriceScales?.() || [];
+                const sides = left.length || right.length ? [['left', left], ['right', right]]
+                    : [['main', [pane.getMainSourcePriceScale?.()].filter(Boolean)]];
+                for (const [side, items] of sides) for (const [index, priceScale] of items.entries()) {
+                    if (priceScale.isAutoScale?.() !== false) continue;
+                    const range = priceScale.getVisiblePriceRange?.();
+                    if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to) || range.from >= range.to) continue;
+                    scales.push({pane: paneIndex, side, index, from: range.from, to: range.to,
+                        mode: priceScale.getMode?.() ?? 0, main: priceScale.hasMainSeries?.() ?? side === 'main',
+                        studies: (priceScale.getStudies?.() || []).map(String)});
+                }
+            }
+            const current = identity || {symbol: chart.symbol?.(), interval: chart.resolution?.()};
+            const prices = {version: 1, symbol: current?.symbol, interval: String(current?.interval || ''), scales};
+            if (validSavedPriceViewport(prices)) value.__chanlun_price_viewport = prices;
+            return JSON.stringify(value);
+        }
+    } catch (_) { /* A disposed/not-yet-ready chart keeps the native save. */ }
+    return content;
 }
 
 function validSseStreamIdentifier(value) {
@@ -1205,7 +1430,11 @@ class ChartManager {
         this._drawingStatePhase = null;
         this._activeDrawingMutations = new Set();
         this.isApplyingDrawingState = false;
-        this._pendingSaveState = null;
+        this._pendingDrawingSnapshots = new Map();
+        this._capturedDrawingSnapshots = new Set();
+        this._failedDrawingSnapshots = new Map();
+        this._userDrawingOrigins = new Map();
+        this._configuringManualDrawings = new Set();
         this._saveScheduled = false;
         this._saveInFlight = null;
 
@@ -1279,43 +1508,45 @@ class ChartManager {
         this._strictStructureSnapshot = null;
         this._strictStructureContextToken = null;
         this._strictStructureStatus = { state: 'waiting', code: null };
+        this._strictOverlayIdentity = null;
+        this._strictOverlaySources = new Map();
         this._strictRecoveryTimer = null;
         this._strictRecoveryAttempts = new Map();
     }
 
-    enqueueLatestDrawingSave(taskFactory) {
+    enqueueLatestDrawingSave(taskFactory, coalesceKey = 'default') {
         if (typeof taskFactory !== "function") {
             return Promise.reject(new TypeError("drawing save task must be a function"));
         }
 
         return new Promise((resolve, reject) => {
-            if (!this._drawingSavePending) {
-                this._drawingSavePending = { taskFactory, waiters: [] };
-            } else {
-                // 当前写入之后排队的请求统一观察最新状态。
-                this._drawingSavePending.taskFactory = taskFactory;
-            }
-            this._drawingSavePending.waiters.push({ resolve, reject });
+            if (!(this._drawingSavePending instanceof Map)) this._drawingSavePending = new Map();
+            let pending = this._drawingSavePending.get(coalesceKey);
+            if (!pending) {
+                pending = {taskFactory, waiters: []};
+                this._drawingSavePending.set(coalesceKey, pending);
+            } else pending.taskFactory = taskFactory;
+            pending.waiters.push({ resolve, reject });
             this._drainDrawingSaveQueue();
         });
     }
 
     async _drainDrawingSaveQueue() {
-        if (this._drawingSaveInFlight || !this._drawingSavePending) return;
-        const job = this._drawingSavePending;
-        this._drawingSavePending = null;
+        if (this._drawingSaveInFlight || !this._drawingSavePending?.size) return;
+        const [key, job] = this._drawingSavePending.entries().next().value;
+        this._drawingSavePending.delete(key);
         this._drawingSaveInFlight = true;
         try {
             await job.taskFactory();
             job.waiters.forEach((waiter) => waiter.resolve());
         } catch (error) {
             if (typeof layer !== "undefined" && layer && typeof layer.msg === "function") {
-                layer.msg("画线保存失败，请检查网络后重试");
+                layer.msg(error.drawingConflict ? error.message : "画线保存失败，请检查网络后重试");
             }
             job.waiters.forEach((waiter) => waiter.reject(error));
         } finally {
             this._drawingSaveInFlight = false;
-            if (this._drawingSavePending) {
+            if (this._drawingSavePending?.size) {
                 this._drainDrawingSaveQueue();
             }
         }
@@ -1344,9 +1575,62 @@ class ChartManager {
     }
 
     getDrawingsCacheKey(symbol, interval) {
+        if (this.usesManualDrawingHierarchy(interval)) return `${symbol}_hierarchy`;
         const mode = this.cl_independent_drawings ? "ind" : "shared";
         const resolutionKey = this.cl_independent_drawings ? interval : "all";
         return `${symbol}_${resolutionKey}_${mode}`;
+    }
+
+    usesManualDrawingHierarchy(interval = this.chart?.resolution?.() ?? this._curResolution) {
+        return MANUAL_DRAWING_PERIODS.has(manualDrawingResolution(interval));
+    }
+
+    getDrawingStorageResolution(interval) {
+        return this.usesManualDrawingHierarchy(interval) ? 'hierarchy'
+            : this.cl_independent_drawings ? interval : 'all';
+    }
+
+    getManualDrawingToolPeriod(interval = this.chart?.resolution?.() ?? this._curResolution) {
+        const current = manualDrawingResolution(interval);
+        const {items} = this._levelBarItems(current);
+        if (this._manualDrawingToolContext !== current
+                || !items.some(item => item.period === this._manualDrawingToolPeriod)) {
+            this._manualDrawingToolContext = current;
+            this._manualDrawingToolPeriod = current;
+        }
+        return this._manualDrawingToolPeriod;
+    }
+
+    setManualDrawingToolPeriod(period) {
+        const current = this.chart?.resolution?.() ?? this._curResolution;
+        this.getManualDrawingToolPeriod(current);
+        const item = this._levelBarItems(current).items.find(item => item.period === manualDrawingResolution(period));
+        if (!item) return false;
+        this._manualDrawingToolPeriod = item.period;
+        this.setDrawColor(item.color);
+        return true;
+    }
+
+    configureManualDrawing(id) {
+        if (!this.usesManualDrawingHierarchy()) return;
+        const key = String(id);
+        if (this._configuringManualDrawings?.has(key)) return;
+        if (!(this._userDrawingOrigins instanceof Map)) this._userDrawingOrigins = new Map();
+        if (!this._userDrawingOrigins.has(key)) {
+            this._userDrawingOrigins.set(key, this.getManualDrawingToolPeriod());
+        }
+        const visibility = manualDrawingVisibility(this._userDrawingOrigins.get(key));
+        if (!visibility) return;
+        let shape;
+        try { shape = this.chart.getShapeById?.(id); }
+        catch (_) { return; } // Cancelled tools can deliver a late property event.
+        const current = shape?.getProperties?.()?.intervalsVisibilities || {};
+        if (shape?.setProperties && Object.entries(visibility).some(([name, value]) => current[name] !== value)) {
+            if (!(this._configuringManualDrawings instanceof Set)) this._configuringManualDrawings = new Set();
+            this._configuringManualDrawings.add(key);
+            try { shape.setProperties({intervalsVisibilities: {...current, ...visibility}}); }
+            finally { this._configuringManualDrawings.delete(key); }
+        }
     }
 
     getDrawingPersistenceKey(layoutId, chartId, symbol, resolution) {
@@ -1418,7 +1702,7 @@ class ChartManager {
             // 用户撤回到旧状态 B 时，B 会在 A 成功后再次写回，不会被旧基线误跳过。
             await taskFactory();
             this._setPersistedDrawingFingerprint(persistenceKey, fingerprint);
-        });
+        }, persistenceKey);
     }
 
     getCurrentChartIdentity() {
@@ -1484,6 +1768,13 @@ class ChartManager {
             || (this._strictPendingCreates instanceof Map && this._strictPendingCreates.size > 0);
     }
 
+    rememberDrawingCacheBaseline(state, persistenceKey, savedState) {
+        if (!(this._drawingCacheBaselines instanceof WeakMap)) this._drawingCacheBaselines = new WeakMap();
+        this._drawingCacheBaselines.set(state, {
+            persistenceKey, fingerprint: this.drawingStateFingerprint(savedState),
+        });
+    }
+
     setDrawingsCache(key, state) {
         this._drawingsCache.set(key, state);
         if (this._drawingsCache.size > 200) {
@@ -1521,15 +1812,18 @@ class ChartManager {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
 
-    serializeUserDrawingsState(state) {
+    serializeUserDrawingsState(state, {userIds = this._userDrawingIds, origins = this._userDrawingOrigins,
+        hierarchy = this.usesManualDrawingHierarchy(), resolution = this.chart?.resolution?.() ?? this._curResolution} = {}) {
         const allowed = new Set(
-            Array.from(this._userDrawingIds || [], (value) => String(value)),
+            Array.from(userIds || [], (value) => String(value)),
         );
         const sources = {};
         for (const [rawId, sourceState] of this._drawingStateEntries(state?.sources)) {
             const id = String(rawId);
             if (!allowed.has(id) || !this._isValidDrawingSourceState(sourceState)) continue;
-            sources[id] = sourceState;
+            const origin = origins?.has(id) ? origins.get(id)
+                : manualDrawingOrigin(sourceState) || (hierarchy ? manualDrawingResolution(resolution) : '');
+            sources[id] = manualDrawingState(sourceState, origin, hierarchy);
         }
         return {
             schema: USER_DRAWING_STATE_SCHEMA,
@@ -1538,34 +1832,76 @@ class ChartManager {
         };
     }
 
-    deserializeUserDrawingsState(state) {
+    deserializeUserDrawingsState(state, {track = true, hierarchy = this.usesManualDrawingHierarchy()} = {}) {
         if (!state || state.schema !== USER_DRAWING_STATE_SCHEMA) {
-            this._userDrawingIds = new Set();
+            if (track) {
+                this._userDrawingIds = new Set();
+                this._userDrawingOrigins = new Map();
+            }
             throw new Error('drawing_state_schema_invalid');
         }
         const sources = new Map();
+        const origins = new Map();
         for (const [rawId, sourceState] of this._drawingStateEntries(state.sources)) {
             if (!this._isValidDrawingSourceState(sourceState)) continue;
-            sources.set(String(rawId), sourceState);
+            const origin = manualDrawingOrigin(sourceState);
+            origins.set(String(rawId), origin);
+            sources.set(String(rawId), manualDrawingState(sourceState, origin, hierarchy));
         }
-        this._userDrawingIds = new Set(sources.keys());
+        if (track) {
+            this._userDrawingIds = new Set(sources.keys());
+            this._userDrawingOrigins = origins;
+        }
         return { sources, groups: new Map() };
     }
 
     scheduleDrawingsSave(reason = 'unspecified') {
-        if (!this.chart || this.shouldSuppressDrawingSave()) return Promise.resolve();
-        if (typeof this.chart.getLineToolsState !== 'function') return Promise.resolve();
-        if (!this.save_load_adapter || typeof this.save_load_adapter.saveLineToolsAndGroups !== 'function') {
+        const required = reason === 'manual-data-reload';
+        const fail = (error) => {
+            if (required) {
+                error.drawingSaveFailed = true;
+                return Promise.reject(error);
+            }
             return Promise.resolve();
+        };
+        if (!this.chart || this.shouldSuppressDrawingSave()
+                || typeof this.chart.getLineToolsState !== 'function'
+                || typeof this.save_load_adapter?.saveLineToolsAndGroups !== 'function') {
+            return fail(new Error('画线状态正在更新，尚未确认保存，请稍后重新加载'));
         }
 
+        let key;
         try {
-            this._pendingSaveState = this.chart.getLineToolsState();
+            const resolution = this.chart.resolution?.() ?? this._curResolution;
+            const symbol = this.chart.symbol?.() ?? this.getCurrentChartIdentity?.()?.symbol;
+            const snapshot = {state: this.chart.getLineToolsState(), resolution, symbol,
+                storageResolution: this.getDrawingStorageResolution(resolution),
+                userIds: new Set(this._userDrawingIds || []), origins: new Map(this._userDrawingOrigins || []),
+                hierarchy: this.usesManualDrawingHierarchy(resolution), reason};
+            if (!(this._pendingDrawingSnapshots instanceof Map)) this._pendingDrawingSnapshots = new Map();
+            if (!(this._capturedDrawingSnapshots instanceof Set)) this._capturedDrawingSnapshots = new Set();
+            key = JSON.stringify([symbol, snapshot.storageResolution]);
+            const previous = this._pendingDrawingSnapshots.get(key);
+            if (previous) this._capturedDrawingSnapshots.delete(previous);
+            const failed = this._failedDrawingSnapshots?.get(key);
+            if (failed) {
+                this._capturedDrawingSnapshots.delete(failed);
+                this._failedDrawingSnapshots.delete(key);
+            }
+            this._capturedDrawingSnapshots.add(snapshot);
+            this._pendingDrawingSnapshots.set(key, snapshot);
         } catch (e) {
             console.debug('[DEBUG-CHARTS] getLineToolsState failed', e);
-            return Promise.resolve();
+            return fail(e);
         }
 
+        return this.flushDrawingSnapshots().then(() => {
+            const failed = this._failedDrawingSnapshots?.get(key);
+            if (failed && required) return fail(failed.error);
+        });
+    }
+
+    flushDrawingSnapshots() {
         if (this._saveScheduled) {
             return this._saveInFlight || Promise.resolve();
         }
@@ -1573,25 +1909,33 @@ class ChartManager {
         this._saveScheduled = true;
         this._saveInFlight = new Promise((resolve) => {
             setTimeout(async () => {
+                const snapshots = Array.from(this._pendingDrawingSnapshots?.values() || []);
+                this._pendingDrawingSnapshots?.clear();
+                for (const snapshot of snapshots) {
+                    const key = JSON.stringify([snapshot.symbol, snapshot.storageResolution]);
+                    try {
+                        const capturedState = this.serializeUserDrawingsState(snapshot.state, snapshot);
+                        await this.save_load_adapter.saveLineToolsAndGroups('default', 'default', snapshot.state,
+                            {reason: snapshot.reason, resolution: snapshot.resolution, symbol: snapshot.symbol,
+                                storageResolution: snapshot.storageResolution, capturedState});
+                        const previous = this._failedDrawingSnapshots?.get(key);
+                        if (previous) this._capturedDrawingSnapshots?.delete(previous);
+                        this._failedDrawingSnapshots?.delete(key);
+                        this._capturedDrawingSnapshots?.delete(snapshot);
+                    } catch (e) {
+                        console.debug('[DEBUG-CHARTS] drawing save skipped', e);
+                        snapshot.error = e;
+                        if (!(this._failedDrawingSnapshots instanceof Map)) this._failedDrawingSnapshots = new Map();
+                        const previous = this._failedDrawingSnapshots.get(key);
+                        if (previous) this._capturedDrawingSnapshots?.delete(previous);
+                        this._failedDrawingSnapshots.set(key, snapshot);
+                    }
+                }
+
                 this._saveScheduled = false;
-                const state = this._pendingSaveState;
-                this._pendingSaveState = null;
-
-                if (!state || this.shouldSuppressDrawingSave()) {
+                if (this._pendingDrawingSnapshots?.size) {
                     this._saveInFlight = null;
-                    resolve();
-                    return;
-                }
-
-                try {
-                    await this.save_load_adapter.saveLineToolsAndGroups('default', 'default', state, { reason });
-                } catch (e) {
-                    console.debug('[DEBUG-CHARTS] drawing save skipped', e);
-                }
-
-                if (this._pendingSaveState && !this.shouldSuppressDrawingSave()) {
-                    this._saveInFlight = null;
-                    resolve(this.scheduleDrawingsSave(reason));
+                    resolve(this.flushDrawingSnapshots());
                     return;
                 }
 
@@ -1625,6 +1969,8 @@ class ChartManager {
             this._userDrawingIds = new Set(
                 this._drawingStateEntries(state.sources).map(([id]) => String(id)),
             );
+            this._userDrawingOrigins = new Map(this._drawingStateEntries(state.sources)
+                .map(([id, source]) => [String(id), manualDrawingOrigin(source)]));
             this._resetReconcileRetry();
             if (!this.isTokenCurrent(token)) {
                 return false;
@@ -1633,6 +1979,13 @@ class ChartManager {
             this._clearAllStrictScopes('apply-user-drawings-settled');
             if (cacheKey && this.isTokenCurrent(token)) {
                 this.setDrawingsCache(cacheKey, state);
+                this._appliedManualDrawingCacheKey = cacheKey;
+                // Remote additions become editable only once this exact cached
+                // state reaches the canvas. Its server baseline must travel
+                // with it; adopting it at save-response time would instead
+                // treat still-unseen remote drawings as local deletions.
+                const baseline = this._drawingCacheBaselines?.get(state);
+                if (baseline) this._setPersistedDrawingFingerprint(baseline.persistenceKey, baseline.fingerprint);
             }
             if (options.redrawAutomatic !== false) {
                 this.debouncedDrawChanlun();
@@ -1653,27 +2006,49 @@ class ChartManager {
         if (!identity) return;
 
         const { symbol, interval } = identity;
-        const token = this.beginContextSwitch(reason, symbol, interval);
         const cacheKey = this.getDrawingsCacheKey(symbol, interval);
-        const cachedDrawings = this._drawingsCache.get(cacheKey);
+        if (reason === 'interval-change' && this.usesManualDrawingHierarchy(interval)
+                && this._appliedManualDrawingCacheKey === cacheKey
+                && !this._is_switching_interval && !this.isApplyingDrawingState) {
+            // TradingView retains hidden drawings across interval changes.
+            // Reloading an older saved state here could erase a recent edit.
+            const token = this.beginContextSwitch(reason, symbol, interval);
+            this.finishContextSwitch(token);
+            if (options.redrawAutomatic !== false) this._requestChanlunDrawWhenReady({immediate: true});
+            return;
+        }
+        const token = this.beginContextSwitch(reason, symbol, interval);
         let currentAtFinish = false;
 
         try {
-            if (!options.bypassCache && this._drawingsCache.has(cacheKey)) {
-                await this.applyUserDrawingsState(
-                    cachedDrawings,
-                    token,
-                    cacheKey,
-                    { ...options, redrawAutomatic: false },
-                );
-            } else {
-                const state = await this.save_load_adapter.loadLineToolsAndGroups('default', 'default', 'load', {
-                    resolution: interval,
-                    symbol,
-                    token,
-                });
-
-                if (this.isTokenCurrent(token)) {
+            // Finish captured edits, then serialize restore with acknowledged
+            // saves. A late save response cannot roll back the visible baseline.
+            if (this._saveInFlight) await this._saveInFlight;
+            await this.enqueueLatestDrawingSave(async () => {
+                if (!this.isTokenCurrent(token)) return;
+                const cached = this._drawingsCache.get(cacheKey);
+                const cachedBaseline = cached && this._drawingCacheBaselines?.get(cached);
+                const persistenceKey = this.getDrawingPersistenceKey('default', 'default', symbol, this.getDrawingStorageResolution(interval));
+                const failed = this._failedDrawingSnapshots?.get(JSON.stringify([symbol, this.getDrawingStorageResolution(interval)]));
+                if (failed) {
+                    // A failed write is a local draft, not a server baseline.
+                    // Restore it when returning to this symbol so it can be
+                    // retried without losing edits or suppressing conflicts.
+                    if (options.bypassCache) throw failed.error;
+                    await this.applyUserDrawingsState(
+                        this.deserializeUserDrawingsState(this.serializeUserDrawingsState(failed.state, failed)),
+                        token, cacheKey, { ...options, redrawAutomatic: false },
+                    );
+                } else if (!options.bypassCache && cached && (!cachedBaseline || cachedBaseline.persistenceKey === persistenceKey)) {
+                    await this.applyUserDrawingsState(
+                        cached, token, cacheKey,
+                        { ...options, redrawAutomatic: false },
+                    );
+                } else {
+                    const state = await this.save_load_adapter.loadLineToolsAndGroups('default', 'default', 'load', {
+                        resolution: interval, symbol, token,
+                    });
+                    if (!this.isTokenCurrent(token)) return;
                     await this.applyUserDrawingsState(
                         state || this.emptyUserDrawingsState(),
                         token,
@@ -1681,9 +2056,10 @@ class ChartManager {
                         { ...options, redrawAutomatic: false },
                     );
                 }
-            }
+            }, 'restore:' + cacheKey);
         } catch (e) {
             console.error(`[DEBUG-CHARTS] Failed to reload drawings (${reason})`, e);
+            if (options.requireSuccess) throw e;
         } finally {
             currentAtFinish = this.isTokenCurrent(token);
             this.finishContextSwitch(token);
@@ -1715,6 +2091,7 @@ class ChartManager {
             await this.reloadDrawingsForCurrentContext('manual-data-reload', {
                 bypassCache: true,
                 redrawAutomatic: false,
+                requireSuccess: true,
             });
             if (this._disposed || !this.chart) return false;
 
@@ -1896,9 +2273,51 @@ class ChartManager {
         );
     }
 
+    _restoreSavedPriceViewport() {
+        const saved = this._pendingSavedPriceViewport;
+        if (!saved || !this._chartDataReadyNow()) return false;
+        const identity = this.widget?.symbolInterval?.();
+        if (!validSavedPriceViewport(saved) || !identity
+            || String(identity.symbol).toLowerCase() !== saved.symbol.toLowerCase()
+            || String(identity.interval) !== saved.interval) {
+            this._pendingSavedPriceViewport = null;
+            return false;
+        }
+        const panes = this.chart.getPanes?.() || [];
+        const attempts = this._savedPriceViewportAttempts || 0;
+        let applied = false;
+        for (const item of saved.scales) {
+            const pane = panes[item.pane];
+            if (!pane) continue;
+            const scales = item.side === 'left' ? pane.getLeftPriceScales?.()
+                : item.side === 'right' ? pane.getRightPriceScales?.() : [pane.getMainSourcePriceScale?.()];
+            const scale = scales?.[item.index];
+            if (!scale || typeof scale.setVisiblePriceRange !== 'function') continue;
+            if (typeof scale.hasMainSeries === 'function' && scale.hasMainSeries() !== item.main) continue;
+            if (!item.main && JSON.stringify((scale.getStudies?.() || []).map(String).sort())
+                !== JSON.stringify([...item.studies].sort())) continue;
+            try {
+                const current = scale.getVisiblePriceRange?.();
+                const tolerance = (item.to - item.from) / Math.max(1, pane.getHeight?.() || 1000);
+                if (attempts > 0 && scale.isAutoScale?.() === false && scale.getMode?.() === item.mode
+                    && current && Math.abs(current.from - item.from) <= tolerance
+                    && Math.abs(current.to - item.to) <= tolerance) continue;
+                if (scale.getMode?.() !== item.mode) scale.setMode?.(item.mode);
+                scale.setAutoScale(false);
+                scale.setVisiblePriceRange({from: item.from, to: item.to});
+                applied = true;
+            } catch (error) {
+                console.warn('[CHARTS] saved price viewport could not be restored', error);
+            }
+        }
+        this._savedPriceViewportAttempts = attempts + 1;
+        if (!applied || this._savedPriceViewportAttempts >= 3) this._pendingSavedPriceViewport = null;
+        return applied;
+    }
+
     _scheduleChartStableReady(contextGeneration, expectedIdentity) {
         if (typeof window === 'undefined') return false;
-        if (typeof window.ChartTransition?.markReady !== 'function') return false;
+        if (typeof window.ChartTransition?.markReady !== 'function' && !this._pendingSavedPriceViewport) return false;
 
         this._cancelChartStableReady();
         const startedAt = performance.now();
@@ -1924,10 +2343,15 @@ class ChartManager {
             } else if (this._chartStableReadySince == null) {
                 this._chartStableReadySince = now;
             } else if (now - this._chartStableReadySince >= CHART_STABLE_QUIET_MS) {
+                if (this._restoreSavedPriceViewport()) {
+                    this._chartStableReadySince = null;
+                    this._chartStableReadyTimer = setTimeout(poll, 50);
+                    return;
+                }
                 const identity = this.getCurrentChartIdentity();
                 this._chartStableReadySince = null;
                 this._chartStableReadyStartedAt = null;
-                window.ChartTransition.markReady({
+                window.ChartTransition?.markReady?.({
                     ...(identity || {}),
                     managerId: this.instanceId,
                 });
@@ -2047,7 +2471,8 @@ class ChartManager {
                 const signature = chartData
                     ? this._chartRenderInputSignature(chartData, currentInterval)
                     : null;
-                if (signature && signature === this._lastCompletedRenderSignature) {
+                if (signature && signature === this._lastCompletedRenderSignature
+                    && this._baseStructureEntitiesMatch(chartData, currentInterval)) {
                     // 重复的分页尾帧或 SSE 快照没有改变任何绘图输入。正在排队的
                     // 同内容防抖任务也可安全取消，稳定完成信号无需再空等一轮。
                     if (
@@ -2194,7 +2619,7 @@ class ChartManager {
             // backend half can remain established after an iframe disappears.
             // Explicit page lifecycle cleanup prevents those ghosts from
             // exhausting the account's realtime-stream allowance.
-            this._pageHideHandler = () => this._closeSseStream();
+            this._pageHideHandler = event => this._handlePageHide(event);
             this._pageShowHandler = () => {
                 if (!this._disposed) {
                     this._openSseStream();
@@ -2287,30 +2712,52 @@ class ChartManager {
             },
             saveChart: function (chartData) {
                 clog("[DEBUG-CHARTS] saveChart called", chartData);
+                const savedContent = captureChartLayoutViewport(chartData.content, self.chart, self.widget?.symbolInterval?.());
                 return fetch("/tv/1.1/charts?client=" + client_id + "&user=" + user_id + (chartData.id ? "&chart=" + chartData.id : ""), {
                     method: "POST",
                     body: new URLSearchParams({
                         name: chartData.name,
                         symbol: chartData.symbol,
                         resolution: chartData.resolution,
-                        content: chartData.content
+                        content: savedContent
                     })
                 })
-                    .then(res => res.json())
+                    .then(res => {
+                        if (!res.ok) throw new Error("chart layout save failed: HTTP " + res.status);
+                        return res.json();
+                    })
                     .then(res => {
                         clog("[DEBUG-CHARTS] saveChart response", res);
-                        return res.status === 'ok' ? (res.id || chartData.id || "default") : null;
+                        if (res.status !== 'ok' || !res.id) {
+                            throw new Error((res && res.message) || "chart layout save returned no id");
+                        }
+                        if (prepareSavedChartLayout(savedContent).hasViewport) self._hasSavedViewport = true;
+                        return res.id;
                     })
                     .catch(err => {
                         console.error("[DEBUG-CHARTS] saveChart error", err);
-                        return null;
+                        throw err;
                     });
             },
             getChartContent: function (chartId) {
                 clog("[DEBUG-CHARTS] getChartContent called", chartId);
+                self._loadingSavedLayout = true;
+                self._pendingSavedPriceViewport = null;
+                self._savedPriceViewportAttempts = 0;
+                self._cancelDefaultViewWork();
                 return fetch("/tv/1.1/charts?client=" + client_id + "&user=" + user_id + "&chart=" + chartId)
                     .then(res => res.json())
-                    .then(res => res.status === 'ok' ? res.data.content : null);
+                    .then(res => {
+                        if (res.status !== 'ok') return null;
+                        const useWorkspace = new URLSearchParams(window.location.search || '').get('workspace_layout') === '1';
+                        const current = self.chart && self.widget?.symbolInterval?.();
+                        const target = useWorkspace ? {symbol: current?.symbol || Utils.get_market() + ':' + Utils.get_code(),
+                            interval: String(current?.interval || getInitialChartInterval(self.id))} : null;
+                        const layout = prepareSavedChartLayout(res.data.content, target);
+                        self._hasSavedViewport = layout.hasViewport;
+                        self._pendingSavedPriceViewport = layout.priceViewport;
+                        return layout.content;
+                    }).finally(() => { self._loadingSavedLayout = false; });
             },
             getAllStudyTemplates: function () {
                 return fetch("/tv/1.1/study_templates?client=" + client_id + "&user=" + user_id)
@@ -2340,7 +2787,7 @@ class ChartManager {
             },
             saveLineToolsAndGroups: function (layoutId, chartId, state, options = {}) {
                 clog("[DEBUG-CHARTS] saveLineToolsAndGroups called", { layoutId, chartId, state, options });
-                if (self.shouldSuppressDrawingSave()) {
+                if (self.shouldSuppressDrawingSave() && !options.capturedState) {
                     clog("[DEBUG-CHARTS] Skip saveLineToolsAndGroups due to active drawing mutation");
                     return Promise.resolve();
                 }
@@ -2351,13 +2798,13 @@ class ChartManager {
                     }
                     return Promise.reject(error);
                 }
-                const rawResolution = self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id);
-                const resolution = self.cl_independent_drawings ? rawResolution : 'all';
-                const symbol = self.chart ? self.chart.symbol() : Utils.get_market() + ":" + Utils.get_code();
+                const rawResolution = options.resolution ?? (self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id));
+                const resolution = options.storageResolution ?? self.getDrawingStorageResolution(rawResolution);
+                const symbol = options.symbol ?? (self.chart ? self.chart.symbol() : Utils.get_market() + ":" + Utils.get_code());
                 const cacheKey = self.getDrawingsCacheKey(symbol, rawResolution);
                 const persistenceKey = self.getDrawingPersistenceKey(layoutId, chartId, symbol, resolution);
 
-                const processedState = self.serializeUserDrawingsState(state);
+                const processedState = options.capturedState || self.serializeUserDrawingsState(state);
                 clog("[DEBUG-CHARTS] Evaluating drawings save", { symbol, resolution, reason: options.reason });
                 const query = new URLSearchParams({
                     client: client_id,
@@ -2368,30 +2815,40 @@ class ChartManager {
                     resolution: String(resolution),
                 });
                 return self.enqueueDrawingStateSave(persistenceKey, processedState, function () {
+                    // Read the acknowledged baseline when this queued save
+                    // actually starts, after any preceding save has finished.
+                    const baseline=self._persistedDrawingFingerprints?.get(persistenceKey);
+                    const body={state:processedState,base_state:baseline!==undefined?JSON.parse(baseline)
+                        :{schema:USER_DRAWING_STATE_SCHEMA,sources:{},groups:{}}};
                     return fetch("/tv/1.1/drawings?" + query.toString(), {
                         method: "POST",
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ state: processedState })
+                        body: JSON.stringify(body),
+                        ...(typeof AbortSignal!=='undefined'&&typeof AbortSignal.timeout==='function'
+                            ?{signal:AbortSignal.timeout(15000)}:{}),
                     }).then(function (response) {
-                        if (!response.ok) {
-                            throw new Error("Drawing save failed with HTTP " + response.status);
-                        }
-                        return response.json();
+                        return response.json().catch(()=>null).then(payload=>{
+                            if(!response.ok){
+                                const error=new Error(payload?.message||'Drawing save failed with HTTP '+response.status);
+                                error.drawingConflict=response.status===409;throw error;
+                            }
+                            return payload;
+                        });
                     }).then(function (payload) {
-                        if (!payload || payload.status !== 'ok') {
+                        if (!payload || payload.status !== 'ok' || payload.ignored) {
                             throw new Error((payload && (payload.message || payload.error)) || "Drawing save was rejected");
                         }
-                        self.setDrawingsCache(
-                            cacheKey,
-                            self.deserializeUserDrawingsState(processedState),
-                        );
+                        const storedState=payload.data||processedState;
+                        const cachedState=self.deserializeUserDrawingsState(storedState, {track: false, hierarchy: resolution === 'hierarchy'});
+                        self.rememberDrawingCacheBaseline(cachedState,persistenceKey,storedState);
+                        self.setDrawingsCache(cacheKey,cachedState);
                         const manifestKey = drawingManifestKey(
                             layoutId,
                             chartId,
                             symbol,
                             resolution,
                         );
-                        if (Object.keys(processedState.sources || {}).length > 0) {
+                        if (Object.keys(storedState.sources || {}).length > 0) {
                             drawingManifestState.entries.add(manifestKey);
                         } else {
                             drawingManifestState.entries.delete(manifestKey);
@@ -2415,7 +2872,7 @@ class ChartManager {
                     }
                     const loadSymbol = symbol || (self.chart ? self.chart.symbol() : '');
                     const rawResolution = resolution || (self.chart ? self.chart.resolution() : '');
-                    const loadResolution = self.cl_independent_drawings ? rawResolution : 'all';
+                    const loadResolution = self.getDrawingStorageResolution(rawResolution);
                     if (!loadSymbol || !loadResolution) {
                         return resolve(null);
                     }
@@ -2433,11 +2890,13 @@ class ChartManager {
                         loadSymbol,
                         loadResolution,
                     );
+                    const manifestKeys = (loadResolution === 'hierarchy' ? ['hierarchy', 'all', '1', '5', '30'] : [loadResolution])
+                        .map(period => drawingManifestKey(layoutId, chartId, loadSymbol, period));
                     if (
                         manifestEligible
                         && drawingManifestState.loaded
                         && drawingManifestState.complete
-                        && !drawingManifestState.entries.has(manifestKey)
+                        && !manifestKeys.some(key => drawingManifestState.entries.has(key))
                     ) {
                         const emptyState = {
                             schema: USER_DRAWING_STATE_SCHEMA,
@@ -2485,7 +2944,7 @@ class ChartManager {
                             if (
                                 !manifest
                                 || manifest.complete !== true
-                                || manifest.entries.has(manifestKey)
+                                || manifestKeys.some(key => manifest.entries.has(key))
                             ) {
                                 // 永不抢赢 itemRequest；存在画线或清单不完整时必须读取正文。
                                 return new Promise(() => {});
@@ -2511,7 +2970,13 @@ class ChartManager {
                                     (payload && (payload.message || payload.error)) || "Drawing load was rejected",
                                 );
                             }
-                            const loadedState = self.deserializeUserDrawingsState(payload.data);
+                            const currentSymbol = self.chart?.symbol?.();
+                            const currentResolution = self.chart?.resolution?.();
+                            const track = !currentSymbol || self.getDrawingsCacheKey(currentSymbol, currentResolution)
+                                === self.getDrawingsCacheKey(loadSymbol, rawResolution);
+                            const loadedState = self.deserializeUserDrawingsState(payload.data,
+                                {track, hierarchy: loadResolution === 'hierarchy'});
+                            self.rememberDrawingCacheBaseline(loadedState,persistenceKey,payload.data);
                             self.rememberPersistedDrawingState(persistenceKey, payload.data);
                             if (manifestEligible) {
                                 if (loadedState.sources.size > 0) {
@@ -2568,7 +3033,6 @@ class ChartManager {
                 ? [...CHART_DISABLED_FEATURES, 'header_symbol_search', 'header_compare', 'header_resolutions']
                 : CHART_DISABLED_FEATURES,
             enabled_features: viewportOptions.enabledFeatures,
-            saved_data_meta_info: { uid: 1, name: "default", description: "default" },
             save_load_adapter: save_load_adapter,
             client_id: "chanlun_pro_" + Utils.get_market() + "_" + this.id,
             user_id: "session", load_last_chart: shouldLoadLastChart(),
@@ -2620,13 +3084,7 @@ class ChartManager {
                 console.warn("[CHARTS] read default studies failed", e);
             }
 
-            if (lowestCenterReviewPage() && typeof this.chart.removeEntity === 'function') {
-                for (const study of existing) {
-                    if (DEFAULT_STUDY_ALLOWLIST.has(study.name) && !requested.includes(study.name)) {
-                        await this.chart.removeEntity(study.id);
-                    }
-                }
-            }
+            // This view has no automatic studies; saved user studies still belong to the layout.
             if (!requested.length) return [];
 
             const studyIds = [];
@@ -2718,6 +3176,11 @@ class ChartManager {
                 const _levelRows = (prefix, suffix) => _levels.map((item) =>
                     _cbRow(`${prefix}_L${item.level}`, `${item.label} ${suffix}`, item.level === 0)
                 ).join('');
+                const _periods = structurePeriodsForChart(_curInterval);
+                const _ownPeriod = physicalStructurePeriod(_curInterval);
+                const _periodRows = (prefix, suffix) => _periods.map((period) =>
+                    _cbRow(`${prefix}_period_${period}`, `${period} ${suffix}`, period === _ownPeriod)
+                ).join('');
                 const _grpTitle = (title, note = '') => `
                     <div style="font-size:14px; color:#2563a6; padding:8px 0 2px; font-weight:700;">
                         ${title}${note ? `<span style="font-size:13px; color:#687386; margin-left:6px; font-weight:400;">${note}</span>` : ''}
@@ -2752,10 +3215,8 @@ class ChartManager {
                         </div>
                         <div id="${menuId}_lvl_detail" style="display:none;font-size:13px;color:#687386;line-height:20px;
                             padding:5px 0 5px 14px;border-left:2px solid #dce3eb;margin:3px 0 5px 4px;">
-                            本周期 K 线计算分型、笔与线段，中枢由本周期线段构建。
-                            中枢核心为三段重叠区间，进入段与离开段独立于核心。
-                            严格离开后，回试不触及中枢区间才确认中枢结束。
-                            L1、L2 等高一级结构由已确认的下级结构递归构建；其 K 线来源仍是当前周期。
+                            分型、笔和线段来自当前图的 K 线。1m、5m、30m 选项读取对应行情周期各自计算的结构并叠加到当前图。
+                            L1、L2 是同一行情周期内递归得到的结构级别，不等同于其他分钟周期。
                         </div>
 
                         ${_grpTitle('基础结构')}
@@ -2767,28 +3228,27 @@ class ChartManager {
                         </div>
                         ${_cbRow('center_observation', '笔类中枢观察', false)}
 
-                        ${_grpTitle('按级别显示中枢')}
+                        ${_grpTitle('中枢')}
                         ${_cbRow('center_all', '中枢总开关')}
-                        <div style="padding-left:14px;">${_levelRows('center', '中枢')}</div>
+                        <div style="padding-left:14px;">${_periods.length ? _periodRows('center', '中枢') : _levelRows('center', '中枢')}</div>
 
-                        ${_grpTitle('一、二、三类买卖点')}
-                        ${_cbRow('point_all', '买卖点总开关')}
+                        ${_grpTitle('一、二、三类买卖点提醒')}
+                        ${_cbRow('point_all', '提醒总开关')}
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;">
                             ${[['1buy','一买'],['2buy','二买'],['3buy','三买'],['1sell','一卖'],['2sell','二卖'],['3sell','三卖']]
                                 .map(([key, label]) => _cbRow(`point_${key}`, label)).join('')}
                         </div>
-                        <div style="padding-left:14px;">${_levelRows('point', '买卖点')}</div>
+                        <div style="padding-left:14px;">${_periods.length ? _periodRows('point', '买卖点提醒') : _levelRows('point', '买卖点提醒')}</div>
 
-                        ${_grpTitle('背驰')}
-                        ${_cbRow('divergence_all', '背驰总开关')}
-                        <div style="padding-left:14px;">${_levelRows('divergence_consolidation', '盘整背驰')}
-                            ${_levelRows('divergence_trend', '趋势背驰')}</div>
+                        <p id="${menuId}_overlay_status" role="status" style="font-size:12px;color:#687386;"></p>
 
                         ${_grpTitle('画线设置')}
+                        ${self.usesManualDrawingHierarchy() ? `<p style="font-size:13px;color:#687386;">手绘图形显示：${({1:'1m、5m、30m',5:'5m、30m',30:'30m'})[manualDrawingResolution(self.chart?.resolution?.() ?? self._curResolution)]}</p>` : `
                         <label style="display:block;cursor:pointer;font-size:14px;">
                             <input type="checkbox" id="${indCbId}" ${self.cl_independent_drawings ? 'checked' : ''}
                                 style="margin-right:6px;vertical-align:middle;">独立周期画线
                         </label>
+                        `}
                         <div style="display:flex;gap:8px;padding-top:8px;">
                             <button id="${menuId}_all" type="button" style="flex:1;font-size:14px;padding:5px 8px;cursor:pointer;
                                 border:1px solid #c5ced8;background:#f7f9fb;border-radius:4px;">全选</button>
@@ -2799,6 +3259,7 @@ class ChartManager {
                 `;
                 $('body').append(html);
                 const menuElement = document.getElementById(menuId);
+                self._updateStrictOverlayMenuStatus();
                 let menuPlacement = null;
                 // 工具栏按钮位于 TradingView 同源内嵌框架中，菜单则挂载在当前
                 // ChartManager 文档内。页面被嵌入时，window.top 属于
@@ -2837,9 +3298,10 @@ class ChartManager {
                 });
 
                 const keys = [
-                    'fx', 'bi', 'xd', 'center_all', 'center_observation', 'point_all', 'divergence_all',
+                    'fx', 'bi', 'xd', 'center_all', 'center_observation', 'point_all',
                     'point_1buy', 'point_2buy', 'point_3buy', 'point_1sell', 'point_2sell', 'point_3sell',
-                    ..._levels.flatMap(({level}) => ['center', 'point', 'divergence_consolidation', 'divergence_trend']
+                    ..._periods.flatMap((period) => PERIOD_LAYERS.map((layer) => `${layer}_period_${period}`)),
+                    ..._levels.flatMap(({level}) => ['center', 'point']
                         .map((prefix) => `${prefix}_L${level}`)),
                 ];
                 keys.forEach(k => {
@@ -2847,6 +3309,19 @@ class ChartManager {
                         const checked = $(this).is(':checked');
                         self.cl_show_config[k] = checked;
                         saveClShowConfig(self.id, self._curResolution, self.cl_show_config);
+                        for (const [period, state] of self._strictOverlaySources || []) {
+                            if (self._strictOverlayEnabled(period)) {
+                                if (state.error === 'retry_later' && state.retryTimer == null) {
+                                    state.nextAttemptAt = 0;
+                                    state.error = null;
+                                }
+                                continue;
+                            }
+                            state.controller?.abort();
+                            if (state.retryTimer != null) clearTimeout(state.retryTimer);
+                            state.retryTimer = null;
+                        }
+                        self._updateStrictOverlayMenuStatus();
                         console.log(`[cl_show_config] toggle ${k}=${checked}`);
                         self.debouncedDrawChanlun();
                     });
@@ -2920,7 +3395,9 @@ class ChartManager {
                 Promise.resolve(self.manualReloadData()).catch(function (error) {
                     console.error('[CHARTS] manual data reload failed', error);
                     if (typeof layer !== 'undefined' && layer && typeof layer.msg === 'function') {
-                        layer.msg('重新加载失败，请稍后重试');
+                        layer.msg(error.drawingSaveFailed
+                            ? '画线尚未保存，已保留当前修改并取消重新加载。' + (error.drawingConflict ? error.message : '请稍后重试。')
+                            : '重新加载失败，请稍后重试');
                     }
                 }).finally(function () {
                     buttonReload.setAttribute('aria-busy', 'false');
@@ -2939,6 +3416,13 @@ class ChartManager {
                 console.warn("[CHARTS] initialize requested default studies failed", e);
             });
             this._alignResolutionOnReady();   // 按真实周期校正显示配置(构造 _curResolution 仅为猜测)
+            this.widget.subscribe('chart_loaded', () => {
+                if (!this._pendingSavedPriceViewport) return;
+                this.chart = this.widget.activeChart();
+                const restoreWhenReady = () => this._scheduleChartStableReady(
+                    this._dataContextGeneration || 0, this._currentDataIdentityKey());
+                if (this.chart?.dataReady(restoreWhenReady) === true) restoreWhenReady();
+            });
             this.chart.applyOverrides({ "mainSeriesProperties.candleStyle.upColor": "#ef5350", "mainSeriesProperties.candleStyle.downColor": "#26a69a" });
             const registry = getTVRegistry();
             registry.widgets.set(this.instanceId, this.widget);
@@ -3004,6 +3488,8 @@ class ChartManager {
                     if (!(this._userDrawingIds instanceof Set)) this._userDrawingIds = new Set();
                     if (eventType === 'remove') this._userDrawingIds.delete(String(id));
                     else this._userDrawingIds.add(String(id));
+                    if (eventType === 'remove') this._userDrawingOrigins?.delete(String(id));
+                    else this.configureManualDrawing(id);
                 }
                 if (this._drawColor && eventType !== 'remove' && !_isChanlunShape && !this._coloredDrawings.has(id)) {
                     try {
@@ -3032,9 +3518,8 @@ class ChartManager {
         });
     }
 
-    // ===== 按级别颜色「手动画线段 / 矩形」调色板 =====
-    // 需求:用 TV 画线/矩形工具在图上手动作图,可挑各级别(笔/段/1m/5m/30m/日…)颜色来画。
-    // 机制:点色块 → setDrawColor 设 TV 趋势线/矩形工具默认色;点「线/框」激活对应工具;
+    // ===== 按周期选择「手动画线段 / 矩形」 =====
+    // 先选新图形所属周期，再点画线/画框；颜色和持久化来源均使用所选周期。
     //       手画完成时 drawing_event=create 再兜底套色。位置优先注入 TV 左侧工具栏,失败回退浮层。
 
     // 设当前「画图颜色」:applyOverrides 设趋势线/矩形默认色,之后手画的线段/矩形即此色。
@@ -3067,10 +3552,59 @@ class ChartManager {
         return container ? container.querySelectorAll('iframe') : [];
     }
 
+    _releaseDrawingPickerFocus(select = null) {
+        const guard = this._drawingPickerFocusGuard;
+        if (!guard || select && guard.select !== select) return;
+        this._drawingPickerFocusGuard = null;
+        guard.restore();
+    }
+
+    _protectDrawingPickerFocus(select) {
+        this._releaseDrawingPickerFocus();
+        if (this._disposed) return;
+        // TradingView's window-level click handler blurs non-input elements
+        // inside this button toolbar, including our native select popup.
+        // Suspend that marker only while this picker owns the interaction.
+        const attribute = 'data-mouse-click-auto-blur';
+        const ancestors = [];
+        for (let parent = select.parentElement; parent; parent = parent.parentElement) {
+            if (!parent.hasAttribute(attribute)) continue;
+            ancestors.push([parent, parent.getAttribute(attribute)]);
+            parent.removeAttribute(attribute);
+        }
+        if (!ancestors.length) return;
+        const doc = select.ownerDocument;
+        const outside = event => {
+            if (!select.contains(event.target)) this._releaseDrawingPickerFocus(select);
+        };
+        this._drawingPickerFocusGuard = {select, restore: () => {
+            for (const [parent, value] of ancestors) {
+                if (!parent.hasAttribute(attribute)) parent.setAttribute(attribute, value);
+            }
+            doc.removeEventListener('pointerdown', outside, true);
+            doc.removeEventListener('mousedown', outside, true);
+        }};
+        doc.addEventListener('pointerdown', outside, true);
+        doc.addEventListener('mousedown', outside, true);
+    }
+
     // 高亮当前画图工具，单独区分线段和矩形。
     _paintDrawPalette(grp) {
         try {
+            const interval = this.chart?.resolution?.() ?? this._curResolution ?? grp.getAttribute('data-interval');
+            const period = this.getManualDrawingToolPeriod(interval);
+            const item = this._levelBarItems(interval).items.find(item => item.period === period);
+            grp.querySelectorAll('.cl-draw-period').forEach(select => {
+                if (select.ownerDocument?.activeElement !== select && select.value !== period) select.value = period;
+            });
             grp.querySelectorAll('.cl-drawbtn').forEach(b => {
+                if (item) {
+                    b.setAttribute('data-color', item.color);
+                    b.setAttribute('data-period', item.period);
+                    b.title = item.label + ' · ' + (b.getAttribute('data-tool') === 'rectangle' ? '画框' : '画线');
+                    b.setAttribute('aria-label', b.title);
+                    b.style.borderColor = item.color;
+                }
                 const c = b.getAttribute('data-color') || '';
                 const active = Boolean(this._drawColor && c.toUpperCase() === this._drawColor.toUpperCase()
                     && b.getAttribute('data-tool') === this._drawTool);
@@ -3082,18 +3616,45 @@ class ChartManager {
         } catch (e) {}
     }
 
-    // 往容器 grp 构建调色板内容:标题 + 各级色块(点=设画图色) + 线段/矩形工具按钮(点=激活工具)。
+    // 在窄工具栏内显示周期选择和两个绘图按钮。
     _buildDrawPaletteInto(grp, doc, interval) {
         const { items } = this._levelBarItems(interval);
+        const selected = this.getManualDrawingToolPeriod(interval);
+        const item = items.find(item => item.period === selected) || items[0];
         const hd = doc.createElement('div');
         grp.setAttribute('role', 'group');
-        grp.setAttribute('aria-label', '本周期快捷画图');
+        grp.setAttribute('aria-label', '手绘快捷画图');
+        grp.setAttribute('data-interval', manualDrawingResolution(interval));
         hd.textContent = '画图';
-        hd.title = '使用当前周期颜色，一键激活画线或画框工具';
+        hd.title = '先选择新图形的周期，再画线或画框';
         hd.style.cssText = 'font-size:10px; color:#7d8796; user-select:none; text-align:center; white-space:nowrap; line-height:16px;';
         grp.appendChild(hd);
+        if (this.usesManualDrawingHierarchy(interval)) {
+            const select = doc.createElement('select');
+            select.className = 'cl-draw-period';
+            select.setAttribute('aria-label', '手绘周期');
+            select.title = '新画出的线和框所属周期';
+            select.style.cssText = 'width:44px;height:26px;padding:0;box-sizing:border-box;font-family:inherit;font-size:11px;border:1px solid #c5ced8;border-radius:4px;background:var(--cp-surface,#fff);color:var(--cp-text,#334155);cursor:pointer;';
+            for (const item of items) {
+                const option = doc.createElement('option');
+                option.value = item.period;
+                option.textContent = item.label;
+                select.appendChild(option);
+            }
+            select.value = selected;
+            select.addEventListener('focus', () => this._protectDrawingPickerFocus(select));
+            select.addEventListener('mousedown', () => this._protectDrawingPickerFocus(select));
+            select.addEventListener('blur', () => this._releaseDrawingPickerFocus(select));
+            select.addEventListener('click', event => event.stopPropagation());
+            select.addEventListener('keydown', event => event.stopPropagation());
+            select.addEventListener('change', event => {
+                event.stopPropagation();
+                if (!this.setManualDrawingToolPeriod(select.value)) this.updateDrawPalette();
+                this._paintDrawPalette(grp);
+            });
+            grp.appendChild(select);
+        }
         // Stack short action labels inside the narrow native toolbar.
-        items.forEach((it) => {
             const row = doc.createElement('div');
             row.style.cssText = 'display:flex; flex-direction:column; gap:5px; align-items:center;';
             const mk = (tool, isBox) => {
@@ -3101,16 +3662,19 @@ class ChartManager {
                 b.type = 'button';
                 b.className = 'cl-drawbtn';
                 b.textContent = isBox ? '画框' : '画线';
-                b.title = it.label + (isBox ? '颜色 · 绘制矩形' : '颜色 · 绘制线段');
+                b.title = item.label + ' · ' + (isBox ? '画框' : '画线');
                 b.setAttribute('aria-label', b.title);
-                b.setAttribute('data-color', it.color);
+                b.setAttribute('data-color', item.color);
                 b.setAttribute('data-tool', tool);
                 b.setAttribute('aria-pressed', 'false');
-                b.style.cssText = 'width:38px; height:30px; padding:0; line-height:28px; white-space:nowrap; flex-shrink:0; text-align:center; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; box-sizing:border-box; background:transparent; border:1px solid ' + it.color + '; border-radius:5px; color:' + it.color + ';';
+                b.style.cssText = 'width:38px; height:30px; padding:0; line-height:28px; white-space:nowrap; flex-shrink:0; text-align:center; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; box-sizing:border-box; background:transparent; border:1px solid ' + item.color + '; border-radius:5px; color:' + item.color + ';';
                 b.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    const current = this.chart?.resolution?.() ?? this._curResolution ?? interval;
+                    const period = this.getManualDrawingToolPeriod(current);
+                    const selected = this._levelBarItems(current).items.find(item => item.period === period);
                     this._drawTool = tool;
-                    this.setDrawColor(it.color);
+                    this.setDrawColor(selected.color);
                     try { this.widget.selectLineTool(tool); } catch (err) {}
                 });
                 return b;
@@ -3118,7 +3682,6 @@ class ChartManager {
             row.appendChild(mk('trend_line', false));
             row.appendChild(mk('rectangle', true));
             grp.appendChild(row);
-        });
         this._paintDrawPalette(grp);
     }
 
@@ -3134,7 +3697,10 @@ class ChartManager {
             const barId = 'cl_drawpal_' + this.id;
             let bar = document.getElementById(barId);
             if (bar && bar.getAttribute('data-sig') === sig) { this._paintDrawPalette(bar); bar.style.display = 'flex'; return; }
-            if (bar) bar.remove();
+            if (bar) {
+                if (this._drawingPickerFocusGuard && bar.contains(this._drawingPickerFocusGuard.select)) this._releaseDrawingPickerFocus();
+                bar.remove();
+            }
             bar = document.createElement('div');
             bar.id = barId;
             bar.setAttribute('data-sig', sig);
@@ -3146,15 +3712,22 @@ class ChartManager {
         }
     }
 
-    // 手工画线调色板沿用当前周期线段的颜色。
+    // 当前周期及更高的操作周期可作为新手绘图形的来源。
     _levelBarItems(interval) {
-        return {items: [{label: '本周期', color: getDynamicColor(interval, 'xds')}], sig: String(interval)};
+        const current = manualDrawingResolution(interval);
+        const periods = MANUAL_DRAWING_PERIODS.has(current)
+            ? [...MANUAL_DRAWING_PERIODS].filter(period => Number(period) >= Number(current)) : [current];
+        return {items: periods.map(period => ({period, label: MANUAL_DRAWING_PERIODS.has(period) ? period + 'm' : '本周期',
+            color: getDynamicColor(period, 'xds')})), sig: String(interval)};
     }
 
     // 在当前图表的窄工具栏内注入按钮，短图表也使用同一布局。
     // 而非哈希类名,较抗 TV 升级;找不到工具栏返回 false → 调用方回退浮层 renderDrawPaletteOverlay。
     injectDrawPaletteIntoTVToolbar() {
         try {
+            if (this._drawingPickerFocusGuard && !this._drawingPickerFocusGuard.select.isConnected) {
+                this._releaseDrawingPickerFocus();
+            }
             let doc = null, inner = null;
             for (const f of this._drawPaletteFrames()) {
                 let dd; try { dd = f.contentDocument; } catch (e) { continue; }
@@ -3180,7 +3753,10 @@ class ChartManager {
                 hideOverlay();
                 return true;
             }
-            if (grp) grp.remove();
+            if (grp) {
+                if (this._drawingPickerFocusGuard && grp.contains(this._drawingPickerFocusGuard.select)) this._releaseDrawingPickerFocus();
+                grp.remove();
+            }
             grp = doc.createElement('div');
             grp.id = grpId;
             grp.setAttribute('data-sig', sig);
@@ -3298,8 +3874,11 @@ class ChartManager {
         const currentSeq = ++this._intervalSwitchSeq;
         this._intervalGeneration++;
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleIntervalChange → ${interval} (seq=${currentSeq}, generation=${this._intervalGeneration}) [_initialLoadDone reset to false]`);
-        Utils.set_local_data(`${market}_interval_${this.id}`, interval);
+        if (new URLSearchParams(window.location.search || '').get('workspace_layout') !== '1') {
+            Utils.set_local_data(`${market}_interval_${this.id}`, interval);
+        }
         this._applyResolutionConfig(interval);   // 切周期:存旧周期配置、载入本周期配置(未配过继承当前)
+        this.updateDrawPalette();
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('interval-change');
         this._openSseStream();
@@ -3367,6 +3946,7 @@ class ChartManager {
     // 不夺已够宽的图(A股默认已宽则跳过)或用户后续缩放。设更宽视窗会触发 TV 按需加载更早的 K 线。
     _maybeWidenDefaultView(retryCount = 0) {
         try {
+            if (this._loadingSavedLayout || this._hasSavedViewport) return;
             const si = this.widget && this.widget.symbolInterval ? this.widget.symbolInterval() : null;
             if (!si || !si.symbol || !si.interval) return;
             const key = si.symbol + '|' + si.interval;
@@ -3433,6 +4013,10 @@ class ChartManager {
             }
             this._defaultViewAttemptTimer = setTimeout(() => {
                 this._defaultViewAttemptTimer = null;
+                if (this._loadingSavedLayout || this._hasSavedViewport) {
+                    this._resumePendingInitialDraw();
+                    return;
+                }
                 const retryAfterTransientFailure = () => {
                     this._defaultViewApplyPending = false;
                     if (
@@ -3577,6 +4161,11 @@ class ChartManager {
         // 异步创建事件可能先于其承诺完成，并短暂表现为用户绘图。所有权确定后必须在
         // 持久化前撤销这一临时用户分类。
         this._userDrawingIds?.delete(String(entityId));
+        this._userDrawingOrigins?.delete(String(entityId));
+        for (const snapshot of this._capturedDrawingSnapshots || []) {
+            snapshot.userIds.delete(String(entityId));
+            snapshot.origins.delete(String(entityId));
+        }
         this._coloredDrawings?.delete(entityId);
         return entityId;
     }
@@ -4006,12 +4595,16 @@ class ChartManager {
         const api = this._strictApi();
         const groups = new Map();
         const annotationSlots = new Map();
+        const sourceFrequency = snapshot.source_frequency;
+        const periodPrefix = sourceFrequency !== context.interval ? `${sourceFrequency}·` : '';
         const add = (rawItem, level, centerLabel) => {
             if (rawItem.structural_level !== level || rawItem.price_basis_revision !== snapshot.price_basis_revision
                 || !Number.isInteger(rawItem.available_at) || rawItem.available_at > snapshot.source_closed_at) {
                 throw new Error('chart evidence context or cutoff is invalid');
             }
-            const item = api.itemToChartCoordinates({...rawItem, ...(centerLabel ? {center_label: centerLabel} : {})},
+            const item = api.itemToChartCoordinates({...rawItem,
+                source_frequency: sourceFrequency, display_frequency: context.interval,
+                ...(centerLabel ? {center_label: centerLabel} : {})},
                 context.interval, context.sourceTimeIsClose ?? this._chartUsesCloseTimestampCoordinates());
             if (item.points.length === 1) {
                 const anchor = item.points[0];
@@ -4037,16 +4630,15 @@ class ChartManager {
             const ownerProjections = new Map(previews.filter(item => item.owner_center_id)
                 .map(item => [item.owner_center_id, item]));
             const centerLabels = new Map();
-            for (const [index, item] of level.centers.entries()) {
+            for (const item of level.centers) {
                 if (item.render_kind !== 'formal_center' || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')) {
                     throw new Error('center source is invalid');
                 }
                 validateStrictCenterRenderContract(item, depth, false);
-                const label = (depth === 0 ? '' : `L${depth}·`) + 'Z' + (index + 1);
+                const label = (periodPrefix + (depth === 0 ? '' : `L${depth}`)).replace(/·$/, '');
                 centerLabels.set(item.center_id, label);
                 add({...item, tail_status: ownerProjections.get(item.center_id)?.preview_status}, depth, label);
             }
-            let formingIndex = 0;
             for (const item of previews) {
                 if (item.render_kind !== 'center_preview' || item.state !== 'forming'
                     || item.tradable !== false || item.third_class_confirmed !== false
@@ -4056,9 +4648,19 @@ class ChartManager {
                 }
                 validateStrictCenterRenderContract(item, depth, true);
                 if (item.draw_geometry === false) continue;
-                const label = item.owner_center_id ? centerLabels.get(item.owner_center_id) + '·' + centerPreviewLabel(item)
-                    : (depth === 0 ? '' : `L${depth}·`) + 'P' + (++formingIndex) + '·' + centerPreviewLabel(item);
+                const label = (periodPrefix + (depth === 0 ? '' : `L${depth}`)).replace(/·$/, '');
                 add(item, depth, label);
+            }
+            for (const item of level.trend_shapes || []) {
+                if (item.schema !== 'chanlun-chart-trend' || item.render_kind !== 'strict_trend'
+                    || !item.trend_id || !['trend', 'consolidation'].includes(item.kind)
+                    || !['forming', 'complete', 'locked'].includes(item.state)
+                    || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')
+                    || !Array.isArray(item.center_ids) || !item.center_ids.length
+                    || !Array.isArray(item.points) || item.points.length !== 2) {
+                    throw new Error('chart trend type evidence is invalid');
+                }
+                add(item, depth);
             }
             for (const item of level.points || []) {
                 if (!['point_confirmed', 'point_approaching'].includes(item.render_kind)
@@ -4119,6 +4721,111 @@ class ChartManager {
 
 
     _createStrictShape(item, currentInterval, bars) {
+        const sourceInterval = item.source_frequency || this._strictFrequencyFromResolution(currentInterval);
+        if (item.render_kind === 'user_same_level_type') {
+            const color = item.state === 'forming' ? '#b77918'
+                : item.structural_level === 0 ? '#0e9f6e'
+                : item.qualification_pending ? '#d94a5b' : '#3276c3';
+            return ChartUtils.createLineShape(this.chart, {
+                ...item, linestyle: item.state === 'locked' && !item.qualification_pending ? 0 : 2,
+            }, {color, linewidth: 2,
+                title: item.state === 'forming'
+                    ? `${sourceInterval}·同级别${item.forming_candidate ? '走势类型候选' : '待分解走势'}·形成中，不进入上级中枢`
+                    : `${sourceInterval}·用户同级别走势类型·L${item.structural_level}·${item.state}`});
+        }
+        if (item.render_kind === 'user_center_type_region') {
+            const centerRegion = item.kind === 'center_region';
+            return ChartUtils.createLineShape(this.chart, {
+                ...item, linestyle: 2,
+            }, {
+                color: centerRegion ? '#8057bd' : '#7b9aab', linewidth: 2,
+                title: centerRegion
+                    ? `${sourceInterval}·五段固定核心中枢占有的连续线段区间；所属走势类型尚待完成证`
+                    : `${sourceInterval}·相邻中枢间连接走势；所属走势类型尚待划分`,
+            });
+        }
+        if (item.render_kind === 'user_physical_center_observation') {
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: '#7b9aab', linewidth: 1,
+                title: `${sourceInterval}·五条线段已触及同一中枢区间；独立离返尚未确认，不是完成中枢`,
+                overrides: {transparency: 96, linestyle: 2},
+            });
+        }
+        if (item.render_kind === 'user_five_segment_center') {
+            const awaitingReturn = item.state === 'awaiting_return';
+            const pending = awaitingReturn || item.grade_assignment_pending;
+            const color = pending ? '#b77918' : '#1577e6';
+            const title = `${sourceInterval}·连续五条已确认线段有共同价格交集即成枢；`
+                + `${item.window_count}个五段窗口；${item.state === 'completed'
+                    ? '离返已确认' : awaitingReturn ? '已离开、等待返回' : '中枢仍在延伸'}`
+                + `${item.grade_assignment_pending ? '；与相邻中枢间缺独立连接，级别关系待核' : ''}；交易点位另行确认`;
+            if (item.core?.zd_tick === item.core?.zg_tick) {
+                return ChartUtils.createLineShape(this.chart, {
+                    ...item, linestyle: pending ? 2 : 0,
+                }, {color, linewidth: 2, title: `${title}；交集为单一价位`});
+            }
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color, linewidth: 2, title,
+                overrides: {transparency: 91, linestyle: pending ? 2 : 0},
+            });
+        }
+        if (item.render_kind === 'user_alternative_five_center') {
+            const title = `${sourceInterval}·五条连续线段重叠已成枢；${item.window_count}个窗口。`
+                + '与选中路径共享来源，唯一归属待判，不能用于正式交易点位';
+            if (item.core?.zd_tick === item.core?.zg_tick) {
+                return ChartUtils.createLineShape(this.chart, {...item, linestyle: 2}, {
+                    color: '#bf5b86', linewidth: 2, title,
+                });
+            }
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: '#bf5b86', linewidth: 1, title,
+                overrides: {transparency: 97, linestyle: 2},
+            });
+        }
+        if (item.render_kind === 'user_forming_five_center_preview') {
+            const title = `${sourceInterval}·五段价格已有交集，但包含未确认线段；仅为形成中预览，不计已成中枢或交易信号`;
+            if (item.core?.zd_tick === item.core?.zg_tick) {
+                return ChartUtils.createLineShape(this.chart, {...item, linestyle: 2}, {
+                    color: '#7b9aab', linewidth: 1, title,
+                });
+            }
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: '#7b9aab', linewidth: 1, title,
+                overrides: {transparency: 98, linestyle: 2},
+            });
+        }
+        if (item.render_kind === 'user_center_structure_extent') {
+            const alternative = item.extent_kind === 'alternative_five_window';
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: alternative ? '#c784a3' : '#7b9aab', linewidth: 1,
+                title: item.extent_kind === 'forming_five_window'
+                    ? `${sourceInterval}·形成中五段候选的全幅范围，含未确认线段；核心预览另用灰虚框表示`
+                    : alternative
+                    ? `${sourceInterval}·五段结构全幅范围，含进入和离开线段；核心价域另用玫红虚框显示`
+                    : `${sourceInterval}·中枢结构全幅范围，含进入、离开和返回线段；核心价域另用蓝/橙框显示`,
+                overrides: {transparency: 100, linestyle: 2, fillBackground: false},
+            });
+        }
+        if (['user_parent_center', 'user_parent_center_observation'].includes(item.render_kind)) {
+            const observation = item.render_kind === 'user_parent_center_observation';
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: observation ? '#a087b8' : '#8057bd', linewidth: observation ? 1 : 2,
+                title: observation
+                    ? `${sourceInterval}·三个已完成下级类型重叠，中枢结构已出现；独立离返资格待确认`
+                    : `${sourceInterval}·三个已完成用户类型构成的上级中枢；正式点位未重发`,
+                overrides: {transparency: observation ? 96 : 92, linestyle: observation ? 2 : 0},
+            });
+        }
+        if (item.render_kind === 'user_fixed30m_center_window') {
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: item.post_gap_observation ? '#7b9aab' : '#a26bb6',
+                linewidth: item.post_gap_observation ? 2 : 1,
+                title: item.post_gap_observation
+                    ? `${sourceInterval}·30分钟固定同级别局部中枢；前段连接待分解，不是正式30分钟走势类型`
+                    : `${sourceInterval}·三个完成5分钟类型重叠形成的30分钟局部中枢；整条路径待认证`,
+                overrides: {transparency: 96, linestyle: item.post_gap_observation ? 2 : 0},
+            });
+        }
         if (item.render_kind === 'segment_unresolved_range') {
             return ChartUtils.createZhongshuShape(this.chart, item, {
                 color: '#7c8798', linewidth: 1,
@@ -4131,11 +4838,23 @@ class ChartManager {
             const observation = item.render_kind === 'center_observation';
             const style = getCenterVisualStyle('formal', item);
             return ChartUtils.createZhongshuShape(this.chart, item, {
-                color: observation ? getDynamicColor(currentInterval, 'bis')
-                    : chainColor(chartBiIndex(currentInterval) + 1 + item.structural_level),
+                color: observation ? getDynamicColor(sourceInterval, 'bis')
+                    : chainColor(chartBiIndex(sourceInterval) + 1 + item.structural_level),
                 linewidth: observation ? 1 : style.linewidth,
                 text: item.center_label || '', title: centerEvidenceTitle(item),
                 overrides: {linestyle: style.linestyle, transparency: observation ? 95 : style.transparency},
+            });
+        }
+        if (item.render_kind === 'strict_trend') {
+            const label = item.kind === 'trend'
+                ? (item.direction === 'up' ? '上涨走势' : '下跌走势') : '盘整走势';
+            return ChartUtils.createLineShape(this.chart, {
+                ...item,
+                linestyle: item.state === 'forming'
+                    ? CHART_CONFIG.LINE_STYLES.DASHED : CHART_CONFIG.LINE_STYLES.SOLID,
+            }, {
+                color: chainColor(chartBiIndex(sourceInterval) + 2 + item.structural_level),
+                linewidth: 2, title: `${sourceInterval}·${label}${item.state === 'forming' ? '·形成中' : ''}`,
             });
         }
         const isDivergence = item.render_kind === 'strict_divergence';
@@ -4445,6 +5164,177 @@ class ChartManager {
         return false;
     }
 
+    _strictOverlayEnabled(period) {
+        const cfg = this.cl_show_config || {};
+        return (cfg.center_all !== false && cfg[`center_period_${period}`] === true)
+            || (cfg.point_all !== false && cfg[`point_period_${period}`] === true);
+    }
+
+    _resetStrictOverlayContext(identity) {
+        if (this._strictOverlayIdentity === identity && this._strictOverlaySources instanceof Map) return;
+        for (const state of this._strictOverlaySources?.values() || []) {
+            state.controller?.abort();
+            if (state.retryTimer != null) clearTimeout(state.retryTimer);
+        }
+        this._strictOverlayIdentity = identity;
+        this._strictOverlaySources = new Map();
+    }
+
+    _updateStrictOverlayMenuStatus() {
+        const status = typeof document === 'undefined' ? null
+            : document.getElementById(`cl_display_menu_${this.id}_overlay_status`);
+        if (!status) return;
+        const messages = [];
+        for (const [period, state] of this._strictOverlaySources || []) {
+            if (!this._strictOverlayEnabled(period)) continue;
+            if (state.loading || state.error === 'pending') messages.push(`${period} 结构读取中`);
+            else if (state.error === 'retry_later') messages.push(`${period} 结构暂未就绪，稍后重试`);
+            else if (state.error) messages.push(`${period} 结构暂不可用（${state.error}）`);
+        }
+        status.textContent = messages.join('；') || '高周期叠加使用对应周期独立计算的结构快照。';
+    }
+
+    _validateStrictOverlaySnapshot(snapshot, period, mainSnapshot, packet = null) {
+        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure'
+            || snapshot.source_frequency !== period || snapshot.display_frequency !== period
+            || this._strictNormalizeSymbol(snapshot.symbol)
+                !== this._strictNormalizeSymbol(mainSnapshot.symbol)
+            || snapshot.price_basis_revision !== mainSnapshot.price_basis_revision
+            || snapshot.structure_price_quantum !== mainSnapshot.structure_price_quantum
+            || !Number.isInteger(snapshot.source_closed_at)
+            || snapshot.source_closed_at > mainSnapshot.source_closed_at
+            || (packet && packet.source_closed_at !== snapshot.source_closed_at)
+            || !Array.isArray(snapshot.levels) || !snapshot.levels.length
+            || snapshot.levels[0].structural_level !== 0
+            || snapshot.levels[0].origin !== 'native_segments') {
+            throw new Error('strict_overlay_context_mismatch');
+        }
+    }
+
+    _fetchStrictOverlay(period, identity) {
+        const generation = this._dataContextGeneration || 0;
+        if (this._disposed || identity !== this._currentDataIdentityKey()
+            || !this._strictOverlayEnabled(period)) return;
+        const state = this._strictOverlaySources?.get(period);
+        const current = this.getCurrentChartIdentity();
+        if (!state || state.loading || !this._strictStructureSnapshot || !current?.symbol) return;
+        const resolution = {'5m':'5','30m':'30'}[period];
+        if (!resolution) return;
+        state.loading = true;
+        state.error = null;
+        const controller = new AbortController();
+        state.controller = controller;
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        this._updateStrictOverlayMenuStatus();
+        const params = new URLSearchParams({
+            symbol: current.symbol, resolution, from: '0',
+            to: String(Math.floor(Date.now() / 1000) + 60),
+            firstDataRequest: 'true', countback: '1', structure_only: '1',
+        });
+        void (async () => {
+            let retryDelay = null;
+            try {
+                const response = await fetch(`/tv/history?${params}`, {
+                    credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const packet = await response.json();
+                if (packet.s !== 'ok') throw new Error(packet.errmsg || 'structure_response_invalid');
+                if (packet.strict_structure_mode === 'replace') {
+                    const main = this._strictStructureSnapshot;
+                    if (!main || identity !== this._currentDataIdentityKey() || this._disposed
+                        || generation !== (this._dataContextGeneration || 0)) return;
+                    if (packet.strict_structure?.source_closed_at > main.source_closed_at) {
+                        state.error = 'pending';
+                        retryDelay = 1000;
+                    } else {
+                        this._validateStrictOverlaySnapshot(packet.strict_structure, period, main, packet);
+                        state.snapshot = packet.strict_structure;
+                        state.loadedAt = Date.now();
+                        state.attempts = 0;
+                        state.error = null;
+                        this.debouncedDrawChanlun?.();
+                    }
+                } else if (['strict_structure_pending', 'strict_initial_build_busy'].includes(
+                    packet.strict_structure_error?.code)) {
+                    state.error = 'pending';
+                    retryDelay = 1000;
+                } else {
+                    throw new Error(packet.strict_structure_error?.code || 'strict_overlay_unavailable');
+                }
+            } catch (error) {
+                if (error?.name !== 'AbortError' || identity === this._currentDataIdentityKey()) {
+                    state.error = error?.message || 'structure_request_failed';
+                    retryDelay = 5000;
+                }
+            } finally {
+                clearTimeout(timeout);
+                state.loading = false;
+                state.controller = null;
+                if (identity !== this._currentDataIdentityKey() || this._disposed
+                    || generation !== (this._dataContextGeneration || 0)) return;
+                if (retryDelay != null && this._strictOverlayEnabled(period)) {
+                    state.attempts = (state.attempts || 0) + 1;
+                    const limit = state.error === 'pending' ? 30 : 3;
+                    if (state.attempts <= limit) {
+                        state.retryTimer = setTimeout(() => {
+                            state.retryTimer = null;
+                            this._fetchStrictOverlay(period, identity);
+                        }, retryDelay);
+                    } else {
+                        state.nextAttemptAt = Date.now() + 60000;
+                        state.error = 'retry_later';
+                        state.attempts = 0;
+                        state.retryTimer = setTimeout(() => {
+                            state.retryTimer = null;
+                            this._fetchStrictOverlay(period, identity);
+                        }, 60000);
+                    }
+                }
+                this._updateStrictOverlayMenuStatus();
+            }
+        })();
+    }
+
+    _strictOverlayGroups(mainSnapshot, validated, currentInterval) {
+        const groups = new Map();
+        const identity = this._currentDataIdentityKey();
+        if (!identity) return groups;
+        this._resetStrictOverlayContext(identity);
+        for (const period of structurePeriodsForChart(currentInterval).slice(1)) {
+            if (!this._strictOverlayEnabled(period)) continue;
+            let state = this._strictOverlaySources.get(period);
+            if (!state) {
+                state = {snapshot: null, loading: false, attempts: 0,
+                    loadedAt: 0, nextAttemptAt: 0, retryTimer: null, controller: null, error: null};
+                this._strictOverlaySources.set(period, state);
+            }
+            if (state.snapshot) {
+                try {
+                    this._validateStrictOverlaySnapshot(state.snapshot, period, mainSnapshot);
+                    const source = {...state.snapshot, levels: [state.snapshot.levels[0]],
+                        stroke_center_observations: [], conditional_centers: [],
+                        unresolved_segment_ranges: []};
+                    const lowerBarTimes = new Set(validated.loadedRange.barTimes);
+                    for (const [scope, items] of this._strictRenderGroups(source, validated.context)) {
+                        groups.set(scope, items.filter((item) =>
+                            ['formal_center', 'center_preview'].includes(item.render_kind)
+                            || item.points.every((point) => lowerBarTimes.has(point.time))));
+                    }
+                } catch (error) {
+                    state.snapshot = null;
+                    state.error = error.message;
+                }
+            }
+            const stale = state.snapshot && mainSnapshot.source_closed_at > state.snapshot.source_closed_at
+                && Date.now() - state.loadedAt > 60000;
+            if (!state.loading && state.retryTimer == null && Date.now() >= state.nextAttemptAt
+                && (!state.snapshot || stale)) this._fetchStrictOverlay(period, identity);
+        }
+        this._updateStrictOverlayMenuStatus();
+        return groups;
+    }
+
     _drawStrictStructure(chartData, currentInterval) {
         const barsResult = chartData?.barsResult;
         const mode = barsResult?.strict_structure_mode;
@@ -4481,6 +5371,9 @@ class ChartManager {
                 0,
                 ...snapshot.levels.map((level) => level.structural_level),
             );
+            for (const [scope, items] of this._strictOverlayGroups(snapshot, validated, currentInterval)) {
+                groups.set(scope, items);
+            }
 
             const nextScopes = new Set(groups.keys());
             const priorScopes = new Set(this._strictScopes instanceof Set ? this._strictScopes : []);
@@ -4585,10 +5478,10 @@ class ChartManager {
         const visibleBaseStructures = (items) => this.getUniqueRenderList(
             this._baseStructureRenderList(items, currentInterval),
         ).filter((item) => {
-            const headTime = Array.isArray(item?.points)
-                ? item.points[0]?.time
+            const tailTime = Array.isArray(item?.points)
+                ? item.points[item.points.length - 1]?.time
                 : item?.points?.time;
-            return Number(headTime) >= visibleFrom;
+            return Number(tailTime) >= visibleFrom;
         });
         const strictMode = String(barsResult.strict_structure_mode || 'missing');
         const effectiveStrictSnapshot = strictMode === 'unchanged'
@@ -4606,6 +5499,12 @@ class ChartManager {
         const configFingerprint = this.drawingStateFingerprint(
             this.cl_show_config || {},
         );
+        const overlayRevisions = this._strictOverlayIdentity === this._currentDataIdentityKey()
+            ? Array.from(this._strictOverlaySources || [])
+                .filter(([period]) => this._strictOverlayEnabled(period))
+                .map(([period, state]) => [period, state.snapshot?.render_revision || null,
+                    state.snapshot?.source_closed_at || null])
+            : [];
         // 指纹只包含当前视窗真正会进入 reconcile 的实体。SSE 补入一整年但
         // 全部落在画外的历史不应延长切换；画内分型已先按真实 K 线坐标规整，
         // 因而停牌/节假日对齐变化仍会反映到指纹中。
@@ -4622,6 +5521,7 @@ class ChartManager {
             visibleBaseStructures(barsResult.bis),
             visibleBaseStructures(barsResult.xds),
             strictState,
+            overlayRevisions,
             configFingerprint,
         ]);
     }
@@ -4714,7 +5614,7 @@ class ChartManager {
             };
         });
     }
-    _baseStructurePathRenderList(sourceList, currentInterval, visibleFrom) {
+    _baseStructurePathRenderList(sourceList, currentInterval, visibleFrom, bars = []) {
         const normalized = this.getUniqueRenderList(
             this._baseStructureRenderList(sourceList, currentInterval),
         ).filter((item) => {
@@ -4729,6 +5629,28 @@ class ChartManager {
             && Number(left.price) === Number(right.price)
         );
         let batch = null;
+        // TradingView can snap an off-window Path anchor to the left edge
+        // without adjusting its price. Clip on trading-bar positions first,
+        // preserving the visible slope across overnight/weekend gaps.
+        const barTimes = Array.isArray(bars) ? bars.map(bar => Number(bar?.time) / 1000) : [];
+        const usableTimes = barTimes.length > 1 && barTimes.every((time, index) =>
+            Number.isFinite(time) && (!index || time > barTimes[index - 1]));
+        const boundaryIndex = usableTimes ? barTimes.findIndex(time => time >= Number(visibleFrom)) : -1;
+        const positions = boundaryIndex >= 0 ? new Map(barTimes.map((time, index) => [time, index])) : null;
+        const clip = points => {
+            if (!positions || points.length < 2 || points[0].time >= barTimes[boundaryIndex]) return points;
+            const right = points.findIndex(point => point.time >= barTimes[boundaryIndex]);
+            if (right < 1) return points;
+            if (points[right].time === barTimes[boundaryIndex]) return points.slice(right);
+            const leftIndex = positions.get(Number(points[right - 1].time));
+            const rightIndex = positions.get(Number(points[right].time));
+            if (leftIndex == null || rightIndex == null || rightIndex <= leftIndex) return points;
+            const weight = (boundaryIndex - leftIndex) / (rightIndex - leftIndex);
+            const price = Number(points[right - 1].price)
+                + weight * (Number(points[right].price) - Number(points[right - 1].price));
+            if (!Number.isFinite(price)) return points;
+            return [{time: barTimes[boundaryIndex], price}, ...points.slice(right)];
+        };
         const flush = () => {
             if (batch && batch.points.length >= 2) batches.push(batch);
             batch = null;
@@ -4737,7 +5659,8 @@ class ChartManager {
             const item = baseStructureRenderItem(rawItem);
             const unfinished = baseStructureLineIsUnfinished(item);
             const linestyle = parseInt(item.linestyle) || 0;
-            const points = item.points.map((point) => ({ ...point }));
+            const points = clip(item.points.map((point) => ({ ...point })));
+            if (points.length < 2) return;
             const canAppend = Boolean(
                 batch
                 && batch.isUnfinished === unfinished
@@ -4764,6 +5687,36 @@ class ChartManager {
         flush();
         return batches;
     }
+
+    _baseStructureEntitiesMatch(chartData, currentInterval) {
+        if (typeof this.chart?.getAllShapes !== 'function') return true;
+        // Let in-flight creation settle before treating its missing ID as a
+        // lost entity. Reconciliation verifies it once creation completes.
+        if (this._automaticShapeCreateCount > 0) return true;
+        let present;
+        try {
+            const shapes = this.chart.getAllShapes();
+            if (!Array.isArray(shapes)) return false;
+            present = new Set(shapes.map(shape => shape.id));
+        } catch (_error) {
+            return false;
+        }
+        for (const [type, enabled] of [['bis', this.cl_show_config?.bi], ['xds', this.cl_show_config?.xd]]) {
+            if (!enabled) continue;
+            const desired = this._baseStructurePathRenderList(
+                chartData.barsResult?.[type] || [], currentInterval, chartData.from,
+                chartData.barsResult?.bars || [],
+            );
+            const existing = new Map((this.obj_charts?.[chartData.symbolKey]?.[type] || [])
+                .map(entry => [entry.key, entry.id]));
+            if (desired.some(item => {
+                const id = existing.get(this.makeKey(item));
+                return !present.has(id) || !this._strictCreatedGeometryMatches(item, id);
+            })) return false;
+        }
+        return true;
+    }
+
     _fractalRenderList(sourceList, bars, visibleRange, currentInterval) {
         if (!Array.isArray(sourceList) || sourceList.length === 0) return [];
         if (!Array.isArray(bars) || bars.length === 0) return [];
@@ -5241,11 +6194,13 @@ class ChartManager {
             barsResult.bis || [],
             currentInterval,
             from,
+            barsResult.bars || [],
         );
         const xdRenderItems = this._baseStructurePathRenderList(
             barsResult.xds || [],
             currentInterval,
             from,
+            barsResult.bars || [],
         );
         this.reconcile(
             'fxs',
@@ -5260,8 +6215,12 @@ class ChartManager {
         // 线段比笔更粗，菜单色块与基础结构使用同一颜色函数。
         const biLineStyle = getBaseStructureStyle(currentInterval, 'bis');
         const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds');
-        this.reconcile('bis', cfg.bi ? biRenderItems : [], from, symbolKey, (item) => safeCreate(ChartUtils.createPathShape(this.chart, item, biLineStyle), 'bi'), false, true);
-        this.reconcile('xds', cfg.xd ? xdRenderItems : [], from, symbolKey, (item) => safeCreate(ChartUtils.createPathShape(this.chart, item, xdLineStyle), 'xd'), false, true);
+        // Restoring a saved time scale can move an existing Path to other bars
+        // without changing its ID. Verify the actual anchors as well as existence.
+        const verifyBaseEntity = (item, realId) => this._autoEntityPresence(realId) !== false
+            && this._strictCreatedGeometryMatches(item, realId);
+        this.reconcile('bis', cfg.bi ? biRenderItems : [], from, symbolKey, (item) => safeCreate(ChartUtils.createPathShape(this.chart, item, biLineStyle), 'bi'), false, true, verifyBaseEntity);
+        this.reconcile('xds', cfg.xd ? xdRenderItems : [], from, symbolKey, (item) => safeCreate(ChartUtils.createPathShape(this.chart, item, xdLineStyle), 'xd'), false, true, verifyBaseEntity);
         // 本周期中枢使用原子快照绘制。
         this._drawStrictStructure(chartData, currentInterval);
         this.updateDrawPalette();
@@ -5446,6 +6405,7 @@ class ChartManager {
             options.skipIfUnchanged === true
             && renderSignature
             && renderSignature === this._lastCompletedRenderSignature
+            && this._baseStructureEntitiesMatch(chartData, symbolInterval.interval)
         ) {
             return;
         }
@@ -5793,7 +6753,13 @@ class ChartManager {
         clog(`[SSE] opened symbol=${symbol} res=${resolution}`);
     }
 
+    _handlePageHide(event) {
+        if (event?.persisted) this._closeSseStream();
+        else this.dispose();
+    }
+
     dispose() {
+        this._releaseDrawingPickerFocus();
         if (this._disposed) return;
         this._disposed = true;
         this._cancelInitialHistoryRetry();
@@ -5810,6 +6776,12 @@ class ChartManager {
         this._clearAllStrictScopes('dispose');
         this._strictStructureSnapshot = null;
         this._strictStructureContextToken = null;
+        for (const state of this._strictOverlaySources?.values() || []) {
+            state.controller?.abort();
+            if (state.retryTimer != null) clearTimeout(state.retryTimer);
+        }
+        this._strictOverlaySources?.clear();
+        this._strictOverlayIdentity = null;
         if (this._clDisplayButtonA11yCleanup) {
             const cleanup = this._clDisplayButtonA11yCleanup;
             this._clDisplayButtonA11yCleanup = null;
@@ -5827,6 +6799,7 @@ class ChartManager {
             this._strictReconcileEpoch = null;
         }
         this._closeSseStream();
+        try { this.udf_datafeed?.dispose?.(); } catch (e) { console.warn('[TV] datafeed cleanup failed', e); }
         // 工具栏注入重试定时器:正常 ≤4.2s 自停,但实例若在窗口内被 dispose 需显式清,
         // 避免定时器多跑几拍对已 dispose 实例操作(与 _sweepOrphanTimer 等清理对齐,审查 L-3)。
         if (this._lvlbtnTimer) { clearInterval(this._lvlbtnTimer); this._lvlbtnTimer = null; }
@@ -5858,6 +6831,7 @@ class ChartManager {
         if (registry.activeManagerId === this.instanceId) {
             registry.activeManagerId = null;
         }
+        if (typeof window !== 'undefined' && window.__cm?.[this.id] === this) delete window.__cm[this.id];
     }
 }
 
@@ -5867,8 +6841,7 @@ var Charts = (function () {
             const chartManager = new ChartManager(id).init();
             // 调试钩子:把每个 ChartManager 实例存到 window.__cm[id],
             // 便于 Playwright/DevTools 直接 inspect cl_show_config / obj_charts。
-            // 生产无害——挂在 window 不影响业务逻辑;若担心暴露面,可改为
-            // 仅当 ``window.__chanlunDebug=true`` 时挂。
+            // dispose 按实例身份清理，避免保留已关闭图表或删除同槽位的新实例。
             try {
                 if (!window.__cm) window.__cm = {};
                 window.__cm[id] = chartManager;

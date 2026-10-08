@@ -82,7 +82,7 @@ def test_futures_ticks_rate_zero_guard_on_pre_close(monkeypatch):
     monkeypatch.setattr(fut_mod, "TdxExHq_API", _FakeExHqApi)
     _FakeExHqApi.quote = _quote_dict(price=110.0, pre_close=0.0)
     t = _fut_ex().ticks(["MA.MA2509"])["MA.MA2509"]
-    assert t.rate == 0  # pre_close=0 触发零守卫
+    assert t.rate is None  # Missing reference does not prove a flat quote.
 
 
 def test_futures_all_ticks_rate_uses_zuojie_denominator(monkeypatch):
@@ -96,7 +96,7 @@ def test_futures_all_ticks_rate_zero_guard_on_zuojie(monkeypatch):
     monkeypatch.setattr(fut_mod, "TdxExHq_API", _FakeExHqApi)
     _FakeExHqApi.quotes_list = [_list_quote(mai_chu=110.0, zuo_jie=0.0)]
     t = _fut_ex().all_ticks()["MA.MA2509"]
-    assert t.rate == 0  # MaiChu>0 不早退, 分母 ZuoJie=0 触发零守卫→0
+    assert t.rate is None
 
 
 # ---- C3: 缓存 key 读写对称 ----

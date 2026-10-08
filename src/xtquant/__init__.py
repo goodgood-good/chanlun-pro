@@ -20,8 +20,7 @@ def check_for_update(package_name):
         pass
 
 
-try:
-    check_for_update("xtquant")
-except:
-    pass
+# Screening workers import this bundled package during time-sensitive reads.
+# Keep version checks explicit so package metadata and update-service requests
+# do not become prerequisites for loading the market-data provider.
 

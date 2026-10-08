@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-from cl_app.services.dingtalk_notifications import DeliveryError, DingTalkOutbox, DingTalkTransport
+from cl_app.services.dingtalk_notifications import DeliveryError, DingTalkOutbox, DingTalkTransport, signal_status_lines, signal_key
 
 
 class Transport:
@@ -35,6 +35,181 @@ def event(stage="approaching", *, identity="point", stamp=1000):
 def result():
     return {"run_id": "a"*32, "completed": 5, "total": 5, "selected": [], "observations": [],
             "errors": [{"market": "us", "code": "EXAMPLE.US"}], "finished_at": 1000, "source_current": True}
+
+
+def test_native_center_notification_uses_confirmed_point_status():
+    lines = signal_status_lines({
+        "frequency": "5m", "point_type": "1buy", "point_status": "confirmed",
+        "stage": "confirmed", "evidence_scope": "native_center_signal",
+    })
+    assert "已确认" in lines[0]
+    assert "观察" not in lines[0]
+
+
+def test_early_consolidation_states_dedupe_across_restart_and_allow_a_new_episode(tmp_path):
+    transport, clock = Transport(), [1000.]
+    path = tmp_path / "early.sqlite3"
+    outbox = DingTalkOutbox(path, transport=transport, now=lambda: clock[0])
+    base = {**event("warning"), "signal_type": "consolidation_divergence", "point_type": "consolidation_up",
+            "point_status": "warning", "lifecycle_cycle": 0, "macd_area_a": 10., "macd_area_c": 2.,
+            "comparison_form": "entry_departure", "core_position": "breakout"}
+    for stage,cycle in [("warning",0),("invalidated",0),("warning",1),("confirmed",1)]:
+        row = {**base, "stage":stage,"point_status":stage,"lifecycle_cycle":cycle,"recorded_at":clock[0]}
+        outbox.signal_events([row],since=0);outbox.deliver_one()
+        restored = DingTalkOutbox(path,transport=transport,now=lambda:clock[0])
+        restored.signal_events([row],since=0)
+        assert restored.snapshot()["pending"] == 0
+        outbox = restored;clock[0] += 5
+    assert len(transport.messages) == 4
+    assert "提前预警（未确认）" in transport.messages[0] and "已确认" not in transport.messages[0]
+    assert "预警已失效" in transport.messages[1]
+    assert "已确认" in transport.messages[-1]
+
+
+def test_existing_confirmation_markers_keep_their_original_key():
+    row = {**event("confirmed"), "signal_type": "consolidation_divergence", "point_status": "confirmed",
+           "selection_status": "confirmed", "point_type": "consolidation_up"}
+    assert signal_key(row) == 'signal:point:["confirmed","confirmed",null]'
+
+
+def test_verbose_chinese_notifications_are_split_by_utf8_size_without_losing_members(tmp_path):
+    box=DingTalkOutbox(tmp_path/'outbox.sqlite',transport=Transport(),now=lambda:1000)
+    rows=[{**event('confirmed',identity=str(i)), 'name':'很长的中文公司名称'*10,
+           'code':'LONG'+str(i)+'X'*72} for i in range(12)]
+    box.signal_events(rows,since=0)
+    with box._connect() as db:
+        contents=db.execute('SELECT content FROM outbox').fetchall()
+        payloads=db.execute('SELECT events FROM signal_payloads').fetchall()
+    assert len(contents)>2 and all(len(row[0].encode('utf-8'))<=3300 for row in contents)
+    assert sorted(e['id'] for row in payloads for e in json.loads(row[0]))==sorted(str(i) for i in range(12))
+
+
+@pytest.mark.parametrize("direction", ["up", "down"])
+def test_holding_consolidation_notification_has_its_own_label_and_persistent_dedup(tmp_path, direction):
+    transport = Transport()
+    outbox = DingTalkOutbox(tmp_path / "pan.sqlite3", transport=transport, now=lambda: 1000)
+    alert = {**event(stage="confirmed"), "signal_type": "consolidation_divergence",
+             "point_type": "consolidation_" + direction, "point_status": "confirmed",
+             "comparison_form": "entry_departure", "core_position": "breakout",
+             "macd_area_a": 10., "macd_area_c": 5.}
+    outbox.signal_events([alert, alert], since=0)
+    outbox.deliver_one()
+    assert len(transport.messages) == 1
+    assert "盘整背驰" in transport.messages[0] and "持仓标的" in transport.messages[0]
+    assert "MACD 同向柱面积" in transport.messages[0]
+    restarted = DingTalkOutbox(tmp_path / "pan.sqlite3", transport=transport, now=lambda: 1000)
+    restarted.signal_events([alert], since=0)
+    restarted.deliver_one()
+    assert len(transport.messages) == 1
+
+
+def test_historical_consolidation_event_is_not_sent(tmp_path):
+    transport = Transport()
+    outbox = DingTalkOutbox(tmp_path / "pan.sqlite3", transport=transport, now=lambda: 1000)
+    outbox.signal_events([{**event(stage="confirmed"), "external_notifications": False,
+                          "signal_type": "consolidation_divergence"}], since=0)
+    outbox.deliver_one()
+    assert transport.messages == []
+
+
+def test_retry_revalidates_and_expires_a_signal_that_has_left_its_window(tmp_path):
+    clock = [1000]
+    active = [True]
+    transport = Transport()
+    outbox = DingTalkOutbox(tmp_path / "outbox.sqlite3", transport=transport, now=lambda: clock[0],
+                           signal_validator=lambda events: (events if active[0] else [], []))
+    outbox.signal_events([event(stage="confirmed")], since=0)
+    transport.error = True
+    outbox.deliver_one()
+    assert outbox.snapshot()["pending"] == 1
+    active[0] = False
+    transport.error = False
+    clock[0] += 16
+    outbox.deliver_one()
+    assert transport.messages == []
+    assert outbox.snapshot()["history"][0]["status"] == "expired"
+
+
+def test_mixed_batch_sends_valid_members_without_waiting_or_resending_after_recovery(tmp_path):
+    clock = [1000]
+    uncertain = [True]
+    transport = Transport()
+
+    def validate(events):
+        valid, pending = [], []
+        for row in events:
+            if row["id"] == "retired":
+                continue
+            (pending if row["id"] == "waiting" and uncertain[0] else valid).append(row)
+        return valid, pending
+
+    outbox = DingTalkOutbox(tmp_path / "outbox.sqlite3", transport=transport, now=lambda: clock[0], signal_validator=validate)
+    events = [{**event(stage="confirmed", identity=identity), "name": identity} for identity in ("ready", "waiting", "retired")]
+    outbox.signal_events(events, since=0)
+    outbox.deliver_one()
+    assert len(transport.messages) == 1
+    assert "ready" in transport.messages[0]
+    assert "waiting" not in transport.messages[0] and "retired" not in transport.messages[0]
+    clock[0] += 5
+    outbox.deliver_one()
+    assert len(transport.messages) == 1
+    with outbox._connect() as db:
+        assert db.execute("SELECT attempts FROM outbox WHERE status='retry'").fetchone()[0] == 0
+    uncertain[0] = False
+    clock[0] += 5
+    restarted = DingTalkOutbox(outbox.path, transport=transport, now=lambda: clock[0], signal_validator=validate)
+    restarted.deliver_one()
+    assert len(transport.messages) == 2
+    assert "waiting" in transport.messages[1] and "ready" not in transport.messages[1]
+    restarted.signal_events(events, since=0)
+    clock[0] += 5
+    restarted.deliver_one()
+    assert len(transport.messages) == 2
+
+
+def test_old_or_damaged_pending_notification_without_ids_cannot_bypass_validation(tmp_path):
+    transport = Transport()
+    outbox = DingTalkOutbox(tmp_path / "outbox.sqlite3", transport=transport, now=lambda: 1000,
+                           signal_validator=lambda rows: (rows, []))
+    with outbox._connect() as db:
+        outbox._insert(db, "legacy", "signals", "old plain text", 1000, 1800)
+    outbox.deliver_one()
+    assert transport.messages == []
+    assert outbox.snapshot()["history"][0]["status"] == "expired"
+
+
+def test_deferred_groups_cannot_starve_a_later_ready_notification(tmp_path):
+    clock = [1000.]
+    uncertain = {"waiting-a", "waiting-b"}
+    transport = Transport()
+
+    def validate(events):
+        return ([row for row in events if row["id"] not in uncertain],
+                [row for row in events if row["id"] in uncertain])
+
+    outbox = DingTalkOutbox(tmp_path / "outbox.sqlite3", transport=transport,
+                           now=lambda: clock[0], signal_validator=validate)
+    for identity in ("waiting-a", "waiting-b", "ready"):
+        outbox.signal_events([{**event("confirmed", identity=identity, stamp=clock[0]),
+                               "name": identity}], since=0)
+        clock[0] += 1
+    for _ in range(3):
+        outbox.deliver_one()
+        clock[0] += 4
+    assert len(transport.messages) == 1
+    assert "ready" in transport.messages[0]
+    assert "waiting-" not in transport.messages[0]
+    assert outbox.snapshot()["pending"] == 2
+    # Unknown signals retain their durable queue entries and recover once,
+    # rather than being dropped to make the ready group appear faster.
+    uncertain.clear()
+    restarted = DingTalkOutbox(outbox.path, transport=transport,
+                              now=lambda: clock[0], signal_validator=validate)
+    for _ in range(3):
+        restarted.deliver_one()
+        clock[0] += 4
+    assert len(transport.messages) == 3
+    assert restarted.snapshot()["pending"] == 0
 
 
 @pytest.fixture
@@ -122,7 +297,7 @@ def test_confirmed_main_point_and_waiting_lower_confirmation_have_separate_notif
     assert len(transport.messages) == 1
     text = transport.messages[0]
     assert "5m 三买 · 已确认" in text
-    assert "1m 区间套：等待确认" in text
+    assert "1m 区间内结构确认：等待确认" in text
     assert "后继向上线段：进行中（尚未完成）" in text
     assert "三买 · 形成等待" not in text
     clock[0] += 10
@@ -132,7 +307,7 @@ def test_confirmed_main_point_and_waiting_lower_confirmation_have_separate_notif
     outbox.deliver_one()
     assert len(transport.messages) == 2
     assert "5m 三买 · 已确认" in transport.messages[1]
-    assert "1m 区间套：已确认" in transport.messages[1]
+    assert "1m 区间内结构确认：已确认" in transport.messages[1]
 
 
 def test_network_failure_retries_without_being_counted_as_sent(box):
@@ -210,7 +385,7 @@ def test_transport_requires_provider_success_and_preserves_chinese_payload(http)
     transport.send("选股完成")
     call = session.post.call_args
     payload = json.loads(call.kwargs["data"].decode("utf-8"))
-    assert payload["text"]["content"] == "应用关键词\n选股完成"
+    assert payload["text"]["content"] == "应用关键词 · 选股完成"
     assert payload["at"]["isAtAll"] is False
     assert call.kwargs["allow_redirects"] is False
     response.json.return_value = {"errcode": 310000, "errmsg": "private-test-token"}
@@ -229,6 +404,15 @@ def test_transport_never_exposes_webhook_on_network_failure(http):
         DingTalkTransport().send("提醒")
     assert "private-test-token" not in str(exc.value)
     assert "Timeout" in str(exc.value)
+
+
+def test_native_chart_markdown_keeps_heading_image_and_robot_keyword(http):
+    session,_=http
+    DingTalkTransport().send_markdown('三买图表','### 三买\n\n![信号快照](https://example.test/chart.png)')
+    payload=json.loads(session.post.call_args.kwargs['data'].decode('utf-8'))
+    assert payload['msgtype']=='markdown' and payload['markdown']['title']=='三买图表'
+    assert payload['markdown']['text'].startswith('### 三买\n\n![信号快照]')
+    assert '应用关键词' in payload['markdown']['text']
 
 
 def test_signing_and_destination_validation(http, monkeypatch):

@@ -73,17 +73,18 @@ def build_center_id(
     """返回正式中枢种子的不可变身份。"""
 
     normalized_source_kind = getattr(source_kind, "value", source_kind)
-    if normalized_source_kind not in {"segment", "stroke_observation", "trend_type"} or formation_rule not in {None, "five_role"}:
-        raise ValueError("only physical five-role centers are supported")
+    if normalized_source_kind not in {"segment", "stroke_observation", "trend_type"} or formation_rule not in {None, "five_role", "three_core"}:
+        raise ValueError("unknown center formation rule")
     if normalized_source_kind == "trend_type":
         entry_unit_id = None
         establishment_leave_unit_id = None
     if normalized_source_kind in {"segment", "stroke_observation"}:
-        # A physical center is the five-role fact: entry + core A/B/C + the
-        # independent establishment leave. Never hash a partial physical seed.
-        if not entry_unit_id or not establishment_leave_unit_id:
+        if formation_rule == "three_core":
+            if entry_unit_id is not None or establishment_leave_unit_id is not None:
+                raise ValueError("three-core identity cannot borrow entry/leave roles")
+        elif not entry_unit_id or not establishment_leave_unit_id:
             raise ValueError(
-                "physical center identity requires entry and establishment leave"
+                "five-role physical identity requires entry and establishment leave"
             )
     if len(initial_unit_ids) != 3 or any(
         not isinstance(unit_id, str) or not unit_id

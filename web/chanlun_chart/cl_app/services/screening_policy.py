@@ -1,9 +1,14 @@
-"""User selection preferences, independent of immutable chart definitions.
+"""Selection preferences, independent of immutable chart definitions.
 
 The engine's center_ordinal counts within a directional center sequence and
 resets at its declared boundaries. It is not the chart's global center index.
 Including its first upward breakout does not assert that a one-center start
 already meets the original-text definition of a completed upward trend.
+
+L091:1045-1051 calls a third buy after the second center generally lacking
+*new* entry value when the first-center third buy was already used. This
+product filter selects first-center third buys regardless of position history;
+it is a preference, not an author rule invalidating later formal points.
 """
 
 POLICY_VERSION = "first-up-center-third-buy-v1"

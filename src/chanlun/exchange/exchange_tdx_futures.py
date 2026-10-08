@@ -17,6 +17,7 @@ from chanlun.exchange.exchange import (
     Tick,
     convert_tdx_futures_kline_frequency,
 )
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.persistence.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
@@ -362,15 +363,9 @@ class ExchangeTDXFutures(Exchange):
                         high=_quote["high"],
                         volume=_quote["zongliang"],
                         open=_quote["open"],
+                        reference_price=quote_price(_quote.get("pre_close")),
                         rate=(
-                            round(
-                                (_quote["price"] - _quote["pre_close"])
-                                / _quote["pre_close"]  # C2:涨跌幅分母=昨收非现价
-                                * 100,
-                                2,
-                            )
-                            if _quote["pre_close"] > 0
-                            else 0
+                            quote_change_rate(_quote["price"], _quote.get("pre_close"))
                         ),
                     )
         return ticks
@@ -409,15 +404,9 @@ class ExchangeTDXFutures(Exchange):
                         high=_quote["ZuiGao"],
                         volume=_quote["ZongLiang"],
                         open=_quote["JinKai"],
+                        reference_price=quote_price(_quote.get("ZuoJie")),
                         rate=(
-                            round(
-                                (_quote["MaiChu"] - _quote["ZuoJie"])
-                                / _quote["ZuoJie"]  # C2:涨跌幅分母=昨结非现价
-                                * 100,
-                                2,
-                            )
-                            if _quote["ZuoJie"] > 0
-                            else 0
+                            quote_change_rate(_quote["MaiChu"], _quote.get("ZuoJie"))
                         ),
                     )
         return ticks

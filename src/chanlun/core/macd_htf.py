@@ -55,8 +55,8 @@ MARKET_DAY_OFFSET_H = {
 
 
 def _bucket_keys(
-    t: np.ndarray, higher: str, market: Optional[str]
-) -> Optional[np.ndarray]:
+    t: np.ndarray | np.int64, higher: str, market: Optional[str]
+) -> Optional[np.ndarray | np.int64]:
     """把来源 K 线收盘时间映射到高周期桶。"""
 
     if higher == "5m":
@@ -78,10 +78,10 @@ def _bucket_keys(
 
 
 def _causal_bucket_keys(
-    t: np.ndarray,
+    t: np.ndarray | np.int64,
     higher: str,
     market: Optional[str],
-) -> Optional[np.ndarray]:
+) -> Optional[np.ndarray | np.int64]:
     """为正式因果高周期证据划分来源收盘 K 线桶。"""
 
     if higher == "5m":
@@ -245,17 +245,20 @@ class CausalPartialHigherMACDCalculator:
         except (ValueError, AttributeError, IndexError, TypeError):
             return False
 
-    def _key_for(self, kline: Kline) -> int:
+    @staticmethod
+    def _timestamp_for(kline: Kline) -> int:
         try:
-            timestamp = int(kline.date.timestamp())
+            return int(kline.date.timestamp())
         except (ValueError, TypeError, AttributeError, OverflowError, OSError) as exc:
             raise ValueError("invalid kline date for causal HTF MACD") from exc
+
+    def _key_for(self, kline: Kline) -> int:
         keys = _causal_bucket_keys(
-            np.array([timestamp], dtype=np.int64), self.higher, self.market
+            np.int64(self._timestamp_for(kline)), self.higher, self.market
         )
-        if keys is None or keys.size != 1:
+        if keys is None:
             raise ValueError("unsupported causal HTF MACD bucket")
-        return int(keys[0])
+        return int(keys)
 
     @staticmethod
     def _close_for(kline: Kline) -> float:
@@ -265,6 +268,55 @@ class CausalPartialHigherMACDCalculator:
         return close
 
     def _rebuild(self, klines: List[Kline]) -> Optional[dict]:
+        if len(klines) < 32 or type(self) is not CausalPartialHigherMACDCalculator:
+            return self._rebuild_scalar(klines)
+        self.reset()
+        dates, stamps, closes = [], [], []
+        for kline in klines:
+            try:
+                date = kline.date
+                if dates and date <= dates[-1]:
+                    return None
+                stamp = self._timestamp_for(kline)
+                close = self._close_for(kline)
+            except (ValueError, TypeError, AttributeError):
+                return None
+            dates.append(date)
+            stamps.append(stamp)
+            closes.append(close)
+        keys = _causal_bucket_keys(np.asarray(stamps, dtype=np.int64), self.higher, self.market)
+        if keys is None or (keys[1:] < keys[:-1]).any():
+            return None
+        ends = np.flatnonzero(np.r_[keys[1:] != keys[:-1], True])
+        counts = np.diff(np.r_[-1, ends])
+        states = []
+        base = None
+        for end in ends:
+            base = self._partial(closes[end], base)
+            states.append(base)
+        # Each source row uses only the preceding bucket's final state.
+        # The current bucket's last close never enters its earlier rows.
+        dif = np.zeros(len(keys), dtype=float)
+        dea = np.zeros(len(keys), dtype=float)
+        first = int(counts[0])
+        with np.errstate(over="ignore", invalid="ignore"):
+            if len(states) > 1:
+                bases = np.repeat(np.asarray(states[:-1], dtype=float), counts[1:], axis=0)
+                tail = np.asarray(closes[first:], dtype=float)
+                fast = self.fast_alpha * tail + (1.0 - self.fast_alpha) * bases[:, 0]
+                slow = self.slow_alpha * tail + (1.0 - self.slow_alpha) * bases[:, 1]
+                dif[first:] = fast - slow
+                dea[first:] = self.signal_alpha * dif[first:] + (1.0 - self.signal_alpha) * bases[:, 2]
+            hist = dif - dea
+            if self.china_mode:
+                hist *= 2.0
+        self.keys, self.dates, self.closes = keys.tolist(), dates, closes
+        self.dif, self.dea, self.hist = dif.tolist(), dea.tolist(), hist.tolist()
+        self._bucket_base = states[-2] if len(states) > 1 else None
+        self._last_partial = states[-1]
+        return self._result()
+
+    def _rebuild_scalar(self, klines: List[Kline]) -> Optional[dict]:
         self.reset()
         previous_date = None
         for kline in klines:

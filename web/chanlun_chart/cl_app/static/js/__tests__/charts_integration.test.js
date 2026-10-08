@@ -76,6 +76,47 @@ function loadChartManager() {
 }
 
 // 裸实例(绕过依赖重的构造函数/init)，手动注入治本相关字段。
+test('base paths clip a crossing leg on trading-bar positions without changing its source', () => {
+  const {ChartManager} = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm._baseStructureRenderList = rows => rows;
+  cm.getUniqueRenderList = rows => rows;
+  const bars = [100, 200, 10000, 10100].map(time => ({time: time * 1000}));
+  const source = [{locked:true, state:'completed', points:[{time:100, price:10}, {time:10100, price:40}]}];
+  const original = JSON.stringify(source);
+  const [visible] = cm._baseStructurePathRenderList(source, '5', 10000, bars);
+  assert.deepEqual(visible.points, [{time:10000, price:30}, {time:10100, price:40}]);
+  assert.equal(JSON.stringify(source), original);
+  assert.deepEqual(cm._baseStructurePathRenderList(source, '5', 100, bars)[0].points, source[0].points);
+});
+
+test('a clipped completed leg cannot hide its unfinished continuation', () => {
+  const {ChartManager} = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm._baseStructureRenderList = rows => rows;
+  cm.getUniqueRenderList = rows => rows;
+  const bars = [100, 200, 10000, 10100].map(time => ({time: time * 1000}));
+  const source = [
+    {locked:true, state:'completed', points:[{time:100, price:10}, {time:10000, price:30}]},
+    {locked:false, state:'forming', points:[{time:10000, price:30}, {time:10100, price:20}]},
+  ];
+  const paths = cm._baseStructurePathRenderList(source, '5', 10000, bars);
+  assert.equal(paths.length, 1);
+  assert.equal(paths[0].isUnfinished, true);
+  assert.deepEqual(paths[0].points, source[1].points);
+});
+
+test('base clipping requires both original anchors in the candle time axis', () => {
+  const {ChartManager} = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm._baseStructureRenderList = rows => rows;
+  cm.getUniqueRenderList = rows => rows;
+  const source = [{locked:true, state:'completed', points:[{time:100, price:10}, {time:10100, price:40}]}];
+  const bars = [200, 10000, 10100].map(time => ({time: time * 1000}));
+  const [path] = cm._baseStructurePathRenderList(source, '5', 10000, bars);
+  assert.deepEqual(path.points, source[0].points);
+});
+
 function makeManager(ChartManager, mockWidget, barsResultMap) {
   const cm = Object.create(ChartManager.prototype);
   cm._resetState = {};
@@ -98,22 +139,28 @@ test('quick drawing tools fit one column and activate the selected tool and colo
   }
   const group=element(), calls=[], cm=Object.create(ChartManager.prototype);
   cm.id=2;
-  cm._levelBarItems=()=>({items:[{label:'本周期',color:'#2563eb'}]});
-  cm.chart={applyOverrides:value=>calls.push(value)};
+  cm._levelBarItems=()=>({items:[{period:'5',label:'5m',color:'#2563eb'},{period:'30',label:'30m',color:'#dc2626'}]});
+  cm.chart={resolution:()=> '5',applyOverrides:value=>calls.push(value)};
   cm.widget={selectLineTool:tool=>calls.push(tool)};
   sb.document.getElementById=id=>id==='cl_drawpal_2'?group:null;
   cm._buildDrawPaletteInto(group,{createElement:element},'5');
   const buttons=group.querySelectorAll();
   assert.deepEqual(buttons.map(b=>b.textContent),['画线','画框']);
-  assert.match(group.children[1].style.cssText,/flex-direction:column/);
+  const selector=group.children.find(child=>child.className==='cl-draw-period');
+  assert.equal(selector.getAttribute('aria-label'),'手绘周期');
+  assert.deepEqual(selector.children.map(option=>option.textContent),['5m','30m']);
+  assert.match(group.children[2].style.cssText,/flex-direction:column/);
   assert.ok(buttons.every(b=>b.style.cssText.includes('white-space:nowrap')));
+  selector.value='30';
+  selector.listeners.change({stopPropagation(){}});
   buttons[1].listeners.click({stopPropagation(){}});
-  assert.equal(calls[1],'rectangle');
-  assert.equal(calls[0]['linetoolrectangle.color'],'#2563eb');
+  assert.equal(calls[2],'rectangle');
+  assert.equal(calls[0]['linetoolrectangle.color'],'#dc2626');
+  assert.equal(buttons[1].getAttribute('data-period'),'30');
   assert.equal(buttons[1].getAttribute('aria-pressed'),'true');
   assert.equal(buttons[0].getAttribute('aria-pressed'),'false');
   buttons[0].listeners.click({stopPropagation(){}});
-  assert.equal(calls[3],'trend_line');
+  assert.equal(calls[4],'trend_line');
   assert.equal(buttons[1].getAttribute('aria-pressed'),'false');
   assert.equal(buttons[0].getAttribute('aria-pressed'),'true');
 });
@@ -1273,6 +1320,238 @@ test('一次完整绘制会取消已被当前输入覆盖的防抖重绘', async
   );
 });
 
+for (const damage of ['missing', 'displaced by restored layout']) {
+test(`same-input redraw repairs an unfinished segment ${damage} and retains completed and manual shapes`, async () => {
+  const { ChartManager, sb } = loadChartManager();
+  sb.setTimeout = callback => { callback(); return 1; };
+  const { cm } = makeReconcileManager(ChartManager);
+  const shapes = new Map([['manual', {}]]), created = [];
+  const symbol = 'a:SZ.301004', symbolKey = symbol + '_5';
+  const data = {symbolKey, from: 1789702800, visibleRange: {from: 1789702800, to: 1790751600},
+    barsResult: {bars: [], bis: [], fxs: [], xds: [
+      {kind: 'xd', state: 'locked', locked: true, linestyle: '0',
+        points: [{time: 1789525800, price: 31.49}, {time: 1790044800, price: 34.18}]},
+      {kind: 'xd', state: 'forming', locked: false, linestyle: '1',
+        points: [{time: 1790044800, price: 34.18}, {time: 1790213700, price: 32.73}]},
+    ]}};
+  cm.chart = {
+    dataReady: () => true, getVisibleRange: () => data.visibleRange,
+    getAllShapes: () => [...shapes.keys()].map(id => ({id})),
+    createMultipointShape(points, options) {
+      const id = 'auto-' + (created.length + 1);
+      created.push({id, points, options});
+      shapes.set(id, {points: points.map(point => ({...point})), options}); return id;
+    },
+    removeEntity: id => shapes.delete(id),
+    getShapeById: id => shapes.has(id) ? {getPoints: () => shapes.get(id).points} : null,
+  };
+  cm.widget = {symbolInterval: () => ({symbol, interval: '5'})};
+  cm.getCurrentChartIdentity = () => ({symbol, interval: '5'});
+  cm.getChartData = () => data;
+  cm._dataContextGeneration = cm._tvDataReadyGeneration = 0;
+  cm._tvDataReadyIdentity = cm._currentDataIdentityKey();
+  cm.cl_show_config = {fx: false, bi: false, xd: true};
+  cm._drawStrictStructure = cm.updateDrawPalette = cm._scheduleVerifyRebuild = () => {};
+  cm.markDrawingMutationStart = cm.markDrawingMutationEnd = cm._scheduleOrphanSweep = () => {};
+  await cm.draw_chanlun({skipIfUnchanged: true});
+  const [completed, tail] = created;
+  assert.equal(created.length, 2);
+  assert.equal(tail.options.overrides.lineStyle, 2);
+  if (damage === 'missing') shapes.delete(tail.id);
+  else {
+    // The production saved layout kept the entity ID but moved September's
+    // tail to October of the previous year while restoring its time scale.
+    const actual = shapes.get(tail.id).points;
+    actual[0].time = 1759986300;
+    actual[1].time = 1760322600;
+  }
+  await cm.draw_chanlun({skipIfUnchanged: true});
+  assert.equal(created.length, 3, 'unchanged input must not retain a missing or displaced native entity');
+  assert.ok(shapes.has(completed.id) && shapes.has('manual'));
+  assert.deepEqual(created[2].points, tail.points);
+  assert.equal(created[2].options.overrides.lineStyle, 2);
+  await cm.draw_chanlun({skipIfUnchanged: true});
+  assert.equal(created.length, 3, 'a healthy unchanged canvas is still reused');
+});
+}
+
+function disposableManager(){
+  const {ChartManager,sb}=loadChartManager();
+  const cm=Object.create(ChartManager.prototype);cm.id='slot';cm.instanceId='old';cm._disposed=false;
+  for(const method of ['_releaseDrawingPickerFocus','_cancelInitialHistoryRetry','_cancelChartStableReady',
+    '_cancelDefaultViewWork','_resetReconcileRetry','_clearAllStrictScopes','_closeSseStream'])cm[method]=()=>{};
+  const registry={chartManagers:new Map([['old',cm]]),datafeeds:new Map([['old',{}]]),widgets:new Map([['old',{}]]),activeManagerId:'old'};
+  sb.ChanlunTVRegistry=registry;return {cm,sb,registry};
+}
+
+test('chart disposal releases its datafeed and removes only its own debug reference',()=>{
+  const {cm,sb,registry}=disposableManager();let disposed=0;
+  cm.udf_datafeed={dispose(){disposed++;}};sb.__cm={slot:cm};
+  cm.dispose();cm.dispose();assert.equal(disposed,1);assert.equal(sb.__cm.slot,undefined);
+  assert.equal(registry.chartManagers.size,0);assert.equal(registry.datafeeds.size,0);
+});
+
+test('an old chart cannot remove the replacement chart debug reference',()=>{
+  const {cm,sb}=disposableManager(),replacement={};let disposed=0;
+  cm.udf_datafeed={dispose(){disposed++;}};sb.__cm={slot:replacement};
+  cm.dispose();assert.equal(disposed,1);assert.equal(sb.__cm.slot,replacement);
+});
+
+test('permanent page departure disposes resources while back-forward cache preserves recovery',()=>{
+  const {cm}=disposableManager();let disposed=0,closed=0;
+  cm.dispose=()=>disposed++;cm._closeSseStream=()=>closed++;
+  assert.equal(typeof cm._handlePageHide,'function');
+  cm._handlePageHide({persisted:true});assert.equal(disposed,0);assert.equal(closed,1);
+  cm._handlePageHide({persisted:false});assert.equal(disposed,1);
+});
+
+test('drawing saves send the acknowledged local baseline and keep remotely merged drawings in cache',async()=>{
+  const {ChartManager,sb}=loadChartManager(),cm=makeDrawingPersistenceManager(ChartManager);
+  cm.id='1';cm.instanceId='drawing-revision-test';cm.setupEventListeners=()=>{};
+  cm.shouldSuppressDrawingSave=()=>false;cm._drawingsCache=new Map();
+  sb.Utils.get_code=()=> 'SH.600000';sb.addEventListener=()=>{};
+  sb.TradingView.widget=function(){return {};};
+  const requests=[];let release;
+  const empty={schema:'chanlun-user-drawings',sources:{},groups:{}};
+  const line={type:'LineToolTrendLine',state:{interval:'5'}};
+  sb.fetch=async(_url,options={})=>{
+    if(options.method!=='POST')return {ok:true,json:async()=>({status:'ok',data:{entries:[],complete:true}})};
+    const body=JSON.parse(options.body);requests.push(body);
+    const result={ok:true,json:async()=>({status:'ok',data:{...body.state,sources:{...body.state.sources,remote:line}},merged:true})};
+    if(requests.length===1)return new Promise(resolve=>{release=()=>resolve(result);});
+    return result;
+  };
+  cm.init();cm.chart={symbol:()=> 'a:SH.600000',resolution:()=> '5'};
+  const key=cm.getDrawingPersistenceKey('default','default','a:SH.600000','hierarchy');
+  cm.rememberPersistedDrawingState(key,empty);
+  const one={...empty,sources:{local:line}},two={...one,sources:{...one.sources,newer:line}};
+  const first=cm.save_load_adapter.saveLineToolsAndGroups('default','default',{}, {capturedState:one});
+  await Promise.resolve();
+  const second=cm.save_load_adapter.saveLineToolsAndGroups('default','default',{}, {capturedState:two});
+  release();await Promise.all([first,second]);
+  assert.deepEqual(requests[0].base_state,empty);
+  assert.deepEqual(requests[1].base_state,one);
+  const cached=cm._drawingsCache.get(cm.getDrawingsCacheKey('a:SH.600000','5'));
+  assert.ok(cached.sources.has('remote'));
+  assert.deepEqual(JSON.parse(cm._persistedDrawingFingerprints.get(key)),two);
+});
+
+function mergedDrawingScenario() {
+  const equal=require('node:util').isDeepStrictEqual;
+  const {ChartManager,sb}=loadChartManager(),cm=makeDrawingPersistenceManager(ChartManager);
+  cm.id='1';cm.instanceId='drawing-cache-baseline';cm.setupEventListeners=()=>{};
+  cm.shouldSuppressDrawingSave=()=>false;cm._drawingsCache=new Map();
+  sb.Utils.get_code=()=> 'SH.600000';sb.addEventListener=()=>{};
+  sb.TradingView.widget=function(){return {};};
+  const empty={schema:'chanlun-user-drawings',sources:{},groups:{}};
+  const line={type:'LineToolTrendLine',_cl_origin_resolution:'5',state:{interval:'5',price:10}};
+  const local={...empty,sources:{local:line}},requests=[];
+  let server={...empty,sources:{remote:line}},visible,delay;
+  sb.fetch=async(_url,options={})=>{
+    if(options.method!=='POST')return {ok:true,json:async()=>({status:'ok',data:{entries:[],complete:true}})};
+    const body=JSON.parse(options.body);requests.push(body);
+    const next=JSON.parse(JSON.stringify(server));
+    for(const id of new Set([...Object.keys(body.base_state.sources),...Object.keys(body.state.sources)])){
+      const before=body.base_state.sources[id],wanted=body.state.sources[id],actual=server.sources[id];
+      if(equal(before,wanted))continue;
+      assert.ok(equal(actual,before)||equal(actual,wanted),'unexpected same-drawing conflict');
+      if(wanted===undefined)delete next.sources[id];else next.sources[id]=wanted;
+    }
+    server=next;
+    const response={ok:true,json:async()=>({status:'ok',data:next,merged:true})};
+    return delay?new Promise(resolve=>{delay(()=>resolve(response));}):response;
+  };
+  cm.init();cm.chart={symbol:()=> 'a:SH.600000',resolution:()=> '5',removeAllShapes(){},
+    async applyLineToolsState(state){visible=state;}};
+  const key=cm.getDrawingPersistenceKey('default','default','a:SH.600000','hierarchy');
+  cm.rememberPersistedDrawingState(key,empty);
+  cm.isTokenCurrent=()=>true;cm.beginContextSwitch=()=>({});cm.finishContextSwitch=()=>{};
+  cm.markDrawingMutationStart=()=>{};cm.markDrawingMutationEnd=()=>{};
+  cm._clearAllStrictScopes=()=>{};cm._resetReconcileRetry=()=>{};
+  return {cm,key,local,line,requests,server:()=>server,visible:()=>visible,delay:fn=>{delay=fn;},
+    save:state=>cm.save_load_adapter.saveLineToolsAndGroups('default','default',{}, {capturedState:state}),
+    restore:()=>cm.reloadDrawingsForCurrentContext('symbol-change',{redrawAutomatic:false})};
+}
+
+for(const action of ['delete','edit'])test('cached remote drawing supports '+action+' after returning to the symbol',async()=>{
+  const fx=mergedDrawingScenario();await fx.save(fx.local);
+  assert.equal(JSON.parse(fx.cm._persistedDrawingFingerprints.get(fx.key)).sources.remote,undefined);
+  await fx.restore();assert.ok(fx.visible().sources.has('remote'));
+  const state=action==='delete'?fx.local:{...fx.local,sources:{...fx.local.sources,
+    remote:{...fx.line,state:{interval:'5',price:15}}}};
+  await fx.save(state);
+  assert.equal(fx.requests.length,2,'deletion must not be skipped as an unchanged save');
+  assert.deepEqual(fx.requests[1].base_state.sources.remote,fx.line);
+  if(action==='delete')assert.equal(fx.server().sources.remote,undefined);
+  else assert.equal(fx.server().sources.remote.state.price,15);
+  await fx.restore();await fx.save(state);
+  assert.equal(fx.requests.length,2,'restoring an acknowledged state does not create redundant writes');
+});
+
+test('cached restore waits for an in-flight save before adopting its merged baseline',async()=>{
+  const fx=mergedDrawingScenario();let release;
+  fx.delay(resolve=>{release=resolve;});
+  const saving=fx.save(fx.local);await Promise.resolve();
+  const restoring=fx.restore();await Promise.resolve();
+  assert.equal(fx.visible(),undefined);
+  fx.delay(null);release();await Promise.all([saving,restoring]);
+  assert.ok(fx.visible().sources.has('local')&&fx.visible().sources.has('remote'));
+  await fx.save(fx.local);
+  assert.equal(fx.server().sources.remote,undefined);
+});
+
+test('an obsolete cached restore never advances the current drawing baseline',async()=>{
+  const fx=mergedDrawingScenario();await fx.save(fx.local);
+  let release,current=true;
+  fx.cm.isTokenCurrent=()=>current;
+  fx.cm.chart.applyLineToolsState=()=>new Promise(resolve=>{release=resolve;});
+  const restoring=fx.restore();await Promise.resolve();
+  current=false;release();await restoring;
+  assert.equal(JSON.parse(fx.cm._persistedDrawingFingerprints.get(fx.key)).sources.remote,undefined);
+});
+
+test('bars-ready requests recovery when the unchanged segment exists only in the entity cache', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.setReady(true);
+  fx.cm._tvDataReadyGeneration = 0;
+  fx.cm._tvDataReadyIdentity = 'a:sh.600000|5';
+  fx.cm._initialLoadDone = true;
+  const data = {symbolKey: 'A:SH.600000_5', from: 1700000000,
+    visibleRange: {from: 1700000000, to: 1700001000}, barsResult: {xds: [
+      {kind: 'xd', state: 'forming', linestyle: '1', points: [
+        {time: 1700000300, price: 12}, {time: 1700000900, price: 10},
+      ]},
+    ]}};
+  fx.cm.cl_show_config = {xd: true};
+  fx.cm.getChartData = () => data;
+  const paths = fx.cm._baseStructurePathRenderList(data.barsResult.xds, '5', data.from);
+  fx.cm.obj_charts = {[data.symbolKey]: {xds: [{id: 'missing-tail', key: fx.cm.makeKey(paths[0])}]}};
+  fx.cm.chart.getAllShapes = () => [];
+  fx.cm._lastCompletedRenderSignature = fx.cm._chartRenderInputSignature(data, '5');
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.debounced, 1);
+  fx.cm.chart.getAllShapes = () => [{id: 'missing-tail'}];
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.debounced, 1, 'the recovered canvas may skip identical updates');
+});
+
+test('a segment crossing the viewport left edge participates in the render signature', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm.getCurrentChartIdentity = () => ({symbol: 'a:SZ.301004', interval: '5'});
+  const data = {from: 1790130000, visibleRange: {from: 1790130000, to: 1790751600},
+    barsResult: {xds: [{kind: 'xd', state: 'forming', linestyle: '1',
+      points: [{time: 1790044800, price: 34.18}, {time: 1790213700, price: 32.73}]}]}};
+  const initial = cm._chartRenderInputSignature(data, '5');
+  data.barsResult.xds[0].points[1].price = 32.72;
+  assert.notEqual(cm._chartRenderInputSignature(data, '5'), initial);
+  const changed = cm._chartRenderInputSignature(data, '5');
+  data.barsResult.xds[0].state = 'locked';
+  data.barsResult.xds[0].locked = true;
+  assert.notEqual(cm._chartRenderInputSignature(data, '5'), changed);
+});
+
 test('vm 能加载真实 charts.js 并取出 ChartManager', () => {
   const { ChartManager } = loadChartManager();
   assert.ok(ChartManager, 'ChartManager 应被加载');
@@ -1419,6 +1698,41 @@ test('single frequency links bootstrap the requested interval before any saved c
   }
 });
 
+test('US layout save returns the persisted id and rejects a false success response', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  cm.id = '1';
+  cm.instanceId = 'chart-manager-1';
+  cm.setupEventListeners = () => {};
+  sb.Utils.get_market = () => 'us';
+  sb.Utils.get_code = () => 'AAPL.US';
+  sb.location.search = '?market=us';
+  sb.__chanlunUrlBootstrap = null;
+  sb.addEventListener = () => {};
+  let widgetOptions;
+  sb.TradingView.widget = function (options) { widgetOptions = options; return {}; };
+  let chartResponse = {status:'ok', id:77};
+  sb.fetch = async (url, options = {}) => {
+    if (String(url).startsWith('/tv/1.1/drawings?')) {
+      return {ok:true, json:async()=>({status:'ok',data:{entries:[],complete:true}})};
+    }
+    assert.match(String(url), /^\/tv\/1\.1\/charts\?/);
+    assert.equal(options.method, 'POST');
+    assert.equal(new URLSearchParams(options.body).get('content'), '{"studies":["MACD"]}');
+    return {ok:true, json:async()=>chartResponse};
+  };
+  cm.init();
+  assert.equal(widgetOptions.client_id, 'chanlun_pro_us_1');
+  assert.equal(widgetOptions.load_last_chart, true);
+  assert.equal(widgetOptions.saved_data_meta_info, undefined);
+  const layout = {id:1,name:'US layout',symbol:'us:AAPL.US',resolution:'30',
+    content:'{"studies":["MACD"]}'};
+  assert.equal(await cm.save_load_adapter.saveChart(layout),77);
+  chartResponse = {status:'ok'};
+  sb.console = {...console, error:()=>{}};
+  await assert.rejects(cm.save_load_adapter.saveChart(layout),/returned no id/);
+});
+
 test('MACD_HTF 默认启用且通知 URL 可同时请求标准 MACD', () => {
   const { requestedDefaultStudies } = loadChartManager();
   assert.equal(typeof requestedDefaultStudies, 'function');
@@ -1434,6 +1748,232 @@ test('MACD_HTF 默认启用且通知 URL 可同时请求标准 MACD', () => {
     )),
     ['MACD_HTF'],
   );
+});
+
+test('saved viewport survives the default widening logic and workspace retargeting preserves studies',()=>{
+  const {ChartManager,sb}=loadChartManager();
+  const native={charts:[{timeScale:{m_barSpacing:14,m_rightOffset:7},panes:[{
+    sources:[{type:'MainSeries',state:{symbol:'a:SH.600000',interval:'30'}},
+      {type:'Study',state:{inputs:{id:'MACD_HTF',length:26}}}],
+    rightAxisesState:[{m_priceRange:{minValue:10,maxValue:20},m_isAutoScale:false}],
+  }]}]};
+  const content=JSON.stringify({symbol:'SH.600000',resolution:'30',name:'My layout',content:JSON.stringify(native)});
+  const restored=sb.prepareSavedChartLayout(content);
+  assert.equal(restored.hasViewport,true);
+  assert.deepEqual(JSON.parse(JSON.parse(restored.content).content),native);
+  const same=sb.prepareSavedChartLayout(content,{symbol:'a:SH.600000',interval:'30'});
+  assert.deepEqual(JSON.parse(JSON.parse(same.content).content),native);
+  const changed=sb.prepareSavedChartLayout(content,{symbol:'a:SZ.000001',interval:'5'});
+  const model=JSON.parse(JSON.parse(changed.content).content);
+  assert.equal(model.charts[0].panes[0].sources[0].state.symbol,'a:SZ.000001');
+  assert.equal(model.charts[0].panes[0].sources[0].state.interval,'5');
+  assert.deepEqual(model.charts[0].panes[0].sources[1],native.charts[0].panes[0].sources[1]);
+  assert.deepEqual(model.charts[0].timeScale,native.charts[0].timeScale);
+  assert.equal(model.charts[0].panes[0].rightAxisesState[0].m_isAutoScale,true);
+  assert.equal(model.charts[0].panes[0].rightAxisesState[0].m_priceRange,null);
+  assert.equal(sb.prepareSavedChartLayout('bad',{symbol:'a:SZ.000001',interval:'5'}).content,null);
+  const captured=sb.captureChartLayoutViewport(content,{getTimeScale:()=>({barSpacing:()=>23,rightOffset:()=>-41})});
+  const capturedScale=JSON.parse(JSON.parse(captured).content).charts[0].timeScale;
+  assert.equal(capturedScale.m_barSpacing,23);
+  assert.equal(capturedScale.m_rightOffset,-41);
+  assert.equal(capturedScale.usePercentageRightOffset,false);
+  const cm=Object.create(ChartManager.prototype);cm._hasSavedViewport=true;
+  cm.widget={symbolInterval:()=>{throw Error('saved viewport must not enter default widening');}};
+  cm._maybeWidenDefaultView();
+  sb.__chanlunUrlBootstrap={intervals:['5']};sb.location.search='?workspace_layout=1';
+  assert.equal(sb.shouldLoadLastChart(),true);
+  sb.location.search='?workspace_layout=1&screening_source=proof';
+  assert.equal(sb.shouldLoadLastChart(),false);
+});
+
+function priceViewportFixture(){
+  const native={charts:[{timeScale:{m_barSpacing:8,m_rightOffset:0},panes:[
+    {sources:[{type:'MainSeries',state:{symbol:'us:AMD.US',interval:'5'}}]},
+    {sources:[{type:'Study',id:'macd-1',state:{inputs:{id:'MACD_HTF'}}}]}
+  ]}]};
+  const ranges=[{from:620,to:680},{from:-3,to:4}],applied=[];
+  const scales=ranges.map((range,index)=>({isAutoScale:()=>false,getVisiblePriceRange:()=>range,
+    getMode:()=>0,hasMainSeries:()=>index===0,getStudies:()=>index?['macd-1']:[],
+    setAutoScale:value=>assert.equal(value,false),setVisiblePriceRange:value=>applied.push({index,...value})}));
+  const chart={symbol:()=> 'us:AMD.US',resolution:()=> '5',dataReady:()=>true,
+    getTimeScale:()=>({barSpacing:()=>14,rightOffset:()=>12}),
+    getPanes:()=>scales.map(scale=>({getLeftPriceScales:()=>[],getRightPriceScales:()=>[scale]}))};
+  return {content:JSON.stringify({content:JSON.stringify(native)}),chart,scales,applied};
+}
+
+test('manual price bounds are captured separately and removed before native layout loading',()=>{
+  const {sb}=loadChartManager(),f=priceViewportFixture();
+  const saved=sb.captureChartLayoutViewport(f.content,f.chart);
+  const metadata=JSON.parse(saved).__chanlun_price_viewport;
+  assert.equal(metadata.symbol,'us:AMD.US');assert.equal(metadata.scales.length,2);
+  assert.equal(metadata.scales[0].from,620);assert.equal(metadata.scales[1].to,4);
+  const loaded=sb.prepareSavedChartLayout(saved,{symbol:'us:AMD.US',interval:'5'});
+  assert.equal(loaded.priceViewport.scales.length,2);
+  assert.equal(JSON.parse(loaded.content).__chanlun_price_viewport,undefined);
+  assert.equal(sb.prepareSavedChartLayout(saved,{symbol:'us:INTC.US',interval:'5'}).priceViewport,null);
+  assert.equal(sb.prepareSavedChartLayout(saved,{symbol:'us:AMD.US',interval:'30'}).priceViewport,null);
+});
+
+test('price viewport waits for data and restores each manual axis only once',()=>{
+  const {ChartManager,sb}=loadChartManager(),f=priceViewportFixture();
+  const cm=Object.create(ChartManager.prototype);
+  cm.chart=f.chart;cm.widget={symbolInterval:()=>({symbol:'us:AMD.US',interval:'5'})};
+  cm._pendingSavedPriceViewport=sb.prepareSavedChartLayout(sb.captureChartLayoutViewport(f.content,f.chart)).priceViewport;
+  let ready=false;cm._chartDataReadyNow=()=>ready;
+  assert.equal(cm._restoreSavedPriceViewport(),false);assert.equal(f.applied.length,0);
+  ready=true;assert.equal(cm._restoreSavedPriceViewport(),true);
+  assert.deepEqual(f.applied,[{index:0,from:620,to:680},{index:1,from:-3,to:4}]);
+  assert.equal(cm._restoreSavedPriceViewport(),false);assert.equal(f.applied.length,2);
+});
+
+test('an old layout cannot impose prices after a symbol switch',()=>{
+  const {ChartManager,sb}=loadChartManager(),f=priceViewportFixture();
+  const cm=Object.create(ChartManager.prototype);
+  cm.chart=f.chart;cm.widget={symbolInterval:()=>({symbol:'us:INTC.US',interval:'5'})};
+  cm._pendingSavedPriceViewport=sb.prepareSavedChartLayout(sb.captureChartLayoutViewport(f.content,f.chart)).priceViewport;
+  cm._chartDataReadyNow=()=>true;
+  assert.equal(cm._restoreSavedPriceViewport(),false);assert.equal(f.applied.length,0);
+});
+
+test('a different study cannot inherit a saved indicator price range',()=>{
+  const {ChartManager,sb}=loadChartManager(),f=priceViewportFixture();
+  const cm=Object.create(ChartManager.prototype);cm.chart=f.chart;
+  cm.widget={symbolInterval:()=>({symbol:'us:AMD.US',interval:'5'})};
+  cm._pendingSavedPriceViewport=sb.prepareSavedChartLayout(sb.captureChartLayoutViewport(f.content,f.chart)).priceViewport;
+  f.scales[1].getStudies=()=>['different-study'];cm._chartDataReadyNow=()=>true;
+  assert.equal(cm._restoreSavedPriceViewport(),true);assert.deepEqual(f.applied,[{index:0,from:620,to:680}]);
+});
+
+test('saving automatic scales discards earlier manual bounds',()=>{
+  const {sb}=loadChartManager(),f=priceViewportFixture();
+  const manual=sb.captureChartLayoutViewport(f.content,f.chart);
+  f.scales.forEach(scale=>{scale.isAutoScale=()=>true;});
+  const automatic=sb.captureChartLayoutViewport(manual,f.chart);
+  assert.equal(JSON.parse(automatic).__chanlun_price_viewport,undefined);
+});
+
+test('malformed app price metadata does not invalidate the native study layout',()=>{
+  const {sb}=loadChartManager(),f=priceViewportFixture();
+  const saved=JSON.parse(sb.captureChartLayoutViewport(f.content,f.chart));
+  saved.__chanlun_price_viewport.scales[0].to=null;
+  const loaded=sb.prepareSavedChartLayout(JSON.stringify(saved));
+  assert.equal(loaded.priceViewport,null);assert.ok(loaded.content.includes('MACD_HTF'));
+});
+
+test('legacy normal price axes recover only from explicit saved margins and owners',()=>{
+  const {sb}=loadChartManager();
+  const axis={sources:['_seriesId'],state:{m_priceRange:{m_minValue:624.8,m_maxValue:674},
+    m_isAutoScale:false,m_isLog:false,m_isPercentage:false,m_isIndexedTo100:false,m_isInverted:false,
+    m_topMargin:0.1,m_bottomMargin:0.08}};
+  const model={charts:[{timeScale:{m_barSpacing:17},panes:[{sources:[{id:'_seriesId',type:'MainSeries',
+    state:{symbol:'us:AMD.US',interval:'5'}}],rightAxisesState:[axis]}]}]};
+  const parsed=sb.prepareSavedChartLayout(JSON.stringify(model));
+  const price=parsed.priceViewport.scales[0];
+  assert.ok(Math.abs(price.from-620)<1e-9);assert.ok(Math.abs(price.to-680)<1e-9);
+  assert.equal(price.main,true);
+  assert.equal(sb.prepareSavedChartLayout(JSON.stringify(model),{symbol:'us:INTC.US',interval:'5'}).priceViewport,null);
+  delete axis.state.m_topMargin;
+  assert.equal(sb.prepareSavedChartLayout(JSON.stringify(model)).priceViewport,null);
+});
+
+test('legacy nonlinear axes without explicit public ranges are not guessed',()=>{
+  const {sb}=loadChartManager();
+  const model={charts:[{panes:[{sources:[{id:'m',type:'MainSeries',state:{symbol:'us:AMD.US',interval:'5'}}],
+    rightAxisesState:[{sources:['m'],state:{m_priceRange:{m_minValue:2,m_maxValue:3},m_isAutoScale:false,
+      m_isLog:true,m_isPercentage:false,m_isIndexedTo100:false,m_isInverted:false,m_topMargin:0.1,m_bottomMargin:0.1}}]}]}]};
+  assert.equal(sb.prepareSavedChartLayout(JSON.stringify(model)).priceViewport,null);
+});
+
+test('saved price bounds settle again when an indexed reference changes after loading',()=>{
+  const {ChartManager,sb}=loadChartManager(),f=priceViewportFixture();
+  const cm=Object.create(ChartManager.prototype);cm.chart=f.chart;
+  cm.widget={symbolInterval:()=>({symbol:'us:AMD.US',interval:'5'})};
+  cm._pendingSavedPriceViewport=sb.prepareSavedChartLayout(sb.captureChartLayoutViewport(f.content,f.chart)).priceViewport;
+  cm._chartDataReadyNow=()=>true;
+  let count=0,current={from:630,to:690};
+  f.scales[0].getVisiblePriceRange=()=>current;
+  f.scales[0].setVisiblePriceRange=range=>{count++;current=count===1?{from:range.from+1,to:range.to+1}:range;};
+  assert.equal(cm._restoreSavedPriceViewport(),true);
+  assert.equal(cm._restoreSavedPriceViewport(),true);
+  assert.equal(cm._restoreSavedPriceViewport(),false);
+  assert.equal(count,2);assert.equal(cm._pendingSavedPriceViewport,null);
+});
+
+test('an uncooperative price scale cannot keep restoration running indefinitely',()=>{
+  const {ChartManager,sb}=loadChartManager(),f=priceViewportFixture();
+  const cm=Object.create(ChartManager.prototype);cm.chart=f.chart;
+  cm.widget={symbolInterval:()=>({symbol:'us:AMD.US',interval:'5'})};
+  cm._pendingSavedPriceViewport=sb.prepareSavedChartLayout(sb.captureChartLayoutViewport(f.content,f.chart)).priceViewport;
+  cm._chartDataReadyNow=()=>true;
+  f.scales[0].getVisiblePriceRange=()=>({from:1,to:2});
+  for(let i=0;i<3;i++)assert.equal(cm._restoreSavedPriceViewport(),true);
+  assert.equal(cm._restoreSavedPriceViewport(),false);
+  assert.equal(cm._pendingSavedPriceViewport,null);
+});
+
+test('screening URL keeps its layout in memory without overwriting account defaults',()=>{
+  const template=fs.readFileSync(path.join(__dirname,'../../../templates/index.html'),'utf8');
+  const bootstrap=template.match(/\(function applyUrlSymbolParams\(\) \{[\s\S]*?\n    \}\)\(\);/)[0];
+  const settings={chart_layout_type:'four',a_interval_1:'30',a_interval_2:'1D'};
+  const sb={URLSearchParams,initial_market:'a',location:{search:'?market=a&code=SH.600088&layout=horizontal-2&intervals=5,1&workspace_layout=1'},
+    Utils:{set_local_data(key,value){settings[key]=value;}}};sb.window=sb;
+  vm.runInNewContext(bootstrap,sb);
+  assert.equal(sb.__chanlunUrlBootstrap.layout,'horizontal-2');
+  assert.deepEqual(Array.from(sb.__chanlunUrlBootstrap.intervals),['5','1']);
+  assert.equal(settings.chart_layout_type,'four');
+  assert.equal(settings.a_interval_1,'30');
+  assert.equal(settings.a_interval_2,'1D');
+});
+
+test('real save/load adapter writes current zoom and restores workspace studies on the requested symbol',async()=>{
+  const {ChartManager,sb}=loadChartManager();
+  const cm=Object.create(ChartManager.prototype);
+  cm.id='1';cm.instanceId='chart-manager-1';cm.setupEventListeners=()=>{};
+  sb.Utils.get_market=()=> 'a';sb.Utils.get_code=()=> 'SZ.000001';
+  sb.location.search='?workspace_layout=1';sb.__chanlunUrlBootstrap={intervals:['5']};
+  sb.addEventListener=()=>{};sb.TradingView.widget=function(){return {};};
+  let saved;
+  sb.fetch=async(url,options={})=>{
+    if(String(url).startsWith('/tv/1.1/drawings?'))return {ok:true,json:async()=>({status:'ok',data:{entries:[],complete:true}})};
+    if(options.method==='POST'){
+      saved=new URLSearchParams(options.body).get('content');
+      return {ok:true,json:async()=>({status:'ok',id:12})};
+    }
+    return {ok:true,json:async()=>({status:'ok',data:{content:saved}})};
+  };
+  cm.init();cm.chart={getTimeScale:()=>({barSpacing:()=>17,rightOffset:()=>-60})};
+  const content=JSON.stringify({charts:[{timeScale:{m_barSpacing:6,m_rightOffset:10},panes:[{sources:[
+    {type:'MainSeries',state:{symbol:'a:SH.600000',interval:'30'}},{type:'Study',state:{inputs:{id:'MACD_HTF'}}}
+  ]}]}]});
+  assert.equal(await cm.save_load_adapter.saveChart({name:'saved',symbol:'SH.600000',resolution:'30',content}),12);
+  assert.equal(JSON.parse(saved).charts[0].timeScale.m_rightOffset,-60);
+  assert.equal(JSON.parse(saved).charts[0].timeScale.m_barSpacing,17);
+  const restored=JSON.parse(await cm.save_load_adapter.getChartContent(12));
+  assert.equal(restored.charts[0].panes[0].sources[0].state.symbol,'a:SZ.000001');
+  assert.equal(restored.charts[0].panes[0].sources[0].state.interval,'5');
+  assert.equal(restored.charts[0].panes[0].sources[1].state.inputs.id,'MACD_HTF');
+  assert.equal(cm._hasSavedViewport,true);
+  assert.equal(cm._loadingSavedLayout,false);
+});
+
+test('lowest-center page preserves studies restored from a saved chart layout', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  sb.document.body = {dataset: {chartFocus: 'lowest-center'}};
+  const studies = [{id: 'saved-macd', name: 'MACD_HTF'},
+    {id: 'saved-rsi', name: 'Relative Strength Index'}];
+  let removals = 0;
+  let additions = 0;
+  cm.chart = {
+    getAllStudies: () => studies,
+    removeEntity: async () => { removals++; },
+    createStudy: async () => { additions++; },
+  };
+
+  assert.deepEqual(Array.from(await cm.ensureRequestedDefaultStudies()), []);
+  assert.deepEqual(studies.map(study => study.name), ['MACD_HTF', 'Relative Strength Index']);
+  assert.equal(removals, 0);
+  assert.equal(additions, 0);
 });
 
 test('ensureRequestedDefaultStudies 复用已有 MACD_HTF，不重复创建', async () => {

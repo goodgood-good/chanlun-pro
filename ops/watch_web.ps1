@@ -212,10 +212,12 @@ function Test-WebHealth {
     $ready = $health.status -eq 'ready'
     # Data-provider availability is not repaired by repeatedly restarting the Web app.
     $runtimeFailed = $health.components.runtime.required -eq $true -and $health.components.runtime.ready -ne $true
+    $monitorFailed = $health.components.monitor.required -eq $true -and $health.components.monitor.recovery_recommended -eq $true
+    $recoveryNeeded = $runtimeFailed -or $monitorFailed
     return [pscustomobject]@{
         Healthy = $ready
-        FailureClass = $(if ($ready) {'healthy'} elseif ($runtimeFailed) {'readiness_failed'} else {'operational_degraded'})
-        RecoveryRecommended = $runtimeFailed
+        FailureClass = $(if ($ready) {'healthy'} elseif ($recoveryNeeded) {'readiness_failed'} else {'operational_degraded'})
+        RecoveryRecommended = $recoveryNeeded
         Detail = ('pid={0}; revision={1}; reasons={2}' -f $health.pid, $health.revision, ($health.reasons -join ','))
         AppPid = $health.pid
     }

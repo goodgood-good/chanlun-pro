@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from chanlun.screening.rules import CN, _price_ticks, audit_snapshot, trading_context, validate_frame
-from chanlun.screening.runner import _review_candidates, is_a_share
+from chanlun.screening.runner import _review_candidates, is_a_share, source_revision
 
 
 @pytest.fixture(autouse=True)
@@ -26,14 +26,23 @@ def sample():
     prices = [12, 9, 12, 10, 11, 9]
     roles = [{"unit_id": f"S{i}", "start_tick": a, "end_tick": b,
               "start_time": times[-200+i], "end_time": times[-199+i], "low_tick": min(a, b), "high_tick": max(a, b),
-              "direction": "up" if b > a else "down", "locked": True, "forming": False}
+              "direction": "up" if b > a else "down", "locked": True, "forming": False,
+              "confirmed_at": times[-199+i], "available_at": times[-199+i]}
              for i, (a, b) in enumerate(zip(prices, prices[1:]))]
-    center = {"center_id": "Z", "third_class_confirmed": True, "core": {"zd_tick": 10, "zg_tick": 11},
+    leave = {"unit_id": "leave", "start_time": times[-195], "end_time": times[-120],
+             "start_tick": 9, "end_tick": 13, "low_tick": 9, "high_tick": 13,
+             "direction": "up", "locked": True, "forming": False,
+             "confirmed_at": times[-120], "available_at": times[-120]}
+    ret = {"unit_id": "return", "start_time": times[-120], "end_time": times[-100],
+           "start_tick": 13, "end_tick": 12, "low_tick": 12, "high_tick": 13,
+           "direction": "down", "locked": True, "forming": False,
+           "confirmed_at": times[-20], "available_at": times[-20]}
+    center = {"center_id": "Z", "structural_level": 0, "source_kind": "segment", "formation_rule": "five_role",
+              "third_class_confirmed": True, "core": {"zd_tick": 10, "zg_tick": 11},
               "establishment_segments": roles, "entry_unit_id": "S0", "core_unit_ids": ["S1", "S2", "S3"],
               "establishment_leave_unit_id": "S4",
-              "lifecycle_leaving_segment": {"locked": True, "forming": False, "direction": "up", "end_time": 7},
-              "completion_return_segment": {"locked": True, "forming": False, "direction": "down",
-                                            "start_time": 7, "low_tick": 12, "unit_id": "return"}}
+              "completion_leave_unit_id": "leave", "completion_return_unit_id": "return",
+              "lifecycle_leaving_segment": leave, "completion_return_segment": ret}
     point = {"point_id": "P", "point_type": "3buy", "side": "buy", "status": "confirmed",
              "confirmed_at": times[-20], "available_at": times[-20], "anchor_at": times[-100],
              "anchor_tick": 12, "invalidation_tick": 11, "center_id": "Z", "anchor_unit_id": "return",
@@ -58,10 +67,20 @@ def first_buy_proof(snapshot):
     point = snapshot["levels"][0]["points"][0]
     center = snapshot["levels"][0]["centers"][0]
     center.update(completion_direction="down", completion_return_unit_id="return")
+    center.update(boundary_divergence_id="divergence", boundary_anchor_unit_id="end")
+    center.setdefault("price_basis_revision", point["price_basis_revision"])
+    center.setdefault("established_at", center["establishment_segments"][3]["available_at"])
     point.update(point_type="1buy", variant="standard", evidence_codes=["two_separated_centers"],
-                 divergence={"kind": "trend", "direction": "down", "structural_level": 0,
-                             "price_basis_revision": "basis", "signal_leg_unit_ids": ["leave", "return", "end"],
-                             "metrics": {"is_divergent": True}})
+                  divergence={"kind": "trend", "direction": "down", "structural_level": 0,
+                              "divergence_id": "divergence", "signal_unit_id": "end",
+                              "source_kind": point["source_kind"],
+                              "price_basis_revision": "basis",
+                              "comparison_center_id": center["center_id"],
+                              "comparison_center_established_at": center["established_at"],
+                              "comparison_center_known_at": center["established_at"],
+                              "available_at": point["available_at"],
+                              "signal_leg_unit_ids": ["leave", "return", "end"],
+                              "metrics": {"is_divergent": True}})
     return point
 
 
@@ -83,6 +102,86 @@ def test_intact_native_buy_is_selected(sample):
     result = audit_snapshot(snapshot, frame, context)
     assert len(result["selected"]) == 1
     assert not result["data_errors"]
+
+
+@pytest.mark.parametrize("fault", [
+    "missing_core_clock", "future_core_clock", "unfinished_leave",
+    "future_return_clock", "disconnected_leave", "wrong_return_anchor",
+    "member_time_gap", "leave_time_gap", "return_time_gap",
+    "stroke_observation_source",
+])
+def test_legacy_five_role_third_requires_causal_completed_members(sample, fault):
+    from chanlun.screening.rules import _valid_center_roles
+
+    frame, snapshot, context = sample
+    center = snapshot["levels"][0]["centers"][0]
+    point = snapshot["levels"][0]["points"][0]
+    assert _valid_center_roles(center, point)
+    if fault == "missing_core_clock":
+        del center["establishment_segments"][2]["confirmed_at"]
+    elif fault == "future_core_clock":
+        center["establishment_segments"][2]["available_at"] = point["available_at"] + 300
+    elif fault == "unfinished_leave":
+        center["lifecycle_leaving_segment"]["forming"] = True
+    elif fault == "future_return_clock":
+        center["completion_return_segment"]["confirmed_at"] = point["confirmed_at"] + 300
+        center["completion_return_segment"]["available_at"] = point["confirmed_at"] + 300
+    elif fault == "disconnected_leave":
+        center["lifecycle_leaving_segment"]["end_tick"] -= 1
+    elif fault == "wrong_return_anchor":
+        point["anchor_at"] = center["completion_return_segment"]["start_time"] - 300
+    elif fault == "member_time_gap":
+        center["establishment_segments"][2]["start_time"] += 60
+    elif fault == "leave_time_gap":
+        center["lifecycle_leaving_segment"]["start_time"] += 60
+    elif fault == "return_time_gap":
+        center["completion_return_segment"]["start_time"] += 60
+    else:
+        point["source_kind"] = center["source_kind"] = "stroke_observation"
+    result = audit_snapshot(snapshot, frame, context)
+    assert not result["selected"]
+    assert "STRUCTURE_MISMATCH" in result["rejected"][0]["reasons"]
+    assert not result["data_errors"]
+
+
+@pytest.mark.parametrize("fault", ["missing_completion_clock", "member_time_gap"])
+def test_legacy_five_role_frozen_result_loses_selection_when_member_proof_breaks(sample, tmp_path, fault):
+    import gzip
+    import hashlib
+    import json
+    from chanlun.screening.runner import _save_evidence, write_json
+    from cl_app.services.screening import ScreeningManager
+
+    frame, snapshot, context = sample
+    snapshot["levels"][0]["points"][0]["center_ordinal"] = 1
+    selected, = audit_snapshot(snapshot, frame, context)["selected"]
+    run_id = "c" * 32
+    directory = tmp_path / run_id
+    manifest = _save_evidence(directory, "SH.600000", "5m", frame, snapshot)
+    record = {"code": "SH.600000", "rows": [{"code": "SH.600000", "frequency": "5m",
+              "source_closed_at": context["cutoff"], "selected": [selected],
+              "observations": [], "recent_rejections": [], "reason_counts": {},
+              "evidence": manifest}]}
+    write_json(tmp_path / "latest.json", {"run_id": run_id})
+    write_json(directory / "status.json", {"run_id": run_id, "status": "completed", "completed": 1,
+                                           "source_revision": source_revision()})
+    record_path = directory / "results.jsonl"
+    record_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    manager = ScreeningManager(tmp_path)
+    assert [item["point"]["point_id"] for item in manager.results()["selected"]] == ["P"]
+
+    member = snapshot["levels"][0]["centers"][0]["establishment_segments"][1]
+    if fault == "missing_completion_clock":
+        del member["available_at"]
+    else:
+        member["start_time"] += 60
+    raw = gzip.compress(json.dumps(snapshot).encode())
+    (directory / "evidence/SH.600000_5m.json.gz").write_bytes(raw)
+    manifest.update(snapshot_sha256=hashlib.sha256(raw).hexdigest(), snapshot_bytes=len(raw))
+    record_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    published = manager.results()
+    assert not published["selected"]
+    assert "STRUCTURE_MISMATCH" in published["recent_rejections"][-1]["reasons"]
 
 
 @pytest.mark.parametrize('keep_old_projection', [False, True])
@@ -214,6 +313,63 @@ def test_nested_scan_publishes_only_five_minute_signals_with_two_frozen_inputs(n
         tmp_path, "SH.600000", row["evidence"], row["confirmation_evidence"]))
 
 
+def test_direct_five_minute_point_does_not_wait_for_thirty_minute_parent(nested_sample, monkeypatch, tmp_path):
+    """L107's child-period operation cannot require the eventual parent center."""
+    from chanlun.screening.runner import DIRECT_STRATEGY
+
+    runner = _nested_runtime(monkeypatch, nested_sample)
+    nested_sample["frames"].pop("1m")
+    nested_sample["contexts"].pop("1m")
+    settings = {**nested_sample["settings"], "strategy": DIRECT_STRATEGY,
+                "frequencies": ["5m"], "structural_levels": [0]}
+    row = runner.scan_symbol(
+        {"code": "SH.600000", "name": "fixture"}, settings,
+        nested_sample["contexts"], tmp_path,
+    )["rows"][0]
+
+    assert not row.get("data_errors"), row.get("error")
+    assert [candidate["point"]["point_id"] for candidate in row["selected"]] == ["P"]
+    assert "30m" not in nested_sample["contexts"]
+    assert "nested_confirmation" not in row["selected"][0]
+
+
+def test_direct_one_minute_scan_exports_lower_witness_without_five_minute_input(
+        nested_sample, monkeypatch, tmp_path):
+    from chanlun.screening.runner import DIRECT_STRATEGY
+    from chanlun.screening.evidence import evidence_u295_lower_structural_witnesses
+
+    runner = _nested_runtime(monkeypatch, nested_sample)
+    lower_point = nested_sample["snapshots"]["1m"]["levels"][0]["points"][0]
+    nested_sample["frames"].pop("5m")
+    nested_sample["contexts"].pop("5m")
+    settings = {**nested_sample["settings"], "strategy": DIRECT_STRATEGY,
+                "frequencies": ["1m"], "point_types": ["3buy"],
+                "structural_levels": [0]}
+    row = runner.scan_symbol(
+        {"code": "SH.600000", "name": "fixture"}, settings,
+        nested_sample["contexts"], tmp_path,
+    )["rows"][0]
+    assert not row.get("data_errors"), row.get("error")
+    assert row["frequency"] == "1m"
+    witness, = row["u295_lower_structural_witnesses"]
+    assert witness["point_id"] == lower_point["point_id"]
+    assert witness["status"] == "lower_formal_buy_point_only"
+    assert witness["author_interval_entry_certified"] is False
+    assert witness["parent_critical_price_followup_certified"] is False
+    assert witness["tradable"] is False
+    assert row["evidence"]["status"] == "complete"
+    assert list(evidence_u295_lower_structural_witnesses(
+        tmp_path, "SH.600000", row["evidence"],
+        known_from=row["u295_witness_known_from"],
+    )) == row["u295_lower_structural_witnesses"]
+    broken = {**row["evidence"], "snapshot_sha256": "0" * 64}
+    with pytest.raises(ValueError):
+        evidence_u295_lower_structural_witnesses(
+            tmp_path, "SH.600000", broken,
+            known_from=row["u295_witness_known_from"],
+        )
+
+
 @pytest.mark.parametrize("fault", ["before_interval", "after_interval", "opposite", "stroke", "wrong_point_side"])
 def test_unrelated_lower_signal_cannot_confirm_five_minute_point(nested_sample, fault):
     from chanlun.screening.nesting import matching_confirmations, attach_confirmation, is_nested_observation
@@ -318,7 +474,19 @@ def test_no_five_minute_setup_skips_one_minute_calculation(nested_sample, monkey
 def test_nested_result_reader_keeps_joint_state_and_serves_both_evidence_periods(
         nested_sample, monkeypatch, tmp_path, lower_present):
     import json
+    from chanlun.core.strict_structure.operational_risk import macd_zero_axis_operational_state
     from cl_app.services.screening import ScreeningManager
+    risk_cutoff = nested_sample["contexts"]["1m"]["cutoff"]
+    known = datetime.fromtimestamp(risk_cutoff, CN)
+    fact = macd_zero_axis_operational_state(
+        (known,), (-0.2,), (-0.1,), physical_frequency="1m",
+        as_of=known, closed_through=known, bar_known_times=(known,),
+    )
+    nested_sample["snapshots"]["1m"]["macd_zero_axis_operational_state"] = {
+        **fact, "bar_market_at": risk_cutoff, "known_at": risk_cutoff,
+        "price_basis_revision": nested_sample["snapshots"]["1m"]["price_basis_revision"],
+    }
+    nested_sample["settings"]["minimum_operating_frequency"] = "1m"
     runner = _nested_runtime(monkeypatch, nested_sample)
     if not lower_present:
         nested_sample["snapshots"]["1m"]["levels"][0]["points"] = []
@@ -329,6 +497,7 @@ def test_nested_result_reader_keeps_joint_state_and_serves_both_evidence_periods
                              nested_sample["contexts"], directory)
     (directory / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     runner.write_json(directory / "status.json", {"run_id": run_id, "status": "completed", "completed": 1,
+                                                 "source_revision": runner.source_revision(),
                                                  "settings": nested_sample["settings"]})
     runner.write_json(tmp_path / "latest.json", {"run_id": run_id})
     monkeypatch.setattr(runner, "snapshot_for", lambda *_: pytest.fail("reading evidence must not calculate structure"))
@@ -336,6 +505,9 @@ def test_nested_result_reader_keeps_joint_state_and_serves_both_evidence_periods
     result = manager.results()
     assert len(result["selected"]) == int(lower_present), result["recent_rejections"]
     assert len(result["observations"]) == int(not lower_present)
+    candidate = (result["selected"] or result["observations"])[0]
+    assert candidate["operational_macd_risk"]["risk_filter_state"] == "basic_avoid_on_selected_period"
+    assert candidate["operational_macd_risk"]["physical_frequency"] == "1m"
     if not lower_present:
         # A confirmed chart point remains confirmed, while combined selection
         # waits. The reader must not promote it back into the confirmed list.
@@ -348,37 +520,19 @@ def test_nested_result_reader_keeps_joint_state_and_serves_both_evidence_periods
         chart = manager.evidence_history(run_id, "SH.600000", frequency, "P", first=True, start=0, end=9999999999)
         assert chart["s"] == "ok"
         assert len(chart["t"]) == len(nested_sample["frames"][frequency])
+        assert chart["strict_structure"]["screening_operational_macd_risk"]["physical_frequency"] == "1m"
     (directory / "evidence" / "SH.600000_1m.json.gz").unlink()
     broken = manager.results()
     assert not broken["selected"] and not broken["observations"]
     assert broken["rejection_counts"]["NESTED_EVIDENCE_MISSING"] == 1
 
 
-def test_nested_manual_settings_and_cutoffs_cannot_enable_independent_periods(tmp_path, monkeypatch):
-    from chanlun.screening import runner
-    from cl_app.services.screening import ScreeningManager, validate_settings
-    from chanlun.screening.rules import POINT_TYPES
-    settings = validate_settings({"scope": "codes", "codes": ["SH.600000"]})
-    assert settings["frequencies"] == ["5m"] and settings["confirmation_frequency"] == "1m"
-    assert settings["point_types"] == list(POINT_TYPES)
-    with pytest.raises(ValueError):
-        validate_settings({"scope": "all_a", "frequencies": ["1m", "5m"]})
-    runner.write_json(tmp_path / "request.json", {"run_id": "f" * 32, "settings": settings,
-                                                "observed_at": "2026-09-11T10:34:00+08:00"})
-    monkeypatch.setattr(runner, "bounded_catalog", lambda *_: iter([{
-        "stocks": [{"code": "SH.600000", "name": "fixture"}], "excluded_requested_codes": []}]))
-    captured = {}
+def test_retired_nested_strategy_cannot_be_started_as_a_new_screening_run():
+    from cl_app.services.screening import validate_settings
 
-    def scan(_stocks, _settings, contexts, *_):
-        captured.update(contexts)
-        return iter([])
-
-    monkeypatch.setattr(runner, "bounded_scan", scan)
-    runner.run_screening(tmp_path)
-    assert captured["1m"]["cutoff"] == captured["5m"]["cutoff"]
-    assert datetime.fromtimestamp(captured["1m"]["cutoff"], CN).strftime("%H:%M") == "10:30"
-    manager = ScreeningManager(now=lambda: datetime.fromisoformat("2026-09-11T10:34:00+08:00"))
-    assert manager._freshness({"settings": settings, "cutoffs": {f: c["cutoff"] for f, c in captured.items()}})["cutoff_current"]
+    with pytest.raises(ValueError, match="已停用"):
+        validate_settings({"scope": "codes", "codes": ["SH.600000"],
+                           "strategy": "5m_with_1m_confirmation"})
 
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
@@ -581,13 +735,13 @@ def test_extended_price_is_excluded_without_mutating_historical_buy(sample):
     assert len(audit_snapshot(snapshot, frame, context, max_anchor_gain_pct=80)["selected"]) == 1
 
 
-@pytest.mark.parametrize("low", [10, 11])
-def test_third_buy_touch_or_break_before_confirmation_stays_invalid_after_recovery(sample, low):
+@pytest.mark.parametrize("low,reason", [(10, "INVALIDATED"), (11, "ANCHOR_BROKEN")])
+def test_third_buy_boundary_cross_or_broken_anchor_stays_excluded(sample, low, reason):
     frame, snapshot, context = sample
     frame.loc[len(frame)-50, "low"] = low
     result = audit_snapshot(snapshot, frame, context)
     assert not result["selected"]
-    assert result["rejected"][0]["reasons"] == ["INVALIDATED"]
+    assert result["rejected"][0]["reasons"] == [reason]
 
 
 @pytest.mark.parametrize("kind", ["1buy", "2buy"])
@@ -689,11 +843,17 @@ def test_unconfirmed_evidence_is_persisted_without_claiming_confirmation_replays
                                   frame.assign(date=frame.date.dt.tz_convert("UTC")))
 
 
-def test_later_confirmed_sell_excludes_buy(sample):
+def test_invalid_later_sell_cannot_expire_buy(sample):
     frame, snapshot, context = sample
     points = snapshot["levels"][0]["points"]
-    points.append({**points[0], "side": "sell", "point_type": "3sell", "anchor_at": context["expected_closes"][-50]})
-    assert "LATER_SELL" in audit_snapshot(snapshot, frame, context)["rejected"][0]["reasons"]
+    points.append({**points[0], "point_id": "invalid-sell", "side": "sell", "point_type": "3sell",
+                   "anchor_at": context["expected_closes"][-50]})
+    result = audit_snapshot(snapshot, frame, context, ["3buy", "3sell"])
+    buy = next(item for item in [*result["selected"], *result["rejected"]]
+               if item["point"]["point_id"] == "P")
+    assert "LATER_SELL" not in buy["reasons"]
+    assert any(item["point"]["point_id"] == "invalid-sell"
+               and "STRUCTURE_MISMATCH" in item["reasons"] for item in result["rejected"])
 
 
 def test_missing_bar_can_hide_stop_crossing_and_is_not_passed(sample):
@@ -800,6 +960,98 @@ def test_point_subtypes_are_explicit_screening_settings(sample):
     assert audit_snapshot(snapshot, frame, context, point_types=["2buy"], include_weak_second=True)["selected"]
 
 
+def test_completed_second_buy_below_first_does_not_require_consolidation_divergence(sample):
+    frame, snapshot, context = sample
+    point, parent = second_buy_proof(snapshot, weak=True)
+    point.update(
+        variant="lower_retest", divergence=None,
+        invalidation_tick=point["anchor_tick"],
+    )
+    assert point["anchor_tick"] < parent["anchor_tick"]
+    excluded = audit_snapshot(snapshot, frame, context, point_types=["2buy"])
+    assert "VARIANT_EXCLUDED" in excluded["rejected"][0]["reasons"]
+    included = audit_snapshot(
+        snapshot, frame, context, point_types=["2buy"], include_weak_second=True
+    )
+    assert included["selected"]
+    assert included["selected"][0]["point"]["variant"] == "lower_retest"
+
+
+def test_higher_third_buy_entry_waits_for_exact_lower_precision_evidence():
+    from chanlun.screening.rules import third_buy_entry_precision_reasons
+
+    point = {
+        "point_id": "third", "point_type": "3buy", "structural_level": 1,
+        "center_id": "center", "anchor_unit_id": "return",
+        "available_at": 120, "status": "confirmed",
+    }
+    assert third_buy_entry_precision_reasons(point, {}, 120) == [
+        "THIRD_ENTRY_PRECISION_PENDING"
+    ]
+    evidence = {
+        "point_id": "third", "point_type": "3buy",
+        "parent_center_id": "center", "lower_return_trend_id": "return",
+        "formal_third_point_available_at": 120,
+        "point_status": "confirmed", "tradable": False,
+        "formal_third_point_independent": True,
+        "status": "bounded_precision_condition_observed",
+        "author_entry_condition_supported": True,
+        "precision_branch": "double_subsub_return",
+        "precision_known_at": 115,
+        "parent_center_initial_known_at": 110,
+    }
+    assert third_buy_entry_precision_reasons(point, {"third": evidence}, 120) == []
+    assert third_buy_entry_precision_reasons(
+        point, {"third": {**evidence, "parent_center_initial_known_at": None}}, 120
+    ) == ["THIRD_ENTRY_PRECISION_PENDING"]
+    assert third_buy_entry_precision_reasons(
+        point, {"third": {**evidence, "parent_center_initial_known_at": 116}}, 120
+    ) == ["STRUCTURE_MISMATCH"]
+    assert third_buy_entry_precision_reasons(point, {"third": evidence}, 114) == [
+        "THIRD_ENTRY_PRECISION_PENDING"
+    ]
+    assert third_buy_entry_precision_reasons(
+        point, {"third": {**evidence, "lower_return_trend_id": None}}, 120
+    ) == ["THIRD_ENTRY_PRECISION_PENDING"]
+    assert third_buy_entry_precision_reasons(
+        point, {"third": {**evidence, "lower_return_trend_id": "other"}}, 120
+    ) == ["STRUCTURE_MISMATCH"]
+    assert third_buy_entry_precision_reasons(
+        {**point, "structural_level": 0}, {}, 120
+    ) == []
+
+
+def test_pending_higher_third_buy_persists_frozen_chart_for_review(sample, monkeypatch, tmp_path):
+    from chanlun.screening import runner
+    from chanlun.screening.evidence import load_evidence
+
+    frame, snapshot, context = sample
+    point = {**snapshot["levels"][0]["points"][0],
+             "point_id": "higher-pending", "point_type": "3buy", "side": "buy",
+             "structural_level": 1, "source_kind": "trend_type", "status": "confirmed",
+             "confirmed_at": context["cutoff"], "missing_conditions": []}
+    snapshot["levels"].append({"structural_level": 1, "points": [point],
+                               "third_point_entry_precision_rule_states": []})
+    rejected = {"point": point, "center": None,
+                "reasons": ["THIRD_ENTRY_PRECISION_PENDING"]}
+    result = {"data_errors": [], "data_quality": {"status": "complete"},
+              "selected": [], "observations": [], "rejected": [rejected],
+              "confirmed_buys": 1, "unconfirmed_buys": 0,
+              "confirmed_sells": 0, "unconfirmed_sells": 0}
+    monkeypatch.setattr(runner, "fetch_frame", lambda *_: frame)
+    monkeypatch.setattr(runner, "snapshot_for", lambda *_: snapshot)
+    monkeypatch.setattr(runner, "audit_snapshot", lambda *_args, **_kwargs: result)
+    row, = runner.scan_symbol(
+        {"code": "SH.600000", "name": "fixture"},
+        {"frequencies": ["5m"], "point_types": ["3buy"], "structural_levels": [1]},
+        {"5m": context}, tmp_path,
+    )["rows"]
+    assert not row["selected"] and not row["observations"] and not row["data_errors"]
+    assert row["recent_rejections"][0]["reasons"] == ["THIRD_ENTRY_PRECISION_PENDING"]
+    _, saved_snapshot, health = load_evidence(tmp_path, "SH.600000", "5m", row["evidence"])
+    assert health["verified"] and saved_snapshot == snapshot
+
+
 @pytest.mark.parametrize("failure", ["consolidation", "missing", "future", "wrong_level"])
 def test_second_buy_cannot_inherit_an_invalid_first_buy(sample, failure):
     frame, snapshot, context = sample
@@ -863,6 +1115,41 @@ def test_fetch_repairs_interior_gap_and_uses_trading_day_history(sample, monkeyp
     assert first.kwargs["start_date"] <= context["history_from"].replace("-", "")
     assert first.kwargs["args"]["skip_download"] is True
     assert second.kwargs["args"] == {"exact_end": True}
+
+
+def test_fetch_history_does_not_roll_forward_at_midnight_without_new_closed_bars(sample, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from datetime import timedelta
+    from chanlun.exchange import exchange_qmt
+    from chanlun.screening import runner
+
+    frame, _, _ = sample
+    ex = exchange_qmt.ExchangeQMT()
+    ex.DEFAULT_LOOKBACK["5m"] = timedelta(days=365)
+    ex.klines = Mock(return_value=frame)
+    wall = [datetime(2026, 9, 30, 22, 42)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return wall[0] if tz is None else wall[0].replace(tzinfo=tz)
+
+    monkeypatch.setattr(exchange_qmt, "datetime", SimpleNamespace(datetime=Clock))
+    monkeypatch.setattr(runner, "_exchange", lambda: ex)
+    monkeypatch.setattr(runner, "validate_frame", lambda *_: [])
+    monkeypatch.setattr(runner, "frame_quality", lambda *_: {"errors": []})
+    monkeypatch.setattr(runner, "_resolve_suspensions", lambda data, *_: data)
+    contexts = []
+    for observed in (datetime(2026, 9, 30, 22, 42, tzinfo=CN), datetime(2026, 10, 1, 2, 30, tzinfo=CN)):
+        context = trading_context(observed, "5m")
+        contexts.append(context)
+        wall[0] = observed.replace(tzinfo=None)
+        assert runner.fetch_frame("SZ.300879", "5m", context) is frame
+    assert contexts[0]["cutoff"] == contexts[1]["cutoff"]
+    first, second = ex.klines.call_args_list
+    assert first.kwargs["start_date"] == second.kwargs["start_date"] == "20250930"
+    assert first.kwargs["end_date"] == second.kwargs["end_date"] == "2026-09-30 15:00:00"
 
 
 def test_repeat_calculation_reuses_only_identical_verified_input(sample, monkeypatch, tmp_path):
@@ -930,14 +1217,18 @@ def test_cached_geometry_reapplies_filters_and_reviews_newly_eligible_points(sam
     assert not changed["calculation_reused"] and changed["replays_reused"] == 0 and len(calls) == 8
 
 
-def _deadline_fixture_worker(connection, _settings, _contexts, _run_dir, _revision):
+def _deadline_fixture_worker(connection):
     import multiprocessing
+    from chanlun.screening.worker_transport import JobInputReader, store_reply
+    inputs = JobInputReader()
     try:
-        while (stock := connection.recv()) is not None:
+        while (message := connection.recv()) is not None:
+            task = inputs.load(message)
+            stock = task['stock']
             if stock["code"] == "SH.600000":
                 multiprocessing.Event().wait(120)
             else:
-                connection.send({"code": stock["code"], "rows": []})
+                connection.send(store_reply(task, {"code": stock["code"], "rows": []}))
     except EOFError:
         pass
 
@@ -1015,7 +1306,7 @@ def test_structurally_inconsistent_center_never_enters_results(sample, part):
     elif part == "entry":
         c["establishment_segments"][0]["locked"] = False
     else:
-        c["completion_return_segment"]["low_tick"] = 11
+        c["completion_return_segment"]["low_tick"] = 10
     assert "STRUCTURE_MISMATCH" in audit_snapshot(snapshot, frame, context)["rejected"][0]["reasons"]
 
 

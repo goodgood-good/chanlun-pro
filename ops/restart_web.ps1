@@ -9,6 +9,8 @@ param(
     [switch]$PreflightOnly,
     [switch]$SkipWatchdog,
     [switch]$OpenBrowser,
+    # Internal entry point for the independent deployment process.
+    [switch]$DeploymentWorker,
 
 
     [switch]$EnableFullSymbolCatalog,
@@ -20,6 +22,35 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy_common.ps1')
+
+# Native PowerShell output capture can remain open while a spawned service is
+# alive, even after this script has finished. Isolate the deployment console
+# and wait for its direct process only. Do not use -Wait (the process tree),
+# stream redirection, or -NoNewWindow here. The worker keeps its normal log.
+# A preflight creates no persistent children and retains its existing output.
+if (-not $PreflightOnly -and -not $DeploymentWorker) {
+    $workerArguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        ('"{0}"' -f $PSCommandPath), '-DeploymentWorker',
+        '-WebReadinessTimeoutSeconds', [string]$WebReadinessTimeoutSeconds
+    )
+    foreach ($name in @('SkipWatchdog', 'OpenBrowser', 'EnableFullSymbolCatalog')) {
+        if (Get-Variable -Name $name -ValueOnly) { $workerArguments += ('-' + $name) }
+    }
+    $workerRoot = Split-Path -Parent $PSScriptRoot
+    Write-Host ('Starting managed deployment; logs: {0}' -f (Join-Path $PSScriptRoot 'logs'))
+    $deploymentProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $workerArguments `
+        -WorkingDirectory $workerRoot -WindowStyle Hidden -PassThru -ErrorAction Stop
+    try {
+        $null = $deploymentProcess.Handle
+        $deploymentProcess.WaitForExit()
+        $deploymentExit = $deploymentProcess.ExitCode
+    } finally {
+        $deploymentProcess.Dispose()
+    }
+    Write-Host ('Managed deployment exited with code {0}.' -f $deploymentExit)
+    exit $deploymentExit
+}
 
 
 # -------------------------------- 配置 ---------------------------------------
@@ -624,10 +655,24 @@ for base in (root / 'src' / 'chanlun', root / 'web' / 'chanlun_chart'):
             continue
         source = path.read_bytes()
         compile(source, str(path), 'exec')
-required = ('flask', 'flask_login', 'flask_wtf', 'numpy', 'pandas', 'sqlalchemy', 'tornado')
+required = ('flask', 'flask_login', 'flask_wtf', 'numpy', 'pandas', 'sqlalchemy', 'tornado', 'playwright')
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit('missing runtime modules: ' + ', '.join(missing))
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    if not Path(p.chromium.executable_path).is_file():
+        raise SystemExit('Chromium missing: run python -m playwright install chromium')
+    browser = p.chromium.launch(headless=True, timeout=10000)
+    try:
+        context = browser.new_context(device_scale_factor=1, service_workers='block')
+        context.route('**/*', lambda route: route.abort())
+        page = context.new_page()
+        page.add_script_tag(path=str(root / 'web/chanlun_chart/cl_app/static/charting_library/charting_library.standalone.js'))
+        if not page.evaluate('typeof TradingView.widget === "function"'):
+            raise SystemExit('Bundled TradingView snapshot runtime is unavailable')
+    finally:
+        browser.close()
 "@
 $encodedPreflight = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($preflightCode))
 $preflightLauncher = "import base64;exec(compile(base64.b64decode('$encodedPreflight'),'<chanlun-preflight>','exec'))"
@@ -1061,6 +1106,20 @@ if (-not $SkipWatchdog) {
         -WindowStyle Hidden `
         -PassThru
     Log ('web watchdog launched PID={0} with current deployment scope' -f $watchdogProcess.Id)
+    $watchdogDeadline = (Get-Date).AddSeconds(30)
+    $watchdogReady = $false
+    do {
+        try {
+            $heartbeat = Get-Content -LiteralPath (Join-Path $watchdogStateRoot 'heartbeat.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            $activeWatchdog = Get-CimInstance Win32_Process -Filter ('ProcessId={0}' -f [int]$heartbeat.watchdog_pid)
+            $watchdogReady = ($null -ne $activeWatchdog -and $activeWatchdog.CommandLine -like ('*' + $watchdogScript + '*') -and
+                [int]$heartbeat.app_pid -eq $startedProcess.Id -and $heartbeat.status -eq 'healthy' -and
+                ((Get-Date) - [datetime]$heartbeat.observed_at).TotalSeconds -lt 30)
+        } catch { $watchdogReady = $false }
+        if (-not $watchdogReady) { Start-Sleep -Milliseconds 500 }
+    } while (-not $watchdogReady -and (Get-Date) -lt $watchdogDeadline)
+    if (-not $watchdogReady) { throw 'watchdog failed to report a fresh healthy heartbeat for the deployed process' }
+    Log ('watchdog verified: PID={0} tracks web PID={1}' -f $heartbeat.watchdog_pid, $startedProcess.Id)
 }
 if ($OpenBrowser) { Open-WebApplication -Uri $webUri }
 Log '===== web restart DONE ====='

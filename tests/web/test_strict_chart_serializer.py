@@ -19,7 +19,7 @@ from chanlun.core.strict_structure.center_machine import (
     establish_center_preview,
 )
 from chanlun.core.strict_structure.models import CenterEvidence, CenterState, ConstituentUnit, SourceKind, TrendCenter
-from tests.core.strict_structure.helpers import completed_up_center, unit
+from tests.core.strict_structure.helpers import completed_up_center, ongoing_center, unit
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -106,16 +106,25 @@ def test_formal_center_rectangle_uses_core_not_envelope() -> None:
     assert payload["envelope"] == {"dd_tick": 100, "gg_tick": 130}
 
 
-def test_boundary_third_buy_exports_non_crossing_end_rule() -> None:
-    center = completed_up_center(return_low_tick=115, zg_tick=115)
+def test_third_buy_exports_a_return_disjoint_from_the_closed_core() -> None:
+    center = completed_up_center(return_low_tick=116, zg_tick=115)
 
     payload = strict_center_to_chart_dict(center)
 
     assert payload["third_class_confirmed"]
     assert payload["center_end_rule"] == (
-        "independent_completed_lower_leave_and_first_non_crossing_return"
+        "independent_completed_lower_leave_and_first_disjoint_return"
     )
-    assert payload["completion_return_segment"]["low_tick"] == payload["core"]["zg_tick"]
+    assert payload["completion_return_segment"]["low_tick"] > payload["core"]["zg_tick"]
+
+
+def test_boundary_contact_exports_an_ongoing_center_without_a_third_point() -> None:
+    center = ongoing_center(zg_tick=115)
+    center, _ = advance_center(center, unit(5, "down", 130, 115))
+    payload = strict_center_to_chart_dict(center)
+    assert payload["boundary_contact"] == "oscillation"
+    assert not payload["third_class_confirmed"] and not payload["center_ended"]
+    assert payload["completion_return_segment"] is None
 
 
 def test_one_price_recursive_center_publishes_unresolved_C46_policy() -> None:

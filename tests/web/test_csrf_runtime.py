@@ -16,7 +16,8 @@ class _EmptyTicksExchange:
 
 
 def test_create_app_accepts_its_own_csrf_token(monkeypatch):
-    monkeypatch.setattr(other_module, "get_exchange", lambda _market: _EmptyTicksExchange())
+    provider = Mock(side_effect=AssertionError("empty quote request reached a provider"))
+    monkeypatch.setattr(other_module, "get_exchange", provider)
     app = create_app(
         {
             "TESTING": True,
@@ -37,11 +38,12 @@ def test_create_app_accepts_its_own_csrf_token(monkeypatch):
         )
 
     assert token
+    provider.assert_not_called()
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "market_state": "open",
-        "now_trading": True,
+        "market_state": "unknown",
+        "now_trading": None,
         "ticks": [],
         "error": None,
     }

@@ -22,6 +22,7 @@ from chanlun import fun
 from chanlun import config
 from chanlun.exchange import Exchange, SINGLE_SYMBOL_STOCK_INFO
 from chanlun.exchange.exchange import Tick
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
 from chanlun.exchange.longbridge_quote import QuoteContextBridge
@@ -1018,6 +1019,12 @@ class ExchangeChangQiao(Exchange):
         is_history_query = end_date is not None
 
         now_dt = datetime.now(tz)
+        # The canonical caller froze observation before entering the provider.
+        # Use that same clock for the query window as well as tail filtering;
+        # a delayed call must not move the lower history boundary forward.
+        canonical_as_of = args.get('_canonical_closed_minute_as_of')
+        if not is_history_query and frequency == '1m' and start_date is None and canonical_as_of is not None:
+            now_dt = min(now_dt, _parse_kline_boundary(canonical_as_of,tz=tz,end_of_day=False))
 
         if is_history_query:
             # 用户指定了结束时间，严格按照用户时间查询
@@ -1253,25 +1260,27 @@ class ExchangeChangQiao(Exchange):
                 quotes = self._quote_ctx().quote(lb_symbols)
                 res = {}
                 for q in quotes:
-                    last_done = float(q.last_done)
-                    prev_close = float(q.prev_close)
-
-                    cal_rate = 0.0
-                    if prev_close > 0:
-                        cal_rate = round(((last_done - prev_close) / prev_close) * 100, 2)
-
-                    project_code = lb_to_project.get(q.symbol, self._from_lb_symbol(q.symbol))
-                    res[project_code] = Tick(
-                        code=project_code,
-                        last=last_done,
-                        buy1=0.0,
-                        sell1=0.0,
-                        high=float(q.high),
-                        low=float(q.low),
-                        open=float(q.open),
-                        volume=float(q.volume),
-                        rate=cal_rate
-                    )
+                    try:
+                        last_done = quote_price(q.last_done)
+                        if last_done is None or not isinstance(q.symbol, str) or not q.symbol.strip():
+                            continue
+                        cal_rate = quote_change_rate(last_done, q.prev_close)
+                        project_code = lb_to_project.get(q.symbol, self._from_lb_symbol(q.symbol))
+                        res[project_code] = Tick(
+                            code=project_code,
+                            last=last_done,
+                            buy1=0.0,
+                            sell1=0.0,
+                            high=float(q.high),
+                            low=float(q.low),
+                            open=float(q.open),
+                            volume=float(q.volume),
+                            reference_price=quote_price(q.prev_close),
+                            rate=cal_rate
+                        )
+                    except Exception as exc:
+                        LogUtil.warning(f"Longbridge quote row unavailable: {type(exc).__name__}")
+                        continue
                 return res
             except Exception as e:
                 LogUtil.error(f"Error in ticks: {e}")

@@ -63,19 +63,23 @@ def _sector_catalog():
     return assessment.get("assessments", []), snapshot.get("members", {}), payload.get("captured_at")
 
 
-def _current_rows(result, source):
+def _current_rows(result, source, *, candidate_id=None):
     rows = []
     seen = set()
-    for item in [*result.get("selected", []), *result.get("observations", [])]:
+    for item in [*result.get("selected", []), *result.get("observations", []),
+                 *result.get("entry_waiting", [])]:
         point = item["point"]
         center = item.get("center") or {}
         identity = _identity(source, item["code"], item["frequency"], point.get("point_id", point.get("render_id")))
         if identity in seen:
             continue
         seen.add(identity)
+        if candidate_id is not None and identity != candidate_id:
+            continue
         waiting = "observation_validation" in item
         rows.append({
             "id": identity,
+            "candidate_evidence_version": hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20],
             "code": item["code"], "name": item.get("name", item["code"]), "market": item.get("market", "a"),
             "frequency": item["frequency"], "point": point,
             "exit_plan": item.get("exit_plan"), "confirmation_exit_plan": item.get("confirmation_exit_plan"),
@@ -93,31 +97,129 @@ def _current_rows(result, source):
             "evidence_available": item.get("evidence_available", False),
             "evidence_chart_available": item.get("evidence_chart_available", False),
             "observation_validation": item.get("observation_validation"),
+            "decision_reasons": item.get("decision_reasons", []),
+            "entry_waiting": item.get("entry_waiting", False),
+            "operational_macd_risk": item.get("operational_macd_risk"),
             "center": {k: center.get(k) for k in (
                 "state", "center_id", "center_zd_price", "center_zg_price", "center_ended",
                 "third_class_confirmed", "source_kind", "structural_level", "center_end_available_at",
             )},
         })
+        if candidate_id is not None:
+            break
     return rows
 
 
-def dashboard(*, background=False):
-    result = manager.results(background=background)
+_POINT_INDEX_FIELDS = (
+    "point_id", "point_type", "status", "confirmed_at", "available_at", "anchor_at",
+    "anchor_price", "invalidation_price", "evidence_scope", "center_ordinal", "variant", "structural_level",
+)
+
+
+def _dashboard_projection(payload, compact):
+    rows = _current_rows(payload, payload.get("run_id", "idle"))
+    if compact:
+        fields = {"id", "code", "name", "market", "frequency", "origin", "stage", "latest_price", "candidate_evidence_version",
+                  "source_closed_at", "gain_pct", "confirmation_age_sessions", "selection_available_at",
+                  "evidence_available", "evidence_chart_available", "operational_macd_risk", "nested_confirmation", "exit_plan"}
+        rows = [{**{key: value for key, value in row.items() if key in fields and value is not None},
+                 "point": {key: row["point"][key] for key in _POINT_INDEX_FIELDS if row["point"].get(key) is not None},
+                 "detail_loaded": False} for row in rows]
+        for row in rows:
+            if row.get("exit_plan"):
+                row["exit_plan"] = {key: value for key, value in row["exit_plan"].items() if key in {
+                    "evidence_scope", "side", "point_status", "source_frequency", "stop_loss", "take_profit",
+                }}
+            nested = row.get("nested_confirmation")
+            if nested:
+                row["nested_confirmation"] = {key: nested.get(key) for key in ("state", "frequency")}
+    return {**{key: value for key, value in payload.items() if key not in {
+        "selected", "observations", "entry_waiting", "consolidation_alerts", "processed_symbols",
+        "u295_lower_structural_witnesses", "recent_rejections", "verified_periods",
+    }}, "_workbench_rows": rows}
+
+
+def candidate_detail(source, candidate_id):
+    """Project one verified candidate before copying the full result payload."""
+    def project(payload):
+        rows = _current_rows(payload, source, candidate_id=candidate_id)
+        return {"candidate": rows[0] if rows else None}
+    result = manager.results(project=project, available=True)
+    if result.get("run_id") != source:
+        raise ValueError("该批次已被新的选股替换，请刷新结果")
+    if result.get("candidate") is None:
+        raise ValueError("该候选已退出当前窗口或证据不可用，请刷新结果")
+    rows, _, version, unverified = _live_rows([result["candidate"]], source, result.get("current_source_revision"))
+    if not rows:
+        if unverified:
+            raise ValueError("该候选正在复核或最新行情复核失败，核验通过后再显示")
+        raise ValueError("最新复核已确认该候选退出，请刷新结果")
+    return {"source": source, "candidate": {**result["candidate"], "detail_loaded": True},
+            "live_recheck_version": version,
+            "evidence_version": result.get("evidence_version"),
+            "result_reader_revision": result.get("result_reader_revision")}
+
+
+def _check_version(records):
+    return hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20] if records else 0
+
+
+def _live_rows(rows, source, revision):
+    from .signal_monitor import service as signal_monitor
+    overlay = signal_monitor.selection_overlay(source, revision)
+    kept, removed, unverified = [], 0, 0
+    for row in rows:
+        period = overlay.get(f"{row['market']}:{row['code']}:{row['frequency']}")
+        cutoff = row.get("source_closed_at") or 0
+        verified = period and type(period.get("cutoff")) is int and period["cutoff"] >= cutoff
+        identity = None
+        if period and (verified or period.get("unverified_identities")):
+            identity = hashlib.sha256(json.dumps([row["market"], row["code"], row["frequency"], row["point"]["point_id"]]).encode()).hexdigest()
+        if verified:
+            if identity not in period["identities"]:
+                removed += 1
+                continue
+        if period and identity in period.get("unverified_identities", ()):
+            unverified += 1
+            continue
+        if period and period.get("error") and (period.get("failed_cutoff", period.get("cutoff")) or 0) >= cutoff:
+            unverified += 1
+            continue
+        if verified:
+            row["latest_recheck_at"] = period["checked_at"]
+            row["latest_recheck_closed_at"] = period["cutoff"]
+            row["selection_check_version"] = _check_version(period)
+        kept.append(row)
+    return kept, removed, _check_version(overlay), unverified
+
+
+def live_recheck_version(source, revision):
+    return _live_rows([], source, revision)[2]
+
+
+def dashboard(*, background=False, compact=False):
+    result = manager.results(background=background, project=lambda payload: _dashboard_projection(payload, compact))
     source = result.get("run_id", "idle")
-    rows = _current_rows(result, source)
+    rows, removed, live_version, unverified = _live_rows(result.get("_workbench_rows", _current_rows(result, source)),
+                                            source, result.get("current_source_revision"))
     status = {k: v for k, v in result.items() if k not in (
-        "selected", "observations", "recent_rejections", "rejection_counts", "reason_labels", "errors",
+        "selected", "observations", "entry_waiting", "consolidation_alerts", "recent_rejections", "rejection_counts", "reason_labels", "errors",
+        "_workbench_rows", "processed_symbols", "u295_lower_structural_witnesses", "verified_periods",
     )}
     status["error_count"] = (result.get("error_count") if result.get("results_loading")
                              else len(result.get("errors", [])))
     context = higher_context.snapshot(manager, source, result.get("source_revision"))
     status["higher_context_version"] = higher_context.status_version(manager, source)
+    status["live_exclusion_count"] = removed
+    status["live_unverified_count"] = unverified
+    status["live_recheck_version"] = live_version
     for row in rows:
         key = (row["market"], row["code"], row.get("source_closed_at"))
         row["higher_context"] = context["rows"].get(key) or {
             "frequency": "30m", "source_closed_at": row.get("source_closed_at"),
             "category": "unknown", "quality": "unknown",
-            "reason": "NOT_COMPUTED" if context["status"] in {"not_started", "failed"} else "PENDING",
+            "reason": "DISABLED" if context["status"] == "disabled" else
+                      "NOT_COMPUTED" if context["status"] in {"not_started", "failed"} else "PENDING",
         }
     sectors, members, catalog_at = _sector_catalog()
     membership = {}
@@ -140,6 +242,7 @@ def dashboard(*, background=False):
     } for s in sectors]
     sector_rows.sort(key=lambda s: (-s["signal_count"], s["name"]))
     return {"source": source, "status": status, "candidates": rows, "sectors": sector_rows,
+            "compact": compact,
             "higher_context": {k: v for k, v in context.items() if k != "rows"},
             "point_exit_sources": EXIT_PRICE_SOURCES,
             "diagnostics": {key: result.get(key, {} if key != "errors" else [])

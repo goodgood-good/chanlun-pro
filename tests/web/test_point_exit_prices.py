@@ -13,14 +13,23 @@ def point(kind="1buy", **kwargs):
             "anchor_at": 100, "available_at": 120, "confirmed_at": 120,
             "anchor_tick": 900 if buy else 1300,
             "invalidation_tick": (850 if buy else 1350) if kind[0] == "2" else (900 if buy else 1300),
-            "center_id": "center", "divergence": {"kind": "trend", "structural_level": 0}, **kwargs}
+            "center_id": "center", "divergence": {
+                "kind": "trend", "structural_level": 0, "source_kind": "segment",
+                "price_basis_revision": "raw", "comparison_center_id": "center",
+                "divergence_id": "divergence", "signal_unit_id": "signal",
+                "comparison_center_established_at": 60,
+                "comparison_center_known_at": 70,
+                "available_at": 100,
+            }, **kwargs}
 
 
 def center(**kwargs):
     return {"center_id": "center", "structural_level": 0, "source_kind": "segment",
             "price_basis_revision": "raw", "available_at": 80, "established_at": 60,
             "core": {"zd_tick": 1100, "zg_tick": 1150},
-            "envelope": {"dd_tick": 1000, "gg_tick": 1200}, **kwargs}
+            "envelope": {"dd_tick": 1000, "gg_tick": 1200},
+            "boundary_divergence_id": "divergence",
+            "boundary_anchor_unit_id": "signal", **kwargs}
 
 
 def snapshot(*points, centers=None, cutoff=300, quantum="0.01"):
@@ -32,7 +41,7 @@ def snapshot(*points, centers=None, cutoff=300, quantum="0.01"):
 
 @pytest.mark.parametrize("kind,price,trigger", [
     ("1buy", 9, "lt"), ("1sell", 13, "gt"), ("2buy", 8.5, "lt"), ("2sell", 13.5, "gt"),
-    ("3buy", 9, "lte"), ("3sell", 13, "gte"),
+    ("3buy", 9, "lt"), ("3sell", 13, "gt"),
 ])
 def test_six_directional_stops_and_boundary_contact(kind, price, trigger):
     plan = build_point_exit_plans(snapshot(point(kind)))[kind]
@@ -47,6 +56,8 @@ def test_first_class_uses_terminal_envelope_not_core(kind, price):
     assert plan["take_profit"]["price"] == price
     assert plan["take_profit"]["basis"] in {"terminal_dd", "terminal_gg"}
     assert plan["take_profit"]["status"] == "reference"
+    assert plan["take_profit"]["comparison_center_id"] == "center"
+    assert plan["take_profit"]["comparison_center_known_at"] == 70
 
 
 @pytest.mark.parametrize("kind", ["2buy", "2sell", "3buy", "3sell"])
@@ -59,6 +70,24 @@ def test_consolidation_and_unknown_center_are_not_first_class_profit_proof():
     p = point(divergence={"kind": "consolidation", "structural_level": 0})
     assert build_point_exit_plans(snapshot(p))[p["point_id"]]["take_profit"]["price"] is None
     assert build_point_exit_plans(snapshot(point(), centers=[]))["1buy"]["take_profit"]["price"] is None
+
+
+def test_first_class_exit_references_reject_a_different_comparison_center():
+    bad_buy = point()
+    bad_buy["divergence"]["comparison_center_id"] = "older-center"
+    plan = build_point_exit_plans(snapshot(bad_buy))["1buy"]
+    assert plan["profit_observation"] is None
+    assert plan["take_profit"]["status"] == "waiting"
+
+    bad_sell = point("1sell", point_id="later", anchor_at=150,
+                     available_at=160, confirmed_at=160)
+    bad_sell["divergence"]["comparison_center_id"] = "older-center"
+    target = build_point_exit_plans(snapshot(point("3buy"), bad_sell))["3buy"]
+    assert target["take_profit"]["status"] == "waiting"
+    wrong_boundary = center(boundary_divergence_id="another-comparison")
+    assert build_point_exit_plans(
+        snapshot(point(), centers=[wrong_boundary])
+    )["1buy"]["profit_observation"] is None
 
 
 def test_subsequent_exit_requires_later_anchor_known_by_snapshot_and_same_level():
@@ -81,6 +110,7 @@ def test_first_reverse_exit_is_retained_even_if_it_is_below_the_buy_price():
     tp = build_point_exit_plans(snapshot(point("3buy"), early, later))["3buy"]["take_profit"]
     assert tp["price"] == 8.5 and tp["point_id"] == "1sell"
     assert tp["status"] == "exit_confirmed"
+    assert tp["comparison_center_id"] == "center"
 
 
 def test_extension_after_original_point_does_not_rewrite_first_observation():

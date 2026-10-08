@@ -6,6 +6,7 @@ import threading
 import pathlib
 import secrets
 import subprocess
+from urllib.parse import urlencode, unquote, urlsplit
 from flask import (
     Flask,
     g,
@@ -43,6 +44,19 @@ def _configured_login_accounts():
     """Resolve the configured named Web accounts."""
 
     return get_login_accounts()
+
+
+def _login_destination(value):
+    """Preserve local chart deep links without accepting an external redirect."""
+    try:
+        parsed = urlsplit(value or "")
+        path = unquote(parsed.path)
+        if (parsed.scheme or parsed.netloc or not path.startswith("/") or path.startswith("//")
+                or "\\" in path or any(ord(char) < 32 for char in value)):
+            return "/"
+        return value
+    except (ValueError, TypeError):
+        return "/"
 
 
 def create_app(test_config=None):
@@ -288,7 +302,8 @@ def create_app(test_config=None):
                 "code": "authentication_required",
                 "errmsg": "Authentication required.",
             }, 401
-        return redirect("/login")
+        target = _login_destination(request.full_path.rstrip("?"))
+        return redirect("/login" + ("?" + urlencode({"next": target}) if target != "/" else ""))
 
     @app.errorhandler(CSRFError)
     def _handle_csrf_error(error):
@@ -357,6 +372,7 @@ def create_app(test_config=None):
     def login_opt():
         accounts = _configured_login_accounts()
         remember_duration = app.config["REMEMBER_COOKIE_DURATION"]
+        destination = _login_destination(request.form.get("next") or request.args.get("next"))
 
         emsg = ""
         submitted_username = ""
@@ -367,6 +383,7 @@ def create_app(test_config=None):
                     "login.html",
                     emsg="尝试次数过多，请稍后再试",
                     login_username=request.form.get("username") or "",
+                    login_next=destination,
                 ), 429
 
             submitted_username = normalize_login_username(
@@ -391,7 +408,7 @@ def create_app(test_config=None):
                     remember=True,
                     duration=remember_duration,
                 )
-                return redirect("/")
+                return redirect(destination)
 
             login_rate_limiter.record_failure(client_key)
             emsg = "用户名或密码错误"
@@ -402,6 +419,7 @@ def create_app(test_config=None):
             "login.html",
             emsg=emsg,
             login_username=submitted_username,
+            login_next=destination,
         )
 
     @app.route("/logout", methods=["POST"])
@@ -574,6 +592,9 @@ def create_app(test_config=None):
                 "error": None,
             }
 
+        monitor_probe = app.extensions.get('monitor_health')
+        monitor_component = monitor_probe() if runtime_required and callable(monitor_probe) else {'required':False,'ready':True}
+
         reasons = []
         if not metadata_component["ready"]:
             reasons.append("metadata_not_ready")
@@ -593,6 +614,8 @@ def create_app(test_config=None):
                 reasons.append("runtime_start_failed")
             else:
                 reasons.append("runtime_not_running")
+        if monitor_component.get('required') and not monitor_component.get('ready'):
+            reasons.append('signal_monitor_'+monitor_component.get('status','unavailable'))
         ready = not reasons
         payload = {
             "status": "ready" if ready else "not_ready",
@@ -606,6 +629,7 @@ def create_app(test_config=None):
                 "metadata": metadata_component,
                 "symbols": symbols_component,
                 "ticks": ticks_component,
+                'monitor':monitor_component,
             },
             "reasons": reasons,
         }
@@ -700,6 +724,7 @@ def create_app(test_config=None):
         "metadata": None,
         "ticks": None,
         "symbols": None,
+        'signal_monitor':None,
     }
     def _probe_ticks(market):
         default_code = (
@@ -799,6 +824,7 @@ def create_app(test_config=None):
             if not app.testing:
                 from .services.signal_monitor import service as signal_monitor
                 signal_monitor.start_runtime()
+                runtime_state['signal_monitor']=signal_monitor
             _ensure_start_is_current()
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
             with runtime_lock:
@@ -934,12 +960,20 @@ def create_app(test_config=None):
                 "error": runtime_state.get("error"),
             }
 
+    def monitor_health():
+        with runtime_lock:
+            monitor=runtime_state.get('signal_monitor')
+        if monitor is None:
+            return {'required':False,'ready':True}
+        return {**monitor.runtime_health(),'required':True}
+
     app.extensions.update({
         "readiness": readiness_registry,
         "metadata_warmup_thread": metadata_warmup_thread,
         "login_rate_limiter": login_rate_limiter,
         "health_snapshot": health_snapshot,
         "runtime_status": runtime_status,
+        'monitor_health':monitor_health,
         "start_runtime_services": start_runtime_services,
         "shutdown_runtime_services": shutdown_runtime_services,
     })

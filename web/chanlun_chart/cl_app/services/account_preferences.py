@@ -180,16 +180,21 @@ def _normalize_display_config(key: str, raw: object) -> str:
                 raise InvalidAccountPreferences(f"{key} schema is too long")
         elif type(value) is not bool:
             raise InvalidAccountPreferences(f"{key} values must be booleans")
-    if parsed["schema"] not in {"chanlun-chart-config-v5", "chanlun-chart-config-v6", "chanlun-chart-config-v7", "chanlun-chart-config-v8"}:
+    if parsed["schema"] not in {"chanlun-chart-config-v5", "chanlun-chart-config-v6",
+                                "chanlun-chart-config-v7", "chanlun-chart-config-v8",
+                                "chanlun-chart-config-v9"}:
         raise InvalidAccountPreferences(f"{key} has an unsupported display schema")
-    normalized = {"schema": "chanlun-chart-config-v8"}
+    normalized = {"schema": "chanlun-chart-config-v9"}
     basic_keys = {
-        "fx", "bi", "xd", "center_all", "center_observation", "point_all", "divergence_all",
+        "fx", "bi", "xd", "center_all", "center_observation", "trend_all",
+        "point_all", "divergence_all",
         "point_1buy", "point_2buy", "point_3buy", "point_1sell", "point_2sell", "point_3sell",
     }
-    level_key = re.compile(r"^(center|point|divergence_consolidation|divergence_trend)_L([0-9]|[1-4][0-9])$")
+    level_key = re.compile(r"^(center|trend|point|divergence_consolidation|divergence_trend)_L([0-9]|[1-4][0-9])$")
+    period_key = re.compile(r"^(center|trend|point|divergence)_period_(1m|5m|30m)$")
     normalized.update({name: value for name, value in parsed.items()
-                       if name in basic_keys or level_key.fullmatch(name)})
+                       if name in basic_keys or level_key.fullmatch(name)
+                       or period_key.fullmatch(name)})
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 

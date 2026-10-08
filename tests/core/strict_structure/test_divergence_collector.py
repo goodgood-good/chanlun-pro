@@ -33,7 +33,10 @@ from tests.core.strict_structure.test_first_class_points import UP_VALUES
 from tests.core.strict_structure.helpers import three_center_fixture
 
 
-RECURSIVE_TREND_VALUES = UP_VALUES[:-6] + (
+RECURSIVE_TREND_VALUES = (
+    ("up", 90, 120),
+    ("down", 120, 100),
+    *UP_VALUES[2:-6],
     ("down", 155, 138),
     ("up", 138, 145),
     ("down", 145, 138),
@@ -218,6 +221,32 @@ def test_completed_trend_emits_trend_divergence_at_recursive_level():
     item = only(collect_formal_divergence_ledger(structure))
     assert item.kind == "trend"
     assert item.structural_level == 2
+
+
+def test_l091_second_center_without_third_buy_cannot_emit_top_trend_divergence():
+    # L091:1027-1033: a developing second center can look weak, but its
+    # third-class buy must occur before this uptrend's top divergence is formal.
+    complete, _earlier, _later = completed_trend_fixture(level=1)
+    values = complete.levels[1].units
+    completed_centers = complete.levels[1].center_result.centers
+    return_id = completed_centers[-1].completion_return_unit.unit_id
+    prefix_end = next(i for i, item in enumerate(values) if item.unit_id == return_id)
+    strength = FixedStrength({
+        ("u-8", "u-9", "u-10"): (10.0, 5.0, 4.0),
+        ("u-16", "u-17", "u-18"): (5.0, 2.0, 2.0),
+    })
+    centers, assembly = calculate_level_with_divergence_boundaries(
+        values[:prefix_end], 1, SourceKind.TREND_TYPE, strength=strength,
+    )
+
+    assert len(centers.centers) == 2
+    assert centers.centers[-1].state is CenterState.ONGOING
+    assert centers.centers[-1].completion_return_unit is None
+    assert all(
+        trend.terminal_divergence is None
+        or trend.terminal_divergence.kind != "trend"
+        for trend in (*assembly.current_trends, *assembly.completed_trends)
+    )
 
 
 def test_non_divergent_comparison_is_not_formal_evidence():

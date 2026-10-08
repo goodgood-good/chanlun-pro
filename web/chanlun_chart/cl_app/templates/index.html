@@ -682,10 +682,14 @@
               layout: urlLayout,
               intervals: selectedIntervals.slice(),
             };
-            setLocalValue("chart_layout_type", urlLayout);
-            selectedIntervals.forEach(function (interval, index) {
-              setLocalValue(selectedMarket + "_interval_" + (index + 1), interval);
-            });
+            // Selecting a screening candidate pins this iframe's context;
+            // it does not replace the account's saved workspace defaults.
+            if (params.get('workspace_layout') !== '1') {
+              setLocalValue("chart_layout_type", urlLayout);
+              selectedIntervals.forEach(function (interval, index) {
+                setLocalValue(selectedMarket + "_interval_" + (index + 1), interval);
+              });
+            }
           }
         }
       } catch (_) { /* URL 解析失败回退到默认行为，不阻塞图表初始化 */ }

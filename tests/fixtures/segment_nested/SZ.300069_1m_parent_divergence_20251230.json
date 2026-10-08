@@ -1,0 +1,19 @@
+{
+  "schema": "chanlun-recorded-market-fixture-v1",
+  "provider": "QMT_XTDATA_local_cache",
+  "market": "a",
+  "code": "SZ.300069",
+  "frequency": "1m",
+  "query_start": "2024-01-01",
+  "exact_end": "2025-12-30 14:31:00",
+  "skip_download": true,
+  "adjustment": "front_ratio",
+  "price_basis_revision": "sha256:ff891fd341d72bebf59c250488bd1a24d9e5f83df4c938dba9931c1564deaeb4",
+  "structure_price_quantum": "0.01",
+  "rows": 33531,
+  "first_closed_at": "2025-06-10T14:00:00+08:00",
+  "last_closed_at": "2025-12-30T14:31:00+08:00",
+  "parquet_sha256": "acf95bd89f59fa076ddfd53cc4c0bf9941f8579d11d455a44ace72203e815f35",
+  "source_scope": "one_real_parent_grade_divergence_first_observed_at_final_closed_bar",
+  "not_original_2007_or_2008_author_market_case": true
+}

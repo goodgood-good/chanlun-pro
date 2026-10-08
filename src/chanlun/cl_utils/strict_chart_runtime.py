@@ -68,6 +68,10 @@ def build_strict_chart_cd(
     last_bar_closed: bool = False,
 ) -> StrictChartRuntimeResult:
     """Build one runtime; callers must explicitly attest completed input."""
+    if frame.attrs.get("qmt_listing_history_conflict") is True:
+        return StrictChartRuntimeResult.unavailable(
+            "listing_metadata_conflict", "上市日期与已有成交记录冲突，暂不生成结构。",
+        )
     try:
         metadata = strict_snapshot_price_metadata(frame)
     except Exception as exc:

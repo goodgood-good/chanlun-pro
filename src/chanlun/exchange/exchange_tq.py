@@ -19,6 +19,7 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import config, fun
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
@@ -257,26 +258,23 @@ class ExchangeTq(Exchange):
                         break
                     continue
                 tick = self.res_ticks[code]
-                res_ticks[code] = Tick(
-                    code=code,
-                    last=0 if math.isnan(tick["last_price"]) else tick["last_price"],
-                    buy1=0 if math.isnan(tick["bid_price1"]) else tick["bid_price1"],
-                    sell1=0 if math.isnan(tick["ask_price1"]) else tick["ask_price1"],
-                    high=0 if math.isnan(tick["highest"]) else tick["highest"],
-                    low=0 if math.isnan(tick["lowest"]) else tick["lowest"],
-                    open=0 if math.isnan(tick["open"]) else tick["open"],
-                    volume=0 if math.isnan(tick["volume"]) else tick["volume"],
-                    rate=(
-                        0
-                        if math.isnan(tick["pre_settlement"])
-                        else round(
-                            (tick["last_price"] - tick["pre_settlement"])
-                            / tick["pre_settlement"]
-                            * 100,
-                            2,
+                try:
+                    last = quote_price(tick["last_price"])
+                    if last is not None:
+                        res_ticks[code] = Tick(
+                            code=code,
+                            last=last,
+                            buy1=0 if math.isnan(tick["bid_price1"]) else tick["bid_price1"],
+                            sell1=0 if math.isnan(tick["ask_price1"]) else tick["ask_price1"],
+                            high=0 if math.isnan(tick["highest"]) else tick["highest"],
+                            low=0 if math.isnan(tick["lowest"]) else tick["lowest"],
+                            open=0 if math.isnan(tick["open"]) else tick["open"],
+                            volume=0 if math.isnan(tick["volume"]) else tick["volume"],
+                            reference_price=quote_price(tick["pre_settlement"]),
+                            rate=quote_change_rate(last, tick["pre_settlement"], positive_reference=False),
                         )
-                    ),
-                )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    pass  # A malformed snapshot cannot block the next symbol.
                 break
         return res_ticks
 

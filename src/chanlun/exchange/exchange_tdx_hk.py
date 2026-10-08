@@ -15,6 +15,7 @@ from chanlun.market import Market
 from chanlun.config import get_data_path
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.persistence.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
 from chanlun.exchange.kline_precision import normalize_kline_precision
@@ -304,17 +305,11 @@ class ExchangeTDXHK(Exchange):
                         high=_quote["high"],
                         volume=_quote["zongliang"],
                         open=_quote["open"],
+                        reference_price=quote_price(_quote.get("pre_close")),
                         rate=(
                             # 涨跌幅=(现价-昨收)/昨收;原分母用现价是错的(涨10%显示~9.09%),
                             # 与 tdx_fx/tdx_us 的审查 L2 修复口径一致。
-                            round(
-                                (_quote["price"] - _quote["pre_close"])
-                                / _quote["pre_close"]
-                                * 100,
-                                2,
-                            )
-                            if _quote["pre_close"] > 0
-                            else 0
+                            quote_change_rate(_quote["price"], _quote.get("pre_close"))
                         ),
                     )
         return ticks

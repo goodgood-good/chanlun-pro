@@ -73,6 +73,26 @@ def test_login_exposes_and_returns_the_named_account(app):
     assert payload["account"] == {"username": "alice-layout-test"}
 
 
+def test_login_retains_notification_chart_symbol_period_and_layout(app):
+    from urllib.parse import parse_qs,urlsplit
+    client=app.test_client()
+    target='/?market=us&code=TSLA.US&frequency=5m&layout=single&workspace_layout=1'
+    redirect=client.get(target)
+    assert redirect.status_code==302
+    login=urlsplit(redirect.headers['Location'])
+    assert login.path=='/login' and parse_qs(login.query)['next']==[target]
+    page=client.get(redirect.headers['Location']).get_data(as_text=True)
+    assert 'name="next"' in page and 'TSLA.US' in page
+    response=client.post('/login',data={'username':'alice-layout-test','password':'alice-password','next':target})
+    assert response.status_code==302 and response.headers['Location']==target
+
+
+@pytest.mark.parametrize('target',['https://example.test/','//example.test/','/\\example.test/','/%2fexample.test/','/\n/evil'])
+def test_login_rejects_external_or_ambiguous_redirects(app,target):
+    response=app.test_client().post('/login',data={'username':'alice-layout-test','password':'alice-password','next':target})
+    assert response.status_code==302 and response.headers['Location']=='/'
+
+
 def test_chart_preferences_are_isolated_between_accounts(app):
     alice = app.test_client()
     bob = app.test_client()
@@ -125,6 +145,45 @@ def test_tradingview_storage_ignores_client_supplied_user_and_uses_session(app):
     assert [row["name"] for row in alice_rows] == ["Alice layout"]
 
 
+def test_stale_chart_id_from_other_market_creates_persisted_us_layout(app):
+    client = app.test_client()
+    _login(client, "alice-layout-test", "alice-password")
+    a_url = "/tv/1.1/charts?client=chanlun_pro_a_1&user=session"
+    us_url = "/tv/1.1/charts?client=chanlun_pro_us_1&user=session"
+    a_content = '{"charts":[{"studies":[]}]}'
+    us_content = '{"charts":[{"studies":[{"name":"MACD"}]}]}'
+
+    a_id = client.post(a_url, data={
+        "name": "A layout", "content": a_content,
+        "symbol": "a:SH.600519", "resolution": "5",
+    }).get_json()["id"]
+    empty_us_id = client.post(us_url, data={
+        "name": "Empty US layout", "content": a_content,
+        "symbol": "us:AAPL.US", "resolution": "30",
+    }).get_json()["id"]
+    first_us_save = client.post(us_url + f"&chart={a_id}", data={
+        "name": "US layout", "content": us_content,
+        "symbol": "us:AAPL.US", "resolution": "30",
+    })
+
+    assert first_us_save.status_code == 200
+    new_id = first_us_save.get_json()["id"]
+    assert new_id != a_id
+    assert [row["id"] for row in client.get(us_url).get_json()["data"]] == [
+        new_id, empty_us_id,
+    ]
+    assert client.get(us_url + f"&chart={new_id}").get_json()["data"]["content"] == us_content
+    assert client.get(a_url + f"&chart={a_id}").get_json()["data"]["content"] == a_content
+
+    revised = '{"charts":[{"studies":[{"name":"MACD"},{"name":"RSI"}]}]}'
+    updated = client.post(us_url + f"&chart={new_id}", data={
+        "name": "US layout", "content": revised,
+        "symbol": "us:AAPL.US", "resolution": "30",
+    })
+    assert updated.get_json() == {"status": "ok", "id": new_id}
+    assert client.get(us_url + f"&chart={new_id}").get_json()["data"]["content"] == revised
+
+
 def test_manual_drawings_are_isolated_by_authenticated_account(app):
     alice = app.test_client()
     bob = app.test_client()
@@ -147,8 +206,8 @@ def test_manual_drawings_are_isolated_by_authenticated_account(app):
 
     assert alice.post(
         base_url + "bob-layout-test",
-        json={"state": state},
-    ).get_json() == {"status": "ok"}
+        json={"state": state,'base_state':{'schema':'chanlun-user-drawings','sources':{},'groups':{}}},
+    ).get_json()['status'] == 'ok'
     assert bob.get(base_url + "alice-layout-test").get_json()["data"] == {
         "schema": "chanlun-user-drawings",
         "sources": {},
@@ -223,8 +282,24 @@ def test_restored_analysis_controls_roundtrip_with_account_preferences(app):
     assert response.status_code == 200
     saved = json.loads(client.get("/api/chart/preferences").get_json()
                        ["preferences"]["values"]["cl_show_config_1_1"])
-    assert saved["schema"] == "chanlun-chart-config-v8"
-    assert "trend_L0" not in saved
+    assert saved["schema"] == "chanlun-chart-config-v9"
     for key, value in display.items():
-        if key not in {"schema", "trend_L0"}:
+        if key != "schema":
             assert saved[key] is value
+
+
+def test_physical_period_and_trend_preferences_roundtrip(app):
+    client = app.test_client()
+    _login(client, "alice-layout-test", "alice-password")
+    display = {"schema": "chanlun-chart-config-v9", "trend_all": True,
+               "center_period_1m": True, "center_period_5m": True,
+               "trend_period_30m": False, "point_period_5m": True,
+               "divergence_period_30m": True}
+    response = client.put("/api/chart/preferences", json={
+        "schema": "chanlun-account-chart-preferences/v1",
+        "values": {"cl_show_config_1_1": json.dumps(display)},
+    })
+    assert response.status_code == 200
+    saved = json.loads(client.get("/api/chart/preferences").get_json()
+                       ["preferences"]["values"]["cl_show_config_1_1"])
+    assert saved == display

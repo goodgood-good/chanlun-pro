@@ -26,7 +26,7 @@ def cl_data_to_tv_chart(
 ) -> Union[dict, None]:
     """Display native bars, strokes, segments and their centers."""
 
-    from chanlun.cl_utils.strict_chart import build_center_snapshot
+    from chanlun.cl_utils.strict_chart import build_native_center_snapshot
 
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("chart frame must be a pandas DataFrame")
@@ -225,7 +225,7 @@ def cl_data_to_tv_chart(
     try:
         structure_started = perf_counter()
         cpu_started = thread_time()
-        strict_structure = build_center_snapshot(
+        strict_structure = build_native_center_snapshot(
             strict_runtime.cd, interval=frequency, display_bar_closed_at=tuple(kline_ts),
         )
         if strict_structure["symbol"] != code or strict_structure["source_frequency"] != frequency:

@@ -3,6 +3,16 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const info = require('../point_exit_info.js');
 
+test('native references state the stop direction and wait for a confirmed opposite period signal', () => {
+  for (const [side,trigger,expected] of [['buy','lt','跌破 10.125'],['sell','gt','升破 10.125']]) {
+    const result=info.describe({evidence_scope:'native_center_signal',point_status:'confirmed',side,
+      stop_loss:{price:10.125,trigger,basis:'turn_extreme'},take_profit:{price:null,status:'waiting',basis:'opposite_point'}});
+    assert.equal(result.stop,expected);
+    assert.equal(result.profit,'等待本周期已确认反向点');
+    assert.match(result.lines.join(' '),/本周期已确认的反向买卖点/);
+  }
+});
+
 test('missing targets are waiting, not a zero price or promised percentage', () => {
   const result = info.describe({point_status:'confirmed', side:'buy',
     stop_loss:{price:10.125,trigger:'lte',basis:'center_edge'},take_profit:{price:null}});
