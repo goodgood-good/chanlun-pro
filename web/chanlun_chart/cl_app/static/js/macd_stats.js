@@ -8,8 +8,8 @@ var MacdStats = (function () {
     const RANGE_SHAPE_TAG = 'macd-stats-range';
     const MARKER_SHAPE_TAG = 'macd-stats-marker';
 
-    const COLOR_POS = '#ef5350'; // 红柱
-    const COLOR_NEG = '#26a69a'; // 绿柱
+    const COLOR_POS = globalThis.ChartColors?.palette.up || '#ef5350'; // 红柱
+    const COLOR_NEG = globalThis.ChartColors?.palette.down || '#26a69a'; // 绿柱
     const COLOR_RANGE_BG = '#FFD54F';
 
     // 复刻后端 HIGHER_FREQ_MAP(chart_compute.py:85);仅取本工具会用到的层级。
@@ -759,7 +759,7 @@ var MacdStats = (function () {
                   <div style="color:${COLOR_POS}">🔴 红柱面积 <b>${fmt(s.posArea)}</b> (×2 <b>${fmt(s.posAreaX2)}</b>) | 峰 <b>${fmt(s.posMax)}</b></div>
                   <div style="color:${COLOR_NEG}">🟢 绿柱面积 <b>${fmt(s.negArea)}</b> (×2 <b>${fmt(s.negAreaX2)}</b>) | 谷 <b>${fmt(s.negMin)}</b></div>
                   <div>⚖️ 净面积 <b style="color:${s.netArea >= 0 ? COLOR_POS : COLOR_NEG}">${fmt(s.netArea)}</b> (×2 <b>${fmt(s.netAreaX2)}</b>)</div>
-                  <div>📈 黄白线 DIF峰 <b>${fmtPeak(s.difMax, s.difMin)}</b> | DEA峰 <b>${fmtPeak(s.deaMax, s.deaMin)}</b></div>
+                  <div>📈 DIF峰 <b>${fmtPeak(s.difMax, s.difMin)}</b> | DEA峰 <b>${fmtPeak(s.deaMax, s.deaMin)}</b></div>
                 </div>`;
             };
             const renderSlopes = (slopes) => {
@@ -833,7 +833,7 @@ var MacdStats = (function () {
             return `
               <div style="margin-top:10px;">
                 <div style="font-weight:bold;color:#FFD54F;margin-bottom:4px;">历史快照</div>
-                <div style="font-size:10px;color:#9aa3b8;margin-bottom:4px;">每条:面积 红/绿/净 · 柱高 红/绿 · 黄白线 DIF/DEA</div>
+                <div style="font-size:10px;color:#9aa3b8;margin-bottom:4px;">每条:面积 红/绿/净 · 柱高 红/绿 · DIF/DEA</div>
                 ${blocks}
               </div>`;
         }

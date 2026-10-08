@@ -1230,6 +1230,7 @@ function prepareSavedChartLayout(content, target = null, viewport = null) {
                 for (const pane of chart.panes || []) {
                     let changed = false;
                     for (const source of pane.sources || []) {
+                        window.ChartColors?.normalizeSavedSource(source);
                         if (source.type !== 'MainSeries' || !source.state) continue;
                         hasMainSeries = true;
                         if (!target) continue;
@@ -2784,7 +2785,8 @@ class ChartManager {
             getStudyTemplateContent: function (templateData) {
                 return fetch("/tv/1.1/study_templates?client=" + client_id + "&user=" + user_id + "&template=" + templateData.name)
                     .then(res => res.json())
-                    .then(res => res.status === 'ok' ? res.data.content : null);
+                    .then(res => res.status === 'ok'
+                        ? (window.ChartColors?.normalizeStudyTemplate(res.data.content) ?? res.data.content) : null);
             },
             saveLineToolsAndGroups: function (layoutId, chartId, state, options = {}) {
                 clog("[DEBUG-CHARTS] saveLineToolsAndGroups called", { layoutId, chartId, state, options });
@@ -3027,6 +3029,10 @@ class ChartManager {
             // Older account state stores "Light"; normalize it before schema
             // validation instead of relying on TradingView's fallback.
             theme: normalizeChartTheme(Utils.get_local_data("theme")),
+            overrides: {...window.ChartColors?.seriesOverrides,
+                ...(window.WorkspaceDevice?.isPhone ? {'scalesProperties.fontSize':10,
+                    'paneProperties.legendProperties.showStudyArguments':false} : {})},
+            studies_overrides: {...window.ChartColors?.studyOverrides},
             numeric_formatting: { decimal_sign: "." },
             time_frames: [], timezone: getMarketTimezone(Utils.get_market()), locale: "zh",
             symbol_search_request_delay: 100, auto_save_delay: 5, study_count_limit: 100,
@@ -3061,7 +3067,7 @@ class ChartManager {
             TvIdxHLFTX.idx(PineJS), TvIdxKDJ.idx(PineJS), TvIdxLTQS.idx(PineJS),
             TvIdxMA.idx(PineJS), TvIdxMACDBL.idx(PineJS), TvIdxVegasMA.idx(PineJS),
             TvIdxVOL.idx(PineJS),
-        ]);
+        ].map(study => window.ChartColors?.customDefaults(study) || study));
     }
 
     ensureRequestedDefaultStudies() {
@@ -3125,6 +3131,13 @@ class ChartManager {
             }
         });
         return pending;
+    }
+
+    applyDeviceDensity() {
+        if (!window.WorkspaceDevice?.isPhone) return;
+        const chart=this.widget?.activeChart?.() || this.chart;
+        chart?.applyOverrides({'scalesProperties.fontSize':10,
+            'paneProperties.legendProperties.showStudyArguments':false});
     }
 
     setupEventListeners() {
@@ -3412,19 +3425,20 @@ class ChartManager {
             if (sk) sk.remove();
             this.chart = this.widget.activeChart();
             if (!this.chart) return;
+            this.applyDeviceDensity();
 
             this.ensureRequestedDefaultStudies().catch((e) => {
                 console.warn("[CHARTS] initialize requested default studies failed", e);
             });
             this._alignResolutionOnReady();   // 按真实周期校正显示配置(构造 _curResolution 仅为猜测)
             this.widget.subscribe('chart_loaded', () => {
+                this.applyDeviceDensity();
                 if (!this._pendingSavedPriceViewport) return;
                 this.chart = this.widget.activeChart();
                 const restoreWhenReady = () => this._scheduleChartStableReady(
                     this._dataContextGeneration || 0, this._currentDataIdentityKey());
                 if (this.chart?.dataReady(restoreWhenReady) === true) restoreWhenReady();
             });
-            this.chart.applyOverrides({ "mainSeriesProperties.candleStyle.upColor": "#ef5350", "mainSeriesProperties.candleStyle.downColor": "#26a69a" });
             const registry = getTVRegistry();
             registry.widgets.set(this.instanceId, this.widget);
             registry.activeManagerId = this.instanceId;

@@ -73,3 +73,51 @@
 .cp-mobile .layui-layer-iframe .layui-layer-content{height:calc(90dvh - 42px)!important}
 .cp-mobile .layui-layer-iframe iframe{height:100%!important}
 @media(min-width:700px){.cp-mobile .monitor-signals tbody{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Dense phone content keeps touch controls usable while reducing reading space. */
+html.cp-mobile{--app-nav-height:44px}
+.cp-mobile .app-nav{gap:8px}
+.cp-mobile .app-brand-mark{width:26px;height:26px;font-size:12px}
+.cp-mobile .app-nav-links{gap:0}
+.cp-mobile .app-nav-links a{padding:0 8px;font-size:12px}
+.cp-mobile .cp-content-page{font-size:12px;line-height:1.4}
+.cp-mobile .cp-content-page main{padding:8px 6px 16px}
+.cp-mobile .cp-content-page .hero{margin-bottom:6px;gap:6px}
+.cp-mobile .cp-content-page .hero h1{font-size:18px}
+.cp-mobile .cp-content-page .hero p{display:none}
+.cp-mobile .cp-content-page .panel{padding:10px;margin-bottom:8px;border-radius:8px}
+.cp-mobile .cp-content-page .panel h2{font-size:14px;line-height:1.3}
+.cp-mobile .cp-content-page .panel p{margin:5px 0}
+.cp-mobile .cp-content-page .summary{margin:8px 0}
+.cp-mobile .cp-content-page .summary article{padding:6px}
+.cp-mobile .cp-content-page .summary strong{font-size:20px}
+.cp-mobile .mobile-monitor-controls{padding:0 10px!important}
+.cp-mobile .mobile-workspace-tabs{padding:4px 0;gap:4px}
+.cp-mobile .mobile-workspace-tabs button{min-height:40px;padding:6px}
+.cp-mobile .mobile-screening-actions>summary,.cp-mobile .mobile-monitor-controls>summary{min-height:36px;padding:8px 0}
+.cp-mobile .cp-screening .chart-filters{padding:6px 10px;margin:6px 0}
+.cp-mobile .cp-screening .queue>header{margin-bottom:0}
+.cp-mobile .queue>.toolbar{top:calc(var(--app-nav-height) + 48px);padding:5px 0}
+.cp-mobile .cp-screening .signal-list{gap:6px}
+.cp-mobile .cp-screening .signal-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 8px;padding:8px;line-height:1.35}
+.cp-mobile .signal-card>.row,.cp-mobile .signal-card>.queue-identity,.cp-mobile .signal-card>.queue-sectors,.cp-mobile .signal-card>.queue-exit,.cp-mobile .signal-card>.queue-context,.cp-mobile .signal-card>.queue-freshness{grid-column:1/-1}
+.cp-mobile .signal-card small{font-size:10px;line-height:1.4;margin:0;min-width:0;overflow-wrap:anywhere}
+.cp-mobile .signal-card small:empty{display:none}
+.cp-mobile .signal-card .row strong{font-size:13px}
+.cp-mobile .signal-card .badge{font-size:10px;padding:0 3px}
+.cp-mobile .cp-screening .analysis>header{gap:5px}
+.cp-mobile .cp-screening .analysis>header .toolbar button{min-height:36px;padding:5px 8px}
+.cp-mobile .cp-screening .mobile-chart-options{margin:0}
+.cp-mobile .cp-screening .mobile-chart-options>summary{min-height:32px;padding:7px 0}
+.cp-mobile .cp-screening #chart-periods{gap:4px;margin:5px 0}
+.cp-mobile .cp-screening #chart-periods button{padding:5px 9px;min-height:36px}
+.cp-mobile .monitor-signals tbody{gap:7px}
+.cp-mobile .monitor-signals tr{grid-template-columns:repeat(6,minmax(0,1fr));gap:4px 8px;padding:8px;font-size:11px;line-height:1.3}
+.cp-mobile .monitor-signals td{grid-column:span 2}
+.cp-mobile .monitor-signals td:first-child{grid-column:1/-1;font-size:13px;padding:0}
+.cp-mobile .monitor-signals td:nth-child(5),.cp-mobile .monitor-signals td:nth-child(6){grid-column:span 3}
+.cp-mobile .monitor-signals td:before{font-size:10px}
+.cp-mobile .monitor-signals td small{font-size:10px}
+.cp-mobile .monitor-list-controls{margin:8px 0;gap:8px}
+.cp-mobile .monitor-signals .monitor-pagination{padding:4px 0;margin-bottom:5px}
+.cp-mobile .monitor-signals>p.muted{font-size:10px}

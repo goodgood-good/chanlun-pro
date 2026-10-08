@@ -227,9 +227,10 @@ test('workbench semantic colors remain readable in light and dark themes', () =>
   const zixuanCss = fs.readFileSync(zixuanCssPath, 'utf8');
   const zixuanJs = fs.readFileSync(zixuanJsPath, 'utf8');
   const token = (scope, name) => {
-    const match = scope.match(new RegExp(`${name}:\\s*(#[0-9a-f]{6})`, 'i'));
-    assert.ok(match, `missing hexadecimal token ${name}`);
-    return match[1];
+    const value = scope.match(new RegExp(`${name}:\\s*([^;]+)`, 'i'))?.[1];
+    assert.ok(value, `missing color token ${name}`);
+    const alias=value.match(/^var\((--[a-z0-9-]+)/i);
+    return alias ? token(scope,alias[1]) : value.match(/#[0-9a-f]{6}/i)?.[0];
   };
   const luminance = (hex) => {
     const channels = hex.slice(1).match(/../g).map((part) => parseInt(part, 16) / 255)
@@ -254,8 +255,11 @@ test('workbench semantic colors remain readable in light and dark themes', () =>
   const chartLight = chartCss.slice(0, chartDarkStart);
   const chartDark = chartCss.slice(chartDarkStart, chartCss.indexOf('#chart_menu *,', chartDarkStart));
   const zixuanDarkStart = zixuanCss.indexOf('html.cl-theme-dark');
-  const zixuanLight = zixuanCss.slice(0, zixuanDarkStart);
-  const zixuanDark = zixuanCss.slice(zixuanDarkStart, zixuanCss.indexOf('.zx-watch-content', zixuanDarkStart));
+  const uiCss = fs.readFileSync(path.join(__dirname, '../../css/ui-system.css'), 'utf8');
+  const uiDarkStart=uiCss.indexOf('html.cl-theme-dark');
+  const zixuanLight = zixuanCss.slice(0, zixuanDarkStart)+uiCss.slice(0,uiDarkStart);
+  const zixuanDark = zixuanCss.slice(zixuanDarkStart, zixuanCss.indexOf('.zx-watch-content', zixuanDarkStart))
+    +uiCss.slice(uiDarkStart)+zixuanLight;
 
   assertReadable(chartLight, [
     '--ca-text-muted', '--ca-blue', '--ca-live', '--ca-buy', '--ca-sell', '--ca-warning',
@@ -281,8 +285,8 @@ test('workbench semantic colors remain readable in light and dark themes', () =>
   assert.match(chartCss, /#chart_menu xm-select \.xm-tips\s*\{[^}]*color:\s*var\(--ca-text-muted\)/s);
   assert.match(zixuanCss, /\.zx-watch-panel \.layui-font-gray\s*\{[^}]*color:\s*var\(--zx-text-muted\)/s);
   assert.match(zixuanJs, /function accessibleDisplayColor\(/);
-  assert.match(zixuanJs, /var\(--zx-rate-up, #c93612\)/);
-  assert.match(zixuanJs, /var\(--zx-rate-down, #08796f\)/);
+  assert.match(zixuanJs, /var\(--zx-rate-up, #c62828\)/);
+  assert.match(zixuanJs, /var\(--zx-rate-down, #087f5b\)/);
 });
 
 test('symbol columns prioritize code and name at narrow widths', () => {

@@ -392,10 +392,10 @@
         const b=node('button',undefined,'signal-card'+(state.selected?.id===row.id?' active':''));b.type='button';b.dataset.id=row.id;
         const title=node('div',undefined,'row');title.append(node('strong',row.name||row.code),node('span',pointLabel(row.point),'badge'));
         const quote=state.quotes.get(`${row.market}:${row.code}`);
-        b.append(title,node('small',`${row.code} · ${row.frequency} · ${row.stage==='entry_pending'?STAGES.entry_pending:STAGES[pointStage(row)]||pointStage(row)}`),
-          node('small',row.origin==='watchlist'?'人工关注 · 点击查看图表':`拐点 ${date(row.point.anchor_at)}`),
-          node('small',row.origin==='watchlist'?'':`${pointStage(row)==='confirmed'?'确认':'观测'} ${date(row.point.available_at)}`),
-          node('small',(row.sectors||[]).map(id=>names[id]).filter(Boolean).slice(-2).join(' / ')||'板块暂缺'),
+        b.append(title,node('small',`${row.code} · ${row.frequency} · ${row.stage==='entry_pending'?STAGES.entry_pending:STAGES[pointStage(row)]||pointStage(row)}`,'queue-identity'),
+          node('small',row.origin==='watchlist'?'人工关注 · 点击查看图表':`拐点 ${date(row.point.anchor_at)}`,'queue-anchor'),
+          node('small',row.origin==='watchlist'?'':`${pointStage(row)==='confirmed'?'确认':'观测'} ${date(row.point.available_at)}`,'queue-confirmation'),
+          node('small',(row.sectors||[]).map(id=>names[id]).filter(Boolean).slice(-2).join(' / ')||'板块暂缺','queue-sectors'),
           node('small',quote?quoteText(quote):`截止收盘 ${price(row.latest_price)}`,'queue-quote'),
           node('small',state.reviews.latest[row.id]?'已保存人工复核':'','badge'));
         if(row.exit_plan){
@@ -405,8 +405,8 @@
         if(row.nested_confirmation)b.append(node('small',`${row.nested_confirmation.frequency||'1m'} 区间内结构确认：${row.nested_confirmation.state==='confirmed'?'已确认':'等待确认'}`));
         if(row.operational_macd_risk?.risk_filter_state==='basic_avoid_on_selected_period')
           b.append(node('small','已选最低周期 MACD 基础避险','badge'));
-        if(row.origin!=='watchlist')b.append(node('small',higherContextText(row.higher_context)));
-        if(row.latest_recheck_closed_at)b.append(node('small',`复核行情截止 ${date(row.latest_recheck_closed_at)}`));
+        if(row.origin!=='watchlist')b.append(node('small',higherContextText(row.higher_context),'queue-context'));
+        if(row.latest_recheck_closed_at)b.append(node('small',`复核行情截止 ${date(row.latest_recheck_closed_at)}`,'queue-freshness'));
         b.addEventListener('click',()=>{selectRow(row);renderQueue();mobileView('chart');});$('signal-list').append(b);
       }
       $('queue-empty').hidden=!!state.rows.length;

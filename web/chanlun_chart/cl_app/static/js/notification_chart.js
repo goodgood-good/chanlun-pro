@@ -10,7 +10,7 @@
     // Fit the requested history into the native exported canvas on every period.
     cm.exportMinBarSpacing = 0.01;
     cm.getCustomIndicators = function (PineJS) {
-        const study = TvIdxMACDBackend.idx(PineJS);
+        const study = window.ChartColors.customDefaults(TvIdxMACDBackend.idx(PineJS));
         study.metainfo.shortDescription = 'MACD_HTF · ' + ({'1m':'5m','5m':'30m','30m':'日线'}[data.frequency] || data.frequency);
         return Promise.resolve([study]);
     };

@@ -211,9 +211,9 @@ var ZiXuan = (function () {
   function accessibleDisplayColor(color) {
     var raw = String(color || "").trim();
     var semanticColors = {
-      "#ff5722": "var(--zx-rate-up, #c93612)",
-      "#16baaa": "var(--zx-rate-down, #08796f)",
-      "#1e9fff": "var(--zx-rate-flat, #0969b7)",
+      "#ff5722": "var(--zx-rate-up, #c62828)",
+      "#16baaa": "var(--zx-rate-down, #087f5b)",
+      "#1e9fff": "var(--zx-rate-flat, #5f6878)",
       "#ffb800": "var(--zx-marker-warning, #8a5a00)",
     };
     return semanticColors[raw.toLowerCase()] || raw;
@@ -848,9 +848,9 @@ var ZiXuan = (function () {
               let rate = Number(tick.rate);
               let price = Number(tick.price);
               if (!Number.isFinite(rate)) continue;
-              let color = "var(--zx-rate-flat, #0969b7)";
-              if (rate > 0) color = "var(--zx-rate-up, #c93612)";
-              else if (rate < 0) color = "var(--zx-rate-down, #08796f)";
+              let color = "var(--zx-rate-flat, #5f6878)";
+              if (rate > 0) color = "var(--zx-rate-up, #c62828)";
+              else if (rate < 0) color = "var(--zx-rate-down, #087f5b)";
 
               let obj_span_rate = $(".code_rate").filter(function () {
                 var node = $(this);

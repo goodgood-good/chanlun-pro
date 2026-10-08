@@ -1978,6 +1978,17 @@ test('phone chart layout clients are independent while drawing clients remain sh
   assert.equal(new URL(manifest.url,'http://local').searchParams.get('client'),'chanlun_pro_a_1');
 });
 
+test('phone density applies only display overrides and desktop layouts keep their own density',()=>{
+  const {ChartManager,sb}=loadChartManager(),changes=[];
+  const cm=Object.create(ChartManager.prototype);
+  cm.widget={activeChart:()=>({applyOverrides:options=>changes.push(options)})};
+  sb.WorkspaceDevice={isPhone:true};cm.applyDeviceDensity();
+  assert.deepEqual(Object.keys(changes[0]).sort(),['paneProperties.legendProperties.showStudyArguments','scalesProperties.fontSize']);
+  assert.equal(changes[0]['scalesProperties.fontSize'],10);
+  assert.equal(changes[0]['paneProperties.legendProperties.showStudyArguments'],false);
+  sb.WorkspaceDevice.isPhone=false;cm.applyDeviceDensity();assert.equal(changes.length,1);
+});
+
 test('lowest-center page preserves studies restored from a saved chart layout', async () => {
   const { ChartManager, sb } = loadChartManager();
   const cm = makeManager(ChartManager, null);
