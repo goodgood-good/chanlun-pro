@@ -1,0 +1,175 @@
+{
+  "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1798&TABKEY=tab1&PAGENO=1&txtDmorjc=000430&txtKsrq=2025-11-01&txtZzrq=2026-10-10",
+  "http_status": 200,
+  "queried_at": 1791570307.518016,
+  "data": [
+    {
+      "metadata": {
+        "catalogid": "1798",
+        "name": "停复牌提示",
+        "excel": "0",
+        "pagetype": null,
+        "subname": "2026-05-15",
+        "tabkey": "tab1",
+        "pagesize": 10,
+        "pageno": 1,
+        "pagecount": 1,
+        "recordcount": 4,
+        "showrecordcount": false,
+        "header": "",
+        "footer": "",
+        "reporttype": null,
+        "tabcss": null,
+        "conditions": [
+          {
+            "label": "证券简称或代码",
+            "name": "txtDmorjc",
+            "hidden": "0",
+            "defaultValue": "000430",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "text",
+            "typeAhead": "/shortname/gethangqing?dataType=XA%7c%7cDM%7c%7cZA%7c%7cEB%7c%7cZQ%7c%7cJJ%7c%7cYX%7c%7cBG%7c%7cCY&input=",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "",
+            "name": "txtKsrq",
+            "hidden": "0",
+            "defaultValue": "2025-11-01",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "至",
+            "name": "txtZzrq",
+            "hidden": "0",
+            "defaultValue": "2026-10-10",
+            "labelstyle": "2",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "",
+            "name": "txtKsrq-txtZzrq",
+            "hidden": "1",
+            "defaultValue": "",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          }
+        ],
+        "colStyle": {
+          "zqdm": {
+            "width": "10%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "zqjc": {
+            "width": "15%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpkssj": {
+            "width": "20%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "fpkssj": {
+            "width": "20%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpsj": {
+            "width": "15%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpyy": {
+            "width": "25%",
+            "align": "left",
+            "group": "false",
+            "hidden": "0"
+          }
+        },
+        "cols": {
+          "zqdm": "证券代码",
+          "zqjc": "证券简称",
+          "tpkssj": "停牌时间",
+          "fpkssj": "复牌时间",
+          "tpsj": "停牌期限",
+          "tpyy": "停牌原因"
+        },
+        "colspan": 0,
+        "notes": null,
+        "topHeader": "",
+        "hidden": "0",
+        "tablestyle": "main",
+        "refreshCondition": false
+      },
+      "data": [
+        {
+          "zqdm": "000430",
+          "zqjc": "ST张家界",
+          "tpkssj": "2026-05-15 开市",
+          "fpkssj": "2026-05-18 开市",
+          "tpsj": "1天",
+          "tpyy": "撤销其他风险警示"
+        },
+        {
+          "zqdm": "000430",
+          "zqjc": "*ST张股",
+          "tpkssj": "2026-02-11 开市",
+          "fpkssj": "2026-02-12 开市",
+          "tpsj": "1天",
+          "tpyy": "撤销退市风险警示"
+        },
+        {
+          "zqdm": "000430",
+          "zqjc": "*ST张股",
+          "tpkssj": "2025-12-26 开市",
+          "fpkssj": "2025-12-29 开市",
+          "tpsj": "1天",
+          "tpyy": "重大事项"
+        },
+        {
+          "zqdm": "000430",
+          "zqjc": "ST张家界",
+          "tpkssj": "2025-11-04 开市",
+          "fpkssj": "2025-11-05 开市",
+          "tpsj": "1天",
+          "tpyy": "实施退市风险警示"
+        }
+      ],
+      "error": null
+    }
+  ]
+}

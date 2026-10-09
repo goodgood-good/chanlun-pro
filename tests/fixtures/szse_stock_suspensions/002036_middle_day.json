@@ -1,0 +1,142 @@
+{
+  "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1798&TABKEY=tab1&PAGENO=1&txtDmorjc=002036&txtKsrq=2025-12-19&txtZzrq=2025-12-19",
+  "http_status": 200,
+  "queried_at": 1791570307.6984973,
+  "data": [
+    {
+      "metadata": {
+        "catalogid": "1798",
+        "name": "停复牌提示",
+        "excel": "0",
+        "pagetype": null,
+        "subname": "",
+        "tabkey": "tab1",
+        "pagesize": 10,
+        "pageno": 1,
+        "pagecount": 0,
+        "recordcount": 0,
+        "showrecordcount": false,
+        "header": "",
+        "footer": "",
+        "reporttype": null,
+        "tabcss": null,
+        "conditions": [
+          {
+            "label": "证券简称或代码",
+            "name": "txtDmorjc",
+            "hidden": "0",
+            "defaultValue": "002036",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "text",
+            "typeAhead": "/shortname/gethangqing?dataType=XA%7c%7cDM%7c%7cZA%7c%7cEB%7c%7cZQ%7c%7cJJ%7c%7cYX%7c%7cBG%7c%7cCY&input=",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "",
+            "name": "txtKsrq",
+            "hidden": "0",
+            "defaultValue": "2025-12-19",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "至",
+            "name": "txtZzrq",
+            "hidden": "0",
+            "defaultValue": "2025-12-19",
+            "labelstyle": "2",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "",
+            "name": "txtKsrq-txtZzrq",
+            "hidden": "1",
+            "defaultValue": "",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          }
+        ],
+        "colStyle": {
+          "zqdm": {
+            "width": "10%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "zqjc": {
+            "width": "15%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpkssj": {
+            "width": "20%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "fpkssj": {
+            "width": "20%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpsj": {
+            "width": "15%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpyy": {
+            "width": "25%",
+            "align": "left",
+            "group": "false",
+            "hidden": "0"
+          }
+        },
+        "cols": {
+          "zqdm": "证券代码",
+          "zqjc": "证券简称",
+          "tpkssj": "停牌时间",
+          "fpkssj": "复牌时间",
+          "tpsj": "停牌期限",
+          "tpyy": "停牌原因"
+        },
+        "colspan": 0,
+        "notes": null,
+        "topHeader": "",
+        "hidden": "0",
+        "tablestyle": "main",
+        "refreshCondition": false
+      },
+      "data": [],
+      "error": null
+    }
+  ]
+}

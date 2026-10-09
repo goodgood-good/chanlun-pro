@@ -1,0 +1,160 @@
+{
+  "code": "002047",
+  "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1798&TABKEY=tab1&PAGENO=1&txtDmorjc=002047&txtKsrq=2025-10-15&txtZzrq=2025-10-31",
+  "http_status": 200,
+  "queried_at": 1791570235.7522368,
+  "data": [
+    {
+      "metadata": {
+        "catalogid": "1798",
+        "name": "停复牌提示",
+        "excel": "0",
+        "pagetype": null,
+        "subname": "2025-10-27",
+        "tabkey": "tab1",
+        "pagesize": 10,
+        "pageno": 1,
+        "pagecount": 1,
+        "recordcount": 2,
+        "showrecordcount": false,
+        "header": "",
+        "footer": "",
+        "reporttype": null,
+        "tabcss": null,
+        "conditions": [
+          {
+            "label": "证券简称或代码",
+            "name": "txtDmorjc",
+            "hidden": "0",
+            "defaultValue": "002047",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "text",
+            "typeAhead": "/shortname/gethangqing?dataType=XA%7c%7cDM%7c%7cZA%7c%7cEB%7c%7cZQ%7c%7cJJ%7c%7cYX%7c%7cBG%7c%7cCY&input=",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "",
+            "name": "txtKsrq",
+            "hidden": "0",
+            "defaultValue": "2025-10-15",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "至",
+            "name": "txtZzrq",
+            "hidden": "0",
+            "defaultValue": "2025-10-31",
+            "labelstyle": "2",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          },
+          {
+            "label": "",
+            "name": "txtKsrq-txtZzrq",
+            "hidden": "1",
+            "defaultValue": "",
+            "labelstyle": "1",
+            "required": "false",
+            "inputType": "date",
+            "typeAhead": "",
+            "options": null,
+            "property": null,
+            "maxlength": null,
+            "otherProperties": null,
+            "clientvalidate": ""
+          }
+        ],
+        "colStyle": {
+          "zqdm": {
+            "width": "10%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "zqjc": {
+            "width": "15%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpkssj": {
+            "width": "20%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "fpkssj": {
+            "width": "20%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpsj": {
+            "width": "15%",
+            "align": "center",
+            "group": "false",
+            "hidden": "0"
+          },
+          "tpyy": {
+            "width": "25%",
+            "align": "left",
+            "group": "false",
+            "hidden": "0"
+          }
+        },
+        "cols": {
+          "zqdm": "证券代码",
+          "zqjc": "证券简称",
+          "tpkssj": "停牌时间",
+          "fpkssj": "复牌时间",
+          "tpsj": "停牌期限",
+          "tpyy": "停牌原因"
+        },
+        "colspan": 0,
+        "notes": null,
+        "topHeader": "",
+        "hidden": "0",
+        "tablestyle": "main",
+        "refreshCondition": false
+      },
+      "data": [
+        {
+          "zqdm": "002047",
+          "zqjc": "*ST宝鹰",
+          "tpkssj": "",
+          "fpkssj": "2025-10-27 开市",
+          "tpsj": "取消停牌",
+          "tpyy": "重大事项"
+        },
+        {
+          "zqdm": "002047",
+          "zqjc": "*ST宝鹰",
+          "tpkssj": "2025-10-20 开市",
+          "fpkssj": "",
+          "tpsj": "停牌",
+          "tpyy": "临时停牌"
+        }
+      ],
+      "error": null
+    }
+  ]
+}

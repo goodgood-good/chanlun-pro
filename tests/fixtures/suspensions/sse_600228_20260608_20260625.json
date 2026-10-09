@@ -1,0 +1,79 @@
+{
+  "actionErrors": [],
+  "actionMessages": [],
+  "fieldErrors": {},
+  "isPagination": "true",
+  "jsonCallBack": null,
+  "locale": "en_CN",
+  "pageHelp": {
+    "beginPage": 1,
+    "cacheSize": 1,
+    "data": [
+      {
+        "startStopDate": "20260617",
+        "stopReason": "重要公告",
+        "productCode": "600228",
+        "endStopReason": "重要公告",
+        "controlType": "TR",
+        "endStopDate": "20260624",
+        "stopTime": "",
+        "type": "LXTP",
+        "productName": "返利科技"
+      },
+      {
+        "startStopDate": "20260608",
+        "stopReason": "重要公告",
+        "productCode": "600228",
+        "endStopReason": "重要公告",
+        "controlType": "TR",
+        "endStopDate": "20260608",
+        "stopTime": "WH",
+        "type": "LSTP",
+        "productName": "*ST返利"
+      }
+    ],
+    "endDate": null,
+    "endPage": null,
+    "objectResult": null,
+    "pageCount": 1,
+    "pageNo": 1,
+    "pageSize": 100,
+    "pageSizeWithOutLimit": 100,
+    "searchDate": null,
+    "sort": null,
+    "startDate": null,
+    "total": 2
+  },
+  "pageNo": null,
+  "pageSize": null,
+  "queryDate": "",
+  "result": [
+    {
+      "startStopDate": "20260617",
+      "stopReason": "重要公告",
+      "productCode": "600228",
+      "endStopReason": "重要公告",
+      "controlType": "TR",
+      "endStopDate": "20260624",
+      "stopTime": "",
+      "type": "LXTP",
+      "productName": "返利科技"
+    },
+    {
+      "startStopDate": "20260608",
+      "stopReason": "重要公告",
+      "productCode": "600228",
+      "endStopReason": "重要公告",
+      "controlType": "TR",
+      "endStopDate": "20260608",
+      "stopTime": "WH",
+      "type": "LSTP",
+      "productName": "*ST返利"
+    }
+  ],
+  "securityCode": "",
+  "sqlId": "GW_PL_JYTS_TFPXX",
+  "texts": null,
+  "type": "",
+  "validateCode": ""
+}

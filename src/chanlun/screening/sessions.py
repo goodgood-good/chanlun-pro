@@ -108,6 +108,17 @@ def suspension_evidence(code: str, start: int, cutoff: int, *, cache_root=None) 
     if code.startswith('SH.5'):
         from .fund_suspensions import suspension_evidence as fund_evidence
         return fund_evidence(code,start,cutoff,cache_root=cache_root)
+    if code.startswith(('SH.6', 'SH.9')):
+        from .sse_stock_suspensions import suspension_evidence as stock_evidence
+        return stock_evidence(code, start, cutoff, cache_root=cache_root)
+    if code.startswith(('SZ.00', 'SZ.30')):
+        from .szse_stock_suspensions import suspension_evidence as stock_evidence
+        return stock_evidence(code, start, cutoff, cache_root=cache_root)
+    return latest_suspension_evidence(code, start, cutoff, cache_root=cache_root)
+
+
+def latest_suspension_evidence(code, start, cutoff, *, cache_root=None):
+    """Fallback disclosure feed for markets without a verified history API."""
     first = datetime.fromtimestamp(start, CN).date().isoformat()
     if cache_root is None:
         from chanlun import config
@@ -153,10 +164,15 @@ def exempt_closes(frame, context, expected):
         return set()
     try:
         from .fund_suspensions import SOURCE_URL as FUND_SOURCE_URL
+        from .sse_stock_suspensions import SOURCE_URL as SSE_STOCK_SOURCE_URL
+        from .szse_stock_suspensions import SOURCE_URL as SZSE_STOCK_SOURCE_URL
         content = {k: v for k, v in evidence.items() if k != "revision"}
         codes = {context["symbol"]} if "symbol" in context else set(frame.code) if "code" in frame else set()
-        if (evidence["schema"] != SCHEMA or evidence["source_url"] not in (SOURCE_URL,FUND_SOURCE_URL)
+        if (evidence["schema"] != SCHEMA or evidence["source_url"] not in (
+                    SOURCE_URL, FUND_SOURCE_URL, SSE_STOCK_SOURCE_URL, SZSE_STOCK_SOURCE_URL)
                 or evidence["source_url"] == FUND_SOURCE_URL and not evidence.get('symbol','').startswith('SH.5')
+                or evidence["source_url"] == SSE_STOCK_SOURCE_URL and not evidence.get('symbol','').startswith(('SH.6', 'SH.9'))
+                or evidence["source_url"] == SZSE_STOCK_SOURCE_URL and not evidence.get('symbol','').startswith(('SZ.00', 'SZ.30'))
                 or codes != {evidence["symbol"]} or evidence["revision"] != _digest(content)
                 or type(evidence["checked_through"]) is not int
                 or evidence["checked_through"] < context["cutoff"]

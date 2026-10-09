@@ -33,13 +33,13 @@ def test_reported_halt_is_exempt_but_missing_normal_trading_bars_are_not(monkeyp
     assert before["errors"] == ["DATA_GAPS"]
     assert before["missing_bars"] == 384
     start = before["first_missing_at"]
-    frame.attrs["screening_suspensions"] = sessions.suspension_evidence("SH.601615",start,context["cutoff"],cache_root=tmp_path)
+    frame.attrs["screening_suspensions"] = sessions.latest_suspension_evidence("SH.601615",start,context["cutoff"],cache_root=tmp_path)
     assert frame_quality(frame, context)["errors"] == []
     damaged = frame.drop(index=frame.index[-25])
     assert frame_quality(damaged, context)["errors"] == ["DATA_GAPS"]
     assert frame_quality(damaged, context)["missing_bars"] == 1
     # Another period consumes the same fetched records, not another HTTP request.
-    sessions.suspension_evidence("SH.601615",start,context["cutoff"],cache_root=tmp_path)
+    sessions.latest_suspension_evidence("SH.601615",start,context["cutoff"],cache_root=tmp_path)
     assert len(calls) == 1
 
 
@@ -53,7 +53,7 @@ def test_wrong_symbol_or_traded_interval_invalidates_suspension_claim(monkeypatc
     monkeypatch.setattr(sessions,"_fetch_records",lambda _: [
         {"SECUCODE":"601615.SH","SUSPEND_START_TIME":"2026-01-12 09:30:00","SUSPEND_END_TIME":"2026-01-22 15:00:00"}])
     frame, context = _fixture()
-    evidence = sessions.suspension_evidence("SH.601615",int(frame.date.iloc[0].timestamp()),context["cutoff"],cache_root=tmp_path)
+    evidence = sessions.latest_suspension_evidence("SH.601615",int(frame.date.iloc[0].timestamp()),context["cutoff"],cache_root=tmp_path)
     frame.attrs["screening_suspensions"] = evidence
     assert frame_quality(frame, context)["errors"] == ["INVALID_SESSION_EVIDENCE"]
     modified = deepcopy(evidence)
@@ -68,5 +68,5 @@ def test_unavailable_feed_does_not_create_a_suspension_cache(monkeypatch, tmp_pa
         raise ValueError("feed unavailable")
     monkeypatch.setattr(sessions,"_fetch_records",unavailable)
     with pytest.raises(ValueError,match="feed unavailable"):
-        sessions.suspension_evidence("SH.601615",1,2,cache_root=tmp_path)
+        sessions.latest_suspension_evidence("SH.601615",1,2,cache_root=tmp_path)
     assert not (tmp_path/"suspensions.json").exists()
