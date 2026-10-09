@@ -540,6 +540,7 @@ def strict_center_preview_to_chart_dict(
         "excursion_unit_ids": list(preview.excursion_unit_ids),
         "excursion_segments": [_unit_audit_payload(units[key]) for key in preview.excursion_unit_ids],
         "establishment_segment_ids": [value.unit_id for value in establishment],
+        "establishment_segments": [_unit_audit_payload(value) for value in establishment],
         "establishment_component_count": len(establishment),
         "overlap_component_count": len(establishment),
         "lifecycle_role_count": len(establishment),

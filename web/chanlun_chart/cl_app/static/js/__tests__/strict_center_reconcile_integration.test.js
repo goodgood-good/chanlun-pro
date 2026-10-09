@@ -310,6 +310,13 @@ test('a confirmed three-core center renders before an independent departure', ()
   assert.equal([...cm._strictRenderGroups(structure,scopeContext(cm)).values()].flat().length,1);
   roles[2].locked=false;
   assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires/);
+  const preview={...native,render_kind:'center_preview',state:'forming',tradable:false,
+    third_class_confirmed:false};
+  structure.levels[0].centers=[];
+  structure.levels[0].center_previews=[preview];
+  assert.equal([...cm._strictRenderGroups(structure,scopeContext(cm)).values()].flat().length,1);
+  delete preview.establishment_segments;
+  assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires/);
 });
 
 test('retired movement types stay hidden even with a saved display switch', () => {

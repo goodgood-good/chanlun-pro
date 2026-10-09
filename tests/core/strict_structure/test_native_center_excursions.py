@@ -120,4 +120,6 @@ def test_recorded_513100_center_keeps_processing_after_july(recorded_frame, cuto
         assert (excursion.low_tick, excursion.high_tick) == (2035, 2141)
         assert excursion.market_start == pd.Timestamp("2026-07-23 13:35", tz="Asia/Shanghai")
     if cutoff >= "2026-09-22":
-        assert snapshot["levels"][0]["center_previews"][-1]["owner_center_id"] == center.center_id
+        preview = snapshot["levels"][0]["center_previews"][-1]
+        assert preview["owner_center_id"] == center.center_id
+        assert [role["unit_id"] for role in preview["establishment_segments"]] == preview["core_unit_ids"]
