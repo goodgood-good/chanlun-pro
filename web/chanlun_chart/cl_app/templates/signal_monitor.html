@@ -39,7 +39,7 @@
         <label>下午收盘后选股（北京时间）<input id="after-close" type="time" min="15:01" max="23:59" value="15:10" required></label>
         <label>选股计算进程<input id="daily-workers" type="number" min="1" max="12" value="12" required></label>
         <label>常规检查间隔<select id="interval"><option value="30">30 秒</option><option value="60" selected>60 秒</option><option value="120">2 分钟</option><option value="300">5 分钟</option></select></label>
-        <label>盘后选股范围<select id="daily-scope"><option value="all_a_watchlist">A 股 + 人工关注组（各市场）</option><option value="watchlist">仅人工关注组（各市场）</option><option value="latest">沿用最近一次选股条件</option></select></label>
+        <label>盘后选股范围<select id="daily-scope"><option value="all_a_watchlist">A 股 + 自选分组（各市场）</option><option value="watchlist">仅自选分组（各市场）</option><option value="latest">沿用最近一次选股条件</option></select></label>
       </div>
       <div class="toolbar"><button class="primary" id="enable" type="submit" disabled>启动自动任务</button><button id="pause" type="button" disabled>暂停自动任务</button><button id="check-now" type="button" disabled>立即检查候选</button><button id="reload" type="button">刷新状态</button></div>
     </form>

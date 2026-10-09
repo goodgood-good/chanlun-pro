@@ -205,7 +205,7 @@ var ZiXuan = (function () {
   }
 
   function displayGroupName(name) {
-    return String(name || "") === "我的持仓" ? "人工关注组" : String(name || "");
+    return String(name || "");
   }
 
   function accessibleDisplayColor(color) {

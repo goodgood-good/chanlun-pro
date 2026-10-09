@@ -59,10 +59,10 @@
           <div class="zx-manager-group-list" id="zixuan_manager_group_list">
             {% for group in zx_groups %}
               <div class="zx-manager-group-row" data-group-name="{{ group['name'] }}">
-                <span class="zx-manager-group-avatar" aria-hidden="true">{% if group['name'] == '我的持仓' %}人{% else %}{{ group['name'][:1] }}{% endif %}</span>
+                <span class="zx-manager-group-avatar" aria-hidden="true">{% if group['name'] == '我的持仓' %}持{% else %}{{ group['name'][:1] }}{% endif %}</span>
                 <span class="zx-manager-group-copy">
                   <strong>{{ group['name'] }}</strong>
-                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% elif group['name'] == '我的持仓' %}人工维护的优先监听分组{% else %}跨市场观察分组{% endif %}</small>
+                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% elif group['name'] == '我的持仓' %}手动维护的持仓分组{% else %}跨市场观察分组{% endif %}</small>
                 </span>
                 {% if group['name'] in ('我的关注', '我的持仓') %}
                   <span class="zx-manager-protected">不可删除</span>
